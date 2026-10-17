@@ -70,11 +70,12 @@ type WaitingTask struct {
 	Turn  int64
 }
 
-// SubmitInput contains the root-task routing and prompt fields.
+// SubmitInput contains the root-task routing and prompt fields; Parts follow the prompt's text part.
 type SubmitInput struct {
 	Selector      []wire.Requirement
 	Labels        map[string]string
 	Prompt        string
+	Parts         []wire.Part
 	Deadline      time.Duration
 	QueueDeadline time.Duration
 }
@@ -479,7 +480,7 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 	submission := wire.SubmissionRecord{
 		Message: wire.Message{
 			MessageID: messageID, ContextID: runID, TaskID: runID, Role: wire.RoleUser,
-			Parts: []wire.Part{{Text: input.Prompt}}, Extensions: []string{wire.ExtensionURI},
+			Parts: append([]wire.Part{{Text: input.Prompt}}, input.Parts...), Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
 			RunID: runID, Turn: 1, Attempt: 1, Pool: chosen.Pool, Selector: slices.Clone(input.Selector), Labels: maps.Clone(input.Labels),

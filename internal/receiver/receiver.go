@@ -31,6 +31,8 @@ type Handle struct {
 	Job    string
 	Alloc  string
 	Format string
+	// Commit is the git commit checked out for a run with a git context.
+	Commit string
 }
 
 // Line is one output line, the byte offset where it starts and the offset after it.
@@ -42,12 +44,17 @@ type Line struct {
 
 // Run is the material needed to start one platform job.
 type Run struct {
-	ID         string
-	Turn       int64
-	Offer      map[string]string
-	Prompt     []byte
-	Credential []byte
+	ID            string
+	Turn          int64
+	Offer         map[string]string
+	Prompt        []byte
+	Credential    []byte
+	Git           *wire.GitContext
+	GitCredential []byte
 }
+
+// ErrGitContext is the error an adapter returns when a run's git context cannot be checked out.
+var ErrGitContext = errors.New("git context unavailable")
 
 // Adapter is the platform seam of ADR-0018; implementations hold platform credentials only.
 type Adapter interface {
@@ -77,17 +84,21 @@ type Config struct {
 
 // AdapterConfig configures one adapter instance; Config is decoded by the adapter type.
 type AdapterConfig struct {
-	Name       string         `json:"name"`
-	Type       string         `json:"type"`
-	Credential string         `json:"credential,omitzero"`
-	Config     jsontext.Value `json:"config"`
+	Name          string         `json:"name"`
+	Type          string         `json:"type"`
+	Credential    string         `json:"credential,omitzero"`
+	GitCredential string         `json:"git_credential,omitzero"`
+	Config        jsontext.Value `json:"config"`
 }
 
-// Named is a constructed adapter with its configured name and sealed-secret name.
+// Named is a constructed adapter with its configured name and sealed-secret names.
 type Named struct {
-	Name       string
-	Credential string
-	Adapter    Adapter
+	Name          string
+	Credential    string
+	GitCredential string
+	// Git is set when the adapter delivers git context parts (ADR-0024).
+	Git     bool
+	Adapter Adapter
 }
 
 // LoadConfig strictly decodes the receiver configuration.
@@ -361,11 +372,10 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	}
 	rejected := false
 	for _, named := range r.adapters {
-		if named.Credential == "" {
-			continue
-		}
-		if !r.openCredential(state, secrets, named) {
-			rejected = true
+		for _, name := range []string{named.Credential, named.GitCredential} {
+			if name != "" && !r.openCredential(state, secrets, name) {
+				rejected = true
+			}
 		}
 	}
 	if rejected {
@@ -425,9 +435,9 @@ func (r *Receiver) requestRenewal(ctx context.Context, state *trust.State, issue
 	return nil
 }
 
-// openCredential holds the newest verified version of the adapter's sealed secret; false means rejected.
-func (r *Receiver) openCredential(state *trust.State, secrets []*kgo.Record, named Named) bool {
-	key := r.config.ReceiverID + "/" + named.Credential
+// openCredential holds the newest verified version of a sealed secret; false means rejected.
+func (r *Receiver) openCredential(state *trust.State, secrets []*kgo.Record, name string) bool {
+	key := r.config.ReceiverID + "/" + name
 	var latest []byte
 	for _, record := range secrets {
 		if string(record.Key) == key {
@@ -438,18 +448,18 @@ func (r *Receiver) openCredential(state *trust.State, secrets []*kgo.Record, nam
 		return true
 	}
 	// Open first: an unverified record must not decide which version is current.
-	value, version, err := trust.Open(latest, state, r.config.ReceiverID, named.Credential, r.sealing, r.userPub, time.Now())
+	value, version, err := trust.Open(latest, state, r.config.ReceiverID, name, r.sealing, r.userPub, time.Now())
 	if err != nil {
 		return false
 	}
 	r.mu.Lock()
-	newer := version > r.credentials[named.Name].version
+	newer := version > r.credentials[name].version
 	if newer {
-		r.credentials[named.Name] = heldCredential{version: version, value: value}
+		r.credentials[name] = heldCredential{version: version, value: value}
 	}
 	r.mu.Unlock()
 	if newer {
-		r.logger.Printf("credential %s version %d opened for adapter %s", named.Credential, version, named.Name)
+		r.logger.Printf("credential %s version %d opened", name, version)
 	}
 	return true
 }

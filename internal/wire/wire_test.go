@@ -956,3 +956,57 @@ func TestStatusTimestampIsRFC3339(t *testing.T) {
 		})
 	}
 }
+
+func TestGitPartValidation(t *testing.T) {
+	const prompt = `{"text":"hello"},`
+	part := func(url, metadata string) string {
+		return `{"url":"` + url + `","mediaType":"application/vnd.wherry.git","metadata":` + metadata + `}`
+	}
+	valid := part("https://git.example.test/org/repo.git", `{"ref":"main"}`)
+	for name, testCase := range map[string]struct {
+		parts string
+		want  string
+	}{
+		"https":            {valid, ""},
+		"ssh":              {part("ssh://git.example.test/org/repo.git", `{"ref":"v1.2.0","path":"src/repo"}`), ""},
+		"commit":           {part("https://git.example.test/org/repo", `{"ref":"0123456789abcdef0123456789abcdef01234567"}`), ""},
+		"http":             {part("http://git.example.test/org/repo.git", `{"ref":"main"}`), "git url must be an https or ssh url with a host"},
+		"file":             {part("file:///srv/repo.git", `{"ref":"main"}`), "git url must be an https or ssh url with a host"},
+		"scp form":         {part("git@git.example.test:org/repo.git", `{"ref":"main"}`), "git url must be an https or ssh url with a host"},
+		"no host":          {part("https:///org/repo.git", `{"ref":"main"}`), "git url must be an https or ssh url with a host"},
+		"userinfo":         {part("https://user:token@git.example.test/org/repo.git", `{"ref":"main"}`), "git url must not carry user information"},
+		"user only":        {part("ssh://git@git.example.test/org/repo.git", `{"ref":"main"}`), "git url must not carry user information"},
+		"query":            {part("https://git.example.test/org/repo.git?token=x", `{"ref":"main"}`), "git url must not carry a query or fragment"},
+		"fragment":         {part("https://git.example.test/org/repo.git#x", `{"ref":"main"}`), "git url must not carry a query or fragment"},
+		"no metadata":      {`{"url":"https://git.example.test/org/repo.git","mediaType":"application/vnd.wherry.git"}`, "git part metadata requires a ref"},
+		"no ref":           {part("https://git.example.test/org/repo.git", `{"path":"repo"}`), "git part metadata requires a ref"},
+		"unknown member":   {part("https://git.example.test/org/repo.git", `{"ref":"main","depth":5}`), "git part metadata requires a ref"},
+		"option ref":       {part("https://git.example.test/org/repo.git", `{"ref":"--upload-pack=touch"}`), "git ref must be a branch, tag or commit name"},
+		"spaced ref":       {part("https://git.example.test/org/repo.git", `{"ref":"main branch"}`), "git ref must be a branch, tag or commit name"},
+		"dotted ref":       {part("https://git.example.test/org/repo.git", `{"ref":"main..other"}`), "git ref must be a branch, tag or commit name"},
+		"traversal":        {part("https://git.example.test/org/repo.git", `{"ref":"main","path":"../outside"}`), "git path must be a relative path without . or .. segments"},
+		"inner traversal":  {part("https://git.example.test/org/repo.git", `{"ref":"main","path":"a/../../b"}`), "git path must be a relative path without . or .. segments"},
+		"absolute path":    {part("https://git.example.test/org/repo.git", `{"ref":"main","path":"/etc"}`), "git path must be a relative path without . or .. segments"},
+		"no default path":  {part("https://git.example.test/", `{"ref":"main"}`), "git path must be a relative path without . or .. segments"},
+		"text with git":    {`{"text":"x","mediaType":"application/vnd.wherry.git"}`, "git part must be a url part"},
+		"two git parts":    {valid + "," + valid, "a submission carries at most one git part"},
+		"other url parts":  {valid + `,{"url":"https://example.test/a"}`, ""},
+		"plain url scheme": {`{"url":"file:///srv/repo.git"}`, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := DecodePayload(TypeSubmission, submissionJSON(t, `"parts":[`+prompt+testCase.parts+`]`))
+			if testCase.want == "" && err != nil || testCase.want != "" && (err == nil || err.Error() != testCase.want) {
+				t.Fatalf("decode error %v, want %q", err, testCase.want)
+			}
+		})
+	}
+	git, err := ParseGitPart(Part{URL: "https://git.example.test/org/repo.git", MediaType: GitMediaType, Metadata: jsontext.Value(`{"ref":"main"}`)})
+	if err != nil || git != (GitContext{URL: "https://git.example.test/org/repo.git", Ref: "main", Path: "repo"}) {
+		t.Fatalf("parsed %#v, %v; want the repository name as the default path", git, err)
+	}
+	submission := validPayloads(t)[TypeSubmission].(*SubmissionRecord)
+	submission.Message.Parts = append(submission.Message.Parts, Part{URL: "https://token@git.example.test/org/repo.git", MediaType: GitMediaType, Metadata: jsontext.Value(`{"ref":"main"}`)})
+	if _, err := MarshalPayload(TypeSubmission, submission); err == nil || strings.Contains(err.Error(), "token") {
+		t.Fatalf("marshal error %v, want a fixed rejection", err)
+	}
+}

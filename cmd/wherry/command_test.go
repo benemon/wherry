@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -83,9 +84,9 @@ func TestNewAdaptersRequiresCredentialEnv(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "credential_env") {
 		t.Fatalf("got %v, want credential_env required", err)
 	}
-	adapters, err := newAdapters([]receiver.AdapterConfig{{Name: "lab", Type: "nomad", Config: config}}, "")
-	if err != nil || len(adapters) != 1 || adapters[0].Name != "lab" {
-		t.Fatalf("adapters %#v, err %v", adapters, err)
+	adapters, err := newAdapters([]receiver.AdapterConfig{{Name: "lab", Type: "nomad", GitCredential: "git-token", Config: config}}, "")
+	if err != nil || len(adapters) != 1 || adapters[0].Name != "lab" || !adapters[0].Git || adapters[0].GitCredential != "git-token" {
+		t.Fatalf("adapters %#v, err %v; want a git-delivering adapter with its git credential", adapters, err)
 	}
 }
 
@@ -741,5 +742,76 @@ func TestReceiversWarnsSealExpiry(t *testing.T) {
 	}
 	if len(rows) != 1 || len(rows[0].Secrets) != 2 || rows[0].Secrets[1].Name != "short" || rows[0].Secrets[1].ExpMS <= time.Now().UnixMilli() {
 		t.Fatalf("JSON secrets %#v", rows)
+	}
+}
+
+func TestSubmitGitFlags(t *testing.T) {
+	ctx, kafka, client, userKey, receiverKey := enrolledReceiver(t)
+	encoded, err := wire.MarshalPayload(wire.TypeCapability, &wire.Capability{
+		ReceiverID: "receiver-a", Labels: map[string]string{}, Pool: "default",
+		Offers:   []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}},
+		Selector: []wire.Requirement{{Key: "region", Operator: wire.OpIn, Values: []string{"eu"}}},
+		Capacity: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability, err := wire.MarshalEnvelope(wire.Sign(wire.TypeCapability, encoded, receiverKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicCapability, Key: []byte("receiver-a"), Value: capability}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"--selector", "runtime=exec", "--labels", "region=eu", "--prompt", "fix the bug"}
+	for name, test := range map[string]struct {
+		flags []string
+		want  string
+	}{
+		"ref without url":  {[]string{"--git-ref", "main"}, "submit requires --git and --git-ref together"},
+		"url without ref":  {[]string{"--git", "https://git.example.test/org/repo.git"}, "submit requires --git and --git-ref together"},
+		"path without url": {[]string{"--git-path", "repo"}, "submit requires --git and --git-ref together"},
+		"userinfo":         {[]string{"--git", "https://user:s3cr3t@git.example.test/org/repo.git", "--git-ref", "main"}, "git url must not carry user information"},
+		"traversal":        {[]string{"--git", "https://git.example.test/org/repo.git", "--git-ref", "main", "--git-path", "../x"}, "git path must be a relative path without . or .. segments"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := runSubmit(ctx, client, append(slices.Clone(base), test.flags...), &stdout, &stderr)
+			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), "s3cr3t") {
+				t.Fatalf("submit error %v, want %q", err, test.want)
+			}
+		})
+	}
+	var stdout, stderr bytes.Buffer
+	flags := append(slices.Clone(base), "--git", "https://git.example.test/org/repo.git", "--git-ref", "v1.2.0", "--git-path", "src/repo")
+	if err := runSubmit(ctx, client, flags, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	runID, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
+	kafka.AddConsumePartitions(map[string]map[int32]kgo.Offset{wire.TopicTask: {0: kgo.NewOffset().AtStart()}})
+	var submission *wire.SubmissionRecord
+	for submission == nil {
+		fetches := kafka.PollFetches(ctx)
+		if err := fetches.Err(); err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range fetches.Records() {
+			verified, err := trust.VerifyRootSubmission(record.Value, userKey.Public().(ed25519.PublicKey))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if verified.Wherry.RunID == runID {
+				submission = verified
+			}
+		}
+	}
+	parts := submission.Message.Parts
+	if len(parts) != 2 || parts[0].Text != "fix the bug" || parts[1].URL != "https://git.example.test/org/repo.git" ||
+		parts[1].MediaType != wire.GitMediaType || string(parts[1].Metadata) != `{"ref":"v1.2.0","path":"src/repo"}` {
+		t.Fatalf("submitted parts %#v", parts)
+	}
+	git, err := wire.ParseGitPart(parts[1])
+	if err != nil || git != (wire.GitContext{URL: "https://git.example.test/org/repo.git", Ref: "v1.2.0", Path: "src/repo"}) {
+		t.Fatalf("parsed %#v, %v", git, err)
 	}
 }

@@ -96,6 +96,54 @@ from a receiver in the same pool for the immediately preceding turn, and
 rejects a continuation that differs from the earlier turns in any of those
 fields.
 
+## Git context
+
+A submission can name a git repository for the agent to work on. The
+repository is a `url` part with media type `application/vnd.wherry.git`:
+
+- `url` (string): the clone URL. Its scheme is `https` or `ssh` and it has
+  a host. It has no user information, query or fragment, so credentials
+  never travel in it.
+- `metadata.ref` (string, required): a branch, tag or full commit SHA.
+- `metadata.path` (string, optional): the checkout directory, a relative
+  path. It defaults to the last segment of the URL path without a `.git`
+  suffix.
+
+A ref, and each segment of a path, starts with a letter, digit or
+underscore and holds only letters, digits, `.`, `_` and `-`. A ref can also
+hold `/`. It cannot hold `..` or `//`, or end in `/`, `.` or `.lock`. A
+submission carries at most one git part. Readers reject a submission that
+breaks these rules.
+
+A receiver admits a git part only when the matched adapter delivers git
+context. Any other part that is not text, or a second git part in the
+run's turns, ends the turn as `TASK_STATE_REJECTED` with the message text
+`unsupported message part`. A git part applies to its own turn and to
+every later turn of the run.
+
+Before the agent starts, the adapter fetches the ref at depth 1, checks it
+out, and adds one line to the end of the prompt:
+
+```
+The git repository <url> at <ref> is checked out in <dir> at commit <sha>.
+```
+
+The turn's `started` status holds `git_commit` (string, the hex commit SHA
+checked out) in its `metadata`. The Nomad adapter checks out the
+repository in a prestart task of the run's job, into
+`<NOMAD_ALLOC_DIR>/<path>`, and starts the agent task only when the
+checkout succeeds.
+
+A receiver's adapter configuration can name a `git_credential`: a sealed
+secret holding an HTTPS token, or an SSH private key for an `ssh` URL. The
+adapter gives it to the checkout step alone. A receiver that does not hold
+the secret interrupts the turn with `TASK_STATE_AUTH_REQUIRED`, as for any
+credential, naming the git credential.
+
+When the checkout fails, the turn ends as `TASK_STATE_FAILED` with the
+message text `git context unavailable`. Receivers do not publish git's
+error output.
+
 ## Cancellation
 
 A cancel applies to every turn of a run, including turns submitted after

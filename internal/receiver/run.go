@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -107,6 +106,7 @@ type admission struct {
 	taskHash string
 	offer    wire.Offer
 	history  []wire.Message
+	git      *wire.GitContext
 	// cancelled is set when the user cancelled the run; it ends CANCELED without a dispatch.
 	cancelled bool
 }
@@ -167,10 +167,35 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 	if now.UnixMilli() > task.Wherry.DeadlineMS {
 		return reject("run deadline passed")
 	}
-	if slices.ContainsFunc(task.Message.Parts, func(part wire.Part) bool { return part.Text == "" }) {
+	named, _ := r.named(offer.Adapter)
+	git, supported := gitContext(history, named.Git)
+	if !supported {
 		return reject("unsupported message part")
 	}
+	admitted.git = git
 	return admitted, 0
+}
+
+// gitContext returns the run's git context; false means the turns carry a part other than text
+// and at most one git part, or a git part the adapter does not deliver.
+func gitContext(history []wire.Message, delivered bool) (*wire.GitContext, bool) {
+	var found *wire.GitContext
+	for _, message := range history {
+		for _, part := range message.Parts {
+			if part.Text != "" {
+				continue
+			}
+			if !delivered || part.MediaType != wire.GitMediaType || found != nil {
+				return nil, false
+			}
+			git, err := wire.ParseGitPart(part)
+			if err != nil {
+				return nil, false
+			}
+			found = &git
+		}
+	}
+	return found, true
 }
 
 func (r *Receiver) publishRejection(ctx context.Context, record *kgo.Record, task *wire.SubmissionRecord, reason string) error {
@@ -360,6 +385,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				if runCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, "timeout", nil)
 				}
+				if errors.Is(err, ErrGitContext) {
+					r.logger.Printf("run %s: git context unavailable: %T", runID, err)
+					run.adapter = named
+					return run.fail(ctx, ErrGitContext.Error(), nil)
+				}
 				r.logger.Printf("run %s: lookup in adapter %s: %T", runID, named.Name, err)
 				return kgo.AckRelease
 			}
@@ -378,20 +408,28 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	if !adopted {
 		named := run.adapter
-		var credential []byte
-		if named.Credential != "" {
-			r.mu.Lock()
-			held, ok := r.credentials[named.Name]
-			r.mu.Unlock()
-			if !ok {
-				return run.interrupt(ctx, named.Credential)
-			}
-			credential = held.value
+		credential, ok := r.held(named.Credential)
+		if !ok {
+			return run.interrupt(ctx, named.Credential)
 		}
-		handle, err = named.Adapter.Dispatch(runCtx, Run{ID: runID, Turn: task.Wherry.Turn, Offer: admitted.offer.Labels, Prompt: []byte(prompt(admitted.history)), Credential: credential})
+		var gitCredential []byte
+		if admitted.git != nil {
+			if gitCredential, ok = r.held(named.GitCredential); !ok {
+				return run.interrupt(ctx, named.GitCredential)
+			}
+		}
+		handle, err = named.Adapter.Dispatch(runCtx, Run{
+			ID: runID, Turn: task.Wherry.Turn, Offer: admitted.offer.Labels, Prompt: []byte(prompt(admitted.history)), Credential: credential,
+			Git: admitted.git, GitCredential: gitCredential,
+		})
 		if err != nil {
 			if runCtx.Err() != nil && ctx.Err() == nil {
 				return run.fail(ctx, "timeout", nil)
+			}
+			if errors.Is(err, ErrGitContext) {
+				// Git error text can echo URLs and credentials, so only the type is logged.
+				r.logger.Printf("run %s: git context unavailable: %T", runID, err)
+				return run.fail(ctx, ErrGitContext.Error(), nil)
 			}
 			r.logger.Printf("run %s: dispatch failed: %T", runID, err)
 			return run.fail(ctx, "dispatch failed", nil)
@@ -400,7 +438,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	run.job = handle.Job
 	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.offer.Labels), handle.Job)
-	if err := run.commit(ctx, run.statusRecord("started", taskStatus(wire.TaskStateWorking, ""), &offset)); err != nil {
+	started := r.status(task, run.taskHash, attempt, "started", taskStatus(wire.TaskStateWorking, ""), &offset)
+	if handle.Commit != "" {
+		started.StatusUpdate.Metadata, _ = json.Marshal(wire.CommitMetadata{GitCommit: handle.Commit}) // a string always encodes
+	}
+	if err := run.commit(ctx, run.signed(wire.TopicEvent, wire.TypeStatus, started)); err != nil {
 		return run.abandon(err)
 	}
 
@@ -803,9 +845,22 @@ func prompt(history []wire.Message) string {
 func text(message wire.Message) string {
 	var parts []string
 	for _, part := range message.Parts {
-		parts = append(parts, part.Text)
+		if part.Text != "" {
+			parts = append(parts, part.Text)
+		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// held returns a configured sealed secret's value; false means it is configured but not held.
+func (r *Receiver) held(name string) ([]byte, bool) {
+	if name == "" {
+		return nil, true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	credential, ok := r.credentials[name]
+	return credential.value, ok
 }
 
 func (r *Receiver) adjustInFlight(delta int64) {

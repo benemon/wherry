@@ -57,6 +57,7 @@ type fakeAdapter struct {
 	lookups     int
 	lookupErr   error
 	existing    bool
+	commit      string
 	releases    int
 	releaseErr  error
 	releaseIDs  []string
@@ -87,7 +88,11 @@ func (f *fakeAdapter) Dispatch(_ context.Context, run Run) (Handle, error) {
 	if f.dispatchErr != nil {
 		return Handle{}, f.dispatchErr
 	}
-	return Handle{Job: fmt.Sprintf("agent-%s-t%d", run.ID, run.Turn), Alloc: run.ID}, nil
+	handle := Handle{Job: fmt.Sprintf("agent-%s-t%d", run.ID, run.Turn), Alloc: run.ID}
+	if run.Git != nil {
+		handle.Commit = f.commit
+	}
+	return handle, nil
 }
 
 func (f *fakeAdapter) Lookup(_ context.Context, runID string, turn int64) (Handle, bool, error) {
@@ -280,7 +285,7 @@ func runToTask(t *testing.T, f fixture) *wire.Task {
 	}
 	for {
 		f.receiver.mu.Lock()
-		delivered := string(f.receiver.credentials["nomad"].value)
+		delivered := string(f.receiver.credentials[credentialName].value)
 		f.receiver.mu.Unlock()
 		if delivered == testToken {
 			break
@@ -396,7 +401,7 @@ func interruptThenContinue(t *testing.T, f fixture, first, second string, betwee
 	}
 	for {
 		f.receiver.mu.Lock()
-		delivered := string(f.receiver.credentials["nomad"].value)
+		delivered := string(f.receiver.credentials[credentialName].value)
 		f.receiver.mu.Unlock()
 		if delivered == testToken {
 			break
@@ -479,7 +484,7 @@ func TestSecretNeverLogged(t *testing.T) {
 		t.Fatalf("forged secret: got %v, want \"credential rejected\"", err)
 	}
 	f.receiver.mu.Lock()
-	delivered := string(f.receiver.credentials["nomad"].value)
+	delivered := string(f.receiver.credentials[credentialName].value)
 	f.receiver.mu.Unlock()
 	if delivered != testToken {
 		t.Fatal("forged record replaced the delivered credential")
@@ -707,7 +712,7 @@ func TestSecretKeyCrossWiringRejected(t *testing.T) {
 	if err := f.receiver.refresh(f.ctx); err == nil || err.Error() != "credential rejected" {
 		t.Fatalf("refresh = %v, want credential rejected", err)
 	}
-	if _, ok := f.receiver.credentials["nomad"]; ok {
+	if _, ok := f.receiver.credentials[credentialName]; ok {
 		t.Fatal("secret for another name was delivered as the adapter credential")
 	}
 }
@@ -1057,7 +1062,7 @@ func decodeObject(t *testing.T, value []byte) map[string]any {
 func TestTaskMetadataRecordsPlacement(t *testing.T) {
 	t.Run("dispatched", func(t *testing.T) {
 		f, enrolled := admitFixture(t)
-		f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+		f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
 		record := signedRoot(t, f, f.userKey, nil)
 		admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
 		if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
@@ -1101,7 +1106,7 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, enrolled := admitFixture(t)
-			f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
 			f.adapter.stream = test.stream
 			if test.heartbeat {
 				f.adapter.endDelay = 3 * renewInterval
@@ -1210,7 +1215,7 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 	})
 	t.Run("dispatch error", func(t *testing.T) {
 		f, enrolled := admitFixture(t)
-		f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+		f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
 		f.adapter.dispatchErr = errors.New("dispatch failed")
 		record := signedRoot(t, f, f.userKey, nil)
 		admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
@@ -1292,7 +1297,7 @@ func TestReceiverRejectsNonTextParts(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, enrolled := admitFixture(t)
-			f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
 			f.receiver.enrolled = enrolled
 			f.cluster.SetGroupConfigs("p-"+enrolled.Pool, map[string]string{"share.auto.offset.reset": "earliest"})
 			record := signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
@@ -1599,7 +1604,7 @@ func TestFollowErrorReasonIsFixed(t *testing.T) {
 func TestDispatchErrorReasonIsFixed(t *testing.T) {
 	const secret = "token=s3cr3t-dispatch-detail"
 	f, enrolled := admitFixture(t)
-	f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
 	f.adapter.dispatchErr = errors.New(secret)
 	record := signedRoot(t, f, f.userKey, nil)
 	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
@@ -1771,7 +1776,7 @@ func podmanResultLine(t *testing.T) string {
 func TestResultArtifactCarriesAgentResult(t *testing.T) {
 	line := podmanResultLine(t)
 	f, enrolled := admitFixture(t)
-	f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
 	f.adapter.stream = []string{line}
 	record := signedRoot(t, f, f.userKey, nil)
 	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
@@ -1943,7 +1948,7 @@ func lastTask(t *testing.T, f fixture) *wire.Task {
 
 func TestReceiverRoutesToMatchedAdapter(t *testing.T) {
 	m := newMultiFixture(t)
-	m.receiver.credentials["cloud"] = heldCredential{version: 1, value: []byte("cloud-token")}
+	m.receiver.credentials["cred-cloud"] = heldCredential{version: 1, value: []byte("cloud-token")}
 	if status := m.execute(t, "run-lambda", runtimeIs("lambda"), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -2215,7 +2220,7 @@ func startInFlight(t *testing.T, f fixture, runID string, exp time.Time) <-chan 
 	}
 	r.mu.Lock()
 	r.offers = []wire.Offer{{Adapter: "nomad", Labels: map[string]string{"runtime": "exec", "nomad.node_pool": "OCPv", "zone": "dc1"}}}
-	r.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+	r.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
 	r.mu.Unlock()
 	f.cluster.SetGroupConfigs("p-nomad", map[string]string{"share.auto.offset.reset": "earliest"})
 	done := make(chan error, 1)
@@ -2441,7 +2446,7 @@ func TestCancelledSubmissionNotDispatched(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f, enrolled := admitFixture(t)
-			f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
 			f.adapter.existing = test.running
 			publishCancel(t, f, "run-a", f.userKey)
 			record := signedRoot(t, f, f.userKey, nil)
@@ -2588,7 +2593,7 @@ func TestCancelInterruptedTaskEndsIt(t *testing.T) {
 	}
 	for {
 		f.receiver.mu.Lock()
-		ready := string(f.receiver.credentials["nomad"].value) == testToken && f.receiver.cancelled[runID]
+		ready := string(f.receiver.credentials[credentialName].value) == testToken && f.receiver.cancelled[runID]
 		f.receiver.mu.Unlock()
 		if ready {
 			break
@@ -2633,5 +2638,183 @@ func TestCancelInterruptedTaskEndsIt(t *testing.T) {
 	}
 	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
 		t.Fatalf("continuation of a cancelled task dispatched %d jobs", dispatches)
+	}
+}
+
+const gitCredentialName = "git-token"
+
+// gitPart is a git context part as wherry submit builds it.
+var gitPart = wire.Part{URL: "https://git.example.test/org/repo.git", MediaType: wire.GitMediaType, Metadata: jsontext.Value(`{"ref":"main"}`)}
+
+func withGitPart(task *wire.SubmissionRecord) {
+	task.Message.Parts = append(task.Message.Parts, gitPart)
+}
+
+func gitStatuses(t *testing.T, f fixture) []*wire.StatusRecord {
+	t.Helper()
+	var statuses []*wire.StatusRecord
+	for _, payload := range published(t, f, wire.TopicEvent) {
+		statuses = append(statuses, payload.(*wire.StatusRecord))
+	}
+	return statuses
+}
+
+func TestGitPartAdmittedOnlyWithGitAdapter(t *testing.T) {
+	for name, test := range map[string]struct {
+		git    bool
+		mutate func(*wire.SubmissionRecord)
+		admit  bool
+	}{
+		"git adapter":         {true, withGitPart, true},
+		"adapter without git": {false, withGitPart, false},
+		"git and another part": {true, func(task *wire.SubmissionRecord) {
+			withGitPart(task)
+			task.Message.Parts = append(task.Message.Parts, wire.Part{URL: "https://example.test/a"})
+		}, false},
+		"non-git url": {true, func(task *wire.SubmissionRecord) {
+			task.Message.Parts = append(task.Message.Parts, wire.Part{URL: "https://example.test/a"})
+		}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, enrolled := admitFixture(t)
+			f.receiver.adapters[0].Git = test.git
+			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+			record := signedRoot(t, f, f.userKey, test.mutate)
+			admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
+			if !test.admit {
+				statuses := gitStatuses(t, f)
+				if admitted != nil || ack != kgo.AckReject || len(statuses) != 1 || statuses[0].StatusUpdate.Status.Message.Parts[0].Text != "unsupported message part" {
+					t.Fatalf("admitted=%v ack=%v statuses=%d, want an unsupported part rejection", admitted != nil, ack, len(statuses))
+				}
+				return
+			}
+			if admitted == nil {
+				t.Fatalf("git part not admitted (ack %v)", ack)
+			}
+			if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
+				t.Fatalf("status %v", status)
+			}
+			want := wire.GitContext{URL: gitPart.URL, Ref: "main", Path: "repo"}
+			if run := f.adapter.lastRun; run.Git == nil || *run.Git != want || string(run.Prompt) != "hi" {
+				t.Fatalf("dispatched git %#v prompt %q, want %#v and the text alone", run.Git, run.Prompt, want)
+			}
+		})
+	}
+}
+
+func TestGitCredentialMissingInterrupts(t *testing.T) {
+	f, enrolled := admitFixture(t)
+	f.receiver.adapters[0].Git = true
+	f.receiver.adapters[0].GitCredential = gitCredentialName
+	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+	record := signedRoot(t, f, f.userKey, withGitPart)
+	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
+	if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
+		t.Fatalf("status %v, want accept", status)
+	}
+	if dispatches, _, _, releases := f.adapter.counts(); dispatches != 0 || releases != 1 {
+		t.Fatalf("dispatches=%d releases=%d, want 0 and 1", dispatches, releases)
+	}
+	statuses := gitStatuses(t, f)
+	interrupted := statuses[len(statuses)-1]
+	if interrupted.Wherry.Kind != "interrupted" || interrupted.StatusUpdate.Status.State != wire.TaskStateAuthRequired ||
+		interrupted.StatusUpdate.Status.Message.Parts[0].Text != "credential "+gitCredentialName+" required" ||
+		string(interrupted.StatusUpdate.Metadata) != `{"credential":"`+gitCredentialName+`"}` {
+		t.Fatalf("status %#v metadata %s, want AUTH_REQUIRED naming %s", interrupted, interrupted.StatusUpdate.Metadata, gitCredentialName)
+	}
+
+	f.receiver.credentials[gitCredentialName] = heldCredential{version: 1, value: []byte("git-secret")}
+	record = signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
+		withGitPart(task)
+		task.Wherry.RunID, task.Wherry.Lineage.RootRunID, task.Message.TaskID, task.Message.ContextID = "run-held", "run-held", "run-held", "run-held"
+	})
+	admitted, _ = f.receiver.admit(f.ctx, record, enrolled)
+	if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
+		t.Fatalf("held credential run status %v", status)
+	}
+	if run := f.adapter.lastRun; string(run.GitCredential) != "git-secret" || string(run.Credential) != testToken {
+		t.Fatal("dispatch did not carry both credentials")
+	}
+}
+
+func TestGitCredentialNotNeededWithoutGitPart(t *testing.T) {
+	f, enrolled := admitFixture(t)
+	f.receiver.adapters[0].Git = true
+	f.receiver.adapters[0].GitCredential = gitCredentialName
+	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+	record := signedRoot(t, f, f.userKey, nil)
+	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
+	if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
+		t.Fatalf("status %v", status)
+	}
+	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 1 || f.adapter.lastRun.GitCredential != nil || f.adapter.lastRun.Git != nil {
+		t.Fatalf("dispatches=%d run=%#v, want one dispatch without git material", dispatches, f.adapter.lastRun)
+	}
+}
+
+func TestGitCloneFailureFixedReason(t *testing.T) {
+	const secret = "fatal: could not read from https://user:s3cr3t-git-token@git.example.test/org/repo.git"
+	f, enrolled := admitFixture(t)
+	f.receiver.adapters[0].Git = true
+	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+	f.adapter.dispatchErr = fmt.Errorf("%w: %s", ErrGitContext, secret)
+	record := signedRoot(t, f, f.userKey, withGitPart)
+	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
+	if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckReject {
+		t.Fatalf("status %v, want reject", status)
+	}
+	task := lastTask(t, f)
+	if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != "git context unavailable" || task.Artifacts[0].Parts[0].Text != "git context unavailable" {
+		t.Fatalf("task status %#v result %q, want FAILED with the fixed reason", task.Status, task.Artifacts[0].Parts[0].Text)
+	}
+	for _, topic := range []string{wire.TopicEvent, wire.TopicTranscript, "replies.test"} {
+		records, err := readBounded(f.ctx, f.receiver.kafkaOpt, topic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range records {
+			envelope, err := wire.DecodeEnvelope(record.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(envelope.Payload), "s3cr3t-git-token") {
+				t.Fatalf("git error text published on %s", topic)
+			}
+		}
+	}
+	if logs := f.logs.String(); strings.Contains(logs, "s3cr3t-git-token") || !strings.Contains(logs, "git context unavailable: *fmt.wrapError") {
+		t.Fatalf("unexpected git failure log: %q", logs)
+	}
+}
+
+func TestStartedStatusRecordsGitCommit(t *testing.T) {
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+	for name, test := range map[string]struct {
+		mutate func(*wire.SubmissionRecord)
+		want   string
+	}{
+		"git":     {withGitPart, `{"git_commit":"` + commit + `"}`},
+		"without": {nil, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, enrolled := admitFixture(t)
+			f.receiver.adapters[0].Git = true
+			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+			f.adapter.commit = commit
+			record := signedRoot(t, f, f.userKey, test.mutate)
+			admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
+			if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
+				t.Fatalf("status %v", status)
+			}
+			var started []*wire.StatusRecord
+			for _, status := range gitStatuses(t, f) {
+				if status.Wherry.Kind == "started" {
+					started = append(started, status)
+				}
+			}
+			if len(started) != 1 || string(started[0].StatusUpdate.Metadata) != test.want {
+				t.Fatalf("started statuses %#v, want one with metadata %q", started, test.want)
+			}
+		})
 	}
 }

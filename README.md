@@ -24,6 +24,8 @@ wherry sends a task to other compute and returns the result to the caller.
     and warns about credentials that expire within 7 days.
   - `submit` publishes a task to the matching live receiver with the most
     spare capacity.
+    `--git URL --git-ref REF [--git-path PATH]` adds a git repository that
+    the receiver checks out for the agent before it starts.
   - `continue` (alias `resume`) publishes the next turn of an interrupted
     run. `--prompt` sets its text (`continue` by default);
     `--deadline` and `--queue-deadline` set its deadlines.

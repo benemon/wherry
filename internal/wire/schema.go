@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -285,6 +286,69 @@ type PointerMetadata struct {
 // CredentialMetadata is the metadata of an interrupted status that waits on a credential.
 type CredentialMetadata struct {
 	Credential string `json:"credential"`
+}
+
+// CommitMetadata is the metadata of a started status for a run with a git context.
+type CommitMetadata struct {
+	GitCommit string `json:"git_commit"`
+}
+
+// GitMediaType is the media type of a url part that names a git repository (ADR-0024).
+const GitMediaType = "application/vnd.wherry.git"
+
+// GitMetadata is the metadata of a git context part.
+type GitMetadata struct {
+	Ref  string `json:"ref"`
+	Path string `json:"path,omitzero"`
+}
+
+// GitContext is a validated git context part; Path has its default applied.
+type GitContext struct {
+	URL  string
+	Ref  string
+	Path string
+}
+
+var (
+	// Refs and paths reach git as arguments, so neither may start with a dash.
+	gitRef     = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._/-]*$`)
+	gitSegment = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+)
+
+// ParseGitPart validates a git context part.
+func ParseGitPart(part Part) (GitContext, error) {
+	if part.URL == "" {
+		return GitContext{}, errors.New("git part must be a url part")
+	}
+	// Error text from url.Parse quotes the URL, so it is never returned.
+	parsed, err := url.Parse(part.URL)
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "ssh") || parsed.Host == "" {
+		return GitContext{}, errors.New("git url must be an https or ssh url with a host")
+	}
+	if parsed.User != nil {
+		return GitContext{}, errors.New("git url must not carry user information")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" || parsed.ForceQuery {
+		return GitContext{}, errors.New("git url must not carry a query or fragment")
+	}
+	var metadata GitMetadata
+	if part.Metadata == nil || json.Unmarshal(part.Metadata, &metadata, json.RejectUnknownMembers(true)) != nil || metadata.Ref == "" {
+		return GitContext{}, errors.New("git part metadata requires a ref")
+	}
+	if !gitRef.MatchString(metadata.Ref) || strings.Contains(metadata.Ref, "..") || strings.Contains(metadata.Ref, "//") ||
+		strings.HasSuffix(metadata.Ref, "/") || strings.HasSuffix(metadata.Ref, ".") || strings.HasSuffix(metadata.Ref, ".lock") {
+		return GitContext{}, errors.New("git ref must be a branch, tag or commit name")
+	}
+	path := metadata.Path
+	if path == "" {
+		path = strings.TrimSuffix(parsed.Path[strings.LastIndex(parsed.Path, "/")+1:], ".git")
+	}
+	for _, segment := range strings.Split(path, "/") {
+		if !gitSegment.MatchString(segment) {
+			return GitContext{}, errors.New("git path must be a relative path without . or .. segments")
+		}
+	}
+	return GitContext{URL: part.URL, Ref: metadata.Ref, Path: path}, nil
 }
 
 // AttemptFilter drops records superseded by a later turn or delivery attempt.
@@ -598,7 +662,22 @@ func validateSubmission(value *SubmissionRecord) error {
 	if value.Message.TaskID != extension.RunID || value.Message.ContextID != lineage.RootRunID {
 		return errors.New("message taskId and contextId must be the run ID and the root run ID")
 	}
-	return validateMessage(&value.Message)
+	if err := validateMessage(&value.Message); err != nil {
+		return err
+	}
+	gitParts := 0
+	for _, part := range value.Message.Parts {
+		if part.MediaType != GitMediaType {
+			continue
+		}
+		if gitParts++; gitParts > 1 {
+			return errors.New("a submission carries at most one git part")
+		}
+		if _, err := ParseGitPart(part); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateStatus(value *StatusRecord) error {

@@ -334,13 +334,24 @@ func runSubmit(ctx context.Context, client *busclient.Client, args []string, std
 	labelsText := flags.String("labels", "", "task labels")
 	prompt := flags.String("prompt", "", "prompt text")
 	promptFile := flags.String("prompt-file", "", "prompt file")
+	gitURL := flags.String("git", "", "git repository URL to check out for the agent")
+	gitRef := flags.String("git-ref", "", "branch, tag or commit to check out")
+	gitPath := flags.String("git-path", "", "checkout directory (default: the repository name)")
 	deadline := flags.Duration("deadline", 30*time.Minute, "task deadline")
 	queueDeadline := flags.Duration("queue-deadline", 10*time.Minute, "queue deadline")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit --selector k=v|v,.. --labels k=v,.. <--prompt TEXT|--prompt-file PATH> [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit --selector k=v|v,.. --labels k=v,.. <--prompt TEXT|--prompt-file PATH> [--git URL --git-ref REF [--git-path PATH]] [--deadline DURATION] [--queue-deadline DURATION]")
+	}
+	var parts []wire.Part
+	if wasSet(flags, "git") || wasSet(flags, "git-ref") || wasSet(flags, "git-path") {
+		if *gitURL == "" || *gitRef == "" {
+			return errors.New("submit requires --git and --git-ref together")
+		}
+		metadata, _ := json.Marshal(wire.GitMetadata{Ref: *gitRef, Path: *gitPath}) // strings always encode
+		parts = append(parts, wire.Part{URL: *gitURL, MediaType: wire.GitMediaType, Metadata: metadata})
 	}
 	if !flagSet(flags, "selector", "labels") {
 		return errors.New("submit requires --selector and --labels")
@@ -369,7 +380,7 @@ func runSubmit(ctx context.Context, client *busclient.Client, args []string, std
 		return fmt.Errorf("labels: %w", err)
 	}
 	result, err := client.Submit(ctx, busclient.SubmitInput{
-		Selector: selector, Labels: labels, Prompt: *prompt,
+		Selector: selector, Labels: labels, Prompt: *prompt, Parts: parts,
 		Deadline: *deadline, QueueDeadline: *queueDeadline,
 	})
 	if err != nil {
