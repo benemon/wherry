@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1018,6 +1019,65 @@ func TestNoCredentialInterruptsAndReleases(t *testing.T) {
 	}
 }
 
+func TestInterruptMetadataNamesCredential(t *testing.T) {
+	f, enrolled := admitFixture(t)
+	record := signedRoot(t, f, f.userKey, nil)
+	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
+	executeSubmission(t, f, record, admitted, 1)
+	statuses := published(t, f, wire.TopicEvent)
+	interrupted := statuses[len(statuses)-1].(*wire.StatusRecord)
+	if interrupted.Wherry.Kind != "interrupted" {
+		t.Fatalf("last status kind %q, want interrupted", interrupted.Wherry.Kind)
+	}
+	if got, want := string(interrupted.StatusUpdate.Metadata), `{"credential":"`+credentialName+`"}`; got != want {
+		t.Fatalf("status metadata %s, want %s", got, want)
+	}
+	if got := interrupted.StatusUpdate.Status.Message.Parts[0].Text; got != "credential "+credentialName+" required" {
+		t.Fatalf("status message %q", got)
+	}
+}
+
+func decodeObject(t *testing.T, value []byte) map[string]any {
+	t.Helper()
+	var object map[string]any
+	if err := json.Unmarshal(value, &object); err != nil {
+		t.Fatalf("decode %s: %v", value, err)
+	}
+	return object
+}
+
+func TestTaskMetadataRecordsPlacement(t *testing.T) {
+	t.Run("dispatched", func(t *testing.T) {
+		f, enrolled := admitFixture(t)
+		f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+		record := signedRoot(t, f, f.userKey, nil)
+		admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
+		if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
+			t.Fatalf("status %v", status)
+		}
+		want := map[string]any{
+			"receiver_id": "receiver-nomad", "pool": "nomad", "adapter": "nomad",
+			"offer": map[string]any{"runtime": "exec", "nomad.node_pool": "OCPv", "zone": "dc1"},
+			"job":   "agent-run-a-t1",
+		}
+		if got := decodeObject(t, lastTask(t, f).Metadata); !reflect.DeepEqual(got, want) {
+			t.Fatalf("task metadata %v, want %v", got, want)
+		}
+	})
+	// The adopted job came from an earlier attempt, whose offer this attempt does not know.
+	t.Run("adopted", func(t *testing.T) {
+		m := newMultiFixture(t)
+		m.cloud.existing = true
+		if status := m.execute(t, "run-moved", runtimeIs("exec"), 2); status != kgo.AckAccept {
+			t.Fatalf("status %v", status)
+		}
+		want := map[string]any{"receiver_id": "receiver-nomad", "pool": "nomad", "adapter": "cloud", "job": "agent-run-moved-t1"}
+		if got := decodeObject(t, lastTask(t, m.fixture).Metadata); !reflect.DeepEqual(got, want) {
+			t.Fatalf("task metadata %v, want %v", got, want)
+		}
+	})
+}
+
 func TestTranscriptArtifactChunks(t *testing.T) {
 	oversized := `{"type":"assistant","message":"` + strings.Repeat("x", maxLine) + `"}`
 	for name, test := range map[string]struct {
@@ -1678,6 +1738,87 @@ func TestResultLine(t *testing.T) {
 		if _, ok := resultLine([]byte(line)); ok {
 			t.Fatalf("%q treated as a result", line)
 		}
+	}
+}
+
+// podmanResultLine is the result record captured in ../adapter/nomad/testdata/podman-cri-stdout.log,
+// without its CRI framing.
+func podmanResultLine(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile("../adapter/nomad/testdata/podman-cri-stdout.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	framed := strings.SplitN(lines[len(lines)-1], " ", 4)
+	if len(framed) != 4 || framed[1] != "stdout" || framed[2] != "F" {
+		t.Fatalf("unexpected CRI framing %.80q", lines[len(lines)-1])
+	}
+	return framed[3]
+}
+
+func TestResultArtifactCarriesAgentResult(t *testing.T) {
+	line := podmanResultLine(t)
+	f, enrolled := admitFixture(t)
+	f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+	f.adapter.stream = []string{line}
+	record := signedRoot(t, f, f.userKey, nil)
+	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
+	if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
+		t.Fatalf("status %v", status)
+	}
+	artifact := lastTask(t, f).Artifacts[0]
+	want := decodeObject(t, []byte(line))
+	if artifact.Parts[0].Text != want["result"] {
+		t.Fatalf("result part %#v, want the record's result", artifact.Parts[0])
+	}
+	delete(want, "result")
+	got := decodeObject(t, artifact.Metadata)
+	if len(got) != 1 || !reflect.DeepEqual(got["agent_result"], want) {
+		t.Fatalf("artifact metadata %s, want agent_result with every member but result", artifact.Metadata)
+	}
+}
+
+func TestAgentResultOmittedWhenOversized(t *testing.T) {
+	// The remaining object is {"pad":"<n bytes>","type":"result"}: n plus 26 bytes.
+	line := func(pad int, result string) []byte {
+		return []byte(`{"type":"result","result":"` + result + `","pad":"` + strings.Repeat("x", pad) + `"}`)
+	}
+	if result, _ := resultLine(line(maxAgentResult-26, strings.Repeat("r", 2*maxAgentResult))); result.metadata == nil {
+		t.Fatal("agent_result at the bound, with a larger result member, was omitted")
+	}
+	result, ok := resultLine(line(maxAgentResult-25, "done"))
+	if !ok || result.metadata != nil {
+		t.Fatalf("agent_result one byte over the bound kept: ok=%t metadata %d bytes", ok, len(result.metadata))
+	}
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-oversized", 1)
+	if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, result); status != kgo.AckAccept {
+		t.Fatalf("status %v", status)
+	}
+	if artifact := lastTask(t, f).Artifacts[0]; artifact.Metadata != nil || artifact.Parts[0].Text != "done" {
+		t.Fatalf("result artifact %#v, want text done and no metadata", artifact)
+	}
+}
+
+func TestAgentResultOmittedWhenNotObject(t *testing.T) {
+	for _, data := range []string{`["result"]`, `"result"`, `null`, `42`, `{"type":"result","a":1,"a":2}`, "{\"type\":\"result\",\"a\":\"\xff\"}"} {
+		if metadata := agentResultMetadata([]byte(data)); metadata != nil {
+			t.Fatalf("%q produced metadata %s", data, metadata)
+		}
+	}
+	// encoding/json accepts the duplicate member, so the line is a result whose record cannot travel.
+	result, ok := resultLine([]byte(`{"type":"result","result":"done","n":1,"n":2}`))
+	if !ok || result.metadata != nil {
+		t.Fatalf("ok=%t metadata %s", ok, result.metadata)
+	}
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-duplicate", 1)
+	if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, result); status != kgo.AckAccept {
+		t.Fatalf("status %v", status)
+	}
+	if artifact := lastTask(t, f).Artifacts[0]; artifact.Metadata != nil {
+		t.Fatalf("result artifact metadata %s, want none", artifact.Metadata)
 	}
 }
 

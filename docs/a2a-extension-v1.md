@@ -76,8 +76,11 @@ false again.
 
 A receiver interrupts a turn with `TASK_STATE_AUTH_REQUIRED` when the adapter
 that matched the task needs a credential the receiver does not hold. The
-status message text is `credential <name> required`. The interrupt publishes
-this status alone: no transcript chunk and no `task` record.
+status message text is `credential <name> required`. The status `metadata`
+holds `credential` (string, the credential's name). Clients match a waiting
+task to a credential by this member and ignore the message text. The
+interrupt publishes this status alone: no transcript chunk and no `task`
+record.
 
 A continuation is a user-signed submission with `turn` greater than 1. It
 uses the run id as `message.taskId` and has a new `messageId`. It repeats the
@@ -86,6 +89,32 @@ run's earlier turns. A receiver admits it only after an interrupted status
 from a receiver in the same pool for the immediately preceding turn, and
 rejects a continuation that differs from the earlier turns in any of those
 fields.
+
+## Metadata
+
+The `metadata` of the final `Task` in a `task` record describes where the
+final turn ran:
+
+- `receiver_id` (string): the receiver that ran the turn.
+- `pool` (string): the submission's pool.
+- `adapter` (string): the name of the receiver's adapter that ran the turn.
+- `offer` (object of string labels): the offer the job was dispatched with.
+  It is absent when no job was dispatched, and when the attempt adopted a
+  job that an earlier attempt dispatched.
+- `job` (string): the platform's id for the job, as the adapter reports it.
+  It is absent when no job was dispatched.
+
+The `metadata` of the result artifact (`artifactId` `result`) holds
+`agent_result` (object): the agent's final result line, decoded as a JSON
+object, with its `result` member removed. That member is already the
+artifact's part. The receiver passes the other members through without
+interpreting them, so their names and values are the agent's own. It
+re-encodes them, so member order and string escaping can differ from the
+line in the transcript.
+
+`agent_result` is absent when the result line is not an RFC 7493 object,
+when the object without `result` exceeds 16 KiB as encoded, and when the
+turn ends without a result line.
 
 ## Identifiers
 

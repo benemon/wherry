@@ -276,6 +276,11 @@ type PointerMetadata struct {
 	Size   int64  `json:"size"`
 }
 
+// CredentialMetadata is the metadata of an interrupted status that waits on a credential.
+type CredentialMetadata struct {
+	Credential string `json:"credential"`
+}
+
 // AttemptFilter drops records superseded by a later turn or delivery attempt.
 type AttemptFilter struct {
 	highest map[string]turnAttempt

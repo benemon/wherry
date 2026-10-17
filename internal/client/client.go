@@ -5,13 +5,13 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
 	"os"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/benemon/wherry/internal/trust"
@@ -604,30 +604,18 @@ func (client *Client) waitingTasks(ctx context.Context, loaded *loadedState, poo
 	if err != nil {
 		return nil, 0, err
 	}
-	wantMessage := "credential " + credential + " required"
 	var waiting []WaitingTask
 	for runID, status := range statuses {
 		submission := submissions[runID][status.Wherry.Turn]
+		var metadata wire.CredentialMetadata
 		if submission.record.Wherry.Pool == pool && status.Wherry.Kind == "interrupted" &&
-			status.StatusUpdate.Status.State == wire.TaskStateAuthRequired && statusText(status.StatusUpdate.Status) == wantMessage {
+			status.StatusUpdate.Status.State == wire.TaskStateAuthRequired &&
+			json.Unmarshal(status.StatusUpdate.Metadata, &metadata) == nil && metadata.Credential == credential {
 			waiting = append(waiting, WaitingTask{RunID: runID, Turn: status.Wherry.Turn})
 		}
 	}
 	sort.Slice(waiting, func(i, j int) bool { return waiting[i].RunID < waiting[j].RunID })
 	return waiting, skipped + statusSkipped, nil
-}
-
-func statusText(status wire.TaskStatus) string {
-	if status.Message == nil {
-		return ""
-	}
-	var parts []string
-	for _, part := range status.Message.Parts {
-		if part.Text != "" {
-			parts = append(parts, part.Text)
-		}
-	}
-	return strings.Join(parts, " ")
 }
 
 // Await follows the reply topic until it accepts a final task for runID: terminal, or waiting on authentication.

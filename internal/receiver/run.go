@@ -25,6 +25,7 @@ import (
 
 const (
 	maxLine        = 512 << 10
+	maxAgentResult = 16 << 10
 	maxRunDuration = time.Hour // receiver cap on any task's run deadline (ADR-0013)
 	readTimeout    = 30 * time.Second
 )
@@ -379,7 +380,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.logger.Printf("run %s: dispatch failed: %T", runID, err)
 			return run.fail(ctx, "dispatch failed", nil)
 		}
+		run.offer = admitted.offer.Labels
 	}
+	run.job = handle.Job
 	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.offer.Labels), handle.Job)
 	if err := run.commit(ctx, run.statusRecord("started", taskStatus(wire.TaskStateWorking, ""), &offset)); err != nil {
 		return run.abandon(err)
@@ -465,6 +468,9 @@ type activeRun struct {
 	attempt  int64
 	// adapter holds the run's platform material, released at the end.
 	adapter Named
+	// offer is set when this attempt dispatched the job; an adopted job's offer is unknown.
+	offer map[string]string
+	job   string
 }
 
 func (run *activeRun) commit(ctx context.Context, records ...*kgo.Record) error {
@@ -508,7 +514,7 @@ func (run *activeRun) revoke(ctx context.Context, handle Handle, pending []Line)
 	}
 	const reason = "receiver revoked"
 	status := taskStatus(wire.TaskStateFailed, reason)
-	if err := run.commit(ctx, append(run.chunks(pending, true), run.taskRecord(status, reason), run.statusRecord("terminal", status, nil))...); err != nil {
+	if err := run.commit(ctx, append(run.chunks(pending, true), run.taskRecord(status, reason, nil), run.statusRecord("terminal", status, nil))...); err != nil {
 		run.receiver.logger.Printf("run %s: publish revoked status: %v", run.task.Wherry.RunID, err)
 	}
 	run.release(ctx)
@@ -516,12 +522,13 @@ func (run *activeRun) revoke(ctx context.Context, handle Handle, pending []Line)
 }
 
 func (run *activeRun) fail(ctx context.Context, reason string, pending []Line) kgo.AckStatus {
-	return run.end(ctx, taskStatus(wire.TaskStateFailed, reason), reason, pending, kgo.AckReject)
+	return run.end(ctx, taskStatus(wire.TaskStateFailed, reason), reason, nil, pending, kgo.AckReject)
 }
 
 func (run *activeRun) interrupt(ctx context.Context, credential string) kgo.AckStatus {
-	status := taskStatus(wire.TaskStateAuthRequired, "credential "+credential+" required")
-	if err := run.commit(ctx, run.statusRecord("interrupted", status, nil)); err != nil {
+	record := run.receiver.status(run.task, run.taskHash, run.attempt, "interrupted", taskStatus(wire.TaskStateAuthRequired, "credential "+credential+" required"), nil)
+	record.StatusUpdate.Metadata, _ = json.Marshal(wire.CredentialMetadata{Credential: credential}) // a string always encodes
+	if err := run.commit(ctx, run.signed(wire.TopicEvent, wire.TypeStatus, record)); err != nil {
 		return run.abandon(err)
 	}
 	run.release(ctx)
@@ -537,12 +544,12 @@ func (run *activeRun) finish(ctx context.Context, handle Handle, pending []Line,
 	if result.IsError {
 		state, ack = wire.TaskStateFailed, kgo.AckReject
 	}
-	return run.end(ctx, taskStatus(state, ""), result.Result, pending, ack)
+	return run.end(ctx, taskStatus(state, ""), result.Result, result.metadata, pending, ack)
 }
 
 // end commits the remaining transcript, the final task and the terminal status in one transaction.
-func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, pending []Line, ack kgo.AckStatus) kgo.AckStatus {
-	records := append(run.chunks(pending, true), run.taskRecord(status, result), run.statusRecord("terminal", status, nil))
+func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, resultMetadata jsontext.Value, pending []Line, ack kgo.AckStatus) kgo.AckStatus {
+	records := append(run.chunks(pending, true), run.taskRecord(status, result, resultMetadata), run.statusRecord("terminal", status, nil))
 	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
 	}
@@ -608,8 +615,17 @@ func (run *activeRun) chunks(lines []Line, last bool) []*kgo.Record {
 	return records
 }
 
+// placement is the final task's metadata: where its last turn ran.
+type placement struct {
+	ReceiverID string            `json:"receiver_id"`
+	Pool       string            `json:"pool"`
+	Adapter    string            `json:"adapter"`
+	Offer      map[string]string `json:"offer,omitempty"`
+	Job        string            `json:"job,omitempty"`
+}
+
 // taskRecord builds the final task; a result that is JSON travels as a data part.
-func (run *activeRun) taskRecord(status wire.TaskStatus, result string) *kgo.Record {
+func (run *activeRun) taskRecord(status wire.TaskStatus, result string, resultMetadata jsontext.Value) *kgo.Record {
 	part := wire.Part{Text: result}
 	switch {
 	case result == "":
@@ -617,11 +633,15 @@ func (run *activeRun) taskRecord(status wire.TaskStatus, result string) *kgo.Rec
 	case jsontext.Value(result).IsValid():
 		part = wire.Part{Data: jsontext.Value(result), MediaType: "application/json"}
 	}
+	metadata, _ := json.Marshal(placement{ // strings and a string map always encode
+		ReceiverID: run.receiver.config.ReceiverID, Pool: run.task.Wherry.Pool, Adapter: run.adapter.Name, Offer: run.offer, Job: run.job,
+	})
 	task := &wire.TaskRecord{
 		Task: wire.Task{
 			ID: run.task.Wherry.RunID, ContextID: run.task.Wherry.Lineage.RootRunID, Status: status,
 			History:   run.history,
-			Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI}}},
+			Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{part}, Metadata: resultMetadata, Extensions: []string{wire.ExtensionURI}}},
+			Metadata:  metadata,
 		},
 		Wherry: wire.TaskExtension{Turn: run.task.Wherry.Turn, Attempt: run.attempt, TaskHash: run.taskHash},
 	}
@@ -704,6 +724,8 @@ type agentResult struct {
 	Type    string `json:"type"`
 	Result  string `json:"result"`
 	IsError bool   `json:"is_error"`
+	// metadata is the result artifact's metadata, nil when the record cannot travel.
+	metadata jsontext.Value
 }
 
 // resultLine recognises the final stream-json record; stdout is data, never control.
@@ -712,7 +734,25 @@ func resultLine(data []byte) (agentResult, bool) {
 	if json.Unmarshal(data, &result) != nil || result.Type != "result" {
 		return agentResult{}, false
 	}
+	result.metadata = agentResultMetadata(data)
 	return result, true
+}
+
+// agentResultMetadata passes the agent's result record through, less the result member the
+// artifact already holds; a record that is not an I-JSON object or exceeds maxAgentResult is dropped.
+func agentResultMetadata(data []byte) jsontext.Value {
+	record := jsontext.Value(data)
+	var members map[string]jsontext.Value
+	if !record.IsValid() || record.Kind() != '{' || json.Unmarshal(record, &members) != nil {
+		return nil
+	}
+	delete(members, "result")
+	rest, err := json.Marshal(members)
+	if err != nil || len(rest) > maxAgentResult {
+		return nil
+	}
+	metadata, _ := json.Marshal(map[string]jsontext.Value{"agent_result": rest}) // a valid object always encodes
+	return metadata
 }
 
 // prompt is the first turn's text alone, or every turn's text under a turn separator.

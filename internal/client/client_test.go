@@ -5,6 +5,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json/jsontext"
 	"encoding/pem"
 	"net/http/httptest"
 	"os"
@@ -799,20 +800,18 @@ func TestLatestStatusesIgnoresRejected(t *testing.T) {
 	}
 }
 
-func TestSecretPutListsWaitingTasks(t *testing.T) {
+// Each status's message text names the other credential; only the metadata decides.
+func TestWaitingTasksUsesStructuredCredential(t *testing.T) {
 	fixture := newClientFixture(t, true)
-	submission, hash := fixture.rootSubmission(t, "run-waiting", "default")
-	status := &wire.StatusRecord{
-		StatusUpdate: wire.TaskStatusUpdateEvent{
-			TaskID: submission.Wherry.RunID, ContextID: submission.Wherry.Lineage.RootRunID,
-			Status: wire.TaskStatus{
-				State: wire.TaskStateAuthRequired, Timestamp: time.Now().UTC().Format(time.RFC3339),
-				Message: &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "credential token required"}}, Extensions: []string{wire.ExtensionURI}},
-			},
-		},
-		Wherry: wire.StatusExtension{Turn: 1, Attempt: 1, TaskHash: hash, ReceiverID: "receiver-a", Kind: "interrupted"},
+	interrupt := func(runID, text, metadata string) {
+		submission, hash := fixture.rootSubmission(t, runID, "default")
+		status := testStatus(submission, hash, "receiver-a", "interrupted", wire.TaskStateAuthRequired)
+		status.StatusUpdate.Status.Message = &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: text}}, Extensions: []string{wire.ExtensionURI}}
+		status.StatusUpdate.Metadata = jsontext.Value(metadata)
+		fixture.produce(t, wire.TopicEvent, runID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
 	}
-	fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
+	interrupt("run-token", "credential other required", `{"credential":"token"}`)
+	interrupt("run-other", "credential token required", `{"credential":"other"}`)
 	path := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
@@ -821,8 +820,8 @@ func TestSecretPutListsWaitingTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Waiting) != 1 || result.Waiting[0].RunID != submission.Wherry.RunID || result.Waiting[0].Turn != 1 {
-		t.Fatalf("waiting tasks %#v", result.Waiting)
+	if len(result.Waiting) != 1 || result.Waiting[0].RunID != "run-token" || result.Waiting[0].Turn != 1 {
+		t.Fatalf("waiting tasks %#v, want run-token alone", result.Waiting)
 	}
 }
 
