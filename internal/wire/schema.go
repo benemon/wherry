@@ -157,11 +157,12 @@ type Requirement struct {
 // OpIn is the only Requirement operator.
 const OpIn = "In"
 
-// TaskStatus is an A2A TaskStatus; Timestamp is RFC 3339, as proto3 JSON writes a Timestamp.
+// TaskStatus is an A2A TaskStatus.
 type TaskStatus struct {
-	State     TaskState `json:"state"`
-	Message   *Message  `json:"message,omitzero"`
-	Timestamp string    `json:"timestamp,omitzero"`
+	State   TaskState `json:"state"`
+	Message *Message  `json:"message,omitzero"`
+	// Timestamp is RFC 3339, as proto3 JSON writes a Timestamp.
+	Timestamp string `json:"timestamp,omitzero"`
 }
 
 // Task is an A2A Task.

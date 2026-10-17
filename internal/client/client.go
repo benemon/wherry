@@ -100,7 +100,7 @@ type ContinueResult struct {
 	Skipped int
 }
 
-// AwaitResult contains the accepted final task.
+// AwaitResult is the accepted outcome of the latest turn; Task is nil when a status record ended it.
 type AwaitResult struct {
 	Task    *wire.Task
 	Status  wire.TaskStatus
@@ -262,7 +262,7 @@ func (client *Client) Approve(ctx context.Context, requestHash, pool string, lab
 	return ApprovalResult{ReceiverID: request.request.ReceiverID, Generation: generation, Skipped: loaded.skipped}, nil
 }
 
-// Renew publishes a renewal of a receiver's current approval that expires 30 days from now.
+// Renew publishes a renewal of a receiver's current approval.
 func (client *Client) Renew(ctx context.Context, receiverID string) (ApprovalResult, error) {
 	loaded, err := client.loadState(ctx)
 	if err != nil {
@@ -318,7 +318,7 @@ func (client *Client) Revoke(ctx context.Context, receiverID string) (RevokeResu
 	return RevokeResult{ReceiverID: receiverID, Floor: current.generation, Skipped: loaded.skipped}, nil
 }
 
-// PutSecret seals a file to an enrolled receiver and publishes its next version, expiring after expires.
+// PutSecret seals a file to an enrolled receiver and publishes its next version.
 func (client *Client) PutSecret(ctx context.Context, name, receiverID, path string, expires time.Duration) (SecretResult, error) {
 	loaded, err := client.loadState(ctx)
 	if err != nil {
@@ -762,7 +762,6 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 	if err != nil {
 		return EventsResult{}, err
 	}
-	// Transcripts are keyed by run ID; only this run's records are verified.
 	for _, record := range transcripts {
 		if string(record.Key) != runID {
 			continue

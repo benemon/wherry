@@ -107,8 +107,9 @@ type admission struct {
 	prompt string
 }
 
-// admit applies ADR-0014 root verification and ADR-0011/0017 matching. A nil
-// admission carries the acknowledgement.
+// admit applies ADR-0014 root verification, the run's turn order, ADR-0011/0017
+// matching, deadlines and part checks, and builds the prompt from the run's
+// history. A nil admission carries the acknowledgement.
 func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trust.Enrolled) (*admission, kgo.AckStatus) {
 	task, err := trust.VerifyRootSubmission(record.Value, r.userPub)
 	if err != nil {
@@ -584,7 +585,6 @@ func taskStatus(state wire.TaskState, reason string) wire.TaskStatus {
 	return status
 }
 
-// chunks builds the transcript artifact_update records for lines; last marks the final one as the last chunk.
 func (run *activeRun) chunks(lines []Line, last bool) []*kgo.Record {
 	records := make([]*kgo.Record, 0, len(lines))
 	for i, line := range lines {
@@ -667,7 +667,7 @@ func (run *activeRun) signed(topic string, recordType wire.RecordType, payload a
 	return &kgo.Record{Topic: topic, Key: []byte(run.task.Wherry.RunID), Value: value}
 }
 
-// lastOffset returns the highest heartbeat log offset this run reached under an earlier attempt.
+// lastOffset returns the highest started or heartbeat log offset this run reached under an earlier attempt.
 func (r *Receiver) lastOffset(ctx context.Context, runID, taskHash, rootRunID string, turn int64) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()

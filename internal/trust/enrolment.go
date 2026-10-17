@@ -15,21 +15,23 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 )
 
-// Enrolled is the current accepted enrolment for a receiver; ApprovalHash is the envelope hash of the generation's founding approval.
+// Enrolled is the current accepted enrolment for a receiver.
 type Enrolled struct {
-	SigningPub   ed25519.PublicKey
-	SealingPub   *ecdh.PublicKey
-	Labels       map[string]string
-	Pool         string
-	Adapters     []wire.AdapterGrant
-	Selector     []wire.Requirement
-	Generation   int64
+	SigningPub ed25519.PublicKey
+	SealingPub *ecdh.PublicKey
+	Labels     map[string]string
+	Pool       string
+	Adapters   []wire.AdapterGrant
+	Selector   []wire.Requirement
+	Generation int64
+	// ApprovalHash is the envelope hash of the generation's founding approval.
 	ApprovalHash string
 }
 
-// enrolled keeps the founding approval's hash, which seals bind; head is the latest accepted approval or renewal at that generation.
 type acceptedApproval struct {
+	// enrolled keeps the founding approval's hash, which seals bind.
 	enrolled Enrolled
+	// head is the latest accepted approval or renewal at that generation.
 	head     *wire.EnrolApproval
 	headHash string
 }

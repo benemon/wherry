@@ -156,7 +156,7 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run receiver.Run) (_ recei
 	return adapter.wait(ctx, jobID, job.TaskGroups[0].Tasks[0].Driver)
 }
 
-// Lookup finds a run's existing job and waits for it as Dispatch does.
+// Lookup finds a turn's existing job and waits for it as Dispatch does.
 func (adapter *Adapter) Lookup(ctx context.Context, runID string, turn int64) (receiver.Handle, bool, error) {
 	job, _, err := adapter.client.Jobs().Info(jobID(runID, turn), (&api.QueryOptions{}).WithContext(ctx))
 	if notFound(err) {
@@ -468,7 +468,7 @@ func (adapter *Adapter) Stop(ctx context.Context, handle receiver.Handle) error 
 	return err
 }
 
-// Release deletes the per-run credential and prompt variable.
+// Release deletes the per-turn credential and prompt variable.
 func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) error {
 	return adapter.deleteVariable(ctx, variablePath(runID, turn))
 }

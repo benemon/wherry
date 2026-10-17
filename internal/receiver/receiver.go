@@ -364,7 +364,7 @@ func (r *Receiver) refresh(ctx context.Context) error {
 }
 
 // requestRenewal publishes a renew request for the current generation once less than a third of
-// the approval's lifetime is left, at most once per renewRequestInterval; expired generations ask too.
+// the approval's lifetime is left; expired generations ask too.
 // The lifetime starts at the approval record's broker timestamp, which is unsigned and only schedules the request.
 func (r *Receiver) requestRenewal(ctx context.Context, state *trust.State, issued map[string]time.Time, now time.Time) error {
 	id := r.config.ReceiverID
