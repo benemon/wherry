@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +18,9 @@ import (
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 func TestRevocationTime(t *testing.T) {
@@ -330,6 +334,66 @@ func TestHistoryRequiresLogAppendTime(t *testing.T) {
 	}
 	if awaited, err := fixture.clientFor(createTime).Await(fixture.ctx, runID, time.Second); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("CreateTime reply: await = %#v, %v; want no accepted outcome", awaited, err)
+	}
+}
+
+// produceForged produces value in a hand-built v2 batch that claims LogAppendTime with a producer timestamp of
+// 1000ms, and returns the partition's error code and base offset.
+func (fixture brokerFixture) produceForged(t *testing.T, topic, key string, value []byte) (int16, int64) {
+	t.Helper()
+	listed, err := fixture.admin.ListTopics(fixture.ctx, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := kmsg.Record{Key: []byte(key), Value: value}
+	record.Length = int32(len(record.AppendTo(nil)) - 1)
+	batch := kmsg.RecordBatch{
+		PartitionLeaderEpoch: -1, Magic: 2, Attributes: 0x08, FirstTimestamp: 1000, MaxTimestamp: 1000,
+		ProducerID: -1, ProducerEpoch: -1, FirstSequence: -1, NumRecords: 1, Records: record.AppendTo(nil),
+	}
+	raw := batch.AppendTo(nil)
+	binary.BigEndian.PutUint32(raw[8:], uint32(len(raw)-12))
+	binary.BigEndian.PutUint32(raw[17:], crc32.Checksum(raw[21:], crc32.MakeTable(crc32.Castagnoli)))
+
+	request := kmsg.NewPtrProduceRequest()
+	request.Acks, request.TimeoutMillis = -1, 10000
+	requestTopic := kmsg.NewProduceRequestTopic()
+	requestTopic.Topic, requestTopic.TopicID = topic, listed[topic].ID
+	partition := kmsg.NewProduceRequestTopicPartition()
+	partition.Records = raw
+	requestTopic.Partitions = append(requestTopic.Partitions, partition)
+	request.Topics = append(request.Topics, requestTopic)
+	response, err := request.RequestWith(fixture.ctx, fixture.kafka)
+	if err != nil {
+		t.Fatal(err)
+	}
+	produced := response.Topics[0].Partitions[0]
+	return produced.ErrorCode, produced.BaseOffset
+}
+
+func TestBrokerRewritesForgedLogAppendBit(t *testing.T) {
+	fixture := newBrokerFixture(t)
+	createTime, logAppend := fixture.replyTopic(t, "forged-create-time", false), fixture.replyTopic(t, "forged-log-append", true)
+	receiverID, pool, runID := "receiver-forged-"+fixture.suffix, "pool-"+fixture.suffix, "run-forged-"+fixture.suffix
+	key := fixture.addReceiver(t, receiverID, pool, map[string]string{}, testSelector())
+	submission, hash := fixture.rootSubmission(t, runID, pool)
+	value := signed(t, wire.TypeTask, testTask(submission, hash, 1, wire.TaskStateCompleted), key)
+
+	if code, _ := fixture.produceForged(t, logAppend, runID, value); code != kerr.InvalidTimestamp.Code {
+		t.Fatalf("LogAppendTime topic: produce error code %d, want %d (INVALID_TIMESTAMP)", code, kerr.InvalidTimestamp.Code)
+	}
+	code, offset := fixture.produceForged(t, createTime, runID, value)
+	if code != 0 {
+		t.Fatalf("CreateTime topic: produce error code %d, want the batch accepted", code)
+	}
+	if _, err := fixture.client.Revoke(fixture.ctx, receiverID); err != nil {
+		t.Fatal(err)
+	}
+	if read := fixture.readBack(t, &kgo.Record{Topic: createTime, Offset: offset}); read.Attrs.TimestampType() != 0 || !read.Timestamp.Equal(time.UnixMilli(1000)) {
+		t.Fatalf("CreateTime topic: forged record read as timestamp type %d at %v, want CreateTime at the producer's 1000ms", read.Attrs.TimestampType(), read.Timestamp)
+	}
+	if awaited, err := fixture.clientFor(createTime).Await(fixture.ctx, runID, time.Second); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("await = %#v, %v; want the forged record rejected", awaited, err)
 	}
 }
 
