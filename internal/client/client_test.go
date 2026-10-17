@@ -94,7 +94,7 @@ func newClientFixture(t *testing.T, approve bool) clientFixture {
 	fixture.produce(t, wire.TopicState, "receiver-a", request)
 	if approve {
 		result, err := fixture.client.Approve(
-			ctx, trust.EnvelopeHash(request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 30,
+			ctx, trust.EnvelopeHash(request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 30*24*time.Hour,
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -166,7 +166,7 @@ func (fixture clientFixture) addReceiver(t *testing.T, receiverID, pool string, 
 		t.Fatal(err)
 	}
 	fixture.produce(t, wire.TopicState, receiverID, request)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(request), pool, labels, singleGrant(), selector, "auto", 30); err != nil {
+	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(request), pool, labels, singleGrant(), selector, "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	return signingKey
@@ -180,7 +180,7 @@ func TestApproveGrantMustNameDetectedAdapter(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fixture := newClientFixture(t, false)
 			before := fixture.topicEnd(t, wire.TopicState)
-			_, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, []wire.AdapterGrant{grant}, []wire.Requirement{}, "auto", 30)
+			_, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, []wire.AdapterGrant{grant}, []wire.Requirement{}, "auto", 30*24*time.Hour)
 			if err == nil || !strings.Contains(err.Error(), "detected adapter") {
 				t.Fatalf("got %v, want grant rejected", err)
 			}
@@ -193,7 +193,7 @@ func TestApproveGrantMustNameDetectedAdapter(t *testing.T) {
 
 func TestApproveDefaultsPoolToReceiverID(t *testing.T) {
 	fixture := newClientFixture(t, false)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, testGrants(), []wire.Requirement{}, "auto", 30); err != nil {
+	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, testGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	records, err := fixture.client.readBounded(fixture.ctx, wire.TopicState)
@@ -1010,7 +1010,7 @@ func TestReEnrolAboveFloor(t *testing.T) {
 	}
 	approve := func(want int64) {
 		t.Helper()
-		result, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 30)
+		result, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 30*24*time.Hour)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1110,7 +1110,7 @@ func TestAutoRenewalByClient(t *testing.T) {
 
 func TestManualRenewalNotAutomatic(t *testing.T) {
 	fixture := newClientFixture(t, false)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "manual", 30); err != nil {
+	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "manual", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	fixture.requestRenewal(t, 1)
@@ -1129,7 +1129,7 @@ func TestManualRenewalNotAutomatic(t *testing.T) {
 
 func TestAutoRenewalLeavesLongerApproval(t *testing.T) {
 	fixture := newClientFixture(t, false)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 120); err != nil {
+	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 120*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	fixture.requestRenewal(t, 1)

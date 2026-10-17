@@ -50,6 +50,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	if args[0] == "key" {
+		if len(args) != 1 {
+			return errors.New("usage: wherry key")
+		}
 		key, err := trust.LoadSigningKeyFile(config.UserKey)
 		if err != nil {
 			return err
@@ -177,7 +180,7 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 			return err
 		}
 		fmt.Fprintf(stdout, "receiver=%s floor_generation=%d\n", result.ReceiverID, result.Floor)
-		fmt.Fprintln(stdout, "credentials sealed to this receiver are not rotated; rotate them at their source")
+		fmt.Fprintln(stderr, "credentials sealed to this receiver are not rotated; rotate them at their source")
 		warnSkipped(stderr, result.Skipped)
 		return nil
 	}
@@ -190,8 +193,9 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 		warnSkipped(stderr, result.Skipped)
 		return nil
 	}
+	const enrolUsage = "usage: wherry enrol <list|revoke RECEIVER_ID|renew RECEIVER_ID|approve REQUEST_HASH [--pool POOL] --labels k=v,.. --grants FILE --selector k=v|v,.. [--expires DURATION]>"
 	if len(args) < 2 || args[0] != "approve" {
-		return errors.New("usage: wherry enrol <list|revoke RECEIVER_ID|renew RECEIVER_ID|approve REQUEST_HASH [--pool POOL] --labels k=v,.. --grants FILE --selector k=v|v,..>")
+		return errors.New(enrolUsage)
 	}
 	requestHash := args[1]
 	flags := flag.NewFlagSet("enrol approve", flag.ContinueOnError)
@@ -201,18 +205,21 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 	grantsPath := flags.String("grants", "", "JSON file holding the adapter grants")
 	selectorText := flags.String("selector", "", "approved selector")
 	renewal := flags.String("renewal", "auto", "renewal policy")
-	days := flags.Int("days", 30, "approval lifetime in days")
+	expires := flags.Duration("expires", 30*24*time.Hour, "approval lifetime")
 	if err := flags.Parse(args[2:]); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || !flagSet(flags, "labels", "grants", "selector") {
-		return errors.New("approve requires --labels, --grants and --selector")
+	if flags.NArg() != 0 {
+		return errors.New(enrolUsage)
+	}
+	if !flagSet(flags, "labels", "grants", "selector") {
+		return errors.New("enrol approve requires --labels, --grants and --selector")
 	}
 	if *renewal != "auto" && *renewal != "manual" {
 		return errors.New("renewal must be auto or manual")
 	}
-	if *days <= 0 {
-		return errors.New("days must be positive")
+	if *expires <= 0 {
+		return errors.New("expires must be positive")
 	}
 	labels, err := parseTerms(*labelsText)
 	if err != nil {
@@ -230,7 +237,7 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 	if err != nil {
 		return fmt.Errorf("selector: %w", err)
 	}
-	result, err := client.Approve(ctx, requestHash, *pool, labels, grants, selector, *renewal, *days)
+	result, err := client.Approve(ctx, requestHash, *pool, labels, grants, selector, *renewal, *expires)
 	if err != nil {
 		return err
 	}
@@ -240,8 +247,9 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 }
 
 func runSecret(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
+	const secretUsage = "usage: wherry secret put NAME --to RECEIVER_ID --from-file PATH [--expires DURATION]"
 	if len(args) < 3 || args[0] != "put" {
-		return errors.New("usage: wherry secret put NAME --to RECEIVER_ID --from-file PATH [--expires DURATION]")
+		return errors.New(secretUsage)
 	}
 	name := args[1]
 	flags := flag.NewFlagSet("secret put", flag.ContinueOnError)
@@ -252,7 +260,10 @@ func runSecret(ctx context.Context, client *busclient.Client, args []string, std
 	if err := flags.Parse(args[2:]); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || !flagSet(flags, "to", "from-file") {
+	if flags.NArg() != 0 {
+		return errors.New(secretUsage)
+	}
+	if !flagSet(flags, "to", "from-file") {
 		return errors.New("secret put requires --to and --from-file")
 	}
 	if *expires <= 0 {
@@ -271,8 +282,9 @@ func runSecret(ctx context.Context, client *busclient.Client, args []string, std
 }
 
 func runContinue(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
+	const continueUsage = "usage: wherry continue RUN_ID [--prompt TEXT] [--deadline DURATION] [--queue-deadline DURATION]"
 	if len(args) == 0 {
-		return errors.New("usage: wherry continue RUN_ID [--prompt TEXT] [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New(continueUsage)
 	}
 	runID := args[0]
 	flags := flag.NewFlagSet("continue", flag.ContinueOnError)
@@ -283,8 +295,11 @@ func runContinue(ctx context.Context, client *busclient.Client, args []string, s
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || *deadline <= 0 || *queueDeadline <= 0 {
-		return errors.New("continue accepts one run ID, an optional prompt and positive deadlines")
+	if flags.NArg() != 0 {
+		return errors.New(continueUsage)
+	}
+	if *deadline <= 0 || *queueDeadline <= 0 {
+		return errors.New("deadlines must be positive")
 	}
 	result, err := client.Continue(ctx, runID, busclient.ContinueInput{
 		Prompt: *prompt, Deadline: *deadline, QueueDeadline: *queueDeadline,
@@ -309,7 +324,10 @@ func runSubmit(ctx context.Context, client *busclient.Client, args []string, std
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || !flagSet(flags, "selector", "labels") {
+	if flags.NArg() != 0 {
+		return errors.New("usage: wherry submit --selector k=v|v,.. --labels k=v,.. <--prompt TEXT|--prompt-file PATH> [--deadline DURATION] [--queue-deadline DURATION]")
+	}
+	if !flagSet(flags, "selector", "labels") {
 		return errors.New("submit requires --selector and --labels")
 	}
 	promptSet := wasSet(flags, "prompt")
@@ -348,8 +366,9 @@ func runSubmit(ctx context.Context, client *busclient.Client, args []string, std
 }
 
 func runAwait(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
+	const awaitUsage = "usage: wherry await RUN_ID [--timeout 30m]"
 	if len(args) == 0 {
-		return errors.New("usage: wherry await RUN_ID [--timeout 30m]")
+		return errors.New(awaitUsage)
 	}
 	runID := args[0]
 	flags := flag.NewFlagSet("await", flag.ContinueOnError)
@@ -358,8 +377,11 @@ func runAwait(ctx context.Context, client *busclient.Client, args []string, stdo
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || *timeout <= 0 {
-		return errors.New("await accepts one run ID and a positive timeout")
+	if flags.NArg() != 0 {
+		return errors.New(awaitUsage)
+	}
+	if *timeout <= 0 {
+		return errors.New("timeout must be positive")
 	}
 	result, err := client.Await(ctx, runID, *timeout)
 	if err != nil {
@@ -378,7 +400,7 @@ func runAwait(ctx context.Context, client *busclient.Client, args []string, stdo
 		}
 	}
 	if result.Status.State == wire.TaskStateAuthRequired {
-		fmt.Fprintf(stdout, "continue with: wherry continue %s\n", runID)
+		fmt.Fprintf(stderr, "continue with: wherry continue %s\n", runID)
 	}
 	warnSkipped(stderr, result.Skipped)
 	if result.Status.State != wire.TaskStateCompleted {

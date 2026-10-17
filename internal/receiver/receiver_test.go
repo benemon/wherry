@@ -267,7 +267,7 @@ func runToTask(t *testing.T, f fixture) *wire.Task {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30); err != nil {
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	tokenFile := filepath.Join(t.TempDir(), "token")
@@ -342,7 +342,7 @@ func interruptThenContinue(t *testing.T, f fixture, first, second string, betwee
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30); err != nil {
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	var submitted busclient.SubmitResult
@@ -1620,7 +1620,7 @@ func TestRunJoinsPeriodicWork(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30); err != nil {
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	for !strings.Contains(f.logs.String(), "enrolled:") {
@@ -1719,7 +1719,7 @@ func newMultiFixture(t *testing.T) multiFixture {
 		{Name: "edge", Platform: "nomad", Allowed: map[string][]string{"runtime": {"podman"}}, Defaults: map[string]string{}},
 	}
 	client := busclient.New(f.kafka, f.userKey, "replies.test")
-	if _, err := client.Approve(f.ctx, trust.EnvelopeHash(request), "nomad", map[string]string{}, grants, []wire.Requirement{}, "auto", 30); err != nil {
+	if _, err := client.Approve(f.ctx, trust.EnvelopeHash(request), "nomad", map[string]string{}, grants, []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	tokenFile := filepath.Join(t.TempDir(), "token")
@@ -1890,7 +1890,7 @@ func TestReceiverSweepsOnTick(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30); err != nil {
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	for f.adapter.sweepCount() < 3 {

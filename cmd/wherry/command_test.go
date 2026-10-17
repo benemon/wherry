@@ -298,9 +298,9 @@ func TestAwaitPrintsAuthRequiredAndContinuation(t *testing.T) {
 	if err == nil || err.Error() != "run ended in TASK_STATE_AUTH_REQUIRED" {
 		t.Fatalf("error %v", err)
 	}
-	want := "TASK_STATE_AUTH_REQUIRED\ncredential token required\ncontinue with: wherry continue run-auth\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout %q, want %q", stdout.String(), want)
+	want := "TASK_STATE_AUTH_REQUIRED\ncredential token required\n"
+	if stdout.String() != want || stderr.String() != "continue with: wherry continue run-auth\n" {
+		t.Fatalf("stdout %q stderr %q, want %q and the continue hint", stdout.String(), stderr.String(), want)
 	}
 }
 
@@ -408,9 +408,9 @@ func TestRevokeCLI(t *testing.T) {
 	if err := runEnrol(ctx, client, []string{"revoke", "receiver-a"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	want := "receiver=receiver-a floor_generation=1\ncredentials sealed to this receiver are not rotated; rotate them at their source\n"
-	if stdout.String() != want || stderr.Len() != 0 {
-		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+	want := "receiver=receiver-a floor_generation=1\n"
+	if stdout.String() != want || stderr.String() != "credentials sealed to this receiver are not rotated; rotate them at their source\n" {
+		t.Fatalf("stdout %q stderr %q, want %q and the rotation notice", stdout.String(), stderr.String(), want)
 	}
 	stdout.Reset()
 	err := runEnrol(ctx, client, []string{"revoke", "receiver-unknown"}, &stdout, &stderr)
@@ -506,6 +506,124 @@ func TestManualRenewalCLI(t *testing.T) {
 	}
 	if err := runEnrol(ctx, client, []string{"renew", "receiver-a"}, &stdout, &stderr); err == nil || err.Error() != "receiver is revoked" {
 		t.Fatalf("renew revoked receiver: got %v", err)
+	}
+}
+
+func TestApproveExpires(t *testing.T) {
+	for _, test := range []struct {
+		flags    []string
+		lifetime time.Duration
+	}{
+		{[]string{"--expires", "48h"}, 48 * time.Hour},
+		{nil, 30 * 24 * time.Hour},
+	} {
+		ctx, kafka, client, userKey, _ := enrolledReceiver(t)
+		enrolments, _, err := client.Enrolments(ctx)
+		if err != nil || len(enrolments) != 1 {
+			t.Fatalf("enrolments %#v, err %v", enrolments, err)
+		}
+		grantsPath := filepath.Join(t.TempDir(), "grants.json")
+		if err := os.WriteFile(grantsPath, []byte(`[{"name":"lab","platform":"nomad","allowed":{"runtime":["exec"]},"defaults":{}}]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		before := time.Now()
+		args := append([]string{"approve", enrolments[0].RequestHash, "--labels", "", "--grants", grantsPath, "--selector", "region=eu"}, test.flags...)
+		if err := runEnrol(ctx, client, args, &stdout, &stderr); err != nil {
+			t.Fatal(err)
+		}
+		after := time.Now()
+		offsets, err := kadm.NewClient(kafka).ListEndOffsets(ctx, wire.TopicState)
+		if err != nil || offsets.Error() != nil {
+			t.Fatal(err)
+		}
+		var remaining int64
+		partitions := map[int32]kgo.Offset{}
+		for _, offset := range offsets[wire.TopicState] {
+			remaining += offset.Offset
+			partitions[offset.Partition] = kgo.NewOffset().AtStart()
+		}
+		kafka.AddConsumePartitions(map[string]map[int32]kgo.Offset{wire.TopicState: partitions})
+		state := trust.NewState(userKey.Public().(ed25519.PublicKey))
+		for remaining > 0 {
+			fetches := kafka.PollFetches(ctx)
+			if err := fetches.Err(); err != nil {
+				t.Fatal(err)
+			}
+			for _, record := range fetches.Records() {
+				remaining--
+				_, _ = state.Apply(record.Value)
+			}
+		}
+		approval, _, ok := state.Approval("receiver-a")
+		if !ok || approval.Generation != 2 || approval.ExpMS < before.Add(test.lifetime).UnixMilli() || approval.ExpMS > after.Add(test.lifetime).UnixMilli() {
+			t.Fatalf("approval %#v, want generation 2 expiring %s after approval", approval, test.lifetime)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runEnrol(context.Background(), nil, []string{"approve", "request", "--labels", "", "--grants", "unused", "--selector", "region=eu", "--expires", "0s"}, &stdout, &stderr); err == nil || err.Error() != "expires must be positive" {
+		t.Fatalf("zero expiry: got %v", err)
+	}
+}
+
+func TestUsageErrors(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		call func(*bytes.Buffer) error
+		want string
+	}{
+		{"submit argument", func(stderr *bytes.Buffer) error {
+			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--labels", "", "extra"}, stderr, stderr)
+		}, "usage: wherry submit"},
+		{"continue argument", func(stderr *bytes.Buffer) error {
+			return runContinue(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
+		}, "usage: wherry continue"},
+		{"await argument", func(stderr *bytes.Buffer) error {
+			return runAwait(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
+		}, "usage: wherry await"},
+		{"secret put argument", func(stderr *bytes.Buffer) error {
+			return runSecret(context.Background(), nil, []string{"put", "token", "--to", "r", "--from-file", "f", "extra"}, stderr, stderr)
+		}, "usage: wherry secret put"},
+		{"approve argument", func(stderr *bytes.Buffer) error {
+			return runEnrol(context.Background(), nil, []string{"approve", "request", "--labels", "", "--grants", "g", "--selector", "a=b", "extra"}, stderr, stderr)
+		}, "usage: wherry enrol"},
+		{"submit deadline", func(stderr *bytes.Buffer) error {
+			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--labels", "", "--prompt", "p", "--deadline", "0s"}, stderr, stderr)
+		}, "deadlines must be positive"},
+		{"continue deadline", func(stderr *bytes.Buffer) error {
+			return runContinue(context.Background(), nil, []string{"run-a", "--deadline", "0s"}, stderr, stderr)
+		}, "deadlines must be positive"},
+		{"await timeout", func(stderr *bytes.Buffer) error {
+			return runAwait(context.Background(), nil, []string{"run-a", "--timeout", "0s"}, stderr, stderr)
+		}, "timeout must be positive"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			if err := test.call(&output); err == nil || !strings.HasPrefix(err.Error(), test.want) {
+				t.Fatalf("got %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestKeyChecksArguments(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.json")
+	keyPath := filepath.Join(dir, "user.key")
+	if err := os.WriteFile(config, []byte(`{"broker":"127.0.0.1:1","ca_file":"ca","kafka_user":"u","kafka_password_file":"p","user_key":"`+keyPath+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WHERRY_CONFIG", config)
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"init"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"key", "extra"}, &stdout, &stderr); err == nil || err.Error() != "usage: wherry key" {
+		t.Fatalf("got %v, want key usage error", err)
+	}
+	stdout.Reset()
+	if err := run([]string{"key"}, &stdout, &stderr); err != nil || !strings.HasPrefix(stdout.String(), "public_key=") {
+		t.Fatalf("key: %v, stdout %q", err, stdout.String())
 	}
 }
 

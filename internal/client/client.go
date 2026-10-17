@@ -225,7 +225,7 @@ func (client *Client) Enrolments(ctx context.Context) ([]Enrolment, int, error) 
 }
 
 // Approve signs and publishes the next approval generation for a request; an empty pool is the receiver ID.
-func (client *Client) Approve(ctx context.Context, requestHash, pool string, labels map[string]string, grants []wire.AdapterGrant, selector []wire.Requirement, renewal string, days int) (ApprovalResult, error) {
+func (client *Client) Approve(ctx context.Context, requestHash, pool string, labels map[string]string, grants []wire.AdapterGrant, selector []wire.Requirement, renewal string, expires time.Duration) (ApprovalResult, error) {
 	loaded, err := client.loadState(ctx)
 	if err != nil {
 		return ApprovalResult{}, err
@@ -248,7 +248,7 @@ func (client *Client) Approve(ctx context.Context, requestHash, pool string, lab
 	generation := max(current.generation, loaded.state.Floor(request.request.ReceiverID)) + 1
 	envelope, err := trust.Approve(
 		request.envelope, request.request, client.userKey, labels, pool, grants, selector, renewal,
-		generation, current.envelopeHash, time.Now().Add(time.Duration(days)*24*time.Hour),
+		generation, current.envelopeHash, time.Now().Add(expires),
 	)
 	if err != nil {
 		return ApprovalResult{}, err
