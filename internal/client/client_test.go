@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -253,36 +254,46 @@ func TestClientEndToEnd(t *testing.T) {
 	if len(tasks) != 1 || string(tasks[0].Key) != submission.RunID {
 		t.Fatalf("got %d tasks for %q", len(tasks), submission.RunID)
 	}
-	task, err := trust.VerifyRootTask(tasks[0].Value, fixture.userPublicKey)
+	verified, err := trust.VerifyRootSubmission(tasks[0].Value, fixture.userPublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply := &wire.Reply{
-		RunID: task.RunID, Attempt: 1, TaskHash: trust.EnvelopeHash(tasks[0].Value),
-		CorrelationID: task.CorrelationID, State: wire.TaskStateCompleted,
-		Artifacts: []wire.Artifact{{ArtifactID: "answer", Parts: []wire.Part{{Text: "finished"}}}},
-		AtMS:      time.Now().UnixMilli(),
+	runID := verified.Wherry.RunID
+	if message := verified.Message; message.TaskID != runID || message.ContextID != runID || !slices.Equal(message.Extensions, []string{wire.ExtensionURI}) {
+		t.Fatalf("submitted message %#v does not carry the run ID, root context and extension", message)
 	}
-	fixture.produce(t, "replies.test", task.RunID, signed(t, wire.TypeReply, reply, fixture.receiverKey))
-	awaited, err := fixture.client.Await(fixture.ctx, task.RunID, time.Second)
+	task := testTask(verified, trust.EnvelopeHash(tasks[0].Value), 1, wire.TaskStateCompleted)
+	task.Task.Artifacts = []wire.Artifact{{ArtifactID: "answer", Parts: []wire.Part{{Text: "finished"}}, Extensions: []string{wire.ExtensionURI}}}
+	fixture.produce(t, "replies.test", runID, signed(t, wire.TypeTask, task, fixture.receiverKey))
+	awaited, err := fixture.client.Await(fixture.ctx, runID, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if awaited.Reply.State != wire.TaskStateCompleted || awaited.Reply.Artifacts[0].Parts[0].Text != "finished" {
-		t.Fatalf("unexpected reply: %#v", awaited.Reply)
+	if awaited.Task.Status.State != wire.TaskStateCompleted || awaited.Task.Artifacts[0].Parts[0].Text != "finished" {
+		t.Fatalf("unexpected task: %#v", awaited.Task)
 	}
 
-	event := &wire.Event{
-		RunID: task.RunID, Attempt: 1, TaskHash: trust.EnvelopeHash(tasks[0].Value),
-		ReceiverID: "receiver-a", AtMS: time.Now().UnixMilli(),
-		State: wire.TaskStateCompleted, Kind: "terminal",
+	status := &wire.StatusRecord{
+		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: runID, ContextID: runID, Status: wire.TaskStatus{
+			State: wire.TaskStateCompleted, Timestamp: time.Now().UTC().Format(time.RFC3339),
+		}},
+		Wherry: wire.StatusExtension{Attempt: 1, TaskHash: trust.EnvelopeHash(tasks[0].Value), ReceiverID: "receiver-a", Kind: "terminal"},
 	}
-	fixture.produce(t, wire.TopicEvent, task.RunID, signed(t, wire.TypeEvent, event, fixture.receiverKey))
-	events, err := fixture.client.Events(fixture.ctx, task.RunID)
+	fixture.produce(t, wire.TopicEvent, runID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
+	for _, attempt := range []int64{1, 1, 2} {
+		chunk := &wire.ArtifactUpdateRecord{
+			ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: runID, ContextID: runID, Artifact: wire.Artifact{
+				ArtifactID: "transcript", Parts: []wire.Part{{Text: "line"}}, Extensions: []string{wire.ExtensionURI},
+			}},
+			Wherry: wire.ArtifactUpdateExtension{Attempt: attempt, Seq: 0},
+		}
+		fixture.produce(t, wire.TopicTranscript, runID, signed(t, wire.TypeArtifactUpdate, chunk, fixture.receiverKey))
+	}
+	events, err := fixture.client.Events(fixture.ctx, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events.Events) != 1 || events.Events[0].Kind != "terminal" {
+	if len(events.Statuses) != 1 || events.Statuses[0].Wherry.Kind != "terminal" || !reflect.DeepEqual(events.Chunks, map[int64]int{1: 2, 2: 1}) {
 		t.Fatalf("unexpected events: %#v", events)
 	}
 
@@ -532,20 +543,86 @@ func TestAwaitIgnoresReplyFromUnenrolledKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply := testReply("run-unenrolled", 1, wire.TaskStateCompleted)
-	fixture.produce(t, "replies.test", reply.RunID, signed(t, wire.TypeReply, reply, key))
-	if _, err := fixture.client.Await(fixture.ctx, reply.RunID, 100*time.Millisecond); err == nil {
-		t.Fatal("reply from unenrolled key was accepted")
+	submission, hash := fixture.rootSubmission(t, "run-unenrolled", "default")
+	task := testTask(submission, hash, 1, wire.TaskStateCompleted)
+	fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, key))
+	if _, err := fixture.client.Await(fixture.ctx, task.Task.ID, 100*time.Millisecond); err == nil {
+		t.Fatal("task from unenrolled key was accepted")
 	}
 }
 
-func TestAwaitIgnoresLowerAttemptReply(t *testing.T) {
+func TestAwaitRejectsForgedTaskFromOtherPool(t *testing.T) {
 	fixture := newClientFixture(t, true)
-	runID := "run-attempts"
-	fixture.produce(t, "replies.test", runID, signed(t, wire.TypeReply, testReply(runID, 2, wire.TaskStateWorking), fixture.receiverKey))
-	fixture.produce(t, "replies.test", runID, signed(t, wire.TypeReply, testReply(runID, 1, wire.TaskStateCompleted), fixture.receiverKey))
-	if _, err := fixture.client.Await(fixture.ctx, runID, 100*time.Millisecond); err == nil {
-		t.Fatal("lower-attempt terminal reply was accepted")
+	otherPoolKey := fixture.addReceiver(t, "receiver-other", "other", map[string]string{}, testSelector())
+	submission, hash := fixture.rootSubmission(t, "run-other-pool", "default")
+	task := testTask(submission, hash, 1, wire.TaskStateCompleted)
+	fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, otherPoolKey))
+	if _, err := fixture.client.Await(fixture.ctx, task.Task.ID, 100*time.Millisecond); err == nil {
+		t.Fatal("task forged by a receiver in another pool was accepted")
+	}
+}
+
+func TestAwaitRejectsTaskHashMismatch(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	submission, _ := fixture.rootSubmission(t, "run-hash-mismatch", "default")
+	task := testTask(submission, strings.Repeat("a", 64), 1, wire.TaskStateCompleted)
+	fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, fixture.receiverKey))
+	if _, err := fixture.client.Await(fixture.ctx, task.Task.ID, 100*time.Millisecond); err == nil {
+		t.Fatal("task with a mismatched submission hash was accepted")
+	}
+}
+
+func TestAwaitHighAttemptDoesNotMaskResult(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	submission, hash := fixture.rootSubmission(t, "run-attempts", "default")
+	fixture.produce(t, "replies.test", submission.Wherry.RunID, signed(t, wire.TypeTask, testTask(submission, hash, 2, wire.TaskStateWorking), fixture.receiverKey))
+	fixture.produce(t, "replies.test", submission.Wherry.RunID, signed(t, wire.TypeTask, testTask(submission, hash, 1, wire.TaskStateCompleted), fixture.receiverKey))
+	awaited, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if awaited.Task.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("state %s, want COMPLETED", awaited.Task.Status.State)
+	}
+}
+
+func TestAwaitFailsClosedWithoutSubmission(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	if _, err := fixture.client.Await(fixture.ctx, "run-missing", time.Second); err == nil || !strings.Contains(err.Error(), "verified root submission not found") {
+		t.Fatalf("got %v, want missing verified submission error", err)
+	}
+}
+
+func TestAwaitRejectsTaskLineageMismatch(t *testing.T) {
+	for name, mutate := range map[string]func(*wire.TaskRecord){
+		"context": func(task *wire.TaskRecord) { task.Task.ContextID = "run-other" },
+		"history": func(task *wire.TaskRecord) { task.Task.History = []wire.Message{} },
+		"message": func(task *wire.TaskRecord) { task.Task.History[0].MessageID = "msg-other" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newClientFixture(t, true)
+			submission, hash := fixture.rootSubmission(t, "run-lineage-"+name, "default")
+			task := testTask(submission, hash, 1, wire.TaskStateCompleted)
+			mutate(task)
+			fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, fixture.receiverKey))
+			if _, err := fixture.client.Await(fixture.ctx, task.Task.ID, 100*time.Millisecond); err == nil {
+				t.Fatal("task with mismatched lineage was accepted")
+			}
+		})
+	}
+}
+
+func TestAwaitAcceptsAuthRequired(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	submission, hash := fixture.rootSubmission(t, "run-auth", "default")
+	task := testTask(submission, hash, 1, wire.TaskStateAuthRequired)
+	fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, fixture.receiverKey))
+	awaited, err := fixture.client.Await(fixture.ctx, task.Task.ID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if awaited.Task.Status.State != wire.TaskStateAuthRequired {
+		t.Fatalf("state %s, want AUTH_REQUIRED", awaited.Task.Status.State)
 	}
 }
 
@@ -636,10 +713,35 @@ func signed(t *testing.T, recordType wire.RecordType, value any, key ed25519.Pri
 	return envelope
 }
 
-func testReply(runID string, attempt int64, state wire.TaskState) *wire.Reply {
-	return &wire.Reply{
-		RunID: runID, Attempt: attempt, TaskHash: strings.Repeat("a", 64),
-		CorrelationID: "correlation", State: state, Artifacts: []wire.Artifact{},
-		AtMS: time.Now().UnixMilli(),
+func (fixture clientFixture) rootSubmission(t *testing.T, runID, pool string) (*wire.SubmissionRecord, string) {
+	t.Helper()
+	submission := &wire.SubmissionRecord{
+		Message: wire.Message{
+			MessageID: "msg-" + runID, ContextID: runID, TaskID: runID, Role: wire.RoleUser,
+			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
+		},
+		Wherry: wire.SubmissionExtension{
+			RunID: runID, Attempt: 1, Pool: pool, Selector: []wire.Requirement{}, Labels: map[string]string{},
+			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
+			ReplyTopic: "replies.test",
+			Lineage:    wire.Lineage{RootRunID: runID, Ancestors: []string{}, Chain: []wire.Bytes{}},
+		},
+	}
+	envelope, err := trust.SignRootSubmission(*submission, fixture.userKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.produce(t, wire.TopicTask, runID, envelope)
+	return submission, trust.EnvelopeHash(envelope)
+}
+
+func testTask(submission *wire.SubmissionRecord, taskHash string, attempt int64, state wire.TaskState) *wire.TaskRecord {
+	return &wire.TaskRecord{
+		Task: wire.Task{
+			ID: submission.Wherry.RunID, ContextID: submission.Wherry.Lineage.RootRunID,
+			Artifacts: []wire.Artifact{}, History: []wire.Message{submission.Message},
+			Status: wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format(time.RFC3339)},
+		},
+		Wherry: wire.TaskExtension{Attempt: attempt, TaskHash: taskHash},
 	}
 }

@@ -3,30 +3,32 @@ package wire
 import (
 	"encoding/hex"
 	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 )
 
 // RecordType identifies a wire payload schema.
 type RecordType string
 
 const (
-	TypeTask          RecordType = "task"
-	TypeCancel        RecordType = "cancel"
-	TypeEvent         RecordType = "event"
-	TypeReply         RecordType = "reply"
-	TypeTranscript    RecordType = "transcript"
-	TypeCapability    RecordType = "capability"
-	TypeEnrolRequest  RecordType = "enrol_request"
-	TypeEnrolApproval RecordType = "enrol_approval"
-	TypeRenewRequest  RecordType = "renew_request"
-	TypeRevocation    RecordType = "revocation"
-	TypeSecretVersion RecordType = "secret_version"
-	TypeSealedSecret  RecordType = "sealed_secret"
+	TypeSubmission     RecordType = "submission"
+	TypeCancel         RecordType = "cancel"
+	TypeStatus         RecordType = "status"
+	TypeTask           RecordType = "task"
+	TypeArtifactUpdate RecordType = "artifact_update"
+	TypeCapability     RecordType = "capability"
+	TypeEnrolRequest   RecordType = "enrol_request"
+	TypeEnrolApproval  RecordType = "enrol_approval"
+	TypeRenewRequest   RecordType = "renew_request"
+	TypeRevocation     RecordType = "revocation"
+	TypeSecretVersion  RecordType = "secret_version"
+	TypeSealedSecret   RecordType = "sealed_secret"
 )
 
 // SignerKind identifies the authority behind a signing key.
@@ -38,18 +40,18 @@ const (
 )
 
 var signerEntitlements = map[RecordType]map[SignerKind]bool{
-	TypeTask:          {SignerUser: true, SignerReceiver: true},
-	TypeCancel:        {SignerUser: true},
-	TypeEvent:         {SignerReceiver: true},
-	TypeReply:         {SignerReceiver: true},
-	TypeTranscript:    {SignerReceiver: true},
-	TypeCapability:    {SignerReceiver: true},
-	TypeEnrolRequest:  {SignerReceiver: true},
-	TypeEnrolApproval: {SignerUser: true},
-	TypeRenewRequest:  {SignerReceiver: true},
-	TypeRevocation:    {SignerUser: true},
-	TypeSecretVersion: {SignerUser: true},
-	TypeSealedSecret:  {SignerUser: true},
+	TypeSubmission:     {SignerUser: true, SignerReceiver: true},
+	TypeCancel:         {SignerUser: true},
+	TypeStatus:         {SignerReceiver: true},
+	TypeTask:           {SignerReceiver: true},
+	TypeArtifactUpdate: {SignerReceiver: true},
+	TypeCapability:     {SignerReceiver: true},
+	TypeEnrolRequest:   {SignerReceiver: true},
+	TypeEnrolApproval:  {SignerUser: true},
+	TypeRenewRequest:   {SignerReceiver: true},
+	TypeRevocation:     {SignerUser: true},
+	TypeSecretVersion:  {SignerUser: true},
+	TypeSealedSecret:   {SignerUser: true},
 }
 
 // entitled reports whether a signer kind may sign a record type.
@@ -115,6 +117,9 @@ type Part struct {
 	MediaType string         `json:"mediaType,omitzero"`
 }
 
+// ExtensionURI identifies the wherry A2A extension.
+const ExtensionURI = "https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md"
+
 // Message is an A2A Message.
 type Message struct {
 	MessageID        string         `json:"messageId"`
@@ -147,23 +152,106 @@ type Requirement struct {
 // OpIn is the only Requirement operator.
 const OpIn = "In"
 
-// Task is a task payload.
+// TaskStatus is an A2A TaskStatus; Timestamp is RFC 3339, as proto3 JSON writes a Timestamp.
+type TaskStatus struct {
+	State     TaskState `json:"state"`
+	Message   *Message  `json:"message,omitzero"`
+	Timestamp string    `json:"timestamp,omitzero"`
+}
+
+// Task is an A2A Task.
 type Task struct {
+	ID        string         `json:"id"`
+	ContextID string         `json:"contextId,omitzero"`
+	Status    TaskStatus     `json:"status"`
+	Artifacts []Artifact     `json:"artifacts,omitzero"`
+	History   []Message      `json:"history,omitzero"`
+	Metadata  jsontext.Value `json:"metadata,omitzero"`
+}
+
+// TaskStatusUpdateEvent is an A2A TaskStatusUpdateEvent.
+type TaskStatusUpdateEvent struct {
+	TaskID    string         `json:"taskId"`
+	ContextID string         `json:"contextId"`
+	Status    TaskStatus     `json:"status"`
+	Metadata  jsontext.Value `json:"metadata,omitzero"`
+}
+
+// TaskArtifactUpdateEvent is an A2A TaskArtifactUpdateEvent.
+type TaskArtifactUpdateEvent struct {
+	TaskID    string         `json:"taskId"`
+	ContextID string         `json:"contextId"`
+	Artifact  Artifact       `json:"artifact"`
+	Append    bool           `json:"append,omitzero"`
+	LastChunk bool           `json:"lastChunk,omitzero"`
+	Metadata  jsontext.Value `json:"metadata,omitzero"`
+}
+
+// Lineage places a submission in its delegation tree.
+type Lineage struct {
+	RootRunID  string   `json:"root_run_id"`
+	Depth      int64    `json:"depth"`
+	Ancestors  []string `json:"ancestors"`
+	ParentHash string   `json:"parent_hash"`
+	Chain      []Bytes  `json:"chain"`
+}
+
+// SubmissionExtension is the wherry extension block of a submission.
+type SubmissionExtension struct {
 	RunID           string            `json:"run_id"`
 	Attempt         int64             `json:"attempt"`
-	RootRunID       string            `json:"root_run_id"`
-	Depth           int64             `json:"depth"`
-	Ancestors       []string          `json:"ancestors"`
-	ParentHash      string            `json:"parent_hash"`
-	Chain           []Bytes           `json:"chain"`
 	Pool            string            `json:"pool"`
-	Labels          map[string]string `json:"labels"`
 	Selector        []Requirement     `json:"selector"`
+	Labels          map[string]string `json:"labels"`
 	DeadlineMS      int64             `json:"deadline_ms"`
 	QueueDeadlineMS int64             `json:"queue_deadline_ms"`
 	ReplyTopic      string            `json:"reply_topic"`
-	CorrelationID   string            `json:"correlation_id"`
-	Message         Message           `json:"message"`
+	Lineage         Lineage           `json:"lineage"`
+}
+
+// SubmissionRecord is a submission payload: the A2A Message that starts a task.
+type SubmissionRecord struct {
+	Message Message             `json:"message"`
+	Wherry  SubmissionExtension `json:"wherry"`
+}
+
+// StatusExtension is the wherry extension block of a status record.
+type StatusExtension struct {
+	Attempt    int64  `json:"attempt"`
+	TaskHash   string `json:"task_hash"`
+	ReceiverID string `json:"receiver_id"`
+	Kind       string `json:"kind"`
+	LogOffset  *int64 `json:"log_offset,omitzero"`
+}
+
+// StatusRecord is a status payload.
+type StatusRecord struct {
+	StatusUpdate TaskStatusUpdateEvent `json:"statusUpdate"`
+	Wherry       StatusExtension       `json:"wherry"`
+}
+
+// ArtifactUpdateExtension is the wherry extension block of an artifact_update record.
+type ArtifactUpdateExtension struct {
+	Attempt int64 `json:"attempt"`
+	Seq     int64 `json:"seq"`
+}
+
+// ArtifactUpdateRecord is an artifact_update payload.
+type ArtifactUpdateRecord struct {
+	ArtifactUpdate TaskArtifactUpdateEvent `json:"artifactUpdate"`
+	Wherry         ArtifactUpdateExtension `json:"wherry"`
+}
+
+// TaskExtension is the wherry extension block of a task record.
+type TaskExtension struct {
+	Attempt  int64  `json:"attempt"`
+	TaskHash string `json:"task_hash"`
+}
+
+// TaskRecord is a task payload: the final A2A Task.
+type TaskRecord struct {
+	Task   Task          `json:"task"`
+	Wherry TaskExtension `json:"wherry"`
 }
 
 // Cancel is a cancellation payload.
@@ -172,44 +260,10 @@ type Cancel struct {
 	AtMS  int64  `json:"at_ms"`
 }
 
-// Event is a task lifecycle event payload.
-type Event struct {
-	RunID      string    `json:"run_id"`
-	Attempt    int64     `json:"attempt"`
-	TaskHash   string    `json:"task_hash"`
-	ReceiverID string    `json:"receiver_id"`
-	AtMS       int64     `json:"at_ms"`
-	State      TaskState `json:"state"`
-	Kind       string    `json:"kind"`
-	LogOffset  *int64    `json:"log_offset,omitzero"`
-	Reason     *string   `json:"reason,omitzero"`
-}
-
-// Reply is a task reply payload.
-type Reply struct {
-	RunID         string     `json:"run_id"`
-	Attempt       int64      `json:"attempt"`
-	TaskHash      string     `json:"task_hash"`
-	CorrelationID string     `json:"correlation_id"`
-	State         TaskState  `json:"state"`
-	Artifacts     []Artifact `json:"artifacts"`
-	AtMS          int64      `json:"at_ms"`
-}
-
-// TranscriptPointer points to an oversized transcript line.
-type TranscriptPointer struct {
-	URL    string `json:"url"`
+// PointerMetadata is the metadata of a url part that stands in for content not carried inline.
+type PointerMetadata struct {
 	SHA256 string `json:"sha256"`
 	Size   int64  `json:"size"`
-}
-
-// Transcript is a transcript payload.
-type Transcript struct {
-	RunID   string             `json:"run_id"`
-	Attempt int64              `json:"attempt"`
-	Seq     int64              `json:"seq"`
-	Line    *Bytes             `json:"line,omitzero"`
-	Pointer *TranscriptPointer `json:"pointer,omitzero"`
 }
 
 // AttemptFilter drops records superseded by a later delivery attempt.
@@ -308,6 +362,7 @@ type SecretVersion struct {
 	Version        int64  `json:"version"`
 	SealingKeyFP   string `json:"sealing_key_fp"`
 	Generation     int64  `json:"generation"`
+	ApprovalHash   string `json:"approval_hash"`
 	CiphertextHash string `json:"ciphertext_hash"`
 	ExpMS          int64  `json:"exp_ms"`
 }
@@ -388,11 +443,11 @@ func grantIndex(grants []AdapterGrant, name string) int {
 
 func validatePayload(recordType RecordType, payload any) error {
 	switch value := payload.(type) {
-	case *Task:
-		if recordType != TypeTask {
+	case *SubmissionRecord:
+		if recordType != TypeSubmission {
 			break
 		}
-		return validateTask(value)
+		return validateSubmission(value)
 	case *Cancel:
 		if recordType != TypeCancel {
 			break
@@ -404,21 +459,21 @@ func validatePayload(recordType RecordType, payload any) error {
 			return errors.New("invalid cancel time")
 		}
 		return nil
-	case *Event:
-		if recordType != TypeEvent {
+	case *StatusRecord:
+		if recordType != TypeStatus {
 			break
 		}
-		return validateEvent(value)
-	case *Reply:
-		if recordType != TypeReply {
+		return validateStatus(value)
+	case *TaskRecord:
+		if recordType != TypeTask {
 			break
 		}
-		return validateReply(value)
-	case *Transcript:
-		if recordType != TypeTranscript {
+		return validateTaskRecord(value)
+	case *ArtifactUpdateRecord:
+		if recordType != TypeArtifactUpdate {
 			break
 		}
-		return validateTranscript(value)
+		return validateArtifactUpdate(value)
 	case *Capability:
 		if recordType != TypeCapability {
 			break
@@ -479,90 +534,134 @@ func validatePayload(recordType RecordType, payload any) error {
 	return errors.New("record type does not match payload")
 }
 
-func validateTask(value *Task) error {
-	for name, id := range map[string]string{"run_id": value.RunID, "root_run_id": value.RootRunID, "correlation_id": value.CorrelationID} {
+func validateSubmission(value *SubmissionRecord) error {
+	extension, lineage := &value.Wherry, &value.Wherry.Lineage
+	for name, id := range map[string]string{"run_id": extension.RunID, "root_run_id": lineage.RootRunID} {
 		if err := validateID(id, name); err != nil {
 			return err
 		}
 	}
-	for _, ancestor := range value.Ancestors {
+	for _, ancestor := range lineage.Ancestors {
 		if err := validateID(ancestor, "ancestor"); err != nil {
 			return err
 		}
 	}
-	if value.Attempt < 1 || value.Depth < 0 || int64(len(value.Ancestors)) != value.Depth || value.Ancestors == nil || value.Chain == nil || value.Labels == nil || value.Selector == nil {
-		return errors.New("invalid task lineage")
+	if extension.Attempt < 1 || lineage.Depth < 0 || int64(len(lineage.Ancestors)) != lineage.Depth || lineage.Ancestors == nil || lineage.Chain == nil || extension.Labels == nil || extension.Selector == nil {
+		return errors.New("invalid submission lineage")
 	}
-	if err := validateTerms(value.Labels, "labels"); err != nil {
+	if err := validateTerms(extension.Labels, "labels"); err != nil {
 		return err
 	}
-	if err := validateRequirements(value.Selector); err != nil {
+	if err := validateRequirements(extension.Selector); err != nil {
 		return err
 	}
-	if value.Depth == 0 {
-		if value.ParentHash != "" || len(value.Chain) != 0 || value.RunID != value.RootRunID {
-			return errors.New("invalid root task lineage")
+	if lineage.Depth == 0 {
+		if lineage.ParentHash != "" || len(lineage.Chain) != 0 || extension.RunID != lineage.RootRunID {
+			return errors.New("invalid root submission lineage")
 		}
-	} else if !validHash(value.ParentHash) || int64(len(value.Chain)) != value.Depth {
-		return errors.New("invalid child task lineage")
+	} else if !validHash(lineage.ParentHash) || int64(len(lineage.Chain)) != lineage.Depth {
+		return errors.New("invalid child submission lineage")
 	}
-	if err := validateID(value.Pool, "pool"); err != nil {
+	if err := validateID(extension.Pool, "pool"); err != nil {
 		return err
 	}
-	if value.ReplyTopic == "" || value.DeadlineMS < 0 || value.QueueDeadlineMS < 0 {
-		return errors.New("invalid task")
+	if extension.ReplyTopic == "" || extension.DeadlineMS < 0 || extension.QueueDeadlineMS < 0 {
+		return errors.New("invalid submission")
+	}
+	if value.Message.TaskID != extension.RunID || value.Message.ContextID != lineage.RootRunID {
+		return errors.New("message taskId and contextId must be the run ID and the root run ID")
 	}
 	return validateMessage(&value.Message)
 }
 
-func validateEvent(value *Event) error {
-	if err := validateID(value.RunID, "run_id"); err != nil {
+func validateStatus(value *StatusRecord) error {
+	update := &value.StatusUpdate
+	if err := validateTaskIDs(update.TaskID, update.ContextID); err != nil {
 		return err
 	}
-	if err := validateID(value.ReceiverID, "receiver_id"); err != nil {
+	if err := validateTaskStatus(&update.Status); err != nil {
 		return err
 	}
-	if value.Attempt < 1 || !validHash(value.TaskHash) || !taskStates[value.State] || value.AtMS < 0 {
-		return errors.New("invalid event")
+	if err := validateMetadata(update.Metadata); err != nil {
+		return err
 	}
-	switch value.Kind {
+	if err := validateID(value.Wherry.ReceiverID, "receiver_id"); err != nil {
+		return err
+	}
+	if value.Wherry.Attempt < 1 || !validHash(value.Wherry.TaskHash) {
+		return errors.New("invalid status")
+	}
+	switch value.Wherry.Kind {
 	case "claimed", "started", "heartbeat", "terminal":
 		return nil
 	default:
-		return errors.New("invalid event kind")
+		return errors.New("invalid status kind")
 	}
 }
 
-func validateReply(value *Reply) error {
-	if err := validateID(value.RunID, "run_id"); err != nil {
+func validateTaskRecord(value *TaskRecord) error {
+	task := &value.Task
+	if err := validateTaskIDs(task.ID, task.ContextID); err != nil {
 		return err
 	}
-	if err := validateID(value.CorrelationID, "correlation_id"); err != nil {
+	if err := validateTaskStatus(&task.Status); err != nil {
 		return err
 	}
-	if value.Attempt < 1 || !validHash(value.TaskHash) || !taskStates[value.State] || value.Artifacts == nil || value.AtMS < 0 {
-		return errors.New("invalid reply")
+	if value.Wherry.Attempt < 1 || !validHash(value.Wherry.TaskHash) || task.Artifacts == nil || task.History == nil {
+		return errors.New("invalid task")
 	}
-	for i := range value.Artifacts {
-		if err := validateArtifact(&value.Artifacts[i]); err != nil {
+	for i := range task.Artifacts {
+		if err := validateArtifact(&task.Artifacts[i]); err != nil {
 			return err
 		}
 	}
-	return nil
+	for i := range task.History {
+		if err := validateMessage(&task.History[i]); err != nil {
+			return err
+		}
+	}
+	return validateMetadata(task.Metadata)
 }
 
-func validateTranscript(value *Transcript) error {
-	if err := validateID(value.RunID, "run_id"); err != nil {
+func validateArtifactUpdate(value *ArtifactUpdateRecord) error {
+	update := &value.ArtifactUpdate
+	if err := validateTaskIDs(update.TaskID, update.ContextID); err != nil {
 		return err
 	}
-	if value.Attempt < 1 || value.Seq < 0 {
-		return errors.New("invalid transcript sequence")
+	if value.Wherry.Attempt < 1 || value.Wherry.Seq < 0 {
+		return errors.New("invalid artifact_update sequence")
 	}
-	if (value.Line == nil) == (value.Pointer == nil) {
-		return errors.New("transcript requires exactly one of line or pointer")
+	if err := validateArtifact(&update.Artifact); err != nil {
+		return err
 	}
-	if value.Pointer != nil && (value.Pointer.URL == "" || !validHash(value.Pointer.SHA256) || value.Pointer.Size <= 0) {
-		return errors.New("invalid transcript pointer")
+	if len(update.Artifact.Parts) != 1 {
+		return errors.New("artifact_update requires exactly one part")
+	}
+	if part := update.Artifact.Parts[0]; part.URL != "" {
+		var pointer PointerMetadata
+		if part.Metadata == nil || json.Unmarshal(part.Metadata, &pointer) != nil || !validHash(pointer.SHA256) || pointer.Size <= 0 {
+			return errors.New("url part metadata requires sha256 and a positive size")
+		}
+	}
+	return validateMetadata(update.Metadata)
+}
+
+func validateTaskIDs(taskID, contextID string) error {
+	if err := validateID(taskID, "task id"); err != nil {
+		return err
+	}
+	return validateID(contextID, "context id")
+}
+
+func validateTaskStatus(value *TaskStatus) error {
+	if !taskStates[value.State] {
+		return errors.New("invalid task state")
+	}
+	if _, err := time.Parse(time.RFC3339, value.Timestamp); err != nil {
+		return errors.New("status timestamp must be RFC 3339")
+	}
+	if value.Message != nil {
+		return validateMessage(value.Message)
 	}
 	return nil
 }
@@ -657,7 +756,7 @@ func validateSecretVersion(value *SecretVersion) error {
 	if err := validateID(value.ReceiverID, "receiver_id"); err != nil {
 		return err
 	}
-	if value.Name == "" || !validFingerprint(value.SealingKeyFP) || !validHash(value.CiphertextHash) || value.Version < 0 || value.Generation < 0 || value.ExpMS < 0 {
+	if value.Name == "" || !validFingerprint(value.SealingKeyFP) || !validHash(value.ApprovalHash) || !validHash(value.CiphertextHash) || value.Version < 0 || value.Generation < 0 || value.ExpMS < 0 {
 		return errors.New("invalid secret_version")
 	}
 	return nil
@@ -680,6 +779,9 @@ func validateMessage(value *Message) error {
 	if value.Role != RoleUser && value.Role != RoleAgent {
 		return errors.New("invalid message role")
 	}
+	if !slices.Contains(value.Extensions, ExtensionURI) {
+		return errors.New("message must declare the wherry extension")
+	}
 	if value.Parts == nil {
 		return errors.New("message parts are required")
 	}
@@ -695,6 +797,9 @@ func validateArtifact(value *Artifact) error {
 	}
 	if value.Parts == nil {
 		return errors.New("artifact parts are required")
+	}
+	if !slices.Contains(value.Extensions, ExtensionURI) {
+		return errors.New("artifact must declare the wherry extension")
 	}
 	if err := validateParts(value.Parts); err != nil {
 		return err

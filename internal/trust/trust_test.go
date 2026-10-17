@@ -128,7 +128,7 @@ func TestEnrolRequestApproveState(t *testing.T) {
 	if !reflect.DeepEqual(fixture.enrolled.Labels, testLabels()) ||
 		!reflect.DeepEqual(fixture.enrolled.Adapters, testGrants()) ||
 		!reflect.DeepEqual(fixture.enrolled.Selector, testSelector()) ||
-		fixture.enrolled.Pool != "default" || fixture.enrolled.Generation != 1 {
+		fixture.enrolled.Pool != "default" || fixture.enrolled.Generation != 1 || fixture.enrolled.ApprovalHash != EnvelopeHash(fixture.approval) {
 		t.Fatalf("unexpected enrolment: %#v", fixture.enrolled)
 	}
 	if _, err := fixture.state.Receiver("receiver-a", testNow.Add(2*time.Hour)); err == nil {
@@ -136,19 +136,19 @@ func TestEnrolRequestApproveState(t *testing.T) {
 	}
 }
 
-func TestRootTaskSignVerify(t *testing.T) {
+func TestRootSubmissionSignVerify(t *testing.T) {
 	fixture := newTrustFixture(t)
-	task := rootTask()
-	envelope, err := SignRootTask(task, fixture.userPrivateKey)
+	submission := rootSubmission()
+	envelope, err := SignRootSubmission(submission, fixture.userPrivateKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	verified, err := VerifyRootTask(envelope, fixture.userPublicKey)
+	verified, err := VerifyRootSubmission(envelope, fixture.userPublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(verified, &task) {
-		t.Fatalf("verified task differs:\n got: %#v\nwant: %#v", verified, &task)
+	if !reflect.DeepEqual(verified, &submission) {
+		t.Fatalf("verified submission differs:\n got: %#v\nwant: %#v", verified, &submission)
 	}
 }
 
@@ -441,20 +441,20 @@ func TestSecretErrorsOmitPlaintext(t *testing.T) {
 	}
 }
 
-func TestVerifyRootTaskRejectsChild(t *testing.T) {
+func TestVerifyRootSubmissionRejectsChild(t *testing.T) {
 	fixture := newTrustFixture(t)
-	child := rootTask()
-	child.RunID = "child"
-	child.Depth = 1
-	child.Ancestors = []string{"root"}
-	child.ParentHash = strings.Repeat("a", 64)
-	child.Chain = []wire.Bytes{wire.Bytes("parent envelope")}
-	envelope := mustSigned(t, wire.TypeTask, &child, fixture.userPrivateKey)
-	if _, err := VerifyRootTask(envelope, fixture.userPublicKey); err == nil {
-		t.Fatal("child task was accepted as a root")
+	child := rootSubmission()
+	child.Wherry.RunID, child.Message.TaskID = "child", "child"
+	child.Wherry.Lineage = wire.Lineage{
+		RootRunID: "root", Depth: 1, Ancestors: []string{"root"},
+		ParentHash: strings.Repeat("a", 64), Chain: []wire.Bytes{wire.Bytes("parent envelope")},
 	}
-	if _, err := SignRootTask(child, fixture.userPrivateKey); err == nil {
-		t.Fatal("child task was signed as a root")
+	envelope := mustSigned(t, wire.TypeSubmission, &child, fixture.userPrivateKey)
+	if _, err := VerifyRootSubmission(envelope, fixture.userPublicKey); err == nil {
+		t.Fatal("child submission was accepted as a root")
+	}
+	if _, err := SignRootSubmission(child, fixture.userPrivateKey); err == nil {
+		t.Fatal("child submission was signed as a root")
 	}
 }
 
@@ -498,26 +498,31 @@ func TestSealedSecretAADBytes(t *testing.T) {
 	header := secretAAD{
 		Topic: sealedSecretTopic, ReceiverID: "receiver-a", Name: "token",
 		SealingKeyFP: "sha256:" + strings.Repeat("a", 64), Generation: 5,
-		Version: 6, ExpMS: 7,
+		ApprovalHash: strings.Repeat("b", 64), Version: 6, ExpMS: 7,
 	}
 	encoded, err := marshalSecretAAD(header)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := "wherry/v1/sealed_secret_aad\x00" +
-		`{"topic":"receivers.secrets","receiver_id":"receiver-a","name":"token","sealing_key_fp":"sha256:` + strings.Repeat("a", 64) + `","generation":5,"version":6,"exp_ms":7}`
+		`{"topic":"receivers.secrets","receiver_id":"receiver-a","name":"token","sealing_key_fp":"sha256:` + strings.Repeat("a", 64) + `","generation":5,"approval_hash":"` + strings.Repeat("b", 64) + `","version":6,"exp_ms":7}`
 	if string(encoded) != want {
 		t.Fatalf("AAD differs:\n got: %q\nwant: %q", encoded, want)
 	}
 }
 
-func rootTask() wire.Task {
-	return wire.Task{
-		RunID: "root", Attempt: 1, RootRunID: "root", Depth: 0, Ancestors: []string{}, ParentHash: "", Chain: []wire.Bytes{},
-		Pool: "default", Labels: map[string]string{"lab/os": "linux"}, Selector: testSelector(),
-		DeadlineMS: testNow.Add(time.Hour).UnixMilli(), QueueDeadlineMS: testNow.Add(time.Minute).UnixMilli(),
-		ReplyTopic: "replies.client", CorrelationID: "correlation",
-		Message: wire.Message{MessageID: "message", Role: wire.RoleUser, Parts: []wire.Part{{Text: "hello"}}},
+func rootSubmission() wire.SubmissionRecord {
+	return wire.SubmissionRecord{
+		Message: wire.Message{
+			MessageID: "message", ContextID: "root", TaskID: "root", Role: wire.RoleUser,
+			Parts: []wire.Part{{Text: "hello"}}, Extensions: []string{wire.ExtensionURI},
+		},
+		Wherry: wire.SubmissionExtension{
+			RunID: "root", Attempt: 1, Pool: "default", Selector: testSelector(), Labels: map[string]string{"lab/os": "linux"},
+			DeadlineMS: testNow.Add(time.Hour).UnixMilli(), QueueDeadlineMS: testNow.Add(time.Minute).UnixMilli(),
+			ReplyTopic: "replies.client",
+			Lineage:    wire.Lineage{RootRunID: "root", Depth: 0, Ancestors: []string{}, ParentHash: "", Chain: []wire.Bytes{}},
+		},
 	}
 }
 
@@ -574,4 +579,69 @@ func TestEmptySelectorSurvivesState(t *testing.T) {
 	if _, err := marshalSigned(wire.TypeCapability, capability, fixture.receiverKey); err != nil {
 		t.Fatalf("capability built from an empty approved selector: %v", err)
 	}
+}
+
+// When history restarts, generation numbering restarts at 1; a secret sealed under the
+// superseded generation-1 approval must not open under the new one.
+func TestSealRejectedUnderDifferentApproval(t *testing.T) {
+	fixture := newTrustFixture(t)
+	versionEnvelope, sealedEnvelope, err := Seal(fixture.enrolled, "receiver-a", "token", 1, []byte("secret"), testNow.Add(time.Minute), fixture.userPrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reapprove := func(state *State, generation int64, previous string) Enrolled {
+		t.Helper()
+		approval, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", generation, previous, testNow.Add(2*time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := state.Apply(approval); err != nil {
+			t.Fatal(err)
+		}
+		enrolled, err := state.Receiver("receiver-a", testNow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if enrolled.ApprovalHash == fixture.enrolled.ApprovalHash || enrolled.Generation != generation {
+			t.Fatalf("re-approval did not produce a distinct generation-%d approval", generation)
+		}
+		return enrolled
+	}
+	open := func(state *State, header []byte) error {
+		t.Helper()
+		if _, err := state.Apply(header); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := Open(sealedEnvelope, state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow)
+		return err
+	}
+	restarted := func() (*State, Enrolled) {
+		t.Helper()
+		state := NewState(fixture.userPublicKey)
+		if _, err := state.Apply(fixture.request); err != nil {
+			t.Fatal(err)
+		}
+		return state, reapprove(state, 1, "")
+	}
+
+	t.Run("next generation", func(t *testing.T) {
+		reapprove(fixture.state, 2, EnvelopeHash(fixture.approval))
+		if err := open(fixture.state, versionEnvelope); err == nil {
+			t.Fatal("secret sealed under approval A opened under A'")
+		}
+	})
+	t.Run("matching generation", func(t *testing.T) {
+		state, _ := restarted()
+		if err := open(state, versionEnvelope); err == nil {
+			t.Fatal("secret sealed under generation-1 approval A opened under generation-1 approval A'")
+		}
+	})
+	t.Run("header relabelled to the current approval", func(t *testing.T) {
+		state, current := restarted()
+		header := decodeSecretVersion(t, versionEnvelope)
+		header.ApprovalHash = current.ApprovalHash
+		if err := open(state, mustSigned(t, wire.TypeSecretVersion, header, fixture.userPrivateKey)); err == nil {
+			t.Fatal("ciphertext sealed under approval A opened through a header naming A'")
+		}
+	})
 }

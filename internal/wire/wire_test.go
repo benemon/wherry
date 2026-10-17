@@ -18,27 +18,46 @@ func validPayloads(t *testing.T) map[RecordType]any {
 	hashA := strings.Repeat("a", 64)
 	hashB := strings.Repeat("b", 64)
 	signingPublicKey, _ := fixedKey(t)
-	line := Bytes("line")
 	logOffset := int64(42)
-	reason := "done"
+	extensions := []string{ExtensionURI}
+	status := TaskStatus{
+		State:     TaskStateCompleted,
+		Message:   &Message{MessageID: "status-1", Role: RoleAgent, Parts: []Part{{Text: "done"}}, Extensions: extensions},
+		Timestamp: "2026-10-17T10:00:00.000Z",
+	}
+	message := Message{MessageID: "message-1", ContextID: "run-1", TaskID: "run-1", Role: RoleUser, Parts: []Part{{Text: "hello"}}, Extensions: extensions}
 	return map[RecordType]any{
-		TypeTask: &Task{
-			RunID: "run-1", Attempt: 1, RootRunID: "run-1", Depth: 0,
-			Ancestors: []string{}, ParentHash: "", Chain: []Bytes{},
-			Pool: "linux", Labels: map[string]string{"lab/os": "linux"}, Selector: []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}},
-			DeadlineMS: 2_000, QueueDeadlineMS: 1_000, ReplyTopic: "replies.client-1", CorrelationID: "correlation-1",
-			Message: Message{MessageID: "message-1", ContextID: "context-1", TaskID: "task-1", Role: RoleUser, Parts: []Part{{Text: "hello"}}},
+		TypeSubmission: &SubmissionRecord{
+			Message: message,
+			Wherry: SubmissionExtension{
+				RunID: "run-1", Attempt: 1, Pool: "linux",
+				Selector: []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}}, Labels: map[string]string{"lab/os": "linux"},
+				DeadlineMS: 2_000, QueueDeadlineMS: 1_000, ReplyTopic: "replies.client-1",
+				Lineage: Lineage{RootRunID: "run-1", Depth: 0, Ancestors: []string{}, ParentHash: "", Chain: []Bytes{}},
+			},
 		},
 		TypeCancel: &Cancel{RunID: "run-1", AtMS: 1_000},
-		TypeEvent: &Event{
-			RunID: "run-1", Attempt: 1, TaskHash: hashA, ReceiverID: "receiver-1", AtMS: 1_000,
-			State: TaskStateWorking, Kind: "heartbeat", LogOffset: &logOffset, Reason: &reason,
+		TypeStatus: &StatusRecord{
+			StatusUpdate: TaskStatusUpdateEvent{TaskID: "run-1", ContextID: "run-1", Status: TaskStatus{
+				State: TaskStateWorking, Timestamp: "2026-10-17T10:00:00.000Z",
+				Message: &Message{MessageID: "status-2", Role: RoleAgent, Parts: []Part{{Text: "working"}}, Extensions: extensions},
+			}},
+			Wherry: StatusExtension{Attempt: 1, TaskHash: hashA, ReceiverID: "receiver-1", Kind: "heartbeat", LogOffset: &logOffset},
 		},
-		TypeReply: &Reply{
-			RunID: "run-1", Attempt: 1, TaskHash: hashA, CorrelationID: "correlation-1", State: TaskStateCompleted,
-			Artifacts: []Artifact{{ArtifactID: "artifact-1", Name: "answer", Description: "result", Parts: []Part{{Text: "done"}}}}, AtMS: 1_000,
+		TypeTask: &TaskRecord{
+			Task: Task{
+				ID: "run-1", ContextID: "run-1", Status: status, History: []Message{message},
+				Artifacts: []Artifact{{ArtifactID: "artifact-1", Name: "answer", Description: "result", Parts: []Part{{Text: "done"}}, Extensions: extensions}},
+			},
+			Wherry: TaskExtension{Attempt: 1, TaskHash: hashA},
 		},
-		TypeTranscript: &Transcript{RunID: "run-1", Attempt: 1, Seq: 1, Line: &line},
+		TypeArtifactUpdate: &ArtifactUpdateRecord{
+			ArtifactUpdate: TaskArtifactUpdateEvent{
+				TaskID: "run-1", ContextID: "run-1", Append: true, LastChunk: true,
+				Artifact: Artifact{ArtifactID: "transcript", Parts: []Part{{Text: `{"type":"assistant"}`, MediaType: "application/x-ndjson"}}, Extensions: extensions},
+			},
+			Wherry: ArtifactUpdateExtension{Attempt: 1, Seq: 1},
+		},
 		TypeCapability: &Capability{
 			ReceiverID: "receiver-1", Labels: map[string]string{"lab/os": "linux"}, Pool: "linux",
 			Offers:   []Offer{{Adapter: "nomad", Labels: map[string]string{"runtime": "exec"}}},
@@ -61,7 +80,7 @@ func validPayloads(t *testing.T) map[RecordType]any {
 		TypeRevocation:   &Revocation{ReceiverID: "receiver-1", FloorGeneration: 2, AtMS: 1_000},
 		TypeSecretVersion: &SecretVersion{
 			ReceiverID: "receiver-1", Name: "token", Version: 3, SealingKeyFP: "sha256:" + hashA,
-			Generation: 2, CiphertextHash: hashB, ExpMS: 2_000,
+			Generation: 2, ApprovalHash: hashA, CiphertextHash: hashB, ExpMS: 2_000,
 		},
 		TypeSealedSecret: &SealedSecret{ReceiverID: "receiver-1", Name: "token", Version: 3, Enc: Bytes("enc"), CT: Bytes("ciphertext")},
 	}
@@ -79,7 +98,7 @@ func fixedKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 
 func verificationKind(recordType RecordType) SignerKind {
 	switch recordType {
-	case TypeTask, TypeCancel, TypeEnrolApproval, TypeRevocation, TypeSecretVersion, TypeSealedSecret:
+	case TypeSubmission, TypeCancel, TypeEnrolApproval, TypeRevocation, TypeSecretVersion, TypeSealedSecret:
 		return SignerUser
 	default:
 		return SignerReceiver
@@ -149,7 +168,8 @@ func TestDecodePayloadRejectsMissingRequiredNumericMember(t *testing.T) {
 		payload    string
 	}{
 		"cancel at_ms":         {TypeCancel, `{"run_id":"run-1"}`},
-		"task depth":           {TypeTask, `{"run_id":"run-1","attempt":1,"root_run_id":"run-1","ancestors":[],"parent_hash":"","chain":[],"pool":"linux","labels":{},"selector":[],"deadline_ms":2,"queue_deadline_ms":1,"reply_topic":"replies.client-1","correlation_id":"correlation-1","message":{"messageId":"message-1","role":"ROLE_USER","parts":[{"text":"hello"}]}}`},
+		"submission depth":     {TypeSubmission, string(withoutMember(t, TypeSubmission, `"depth":0,`))},
+		"artifact_update seq":  {TypeArtifactUpdate, string(withoutMember(t, TypeArtifactUpdate, `,"seq":1`))},
 		"capability in_flight": {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{},"offers":[],"selector":[],"capacity":1,"generation":1,"at_ms":1}`},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -162,7 +182,7 @@ func TestDecodePayloadRejectsMissingRequiredNumericMember(t *testing.T) {
 
 func TestAttemptRequired(t *testing.T) {
 	for recordType, value := range validPayloads(t) {
-		if recordType != TypeTask && recordType != TypeEvent && recordType != TypeReply && recordType != TypeTranscript {
+		if recordType != TypeSubmission && recordType != TypeStatus && recordType != TypeTask && recordType != TypeArtifactUpdate {
 			continue
 		}
 		t.Run(string(recordType), func(t *testing.T) {
@@ -180,7 +200,7 @@ func TestAttemptRequired(t *testing.T) {
 
 func TestAttemptZeroRejected(t *testing.T) {
 	for recordType, value := range validPayloads(t) {
-		if recordType != TypeTask && recordType != TypeEvent && recordType != TypeReply && recordType != TypeTranscript {
+		if recordType != TypeSubmission && recordType != TypeStatus && recordType != TypeTask && recordType != TypeArtifactUpdate {
 			continue
 		}
 		t.Run(string(recordType), func(t *testing.T) {
@@ -216,8 +236,7 @@ func TestAttemptFilterDropsLowerAttempt(t *testing.T) {
 }
 
 func TestDecodePayloadRequiresExplicitEmptyLineageFields(t *testing.T) {
-	missingParentHash := `{"run_id":"run-1","attempt":1,"root_run_id":"run-1","depth":0,"ancestors":[],"chain":[],"pool":"linux","labels":{},"selector":[],"deadline_ms":2,"queue_deadline_ms":1,"reply_topic":"replies.client-1","correlation_id":"correlation-1","message":{"messageId":"message-1","role":"ROLE_USER","parts":[{"text":"hello"}]}}`
-	if _, err := DecodePayload(TypeTask, []byte(missingParentHash)); err == nil {
+	if _, err := DecodePayload(TypeSubmission, withoutMember(t, TypeSubmission, `"parent_hash":"",`)); err == nil {
 		t.Fatal("missing parent_hash accepted")
 	}
 	hash := strings.Repeat("a", 64)
@@ -243,12 +262,12 @@ func TestDecodeEnvelopeIsStrict(t *testing.T) {
 
 func TestVerifyRejectsCrossTypeSignature(t *testing.T) {
 	publicKey, privateKey := fixedKey(t)
-	payload, err := MarshalPayload(TypeEvent, validPayloads(t)[TypeEvent])
+	payload, err := MarshalPayload(TypeStatus, validPayloads(t)[TypeStatus])
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope := Sign(TypeEvent, payload, privateKey)
-	envelope.Type = TypeReply
+	envelope := Sign(TypeStatus, payload, privateKey)
+	envelope.Type = TypeTask
 	if _, err := Verify(envelope, publicKey, SignerReceiver); !errors.Is(err, errInvalidSignature) {
 		t.Fatalf("got %v, want invalid signature", err)
 	}
@@ -290,25 +309,25 @@ func TestEntitledRejectsWrongSignerKind(t *testing.T) {
 	if entitled(TypeCancel, SignerReceiver) {
 		t.Fatal("receiver was entitled to sign cancel")
 	}
-	if !entitled(TypeTask, SignerUser) || !entitled(TypeTask, SignerReceiver) {
-		t.Fatal("task signer entitlements incomplete")
+	if !entitled(TypeSubmission, SignerUser) || !entitled(TypeSubmission, SignerReceiver) {
+		t.Fatal("submission signer entitlements incomplete")
 	}
 }
 
 func TestEntitlementTable(t *testing.T) {
 	want := map[RecordType]map[SignerKind]bool{
-		TypeTask:          {SignerUser: true, SignerReceiver: true},
-		TypeCancel:        {SignerUser: true},
-		TypeEvent:         {SignerReceiver: true},
-		TypeReply:         {SignerReceiver: true},
-		TypeTranscript:    {SignerReceiver: true},
-		TypeCapability:    {SignerReceiver: true},
-		TypeEnrolRequest:  {SignerReceiver: true},
-		TypeEnrolApproval: {SignerUser: true},
-		TypeRenewRequest:  {SignerReceiver: true},
-		TypeRevocation:    {SignerUser: true},
-		TypeSecretVersion: {SignerUser: true},
-		TypeSealedSecret:  {SignerUser: true},
+		TypeSubmission:     {SignerUser: true, SignerReceiver: true},
+		TypeCancel:         {SignerUser: true},
+		TypeStatus:         {SignerReceiver: true},
+		TypeTask:           {SignerReceiver: true},
+		TypeArtifactUpdate: {SignerReceiver: true},
+		TypeCapability:     {SignerReceiver: true},
+		TypeEnrolRequest:   {SignerReceiver: true},
+		TypeEnrolApproval:  {SignerUser: true},
+		TypeRenewRequest:   {SignerReceiver: true},
+		TypeRevocation:     {SignerUser: true},
+		TypeSecretVersion:  {SignerUser: true},
+		TypeSealedSecret:   {SignerUser: true},
 	}
 	for recordType, kinds := range want {
 		for _, kind := range []SignerKind{SignerUser, SignerReceiver} {
@@ -372,9 +391,9 @@ func TestTerminalStates(t *testing.T) {
 }
 
 func TestRequirementUnknownOperatorRejected(t *testing.T) {
-	task := validPayloads(t)[TypeTask].(*Task)
-	task.Selector[0].Operator = "Exists"
-	if _, err := MarshalPayload(TypeTask, task); err == nil || !strings.Contains(err.Error(), "unknown operator") {
+	submission := validPayloads(t)[TypeSubmission].(*SubmissionRecord)
+	submission.Wherry.Selector[0].Operator = "Exists"
+	if _, err := MarshalPayload(TypeSubmission, submission); err == nil || !strings.Contains(err.Error(), "unknown operator") {
 		t.Fatalf("got %v, want unknown operator", err)
 	}
 }
@@ -596,15 +615,25 @@ func TestApprovalAllowedValidation(t *testing.T) {
 	}
 }
 
-func TestDecodeTranscriptRequiresExactlyOneContent(t *testing.T) {
+func TestArtifactUpdateRequiresOnePart(t *testing.T) {
 	hash := strings.Repeat("a", 64)
-	for name, input := range map[string]string{
-		"both":    `{"run_id":"run-1","attempt":1,"seq":1,"line":"bGluZQ","pointer":{"url":"https://example.test/line","sha256":"` + hash + `","size":4}}`,
-		"neither": `{"run_id":"run-1","attempt":1,"seq":1}`,
+	for name, testCase := range map[string]struct {
+		parts []Part
+		ok    bool
+	}{
+		"text":                {[]Part{{Text: "line"}}, true},
+		"pointer":             {[]Part{{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + hash + `","size":4}`)}}, true},
+		"line and pointer":    {[]Part{{Text: "line"}, {URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + hash + `","size":4}`)}}, false},
+		"neither":             {[]Part{}, false},
+		"pointer no metadata": {[]Part{{URL: "unstored:oversize"}}, false},
+		"pointer bad hash":    {[]Part{{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"x","size":4}`)}}, false},
+		"pointer zero size":   {[]Part{{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + hash + `","size":0}`)}}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := DecodePayload(TypeTranscript, []byte(input)); err == nil {
-				t.Fatal("invalid transcript accepted")
+			update := validPayloads(t)[TypeArtifactUpdate].(*ArtifactUpdateRecord)
+			update.ArtifactUpdate.Artifact.Parts = testCase.parts
+			if _, err := MarshalPayload(TypeArtifactUpdate, update); (err == nil) != testCase.ok {
+				t.Fatalf("marshal error %v, want ok=%v", err, testCase.ok)
 			}
 		})
 	}
@@ -677,10 +706,23 @@ func TestEnvelopeAndPayloadUseRawBase64URL(t *testing.T) {
 	}
 }
 
-// taskJSON returns the valid task payload with its message parts member replaced by parts.
-func taskJSON(t *testing.T, parts string) []byte {
+// withoutMember returns the valid payload of recordType with member, which must occur once, removed.
+func withoutMember(t *testing.T, recordType RecordType, member string) []byte {
 	t.Helper()
-	encoded, err := MarshalPayload(TypeTask, validPayloads(t)[TypeTask])
+	encoded, err := MarshalPayload(recordType, validPayloads(t)[recordType])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(encoded, []byte(member)) != 1 {
+		t.Fatalf("payload does not hold %s once: %s", member, encoded)
+	}
+	return bytes.Replace(encoded, []byte(member), nil, 1)
+}
+
+// submissionJSON returns the valid submission payload with its message parts member replaced by parts.
+func submissionJSON(t *testing.T, parts string) []byte {
+	t.Helper()
+	encoded, err := MarshalPayload(TypeSubmission, validPayloads(t)[TypeSubmission])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -712,7 +754,7 @@ func TestPartRequiresExactlyOneContent(t *testing.T) {
 		"second part":  {`"parts":[{"text":"hello"},{"text":"hello","data":true}]`, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := DecodePayload(TypeTask, taskJSON(t, testCase.parts))
+			_, err := DecodePayload(TypeSubmission, submissionJSON(t, testCase.parts))
 			if (err == nil) != testCase.ok {
 				t.Fatalf("decode error %v, want ok=%v", err, testCase.ok)
 			}
@@ -725,9 +767,9 @@ func TestPartRequiresExactlyOneContent(t *testing.T) {
 		"text and data": {Text: "hello", Data: jsontext.Value(`null`)},
 	} {
 		t.Run("marshal "+name, func(t *testing.T) {
-			task := validPayloads(t)[TypeTask].(*Task)
-			task.Message.Parts = []Part{part}
-			if _, err := MarshalPayload(TypeTask, task); err == nil {
+			submission := validPayloads(t)[TypeSubmission].(*SubmissionRecord)
+			submission.Message.Parts = []Part{part}
+			if _, err := MarshalPayload(TypeSubmission, submission); err == nil {
 				t.Fatal("part without exactly one content marshalled")
 			}
 		})
@@ -737,9 +779,9 @@ func TestPartRequiresExactlyOneContent(t *testing.T) {
 // Proto3 JSON writes bytes as padded standard base64 and accepts standard or
 // URL-safe, padded or not: https://protobuf.dev/programming-guides/json/
 func TestPartRawIsStandardBase64(t *testing.T) {
-	reply := validPayloads(t)[TypeReply].(*Reply)
-	reply.Artifacts[0].Parts = []Part{{Raw: StdBytes{0xfb, 0xff}, MediaType: "application/octet-stream"}}
-	encoded, err := MarshalPayload(TypeReply, reply)
+	task := validPayloads(t)[TypeTask].(*TaskRecord)
+	task.Task.Artifacts[0].Parts = []Part{{Raw: StdBytes{0xfb, 0xff}, MediaType: "application/octet-stream"}}
+	encoded, err := MarshalPayload(TypeTask, task)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -757,12 +799,12 @@ func TestPartRawIsStandardBase64(t *testing.T) {
 		"*":     false,
 	} {
 		t.Run(input, func(t *testing.T) {
-			decoded, err := DecodePayload(TypeTask, taskJSON(t, `"parts":[{"raw":"`+input+`"}]`))
+			decoded, err := DecodePayload(TypeSubmission, submissionJSON(t, `"parts":[{"raw":"`+input+`"}]`))
 			if (err == nil) != ok {
 				t.Fatalf("decode error %v, want ok=%v", err, ok)
 			}
-			if ok && !bytes.Equal(decoded.(*Task).Message.Parts[0].Raw, []byte{0xfb, 0xff}) {
-				t.Fatalf("decoded raw %x", decoded.(*Task).Message.Parts[0].Raw)
+			if ok && !bytes.Equal(decoded.(*SubmissionRecord).Message.Parts[0].Raw, []byte{0xfb, 0xff}) {
+				t.Fatalf("decoded raw %x", decoded.(*SubmissionRecord).Message.Parts[0].Raw)
 			}
 		})
 	}
@@ -772,30 +814,30 @@ func TestOpaqueJSONRelayedByteForByte(t *testing.T) {
 	// Unsorted names, exponent and trailing-zero numbers, an integer beyond int64 and escapes json/v2 would rewrite.
 	metadata := jsontext.Value(`{"z":1,"a":[1E2,1.50,-0,12345678901234567890,"\/\u0041"],"n":null}`)
 	data := jsontext.Value(`[{"y":"\u00e9"},1e-7]`)
-	task := validPayloads(t)[TypeTask].(*Task)
-	task.Message.Metadata = metadata
-	task.Message.Parts = []Part{{Data: data, Metadata: metadata}}
-	encoded, err := MarshalPayload(TypeTask, task)
+	submission := validPayloads(t)[TypeSubmission].(*SubmissionRecord)
+	submission.Message.Metadata = metadata
+	submission.Message.Parts = []Part{{Data: data, Metadata: metadata}}
+	encoded, err := MarshalPayload(TypeSubmission, submission)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(encoded, []byte(`"metadata":`+string(metadata))) || !bytes.Contains(encoded, []byte(`"data":`+string(data))) {
 		t.Fatalf("opaque JSON re-encoded: %s", encoded)
 	}
-	decoded, err := DecodePayload(TypeTask, encoded)
+	decoded, err := DecodePayload(TypeSubmission, encoded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := decoded.(*Task).Message
+	message := decoded.(*SubmissionRecord).Message
 	if !bytes.Equal(message.Metadata, metadata) || !bytes.Equal(message.Parts[0].Metadata, metadata) || !bytes.Equal(message.Parts[0].Data, data) {
 		t.Fatalf("decoded metadata %s, part metadata %s, data %s", message.Metadata, message.Parts[0].Metadata, message.Parts[0].Data)
 	}
 	spaced := `{ "z" : 1 ,` + "\n\t" + `"a" : [ ] }`
-	decoded, err = DecodePayload(TypeTask, taskJSON(t, `"parts":[{"text":"hello"}],"metadata":`+spaced))
+	decoded, err = DecodePayload(TypeSubmission, submissionJSON(t, `"parts":[{"text":"hello"}],"metadata":`+spaced))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(decoded.(*Task).Message.Metadata); got != spaced {
+	if got := string(decoded.(*SubmissionRecord).Message.Metadata); got != spaced {
 		t.Fatalf("decoded metadata %q, want %q", got, spaced)
 	}
 }
@@ -815,7 +857,7 @@ func TestMetadataMustBeObject(t *testing.T) {
 		"part data not object": {`"parts":[{"data":[1]}]`, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := DecodePayload(TypeTask, taskJSON(t, testCase.parts))
+			_, err := DecodePayload(TypeSubmission, submissionJSON(t, testCase.parts))
 			if (err == nil) != testCase.ok {
 				t.Fatalf("decode error %v, want ok=%v", err, testCase.ok)
 			}
@@ -823,9 +865,9 @@ func TestMetadataMustBeObject(t *testing.T) {
 	}
 	for name, metadata := range map[string]jsontext.Value{"array": jsontext.Value(`[]`), "malformed": jsontext.Value(`{"k":`)} {
 		t.Run("marshal "+name, func(t *testing.T) {
-			reply := validPayloads(t)[TypeReply].(*Reply)
-			reply.Artifacts[0].Metadata = metadata
-			if _, err := MarshalPayload(TypeReply, reply); err == nil {
+			task := validPayloads(t)[TypeTask].(*TaskRecord)
+			task.Task.Artifacts[0].Metadata = metadata
+			if _, err := MarshalPayload(TypeTask, task); err == nil {
 				t.Fatal("artifact metadata that is not a JSON object marshalled")
 			}
 		})
@@ -838,14 +880,37 @@ func TestOpaqueJSONRejectsDuplicateNames(t *testing.T) {
 		"data":     `"parts":[{"data":{"x":{"k":1,"k":2}}}]`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := DecodePayload(TypeTask, taskJSON(t, parts)); err == nil {
+			if _, err := DecodePayload(TypeSubmission, submissionJSON(t, parts)); err == nil {
 				t.Fatal("duplicate member name inside opaque JSON accepted")
 			}
 		})
 	}
-	task := validPayloads(t)[TypeTask].(*Task)
-	task.Message.Metadata = jsontext.Value(`{"k":1,"k":2}`)
-	if _, err := MarshalPayload(TypeTask, task); err == nil {
+	submission := validPayloads(t)[TypeSubmission].(*SubmissionRecord)
+	submission.Message.Metadata = jsontext.Value(`{"k":1,"k":2}`)
+	if _, err := MarshalPayload(TypeSubmission, submission); err == nil {
 		t.Fatal("duplicate member name inside metadata marshalled")
+	}
+}
+
+func TestStatusTimestampIsRFC3339(t *testing.T) {
+	for timestamp, ok := range map[string]bool{
+		"2026-10-17T10:00:00Z":        true,
+		"2026-10-17T10:00:00.123456Z": true,
+		"2026-10-17T10:00:00+01:00":   true,
+		"":                            false,
+		"1760695200000":               false,
+		"2026-10-17 10:00:00Z":        false,
+	} {
+		t.Run(timestamp, func(t *testing.T) {
+			status := validPayloads(t)[TypeStatus].(*StatusRecord)
+			status.StatusUpdate.Status.Timestamp = timestamp
+			task := validPayloads(t)[TypeTask].(*TaskRecord)
+			task.Task.Status.Timestamp = timestamp
+			for recordType, payload := range map[RecordType]any{TypeStatus: status, TypeTask: task} {
+				if _, err := MarshalPayload(recordType, payload); (err == nil) != ok {
+					t.Errorf("%s: marshal error %v, want ok=%v", recordType, err, ok)
+				}
+			}
+		})
 	}
 }

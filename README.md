@@ -17,3 +17,4 @@ wherry sends a task to other compute and returns the result to the caller.
   job through a compile-time Nomad adapter.
 - Kafka as the record of each exchange. Tasks, events, transcripts and replies
   are signed records that chain to the user key.
+- Records are A2A v1.0 objects; [the wherry A2A extension](docs/a2a-extension-v1.md) defines their added fields.

@@ -10,7 +10,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -285,15 +287,15 @@ func runAwait(ctx context.Context, client *busclient.Client, args []string, stdo
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, result.Reply.State)
-	for _, artifact := range result.Reply.Artifacts {
+	fmt.Fprintln(stdout, result.Task.Status.State)
+	for _, artifact := range result.Task.Artifacts {
 		for _, part := range artifact.Parts {
 			fmt.Fprintln(stdout, partText(part))
 		}
 	}
 	warnSkipped(stderr, result.Skipped)
-	if result.Reply.State != wire.TaskStateCompleted {
-		return fmt.Errorf("run ended in %s", result.Reply.State)
+	if result.Task.Status.State != wire.TaskStateCompleted {
+		return fmt.Errorf("run ended in %s", result.Task.Status.State)
 	}
 	return nil
 }
@@ -305,7 +307,7 @@ func partText(part wire.Part) string {
 	case part.URL != "":
 		return fmt.Sprintf("[url %s]", part.URL)
 	case part.Data != nil:
-		return fmt.Sprintf("[data %d bytes]", len(part.Data))
+		return string(part.Data)
 	}
 	return part.Text
 }
@@ -318,10 +320,21 @@ func runEvents(ctx context.Context, client *busclient.Client, args []string, std
 	if err != nil {
 		return err
 	}
-	for _, event := range result.Events {
-		fmt.Fprintf(stdout, "attempt=%d kind=%s state=%s receiver=%s time=%s\n",
-			event.Attempt, event.Kind, event.State, event.ReceiverID,
-			time.UnixMilli(event.AtMS).UTC().Format(time.RFC3339Nano))
+	for _, record := range result.Statuses {
+		status := record.StatusUpdate.Status
+		fmt.Fprintf(stdout, "attempt=%d kind=%s state=%s receiver=%s time=%s",
+			record.Wherry.Attempt, record.Wherry.Kind, status.State, record.Wherry.ReceiverID, status.Timestamp)
+		if status.Message != nil {
+			texts := make([]string, 0, len(status.Message.Parts))
+			for _, part := range status.Message.Parts {
+				texts = append(texts, partText(part))
+			}
+			fmt.Fprintf(stdout, " message=%q", strings.Join(texts, " "))
+		}
+		fmt.Fprintln(stdout)
+	}
+	for _, attempt := range slices.Sorted(maps.Keys(result.Chunks)) {
+		fmt.Fprintf(stdout, "attempt=%d transcript_chunks=%d\n", attempt, result.Chunks[attempt])
 	}
 	warnSkipped(stderr, result.Skipped)
 	return nil

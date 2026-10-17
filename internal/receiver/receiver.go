@@ -321,7 +321,7 @@ func (r *Receiver) refresh(ctx context.Context) error {
 			continue
 		}
 		peer, err := state.Receiver(id, now)
-		if err == nil {
+		if err == nil && peer.Pool == enrolled.Pool {
 			ids[id] = true
 			signers = append(signers, peer.SigningPub)
 		}

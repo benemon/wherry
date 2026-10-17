@@ -88,7 +88,7 @@ func TestNewAdaptersRequiresCredentialEnv(t *testing.T) {
 }
 
 // enrolledReceiver returns a client whose bus holds an approved enrolment for receiver-a, and that receiver's signing key.
-func enrolledReceiver(t *testing.T) (context.Context, *kgo.Client, *busclient.Client, ed25519.PrivateKey) {
+func enrolledReceiver(t *testing.T) (context.Context, *kgo.Client, *busclient.Client, ed25519.PrivateKey, ed25519.PrivateKey) {
 	t.Helper()
 	cluster := kfake.MustCluster(kfake.NumBrokers(1))
 	t.Cleanup(cluster.Close)
@@ -139,11 +139,11 @@ func enrolledReceiver(t *testing.T) (context.Context, *kgo.Client, *busclient.Cl
 	).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
-	return ctx, kafka, busclient.New(kafka, userKey, "replies.test"), receiverKey
+	return ctx, kafka, busclient.New(kafka, userKey, "replies.test"), userKey, receiverKey
 }
 
 func TestReceiversJSONOutputShape(t *testing.T) {
-	ctx, _, client, _ := enrolledReceiver(t)
+	ctx, _, client, _, _ := enrolledReceiver(t)
 	var stdout, stderr bytes.Buffer
 	if err := runReceivers(ctx, client, []string{"--json"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
@@ -172,37 +172,113 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	}
 }
 
-func TestAwaitPrintsNonTextPartPlaceholders(t *testing.T) {
-	ctx, kafka, client, receiverKey := enrolledReceiver(t)
+// awaitOutput publishes a completed task with parts for run-a and returns what await prints.
+func awaitOutput(t *testing.T, parts []wire.Part) string {
+	t.Helper()
+	ctx, kafka, client, userKey, receiverKey := enrolledReceiver(t)
 	if _, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, 1, nil, "replies.test"); err != nil {
 		t.Fatal(err)
 	}
-	reply := &wire.Reply{
-		RunID: "run-a", Attempt: 1, TaskHash: strings.Repeat("a", 64), CorrelationID: "corr",
-		State: wire.TaskStateCompleted, AtMS: time.Now().UnixMilli(),
-		Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{
-			{Text: "done"},
-			{Raw: wire.StdBytes("hello"), MediaType: "text/plain"},
-			{URL: "https://example.test/report.pdf"},
-			{Data: jsontext.Value(`{"k":[1,2]}`)},
-		}}},
+	submission := wire.SubmissionRecord{
+		Message: wire.Message{
+			MessageID: "msg-run-a", ContextID: "run-a", TaskID: "run-a", Role: wire.RoleUser,
+			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
+		},
+		Wherry: wire.SubmissionExtension{
+			RunID: "run-a", Attempt: 1, Pool: "default", Selector: []wire.Requirement{}, Labels: map[string]string{},
+			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
+			ReplyTopic: "replies.test", Lineage: wire.Lineage{RootRunID: "run-a", Ancestors: []string{}, Chain: []wire.Bytes{}},
+		},
 	}
-	payload, err := wire.MarshalPayload(wire.TypeReply, reply)
+	submissionEnvelope, err := trust.SignRootSubmission(submission, userKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope, err := wire.MarshalEnvelope(wire.Sign(wire.TypeReply, payload, receiverKey))
+	task := &wire.TaskRecord{
+		Task: wire.Task{
+			ID: "run-a", ContextID: "run-a", History: []wire.Message{submission.Message},
+			Status:    wire.TaskStatus{State: wire.TaskStateCompleted, Timestamp: time.Now().UTC().Format(time.RFC3339)},
+			Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: parts, Extensions: []string{wire.ExtensionURI}}},
+		},
+		Wherry: wire.TaskExtension{Attempt: 1, TaskHash: trust.EnvelopeHash(submissionEnvelope)},
+	}
+	payload, err := wire.MarshalPayload(wire.TypeTask, task)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: "replies.test", Key: []byte("run-a"), Value: envelope}).FirstErr(); err != nil {
+	envelope, err := wire.MarshalEnvelope(wire.Sign(wire.TypeTask, payload, receiverKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kafka.ProduceSync(ctx,
+		&kgo.Record{Topic: wire.TopicTask, Key: []byte("run-a"), Value: submissionEnvelope},
+		&kgo.Record{Topic: "replies.test", Key: []byte("run-a"), Value: envelope},
+	).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
 	if err := runAwait(ctx, client, []string{"run-a", "--timeout", "5s"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	want := "TASK_STATE_COMPLETED\ndone\n[raw text/plain 5 bytes]\n[url https://example.test/report.pdf]\n[data 11 bytes]\n"
+	return stdout.String()
+}
+
+func TestAwaitPrintsNonTextPartPlaceholders(t *testing.T) {
+	got := awaitOutput(t, []wire.Part{
+		{Text: "done"},
+		{Raw: wire.StdBytes("hello"), MediaType: "text/plain"},
+		{URL: "https://example.test/report.pdf"},
+	})
+	if want := "TASK_STATE_COMPLETED\ndone\n[raw text/plain 5 bytes]\n[url https://example.test/report.pdf]\n"; got != want {
+		t.Fatalf("stdout %q, want %q", got, want)
+	}
+}
+
+func TestAwaitPrintsDataPart(t *testing.T) {
+	got := awaitOutput(t, []wire.Part{{Data: jsontext.Value(`{"answer":42,"items":["a","b"]}`), MediaType: "application/json"}})
+	if want := "TASK_STATE_COMPLETED\n{\"answer\":42,\"items\":[\"a\",\"b\"]}\n"; got != want {
+		t.Fatalf("stdout %q, want %q", got, want)
+	}
+}
+
+func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
+	ctx, kafka, client, _, receiverKey := enrolledReceiver(t)
+	publish := func(topic string, recordType wire.RecordType, payload any) {
+		t.Helper()
+		encoded, err := wire.MarshalPayload(recordType, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		envelope, err := wire.MarshalEnvelope(wire.Sign(recordType, encoded, receiverKey))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte("run-a"), Value: envelope}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	extensions := []string{wire.ExtensionURI}
+	publish(wire.TopicEvent, wire.TypeStatus, &wire.StatusRecord{
+		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: "run-a", ContextID: "run-a", Status: wire.TaskStatus{
+			State: wire.TaskStateRejected, Timestamp: "2026-10-17T10:00:00.000Z",
+			Message: &wire.Message{MessageID: "msg-1", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "queue deadline passed"}}, Extensions: extensions},
+		}},
+		Wherry: wire.StatusExtension{Attempt: 1, TaskHash: strings.Repeat("a", 64), ReceiverID: "receiver-a", Kind: "terminal"},
+	})
+	for seq := range int64(2) {
+		publish(wire.TopicTranscript, wire.TypeArtifactUpdate, &wire.ArtifactUpdateRecord{
+			ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", Append: seq > 0, Artifact: wire.Artifact{
+				ArtifactID: "transcript", Parts: []wire.Part{{Text: "line", MediaType: "application/x-ndjson"}}, Extensions: extensions,
+			}},
+			Wherry: wire.ArtifactUpdateExtension{Attempt: 1, Seq: seq},
+		})
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runEvents(ctx, client, []string{"run-a"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	want := "attempt=1 kind=terminal state=TASK_STATE_REJECTED receiver=receiver-a time=2026-10-17T10:00:00.000Z message=\"queue deadline passed\"\n" +
+		"attempt=1 transcript_chunks=2\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout %q, want %q", stdout.String(), want)
 	}

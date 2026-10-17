@@ -25,11 +25,12 @@ type secretAAD struct {
 	Name         string `json:"name"`
 	SealingKeyFP string `json:"sealing_key_fp"`
 	Generation   int64  `json:"generation"`
+	ApprovalHash string `json:"approval_hash"`
 	Version      int64  `json:"version"`
 	ExpMS        int64  `json:"exp_ms"`
 }
 
-// Seal encrypts a secret to an enrolled receiver and signs its version and ciphertext records.
+// Seal encrypts a secret to an enrolled receiver under its accepted approval and signs its version and ciphertext records.
 func Seal(enrolled Enrolled, receiverID, name string, version int64, value []byte, exp time.Time, userKey ed25519.PrivateKey) ([]byte, []byte, error) {
 	if enrolled.SealingPub == nil {
 		return nil, nil, errors.New("enrolled sealing key is required")
@@ -37,7 +38,7 @@ func Seal(enrolled Enrolled, receiverID, name string, version int64, value []byt
 	sealingKeyFP := sealingFingerprint(enrolled.SealingPub.Bytes())
 	header := secretAAD{
 		Topic: sealedSecretTopic, ReceiverID: receiverID, Name: name,
-		SealingKeyFP: sealingKeyFP, Generation: enrolled.Generation,
+		SealingKeyFP: sealingKeyFP, Generation: enrolled.Generation, ApprovalHash: enrolled.ApprovalHash,
 		Version: version, ExpMS: exp.UnixMilli(),
 	}
 	aad, err := marshalSecretAAD(header)
@@ -58,7 +59,7 @@ func Seal(enrolled Enrolled, receiverID, name string, version int64, value []byt
 	}
 	secretVersion := &wire.SecretVersion{
 		ReceiverID: receiverID, Name: name, Version: version,
-		SealingKeyFP: sealingKeyFP, Generation: enrolled.Generation,
+		SealingKeyFP: sealingKeyFP, Generation: enrolled.Generation, ApprovalHash: enrolled.ApprovalHash,
 		CiphertextHash: ciphertextHash(enc, ciphertext), ExpMS: exp.UnixMilli(),
 	}
 	secretVersionEnvelope, err := marshalSigned(wire.TypeSecretVersion, secretVersion, userKey)
@@ -118,12 +119,15 @@ func Open(sealedEnvelopeBytes []byte, state *State, receiverID string, sealingKe
 	if header.Generation != enrolled.Generation {
 		return nil, 0, errors.New("sealed secret generation is not current")
 	}
+	if header.ApprovalHash != enrolled.ApprovalHash {
+		return nil, 0, errors.New("sealed secret approval is not current")
+	}
 	if now.UnixMilli() >= header.ExpMS {
 		return nil, 0, errors.New("sealed secret is expired")
 	}
 	aad, err := marshalSecretAAD(secretAAD{
 		Topic: sealedSecretTopic, ReceiverID: header.ReceiverID, Name: header.Name,
-		SealingKeyFP: header.SealingKeyFP, Generation: header.Generation,
+		SealingKeyFP: header.SealingKeyFP, Generation: header.Generation, ApprovalHash: header.ApprovalHash,
 		Version: header.Version, ExpMS: header.ExpMS,
 	})
 	if err != nil {

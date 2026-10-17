@@ -18,11 +18,11 @@ import (
 var updateVectors = flag.Bool("update-vectors", false, "rewrite published wire test vectors")
 
 var vectorRecordTypes = []RecordType{
-	TypeTask,
+	TypeSubmission,
 	TypeCancel,
-	TypeEvent,
-	TypeReply,
-	TypeTranscript,
+	TypeStatus,
+	TypeTask,
+	TypeArtifactUpdate,
 	TypeCapability,
 	TypeEnrolRequest,
 	TypeEnrolApproval,
@@ -33,11 +33,11 @@ var vectorRecordTypes = []RecordType{
 }
 
 var vectorFilenames = []string{
-	"task-ok.json",
+	"submission-ok.json",
 	"cancel-ok.json",
-	"event-ok.json",
-	"reply-ok.json",
-	"transcript-ok.json",
+	"status-ok.json",
+	"task-ok.json",
+	"artifact_update-ok.json",
 	"capability-ok.json",
 	"enrol_request-ok.json",
 	"enrol_approval-ok.json",
@@ -51,16 +51,18 @@ var vectorFilenames = []string{
 	"cross-type-signature.json",
 	"cancel-altered-payload.json",
 	"float-numeric.json",
-	"transcript-both.json",
+	"artifact-update-two-parts.json",
 	"enrol-request-not-self-signed.json",
 	"unentitled-signer.json",
 	"empty-label-value.json",
 	"attempt-zero.json",
-	"task-parts-ok.json",
+	"submission-parts-ok.json",
 	"part-two-contents.json",
 	"part-no-content.json",
 	"metadata-not-object.json",
 	"raw-invalid-base64.json",
+	"submission-task-id-mismatch.json",
+	"message-extension-missing.json",
 }
 
 type publishedVector struct {
@@ -189,10 +191,10 @@ func writePublishedVectors(t *testing.T) {
 	add("unknown-member.json", "unknown payload member", Sign(TypeCancel, []byte(`{"run_id":"run-1","at_ms":1,"unexpected":true}`), privateKey), SignerUser, "invalid_payload")
 	add("trailing-value.json", "trailing payload value", Sign(TypeCancel, []byte(`{"run_id":"run-1","at_ms":1} {}`), privateKey), SignerUser, "invalid_payload")
 
-	eventPayload := mustPayload(TypeEvent, payloads[TypeEvent])
-	crossType := Sign(TypeEvent, eventPayload, privateKey)
-	crossType.Type = TypeReply
-	add("cross-type-signature.json", "event signature presented as reply", crossType, SignerReceiver, "invalid_signature")
+	statusPayload := mustPayload(TypeStatus, payloads[TypeStatus])
+	crossType := Sign(TypeStatus, statusPayload, privateKey)
+	crossType.Type = TypeTask
+	add("cross-type-signature.json", "status signature presented as task", crossType, SignerReceiver, "invalid_signature")
 
 	cancelPayload := mustPayload(TypeCancel, payloads[TypeCancel])
 	altered := Sign(TypeCancel, cancelPayload, privateKey)
@@ -201,21 +203,26 @@ func writePublishedVectors(t *testing.T) {
 
 	add("float-numeric.json", "float numeric field", Sign(TypeCancel, []byte(`{"run_id":"run-1","at_ms":1.5}`), privateKey), SignerUser, "invalid_payload")
 	hash := strings.Repeat("a", 64)
-	both := `{"run_id":"run-1","attempt":1,"seq":1,"line":"bGluZQ","pointer":{"url":"https://example.test/line","sha256":"` + hash + `","size":4}}`
-	add("transcript-both.json", "transcript line and pointer", Sign(TypeTranscript, []byte(both), privateKey), SignerReceiver, "invalid_payload")
-	zeroAttempt := bytes.Replace(eventPayload, []byte(`"attempt":1`), []byte(`"attempt":0`), 1)
-	add("attempt-zero.json", "zero attempt", Sign(TypeEvent, zeroAttempt, privateKey), SignerReceiver, "invalid_payload")
+	both := replaceOnce(t, mustPayload(TypeArtifactUpdate, payloads[TypeArtifactUpdate]), `"mediaType":"application/x-ndjson"}]`,
+		`"mediaType":"application/x-ndjson"},{"url":"unstored:oversize","metadata":{"sha256":"`+hash+`","size":4}}]`)
+	add("artifact-update-two-parts.json", "transcript chunk with a line and a pointer", Sign(TypeArtifactUpdate, both, privateKey), SignerReceiver, "invalid_payload")
+	zeroAttempt := replaceOnce(t, statusPayload, `"attempt":1`, `"attempt":0`)
+	add("attempt-zero.json", "zero attempt", Sign(TypeStatus, zeroAttempt, privateKey), SignerReceiver, "invalid_payload")
 
 	request := payloads[TypeEnrolRequest].(*EnrolRequest)
 	request.SigningPub = bytes.Repeat([]byte{9}, ed25519.PublicKeySize)
 	add("enrol-request-not-self-signed.json", "enrolment signing key differs", Sign(TypeEnrolRequest, mustPayload(TypeEnrolRequest, request), privateKey), SignerReceiver, "not_self_signed")
 	add("unentitled-signer.json", "receiver verifies cancel", Sign(TypeCancel, cancelPayload, privateKey), SignerReceiver, "unentitled_signer")
 
-	taskPayload := mustPayload(TypeTask, payloads[TypeTask])
-	emptyLabel := strings.Replace(string(taskPayload), `"labels":{"lab/os":"linux"}`, `"labels":{"lab/os":""}`, 1)
-	add("empty-label-value.json", "empty label value", Sign(TypeTask, []byte(emptyLabel), privateKey), SignerUser, "invalid_payload")
+	submissionPayload := mustPayload(TypeSubmission, payloads[TypeSubmission])
+	emptyLabel := replaceOnce(t, submissionPayload, `"labels":{"lab/os":"linux"}`, `"labels":{"lab/os":""}`)
+	add("empty-label-value.json", "empty label value", Sign(TypeSubmission, emptyLabel, privateKey), SignerUser, "invalid_payload")
+	mismatch := replaceOnce(t, submissionPayload, `"taskId":"run-1"`, `"taskId":"run-2"`)
+	add("submission-task-id-mismatch.json", "message taskId differs from run_id", Sign(TypeSubmission, mismatch, privateKey), SignerUser, "invalid_payload")
+	undeclared := replaceOnce(t, submissionPayload, `,"extensions":["`+ExtensionURI+`"]`, ``)
+	add("message-extension-missing.json", "message without the wherry extension", Sign(TypeSubmission, undeclared, privateKey), SignerUser, "invalid_payload")
 
-	parts := payloads[TypeTask].(*Task)
+	parts := payloads[TypeSubmission].(*SubmissionRecord)
 	parts.Message.Metadata = jsontext.Value(`{"origin":"vector","tags":["a","b"]}`)
 	parts.Message.Parts = []Part{
 		{Text: "hello"},
@@ -223,11 +230,11 @@ func writePublishedVectors(t *testing.T) {
 		{URL: "https://example.test/report.pdf", MediaType: "application/pdf"},
 		{Data: jsontext.Value(`{"rows":[1,2.5,null]}`), MediaType: "application/json", Metadata: jsontext.Value(`{"schema":"v1"}`)},
 	}
-	add("task-parts-ok.json", "task with raw, url and data parts and metadata", Sign(TypeTask, mustPayload(TypeTask, parts), privateKey), SignerUser, "ok")
-	add("part-two-contents.json", "part with text and url", Sign(TypeTask, taskJSON(t, `"parts":[{"text":"hello","url":"https://example.test/a"}]`), privateKey), SignerUser, "invalid_payload")
-	add("part-no-content.json", "part with no content", Sign(TypeTask, taskJSON(t, `"parts":[{"mediaType":"text/plain"}]`), privateKey), SignerUser, "invalid_payload")
-	add("metadata-not-object.json", "message metadata array", Sign(TypeTask, taskJSON(t, `"parts":[{"text":"hello"}],"metadata":["a"]`), privateKey), SignerUser, "invalid_payload")
-	add("raw-invalid-base64.json", "raw not base64", Sign(TypeTask, taskJSON(t, `"parts":[{"raw":"aGk*"}]`), privateKey), SignerUser, "invalid_payload")
+	add("submission-parts-ok.json", "submission with raw, url and data parts and metadata", Sign(TypeSubmission, mustPayload(TypeSubmission, parts), privateKey), SignerUser, "ok")
+	add("part-two-contents.json", "part with text and url", Sign(TypeSubmission, submissionJSON(t, `"parts":[{"text":"hello","url":"https://example.test/a"}]`), privateKey), SignerUser, "invalid_payload")
+	add("part-no-content.json", "part with no content", Sign(TypeSubmission, submissionJSON(t, `"parts":[{"mediaType":"text/plain"}]`), privateKey), SignerUser, "invalid_payload")
+	add("metadata-not-object.json", "message metadata array", Sign(TypeSubmission, submissionJSON(t, `"parts":[{"text":"hello"}],"metadata":["a"]`), privateKey), SignerUser, "invalid_payload")
+	add("raw-invalid-base64.json", "raw not base64", Sign(TypeSubmission, submissionJSON(t, `"parts":[{"raw":"aGk*"}]`), privateKey), SignerUser, "invalid_payload")
 
 	if err := os.MkdirAll("testdata/vectors", 0o755); err != nil {
 		t.Fatal(err)
@@ -245,4 +252,12 @@ func writePublishedVectors(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func replaceOnce(t *testing.T, payload []byte, old, replacement string) []byte {
+	t.Helper()
+	if bytes.Count(payload, []byte(old)) != 1 {
+		t.Fatalf("payload does not hold %s once: %s", old, payload)
+	}
+	return bytes.Replace(payload, []byte(old), []byte(replacement), 1)
 }

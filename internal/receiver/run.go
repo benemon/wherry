@@ -3,13 +3,17 @@ package receiver
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
@@ -88,7 +92,7 @@ func (r *Receiver) claimOne(ctx context.Context, enrolled *trust.Enrolled) error
 }
 
 type admission struct {
-	task   *wire.Task
+	task   *wire.SubmissionRecord
 	offer  wire.Offer
 	prompt string
 }
@@ -96,33 +100,33 @@ type admission struct {
 // admit applies ADR-0014 root verification and ADR-0011/0017 matching. A nil
 // admission carries the acknowledgement.
 func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trust.Enrolled) (*admission, kgo.AckStatus) {
-	task, err := trust.VerifyRootTask(record.Value, r.userPub)
+	task, err := trust.VerifyRootSubmission(record.Value, r.userPub)
 	if err != nil {
 		return nil, kgo.AckReject
 	}
-	if task.Pool != enrolled.Pool {
+	if task.Wherry.Pool != enrolled.Pool {
 		return nil, kgo.AckAccept
 	}
 	r.mu.Lock()
 	offers := r.offers
 	r.mu.Unlock()
 	reject := func(reason string) (*admission, kgo.AckStatus) {
-		r.logger.Printf("rejected %s: %s", task.RunID, reason)
+		r.logger.Printf("rejected %s: %s", task.Wherry.RunID, reason)
 		if err := r.publishRejection(ctx, record, task, reason); err != nil {
-			r.logger.Printf("publish rejection for %s: %v", task.RunID, err)
+			r.logger.Printf("publish rejection for %s: %v", task.Wherry.RunID, err)
 			return nil, kgo.AckRelease
 		}
 		return nil, kgo.AckReject
 	}
-	offer, matched := wire.MatchOffer(task.Selector, enrolled.Labels, enrolled.Adapters, offers)
-	if !matched || !wire.Satisfies(enrolled.Selector, task.Labels) {
+	offer, matched := wire.MatchOffer(task.Wherry.Selector, enrolled.Labels, enrolled.Adapters, offers)
+	if !matched || !wire.Satisfies(enrolled.Selector, task.Wherry.Labels) {
 		return nil, kgo.AckAccept
 	}
 	now := time.Now()
-	if now.UnixMilli() > task.QueueDeadlineMS {
+	if now.UnixMilli() > task.Wherry.QueueDeadlineMS {
 		return reject("queue deadline passed")
 	}
-	if now.UnixMilli() > task.DeadlineMS {
+	if now.UnixMilli() > task.Wherry.DeadlineMS {
 		return reject("run deadline passed")
 	}
 	if slices.ContainsFunc(task.Message.Parts, func(part wire.Part) bool { return part.Text == "" }) {
@@ -132,13 +136,13 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 	return &admission{task: task, offer: offer, prompt: text}, 0
 }
 
-func (r *Receiver) publishRejection(ctx context.Context, record *kgo.Record, task *wire.Task, reason string) error {
-	event := r.event(task, trust.EnvelopeHash(record.Value), attemptOf(record), "terminal", wire.TaskStateRejected, nil, &reason)
-	value, err := sign(wire.TypeEvent, event, r.signing)
+func (r *Receiver) publishRejection(ctx context.Context, record *kgo.Record, task *wire.SubmissionRecord, reason string) error {
+	status := r.status(task, trust.EnvelopeHash(record.Value), attemptOf(record), "terminal", taskStatus(wire.TaskStateRejected, reason), nil)
+	value, err := sign(wire.TypeStatus, status, r.signing)
 	if err != nil {
 		return err
 	}
-	return r.base.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.RunID), Value: value}).FirstErr()
+	return r.base.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.Wherry.RunID), Value: value}).FirstErr()
 }
 
 // renewer keeps the share lock alive from claim until the final acknowledgement,
@@ -169,41 +173,42 @@ func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record, logf fu
 // execute runs one task; it returns the final share acknowledgement, or 0 when fenced.
 func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.Record, admitted *admission, attempt int64) kgo.AckStatus {
 	task := admitted.task
+	runID := task.Wherry.RunID
 	stopRenew := renewer(ctx, share, record, func(format string, args ...any) {
-		r.logger.Printf("run %s: "+format, append([]any{task.RunID}, args...)...)
+		r.logger.Printf("run %s: "+format, append([]any{runID}, args...)...)
 	})
 	defer stopRenew()
 
 	// The cap is anchored to the signed queue deadline so redelivery cannot extend it.
-	deadline := time.UnixMilli(task.DeadlineMS)
-	if limit := time.UnixMilli(task.QueueDeadlineMS).Add(maxRunDuration); deadline.After(limit) {
+	deadline := time.UnixMilli(task.Wherry.DeadlineMS)
+	if limit := time.UnixMilli(task.Wherry.QueueDeadlineMS).Add(maxRunDuration); deadline.After(limit) {
 		deadline = limit
 	}
 	runCtx, cancelRun := context.WithDeadline(ctx, deadline)
 	defer cancelRun()
 
 	// One transactional producer per run: an adopter initialising the same ID fences this holder (ADR-0010).
-	producer, err := kgo.NewClient(append(append([]kgo.Opt(nil), r.kafkaOpt...), kgo.TransactionalID(task.RunID))...)
+	producer, err := kgo.NewClient(append(append([]kgo.Opt(nil), r.kafkaOpt...), kgo.TransactionalID(runID))...)
 	if err != nil {
-		r.logger.Printf("run %s: producer: %v", task.RunID, err)
+		r.logger.Printf("run %s: producer: %v", runID, err)
 		return kgo.AckRelease
 	}
 	defer producer.Close()
 	matched, ok := r.named(admitted.offer.Adapter)
 	if !ok {
-		r.logger.Printf("run %s: matched adapter %s is not configured", task.RunID, admitted.offer.Adapter)
+		r.logger.Printf("run %s: matched adapter %s is not configured", runID, admitted.offer.Adapter)
 		return kgo.AckRelease
 	}
 	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: trust.EnvelopeHash(record.Value), attempt: attempt, adapter: matched}
 
-	if err := run.commit(ctx, run.eventRecord("claimed", wire.TaskStateWorking, nil, nil)); err != nil {
+	if err := run.commit(ctx, run.statusRecord("claimed", taskStatus(wire.TaskStateWorking, ""), nil)); err != nil {
 		return run.abandon(err)
 	}
 	offset := int64(0)
 	if attempt > 1 {
-		offset, err = r.lastOffset(runCtx, task.RunID)
+		offset, err = r.lastOffset(runCtx, runID, run.taskHash, task.Wherry.Lineage.RootRunID)
 		if err != nil {
-			r.logger.Printf("run %s: read events: %v", task.RunID, err)
+			r.logger.Printf("run %s: read events: %v", runID, err)
 			return kgo.AckRelease
 		}
 	}
@@ -212,12 +217,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if attempt > 1 {
 		// Offers can change between attempts, so the run may live in an adapter other than the matched one.
 		for _, named := range r.adapters {
-			found, ok, err := named.Adapter.Lookup(runCtx, task.RunID)
+			found, ok, err := named.Adapter.Lookup(runCtx, runID)
 			if err != nil {
 				if runCtx.Err() != nil && ctx.Err() == nil {
-					return run.fail(ctx, "timeout")
+					return run.fail(ctx, wire.TaskStateFailed, "timeout", nil)
 				}
-				r.logger.Printf("run %s: lookup in adapter %s: %v", task.RunID, named.Name, err)
+				r.logger.Printf("run %s: lookup in adapter %s: %v", runID, named.Name, err)
 				return kgo.AckRelease
 			}
 			if ok {
@@ -234,21 +239,21 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			held, ok := r.credentials[named.Name]
 			r.mu.Unlock()
 			if !ok {
-				return run.fail(ctx, "credential unavailable")
+				return run.fail(ctx, wire.TaskStateAuthRequired, "credential unavailable", nil)
 			}
 			credential = held.value
 		}
-		handle, err = named.Adapter.Dispatch(runCtx, Run{ID: task.RunID, Offer: admitted.offer.Labels, Prompt: []byte(admitted.prompt), Credential: credential})
+		handle, err = named.Adapter.Dispatch(runCtx, Run{ID: runID, Offer: admitted.offer.Labels, Prompt: []byte(admitted.prompt), Credential: credential})
 		if err != nil {
 			if runCtx.Err() != nil && ctx.Err() == nil {
-				return run.fail(ctx, "timeout")
+				return run.fail(ctx, wire.TaskStateFailed, "timeout", nil)
 			}
-			r.logger.Printf("run %s: dispatch failed: %T", task.RunID, err)
-			return run.fail(ctx, "dispatch failed")
+			r.logger.Printf("run %s: dispatch failed: %T", runID, err)
+			return run.fail(ctx, wire.TaskStateFailed, "dispatch failed", nil)
 		}
 	}
-	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", task.RunID, attempt, run.adapter.Name, wire.TermsText(admitted.offer.Labels), handle.Job)
-	if err := run.commit(ctx, run.eventRecord("started", wire.TaskStateWorking, &offset, nil)); err != nil {
+	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.offer.Labels), handle.Job)
+	if err := run.commit(ctx, run.statusRecord("started", taskStatus(wire.TaskStateWorking, ""), &offset)); err != nil {
 		return run.abandon(err)
 	}
 
@@ -260,10 +265,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 
 	heartbeat := time.NewTicker(renewInterval)
 	defer heartbeat.Stop()
-	var pending []*kgo.Record
+	var pending []Line
 	position := offset
 	take := func(line Line) (agentResult, bool) {
-		pending = append(pending, run.transcriptRecord(line))
+		pending = append(pending, line)
 		position = line.Next
 		return resultLine(line.Data)
 	}
@@ -285,28 +290,33 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 					drained = true
 				}
 			}
-			if commitErr := run.commit(ctx, pending...); commitErr != nil {
-				return run.abandon(commitErr)
-			}
 			switch {
 			case runCtx.Err() != nil && ctx.Err() == nil:
-				return run.stopAndFail(ctx, handle, "timeout")
+				return run.stopAndFail(ctx, handle, "timeout", pending)
 			case ctx.Err() != nil:
+				if commitErr := run.commit(ctx, run.chunks(pending, false)...); commitErr != nil {
+					return run.abandon(commitErr)
+				}
 				return kgo.AckRelease
 			case err != nil:
 				// A dropped stream does not mean the task ended; stop it rather than leave it running.
-				r.logger.Printf("run %s: follow failed: %T", task.RunID, err)
-				return run.stopAndFail(ctx, handle, "log stream failed")
+				r.logger.Printf("run %s: follow failed: %T", runID, err)
+				return run.stopAndFail(ctx, handle, "log stream failed", pending)
 			default:
-				return run.stopAndFail(ctx, handle, "agent ended without a result")
+				return run.stopAndFail(ctx, handle, "agent ended without a result", pending)
 			}
 		case <-heartbeat.C:
-			at := position
-			pending = append(pending, run.eventRecord("heartbeat", wire.TaskStateWorking, &at, nil))
-			if err := run.commit(ctx, pending...); err != nil {
+			// The newest line stays pending so the terminal transaction always holds the last chunk;
+			// the heartbeat offset is where that line starts, so an adopter reads it again.
+			at, held := position, 0
+			if len(pending) > 0 {
+				at, held = pending[len(pending)-1].Offset, 1
+			}
+			records := append(run.chunks(pending[:len(pending)-held], false), run.statusRecord("heartbeat", taskStatus(wire.TaskStateWorking, ""), &at))
+			if err := run.commit(ctx, records...); err != nil {
 				return run.abandon(err)
 			}
-			pending = nil
+			pending = pending[len(pending)-held:]
 		}
 	}
 }
@@ -314,7 +324,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 type activeRun struct {
 	receiver *Receiver
 	producer *kgo.Client
-	task     *wire.Task
+	task     *wire.SubmissionRecord
 	taskHash string
 	attempt  int64
 	// adapter holds the run's platform material, released at the end.
@@ -338,84 +348,124 @@ func (run *activeRun) commit(ctx context.Context, records ...*kgo.Record) error 
 // abandon stops all activity for a run whose writes failed; a fenced holder leaves the run to its adopter.
 func (run *activeRun) abandon(err error) kgo.AckStatus {
 	if errors.Is(err, kerr.InvalidProducerEpoch) || errors.Is(err, kerr.ProducerFenced) {
-		run.receiver.logger.Printf("run %s: fenced by a newer holder", run.task.RunID)
+		run.receiver.logger.Printf("run %s: fenced by a newer holder", run.task.Wherry.RunID)
 		return 0
 	}
-	run.receiver.logger.Printf("run %s: write failed: %v", run.task.RunID, err)
+	run.receiver.logger.Printf("run %s: write failed: %v", run.task.Wherry.RunID, err)
 	return kgo.AckRelease
 }
 
-func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason string) kgo.AckStatus {
+func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason string, pending []Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
-		run.receiver.logger.Printf("run %s: stop: %v", run.task.RunID, err)
+		run.receiver.logger.Printf("run %s: stop: %v", run.task.Wherry.RunID, err)
 		return kgo.AckRelease
 	}
-	return run.fail(ctx, reason)
+	return run.fail(ctx, wire.TaskStateFailed, reason, pending)
 }
 
-func (run *activeRun) fail(ctx context.Context, reason string) kgo.AckStatus {
-	if err := run.commit(ctx, run.reply(wire.TaskStateFailed, reason), run.eventRecord("terminal", wire.TaskStateFailed, nil, &reason)); err != nil {
-		return run.abandon(err)
-	}
-	run.release(ctx)
-	return kgo.AckReject
+func (run *activeRun) fail(ctx context.Context, state wire.TaskState, reason string, pending []Line) kgo.AckStatus {
+	return run.end(ctx, taskStatus(state, reason), reason, pending, kgo.AckReject)
 }
 
-func (run *activeRun) finish(ctx context.Context, handle Handle, pending []*kgo.Record, result agentResult) kgo.AckStatus {
+func (run *activeRun) finish(ctx context.Context, handle Handle, pending []Line, result agentResult) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
-		run.receiver.logger.Printf("run %s: stop: %v", run.task.RunID, err)
+		run.receiver.logger.Printf("run %s: stop: %v", run.task.Wherry.RunID, err)
 		return kgo.AckRelease
 	}
-	state, status := wire.TaskStateCompleted, kgo.AckAccept
+	state, ack := wire.TaskStateCompleted, kgo.AckAccept
 	if result.IsError {
-		state, status = wire.TaskStateFailed, kgo.AckReject
+		state, ack = wire.TaskStateFailed, kgo.AckReject
 	}
-	pending = append(pending, run.reply(state, result.Result), run.eventRecord("terminal", state, nil, nil))
-	if err := run.commit(ctx, pending...); err != nil {
+	return run.end(ctx, taskStatus(state, ""), result.Result, pending, ack)
+}
+
+// end commits the remaining transcript, the final task and the terminal status in one transaction.
+func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, pending []Line, ack kgo.AckStatus) kgo.AckStatus {
+	records := append(run.chunks(pending, true), run.taskRecord(status, result), run.statusRecord("terminal", status, nil))
+	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
 	}
 	run.release(ctx)
-	return status
+	return ack
 }
 
 func (run *activeRun) release(ctx context.Context) {
-	if err := run.adapter.Adapter.Release(ctx, run.task.RunID); err != nil {
-		run.receiver.logger.Printf("run %s: release: %v", run.task.RunID, err)
+	if err := run.adapter.Adapter.Release(ctx, run.task.Wherry.RunID); err != nil {
+		run.receiver.logger.Printf("run %s: release: %v", run.task.Wherry.RunID, err)
 	}
 }
 
-func (run *activeRun) eventRecord(kind string, state wire.TaskState, offset *int64, reason *string) *kgo.Record {
-	return run.signed(wire.TopicEvent, wire.TypeEvent, run.receiver.event(run.task, run.taskHash, run.attempt, kind, state, offset, reason))
+func (run *activeRun) statusRecord(kind string, status wire.TaskStatus, offset *int64) *kgo.Record {
+	return run.signed(wire.TopicEvent, wire.TypeStatus, run.receiver.status(run.task, run.taskHash, run.attempt, kind, status, offset))
 }
 
-func (r *Receiver) event(task *wire.Task, taskHash string, attempt int64, kind string, state wire.TaskState, offset *int64, reason *string) *wire.Event {
-	return &wire.Event{
-		RunID: task.RunID, Attempt: attempt, TaskHash: taskHash, ReceiverID: r.config.ReceiverID,
-		AtMS: time.Now().UnixMilli(), State: state, Kind: kind, LogOffset: offset, Reason: reason,
+func (r *Receiver) status(task *wire.SubmissionRecord, taskHash string, attempt int64, kind string, status wire.TaskStatus, offset *int64) *wire.StatusRecord {
+	return &wire.StatusRecord{
+		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: task.Wherry.RunID, ContextID: task.Wherry.Lineage.RootRunID, Status: status},
+		Wherry:       wire.StatusExtension{Attempt: attempt, TaskHash: taskHash, ReceiverID: r.config.ReceiverID, Kind: kind, LogOffset: offset},
 	}
 }
 
-func (run *activeRun) transcriptRecord(line Line) *kgo.Record {
-	transcript := &wire.Transcript{RunID: run.task.RunID, Attempt: run.attempt, Seq: line.Offset}
-	if len(line.Data) > maxLine {
-		transcript.Pointer = &wire.TranscriptPointer{URL: "unstored:oversize", SHA256: trust.EnvelopeHash(line.Data), Size: int64(len(line.Data))}
-	} else {
-		data := wire.Bytes(line.Data)
-		transcript.Line = &data
+// taskStatus stamps state with the current time; a reason becomes the status message.
+func taskStatus(state wire.TaskState, reason string) wire.TaskStatus {
+	status := wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
+	if reason != "" {
+		id := make([]byte, 16)
+		rand.Read(id)
+		status.Message = &wire.Message{
+			MessageID: "msg-" + hex.EncodeToString(id), Role: wire.RoleAgent,
+			Parts: []wire.Part{{Text: reason}}, Extensions: []string{wire.ExtensionURI},
+		}
 	}
-	return run.signed(wire.TopicTranscript, wire.TypeTranscript, transcript)
+	return status
 }
 
-func (run *activeRun) reply(state wire.TaskState, text string) *kgo.Record {
-	if text == "" {
-		text = string(state)
+// chunks builds the transcript artifact_update records for lines; last marks the final one as the last chunk.
+func (run *activeRun) chunks(lines []Line, last bool) []*kgo.Record {
+	records := make([]*kgo.Record, 0, len(lines))
+	for i, line := range lines {
+		part := wire.Part{Text: string(line.Data), MediaType: "application/x-ndjson"}
+		switch {
+		case len(line.Data) > maxLine:
+			metadata, _ := json.Marshal(wire.PointerMetadata{SHA256: trust.EnvelopeHash(line.Data), Size: int64(len(line.Data))}) // a string and an integer always encode
+			part = wire.Part{URL: "unstored:oversize", MediaType: part.MediaType, Metadata: metadata}
+		case len(line.Data) == 0 || !utf8.Valid(line.Data):
+			// A text part holds only non-empty UTF-8; other lines travel as exact bytes.
+			part = wire.Part{Raw: append(wire.StdBytes{}, line.Data...), MediaType: part.MediaType}
+		}
+		update := &wire.ArtifactUpdateRecord{
+			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
+				TaskID: run.task.Wherry.RunID, ContextID: run.task.Wherry.Lineage.RootRunID,
+				Artifact: wire.Artifact{ArtifactID: "transcript", Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI}},
+				// The stream's first chunk is the line at log offset zero; an adopter resumes past it.
+				Append:    line.Offset > 0,
+				LastChunk: last && i == len(lines)-1,
+			},
+			Wherry: wire.ArtifactUpdateExtension{Attempt: run.attempt, Seq: line.Offset},
+		}
+		records = append(records, run.signed(wire.TopicTranscript, wire.TypeArtifactUpdate, update))
 	}
-	reply := &wire.Reply{
-		RunID: run.task.RunID, Attempt: run.attempt, TaskHash: run.taskHash, CorrelationID: run.task.CorrelationID,
-		State: state, AtMS: time.Now().UnixMilli(),
-		Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{{Text: text}}}},
+	return records
+}
+
+// taskRecord builds the final task; a result that is JSON travels as a data part.
+func (run *activeRun) taskRecord(status wire.TaskStatus, result string) *kgo.Record {
+	part := wire.Part{Text: result}
+	switch {
+	case result == "":
+		part.Text = string(status.State)
+	case jsontext.Value(result).IsValid():
+		part = wire.Part{Data: jsontext.Value(result), MediaType: "application/json"}
 	}
-	return run.signed(run.task.ReplyTopic, wire.TypeReply, reply)
+	task := &wire.TaskRecord{
+		Task: wire.Task{
+			ID: run.task.Wherry.RunID, ContextID: run.task.Wherry.Lineage.RootRunID, Status: status,
+			History:   []wire.Message{run.task.Message},
+			Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI}}},
+		},
+		Wherry: wire.TaskExtension{Attempt: run.attempt, TaskHash: run.taskHash},
+	}
+	return run.signed(run.task.Wherry.ReplyTopic, wire.TypeTask, task)
 }
 
 func (run *activeRun) signed(topic string, recordType wire.RecordType, payload any) *kgo.Record {
@@ -423,11 +473,11 @@ func (run *activeRun) signed(topic string, recordType wire.RecordType, payload a
 	if err != nil {
 		panic(fmt.Sprintf("sign %s: %v", recordType, err)) // payloads are built here; invalid ones are programming errors
 	}
-	return &kgo.Record{Topic: topic, Key: []byte(run.task.RunID), Value: value}
+	return &kgo.Record{Topic: topic, Key: []byte(run.task.Wherry.RunID), Value: value}
 }
 
 // lastOffset returns the highest heartbeat log offset this run reached under an earlier attempt.
-func (r *Receiver) lastOffset(ctx context.Context, runID string) (int64, error) {
+func (r *Receiver) lastOffset(ctx context.Context, runID, taskHash, rootRunID string) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	records, err := readBounded(ctx, r.kafkaOpt, wire.TopicEvent)
@@ -456,8 +506,14 @@ func (r *Receiver) lastOffset(ctx context.Context, runID string) (int64, error) 
 				break
 			}
 		}
-		if event, ok := verified.(*wire.Event); err == nil && ok && event.LogOffset != nil && *event.LogOffset > highest {
-			highest = *event.LogOffset
+		status, ok := verified.(*wire.StatusRecord)
+		if err != nil || !ok || status.StatusUpdate.TaskID != runID || status.StatusUpdate.ContextID != rootRunID ||
+			status.Wherry.TaskHash != taskHash || (status.Wherry.Kind != "started" && status.Wherry.Kind != "heartbeat") ||
+			status.Wherry.LogOffset == nil {
+			continue
+		}
+		if *status.Wherry.LogOffset > highest {
+			highest = *status.Wherry.LogOffset
 		}
 	}
 	return highest, nil
@@ -484,7 +540,7 @@ func resultLine(data []byte) (agentResult, bool) {
 	return result, true
 }
 
-func prompt(task *wire.Task) string {
+func prompt(task *wire.SubmissionRecord) string {
 	var parts []string
 	for _, part := range task.Message.Parts {
 		parts = append(parts, part.Text)

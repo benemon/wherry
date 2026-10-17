@@ -15,21 +15,21 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 )
 
-// Enrolled is the current accepted enrolment for a receiver.
+// Enrolled is the current accepted enrolment for a receiver; ApprovalHash is the approval's envelope hash.
 type Enrolled struct {
-	SigningPub ed25519.PublicKey
-	SealingPub *ecdh.PublicKey
-	Labels     map[string]string
-	Pool       string
-	Adapters   []wire.AdapterGrant
-	Selector   []wire.Requirement
-	Generation int64
+	SigningPub   ed25519.PublicKey
+	SealingPub   *ecdh.PublicKey
+	Labels       map[string]string
+	Pool         string
+	Adapters     []wire.AdapterGrant
+	Selector     []wire.Requirement
+	Generation   int64
+	ApprovalHash string
 }
 
 type acceptedApproval struct {
-	enrolled     Enrolled
-	expMS        int64
-	envelopeHash string
+	enrolled Enrolled
+	expMS    int64
 }
 
 type secretID struct {
@@ -178,16 +178,16 @@ func CapabilityWithin(capEnvelopeBytes []byte, enrolled Enrolled) (*wire.Capabil
 	return capability, nil
 }
 
-// SignRootTask signs a root task with the user key.
-func SignRootTask(task wire.Task, userKey ed25519.PrivateKey) ([]byte, error) {
-	if task.Depth != 0 {
-		return nil, errors.New("root task depth must be zero")
+// SignRootSubmission signs a root submission with the user key.
+func SignRootSubmission(submission wire.SubmissionRecord, userKey ed25519.PrivateKey) ([]byte, error) {
+	if submission.Wherry.Lineage.Depth != 0 {
+		return nil, errors.New("root submission depth must be zero")
 	}
-	return marshalSigned(wire.TypeTask, &task, userKey)
+	return marshalSigned(wire.TypeSubmission, &submission, userKey)
 }
 
-// VerifyRootTask verifies a user-signed root task and its root lineage fields.
-func VerifyRootTask(envelopeBytes []byte, userPublicKey ed25519.PublicKey) (*wire.Task, error) {
+// VerifyRootSubmission verifies a user-signed root submission and its root lineage fields.
+func VerifyRootSubmission(envelopeBytes []byte, userPublicKey ed25519.PublicKey) (*wire.SubmissionRecord, error) {
 	envelope, err := wire.DecodeEnvelope(envelopeBytes)
 	if err != nil {
 		return nil, err
@@ -196,14 +196,14 @@ func VerifyRootTask(envelopeBytes []byte, userPublicKey ed25519.PublicKey) (*wir
 	if err != nil {
 		return nil, err
 	}
-	task, ok := verified.(*wire.Task)
+	submission, ok := verified.(*wire.SubmissionRecord)
 	if !ok {
-		return nil, errors.New("not a task")
+		return nil, errors.New("not a submission")
 	}
-	if task.Depth != 0 || task.ParentHash != "" || len(task.Chain) != 0 || task.RunID != task.RootRunID {
-		return nil, errors.New("task is not a root task")
+	if lineage := submission.Wherry.Lineage; lineage.Depth != 0 || lineage.ParentHash != "" || len(lineage.Chain) != 0 || submission.Wherry.RunID != lineage.RootRunID {
+		return nil, errors.New("submission is not a root submission")
 	}
-	return task, nil
+	return submission, nil
 }
 
 func (state *State) applyRequest(envelope wire.Envelope, envelopeBytes []byte) (any, error) {
@@ -236,7 +236,7 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 	}
 	wantPreviousHash := ""
 	if enrolled {
-		wantPreviousHash = current.envelopeHash
+		wantPreviousHash = current.enrolled.ApprovalHash
 	}
 	if approval.PrevStateHash != wantPreviousHash {
 		return nil, errors.New("approval has wrong previous state hash")
@@ -247,16 +247,16 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 	}
 	state.approvals[approval.ReceiverID] = acceptedApproval{
 		enrolled: Enrolled{
-			SigningPub: append(ed25519.PublicKey(nil), request.SigningPub...),
-			SealingPub: sealingPublicKey,
-			Labels:     maps.Clone(approval.Labels),
-			Pool:       approval.Pool,
-			Adapters:   cloneGrants(approval.Adapters),
-			Selector:   slices.Clone(approval.Selector),
-			Generation: approval.Generation,
+			SigningPub:   append(ed25519.PublicKey(nil), request.SigningPub...),
+			SealingPub:   sealingPublicKey,
+			Labels:       maps.Clone(approval.Labels),
+			Pool:         approval.Pool,
+			Adapters:     cloneGrants(approval.Adapters),
+			Selector:     slices.Clone(approval.Selector),
+			Generation:   approval.Generation,
+			ApprovalHash: EnvelopeHash(envelopeBytes),
 		},
-		expMS:        approval.ExpMS,
-		envelopeHash: EnvelopeHash(envelopeBytes),
+		expMS: approval.ExpMS,
 	}
 	return approval, nil
 }
@@ -289,13 +289,14 @@ func marshalSigned(recordType wire.RecordType, value any, key ed25519.PrivateKey
 
 func cloneEnrolled(enrolled Enrolled) Enrolled {
 	return Enrolled{
-		SigningPub: append(ed25519.PublicKey(nil), enrolled.SigningPub...),
-		SealingPub: enrolled.SealingPub,
-		Labels:     maps.Clone(enrolled.Labels),
-		Pool:       enrolled.Pool,
-		Adapters:   cloneGrants(enrolled.Adapters),
-		Selector:   slices.Clone(enrolled.Selector),
-		Generation: enrolled.Generation,
+		SigningPub:   append(ed25519.PublicKey(nil), enrolled.SigningPub...),
+		SealingPub:   enrolled.SealingPub,
+		Labels:       maps.Clone(enrolled.Labels),
+		Pool:         enrolled.Pool,
+		Adapters:     cloneGrants(enrolled.Adapters),
+		Selector:     slices.Clone(enrolled.Selector),
+		Generation:   enrolled.Generation,
+		ApprovalHash: enrolled.ApprovalHash,
 	}
 }
 

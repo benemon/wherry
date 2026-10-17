@@ -202,16 +202,16 @@ func verifySignature(publicKey ed25519.PublicKey, message, signature []byte) boo
 
 func newPayload(recordType RecordType) (any, error) {
 	switch recordType {
-	case TypeTask:
-		return &Task{Depth: -1, ParentHash: "\x00missing", DeadlineMS: -1, QueueDeadlineMS: -1}, nil
+	case TypeSubmission:
+		return &SubmissionRecord{Wherry: SubmissionExtension{DeadlineMS: -1, QueueDeadlineMS: -1, Lineage: Lineage{Depth: -1, ParentHash: "\x00missing"}}}, nil
 	case TypeCancel:
 		return &Cancel{AtMS: -1}, nil
-	case TypeEvent:
-		return &Event{AtMS: -1}, nil
-	case TypeReply:
-		return &Reply{AtMS: -1}, nil
-	case TypeTranscript:
-		return &Transcript{Seq: -1}, nil
+	case TypeStatus:
+		return &StatusRecord{}, nil
+	case TypeTask:
+		return &TaskRecord{}, nil
+	case TypeArtifactUpdate:
+		return &ArtifactUpdateRecord{Wherry: ArtifactUpdateExtension{Seq: -1}}, nil
 	case TypeCapability:
 		return &Capability{Capacity: -1, InFlight: -1, Generation: -1, AtMS: -1}, nil
 	case TypeEnrolRequest:

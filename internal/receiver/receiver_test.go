@@ -6,12 +6,14 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +57,8 @@ type fakeAdapter struct {
 	existing    bool
 	releases    int
 	releaseIDs  []string
+	// endDelay holds a stream without a result line open before it ends.
+	endDelay time.Duration
 }
 
 func (f *fakeAdapter) Platform() string {
@@ -95,7 +99,7 @@ func (f *fakeAdapter) Lookup(_ context.Context, runID string) (Handle, bool, err
 func (f *fakeAdapter) Follow(ctx context.Context, _ Handle, _ int64, lines chan<- Line) error {
 	f.mu.Lock()
 	f.follows++
-	stream, followErr := append([]string(nil), f.stream...), f.followErr
+	stream, followErr, endDelay := append([]string(nil), f.stream...), f.followErr, f.endDelay
 	f.mu.Unlock()
 	var offset int64
 	for _, data := range stream {
@@ -109,7 +113,8 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ Handle, _ int64, lines chan<
 	if followErr != nil {
 		return followErr
 	}
-	if len(stream) == len(noResultStream) {
+	if !slices.ContainsFunc(stream, func(data string) bool { _, ok := resultLine([]byte(data)); return ok }) {
+		time.Sleep(endDelay)
 		return nil
 	}
 	<-ctx.Done()
@@ -220,8 +225,8 @@ func newFixture(t *testing.T, stream []string) fixture {
 	return fixture{ctx: ctx, kafka: kafka, userKey: userKey, receiver: r, adapter: adapter, logs: logs, cluster: cluster}
 }
 
-// runToReply enrols the receiver, delivers a credential, submits one task and returns its reply.
-func runToReply(t *testing.T, f fixture) *wire.Reply {
+// runToTask enrols the receiver, delivers a credential, submits one task and returns its final task.
+func runToTask(t *testing.T, f fixture) *wire.Task {
 	t.Helper()
 	runCtx, stop := context.WithCancel(f.ctx)
 	done := make(chan error, 1)
@@ -283,22 +288,22 @@ func runToReply(t *testing.T, f fixture) *wire.Reply {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return result.Reply
+	return result.Task
 }
 
 func TestEndToEndWithFakeAdapter(t *testing.T) {
 	f := newFixture(t, resultStream)
-	reply := runToReply(t, f)
-	if reply.State != wire.TaskStateCompleted || reply.Artifacts[0].Parts[0].Text != "done" {
-		t.Fatalf("unexpected reply: %#v", reply)
+	task := runToTask(t, f)
+	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
+		t.Fatalf("unexpected task: %#v", task)
 	}
 }
 
 func TestRunEndingWithoutResultFails(t *testing.T) {
 	f := newFixture(t, noResultStream)
-	reply := runToReply(t, f)
-	if reply.State != wire.TaskStateFailed || reply.Artifacts[0].Parts[0].Text != "agent ended without a result" {
-		t.Fatalf("unexpected reply: %#v", reply)
+	task := runToTask(t, f)
+	if task.Status.State != wire.TaskStateFailed || task.Artifacts[0].Parts[0].Text != "agent ended without a result" {
+		t.Fatalf("unexpected task: %#v", task)
 	}
 	f.adapter.mu.Lock()
 	defer f.adapter.mu.Unlock()
@@ -309,7 +314,7 @@ func TestRunEndingWithoutResultFails(t *testing.T) {
 
 func TestSecretNeverLogged(t *testing.T) {
 	f := newFixture(t, resultStream)
-	runToReply(t, f)
+	runToTask(t, f)
 	// A forged, unsigned record as the latest sealed secret must be refused without echoing anything.
 	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicSecret, Key: []byte("receiver-nomad/" + credentialName), Value: []byte(testToken)}).FirstErr(); err != nil {
 		t.Fatal(err)
@@ -380,24 +385,34 @@ func TestReceiverGrantPlatformMismatchNotEnrolled(t *testing.T) {
 	}
 }
 
-func signedRoot(t *testing.T, key ed25519.PrivateKey, mutate func(*wire.Task)) *kgo.Record {
+// testSubmission is a root submission for runID as client.Submit builds it.
+func testSubmission(runID string) *wire.SubmissionRecord {
+	return &wire.SubmissionRecord{
+		Message: wire.Message{
+			MessageID: "msg-a", ContextID: runID, TaskID: runID, Role: wire.RoleUser,
+			Parts: []wire.Part{{Text: "hi"}}, Extensions: []string{wire.ExtensionURI},
+		},
+		Wherry: wire.SubmissionExtension{
+			RunID: runID, Attempt: 1, Pool: "nomad", Labels: map[string]string{"lab/trust": "lab"},
+			Selector:   []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
+			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
+			ReplyTopic: "replies.test",
+			Lineage:    wire.Lineage{RootRunID: runID, Ancestors: []string{}, Chain: []wire.Bytes{}},
+		},
+	}
+}
+
+func signedRoot(t *testing.T, key ed25519.PrivateKey, mutate func(*wire.SubmissionRecord)) *kgo.Record {
 	t.Helper()
-	task := wire.Task{
-		RunID: "run-a", RootRunID: "run-a", Attempt: 1, Ancestors: []string{}, Chain: []wire.Bytes{},
-		Pool: "nomad", Labels: map[string]string{"lab/trust": "lab"},
-		Selector:   []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
-		DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
-		ReplyTopic: "replies.test", CorrelationID: "corr",
-		Message: wire.Message{MessageID: "msg-a", Role: wire.RoleUser, Parts: []wire.Part{{Text: "hi"}}},
-	}
+	submission := testSubmission("run-a")
 	if mutate != nil {
-		mutate(&task)
+		mutate(submission)
 	}
-	value, err := trust.SignRootTask(task, key)
+	value, err := trust.SignRootSubmission(*submission, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &kgo.Record{Key: []byte(task.RunID), Value: value}
+	return &kgo.Record{Key: []byte(submission.Wherry.RunID), Value: value}
 }
 
 func admitFixture(t *testing.T) (fixture, *trust.Enrolled) {
@@ -432,7 +447,7 @@ func testActiveRun(t *testing.T, f fixture, runID string, attempt int64) *active
 	return &activeRun{
 		receiver: f.receiver,
 		producer: producer,
-		task:     &wire.Task{RunID: runID, ReplyTopic: "replies.test", CorrelationID: "corr"},
+		task:     testSubmission(runID),
 		taskHash: strings.Repeat("a", 64),
 		attempt:  attempt,
 		adapter:  f.receiver.adapters[0],
@@ -473,12 +488,12 @@ func TestReceiverDropsOffersOutsideAllowed(t *testing.T) {
 	}
 }
 
-func TestReceiverNoCredentialFailsRun(t *testing.T) {
+func TestStatusAuthRequiredWhenNoCredential(t *testing.T) {
 	f, enrolled := admitFixture(t)
 	record := signedRoot(t, f.userKey, nil)
 	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
-	status := f.receiver.execute(f.ctx, f.kafka, record, admitted, 1)
-	if status != kgo.AckReject {
+	before := time.Now().Add(-time.Second)
+	if status := f.receiver.execute(f.ctx, f.kafka, record, admitted, 1); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject", status)
 	}
 	f.adapter.mu.Lock()
@@ -487,11 +502,132 @@ func TestReceiverNoCredentialFailsRun(t *testing.T) {
 	if dispatches != 0 || releases != 1 {
 		t.Fatalf("dispatches=%d releases=%d, want 0 and 1", dispatches, releases)
 	}
-	if n := topicCount(t, f, "replies.test"); n != 1 {
-		t.Fatalf("reply records=%d, want 1", n)
+	statuses := published(t, f, wire.TopicEvent)
+	if len(statuses) != 2 {
+		t.Fatalf("status records=%d, want claimed and terminal", len(statuses))
 	}
-	if got := lastReplyText(t, f); got != "credential unavailable" {
-		t.Fatalf("reason %q", got)
+	terminal := statuses[1].(*wire.StatusRecord)
+	got := terminal.StatusUpdate.Status
+	if terminal.Wherry.Kind != "terminal" || got.State != wire.TaskStateAuthRequired {
+		t.Fatalf("terminal status %#v, want AUTH_REQUIRED", terminal)
+	}
+	if got.Message == nil || got.Message.Role != wire.RoleAgent || len(got.Message.Parts) != 1 || got.Message.Parts[0].Text != "credential unavailable" {
+		t.Fatalf("status message %#v, want one agent text part with the reason", got.Message)
+	}
+	if at, err := time.Parse(time.RFC3339, got.Timestamp); err != nil || at.Before(before) || at.After(time.Now()) {
+		t.Fatalf("status timestamp %q is not the time of the status: %v", got.Timestamp, err)
+	}
+	if task := lastTask(t, f); task.Status.State != wire.TaskStateAuthRequired || task.Artifacts[0].Parts[0].Text != "credential unavailable" {
+		t.Fatalf("final task %#v, want AUTH_REQUIRED with the reason", task)
+	}
+}
+
+func TestTranscriptArtifactChunks(t *testing.T) {
+	oversized := `{"type":"assistant","message":"` + strings.Repeat("x", maxLine) + `"}`
+	for name, test := range map[string]struct {
+		stream    []string
+		heartbeat bool
+		pointer   int
+		raw       []int
+	}{
+		"result after an oversized line": {[]string{`{"type":"system"}`, oversized, `{"type":"assistant"}`, resultStream[1]}, false, 1, nil},
+		// The stream outlives a heartbeat, which commits all but the newest line.
+		"no result after a heartbeat": {[]string{`{"type":"system"}`, `{"type":"assistant"}`}, true, -1, nil},
+		"empty and non-UTF-8 lines":   {[]string{`{"type":"system"}`, "", "\xff\xfe", resultStream[1]}, false, -1, []int{1, 2}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, enrolled := admitFixture(t)
+			f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+			f.adapter.stream = test.stream
+			if test.heartbeat {
+				f.adapter.endDelay = 3 * renewInterval
+			}
+			record := signedRoot(t, f.userKey, nil)
+			admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
+			f.receiver.execute(f.ctx, f.kafka, record, admitted, 1)
+
+			chunks := published(t, f, wire.TopicTranscript)
+			if len(chunks) != len(test.stream) {
+				t.Fatalf("chunks=%d, want one per line (%d)", len(chunks), len(test.stream))
+			}
+			var offset int64
+			for i, payload := range chunks {
+				chunk := payload.(*wire.ArtifactUpdateRecord)
+				update, part := chunk.ArtifactUpdate, chunk.ArtifactUpdate.Artifact.Parts[0]
+				if update.TaskID != "run-a" || update.ContextID != "run-a" || update.Artifact.ArtifactID != "transcript" || chunk.Wherry.Seq != offset || part.MediaType != "application/x-ndjson" {
+					t.Fatalf("chunk %d: %#v", i, chunk)
+				}
+				if update.Append != (i > 0) || update.LastChunk != (i == len(chunks)-1) {
+					t.Fatalf("chunk %d: append=%t lastChunk=%t", i, update.Append, update.LastChunk)
+				}
+				line := test.stream[i]
+				if i == test.pointer {
+					var pointer wire.PointerMetadata
+					if err := json.Unmarshal(part.Metadata, &pointer); err != nil {
+						t.Fatal(err)
+					}
+					if part.URL != "unstored:oversize" || part.Text != "" || pointer.SHA256 != trust.EnvelopeHash([]byte(line)) || pointer.Size != int64(len(line)) {
+						t.Fatalf("oversized line became %#v with %#v", part, pointer)
+					}
+				} else if slices.Contains(test.raw, i) {
+					if part.Raw == nil || string(part.Raw) != line || part.Text != "" {
+						t.Fatalf("chunk %d became %#v, want raw %q", i, part, line)
+					}
+				} else if part.Text != line {
+					t.Fatalf("chunk %d text %q, want %q", i, part.Text, line)
+				}
+				offset += int64(len(line) + 1)
+			}
+			if !test.heartbeat {
+				return
+			}
+			var offsets []int64
+			for _, payload := range published(t, f, wire.TopicEvent) {
+				if status := payload.(*wire.StatusRecord); status.Wherry.Kind == "heartbeat" {
+					offsets = append(offsets, *status.Wherry.LogOffset)
+				}
+			}
+			// Once both lines have arrived, a heartbeat commits the first and records where the held second starts.
+			if want := int64(len(test.stream[0]) + 1); len(offsets) == 0 || offsets[len(offsets)-1] != want {
+				t.Fatalf("heartbeat offsets %v, want the last at %d", offsets, want)
+			}
+		})
+	}
+}
+
+func TestTaskResultDataPartWhenJSON(t *testing.T) {
+	for _, result := range []string{`{"answer":42,"items":[1,2]}`, `[true,null]`, `42`} {
+		t.Run(result, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			run := testActiveRun(t, f, "run-json", 1)
+			if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: result}); status != kgo.AckAccept {
+				t.Fatalf("status %v", status)
+			}
+			part := lastTask(t, f).Artifacts[0].Parts[0]
+			if part.Text != "" || part.MediaType != "application/json" || string(part.Data) != result {
+				t.Fatalf("result part %#v, want data %s", part, result)
+			}
+		})
+	}
+}
+
+func TestTaskResultTextPartOtherwise(t *testing.T) {
+	for _, result := range []string{"done", `{"answer":`, `{"k":1,"k":2}`, "42 is the answer"} {
+		t.Run(result, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			run := testActiveRun(t, f, "run-text", 1)
+			if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: result}); status != kgo.AckAccept {
+				t.Fatalf("status %v", status)
+			}
+			task := lastTask(t, f)
+			part := task.Artifacts[0].Parts[0]
+			if part.Text != result || part.Data != nil || part.MediaType != "" {
+				t.Fatalf("result part %#v, want text %q", part, result)
+			}
+			if task.ID != "run-text" || task.ContextID != "run-text" || len(task.History) != 1 || task.History[0].MessageID != "msg-a" {
+				t.Fatalf("task ids or history %#v", task)
+			}
+		})
 	}
 }
 
@@ -547,7 +683,7 @@ func TestForeignSignedTaskRejectedSilently(t *testing.T) {
 
 func TestTaskForOtherPoolSkippedSilently(t *testing.T) {
 	f, enrolled := admitFixture(t)
-	record := signedRoot(t, f.userKey, func(task *wire.Task) { task.Pool = "other" })
+	record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) { task.Wherry.Pool = "other" })
 	admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
 	if admitted != nil || ack != kgo.AckAccept || topicCount(t, f, wire.TopicEvent) != 0 {
 		t.Fatalf("admitted=%v ack=%v events=%d", admitted != nil, ack, topicCount(t, f, wire.TopicEvent))
@@ -558,13 +694,13 @@ func TestAdmitRejections(t *testing.T) {
 	cases := []struct {
 		name   string
 		reason string
-		mutate func(*wire.Task)
+		mutate func(*wire.SubmissionRecord)
 	}{
-		{"ExpiredQueueDeadlineRejected", "queue deadline passed", func(task *wire.Task) {
-			task.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli()
+		{"ExpiredQueueDeadlineRejected", "queue deadline passed", func(task *wire.SubmissionRecord) {
+			task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli()
 		}},
-		{"ExpiredRunDeadlineRejected", "run deadline passed", func(task *wire.Task) {
-			task.DeadlineMS = time.Now().Add(-time.Second).UnixMilli()
+		{"ExpiredRunDeadlineRejected", "run deadline passed", func(task *wire.SubmissionRecord) {
+			task.Wherry.DeadlineMS = time.Now().Add(-time.Second).UnixMilli()
 		}},
 	}
 	for _, c := range cases {
@@ -594,7 +730,7 @@ func TestReceiverRejectsNonTextParts(t *testing.T) {
 			f, enrolled := admitFixture(t)
 			f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
 			f.cluster.SetGroupConfigs("p-"+enrolled.Pool, map[string]string{"share.auto.offset.reset": "earliest"})
-			record := signedRoot(t, f.userKey, func(task *wire.Task) {
+			record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
 				task.Message.Parts = append(task.Message.Parts, part)
 			})
 			record.Topic = wire.TopicTask
@@ -619,9 +755,10 @@ func TestReceiverRejectsNonTextParts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			event := verified.(*wire.Event)
-			if event.State != wire.TaskStateRejected || event.Kind != "terminal" || event.Reason == nil || *event.Reason != "unsupported message part" {
-				t.Fatalf("event %#v", event)
+			status := verified.(*wire.StatusRecord)
+			got := status.StatusUpdate.Status
+			if got.State != wire.TaskStateRejected || status.Wherry.Kind != "terminal" || got.Message == nil || got.Message.Parts[0].Text != "unsupported message part" {
+				t.Fatalf("status %#v", status)
 			}
 		})
 	}
@@ -629,8 +766,8 @@ func TestReceiverRejectsNonTextParts(t *testing.T) {
 
 func TestAdmissionMismatchSkippedSilently(t *testing.T) {
 	f, enrolled := admitFixture(t)
-	record := signedRoot(t, f.userKey, func(task *wire.Task) {
-		task.Selector[0].Values = []string{"docker"}
+	record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
+		task.Wherry.Selector[0].Values = []string{"docker"}
 	})
 	admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
 	if admitted != nil || ack != kgo.AckAccept || topicCount(t, f, wire.TopicEvent) != 0 {
@@ -641,8 +778,8 @@ func TestAdmissionMismatchSkippedSilently(t *testing.T) {
 func TestRejectionPublishFailureReleases(t *testing.T) {
 	f, enrolled := admitFixture(t)
 	f.receiver.base.Close()
-	record := signedRoot(t, f.userKey, func(task *wire.Task) {
-		task.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli()
+	record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
+		task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli()
 	})
 	admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
 	if admitted != nil || ack != kgo.AckRelease {
@@ -686,7 +823,7 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 			return run.finish(ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"})
 		}},
 		{"failure", func(run *activeRun, ctx context.Context) kgo.AckStatus {
-			return run.stopAndFail(ctx, Handle{Alloc: "alloc"}, "timeout")
+			return run.stopAndFail(ctx, Handle{Alloc: "alloc"}, "timeout", nil)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -705,16 +842,17 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 
 func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	f, _ := admitFixture(t)
-	task := &wire.Task{RunID: "run-adopt", ReplyTopic: "replies.test", CorrelationID: "c"}
+	task := testSubmission("run-adopt")
+	taskHash := strings.Repeat("a", 64)
 	heartbeat := func(offset int64) []byte {
-		value, err := sign(wire.TypeEvent, f.receiver.event(task, strings.Repeat("a", 64), 1, "heartbeat", wire.TaskStateWorking, &offset, nil), f.receiver.signing)
+		value, err := sign(wire.TypeStatus, f.receiver.status(task, taskHash, 1, "heartbeat", taskStatus(wire.TaskStateWorking, ""), &offset), f.receiver.signing)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return value
 	}
 	for _, offset := range []int64{10, 42} {
-		if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.RunID), Value: heartbeat(offset)}).FirstErr(); err != nil {
+		if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.Wherry.RunID), Value: heartbeat(offset)}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -727,13 +865,39 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	if err := aborted.BeginTransaction(); err != nil {
 		t.Fatal(err)
 	}
-	if err := aborted.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.RunID), Value: heartbeat(99)}).FirstErr(); err != nil {
+	if err := aborted.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.Wherry.RunID), Value: heartbeat(99)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	if err := aborted.EndTransaction(f.ctx, kgo.TryAbort); err != nil {
 		t.Fatal(err)
 	}
-	got, err := f.receiver.lastOffset(f.ctx, task.RunID)
+	got, err := f.receiver.lastOffset(f.ctx, task.Wherry.RunID, taskHash, task.Wherry.Lineage.RootRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 42 {
+		t.Fatalf("resume offset %d, want 42", got)
+	}
+}
+
+func TestLastOffsetIgnoresMismatchedStatus(t *testing.T) {
+	f, _ := admitFixture(t)
+	task := testSubmission("run-offset-binding")
+	taskHash := strings.Repeat("b", 64)
+	validOffset, mismatchedOffset := int64(42), int64(99)
+	for _, status := range []*wire.StatusRecord{
+		f.receiver.status(task, taskHash, 1, "heartbeat", taskStatus(wire.TaskStateWorking, ""), &validOffset),
+		f.receiver.status(task, strings.Repeat("c", 64), 1, "heartbeat", taskStatus(wire.TaskStateWorking, ""), &mismatchedOffset),
+	} {
+		value, err := sign(wire.TypeStatus, status, f.receiver.signing)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.Wherry.RunID), Value: value}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := f.receiver.lastOffset(f.ctx, task.Wherry.RunID, taskHash, task.Wherry.Lineage.RootRunID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -761,7 +925,7 @@ func TestAdoptionReadFailureReleases(t *testing.T) {
 		return response, nil, true
 	})
 	record := signedRoot(t, f.userKey, nil)
-	task, err := trust.VerifyRootTask(record.Value, f.receiver.userPub)
+	task, err := trust.VerifyRootSubmission(record.Value, f.receiver.userPub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -779,7 +943,7 @@ func TestAdoptionReadFailureReleases(t *testing.T) {
 
 func TestAdoptionTrustsPeerHeartbeat(t *testing.T) {
 	f, _ := admitFixture(t)
-	enrol := func(id string, signing ed25519.PrivateKey, sealing *ecdh.PrivateKey) {
+	enrol := func(id, pool string, signing ed25519.PrivateKey, sealing *ecdh.PrivateKey) {
 		t.Helper()
 		request, err := trust.NewEnrolRequest(id, signing, sealing, map[string]string{}, []wire.DetectedAdapter{{Name: "nomad", Platform: "nomad", Offers: []wire.Offer{}}}, time.Now())
 		if err != nil {
@@ -789,7 +953,7 @@ func TestAdoptionTrustsPeerHeartbeat(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		approval, err := trust.Approve(request, enrolRequest.(*wire.EnrolRequest), f.userKey, map[string]string{}, "nomad", nomadGrants(), []wire.Requirement{}, "auto", 1, "", time.Now().Add(time.Hour))
+		approval, err := trust.Approve(request, enrolRequest.(*wire.EnrolRequest), f.userKey, map[string]string{}, pool, nomadGrants(), []wire.Requirement{}, "auto", 1, "", time.Now().Add(time.Hour))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -799,7 +963,7 @@ func TestAdoptionTrustsPeerHeartbeat(t *testing.T) {
 			}
 		}
 	}
-	enrol(f.receiver.config.ReceiverID, f.receiver.signing, f.receiver.sealing)
+	enrol(f.receiver.config.ReceiverID, "nomad", f.receiver.signing, f.receiver.sealing)
 	_, peerSigning, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -808,20 +972,38 @@ func TestAdoptionTrustsPeerHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	enrol("receiver-peer", peerSigning, peerSealing)
-	if err := f.receiver.refresh(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	task := &wire.Task{RunID: "run-peer", ReplyTopic: "replies.test", CorrelationID: "c"}
-	offset := int64(42)
-	value, err := sign(wire.TypeEvent, f.receiver.event(task, strings.Repeat("a", 64), 1, "heartbeat", wire.TaskStateWorking, &offset, nil), peerSigning)
+	enrol("receiver-peer", "nomad", peerSigning, peerSealing)
+	_, otherPoolSigning, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.RunID), Value: value}).FirstErr(); err != nil {
+	otherPoolSealing, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := f.receiver.lastOffset(f.ctx, task.RunID)
+	enrol("receiver-other-pool", "other", otherPoolSigning, otherPoolSealing)
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	task := testSubmission("run-peer")
+	offset := int64(42)
+	taskHash := strings.Repeat("a", 64)
+	value, err := sign(wire.TypeStatus, f.receiver.status(task, taskHash, 1, "heartbeat", taskStatus(wire.TaskStateWorking, ""), &offset), peerSigning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.Wherry.RunID), Value: value}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	otherPoolOffset := int64(99)
+	value, err = sign(wire.TypeStatus, f.receiver.status(task, taskHash, 1, "heartbeat", taskStatus(wire.TaskStateWorking, ""), &otherPoolOffset), otherPoolSigning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.Wherry.RunID), Value: value}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.receiver.lastOffset(f.ctx, task.Wherry.RunID, taskHash, task.Wherry.Lineage.RootRunID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -833,8 +1015,8 @@ func TestAdoptionTrustsPeerHeartbeat(t *testing.T) {
 func TestFollowErrorReasonIsFixed(t *testing.T) {
 	f := newFixture(t, nil)
 	f.adapter.followErr = errors.New("secret upstream detail")
-	reply := runToReply(t, f)
-	if got := reply.Artifacts[0].Parts[0].Text; got != "log stream failed" {
+	task := runToTask(t, f)
+	if got := task.Artifacts[0].Parts[0].Text; got != "log stream failed" {
 		t.Fatalf("reply reason %q, want fixed reason", got)
 	}
 	logs := f.logs.String()
@@ -853,7 +1035,7 @@ func TestDispatchErrorReasonIsFixed(t *testing.T) {
 	if status := f.receiver.execute(f.ctx, f.kafka, record, admitted, 1); status != kgo.AckReject {
 		t.Fatalf("status %v", status)
 	}
-	if got := lastReplyText(t, f); got != "dispatch failed" {
+	if got := lastTask(t, f).Artifacts[0].Parts[0].Text; got != "dispatch failed" {
 		t.Fatalf("reply reason %q, want fixed reason", got)
 	}
 	for _, topic := range []string{wire.TopicEvent, "replies.test"} {
@@ -921,14 +1103,14 @@ func TestRunJoinsPeriodicWork(t *testing.T) {
 func TestFencedProducerStopsRunWrites(t *testing.T) {
 	f, _ := admitFixture(t)
 	zombie := testActiveRun(t, f, "run-fence", 1)
-	if err := zombie.commit(f.ctx, zombie.eventRecord("claimed", wire.TaskStateWorking, nil, nil)); err != nil {
+	if err := zombie.commit(f.ctx, zombie.statusRecord("claimed", taskStatus(wire.TaskStateWorking, ""), nil)); err != nil {
 		t.Fatal(err)
 	}
 	adopter := testActiveRun(t, f, "run-fence", 2)
-	if err := adopter.commit(f.ctx, adopter.eventRecord("claimed", wire.TaskStateWorking, nil, nil)); err != nil {
+	if err := adopter.commit(f.ctx, adopter.statusRecord("claimed", taskStatus(wire.TaskStateWorking, ""), nil)); err != nil {
 		t.Fatal(err)
 	}
-	err := zombie.commit(f.ctx, zombie.eventRecord("heartbeat", wire.TaskStateWorking, nil, nil))
+	err := zombie.commit(f.ctx, zombie.statusRecord("heartbeat", taskStatus(wire.TaskStateWorking, ""), nil))
 	if err == nil {
 		t.Fatal("zombie write succeeded after adoption")
 	}
@@ -941,8 +1123,8 @@ func TestFencedProducerStopsRunWrites(t *testing.T) {
 	}
 	for _, record := range records {
 		envelope, _ := wire.DecodeEnvelope(record.Value)
-		decoded, _ := wire.DecodePayload(wire.TypeEvent, envelope.Payload)
-		if event := decoded.(*wire.Event); event.Kind == "heartbeat" {
+		decoded, _ := wire.DecodePayload(wire.TypeStatus, envelope.Payload)
+		if status := decoded.(*wire.StatusRecord); status.Wherry.Kind == "heartbeat" {
 			t.Fatal("zombie heartbeat is readable after fencing")
 		}
 	}
@@ -956,23 +1138,6 @@ func TestResultLine(t *testing.T) {
 		if _, ok := resultLine([]byte(line)); ok {
 			t.Fatalf("%q treated as a result", line)
 		}
-	}
-}
-
-func TestOversizeTranscriptLineBecomesPointer(t *testing.T) {
-	f, _ := admitFixture(t)
-	run := &activeRun{receiver: f.receiver, task: &wire.Task{RunID: "run-big"}, attempt: 1}
-	record := run.transcriptRecord(Line{Offset: 7, Data: bytes.Repeat([]byte("x"), maxLine+1)})
-	envelope, err := wire.DecodeEnvelope(record.Value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := wire.DecodePayload(wire.TypeTranscript, envelope.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if transcript := decoded.(*wire.Transcript); transcript.Pointer == nil || transcript.Line != nil || transcript.Seq != 7 {
-		t.Fatalf("got %#v", transcript)
 	}
 }
 
@@ -1038,8 +1203,9 @@ func newMultiFixture(t *testing.T) multiFixture {
 
 func (m multiFixture) execute(t *testing.T, runID string, selector []wire.Requirement, attempt int64) kgo.AckStatus {
 	t.Helper()
-	record := signedRoot(t, m.userKey, func(task *wire.Task) {
-		task.RunID, task.RootRunID, task.Selector = runID, runID, selector
+	record := signedRoot(t, m.userKey, func(task *wire.SubmissionRecord) {
+		task.Wherry.RunID, task.Wherry.Lineage.RootRunID, task.Wherry.Selector = runID, runID, selector
+		task.Message.TaskID, task.Message.ContextID = runID, runID
 	})
 	admitted, ack := m.receiver.admit(m.ctx, record, m.receiver.current())
 	if admitted == nil {
@@ -1052,21 +1218,35 @@ func runtimeIs(value string) []wire.Requirement {
 	return []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{value}}}
 }
 
-func lastReplyText(t *testing.T, f fixture) string {
+// published returns the receiver-verified payloads on topic in log order.
+func published(t *testing.T, f fixture, topic string) []any {
 	t.Helper()
-	records, err := readBounded(f.ctx, f.receiver.kafkaOpt, "replies.test")
-	if err != nil || len(records) == 0 {
-		t.Fatalf("reply records=%d err=%v", len(records), err)
-	}
-	envelope, err := wire.DecodeEnvelope(records[len(records)-1].Value)
+	records, err := readBounded(f.ctx, f.receiver.kafkaOpt, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
-	verified, err := wire.Verify(envelope, f.receiver.signing.Public().(ed25519.PublicKey), wire.SignerReceiver)
-	if err != nil {
-		t.Fatal(err)
+	payloads := make([]any, 0, len(records))
+	for _, record := range records {
+		envelope, err := wire.DecodeEnvelope(record.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		verified, err := wire.Verify(envelope, f.receiver.signing.Public().(ed25519.PublicKey), wire.SignerReceiver)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payloads = append(payloads, verified)
 	}
-	return verified.(*wire.Reply).Artifacts[0].Parts[0].Text
+	return payloads
+}
+
+func lastTask(t *testing.T, f fixture) *wire.Task {
+	t.Helper()
+	tasks := published(t, f, "replies.test")
+	if len(tasks) == 0 {
+		t.Fatal("no task records")
+	}
+	return &tasks[len(tasks)-1].(*wire.TaskRecord).Task
 }
 
 func TestReceiverRoutesToMatchedAdapter(t *testing.T) {
@@ -1169,7 +1349,7 @@ func TestReceiverCredentialPerAdapter(t *testing.T) {
 	if dispatches, _, _, releases := m.cloud.counts(); dispatches != 0 || releases != 1 {
 		t.Fatalf("cloud dispatches=%d releases=%d, want 0 and 1", dispatches, releases)
 	}
-	if got := lastReplyText(t, m.fixture); got != "credential unavailable" {
+	if got := lastTask(t, m.fixture).Artifacts[0].Parts[0].Text; got != "credential unavailable" {
 		t.Fatalf("reason %q", got)
 	}
 	if strings.Contains(m.logs.String(), testToken) {
