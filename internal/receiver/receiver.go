@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/benemon/agentbus/internal/trust"
-	"github.com/benemon/agentbus/internal/wire"
+	"github.com/benemon/wherry/internal/trust"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/scram"

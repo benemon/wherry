@@ -15,14 +15,14 @@ import (
 	"strings"
 	"time"
 
-	busclient "github.com/benemon/agentbus/internal/client"
-	"github.com/benemon/agentbus/internal/trust"
-	"github.com/benemon/agentbus/internal/wire"
+	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/trust"
+	"github.com/benemon/wherry/internal/wire"
 )
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: agentbus <init|key|enrol|secret|receivers|submit|await|events|receiver>")
+		return errors.New("usage: wherry <init|key|enrol|secret|receivers|submit|await|events|receiver>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -37,7 +37,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	if args[0] == "init" {
 		if len(args) != 1 {
-			return errors.New("usage: agentbus init")
+			return errors.New("usage: wherry init")
 		}
 		fingerprint, err := busclient.InitUserKey(config.UserKey)
 		if err != nil {
@@ -88,7 +88,7 @@ func runReceivers(ctx context.Context, client *busclient.Client, args []string, 
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: agentbus receivers [--json]")
+		return errors.New("usage: wherry receivers [--json]")
 	}
 	receivers, skipped, err := client.Receivers(ctx)
 	if err != nil {
@@ -145,7 +145,7 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 		return nil
 	}
 	if len(args) < 2 || args[0] != "approve" {
-		return errors.New("usage: agentbus enrol <list|approve REQUEST_HASH [--pool POOL] --labels k=v,.. --grants FILE --selector k=v|v,..>")
+		return errors.New("usage: wherry enrol <list|approve REQUEST_HASH [--pool POOL] --labels k=v,.. --grants FILE --selector k=v|v,..>")
 	}
 	requestHash := args[1]
 	flags := flag.NewFlagSet("enrol approve", flag.ContinueOnError)
@@ -195,7 +195,7 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 
 func runSecret(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
 	if len(args) < 3 || args[0] != "put" {
-		return errors.New("usage: agentbus secret put NAME --to RECEIVER_ID --from-file PATH")
+		return errors.New("usage: wherry secret put NAME --to RECEIVER_ID --from-file PATH")
 	}
 	name := args[1]
 	flags := flag.NewFlagSet("secret put", flag.ContinueOnError)
@@ -269,7 +269,7 @@ func runSubmit(ctx context.Context, client *busclient.Client, args []string, std
 
 func runAwait(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: agentbus await RUN_ID [--timeout 30m]")
+		return errors.New("usage: wherry await RUN_ID [--timeout 30m]")
 	}
 	runID := args[0]
 	flags := flag.NewFlagSet("await", flag.ContinueOnError)
@@ -312,7 +312,7 @@ func partText(part wire.Part) string {
 
 func runEvents(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
 	if len(args) != 1 {
-		return errors.New("usage: agentbus events RUN_ID")
+		return errors.New("usage: wherry events RUN_ID")
 	}
 	result, err := client.Events(ctx, args[0])
 	if err != nil {

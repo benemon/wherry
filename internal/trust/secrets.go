@@ -10,13 +10,13 @@ import (
 	"errors"
 	"time"
 
-	"github.com/benemon/agentbus/internal/wire"
+	"github.com/benemon/wherry/internal/wire"
 )
 
 const (
 	sealedSecretTopic = "receivers.secrets"
-	sealedSecretInfo  = "agentbus/v1/sealed_secret"
-	sealedSecretAAD   = "agentbus/v1/sealed_secret_aad\x00"
+	sealedSecretInfo  = "wherry/v1/sealed_secret"
+	sealedSecretAAD   = "wherry/v1/sealed_secret_aad\x00"
 )
 
 type secretAAD struct {

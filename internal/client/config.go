@@ -12,13 +12,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/benemon/agentbus/internal/trust"
-	"github.com/benemon/agentbus/internal/wire"
+	"github.com/benemon/wherry/internal/trust"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-// Config is the on-disk agentbus client configuration.
+// Config is the on-disk wherry client configuration.
 type Config struct {
 	Broker            string `json:"broker"`
 	CAFile            string `json:"ca_file"`
@@ -28,16 +28,16 @@ type Config struct {
 	ReplyTopic        string `json:"reply_topic,omitzero"`
 }
 
-// DefaultConfigPath returns AGENTBUS_CONFIG or the per-user default path.
+// DefaultConfigPath returns WHERRY_CONFIG or the per-user default path.
 func DefaultConfigPath() (string, error) {
-	if path := os.Getenv("AGENTBUS_CONFIG"); path != "" {
+	if path := os.Getenv("WHERRY_CONFIG"); path != "" {
 		return expandHome(path)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "agentbus", "config.json"), nil
+	return filepath.Join(home, ".config", "wherry", "config.json"), nil
 }
 
 // LoadConfig decodes the config at path, defaulting user_key and reply_topic.
@@ -61,7 +61,7 @@ func LoadConfig(path string) (Config, error) {
 		if err != nil {
 			return Config{}, err
 		}
-		config.UserKey = filepath.Join(home, ".config", "agentbus", "user.key")
+		config.UserKey = filepath.Join(home, ".config", "wherry", "user.key")
 	}
 	if config.ReplyTopic == "" {
 		config.ReplyTopic = "replies." + config.KafkaUser

@@ -15,21 +15,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/agentbus/internal/receiver"
-	"github.com/benemon/agentbus/internal/wire"
+	"github.com/benemon/wherry/internal/receiver"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/hashicorp/nomad/api"
 )
 
-const credentialEnv = "AGENTBUS_TEST_CREDENTIAL"
+const credentialEnv = "WHERRY_TEST_CREDENTIAL"
 
 func testConfig(address string) Config {
-	script := `printf '{"type":"result","result":"prompt=%s token=%s env=%s home=%s"}\n' "$(cat ${NOMAD_TASK_DIR}/prompt.txt)" "$` + credentialEnv + `" "$AGENTBUS_TEST_ENV" "$HOME"`
+	script := `printf '{"type":"result","result":"prompt=%s token=%s env=%s home=%s"}\n' "$(cat ${NOMAD_TASK_DIR}/prompt.txt)" "$` + credentialEnv + `" "$WHERRY_TEST_ENV" "$HOME"`
 	return Config{
 		Address: address, Namespace: "default", CredentialEnv: credentialEnv,
 		Runtimes: map[string]Runtime{"exec": {
 			Driver:    "raw_exec",
 			Config:    map[string]any{"command": "/bin/sh", "args": []any{"-c", script}},
-			Env:       map[string]string{"AGENTBUS_TEST_ENV": "from-runtime"},
+			Env:       map[string]string{"WHERRY_TEST_ENV": "from-runtime"},
 			Resources: Resources{CPU: new(100), MemoryMB: new(64)},
 		}},
 	}
@@ -37,9 +37,9 @@ func testConfig(address string) Config {
 
 func devAdapter(t *testing.T) (*Adapter, context.Context) {
 	t.Helper()
-	address := os.Getenv("AGENTBUS_NOMAD_DEV_ADDR")
+	address := os.Getenv("WHERRY_NOMAD_DEV_ADDR")
 	if address == "" {
-		t.Skip("AGENTBUS_NOMAD_DEV_ADDR not set")
+		t.Skip("WHERRY_NOMAD_DEV_ADDR not set")
 	}
 	adapter, err := New(testConfig(address), "")
 	if err != nil {
@@ -151,12 +151,12 @@ func TestBuildJobFromRuntime(t *testing.T) {
 	if len(tasks) != 1 || tasks[0].Name != taskName || tasks[0].Driver != "raw_exec" || !reflect.DeepEqual(tasks[0].Config, runtime.Config) ||
 		*tasks[0].Resources.CPU != 100 || *tasks[0].Resources.MemoryMB != 64 ||
 		*tasks[0].LogConfig.MaxFiles != 3 || *tasks[0].LogConfig.MaxFileSizeMB != 10 ||
-		!reflect.DeepEqual(tasks[0].Env, map[string]string{"AGENTBUS_TEST_ENV": "from-runtime", "HOME": "${NOMAD_TASK_DIR}"}) {
+		!reflect.DeepEqual(tasks[0].Env, map[string]string{"WHERRY_TEST_ENV": "from-runtime", "HOME": "${NOMAD_TASK_DIR}"}) {
 		t.Fatalf("runtime not carried: %#v", tasks)
 	}
 	templates := tasks[0].Templates
 	if len(templates) != 2 || *templates[0].DestPath != "local/prompt.txt" ||
-		*templates[1].DestPath != "${NOMAD_SECRETS_DIR}/agentbus.env" || !*templates[1].Envvars ||
+		*templates[1].DestPath != "${NOMAD_SECRETS_DIR}/wherry.env" || !*templates[1].Envvars ||
 		!strings.Contains(*templates[1].EmbeddedTmpl, credentialEnv+"={{ .credential }}") ||
 		*templates[0].ChangeMode != "noop" || *templates[1].ChangeMode != "noop" {
 		t.Fatalf("templates %#v", templates)
@@ -289,7 +289,7 @@ func TestLookupMissingRun(t *testing.T) {
 func TestLookupWaitsForUnplacedJob(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("lookup-unplaced")
-	run.Offer["zone"] = "agentbus-no-such-datacenter"
+	run.Offer["zone"] = "wherry-no-such-datacenter"
 	cleanupRun(t, adapter, run)
 	job, err := adapter.buildJob(run, variablePath(run.ID))
 	if err != nil {
@@ -330,7 +330,7 @@ func TestReleaseDeletesVariable(t *testing.T) {
 func TestDispatchErrorDeletesVariable(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("error-cleanup")
-	run.Offer["zone"] = "agentbus-no-such-datacenter"
+	run.Offer["zone"] = "wherry-no-such-datacenter"
 	cleanupRun(t, adapter, run)
 	dispatchCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
@@ -487,7 +487,7 @@ func TestStopAlreadyTerminalDoesNotSignal(t *testing.T) {
 func TestDispatchTimeoutDeregisters(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("dispatch-timeout")
-	run.Offer["zone"] = "agentbus-no-such-datacenter"
+	run.Offer["zone"] = "wherry-no-such-datacenter"
 	cleanupRun(t, adapter, run)
 	dispatchCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()

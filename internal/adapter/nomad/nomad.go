@@ -11,8 +11,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/benemon/agentbus/internal/receiver"
-	"github.com/benemon/agentbus/internal/wire"
+	"github.com/benemon/wherry/internal/receiver"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/hashicorp/nomad/api"
 )
 
@@ -214,7 +214,7 @@ func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error
 	if run.Credential != nil {
 		templates = append(templates, &api.Template{
 			EmbeddedTmpl: new(`{{ with nomadVar "` + path + `" }}` + adapter.credentialEnv + `={{ .credential }}{{ end }}`),
-			DestPath:     new("${NOMAD_SECRETS_DIR}/agentbus.env"), Envvars: new(true), ChangeMode: new("noop"),
+			DestPath:     new("${NOMAD_SECRETS_DIR}/wherry.env"), Envvars: new(true), ChangeMode: new("noop"),
 		})
 	}
 	return &api.Job{

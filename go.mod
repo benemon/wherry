@@ -1,4 +1,4 @@
-module github.com/benemon/agentbus
+module github.com/benemon/wherry
 
 go 1.27
 

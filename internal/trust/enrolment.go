@@ -12,7 +12,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/benemon/agentbus/internal/wire"
+	"github.com/benemon/wherry/internal/wire"
 )
 
 // Enrolled is the current accepted enrolment for a receiver.

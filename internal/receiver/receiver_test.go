@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	busclient "github.com/benemon/agentbus/internal/client"
-	"github.com/benemon/agentbus/internal/trust"
-	"github.com/benemon/agentbus/internal/wire"
+	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/trust"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"

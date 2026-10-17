@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/agentbus/internal/wire"
+	"github.com/benemon/wherry/internal/wire"
 )
 
 var testNow = time.UnixMilli(1_800_000_000_000)
@@ -504,7 +504,7 @@ func TestSealedSecretAADBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "agentbus/v1/sealed_secret_aad\x00" +
+	want := "wherry/v1/sealed_secret_aad\x00" +
 		`{"topic":"receivers.secrets","receiver_id":"receiver-a","name":"token","sealing_key_fp":"sha256:` + strings.Repeat("a", 64) + `","generation":5,"version":6,"exp_ms":7}`
 	if string(encoded) != want {
 		t.Fatalf("AAD differs:\n got: %q\nwant: %q", encoded, want)

@@ -13,12 +13,12 @@ import (
 	"sort"
 	"time"
 
-	"github.com/benemon/agentbus/internal/trust"
-	"github.com/benemon/agentbus/internal/wire"
+	"github.com/benemon/wherry/internal/trust"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Client implements the user-side agentbus operations.
+// Client implements the user-side wherry operations.
 type Client struct {
 	kafka      *kgo.Client
 	userKey    ed25519.PrivateKey

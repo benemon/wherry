@@ -192,7 +192,7 @@ func DecodeEnvelope(encoded []byte) (Envelope, error) {
 }
 
 func signatureInput(recordType RecordType, payload []byte) []byte {
-	prefix := []byte("agentbus/v1/" + string(recordType) + "\x00")
+	prefix := []byte("wherry/v1/" + string(recordType) + "\x00")
 	return append(prefix, payload...)
 }
 

@@ -9,7 +9,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kerr"
 )
 
-// Agentbus topic names.
+// Wherry topic names.
 const (
 	TopicTask       = "tasks.queue"
 	TopicEvent      = "tasks.events"
@@ -39,7 +39,7 @@ var topicDeclarations = []topicDeclaration{
 	}},
 }
 
-// ApplyTopics creates and configures the Agentbus topics.
+// ApplyTopics creates and configures the Wherry topics.
 func ApplyTopics(ctx context.Context, client *kadm.Client, replicationFactor int16) error {
 	for _, declaration := range topicDeclarations {
 		configs := make(map[string]*string, len(declaration.configs))

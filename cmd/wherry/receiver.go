@@ -12,8 +12,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/benemon/agentbus/internal/adapter/nomad"
-	"github.com/benemon/agentbus/internal/receiver"
+	"github.com/benemon/wherry/internal/adapter/nomad"
+	"github.com/benemon/wherry/internal/receiver"
 )
 
 func runReceiver(args []string, stdout, stderr io.Writer) error {
@@ -24,7 +24,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if *configPath == "" {
-		return errors.New("usage: agentbus receiver --config PATH")
+		return errors.New("usage: wherry receiver --config PATH")
 	}
 	config, err := receiver.LoadConfig(*configPath)
 	if err != nil {

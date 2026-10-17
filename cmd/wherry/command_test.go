@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	busclient "github.com/benemon/agentbus/internal/client"
-	"github.com/benemon/agentbus/internal/receiver"
-	"github.com/benemon/agentbus/internal/trust"
-	"github.com/benemon/agentbus/internal/wire"
+	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/receiver"
+	"github.com/benemon/wherry/internal/trust"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -76,7 +76,7 @@ func TestNewAdaptersRejectsUnknownType(t *testing.T) {
 }
 
 func TestNewAdaptersRequiresCredentialEnv(t *testing.T) {
-	config := jsontext.Value(`{"address":"http://127.0.0.1:1","namespace":"agentbus","runtimes":{}}`)
+	config := jsontext.Value(`{"address":"http://127.0.0.1:1","namespace":"wherry","runtimes":{}}`)
 	_, err := newAdapters([]receiver.AdapterConfig{{Name: "lab", Type: "nomad", Credential: "token", Config: config}}, "")
 	if err == nil || !strings.Contains(err.Error(), "credential_env") {
 		t.Fatalf("got %v, want credential_env required", err)

@@ -753,7 +753,7 @@ func TestPartRawIsStandardBase64(t *testing.T) {
 		"-_8":   true,
 		"+_8=":  false,
 		"+/8==": false,
-		"+/9=":  false, // non-zero trailing bits: agentbus decodes strictly
+		"+/9=":  false, // non-zero trailing bits: wherry decodes strictly
 		"*":     false,
 	} {
 		t.Run(input, func(t *testing.T) {
