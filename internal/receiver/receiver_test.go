@@ -57,6 +57,8 @@ type fakeAdapter struct {
 	existing    bool
 	releases    int
 	releaseIDs  []string
+	sweeps      int
+	sweepErr    error
 	// endDelay holds a stream without a result line open before it ends.
 	endDelay time.Duration
 }
@@ -138,6 +140,19 @@ func (f *fakeAdapter) Release(_ context.Context, runID string, _ int64) error {
 	f.releases++
 	f.releaseIDs = append(f.releaseIDs, runID)
 	return nil
+}
+
+func (f *fakeAdapter) Sweep(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sweeps++
+	return f.sweepErr
+}
+
+func (f *fakeAdapter) sweepCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sweeps
 }
 
 func (f *fakeAdapter) counts() (dispatches, lookups, follows, releases int) {
@@ -1774,6 +1789,66 @@ func TestReceiverAdapterOffersErrorIsolated(t *testing.T) {
 	}
 	if !strings.Contains(m.logs.String(), "adapter lab offers: nomad unreachable") {
 		t.Fatalf("offers error not logged: %q", m.logs.String())
+	}
+}
+
+func TestReceiverSweepsOnTick(t *testing.T) {
+	f := newFixture(t, resultStream)
+	runCtx, cancel := context.WithCancel(f.ctx)
+	done := make(chan error, 1)
+	go func() { done <- f.receiver.Run(runCtx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	client := busclient.New(f.kafka, f.userKey, "replies.test")
+	var requestHash string
+	for requestHash == "" {
+		enrolments, _, err := client.Enrolments(f.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, enrolment := range enrolments {
+			if enrolment.ReceiverID == f.receiver.config.ReceiverID {
+				requestHash = enrolment.RequestHash
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30); err != nil {
+		t.Fatal(err)
+	}
+	for f.adapter.sweepCount() < 3 {
+		if f.ctx.Err() != nil {
+			t.Fatalf("sweeps = %d, want repeated sweeps on the capability tick", f.adapter.sweepCount())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestReceiverSweepErrorIsolated(t *testing.T) {
+	m := newMultiFixture(t)
+	const detail = "variable item test-credential"
+	m.lab.mu.Lock()
+	m.lab.sweepErr = errors.New(detail)
+	m.lab.mu.Unlock()
+	before := []int{m.lab.sweepCount(), m.cloud.sweepCount(), m.edge.sweepCount()}
+	if err := m.receiver.publishCapability(m.ctx); err != nil {
+		t.Fatal(err)
+	}
+	after := []int{m.lab.sweepCount(), m.cloud.sweepCount(), m.edge.sweepCount()}
+	for i := range after {
+		if after[i] != before[i]+1 {
+			t.Fatalf("sweeps lab, cloud, edge went %v -> %v, want one more each", before, after)
+		}
+	}
+	m.receiver.mu.Lock()
+	offers := len(m.receiver.offers)
+	m.receiver.mu.Unlock()
+	if offers != 4 {
+		t.Fatalf("published %d offers after a sweep error, want 4", offers)
+	}
+	logs := m.logs.String()
+	if !strings.Contains(logs, "adapter lab sweep: *errors.errorString") || strings.Contains(logs, detail) {
+		t.Fatalf("unexpected sweep error log: %q", logs)
 	}
 }
 

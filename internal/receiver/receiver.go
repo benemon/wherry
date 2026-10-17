@@ -58,6 +58,7 @@ type Adapter interface {
 	Follow(ctx context.Context, handle Handle, offset int64, lines chan<- Line) error
 	Stop(ctx context.Context, handle Handle) error
 	Release(ctx context.Context, runID string, turn int64) error
+	Sweep(ctx context.Context) error
 }
 
 // Config is the receiver's local configuration.
@@ -407,6 +408,11 @@ func (r *Receiver) named(name string) (Named, bool) {
 }
 
 func (r *Receiver) publishCapability(ctx context.Context) error {
+	for _, named := range r.adapters {
+		if err := named.Adapter.Sweep(ctx); err != nil {
+			r.logger.Printf("adapter %s sweep: %T", named.Name, err)
+		}
+	}
 	enrolled := r.current()
 	if enrolled == nil {
 		return nil

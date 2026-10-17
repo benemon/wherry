@@ -841,3 +841,103 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 		}
 	}
 }
+
+func sleepRun(adapter *Adapter, name string) receiver.Run {
+	adapter.runtimes["sleep"] = Runtime{Driver: "raw_exec", Config: map[string]any{"command": "/bin/sleep", "args": []any{"300"}}}
+	run := testRun(name)
+	run.Offer["runtime"] = "sleep"
+	return run
+}
+
+func putVariable(t *testing.T, adapter *Adapter, ctx context.Context, path string) {
+	t.Helper()
+	t.Cleanup(func() { _, _ = adapter.client.Variables().Delete(path, nil) })
+	if _, _, err := adapter.client.Variables().Update(&api.Variable{Path: path, Items: map[string]string{"credential": "test-credential"}}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+		t.Fatal(redacted("write", path, err))
+	}
+}
+
+func sweepLeaves(t *testing.T, adapter *Adapter, ctx context.Context, path string, want bool) {
+	t.Helper()
+	if err := adapter.Sweep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	variable, _, err := adapter.client.Variables().Peek(path, nil)
+	if err != nil {
+		t.Fatal(redacted("peek", path, err))
+	}
+	if (variable != nil) != want {
+		t.Fatalf("variable %s present after sweep = %v, want %v", path, variable != nil, want)
+	}
+}
+
+func shortGrace(t *testing.T) {
+	previous := sweepGrace
+	sweepGrace = 0
+	t.Cleanup(func() { sweepGrace = previous })
+}
+
+func TestSweepDeletesVariableOfDeadJob(t *testing.T) {
+	adapter, ctx := devAdapter(t)
+	run := testRun("sweep-dead")
+	dispatch(t, adapter, ctx, run)
+	for {
+		job, _, err := adapter.client.Jobs().Info(jobID(run.ID, run.Turn), (&api.QueryOptions{}).WithContext(ctx))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if *job.Status == "dead" {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	sweepLeaves(t, adapter, ctx, variablePath(run.ID, run.Turn), false)
+}
+
+func TestSweepDeletesVariableOfStoppedJob(t *testing.T) {
+	adapter, ctx := devAdapter(t)
+	run := sleepRun(adapter, "sweep-stopped")
+	dispatch(t, adapter, ctx, run)
+	if _, _, err := adapter.client.Jobs().Deregister(jobID(run.ID, run.Turn), false, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+		t.Fatal(err)
+	}
+	job, _, err := adapter.client.Jobs().Info(jobID(run.ID, run.Turn), (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil || !*job.Stop || *job.Status == "dead" {
+		t.Fatalf("job after stop = %#v, %v; want stopped and not yet dead", job, err)
+	}
+	sweepLeaves(t, adapter, ctx, variablePath(run.ID, run.Turn), false)
+}
+
+func TestSweepKeepsVariableOfRunningJob(t *testing.T) {
+	adapter, ctx := devAdapter(t)
+	shortGrace(t)
+	run := sleepRun(adapter, "sweep-running")
+	dispatch(t, adapter, ctx, run)
+	sweepLeaves(t, adapter, ctx, variablePath(run.ID, run.Turn), true)
+}
+
+func TestSweepKeepsRecentVariableWithoutJob(t *testing.T) {
+	adapter, ctx := devAdapter(t)
+	run := testRun("sweep-recent")
+	path := variablePath(run.ID, run.Turn)
+	putVariable(t, adapter, ctx, path)
+	sweepLeaves(t, adapter, ctx, path, true)
+}
+
+func TestSweepDeletesStaleVariableWithoutJob(t *testing.T) {
+	adapter, ctx := devAdapter(t)
+	shortGrace(t)
+	run := testRun("sweep-stale")
+	path := variablePath(run.ID, run.Turn)
+	putVariable(t, adapter, ctx, path)
+	sweepLeaves(t, adapter, ctx, path, false)
+}
+
+func TestSweepIgnoresNonRunVariables(t *testing.T) {
+	adapter, ctx := devAdapter(t)
+	shortGrace(t)
+	for _, path := range []string{"nomad/jobs/agentbus-receiver", "nomad/jobs/agent-foo"} {
+		putVariable(t, adapter, ctx, path)
+		sweepLeaves(t, adapter, ctx, path, true)
+	}
+}

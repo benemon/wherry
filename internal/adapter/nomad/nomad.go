@@ -57,7 +57,12 @@ type Adapter struct {
 	runtimes      map[string]Runtime
 }
 
-var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var (
+	envName     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	runVariable = regexp.MustCompile(`^nomad/jobs/(agent-.+-t[0-9]+)$`)
+	// sweepGrace covers Dispatch's window between writing the variable and registering the job.
+	sweepGrace = 10 * time.Minute
+)
 
 // New builds a Nomad client; the token is the receiver's workload identity.
 func New(config Config, token string) (*Adapter, error) {
@@ -466,6 +471,35 @@ func (adapter *Adapter) Stop(ctx context.Context, handle receiver.Handle) error 
 // Release deletes the per-run credential and prompt variable.
 func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) error {
 	return adapter.deleteVariable(ctx, variablePath(runID, turn))
+}
+
+// Sweep deletes per-run variables whose job has ended, been stopped, or never registered.
+func (adapter *Adapter) Sweep(ctx context.Context) error {
+	variables, _, err := adapter.client.Variables().PrefixList("nomad/jobs/"+jobPrefix, (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, variable := range variables {
+		match := runVariable.FindStringSubmatch(variable.Path)
+		if match == nil {
+			continue
+		}
+		job, _, err := adapter.client.Jobs().Info(match[1], (&api.QueryOptions{}).WithContext(ctx))
+		switch {
+		case notFound(err):
+			if time.Since(time.Unix(0, variable.ModifyTime)) < sweepGrace {
+				continue
+			}
+		case err != nil:
+			errs = append(errs, err)
+			continue
+		case *job.Status != "dead" && !*job.Stop:
+			continue
+		}
+		errs = append(errs, adapter.deleteVariable(ctx, variable.Path))
+	}
+	return errors.Join(errs...)
 }
 
 func (adapter *Adapter) deleteVariable(ctx context.Context, path string) error {
