@@ -108,9 +108,11 @@ type CancelResult struct {
 
 // AwaitResult is the accepted outcome of the latest turn; Task is nil when a status record ended it.
 type AwaitResult struct {
-	Task    *wire.Task
-	Status  wire.TaskStatus
-	Skipped int
+	Task   *wire.Task
+	Status wire.TaskStatus
+	// RevokedAt is the revocation time of the receiver that signed the outcome, zero while it is enrolled.
+	RevokedAt time.Time
+	Skipped   int
 }
 
 // TurnAttempt identifies one delivery attempt within one submission turn.
@@ -122,10 +124,18 @@ type TurnAttempt struct {
 // EventsResult contains a run's verified status records, whether the user cancelled it, and its
 // transcript chunk count per turn and attempt.
 type EventsResult struct {
-	Statuses  []wire.StatusRecord
+	Statuses  []EventStatus
 	Cancelled bool
 	Chunks    map[TurnAttempt]int
-	Skipped   int
+	// ChunksRevokedAt holds, per turn and attempt, the revocation time of a revoked receiver that signed its chunks.
+	ChunksRevokedAt map[TurnAttempt]time.Time
+	Skipped         int
+}
+
+// EventStatus is one verified status record and the revocation time of its signer, zero while it is enrolled.
+type EventStatus struct {
+	wire.StatusRecord
+	RevokedAt time.Time
 }
 
 // Receiver describes one enrolled receiver and its latest verified capability.
@@ -175,12 +185,25 @@ type loadedState struct {
 	approvals        map[string]approvalRecord
 	approvedRequests map[string]int64
 	secretVersions   map[secretKey]wire.SecretVersion
+	revocations      map[string][]revocationRecord
 	skipped          int
+}
+
+type revocationRecord struct {
+	floor         int64
+	timestampType int8
+	timestamp     time.Time
 }
 
 type receiverIdentity struct {
 	id       string
 	enrolled trust.Enrolled
+}
+
+// revokedSigner is a revoked receiver's last approved identity, trusted only for records the broker appended before revokedAt.
+type revokedSigner struct {
+	identity  receiverIdentity
+	revokedAt time.Time
 }
 
 type verifiedCapability struct {
@@ -687,6 +710,7 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 		return AwaitResult{}, err
 	}
 	receivers := loaded.receiverSigners(time.Now())
+	revoked := loaded.revokedSigners()
 	submissions, skipped, err := client.readSubmissions(ctx)
 	if err != nil {
 		return AwaitResult{}, err
@@ -730,17 +754,7 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 				if record.Topic != topic || record.Attrs.IsControl() || string(record.Key) != runID {
 					continue
 				}
-				envelope, err := wire.DecodeEnvelope(record.Value)
-				if err != nil {
-					loaded.skipped++
-					continue
-				}
-				receiver, ok := receivers[envelope.Signer]
-				if !ok {
-					loaded.skipped++
-					continue
-				}
-				verified, err := wire.Verify(envelope, receiver.enrolled.SigningPub, wire.SignerReceiver)
+				verified, receiver, revokedAt, err := verifyHistory(record, receivers, revoked)
 				if err != nil {
 					loaded.skipped++
 					continue
@@ -754,7 +768,7 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 						!attempts.Admit(value.Task.ID, value.Wherry.Turn, value.Wherry.Attempt) {
 						continue
 					}
-					return AwaitResult{Task: &value.Task, Status: value.Task.Status, Skipped: loaded.skipped}, nil
+					return AwaitResult{Task: &value.Task, Status: value.Task.Status, RevokedAt: revokedAt, Skipped: loaded.skipped}, nil
 				case *wire.StatusRecord:
 					acceptable := value.Wherry.Kind == "interrupted" && wire.Interrupted(value.StatusUpdate.Status.State) ||
 						value.Wherry.Kind == "terminal" && wire.Terminal(value.StatusUpdate.Status.State) ||
@@ -768,7 +782,7 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 					if value.Wherry.Kind == "interrupted" && cancelled[runID] {
 						return AwaitResult{Status: wire.TaskStatus{State: wire.TaskStateCanceled}, Skipped: loaded.skipped}, nil
 					}
-					return AwaitResult{Status: value.StatusUpdate.Status, Skipped: loaded.skipped}, nil
+					return AwaitResult{Status: value.StatusUpdate.Status, RevokedAt: revokedAt, Skipped: loaded.skipped}, nil
 				}
 			}
 		}
@@ -782,26 +796,17 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 		return EventsResult{}, err
 	}
 	receivers := loaded.receiverSigners(time.Now())
+	revoked := loaded.revokedSigners()
 	records, err := client.readBounded(ctx, wire.TopicEvent)
 	if err != nil {
 		return EventsResult{}, err
 	}
-	result := EventsResult{Chunks: map[TurnAttempt]int{}, Skipped: loaded.skipped}
+	result := EventsResult{Chunks: map[TurnAttempt]int{}, ChunksRevokedAt: map[TurnAttempt]time.Time{}, Skipped: loaded.skipped}
 	for _, record := range records {
 		if string(record.Key) != runID {
 			continue
 		}
-		envelope, err := wire.DecodeEnvelope(record.Value)
-		if err != nil {
-			result.Skipped++
-			continue
-		}
-		receiver, ok := receivers[envelope.Signer]
-		if !ok {
-			result.Skipped++
-			continue
-		}
-		verified, err := wire.Verify(envelope, receiver.enrolled.SigningPub, wire.SignerReceiver)
+		verified, receiver, revokedAt, err := verifyHistory(record, receivers, revoked)
 		if err != nil {
 			result.Skipped++
 			continue
@@ -811,7 +816,7 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 			result.Skipped++
 			continue
 		}
-		result.Statuses = append(result.Statuses, *status)
+		result.Statuses = append(result.Statuses, EventStatus{StatusRecord: *status, RevokedAt: revokedAt})
 	}
 	controls, err := client.readBounded(ctx, wire.TopicControl)
 	if err != nil {
@@ -835,23 +840,17 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 		if string(record.Key) != runID {
 			continue
 		}
-		envelope, err := wire.DecodeEnvelope(record.Value)
-		if err != nil {
-			result.Skipped++
-			continue
-		}
-		receiver, ok := receivers[envelope.Signer]
-		if !ok {
-			result.Skipped++
-			continue
-		}
-		verified, err := wire.Verify(envelope, receiver.enrolled.SigningPub, wire.SignerReceiver)
+		verified, _, revokedAt, err := verifyHistory(record, receivers, revoked)
 		update, ok := verified.(*wire.ArtifactUpdateRecord)
 		if err != nil || !ok || update.ArtifactUpdate.TaskID != runID {
 			result.Skipped++
 			continue
 		}
-		result.Chunks[TurnAttempt{Turn: update.Wherry.Turn, Attempt: update.Wherry.Attempt}]++
+		position := TurnAttempt{Turn: update.Wherry.Turn, Attempt: update.Wherry.Attempt}
+		result.Chunks[position]++
+		if !revokedAt.IsZero() {
+			result.ChunksRevokedAt[position] = revokedAt
+		}
 	}
 	return result, nil
 }
@@ -911,6 +910,7 @@ func (client *Client) loadState(ctx context.Context) (*loadedState, error) {
 		state:    trust.NewState(client.userKey.Public().(ed25519.PublicKey)),
 		requests: make(map[string]requestRecord), approvals: make(map[string]approvalRecord),
 		approvedRequests: make(map[string]int64), secretVersions: make(map[secretKey]wire.SecretVersion),
+		revocations: make(map[string][]revocationRecord),
 	}
 	for _, record := range records {
 		verified, err := loaded.state.Apply(record.Value)
@@ -931,6 +931,10 @@ func (client *Client) loadState(ctx context.Context) (*loadedState, error) {
 			if payload.Version > loaded.secretVersions[key].Version {
 				loaded.secretVersions[key] = *payload
 			}
+		case *wire.Revocation:
+			loaded.revocations[payload.ReceiverID] = append(loaded.revocations[payload.ReceiverID], revocationRecord{
+				floor: payload.FloorGeneration, timestampType: record.Attrs.TimestampType(), timestamp: record.Timestamp,
+			})
 		}
 	}
 	now := time.Now()
@@ -974,6 +978,73 @@ func (loaded *loadedState) receiverSigners(now time.Time) map[string]receiverIde
 		receivers[wire.Fingerprint(enrolled.SigningPub)] = receiverIdentity{id: id, enrolled: enrolled}
 	}
 	return receivers
+}
+
+// revokedSigners returns the revoked receivers with a broker revocation time, by signer fingerprint.
+func (loaded *loadedState) revokedSigners() map[string]revokedSigner {
+	signers := make(map[string]revokedSigner)
+	for id, approval := range loaded.approvals {
+		if approval.generation > loaded.state.Floor(id) {
+			continue
+		}
+		revokedAt, ok := revocationTime(loaded.revocations[id], approval.generation)
+		if !ok {
+			continue
+		}
+		head, _, _ := loaded.state.Approval(id)
+		request, ok := loaded.requests[head.RequestHash]
+		if !ok {
+			continue
+		}
+		signingPub := ed25519.PublicKey(request.request.SigningPub)
+		signers[wire.Fingerprint(signingPub)] = revokedSigner{
+			identity:  receiverIdentity{id: id, enrolled: trust.Enrolled{SigningPub: signingPub, Pool: head.Pool, Generation: head.Generation}},
+			revokedAt: revokedAt,
+		}
+	}
+	return signers
+}
+
+// revocationTime returns the broker append time of the first revocation, in log order, whose floor covers generation.
+// It reports false when that record's timestamp is the producer's.
+func revocationTime(revocations []revocationRecord, generation int64) (time.Time, bool) {
+	for _, revocation := range revocations {
+		if revocation.floor >= generation {
+			return revocation.timestamp, revocation.timestampType == logAppendTime
+		}
+	}
+	return time.Time{}, false
+}
+
+// logAppendTime is the Kafka record timestamp type set by the broker on append.
+const logAppendTime = 1
+
+// appendedBefore reports whether the broker appended a record strictly before revokedAt.
+func appendedBefore(timestampType int8, timestamp, revokedAt time.Time) bool {
+	return timestampType == logAppendTime && timestamp.Before(revokedAt)
+}
+
+// verifyHistory verifies a receiver-signed record read as history. Its signer is an enrolled receiver, or a revoked
+// one whose record the broker appended before the revocation; revokedAt is zero for an enrolled signer.
+func verifyHistory(record *kgo.Record, receivers map[string]receiverIdentity, revoked map[string]revokedSigner) (any, receiverIdentity, time.Time, error) {
+	envelope, err := wire.DecodeEnvelope(record.Value)
+	if err != nil {
+		return nil, receiverIdentity{}, time.Time{}, err
+	}
+	receiver, ok := receivers[envelope.Signer]
+	var revokedAt time.Time
+	if !ok {
+		signer, ok := revoked[envelope.Signer]
+		if !ok || !appendedBefore(record.Attrs.TimestampType(), record.Timestamp, signer.revokedAt) {
+			return nil, receiverIdentity{}, time.Time{}, errors.New("record signer is not trusted")
+		}
+		receiver, revokedAt = signer.identity, signer.revokedAt
+	}
+	verified, err := wire.Verify(envelope, receiver.enrolled.SigningPub, wire.SignerReceiver)
+	if err != nil {
+		return nil, receiverIdentity{}, time.Time{}, err
+	}
+	return verified, receiver, revokedAt, nil
 }
 
 func spare(capability *wire.Capability) int64 {

@@ -27,11 +27,11 @@ type topicDeclaration struct {
 
 var topicDeclarations = []topicDeclaration{
 	{name: TopicTask, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},
-	{name: TopicEvent, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},
+	{name: TopicEvent, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1", "message.timestamp.type": "LogAppendTime"}},
 	{name: TopicControl, configs: map[string]string{"cleanup.policy": "compact"}},
-	{name: TopicTranscript, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "2592000000"}},
+	{name: TopicTranscript, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "2592000000", "message.timestamp.type": "LogAppendTime"}},
 	{name: TopicCapability, configs: map[string]string{"cleanup.policy": "compact"}},
-	{name: TopicState, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},
+	{name: TopicState, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1", "message.timestamp.type": "LogAppendTime"}},
 	{name: TopicSecret, configs: map[string]string{
 		"cleanup.policy":        "compact",
 		"segment.ms":            "3600000",

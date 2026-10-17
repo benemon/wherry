@@ -165,3 +165,31 @@ is Ed25519 over `wherry/v1/<type>`, a zero byte, and those payload bytes,
 where `<type>` is the record type named above. A reader decodes `payload` to
 get the record. Verifiers check the signature over the bytes as transmitted
 before parsing them.
+
+## Topic timestamps
+
+The topics `receivers.state`, `tasks.events` and `transcripts` and each
+reply topic set `message.timestamp.type` to `LogAppendTime`. The broker
+replaces the producer's timestamp on these topics with the time it appended
+the record.
+
+## Revoked receivers
+
+Clients and receivers do not trust a revoked receiver for new work: routing,
+claims, continuations and the runs waiting for a credential. When a client
+reads a run's history with `await` or `events`, it accepts a `status`,
+`artifact_update` or `task` record signed by a revoked receiver when all of
+these hold:
+
+- The record's timestamp type is `LogAppendTime`.
+- The first `revocation` record on `receivers.state` whose
+  `floor_generation` covers the receiver's revoked generation has timestamp
+  type `LogAppendTime`. Its timestamp is the revocation time.
+- The record's timestamp is earlier than the revocation time. A record
+  appended in the same millisecond as the revocation is not accepted.
+- The record passes the checks that apply to a record from an enrolled
+  receiver.
+
+The `wherry` CLI marks such a record with `signer=revoked-before=<time>`,
+the revocation time in RFC 3339. Records that a compromised key signed
+before the revocation also pass these checks.

@@ -37,3 +37,8 @@ wherry sends a task to other compute and returns the result to the caller.
 - Task, event, transcript and reply records are A2A v1.0 objects;
   [the wherry A2A extension](docs/a2a-extension-v1.md) defines their added
   fields.
+
+## Tests
+
+Tests that need a Kafka broker run when `WHERRY_KAFKA_TEST_BROKER` is set to
+a plaintext broker address, such as `127.0.0.1:9092`, and skip otherwise.

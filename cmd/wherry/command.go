@@ -414,6 +414,9 @@ func runAwait(ctx context.Context, client *busclient.Client, args []string, stdo
 			fmt.Fprintln(stdout, partText(part))
 		}
 	}
+	if !result.RevokedAt.IsZero() {
+		fmt.Fprintln(stderr, strings.TrimSpace(revokedSigner(result.RevokedAt)))
+	}
 	if result.Status.State == wire.TaskStateAuthRequired {
 		fmt.Fprintf(stderr, "continue with: wherry continue %s\n", runID)
 	}
@@ -422,6 +425,14 @@ func runAwait(ctx context.Context, client *busclient.Client, args []string, stdo
 		return fmt.Errorf("run ended in %s", result.Status.State)
 	}
 	return nil
+}
+
+// revokedSigner marks a record signed by a receiver revoked at revokedAt, or returns "" when revokedAt is zero.
+func revokedSigner(revokedAt time.Time) string {
+	if revokedAt.IsZero() {
+		return ""
+	}
+	return " signer=revoked-before=" + revokedAt.UTC().Format(time.RFC3339Nano)
 }
 
 func partText(part wire.Part) string {
@@ -455,7 +466,7 @@ func runEvents(ctx context.Context, client *busclient.Client, args []string, std
 			}
 			fmt.Fprintf(stdout, " message=%q", strings.Join(texts, " "))
 		}
-		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, revokedSigner(record.RevokedAt))
 	}
 	if result.Cancelled {
 		fmt.Fprintf(stdout, "kind=cancel state=%s signer=user\n", wire.TaskStateCanceled)
@@ -468,7 +479,7 @@ func runEvents(ctx context.Context, client *busclient.Client, args []string, std
 		return positions[i].Attempt < positions[j].Attempt
 	})
 	for _, position := range positions {
-		fmt.Fprintf(stdout, "turn=%d attempt=%d transcript_chunks=%d\n", position.Turn, position.Attempt, result.Chunks[position])
+		fmt.Fprintf(stdout, "turn=%d attempt=%d transcript_chunks=%d%s\n", position.Turn, position.Attempt, result.Chunks[position], revokedSigner(result.ChunksRevokedAt[position]))
 	}
 	warnSkipped(stderr, result.Skipped)
 	return nil
