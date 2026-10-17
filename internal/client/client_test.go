@@ -301,7 +301,7 @@ func TestClientEndToEnd(t *testing.T) {
 	if err := os.WriteFile(secretPath, []byte("super secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	secret, err := fixture.client.PutSecret(fixture.ctx, "token", "receiver-a", secretPath)
+	secret, err := fixture.client.PutSecret(fixture.ctx, "token", "receiver-a", secretPath, 30*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -817,7 +817,7 @@ func TestSecretPutListsWaitingTasks(t *testing.T) {
 	if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err := fixture.client.PutSecret(fixture.ctx, "token", "receiver-a", path)
+	result, err := fixture.client.PutSecret(fixture.ctx, "token", "receiver-a", path, 30*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1028,5 +1028,97 @@ func TestClientDistrustsRevokedReceiverRecords(t *testing.T) {
 	}
 	if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 200*time.Millisecond); err == nil {
 		t.Fatal("task signed by a revoked receiver was accepted")
+	}
+}
+
+func (fixture clientFixture) requestRenewal(t *testing.T, generation int64) {
+	t.Helper()
+	request := &wire.RenewRequest{ReceiverID: "receiver-a", Generation: generation, AtMS: time.Now().UnixMilli()}
+	fixture.produce(t, wire.TopicState, "receiver-a", signed(t, wire.TypeRenewRequest, request, fixture.receiverKey))
+}
+
+func TestAutoRenewalByClient(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	before, err := fixture.client.loadState(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	founding, err := before.state.Receiver("receiver-a", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.requestRenewal(t, 1)
+	end := fixture.topicEnd(t, wire.TopicState)
+	if _, _, err := fixture.client.Receivers(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if after := fixture.topicEnd(t, wire.TopicState); after != end+1 {
+		t.Fatalf("state records %d after answering one renew request, want %d", after, end+1)
+	}
+	loaded, err := fixture.client.loadState(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixture.topicEnd(t, wire.TopicState) != end+1 {
+		t.Fatal("an answered renew request was renewed again")
+	}
+	renewed, err := loaded.state.Receiver("receiver-a", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _, _ := loaded.state.Approval("receiver-a")
+	if renewed.Generation != 1 || renewed.ApprovalHash != founding.ApprovalHash || current.PrevStateHash != founding.ApprovalHash {
+		t.Fatalf("renewal generation %d hash %s prev %s", renewed.Generation, renewed.ApprovalHash, current.PrevStateHash)
+	}
+	if loaded.skipped != 0 {
+		t.Fatalf("skipped %d records", loaded.skipped)
+	}
+
+	t.Run("revoked", func(t *testing.T) {
+		if _, err := fixture.client.Revoke(fixture.ctx, "receiver-a"); err != nil {
+			t.Fatal(err)
+		}
+		fixture.requestRenewal(t, 1)
+		end := fixture.topicEnd(t, wire.TopicState)
+		if _, _, err := fixture.client.Enrolments(fixture.ctx); err != nil {
+			t.Fatal(err)
+		}
+		if after := fixture.topicEnd(t, wire.TopicState); after != end {
+			t.Fatal("client renewed a revoked receiver")
+		}
+	})
+}
+
+func TestManualRenewalNotAutomatic(t *testing.T) {
+	fixture := newClientFixture(t, false)
+	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "manual", 30); err != nil {
+		t.Fatal(err)
+	}
+	fixture.requestRenewal(t, 1)
+	end := fixture.topicEnd(t, wire.TopicState)
+	enrolments, _, err := fixture.client.Enrolments(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixture.topicEnd(t, wire.TopicState) != end {
+		t.Fatal("client answered a manual renew request")
+	}
+	if len(enrolments) != 1 || !enrolments[0].RenewalRequested {
+		t.Fatalf("enrolments %#v, want the renew request listed", enrolments)
+	}
+}
+
+func TestAutoRenewalLeavesLongerApproval(t *testing.T) {
+	fixture := newClientFixture(t, false)
+	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 120); err != nil {
+		t.Fatal(err)
+	}
+	fixture.requestRenewal(t, 1)
+	end := fixture.topicEnd(t, wire.TopicState)
+	if _, _, err := fixture.client.Receivers(fixture.ctx); err != nil {
+		t.Fatalf("a renew request that cannot extend the approval broke the client: %v", err)
+	}
+	if fixture.topicEnd(t, wire.TopicState) != end {
+		t.Fatal("client published a renewal that does not extend the approval")
 	}
 }

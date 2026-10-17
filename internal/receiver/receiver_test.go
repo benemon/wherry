@@ -269,7 +269,7 @@ func runToTask(t *testing.T, f fixture) *wire.Task {
 	if err := os.WriteFile(tokenFile, []byte(testToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.PutSecret(f.ctx, credentialName, "receiver-nomad", tokenFile); err != nil {
+	if _, err := client.PutSecret(f.ctx, credentialName, "receiver-nomad", tokenFile, 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	for {
@@ -314,9 +314,9 @@ func TestEndToEndWithFakeAdapter(t *testing.T) {
 	}
 }
 
-// interruptThenContinue submits first with no credential, delivers the credential,
+// interruptThenContinue submits first with no credential, calls between if set, delivers the credential,
 // continues with second and returns the completed continuation.
-func interruptThenContinue(t *testing.T, f fixture, first, second string) busclient.AwaitResult {
+func interruptThenContinue(t *testing.T, f fixture, first, second string, between func(*busclient.Client)) busclient.AwaitResult {
 	t.Helper()
 	runCtx, stop := context.WithCancel(f.ctx)
 	done := make(chan error, 1)
@@ -365,12 +365,15 @@ func interruptThenContinue(t *testing.T, f fixture, first, second string) buscli
 	if tasks := topicCount(t, f, "replies.test"); tasks != 0 {
 		t.Fatalf("task records after interruption=%d, want none", tasks)
 	}
+	if between != nil {
+		between(client)
+	}
 
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte(testToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	secret, err := client.PutSecret(f.ctx, credentialName, f.receiver.config.ReceiverID, tokenFile)
+	secret, err := client.PutSecret(f.ctx, credentialName, f.receiver.config.ReceiverID, tokenFile, 30*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +409,7 @@ func interruptThenContinue(t *testing.T, f fixture, first, second string) buscli
 }
 
 func TestContinuationResumesInterruptedTask(t *testing.T) {
-	completed := interruptThenContinue(t, newFixture(t, resultStream), "first", "second")
+	completed := interruptThenContinue(t, newFixture(t, resultStream), "first", "second", nil)
 	if completed.Status.State != wire.TaskStateCompleted || completed.Turn != 2 || completed.Task == nil ||
 		len(completed.Task.History) != 2 || completed.Task.History[0].Parts[0].Text != "first" || completed.Task.History[1].Parts[0].Text != "second" {
 		t.Fatalf("completed continuation %#v", completed)
@@ -415,7 +418,7 @@ func TestContinuationResumesInterruptedTask(t *testing.T) {
 
 func TestContinuationPromptIncludesAllTurns(t *testing.T) {
 	f := newFixture(t, resultStream)
-	completed := interruptThenContinue(t, f, "write the report", "continue")
+	completed := interruptThenContinue(t, f, "write the report", "continue", nil)
 	if completed.Status.State != wire.TaskStateCompleted || completed.Turn != 2 {
 		t.Fatalf("completed continuation %#v", completed)
 	}
@@ -671,7 +674,7 @@ func TestSecretKeyCrossWiringRejected(t *testing.T) {
 	if err := os.WriteFile(path, []byte("other-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.PutSecret(f.ctx, "other", f.receiver.config.ReceiverID, path); err != nil {
+	if _, err := client.PutSecret(f.ctx, "other", f.receiver.config.ReceiverID, path, 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	records, err := readBounded(f.ctx, f.receiver.kafkaOpt, wire.TopicSecret)
@@ -1681,7 +1684,7 @@ func newMultiFixture(t *testing.T) multiFixture {
 	if err := os.WriteFile(tokenFile, []byte(testToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.PutSecret(f.ctx, "cred-lab", f.receiver.config.ReceiverID, tokenFile); err != nil {
+	if _, err := client.PutSecret(f.ctx, "cred-lab", f.receiver.config.ReceiverID, tokenFile, 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.receiver.refresh(f.ctx); err != nil {
@@ -2117,5 +2120,102 @@ func TestExpiryDoesNotStopInFlightRuns(t *testing.T) {
 	}
 	if state, reason := terminalReason(t, f, "run-expired"); state != wire.TaskStateFailed || reason != "agent ended without a result" {
 		t.Fatalf("terminal %s %q", state, reason)
+	}
+}
+
+// renewRequests returns the receiver-signed renew requests on the state topic.
+func renewRequests(t *testing.T, f fixture) []*wire.RenewRequest {
+	t.Helper()
+	records, err := readBounded(f.ctx, f.receiver.kafkaOpt, wire.TopicState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests []*wire.RenewRequest
+	for _, record := range records {
+		envelope, err := wire.DecodeEnvelope(record.Value)
+		if err != nil || envelope.Type != wire.TypeRenewRequest {
+			continue
+		}
+		verified, err := wire.Verify(envelope, f.receiver.signing.Public().(ed25519.PublicKey), wire.SignerReceiver)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, verified.(*wire.RenewRequest))
+	}
+	return requests
+}
+
+func TestReceiverRequestsRenewalBeforeExpiry(t *testing.T) {
+	f := newFixture(t, resultStream)
+	r := f.receiver
+	request, err := trust.NewEnrolRequest(r.config.ReceiverID, r.signing, r.sealing, map[string]string{}, []wire.DetectedAdapter{{Name: "nomad", Platform: "nomad", Offers: []wire.Offer{}}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := trust.NewState(r.userPub).Apply(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, err := trust.Approve(request, verified.(*wire.EnrolRequest), f.userKey, map[string]string{}, "nomad", nomadGrants(), []wire.Requirement{}, "auto", 1, "", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kafka.ProduceSync(f.ctx,
+		&kgo.Record{Topic: wire.TopicState, Key: []byte(r.config.ReceiverID), Value: request},
+		// Approved 2h ago for 3h: a third of the lifetime is left.
+		&kgo.Record{Topic: wire.TopicState, Key: []byte(r.config.ReceiverID), Value: approval, Timestamp: time.Now().Add(-2*time.Hour - time.Minute)},
+	).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := r.refresh(f.ctx); err != nil || r.current() == nil {
+			t.Fatalf("refresh: %v", err)
+		}
+	}
+	requests := renewRequests(t, f)
+	if len(requests) != 1 || requests[0].ReceiverID != r.config.ReceiverID || requests[0].Generation != 1 {
+		t.Fatalf("renew requests %#v, want one for generation 1 within the hour", requests)
+	}
+	if !strings.Contains(f.logs.String(), "renewal requested: generation=1") {
+		t.Fatalf("logs:\n%s", f.logs.String())
+	}
+	if _, _, err := busclient.New(f.kafka, f.userKey, "replies.test").Receivers(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if enrolled := r.current(); enrolled == nil || enrolled.Generation != 1 || enrolled.ApprovalHash != trust.EnvelopeHash(approval) {
+		t.Fatalf("renewed enrolment %#v", enrolled)
+	}
+	if requests := renewRequests(t, f); len(requests) != 1 {
+		t.Fatalf("%d renew requests after renewal, want no new one", len(requests))
+	}
+}
+
+func TestContinuationAcrossRenewal(t *testing.T) {
+	f := newFixture(t, resultStream)
+	completed := interruptThenContinue(t, f, "first", "second", func(client *busclient.Client) {
+		r := f.receiver
+		request, err := sign(wire.TypeRenewRequest, &wire.RenewRequest{ReceiverID: r.config.ReceiverID, Generation: 1, AtMS: time.Now().UnixMilli()}, r.signing)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(r.config.ReceiverID), Value: request}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+		before := topicCount(t, f, wire.TopicState)
+		if _, _, err := client.Receivers(f.ctx); err != nil {
+			t.Fatal(err)
+		}
+		if topicCount(t, f, wire.TopicState) != before+1 {
+			t.Fatal("renew request was not answered")
+		}
+		if err := r.refresh(f.ctx); err != nil || r.current() == nil || r.current().Generation != 1 {
+			t.Fatalf("refresh after renewal: %v", err)
+		}
+	})
+	if completed.Status.State != wire.TaskStateCompleted || completed.Turn != 2 {
+		t.Fatalf("continuation across renewal %#v", completed)
 	}
 }

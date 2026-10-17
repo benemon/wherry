@@ -8,6 +8,8 @@ import (
 	"crypto/rand"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -163,7 +165,7 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	wantKeys := []string{"adapters", "capacity", "floor_generation", "generation", "heartbeat_age", "in_flight", "labels", "offers", "pool", "receiver_id", "revoked", "selector", "status"}
+	wantKeys := []string{"adapters", "capacity", "floor_generation", "generation", "heartbeat_age", "in_flight", "labels", "offers", "pool", "receiver_id", "revoked", "secrets", "selector", "status"}
 	if !reflect.DeepEqual(keys, wantKeys) {
 		t.Fatalf("got JSON fields %v, want %v", keys, wantKeys)
 	}
@@ -446,5 +448,128 @@ func TestReceiversShowsRevoked(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
+func TestManualRenewalCLI(t *testing.T) {
+	ctx, kafka, client, _, receiverKey := enrolledReceiver(t)
+	enrolments, _, err := client.Enrolments(ctx)
+	if err != nil || len(enrolments) != 1 {
+		t.Fatalf("enrolments %#v, err %v", enrolments, err)
+	}
+	grantsPath := filepath.Join(t.TempDir(), "grants.json")
+	if err := os.WriteFile(grantsPath, []byte(`[{"name":"lab","platform":"nomad","allowed":{"runtime":["exec"]},"defaults":{}}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runEnrol(ctx, client, []string{"approve", enrolments[0].RequestHash, "--pool", "default", "--labels", "", "--grants", grantsPath, "--selector", "region=eu", "--renewal", "manual"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := wire.MarshalPayload(wire.TypeRenewRequest, &wire.RenewRequest{ReceiverID: "receiver-a", Generation: 2, AtMS: time.Now().UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := wire.MarshalEnvelope(wire.Sign(wire.TypeRenewRequest, payload, receiverKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte("receiver-a"), Value: request}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	list := func() string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if err := runEnrol(ctx, client, []string{"list"}, &stdout, &stderr); err != nil {
+			t.Fatal(err)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("unexpected stderr: %s", stderr.String())
+		}
+		return strings.SplitN(stdout.String(), "\n", 2)[0]
+	}
+	want := "receiver=receiver-a request=" + enrolments[0].RequestHash + " labels= approved=true generation=2"
+	if got := list(); got != want+" renewal=requested" {
+		t.Fatalf("got %q, want the renew request listed", got)
+	}
+	stdout.Reset()
+	if err := runEnrol(ctx, client, []string{"renew", "receiver-a"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "receiver=receiver-a generation=2 renewed=true\n" || stderr.Len() != 0 {
+		t.Fatalf("stdout %q stderr %q", stdout.String(), stderr.String())
+	}
+	if got := list(); got != want {
+		t.Fatalf("got %q after renewal, want %q", got, want)
+	}
+	if err := runEnrol(ctx, client, []string{"revoke", "receiver-a"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if err := runEnrol(ctx, client, []string{"renew", "receiver-a"}, &stdout, &stderr); err == nil || err.Error() != "receiver is revoked" {
+		t.Fatalf("renew revoked receiver: got %v", err)
+	}
+}
+
+// putSecret seals a fixed value to receiver-a with the given extra secret put flags.
+func putSecret(t *testing.T, ctx context.Context, client *busclient.Client, name string, flags ...string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runSecret(ctx, client, append([]string{"put", name, "--to", "receiver-a", "--from-file", path}, flags...), &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSecretPutExpires(t *testing.T) {
+	ctx, _, client, _, _ := enrolledReceiver(t)
+	before := time.Now()
+	putSecret(t, ctx, client, "short", "--expires", "48h")
+	putSecret(t, ctx, client, "long")
+	after := time.Now()
+	receivers, _, err := client.Receivers(ctx)
+	if err != nil || len(receivers) != 1 || len(receivers[0].Secrets) != 2 {
+		t.Fatalf("receivers %#v, err %v", receivers, err)
+	}
+	for _, seal := range receivers[0].Secrets {
+		lifetime := map[string]time.Duration{"short": 48 * time.Hour, "long": 30 * 24 * time.Hour}[seal.Name]
+		if seal.ExpMS < before.Add(lifetime).UnixMilli() || seal.ExpMS > after.Add(lifetime).UnixMilli() {
+			t.Fatalf("secret %s expires at %s, want %s after sealing", seal.Name, time.UnixMilli(seal.ExpMS), lifetime)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runSecret(ctx, client, []string{"put", "zero", "--to", "receiver-a", "--from-file", "unused", "--expires", "0s"}, &stdout, &stderr); err == nil {
+		t.Fatal("zero expiry accepted")
+	}
+}
+
+func TestReceiversWarnsSealExpiry(t *testing.T) {
+	ctx, _, client, _, _ := enrolledReceiver(t)
+	putSecret(t, ctx, client, "short", "--expires", "72h")
+	putSecret(t, ctx, client, "long")
+	var stdout, stderr bytes.Buffer
+	if err := runReceivers(ctx, client, nil, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"long", "short"} {
+		if !strings.Contains(stdout.String(), "\n  secret="+name+" version=1 expires=") {
+			t.Fatalf("secret %s not listed:\n%s", name, stdout.String())
+		}
+	}
+	if want := "secret short on receiver receiver-a expires in 3d\n"; stderr.String() != want {
+		t.Fatalf("stderr %q, want %q", stderr.String(), want)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runReceivers(ctx, client, []string{"--json"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var rows []busclient.Receiver
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || len(rows[0].Secrets) != 2 || rows[0].Secrets[1].Name != "short" || rows[0].Secrets[1].ExpMS <= time.Now().UnixMilli() {
+		t.Fatalf("JSON secrets %#v", rows)
 	}
 }

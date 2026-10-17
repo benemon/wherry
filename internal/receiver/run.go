@@ -37,6 +37,9 @@ var (
 	enrolPollInterval  = 10 * time.Second
 )
 
+// renewRequestInterval is the least time between renew requests for one generation.
+const renewRequestInterval = time.Hour
+
 // claimLoop holds one slot: a dedicated share client per claimed record,
 // because renews do not survive a poll and held records are tied to the connection.
 func (r *Receiver) claimLoop(ctx context.Context) {

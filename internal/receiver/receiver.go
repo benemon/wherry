@@ -296,13 +296,18 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	}
 	state := trust.NewState(r.userPub)
 	var approved []string
+	issued := make(map[string]time.Time)
 	for _, record := range records {
 		verified, _ := state.Apply(record.Value) // unverifiable records change nothing
 		if approval, ok := verified.(*wire.EnrolApproval); ok {
 			approved = append(approved, approval.ReceiverID)
+			issued[trust.EnvelopeHash(record.Value)] = record.Timestamp
 		}
 	}
 	now := time.Now()
+	if err := r.requestRenewal(ctx, state, issued, now); err != nil {
+		r.logger.Printf("renew request: %v", err)
+	}
 	enrolled, err := state.Receiver(r.config.ReceiverID, now)
 	if err != nil || !enrolled.SigningPub.Equal(r.signing.Public()) {
 		revoked := errors.Is(err, trust.ErrRevoked)
@@ -355,6 +360,37 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	if rejected {
 		return errors.New("credential rejected") // never wrap: the cause may describe secret material
 	}
+	return nil
+}
+
+// requestRenewal publishes a renew request for the current generation once less than a third of
+// the approval's lifetime is left, at most once per renewRequestInterval; expired generations ask too.
+// The lifetime starts at the approval record's broker timestamp, which is unsigned and only schedules the request.
+func (r *Receiver) requestRenewal(ctx context.Context, state *trust.State, issued map[string]time.Time, now time.Time) error {
+	id := r.config.ReceiverID
+	current, hash, ok := state.Approval(id)
+	if !ok || current.Generation <= state.Floor(id) {
+		return nil
+	}
+	exp := time.UnixMilli(current.ExpMS)
+	if exp.Sub(now) >= exp.Sub(issued[hash])/3 {
+		return nil
+	}
+	if pending, ok := state.RenewRequest(id); ok && now.Sub(time.UnixMilli(pending.AtMS)) < renewRequestInterval {
+		return nil
+	}
+	request, err := sign(wire.TypeRenewRequest, &wire.RenewRequest{ReceiverID: id, Generation: current.Generation, AtMS: now.UnixMilli()}, r.signing)
+	if err != nil {
+		return err
+	}
+	// Applying first checks the request is signed by the enrolled key; a re-keyed receiver does not ask.
+	if _, err := state.Apply(request); err != nil {
+		return nil
+	}
+	if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(id), Value: request}).FirstErr(); err != nil {
+		return err
+	}
+	r.logger.Printf("renewal requested: generation=%d expires=%s", current.Generation, exp.UTC().Format(time.RFC3339))
 	return nil
 }
 

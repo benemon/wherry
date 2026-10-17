@@ -769,3 +769,186 @@ func TestStateRejectsRevocationNotSignedByUser(t *testing.T) {
 		t.Fatalf("unverified revocation revoked the receiver: %v", err)
 	}
 }
+
+func (fixture trustFixture) renewal(t *testing.T, mutate func(*wire.EnrolApproval)) []byte {
+	t.Helper()
+	current, hash, ok := fixture.state.Approval("receiver-a")
+	if !ok {
+		t.Fatal("receiver-a has no approval")
+	}
+	current.PrevStateHash, current.ExpMS = hash, current.ExpMS+int64(time.Hour/time.Millisecond)
+	if mutate != nil {
+		mutate(&current)
+	}
+	return mustSigned(t, wire.TypeEnrolApproval, &current, fixture.userPrivateKey)
+}
+
+func TestRenewalExtendsSameGeneration(t *testing.T) {
+	fixture := newTrustFixture(t)
+	if _, err := fixture.state.Apply(mustSigned(t, wire.TypeRenewRequest, &wire.RenewRequest{ReceiverID: "receiver-a", Generation: 1, AtMS: testNow.UnixMilli()}, fixture.receiverKey)); err != nil {
+		t.Fatal(err)
+	}
+	if _, pending := fixture.state.RenewRequest("receiver-a"); !pending {
+		t.Fatal("verified renew request is not pending")
+	}
+	current, hash, _ := fixture.state.Approval("receiver-a")
+	renewal, err := Renew(current, hash, fixture.userPrivateKey, testNow.Add(3*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.state.Apply(renewal); err != nil {
+		t.Fatal(err)
+	}
+	if _, pending := fixture.state.RenewRequest("receiver-a"); pending {
+		t.Fatal("renew request still pending after renewal")
+	}
+	enrolled, err := fixture.state.Receiver("receiver-a", testNow.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("renewed enrolment: %v", err)
+	}
+	if enrolled.Generation != 1 || enrolled.ApprovalHash != EnvelopeHash(fixture.approval) {
+		t.Fatalf("renewal changed generation %d or approval hash %s", enrolled.Generation, enrolled.ApprovalHash)
+	}
+	if _, head, _ := fixture.state.Approval("receiver-a"); head != EnvelopeHash(renewal) {
+		t.Fatal("renewal is not the head of the chain")
+	}
+	if _, err := fixture.state.Apply(fixture.renewal(t, nil)); err != nil {
+		t.Fatalf("renewal of a renewal: %v", err)
+	}
+	if _, err := fixture.state.Receiver("receiver-a", testNow.Add(3*time.Hour)); err != nil {
+		t.Fatalf("second renewal: %v", err)
+	}
+	// The next generation chains to the latest renewal.
+	_, head, _ := fixture.state.Approval("receiver-a")
+	if _, err := fixture.state.Apply(fixture.approve(t, 2, head)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRenewRequestRequiresEnrolledKey(t *testing.T) {
+	fixture := newTrustFixture(t)
+	_, otherKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, request := range map[string][]byte{
+		"foreign key":    mustSigned(t, wire.TypeRenewRequest, &wire.RenewRequest{ReceiverID: "receiver-a", Generation: 1, AtMS: testNow.UnixMilli()}, otherKey),
+		"old generation": mustSigned(t, wire.TypeRenewRequest, &wire.RenewRequest{ReceiverID: "receiver-a", Generation: 0, AtMS: testNow.UnixMilli()}, fixture.receiverKey),
+	} {
+		if _, err := fixture.state.Apply(request); err == nil {
+			t.Fatalf("%s renew request was accepted", name)
+		}
+	}
+	if _, pending := fixture.state.RenewRequest("receiver-a"); pending {
+		t.Fatal("rejected renew request is pending")
+	}
+}
+
+func TestRenewalRejectsChangedTerms(t *testing.T) {
+	for name, mutate := range map[string]func(*wire.EnrolApproval){
+		"request hash": func(approval *wire.EnrolApproval) { approval.RequestHash = strings.Repeat("b", 64) },
+		"labels":       func(approval *wire.EnrolApproval) { approval.Labels = map[string]string{"lab/site": "away"} },
+		"pool":         func(approval *wire.EnrolApproval) { approval.Pool = "other" },
+		"grants": func(approval *wire.EnrolApproval) {
+			approval.Adapters = []wire.AdapterGrant{{Name: "lab", Platform: "nomad", Allowed: map[string][]string{"runtime": {"exec"}}, Defaults: map[string]string{}}}
+		},
+		"selector":    func(approval *wire.EnrolApproval) { approval.Selector = []wire.Requirement{} },
+		"renewal":     func(approval *wire.EnrolApproval) { approval.Renewal = "manual" },
+		"earlier exp": func(approval *wire.EnrolApproval) { approval.ExpMS = testNow.Add(time.Minute).UnixMilli() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newTrustFixture(t)
+			if _, err := fixture.state.Apply(fixture.renewal(t, mutate)); err == nil {
+				t.Fatal("renewal with changed terms was accepted")
+			}
+			if _, err := fixture.state.Receiver("receiver-a", testNow.Add(90*time.Minute)); err == nil {
+				t.Fatal("rejected renewal extended the enrolment")
+			}
+			if _, head, _ := fixture.state.Approval("receiver-a"); head != EnvelopeHash(fixture.approval) {
+				t.Fatal("rejected renewal became the head")
+			}
+		})
+	}
+}
+
+func TestRenewalRejectsBrokenChain(t *testing.T) {
+	fixture := newTrustFixture(t)
+	stale := fixture.renewal(t, func(approval *wire.EnrolApproval) { approval.ExpMS += int64(10 * time.Hour / time.Millisecond) })
+	if _, err := fixture.state.Apply(fixture.renewal(t, func(approval *wire.EnrolApproval) { approval.ExpMS += 1 })); err != nil {
+		t.Fatal(err)
+	}
+	for name, renewal := range map[string][]byte{
+		"wrong hash":            fixture.renewal(t, func(approval *wire.EnrolApproval) { approval.PrevStateHash = strings.Repeat("c", 64) }),
+		"no previous hash":      fixture.renewal(t, func(approval *wire.EnrolApproval) { approval.PrevStateHash = "" }),
+		"chained to superseded": stale,
+		"founding replayed":     fixture.approval,
+	} {
+		if _, err := fixture.state.Apply(renewal); err == nil {
+			t.Fatalf("%s: renewal that does not chain was accepted", name)
+		}
+	}
+}
+
+func TestRenewalRejectedBelowFloor(t *testing.T) {
+	fixture := newTrustFixture(t)
+	if _, err := fixture.state.Apply(mustSigned(t, wire.TypeRenewRequest, &wire.RenewRequest{ReceiverID: "receiver-a", Generation: 1, AtMS: testNow.UnixMilli()}, fixture.receiverKey)); err != nil {
+		t.Fatal(err)
+	}
+	renewal := fixture.renewal(t, nil)
+	fixture.revoke(t, 1)
+	if _, pending := fixture.state.RenewRequest("receiver-a"); pending {
+		t.Fatal("revoked receiver's renew request is pending")
+	}
+	if _, err := fixture.state.Apply(renewal); err == nil {
+		t.Fatal("renewal of a revoked receiver was accepted")
+	}
+	if _, err := fixture.state.Receiver("receiver-a", testNow); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("got %v, want ErrRevoked", err)
+	}
+}
+
+func TestRenewalRevivesExpiredGeneration(t *testing.T) {
+	fixture := newTrustFixture(t)
+	later := testNow.Add(2 * time.Hour)
+	if _, err := fixture.state.Receiver("receiver-a", later); err == nil {
+		t.Fatal("enrolment not expired")
+	}
+	current, hash, _ := fixture.state.Approval("receiver-a")
+	renewal, err := Renew(current, hash, fixture.userPrivateKey, later.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.state.Apply(renewal); err != nil {
+		t.Fatal(err)
+	}
+	if enrolled, err := fixture.state.Receiver("receiver-a", later); err != nil || enrolled.Generation != 1 {
+		t.Fatalf("revived enrolment generation %d, err %v", enrolled.Generation, err)
+	}
+}
+
+func TestSealSurvivesRenewal(t *testing.T) {
+	fixture := newTrustFixture(t)
+	versionEnvelope, sealedEnvelope, err := Seal(fixture.enrolled, "receiver-a", "token", 1, []byte("secret"), testNow.Add(3*time.Hour), fixture.userPrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.state.Apply(versionEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	current, hash, _ := fixture.state.Approval("receiver-a")
+	renewal, err := Renew(current, hash, fixture.userPrivateKey, testNow.Add(4*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.state.Apply(renewal); err != nil {
+		t.Fatal(err)
+	}
+	// Past the founding approval's expiry, before the seal's own.
+	value, _, err := Open(sealedEnvelope, fixture.state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow.Add(2*time.Hour))
+	if err != nil || string(value) != "secret" {
+		t.Fatalf("seal from before the renewal: %v", err)
+	}
+	if _, _, err := Open(sealedEnvelope, fixture.state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow.Add(3*time.Hour)); err == nil {
+		t.Fatal("renewal extended the seal past its own expiry")
+	}
+}

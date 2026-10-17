@@ -15,7 +15,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 )
 
-// Enrolled is the current accepted enrolment for a receiver; ApprovalHash is the approval's envelope hash.
+// Enrolled is the current accepted enrolment for a receiver; ApprovalHash is the envelope hash of the generation's founding approval.
 type Enrolled struct {
 	SigningPub   ed25519.PublicKey
 	SealingPub   *ecdh.PublicKey
@@ -27,9 +27,11 @@ type Enrolled struct {
 	ApprovalHash string
 }
 
+// enrolled keeps the founding approval's hash, which seals bind; head is the latest accepted approval or renewal at that generation.
 type acceptedApproval struct {
 	enrolled Enrolled
-	expMS    int64
+	head     *wire.EnrolApproval
+	headHash string
 }
 
 type secretID struct {
@@ -46,6 +48,7 @@ type State struct {
 	requests        map[string]*wire.EnrolRequest
 	approvals       map[string]acceptedApproval
 	floors          map[string]int64
+	renewRequests   map[string]*wire.RenewRequest
 	secretVersions  map[secretID]map[int64]*wire.SecretVersion
 	maximumVersions map[secretID]int64
 }
@@ -57,6 +60,7 @@ func NewState(userPublicKey ed25519.PublicKey) *State {
 		requests:        make(map[string]*wire.EnrolRequest),
 		approvals:       make(map[string]acceptedApproval),
 		floors:          make(map[string]int64),
+		renewRequests:   make(map[string]*wire.RenewRequest),
 		secretVersions:  make(map[secretID]map[int64]*wire.SecretVersion),
 		maximumVersions: make(map[secretID]int64),
 	}
@@ -113,6 +117,12 @@ func Approve(requestEnvelopeBytes []byte, request *wire.EnrolRequest, userKey ed
 	return marshalSigned(wire.TypeEnrolApproval, approval, userKey)
 }
 
+// Renew signs a renewal of the current approval: identical terms, chained to its hash, expiring at exp.
+func Renew(current wire.EnrolApproval, currentHash string, userKey ed25519.PrivateKey, exp time.Time) ([]byte, error) {
+	current.PrevStateHash, current.ExpMS = currentHash, exp.UnixMilli()
+	return marshalSigned(wire.TypeEnrolApproval, &current, userKey)
+}
+
 // NewRevocation signs a revocation floor for a receiver with the user key.
 func NewRevocation(receiverID string, floor int64, userKey ed25519.PrivateKey, now time.Time) ([]byte, error) {
 	return marshalSigned(wire.TypeRevocation, &wire.Revocation{ReceiverID: receiverID, FloorGeneration: floor, AtMS: now.UnixMilli()}, userKey)
@@ -129,6 +139,8 @@ func (state *State) Apply(envelopeBytes []byte) (any, error) {
 		return state.applyRequest(envelope, envelopeBytes)
 	case wire.TypeEnrolApproval:
 		return state.applyApproval(envelope, envelopeBytes)
+	case wire.TypeRenewRequest:
+		return state.applyRenewRequest(envelope)
 	case wire.TypeRevocation:
 		return state.applyRevocation(envelope)
 	case wire.TypeSecretVersion:
@@ -147,10 +159,28 @@ func (state *State) Receiver(id string, now time.Time) (Enrolled, error) {
 	if approval.enrolled.Generation <= state.floors[id] {
 		return Enrolled{}, ErrRevoked
 	}
-	if now.UnixMilli() >= approval.expMS {
+	if now.UnixMilli() >= approval.head.ExpMS {
 		return Enrolled{}, errors.New("receiver enrolment is expired")
 	}
 	return cloneEnrolled(approval.enrolled), nil
+}
+
+// Approval returns a receiver's latest accepted approval or renewal and its envelope hash, whether or not it is expired or revoked.
+func (state *State) Approval(id string) (wire.EnrolApproval, string, bool) {
+	approval, ok := state.approvals[id]
+	if !ok {
+		return wire.EnrolApproval{}, "", false
+	}
+	return *approval.head, approval.headHash, true
+}
+
+// RenewRequest returns the receiver's unanswered renew request for its current, unrevoked generation.
+func (state *State) RenewRequest(id string) (wire.RenewRequest, bool) {
+	request, ok := state.renewRequests[id]
+	if !ok || request.Generation != state.approvals[id].enrolled.Generation || request.Generation <= state.floors[id] {
+		return wire.RenewRequest{}, false
+	}
+	return *request, true
 }
 
 // Floor returns the highest revocation floor applied for a receiver, 0 if none.
@@ -250,7 +280,16 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 		return nil, errors.New("approval is at or below the revocation floor")
 	}
 	current, enrolled := state.approvals[approval.ReceiverID]
-	if enrolled && approval.Generation <= current.enrolled.Generation {
+	if enrolled && approval.Generation == current.enrolled.Generation {
+		if err := renews(current, approval); err != nil {
+			return nil, err
+		}
+		current.head, current.headHash = approval, EnvelopeHash(envelopeBytes)
+		state.approvals[approval.ReceiverID] = current
+		delete(state.renewRequests, approval.ReceiverID)
+		return approval, nil
+	}
+	if enrolled && approval.Generation < current.enrolled.Generation {
 		return approval, nil
 	}
 	request, ok := state.requests[approval.RequestHash]
@@ -259,7 +298,7 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 	}
 	wantPreviousHash := ""
 	if enrolled {
-		wantPreviousHash = current.enrolled.ApprovalHash
+		wantPreviousHash = current.headHash
 	}
 	if approval.PrevStateHash != wantPreviousHash {
 		return nil, errors.New("approval has wrong previous state hash")
@@ -268,6 +307,7 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 	if err != nil {
 		return nil, fmt.Errorf("invalid request sealing key: %w", err)
 	}
+	approvalHash := EnvelopeHash(envelopeBytes)
 	state.approvals[approval.ReceiverID] = acceptedApproval{
 		enrolled: Enrolled{
 			SigningPub:   append(ed25519.PublicKey(nil), request.SigningPub...),
@@ -277,11 +317,49 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 			Adapters:     cloneGrants(approval.Adapters),
 			Selector:     slices.Clone(approval.Selector),
 			Generation:   approval.Generation,
-			ApprovalHash: EnvelopeHash(envelopeBytes),
+			ApprovalHash: approvalHash,
 		},
-		expMS: approval.ExpMS,
+		head:     approval,
+		headHash: approvalHash,
 	}
 	return approval, nil
+}
+
+// renews reports why a same-generation approval is not a renewal of the current one.
+func renews(current acceptedApproval, renewal *wire.EnrolApproval) error {
+	if renewal.PrevStateHash != current.headHash {
+		return errors.New("renewal does not chain to the current approval")
+	}
+	if renewal.ExpMS <= current.head.ExpMS {
+		return errors.New("renewal does not extend the current approval")
+	}
+	terms := *renewal
+	terms.PrevStateHash, terms.ExpMS = current.head.PrevStateHash, current.head.ExpMS
+	if !reflect.DeepEqual(&terms, current.head) {
+		return errors.New("renewal changes the approved terms")
+	}
+	return nil
+}
+
+func (state *State) applyRenewRequest(envelope wire.Envelope) (any, error) {
+	decoded, err := wire.DecodePayload(wire.TypeRenewRequest, envelope.Payload)
+	if err != nil {
+		return nil, err
+	}
+	current, ok := state.approvals[decoded.(*wire.RenewRequest).ReceiverID]
+	if !ok {
+		return nil, errors.New("renew request for an unenrolled receiver")
+	}
+	verified, err := wire.Verify(envelope, current.enrolled.SigningPub, wire.SignerReceiver)
+	if err != nil {
+		return nil, fmt.Errorf("verify renew request: %w", err)
+	}
+	request := verified.(*wire.RenewRequest)
+	if request.Generation != current.enrolled.Generation {
+		return nil, errors.New("renew request is not for the current generation")
+	}
+	state.renewRequests[request.ReceiverID] = request
+	return request, nil
 }
 
 func (state *State) applyRevocation(envelope wire.Envelope) (any, error) {

@@ -19,6 +19,9 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+// renewalLifetime is how far a renewal extends an approval from the time it is signed.
+const renewalLifetime = 30 * 24 * time.Hour
+
 // Client implements the user-side wherry operations.
 type Client struct {
 	kafka      *kgo.Client
@@ -34,6 +37,8 @@ type Enrolment struct {
 	Adapters    []wire.DetectedAdapter
 	Approved    bool
 	Generation  int64
+	// RenewalRequested reports an unanswered renew request for this approved, current generation.
+	RenewalRequested bool
 }
 
 // ApprovalResult describes a produced enrolment approval.
@@ -131,6 +136,14 @@ type Receiver struct {
 	Status       string              `json:"status"`
 	Revoked      bool                `json:"revoked"`
 	Floor        int64               `json:"floor_generation"`
+	Secrets      []Seal              `json:"secrets"`
+}
+
+// Seal is the current sealed version of one credential under a receiver's current approval.
+type Seal struct {
+	Name    string `json:"name"`
+	Version int64  `json:"version"`
+	ExpMS   int64  `json:"exp_ms"`
 }
 
 type requestRecord struct {
@@ -154,7 +167,7 @@ type loadedState struct {
 	requests         map[string]requestRecord
 	approvals        map[string]approvalRecord
 	approvedRequests map[string]int64
-	secretVersions   map[secretKey]int64
+	secretVersions   map[secretKey]wire.SecretVersion
 	skipped          int
 }
 
@@ -192,12 +205,15 @@ func (client *Client) Enrolments(ctx context.Context) ([]Enrolment, int, error) 
 	}
 	result := make([]Enrolment, 0, len(loaded.requests))
 	for hash, record := range loaded.requests {
+		id := record.request.ReceiverID
 		generation, approved := loaded.approvedRequests[hash]
+		_, pending := loaded.state.RenewRequest(id)
 		result = append(result, Enrolment{
-			ReceiverID: record.request.ReceiverID, RequestHash: hash,
+			ReceiverID: id, RequestHash: hash,
 			Labels:   maps.Clone(record.request.Labels),
 			Adapters: append([]wire.DetectedAdapter(nil), record.request.Adapters...),
 			Approved: approved, Generation: generation,
+			RenewalRequested: approved && pending && generation == loaded.approvals[id].generation,
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -246,6 +262,42 @@ func (client *Client) Approve(ctx context.Context, requestHash, pool string, lab
 	return ApprovalResult{ReceiverID: request.request.ReceiverID, Generation: generation, Skipped: loaded.skipped}, nil
 }
 
+// Renew publishes a renewal of a receiver's current approval that expires 30 days from now.
+func (client *Client) Renew(ctx context.Context, receiverID string) (ApprovalResult, error) {
+	loaded, err := client.loadState(ctx)
+	if err != nil {
+		return ApprovalResult{}, err
+	}
+	generation, err := client.renew(ctx, loaded, receiverID, time.Now())
+	if err != nil {
+		return ApprovalResult{}, err
+	}
+	return ApprovalResult{ReceiverID: receiverID, Generation: generation, Skipped: loaded.skipped}, nil
+}
+
+// renew publishes a renewal of a receiver's current approval and applies it to loaded.
+func (client *Client) renew(ctx context.Context, loaded *loadedState, receiverID string, now time.Time) (int64, error) {
+	current, hash, ok := loaded.state.Approval(receiverID)
+	if !ok {
+		return 0, fmt.Errorf("receiver %s has never been approved", receiverID)
+	}
+	if current.Generation <= loaded.state.Floor(receiverID) {
+		return 0, trust.ErrRevoked
+	}
+	envelope, err := trust.Renew(current, hash, client.userKey, now.Add(renewalLifetime))
+	if err != nil {
+		return 0, err
+	}
+	if _, err := loaded.state.Apply(envelope); err != nil {
+		return 0, err
+	}
+	if err := client.produce(ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(receiverID), Value: envelope}); err != nil {
+		return 0, err
+	}
+	loaded.approvals[receiverID] = approvalRecord{generation: current.Generation, envelopeHash: trust.EnvelopeHash(envelope), pool: current.Pool}
+	return current.Generation, nil
+}
+
 // Revoke publishes a revocation floor at the receiver's highest approved generation.
 func (client *Client) Revoke(ctx context.Context, receiverID string) (RevokeResult, error) {
 	loaded, err := client.loadState(ctx)
@@ -266,8 +318,8 @@ func (client *Client) Revoke(ctx context.Context, receiverID string) (RevokeResu
 	return RevokeResult{ReceiverID: receiverID, Floor: current.generation, Skipped: loaded.skipped}, nil
 }
 
-// PutSecret seals a file to an enrolled receiver and publishes its next version.
-func (client *Client) PutSecret(ctx context.Context, name, receiverID, path string) (SecretResult, error) {
+// PutSecret seals a file to an enrolled receiver and publishes its next version, expiring after expires.
+func (client *Client) PutSecret(ctx context.Context, name, receiverID, path string, expires time.Duration) (SecretResult, error) {
 	loaded, err := client.loadState(ctx)
 	if err != nil {
 		return SecretResult{}, err
@@ -281,8 +333,8 @@ func (client *Client) PutSecret(ctx context.Context, name, receiverID, path stri
 	if err != nil {
 		return SecretResult{}, err
 	}
-	version := loaded.secretVersions[secretKey{receiverID: receiverID, name: name}] + 1
-	versionEnvelope, sealedEnvelope, err := trust.Seal(enrolled, receiverID, name, version, value, now.Add(30*24*time.Hour), client.userKey)
+	version := loaded.secretVersions[secretKey{receiverID: receiverID, name: name}].Version + 1
+	versionEnvelope, sealedEnvelope, err := trust.Seal(enrolled, receiverID, name, version, value, now.Add(expires), client.userKey)
 	if err != nil {
 		return SecretResult{}, err
 	}
@@ -324,6 +376,7 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 			Selector: slices.Clone(identity.enrolled.Selector),
 			Adapters: identity.enrolled.Adapters, Offers: []wire.Offer{},
 			HeartbeatAge: "-", Status: "silent", Floor: loaded.state.Floor(identity.id),
+			Secrets: loaded.seals(identity.id, identity.enrolled.ApprovalHash),
 		}
 		if capability := byReceiver[identity.id]; capability != nil {
 			receiver.Offers = capability.Offers
@@ -343,7 +396,7 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 			result = append(result, Receiver{
 				ReceiverID: id, Pool: approval.pool, Generation: approval.generation,
 				Labels: map[string]string{}, Selector: []wire.Requirement{}, Adapters: []wire.AdapterGrant{}, Offers: []wire.Offer{},
-				HeartbeatAge: "-", Status: "revoked", Revoked: true, Floor: loaded.state.Floor(id),
+				HeartbeatAge: "-", Status: "revoked", Revoked: true, Floor: loaded.state.Floor(id), Secrets: []Seal{},
 			})
 		}
 	}
@@ -789,7 +842,7 @@ func (client *Client) loadState(ctx context.Context) (*loadedState, error) {
 	loaded := &loadedState{
 		state:    trust.NewState(client.userKey.Public().(ed25519.PublicKey)),
 		requests: make(map[string]requestRecord), approvals: make(map[string]approvalRecord),
-		approvedRequests: make(map[string]int64), secretVersions: make(map[secretKey]int64),
+		approvedRequests: make(map[string]int64), secretVersions: make(map[secretKey]wire.SecretVersion),
 	}
 	for _, record := range records {
 		verified, err := loaded.state.Apply(record.Value)
@@ -802,20 +855,40 @@ func (client *Client) loadState(ctx context.Context) (*loadedState, error) {
 			hash := trust.EnvelopeHash(record.Value)
 			loaded.requests[hash] = requestRecord{envelope: append([]byte(nil), record.Value...), request: payload}
 		case *wire.EnrolApproval:
-			if payload.Generation > loaded.approvals[payload.ReceiverID].generation {
-				loaded.approvals[payload.ReceiverID] = approvalRecord{
-					generation: payload.Generation, envelopeHash: trust.EnvelopeHash(record.Value), pool: payload.Pool,
-				}
-				loaded.approvedRequests[payload.RequestHash] = payload.Generation
-			}
+			current, hash, _ := loaded.state.Approval(payload.ReceiverID)
+			loaded.approvals[payload.ReceiverID] = approvalRecord{generation: current.Generation, envelopeHash: hash, pool: current.Pool}
+			loaded.approvedRequests[current.RequestHash] = current.Generation
 		case *wire.SecretVersion:
 			key := secretKey{receiverID: payload.ReceiverID, name: payload.Name}
-			if payload.Version > loaded.secretVersions[key] {
-				loaded.secretVersions[key] = payload.Version
+			if payload.Version > loaded.secretVersions[key].Version {
+				loaded.secretVersions[key] = *payload
+			}
+		}
+	}
+	now := time.Now()
+	for id := range loaded.approvals {
+		current, _, _ := loaded.state.Approval(id)
+		// An approval that already outlasts a renewal is left as it is; the request stays pending.
+		extends := now.Add(renewalLifetime).UnixMilli() > current.ExpMS
+		if _, pending := loaded.state.RenewRequest(id); pending && current.Renewal == "auto" && extends {
+			if _, err := client.renew(ctx, loaded, id, now); err != nil {
+				return nil, fmt.Errorf("renew %s: %w", id, err)
 			}
 		}
 	}
 	return loaded, nil
+}
+
+// seals returns a receiver's current secret versions sealed under approvalHash, by name.
+func (loaded *loadedState) seals(receiverID, approvalHash string) []Seal {
+	seals := []Seal{}
+	for key, version := range loaded.secretVersions {
+		if key.receiverID == receiverID && version.ApprovalHash == approvalHash {
+			seals = append(seals, Seal{Name: version.Name, Version: version.Version, ExpMS: version.ExpMS})
+		}
+	}
+	sort.Slice(seals, func(i, j int) bool { return seals[i].Name < seals[j].Name })
+	return seals
 }
 
 func (loaded *loadedState) receiverSigners(now time.Time) map[string]receiverIdentity {

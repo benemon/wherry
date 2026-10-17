@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"slices"
 	"sort"
@@ -98,6 +99,7 @@ func runReceivers(ctx context.Context, client *busclient.Client, args []string, 
 	if err != nil {
 		return err
 	}
+	now := time.Now()
 	if *jsonOutput {
 		encoded, err := json.Marshal(receivers, json.Deterministic(true))
 		if err != nil {
@@ -123,6 +125,18 @@ func runReceivers(ctx context.Context, client *busclient.Client, args []string, 
 					}
 				}
 			}
+			for _, seal := range receiver.Secrets {
+				fmt.Fprintf(stdout, "  secret=%s version=%d expires=%s\n", seal.Name, seal.Version, time.UnixMilli(seal.ExpMS).UTC().Format(time.RFC3339))
+			}
+		}
+	}
+	for _, receiver := range receivers {
+		for _, seal := range receiver.Secrets {
+			if left := time.UnixMilli(seal.ExpMS).Sub(now); left <= 0 {
+				fmt.Fprintf(stderr, "secret %s on receiver %s has expired\n", seal.Name, receiver.ReceiverID)
+			} else if left < 7*24*time.Hour {
+				fmt.Fprintf(stderr, "secret %s on receiver %s expires in %dd\n", seal.Name, receiver.ReceiverID, int(math.Ceil(left.Hours()/24)))
+			}
 		}
 	}
 	warnSkipped(stderr, skipped)
@@ -137,8 +151,12 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 		}
 		for _, enrolment := range enrolments {
 			if enrolment.Approved {
-				fmt.Fprintf(stdout, "receiver=%s request=%s labels=%s approved=true generation=%d\n",
-					enrolment.ReceiverID, enrolment.RequestHash, wire.TermsText(enrolment.Labels), enrolment.Generation)
+				renewal := ""
+				if enrolment.RenewalRequested {
+					renewal = " renewal=requested"
+				}
+				fmt.Fprintf(stdout, "receiver=%s request=%s labels=%s approved=true generation=%d%s\n",
+					enrolment.ReceiverID, enrolment.RequestHash, wire.TermsText(enrolment.Labels), enrolment.Generation, renewal)
 			} else {
 				fmt.Fprintf(stdout, "receiver=%s request=%s labels=%s approved=false\n",
 					enrolment.ReceiverID, enrolment.RequestHash, wire.TermsText(enrolment.Labels))
@@ -163,8 +181,17 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 		warnSkipped(stderr, result.Skipped)
 		return nil
 	}
+	if len(args) == 2 && args[0] == "renew" {
+		result, err := client.Renew(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "receiver=%s generation=%d renewed=true\n", result.ReceiverID, result.Generation)
+		warnSkipped(stderr, result.Skipped)
+		return nil
+	}
 	if len(args) < 2 || args[0] != "approve" {
-		return errors.New("usage: wherry enrol <list|revoke RECEIVER_ID|approve REQUEST_HASH [--pool POOL] --labels k=v,.. --grants FILE --selector k=v|v,..>")
+		return errors.New("usage: wherry enrol <list|revoke RECEIVER_ID|renew RECEIVER_ID|approve REQUEST_HASH [--pool POOL] --labels k=v,.. --grants FILE --selector k=v|v,..>")
 	}
 	requestHash := args[1]
 	flags := flag.NewFlagSet("enrol approve", flag.ContinueOnError)
@@ -214,20 +241,24 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 
 func runSecret(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
 	if len(args) < 3 || args[0] != "put" {
-		return errors.New("usage: wherry secret put NAME --to RECEIVER_ID --from-file PATH")
+		return errors.New("usage: wherry secret put NAME --to RECEIVER_ID --from-file PATH [--expires DURATION]")
 	}
 	name := args[1]
 	flags := flag.NewFlagSet("secret put", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	receiverID := flags.String("to", "", "receiver ID")
 	path := flags.String("from-file", "", "secret file")
+	expires := flags.Duration("expires", 30*24*time.Hour, "seal lifetime")
 	if err := flags.Parse(args[2:]); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || !flagSet(flags, "to", "from-file") {
 		return errors.New("secret put requires --to and --from-file")
 	}
-	result, err := client.PutSecret(ctx, name, *receiverID, *path)
+	if *expires <= 0 {
+		return errors.New("expires must be positive")
+	}
+	result, err := client.PutSecret(ctx, name, *receiverID, *path, *expires)
 	if err != nil {
 		return err
 	}
