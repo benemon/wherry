@@ -11,7 +11,8 @@ above in its `extensions`.
 
 A `submission` record (topic `tasks.queue`) carries the A2A `Message` that
 starts a task, under `message`. Its `wherry` fields are `run_id` (string, the
-task id), `attempt` (integer, the delivery attempt, from 1), `pool` (string,
+task id), `turn` (integer, from 1; values above 1 are continuations),
+`attempt` (integer, the delivery attempt within that turn, from 1), `pool` (string,
 the receiver pool that may claim it), `selector` (array of `{key, operator,
 values}` requirements on receiver labels), `labels` (object of string
 labels), `deadline_ms` and `queue_deadline_ms` (integers, Unix milliseconds
@@ -22,10 +23,12 @@ the root), `parent_hash` (string, hex SHA-256 of the parent's envelope, empty
 for a root) and `chain` (array of the ancestors' envelopes, base64url).
 
 A `status` record (topic `tasks.events`) carries a `TaskStatusUpdateEvent`
-under `statusUpdate`. Its `wherry` fields are `attempt` (integer),
-`task_hash` (string, hex SHA-256 of the submission's envelope), `receiver_id`
+under `statusUpdate`. Its `wherry` fields are `turn` and `attempt` (integers
+identifying the submission turn and its
+delivery attempt), `task_hash` (string, hex SHA-256 of that turn's
+submission envelope), `receiver_id`
 (string, the receiver that published it), `kind` (one of `claimed`,
-`started`, `heartbeat` and `terminal`) and `log_offset` (integer, optional,
+`started`, `heartbeat`, `interrupted`, `rejected` and `terminal`) and `log_offset` (integer, optional,
 the agent log offset up to which the transcript is published).
 
 An `artifact_update` record (topic `transcripts`) carries a
@@ -35,13 +38,20 @@ artifact `transcript`: one agent output line as a text part with media type
 part instead. A line over 512 KiB is a `url` part whose `metadata` holds the
 line's hex `sha256` and its `size` in bytes. The first chunk has `append`
 false and the rest true; the last chunk before the terminal status has
-`lastChunk` true. Its `wherry` fields are `attempt` (integer) and `seq`
+`lastChunk` true. Its `wherry` fields are `turn` and `attempt` (integers)
+and `seq`
 (integer, the line's log offset, which orders the chunks).
 
 A `task` record (topic named by `reply_topic`) carries the final A2A `Task`
-under `task`. Its `history` holds the submitted message and its `artifacts`
-hold the result. Its `wherry` fields are `attempt` (integer) and `task_hash`
-(string).
+under `task`. Its `history` holds every submitted message in turn order and
+its `artifacts` hold the result. Its `wherry` fields are `turn` and `attempt` (integers) and
+`task_hash` (string, the final turn's submission hash).
+
+A continuation is a user-signed submission with `turn` greater than 1. It
+uses the existing run id as `message.taskId`, has a new `messageId`, and is
+admitted only after an interrupted status from the same receiver pool for
+the immediately preceding turn. Readers order status, artifact update and
+task records by `(turn, attempt)`.
 
 ## Identifiers
 

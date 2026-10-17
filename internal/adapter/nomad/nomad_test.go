@@ -53,7 +53,7 @@ func devAdapter(t *testing.T) (*Adapter, context.Context) {
 func testRun(name string) receiver.Run {
 	id := fmt.Sprintf("run-%s-%d", name, time.Now().UnixNano())
 	return receiver.Run{
-		ID: id, Offer: map[string]string{"runtime": "exec", "nomad.node_pool": "default", "zone": "dc1"},
+		ID: id, Turn: 1, Offer: map[string]string{"runtime": "exec", "nomad.node_pool": "default", "zone": "dc1"},
 		Prompt: []byte("hello-prompt"), Credential: []byte("test-credential"),
 	}
 }
@@ -63,8 +63,8 @@ func cleanupRun(t *testing.T, adapter *Adapter, run receiver.Run) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = adapter.Release(ctx, run.ID)
-		_, _, _ = adapter.client.Jobs().Deregister(jobPrefix+run.ID, true, (&api.WriteOptions{}).WithContext(ctx))
+		_ = adapter.Release(ctx, run.ID, run.Turn)
+		_, _, _ = adapter.client.Jobs().Deregister(jobID(run.ID, run.Turn), true, (&api.WriteOptions{}).WithContext(ctx))
 	})
 }
 
@@ -135,11 +135,11 @@ func TestBuildJobFromRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("build")
-	job, err := adapter.buildJob(run, variablePath(run.ID))
+	job, err := adapter.buildJob(run, variablePath(run.ID, run.Turn))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *job.ID != jobPrefix+run.ID || *job.Name != jobPrefix+run.ID || *job.Namespace != "default" || *job.Type != api.JobTypeBatch ||
+	if *job.ID != jobID(run.ID, run.Turn) || *job.Name != jobID(run.ID, run.Turn) || *job.Namespace != "default" || *job.Type != api.JobTypeBatch ||
 		*job.NodePool != "default" || !reflect.DeepEqual(job.Datacenters, []string{"dc1"}) || !reflect.DeepEqual(job.Meta, map[string]string{"run_id": run.ID}) {
 		t.Fatalf("unexpected job identity or placement: %#v", job)
 	}
@@ -162,12 +162,36 @@ func TestBuildJobFromRuntime(t *testing.T) {
 		t.Fatalf("templates %#v", templates)
 	}
 	run.Credential = nil
-	job, err = adapter.buildJob(run, variablePath(run.ID))
+	job, err = adapter.buildJob(run, variablePath(run.ID, run.Turn))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if templates := job.TaskGroups[0].Tasks[0].Templates; len(templates) != 1 || *templates[0].DestPath != "local/prompt.txt" {
 		t.Fatalf("run without a credential has templates %#v", templates)
+	}
+}
+
+func TestPerTurnJobIDs(t *testing.T) {
+	adapter, err := New(testConfig("http://127.0.0.1:1"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := testRun("turns")
+	run.ID = "run-turns"
+	for _, turn := range []int64{1, 2} {
+		run.Turn = turn
+		path := variablePath(run.ID, turn)
+		job, err := adapter.buildJob(run, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantID := fmt.Sprintf("agent-%s-t%d", run.ID, turn)
+		if *job.ID != wantID || *job.Name != wantID || path != "nomad/jobs/"+wantID {
+			t.Fatalf("turn %d job=%q name=%q path=%q, want %q", turn, *job.ID, *job.Name, path, wantID)
+		}
+		if template := *job.TaskGroups[0].Tasks[0].Templates[0].EmbeddedTmpl; !strings.Contains(template, path) {
+			t.Fatalf("turn %d template %q does not use %q", turn, template, path)
+		}
 	}
 }
 
@@ -190,11 +214,11 @@ func TestDispatchRegistersPerRunJob(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("register")
 	dispatch(t, adapter, ctx, run)
-	job, _, err := adapter.client.Jobs().Info(jobPrefix+run.ID, nil)
+	job, _, err := adapter.client.Jobs().Info(jobID(run.ID, run.Turn), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *job.ID != jobPrefix+run.ID || *job.Name != jobPrefix+run.ID || *job.Type != api.JobTypeBatch ||
+	if *job.ID != jobID(run.ID, run.Turn) || *job.Name != jobID(run.ID, run.Turn) || *job.Type != api.JobTypeBatch ||
 		*job.NodePool != "default" || len(job.Datacenters) != 1 || job.Datacenters[0] != "dc1" || job.Meta["run_id"] != run.ID {
 		t.Fatalf("unexpected job: %#v", job)
 	}
@@ -210,14 +234,14 @@ func TestDispatchAdoptsExistingJob(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("adopt")
 	dispatch(t, adapter, ctx, run)
-	before, _, err := adapter.client.Jobs().Info(jobPrefix+run.ID, nil)
+	before, _, err := adapter.client.Jobs().Info(jobID(run.ID, run.Turn), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := adapter.Dispatch(ctx, run); err != nil {
 		t.Fatal(err)
 	}
-	after, _, err := adapter.client.Jobs().Info(jobPrefix+run.ID, nil)
+	after, _, err := adapter.client.Jobs().Info(jobID(run.ID, run.Turn), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +277,7 @@ func TestDispatchWithoutCredential(t *testing.T) {
 	if got := output(t, ctx, adapter, handle); !strings.Contains(got, "prompt=hello-prompt token= env=from-runtime") {
 		t.Fatalf("task output %q", got)
 	}
-	variable, _, err := adapter.client.Variables().Peek(variablePath(run.ID), nil)
+	variable, _, err := adapter.client.Variables().Peek(variablePath(run.ID, run.Turn), nil)
 	if err != nil || variable == nil {
 		t.Fatalf("variable = %#v, %v", variable, err)
 	}
@@ -266,7 +290,7 @@ func TestLookupFindsExistingRun(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("lookup")
 	dispatched := dispatch(t, adapter, ctx, run)
-	found, ok, err := adapter.Lookup(ctx, run.ID)
+	found, ok, err := adapter.Lookup(ctx, run.ID, run.Turn)
 	if err != nil || !ok {
 		t.Fatalf("lookup = %v, %v", ok, err)
 	}
@@ -280,7 +304,7 @@ func TestLookupFindsExistingRun(t *testing.T) {
 
 func TestLookupMissingRun(t *testing.T) {
 	adapter, ctx := devAdapter(t)
-	handle, ok, err := adapter.Lookup(ctx, fmt.Sprintf("run-missing-%d", time.Now().UnixNano()))
+	handle, ok, err := adapter.Lookup(ctx, fmt.Sprintf("run-missing-%d", time.Now().UnixNano()), 1)
 	if err != nil || ok || handle != (receiver.Handle{}) {
 		t.Fatalf("lookup = %#v, %v, %v", handle, ok, err)
 	}
@@ -291,7 +315,7 @@ func TestLookupWaitsForUnplacedJob(t *testing.T) {
 	run := testRun("lookup-unplaced")
 	run.Offer["zone"] = "wherry-no-such-datacenter"
 	cleanupRun(t, adapter, run)
-	job, err := adapter.buildJob(run, variablePath(run.ID))
+	job, err := adapter.buildJob(run, variablePath(run.ID, run.Turn))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,10 +324,10 @@ func TestLookupWaitsForUnplacedJob(t *testing.T) {
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if _, ok, err := adapter.Lookup(lookupCtx, run.ID); ok || !errors.Is(err, context.DeadlineExceeded) {
+	if _, ok, err := adapter.Lookup(lookupCtx, run.ID, run.Turn); ok || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("lookup of a job without an allocation = %v, %v; want a wait that times out", ok, err)
 	}
-	if _, _, err := adapter.client.Jobs().Info(jobPrefix+run.ID, nil); !notFound(err) {
+	if _, _, err := adapter.client.Jobs().Info(jobID(run.ID, run.Turn), nil); !notFound(err) {
 		t.Fatalf("timed-out job still registered: %v", err)
 	}
 }
@@ -312,17 +336,17 @@ func TestReleaseDeletesVariable(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("release")
 	dispatch(t, adapter, ctx, run)
-	path := variablePath(run.ID)
+	path := variablePath(run.ID, run.Turn)
 	if variable, _, err := adapter.client.Variables().Peek(path, nil); err != nil || variable == nil {
 		t.Fatalf("variable before release = %#v, %v", variable, err)
 	}
-	if err := adapter.Release(ctx, run.ID); err != nil {
+	if err := adapter.Release(ctx, run.ID, run.Turn); err != nil {
 		t.Fatal(err)
 	}
 	if variable, _, err := adapter.client.Variables().Peek(path, nil); err != nil || variable != nil {
 		t.Fatalf("variable after release = %#v, %v", variable, err)
 	}
-	if err := adapter.Release(ctx, run.ID); err != nil {
+	if err := adapter.Release(ctx, run.ID, run.Turn); err != nil {
 		t.Fatalf("absent release failed: %v", err)
 	}
 }
@@ -337,7 +361,7 @@ func TestDispatchErrorDeletesVariable(t *testing.T) {
 	if _, err := adapter.Dispatch(dispatchCtx, run); err == nil {
 		t.Fatal("unplaceable dispatch succeeded")
 	}
-	path := variablePath(run.ID)
+	path := variablePath(run.ID, run.Turn)
 	if variable, _, err := adapter.client.Variables().Peek(path, nil); err != nil || variable != nil {
 		t.Fatalf("variable after dispatch error = %#v, %v", variable, err)
 	}
@@ -494,7 +518,7 @@ func TestDispatchTimeoutDeregisters(t *testing.T) {
 	if _, err := adapter.Dispatch(dispatchCtx, run); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("dispatch of an unplaceable job = %v; want a wait that times out", err)
 	}
-	if _, _, err := adapter.client.Jobs().Info(jobPrefix+run.ID, nil); !notFound(err) {
+	if _, _, err := adapter.client.Jobs().Info(jobID(run.ID, run.Turn), nil); !notFound(err) {
 		t.Fatalf("timed-out job still registered: %v", err)
 	}
 }
@@ -724,18 +748,18 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 			return
 		}
 		switch request.Method + " " + request.URL.Path {
-		case "PUT /v1/var/nomad/jobs/agent-run-urls", "DELETE /v1/var/nomad/jobs/agent-run-urls":
+		case "PUT /v1/var/nomad/jobs/agent-run-urls-t1", "DELETE /v1/var/nomad/jobs/agent-run-urls-t1":
 			_, _ = response.Write([]byte(`{}`))
-		case "GET /v1/job/agent-run-urls":
+		case "GET /v1/job/agent-run-urls-t1":
 			if !registered {
 				http.Error(response, "job not found", http.StatusNotFound)
 				return
 			}
-			_, _ = response.Write([]byte(`{"ID":"agent-run-urls","TaskGroups":[{"Tasks":[{"Driver":"raw_exec"}]}]}`))
+			_, _ = response.Write([]byte(`{"ID":"agent-run-urls-t1","TaskGroups":[{"Tasks":[{"Driver":"raw_exec"}]}]}`))
 		case "PUT /v1/jobs":
 			registered = true
 			_, _ = response.Write([]byte(`{}`))
-		case "GET /v1/job/agent-run-urls/allocations":
+		case "GET /v1/job/agent-run-urls-t1/allocations":
 			_, _ = response.Write([]byte(`[{"ID":"alloc-urls","ClientStatus":"complete"}]`))
 		case "GET /v1/allocation/alloc-urls":
 			_, _ = response.Write([]byte(`{"ID":"alloc-urls","ClientStatus":"complete"}`))
@@ -753,13 +777,13 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := adapter.Lookup(ctx, run.ID); err != nil || !ok {
+	if _, ok, err := adapter.Lookup(ctx, run.ID, run.Turn); err != nil || !ok {
 		t.Fatalf("lookup = %v, %v", ok, err)
 	}
 	if err := adapter.Stop(ctx, handle); err != nil {
 		t.Fatal(err)
 	}
-	if err := adapter.Release(ctx, run.ID); err != nil {
+	if err := adapter.Release(ctx, run.ID, run.Turn); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -803,7 +827,7 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("plaintext")
-	job, err := adapter.buildJob(run, variablePath(run.ID))
+	job, err := adapter.buildJob(run, variablePath(run.ID, run.Turn))
 	if err != nil {
 		t.Fatal(err)
 	}

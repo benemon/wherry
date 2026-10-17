@@ -56,6 +56,8 @@ var vectorFilenames = []string{
 	"unentitled-signer.json",
 	"empty-label-value.json",
 	"attempt-zero.json",
+	"turn-zero.json",
+	"continuation-ok.json",
 	"submission-parts-ok.json",
 	"part-two-contents.json",
 	"part-no-content.json",
@@ -208,11 +210,17 @@ func writePublishedVectors(t *testing.T) {
 	add("artifact-update-two-parts.json", "transcript chunk with a line and a pointer", Sign(TypeArtifactUpdate, both, privateKey), SignerReceiver, "invalid_payload")
 	zeroAttempt := replaceOnce(t, statusPayload, `"attempt":1`, `"attempt":0`)
 	add("attempt-zero.json", "zero attempt", Sign(TypeStatus, zeroAttempt, privateKey), SignerReceiver, "invalid_payload")
+	zeroTurn := replaceOnce(t, statusPayload, `"turn":1`, `"turn":0`)
+	add("turn-zero.json", "zero turn", Sign(TypeStatus, zeroTurn, privateKey), SignerReceiver, "invalid_payload")
+	continuation := *payloads[TypeSubmission].(*SubmissionRecord)
+	continuation.Message.MessageID = "message-2"
+	continuation.Wherry.Turn = 2
+	add("continuation-ok.json", "continuation submission", Sign(TypeSubmission, mustPayload(TypeSubmission, &continuation), privateKey), SignerUser, "ok")
 
 	request := payloads[TypeEnrolRequest].(*EnrolRequest)
 	request.SigningPub = bytes.Repeat([]byte{9}, ed25519.PublicKeySize)
 	add("enrol-request-not-self-signed.json", "enrolment signing key differs", Sign(TypeEnrolRequest, mustPayload(TypeEnrolRequest, request), privateKey), SignerReceiver, "not_self_signed")
-	add("unentitled-signer.json", "receiver verifies cancel", Sign(TypeCancel, cancelPayload, privateKey), SignerReceiver, "unentitled_signer")
+	add("unentitled-signer.json", "receiver verifies submission", Sign(TypeSubmission, mustPayload(TypeSubmission, payloads[TypeSubmission]), privateKey), SignerReceiver, "unentitled_signer")
 
 	submissionPayload := mustPayload(TypeSubmission, payloads[TypeSubmission])
 	emptyLabel := replaceOnce(t, submissionPayload, `"labels":{"lab/os":"linux"}`, `"labels":{"lab/os":""}`)

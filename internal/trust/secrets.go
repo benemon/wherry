@@ -77,8 +77,8 @@ func Seal(enrolled Enrolled, receiverID, name string, version int64, value []byt
 	return secretVersionEnvelope, sealedSecretEnvelope, nil
 }
 
-// Open verifies and decrypts the current version of a sealed secret and returns its plaintext and version.
-func Open(sealedEnvelopeBytes []byte, state *State, receiverID string, sealingKey *ecdh.PrivateKey, userPublicKey ed25519.PublicKey, now time.Time) ([]byte, int64, error) {
+// Open verifies and decrypts the current version of a named sealed secret and returns its plaintext and version.
+func Open(sealedEnvelopeBytes []byte, state *State, receiverID, name string, sealingKey *ecdh.PrivateKey, userPublicKey ed25519.PublicKey, now time.Time) ([]byte, int64, error) {
 	if state == nil || sealingKey == nil {
 		return nil, 0, errors.New("state and sealing key are required")
 	}
@@ -97,6 +97,9 @@ func Open(sealedEnvelopeBytes []byte, state *State, receiverID string, sealingKe
 	if sealed.ReceiverID != receiverID {
 		return nil, 0, errors.New("sealed secret receiver does not match opener")
 	}
+	if sealed.Name != name {
+		return nil, 0, errors.New("sealed secret name does not match opener")
+	}
 	enrolled, err := state.Receiver(receiverID, now)
 	if err != nil {
 		return nil, 0, err
@@ -109,6 +112,9 @@ func Open(sealedEnvelopeBytes []byte, state *State, receiverID string, sealingKe
 	}
 	if sealed.Version != state.maximumVersions[id] {
 		return nil, 0, errors.New("sealed secret version is not current")
+	}
+	if header.ReceiverID != sealed.ReceiverID || header.Name != sealed.Name {
+		return nil, 0, errors.New("sealed secret header does not match ciphertext")
 	}
 	if header.CiphertextHash != ciphertextHash(sealed.Enc, sealed.CT) {
 		return nil, 0, errors.New("sealed secret ciphertext hash does not match")

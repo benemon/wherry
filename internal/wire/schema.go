@@ -40,7 +40,7 @@ const (
 )
 
 var signerEntitlements = map[RecordType]map[SignerKind]bool{
-	TypeSubmission:     {SignerUser: true, SignerReceiver: true},
+	TypeSubmission:     {SignerUser: true},
 	TypeCancel:         {SignerUser: true},
 	TypeStatus:         {SignerReceiver: true},
 	TypeTask:           {SignerReceiver: true},
@@ -104,6 +104,11 @@ var terminalStates = map[TaskState]bool{
 // Terminal reports whether an A2A task state ends a task.
 func Terminal(state TaskState) bool {
 	return terminalStates[state]
+}
+
+// Interrupted reports whether an A2A task state waits for a continuation.
+func Interrupted(state TaskState) bool {
+	return state == TaskStateAuthRequired || state == TaskStateInputRequired
 }
 
 // Part is an A2A Part with exactly one of Text, Raw, URL or Data.
@@ -199,6 +204,7 @@ type Lineage struct {
 // SubmissionExtension is the wherry extension block of a submission.
 type SubmissionExtension struct {
 	RunID           string            `json:"run_id"`
+	Turn            int64             `json:"turn"`
 	Attempt         int64             `json:"attempt"`
 	Pool            string            `json:"pool"`
 	Selector        []Requirement     `json:"selector"`
@@ -217,6 +223,7 @@ type SubmissionRecord struct {
 
 // StatusExtension is the wherry extension block of a status record.
 type StatusExtension struct {
+	Turn       int64  `json:"turn"`
 	Attempt    int64  `json:"attempt"`
 	TaskHash   string `json:"task_hash"`
 	ReceiverID string `json:"receiver_id"`
@@ -232,6 +239,7 @@ type StatusRecord struct {
 
 // ArtifactUpdateExtension is the wherry extension block of an artifact_update record.
 type ArtifactUpdateExtension struct {
+	Turn    int64 `json:"turn"`
 	Attempt int64 `json:"attempt"`
 	Seq     int64 `json:"seq"`
 }
@@ -244,6 +252,7 @@ type ArtifactUpdateRecord struct {
 
 // TaskExtension is the wherry extension block of a task record.
 type TaskExtension struct {
+	Turn     int64  `json:"turn"`
 	Attempt  int64  `json:"attempt"`
 	TaskHash string `json:"task_hash"`
 }
@@ -266,20 +275,26 @@ type PointerMetadata struct {
 	Size   int64  `json:"size"`
 }
 
-// AttemptFilter drops records superseded by a later delivery attempt.
+// AttemptFilter drops records superseded by a later turn or delivery attempt.
 type AttemptFilter struct {
-	highest map[string]int64
+	highest map[string]turnAttempt
+}
+
+type turnAttempt struct {
+	turn    int64
+	attempt int64
 }
 
 // Admit reports whether a record is current for its run.
-func (filter *AttemptFilter) Admit(runID string, attempt int64) bool {
-	if attempt < filter.highest[runID] {
+func (filter *AttemptFilter) Admit(runID string, turn, attempt int64) bool {
+	highest := filter.highest[runID]
+	if turn < highest.turn || turn == highest.turn && attempt < highest.attempt {
 		return false
 	}
 	if filter.highest == nil {
-		filter.highest = make(map[string]int64)
+		filter.highest = make(map[string]turnAttempt)
 	}
-	filter.highest[runID] = attempt
+	filter.highest[runID] = turnAttempt{turn: turn, attempt: attempt}
 	return true
 }
 
@@ -546,7 +561,7 @@ func validateSubmission(value *SubmissionRecord) error {
 			return err
 		}
 	}
-	if extension.Attempt < 1 || lineage.Depth < 0 || int64(len(lineage.Ancestors)) != lineage.Depth || lineage.Ancestors == nil || lineage.Chain == nil || extension.Labels == nil || extension.Selector == nil {
+	if extension.Turn < 1 || extension.Attempt < 1 || lineage.Depth < 0 || int64(len(lineage.Ancestors)) != lineage.Depth || lineage.Ancestors == nil || lineage.Chain == nil || extension.Labels == nil || extension.Selector == nil {
 		return errors.New("invalid submission lineage")
 	}
 	if err := validateTerms(extension.Labels, "labels"); err != nil {
@@ -588,11 +603,11 @@ func validateStatus(value *StatusRecord) error {
 	if err := validateID(value.Wherry.ReceiverID, "receiver_id"); err != nil {
 		return err
 	}
-	if value.Wherry.Attempt < 1 || !validHash(value.Wherry.TaskHash) {
+	if value.Wherry.Turn < 1 || value.Wherry.Attempt < 1 || !validHash(value.Wherry.TaskHash) {
 		return errors.New("invalid status")
 	}
 	switch value.Wherry.Kind {
-	case "claimed", "started", "heartbeat", "terminal":
+	case "claimed", "started", "heartbeat", "interrupted", "rejected", "terminal":
 		return nil
 	default:
 		return errors.New("invalid status kind")
@@ -607,7 +622,7 @@ func validateTaskRecord(value *TaskRecord) error {
 	if err := validateTaskStatus(&task.Status); err != nil {
 		return err
 	}
-	if value.Wherry.Attempt < 1 || !validHash(value.Wherry.TaskHash) || task.Artifacts == nil || task.History == nil {
+	if value.Wherry.Turn < 1 || value.Wherry.Attempt < 1 || !validHash(value.Wherry.TaskHash) || task.Artifacts == nil || task.History == nil {
 		return errors.New("invalid task")
 	}
 	for i := range task.Artifacts {
@@ -628,7 +643,7 @@ func validateArtifactUpdate(value *ArtifactUpdateRecord) error {
 	if err := validateTaskIDs(update.TaskID, update.ContextID); err != nil {
 		return err
 	}
-	if value.Wherry.Attempt < 1 || value.Wherry.Seq < 0 {
+	if value.Wherry.Turn < 1 || value.Wherry.Attempt < 1 || value.Wherry.Seq < 0 {
 		return errors.New("invalid artifact_update sequence")
 	}
 	if err := validateArtifact(&update.Artifact); err != nil {

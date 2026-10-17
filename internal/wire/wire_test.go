@@ -30,7 +30,7 @@ func validPayloads(t *testing.T) map[RecordType]any {
 		TypeSubmission: &SubmissionRecord{
 			Message: message,
 			Wherry: SubmissionExtension{
-				RunID: "run-1", Attempt: 1, Pool: "linux",
+				RunID: "run-1", Turn: 1, Attempt: 1, Pool: "linux",
 				Selector: []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}}, Labels: map[string]string{"lab/os": "linux"},
 				DeadlineMS: 2_000, QueueDeadlineMS: 1_000, ReplyTopic: "replies.client-1",
 				Lineage: Lineage{RootRunID: "run-1", Depth: 0, Ancestors: []string{}, ParentHash: "", Chain: []Bytes{}},
@@ -42,21 +42,21 @@ func validPayloads(t *testing.T) map[RecordType]any {
 				State: TaskStateWorking, Timestamp: "2026-10-17T10:00:00.000Z",
 				Message: &Message{MessageID: "status-2", Role: RoleAgent, Parts: []Part{{Text: "working"}}, Extensions: extensions},
 			}},
-			Wherry: StatusExtension{Attempt: 1, TaskHash: hashA, ReceiverID: "receiver-1", Kind: "heartbeat", LogOffset: &logOffset},
+			Wherry: StatusExtension{Turn: 1, Attempt: 1, TaskHash: hashA, ReceiverID: "receiver-1", Kind: "heartbeat", LogOffset: &logOffset},
 		},
 		TypeTask: &TaskRecord{
 			Task: Task{
 				ID: "run-1", ContextID: "run-1", Status: status, History: []Message{message},
 				Artifacts: []Artifact{{ArtifactID: "artifact-1", Name: "answer", Description: "result", Parts: []Part{{Text: "done"}}, Extensions: extensions}},
 			},
-			Wherry: TaskExtension{Attempt: 1, TaskHash: hashA},
+			Wherry: TaskExtension{Turn: 1, Attempt: 1, TaskHash: hashA},
 		},
 		TypeArtifactUpdate: &ArtifactUpdateRecord{
 			ArtifactUpdate: TaskArtifactUpdateEvent{
 				TaskID: "run-1", ContextID: "run-1", Append: true, LastChunk: true,
 				Artifact: Artifact{ArtifactID: "transcript", Parts: []Part{{Text: `{"type":"assistant"}`, MediaType: "application/x-ndjson"}}, Extensions: extensions},
 			},
-			Wherry: ArtifactUpdateExtension{Attempt: 1, Seq: 1},
+			Wherry: ArtifactUpdateExtension{Turn: 1, Attempt: 1, Seq: 1},
 		},
 		TypeCapability: &Capability{
 			ReceiverID: "receiver-1", Labels: map[string]string{"lab/os": "linux"}, Pool: "linux",
@@ -198,6 +198,42 @@ func TestAttemptRequired(t *testing.T) {
 	}
 }
 
+func TestTurnRequired(t *testing.T) {
+	for recordType, value := range validPayloads(t) {
+		if recordType != TypeSubmission && recordType != TypeStatus && recordType != TypeTask && recordType != TypeArtifactUpdate {
+			continue
+		}
+		t.Run(string(recordType), func(t *testing.T) {
+			payload, err := MarshalPayload(recordType, value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload = bytes.Replace(payload, []byte(`"turn":1,`), nil, 1)
+			if _, err := DecodePayload(recordType, payload); err == nil {
+				t.Fatal("missing turn accepted")
+			}
+		})
+	}
+}
+
+func TestTurnZeroRejected(t *testing.T) {
+	for recordType, value := range validPayloads(t) {
+		if recordType != TypeSubmission && recordType != TypeStatus && recordType != TypeTask && recordType != TypeArtifactUpdate {
+			continue
+		}
+		t.Run(string(recordType), func(t *testing.T) {
+			payload, err := MarshalPayload(recordType, value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload = bytes.Replace(payload, []byte(`"turn":1`), []byte(`"turn":0`), 1)
+			if _, err := DecodePayload(recordType, payload); err == nil {
+				t.Fatal("zero turn accepted")
+			}
+		})
+	}
+}
+
 func TestAttemptZeroRejected(t *testing.T) {
 	for recordType, value := range validPayloads(t) {
 		if recordType != TypeSubmission && recordType != TypeStatus && recordType != TypeTask && recordType != TypeArtifactUpdate {
@@ -216,21 +252,27 @@ func TestAttemptZeroRejected(t *testing.T) {
 	}
 }
 
-func TestAttemptFilterDropsLowerAttempt(t *testing.T) {
+func TestAttemptFilterOrdersByTurn(t *testing.T) {
 	var filter AttemptFilter
-	if !filter.Admit("r", 2) {
+	if !filter.Admit("r", 1, 2) {
 		t.Fatal("first attempt rejected")
 	}
-	if filter.Admit("r", 1) {
+	if filter.Admit("r", 1, 1) {
 		t.Fatal("lower attempt admitted")
 	}
-	if !filter.Admit("r", 2) {
+	if !filter.Admit("r", 1, 2) {
 		t.Fatal("equal attempt rejected")
 	}
-	if !filter.Admit("r", 3) {
+	if !filter.Admit("r", 1, 3) {
 		t.Fatal("higher attempt rejected")
 	}
-	if !filter.Admit("other", 1) {
+	if !filter.Admit("r", 2, 1) {
+		t.Fatal("higher turn with restarted attempt rejected")
+	}
+	if filter.Admit("r", 1, 99) {
+		t.Fatal("lower turn with higher attempt admitted")
+	}
+	if !filter.Admit("other", 1, 1) {
 		t.Fatal("other run rejected")
 	}
 }
@@ -309,14 +351,14 @@ func TestEntitledRejectsWrongSignerKind(t *testing.T) {
 	if entitled(TypeCancel, SignerReceiver) {
 		t.Fatal("receiver was entitled to sign cancel")
 	}
-	if !entitled(TypeSubmission, SignerUser) || !entitled(TypeSubmission, SignerReceiver) {
-		t.Fatal("submission signer entitlements incomplete")
+	if !entitled(TypeSubmission, SignerUser) || entitled(TypeSubmission, SignerReceiver) {
+		t.Fatal("submission signer entitlements are not user-only")
 	}
 }
 
 func TestEntitlementTable(t *testing.T) {
 	want := map[RecordType]map[SignerKind]bool{
-		TypeSubmission:     {SignerUser: true, SignerReceiver: true},
+		TypeSubmission:     {SignerUser: true},
 		TypeCancel:         {SignerUser: true},
 		TypeStatus:         {SignerReceiver: true},
 		TypeTask:           {SignerReceiver: true},

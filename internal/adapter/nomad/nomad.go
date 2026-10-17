@@ -113,7 +113,7 @@ func (adapter *Adapter) Offers(ctx context.Context) ([]map[string]string, error)
 
 // Dispatch starts one run idempotently and returns once its task has started or ended.
 func (adapter *Adapter) Dispatch(ctx context.Context, run receiver.Run) (_ receiver.Handle, dispatchErr error) {
-	path := variablePath(run.ID)
+	path := variablePath(run.ID, run.Turn)
 	job, err := adapter.buildJob(run, path)
 	if err != nil {
 		return receiver.Handle{}, err
@@ -152,8 +152,8 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run receiver.Run) (_ recei
 }
 
 // Lookup finds a run's existing job and waits for it as Dispatch does.
-func (adapter *Adapter) Lookup(ctx context.Context, runID string) (receiver.Handle, bool, error) {
-	job, _, err := adapter.client.Jobs().Info(jobPrefix+runID, (&api.QueryOptions{}).WithContext(ctx))
+func (adapter *Adapter) Lookup(ctx context.Context, runID string, turn int64) (receiver.Handle, bool, error) {
+	job, _, err := adapter.client.Jobs().Info(jobID(runID, turn), (&api.QueryOptions{}).WithContext(ctx))
 	if notFound(err) {
 		return receiver.Handle{}, false, nil
 	}
@@ -202,7 +202,7 @@ func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error
 	if !ok {
 		return nil, errors.New("unknown runtime")
 	}
-	jobID := jobPrefix + run.ID
+	jobID := jobID(run.ID, run.Turn)
 	env := maps.Clone(runtime.Env)
 	if env == nil {
 		env = make(map[string]string)
@@ -235,8 +235,12 @@ func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error
 	}, nil
 }
 
-func variablePath(runID string) string {
-	return "nomad/jobs/" + jobPrefix + runID
+func jobID(runID string, turn int64) string {
+	return fmt.Sprintf("%s%s-t%d", jobPrefix, runID, turn)
+}
+
+func variablePath(runID string, turn int64) string {
+	return "nomad/jobs/" + jobID(runID, turn)
 }
 
 func notFound(err error) bool {
@@ -460,8 +464,8 @@ func (adapter *Adapter) Stop(ctx context.Context, handle receiver.Handle) error 
 }
 
 // Release deletes the per-run credential and prompt variable.
-func (adapter *Adapter) Release(ctx context.Context, runID string) error {
-	return adapter.deleteVariable(ctx, variablePath(runID))
+func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) error {
+	return adapter.deleteVariable(ctx, variablePath(runID, turn))
 }
 
 func (adapter *Adapter) deleteVariable(ctx context.Context, path string) error {

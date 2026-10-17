@@ -43,6 +43,7 @@ type Line struct {
 // Run is the material needed to start one platform job.
 type Run struct {
 	ID         string
+	Turn       int64
 	Offer      map[string]string
 	Prompt     []byte
 	Credential []byte
@@ -53,10 +54,10 @@ type Adapter interface {
 	Platform() string
 	Offers(ctx context.Context) ([]map[string]string, error)
 	Dispatch(ctx context.Context, run Run) (Handle, error)
-	Lookup(ctx context.Context, runID string) (Handle, bool, error)
+	Lookup(ctx context.Context, runID string, turn int64) (Handle, bool, error)
 	Follow(ctx context.Context, handle Handle, offset int64, lines chan<- Line) error
 	Stop(ctx context.Context, handle Handle) error
-	Release(ctx context.Context, runID string) error
+	Release(ctx context.Context, runID string, turn int64) error
 }
 
 // Config is the receiver's local configuration.
@@ -362,7 +363,7 @@ func (r *Receiver) openCredential(state *trust.State, secrets []*kgo.Record, nam
 		return true
 	}
 	// Open first: an unverified record must not decide which version is current.
-	value, version, err := trust.Open(latest, state, r.config.ReceiverID, r.sealing, r.userPub, time.Now())
+	value, version, err := trust.Open(latest, state, r.config.ReceiverID, named.Credential, r.sealing, r.userPub, time.Now())
 	if err != nil {
 		return false
 	}

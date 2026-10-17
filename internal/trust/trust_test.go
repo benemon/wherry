@@ -161,7 +161,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	if _, err := fixture.state.Apply(versionEnvelope); err != nil {
 		t.Fatal(err)
 	}
-	plaintext, _, err := Open(sealedEnvelope, fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow)
+	plaintext, _, err := Open(sealedEnvelope, fixture.state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func TestOpenRejectsRolledBackVersion(t *testing.T) {
 	if _, err := fixture.state.Apply(version2); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Open(sealed1, fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
+	if _, _, err := Open(sealed1, fixture.state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
 		t.Fatal("rolled-back secret version was opened")
 	}
 }
@@ -376,7 +376,7 @@ func TestOpenRejectsAADMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Run("receiver", func(t *testing.T) {
-		if _, _, err := Open(sealedEnvelope, fixture.state, "receiver-b", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
+		if _, _, err := Open(sealedEnvelope, fixture.state, "receiver-b", "token", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
 			t.Fatal("secret sealed for receiver A opened as receiver B")
 		}
 	})
@@ -388,10 +388,24 @@ func TestOpenRejectsAADMismatch(t *testing.T) {
 		}
 		sealed := decodeSealedSecret(t, sealedEnvelope)
 		sealed.Name = "other"
-		if _, _, err := Open(mustSigned(t, wire.TypeSealedSecret, sealed, fixture.userPrivateKey), fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
+		if _, _, err := Open(mustSigned(t, wire.TypeSealedSecret, sealed, fixture.userPrivateKey), fixture.state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
 			t.Fatal("secret opened under another name")
 		}
 	})
+}
+
+func TestOpenRejectsReceiverCrossWiring(t *testing.T) {
+	fixture := newTrustFixture(t)
+	version, sealed, err := Seal(fixture.enrolled, "receiver-b", "token", 1, []byte("secret"), testNow.Add(time.Minute), fixture.userPrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.state.Apply(version); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Open(sealed, fixture.state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
+		t.Fatal("secret for receiver B opened by receiver A")
+	}
 }
 
 func TestOpenRejectsCiphertextHashMismatch(t *testing.T) {
@@ -405,7 +419,7 @@ func TestOpenRejectsCiphertextHashMismatch(t *testing.T) {
 	}
 	sealed := decodeSealedSecret(t, sealedEnvelope)
 	sealed.CT[0] ^= 1
-	if _, _, err := Open(mustSigned(t, wire.TypeSealedSecret, sealed, fixture.userPrivateKey), fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
+	if _, _, err := Open(mustSigned(t, wire.TypeSealedSecret, sealed, fixture.userPrivateKey), fixture.state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
 		t.Fatal("secret with mismatched ciphertext hash was opened")
 	}
 }
@@ -428,7 +442,7 @@ func TestSecretErrorsOmitPlaintext(t *testing.T) {
 	sealed := decodeSealedSecret(t, sealedEnvelope)
 	sealed.CT[0] ^= 1
 	tampered := mustSigned(t, wire.TypeSealedSecret, sealed, fixture.userPrivateKey)
-	if _, _, err := Open(tampered, fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil || strings.Contains(err.Error(), plaintext) {
+	if _, _, err := Open(tampered, fixture.state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil || strings.Contains(err.Error(), plaintext) {
 		t.Fatalf("hash mismatch error %v", err)
 	}
 	version := decodeSecretVersion(t, versionEnvelope)
@@ -436,7 +450,7 @@ func TestSecretErrorsOmitPlaintext(t *testing.T) {
 	if _, err := fixture.state.Apply(mustSigned(t, wire.TypeSecretVersion, version, fixture.userPrivateKey)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Open(tampered, fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil || strings.Contains(err.Error(), plaintext) {
+	if _, _, err := Open(tampered, fixture.state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil || strings.Contains(err.Error(), plaintext) {
 		t.Fatalf("decrypt error %v", err)
 	}
 }
@@ -518,7 +532,7 @@ func rootSubmission() wire.SubmissionRecord {
 			Parts: []wire.Part{{Text: "hello"}}, Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
-			RunID: "root", Attempt: 1, Pool: "default", Selector: testSelector(), Labels: map[string]string{"lab/os": "linux"},
+			RunID: "root", Turn: 1, Attempt: 1, Pool: "default", Selector: testSelector(), Labels: map[string]string{"lab/os": "linux"},
 			DeadlineMS: testNow.Add(time.Hour).UnixMilli(), QueueDeadlineMS: testNow.Add(time.Minute).UnixMilli(),
 			ReplyTopic: "replies.client",
 			Lineage:    wire.Lineage{RootRunID: "root", Depth: 0, Ancestors: []string{}, ParentHash: "", Chain: []wire.Bytes{}},
@@ -612,7 +626,7 @@ func TestSealRejectedUnderDifferentApproval(t *testing.T) {
 		if _, err := state.Apply(header); err != nil {
 			t.Fatal(err)
 		}
-		_, _, err := Open(sealedEnvelope, state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow)
+		_, _, err := Open(sealedEnvelope, state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow)
 		return err
 	}
 	restarted := func() (*State, Enrolled) {

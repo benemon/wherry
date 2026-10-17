@@ -277,7 +277,7 @@ func TestClientEndToEnd(t *testing.T) {
 		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: runID, ContextID: runID, Status: wire.TaskStatus{
 			State: wire.TaskStateCompleted, Timestamp: time.Now().UTC().Format(time.RFC3339),
 		}},
-		Wherry: wire.StatusExtension{Attempt: 1, TaskHash: trust.EnvelopeHash(tasks[0].Value), ReceiverID: "receiver-a", Kind: "terminal"},
+		Wherry: wire.StatusExtension{Turn: 1, Attempt: 1, TaskHash: trust.EnvelopeHash(tasks[0].Value), ReceiverID: "receiver-a", Kind: "terminal"},
 	}
 	fixture.produce(t, wire.TopicEvent, runID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
 	for _, attempt := range []int64{1, 1, 2} {
@@ -285,7 +285,7 @@ func TestClientEndToEnd(t *testing.T) {
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: runID, ContextID: runID, Artifact: wire.Artifact{
 				ArtifactID: "transcript", Parts: []wire.Part{{Text: "line"}}, Extensions: []string{wire.ExtensionURI},
 			}},
-			Wherry: wire.ArtifactUpdateExtension{Attempt: attempt, Seq: 0},
+			Wherry: wire.ArtifactUpdateExtension{Turn: 1, Attempt: attempt, Seq: 0},
 		}
 		fixture.produce(t, wire.TopicTranscript, runID, signed(t, wire.TypeArtifactUpdate, chunk, fixture.receiverKey))
 	}
@@ -293,7 +293,7 @@ func TestClientEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events.Statuses) != 1 || events.Statuses[0].Wherry.Kind != "terminal" || !reflect.DeepEqual(events.Chunks, map[int64]int{1: 2, 2: 1}) {
+	if len(events.Statuses) != 1 || events.Statuses[0].Wherry.Kind != "terminal" || !reflect.DeepEqual(events.Chunks, map[TurnAttempt]int{{Turn: 1, Attempt: 1}: 2, {Turn: 1, Attempt: 2}: 1}) {
 		t.Fatalf("unexpected events: %#v", events)
 	}
 
@@ -326,7 +326,7 @@ func TestClientEndToEnd(t *testing.T) {
 		t.Fatalf("unexpected sealed-secret records: %#v", sealedRecords)
 	}
 	plaintext, _, err := trust.Open(
-		sealedRecords[0].Value, state, "receiver-a", fixture.sealingKey,
+		sealedRecords[0].Value, state, "receiver-a", "token", fixture.sealingKey,
 		fixture.userPublicKey, time.Now(),
 	)
 	if err != nil {
@@ -612,17 +612,217 @@ func TestAwaitRejectsTaskLineageMismatch(t *testing.T) {
 	}
 }
 
-func TestAwaitAcceptsAuthRequired(t *testing.T) {
+func TestAwaitReturnsOnInterrupted(t *testing.T) {
 	fixture := newClientFixture(t, true)
 	submission, hash := fixture.rootSubmission(t, "run-auth", "default")
-	task := testTask(submission, hash, 1, wire.TaskStateAuthRequired)
-	fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, fixture.receiverKey))
-	awaited, err := fixture.client.Await(fixture.ctx, task.Task.ID, time.Second)
+	status := &wire.StatusRecord{
+		StatusUpdate: wire.TaskStatusUpdateEvent{
+			TaskID: submission.Wherry.RunID, ContextID: submission.Wherry.Lineage.RootRunID,
+			Status: wire.TaskStatus{
+				State: wire.TaskStateAuthRequired, Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Message: &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "credential token required"}}, Extensions: []string{wire.ExtensionURI}},
+			},
+		},
+		Wherry: wire.StatusExtension{Turn: 1, Attempt: 1, TaskHash: hash, ReceiverID: "receiver-a", Kind: "interrupted"},
+	}
+	fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
+	awaited, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if awaited.Task.Status.State != wire.TaskStateAuthRequired {
-		t.Fatalf("state %s, want AUTH_REQUIRED", awaited.Task.Status.State)
+	if awaited.Task != nil || awaited.Status.State != wire.TaskStateAuthRequired || awaited.Turn != 1 {
+		t.Fatalf("result %#v, want turn 1 AUTH_REQUIRED without a task", awaited)
+	}
+}
+
+func TestAwaitReturnsOnRejection(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	submission, hash := fixture.rootSubmission(t, "run-rejected", "default")
+	status := testStatus(submission, hash, "receiver-a", "rejected", wire.TaskStateRejected)
+	fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
+	awaited, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if awaited.Task != nil || awaited.Status.State != wire.TaskStateRejected || awaited.Turn != 1 {
+		t.Fatalf("result %#v, want turn 1 REJECTED without a task", awaited)
+	}
+}
+
+func TestAwaitReturnsOnTerminalStatus(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	submission, hash := fixture.rootSubmission(t, "run-terminal-status", "default")
+	status := testStatus(submission, hash, "receiver-a", "terminal", wire.TaskStateCompleted)
+	fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
+	awaited, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if awaited.Task != nil || awaited.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("result %#v, want terminal status", awaited)
+	}
+}
+
+func TestAwaitStatusBindings(t *testing.T) {
+	for name, setup := range map[string]func(*testing.T, clientFixture, *wire.SubmissionRecord, string) (ed25519.PrivateKey, *wire.StatusRecord){
+		"task hash": func(_ *testing.T, f clientFixture, submission *wire.SubmissionRecord, _ string) (ed25519.PrivateKey, *wire.StatusRecord) {
+			return f.receiverKey, testStatus(submission, strings.Repeat("a", 64), "receiver-a", "interrupted", wire.TaskStateAuthRequired)
+		},
+		"receiver id": func(_ *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
+			return f.receiverKey, testStatus(submission, hash, "receiver-other", "interrupted", wire.TaskStateAuthRequired)
+		},
+		"turn": func(_ *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
+			status := testStatus(submission, hash, "receiver-a", "interrupted", wire.TaskStateAuthRequired)
+			status.Wherry.Turn++
+			return f.receiverKey, status
+		},
+		"pool": func(t *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
+			key := f.addReceiver(t, "receiver-other", "other", map[string]string{}, testSelector())
+			return key, testStatus(submission, hash, "receiver-other", "interrupted", wire.TaskStateAuthRequired)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newClientFixture(t, true)
+			submission, hash := fixture.rootSubmission(t, "run-await-status-binding", "default")
+			key, status := setup(t, fixture, submission, hash)
+			fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, key))
+			if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 100*time.Millisecond); err == nil {
+				t.Fatalf("status with mismatched %s was accepted", name)
+			}
+		})
+	}
+}
+
+func TestAwaitTaskRequiresLatestTurn(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	submission, hash := fixture.rootSubmission(t, "run-task-turn", "default")
+	task := testTask(submission, hash, 1, wire.TaskStateCompleted)
+	task.Wherry.Turn++
+	fixture.produce(t, "replies.test", submission.Wherry.RunID, signed(t, wire.TypeTask, task, fixture.receiverKey))
+	if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 100*time.Millisecond); err == nil {
+		t.Fatal("task from a non-latest turn was accepted")
+	}
+}
+
+func TestAwaitEnforcesRecordTopics(t *testing.T) {
+	t.Run("task only from reply topic", func(t *testing.T) {
+		fixture := newClientFixture(t, true)
+		submission, hash := fixture.rootSubmission(t, "run-task-topic", "default")
+		fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeTask, testTask(submission, hash, 1, wire.TaskStateCompleted), fixture.receiverKey))
+		if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 100*time.Millisecond); err == nil {
+			t.Fatal("task record from tasks.events was accepted")
+		}
+	})
+	t.Run("status only from event topic", func(t *testing.T) {
+		fixture := newClientFixture(t, true)
+		submission, hash := fixture.rootSubmission(t, "run-status-topic", "default")
+		status := testStatus(submission, hash, "receiver-a", "interrupted", wire.TaskStateAuthRequired)
+		fixture.produce(t, "replies.test", submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
+		if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 100*time.Millisecond); err == nil {
+			t.Fatal("status record from the reply topic was accepted")
+		}
+	})
+}
+
+func TestClientContinueRefusesDuplicateTurn(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	first, hash := fixture.turnSubmission(t, "run-duplicate-turn", 1, "msg-1")
+	status := testStatus(first, hash, "receiver-a", "interrupted", wire.TaskStateAuthRequired)
+	fixture.produce(t, wire.TopicEvent, first.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
+	fixture.turnSubmission(t, first.Wherry.RunID, 2, "msg-2")
+	if _, err := fixture.client.Continue(fixture.ctx, first.Wherry.RunID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil || !strings.Contains(err.Error(), "already submitted") {
+		t.Fatalf("Continue = %v, want duplicate-turn refusal", err)
+	}
+}
+
+func TestClientContinueRequiresInterruptedTask(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	first, hash := fixture.turnSubmission(t, "run-working", 1, "msg-1")
+	status := testStatus(first, hash, "receiver-a", "claimed", wire.TaskStateWorking)
+	fixture.produce(t, wire.TopicEvent, first.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
+	if _, err := fixture.client.Continue(fixture.ctx, first.Wherry.RunID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
+		t.Fatal("continued a task that was not interrupted")
+	}
+}
+
+func TestLatestStatusesRequireBindings(t *testing.T) {
+	for name, setup := range map[string]func(*testing.T, clientFixture, *wire.SubmissionRecord, string) (ed25519.PrivateKey, *wire.StatusRecord){
+		"task hash": func(_ *testing.T, f clientFixture, submission *wire.SubmissionRecord, _ string) (ed25519.PrivateKey, *wire.StatusRecord) {
+			return f.receiverKey, testStatus(submission, strings.Repeat("a", 64), "receiver-a", "interrupted", wire.TaskStateAuthRequired)
+		},
+		"receiver id": func(_ *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
+			return f.receiverKey, testStatus(submission, hash, "receiver-other", "interrupted", wire.TaskStateAuthRequired)
+		},
+		"pool": func(t *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
+			key := f.addReceiver(t, "receiver-other", "other", map[string]string{}, testSelector())
+			return key, testStatus(submission, hash, "receiver-other", "interrupted", wire.TaskStateAuthRequired)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newClientFixture(t, true)
+			submission, hash := fixture.rootSubmission(t, "run-latest-binding", "default")
+			key, status := setup(t, fixture, submission, hash)
+			fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, key))
+			submissions, _, err := fixture.client.readSubmissions(fixture.ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := fixture.client.loadState(fixture.ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			statuses, _, err := fixture.client.latestStatuses(fixture.ctx, submissions, loaded.receiverSigners(time.Now()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if statuses[submission.Wherry.RunID] != nil {
+				t.Fatalf("status with mismatched %s was accepted", name)
+			}
+		})
+	}
+}
+
+func TestLatestStatusesIgnoresRejected(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	first, hash := fixture.turnSubmission(t, "run-ignore-rejected", 1, "msg-1")
+	interrupted := testStatus(first, hash, "receiver-a", "interrupted", wire.TaskStateAuthRequired)
+	fixture.produce(t, wire.TopicEvent, first.Wherry.RunID, signed(t, wire.TypeStatus, interrupted, fixture.receiverKey))
+	third, thirdHash := fixture.turnSubmission(t, first.Wherry.RunID, 3, "msg-3")
+	rejected := testStatus(third, thirdHash, "receiver-a", "rejected", wire.TaskStateRejected)
+	fixture.produce(t, wire.TopicEvent, first.Wherry.RunID, signed(t, wire.TypeStatus, rejected, fixture.receiverKey))
+	result, err := fixture.client.Continue(fixture.ctx, first.Wherry.RunID, ContinueInput{Prompt: "second", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Turn != 2 {
+		t.Fatalf("continued at turn %d, want 2", result.Turn)
+	}
+}
+
+func TestSecretPutListsWaitingTasks(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	submission, hash := fixture.rootSubmission(t, "run-waiting", "default")
+	status := &wire.StatusRecord{
+		StatusUpdate: wire.TaskStatusUpdateEvent{
+			TaskID: submission.Wherry.RunID, ContextID: submission.Wherry.Lineage.RootRunID,
+			Status: wire.TaskStatus{
+				State: wire.TaskStateAuthRequired, Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Message: &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "credential token required"}}, Extensions: []string{wire.ExtensionURI}},
+			},
+		},
+		Wherry: wire.StatusExtension{Turn: 1, Attempt: 1, TaskHash: hash, ReceiverID: "receiver-a", Kind: "interrupted"},
+	}
+	fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.client.PutSecret(fixture.ctx, "token", "receiver-a", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Waiting) != 1 || result.Waiting[0].RunID != submission.Wherry.RunID || result.Waiting[0].Turn != 1 {
+		t.Fatalf("waiting tasks %#v", result.Waiting)
 	}
 }
 
@@ -721,7 +921,7 @@ func (fixture clientFixture) rootSubmission(t *testing.T, runID, pool string) (*
 			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
-			RunID: runID, Attempt: 1, Pool: pool, Selector: []wire.Requirement{}, Labels: map[string]string{},
+			RunID: runID, Turn: 1, Attempt: 1, Pool: pool, Selector: []wire.Requirement{}, Labels: map[string]string{},
 			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
 			ReplyTopic: "replies.test",
 			Lineage:    wire.Lineage{RootRunID: runID, Ancestors: []string{}, Chain: []wire.Bytes{}},
@@ -735,6 +935,40 @@ func (fixture clientFixture) rootSubmission(t *testing.T, runID, pool string) (*
 	return submission, trust.EnvelopeHash(envelope)
 }
 
+func (fixture clientFixture) turnSubmission(t *testing.T, runID string, turn int64, messageID string) (*wire.SubmissionRecord, string) {
+	t.Helper()
+	submission := &wire.SubmissionRecord{
+		Message: wire.Message{
+			MessageID: messageID, ContextID: runID, TaskID: runID, Role: wire.RoleUser,
+			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
+		},
+		Wherry: wire.SubmissionExtension{
+			RunID: runID, Turn: turn, Attempt: 1, Pool: "default", Selector: []wire.Requirement{}, Labels: map[string]string{},
+			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
+			ReplyTopic: "replies.test",
+			Lineage:    wire.Lineage{RootRunID: runID, Ancestors: []string{}, Chain: []wire.Bytes{}},
+		},
+	}
+	envelope, err := trust.SignRootSubmission(*submission, fixture.userKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.produce(t, wire.TopicTask, runID, envelope)
+	return submission, trust.EnvelopeHash(envelope)
+}
+
+func testStatus(submission *wire.SubmissionRecord, hash, receiverID, kind string, state wire.TaskState) *wire.StatusRecord {
+	return &wire.StatusRecord{
+		StatusUpdate: wire.TaskStatusUpdateEvent{
+			TaskID: submission.Wherry.RunID, ContextID: submission.Wherry.Lineage.RootRunID,
+			Status: wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format(time.RFC3339)},
+		},
+		Wherry: wire.StatusExtension{
+			Turn: submission.Wherry.Turn, Attempt: 1, TaskHash: hash, ReceiverID: receiverID, Kind: kind,
+		},
+	}
+}
+
 func testTask(submission *wire.SubmissionRecord, taskHash string, attempt int64, state wire.TaskState) *wire.TaskRecord {
 	return &wire.TaskRecord{
 		Task: wire.Task{
@@ -742,6 +976,6 @@ func testTask(submission *wire.SubmissionRecord, taskHash string, attempt int64,
 			Artifacts: []wire.Artifact{}, History: []wire.Message{submission.Message},
 			Status: wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format(time.RFC3339)},
 		},
-		Wherry: wire.TaskExtension{Attempt: attempt, TaskHash: taskHash},
+		Wherry: wire.TaskExtension{Turn: submission.Wherry.Turn, Attempt: attempt, TaskHash: taskHash},
 	}
 }

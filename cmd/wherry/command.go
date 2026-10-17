@@ -24,7 +24,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|enrol|secret|receivers|submit|await|events|receiver>")
+		return errors.New("usage: wherry <init|key|enrol|secret|receivers|submit|continue|await|events|receiver>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -73,6 +73,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runReceivers(ctx, client, args[1:], stdout, stderr)
 	case "submit":
 		return runSubmit(ctx, client, args[1:], stdout, stderr)
+	case "continue", "resume":
+		return runContinue(ctx, client, args[1:], stdout, stderr)
 	case "await":
 		return runAwait(ctx, client, args[1:], stdout, stderr)
 	case "events":
@@ -215,6 +217,36 @@ func runSecret(ctx context.Context, client *busclient.Client, args []string, std
 		return err
 	}
 	fmt.Fprintf(stdout, "name=%s receiver=%s version=%d\n", result.Name, result.ReceiverID, result.Version)
+	for _, waiting := range result.Waiting {
+		fmt.Fprintf(stdout, "waiting run_id=%s turn=%d\n", waiting.RunID, waiting.Turn)
+	}
+	warnSkipped(stderr, result.Skipped)
+	return nil
+}
+
+func runContinue(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: wherry continue RUN_ID [--prompt TEXT] [--deadline DURATION] [--queue-deadline DURATION]")
+	}
+	runID := args[0]
+	flags := flag.NewFlagSet("continue", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	prompt := flags.String("prompt", "continue", "continuation prompt")
+	deadline := flags.Duration("deadline", 30*time.Minute, "task deadline")
+	queueDeadline := flags.Duration("queue-deadline", 10*time.Minute, "queue deadline")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *deadline <= 0 || *queueDeadline <= 0 {
+		return errors.New("continue accepts one run ID, an optional prompt and positive deadlines")
+	}
+	result, err := client.Continue(ctx, runID, busclient.ContinueInput{
+		Prompt: *prompt, Deadline: *deadline, QueueDeadline: *queueDeadline,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "run_id=%s turn=%d\n", result.RunID, result.Turn)
 	warnSkipped(stderr, result.Skipped)
 	return nil
 }
@@ -287,15 +319,24 @@ func runAwait(ctx context.Context, client *busclient.Client, args []string, stdo
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, result.Task.Status.State)
-	for _, artifact := range result.Task.Artifacts {
-		for _, part := range artifact.Parts {
+	fmt.Fprintln(stdout, result.Status.State)
+	if result.Task != nil {
+		for _, artifact := range result.Task.Artifacts {
+			for _, part := range artifact.Parts {
+				fmt.Fprintln(stdout, partText(part))
+			}
+		}
+	} else if result.Status.Message != nil {
+		for _, part := range result.Status.Message.Parts {
 			fmt.Fprintln(stdout, partText(part))
 		}
 	}
+	if result.Status.State == wire.TaskStateAuthRequired {
+		fmt.Fprintf(stdout, "continue with: wherry continue %s\n", runID)
+	}
 	warnSkipped(stderr, result.Skipped)
-	if result.Task.Status.State != wire.TaskStateCompleted {
-		return fmt.Errorf("run ended in %s", result.Task.Status.State)
+	if result.Status.State != wire.TaskStateCompleted {
+		return fmt.Errorf("run ended in %s", result.Status.State)
 	}
 	return nil
 }
@@ -322,8 +363,8 @@ func runEvents(ctx context.Context, client *busclient.Client, args []string, std
 	}
 	for _, record := range result.Statuses {
 		status := record.StatusUpdate.Status
-		fmt.Fprintf(stdout, "attempt=%d kind=%s state=%s receiver=%s time=%s",
-			record.Wherry.Attempt, record.Wherry.Kind, status.State, record.Wherry.ReceiverID, status.Timestamp)
+		fmt.Fprintf(stdout, "turn=%d attempt=%d kind=%s state=%s receiver=%s time=%s",
+			record.Wherry.Turn, record.Wherry.Attempt, record.Wherry.Kind, status.State, record.Wherry.ReceiverID, status.Timestamp)
 		if status.Message != nil {
 			texts := make([]string, 0, len(status.Message.Parts))
 			for _, part := range status.Message.Parts {
@@ -333,8 +374,15 @@ func runEvents(ctx context.Context, client *busclient.Client, args []string, std
 		}
 		fmt.Fprintln(stdout)
 	}
-	for _, attempt := range slices.Sorted(maps.Keys(result.Chunks)) {
-		fmt.Fprintf(stdout, "attempt=%d transcript_chunks=%d\n", attempt, result.Chunks[attempt])
+	positions := slices.Collect(maps.Keys(result.Chunks))
+	sort.Slice(positions, func(i, j int) bool {
+		if positions[i].Turn != positions[j].Turn {
+			return positions[i].Turn < positions[j].Turn
+		}
+		return positions[i].Attempt < positions[j].Attempt
+	})
+	for _, position := range positions {
+		fmt.Fprintf(stdout, "turn=%d attempt=%d transcript_chunks=%d\n", position.Turn, position.Attempt, result.Chunks[position])
 	}
 	warnSkipped(stderr, result.Skipped)
 	return nil

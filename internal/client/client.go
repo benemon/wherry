@@ -11,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/benemon/wherry/internal/trust"
@@ -47,7 +48,14 @@ type SecretResult struct {
 	Name       string
 	ReceiverID string
 	Version    int64
+	Waiting    []WaitingTask
 	Skipped    int
+}
+
+// WaitingTask identifies a run interrupted for a credential.
+type WaitingTask struct {
+	RunID string
+	Turn  int64
 }
 
 // SubmitInput contains the root-task routing and prompt fields.
@@ -66,16 +74,38 @@ type SubmitResult struct {
 	Skipped int
 }
 
-// AwaitResult contains the accepted final task.
-type AwaitResult struct {
-	Task    *wire.Task
+// ContinueInput contains the new prompt and deadlines for a continuation.
+type ContinueInput struct {
+	Prompt        string
+	Deadline      time.Duration
+	QueueDeadline time.Duration
+}
+
+// ContinueResult describes a produced continuation.
+type ContinueResult struct {
+	RunID   string
+	Turn    int64
 	Skipped int
 }
 
-// EventsResult contains a run's verified status records and its transcript chunk count per attempt.
+// AwaitResult contains the accepted final task.
+type AwaitResult struct {
+	Task    *wire.Task
+	Status  wire.TaskStatus
+	Turn    int64
+	Skipped int
+}
+
+// TurnAttempt identifies one delivery attempt within one submission turn.
+type TurnAttempt struct {
+	Turn    int64
+	Attempt int64
+}
+
+// EventsResult contains a run's verified status records and its transcript chunk count per turn and attempt.
 type EventsResult struct {
 	Statuses []wire.StatusRecord
-	Chunks   map[int64]int
+	Chunks   map[TurnAttempt]int
 	Skipped  int
 }
 
@@ -127,6 +157,11 @@ type verifiedCapability struct {
 	receiverID string
 	enrolled   trust.Enrolled
 	capability *wire.Capability
+}
+
+type runSubmission struct {
+	record *wire.SubmissionRecord
+	hash   string
 }
 
 // New constructs a client over an existing direct Kafka connection.
@@ -227,7 +262,11 @@ func (client *Client) PutSecret(ctx context.Context, name, receiverID, path stri
 	); err != nil {
 		return SecretResult{}, err
 	}
-	return SecretResult{Name: name, ReceiverID: receiverID, Version: version, Skipped: loaded.skipped}, nil
+	waiting, skipped, err := client.waitingTasks(ctx, loaded, enrolled.Pool, name)
+	if err != nil {
+		return SecretResult{}, err
+	}
+	return SecretResult{Name: name, ReceiverID: receiverID, Version: version, Waiting: waiting, Skipped: loaded.skipped + skipped}, nil
 }
 
 // Receivers returns every enrolled receiver with its latest verified capability status.
@@ -321,7 +360,7 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 			Parts: []wire.Part{{Text: input.Prompt}}, Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
-			RunID: runID, Attempt: 1, Pool: chosen.Pool, Selector: slices.Clone(input.Selector), Labels: maps.Clone(input.Labels),
+			RunID: runID, Turn: 1, Attempt: 1, Pool: chosen.Pool, Selector: slices.Clone(input.Selector), Labels: maps.Clone(input.Labels),
 			DeadlineMS: now.Add(input.Deadline).UnixMilli(), QueueDeadlineMS: now.Add(input.QueueDeadline).UnixMilli(),
 			ReplyTopic: client.replyTopic,
 			Lineage:    wire.Lineage{RootRunID: runID, Depth: 0, Ancestors: []string{}, ParentHash: "", Chain: []wire.Bytes{}},
@@ -337,6 +376,172 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 	return SubmitResult{RunID: runID, Pool: chosen.Pool, Skipped: loaded.skipped}, nil
 }
 
+// Continue publishes the next user-signed turn of an interrupted run.
+func (client *Client) Continue(ctx context.Context, runID string, input ContinueInput) (ContinueResult, error) {
+	if input.Deadline <= 0 || input.QueueDeadline <= 0 {
+		return ContinueResult{}, errors.New("deadlines must be positive")
+	}
+	loaded, err := client.loadState(ctx)
+	if err != nil {
+		return ContinueResult{}, err
+	}
+	submissions, skipped, err := client.readSubmissions(ctx)
+	if err != nil {
+		return ContinueResult{}, err
+	}
+	run := submissions[runID]
+	if len(run) == 0 {
+		return ContinueResult{}, fmt.Errorf("continue %s: verified root submission not found", runID)
+	}
+	receivers := loaded.receiverSigners(time.Now())
+	statuses, statusSkipped, err := client.latestStatuses(ctx, submissions, receivers)
+	if err != nil {
+		return ContinueResult{}, err
+	}
+	status := statuses[runID]
+	if status == nil || status.Wherry.Kind != "interrupted" || !wire.Interrupted(status.StatusUpdate.Status.State) {
+		return ContinueResult{}, errors.New("task is not awaiting continuation")
+	}
+	nextTurn := status.Wherry.Turn + 1
+	if run[nextTurn].record != nil {
+		return ContinueResult{}, errors.New("continuation turn already submitted")
+	}
+	previous := run[status.Wherry.Turn]
+	if previous.record == nil {
+		return ContinueResult{}, errors.New("task is not awaiting continuation")
+	}
+	messageID, err := randomID("msg-")
+	if err != nil {
+		return ContinueResult{}, err
+	}
+	now := time.Now()
+	continuation := wire.SubmissionRecord{
+		Message: wire.Message{
+			MessageID: messageID, ContextID: previous.record.Message.ContextID, TaskID: runID, Role: wire.RoleUser,
+			Parts: []wire.Part{{Text: input.Prompt}}, Extensions: []string{wire.ExtensionURI},
+		},
+		Wherry: wire.SubmissionExtension{
+			RunID: runID, Turn: nextTurn, Attempt: 1, Pool: previous.record.Wherry.Pool,
+			Selector: slices.Clone(previous.record.Wherry.Selector), Labels: maps.Clone(previous.record.Wherry.Labels),
+			DeadlineMS: now.Add(input.Deadline).UnixMilli(), QueueDeadlineMS: now.Add(input.QueueDeadline).UnixMilli(),
+			ReplyTopic: previous.record.Wherry.ReplyTopic, Lineage: previous.record.Wherry.Lineage,
+		},
+	}
+	envelope, err := trust.SignRootSubmission(continuation, client.userKey)
+	if err != nil {
+		return ContinueResult{}, err
+	}
+	if err := client.produce(ctx, &kgo.Record{Topic: wire.TopicTask, Key: []byte(runID), Value: envelope}); err != nil {
+		return ContinueResult{}, err
+	}
+	return ContinueResult{RunID: runID, Turn: continuation.Wherry.Turn, Skipped: loaded.skipped + skipped + statusSkipped}, nil
+}
+
+func (client *Client) readSubmissions(ctx context.Context) (map[string]map[int64]runSubmission, int, error) {
+	records, err := client.readBounded(ctx, wire.TopicTask)
+	if err != nil {
+		return nil, 0, err
+	}
+	result := make(map[string]map[int64]runSubmission)
+	skipped := 0
+	for _, record := range records {
+		submission, err := trust.VerifyRootSubmission(record.Value, client.userKey.Public().(ed25519.PublicKey))
+		if err != nil {
+			skipped++
+			continue
+		}
+		if string(record.Key) != submission.Wherry.RunID {
+			skipped++
+			continue
+		}
+		run := result[submission.Wherry.RunID]
+		if run == nil {
+			run = make(map[int64]runSubmission)
+			result[submission.Wherry.RunID] = run
+		}
+		if _, duplicate := run[submission.Wherry.Turn]; duplicate {
+			skipped++
+			continue
+		}
+		run[submission.Wherry.Turn] = runSubmission{record: submission, hash: trust.EnvelopeHash(record.Value)}
+	}
+	return result, skipped, nil
+}
+
+func (client *Client) latestStatuses(ctx context.Context, submissions map[string]map[int64]runSubmission, receivers map[string]receiverIdentity) (map[string]*wire.StatusRecord, int, error) {
+	records, err := client.readBounded(ctx, wire.TopicEvent)
+	if err != nil {
+		return nil, 0, err
+	}
+	latest := make(map[string]*wire.StatusRecord)
+	var order wire.AttemptFilter
+	skipped := 0
+	for _, record := range records {
+		envelope, err := wire.DecodeEnvelope(record.Value)
+		if err != nil {
+			skipped++
+			continue
+		}
+		receiver, ok := receivers[envelope.Signer]
+		if !ok {
+			skipped++
+			continue
+		}
+		verified, err := wire.Verify(envelope, receiver.enrolled.SigningPub, wire.SignerReceiver)
+		status, ok := verified.(*wire.StatusRecord)
+		if err != nil || !ok || status.Wherry.Kind == "rejected" {
+			skipped++
+			continue
+		}
+		submission := submissions[status.StatusUpdate.TaskID][status.Wherry.Turn]
+		if submission.record == nil || string(record.Key) != status.StatusUpdate.TaskID ||
+			receiver.id != status.Wherry.ReceiverID || receiver.enrolled.Pool != submission.record.Wherry.Pool ||
+			status.StatusUpdate.ContextID != submission.record.Wherry.Lineage.RootRunID || status.Wherry.TaskHash != submission.hash {
+			skipped++
+			continue
+		}
+		if order.Admit(status.StatusUpdate.TaskID, status.Wherry.Turn, status.Wherry.Attempt) {
+			latest[status.StatusUpdate.TaskID] = status
+		}
+	}
+	return latest, skipped, nil
+}
+
+func (client *Client) waitingTasks(ctx context.Context, loaded *loadedState, pool, credential string) ([]WaitingTask, int, error) {
+	submissions, skipped, err := client.readSubmissions(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	statuses, statusSkipped, err := client.latestStatuses(ctx, submissions, loaded.receiverSigners(time.Now()))
+	if err != nil {
+		return nil, 0, err
+	}
+	wantMessage := "credential " + credential + " required"
+	var waiting []WaitingTask
+	for runID, status := range statuses {
+		submission := submissions[runID][status.Wherry.Turn]
+		if submission.record.Wherry.Pool == pool && status.Wherry.Kind == "interrupted" &&
+			status.StatusUpdate.Status.State == wire.TaskStateAuthRequired && statusText(status.StatusUpdate.Status) == wantMessage {
+			waiting = append(waiting, WaitingTask{RunID: runID, Turn: status.Wherry.Turn})
+		}
+	}
+	sort.Slice(waiting, func(i, j int) bool { return waiting[i].RunID < waiting[j].RunID })
+	return waiting, skipped + statusSkipped, nil
+}
+
+func statusText(status wire.TaskStatus) string {
+	if status.Message == nil {
+		return ""
+	}
+	var parts []string
+	for _, part := range status.Message.Parts {
+		if part.Text != "" {
+			parts = append(parts, part.Text)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 // Await follows the reply topic until it accepts a final task for runID: terminal, or waiting on authentication.
 func (client *Client) Await(ctx context.Context, runID string, timeout time.Duration) (AwaitResult, error) {
 	loaded, err := client.loadState(ctx)
@@ -344,30 +549,25 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 		return AwaitResult{}, err
 	}
 	receivers := loaded.receiverSigners(time.Now())
-	submissions, err := client.readBounded(ctx, wire.TopicTask)
+	submissions, skipped, err := client.readSubmissions(ctx)
 	if err != nil {
 		return AwaitResult{}, err
 	}
-	var submission *wire.SubmissionRecord
-	var submissionHash string
-	for _, record := range submissions {
-		if string(record.Key) != runID {
-			continue
+	loaded.skipped += skipped
+	run := submissions[runID]
+	var latest runSubmission
+	var latestTurn int64
+	for turn, submission := range run {
+		if turn > latestTurn {
+			latestTurn, latest = turn, submission
 		}
-		verified, err := trust.VerifyRootSubmission(record.Value, client.userKey.Public().(ed25519.PublicKey))
-		if err != nil || verified.Wherry.RunID != runID {
-			continue
-		}
-		submission = verified
-		submissionHash = trust.EnvelopeHash(record.Value)
-		break
 	}
-	if submission == nil {
+	if latest.record == nil {
 		return AwaitResult{}, fmt.Errorf("await %s: verified root submission not found", runID)
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	stop, err := client.followFromStart(waitCtx, client.replyTopic)
+	stop, err := client.followFromStart(waitCtx, client.replyTopic, wire.TopicEvent)
 	if err != nil {
 		return AwaitResult{}, err
 	}
@@ -381,38 +581,50 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 		if err := fetches.Err(); err != nil {
 			return AwaitResult{}, err
 		}
-		for _, record := range fetches.Records() {
-			if record.Topic != client.replyTopic || record.Attrs.IsControl() {
-				continue
+		records := fetches.Records()
+		for _, topic := range []string{client.replyTopic, wire.TopicEvent} {
+			for _, record := range records {
+				if record.Topic != topic || record.Attrs.IsControl() || string(record.Key) != runID {
+					continue
+				}
+				envelope, err := wire.DecodeEnvelope(record.Value)
+				if err != nil {
+					loaded.skipped++
+					continue
+				}
+				receiver, ok := receivers[envelope.Signer]
+				if !ok {
+					loaded.skipped++
+					continue
+				}
+				verified, err := wire.Verify(envelope, receiver.enrolled.SigningPub, wire.SignerReceiver)
+				if err != nil {
+					loaded.skipped++
+					continue
+				}
+				switch value := verified.(type) {
+				case *wire.TaskRecord:
+					if topic != client.replyTopic || value.Wherry.Turn != latestTurn || receiver.enrolled.Pool != latest.record.Wherry.Pool ||
+						value.Wherry.TaskHash != latest.hash || value.Task.ID != runID ||
+						value.Task.ContextID != latest.record.Wherry.Lineage.RootRunID || !wire.Terminal(value.Task.Status.State) ||
+						len(value.Task.History) < int(latestTurn) || value.Task.History[latestTurn-1].MessageID != latest.record.Message.MessageID ||
+						!attempts.Admit(value.Task.ID, value.Wherry.Turn, value.Wherry.Attempt) {
+						continue
+					}
+					return AwaitResult{Task: &value.Task, Status: value.Task.Status, Turn: value.Wherry.Turn, Skipped: loaded.skipped}, nil
+				case *wire.StatusRecord:
+					acceptable := value.Wherry.Kind == "interrupted" && wire.Interrupted(value.StatusUpdate.Status.State) ||
+						value.Wherry.Kind == "terminal" && wire.Terminal(value.StatusUpdate.Status.State) ||
+						value.Wherry.Kind == "rejected" && value.StatusUpdate.Status.State == wire.TaskStateRejected
+					if topic != wire.TopicEvent || value.Wherry.Turn != latestTurn || receiver.id != value.Wherry.ReceiverID || receiver.enrolled.Pool != latest.record.Wherry.Pool ||
+						value.Wherry.TaskHash != latest.hash || value.StatusUpdate.TaskID != runID ||
+						value.StatusUpdate.ContextID != latest.record.Wherry.Lineage.RootRunID || !acceptable ||
+						!attempts.Admit(value.StatusUpdate.TaskID, value.Wherry.Turn, value.Wherry.Attempt) {
+						continue
+					}
+					return AwaitResult{Status: value.StatusUpdate.Status, Turn: value.Wherry.Turn, Skipped: loaded.skipped}, nil
+				}
 			}
-			envelope, err := wire.DecodeEnvelope(record.Value)
-			if err != nil {
-				loaded.skipped++
-				continue
-			}
-			receiver, ok := receivers[envelope.Signer]
-			if !ok {
-				loaded.skipped++
-				continue
-			}
-			verified, err := wire.Verify(envelope, receiver.enrolled.SigningPub, wire.SignerReceiver)
-			if err != nil {
-				loaded.skipped++
-				continue
-			}
-			task, ok := verified.(*wire.TaskRecord)
-			if !ok || receiver.enrolled.Pool != submission.Wherry.Pool || task.Wherry.TaskHash != submissionHash ||
-				task.Task.ID != runID || task.Task.ContextID != submission.Wherry.Lineage.RootRunID ||
-				len(task.Task.History) == 0 || task.Task.History[0].MessageID != submission.Message.MessageID {
-				continue
-			}
-			if state := task.Task.Status.State; !wire.Terminal(state) && state != wire.TaskStateAuthRequired {
-				continue
-			}
-			if !attempts.Admit(task.Task.ID, task.Wherry.Attempt) {
-				continue
-			}
-			return AwaitResult{Task: &task.Task, Skipped: loaded.skipped}, nil
 		}
 	}
 }
@@ -428,7 +640,7 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 	if err != nil {
 		return EventsResult{}, err
 	}
-	result := EventsResult{Chunks: map[int64]int{}, Skipped: loaded.skipped}
+	result := EventsResult{Chunks: map[TurnAttempt]int{}, Skipped: loaded.skipped}
 	for _, record := range records {
 		envelope, err := wire.DecodeEnvelope(record.Value)
 		if err != nil {
@@ -479,7 +691,7 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 			result.Skipped++
 			continue
 		}
-		result.Chunks[update.Wherry.Attempt]++
+		result.Chunks[TurnAttempt{Turn: update.Wherry.Turn, Attempt: update.Wherry.Attempt}]++
 	}
 	return result, nil
 }

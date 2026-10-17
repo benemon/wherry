@@ -185,7 +185,7 @@ func awaitOutput(t *testing.T, parts []wire.Part) string {
 			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
-			RunID: "run-a", Attempt: 1, Pool: "default", Selector: []wire.Requirement{}, Labels: map[string]string{},
+			RunID: "run-a", Turn: 1, Attempt: 1, Pool: "default", Selector: []wire.Requirement{}, Labels: map[string]string{},
 			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
 			ReplyTopic: "replies.test", Lineage: wire.Lineage{RootRunID: "run-a", Ancestors: []string{}, Chain: []wire.Bytes{}},
 		},
@@ -200,7 +200,7 @@ func awaitOutput(t *testing.T, parts []wire.Part) string {
 			Status:    wire.TaskStatus{State: wire.TaskStateCompleted, Timestamp: time.Now().UTC().Format(time.RFC3339)},
 			Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: parts, Extensions: []string{wire.ExtensionURI}}},
 		},
-		Wherry: wire.TaskExtension{Attempt: 1, TaskHash: trust.EnvelopeHash(submissionEnvelope)},
+		Wherry: wire.TaskExtension{Turn: 1, Attempt: 1, TaskHash: trust.EnvelopeHash(submissionEnvelope)},
 	}
 	payload, err := wire.MarshalPayload(wire.TypeTask, task)
 	if err != nil {
@@ -241,6 +241,122 @@ func TestAwaitPrintsDataPart(t *testing.T) {
 	}
 }
 
+func publishInterruptedRun(t *testing.T) (context.Context, *kgo.Client, *busclient.Client) {
+	t.Helper()
+	ctx, kafka, client, userKey, receiverKey := enrolledReceiver(t)
+	if _, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, 1, nil, "replies.test"); err != nil {
+		t.Fatal(err)
+	}
+	submission := wire.SubmissionRecord{
+		Message: wire.Message{
+			MessageID: "msg-run-auth", ContextID: "run-auth", TaskID: "run-auth", Role: wire.RoleUser,
+			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
+		},
+		Wherry: wire.SubmissionExtension{
+			RunID: "run-auth", Turn: 1, Attempt: 1, Pool: "default", Selector: []wire.Requirement{}, Labels: map[string]string{},
+			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
+			ReplyTopic: "replies.test", Lineage: wire.Lineage{RootRunID: "run-auth", Ancestors: []string{}, Chain: []wire.Bytes{}},
+		},
+	}
+	payload, err := trust.SignRootSubmission(submission, userKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := &wire.StatusRecord{
+		StatusUpdate: wire.TaskStatusUpdateEvent{
+			TaskID: "run-auth", ContextID: "run-auth",
+			Status: wire.TaskStatus{
+				State: wire.TaskStateAuthRequired, Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Message: &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "credential token required"}}, Extensions: []string{wire.ExtensionURI}},
+			},
+		},
+		Wherry: wire.StatusExtension{Turn: 1, Attempt: 1, TaskHash: trust.EnvelopeHash(payload), ReceiverID: "receiver-a", Kind: "interrupted"},
+	}
+	statusPayload, err := wire.MarshalPayload(wire.TypeStatus, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusEnvelope, err := wire.MarshalEnvelope(wire.Sign(wire.TypeStatus, statusPayload, receiverKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kafka.ProduceSync(ctx,
+		&kgo.Record{Topic: wire.TopicTask, Key: []byte("run-auth"), Value: payload},
+		&kgo.Record{Topic: wire.TopicEvent, Key: []byte("run-auth"), Value: statusEnvelope},
+	).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	return ctx, kafka, client
+}
+
+func TestAwaitPrintsAuthRequiredAndContinuation(t *testing.T) {
+	ctx, _, client := publishInterruptedRun(t)
+	var stdout, stderr bytes.Buffer
+	err := runAwait(ctx, client, []string{"run-auth", "--timeout", "5s"}, &stdout, &stderr)
+	if err == nil || err.Error() != "run ended in TASK_STATE_AUTH_REQUIRED" {
+		t.Fatalf("error %v", err)
+	}
+	want := "TASK_STATE_AUTH_REQUIRED\ncredential token required\ncontinue with: wherry continue run-auth\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestContinuePrintsRunAndTurn(t *testing.T) {
+	ctx, kafka, client := publishInterruptedRun(t)
+	var stdout, stderr bytes.Buffer
+	before := time.Now()
+	if err := runContinue(ctx, client, []string{"run-auth", "--deadline", "45s", "--queue-deadline", "15s"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now()
+	if got, want := stdout.String(), "run_id=run-auth turn=2\n"; got != want {
+		t.Fatalf("stdout %q, want %q", got, want)
+	}
+	records, err := kadm.NewClient(kafka).ListEndOffsets(ctx, wire.TopicTask)
+	if err != nil || records.Error() != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	partitions := map[int32]kgo.Offset{}
+	for _, offset := range records[wire.TopicTask] {
+		if offset.Partition >= 0 {
+			count += offset.Offset
+			partitions[offset.Partition] = kgo.NewOffset().AtStart()
+		}
+	}
+	if count != 2 {
+		t.Fatalf("task queue has %d records, want submission and continuation", count)
+	}
+	kafka.AddConsumePartitions(map[string]map[int32]kgo.Offset{wire.TopicTask: partitions})
+	var continuation *wire.SubmissionRecord
+	for continuation == nil {
+		fetches := kafka.PollFetches(ctx)
+		if err := fetches.Err(); err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range fetches.Records() {
+			envelope, err := wire.DecodeEnvelope(record.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := wire.DecodePayload(wire.TypeSubmission, envelope.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if submission := payload.(*wire.SubmissionRecord); submission.Wherry.Turn == 2 {
+				continuation = submission
+			}
+		}
+	}
+	inRange := func(ms int64, d time.Duration) bool {
+		return ms >= before.Add(d).UnixMilli() && ms <= after.Add(d).UnixMilli()
+	}
+	if !inRange(continuation.Wherry.DeadlineMS, 45*time.Second) || !inRange(continuation.Wherry.QueueDeadlineMS, 15*time.Second) {
+		t.Fatalf("continuation deadlines %d/%d do not follow the flags", continuation.Wherry.DeadlineMS, continuation.Wherry.QueueDeadlineMS)
+	}
+}
+
 func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 	ctx, kafka, client, _, receiverKey := enrolledReceiver(t)
 	publish := func(topic string, recordType wire.RecordType, payload any) {
@@ -263,22 +379,22 @@ func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 			State: wire.TaskStateRejected, Timestamp: "2026-10-17T10:00:00.000Z",
 			Message: &wire.Message{MessageID: "msg-1", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "queue deadline passed"}}, Extensions: extensions},
 		}},
-		Wherry: wire.StatusExtension{Attempt: 1, TaskHash: strings.Repeat("a", 64), ReceiverID: "receiver-a", Kind: "terminal"},
+		Wherry: wire.StatusExtension{Turn: 1, Attempt: 1, TaskHash: strings.Repeat("a", 64), ReceiverID: "receiver-a", Kind: "terminal"},
 	})
 	for seq := range int64(2) {
 		publish(wire.TopicTranscript, wire.TypeArtifactUpdate, &wire.ArtifactUpdateRecord{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", Append: seq > 0, Artifact: wire.Artifact{
 				ArtifactID: "transcript", Parts: []wire.Part{{Text: "line", MediaType: "application/x-ndjson"}}, Extensions: extensions,
 			}},
-			Wherry: wire.ArtifactUpdateExtension{Attempt: 1, Seq: seq},
+			Wherry: wire.ArtifactUpdateExtension{Turn: 1, Attempt: 1, Seq: seq},
 		})
 	}
 	var stdout, stderr bytes.Buffer
 	if err := runEvents(ctx, client, []string{"run-a"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	want := "attempt=1 kind=terminal state=TASK_STATE_REJECTED receiver=receiver-a time=2026-10-17T10:00:00.000Z message=\"queue deadline passed\"\n" +
-		"attempt=1 transcript_chunks=2\n"
+	want := "turn=1 attempt=1 kind=terminal state=TASK_STATE_REJECTED receiver=receiver-a time=2026-10-17T10:00:00.000Z message=\"queue deadline passed\"\n" +
+		"turn=1 attempt=1 transcript_chunks=2\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout %q, want %q", stdout.String(), want)
 	}

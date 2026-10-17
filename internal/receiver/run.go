@@ -9,6 +9,8 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
+	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -118,6 +120,15 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 		}
 		return nil, kgo.AckReject
 	}
+	taskHash := trust.EnvelopeHash(record.Value)
+	reason, err := r.continuationRejection(ctx, task, taskHash)
+	if err != nil {
+		r.logger.Printf("read continuation status for %s: %v", task.Wherry.RunID, err)
+		return nil, kgo.AckRelease
+	}
+	if reason != "" {
+		return reject(reason)
+	}
 	offer, matched := wire.MatchOffer(task.Wherry.Selector, enrolled.Labels, enrolled.Adapters, offers)
 	if !matched || !wire.Satisfies(enrolled.Selector, task.Wherry.Labels) {
 		return nil, kgo.AckAccept
@@ -137,12 +148,110 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 }
 
 func (r *Receiver) publishRejection(ctx context.Context, record *kgo.Record, task *wire.SubmissionRecord, reason string) error {
-	status := r.status(task, trust.EnvelopeHash(record.Value), attemptOf(record), "terminal", taskStatus(wire.TaskStateRejected, reason), nil)
+	status := r.status(task, trust.EnvelopeHash(record.Value), attemptOf(record), "rejected", taskStatus(wire.TaskStateRejected, reason), nil)
 	value, err := sign(wire.TypeStatus, status, r.signing)
 	if err != nil {
 		return err
 	}
 	return r.base.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.Wherry.RunID), Value: value}).FirstErr()
+}
+
+type runSubmission struct {
+	record *wire.SubmissionRecord
+	hash   string
+}
+
+func (r *Receiver) submissions(ctx context.Context, expected *wire.SubmissionRecord) (map[int64]runSubmission, error) {
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	records, err := readBounded(ctx, r.kafkaOpt, wire.TopicTask)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[int64]runSubmission)
+	for _, record := range records {
+		if string(record.Key) != expected.Wherry.RunID {
+			continue
+		}
+		submission, err := trust.VerifyRootSubmission(record.Value, r.userPub)
+		if err != nil || submission.Wherry.RunID != expected.Wherry.RunID ||
+			submission.Message.ContextID != expected.Message.ContextID ||
+			submission.Wherry.Pool != expected.Wherry.Pool ||
+			submission.Wherry.ReplyTopic != expected.Wherry.ReplyTopic ||
+			!maps.Equal(submission.Wherry.Labels, expected.Wherry.Labels) ||
+			!reflect.DeepEqual(submission.Wherry.Selector, expected.Wherry.Selector) ||
+			!reflect.DeepEqual(submission.Wherry.Lineage, expected.Wherry.Lineage) {
+			continue
+		}
+		if _, duplicate := result[submission.Wherry.Turn]; duplicate {
+			continue
+		}
+		result[submission.Wherry.Turn] = runSubmission{record: submission, hash: trust.EnvelopeHash(record.Value)}
+	}
+	return result, nil
+}
+
+func (r *Receiver) continuationRejection(ctx context.Context, task *wire.SubmissionRecord, taskHash string) (string, error) {
+	submissions, err := r.submissions(ctx, task)
+	if err != nil {
+		return "", err
+	}
+	if task.Wherry.Turn > 1 && submissions[task.Wherry.Turn].hash != taskHash {
+		return "duplicate continuation", nil
+	}
+	r.mu.Lock()
+	signers := append([]ed25519.PublicKey(nil), r.signers...)
+	r.mu.Unlock()
+	if len(signers) == 0 {
+		signers = append(signers, r.signing.Public().(ed25519.PublicKey))
+	}
+	records, err := readBounded(ctx, r.kafkaOpt, wire.TopicEvent)
+	if err != nil {
+		return "", err
+	}
+	var latest *wire.StatusRecord
+	var order wire.AttemptFilter
+	for _, record := range records {
+		if string(record.Key) != task.Wherry.RunID {
+			continue
+		}
+		envelope, err := wire.DecodeEnvelope(record.Value)
+		if err != nil {
+			continue
+		}
+		var verified any
+		for _, signer := range signers {
+			verified, err = wire.Verify(envelope, signer, wire.SignerReceiver)
+			if err == nil {
+				break
+			}
+		}
+		status, ok := verified.(*wire.StatusRecord)
+		if err != nil || !ok || status.Wherry.Kind == "rejected" {
+			continue
+		}
+		submission, found := submissions[status.Wherry.Turn]
+		if !found || status.StatusUpdate.TaskID != task.Wherry.RunID ||
+			status.StatusUpdate.ContextID != task.Wherry.Lineage.RootRunID || status.Wherry.TaskHash != submission.hash ||
+			!order.Admit(task.Wherry.RunID, status.Wherry.Turn, status.Wherry.Attempt) {
+			continue
+		}
+		latest = status
+	}
+	if latest != nil && (latest.Wherry.Turn > task.Wherry.Turn ||
+		latest.Wherry.Turn == task.Wherry.Turn && (latest.Wherry.Kind == "interrupted" || latest.Wherry.Kind == "terminal")) {
+		return "stale submission", nil
+	}
+	if task.Wherry.Turn == 1 || latest != nil && latest.Wherry.Turn == task.Wherry.Turn {
+		return "", nil
+	}
+	if latest == nil || latest.Wherry.Kind != "interrupted" || !wire.Interrupted(latest.StatusUpdate.Status.State) {
+		return "task is not awaiting continuation", nil
+	}
+	if task.Wherry.Turn != latest.Wherry.Turn+1 {
+		return "continuation turn out of order", nil
+	}
+	return "", nil
 }
 
 // renewer keeps the share lock alive from claim until the final acknowledgement,
@@ -206,7 +315,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	offset := int64(0)
 	if attempt > 1 {
-		offset, err = r.lastOffset(runCtx, runID, run.taskHash, task.Wherry.Lineage.RootRunID)
+		offset, err = r.lastOffset(runCtx, runID, run.taskHash, task.Wherry.Lineage.RootRunID, task.Wherry.Turn)
 		if err != nil {
 			r.logger.Printf("run %s: read events: %v", runID, err)
 			return kgo.AckRelease
@@ -217,7 +326,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if attempt > 1 {
 		// Offers can change between attempts, so the run may live in an adapter other than the matched one.
 		for _, named := range r.adapters {
-			found, ok, err := named.Adapter.Lookup(runCtx, runID)
+			found, ok, err := named.Adapter.Lookup(runCtx, runID, task.Wherry.Turn)
 			if err != nil {
 				if runCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, wire.TaskStateFailed, "timeout", nil)
@@ -239,11 +348,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			held, ok := r.credentials[named.Name]
 			r.mu.Unlock()
 			if !ok {
-				return run.fail(ctx, wire.TaskStateAuthRequired, "credential unavailable", nil)
+				return run.interrupt(ctx, named.Credential)
 			}
 			credential = held.value
 		}
-		handle, err = named.Adapter.Dispatch(runCtx, Run{ID: runID, Offer: admitted.offer.Labels, Prompt: []byte(admitted.prompt), Credential: credential})
+		handle, err = named.Adapter.Dispatch(runCtx, Run{ID: runID, Turn: task.Wherry.Turn, Offer: admitted.offer.Labels, Prompt: []byte(admitted.prompt), Credential: credential})
 		if err != nil {
 			if runCtx.Err() != nil && ctx.Err() == nil {
 				return run.fail(ctx, wire.TaskStateFailed, "timeout", nil)
@@ -367,6 +476,15 @@ func (run *activeRun) fail(ctx context.Context, state wire.TaskState, reason str
 	return run.end(ctx, taskStatus(state, reason), reason, pending, kgo.AckReject)
 }
 
+func (run *activeRun) interrupt(ctx context.Context, credential string) kgo.AckStatus {
+	status := taskStatus(wire.TaskStateAuthRequired, "credential "+credential+" required")
+	if err := run.commit(ctx, run.statusRecord("interrupted", status, nil)); err != nil {
+		return run.abandon(err)
+	}
+	run.release(ctx)
+	return kgo.AckAccept
+}
+
 func (run *activeRun) finish(ctx context.Context, handle Handle, pending []Line, result agentResult) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.logger.Printf("run %s: stop: %v", run.task.Wherry.RunID, err)
@@ -381,7 +499,12 @@ func (run *activeRun) finish(ctx context.Context, handle Handle, pending []Line,
 
 // end commits the remaining transcript, the final task and the terminal status in one transaction.
 func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, pending []Line, ack kgo.AckStatus) kgo.AckStatus {
-	records := append(run.chunks(pending, true), run.taskRecord(status, result), run.statusRecord("terminal", status, nil))
+	task, err := run.taskRecord(ctx, status, result)
+	if err != nil {
+		run.receiver.logger.Printf("run %s: read history: %v", run.task.Wherry.RunID, err)
+		return kgo.AckRelease
+	}
+	records := append(run.chunks(pending, true), task, run.statusRecord("terminal", status, nil))
 	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
 	}
@@ -390,7 +513,7 @@ func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result st
 }
 
 func (run *activeRun) release(ctx context.Context) {
-	if err := run.adapter.Adapter.Release(ctx, run.task.Wherry.RunID); err != nil {
+	if err := run.adapter.Adapter.Release(ctx, run.task.Wherry.RunID, run.task.Wherry.Turn); err != nil {
 		run.receiver.logger.Printf("run %s: release: %v", run.task.Wherry.RunID, err)
 	}
 }
@@ -402,7 +525,7 @@ func (run *activeRun) statusRecord(kind string, status wire.TaskStatus, offset *
 func (r *Receiver) status(task *wire.SubmissionRecord, taskHash string, attempt int64, kind string, status wire.TaskStatus, offset *int64) *wire.StatusRecord {
 	return &wire.StatusRecord{
 		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: task.Wherry.RunID, ContextID: task.Wherry.Lineage.RootRunID, Status: status},
-		Wherry:       wire.StatusExtension{Attempt: attempt, TaskHash: taskHash, ReceiverID: r.config.ReceiverID, Kind: kind, LogOffset: offset},
+		Wherry:       wire.StatusExtension{Turn: task.Wherry.Turn, Attempt: attempt, TaskHash: taskHash, ReceiverID: r.config.ReceiverID, Kind: kind, LogOffset: offset},
 	}
 }
 
@@ -441,7 +564,7 @@ func (run *activeRun) chunks(lines []Line, last bool) []*kgo.Record {
 				Append:    line.Offset > 0,
 				LastChunk: last && i == len(lines)-1,
 			},
-			Wherry: wire.ArtifactUpdateExtension{Attempt: run.attempt, Seq: line.Offset},
+			Wherry: wire.ArtifactUpdateExtension{Turn: run.task.Wherry.Turn, Attempt: run.attempt, Seq: line.Offset},
 		}
 		records = append(records, run.signed(wire.TopicTranscript, wire.TypeArtifactUpdate, update))
 	}
@@ -449,7 +572,7 @@ func (run *activeRun) chunks(lines []Line, last bool) []*kgo.Record {
 }
 
 // taskRecord builds the final task; a result that is JSON travels as a data part.
-func (run *activeRun) taskRecord(status wire.TaskStatus, result string) *kgo.Record {
+func (run *activeRun) taskRecord(ctx context.Context, status wire.TaskStatus, result string) (*kgo.Record, error) {
 	part := wire.Part{Text: result}
 	switch {
 	case result == "":
@@ -457,15 +580,38 @@ func (run *activeRun) taskRecord(status wire.TaskStatus, result string) *kgo.Rec
 	case jsontext.Value(result).IsValid():
 		part = wire.Part{Data: jsontext.Value(result), MediaType: "application/json"}
 	}
+	history, err := run.receiver.history(ctx, run.task, run.taskHash)
+	if err != nil {
+		return nil, err
+	}
 	task := &wire.TaskRecord{
 		Task: wire.Task{
 			ID: run.task.Wherry.RunID, ContextID: run.task.Wherry.Lineage.RootRunID, Status: status,
-			History:   []wire.Message{run.task.Message},
+			History:   history,
 			Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI}}},
 		},
-		Wherry: wire.TaskExtension{Attempt: run.attempt, TaskHash: run.taskHash},
+		Wherry: wire.TaskExtension{Turn: run.task.Wherry.Turn, Attempt: run.attempt, TaskHash: run.taskHash},
 	}
-	return run.signed(run.task.Wherry.ReplyTopic, wire.TypeTask, task)
+	return run.signed(run.task.Wherry.ReplyTopic, wire.TypeTask, task), nil
+}
+
+func (r *Receiver) history(ctx context.Context, task *wire.SubmissionRecord, taskHash string) ([]wire.Message, error) {
+	submissions, err := r.submissions(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+	history := make([]wire.Message, 0, task.Wherry.Turn)
+	for turn := int64(1); turn <= task.Wherry.Turn; turn++ {
+		submission, ok := submissions[turn]
+		if !ok {
+			return nil, fmt.Errorf("submission turn %d not found", turn)
+		}
+		if turn == task.Wherry.Turn && submission.hash != taskHash {
+			return nil, errors.New("final submission hash does not match claimed task")
+		}
+		history = append(history, submission.record.Message)
+	}
+	return history, nil
 }
 
 func (run *activeRun) signed(topic string, recordType wire.RecordType, payload any) *kgo.Record {
@@ -477,7 +623,7 @@ func (run *activeRun) signed(topic string, recordType wire.RecordType, payload a
 }
 
 // lastOffset returns the highest heartbeat log offset this run reached under an earlier attempt.
-func (r *Receiver) lastOffset(ctx context.Context, runID, taskHash, rootRunID string) (int64, error) {
+func (r *Receiver) lastOffset(ctx context.Context, runID, taskHash, rootRunID string, turn int64) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	records, err := readBounded(ctx, r.kafkaOpt, wire.TopicEvent)
@@ -508,7 +654,7 @@ func (r *Receiver) lastOffset(ctx context.Context, runID, taskHash, rootRunID st
 		}
 		status, ok := verified.(*wire.StatusRecord)
 		if err != nil || !ok || status.StatusUpdate.TaskID != runID || status.StatusUpdate.ContextID != rootRunID ||
-			status.Wherry.TaskHash != taskHash || (status.Wherry.Kind != "started" && status.Wherry.Kind != "heartbeat") ||
+			status.Wherry.Turn != turn || status.Wherry.TaskHash != taskHash || (status.Wherry.Kind != "started" && status.Wherry.Kind != "heartbeat") ||
 			status.Wherry.LogOffset == nil {
 			continue
 		}

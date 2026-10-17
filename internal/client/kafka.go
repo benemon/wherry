@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -87,29 +86,33 @@ func (client *Client) readBounded(ctx context.Context, topic string) ([]*kgo.Rec
 	return records, nil
 }
 
-func (client *Client) followFromStart(ctx context.Context, topic string) (func(), error) {
-	starts, err := kadm.NewClient(client.kafka).ListStartOffsets(ctx, topic)
+func (client *Client) followFromStart(ctx context.Context, topics ...string) (func(), error) {
+	starts, err := kadm.NewClient(client.kafka).ListStartOffsets(ctx, topics...)
 	if err != nil {
 		return nil, err
 	}
 	if err := starts.Error(); err != nil {
 		return nil, err
 	}
-	partitions, ok := starts[topic]
-	if !ok {
-		return nil, fmt.Errorf("topic %s has no partitions", topic)
-	}
-	assignments := map[string]map[int32]kgo.Offset{topic: {}}
-	remove := map[string][]int32{topic: {}}
-	for partition, offset := range partitions {
-		if partition < 0 || offset.Err != nil {
-			continue
+	assignments := make(map[string]map[int32]kgo.Offset, len(topics))
+	remove := make(map[string][]int32, len(topics))
+	for _, topic := range topics {
+		partitions, ok := starts[topic]
+		if !ok {
+			return nil, fmt.Errorf("topic %s has no partitions", topic)
 		}
-		assignments[topic][partition] = kgo.NewOffset().At(offset.Offset)
-		remove[topic] = append(remove[topic], partition)
-	}
-	if len(assignments[topic]) == 0 {
-		return nil, errors.New("reply topic has no readable partitions")
+		assignments[topic] = map[int32]kgo.Offset{}
+		remove[topic] = []int32{}
+		for partition, offset := range partitions {
+			if partition < 0 || offset.Err != nil {
+				continue
+			}
+			assignments[topic][partition] = kgo.NewOffset().At(offset.Offset)
+			remove[topic] = append(remove[topic], partition)
+		}
+		if len(assignments[topic]) == 0 {
+			return nil, fmt.Errorf("topic %s has no readable partitions", topic)
+		}
 	}
 	client.kafka.AddConsumePartitions(assignments)
 	return func() { client.kafka.RemoveConsumePartitions(remove) }, nil
