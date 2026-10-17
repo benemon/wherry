@@ -412,22 +412,16 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		if !ok {
 			return run.interrupt(ctx, named.Credential)
 		}
-		var gitCredential []byte
-		if admitted.git != nil {
-			if gitCredential, ok = r.held(named.GitCredential); !ok {
-				return run.interrupt(ctx, named.GitCredential)
-			}
-		}
 		handle, err = named.Adapter.Dispatch(runCtx, Run{
 			ID: runID, Turn: task.Wherry.Turn, Offer: admitted.offer.Labels, Prompt: []byte(prompt(admitted.history)), Credential: credential,
-			Git: admitted.git, GitCredential: gitCredential,
+			Git: admitted.git,
 		})
 		if err != nil {
 			if runCtx.Err() != nil && ctx.Err() == nil {
 				return run.fail(ctx, "timeout", nil)
 			}
 			if errors.Is(err, ErrGitContext) {
-				// Git error text can echo URLs and credentials, so only the type is logged.
+				// Git error text can echo URLs, so only the type is logged.
 				r.logger.Printf("run %s: git context unavailable: %T", runID, err)
 				return run.fail(ctx, ErrGitContext.Error(), nil)
 			}

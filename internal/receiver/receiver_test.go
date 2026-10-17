@@ -2641,8 +2641,6 @@ func TestCancelInterruptedTaskEndsIt(t *testing.T) {
 	}
 }
 
-const gitCredentialName = "git-token"
-
 // gitPart is a git context part as wherry submit builds it.
 var gitPart = wire.Part{URL: "https://git.example.test/org/repo.git", MediaType: wire.GitMediaType, Metadata: jsontext.Value(`{"ref":"main"}`)}
 
@@ -2699,56 +2697,6 @@ func TestGitPartAdmittedOnlyWithGitAdapter(t *testing.T) {
 				t.Fatalf("dispatched git %#v prompt %q, want %#v and the text alone", run.Git, run.Prompt, want)
 			}
 		})
-	}
-}
-
-func TestGitCredentialMissingInterrupts(t *testing.T) {
-	f, enrolled := admitFixture(t)
-	f.receiver.adapters[0].Git = true
-	f.receiver.adapters[0].GitCredential = gitCredentialName
-	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
-	record := signedRoot(t, f, f.userKey, withGitPart)
-	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
-	if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
-		t.Fatalf("status %v, want accept", status)
-	}
-	if dispatches, _, _, releases := f.adapter.counts(); dispatches != 0 || releases != 1 {
-		t.Fatalf("dispatches=%d releases=%d, want 0 and 1", dispatches, releases)
-	}
-	statuses := gitStatuses(t, f)
-	interrupted := statuses[len(statuses)-1]
-	if interrupted.Wherry.Kind != "interrupted" || interrupted.StatusUpdate.Status.State != wire.TaskStateAuthRequired ||
-		interrupted.StatusUpdate.Status.Message.Parts[0].Text != "credential "+gitCredentialName+" required" ||
-		string(interrupted.StatusUpdate.Metadata) != `{"credential":"`+gitCredentialName+`"}` {
-		t.Fatalf("status %#v metadata %s, want AUTH_REQUIRED naming %s", interrupted, interrupted.StatusUpdate.Metadata, gitCredentialName)
-	}
-
-	f.receiver.credentials[gitCredentialName] = heldCredential{version: 1, value: []byte("git-secret")}
-	record = signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
-		withGitPart(task)
-		task.Wherry.RunID, task.Wherry.Lineage.RootRunID, task.Message.TaskID, task.Message.ContextID = "run-held", "run-held", "run-held", "run-held"
-	})
-	admitted, _ = f.receiver.admit(f.ctx, record, enrolled)
-	if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
-		t.Fatalf("held credential run status %v", status)
-	}
-	if run := f.adapter.lastRun; string(run.GitCredential) != "git-secret" || string(run.Credential) != testToken {
-		t.Fatal("dispatch did not carry both credentials")
-	}
-}
-
-func TestGitCredentialNotNeededWithoutGitPart(t *testing.T) {
-	f, enrolled := admitFixture(t)
-	f.receiver.adapters[0].Git = true
-	f.receiver.adapters[0].GitCredential = gitCredentialName
-	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
-	record := signedRoot(t, f, f.userKey, nil)
-	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
-	if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
-		t.Fatalf("status %v", status)
-	}
-	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 1 || f.adapter.lastRun.GitCredential != nil || f.adapter.lastRun.Git != nil {
-		t.Fatalf("dispatches=%d run=%#v, want one dispatch without git material", dispatches, f.adapter.lastRun)
 	}
 }
 

@@ -73,7 +73,7 @@ type receiversOutput struct {
 }
 
 type gitInput struct {
-	URL  string `json:"url" jsonschema:"https or ssh repository url without user information"`
+	URL  string `json:"url" jsonschema:"https repository url, or ssh url whose only user information is the user git"`
 	Ref  string `json:"ref" jsonschema:"branch, tag or commit to check out"`
 	Path string `json:"path,omitempty" jsonschema:"checkout directory, relative; defaults to the repository name"`
 }

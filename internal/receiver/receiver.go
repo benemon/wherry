@@ -44,13 +44,12 @@ type Line struct {
 
 // Run is the material needed to start one platform job.
 type Run struct {
-	ID            string
-	Turn          int64
-	Offer         map[string]string
-	Prompt        []byte
-	Credential    []byte
-	Git           *wire.GitContext
-	GitCredential []byte
+	ID         string
+	Turn       int64
+	Offer      map[string]string
+	Prompt     []byte
+	Credential []byte
+	Git        *wire.GitContext
 }
 
 // ErrGitContext is the error an adapter returns when a run's git context cannot be checked out.
@@ -84,18 +83,16 @@ type Config struct {
 
 // AdapterConfig configures one adapter instance; Config is decoded by the adapter type.
 type AdapterConfig struct {
-	Name          string         `json:"name"`
-	Type          string         `json:"type"`
-	Credential    string         `json:"credential,omitzero"`
-	GitCredential string         `json:"git_credential,omitzero"`
-	Config        jsontext.Value `json:"config"`
+	Name       string         `json:"name"`
+	Type       string         `json:"type"`
+	Credential string         `json:"credential,omitzero"`
+	Config     jsontext.Value `json:"config"`
 }
 
-// Named is a constructed adapter with its configured name and sealed-secret names.
+// Named is a constructed adapter with its configured name and sealed-secret name.
 type Named struct {
-	Name          string
-	Credential    string
-	GitCredential string
+	Name       string
+	Credential string
 	// Git is set when the adapter delivers git context parts (ADR-0024).
 	Git     bool
 	Adapter Adapter
@@ -372,10 +369,8 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	}
 	rejected := false
 	for _, named := range r.adapters {
-		for _, name := range []string{named.Credential, named.GitCredential} {
-			if name != "" && !r.openCredential(state, secrets, name) {
-				rejected = true
-			}
+		if named.Credential != "" && !r.openCredential(state, secrets, named.Credential) {
+			rejected = true
 		}
 	}
 	if rejected {

@@ -84,9 +84,9 @@ func TestNewAdaptersRequiresCredentialEnv(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "credential_env") {
 		t.Fatalf("got %v, want credential_env required", err)
 	}
-	adapters, err := newAdapters([]receiver.AdapterConfig{{Name: "lab", Type: "nomad", GitCredential: "git-token", Config: config}}, "")
-	if err != nil || len(adapters) != 1 || adapters[0].Name != "lab" || !adapters[0].Git || adapters[0].GitCredential != "git-token" {
-		t.Fatalf("adapters %#v, err %v; want a git-delivering adapter with its git credential", adapters, err)
+	adapters, err := newAdapters([]receiver.AdapterConfig{{Name: "lab", Type: "nomad", Config: config}}, "")
+	if err != nil || len(adapters) != 1 || adapters[0].Name != "lab" || !adapters[0].Git {
+		t.Fatalf("adapters %#v, err %v; want a git-delivering adapter", adapters, err)
 	}
 }
 
@@ -771,7 +771,7 @@ func TestSubmitGitFlags(t *testing.T) {
 		"ref without url":  {[]string{"--git-ref", "main"}, "submit requires --git and --git-ref together"},
 		"url without ref":  {[]string{"--git", "https://git.example.test/org/repo.git"}, "submit requires --git and --git-ref together"},
 		"path without url": {[]string{"--git-path", "repo"}, "submit requires --git and --git-ref together"},
-		"userinfo":         {[]string{"--git", "https://user:s3cr3t@git.example.test/org/repo.git", "--git-ref", "main"}, "git url must not carry user information"},
+		"userinfo":         {[]string{"--git", "https://user:s3cr3t@git.example.test/org/repo.git", "--git-ref", "main"}, "https git url must not carry user information"},
 		"traversal":        {[]string{"--git", "https://git.example.test/org/repo.git", "--git-ref", "main", "--git-path", "../x"}, "git path must be a relative path without . or .. segments"},
 	} {
 		t.Run(name, func(t *testing.T) {

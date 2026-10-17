@@ -739,7 +739,6 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	run := testRun("urls")
 	run.ID = "run-urls"
 	run.Git = &wire.GitContext{URL: "https://git.example.test/org/private-repo.git", Ref: "main", Path: "repo"}
-	run.GitCredential = []byte("git-credential-secret")
 	var mu sync.Mutex
 	var urls []string
 	registered := false
@@ -760,7 +759,7 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 			_ = json.NewEncoder(response).Encode(&api.Variable{Path: "nomad/jobs/agent-run-urls-t1", Items: map[string]string{"prompt": string(run.Prompt)}})
 		case "GET /v1/var/nomad/jobs/agent-run-urls-t1/agent/git":
 			_ = json.NewEncoder(response).Encode(&api.Variable{Path: "nomad/jobs/agent-run-urls-t1/agent/git", Items: map[string]string{
-				"git_url": run.Git.URL, "git_ref": run.Git.Ref, "git_path": run.Git.Path, "git_credential": string(run.GitCredential),
+				"git_url": run.Git.URL, "git_ref": run.Git.Ref, "git_path": run.Git.Path,
 			}})
 		case "GET /v1/job/agent-run-urls-t1":
 			if !registered {
@@ -813,7 +812,7 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 		t.Fatalf("requests = %d %v, want dispatch and lookup with prompt delivery, stop, release and sweep", len(urls), urls)
 	}
 	for _, url := range urls {
-		for _, secret := range []string{token, string(run.Credential), string(run.Prompt), string(run.GitCredential), run.Git.URL, "private-repo"} {
+		for _, secret := range []string{token, string(run.Credential), string(run.Prompt), run.Git.URL, "private-repo"} {
 			if strings.Contains(url, secret) {
 				t.Fatalf("request URL %q contains %q", url, secret)
 			}
@@ -852,7 +851,6 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 	}
 	run := testRun("plaintext")
 	run.Git = &wire.GitContext{URL: "https://git.example.test/org/private-repo.git", Ref: "main", Path: "repo"}
-	run.GitCredential = []byte("git-credential-secret")
 	job, err := adapter.buildJob(run, variablePath(run.ID, run.Turn))
 	if err != nil {
 		t.Fatal(err)
@@ -861,7 +859,7 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{string(run.Credential), string(run.Prompt), string(run.GitCredential), run.Git.URL} {
+	for _, secret := range []string{string(run.Credential), string(run.Prompt), run.Git.URL} {
 		if strings.Contains(string(encoded), secret) {
 			t.Fatalf("job JSON contains %q", secret)
 		}
@@ -1045,45 +1043,35 @@ func TestDispatchClonesGitContext(t *testing.T) {
 	}
 }
 
-func TestGitCredentialOnlyInPrestart(t *testing.T) {
-	adapter, ctx := devAdapter(t)
-	url, _ := bareRepository(t)
-	const gitCredential = "git-credential-never-in-agent"
-	// raw_exec does not isolate tasks, so the agent can read the clone task's secrets directory:
-	// that read proves the credential was rendered, and everything after the marker is the agent's own view.
-	script := `echo "prestart=$(cat "$NOMAD_ALLOC_DIR/../git/secrets/git-credential")"; echo agent-view; env; ` +
-		`find "$NOMAD_TASK_DIR/.." "$NOMAD_ALLOC_DIR" -path "$NOMAD_ALLOC_DIR/logs" -prune -o -type f -exec cat {} +; echo; echo '{"type":"result","result":"ok"}'`
-	run := gitRun(adapter, "git-credential", script, url, "main")
-	run.GitCredential = []byte(gitCredential)
-	handle := dispatch(t, adapter, ctx, run)
-	got := output(t, ctx, adapter, handle)
-	prestart, agentView, found := strings.Cut(got, "agent-view")
-	if !found || !strings.Contains(prestart, "prestart="+gitCredential) {
-		t.Fatalf("credential not rendered for the clone task: %q", prestart)
-	}
-	if !strings.Contains(agentView, "WHERRY_TEST_CREDENTIAL=test-credential") || !strings.Contains(agentView, "hello-prompt") {
-		t.Fatalf("agent view lacks its own environment and files: %.2000q", agentView)
-	}
-	if strings.Contains(agentView, gitCredential) {
-		t.Fatal("agent task environment or files contain the git credential")
-	}
-	job, _, err := adapter.client.Jobs().Info(handle.Job, nil)
+func TestCloneUsesStrictHostKeyChecking(t *testing.T) {
+	adapter, err := New(testConfig("http://127.0.0.1:1"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, task := range job.TaskGroups[0].Tasks {
-		for _, template := range task.Templates {
-			if strings.Contains(*template.EmbeddedTmpl, ".git_credential") && task.Name != gitTaskName {
-				t.Fatalf("task %s renders the git credential", task.Name)
-			}
+	run := testRun("strict")
+	runtime := adapter.runtimes[run.Offer["runtime"]]
+	runtime.Env = map[string]string{"GIT_SSH_COMMAND": "ssh -o StrictHostKeyChecking=accept-new"}
+	adapter.runtimes[run.Offer["runtime"]] = runtime
+	run.Git = &wire.GitContext{URL: "ssh://git@git.example.test/org/repo.git", Ref: "main", Path: "repo"}
+	job, err := adapter.buildJob(run, variablePath(run.ID, run.Turn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := job.TaskGroups[0].Tasks
+	if len(tasks) != 2 || tasks[1].Name != gitTaskName {
+		t.Fatalf("job tasks %#v, want the agent and the git task", tasks)
+	}
+	if got := tasks[1].Env["GIT_SSH_COMMAND"]; got != "ssh -o StrictHostKeyChecking=yes -o BatchMode=yes" {
+		t.Fatalf("git task GIT_SSH_COMMAND = %q, want strict host key checking", got)
+	}
+	encoded, err := json.Marshal(tasks[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unwanted := range []string{"accept-new", "IdentityFile", "UserKnownHostsFile", "-i "} {
+		if strings.Contains(string(encoded), unwanted) {
+			t.Fatalf("git task carries %q", unwanted)
 		}
-	}
-	encoded, err := json.Marshal(job)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(encoded), gitCredential) {
-		t.Fatal("job JSON contains the git credential")
 	}
 }
 
@@ -1114,7 +1102,6 @@ func TestRunVariableHoldsNoGitMaterial(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	url, _ := bareRepository(t)
 	run := gitRun(adapter, "git-variables", `echo '{"type":"result","result":"ok"}'`, url, "main")
-	run.GitCredential = []byte("git-credential-only-in-git-variable")
 	dispatch(t, adapter, ctx, run)
 	path := variablePath(run.ID, run.Turn)
 	variable, _, err := adapter.client.Variables().Peek(path, nil)
@@ -1122,13 +1109,13 @@ func TestRunVariableHoldsNoGitMaterial(t *testing.T) {
 		t.Fatalf("run variable = %#v, %v", variable, err)
 	}
 	for key, value := range variable.Items {
-		if strings.HasPrefix(key, "git_") || strings.Contains(value, string(run.GitCredential)) || strings.Contains(value, url) {
+		if strings.HasPrefix(key, "git_") || strings.Contains(value, url) {
 			t.Fatalf("job-level run variable carries git material in item %q", key)
 		}
 	}
 	git, _, err := adapter.client.Variables().Peek(path+gitSuffix, nil)
-	if err != nil || git == nil || git.Items["git_credential"] != string(run.GitCredential) || git.Items["git_url"] != url {
-		t.Fatal("git task variable does not hold the git context and credential")
+	if err != nil || git == nil || git.Items["git_url"] != url {
+		t.Fatal("git task variable does not hold the git context")
 	}
 	if err := adapter.Release(ctx, run.ID, run.Turn); err != nil {
 		t.Fatal(err)

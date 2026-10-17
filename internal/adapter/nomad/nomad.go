@@ -41,13 +41,6 @@ const (
 const cloneScript = `set -eu
 { read -r url; read -r ref; read -r dir; } < "$NOMAD_TASK_DIR/git"
 dest="$NOMAD_ALLOC_DIR/$dir"
-key="$NOMAD_SECRETS_DIR/git-credential"
-if [ -f "$key" ]; then
-  case "$url" in
-  ssh://*) export GIT_SSH_COMMAND="ssh -i '$key' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" ;;
-  *) export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$(cat "$NOMAD_SECRETS_DIR/git-credential")"; }; f' ;;
-  esac
-fi
 git init -q "$dest"
 cd "$dest"
 git remote add origin "$url"
@@ -176,9 +169,6 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run receiver.Run) (_ recei
 	}()
 	if run.Git != nil {
 		gitItems := map[string]string{"git_url": run.Git.URL, "git_ref": run.Git.Ref, "git_path": run.Git.Path}
-		if run.GitCredential != nil {
-			gitItems["git_credential"] = string(run.GitCredential)
-		}
 		gitPath := path + gitSuffix
 		if _, _, err := adapter.client.Variables().Update(&api.Variable{Namespace: adapter.namespace, Path: gitPath, Items: gitItems}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
 			return receiver.Handle{}, redacted("write", gitPath, err)
@@ -362,7 +352,7 @@ func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error
 		Templates: templates,
 	}}
 	if run.Git != nil {
-		tasks = append(tasks, gitTask(runtime, path+gitSuffix, run.GitCredential != nil))
+		tasks = append(tasks, gitTask(runtime, path+gitSuffix))
 	}
 	return &api.Job{
 		ID: new(jobID), Name: new(jobID), Namespace: new(adapter.namespace), Type: new(api.JobTypeBatch),
@@ -379,8 +369,9 @@ func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error
 
 // gitTask is the prestart task that clones the run's git context into the shared alloc directory,
 // using the runtime's driver and configuration with the clone script as its command. Its
-// templates read gitPath, its own variable; only this task renders the git credential.
-func gitTask(runtime Runtime, gitPath string, credential bool) *api.Task {
+// template reads gitPath, its own variable. Repository access and host trust come from the
+// platform (ADR-0024); ssh never accepts an unknown or changed host key.
+func gitTask(runtime Runtime, gitPath string) *api.Task {
 	config := maps.Clone(runtime.Config)
 	if runtime.Driver == "podman" {
 		delete(config, "command")
@@ -396,16 +387,11 @@ func gitTask(runtime Runtime, gitPath string, credential bool) *api.Task {
 	}
 	env["HOME"] = "${NOMAD_TASK_DIR}"
 	env["GIT_TERMINAL_PROMPT"] = "0"
+	env["GIT_SSH_COMMAND"] = "ssh -o StrictHostKeyChecking=yes -o BatchMode=yes"
 	templates := []*api.Template{{
 		EmbeddedTmpl: new(`{{ with nomadVar "` + gitPath + `" }}{{ .git_url }}` + "\n" + `{{ .git_ref }}` + "\n" + `{{ .git_path }}` + "\n" + `{{ end }}`),
 		DestPath:     new("local/git"), ChangeMode: new("noop"),
 	}}
-	if credential {
-		templates = append(templates, &api.Template{
-			EmbeddedTmpl: new(`{{ with nomadVar "` + gitPath + `" }}{{ .git_credential }}{{ end }}`),
-			DestPath:     new("${NOMAD_SECRETS_DIR}/git-credential"), Perms: new("0600"), ChangeMode: new("noop"),
-		})
-	}
 	return &api.Task{
 		Name: gitTaskName, Driver: runtime.Driver, Config: config, Env: env,
 		Lifecycle: &api.TaskLifecycle{Hook: api.TaskLifecycleHookPrestart},
@@ -643,7 +629,7 @@ func (adapter *Adapter) Stop(ctx context.Context, handle receiver.Handle) error 
 	return err
 }
 
-// Release deletes the per-turn variables holding the credentials, the prompt and the git context.
+// Release deletes the per-turn variables holding the credential, the prompt and the git context.
 func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) error {
 	path := variablePath(runID, turn)
 	return errors.Join(adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+promptSuffix), adapter.deleteVariable(ctx, path+gitSuffix))

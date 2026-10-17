@@ -326,7 +326,15 @@ func ParseGitPart(part Part) (GitContext, error) {
 		return GitContext{}, errors.New("git url must be an https or ssh url with a host")
 	}
 	if parsed.User != nil {
-		return GitContext{}, errors.New("git url must not carry user information")
+		if parsed.Scheme != "ssh" {
+			return GitContext{}, errors.New("https git url must not carry user information")
+		}
+		if _, ok := parsed.User.Password(); ok {
+			return GitContext{}, errors.New("ssh git url must not carry a password")
+		}
+		if parsed.User.Username() != "git" {
+			return GitContext{}, errors.New("ssh git url user must be git")
+		}
 	}
 	if parsed.RawQuery != "" || parsed.Fragment != "" || parsed.ForceQuery {
 		return GitContext{}, errors.New("git url must not carry a query or fragment")

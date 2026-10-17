@@ -102,8 +102,9 @@ A submission can name a git repository for the agent to work on. The
 repository is a `url` part with media type `application/vnd.wherry.git`:
 
 - `url` (string): the clone URL. Its scheme is `https` or `ssh` and it has
-  a host. It has no user information, query or fragment, so credentials
-  never travel in it.
+  a host. An `ssh` URL may carry the user name `git` as its only user
+  information; an `https` URL carries none. Neither has a query or
+  fragment, so credentials never travel in it.
 - `metadata.ref` (string, required): a branch, tag or full commit SHA.
 - `metadata.path` (string, optional): the checkout directory, a relative
   path. It defaults to the last segment of the URL path without a `.git`
@@ -134,15 +135,22 @@ repository in a prestart task of the run's job, into
 `<NOMAD_ALLOC_DIR>/<path>`, and starts the agent task only when the
 checkout succeeds.
 
-A receiver's adapter configuration can name a `git_credential`: a sealed
-secret holding an HTTPS token, or an SSH private key for an `ssh` URL. The
-adapter gives it to the checkout step alone. A receiver that does not hold
-the secret interrupts the turn with `TASK_STATE_AUTH_REQUIRED`, as for any
-credential, naming the git credential.
+The platform the adapter runs on supplies host trust and repository
+access; wherry carries no git credential. For an `https` URL the checkout
+uses the platform's system git configuration and CA bundle. For an `ssh`
+URL it uses the platform's SSH configuration with
+`StrictHostKeyChecking=yes`, so the host key must already be in the system
+known hosts file, `/etc/ssh/ssh_known_hosts`. Access to a private
+repository comes from a deploy key or a credential helper that the
+platform configures in the image or on the host. The repositories a
+runtime can reach therefore vary by platform. An offer can advertise them
+with an operator label, such as `git-access`, and a selector can require
+it.
 
 When the checkout fails, the turn ends as `TASK_STATE_FAILED` with the
-message text `git context unavailable`. Receivers do not publish git's
-error output.
+message text `git context unavailable`. This includes an unknown or
+changed host key and a repository the platform cannot authenticate to.
+Receivers do not publish git's error output.
 
 ## Cancellation
 

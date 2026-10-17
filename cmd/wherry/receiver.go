@@ -63,7 +63,7 @@ func newAdapters(configs []receiver.AdapterConfig, nomadToken string) ([]receive
 			if err != nil {
 				return nil, fmt.Errorf("adapter %s: %w", config.Name, err)
 			}
-			adapters = append(adapters, receiver.Named{Name: config.Name, Credential: config.Credential, GitCredential: config.GitCredential, Git: true, Adapter: adapter})
+			adapters = append(adapters, receiver.Named{Name: config.Name, Credential: config.Credential, Git: true, Adapter: adapter})
 		default:
 			return nil, fmt.Errorf("adapter %s has unknown type %q", config.Name, config.Type)
 		}
