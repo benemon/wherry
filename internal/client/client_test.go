@@ -326,7 +326,7 @@ func TestClientEndToEnd(t *testing.T) {
 	if len(sealedRecords) != 1 || string(sealedRecords[0].Key) != "receiver-a/token" {
 		t.Fatalf("unexpected sealed-secret records: %#v", sealedRecords)
 	}
-	plaintext, _, err := trust.Open(
+	plaintext, _, _, err := trust.Open(
 		sealedRecords[0].Value, state, "receiver-a", "token", fixture.sealingKey,
 		fixture.userPublicKey, time.Now(),
 	)

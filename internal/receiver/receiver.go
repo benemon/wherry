@@ -156,6 +156,7 @@ type Receiver struct {
 type heldCredential struct {
 	version int64
 	value   []byte
+	exp     time.Time
 }
 
 // New loads or creates the receiver's keys and builds its Kafka client; adapters are in configuration order.
@@ -363,6 +364,7 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	r.enrolled, r.signers, r.revoked = &enrolled, signers, false
 	r.mu.Unlock()
 
+	r.dropLapsed(state)
 	secrets, err := readBounded(ctx, r.kafkaOpt, wire.TopicSecret)
 	if err != nil {
 		return err
@@ -430,6 +432,26 @@ func (r *Receiver) requestRenewal(ctx context.Context, state *trust.State, issue
 	return nil
 }
 
+// dropLapsed forgets held credentials whose seal is no longer current. It reads only user-signed trust
+// state, so a forged secrets record cannot evict a credential, and it runs before the secrets read can fail.
+func (r *Receiver) dropLapsed(state *trust.State) {
+	for _, named := range r.adapters {
+		if named.Credential == "" {
+			continue
+		}
+		r.mu.Lock()
+		held, ok := r.credentials[named.Credential]
+		dropped := ok && !state.SecretCurrent(r.config.ReceiverID, named.Credential, held.version, time.Now())
+		if dropped {
+			delete(r.credentials, named.Credential)
+		}
+		r.mu.Unlock()
+		if dropped {
+			r.logger.Printf("credential %s version %d no longer current; dropped", named.Credential, held.version)
+		}
+	}
+}
+
 // openCredential holds the newest verified version of a sealed secret; false means rejected.
 func (r *Receiver) openCredential(state *trust.State, secrets []*kgo.Record, name string) bool {
 	key := r.config.ReceiverID + "/" + name
@@ -443,14 +465,14 @@ func (r *Receiver) openCredential(state *trust.State, secrets []*kgo.Record, nam
 		return true
 	}
 	// Open first: an unverified record must not decide which version is current.
-	value, version, err := trust.Open(latest, state, r.config.ReceiverID, name, r.sealing, r.userPub, time.Now())
+	value, version, exp, err := trust.Open(latest, state, r.config.ReceiverID, name, r.sealing, r.userPub, time.Now())
 	if err != nil {
 		return false
 	}
 	r.mu.Lock()
 	newer := version > r.credentials[name].version
 	if newer {
-		r.credentials[name] = heldCredential{version: version, value: value}
+		r.credentials[name] = heldCredential{version: version, value: value, exp: exp}
 	}
 	r.mu.Unlock()
 	if newer {

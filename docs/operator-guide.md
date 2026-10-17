@@ -121,7 +121,9 @@ each one with `wherry continue RUN_ID`.
 
 A seal opens only on the receiver it was sealed to, under the approval
 generation current when it was sealed, and before its expiry. The receiver
-opens only the newest version of each name.
+opens only the newest version of each name. Once its seal expires, or the
+receiver is approved at a new generation, the receiver stops delivering the
+credential, and new runs wait for a new seal. A renewal keeps it.
 
 To rotate a credential, run `secret put` again with the new value. The
 receiver opens the new version within 15 seconds, and the runs it dispatches

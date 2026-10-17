@@ -1062,7 +1062,7 @@ func decodeObject(t *testing.T, value []byte) map[string]any {
 func TestTaskMetadataRecordsPlacement(t *testing.T) {
 	t.Run("dispatched", func(t *testing.T) {
 		f, enrolled := admitFixture(t)
-		f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+		f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken), exp: time.Now().Add(time.Hour)}
 		record := signedRoot(t, f, f.userKey, nil)
 		admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
 		if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
@@ -1106,7 +1106,7 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, enrolled := admitFixture(t)
-			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken), exp: time.Now().Add(time.Hour)}
 			f.adapter.stream = test.stream
 			if test.heartbeat {
 				f.adapter.endDelay = 3 * renewInterval
@@ -1215,7 +1215,7 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 	})
 	t.Run("dispatch error", func(t *testing.T) {
 		f, enrolled := admitFixture(t)
-		f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+		f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken), exp: time.Now().Add(time.Hour)}
 		f.adapter.dispatchErr = errors.New("dispatch failed")
 		record := signedRoot(t, f, f.userKey, nil)
 		admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
@@ -1297,7 +1297,7 @@ func TestReceiverRejectsNonTextParts(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, enrolled := admitFixture(t)
-			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken), exp: time.Now().Add(time.Hour)}
 			f.receiver.enrolled = enrolled
 			f.cluster.SetGroupConfigs("p-"+enrolled.Pool, map[string]string{"share.auto.offset.reset": "earliest"})
 			record := signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
@@ -1604,7 +1604,7 @@ func TestFollowErrorReasonIsFixed(t *testing.T) {
 func TestDispatchErrorReasonIsFixed(t *testing.T) {
 	const secret = "token=s3cr3t-dispatch-detail"
 	f, enrolled := admitFixture(t)
-	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken), exp: time.Now().Add(time.Hour)}
 	f.adapter.dispatchErr = errors.New(secret)
 	record := signedRoot(t, f, f.userKey, nil)
 	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
@@ -1776,7 +1776,7 @@ func podmanResultLine(t *testing.T) string {
 func TestResultArtifactCarriesAgentResult(t *testing.T) {
 	line := podmanResultLine(t)
 	f, enrolled := admitFixture(t)
-	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken), exp: time.Now().Add(time.Hour)}
 	f.adapter.stream = []string{line}
 	record := signedRoot(t, f, f.userKey, nil)
 	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
@@ -1948,7 +1948,7 @@ func lastTask(t *testing.T, f fixture) *wire.Task {
 
 func TestReceiverRoutesToMatchedAdapter(t *testing.T) {
 	m := newMultiFixture(t)
-	m.receiver.credentials["cred-cloud"] = heldCredential{version: 1, value: []byte("cloud-token")}
+	m.receiver.credentials["cred-cloud"] = heldCredential{version: 1, value: []byte("cloud-token"), exp: time.Now().Add(time.Hour)}
 	if status := m.execute(t, "run-lambda", runtimeIs("lambda"), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -2220,7 +2220,7 @@ func startInFlight(t *testing.T, f fixture, runID string, exp time.Time) <-chan 
 	}
 	r.mu.Lock()
 	r.offers = []wire.Offer{{Adapter: "nomad", Labels: map[string]string{"runtime": "exec", "nomad.node_pool": "OCPv", "zone": "dc1"}}}
-	r.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+	r.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken), exp: time.Now().Add(time.Hour)}
 	r.mu.Unlock()
 	f.cluster.SetGroupConfigs("p-nomad", map[string]string{"share.auto.offset.reset": "earliest"})
 	done := make(chan error, 1)
@@ -2446,7 +2446,7 @@ func TestCancelledSubmissionNotDispatched(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f, enrolled := admitFixture(t)
-			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken), exp: time.Now().Add(time.Hour)}
 			f.adapter.existing = test.running
 			publishCancel(t, f, "run-a", f.userKey)
 			record := signedRoot(t, f, f.userKey, nil)
@@ -2676,7 +2676,7 @@ func TestGitPartAdmittedOnlyWithGitAdapter(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f, enrolled := admitFixture(t)
 			f.receiver.adapters[0].Git = test.git
-			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken), exp: time.Now().Add(time.Hour)}
 			record := signedRoot(t, f, f.userKey, test.mutate)
 			admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
 			if !test.admit {
@@ -2704,7 +2704,7 @@ func TestGitCloneFailureFixedReason(t *testing.T) {
 	const secret = "fatal: could not read from https://user:s3cr3t-git-token@git.example.test/org/repo.git"
 	f, enrolled := admitFixture(t)
 	f.receiver.adapters[0].Git = true
-	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+	f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken), exp: time.Now().Add(time.Hour)}
 	f.adapter.dispatchErr = fmt.Errorf("%w: %s", ErrGitContext, secret)
 	record := signedRoot(t, f, f.userKey, withGitPart)
 	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
@@ -2747,7 +2747,7 @@ func TestStartedStatusRecordsGitCommit(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f, enrolled := admitFixture(t)
 			f.receiver.adapters[0].Git = true
-			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken)}
+			f.receiver.credentials[credentialName] = heldCredential{version: 1, value: []byte(testToken), exp: time.Now().Add(time.Hour)}
 			f.adapter.commit = commit
 			record := signedRoot(t, f, f.userKey, test.mutate)
 			admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
@@ -2764,5 +2764,149 @@ func TestStartedStatusRecordsGitCommit(t *testing.T) {
 				t.Fatalf("started statuses %#v, want one with metadata %q", started, test.want)
 			}
 		})
+	}
+}
+
+// enrolWithCredential enrols the fixture receiver through the client and delivers testToken with the given expiry.
+func enrolWithCredential(t *testing.T, f fixture, client *busclient.Client, expires time.Duration) string {
+	t.Helper()
+	r := f.receiver
+	request, err := trust.NewEnrolRequest(r.config.ReceiverID, r.signing, r.sealing, map[string]string{}, []wire.DetectedAdapter{{Name: "nomad", Platform: "nomad", Offers: []wire.Offer{}}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(r.config.ReceiverID), Value: request}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	requestHash := trust.EnvelopeHash(request)
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(testToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.PutSecret(f.ctx, credentialName, r.config.ReceiverID, tokenFile, expires); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.refresh(f.ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if held := heldValue(r); held != testToken {
+		t.Fatal("credential not delivered")
+	}
+	return requestHash
+}
+
+func heldValue(r *Receiver) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return string(r.credentials[credentialName].value)
+}
+
+func TestHeldCredentialDroppedWhenApprovalChanges(t *testing.T) {
+	f := newFixture(t, resultStream)
+	client := busclient.New(f.kafka, f.userKey, "replies.test")
+	requestHash := enrolWithCredential(t, f, client, 30*24*time.Hour)
+	// Revoke and re-approve with no refresh between, so the receiver never observes the revoked state.
+	if _, err := client.Revoke(f.ctx, f.receiver.config.ReceiverID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.refresh(f.ctx); err == nil || err.Error() != "credential rejected" {
+		t.Fatalf("refresh: got %v, want credential rejected", err)
+	}
+	if current := f.receiver.current(); current == nil || current.Generation != 2 {
+		t.Fatalf("not enrolled at generation 2: %#v", current)
+	}
+	if held := heldValue(f.receiver); held != "" {
+		t.Fatal("credential sealed under the previous approval is still held")
+	}
+}
+
+// waitPastSeal waits until the held credential's seal has expired.
+func waitPastSeal(t *testing.T, r *Receiver) {
+	t.Helper()
+	r.mu.Lock()
+	exp := r.credentials[credentialName].exp
+	r.mu.Unlock()
+	time.Sleep(time.Until(exp) + 100*time.Millisecond)
+}
+
+func TestHeldCredentialDroppedWhenSealExpires(t *testing.T) {
+	f := newFixture(t, resultStream)
+	client := busclient.New(f.kafka, f.userKey, "replies.test")
+	enrolWithCredential(t, f, client, 3*time.Second)
+	waitPastSeal(t, f.receiver)
+	if _, ok := f.receiver.held(credentialName); ok {
+		t.Fatal("dispatch was given a credential whose seal has expired")
+	}
+	if err := f.receiver.refresh(f.ctx); err == nil || err.Error() != "credential rejected" {
+		t.Fatalf("refresh: got %v, want credential rejected", err)
+	}
+	if held := heldValue(f.receiver); held != "" {
+		t.Fatal("credential with an expired seal is still held")
+	}
+	if !strings.Contains(f.logs.String(), "credential "+credentialName+" version 1 no longer current; dropped") {
+		t.Fatalf("drop not logged; logs:\n%s", f.logs.String())
+	}
+}
+
+func TestHeldCredentialDroppedWhenSecretsReadFails(t *testing.T) {
+	f := newFixture(t, resultStream)
+	client := busclient.New(f.kafka, f.userKey, "replies.test")
+	enrolWithCredential(t, f, client, 3*time.Second)
+	if _, err := kadm.NewClient(f.kafka).DeleteTopics(f.ctx, wire.TopicSecret); err != nil {
+		t.Fatal(err)
+	}
+	waitPastSeal(t, f.receiver)
+	if err := f.receiver.refresh(f.ctx); err == nil {
+		t.Fatal("refresh succeeded without the secrets topic")
+	}
+	f.receiver.mu.Lock()
+	_, ok := f.receiver.credentials[credentialName]
+	f.receiver.mu.Unlock()
+	if ok {
+		t.Fatal("expired credential still held after a failed secrets read")
+	}
+}
+
+func TestHeldCredentialKeptAcrossRenewal(t *testing.T) {
+	f := newFixture(t, resultStream)
+	client := busclient.New(f.kafka, f.userKey, "replies.test")
+	enrolWithCredential(t, f, client, 30*24*time.Hour)
+	if _, err := client.Renew(f.ctx, f.receiver.config.ReceiverID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatalf("refresh after renewal: %v", err)
+	}
+	if held := heldValue(f.receiver); held != testToken {
+		t.Fatal("credential dropped after renewal")
+	}
+	// Open would reopen a wrongly dropped credential in the same refresh; only the log shows the drop.
+	if strings.Contains(f.logs.String(), "no longer current") {
+		t.Fatalf("credential dropped across renewal; logs:\n%s", f.logs.String())
+	}
+}
+
+func TestHeldCredentialDroppedWhenSuperseded(t *testing.T) {
+	f := newFixture(t, resultStream)
+	client := busclient.New(f.kafka, f.userKey, "replies.test")
+	enrolWithCredential(t, f, client, 30*24*time.Hour)
+	header, _, err := trust.Seal(*f.receiver.current(), f.receiver.config.ReceiverID, credentialName, 2, []byte("newer"), time.Now().Add(time.Hour), f.userKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(f.receiver.config.ReceiverID), Value: header}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.refresh(f.ctx); err == nil || err.Error() != "credential rejected" {
+		t.Fatalf("refresh: got %v, want credential rejected", err)
+	}
+	if held := heldValue(f.receiver); held != "" {
+		t.Fatal("superseded version 1 is still held")
 	}
 }

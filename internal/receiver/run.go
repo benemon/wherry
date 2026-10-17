@@ -854,7 +854,10 @@ func (r *Receiver) held(name string) ([]byte, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	credential, ok := r.credentials[name]
-	return credential.value, ok
+	if !ok || !time.Now().Before(credential.exp) {
+		return nil, false
+	}
+	return credential.value, true
 }
 
 func (r *Receiver) adjustInFlight(delta int64) {
