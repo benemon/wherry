@@ -920,8 +920,9 @@ func TestSweepDeletesVariableOfDeadJob(t *testing.T) {
 
 func TestSweepDeletesVariableOfStoppedJob(t *testing.T) {
 	adapter, ctx := devAdapter(t)
-	run := sleepRun(adapter, "sweep-stopped")
-	dispatch(t, adapter, ctx, run)
+	// A running task that ignores SIGTERM keeps the job stopped but not dead for the kill timeout.
+	run := scriptRun(adapter, "sweep-stopped", `trap '' TERM; sleep 300`)
+	waitRunning(t, ctx, adapter, dispatch(t, adapter, ctx, run))
 	if _, _, err := adapter.client.Jobs().Deregister(jobID(run.ID, run.Turn), false, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
 		t.Fatal(err)
 	}
