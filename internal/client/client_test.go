@@ -882,6 +882,25 @@ func TestConnectErrorsOmitPassword(t *testing.T) {
 	}
 }
 
+func TestEventsSkipsOnlyThisRun(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	submission, hash := fixture.rootSubmission(t, "run-events", "default")
+	other, otherHash := fixture.rootSubmission(t, "run-other", "default")
+	fixture.produce(t, wire.TopicEvent, "run-events", signed(t, wire.TypeStatus, testStatus(submission, hash, "receiver-a", "started", wire.TaskStateWorking), fixture.receiverKey))
+	fixture.produce(t, wire.TopicEvent, "run-other", signed(t, wire.TypeStatus, testStatus(other, otherHash, "receiver-a", "started", wire.TaskStateWorking), fixture.receiverKey))
+	for _, topic := range []string{wire.TopicEvent, wire.TopicTranscript} {
+		fixture.produce(t, topic, "run-events", []byte("not an envelope"))
+		fixture.produce(t, topic, "run-other", []byte("not an envelope"))
+	}
+	events, err := fixture.client.Events(fixture.ctx, "run-events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events.Statuses) != 1 || events.Statuses[0].StatusUpdate.TaskID != "run-events" || events.Skipped != 2 {
+		t.Fatalf("statuses %#v skipped %d, want this run's status and its two bad records", events.Statuses, events.Skipped)
+	}
+}
+
 func (fixture clientFixture) topicEnd(t *testing.T, topic string) int64 {
 	t.Helper()
 	offsets, err := kadm.NewClient(fixture.kafka).ListEndOffsets(fixture.ctx, topic)

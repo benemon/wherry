@@ -102,9 +102,10 @@ func (r *Receiver) claimOne(ctx context.Context, enrolled *trust.Enrolled) error
 }
 
 type admission struct {
-	task   *wire.SubmissionRecord
-	offer  wire.Offer
-	prompt string
+	task     *wire.SubmissionRecord
+	taskHash string
+	offer    wire.Offer
+	history  []wire.Message
 }
 
 // admit applies ADR-0014 root verification, the run's turn order, ADR-0011/0017
@@ -159,7 +160,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 			return reject("continuation history unavailable")
 		}
 	}
-	return &admission{task: task, offer: offer, prompt: prompt(history)}, 0
+	return &admission{task: task, taskHash: taskHash, offer: offer, history: history}, 0
 }
 
 func (r *Receiver) publishRejection(ctx context.Context, record *kgo.Record, task *wire.SubmissionRecord, reason string) error {
@@ -211,7 +212,10 @@ func (r *Receiver) continuationRejection(ctx context.Context, task *wire.Submiss
 	if err != nil {
 		return nil, "", err
 	}
-	if task.Wherry.Turn > 1 && submissions[task.Wherry.Turn].hash != taskHash {
+	if submissions[task.Wherry.Turn].hash != taskHash {
+		if task.Wherry.Turn == 1 {
+			return nil, "duplicate submission", nil
+		}
 		return nil, "duplicate continuation", nil
 	}
 	r.mu.Lock()
@@ -323,7 +327,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		r.logger.Printf("run %s: matched adapter %s is not configured", runID, admitted.offer.Adapter)
 		return kgo.AckRelease
 	}
-	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: trust.EnvelopeHash(record.Value), attempt: attempt, adapter: matched}
+	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, adapter: matched}
 
 	if err := run.commit(ctx, run.statusRecord("claimed", taskStatus(wire.TaskStateWorking, ""), nil)); err != nil {
 		return run.abandon(err)
@@ -367,7 +371,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 			credential = held.value
 		}
-		handle, err = named.Adapter.Dispatch(runCtx, Run{ID: runID, Turn: task.Wherry.Turn, Offer: admitted.offer.Labels, Prompt: []byte(admitted.prompt), Credential: credential})
+		handle, err = named.Adapter.Dispatch(runCtx, Run{ID: runID, Turn: task.Wherry.Turn, Offer: admitted.offer.Labels, Prompt: []byte(prompt(admitted.history)), Credential: credential})
 		if err != nil {
 			if runCtx.Err() != nil && ctx.Err() == nil {
 				return run.fail(ctx, "timeout", nil)
@@ -457,6 +461,7 @@ type activeRun struct {
 	producer *kgo.Client
 	task     *wire.SubmissionRecord
 	taskHash string
+	history  []wire.Message
 	attempt  int64
 	// adapter holds the run's platform material, released at the end.
 	adapter Named
@@ -503,11 +508,7 @@ func (run *activeRun) revoke(ctx context.Context, handle Handle, pending []Line)
 	}
 	const reason = "receiver revoked"
 	status := taskStatus(wire.TaskStateFailed, reason)
-	task, err := run.taskRecord(ctx, status, reason)
-	if err == nil {
-		err = run.commit(ctx, append(run.chunks(pending, true), task, run.statusRecord("terminal", status, nil))...)
-	}
-	if err != nil {
+	if err := run.commit(ctx, append(run.chunks(pending, true), run.taskRecord(status, reason), run.statusRecord("terminal", status, nil))...); err != nil {
 		run.receiver.logger.Printf("run %s: publish revoked status: %v", run.task.Wherry.RunID, err)
 	}
 	run.release(ctx)
@@ -541,12 +542,7 @@ func (run *activeRun) finish(ctx context.Context, handle Handle, pending []Line,
 
 // end commits the remaining transcript, the final task and the terminal status in one transaction.
 func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, pending []Line, ack kgo.AckStatus) kgo.AckStatus {
-	task, err := run.taskRecord(ctx, status, result)
-	if err != nil {
-		run.receiver.logger.Printf("run %s: read history: %v", run.task.Wherry.RunID, err)
-		return kgo.AckRelease
-	}
-	records := append(run.chunks(pending, true), task, run.statusRecord("terminal", status, nil))
+	records := append(run.chunks(pending, true), run.taskRecord(status, result), run.statusRecord("terminal", status, nil))
 	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
 	}
@@ -613,7 +609,7 @@ func (run *activeRun) chunks(lines []Line, last bool) []*kgo.Record {
 }
 
 // taskRecord builds the final task; a result that is JSON travels as a data part.
-func (run *activeRun) taskRecord(ctx context.Context, status wire.TaskStatus, result string) (*kgo.Record, error) {
+func (run *activeRun) taskRecord(status wire.TaskStatus, result string) *kgo.Record {
 	part := wire.Part{Text: result}
 	switch {
 	case result == "":
@@ -621,27 +617,15 @@ func (run *activeRun) taskRecord(ctx context.Context, status wire.TaskStatus, re
 	case jsontext.Value(result).IsValid():
 		part = wire.Part{Data: jsontext.Value(result), MediaType: "application/json"}
 	}
-	history, err := run.receiver.history(ctx, run.task, run.taskHash)
-	if err != nil {
-		return nil, err
-	}
 	task := &wire.TaskRecord{
 		Task: wire.Task{
 			ID: run.task.Wherry.RunID, ContextID: run.task.Wherry.Lineage.RootRunID, Status: status,
-			History:   history,
+			History:   run.history,
 			Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI}}},
 		},
 		Wherry: wire.TaskExtension{Turn: run.task.Wherry.Turn, Attempt: run.attempt, TaskHash: run.taskHash},
 	}
-	return run.signed(run.task.Wherry.ReplyTopic, wire.TypeTask, task), nil
-}
-
-func (r *Receiver) history(ctx context.Context, task *wire.SubmissionRecord, taskHash string) ([]wire.Message, error) {
-	submissions, err := r.submissions(ctx, task)
-	if err != nil {
-		return nil, err
-	}
-	return turns(submissions, task, taskHash)
+	return run.signed(run.task.Wherry.ReplyTopic, wire.TypeTask, task)
 }
 
 func turns(submissions map[int64]runSubmission, task *wire.SubmissionRecord, taskHash string) ([]wire.Message, error) {

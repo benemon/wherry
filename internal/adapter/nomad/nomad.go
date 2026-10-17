@@ -17,13 +17,14 @@ import (
 )
 
 const (
-	jobPrefix   = "agent-"
-	taskName    = "agent"
-	formatCRI   = "cri"
-	maxPending  = 1 << 20
-	stopGrace   = 15 * time.Second
-	followPoll  = time.Second
-	cleanupWait = 10 * time.Second
+	jobPrefix         = "agent-"
+	jobVariablePrefix = "nomad/jobs/"
+	taskName          = "agent"
+	formatCRI         = "cri"
+	maxPending        = 1 << 20
+	stopGrace         = 15 * time.Second
+	followPoll        = time.Second
+	cleanupWait       = 10 * time.Second
 )
 
 // Config is the adapter's section of the receiver configuration.
@@ -59,7 +60,7 @@ type Adapter struct {
 
 var (
 	envName     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	runVariable = regexp.MustCompile(`^nomad/jobs/(agent-.+-t[0-9]+)$`)
+	runVariable = regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(jobPrefix) + `.+-t[0-9]+)$`)
 	// sweepGrace covers Dispatch's window between writing the variable and registering the job.
 	sweepGrace = 10 * time.Minute
 )
@@ -245,7 +246,7 @@ func jobID(runID string, turn int64) string {
 }
 
 func variablePath(runID string, turn int64) string {
-	return "nomad/jobs/" + jobID(runID, turn)
+	return jobVariablePrefix + jobID(runID, turn)
 }
 
 func notFound(err error) bool {
@@ -475,7 +476,7 @@ func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) e
 
 // Sweep deletes per-run variables whose job has ended, been stopped, or never registered.
 func (adapter *Adapter) Sweep(ctx context.Context) error {
-	prefix := "nomad/jobs/" + jobPrefix
+	prefix := jobVariablePrefix + jobPrefix
 	variables, _, err := adapter.client.Variables().PrefixList(prefix, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
 		return redacted("list", prefix, err)

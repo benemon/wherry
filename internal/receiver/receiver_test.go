@@ -437,11 +437,11 @@ func TestContinuationPromptIncludesAllTurns(t *testing.T) {
 
 func TestFirstTurnPromptUnchanged(t *testing.T) {
 	f, enrolled := admitFixture(t)
-	record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
+	record := signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
 		task.Message.Parts = []wire.Part{{Text: "line one"}, {Text: "--- turn 1 ---"}, {Text: "line three\n"}}
 	})
 	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
-	if admitted == nil || admitted.prompt != "line one\n--- turn 1 ---\nline three\n" {
+	if admitted == nil || prompt(admitted.history) != "line one\n--- turn 1 ---\nline three\n" {
 		t.Fatalf("got %#v", admitted)
 	}
 }
@@ -549,7 +549,8 @@ func testSubmission(runID string) *wire.SubmissionRecord {
 	}
 }
 
-func signedRoot(t *testing.T, key ed25519.PrivateKey, mutate func(*wire.SubmissionRecord)) *kgo.Record {
+// signedRoot signs a submission with key and puts it on the task queue, where every delivered record is.
+func signedRoot(t *testing.T, f fixture, key ed25519.PrivateKey, mutate func(*wire.SubmissionRecord)) *kgo.Record {
 	t.Helper()
 	submission := testSubmission("run-a")
 	if mutate != nil {
@@ -559,7 +560,11 @@ func signedRoot(t *testing.T, key ed25519.PrivateKey, mutate func(*wire.Submissi
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &kgo.Record{Key: []byte(submission.Wherry.RunID), Value: value}
+	record := &kgo.Record{Key: []byte(submission.Wherry.RunID), Value: value}
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicTask, Key: record.Key, Value: record.Value}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	return record
 }
 
 func admitFixture(t *testing.T) (fixture, *trust.Enrolled) {
@@ -604,6 +609,7 @@ func testActiveRun(t *testing.T, f fixture, runID string, attempt int64) *active
 		producer: producer,
 		task:     task,
 		taskHash: trust.EnvelopeHash(envelope),
+		history:  []wire.Message{task.Message},
 		attempt:  attempt,
 		adapter:  f.receiver.adapters[0],
 	}
@@ -611,15 +617,12 @@ func testActiveRun(t *testing.T, f fixture, runID string, attempt int64) *active
 
 func executeSubmission(t *testing.T, f fixture, record *kgo.Record, admitted *admission, attempt int64) kgo.AckStatus {
 	t.Helper()
-	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicTask, Key: record.Key, Value: record.Value}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
 	return f.receiver.execute(f.ctx, f.kafka, record, admitted, attempt)
 }
 
 func signedTurn(t *testing.T, f fixture, runID string, turn int64) *kgo.Record {
 	t.Helper()
-	record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
+	record := signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
 		task.Wherry.RunID = runID
 		task.Wherry.Lineage.RootRunID = runID
 		task.Wherry.Turn = turn
@@ -627,9 +630,6 @@ func signedTurn(t *testing.T, f fixture, runID string, turn int64) *kgo.Record {
 		task.Message.TaskID = runID
 		task.Message.ContextID = runID
 	})
-	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicTask, Key: record.Key, Value: record.Value}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
 	return record
 }
 
@@ -767,7 +767,7 @@ func TestDuplicateContinuationRejected(t *testing.T) {
 	first := signedTurn(t, f, "run-duplicate", 1)
 	publishRunStatus(t, f, first, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired)
 	accepted := signedTurn(t, f, "run-duplicate", 2)
-	duplicate := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
+	duplicate := signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
 		task.Wherry.RunID = "run-duplicate"
 		task.Wherry.Lineage.RootRunID = "run-duplicate"
 		task.Wherry.Turn = 2
@@ -775,9 +775,6 @@ func TestDuplicateContinuationRejected(t *testing.T) {
 		task.Message.TaskID = "run-duplicate"
 		task.Message.ContextID = "run-duplicate"
 	})
-	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicTask, Key: duplicate.Key, Value: duplicate.Value}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
 	if admitted, _ := f.receiver.admit(f.ctx, accepted, enrolled); admitted == nil {
 		t.Fatal("first continuation was not admitted")
 	}
@@ -932,31 +929,31 @@ func TestSubmissionsRequireSameBindings(t *testing.T) {
 	}
 }
 
-func TestHistoryRequiresFinalTurnHash(t *testing.T) {
-	f, _ := admitFixture(t)
-	signedTurn(t, f, "run-history-hash", 1)
-	signedTurn(t, f, "run-history-hash", 2)
-	duplicate := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
-		task.Wherry.RunID = "run-history-hash"
-		task.Wherry.Lineage.RootRunID = "run-history-hash"
-		task.Wherry.Turn = 2
-		task.Message.MessageID = "msg-history-duplicate"
-		task.Message.TaskID = "run-history-hash"
-		task.Message.ContextID = "run-history-hash"
+func TestDuplicateSubmissionRejected(t *testing.T) {
+	f, enrolled := admitFixture(t)
+	accepted := signedTurn(t, f, "run-duplicate-root", 1)
+	duplicate := signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
+		task.Wherry.RunID = "run-duplicate-root"
+		task.Wherry.Lineage.RootRunID = "run-duplicate-root"
+		task.Message.MessageID = "msg-duplicate-root"
+		task.Message.TaskID = "run-duplicate-root"
+		task.Message.ContextID = "run-duplicate-root"
 	})
-	task, err := trust.VerifyRootSubmission(duplicate.Value, f.receiver.userPub)
-	if err != nil {
-		t.Fatal(err)
+	if admitted, _ := f.receiver.admit(f.ctx, accepted, enrolled); admitted == nil {
+		t.Fatal("first submission was not admitted")
 	}
-	if _, err := f.receiver.history(f.ctx, task, trust.EnvelopeHash(duplicate.Value)); err == nil {
-		t.Fatal("history accepted a final turn other than the claimed submission")
+	if admitted, ack := f.receiver.admit(f.ctx, duplicate, enrolled); admitted != nil || ack != kgo.AckReject {
+		t.Fatalf("duplicate admitted=%#v ack=%v", admitted, ack)
+	}
+	if !strings.Contains(f.logs.String(), "duplicate submission") {
+		t.Fatalf("fixed rejection reason missing from %q", f.logs.String())
 	}
 }
 
 func TestAdmitAcceptsValidTask(t *testing.T) {
 	f, enrolled := admitFixture(t)
-	admitted, _ := f.receiver.admit(f.ctx, signedRoot(t, f.userKey, nil), enrolled)
-	if admitted == nil || admitted.offer.Adapter != "nomad" || admitted.offer.Labels["runtime"] != "exec" || admitted.prompt != "hi" {
+	admitted, _ := f.receiver.admit(f.ctx, signedRoot(t, f, f.userKey, nil), enrolled)
+	if admitted == nil || admitted.offer.Adapter != "nomad" || admitted.offer.Labels["runtime"] != "exec" || prompt(admitted.history) != "hi" {
 		t.Fatalf("got %#v", admitted)
 	}
 }
@@ -989,7 +986,7 @@ func TestReceiverDropsOffersOutsideAllowed(t *testing.T) {
 
 func TestNoCredentialInterruptsAndReleases(t *testing.T) {
 	f, enrolled := admitFixture(t)
-	record := signedRoot(t, f.userKey, nil)
+	record := signedRoot(t, f, f.userKey, nil)
 	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
 	before := time.Now().Add(-time.Second)
 	if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckAccept {
@@ -1041,7 +1038,7 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 			if test.heartbeat {
 				f.adapter.endDelay = 3 * renewInterval
 			}
-			record := signedRoot(t, f.userKey, nil)
+			record := signedRoot(t, f, f.userKey, nil)
 			admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
 			executeSubmission(t, f, record, admitted, 1)
 
@@ -1147,7 +1144,7 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 		f, enrolled := admitFixture(t)
 		f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
 		f.adapter.dispatchErr = errors.New("dispatch failed")
-		record := signedRoot(t, f.userKey, nil)
+		record := signedRoot(t, f, f.userKey, nil)
 		admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
 		if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckReject {
 			t.Fatalf("status %v", status)
@@ -1174,7 +1171,7 @@ func TestForeignSignedTaskRejectedSilently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admitted, ack := f.receiver.admit(f.ctx, signedRoot(t, other, nil), enrolled)
+	admitted, ack := f.receiver.admit(f.ctx, signedRoot(t, f, other, nil), enrolled)
 	if admitted != nil || ack != kgo.AckReject || topicCount(t, f, wire.TopicEvent) != 0 {
 		t.Fatalf("admitted=%v ack=%v", admitted != nil, ack)
 	}
@@ -1182,7 +1179,7 @@ func TestForeignSignedTaskRejectedSilently(t *testing.T) {
 
 func TestTaskForOtherPoolSkippedSilently(t *testing.T) {
 	f, enrolled := admitFixture(t)
-	record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) { task.Wherry.Pool = "other" })
+	record := signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) { task.Wherry.Pool = "other" })
 	admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
 	if admitted != nil || ack != kgo.AckAccept || topicCount(t, f, wire.TopicEvent) != 0 {
 		t.Fatalf("admitted=%v ack=%v events=%d", admitted != nil, ack, topicCount(t, f, wire.TopicEvent))
@@ -1205,7 +1202,7 @@ func TestAdmitRejections(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f, enrolled := admitFixture(t)
-			admitted, ack := f.receiver.admit(f.ctx, signedRoot(t, f.userKey, c.mutate), enrolled)
+			admitted, ack := f.receiver.admit(f.ctx, signedRoot(t, f, f.userKey, c.mutate), enrolled)
 			if admitted != nil || ack != kgo.AckReject {
 				t.Fatalf("admitted=%v ack=%v", admitted != nil, ack)
 			}
@@ -1230,7 +1227,7 @@ func TestReceiverRejectsNonTextParts(t *testing.T) {
 			f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
 			f.receiver.enrolled = enrolled
 			f.cluster.SetGroupConfigs("p-"+enrolled.Pool, map[string]string{"share.auto.offset.reset": "earliest"})
-			record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
+			record := signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
 				task.Message.Parts = append(task.Message.Parts, part)
 			})
 			record.Topic = wire.TopicTask
@@ -1266,7 +1263,7 @@ func TestReceiverRejectsNonTextParts(t *testing.T) {
 
 func TestAdmissionMismatchSkippedSilently(t *testing.T) {
 	f, enrolled := admitFixture(t)
-	record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
+	record := signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
 		task.Wherry.Selector[0].Values = []string{"docker"}
 	})
 	admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
@@ -1278,7 +1275,7 @@ func TestAdmissionMismatchSkippedSilently(t *testing.T) {
 func TestRejectionPublishFailureReleases(t *testing.T) {
 	f, enrolled := admitFixture(t)
 	f.receiver.base.Close()
-	record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
+	record := signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
 		task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli()
 	})
 	admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
@@ -1427,12 +1424,12 @@ func TestAdoptionReadFailureReleases(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	record := signedRoot(t, f.userKey, nil)
+	record := signedRoot(t, f, f.userKey, nil)
 	task, err := trust.VerifyRootSubmission(record.Value, f.receiver.userPub)
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := executeSubmission(t, f, record, &admission{task: task, offer: wire.Offer{Adapter: "nomad", Labels: map[string]string{"runtime": "exec"}}, prompt: "hi"}, 2)
+	status := executeSubmission(t, f, record, &admission{task: task, taskHash: trust.EnvelopeHash(record.Value), offer: wire.Offer{Adapter: "nomad", Labels: map[string]string{"runtime": "exec"}}, history: []wire.Message{task.Message}}, 2)
 	if status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
@@ -1533,7 +1530,7 @@ func TestDispatchErrorReasonIsFixed(t *testing.T) {
 	f, enrolled := admitFixture(t)
 	f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
 	f.adapter.dispatchErr = errors.New(secret)
-	record := signedRoot(t, f.userKey, nil)
+	record := signedRoot(t, f, f.userKey, nil)
 	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
 	if status := executeSubmission(t, f, record, admitted, 1); status != kgo.AckReject {
 		t.Fatalf("status %v", status)
@@ -1570,7 +1567,7 @@ func TestAdapterErrorLogsCarryOnlyType(t *testing.T) {
 	}{
 		{"lookup", func(t *testing.T, f fixture, enrolled *trust.Enrolled) {
 			f.adapter.lookupErr = errors.New(secret)
-			record := signedRoot(t, f.userKey, nil)
+			record := signedRoot(t, f, f.userKey, nil)
 			admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
 			executeSubmission(t, f, record, admitted, 2)
 		}},
@@ -1746,7 +1743,7 @@ func newMultiFixture(t *testing.T) multiFixture {
 
 func (m multiFixture) execute(t *testing.T, runID string, selector []wire.Requirement, attempt int64) kgo.AckStatus {
 	t.Helper()
-	record := signedRoot(t, m.userKey, func(task *wire.SubmissionRecord) {
+	record := signedRoot(t, m.fixture, m.userKey, func(task *wire.SubmissionRecord) {
 		task.Wherry.RunID, task.Wherry.Lineage.RootRunID, task.Wherry.Selector = runID, runID, selector
 		task.Message.TaskID, task.Message.ContextID = runID, runID
 	})

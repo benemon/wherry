@@ -391,7 +391,7 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 		result = append(result, receiver)
 	}
 	for id, approval := range loaded.approvals {
-		if _, err := loaded.state.Receiver(id, now); errors.Is(err, trust.ErrRevoked) {
+		if approval.generation <= loaded.state.Floor(id) {
 			result = append(result, Receiver{
 				ReceiverID: id, Pool: approval.pool, Generation: approval.generation,
 				Labels: map[string]string{}, Selector: []wire.Requirement{}, Adapters: []wire.AdapterGrant{}, Offers: []wire.Offer{},
@@ -469,9 +469,6 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 
 // Continue publishes the next user-signed turn of an interrupted run.
 func (client *Client) Continue(ctx context.Context, runID string, input ContinueInput) (ContinueResult, error) {
-	if input.Deadline <= 0 || input.QueueDeadline <= 0 {
-		return ContinueResult{}, errors.New("deadlines must be positive")
-	}
 	loaded, err := client.loadState(ctx)
 	if err != nil {
 		return ContinueResult{}, err
@@ -733,6 +730,9 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 	}
 	result := EventsResult{Chunks: map[TurnAttempt]int{}, Skipped: loaded.skipped}
 	for _, record := range records {
+		if string(record.Key) != runID {
+			continue
+		}
 		envelope, err := wire.DecodeEnvelope(record.Value)
 		if err != nil {
 			result.Skipped++
@@ -749,13 +749,11 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 			continue
 		}
 		status, ok := verified.(*wire.StatusRecord)
-		if !ok || status.Wherry.ReceiverID != receiver.id {
+		if !ok || status.Wherry.ReceiverID != receiver.id || status.StatusUpdate.TaskID != runID {
 			result.Skipped++
 			continue
 		}
-		if status.StatusUpdate.TaskID == runID {
-			result.Statuses = append(result.Statuses, *status)
-		}
+		result.Statuses = append(result.Statuses, *status)
 	}
 	transcripts, err := client.readBounded(ctx, wire.TopicTranscript)
 	if err != nil {
