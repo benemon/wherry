@@ -104,7 +104,6 @@ type ContinueResult struct {
 type AwaitResult struct {
 	Task    *wire.Task
 	Status  wire.TaskStatus
-	Turn    int64
 	Skipped int
 }
 
@@ -703,7 +702,7 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 						!attempts.Admit(value.Task.ID, value.Wherry.Turn, value.Wherry.Attempt) {
 						continue
 					}
-					return AwaitResult{Task: &value.Task, Status: value.Task.Status, Turn: value.Wherry.Turn, Skipped: loaded.skipped}, nil
+					return AwaitResult{Task: &value.Task, Status: value.Task.Status, Skipped: loaded.skipped}, nil
 				case *wire.StatusRecord:
 					acceptable := value.Wherry.Kind == "interrupted" && wire.Interrupted(value.StatusUpdate.Status.State) ||
 						value.Wherry.Kind == "terminal" && wire.Terminal(value.StatusUpdate.Status.State) ||
@@ -714,7 +713,7 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 						!attempts.Admit(value.StatusUpdate.TaskID, value.Wherry.Turn, value.Wherry.Attempt) {
 						continue
 					}
-					return AwaitResult{Status: value.StatusUpdate.Status, Turn: value.Wherry.Turn, Skipped: loaded.skipped}, nil
+					return AwaitResult{Status: value.StatusUpdate.Status, Skipped: loaded.skipped}, nil
 				}
 			}
 		}

@@ -630,8 +630,8 @@ func TestAwaitReturnsOnInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if awaited.Task != nil || awaited.Status.State != wire.TaskStateAuthRequired || awaited.Turn != 1 {
-		t.Fatalf("result %#v, want turn 1 AUTH_REQUIRED without a task", awaited)
+	if awaited.Task != nil || awaited.Status.State != wire.TaskStateAuthRequired {
+		t.Fatalf("result %#v, want AUTH_REQUIRED without a task", awaited)
 	}
 }
 
@@ -644,8 +644,8 @@ func TestAwaitReturnsOnRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if awaited.Task != nil || awaited.Status.State != wire.TaskStateRejected || awaited.Turn != 1 {
-		t.Fatalf("result %#v, want turn 1 REJECTED without a task", awaited)
+	if awaited.Task != nil || awaited.Status.State != wire.TaskStateRejected {
+		t.Fatalf("result %#v, want REJECTED without a task", awaited)
 	}
 }
 

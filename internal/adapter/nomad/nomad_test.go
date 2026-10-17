@@ -936,7 +936,7 @@ func TestSweepDeletesStaleVariableWithoutJob(t *testing.T) {
 func TestSweepIgnoresNonRunVariables(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	shortGrace(t)
-	for _, path := range []string{"nomad/jobs/agentbus-receiver", "nomad/jobs/agent-foo"} {
+	for _, path := range []string{"nomad/jobs/agent-foo-t1/prompt", "nomad/jobs/agent-foo"} {
 		putVariable(t, adapter, ctx, path)
 		sweepLeaves(t, adapter, ctx, path, true)
 	}

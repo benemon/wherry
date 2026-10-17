@@ -359,7 +359,7 @@ func interruptThenContinue(t *testing.T, f fixture, first, second string, betwee
 	if err != nil {
 		t.Fatal(err)
 	}
-	if interrupted.Status.State != wire.TaskStateAuthRequired || interrupted.Task != nil || interrupted.Turn != 1 {
+	if interrupted.Status.State != wire.TaskStateAuthRequired || interrupted.Task != nil {
 		t.Fatalf("unexpected interruption: %#v", interrupted)
 	}
 	if tasks := topicCount(t, f, "replies.test"); tasks != 0 {
@@ -410,7 +410,7 @@ func interruptThenContinue(t *testing.T, f fixture, first, second string, betwee
 
 func TestContinuationResumesInterruptedTask(t *testing.T) {
 	completed := interruptThenContinue(t, newFixture(t, resultStream), "first", "second", nil)
-	if completed.Status.State != wire.TaskStateCompleted || completed.Turn != 2 || completed.Task == nil ||
+	if completed.Status.State != wire.TaskStateCompleted || completed.Task == nil ||
 		len(completed.Task.History) != 2 || completed.Task.History[0].Parts[0].Text != "first" || completed.Task.History[1].Parts[0].Text != "second" {
 		t.Fatalf("completed continuation %#v", completed)
 	}
@@ -419,7 +419,7 @@ func TestContinuationResumesInterruptedTask(t *testing.T) {
 func TestContinuationPromptIncludesAllTurns(t *testing.T) {
 	f := newFixture(t, resultStream)
 	completed := interruptThenContinue(t, f, "write the report", "continue", nil)
-	if completed.Status.State != wire.TaskStateCompleted || completed.Turn != 2 {
+	if completed.Status.State != wire.TaskStateCompleted || completed.Task == nil || len(completed.Task.History) != 2 {
 		t.Fatalf("completed continuation %#v", completed)
 	}
 	f.adapter.mu.Lock()
@@ -2215,7 +2215,7 @@ func TestContinuationAcrossRenewal(t *testing.T) {
 			t.Fatalf("refresh after renewal: %v", err)
 		}
 	})
-	if completed.Status.State != wire.TaskStateCompleted || completed.Turn != 2 {
+	if completed.Status.State != wire.TaskStateCompleted || completed.Task == nil || len(completed.Task.History) != 2 {
 		t.Fatalf("continuation across renewal %#v", completed)
 	}
 }

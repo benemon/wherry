@@ -344,7 +344,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			found, ok, err := named.Adapter.Lookup(runCtx, runID, task.Wherry.Turn)
 			if err != nil {
 				if runCtx.Err() != nil && ctx.Err() == nil {
-					return run.fail(ctx, wire.TaskStateFailed, "timeout", nil)
+					return run.fail(ctx, "timeout", nil)
 				}
 				r.logger.Printf("run %s: lookup in adapter %s: %v", runID, named.Name, err)
 				return kgo.AckRelease
@@ -370,10 +370,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		handle, err = named.Adapter.Dispatch(runCtx, Run{ID: runID, Turn: task.Wherry.Turn, Offer: admitted.offer.Labels, Prompt: []byte(admitted.prompt), Credential: credential})
 		if err != nil {
 			if runCtx.Err() != nil && ctx.Err() == nil {
-				return run.fail(ctx, wire.TaskStateFailed, "timeout", nil)
+				return run.fail(ctx, "timeout", nil)
 			}
 			r.logger.Printf("run %s: dispatch failed: %T", runID, err)
-			return run.fail(ctx, wire.TaskStateFailed, "dispatch failed", nil)
+			return run.fail(ctx, "dispatch failed", nil)
 		}
 	}
 	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.offer.Labels), handle.Job)
@@ -491,7 +491,7 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason str
 		run.receiver.logger.Printf("run %s: stop: %v", run.task.Wherry.RunID, err)
 		return kgo.AckRelease
 	}
-	return run.fail(ctx, wire.TaskStateFailed, reason, pending)
+	return run.fail(ctx, reason, pending)
 }
 
 // revoke stops a run on a revoked receiver and releases its task to the pool; clients no longer
@@ -514,8 +514,8 @@ func (run *activeRun) revoke(ctx context.Context, handle Handle, pending []Line)
 	return kgo.AckRelease
 }
 
-func (run *activeRun) fail(ctx context.Context, state wire.TaskState, reason string, pending []Line) kgo.AckStatus {
-	return run.end(ctx, taskStatus(state, reason), reason, pending, kgo.AckReject)
+func (run *activeRun) fail(ctx context.Context, reason string, pending []Line) kgo.AckStatus {
+	return run.end(ctx, taskStatus(wire.TaskStateFailed, reason), reason, pending, kgo.AckReject)
 }
 
 func (run *activeRun) interrupt(ctx context.Context, credential string) kgo.AckStatus {
