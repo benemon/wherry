@@ -359,6 +359,36 @@ func TestContinuePrintsRunAndTurn(t *testing.T) {
 	}
 }
 
+func TestCancelCLI(t *testing.T) {
+	ctx, _, client := publishInterruptedRun(t)
+	var stdout, stderr bytes.Buffer
+	if err := runCancel(ctx, client, []string{"run-auth"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "run_id=run-auth\n" || stderr.Len() != 0 {
+		t.Fatalf("cancel stdout %q stderr %q", stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	err := runAwait(ctx, client, []string{"run-auth", "--timeout", "5s"}, &stdout, &stderr)
+	if err == nil || err.Error() != "run ended in TASK_STATE_CANCELED" {
+		t.Fatalf("await error %v", err)
+	}
+	if stdout.String() != "TASK_STATE_CANCELED\n" || stderr.Len() != 0 {
+		t.Fatalf("await stdout %q stderr %q", stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	if err := runEvents(ctx, client, []string{"run-auth"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n"); len(lines) != 2 ||
+		!strings.Contains(lines[0], "kind=interrupted") || lines[1] != "kind=cancel state=TASK_STATE_CANCELED signer=user" {
+		t.Fatalf("events stdout %q", stdout.String())
+	}
+	if err := runCancel(ctx, client, []string{"run-missing"}, &stdout, &stderr); err == nil || err.Error() != "cancel run-missing: verified root submission not found" {
+		t.Fatalf("cancel of an unknown run: got %v", err)
+	}
+}
+
 func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 	ctx, kafka, client, _, receiverKey := enrolledReceiver(t)
 	publish := func(topic string, recordType wire.RecordType, payload any) {
@@ -578,6 +608,9 @@ func TestUsageErrors(t *testing.T) {
 		{"continue argument", func(stderr *bytes.Buffer) error {
 			return runContinue(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
 		}, "usage: wherry continue"},
+		{"cancel argument", func(stderr *bytes.Buffer) error {
+			return runCancel(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
+		}, "usage: wherry cancel"},
 		{"await argument", func(stderr *bytes.Buffer) error {
 			return runAwait(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
 		}, "usage: wherry await"},

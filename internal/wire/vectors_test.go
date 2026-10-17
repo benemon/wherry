@@ -189,9 +189,9 @@ func writePublishedVectors(t *testing.T) {
 		add(string(recordType)+"-ok.json", string(recordType)+" ok", Sign(recordType, payload, privateKey), verificationKind(recordType), "ok")
 	}
 
-	add("duplicate-member.json", "duplicate payload member", Sign(TypeCancel, []byte(`{"run_id":"run-1","run_id":"run-2","at_ms":1}`), privateKey), SignerUser, "invalid_payload")
-	add("unknown-member.json", "unknown payload member", Sign(TypeCancel, []byte(`{"run_id":"run-1","at_ms":1,"unexpected":true}`), privateKey), SignerUser, "invalid_payload")
-	add("trailing-value.json", "trailing payload value", Sign(TypeCancel, []byte(`{"run_id":"run-1","at_ms":1} {}`), privateKey), SignerUser, "invalid_payload")
+	add("duplicate-member.json", "duplicate payload member", Sign(TypeRevocation, []byte(`{"receiver_id":"receiver-1","receiver_id":"receiver-2","floor_generation":1,"at_ms":1}`), privateKey), SignerUser, "invalid_payload")
+	add("unknown-member.json", "unknown payload member", Sign(TypeRevocation, []byte(`{"receiver_id":"receiver-1","floor_generation":1,"at_ms":1,"unexpected":true}`), privateKey), SignerUser, "invalid_payload")
+	add("trailing-value.json", "trailing payload value", Sign(TypeRevocation, []byte(`{"receiver_id":"receiver-1","floor_generation":1,"at_ms":1} {}`), privateKey), SignerUser, "invalid_payload")
 
 	statusPayload := mustPayload(TypeStatus, payloads[TypeStatus])
 	crossType := Sign(TypeStatus, statusPayload, privateKey)
@@ -200,10 +200,10 @@ func writePublishedVectors(t *testing.T) {
 
 	cancelPayload := mustPayload(TypeCancel, payloads[TypeCancel])
 	altered := Sign(TypeCancel, cancelPayload, privateKey)
-	altered.Payload = Bytes(strings.Replace(string(altered.Payload), `"at_ms":1000`, `"at_ms":1001`, 1))
+	altered.Payload = Bytes(strings.Replace(string(altered.Payload), `"id":"run-1"`, `"id":"run-2"`, 1))
 	add("cancel-altered-payload.json", "altered payload byte", altered, SignerUser, "invalid_signature")
 
-	add("float-numeric.json", "float numeric field", Sign(TypeCancel, []byte(`{"run_id":"run-1","at_ms":1.5}`), privateKey), SignerUser, "invalid_payload")
+	add("float-numeric.json", "float numeric field", Sign(TypeRevocation, []byte(`{"receiver_id":"receiver-1","floor_generation":1,"at_ms":1.5}`), privateKey), SignerUser, "invalid_payload")
 	hash := strings.Repeat("a", 64)
 	both := replaceOnce(t, mustPayload(TypeArtifactUpdate, payloads[TypeArtifactUpdate]), `"mediaType":"application/x-ndjson"}]`,
 		`"mediaType":"application/x-ndjson"},{"url":"unstored:oversize","metadata":{"sha256":"`+hash+`","size":4}}]`)

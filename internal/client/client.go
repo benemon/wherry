@@ -100,6 +100,12 @@ type ContinueResult struct {
 	Skipped int
 }
 
+// CancelResult describes a produced cancel.
+type CancelResult struct {
+	RunID   string
+	Skipped int
+}
+
 // AwaitResult is the accepted outcome of the latest turn; Task is nil when a status record ended it.
 type AwaitResult struct {
 	Task    *wire.Task
@@ -113,11 +119,13 @@ type TurnAttempt struct {
 	Attempt int64
 }
 
-// EventsResult contains a run's verified status records and its transcript chunk count per turn and attempt.
+// EventsResult contains a run's verified status records, whether the user cancelled it, and its
+// transcript chunk count per turn and attempt.
 type EventsResult struct {
-	Statuses []wire.StatusRecord
-	Chunks   map[TurnAttempt]int
-	Skipped  int
+	Statuses  []wire.StatusRecord
+	Cancelled bool
+	Chunks    map[TurnAttempt]int
+	Skipped   int
 }
 
 // Receiver describes one enrolled receiver and its latest verified capability.
@@ -490,6 +498,13 @@ func (client *Client) Continue(ctx context.Context, runID string, input Continue
 	if status == nil || status.Wherry.Kind != "interrupted" || !wire.Interrupted(status.StatusUpdate.Status.State) {
 		return ContinueResult{}, errors.New("task is not awaiting continuation")
 	}
+	cancelled, cancelSkipped, err := client.cancelled(ctx)
+	if err != nil {
+		return ContinueResult{}, err
+	}
+	if cancelled[runID] {
+		return ContinueResult{}, errors.New("task is canceled")
+	}
 	nextTurn := status.Wherry.Turn + 1
 	if run[nextTurn].record != nil {
 		return ContinueResult{}, errors.New("continuation turn already submitted")
@@ -522,7 +537,49 @@ func (client *Client) Continue(ctx context.Context, runID string, input Continue
 	if err := client.produce(ctx, &kgo.Record{Topic: wire.TopicTask, Key: []byte(runID), Value: envelope}); err != nil {
 		return ContinueResult{}, err
 	}
-	return ContinueResult{RunID: runID, Turn: continuation.Wherry.Turn, Skipped: loaded.skipped + skipped + statusSkipped}, nil
+	return ContinueResult{RunID: runID, Turn: continuation.Wherry.Turn, Skipped: loaded.skipped + skipped + statusSkipped + cancelSkipped}, nil
+}
+
+// Cancel publishes a user-signed request to cancel a run.
+func (client *Client) Cancel(ctx context.Context, runID string) (CancelResult, error) {
+	loaded, err := client.loadState(ctx)
+	if err != nil {
+		return CancelResult{}, err
+	}
+	submissions, skipped, err := client.readSubmissions(ctx)
+	if err != nil {
+		return CancelResult{}, err
+	}
+	if len(submissions[runID]) == 0 {
+		return CancelResult{}, fmt.Errorf("cancel %s: verified root submission not found", runID)
+	}
+	envelope, err := trust.NewCancel(runID, client.userKey)
+	if err != nil {
+		return CancelResult{}, err
+	}
+	if err := client.produce(ctx, &kgo.Record{Topic: wire.TopicControl, Key: []byte(runID), Value: envelope}); err != nil {
+		return CancelResult{}, err
+	}
+	return CancelResult{RunID: runID, Skipped: loaded.skipped + skipped}, nil
+}
+
+// cancelled returns the runs the user has cancelled and the number of unverifiable control records.
+func (client *Client) cancelled(ctx context.Context) (map[string]bool, int, error) {
+	records, err := client.readBounded(ctx, wire.TopicControl)
+	if err != nil {
+		return nil, 0, err
+	}
+	result := make(map[string]bool)
+	skipped := 0
+	for _, record := range records {
+		runID, err := trust.VerifyCancel(record.Value, client.userKey.Public().(ed25519.PublicKey))
+		if err != nil || string(record.Key) != runID {
+			skipped++
+			continue
+		}
+		result[runID] = true
+	}
+	return result, skipped, nil
 }
 
 func (client *Client) readSubmissions(ctx context.Context) (map[string]map[int64]runSubmission, int, error) {
@@ -604,21 +661,26 @@ func (client *Client) waitingTasks(ctx context.Context, loaded *loadedState, poo
 	if err != nil {
 		return nil, 0, err
 	}
+	cancelled, cancelSkipped, err := client.cancelled(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
 	var waiting []WaitingTask
 	for runID, status := range statuses {
 		submission := submissions[runID][status.Wherry.Turn]
 		var metadata wire.CredentialMetadata
-		if submission.record.Wherry.Pool == pool && status.Wherry.Kind == "interrupted" &&
+		if !cancelled[runID] && submission.record.Wherry.Pool == pool && status.Wherry.Kind == "interrupted" &&
 			status.StatusUpdate.Status.State == wire.TaskStateAuthRequired &&
 			json.Unmarshal(status.StatusUpdate.Metadata, &metadata) == nil && metadata.Credential == credential {
 			waiting = append(waiting, WaitingTask{RunID: runID, Turn: status.Wherry.Turn})
 		}
 	}
 	sort.Slice(waiting, func(i, j int) bool { return waiting[i].RunID < waiting[j].RunID })
-	return waiting, skipped + statusSkipped, nil
+	return waiting, skipped + statusSkipped + cancelSkipped, nil
 }
 
 // Await follows the reply topic until it accepts a final task for runID: terminal, or waiting on authentication.
+// No receiver holds an interrupted task, so the user's own cancel ends one as CANCELED.
 func (client *Client) Await(ctx context.Context, runID string, timeout time.Duration) (AwaitResult, error) {
 	loaded, err := client.loadState(ctx)
 	if err != nil {
@@ -641,6 +703,11 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 	if latest.record == nil {
 		return AwaitResult{}, fmt.Errorf("await %s: verified root submission not found", runID)
 	}
+	cancelled, cancelSkipped, err := client.cancelled(ctx)
+	if err != nil {
+		return AwaitResult{}, err
+	}
+	loaded.skipped += cancelSkipped
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	stop, err := client.followFromStart(waitCtx, client.replyTopic, wire.TopicEvent)
@@ -698,6 +765,9 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 						!attempts.Admit(value.StatusUpdate.TaskID, value.Wherry.Turn, value.Wherry.Attempt) {
 						continue
 					}
+					if value.Wherry.Kind == "interrupted" && cancelled[runID] {
+						return AwaitResult{Status: wire.TaskStatus{State: wire.TaskStateCanceled}, Skipped: loaded.skipped}, nil
+					}
 					return AwaitResult{Status: value.StatusUpdate.Status, Skipped: loaded.skipped}, nil
 				}
 			}
@@ -742,6 +812,20 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 			continue
 		}
 		result.Statuses = append(result.Statuses, *status)
+	}
+	controls, err := client.readBounded(ctx, wire.TopicControl)
+	if err != nil {
+		return EventsResult{}, err
+	}
+	for _, record := range controls {
+		if string(record.Key) != runID {
+			continue
+		}
+		if id, err := trust.VerifyCancel(record.Value, client.userKey.Public().(ed25519.PublicKey)); err != nil || id != runID {
+			result.Skipped++
+			continue
+		}
+		result.Cancelled = true
 	}
 	transcripts, err := client.readBounded(ctx, wire.TopicTranscript)
 	if err != nil {

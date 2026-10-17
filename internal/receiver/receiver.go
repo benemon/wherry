@@ -141,6 +141,8 @@ type Receiver struct {
 	credentials map[string]heldCredential
 	// revoked is set when refresh last saw this receiver revoked; in-flight runs stop on their next heartbeat.
 	revoked bool
+	// cancelled holds the runs the user has cancelled, as of the last control topic read.
+	cancelled map[string]bool
 }
 
 type heldCredential struct {
@@ -203,8 +205,12 @@ func (r *Receiver) Run(ctx context.Context) error {
 	if err := r.enrol(ctx); err != nil {
 		return err
 	}
+	// Claiming waits for one read of the control topic, so a cancelled submission is not dispatched on start.
+	if err := r.refreshCancelled(ctx); err != nil {
+		return err
+	}
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		r.every(ctx, capabilityInterval, r.publishCapability)
@@ -212,6 +218,11 @@ func (r *Receiver) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		r.every(ctx, refreshInterval, r.refresh)
+	}()
+	// A separate step, so a control topic read failure never delays noticing a revocation.
+	go func() {
+		defer wg.Done()
+		r.every(ctx, refreshInterval, r.refreshCancelled)
 	}()
 	for slot := int64(0); slot < r.config.Capacity; slot++ {
 		wg.Add(1)
@@ -360,6 +371,26 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	if rejected {
 		return errors.New("credential rejected") // never wrap: the cause may describe secret material
 	}
+	return nil
+}
+
+// refreshCancelled rebuilds the set of runs the user has cancelled from the control topic.
+func (r *Receiver) refreshCancelled(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	records, err := readBounded(ctx, r.kafkaOpt, wire.TopicControl)
+	if err != nil {
+		return err
+	}
+	cancelled := make(map[string]bool)
+	for _, record := range records {
+		if runID, err := trust.VerifyCancel(record.Value, r.userPub); err == nil && string(record.Key) == runID {
+			cancelled[runID] = true
+		}
+	}
+	r.mu.Lock()
+	r.cancelled = cancelled
+	r.mu.Unlock()
 	return nil
 }
 

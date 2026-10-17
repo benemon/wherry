@@ -25,7 +25,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|enrol|secret|receivers|submit|continue|await|events|receiver>")
+		return errors.New("usage: wherry <init|key|enrol|secret|receivers|submit|continue|cancel|await|events|receiver>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -79,6 +79,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runSubmit(ctx, client, args[1:], stdout, stderr)
 	case "continue", "resume":
 		return runContinue(ctx, client, args[1:], stdout, stderr)
+	case "cancel":
+		return runCancel(ctx, client, args[1:], stdout, stderr)
 	case "await":
 		return runAwait(ctx, client, args[1:], stdout, stderr)
 	case "events":
@@ -312,6 +314,19 @@ func runContinue(ctx context.Context, client *busclient.Client, args []string, s
 	return nil
 }
 
+func runCancel(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
+	if len(args) != 1 {
+		return errors.New("usage: wherry cancel RUN_ID")
+	}
+	result, err := client.Cancel(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "run_id=%s\n", result.RunID)
+	warnSkipped(stderr, result.Skipped)
+	return nil
+}
+
 func runSubmit(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("submit", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -441,6 +456,9 @@ func runEvents(ctx context.Context, client *busclient.Client, args []string, std
 			fmt.Fprintf(stdout, " message=%q", strings.Join(texts, " "))
 		}
 		fmt.Fprintln(stdout)
+	}
+	if result.Cancelled {
+		fmt.Fprintf(stdout, "kind=cancel state=%s signer=user\n", wire.TaskStateCanceled)
 	}
 	positions := slices.Collect(maps.Keys(result.Chunks))
 	sort.Slice(positions, func(i, j int) bool {

@@ -42,6 +42,7 @@ func TestModeledA2AFieldsExistInVendoredProto(t *testing.T) {
 		"TaskStatus":              TaskStatus{},
 		"TaskStatusUpdateEvent":   TaskStatusUpdateEvent{},
 		"TaskArtifactUpdateEvent": TaskArtifactUpdateEvent{},
+		"CancelTaskRequest":       CancelTaskRequest{},
 	} {
 		fields := protoFields(t, proto, protoName)
 		modeledFields := map[string]bool{}
@@ -107,6 +108,42 @@ func TestRecordsAreA2AObjects(t *testing.T) {
 				t.Errorf("%s.%s = %v, want root run id %q", test.field, test.contextID, got, rootRunID)
 			}
 		})
+	}
+}
+
+func TestCancelRecordIsA2ACancelTaskRequest(t *testing.T) {
+	proto := vendoredProto(t)
+	cancel := &CancelRecord{CancelRequest: CancelTaskRequest{ID: "run-1", Metadata: jsontext.Value(`{"reason":"superseded"}`)}}
+	encoded, err := MarshalPayload(TypeCancel, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]jsontext.Value
+	if err := json.Unmarshal(encoded, &record); err != nil {
+		t.Fatal(err)
+	}
+	if len(record) != 1 || record["cancelRequest"] == nil {
+		t.Fatalf("record members %v, want cancelRequest alone", reflect.ValueOf(record).MapKeys())
+	}
+	var object map[string]any
+	if err := json.Unmarshal(record["cancelRequest"], &object); err != nil {
+		t.Fatal(err)
+	}
+	checkProtoValue(t, proto, "CancelTaskRequest", "cancelRequest", object)
+	if object["id"] != "run-1" || object["tenant"] != nil {
+		t.Errorf("cancelRequest %v, want id run-1 and no tenant", object)
+	}
+	for name, mutate := range map[string]func(*CancelRecord){
+		"no id":     func(value *CancelRecord) { value.CancelRequest.ID = "" },
+		"tenant":    func(value *CancelRecord) { value.CancelRequest.Tenant = "acme" },
+		"metadata":  func(value *CancelRecord) { value.CancelRequest.Metadata = jsontext.Value(`["a"]`) },
+		"uppercase": func(value *CancelRecord) { value.CancelRequest.ID = "Run-1" },
+	} {
+		invalid := *cancel
+		mutate(&invalid)
+		if _, err := MarshalPayload(TypeCancel, &invalid); err == nil {
+			t.Errorf("%s: invalid cancel marshalled", name)
+		}
 	}
 }
 

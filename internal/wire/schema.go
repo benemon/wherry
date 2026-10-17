@@ -264,10 +264,16 @@ type TaskRecord struct {
 	Wherry TaskExtension `json:"wherry"`
 }
 
-// Cancel is a cancellation payload.
-type Cancel struct {
-	RunID string `json:"run_id"`
-	AtMS  int64  `json:"at_ms"`
+// CancelTaskRequest is an A2A CancelTaskRequest.
+type CancelTaskRequest struct {
+	Tenant   string         `json:"tenant,omitzero"`
+	ID       string         `json:"id"`
+	Metadata jsontext.Value `json:"metadata,omitzero"`
+}
+
+// CancelRecord is a cancel payload: the A2A request to cancel a task.
+type CancelRecord struct {
+	CancelRequest CancelTaskRequest `json:"cancelRequest"`
 }
 
 // PointerMetadata is the metadata of a url part that stands in for content not carried inline.
@@ -469,17 +475,17 @@ func validatePayload(recordType RecordType, payload any) error {
 			break
 		}
 		return validateSubmission(value)
-	case *Cancel:
+	case *CancelRecord:
 		if recordType != TypeCancel {
 			break
 		}
-		if err := validateID(value.RunID, "run_id"); err != nil {
+		if err := validateID(value.CancelRequest.ID, "id"); err != nil {
 			return err
 		}
-		if value.AtMS < 0 {
-			return errors.New("invalid cancel time")
+		if value.CancelRequest.Tenant != "" {
+			return errors.New("cancel tenant is unused")
 		}
-		return nil
+		return validateMetadata(value.CancelRequest.Metadata)
 	case *StatusRecord:
 		if recordType != TypeStatus {
 			break

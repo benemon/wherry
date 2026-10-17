@@ -107,11 +107,13 @@ type admission struct {
 	taskHash string
 	offer    wire.Offer
 	history  []wire.Message
+	// cancelled is set when the user cancelled the run; it ends CANCELED without a dispatch.
+	cancelled bool
 }
 
 // admit applies ADR-0014 root verification, the run's turn order, ADR-0011/0017
-// matching, deadlines and part checks, and builds the prompt from the run's
-// history. A nil admission carries the acknowledgement.
+// matching, ADR-0013 cancellation, deadlines and part checks, and builds the
+// prompt from the run's history. A nil admission carries the acknowledgement.
 func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trust.Enrolled) (*admission, kgo.AckStatus) {
 	task, err := trust.VerifyRootSubmission(record.Value, r.userPub)
 	if err != nil {
@@ -144,6 +146,20 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 	if !matched || !wire.Satisfies(enrolled.Selector, task.Wherry.Labels) {
 		return nil, kgo.AckAccept
 	}
+	history := []wire.Message{task.Message}
+	if task.Wherry.Turn > 1 {
+		if history, err = turns(submissions, task, taskHash); err != nil {
+			r.logger.Printf("run %s: continuation history: %v", task.Wherry.RunID, err)
+			return reject("continuation history unavailable")
+		}
+	}
+	r.mu.Lock()
+	cancelled := r.cancelled[task.Wherry.RunID]
+	r.mu.Unlock()
+	admitted := &admission{task: task, taskHash: taskHash, offer: offer, history: history, cancelled: cancelled}
+	if cancelled {
+		return admitted, 0
+	}
 	now := time.Now()
 	if now.UnixMilli() > task.Wherry.QueueDeadlineMS {
 		return reject("queue deadline passed")
@@ -154,14 +170,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 	if slices.ContainsFunc(task.Message.Parts, func(part wire.Part) bool { return part.Text == "" }) {
 		return reject("unsupported message part")
 	}
-	history := []wire.Message{task.Message}
-	if task.Wherry.Turn > 1 {
-		if history, err = turns(submissions, task, taskHash); err != nil {
-			r.logger.Printf("run %s: continuation history: %v", task.Wherry.RunID, err)
-			return reject("continuation history unavailable")
-		}
-	}
-	return &admission{task: task, taskHash: taskHash, offer: offer, history: history}, 0
+	return admitted, 0
 }
 
 func (r *Receiver) publishRejection(ctx context.Context, record *kgo.Record, task *wire.SubmissionRecord, reason string) error {
@@ -360,6 +369,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 		}
 	}
+	if admitted.cancelled {
+		if adopted {
+			run.job = handle.Job
+			return run.stopAndCancel(ctx, handle, nil)
+		}
+		return run.cancel(ctx, nil)
+	}
 	if !adopted {
 		named := run.adapter
 		var credential []byte
@@ -438,11 +454,15 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 		case <-heartbeat.C:
 			r.mu.Lock()
-			revoked := r.revoked
+			revoked, cancelled := r.revoked, r.cancelled[runID]
 			r.mu.Unlock()
 			if revoked {
 				stopFollow()
 				return run.revoke(ctx, handle, pending)
+			}
+			if cancelled {
+				stopFollow()
+				return run.stopAndCancel(ctx, handle, pending)
 			}
 			// The newest line stays pending so the terminal transaction always holds the last chunk;
 			// the heartbeat offset is where that line starts, so an adopter reads it again.
@@ -505,6 +525,14 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason str
 	return run.fail(ctx, reason, pending)
 }
 
+func (run *activeRun) stopAndCancel(ctx context.Context, handle Handle, pending []Line) kgo.AckStatus {
+	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
+		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.RunID, err)
+		return kgo.AckRelease
+	}
+	return run.cancel(ctx, pending)
+}
+
 // revoke stops a run on a revoked receiver and releases its task to the pool; clients no longer
 // trust this receiver's records, so the terminal status is best effort.
 func (run *activeRun) revoke(ctx context.Context, handle Handle, pending []Line) kgo.AckStatus {
@@ -523,6 +551,11 @@ func (run *activeRun) revoke(ctx context.Context, handle Handle, pending []Line)
 
 func (run *activeRun) fail(ctx context.Context, reason string, pending []Line) kgo.AckStatus {
 	return run.end(ctx, taskStatus(wire.TaskStateFailed, reason), reason, nil, pending, kgo.AckReject)
+}
+
+func (run *activeRun) cancel(ctx context.Context, pending []Line) kgo.AckStatus {
+	const reason = "canceled by user"
+	return run.end(ctx, taskStatus(wire.TaskStateCanceled, reason), reason, nil, pending, kgo.AckAccept)
 }
 
 func (run *activeRun) interrupt(ctx context.Context, credential string) kgo.AckStatus {

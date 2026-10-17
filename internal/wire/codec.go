@@ -205,7 +205,7 @@ func newPayload(recordType RecordType) (any, error) {
 	case TypeSubmission:
 		return &SubmissionRecord{Wherry: SubmissionExtension{DeadlineMS: -1, QueueDeadlineMS: -1, Lineage: Lineage{Depth: -1, ParentHash: "\x00missing"}}}, nil
 	case TypeCancel:
-		return &Cancel{AtMS: -1}, nil
+		return &CancelRecord{}, nil
 	case TypeStatus:
 		return &StatusRecord{}, nil
 	case TypeTask:

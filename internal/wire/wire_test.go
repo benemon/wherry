@@ -36,7 +36,7 @@ func validPayloads(t *testing.T) map[RecordType]any {
 				Lineage: Lineage{RootRunID: "run-1", Depth: 0, Ancestors: []string{}, ParentHash: "", Chain: []Bytes{}},
 			},
 		},
-		TypeCancel: &Cancel{RunID: "run-1", AtMS: 1_000},
+		TypeCancel: &CancelRecord{CancelRequest: CancelTaskRequest{ID: "run-1"}},
 		TypeStatus: &StatusRecord{
 			StatusUpdate: TaskStatusUpdateEvent{TaskID: "run-1", ContextID: "run-1", Status: TaskStatus{
 				State: TaskStateWorking, Timestamp: "2026-10-17T10:00:00.000Z",
@@ -142,21 +142,21 @@ func TestSignVerifyAndStrictDecodeEveryRecordType(t *testing.T) {
 }
 
 func TestDecodePayloadRejectsDuplicateMember(t *testing.T) {
-	_, err := DecodePayload(TypeCancel, []byte(`{"run_id":"run-1","run_id":"run-2","at_ms":1}`))
+	_, err := DecodePayload(TypeRevocation, []byte(`{"receiver_id":"receiver-1","receiver_id":"receiver-2","floor_generation":1,"at_ms":1}`))
 	if err == nil {
 		t.Fatal("duplicate member accepted")
 	}
 }
 
 func TestDecodePayloadRejectsUnknownMember(t *testing.T) {
-	_, err := DecodePayload(TypeCancel, []byte(`{"run_id":"run-1","at_ms":1,"unexpected":true}`))
+	_, err := DecodePayload(TypeRevocation, []byte(`{"receiver_id":"receiver-1","floor_generation":1,"at_ms":1,"unexpected":true}`))
 	if err == nil {
 		t.Fatal("unknown member accepted")
 	}
 }
 
 func TestDecodePayloadRejectsTrailingValue(t *testing.T) {
-	_, err := DecodePayload(TypeCancel, []byte(`{"run_id":"run-1","at_ms":1} {}`))
+	_, err := DecodePayload(TypeRevocation, []byte(`{"receiver_id":"receiver-1","floor_generation":1,"at_ms":1} {}`))
 	if err == nil {
 		t.Fatal("trailing value accepted")
 	}
@@ -167,7 +167,7 @@ func TestDecodePayloadRejectsMissingRequiredNumericMember(t *testing.T) {
 		recordType RecordType
 		payload    string
 	}{
-		"cancel at_ms":         {TypeCancel, `{"run_id":"run-1"}`},
+		"revocation at_ms":     {TypeRevocation, `{"receiver_id":"receiver-1","floor_generation":1}`},
 		"submission depth":     {TypeSubmission, string(withoutMember(t, TypeSubmission, `"depth":0,`))},
 		"artifact_update seq":  {TypeArtifactUpdate, string(withoutMember(t, TypeArtifactUpdate, `,"seq":1`))},
 		"capability in_flight": {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{},"offers":[],"selector":[],"capacity":1,"generation":1,"at_ms":1}`},
@@ -682,7 +682,7 @@ func TestArtifactUpdateRequiresOnePart(t *testing.T) {
 }
 
 func TestDecodePayloadRejectsFloatNumericField(t *testing.T) {
-	_, err := DecodePayload(TypeCancel, []byte(`{"run_id":"run-1","at_ms":1.5}`))
+	_, err := DecodePayload(TypeRevocation, []byte(`{"receiver_id":"receiver-1","floor_generation":1,"at_ms":1.5}`))
 	if err == nil {
 		t.Fatal("float accepted for integer field")
 	}

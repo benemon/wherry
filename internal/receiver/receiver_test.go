@@ -320,9 +320,9 @@ func TestEndToEndWithFakeAdapter(t *testing.T) {
 	}
 }
 
-// interruptThenContinue submits first with no credential, calls between if set, delivers the credential,
-// continues with second and returns the completed continuation.
-func interruptThenContinue(t *testing.T, f fixture, first, second string, between func(*busclient.Client)) busclient.AwaitResult {
+// startInterrupted runs and enrols the receiver without a credential and returns a run submitted with
+// first once it is interrupted.
+func startInterrupted(t *testing.T, f fixture, first string) (*busclient.Client, string) {
 	t.Helper()
 	runCtx, stop := context.WithCancel(f.ctx)
 	done := make(chan error, 1)
@@ -371,6 +371,14 @@ func interruptThenContinue(t *testing.T, f fixture, first, second string, betwee
 	if tasks := topicCount(t, f, "replies.test"); tasks != 0 {
 		t.Fatalf("task records after interruption=%d, want none", tasks)
 	}
+	return client, submitted.RunID
+}
+
+// interruptThenContinue submits first with no credential, calls between if set, delivers the credential,
+// continues with second and returns the completed continuation.
+func interruptThenContinue(t *testing.T, f fixture, first, second string, between func(*busclient.Client)) busclient.AwaitResult {
+	t.Helper()
+	client, runID := startInterrupted(t, f, first)
 	if between != nil {
 		between(client)
 	}
@@ -383,7 +391,7 @@ func interruptThenContinue(t *testing.T, f fixture, first, second string, betwee
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(secret.Waiting) != 1 || secret.Waiting[0].RunID != submitted.RunID || secret.Waiting[0].Turn != 1 {
+	if len(secret.Waiting) != 1 || secret.Waiting[0].RunID != runID || secret.Waiting[0].Turn != 1 {
 		t.Fatalf("waiting tasks %#v", secret.Waiting)
 	}
 	for {
@@ -398,16 +406,16 @@ func interruptThenContinue(t *testing.T, f fixture, first, second string, betwee
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	continued, err := client.Continue(f.ctx, submitted.RunID, busclient.ContinueInput{
+	continued, err := client.Continue(f.ctx, runID, busclient.ContinueInput{
 		Prompt: second, Deadline: time.Minute, QueueDeadline: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if continued.RunID != submitted.RunID || continued.Turn != 2 {
+	if continued.RunID != runID || continued.Turn != 2 {
 		t.Fatalf("continuation %#v", continued)
 	}
-	completed, err := client.Await(f.ctx, submitted.RunID, 30*time.Second)
+	completed, err := client.Await(f.ctx, runID, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1381,6 +1389,9 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 		}},
 		{"failure", func(run *activeRun, ctx context.Context) kgo.AckStatus {
 			return run.stopAndFail(ctx, Handle{Alloc: "alloc"}, "timeout", nil)
+		}},
+		{"cancel", func(run *activeRun, ctx context.Context) kgo.AckStatus {
+			return run.stopAndCancel(ctx, Handle{Alloc: "alloc"}, nil)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2400,5 +2411,227 @@ func TestContinuationAcrossRenewal(t *testing.T) {
 	})
 	if completed.Status.State != wire.TaskStateCompleted || completed.Task == nil || len(completed.Task.History) != 2 {
 		t.Fatalf("continuation across renewal %#v", completed)
+	}
+}
+
+// publishCancel puts a cancel for runID signed by key on the control topic and refreshes the receiver's cancelled set.
+func publishCancel(t *testing.T, f fixture, runID string, key ed25519.PrivateKey) {
+	t.Helper()
+	value, err := trust.NewCancel(runID, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicControl, Key: []byte(runID), Value: value}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.refreshCancelled(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCancelledSubmissionNotDispatched(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		attempt int64
+		running bool
+		stops   int
+	}{
+		{"queued", 1, false, 0},
+		{"redelivered with its job running", 2, true, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, enrolled := admitFixture(t)
+			f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+			f.adapter.existing = test.running
+			publishCancel(t, f, "run-a", f.userKey)
+			record := signedRoot(t, f, f.userKey, nil)
+			admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
+			if admitted == nil {
+				t.Fatalf("cancelled submission not admitted for cancellation: ack %v", ack)
+			}
+			if status := executeSubmission(t, f, record, admitted, test.attempt); status != kgo.AckAccept {
+				t.Fatalf("status %v, want accept", status)
+			}
+			f.adapter.mu.Lock()
+			dispatches, stops, releaseIDs := f.adapter.dispatches, f.adapter.stops, f.adapter.releaseIDs
+			f.adapter.mu.Unlock()
+			if dispatches != 0 || stops != test.stops || !slices.Equal(releaseIDs, []string{"run-a"}) {
+				t.Fatalf("dispatches=%d stops=%d releases=%v, want 0, %d and run-a", dispatches, stops, releaseIDs, test.stops)
+			}
+			if task := lastTask(t, f); task.ID != "run-a" || task.Status.State != wire.TaskStateCanceled {
+				t.Fatalf("task %#v, want CANCELED", task)
+			}
+			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateCanceled || reason != "canceled by user" {
+				t.Fatalf("terminal %s %q", state, reason)
+			}
+		})
+	}
+}
+
+func TestCancelStopsInFlightRun(t *testing.T) {
+	f := newFixture(t, noResultStream)
+	f.adapter.endDelay = 30 * time.Second
+	done := startInFlight(t, f, "run-cancelled", time.Now().Add(time.Hour))
+	publishCancel(t, f, "run-cancelled", f.userKey)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight run kept going after its cancel")
+	}
+	f.adapter.mu.Lock()
+	stops, releaseIDs := f.adapter.stops, f.adapter.releaseIDs
+	f.adapter.mu.Unlock()
+	if stops != 1 || !slices.Equal(releaseIDs, []string{"run-cancelled"}) {
+		t.Fatalf("stops=%d releases=%v", stops, releaseIDs)
+	}
+	if task := lastTask(t, f); task.ID != "run-cancelled" || task.Status.State != wire.TaskStateCanceled {
+		t.Fatalf("task %#v, want CANCELED", task)
+	}
+	if state, reason := terminalReason(t, f, "run-cancelled"); state != wire.TaskStateCanceled || reason != "canceled by user" {
+		t.Fatalf("terminal %s %q", state, reason)
+	}
+	// Accepted, not released: the pool never sees the submission again.
+	peer, err := kgo.NewClient(append(append([]kgo.Opt(nil), f.receiver.kafkaOpt...),
+		kgo.ConsumeTopics(wire.TopicTask), kgo.ShareGroup("p-nomad"))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	pollCtx, cancel := context.WithTimeout(f.ctx, 2*time.Second)
+	defer cancel()
+	for pollCtx.Err() == nil {
+		for _, record := range peer.PollRecords(pollCtx, 10).Records() {
+			if string(record.Key) == "run-cancelled" {
+				t.Fatalf("cancelled run's submission was redelivered (delivery %d)", record.DeliveryCount())
+			}
+		}
+	}
+}
+
+func TestCancelMustBeUserSigned(t *testing.T) {
+	f, _ := admitFixture(t)
+	signedRoot(t, f, f.userKey, nil)
+	client := busclient.New(f.kafka, f.userKey, "replies.test")
+	_, foreign, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, key := range map[string]ed25519.PrivateKey{"receiver": f.receiver.signing, "other user": foreign} {
+		publishCancel(t, f, "run-a", key)
+		f.receiver.mu.Lock()
+		cancelled := f.receiver.cancelled["run-a"]
+		f.receiver.mu.Unlock()
+		if cancelled {
+			t.Fatalf("receiver honoured a cancel signed by the %s key", name)
+		}
+		events, err := client.Events(f.ctx, "run-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if events.Cancelled {
+			t.Fatalf("client honoured a cancel signed by the %s key", name)
+		}
+	}
+	value, err := trust.NewCancel("run-a", f.receiver.signing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := wire.DecodeEnvelope(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wire.Verify(envelope, f.receiver.signing.Public().(ed25519.PublicKey), wire.SignerReceiver); err == nil {
+		t.Fatal("a receiver-signed cancel verified as a receiver record")
+	}
+	publishCancel(t, f, "run-a", f.userKey)
+	f.receiver.mu.Lock()
+	cancelled := f.receiver.cancelled["run-a"]
+	f.receiver.mu.Unlock()
+	if !cancelled {
+		t.Fatal("receiver ignored the user's cancel")
+	}
+}
+
+func TestCancelInterruptedTaskEndsIt(t *testing.T) {
+	f := newFixture(t, resultStream)
+	client, runID := startInterrupted(t, f, "first")
+	if _, err := client.Cancel(f.ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	ended, err := client.Await(f.ctx, runID, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ended.Status.State != wire.TaskStateCanceled || ended.Task != nil {
+		t.Fatalf("await %#v, want CANCELED from the user's cancel", ended)
+	}
+	if events, err := client.Events(f.ctx, runID); err != nil || !events.Cancelled {
+		t.Fatalf("events cancelled=%t err=%v", events.Cancelled, err)
+	}
+
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(testToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secret, err := client.PutSecret(f.ctx, credentialName, f.receiver.config.ReceiverID, tokenFile, 30*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secret.Waiting) != 0 {
+		t.Fatalf("cancelled task still listed as waiting: %#v", secret.Waiting)
+	}
+	if _, err := client.Continue(f.ctx, runID, busclient.ContinueInput{Prompt: "second", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil || err.Error() != "task is canceled" {
+		t.Fatalf("continue after cancel: got %v", err)
+	}
+	for {
+		f.receiver.mu.Lock()
+		ready := string(f.receiver.credentials["nomad"].value) == testToken && f.receiver.cancelled[runID]
+		f.receiver.mu.Unlock()
+		if ready {
+			break
+		}
+		if f.ctx.Err() != nil {
+			t.Fatal("receiver never held both the credential and the cancel")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// A continuation published without the client's check, built from the run's first turn.
+	queued, err := readBounded(f.ctx, f.receiver.kafkaOpt, wire.TopicTask)
+	if err != nil || len(queued) != 1 {
+		t.Fatalf("queued=%d err=%v, want the first turn alone", len(queued), err)
+	}
+	first, err := trust.VerifyRootSubmission(queued[0].Value, f.receiver.userPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuation := *first
+	continuation.Message.MessageID = "msg-turn-2"
+	continuation.Message.Parts = []wire.Part{{Text: "second"}}
+	continuation.Wherry.Turn = 2
+	continuation.Wherry.DeadlineMS = time.Now().Add(time.Minute).UnixMilli()
+	continuation.Wherry.QueueDeadlineMS = time.Now().Add(time.Minute).UnixMilli()
+	value, err := trust.SignRootSubmission(continuation, f.userKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicTask, Key: []byte(runID), Value: value}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	final, err := client.Await(f.ctx, runID, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Status.State != wire.TaskStateCanceled {
+		t.Fatalf("await after continuation %#v, want CANCELED", final)
+	}
+	if task := lastTask(t, f); task.Status.State != wire.TaskStateCanceled || len(task.History) != 2 {
+		t.Fatalf("task %#v, want CANCELED with both turns", task)
+	}
+	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
+		t.Fatalf("continuation of a cancelled task dispatched %d jobs", dispatches)
 	}
 }

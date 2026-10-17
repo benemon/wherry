@@ -13,6 +13,7 @@ import (
 const (
 	TopicTask       = "tasks.queue"
 	TopicEvent      = "tasks.events"
+	TopicControl    = "tasks.control"
 	TopicTranscript = "transcripts"
 	TopicCapability = "receivers.capabilities"
 	TopicState      = "receivers.state"
@@ -27,7 +28,7 @@ type topicDeclaration struct {
 var topicDeclarations = []topicDeclaration{
 	{name: TopicTask, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},
 	{name: TopicEvent, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},
-	{name: "tasks.control", configs: map[string]string{"cleanup.policy": "compact"}},
+	{name: TopicControl, configs: map[string]string{"cleanup.policy": "compact"}},
 	{name: TopicTranscript, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "2592000000"}},
 	{name: TopicCapability, configs: map[string]string{"cleanup.policy": "compact"}},
 	{name: TopicState, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},

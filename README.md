@@ -27,6 +27,7 @@ wherry sends a task to other compute and returns the result to the caller.
   - `continue` (alias `resume`) publishes the next turn of an interrupted
     run. `--prompt` sets its text (`continue` by default);
     `--deadline` and `--queue-deadline` set its deadlines.
+  - `cancel` cancels a run, which ends in `TASK_STATE_CANCELED`.
   - `await` waits for a task's reply.
   - `events` prints a task's event history.
 - `wherry receiver`, which claims tasks for its pool and runs each one as a

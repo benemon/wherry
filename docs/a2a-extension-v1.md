@@ -2,17 +2,17 @@
 
 URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
-Four of wherry's twelve record types are A2A-shaped: `submission`, `status`,
-`artifact_update` and `task`. Each is a JSON object with two members: an A2A
-v1.0 object under its A2A field name, and a `wherry` object holding this
-extension's fields. Every `Message` and `Artifact` that wherry produces lists
-the URI above in its `extensions`.
+Five of wherry's twelve record types are A2A-shaped. A `submission`,
+`status`, `artifact_update` or `task` record is a JSON object with two
+members: an A2A v1.0 object under its A2A field name, and a `wherry` object
+holding this extension's fields. A `cancel` record has one member, its A2A
+object, and no `wherry` member. Every `Message` and `Artifact` that wherry
+produces lists the URI above in its `extensions`.
 
-The other eight record types are wherry's own control-plane and trust-plane
-records: `cancel`, `capability`, `enrol_request`, `enrol_approval`,
-`renew_request`, `revocation`, `secret_version` and `sealed_secret`. They
-carry their fields at the top level, with no A2A object and no `wherry`
-member.
+The other seven record types are wherry's own control-plane and trust-plane
+records: `capability`, `enrol_request`, `enrol_approval`, `renew_request`,
+`revocation`, `secret_version` and `sealed_secret`. They carry their fields
+at the top level, with no A2A object and no `wherry` member.
 
 ## Records
 
@@ -63,6 +63,12 @@ its `artifacts` hold the result. Its `wherry` fields are `turn` and
 `attempt` (integers, as in `status`) and `task_hash` (string, the final
 turn's submission hash).
 
+A `cancel` record (topic `tasks.control`, compacted, keyed by run id)
+carries an A2A `CancelTaskRequest` under `cancelRequest`. Its `id` is the
+run id of the task to cancel, and its `metadata` is optional. It has no
+`tenant`. Only the user signs a cancel. Readers ignore a cancel signed by
+any other key, and one whose Kafka key differs from its `id`.
+
 ## Turns and continuations
 
 A task runs in turns. Each turn is a separate `submission` and runs as a new
@@ -90,6 +96,31 @@ from a receiver in the same pool for the immediately preceding turn, and
 rejects a continuation that differs from the earlier turns in any of those
 fields.
 
+## Cancellation
+
+A cancel applies to every turn of a run, including turns submitted after
+it. Receivers read the control topic at a fixed interval and act on the
+cancels they hold:
+
+- A receiver that claims a submission for a cancelled run starts no job. It
+  publishes a `task` record and a `terminal` status, both with
+  `TASK_STATE_CANCELED` and the message text `canceled by user`. If an
+  earlier delivery attempt left the turn's job running, the receiver stops
+  that job first.
+- A receiver running a turn for a cancelled run stops its job at the next
+  heartbeat and publishes the same `task` record and `terminal` status.
+
+If stopping a job fails, the receiver releases the submission without a
+terminal status, and the next delivery tries again.
+
+No receiver holds an interrupted task, so a cancel for one ends it with no
+receiver record. Clients treat an interrupted task with a cancel from the
+user as `TASK_STATE_CANCELED`. A receiver that later claims a continuation
+for it ends that turn as above.
+
+Cancellation is best effort. A turn that ends before a receiver acts on
+the cancel keeps the state it ended in.
+
 ## Metadata
 
 The `metadata` of the final `Task` in a `task` record describes where the
@@ -97,7 +128,8 @@ final turn ran:
 
 - `receiver_id` (string): the receiver that ran the turn.
 - `pool` (string): the submission's pool.
-- `adapter` (string): the name of the receiver's adapter that ran the turn.
+- `adapter` (string): the name of the receiver's adapter that ran the turn,
+  or that matched it when the turn was cancelled before a job started.
 - `offer` (object of string labels): the offer the job was dispatched with.
   It is absent when no job was dispatched, and when the attempt adopted a
   job that an earlier attempt dispatched.

@@ -258,6 +258,28 @@ func VerifyRootSubmission(envelopeBytes []byte, userPublicKey ed25519.PublicKey)
 	return submission, nil
 }
 
+// NewCancel signs a request to cancel a run with the user key.
+func NewCancel(runID string, userKey ed25519.PrivateKey) ([]byte, error) {
+	return marshalSigned(wire.TypeCancel, &wire.CancelRecord{CancelRequest: wire.CancelTaskRequest{ID: runID}}, userKey)
+}
+
+// VerifyCancel verifies a user-signed cancel and returns the run id it cancels.
+func VerifyCancel(envelopeBytes []byte, userPublicKey ed25519.PublicKey) (string, error) {
+	envelope, err := wire.DecodeEnvelope(envelopeBytes)
+	if err != nil {
+		return "", err
+	}
+	verified, err := wire.Verify(envelope, userPublicKey, wire.SignerUser)
+	if err != nil {
+		return "", err
+	}
+	cancel, ok := verified.(*wire.CancelRecord)
+	if !ok {
+		return "", errors.New("not a cancel")
+	}
+	return cancel.CancelRequest.ID, nil
+}
+
 func (state *State) applyRequest(envelope wire.Envelope, envelopeBytes []byte) (any, error) {
 	decoded, err := wire.DecodePayload(wire.TypeEnrolRequest, envelope.Payload)
 	if err != nil {
