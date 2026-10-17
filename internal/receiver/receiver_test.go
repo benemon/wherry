@@ -314,8 +314,10 @@ func TestEndToEndWithFakeAdapter(t *testing.T) {
 	}
 }
 
-func TestContinuationResumesInterruptedTask(t *testing.T) {
-	f := newFixture(t, resultStream)
+// interruptThenContinue submits first with no credential, delivers the credential,
+// continues with second and returns the completed continuation.
+func interruptThenContinue(t *testing.T, f fixture, first, second string) busclient.AwaitResult {
+	t.Helper()
 	runCtx, stop := context.WithCancel(f.ctx)
 	done := make(chan error, 1)
 	go func() { done <- f.receiver.Run(runCtx) }()
@@ -343,7 +345,7 @@ func TestContinuationResumesInterruptedTask(t *testing.T) {
 		var err error
 		submitted, err = client.Submit(f.ctx, busclient.SubmitInput{
 			Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
-			Labels:   map[string]string{}, Prompt: "first", Deadline: time.Minute, QueueDeadline: time.Minute,
+			Labels:   map[string]string{}, Prompt: first, Deadline: time.Minute, QueueDeadline: time.Minute,
 		})
 		if err == nil {
 			break
@@ -388,7 +390,7 @@ func TestContinuationResumesInterruptedTask(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	continued, err := client.Continue(f.ctx, submitted.RunID, busclient.ContinueInput{
-		Prompt: "second", Deadline: time.Minute, QueueDeadline: time.Minute,
+		Prompt: second, Deadline: time.Minute, QueueDeadline: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -400,9 +402,39 @@ func TestContinuationResumesInterruptedTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return completed
+}
+
+func TestContinuationResumesInterruptedTask(t *testing.T) {
+	completed := interruptThenContinue(t, newFixture(t, resultStream), "first", "second")
 	if completed.Status.State != wire.TaskStateCompleted || completed.Turn != 2 || completed.Task == nil ||
 		len(completed.Task.History) != 2 || completed.Task.History[0].Parts[0].Text != "first" || completed.Task.History[1].Parts[0].Text != "second" {
 		t.Fatalf("completed continuation %#v", completed)
+	}
+}
+
+func TestContinuationPromptIncludesAllTurns(t *testing.T) {
+	f := newFixture(t, resultStream)
+	completed := interruptThenContinue(t, f, "write the report", "continue")
+	if completed.Status.State != wire.TaskStateCompleted || completed.Turn != 2 {
+		t.Fatalf("completed continuation %#v", completed)
+	}
+	f.adapter.mu.Lock()
+	run := f.adapter.lastRun
+	f.adapter.mu.Unlock()
+	if want := "--- turn 1 ---\nwrite the report\n--- turn 2 ---\ncontinue"; string(run.Prompt) != want || run.Turn != 2 {
+		t.Fatalf("turn %d prompt %q, want turn 2 prompt %q", run.Turn, run.Prompt, want)
+	}
+}
+
+func TestFirstTurnPromptUnchanged(t *testing.T) {
+	f, enrolled := admitFixture(t)
+	record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
+		task.Message.Parts = []wire.Part{{Text: "line one"}, {Text: "--- turn 1 ---"}, {Text: "line three\n"}}
+	})
+	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
+	if admitted == nil || admitted.prompt != "line one\n--- turn 1 ---\nline three\n" {
+		t.Fatalf("got %#v", admitted)
 	}
 }
 

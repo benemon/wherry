@@ -126,7 +126,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 		return nil, kgo.AckReject
 	}
 	taskHash := trust.EnvelopeHash(record.Value)
-	reason, err := r.continuationRejection(ctx, task, taskHash)
+	submissions, reason, err := r.continuationRejection(ctx, task, taskHash)
 	if err != nil {
 		r.logger.Printf("read continuation status for %s: %v", task.Wherry.RunID, err)
 		return nil, kgo.AckRelease
@@ -148,8 +148,14 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 	if slices.ContainsFunc(task.Message.Parts, func(part wire.Part) bool { return part.Text == "" }) {
 		return reject("unsupported message part")
 	}
-	text := prompt(task)
-	return &admission{task: task, offer: offer, prompt: text}, 0
+	history := []wire.Message{task.Message}
+	if task.Wherry.Turn > 1 {
+		if history, err = turns(submissions, task, taskHash); err != nil {
+			r.logger.Printf("run %s: continuation history: %v", task.Wherry.RunID, err)
+			return reject("continuation history unavailable")
+		}
+	}
+	return &admission{task: task, offer: offer, prompt: prompt(history)}, 0
 }
 
 func (r *Receiver) publishRejection(ctx context.Context, record *kgo.Record, task *wire.SubmissionRecord, reason string) error {
@@ -196,13 +202,13 @@ func (r *Receiver) submissions(ctx context.Context, expected *wire.SubmissionRec
 	return result, nil
 }
 
-func (r *Receiver) continuationRejection(ctx context.Context, task *wire.SubmissionRecord, taskHash string) (string, error) {
+func (r *Receiver) continuationRejection(ctx context.Context, task *wire.SubmissionRecord, taskHash string) (map[int64]runSubmission, string, error) {
 	submissions, err := r.submissions(ctx, task)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	if task.Wherry.Turn > 1 && submissions[task.Wherry.Turn].hash != taskHash {
-		return "duplicate continuation", nil
+		return nil, "duplicate continuation", nil
 	}
 	r.mu.Lock()
 	signers := append([]ed25519.PublicKey(nil), r.signers...)
@@ -212,7 +218,7 @@ func (r *Receiver) continuationRejection(ctx context.Context, task *wire.Submiss
 	}
 	records, err := readBounded(ctx, r.kafkaOpt, wire.TopicEvent)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	var latest *wire.StatusRecord
 	var order wire.AttemptFilter
@@ -245,18 +251,18 @@ func (r *Receiver) continuationRejection(ctx context.Context, task *wire.Submiss
 	}
 	if latest != nil && (latest.Wherry.Turn > task.Wherry.Turn ||
 		latest.Wherry.Turn == task.Wherry.Turn && (latest.Wherry.Kind == "interrupted" || latest.Wherry.Kind == "terminal")) {
-		return "stale submission", nil
+		return nil, "stale submission", nil
 	}
 	if task.Wherry.Turn == 1 || latest != nil && latest.Wherry.Turn == task.Wherry.Turn {
-		return "", nil
+		return submissions, "", nil
 	}
 	if latest == nil || latest.Wherry.Kind != "interrupted" || !wire.Interrupted(latest.StatusUpdate.Status.State) {
-		return "task is not awaiting continuation", nil
+		return nil, "task is not awaiting continuation", nil
 	}
 	if task.Wherry.Turn != latest.Wherry.Turn+1 {
-		return "continuation turn out of order", nil
+		return nil, "continuation turn out of order", nil
 	}
-	return "", nil
+	return submissions, "", nil
 }
 
 // renewer keeps the share lock alive from claim until the final acknowledgement,
@@ -632,6 +638,10 @@ func (r *Receiver) history(ctx context.Context, task *wire.SubmissionRecord, tas
 	if err != nil {
 		return nil, err
 	}
+	return turns(submissions, task, taskHash)
+}
+
+func turns(submissions map[int64]runSubmission, task *wire.SubmissionRecord, taskHash string) ([]wire.Message, error) {
 	history := make([]wire.Message, 0, task.Wherry.Turn)
 	for turn := int64(1); turn <= task.Wherry.Turn; turn++ {
 		submission, ok := submissions[turn]
@@ -718,9 +728,21 @@ func resultLine(data []byte) (agentResult, bool) {
 	return result, true
 }
 
-func prompt(task *wire.SubmissionRecord) string {
+// prompt is the first turn's text alone, or every turn's text under a turn separator.
+func prompt(history []wire.Message) string {
+	if len(history) == 1 {
+		return text(history[0])
+	}
+	sections := make([]string, len(history))
+	for i, message := range history {
+		sections[i] = fmt.Sprintf("--- turn %d ---\n%s", i+1, text(message))
+	}
+	return strings.Join(sections, "\n")
+}
+
+func text(message wire.Message) string {
 	var parts []string
-	for _, part := range task.Message.Parts {
+	for _, part := range message.Parts {
 		parts = append(parts, part.Text)
 	}
 	return strings.Join(parts, "\n")
