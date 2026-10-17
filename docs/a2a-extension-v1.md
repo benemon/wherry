@@ -2,56 +2,90 @@
 
 URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
-Every wherry record is a JSON object with two members: an A2A v1.0 object
-under its A2A field name, and a `wherry` object holding this extension's
-fields. Every `Message` and `Artifact` that wherry produces lists the URI
-above in its `extensions`.
+Four of wherry's twelve record types are A2A-shaped: `submission`, `status`,
+`artifact_update` and `task`. Each is a JSON object with two members: an A2A
+v1.0 object under its A2A field name, and a `wherry` object holding this
+extension's fields. Every `Message` and `Artifact` that wherry produces lists
+the URI above in its `extensions`.
+
+The other eight record types are wherry's own control-plane and trust-plane
+records: `cancel`, `capability`, `enrol_request`, `enrol_approval`,
+`renew_request`, `revocation`, `secret_version` and `sealed_secret`. They
+carry their fields at the top level, with no A2A object and no `wherry`
+member.
 
 ## Records
 
-A `submission` record (topic `tasks.queue`) carries the A2A `Message` that
-starts a task, under `message`. Its `wherry` fields are `run_id` (string, the
-task id), `turn` (integer, from 1; values above 1 are continuations),
-`attempt` (integer, the delivery attempt within that turn, from 1), `pool` (string,
-the receiver pool that may claim it), `selector` (array of `{key, operator,
-values}` requirements on receiver labels), `labels` (object of string
-labels), `deadline_ms` and `queue_deadline_ms` (integers, Unix milliseconds
-by which the run must end and must be claimed), `reply_topic` (string, where
-the final task is published) and `lineage`. The `lineage` object holds
-`root_run_id` (string), `depth` (integer), `ancestors` (array of run ids from
-the root), `parent_hash` (string, hex SHA-256 of the parent's envelope, empty
-for a root) and `chain` (array of the ancestors' envelopes, base64url).
+A `submission` record (topic `tasks.queue`) carries the A2A `Message` for one
+turn of a task, under `message`. Its `wherry` fields are `run_id` (string,
+the task id), `turn` (integer, from 1), `attempt` (integer, always 1; the
+delivery attempt appears in `status`, `artifact_update` and `task`), `pool`
+(string, the receiver pool that may claim it), `selector` (array of `{key,
+operator, values}` requirements on receiver labels), `labels` (object of
+string labels), `deadline_ms` and `queue_deadline_ms` (integers, Unix
+milliseconds by which the run must end and must be claimed), `reply_topic`
+(string, where the final task is published) and `lineage`.
+
+The `lineage` object holds `root_run_id` (string), `depth` (integer),
+`ancestors` (array of run ids from the root), `parent_hash` (string, hex
+SHA-256 of the parent's envelope, empty for a root) and `chain` (array of the
+ancestors' envelopes, base64url). Child lineage is schema-only. The wherry
+client publishes only root submissions, with `depth` 0, empty `ancestors`,
+`chain` and `parent_hash`, and `root_run_id` equal to `run_id`. Receivers
+reject any other submission.
 
 A `status` record (topic `tasks.events`) carries a `TaskStatusUpdateEvent`
-under `statusUpdate`. Its `wherry` fields are `turn` and `attempt` (integers
-identifying the submission turn and its
-delivery attempt), `task_hash` (string, hex SHA-256 of that turn's
-submission envelope), `receiver_id`
+under `statusUpdate`. Its `wherry` fields are `turn` and `attempt` (integers,
+the submission turn and the receiver's delivery attempt for it), `task_hash`
+(string, hex SHA-256 of that turn's submission envelope), `receiver_id`
 (string, the receiver that published it), `kind` (one of `claimed`,
-`started`, `heartbeat`, `interrupted`, `rejected` and `terminal`) and `log_offset` (integer, optional,
-the agent log offset up to which the transcript is published).
+`started`, `heartbeat`, `interrupted`, `rejected` and `terminal`) and
+`log_offset` (integer, optional, the agent log offset up to which the
+transcript is published).
+
+An interrupted status is a `status` record with `kind` `interrupted` and a
+state of `TASK_STATE_AUTH_REQUIRED` or `TASK_STATE_INPUT_REQUIRED`. It ends
+the turn without ending the task.
 
 An `artifact_update` record (topic `transcripts`) carries a
 `TaskArtifactUpdateEvent` under `artifactUpdate`. It is one chunk of the
 artifact `transcript`: one agent output line as a text part with media type
 `application/x-ndjson`. An empty line or one that is not UTF-8 is a `raw`
-part instead. A line over 512 KiB is a `url` part whose `metadata` holds the
-line's hex `sha256` and its `size` in bytes. The first chunk has `append`
-false and the rest true; the last chunk before the terminal status has
-`lastChunk` true. Its `wherry` fields are `turn` and `attempt` (integers)
-and `seq`
-(integer, the line's log offset, which orders the chunks).
+part instead. A line over 512 KiB is a `url` part with the value
+`unstored:oversize`, whose `metadata` holds the line's hex `sha256` and its
+`size` in bytes. The line itself is not stored. Its `wherry` fields are
+`turn` and `attempt` (integers, as in `status`) and `seq` (integer, the
+line's log offset, which orders the chunks).
 
 A `task` record (topic named by `reply_topic`) carries the final A2A `Task`
 under `task`. Its `history` holds every submitted message in turn order and
-its `artifacts` hold the result. Its `wherry` fields are `turn` and `attempt` (integers) and
-`task_hash` (string, the final turn's submission hash).
+its `artifacts` hold the result. Its `wherry` fields are `turn` and
+`attempt` (integers, as in `status`) and `task_hash` (string, the final
+turn's submission hash).
+
+## Turns and continuations
+
+A task runs in turns. Each turn is a separate `submission` and runs as a new
+job. Readers order status, artifact update and task records by
+`(turn, attempt)`.
+
+Within one turn, the transcript's first chunk has `append` false and the rest
+true. The last chunk before the terminal status has `lastChunk` true. A
+continuation turn starts a new transcript, so its first chunk has `append`
+false again.
+
+A receiver interrupts a turn with `TASK_STATE_AUTH_REQUIRED` when the adapter
+that matched the task needs a credential the receiver does not hold. The
+status message text is `credential <name> required`. The interrupt publishes
+this status alone: no transcript chunk and no `task` record.
 
 A continuation is a user-signed submission with `turn` greater than 1. It
-uses the existing run id as `message.taskId`, has a new `messageId`, and is
-admitted only after an interrupted status from the same receiver pool for
-the immediately preceding turn. Readers order status, artifact update and
-task records by `(turn, attempt)`.
+uses the run id as `message.taskId` and has a new `messageId`. It repeats the
+`contextId`, `pool`, `reply_topic`, `labels`, `selector` and `lineage` of the
+run's earlier turns. A receiver admits it only after an interrupted status
+from a receiver in the same pool for the immediately preceding turn, and
+rejects a continuation that differs from the earlier turns in any of those
+fields.
 
 ## Identifiers
 
@@ -61,10 +95,12 @@ root task, so every task in one delegation tree shares a context.
 
 ## Signing and transport
 
-Each Kafka record value is a JSON envelope with members `v`, `type`,
-`signer`, `payload` and `sig`. The `payload` member holds the record's exact
-JSON bytes, base64url-encoded without padding. The signature is Ed25519 over
-`wherry/v1/<type>`, a zero byte, and those payload bytes, where `<type>` is
-the record type named above. Verifiers check the signature over the bytes as
-transmitted before parsing them. Any Kafka consumer can read the records as
-plain JSON without wherry code.
+Each Kafka record value is a JSON envelope with members `v` (integer, 1),
+`type`, `signer`, `payload` and `sig`. The `signer` is
+`sha256:<hex SHA-256 of the signer's 32-byte Ed25519 public key>`. The
+`payload` member holds the record's exact JSON bytes, base64url-encoded
+without padding, and `sig` is base64url-encoded the same way. The signature
+is Ed25519 over `wherry/v1/<type>`, a zero byte, and those payload bytes,
+where `<type>` is the record type named above. A reader decodes `payload` to
+get the record. Verifiers check the signature over the bytes as transmitted
+before parsing them.
