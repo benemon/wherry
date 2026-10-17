@@ -45,6 +45,14 @@ wherry sends a task to other compute and returns the result to the caller.
   [the wherry A2A extension](docs/a2a-extension-v1.md) defines their added
   fields.
 
+## Documentation
+
+- [Concepts](docs/concepts.md)
+- [Getting started](docs/getting-started.md)
+- [Operator guide](docs/operator-guide.md)
+- [Reference](docs/reference.md)
+- [The wherry A2A extension](docs/a2a-extension-v1.md)
+
 ## Harness integration
 
 `wherry mcp` is an MCP server (protocol 2026-07-28 and earlier) on stdio.
