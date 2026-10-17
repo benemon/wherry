@@ -420,6 +420,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				return run.stopAndFail(ctx, handle, "agent ended without a result", pending)
 			}
 		case <-heartbeat.C:
+			r.mu.Lock()
+			revoked := r.revoked
+			r.mu.Unlock()
+			if revoked {
+				stopFollow()
+				return run.revoke(ctx, handle, pending)
+			}
 			// The newest line stays pending so the terminal transaction always holds the last chunk;
 			// the heartbeat offset is where that line starts, so an adopter reads it again.
 			at, held := position, 0
@@ -475,6 +482,26 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason str
 		return kgo.AckRelease
 	}
 	return run.fail(ctx, wire.TaskStateFailed, reason, pending)
+}
+
+// revoke stops a run on a revoked receiver and releases its task to the pool; clients no longer
+// trust this receiver's records, so the terminal status is best effort.
+func (run *activeRun) revoke(ctx context.Context, handle Handle, pending []Line) kgo.AckStatus {
+	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
+		run.receiver.logger.Printf("run %s: stop: %v", run.task.Wherry.RunID, err)
+		return kgo.AckRelease
+	}
+	const reason = "receiver revoked"
+	status := taskStatus(wire.TaskStateFailed, reason)
+	task, err := run.taskRecord(ctx, status, reason)
+	if err == nil {
+		err = run.commit(ctx, append(run.chunks(pending, true), task, run.statusRecord("terminal", status, nil))...)
+	}
+	if err != nil {
+		run.receiver.logger.Printf("run %s: publish revoked status: %v", run.task.Wherry.RunID, err)
+	}
+	run.release(ctx)
+	return kgo.AckRelease
 }
 
 func (run *activeRun) fail(ctx context.Context, state wire.TaskState, reason string, pending []Line) kgo.AckStatus {

@@ -1952,3 +1952,138 @@ func TestReceiverStopsClaimingWhenRevoked(t *testing.T) {
 		t.Fatalf("submit after revocation: got %v, want no matching live receiver", err)
 	}
 }
+
+// startInFlight enrols the fixture receiver until exp and returns once a claimed run is following its job.
+func startInFlight(t *testing.T, f fixture, runID string, exp time.Time) <-chan error {
+	t.Helper()
+	r := f.receiver
+	request, err := trust.NewEnrolRequest(r.config.ReceiverID, r.signing, r.sealing, map[string]string{}, []wire.DetectedAdapter{{Name: "nomad", Platform: "nomad", Offers: []wire.Offer{}}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := trust.NewState(r.userPub).Apply(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, err := trust.Approve(request, verified.(*wire.EnrolRequest), f.userKey, map[string]string{}, "nomad", nomadGrants(), []wire.Requirement{}, "auto", 1, "", exp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submission := testSubmission(runID)
+	value, err := trust.SignRootSubmission(*submission, f.userKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kafka.ProduceSync(f.ctx,
+		&kgo.Record{Topic: wire.TopicState, Key: []byte(r.config.ReceiverID), Value: request},
+		&kgo.Record{Topic: wire.TopicState, Key: []byte(r.config.ReceiverID), Value: approval},
+		&kgo.Record{Topic: wire.TopicTask, Key: []byte(runID), Value: value},
+	).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.refresh(f.ctx); err != nil || r.current() == nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	r.mu.Lock()
+	r.offers = []wire.Offer{{Adapter: "nomad", Labels: map[string]string{"runtime": "exec", "nomad.node_pool": "OCPv", "zone": "dc1"}}}
+	r.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+	r.mu.Unlock()
+	f.cluster.SetGroupConfigs("p-nomad", map[string]string{"share.auto.offset.reset": "earliest"})
+	done := make(chan error, 1)
+	go func() { done <- r.claimOne(f.ctx, r.current()) }()
+	for {
+		if _, _, follows, _ := f.adapter.counts(); follows == 1 {
+			return done
+		}
+		if f.ctx.Err() != nil {
+			t.Fatalf("run never started; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func terminalReason(t *testing.T, f fixture, runID string) (wire.TaskState, string) {
+	t.Helper()
+	for _, payload := range published(t, f, wire.TopicEvent) {
+		if status, ok := payload.(*wire.StatusRecord); ok && status.StatusUpdate.TaskID == runID && status.Wherry.Kind == "terminal" {
+			return status.StatusUpdate.Status.State, status.StatusUpdate.Status.Message.Parts[0].Text
+		}
+	}
+	t.Fatal("no terminal status")
+	return "", ""
+}
+
+func TestRevokedReceiverStopsInFlightRuns(t *testing.T) {
+	f := newFixture(t, noResultStream)
+	f.adapter.endDelay = 30 * time.Second
+	done := startInFlight(t, f, "run-revoked", time.Now().Add(time.Hour))
+	revocation, err := trust.NewRevocation(f.receiver.config.ReceiverID, 1, f.userKey, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(f.receiver.config.ReceiverID), Value: revocation}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil || f.receiver.current() != nil {
+		t.Fatalf("refresh after revocation: err=%v enrolled=%v", err, f.receiver.current())
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight run kept going after revocation")
+	}
+	f.adapter.mu.Lock()
+	stops, releaseIDs := f.adapter.stops, f.adapter.releaseIDs
+	f.adapter.mu.Unlock()
+	if stops != 1 || !slices.Equal(releaseIDs, []string{"run-revoked"}) {
+		t.Fatalf("stops=%d releases=%v", stops, releaseIDs)
+	}
+	if state, reason := terminalReason(t, f, "run-revoked"); state != wire.TaskStateFailed || reason != "receiver revoked" {
+		t.Fatalf("terminal %s %q", state, reason)
+	}
+	// Released, not acknowledged: the submission is delivered again to the pool.
+	peer, err := kgo.NewClient(append(append([]kgo.Opt(nil), f.receiver.kafkaOpt...),
+		kgo.ConsumeTopics(wire.TopicTask), kgo.ShareGroup("p-nomad"))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	pollCtx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
+	defer cancel()
+	for redelivered := false; !redelivered; {
+		fetches := peer.PollRecords(pollCtx, 10)
+		if pollCtx.Err() != nil {
+			t.Fatal("revoked run's submission was not released to the pool")
+		}
+		for _, record := range fetches.Records() {
+			redelivered = redelivered || string(record.Key) == "run-revoked" && record.DeliveryCount() > 1
+		}
+	}
+}
+
+func TestExpiryDoesNotStopInFlightRuns(t *testing.T) {
+	f := newFixture(t, noResultStream)
+	f.adapter.endDelay = 4 * time.Second
+	exp := time.Now().Add(time.Second)
+	done := startInFlight(t, f, "run-expired", exp)
+	time.Sleep(time.Until(exp))
+	if err := f.receiver.refresh(f.ctx); err != nil || f.receiver.current() != nil {
+		t.Fatalf("refresh after expiry: err=%v enrolled=%v", err, f.receiver.current())
+	}
+	time.Sleep(5 * renewInterval)
+	f.adapter.mu.Lock()
+	stops := f.adapter.stops
+	f.adapter.mu.Unlock()
+	if stops != 0 {
+		t.Fatalf("expiry stopped the in-flight run: stops=%d", stops)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if state, reason := terminalReason(t, f, "run-expired"); state != wire.TaskStateFailed || reason != "agent ended without a result" {
+		t.Fatalf("terminal %s %q", state, reason)
+	}
+}

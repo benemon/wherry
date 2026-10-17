@@ -139,6 +139,8 @@ type Receiver struct {
 	signers     []ed25519.PublicKey
 	inFlight    int64
 	credentials map[string]heldCredential
+	// revoked is set when refresh last saw this receiver revoked; in-flight runs stop on their next heartbeat.
+	revoked bool
 }
 
 type heldCredential struct {
@@ -303,12 +305,13 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	now := time.Now()
 	enrolled, err := state.Receiver(r.config.ReceiverID, now)
 	if err != nil || !enrolled.SigningPub.Equal(r.signing.Public()) {
-		if errors.Is(err, trust.ErrRevoked) {
+		revoked := errors.Is(err, trust.ErrRevoked)
+		if revoked {
 			r.logger.Printf("revoked at generation %d", state.Floor(r.config.ReceiverID))
 		}
 		// Expired, revoked or re-keyed: stop claiming, advertising and delivering credentials.
 		r.mu.Lock()
-		r.enrolled, r.offers, r.signers = nil, nil, nil
+		r.enrolled, r.offers, r.signers, r.revoked = nil, nil, nil, revoked
 		clear(r.credentials)
 		r.mu.Unlock()
 		return nil
@@ -333,7 +336,7 @@ func (r *Receiver) refresh(ctx context.Context) error {
 		}
 	}
 	r.mu.Lock()
-	r.enrolled, r.signers = &enrolled, signers
+	r.enrolled, r.signers, r.revoked = &enrolled, signers, false
 	r.mu.Unlock()
 
 	secrets, err := readBounded(ctx, r.kafkaOpt, wire.TopicSecret)
