@@ -19,6 +19,15 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+// Errors the client returns for a run or placement that cannot proceed.
+var (
+	ErrNoMatchingReceiver      = errors.New("no matching live receiver")
+	ErrRunNotFound             = errors.New("verified root submission not found")
+	ErrNotAwaitingContinuation = errors.New("task is not awaiting continuation")
+	ErrRunCanceled             = errors.New("task is canceled")
+	ErrTurnSubmitted           = errors.New("continuation turn already submitted")
+)
+
 // renewalLifetime is how far a renewal extends an approval from the time it is signed.
 const renewalLifetime = 30 * 24 * time.Hour
 
@@ -112,6 +121,15 @@ type AwaitResult struct {
 	Task   *wire.Task
 	Status wire.TaskStatus
 	// RevokedAt is the revocation time of the receiver that signed the outcome, zero while it is enrolled.
+	RevokedAt time.Time
+	Skipped   int
+}
+
+// StatusResult is the latest verified status of a run's latest turn.
+type StatusResult struct {
+	Turn   int64
+	Status wire.TaskStatus
+	// RevokedAt is the revocation time of the receiver that signed the status, zero while it is enrolled.
 	RevokedAt time.Time
 	Skipped   int
 }
@@ -467,7 +485,7 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 		}
 	}
 	if chosen == nil {
-		return SubmitResult{}, errors.New("no matching live receiver")
+		return SubmitResult{}, ErrNoMatchingReceiver
 	}
 	runID, err := randomID("run-")
 	if err != nil {
@@ -511,7 +529,7 @@ func (client *Client) Continue(ctx context.Context, runID string, input Continue
 	}
 	run := submissions[runID]
 	if len(run) == 0 {
-		return ContinueResult{}, fmt.Errorf("continue %s: verified root submission not found", runID)
+		return ContinueResult{}, fmt.Errorf("continue %s: %w", runID, ErrRunNotFound)
 	}
 	receivers := loaded.receiverSigners(time.Now())
 	statuses, statusSkipped, err := client.latestStatuses(ctx, submissions, receivers)
@@ -520,22 +538,22 @@ func (client *Client) Continue(ctx context.Context, runID string, input Continue
 	}
 	status := statuses[runID]
 	if status == nil || status.Wherry.Kind != "interrupted" || !wire.Interrupted(status.StatusUpdate.Status.State) {
-		return ContinueResult{}, errors.New("task is not awaiting continuation")
+		return ContinueResult{}, ErrNotAwaitingContinuation
 	}
 	cancelled, cancelSkipped, err := client.cancelled(ctx)
 	if err != nil {
 		return ContinueResult{}, err
 	}
 	if cancelled[runID] {
-		return ContinueResult{}, errors.New("task is canceled")
+		return ContinueResult{}, ErrRunCanceled
 	}
 	nextTurn := status.Wherry.Turn + 1
 	if run[nextTurn].record != nil {
-		return ContinueResult{}, errors.New("continuation turn already submitted")
+		return ContinueResult{}, ErrTurnSubmitted
 	}
 	previous := run[status.Wherry.Turn]
 	if previous.record == nil {
-		return ContinueResult{}, errors.New("task is not awaiting continuation")
+		return ContinueResult{}, ErrNotAwaitingContinuation
 	}
 	messageID, err := randomID("msg-")
 	if err != nil {
@@ -575,7 +593,7 @@ func (client *Client) Cancel(ctx context.Context, runID string) (CancelResult, e
 		return CancelResult{}, err
 	}
 	if len(submissions[runID]) == 0 {
-		return CancelResult{}, fmt.Errorf("cancel %s: verified root submission not found", runID)
+		return CancelResult{}, fmt.Errorf("cancel %s: %w", runID, ErrRunNotFound)
 	}
 	envelope, err := trust.NewCancel(runID, client.userKey)
 	if err != nil {
@@ -717,16 +735,9 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 		return AwaitResult{}, err
 	}
 	loaded.skipped += skipped
-	run := submissions[runID]
-	var latest runSubmission
-	var latestTurn int64
-	for turn, submission := range run {
-		if turn > latestTurn {
-			latestTurn, latest = turn, submission
-		}
-	}
+	latest, latestTurn := latestSubmission(submissions[runID])
 	if latest.record == nil {
-		return AwaitResult{}, fmt.Errorf("await %s: verified root submission not found", runID)
+		return AwaitResult{}, fmt.Errorf("await %s: %w", runID, ErrRunNotFound)
 	}
 	cancelled, cancelSkipped, err := client.cancelled(ctx)
 	if err != nil {
@@ -774,9 +785,7 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 					acceptable := value.Wherry.Kind == "interrupted" && wire.Interrupted(value.StatusUpdate.Status.State) ||
 						value.Wherry.Kind == "terminal" && wire.Terminal(value.StatusUpdate.Status.State) ||
 						value.Wherry.Kind == "rejected" && value.StatusUpdate.Status.State == wire.TaskStateRejected
-					if topic != wire.TopicEvent || value.Wherry.Turn != latestTurn || receiver.id != value.Wherry.ReceiverID || receiver.enrolled.Pool != latest.record.Wherry.Pool ||
-						value.Wherry.TaskHash != latest.hash || value.StatusUpdate.TaskID != runID ||
-						value.StatusUpdate.ContextID != latest.record.Wherry.Lineage.RootRunID || !acceptable ||
+					if topic != wire.TopicEvent || !turnStatus(value, receiver, latest, latestTurn, runID) || !acceptable ||
 						!attempts.Admit(value.StatusUpdate.TaskID, value.Wherry.Turn, value.Wherry.Attempt) {
 						continue
 					}
@@ -788,6 +797,76 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 			}
 		}
 	}
+}
+
+// Status returns the latest verified status of runID's latest turn, SUBMITTED until a receiver reports one.
+// As in Await, the user's own cancel ends an interrupted task as CANCELED.
+func (client *Client) Status(ctx context.Context, runID string) (StatusResult, error) {
+	loaded, err := client.loadState(ctx)
+	if err != nil {
+		return StatusResult{}, err
+	}
+	receivers := loaded.receiverSigners(time.Now())
+	revoked := loaded.revokedSigners()
+	submissions, skipped, err := client.readSubmissions(ctx)
+	if err != nil {
+		return StatusResult{}, err
+	}
+	latest, latestTurn := latestSubmission(submissions[runID])
+	if latest.record == nil {
+		return StatusResult{}, fmt.Errorf("status %s: %w", runID, ErrRunNotFound)
+	}
+	cancelled, cancelSkipped, err := client.cancelled(ctx)
+	if err != nil {
+		return StatusResult{}, err
+	}
+	records, err := client.readBounded(ctx, wire.TopicEvent)
+	if err != nil {
+		return StatusResult{}, err
+	}
+	result := StatusResult{Turn: latestTurn, Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Skipped: loaded.skipped + skipped + cancelSkipped}
+	var attempts wire.AttemptFilter
+	var kind string
+	for _, record := range records {
+		if string(record.Key) != runID {
+			continue
+		}
+		verified, receiver, revokedAt, err := verifyHistory(record, receivers, revoked)
+		if err != nil {
+			result.Skipped++
+			continue
+		}
+		value, ok := verified.(*wire.StatusRecord)
+		if !ok || !turnStatus(value, receiver, latest, latestTurn, runID) {
+			continue
+		}
+		if attempts.Admit(runID, value.Wherry.Turn, value.Wherry.Attempt) {
+			result.Status, result.RevokedAt, kind = value.StatusUpdate.Status, revokedAt, value.Wherry.Kind
+		}
+	}
+	if kind == "interrupted" && cancelled[runID] {
+		result.Status, result.RevokedAt = wire.TaskStatus{State: wire.TaskStateCanceled}, time.Time{}
+	}
+	return result, nil
+}
+
+// latestSubmission returns the highest turn of a run and its submission; the record is nil for an unknown run.
+func latestSubmission(run map[int64]runSubmission) (runSubmission, int64) {
+	var latest runSubmission
+	var latestTurn int64
+	for turn, submission := range run {
+		if turn > latestTurn {
+			latestTurn, latest = turn, submission
+		}
+	}
+	return latest, latestTurn
+}
+
+// turnStatus reports whether a status was signed by its own receiver in the run's pool for the submission of turn.
+func turnStatus(value *wire.StatusRecord, receiver receiverIdentity, submission runSubmission, turn int64, runID string) bool {
+	return value.Wherry.Turn == turn && receiver.id == value.Wherry.ReceiverID && receiver.enrolled.Pool == submission.record.Wherry.Pool &&
+		value.Wherry.TaskHash == submission.hash && value.StatusUpdate.TaskID == runID &&
+		value.StatusUpdate.ContextID == submission.record.Wherry.Lineage.RootRunID
 }
 
 // Events reads and verifies the bounded status history and transcript chunks for runID.

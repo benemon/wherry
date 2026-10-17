@@ -1,0 +1,7 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "wherry",
+  "description": "Run subagent tasks on other compute through wherry and collect their results.",
+  "repository": "https://github.com/benemon/wherry",
+  "keywords": ["subagents", "delegation", "mcp"]
+}

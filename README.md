@@ -32,6 +32,8 @@ wherry sends a task to other compute and returns the result to the caller.
   - `cancel` cancels a run, which ends in `TASK_STATE_CANCELED`.
   - `await` waits for a task's reply.
   - `events` prints a task's event history.
+  - `mcp` serves these operations as MCP tools over stdio; see
+    [Harness integration](#harness-integration).
 - `wherry receiver`, which claims tasks for its pool and runs each one as a
   job through a compile-time Nomad adapter.
 - Kafka as the record of each exchange. Tasks, events, transcripts and replies
@@ -39,6 +41,29 @@ wherry sends a task to other compute and returns the result to the caller.
 - Task, event, transcript and reply records are A2A v1.0 objects;
   [the wherry A2A extension](docs/a2a-extension-v1.md) defines their added
   fields.
+
+## Harness integration
+
+`wherry mcp` is an MCP server (protocol 2026-07-28 and earlier) on stdio.
+It reads the CLI's configuration and offers seven tools: `receivers`,
+`submit`, `status`, `await`, `continue`, `cancel` and `events`. Each takes
+and returns JSON with a declared schema. `await` returns within 45 seconds:
+with the result, with an interrupted, canceled or rejected state, or with
+`retry_after` while the run is unfinished. A failed call returns a `code`
+and a `message` that carry no underlying error text.
+
+[`plugins/wherry`](plugins/wherry) packages the server with a `wherry`
+Agent Skill that teaches the submit and await protocol:
+
+- `plugin.json`, `mcp.json` and `skills/` form an Agent Plugins 1.0 bundle.
+- `.claude-plugin/plugin.json` is the Claude Code manifest for the same
+  skill and server.
+- Other harnesses take `mcp.json` and `skills/wherry` directly.
+
+[`plugins/AGENTS.snippet.md`](plugins/AGENTS.snippet.md) covers harnesses
+without skills, using the CLI.
+
+The `wherry` binary must be on `PATH` for the harness.
 
 ## Tests
 

@@ -1,0 +1,7 @@
+{
+  "name": "wherry",
+  "description": "Run subagent tasks on other compute through wherry and collect their results.",
+  "repository": "https://github.com/benemon/wherry",
+  "keywords": ["subagents", "delegation", "mcp"],
+  "mcpServers": "./mcp.json"
+}

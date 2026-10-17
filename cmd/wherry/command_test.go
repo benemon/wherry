@@ -244,7 +244,7 @@ func TestAwaitPrintsDataPart(t *testing.T) {
 	}
 }
 
-func publishInterruptedRun(t *testing.T) (context.Context, *kgo.Client, *busclient.Client) {
+func publishInterruptedRun(t *testing.T) (context.Context, *kgo.Client, *busclient.Client, ed25519.PrivateKey) {
 	t.Helper()
 	ctx, kafka, client, userKey, receiverKey := enrolledReceiver(t)
 	if _, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, 1, nil, "replies.test"); err != nil {
@@ -289,11 +289,11 @@ func publishInterruptedRun(t *testing.T) (context.Context, *kgo.Client, *busclie
 	).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
-	return ctx, kafka, client
+	return ctx, kafka, client, userKey
 }
 
 func TestAwaitPrintsAuthRequiredAndContinuation(t *testing.T) {
-	ctx, _, client := publishInterruptedRun(t)
+	ctx, _, client, _ := publishInterruptedRun(t)
 	var stdout, stderr bytes.Buffer
 	err := runAwait(ctx, client, []string{"run-auth", "--timeout", "5s"}, &stdout, &stderr)
 	if err == nil || err.Error() != "run ended in TASK_STATE_AUTH_REQUIRED" {
@@ -306,7 +306,7 @@ func TestAwaitPrintsAuthRequiredAndContinuation(t *testing.T) {
 }
 
 func TestContinuePrintsRunAndTurn(t *testing.T) {
-	ctx, kafka, client := publishInterruptedRun(t)
+	ctx, kafka, client, _ := publishInterruptedRun(t)
 	var stdout, stderr bytes.Buffer
 	before := time.Now()
 	if err := runContinue(ctx, client, []string{"run-auth", "--deadline", "45s", "--queue-deadline", "15s"}, &stdout, &stderr); err != nil {
@@ -361,7 +361,7 @@ func TestContinuePrintsRunAndTurn(t *testing.T) {
 }
 
 func TestCancelCLI(t *testing.T) {
-	ctx, _, client := publishInterruptedRun(t)
+	ctx, _, client, _ := publishInterruptedRun(t)
 	var stdout, stderr bytes.Buffer
 	if err := runCancel(ctx, client, []string{"run-auth"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)

@@ -25,7 +25,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|enrol|secret|receivers|submit|continue|cancel|await|events|receiver>")
+		return errors.New("usage: wherry <init|key|enrol|secret|receivers|submit|continue|cancel|await|events|receiver|mcp>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -60,6 +60,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		public := key.Public().(ed25519.PublicKey)
 		fmt.Fprintf(stdout, "public_key=%s fingerprint=%s\n", base64.RawURLEncoding.EncodeToString(public), wire.Fingerprint(public))
 		return nil
+	}
+	if args[0] == "mcp" {
+		return runMCP(context.Background(), config, args[1:])
 	}
 	client, err := busclient.Connect(config)
 	if err != nil {
