@@ -43,6 +43,13 @@ type ApprovalResult struct {
 	Skipped    int
 }
 
+// RevokeResult describes a produced revocation.
+type RevokeResult struct {
+	ReceiverID string
+	Floor      int64
+	Skipped    int
+}
+
 // SecretResult describes a produced sealed-secret version.
 type SecretResult struct {
 	Name       string
@@ -122,6 +129,8 @@ type Receiver struct {
 	InFlight     int64               `json:"in_flight"`
 	HeartbeatAge string              `json:"heartbeat_age"`
 	Status       string              `json:"status"`
+	Revoked      bool                `json:"revoked"`
+	Floor        int64               `json:"floor_generation"`
 }
 
 type requestRecord struct {
@@ -132,6 +141,7 @@ type requestRecord struct {
 type approvalRecord struct {
 	generation   int64
 	envelopeHash string
+	pool         string
 }
 
 type secretKey struct {
@@ -220,7 +230,7 @@ func (client *Client) Approve(ctx context.Context, requestHash, pool string, lab
 		pool = request.request.ReceiverID
 	}
 	current := loaded.approvals[request.request.ReceiverID]
-	generation := current.generation + 1
+	generation := max(current.generation, loaded.state.Floor(request.request.ReceiverID)) + 1
 	envelope, err := trust.Approve(
 		request.envelope, request.request, client.userKey, labels, pool, grants, selector, renewal,
 		generation, current.envelopeHash, time.Now().Add(time.Duration(days)*24*time.Hour),
@@ -234,6 +244,26 @@ func (client *Client) Approve(ctx context.Context, requestHash, pool string, lab
 		return ApprovalResult{}, err
 	}
 	return ApprovalResult{ReceiverID: request.request.ReceiverID, Generation: generation, Skipped: loaded.skipped}, nil
+}
+
+// Revoke publishes a revocation floor at the receiver's highest approved generation.
+func (client *Client) Revoke(ctx context.Context, receiverID string) (RevokeResult, error) {
+	loaded, err := client.loadState(ctx)
+	if err != nil {
+		return RevokeResult{}, err
+	}
+	current, ok := loaded.approvals[receiverID]
+	if !ok {
+		return RevokeResult{}, fmt.Errorf("receiver %s has never been approved", receiverID)
+	}
+	envelope, err := trust.NewRevocation(receiverID, current.generation, client.userKey, time.Now())
+	if err != nil {
+		return RevokeResult{}, err
+	}
+	if err := client.produce(ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(receiverID), Value: envelope}); err != nil {
+		return RevokeResult{}, err
+	}
+	return RevokeResult{ReceiverID: receiverID, Floor: current.generation, Skipped: loaded.skipped}, nil
 }
 
 // PutSecret seals a file to an enrolled receiver and publishes its next version.
@@ -269,7 +299,7 @@ func (client *Client) PutSecret(ctx context.Context, name, receiverID, path stri
 	return SecretResult{Name: name, ReceiverID: receiverID, Version: version, Waiting: waiting, Skipped: loaded.skipped + skipped}, nil
 }
 
-// Receivers returns every enrolled receiver with its latest verified capability status.
+// Receivers returns every enrolled or revoked receiver with its latest verified capability status.
 func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 	loaded, err := client.loadState(ctx)
 	if err != nil {
@@ -293,7 +323,7 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 			Generation: identity.enrolled.Generation, Labels: maps.Clone(identity.enrolled.Labels),
 			Selector: slices.Clone(identity.enrolled.Selector),
 			Adapters: identity.enrolled.Adapters, Offers: []wire.Offer{},
-			HeartbeatAge: "-", Status: "silent",
+			HeartbeatAge: "-", Status: "silent", Floor: loaded.state.Floor(identity.id),
 		}
 		if capability := byReceiver[identity.id]; capability != nil {
 			receiver.Offers = capability.Offers
@@ -307,6 +337,15 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 			}
 		}
 		result = append(result, receiver)
+	}
+	for id, approval := range loaded.approvals {
+		if _, err := loaded.state.Receiver(id, now); errors.Is(err, trust.ErrRevoked) {
+			result = append(result, Receiver{
+				ReceiverID: id, Pool: approval.pool, Generation: approval.generation,
+				Labels: map[string]string{}, Selector: []wire.Requirement{}, Adapters: []wire.AdapterGrant{}, Offers: []wire.Offer{},
+				HeartbeatAge: "-", Status: "revoked", Revoked: true, Floor: loaded.state.Floor(id),
+			})
+		}
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Pool != result[j].Pool {
@@ -765,7 +804,7 @@ func (client *Client) loadState(ctx context.Context) (*loadedState, error) {
 		case *wire.EnrolApproval:
 			if payload.Generation > loaded.approvals[payload.ReceiverID].generation {
 				loaded.approvals[payload.ReceiverID] = approvalRecord{
-					generation: payload.Generation, envelopeHash: trust.EnvelopeHash(record.Value),
+					generation: payload.Generation, envelopeHash: trust.EnvelopeHash(record.Value), pool: payload.Pool,
 				}
 				loaded.approvedRequests[payload.RequestHash] = payload.Generation
 			}

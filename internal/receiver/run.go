@@ -79,6 +79,11 @@ func (r *Receiver) claimOne(ctx context.Context, enrolled *trust.Enrolled) error
 			record = records[0]
 		}
 	}
+	if r.current() == nil {
+		// Enrolment ended while this poll was open.
+		record.Ack(kgo.AckRelease)
+		return share.FlushAcks(ctx)
+	}
 	admitted, ack := r.admit(ctx, record, enrolled)
 	if admitted == nil {
 		record.Ack(ack)

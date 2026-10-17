@@ -979,3 +979,54 @@ func testTask(submission *wire.SubmissionRecord, taskHash string, attempt int64,
 		Wherry: wire.TaskExtension{Turn: submission.Wherry.Turn, Attempt: attempt, TaskHash: taskHash},
 	}
 }
+
+func TestReEnrolAboveFloor(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	revoked, err := fixture.client.Revoke(fixture.ctx, "receiver-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked.Floor != 1 {
+		t.Fatalf("floor %d, want 1", revoked.Floor)
+	}
+	approve := func(want int64) {
+		t.Helper()
+		result, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 30)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Generation != want {
+			t.Fatalf("approved generation %d, want %d", result.Generation, want)
+		}
+		loaded, err := fixture.client.loadState(fixture.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if enrolled, err := loaded.state.Receiver("receiver-a", time.Now()); err != nil || enrolled.Generation != want {
+			t.Fatalf("enrolled generation %d, err %v; want %d", enrolled.Generation, err, want)
+		}
+	}
+	approve(2)
+	// A floor above the current generation: the next approval must clear it, not follow the current generation.
+	revocation, err := trust.NewRevocation("receiver-a", 5, fixture.userKey, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.produce(t, wire.TopicState, "receiver-a", revocation)
+	approve(6)
+}
+
+func TestClientDistrustsRevokedReceiverRecords(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	submission, hash := fixture.rootSubmission(t, "run-revoked", "default")
+	fixture.produce(t, "replies.test", submission.Wherry.RunID, signed(t, wire.TypeTask, testTask(submission, hash, 1, wire.TaskStateCompleted), fixture.receiverKey))
+	if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, time.Second); err != nil {
+		t.Fatalf("before revocation: %v", err)
+	}
+	if _, err := fixture.client.Revoke(fixture.ctx, "receiver-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 200*time.Millisecond); err == nil {
+		t.Fatal("task signed by a revoked receiver was accepted")
+	}
+}

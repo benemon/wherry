@@ -37,11 +37,15 @@ type secretID struct {
 	name       string
 }
 
+// ErrRevoked reports that a receiver's accepted approval is at or below its revocation floor.
+var ErrRevoked = errors.New("receiver is revoked")
+
 // State computes current trust state from records applied in log order.
 type State struct {
 	userPublicKey   ed25519.PublicKey
 	requests        map[string]*wire.EnrolRequest
 	approvals       map[string]acceptedApproval
+	floors          map[string]int64
 	secretVersions  map[secretID]map[int64]*wire.SecretVersion
 	maximumVersions map[secretID]int64
 }
@@ -52,6 +56,7 @@ func NewState(userPublicKey ed25519.PublicKey) *State {
 		userPublicKey:   append(ed25519.PublicKey(nil), userPublicKey...),
 		requests:        make(map[string]*wire.EnrolRequest),
 		approvals:       make(map[string]acceptedApproval),
+		floors:          make(map[string]int64),
 		secretVersions:  make(map[secretID]map[int64]*wire.SecretVersion),
 		maximumVersions: make(map[secretID]int64),
 	}
@@ -108,6 +113,11 @@ func Approve(requestEnvelopeBytes []byte, request *wire.EnrolRequest, userKey ed
 	return marshalSigned(wire.TypeEnrolApproval, approval, userKey)
 }
 
+// NewRevocation signs a revocation floor for a receiver with the user key.
+func NewRevocation(receiverID string, floor int64, userKey ed25519.PrivateKey, now time.Time) ([]byte, error) {
+	return marshalSigned(wire.TypeRevocation, &wire.Revocation{ReceiverID: receiverID, FloorGeneration: floor, AtMS: now.UnixMilli()}, userKey)
+}
+
 // Apply verifies and applies one append-only trust record and returns its verified payload, nil for other record types.
 func (state *State) Apply(envelopeBytes []byte) (any, error) {
 	envelope, err := wire.DecodeEnvelope(envelopeBytes)
@@ -119,6 +129,8 @@ func (state *State) Apply(envelopeBytes []byte) (any, error) {
 		return state.applyRequest(envelope, envelopeBytes)
 	case wire.TypeEnrolApproval:
 		return state.applyApproval(envelope, envelopeBytes)
+	case wire.TypeRevocation:
+		return state.applyRevocation(envelope)
 	case wire.TypeSecretVersion:
 		return state.applySecretVersion(envelope)
 	default:
@@ -126,16 +138,24 @@ func (state *State) Apply(envelopeBytes []byte) (any, error) {
 	}
 }
 
-// Receiver returns the current unexpired enrolment for a receiver.
+// Receiver returns the current unexpired, unrevoked enrolment for a receiver.
 func (state *State) Receiver(id string, now time.Time) (Enrolled, error) {
 	approval, ok := state.approvals[id]
 	if !ok {
 		return Enrolled{}, errors.New("receiver is not enrolled")
 	}
+	if approval.enrolled.Generation <= state.floors[id] {
+		return Enrolled{}, ErrRevoked
+	}
 	if now.UnixMilli() >= approval.expMS {
 		return Enrolled{}, errors.New("receiver enrolment is expired")
 	}
 	return cloneEnrolled(approval.enrolled), nil
+}
+
+// Floor returns the highest revocation floor applied for a receiver, 0 if none.
+func (state *State) Floor(id string) int64 {
+	return state.floors[id]
 }
 
 // CapabilityWithin verifies that a receiver capability stays within its enrolment and returns it.
@@ -226,6 +246,9 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 		return nil, fmt.Errorf("verify enrolment approval: %w", err)
 	}
 	approval := verified.(*wire.EnrolApproval)
+	if approval.Generation <= state.floors[approval.ReceiverID] {
+		return nil, errors.New("approval is at or below the revocation floor")
+	}
 	current, enrolled := state.approvals[approval.ReceiverID]
 	if enrolled && approval.Generation <= current.enrolled.Generation {
 		return approval, nil
@@ -259,6 +282,18 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 		expMS: approval.ExpMS,
 	}
 	return approval, nil
+}
+
+func (state *State) applyRevocation(envelope wire.Envelope) (any, error) {
+	verified, err := wire.Verify(envelope, state.userPublicKey, wire.SignerUser)
+	if err != nil {
+		return nil, fmt.Errorf("verify revocation: %w", err)
+	}
+	revocation := verified.(*wire.Revocation)
+	if revocation.FloorGeneration > state.floors[revocation.ReceiverID] {
+		state.floors[revocation.ReceiverID] = revocation.FloorGeneration
+	}
+	return revocation, nil
 }
 
 func (state *State) applySecretVersion(envelope wire.Envelope) (any, error) {

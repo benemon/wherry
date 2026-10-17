@@ -302,9 +302,13 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	now := time.Now()
 	enrolled, err := state.Receiver(r.config.ReceiverID, now)
 	if err != nil || !enrolled.SigningPub.Equal(r.signing.Public()) {
-		// Expired, revoked or re-keyed: stop claiming and advertising.
+		if errors.Is(err, trust.ErrRevoked) {
+			r.logger.Printf("revoked at generation %d", state.Floor(r.config.ReceiverID))
+		}
+		// Expired, revoked or re-keyed: stop claiming, advertising and delivering credentials.
 		r.mu.Lock()
 		r.enrolled, r.offers, r.signers = nil, nil, nil
+		clear(r.credentials)
 		r.mu.Unlock()
 		return nil
 	}

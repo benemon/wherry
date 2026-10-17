@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -658,4 +659,113 @@ func TestSealRejectedUnderDifferentApproval(t *testing.T) {
 			t.Fatal("ciphertext sealed under approval A opened through a header naming A'")
 		}
 	})
+}
+
+func (fixture trustFixture) revoke(t *testing.T, floor int64) {
+	t.Helper()
+	revocation, err := NewRevocation("receiver-a", floor, fixture.userPrivateKey, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.state.Apply(revocation); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (fixture trustFixture) approve(t *testing.T, generation int64, previous string) []byte {
+	t.Helper()
+	approval, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", generation, previous, testNow.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return approval
+}
+
+func TestRevocationFloorIsMaximum(t *testing.T) {
+	fixture := newTrustFixture(t)
+	approval2 := fixture.approve(t, 2, EnvelopeHash(fixture.approval))
+	if _, err := fixture.state.Apply(approval2); err != nil {
+		t.Fatal(err)
+	}
+	fixture.revoke(t, 2)
+	fixture.revoke(t, 1)
+	if floor := fixture.state.Floor("receiver-a"); floor != 2 {
+		t.Fatalf("floor %d after a lower floor was appended, want 2", floor)
+	}
+	if _, err := fixture.state.Receiver("receiver-a", testNow); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("got %v, want ErrRevoked", err)
+	}
+}
+
+func TestApprovalAtOrBelowFloorRejected(t *testing.T) {
+	t.Run("approved before the revocation", func(t *testing.T) {
+		fixture := newTrustFixture(t)
+		fixture.revoke(t, 1)
+		if _, err := fixture.state.Receiver("receiver-a", testNow); !errors.Is(err, ErrRevoked) {
+			t.Fatalf("got %v, want ErrRevoked", err)
+		}
+		if _, err := fixture.state.Apply(fixture.approval); err == nil {
+			t.Fatal("replayed approval at the floor was accepted")
+		}
+		if _, err := fixture.state.Receiver("receiver-a", testNow); !errors.Is(err, ErrRevoked) {
+			t.Fatalf("after replay got %v, want ErrRevoked", err)
+		}
+	})
+	for name, floor := range map[string]int64{"at the floor": 2, "below the floor": 3} {
+		t.Run(name+" appended after the revocation", func(t *testing.T) {
+			fixture := newTrustFixture(t)
+			fixture.revoke(t, floor)
+			if _, err := fixture.state.Apply(fixture.approve(t, 2, EnvelopeHash(fixture.approval))); err == nil {
+				t.Fatal("approval at or below the floor was accepted")
+			}
+			if _, err := fixture.state.Receiver("receiver-a", testNow); !errors.Is(err, ErrRevoked) {
+				t.Fatalf("got %v, want ErrRevoked", err)
+			}
+			// The rejected approval must not become the previous state of the next one.
+			if _, err := fixture.state.Apply(fixture.approve(t, floor+1, EnvelopeHash(fixture.approval))); err != nil {
+				t.Fatal(err)
+			}
+			if enrolled, err := fixture.state.Receiver("receiver-a", testNow); err != nil || enrolled.Generation != floor+1 {
+				t.Fatalf("got generation %d, err %v; want %d", enrolled.Generation, err, floor+1)
+			}
+		})
+	}
+}
+
+func TestOpenFailsForRevokedReceiver(t *testing.T) {
+	fixture := newTrustFixture(t)
+	versionEnvelope, sealedEnvelope, err := Seal(fixture.enrolled, "receiver-a", "token", 1, []byte("secret value"), testNow.Add(time.Minute), fixture.userPrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.state.Apply(versionEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Open(sealedEnvelope, fixture.state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow); err != nil {
+		t.Fatal(err)
+	}
+	fixture.revoke(t, 1)
+	if _, _, err := Open(sealedEnvelope, fixture.state, "receiver-a", "token", fixture.sealingKey, fixture.userPublicKey, testNow); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("got %v, want ErrRevoked", err)
+	}
+}
+
+func TestStateRejectsRevocationNotSignedByUser(t *testing.T) {
+	fixture := newTrustFixture(t)
+	_, otherKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revocation := &wire.Revocation{ReceiverID: "receiver-a", FloorGeneration: 1, AtMS: testNow.UnixMilli()}
+	for name, key := range map[string]ed25519.PrivateKey{"receiver": fixture.receiverKey, "unknown": otherKey} {
+		if _, err := fixture.state.Apply(mustSigned(t, wire.TypeRevocation, revocation, key)); err == nil {
+			t.Fatalf("%s-signed revocation was accepted", name)
+		}
+	}
+	if fixture.state.Floor("receiver-a") != 0 {
+		t.Fatal("unverified revocation set a floor")
+	}
+	if _, err := fixture.state.Receiver("receiver-a", testNow); err != nil {
+		t.Fatalf("unverified revocation revoked the receiver: %v", err)
+	}
 }

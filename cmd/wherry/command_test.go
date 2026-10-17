@@ -163,7 +163,7 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	wantKeys := []string{"adapters", "capacity", "generation", "heartbeat_age", "in_flight", "labels", "offers", "pool", "receiver_id", "selector", "status"}
+	wantKeys := []string{"adapters", "capacity", "floor_generation", "generation", "heartbeat_age", "in_flight", "labels", "offers", "pool", "receiver_id", "revoked", "selector", "status"}
 	if !reflect.DeepEqual(keys, wantKeys) {
 		t.Fatalf("got JSON fields %v, want %v", keys, wantKeys)
 	}
@@ -397,5 +397,54 @@ func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 		"turn=1 attempt=1 transcript_chunks=2\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestRevokeCLI(t *testing.T) {
+	ctx, _, client, _, _ := enrolledReceiver(t)
+	var stdout, stderr bytes.Buffer
+	if err := runEnrol(ctx, client, []string{"revoke", "receiver-a"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	want := "receiver=receiver-a floor_generation=1\ncredentials sealed to this receiver are not rotated; rotate them at their source\n"
+	if stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+	}
+	stdout.Reset()
+	err := runEnrol(ctx, client, []string{"revoke", "receiver-unknown"}, &stdout, &stderr)
+	if err == nil || err.Error() != "receiver receiver-unknown has never been approved" {
+		t.Fatalf("got %v, want never approved error", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("produced output for an unknown receiver: %q", stdout.String())
+	}
+}
+
+func TestReceiversShowsRevoked(t *testing.T) {
+	ctx, _, client, _, _ := enrolledReceiver(t)
+	var discard bytes.Buffer
+	if err := runEnrol(ctx, client, []string{"revoke", "receiver-a"}, &discard, &discard); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runReceivers(ctx, client, nil, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if want := "receiver=receiver-a pool=default generation=1 floor_generation=1 status=revoked\n"; stdout.String() != want {
+		t.Fatalf("got %q, want %q", stdout.String(), want)
+	}
+	stdout.Reset()
+	if err := runReceivers(ctx, client, []string{"--json"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0]["revoked"] != true || rows[0]["floor_generation"] != float64(1) || rows[0]["status"] != "revoked" {
+		t.Fatalf("unexpected JSON rows: %#v", rows)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
 	}
 }

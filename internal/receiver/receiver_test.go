@@ -1173,6 +1173,7 @@ func TestReceiverRejectsNonTextParts(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f, enrolled := admitFixture(t)
 			f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+			f.receiver.enrolled = enrolled
 			f.cluster.SetGroupConfigs("p-"+enrolled.Pool, map[string]string{"share.auto.offset.reset": "earliest"})
 			record := signedRoot(t, f.userKey, func(task *wire.SubmissionRecord) {
 				task.Message.Parts = append(task.Message.Parts, part)
@@ -1803,5 +1804,76 @@ func TestReceiverCredentialPerAdapter(t *testing.T) {
 	}
 	if strings.Contains(m.logs.String(), testToken) {
 		t.Fatal("credential value appeared in receiver logs")
+	}
+}
+
+func TestReceiverStopsClaimingWhenRevoked(t *testing.T) {
+	f := newFixture(t, resultStream)
+	if task := runToTask(t, f); task.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("unexpected task before revocation: %#v", task)
+	}
+	client := busclient.New(f.kafka, f.userKey, "replies.test")
+	if _, err := client.Revoke(f.ctx, f.receiver.config.ReceiverID); err != nil {
+		t.Fatal(err)
+	}
+	for f.receiver.current() != nil || !strings.Contains(f.logs.String(), "revoked at generation 1") {
+		if f.ctx.Err() != nil {
+			t.Fatalf("receiver still enrolled after revocation; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	f.receiver.mu.Lock()
+	held := len(f.receiver.credentials)
+	f.receiver.mu.Unlock()
+	if held != 0 {
+		t.Fatalf("revoked receiver still holds %d credentials", held)
+	}
+
+	capabilities := topicCount(t, f, wire.TopicCapability)
+	submission := testSubmission("run-after-revocation")
+	submission.Wherry.Pool, submission.Wherry.Labels = f.receiver.config.ReceiverID, map[string]string{}
+	value, err := trust.SignRootSubmission(*submission, f.userKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicTask, Key: []byte(submission.Wherry.RunID), Value: value}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Second)
+	if after := topicCount(t, f, wire.TopicCapability); after != capabilities {
+		t.Fatalf("revoked receiver published %d capability records", after-capabilities)
+	}
+	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 1 {
+		t.Fatalf("dispatches %d after revocation, want only the task before it", dispatches)
+	}
+	for _, payload := range published(t, f, wire.TopicEvent) {
+		if status, ok := payload.(*wire.StatusRecord); ok && status.StatusUpdate.TaskID == submission.Wherry.RunID {
+			t.Fatalf("revoked receiver claimed %s: %#v", submission.Wherry.RunID, status)
+		}
+	}
+	// The task stays available to the pool: released, not acknowledged away.
+	peer, err := kgo.NewClient(append(append([]kgo.Opt(nil), f.receiver.kafkaOpt...),
+		kgo.ConsumeTopics(wire.TopicTask), kgo.ShareGroup("p-"+f.receiver.config.ReceiverID))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	pollCtx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
+	defer cancel()
+	for available := false; !available; {
+		fetches := peer.PollRecords(pollCtx, 10)
+		if pollCtx.Err() != nil {
+			t.Fatal("task submitted after revocation is no longer available to the pool")
+		}
+		for _, record := range fetches.Records() {
+			available = available || string(record.Key) == submission.Wherry.RunID
+		}
+	}
+	_, err = client.Submit(f.ctx, busclient.SubmitInput{
+		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Labels: map[string]string{}, Prompt: "hello",
+		Deadline: time.Minute, QueueDeadline: time.Minute,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no matching live receiver") {
+		t.Fatalf("submit after revocation: got %v, want no matching live receiver", err)
 	}
 }

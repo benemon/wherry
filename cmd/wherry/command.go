@@ -106,6 +106,11 @@ func runReceivers(ctx context.Context, client *busclient.Client, args []string, 
 		fmt.Fprintln(stdout, string(encoded))
 	} else {
 		for _, receiver := range receivers {
+			if receiver.Revoked {
+				fmt.Fprintf(stdout, "receiver=%s pool=%s generation=%d floor_generation=%d status=%s\n",
+					receiver.ReceiverID, receiver.Pool, receiver.Generation, receiver.Floor, receiver.Status)
+				continue
+			}
 			fmt.Fprintf(stdout, "receiver=%s pool=%s generation=%d labels=%s selector=%s capacity=%d in_flight=%d heartbeat_age=%s status=%s\n",
 				receiver.ReceiverID, receiver.Pool, receiver.Generation,
 				wire.TermsText(receiver.Labels), formatRequirements(receiver.Selector),
@@ -148,8 +153,18 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 		warnSkipped(stderr, skipped)
 		return nil
 	}
+	if len(args) == 2 && args[0] == "revoke" {
+		result, err := client.Revoke(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "receiver=%s floor_generation=%d\n", result.ReceiverID, result.Floor)
+		fmt.Fprintln(stdout, "credentials sealed to this receiver are not rotated; rotate them at their source")
+		warnSkipped(stderr, result.Skipped)
+		return nil
+	}
 	if len(args) < 2 || args[0] != "approve" {
-		return errors.New("usage: wherry enrol <list|approve REQUEST_HASH [--pool POOL] --labels k=v,.. --grants FILE --selector k=v|v,..>")
+		return errors.New("usage: wherry enrol <list|revoke RECEIVER_ID|approve REQUEST_HASH [--pool POOL] --labels k=v,.. --grants FILE --selector k=v|v,..>")
 	}
 	requestHash := args[1]
 	flags := flag.NewFlagSet("enrol approve", flag.ContinueOnError)

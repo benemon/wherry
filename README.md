@@ -7,7 +7,8 @@ wherry sends a task to other compute and returns the result to the caller.
 
 - `wherry`, a CLI for the submitting side:
   - `init` and `key` create and show the user signing key.
-  - `enrol list` shows enrolment requests and `enrol approve` approves one.
+  - `enrol list` shows enrolment requests, `enrol approve` approves one and
+    `enrol revoke` revokes a receiver.
   - `secret put` seals a credential to one receiver.
   - `receivers` lists enrolled receivers and their offers.
   - `submit` publishes a task to the matching live receiver with the most spare capacity.
