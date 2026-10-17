@@ -51,8 +51,8 @@ var signerEntitlements = map[RecordType]map[SignerKind]bool{
 	TypeSealedSecret:  {SignerUser: true},
 }
 
-// Entitled reports whether a signer kind may sign a record type.
-func Entitled(recordType RecordType, kind SignerKind) bool {
+// entitled reports whether a signer kind may sign a record type.
+func entitled(recordType RecordType, kind SignerKind) bool {
 	return signerEntitlements[recordType][kind]
 }
 
@@ -138,6 +138,7 @@ type Requirement struct {
 	Values   []string `json:"values"`
 }
 
+// OpIn is the only Requirement operator.
 const OpIn = "In"
 
 // Task is a task payload.
@@ -377,89 +378,6 @@ func TermsText(terms map[string]string) string {
 
 func grantIndex(grants []AdapterGrant, name string) int {
 	return slices.IndexFunc(grants, func(grant AdapterGrant) bool { return grant.Name == name })
-}
-
-// Narrows reports whether child retains every parent requirement with a value subset.
-func Narrows(parent, child []Requirement) bool {
-	for _, outer := range parent {
-		found := false
-		for _, inner := range child {
-			if inner.Key != outer.Key || inner.Operator != outer.Operator {
-				continue
-			}
-			found = true
-			for _, value := range inner.Values {
-				if !slices.Contains(outer.Values, value) {
-					return false
-				}
-			}
-			break
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
-// LabelsEqual reports whether two label maps are identical.
-func LabelsEqual(left, right map[string]string) bool {
-	return maps.Equal(left, right)
-}
-
-// KafkaKey returns the required Kafka record key for a payload.
-func KafkaKey(recordType RecordType, payload any) (string, error) {
-	switch value := payload.(type) {
-	case *Task:
-		if recordType == TypeTask {
-			return value.RunID, nil
-		}
-	case *Cancel:
-		if recordType == TypeCancel {
-			return value.RunID, nil
-		}
-	case *Event:
-		if recordType == TypeEvent {
-			return value.RunID, nil
-		}
-	case *Reply:
-		if recordType == TypeReply {
-			return value.RunID, nil
-		}
-	case *Transcript:
-		if recordType == TypeTranscript {
-			return value.RunID, nil
-		}
-	case *Capability:
-		if recordType == TypeCapability {
-			return value.ReceiverID, nil
-		}
-	case *EnrolRequest:
-		if recordType == TypeEnrolRequest {
-			return value.ReceiverID, nil
-		}
-	case *EnrolApproval:
-		if recordType == TypeEnrolApproval {
-			return value.ReceiverID, nil
-		}
-	case *RenewRequest:
-		if recordType == TypeRenewRequest {
-			return value.ReceiverID, nil
-		}
-	case *Revocation:
-		if recordType == TypeRevocation {
-			return value.ReceiverID, nil
-		}
-	case *SecretVersion:
-		if recordType == TypeSecretVersion {
-			return value.ReceiverID, nil
-		}
-	case *SealedSecret:
-		if recordType == TypeSealedSecret {
-			return value.ReceiverID, nil
-		}
-	}
-	return "", errors.New("record type does not match payload")
 }
 
 func validatePayload(recordType RecordType, payload any) error {

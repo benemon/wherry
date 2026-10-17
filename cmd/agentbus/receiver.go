@@ -47,7 +47,6 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-// newAdapters constructs the configured adapters in order; nomad is the only compiled-in type.
 func newAdapters(configs []receiver.AdapterConfig, nomadToken string) ([]receiver.Named, error) {
 	adapters := make([]receiver.Named, 0, len(configs))
 	for _, config := range configs {

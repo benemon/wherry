@@ -12,11 +12,11 @@ import (
 	"testing"
 )
 
-func validPayloads() map[RecordType]any {
+func validPayloads(t *testing.T) map[RecordType]any {
+	t.Helper()
 	hashA := strings.Repeat("a", 64)
 	hashB := strings.Repeat("b", 64)
-	seed, _ := hex.DecodeString("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
-	signingPublicKey := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	signingPublicKey, _ := fixedKey(t)
 	line := Bytes("line")
 	logOffset := int64(42)
 	reason := "done"
@@ -87,7 +87,7 @@ func verificationKind(recordType RecordType) SignerKind {
 
 func TestSignVerifyAndStrictDecodeEveryRecordType(t *testing.T) {
 	publicKey, privateKey := fixedKey(t)
-	for recordType, value := range validPayloads() {
+	for recordType, value := range validPayloads(t) {
 		t.Run(string(recordType), func(t *testing.T) {
 			payload, err := MarshalPayload(recordType, value)
 			if err != nil {
@@ -116,13 +116,6 @@ func TestSignVerifyAndStrictDecodeEveryRecordType(t *testing.T) {
 			}
 			if !reflect.DeepEqual(verified, value) {
 				t.Fatalf("verified payload differs:\n got: %#v\nwant: %#v", verified, value)
-			}
-			key, err := KafkaKey(recordType, decodedPayload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if key != "run-1" && key != "receiver-1" {
-				t.Fatalf("unexpected Kafka key %q", key)
 			}
 		})
 	}
@@ -167,7 +160,7 @@ func TestDecodePayloadRejectsMissingRequiredNumericMember(t *testing.T) {
 }
 
 func TestAttemptRequired(t *testing.T) {
-	for recordType, value := range validPayloads() {
+	for recordType, value := range validPayloads(t) {
 		if recordType != TypeTask && recordType != TypeEvent && recordType != TypeReply && recordType != TypeTranscript {
 			continue
 		}
@@ -185,7 +178,7 @@ func TestAttemptRequired(t *testing.T) {
 }
 
 func TestAttemptZeroRejected(t *testing.T) {
-	for recordType, value := range validPayloads() {
+	for recordType, value := range validPayloads(t) {
 		if recordType != TypeTask && recordType != TypeEvent && recordType != TypeReply && recordType != TypeTranscript {
 			continue
 		}
@@ -249,7 +242,7 @@ func TestDecodeEnvelopeIsStrict(t *testing.T) {
 
 func TestVerifyRejectsCrossTypeSignature(t *testing.T) {
 	publicKey, privateKey := fixedKey(t)
-	payload, err := MarshalPayload(TypeEvent, validPayloads()[TypeEvent])
+	payload, err := MarshalPayload(TypeEvent, validPayloads(t)[TypeEvent])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +255,7 @@ func TestVerifyRejectsCrossTypeSignature(t *testing.T) {
 
 func TestVerifyRejectsAlteredPayload(t *testing.T) {
 	publicKey, privateKey := fixedKey(t)
-	payload, err := MarshalPayload(TypeCancel, validPayloads()[TypeCancel])
+	payload, err := MarshalPayload(TypeCancel, validPayloads(t)[TypeCancel])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,10 +286,10 @@ func TestDecodeEnvelopeRejectsOversizeBeforeDecode(t *testing.T) {
 }
 
 func TestEntitledRejectsWrongSignerKind(t *testing.T) {
-	if Entitled(TypeCancel, SignerReceiver) {
+	if entitled(TypeCancel, SignerReceiver) {
 		t.Fatal("receiver was entitled to sign cancel")
 	}
-	if !Entitled(TypeTask, SignerUser) || !Entitled(TypeTask, SignerReceiver) {
+	if !entitled(TypeTask, SignerUser) || !entitled(TypeTask, SignerReceiver) {
 		t.Fatal("task signer entitlements incomplete")
 	}
 }
@@ -318,8 +311,8 @@ func TestEntitlementTable(t *testing.T) {
 	}
 	for recordType, kinds := range want {
 		for _, kind := range []SignerKind{SignerUser, SignerReceiver} {
-			if Entitled(recordType, kind) != kinds[kind] {
-				t.Errorf("Entitled(%q, %q) = %t, want %t", recordType, kind, Entitled(recordType, kind), kinds[kind])
+			if entitled(recordType, kind) != kinds[kind] {
+				t.Errorf("entitled(%q, %q) = %t, want %t", recordType, kind, entitled(recordType, kind), kinds[kind])
 			}
 		}
 	}
@@ -327,7 +320,7 @@ func TestEntitlementTable(t *testing.T) {
 
 func TestVerifyRejectsWrongSignerFingerprint(t *testing.T) {
 	publicKey, privateKey := fixedKey(t)
-	payload, err := MarshalPayload(TypeCancel, validPayloads()[TypeCancel])
+	payload, err := MarshalPayload(TypeCancel, validPayloads(t)[TypeCancel])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +336,7 @@ func TestVerifyRejectsWrongSignerFingerprint(t *testing.T) {
 
 func TestVerifyRejectsEnrolmentRequestSignedByDifferentKey(t *testing.T) {
 	publicKey, privateKey := fixedKey(t)
-	request := validPayloads()[TypeEnrolRequest].(*EnrolRequest)
+	request := validPayloads(t)[TypeEnrolRequest].(*EnrolRequest)
 	request.SigningPub = bytes.Repeat([]byte{9}, ed25519.PublicKeySize)
 	payload, err := MarshalPayload(TypeEnrolRequest, request)
 	if err != nil {
@@ -356,7 +349,7 @@ func TestVerifyRejectsEnrolmentRequestSignedByDifferentKey(t *testing.T) {
 
 func TestVerifyRejectsUnentitledSigner(t *testing.T) {
 	publicKey, privateKey := fixedKey(t)
-	payload, err := MarshalPayload(TypeCancel, validPayloads()[TypeCancel])
+	payload, err := MarshalPayload(TypeCancel, validPayloads(t)[TypeCancel])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +387,7 @@ func TestTransitionRejectsMoveOutOfTerminalStates(t *testing.T) {
 }
 
 func TestRequirementUnknownOperatorRejected(t *testing.T) {
-	task := validPayloads()[TypeTask].(*Task)
+	task := validPayloads(t)[TypeTask].(*Task)
 	task.Selector[0].Operator = "Exists"
 	if _, err := MarshalPayload(TypeTask, task); err == nil || !strings.Contains(err.Error(), "unknown operator") {
 		t.Fatalf("got %v, want unknown operator", err)
@@ -540,7 +533,7 @@ func TestTermsTextIsDeterministic(t *testing.T) {
 }
 
 func TestReceiverLabelsRejectPlatform(t *testing.T) {
-	payloads := validPayloads()
+	payloads := validPayloads(t)
 	payloads[TypeEnrolRequest].(*EnrolRequest).Labels["platform"] = "nomad"
 	payloads[TypeEnrolApproval].(*EnrolApproval).Labels["platform"] = "nomad"
 	payloads[TypeCapability].(*Capability).Labels["platform"] = "nomad"
@@ -554,7 +547,7 @@ func TestReceiverLabelsRejectPlatform(t *testing.T) {
 func TestGrantAllowedRejectsPlatformAndLabelKeys(t *testing.T) {
 	for name, key := range map[string]string{"platform": "platform", "receiver label": "lab/os"} {
 		t.Run(name, func(t *testing.T) {
-			approval := validPayloads()[TypeEnrolApproval].(*EnrolApproval)
+			approval := validPayloads(t)[TypeEnrolApproval].(*EnrolApproval)
 			approval.Adapters[0].Allowed[key] = []string{"linux"}
 			if _, err := MarshalPayload(TypeEnrolApproval, approval); err == nil || !strings.Contains(err.Error(), "exclude platform and receiver label keys") {
 				t.Fatalf("got %v, want allowed key rejected", err)
@@ -571,7 +564,7 @@ func TestAdapterNamesValidated(t *testing.T) {
 		"pool":      func(value *EnrolApproval) { value.Pool = "Linux" },
 	} {
 		t.Run(name, func(t *testing.T) {
-			approval := validPayloads()[TypeEnrolApproval].(*EnrolApproval)
+			approval := validPayloads(t)[TypeEnrolApproval].(*EnrolApproval)
 			mutate(approval)
 			if _, err := MarshalPayload(TypeEnrolApproval, approval); err == nil {
 				t.Fatal("invalid approval accepted")
@@ -588,37 +581,17 @@ func TestOfferValidation(t *testing.T) {
 		"missing adapter": {Adapter: "", Labels: map[string]string{"runtime": "exec"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			capability := validPayloads()[TypeCapability].(*Capability)
+			capability := validPayloads(t)[TypeCapability].(*Capability)
 			capability.Offers = []Offer{offer}
 			if _, err := MarshalPayload(TypeCapability, capability); err == nil {
 				t.Fatal("invalid offer accepted")
 			}
 		})
 	}
-	request := validPayloads()[TypeEnrolRequest].(*EnrolRequest)
+	request := validPayloads(t)[TypeEnrolRequest].(*EnrolRequest)
 	request.Adapters[0].Offers[0].Adapter = "other"
 	if _, err := MarshalPayload(TypeEnrolRequest, request); err == nil {
 		t.Fatal("detected offer naming another adapter accepted")
-	}
-}
-
-func TestLabelsEqualRejectsDifferentKeysWithEmptyValues(t *testing.T) {
-	left := map[string]string{"a": "", "b": "1"}
-	right := map[string]string{"b": "1", "c": "x"}
-	if LabelsEqual(left, right) {
-		t.Fatal("different label keys compared equal")
-	}
-}
-
-func TestNarrows(t *testing.T) {
-	parent := []Requirement{{Key: "runtime", Operator: OpIn, Values: []string{"exec", "podman"}}, {Key: "region", Operator: OpIn, Values: []string{"eu"}}}
-	if !Narrows(parent, []Requirement{{Key: "runtime", Operator: OpIn, Values: []string{"exec"}}, {Key: "region", Operator: OpIn, Values: []string{"eu"}}}) {
-		t.Fatal("subset did not narrow")
-	}
-	if Narrows(parent, []Requirement{{Key: "runtime", Operator: OpIn, Values: []string{"exec", "podman", "docker"}}, {Key: "region", Operator: OpIn, Values: []string{"eu"}}}) ||
-		Narrows(parent, []Requirement{{Key: "runtime", Operator: OpIn, Values: []string{"exec"}}}) ||
-		Narrows(parent, []Requirement{{Key: "runtime", Operator: "Exists", Values: []string{"exec"}}, {Key: "region", Operator: OpIn, Values: []string{"eu"}}}) {
-		t.Fatal("invalid child narrowed")
 	}
 }
 
@@ -629,7 +602,7 @@ func TestApprovalAllowedValidation(t *testing.T) {
 		"empty values":    func(grant *AdapterGrant) { grant.Allowed = map[string][]string{"runtime": {}} },
 	} {
 		t.Run(name, func(t *testing.T) {
-			approval := validPayloads()[TypeEnrolApproval].(*EnrolApproval)
+			approval := validPayloads(t)[TypeEnrolApproval].(*EnrolApproval)
 			mutate(&approval.Adapters[0])
 			if _, err := MarshalPayload(TypeEnrolApproval, approval); err == nil {
 				t.Fatal("invalid approval accepted")

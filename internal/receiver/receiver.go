@@ -26,15 +26,6 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-const (
-	stateTopic      = "receivers.state"
-	capabilityTopic = "receivers.capabilities"
-	secretTopic     = "receivers.secrets"
-	taskTopic       = "tasks.queue"
-	eventTopic      = "tasks.events"
-	transcriptTopic = "transcripts"
-)
-
 // Handle identifies one platform instance of a run; Format is adapter-private and Adapter is set by the core.
 type Handle struct {
 	Adapter string
@@ -133,20 +124,19 @@ func LoadConfig(path string) (Config, error) {
 
 // Receiver claims tasks for one pool and runs them through its adapters.
 type Receiver struct {
-	config   Config
-	adapters []Named
-	kafkaOpt []kgo.Opt
-	base     *kgo.Client
-	userPub  ed25519.PublicKey
-	signing  ed25519.PrivateKey
-	sealing  *ecdh.PrivateKey
-	logger   *log.Logger
-	mu       sync.Mutex
-	enrolled *trust.Enrolled
-	offers   []wire.Offer
-	signers  []ed25519.PublicKey
-	inFlight int64
-	// credentials holds the latest opened secret per adapter name.
+	config      Config
+	adapters    []Named
+	kafkaOpt    []kgo.Opt
+	base        *kgo.Client
+	userPub     ed25519.PublicKey
+	signing     ed25519.PrivateKey
+	sealing     *ecdh.PrivateKey
+	logger      *log.Logger
+	mu          sync.Mutex
+	enrolled    *trust.Enrolled
+	offers      []wire.Offer
+	signers     []ed25519.PublicKey
+	inFlight    int64
 	credentials map[string]heldCredential
 }
 
@@ -155,7 +145,7 @@ type heldCredential struct {
 	value   []byte
 }
 
-// New loads or creates the receiver's keys and connects to Kafka; adapters are in configuration order.
+// New loads or creates the receiver's keys and builds its Kafka client; adapters are in configuration order.
 func New(config Config, adapters []Named, logger *log.Logger) (*Receiver, error) {
 	caPEM, err := os.ReadFile(config.CAFile)
 	if err != nil {
@@ -267,7 +257,7 @@ func (r *Receiver) enrol(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: stateTopic, Key: []byte(r.config.ReceiverID), Value: request}).FirstErr(); err != nil {
+		if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(r.config.ReceiverID), Value: request}).FirstErr(); err != nil {
 			return fmt.Errorf("publish enrolment request: %w", err)
 		}
 		r.logger.Printf("enrolment requested: receiver=%s request=%s signing=%s", r.config.ReceiverID, trust.EnvelopeHash(request), wire.Fingerprint(r.signing.Public().(ed25519.PublicKey)))
@@ -297,13 +287,17 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	// A bounded read can wait on another holder's open transaction; never longer than this.
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	records, err := readBounded(ctx, r.kafkaOpt, stateTopic)
+	records, err := readBounded(ctx, r.kafkaOpt, wire.TopicState)
 	if err != nil {
 		return err
 	}
 	state := trust.NewState(r.userPub)
+	var approved []string
 	for _, record := range records {
-		_ = state.Apply(record.Value) // unverifiable records change nothing
+		verified, _ := state.Apply(record.Value) // unverifiable records change nothing
+		if approval, ok := verified.(*wire.EnrolApproval); ok {
+			approved = append(approved, approval.ReceiverID)
+		}
 	}
 	now := time.Now()
 	enrolled, err := state.Receiver(r.config.ReceiverID, now)
@@ -323,16 +317,7 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	}
 	ids := make(map[string]bool)
 	var signers []ed25519.PublicKey
-	for _, record := range records {
-		envelope, err := wire.DecodeEnvelope(record.Value)
-		if err != nil || envelope.Type != wire.TypeEnrolApproval {
-			continue
-		}
-		decoded, err := wire.DecodePayload(wire.TypeEnrolApproval, envelope.Payload)
-		if err != nil {
-			continue
-		}
-		id := decoded.(*wire.EnrolApproval).ReceiverID
+	for _, id := range approved {
 		if ids[id] {
 			continue
 		}
@@ -346,7 +331,7 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	r.enrolled, r.signers = &enrolled, signers
 	r.mu.Unlock()
 
-	secrets, err := readBounded(ctx, r.kafkaOpt, secretTopic)
+	secrets, err := readBounded(ctx, r.kafkaOpt, wire.TopicSecret)
 	if err != nil {
 		return err
 	}
@@ -378,19 +363,10 @@ func (r *Receiver) openCredential(state *trust.State, secrets []*kgo.Record, nam
 		return true
 	}
 	// Open first: an unverified record must not decide which version is current.
-	value, err := trust.Open(latest, state, r.config.ReceiverID, r.sealing, r.userPub, time.Now())
+	value, version, err := trust.Open(latest, state, r.config.ReceiverID, r.sealing, r.userPub, time.Now())
 	if err != nil {
 		return false
 	}
-	envelope, err := wire.DecodeEnvelope(latest)
-	if err != nil {
-		return false
-	}
-	decoded, err := wire.DecodePayload(wire.TypeSealedSecret, envelope.Payload)
-	if err != nil {
-		return false
-	}
-	version := decoded.(*wire.SealedSecret).Version
 	r.mu.Lock()
 	newer := version > r.credentials[named.Name].version
 	if newer {
@@ -456,7 +432,7 @@ func (r *Receiver) publishCapability(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return r.base.ProduceSync(ctx, &kgo.Record{Topic: capabilityTopic, Key: []byte(r.config.ReceiverID), Value: value}).FirstErr()
+	return r.base.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicCapability, Key: []byte(r.config.ReceiverID), Value: value}).FirstErr()
 }
 
 func (r *Receiver) filterOffers(enrolled *trust.Enrolled, offers []wire.Offer) []wire.Offer {

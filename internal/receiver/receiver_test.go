@@ -310,7 +310,7 @@ func TestSecretNeverLogged(t *testing.T) {
 	f := newFixture(t, resultStream)
 	runToReply(t, f)
 	// A forged, unsigned record as the latest sealed secret must be refused without echoing anything.
-	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: secretTopic, Key: []byte("receiver-nomad/" + credentialName), Value: []byte(testToken)}).FirstErr(); err != nil {
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicSecret, Key: []byte("receiver-nomad/" + credentialName), Value: []byte(testToken)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.receiver.refresh(f.ctx); err == nil || err.Error() != "credential rejected" {
@@ -352,13 +352,17 @@ func TestReceiverGrantPlatformMismatchNotEnrolled(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			approval, err := trust.Approve(request, f.userKey, map[string]string{}, "nomad", []wire.AdapterGrant{test.grant}, []wire.Requirement{}, "auto", 1, "", time.Now().Add(time.Hour))
+			enrolRequest, err := trust.NewState(f.userKey.Public().(ed25519.PublicKey)).Apply(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			approval, err := trust.Approve(request, enrolRequest.(*wire.EnrolRequest), f.userKey, map[string]string{}, "nomad", []wire.AdapterGrant{test.grant}, []wire.Requirement{}, "auto", 1, "", time.Now().Add(time.Hour))
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := f.kafka.ProduceSync(f.ctx,
-				&kgo.Record{Topic: stateTopic, Key: []byte(f.receiver.config.ReceiverID), Value: request},
-				&kgo.Record{Topic: stateTopic, Key: []byte(f.receiver.config.ReceiverID), Value: approval},
+				&kgo.Record{Topic: wire.TopicState, Key: []byte(f.receiver.config.ReceiverID), Value: request},
+				&kgo.Record{Topic: wire.TopicState, Key: []byte(f.receiver.config.ReceiverID), Value: approval},
 			).FirstErr(); err != nil {
 				t.Fatal(err)
 			}
@@ -408,15 +412,6 @@ func admitFixture(t *testing.T) (fixture, *trust.Enrolled) {
 	return f, enrolled
 }
 
-func eventCount(t *testing.T, f fixture) int {
-	t.Helper()
-	records, err := readBounded(f.ctx, f.receiver.kafkaOpt, eventTopic)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return len(records)
-}
-
 func topicCount(t *testing.T, f fixture, topic string) int {
 	t.Helper()
 	records, err := readBounded(f.ctx, f.receiver.kafkaOpt, topic)
@@ -426,7 +421,7 @@ func topicCount(t *testing.T, f fixture, topic string) int {
 	return len(records)
 }
 
-func testActiveRun(t *testing.T, f fixture, runID string) *activeRun {
+func testActiveRun(t *testing.T, f fixture, runID string, attempt int64) *activeRun {
 	t.Helper()
 	producer, err := kgo.NewClient(append(append([]kgo.Opt(nil), f.receiver.kafkaOpt...), kgo.TransactionalID(runID))...)
 	if err != nil {
@@ -438,7 +433,7 @@ func testActiveRun(t *testing.T, f fixture, runID string) *activeRun {
 		producer: producer,
 		task:     &wire.Task{RunID: runID, ReplyTopic: "replies.test", CorrelationID: "corr"},
 		taskHash: strings.Repeat("a", 64),
-		attempt:  1,
+		attempt:  attempt,
 		adapter:  "nomad",
 	}
 }
@@ -491,19 +486,10 @@ func TestReceiverNoCredentialFailsRun(t *testing.T) {
 	if dispatches != 0 || releases != 1 {
 		t.Fatalf("dispatches=%d releases=%d, want 0 and 1", dispatches, releases)
 	}
-	records, err := readBounded(f.ctx, f.receiver.kafkaOpt, "replies.test")
-	if err != nil || len(records) != 1 {
-		t.Fatalf("reply records=%d err=%v", len(records), err)
+	if n := topicCount(t, f, "replies.test"); n != 1 {
+		t.Fatalf("reply records=%d, want 1", n)
 	}
-	envelope, err := wire.DecodeEnvelope(records[0].Value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	verified, err := wire.Verify(envelope, f.receiver.signing.Public().(ed25519.PublicKey), wire.SignerReceiver)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := verified.(*wire.Reply).Artifacts[0].Parts[0].Text; got != "credential unavailable" {
+	if got := lastReplyText(t, f); got != "credential unavailable" {
 		t.Fatalf("reason %q", got)
 	}
 }
@@ -511,7 +497,7 @@ func TestReceiverNoCredentialFailsRun(t *testing.T) {
 func TestReceiverReleasesAfterTerminal(t *testing.T) {
 	t.Run("stop", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		run := testActiveRun(t, f, "run-release-stop")
+		run := testActiveRun(t, f, "run-release-stop", 1)
 		if status := run.finish(f.ctx, Handle{Adapter: "nomad", Alloc: "alloc"}, nil, agentResult{Result: "done"}); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
@@ -541,8 +527,8 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 func TestUnsignedTaskRejectedSilently(t *testing.T) {
 	f, enrolled := admitFixture(t)
 	admitted, ack := f.receiver.admit(f.ctx, &kgo.Record{Value: []byte("acl-probe")}, enrolled)
-	if admitted != nil || ack != kgo.AckReject || eventCount(t, f) != 0 {
-		t.Fatalf("admitted=%v ack=%v events=%d", admitted != nil, ack, eventCount(t, f))
+	if admitted != nil || ack != kgo.AckReject || topicCount(t, f, wire.TopicEvent) != 0 {
+		t.Fatalf("admitted=%v ack=%v events=%d", admitted != nil, ack, topicCount(t, f, wire.TopicEvent))
 	}
 }
 
@@ -553,7 +539,7 @@ func TestForeignSignedTaskRejectedSilently(t *testing.T) {
 		t.Fatal(err)
 	}
 	admitted, ack := f.receiver.admit(f.ctx, signedRoot(t, other, nil), enrolled)
-	if admitted != nil || ack != kgo.AckReject || eventCount(t, f) != 0 {
+	if admitted != nil || ack != kgo.AckReject || topicCount(t, f, wire.TopicEvent) != 0 {
 		t.Fatalf("admitted=%v ack=%v", admitted != nil, ack)
 	}
 }
@@ -562,8 +548,8 @@ func TestTaskForOtherPoolSkippedSilently(t *testing.T) {
 	f, enrolled := admitFixture(t)
 	record := signedRoot(t, f.userKey, func(task *wire.Task) { task.Pool = "other" })
 	admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
-	if admitted != nil || ack != kgo.AckAccept || eventCount(t, f) != 0 {
-		t.Fatalf("admitted=%v ack=%v events=%d", admitted != nil, ack, eventCount(t, f))
+	if admitted != nil || ack != kgo.AckAccept || topicCount(t, f, wire.TopicEvent) != 0 {
+		t.Fatalf("admitted=%v ack=%v events=%d", admitted != nil, ack, topicCount(t, f, wire.TopicEvent))
 	}
 }
 
@@ -590,7 +576,7 @@ func TestAdmitRejections(t *testing.T) {
 			if !strings.Contains(f.logs.String(), c.reason) {
 				t.Fatalf("logs %q lack reason %q", f.logs.String(), c.reason)
 			}
-			if n := eventCount(t, f); n != 1 {
+			if n := topicCount(t, f, wire.TopicEvent); n != 1 {
 				t.Fatalf("want one signed REJECTED event, got %d", n)
 			}
 		})
@@ -603,8 +589,8 @@ func TestAdmissionMismatchSkippedSilently(t *testing.T) {
 		task.Selector[0].Values = []string{"docker"}
 	})
 	admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
-	if admitted != nil || ack != kgo.AckAccept || eventCount(t, f) != 0 {
-		t.Fatalf("admitted=%v ack=%v events=%d", admitted != nil, ack, eventCount(t, f))
+	if admitted != nil || ack != kgo.AckAccept || topicCount(t, f, wire.TopicEvent) != 0 {
+		t.Fatalf("admitted=%v ack=%v events=%d", admitted != nil, ack, topicCount(t, f, wire.TopicEvent))
 	}
 }
 
@@ -618,19 +604,19 @@ func TestRejectionPublishFailureReleases(t *testing.T) {
 	if admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("admitted=%v ack=%v, want nil and release", admitted != nil, ack)
 	}
-	if n := eventCount(t, f); n != 0 {
+	if n := topicCount(t, f, wire.TopicEvent); n != 0 {
 		t.Fatalf("failed rejection publish left %d events", n)
 	}
 }
 
 func TestResultLineStopsAllocationBeforeTerminal(t *testing.T) {
 	f, _ := admitFixture(t)
-	run := testActiveRun(t, f, "run-result-stop")
+	run := testActiveRun(t, f, "run-result-stop", 1)
 	f.adapter.stopCheck = func() error {
 		if n := topicCount(t, f, "replies.test"); n != 0 {
 			return fmt.Errorf("reply visible before Stop: %d records", n)
 		}
-		if n := eventCount(t, f); n != 0 {
+		if n := topicCount(t, f, wire.TopicEvent); n != 0 {
 			return fmt.Errorf("terminal event visible before Stop: %d records", n)
 		}
 		return nil
@@ -642,8 +628,8 @@ func TestResultLineStopsAllocationBeforeTerminal(t *testing.T) {
 	f.adapter.mu.Lock()
 	stops := f.adapter.stops
 	f.adapter.mu.Unlock()
-	if stops != 1 || topicCount(t, f, "replies.test") != 1 || eventCount(t, f) != 1 {
-		t.Fatalf("stops=%d replies=%d events=%d", stops, topicCount(t, f, "replies.test"), eventCount(t, f))
+	if stops != 1 || topicCount(t, f, "replies.test") != 1 || topicCount(t, f, wire.TopicEvent) != 1 {
+		t.Fatalf("stops=%d replies=%d events=%d", stops, topicCount(t, f, "replies.test"), topicCount(t, f, wire.TopicEvent))
 	}
 }
 
@@ -662,11 +648,11 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			f, _ := admitFixture(t)
 			f.adapter.stopErr = errors.New("stop failed")
-			run := testActiveRun(t, f, "run-stop-failure-"+test.name)
+			run := testActiveRun(t, f, "run-stop-failure-"+test.name, 1)
 			if status := test.call(run, f.ctx); status != kgo.AckRelease {
 				t.Fatalf("status %v, want release", status)
 			}
-			if replies, events := topicCount(t, f, "replies.test"), eventCount(t, f); replies != 0 || events != 0 {
+			if replies, events := topicCount(t, f, "replies.test"), topicCount(t, f, wire.TopicEvent); replies != 0 || events != 0 {
 				t.Fatalf("Stop failure published replies=%d events=%d", replies, events)
 			}
 		})
@@ -684,7 +670,7 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 		return value
 	}
 	for _, offset := range []int64{10, 42} {
-		if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: eventTopic, Key: []byte(task.RunID), Value: heartbeat(offset)}).FirstErr(); err != nil {
+		if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.RunID), Value: heartbeat(offset)}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -697,7 +683,7 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	if err := aborted.BeginTransaction(); err != nil {
 		t.Fatal(err)
 	}
-	if err := aborted.ProduceSync(f.ctx, &kgo.Record{Topic: eventTopic, Key: []byte(task.RunID), Value: heartbeat(99)}).FirstErr(); err != nil {
+	if err := aborted.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.RunID), Value: heartbeat(99)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	if err := aborted.EndTransaction(f.ctx, kgo.TryAbort); err != nil {
@@ -755,12 +741,16 @@ func TestAdoptionTrustsPeerHeartbeat(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		approval, err := trust.Approve(request, f.userKey, map[string]string{}, "nomad", nomadGrants(), []wire.Requirement{}, "auto", 1, "", time.Now().Add(time.Hour))
+		enrolRequest, err := trust.NewState(f.userKey.Public().(ed25519.PublicKey)).Apply(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		approval, err := trust.Approve(request, enrolRequest.(*wire.EnrolRequest), f.userKey, map[string]string{}, "nomad", nomadGrants(), []wire.Requirement{}, "auto", 1, "", time.Now().Add(time.Hour))
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, value := range [][]byte{request, approval} {
-			if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: stateTopic, Key: []byte(id), Value: value}).FirstErr(); err != nil {
+			if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(id), Value: value}).FirstErr(); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -784,7 +774,7 @@ func TestAdoptionTrustsPeerHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: eventTopic, Key: []byte(task.RunID), Value: value}).FirstErr(); err != nil {
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.RunID), Value: value}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	got, err := f.receiver.lastOffset(f.ctx, task.RunID)
@@ -806,6 +796,40 @@ func TestFollowErrorReasonIsFixed(t *testing.T) {
 	logs := f.logs.String()
 	if strings.Contains(logs, "secret upstream detail") || !strings.Contains(logs, "*errors.errorString") {
 		t.Fatalf("unexpected follow error log: %q", logs)
+	}
+}
+
+func TestDispatchErrorReasonIsFixed(t *testing.T) {
+	const secret = "token=s3cr3t-dispatch-detail"
+	f, enrolled := admitFixture(t)
+	f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+	f.adapter.dispatchErr = errors.New(secret)
+	record := signedRoot(t, f.userKey, nil)
+	admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
+	if status := f.receiver.execute(f.ctx, f.kafka, record, admitted, 1); status != kgo.AckReject {
+		t.Fatalf("status %v", status)
+	}
+	if got := lastReplyText(t, f); got != "dispatch failed" {
+		t.Fatalf("reply reason %q, want fixed reason", got)
+	}
+	for _, topic := range []string{wire.TopicEvent, "replies.test"} {
+		records, err := readBounded(f.ctx, f.receiver.kafkaOpt, topic)
+		if err != nil || len(records) == 0 {
+			t.Fatalf("%s records=%d err=%v", topic, len(records), err)
+		}
+		for _, record := range records {
+			envelope, err := wire.DecodeEnvelope(record.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(envelope.Payload), secret) {
+				t.Fatalf("dispatch error detail published on %s: %s", topic, envelope.Payload)
+			}
+		}
+	}
+	logs := f.logs.String()
+	if strings.Contains(logs, secret) || !strings.Contains(logs, "*errors.errorString") {
+		t.Fatalf("unexpected dispatch error log: %q", logs)
 	}
 }
 
@@ -852,20 +876,11 @@ func TestRunJoinsPeriodicWork(t *testing.T) {
 
 func TestFencedProducerStopsRunWrites(t *testing.T) {
 	f, _ := admitFixture(t)
-	newRun := func(attempt int64) *activeRun {
-		producer, err := kgo.NewClient(append(append([]kgo.Opt(nil), f.receiver.kafkaOpt...), kgo.TransactionalID("run-fence"))...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(producer.Close)
-		task := &wire.Task{RunID: "run-fence", ReplyTopic: "replies.test", CorrelationID: "c"}
-		return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: strings.Repeat("a", 64), attempt: attempt}
-	}
-	zombie := newRun(1)
+	zombie := testActiveRun(t, f, "run-fence", 1)
 	if err := zombie.commit(f.ctx, zombie.eventRecord("claimed", wire.TaskStateWorking, nil, nil)); err != nil {
 		t.Fatal(err)
 	}
-	adopter := newRun(2)
+	adopter := testActiveRun(t, f, "run-fence", 2)
 	if err := adopter.commit(f.ctx, adopter.eventRecord("claimed", wire.TaskStateWorking, nil, nil)); err != nil {
 		t.Fatal(err)
 	}
@@ -876,7 +891,7 @@ func TestFencedProducerStopsRunWrites(t *testing.T) {
 	if status := zombie.abandon(err); status != 0 {
 		t.Fatalf("fenced run returned ack %v, want 0 (no acknowledgement)", status)
 	}
-	records, err := readBounded(f.ctx, f.receiver.kafkaOpt, eventTopic)
+	records, err := readBounded(f.ctx, f.receiver.kafkaOpt, wire.TopicEvent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -922,8 +937,8 @@ type multiFixture struct {
 	lab, cloud, edge *fakeAdapter
 }
 
-// newMultiFixture enrols a receiver hosting a nomad adapter and an aws adapter, each with its own
-// credential, and a second nomad adapter with none.
+// newMultiFixture enrols a receiver hosting nomad adapters lab and edge and an aws adapter cloud;
+// only lab's credential is delivered.
 func newMultiFixture(t *testing.T) multiFixture {
 	t.Helper()
 	f := newFixture(t, resultStream)
@@ -946,7 +961,7 @@ func newMultiFixture(t *testing.T) multiFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: stateTopic, Key: []byte(f.receiver.config.ReceiverID), Value: request}).FirstErr(); err != nil {
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(f.receiver.config.ReceiverID), Value: request}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	grants := []wire.AdapterGrant{

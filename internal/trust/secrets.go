@@ -76,50 +76,50 @@ func Seal(enrolled Enrolled, receiverID, name string, version int64, value []byt
 	return secretVersionEnvelope, sealedSecretEnvelope, nil
 }
 
-// Open verifies and decrypts the current version of a sealed secret.
-func Open(sealedEnvelopeBytes []byte, state *State, receiverID string, sealingKey *ecdh.PrivateKey, userPublicKey ed25519.PublicKey, now time.Time) ([]byte, error) {
+// Open verifies and decrypts the current version of a sealed secret and returns its plaintext and version.
+func Open(sealedEnvelopeBytes []byte, state *State, receiverID string, sealingKey *ecdh.PrivateKey, userPublicKey ed25519.PublicKey, now time.Time) ([]byte, int64, error) {
 	if state == nil || sealingKey == nil {
-		return nil, errors.New("state and sealing key are required")
+		return nil, 0, errors.New("state and sealing key are required")
 	}
 	envelope, err := wire.DecodeEnvelope(sealedEnvelopeBytes)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	verified, err := wire.Verify(envelope, userPublicKey, wire.SignerUser)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	sealed, ok := verified.(*wire.SealedSecret)
 	if !ok {
-		return nil, errors.New("not a sealed secret")
+		return nil, 0, errors.New("not a sealed secret")
 	}
 	if sealed.ReceiverID != receiverID {
-		return nil, errors.New("sealed secret receiver does not match opener")
+		return nil, 0, errors.New("sealed secret receiver does not match opener")
 	}
 	enrolled, err := state.Receiver(receiverID, now)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	id := secretID{receiverID: sealed.ReceiverID, name: sealed.Name}
 	versions := state.secretVersions[id]
 	header, ok := versions[sealed.Version]
 	if !ok {
-		return nil, errors.New("matching secret version is not in state")
+		return nil, 0, errors.New("matching secret version is not in state")
 	}
 	if sealed.Version != state.maximumVersions[id] {
-		return nil, errors.New("sealed secret version is not current")
+		return nil, 0, errors.New("sealed secret version is not current")
 	}
 	if header.CiphertextHash != ciphertextHash(sealed.Enc, sealed.CT) {
-		return nil, errors.New("sealed secret ciphertext hash does not match")
+		return nil, 0, errors.New("sealed secret ciphertext hash does not match")
 	}
 	if header.SealingKeyFP != sealingFingerprint(sealingKey.PublicKey().Bytes()) {
-		return nil, errors.New("sealed secret sealing key does not match opener")
+		return nil, 0, errors.New("sealed secret sealing key does not match opener")
 	}
 	if header.Generation != enrolled.Generation {
-		return nil, errors.New("sealed secret generation is not current")
+		return nil, 0, errors.New("sealed secret generation is not current")
 	}
 	if now.UnixMilli() >= header.ExpMS {
-		return nil, errors.New("sealed secret is expired")
+		return nil, 0, errors.New("sealed secret is expired")
 	}
 	aad, err := marshalSecretAAD(secretAAD{
 		Topic: sealedSecretTopic, ReceiverID: header.ReceiverID, Name: header.Name,
@@ -127,17 +127,21 @@ func Open(sealedEnvelopeBytes []byte, state *State, receiverID string, sealingKe
 		Version: header.Version, ExpMS: header.ExpMS,
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	privateKey, err := hpke.NewDHKEMPrivateKey(sealingKey)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	recipient, err := hpke.NewRecipient(sealed.Enc, privateKey, hpke.HKDFSHA256(), hpke.AES256GCM(), []byte(sealedSecretInfo))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return recipient.Open(aad, sealed.CT)
+	value, err := recipient.Open(aad, sealed.CT)
+	if err != nil {
+		return nil, 0, err
+	}
+	return value, sealed.Version, nil
 }
 
 func marshalSecretAAD(header secretAAD) ([]byte, error) {

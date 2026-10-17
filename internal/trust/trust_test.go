@@ -25,6 +25,7 @@ type trustFixture struct {
 	receiverKey    ed25519.PrivateKey
 	sealingKey     *ecdh.PrivateKey
 	request        []byte
+	enrolRequest   *wire.EnrolRequest
 	approval       []byte
 	state          *State
 	enrolled       Enrolled
@@ -48,15 +49,17 @@ func newTrustFixture(t *testing.T) trustFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approval, err := Approve(request, userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 1, "", testNow.Add(time.Hour))
+	state := NewState(userPublicKey)
+	decoded, err := state.Apply(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := NewState(userPublicKey)
-	if err := state.Apply(request); err != nil {
+	enrolRequest := decoded.(*wire.EnrolRequest)
+	approval, err := Approve(request, enrolRequest, userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 1, "", testNow.Add(time.Hour))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := state.Apply(approval); err != nil {
+	if _, err := state.Apply(approval); err != nil {
 		t.Fatal(err)
 	}
 	enrolled, err := state.Receiver("receiver-a", testNow)
@@ -66,7 +69,7 @@ func newTrustFixture(t *testing.T) trustFixture {
 	return trustFixture{
 		userPublicKey: userPublicKey, userPrivateKey: userPrivateKey,
 		receiverKey: receiverKey, sealingKey: sealingKey,
-		request: request, approval: approval, state: state, enrolled: enrolled,
+		request: request, enrolRequest: enrolRequest, approval: approval, state: state, enrolled: enrolled,
 	}
 }
 
@@ -125,7 +128,7 @@ func TestEnrolRequestApproveState(t *testing.T) {
 	if !reflect.DeepEqual(fixture.enrolled.Labels, testLabels()) ||
 		!reflect.DeepEqual(fixture.enrolled.Adapters, testGrants()) ||
 		!reflect.DeepEqual(fixture.enrolled.Selector, testSelector()) ||
-		fixture.enrolled.Pool != "default" || fixture.enrolled.Renewal != "auto" || fixture.enrolled.Generation != 1 {
+		fixture.enrolled.Pool != "default" || fixture.enrolled.Generation != 1 {
 		t.Fatalf("unexpected enrolment: %#v", fixture.enrolled)
 	}
 	if _, err := fixture.state.Receiver("receiver-a", testNow.Add(2*time.Hour)); err == nil {
@@ -155,10 +158,10 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.state.Apply(versionEnvelope); err != nil {
+	if _, err := fixture.state.Apply(versionEnvelope); err != nil {
 		t.Fatal(err)
 	}
-	plaintext, err := Open(sealedEnvelope, fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow)
+	plaintext, _, err := Open(sealedEnvelope, fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +204,7 @@ func TestCapabilityWithinBounds(t *testing.T) {
 		wire.Offer{Adapter: "cloud", Labels: map[string]string{"runtime": "lambda"}},
 	)
 	envelope := mustSigned(t, wire.TypeCapability, capability, fixture.receiverKey)
-	if err := CapabilityWithin(envelope, fixture.enrolled); err != nil {
+	if _, err := CapabilityWithin(envelope, fixture.enrolled); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -209,7 +212,7 @@ func TestCapabilityWithinBounds(t *testing.T) {
 func TestCapabilityOfferOutsideAllowedRejected(t *testing.T) {
 	fixture := newTrustFixture(t)
 	capability := testCapability(wire.Offer{Adapter: "lab", Labels: map[string]string{"runtime": "podman"}})
-	if err := CapabilityWithin(mustSigned(t, wire.TypeCapability, capability, fixture.receiverKey), fixture.enrolled); err == nil {
+	if _, err := CapabilityWithin(mustSigned(t, wire.TypeCapability, capability, fixture.receiverKey), fixture.enrolled); err == nil {
 		t.Fatal("offer outside allowed was accepted")
 	}
 }
@@ -217,7 +220,7 @@ func TestCapabilityOfferOutsideAllowedRejected(t *testing.T) {
 func TestCapabilityOfferUnknownAdapterRejected(t *testing.T) {
 	fixture := newTrustFixture(t)
 	capability := testCapability(wire.Offer{Adapter: "other", Labels: map[string]string{"runtime": "exec"}})
-	if err := CapabilityWithin(mustSigned(t, wire.TypeCapability, capability, fixture.receiverKey), fixture.enrolled); err == nil || !strings.Contains(err.Error(), "ungranted") {
+	if _, err := CapabilityWithin(mustSigned(t, wire.TypeCapability, capability, fixture.receiverKey), fixture.enrolled); err == nil || !strings.Contains(err.Error(), "ungranted") {
 		t.Fatalf("got %v, want offer from ungranted adapter rejected", err)
 	}
 }
@@ -225,7 +228,7 @@ func TestCapabilityOfferUnknownAdapterRejected(t *testing.T) {
 func TestCapabilityOfferOutsideItsGrantRejected(t *testing.T) {
 	fixture := newTrustFixture(t)
 	capability := testCapability(wire.Offer{Adapter: "lab", Labels: map[string]string{"runtime": "lambda"}})
-	if err := CapabilityWithin(mustSigned(t, wire.TypeCapability, capability, fixture.receiverKey), fixture.enrolled); err == nil || !strings.Contains(err.Error(), "exceeds its grant") {
+	if _, err := CapabilityWithin(mustSigned(t, wire.TypeCapability, capability, fixture.receiverKey), fixture.enrolled); err == nil || !strings.Contains(err.Error(), "exceeds its grant") {
 		t.Fatalf("got %v, want value allowed only in the other grant rejected", err)
 	}
 }
@@ -250,21 +253,21 @@ func TestApproveRejectsSwappedSealingKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Approve(tampered, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 1, "", testNow.Add(time.Hour)); err == nil {
+	if _, err := Approve(tampered, request, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 1, "", testNow.Add(time.Hour)); err == nil {
 		t.Fatal("request with swapped sealing key was approved")
 	}
 }
 
 func TestStateIgnoresOlderApprovalAppendedLater(t *testing.T) {
 	fixture := newTrustFixture(t)
-	approval2, err := Approve(fixture.request, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 2, EnvelopeHash(fixture.approval), testNow.Add(2*time.Hour))
+	approval2, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 2, EnvelopeHash(fixture.approval), testNow.Add(2*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.state.Apply(approval2); err != nil {
+	if _, err := fixture.state.Apply(approval2); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.state.Apply(fixture.approval); err != nil {
+	if _, err := fixture.state.Apply(fixture.approval); err != nil {
 		t.Fatal(err)
 	}
 	enrolled, err := fixture.state.Receiver("receiver-a", testNow)
@@ -279,11 +282,11 @@ func TestStateIgnoresOlderApprovalAppendedLater(t *testing.T) {
 func TestStateRejectsApprovalWithWrongPrevHash(t *testing.T) {
 	fixture := newTrustFixture(t)
 	wrongHash := strings.Repeat("a", 64)
-	approval2, err := Approve(fixture.request, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 2, wrongHash, testNow.Add(2*time.Hour))
+	approval2, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 2, wrongHash, testNow.Add(2*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.state.Apply(approval2); err == nil {
+	if _, err := fixture.state.Apply(approval2); err == nil {
 		t.Fatal("approval with wrong previous hash was accepted")
 	}
 	enrolled, err := fixture.state.Receiver("receiver-a", testNow)
@@ -298,7 +301,7 @@ func TestStateRejectsApprovalWithWrongPrevHash(t *testing.T) {
 func TestStateRejectsApprovalForUnknownRequest(t *testing.T) {
 	fixture := newTrustFixture(t)
 	state := NewState(fixture.userPublicKey)
-	if err := state.Apply(fixture.approval); err == nil {
+	if _, err := state.Apply(fixture.approval); err == nil {
 		t.Fatal("approval for unknown request was accepted")
 	}
 	if _, err := state.Receiver("receiver-a", testNow); err == nil {
@@ -309,7 +312,7 @@ func TestStateRejectsApprovalForUnknownRequest(t *testing.T) {
 func TestStateRejectsReceiverSignedApproval(t *testing.T) {
 	fixture := newTrustFixture(t)
 	state := NewState(fixture.userPublicKey)
-	if err := state.Apply(fixture.request); err != nil {
+	if _, err := state.Apply(fixture.request); err != nil {
 		t.Fatal(err)
 	}
 	approval := &wire.EnrolApproval{
@@ -317,7 +320,7 @@ func TestStateRejectsReceiverSignedApproval(t *testing.T) {
 		Labels: testLabels(), Pool: "default", Adapters: testGrants(), Selector: testSelector(),
 		Renewal: "auto", Generation: 1, PrevStateHash: "", ExpMS: testNow.Add(time.Hour).UnixMilli(),
 	}
-	if err := state.Apply(mustSigned(t, wire.TypeEnrolApproval, approval, fixture.receiverKey)); err == nil {
+	if _, err := state.Apply(mustSigned(t, wire.TypeEnrolApproval, approval, fixture.receiverKey)); err == nil {
 		t.Fatal("receiver-signed approval was accepted")
 	}
 }
@@ -335,7 +338,7 @@ func TestCapabilityBroaderThanApprovalRejected(t *testing.T) {
 			capability := testCapability(wire.Offer{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}})
 			mutate(capability)
 			envelope := mustSigned(t, wire.TypeCapability, capability, fixture.receiverKey)
-			if err := CapabilityWithin(envelope, fixture.enrolled); err == nil {
+			if _, err := CapabilityWithin(envelope, fixture.enrolled); err == nil {
 				t.Fatal("out-of-bounds capability was accepted")
 			}
 		})
@@ -352,13 +355,13 @@ func TestOpenRejectsRolledBackVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.state.Apply(version1); err != nil {
+	if _, err := fixture.state.Apply(version1); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.state.Apply(version2); err != nil {
+	if _, err := fixture.state.Apply(version2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(sealed1, fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
+	if _, _, err := Open(sealed1, fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
 		t.Fatal("rolled-back secret version was opened")
 	}
 }
@@ -369,23 +372,23 @@ func TestOpenRejectsAADMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.state.Apply(versionEnvelope); err != nil {
+	if _, err := fixture.state.Apply(versionEnvelope); err != nil {
 		t.Fatal(err)
 	}
 	t.Run("receiver", func(t *testing.T) {
-		if _, err := Open(sealedEnvelope, fixture.state, "receiver-b", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
+		if _, _, err := Open(sealedEnvelope, fixture.state, "receiver-b", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
 			t.Fatal("secret sealed for receiver A opened as receiver B")
 		}
 	})
 	t.Run("name", func(t *testing.T) {
 		version := decodeSecretVersion(t, versionEnvelope)
 		version.Name = "other"
-		if err := fixture.state.Apply(mustSigned(t, wire.TypeSecretVersion, version, fixture.userPrivateKey)); err != nil {
+		if _, err := fixture.state.Apply(mustSigned(t, wire.TypeSecretVersion, version, fixture.userPrivateKey)); err != nil {
 			t.Fatal(err)
 		}
 		sealed := decodeSealedSecret(t, sealedEnvelope)
 		sealed.Name = "other"
-		if _, err := Open(mustSigned(t, wire.TypeSealedSecret, sealed, fixture.userPrivateKey), fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
+		if _, _, err := Open(mustSigned(t, wire.TypeSealedSecret, sealed, fixture.userPrivateKey), fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
 			t.Fatal("secret opened under another name")
 		}
 	})
@@ -397,13 +400,44 @@ func TestOpenRejectsCiphertextHashMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.state.Apply(versionEnvelope); err != nil {
+	if _, err := fixture.state.Apply(versionEnvelope); err != nil {
 		t.Fatal(err)
 	}
 	sealed := decodeSealedSecret(t, sealedEnvelope)
 	sealed.CT[0] ^= 1
-	if _, err := Open(mustSigned(t, wire.TypeSealedSecret, sealed, fixture.userPrivateKey), fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
+	if _, _, err := Open(mustSigned(t, wire.TypeSealedSecret, sealed, fixture.userPrivateKey), fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil {
 		t.Fatal("secret with mismatched ciphertext hash was opened")
+	}
+}
+
+func TestSecretErrorsOmitPlaintext(t *testing.T) {
+	const plaintext = "plaintext-secret-value"
+	fixture := newTrustFixture(t)
+	unsealable := fixture.enrolled
+	unsealable.SealingPub = nil
+	if _, _, err := Seal(unsealable, "receiver-a", "token", 1, []byte(plaintext), testNow.Add(time.Minute), fixture.userPrivateKey); err == nil || strings.Contains(err.Error(), plaintext) {
+		t.Fatalf("seal error %v", err)
+	}
+	versionEnvelope, sealedEnvelope, err := Seal(fixture.enrolled, "receiver-a", "token", 1, []byte(plaintext), testNow.Add(time.Minute), fixture.userPrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.state.Apply(versionEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	sealed := decodeSealedSecret(t, sealedEnvelope)
+	sealed.CT[0] ^= 1
+	tampered := mustSigned(t, wire.TypeSealedSecret, sealed, fixture.userPrivateKey)
+	if _, _, err := Open(tampered, fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil || strings.Contains(err.Error(), plaintext) {
+		t.Fatalf("hash mismatch error %v", err)
+	}
+	version := decodeSecretVersion(t, versionEnvelope)
+	version.CiphertextHash = ciphertextHash(sealed.Enc, sealed.CT)
+	if _, err := fixture.state.Apply(mustSigned(t, wire.TypeSecretVersion, version, fixture.userPrivateKey)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Open(tampered, fixture.state, "receiver-a", fixture.sealingKey, fixture.userPublicKey, testNow); err == nil || strings.Contains(err.Error(), plaintext) {
+		t.Fatalf("decrypt error %v", err)
 	}
 }
 
@@ -524,11 +558,11 @@ func decodeSealedSecret(t *testing.T, encoded []byte) *wire.SealedSecret {
 
 func TestEmptySelectorSurvivesState(t *testing.T) {
 	fixture := newTrustFixture(t)
-	approval, err := Approve(fixture.request, fixture.userPrivateKey, testLabels(), "default", testGrants(), []wire.Requirement{}, "auto", 2, EnvelopeHash(fixture.approval), testNow.Add(time.Hour))
+	approval, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), []wire.Requirement{}, "auto", 2, EnvelopeHash(fixture.approval), testNow.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.state.Apply(approval); err != nil {
+	if _, err := fixture.state.Apply(approval); err != nil {
 		t.Fatal(err)
 	}
 	enrolled, err := fixture.state.Receiver("receiver-a", testNow)

@@ -28,6 +28,7 @@ var (
 		json.RejectUnknownMembers(true),
 		jsontext.AllowDuplicateNames(false),
 	)
+	strictBase64 = base64.RawURLEncoding.Strict()
 )
 
 // Bytes is base64url-encoded without padding on the wire.
@@ -42,8 +43,8 @@ func (value Bytes) MarshalText() ([]byte, error) {
 
 // UnmarshalText decodes strict unpadded base64url.
 func (value *Bytes) UnmarshalText(encoded []byte) error {
-	decoded := make([]byte, base64.RawURLEncoding.Strict().DecodedLen(len(encoded)))
-	n, err := base64.RawURLEncoding.Strict().Decode(decoded, encoded)
+	decoded := make([]byte, strictBase64.DecodedLen(len(encoded)))
+	n, err := strictBase64.Decode(decoded, encoded)
 	if err != nil {
 		return err
 	}
@@ -86,11 +87,8 @@ func Verify(envelope Envelope, publicKey ed25519.PublicKey, kind SignerKind) (an
 	if !verifySignature(publicKey, signatureInput(envelope.Type, envelope.Payload), envelope.Sig) {
 		return nil, errInvalidSignature
 	}
-	if !Entitled(envelope.Type, kind) {
+	if !entitled(envelope.Type, kind) {
 		return nil, errUnentitledSigner
-	}
-	if len(envelope.Payload) > maxPayloadSize {
-		return nil, errPayloadTooLarge
 	}
 	decoded, err := DecodePayload(envelope.Type, envelope.Payload)
 	if err != nil {
@@ -158,9 +156,6 @@ func DecodeEnvelope(encoded []byte) (Envelope, error) {
 	}
 	if envelope.V != 1 || envelope.Type == "" || !validFingerprint(envelope.Signer) || envelope.Payload == nil || len(envelope.Sig) != ed25519.SignatureSize {
 		return Envelope{}, errors.New("invalid envelope")
-	}
-	if len(envelope.Payload) > maxPayloadSize {
-		return Envelope{}, errPayloadTooLarge
 	}
 	return envelope, nil
 }

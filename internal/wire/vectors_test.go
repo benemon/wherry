@@ -152,12 +152,8 @@ func verifyPublishedVector(t *testing.T, path string) {
 func writePublishedVectors(t *testing.T) {
 	t.Helper()
 	const seedHex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-	seed, err := hex.DecodeString(seedHex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	privateKey := ed25519.NewKeyFromSeed(seed)
-	payloads := validPayloads()
+	_, privateKey := fixedKey(t)
+	payloads := validPayloads(t)
 	vectors := make(map[string]publishedVector, len(vectorFilenames))
 
 	add := func(filename, name string, envelope Envelope, kind SignerKind, expect string) {

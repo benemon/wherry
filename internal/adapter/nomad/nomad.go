@@ -59,7 +59,7 @@ type Adapter struct {
 
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// New connects to Nomad; the token is the receiver's workload identity.
+// New builds a Nomad client; the token is the receiver's workload identity.
 func New(config Config, token string) (*Adapter, error) {
 	if config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv) {
 		return nil, errors.New("credential_env must be an environment variable name")
@@ -113,11 +113,11 @@ func (adapter *Adapter) Offers(ctx context.Context) ([]map[string]string, error)
 
 // Dispatch starts one run idempotently and returns once its task has started or ended.
 func (adapter *Adapter) Dispatch(ctx context.Context, run receiver.Run) (_ receiver.Handle, dispatchErr error) {
-	job, err := adapter.buildJob(run)
+	path := variablePath(run.ID)
+	job, err := adapter.buildJob(run, path)
 	if err != nil {
 		return receiver.Handle{}, err
 	}
-	path := variablePath(run.ID)
 	items := map[string]string{"prompt": string(run.Prompt)}
 	if run.Credential != nil {
 		items["credential"] = string(run.Credential)
@@ -196,14 +196,13 @@ func (adapter *Adapter) wait(ctx context.Context, jobID, driver string) (receive
 	}
 }
 
-// buildJob is the whole per-run job; nothing in it comes from the task except the run ID and the matched offer.
-func (adapter *Adapter) buildJob(run receiver.Run) (*api.Job, error) {
+// buildJob takes nothing from the task except the run ID and the matched offer.
+func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error) {
 	runtime, ok := adapter.runtimes[run.Offer["runtime"]]
 	if !ok {
 		return nil, errors.New("unknown runtime")
 	}
 	jobID := jobPrefix + run.ID
-	path := variablePath(run.ID)
 	env := maps.Clone(runtime.Env)
 	if env == nil {
 		env = make(map[string]string)
@@ -385,9 +384,7 @@ func (reader *lineReader) raw(ctx context.Context, data []byte, advance int64) e
 	fields := bytes.SplitN(data, []byte(" "), 4)
 	if len(fields) != 4 || (string(fields[2]) != "P" && string(fields[2]) != "F") {
 		if reader.consumed > 0 {
-			content, total := reader.partial, reader.consumed
-			reader.partial, reader.consumed = nil, 0
-			if err := reader.emit(ctx, content, total); err != nil {
+			if err := reader.emitPartial(ctx); err != nil {
 				return err
 			}
 		}
@@ -396,23 +393,17 @@ func (reader *lineReader) raw(ctx context.Context, data []byte, advance int64) e
 	reader.partial = append(reader.partial, fields[3]...)
 	reader.consumed += advance
 	if len(reader.partial) >= maxPending {
-		content, total := reader.partial, reader.consumed
-		reader.partial, reader.consumed = nil, 0
-		return reader.emit(ctx, content, total)
+		return reader.emitPartial(ctx)
 	}
 	if string(fields[2]) == "P" {
 		return nil
 	}
-	content, total := reader.partial, reader.consumed
-	reader.partial, reader.consumed = nil, 0
-	return reader.emit(ctx, content, total)
+	return reader.emitPartial(ctx)
 }
 
 func (reader *lineReader) flush(ctx context.Context) error {
 	if reader.consumed > 0 {
-		content, total := reader.partial, reader.consumed
-		reader.partial, reader.consumed = nil, 0
-		if err := reader.emit(ctx, content, total); err != nil {
+		if err := reader.emitPartial(ctx); err != nil {
 			return err
 		}
 	}
@@ -422,6 +413,12 @@ func (reader *lineReader) flush(ctx context.Context) error {
 	err := reader.emit(ctx, reader.pending, int64(len(reader.pending)))
 	reader.pending = nil
 	return err
+}
+
+func (reader *lineReader) emitPartial(ctx context.Context) error {
+	content, total := reader.partial, reader.consumed
+	reader.partial, reader.consumed = nil, 0
+	return reader.emit(ctx, content, total)
 }
 
 func (reader *lineReader) emit(ctx context.Context, data []byte, advance int64) error {

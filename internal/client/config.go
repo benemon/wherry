@@ -40,7 +40,7 @@ func DefaultConfigPath() (string, error) {
 	return filepath.Join(home, ".config", "agentbus", "config.json"), nil
 }
 
-// LoadConfig strictly decodes and applies the two settled defaults.
+// LoadConfig decodes the config at path, defaulting user_key and reply_topic.
 func LoadConfig(path string) (Config, error) {
 	encoded, err := os.ReadFile(path)
 	if err != nil {

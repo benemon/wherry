@@ -5,6 +5,8 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/pem"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -88,7 +90,7 @@ func newClientFixture(t *testing.T, approve bool) clientFixture {
 		userPublicKey: userPublicKey, userKey: userKey,
 		receiverKey: receiverKey, sealingKey: sealingKey, request: request,
 	}
-	fixture.produce(t, stateTopic, "receiver-a", request)
+	fixture.produce(t, wire.TopicState, "receiver-a", request)
 	if approve {
 		result, err := fixture.client.Approve(
 			ctx, trust.EnvelopeHash(request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 30,
@@ -162,7 +164,7 @@ func (fixture clientFixture) addReceiver(t *testing.T, receiverID, pool string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.produce(t, stateTopic, receiverID, request)
+	fixture.produce(t, wire.TopicState, receiverID, request)
 	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(request), pool, labels, singleGrant(), selector, "auto", 30); err != nil {
 		t.Fatal(err)
 	}
@@ -176,12 +178,12 @@ func TestApproveGrantMustNameDetectedAdapter(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newClientFixture(t, false)
-			before := fixture.topicEnd(t, stateTopic)
+			before := fixture.topicEnd(t, wire.TopicState)
 			_, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, []wire.AdapterGrant{grant}, []wire.Requirement{}, "auto", 30)
 			if err == nil || !strings.Contains(err.Error(), "detected adapter") {
 				t.Fatalf("got %v, want grant rejected", err)
 			}
-			if after := fixture.topicEnd(t, stateTopic); after != before {
+			if after := fixture.topicEnd(t, wire.TopicState); after != before {
 				t.Fatalf("receivers.state changed from offset %d to %d", before, after)
 			}
 		})
@@ -193,13 +195,13 @@ func TestApproveDefaultsPoolToReceiverID(t *testing.T) {
 	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, testGrants(), []wire.Requirement{}, "auto", 30); err != nil {
 		t.Fatal(err)
 	}
-	records, err := fixture.client.readBounded(fixture.ctx, stateTopic)
+	records, err := fixture.client.readBounded(fixture.ctx, wire.TopicState)
 	if err != nil {
 		t.Fatal(err)
 	}
 	state := trust.NewState(fixture.userPublicKey)
 	for _, record := range records {
-		if err := state.Apply(record.Value); err != nil {
+		if _, err := state.Apply(record.Value); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -214,7 +216,7 @@ func TestApproveDefaultsPoolToReceiverID(t *testing.T) {
 
 func (fixture clientFixture) produceCapability(t *testing.T, key string, capability *wire.Capability, signingKey ed25519.PrivateKey) {
 	t.Helper()
-	fixture.produce(t, capabilityTopic, key, signed(t, wire.TypeCapability, capability, signingKey))
+	fixture.produce(t, wire.TopicCapability, key, signed(t, wire.TypeCapability, capability, signingKey))
 }
 
 func (fixture clientFixture) submit(t *testing.T) SubmitResult {
@@ -244,7 +246,7 @@ func TestClientEndToEnd(t *testing.T) {
 	if !strings.HasPrefix(submission.RunID, "run-") || submission.Pool != "default" {
 		t.Fatalf("unexpected submission: %#v", submission)
 	}
-	tasks, err := fixture.client.readBounded(fixture.ctx, taskTopic)
+	tasks, err := fixture.client.readBounded(fixture.ctx, wire.TopicTask)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +277,7 @@ func TestClientEndToEnd(t *testing.T) {
 		ReceiverID: "receiver-a", AtMS: time.Now().UnixMilli(),
 		State: wire.TaskStateCompleted, Kind: "terminal",
 	}
-	fixture.produce(t, eventTopic, task.RunID, signed(t, wire.TypeEvent, event, fixture.receiverKey))
+	fixture.produce(t, wire.TopicEvent, task.RunID, signed(t, wire.TypeEvent, event, fixture.receiverKey))
 	events, err := fixture.client.Events(fixture.ctx, task.RunID)
 	if err != nil {
 		t.Fatal(err)
@@ -295,24 +297,24 @@ func TestClientEndToEnd(t *testing.T) {
 	if secret.Version != 1 {
 		t.Fatalf("got secret version %d, want 1", secret.Version)
 	}
-	stateRecords, err := fixture.client.readBounded(fixture.ctx, stateTopic)
+	stateRecords, err := fixture.client.readBounded(fixture.ctx, wire.TopicState)
 	if err != nil {
 		t.Fatal(err)
 	}
 	state := trust.NewState(fixture.userPublicKey)
 	for _, record := range stateRecords {
-		if err := state.Apply(record.Value); err != nil {
+		if _, err := state.Apply(record.Value); err != nil {
 			t.Fatal(err)
 		}
 	}
-	sealedRecords, err := fixture.client.readBounded(fixture.ctx, secretTopic)
+	sealedRecords, err := fixture.client.readBounded(fixture.ctx, wire.TopicSecret)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(sealedRecords) != 1 || string(sealedRecords[0].Key) != "receiver-a/token" {
 		t.Fatalf("unexpected sealed-secret records: %#v", sealedRecords)
 	}
-	plaintext, err := trust.Open(
+	plaintext, _, err := trust.Open(
 		sealedRecords[0].Value, state, "receiver-a", fixture.sealingKey,
 		fixture.userPublicKey, time.Now(),
 	)
@@ -327,7 +329,7 @@ func TestClientEndToEnd(t *testing.T) {
 func TestSubmitNoMatchingReceiverProducesNothing(t *testing.T) {
 	fixture := newClientFixture(t, true)
 	fixture.capability(t, nil)
-	before := fixture.topicEnd(t, taskTopic)
+	before := fixture.topicEnd(t, wire.TopicTask)
 	_, err := fixture.client.Submit(fixture.ctx, SubmitInput{
 		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"podman"}}}, Labels: map[string]string{"region": "eu"},
 		Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
@@ -335,7 +337,7 @@ func TestSubmitNoMatchingReceiverProducesNothing(t *testing.T) {
 	if err == nil {
 		t.Fatal("submit without a matching receiver succeeded")
 	}
-	if after := fixture.topicEnd(t, taskTopic); after != before {
+	if after := fixture.topicEnd(t, wire.TopicTask); after != before {
 		t.Fatalf("tasks.queue changed from offset %d to %d", before, after)
 	}
 }
@@ -386,7 +388,7 @@ func TestSubmitMatchesAcrossAdapters(t *testing.T) {
 func TestSubmitIgnoresOneWayMatch(t *testing.T) {
 	fixture := newClientFixture(t, true)
 	fixture.capability(t, nil)
-	before := fixture.topicEnd(t, taskTopic)
+	before := fixture.topicEnd(t, wire.TopicTask)
 	_, err := fixture.client.Submit(fixture.ctx, SubmitInput{
 		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Labels: map[string]string{"region": "us"},
 		Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
@@ -394,7 +396,7 @@ func TestSubmitIgnoresOneWayMatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("one-way match was accepted")
 	}
-	if after := fixture.topicEnd(t, taskTopic); after != before {
+	if after := fixture.topicEnd(t, wire.TopicTask); after != before {
 		t.Fatalf("tasks.queue changed from offset %d to %d", before, after)
 	}
 }
@@ -549,7 +551,7 @@ func TestAwaitIgnoresLowerAttemptReply(t *testing.T) {
 
 func TestStateLoadSkipsUnsignedRecords(t *testing.T) {
 	fixture := newClientFixture(t, false)
-	fixture.produce(t, stateTopic, "unsigned", []byte(`{"not":"an envelope"}`))
+	fixture.produce(t, wire.TopicState, "unsigned", []byte(`{"not":"an envelope"}`))
 	enrolments, skipped, err := fixture.client.Enrolments(fixture.ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -570,6 +572,36 @@ func TestConfigRejectsUnknownField(t *testing.T) {
 	}
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatal("config with unknown field was accepted")
+	}
+}
+
+func TestConnectErrorsOmitPassword(t *testing.T) {
+	const password = "kafka-password-secret"
+	dir := t.TempDir()
+	server := httptest.NewTLSServer(nil)
+	server.Close()
+	config := Config{
+		Broker: "localhost:9092", KafkaUser: "user",
+		CAFile:            filepath.Join(dir, "ca.pem"),
+		KafkaPasswordFile: filepath.Join(dir, "password"),
+		UserKey:           filepath.Join(dir, "missing.key"),
+	}
+	if err := os.WriteFile(config.CAFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.KafkaPasswordFile, []byte(password+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Connect(config); err == nil || strings.Contains(err.Error(), password) {
+		t.Fatalf("missing user key: %v", err)
+	}
+	config.UserKey = filepath.Join(dir, "user.key")
+	if _, err := InitUserKey(config.UserKey); err != nil {
+		t.Fatal(err)
+	}
+	config.Broker = "localhost:not-a-port"
+	if _, err := Connect(config); err == nil || strings.Contains(err.Error(), password) {
+		t.Fatalf("bad broker: %v", err)
 	}
 }
 

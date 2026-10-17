@@ -9,19 +9,29 @@ import (
 	"github.com/twmb/franz-go/pkg/kerr"
 )
 
+// Agentbus topic names.
+const (
+	TopicTask       = "tasks.queue"
+	TopicEvent      = "tasks.events"
+	TopicTranscript = "transcripts"
+	TopicCapability = "receivers.capabilities"
+	TopicState      = "receivers.state"
+	TopicSecret     = "receivers.secrets"
+)
+
 type topicDeclaration struct {
 	name    string
 	configs map[string]string
 }
 
 var topicDeclarations = []topicDeclaration{
-	{name: "tasks.queue", configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},
-	{name: "tasks.events", configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},
+	{name: TopicTask, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},
+	{name: TopicEvent, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},
 	{name: "tasks.control", configs: map[string]string{"cleanup.policy": "compact"}},
-	{name: "transcripts", configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "2592000000"}},
-	{name: "receivers.capabilities", configs: map[string]string{"cleanup.policy": "compact"}},
-	{name: "receivers.state", configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},
-	{name: "receivers.secrets", configs: map[string]string{
+	{name: TopicTranscript, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "2592000000"}},
+	{name: TopicCapability, configs: map[string]string{"cleanup.policy": "compact"}},
+	{name: TopicState, configs: map[string]string{"cleanup.policy": "delete", "retention.ms": "-1"}},
+	{name: TopicSecret, configs: map[string]string{
 		"cleanup.policy":        "compact",
 		"segment.ms":            "3600000",
 		"delete.retention.ms":   "3600000",
@@ -29,7 +39,7 @@ var topicDeclarations = []topicDeclaration{
 	}},
 }
 
-// ApplyTopics creates and configures the fixed Agentbus topics.
+// ApplyTopics creates and configures the Agentbus topics.
 func ApplyTopics(ctx context.Context, client *kadm.Client, replicationFactor int16) error {
 	for _, declaration := range topicDeclarations {
 		configs := make(map[string]*string, len(declaration.configs))

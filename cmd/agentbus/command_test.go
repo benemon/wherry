@@ -123,7 +123,11 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	grants := []wire.AdapterGrant{{Name: "lab", Platform: "nomad", Allowed: map[string][]string{"runtime": {"exec"}}, Defaults: map[string]string{}}}
-	approval, err := trust.Approve(request, userKey, map[string]string{}, "default", grants, []wire.Requirement{{Key: "region", Operator: wire.OpIn, Values: []string{"eu"}}}, "auto", 1, "", time.Now().Add(time.Hour))
+	enrolRequest, err := trust.NewState(userKey.Public().(ed25519.PublicKey)).Apply(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, err := trust.Approve(request, enrolRequest.(*wire.EnrolRequest), userKey, map[string]string{}, "default", grants, []wire.Requirement{{Key: "region", Operator: wire.OpIn, Values: []string{"eu"}}}, "auto", 1, "", time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

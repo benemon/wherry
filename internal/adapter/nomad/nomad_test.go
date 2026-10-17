@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,7 +135,7 @@ func TestBuildJobFromRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("build")
-	job, err := adapter.buildJob(run)
+	job, err := adapter.buildJob(run, variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +162,7 @@ func TestBuildJobFromRuntime(t *testing.T) {
 		t.Fatalf("templates %#v", templates)
 	}
 	run.Credential = nil
-	job, err = adapter.buildJob(run)
+	job, err = adapter.buildJob(run, variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +291,7 @@ func TestLookupWaitsForUnplacedJob(t *testing.T) {
 	run := testRun("lookup-unplaced")
 	run.Offer["zone"] = "agentbus-no-such-datacenter"
 	cleanupRun(t, adapter, run)
-	job, err := adapter.buildJob(run)
+	job, err := adapter.buildJob(run, variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,11 +617,7 @@ func TestLineReaderDecodesPodmanCRI(t *testing.T) {
 	if err := reader.take(context.Background(), raw); err != nil {
 		t.Fatal(err)
 	}
-	close(lines)
-	var got []receiver.Line
-	for line := range lines {
-		got = append(got, line)
-	}
+	got := closeAndRead(lines)
 	if len(got) != 4 {
 		t.Fatalf("got %d lines, want 4", len(got))
 	}
@@ -644,11 +641,7 @@ func TestCRIPartialBounded(t *testing.T) {
 	if err := reader.take(context.Background(), []byte(firstRaw+secondRaw+finalRaw)); err != nil {
 		t.Fatal(err)
 	}
-	close(lines)
-	var got []receiver.Line
-	for line := range lines {
-		got = append(got, line)
-	}
+	got := closeAndRead(lines)
 	if len(got) != 2 {
 		t.Fatalf("got %d lines, want 2", len(got))
 	}
@@ -669,11 +662,7 @@ func TestCRIMalformedAfterPartial(t *testing.T) {
 	if err := reader.take(context.Background(), []byte(partialRaw+malformedRaw)); err != nil {
 		t.Fatal(err)
 	}
-	close(lines)
-	var got []receiver.Line
-	for line := range lines {
-		got = append(got, line)
-	}
+	got := closeAndRead(lines)
 	if len(got) != 2 {
 		t.Fatalf("got %d lines, want 2", len(got))
 	}
@@ -697,11 +686,7 @@ func TestCRIFlushEmitsPendingPartial(t *testing.T) {
 	if err := reader.flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	close(lines)
-	var got []receiver.Line
-	for line := range lines {
-		got = append(got, line)
-	}
+	got := closeAndRead(lines)
 	if len(got) != 2 {
 		t.Fatalf("got %d lines, want 2", len(got))
 	}
@@ -711,5 +696,124 @@ func TestCRIFlushEmitsPendingPartial(t *testing.T) {
 	}
 	if string(pending.Data) != pendingRaw || pending.Offset != partial.Next || pending.Next != int64(len(partialRaw)+len(pendingRaw)) {
 		t.Fatalf("pending = %#v", pending)
+	}
+}
+
+func closeAndRead(lines chan receiver.Line) []receiver.Line {
+	close(lines)
+	var got []receiver.Line
+	for line := range lines {
+		got = append(got, line)
+	}
+	return got
+}
+
+func TestSecretsNeverInRequestURLs(t *testing.T) {
+	const token = "nomad-token-secret"
+	run := testRun("urls")
+	run.ID = "run-urls"
+	var mu sync.Mutex
+	var urls []string
+	registered := false
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		urls = append(urls, request.Method+" "+request.URL.Path+"?"+request.URL.RawQuery)
+		if request.Header.Get("X-Nomad-Token") != token {
+			http.Error(response, "missing token", http.StatusForbidden)
+			return
+		}
+		switch request.Method + " " + request.URL.Path {
+		case "PUT /v1/var/nomad/jobs/agent-run-urls", "DELETE /v1/var/nomad/jobs/agent-run-urls":
+			_, _ = response.Write([]byte(`{}`))
+		case "GET /v1/job/agent-run-urls":
+			if !registered {
+				http.Error(response, "job not found", http.StatusNotFound)
+				return
+			}
+			_, _ = response.Write([]byte(`{"ID":"agent-run-urls","TaskGroups":[{"Tasks":[{"Driver":"raw_exec"}]}]}`))
+		case "PUT /v1/jobs":
+			registered = true
+			_, _ = response.Write([]byte(`{}`))
+		case "GET /v1/job/agent-run-urls/allocations":
+			_, _ = response.Write([]byte(`[{"ID":"alloc-urls","ClientStatus":"complete"}]`))
+		case "GET /v1/allocation/alloc-urls":
+			_, _ = response.Write([]byte(`{"ID":"alloc-urls","ClientStatus":"complete"}`))
+		default:
+			http.Error(response, "unexpected request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	adapter, err := New(testConfig(server.URL), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	handle, err := adapter.Dispatch(ctx, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := adapter.Lookup(ctx, run.ID); err != nil || !ok {
+		t.Fatalf("lookup = %v, %v", ok, err)
+	}
+	if err := adapter.Stop(ctx, handle); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Release(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(urls) != 8 {
+		t.Fatalf("requests = %v, want dispatch, lookup, stop and release", urls)
+	}
+	for _, url := range urls {
+		for _, secret := range []string{token, string(run.Credential), string(run.Prompt)} {
+			if strings.Contains(url, secret) {
+				t.Fatalf("request URL %q contains %q", url, secret)
+			}
+		}
+	}
+}
+
+func TestRedactedDropsResponseBody(t *testing.T) {
+	const echoed = `{"Items":{"credential":"test-credential","prompt":"hello-prompt"}}`
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		http.Error(response, echoed, http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	adapter, err := New(Config{Address: server.URL}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = adapter.client.Variables().Update(&api.Variable{Path: "nomad/jobs/agent-run-redact", Items: map[string]string{"credential": "test-credential"}}, nil)
+	var response api.UnexpectedResponseError
+	if !errors.As(err, &response) || !strings.Contains(err.Error(), "test-credential") {
+		t.Fatalf("fixture error %v does not echo the body", err)
+	}
+	got := redacted("write", "nomad/jobs/agent-run-redact", err).Error()
+	if strings.Contains(got, "test-credential") || strings.Contains(got, "hello-prompt") {
+		t.Fatalf("redacted error %q contains variable items", got)
+	}
+}
+
+func TestBuildJobOmitsPlaintext(t *testing.T) {
+	adapter, err := New(testConfig("http://127.0.0.1:1"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := testRun("plaintext")
+	job, err := adapter.buildJob(run, variablePath(run.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{string(run.Credential), string(run.Prompt)} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("job JSON contains %q", secret)
+		}
 	}
 }

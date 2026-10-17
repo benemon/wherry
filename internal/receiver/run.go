@@ -30,8 +30,6 @@ var (
 	enrolPollInterval  = 10 * time.Second
 )
 
-var errFenced = errors.New("fenced by a newer holder")
-
 // claimLoop holds one slot: a dedicated share client per claimed record,
 // because renews do not survive a poll and held records are tied to the connection.
 func (r *Receiver) claimLoop(ctx context.Context) {
@@ -50,7 +48,7 @@ func (r *Receiver) claimLoop(ctx context.Context) {
 
 func (r *Receiver) claimOne(ctx context.Context, enrolled *trust.Enrolled) error {
 	share, err := kgo.NewClient(append(append([]kgo.Opt(nil), r.kafkaOpt...),
-		kgo.ConsumeTopics(taskTopic),
+		kgo.ConsumeTopics(wire.TopicTask),
 		kgo.ShareGroup("p-"+enrolled.Pool),
 		kgo.ShareMaxRecords(1),
 		kgo.ShareMaxRecordsStrict(),
@@ -95,9 +93,7 @@ type admission struct {
 }
 
 // admit applies ADR-0014 root verification and ADR-0011/0017 matching. A nil
-// admission carries the acknowledgement: unverifiable records are rejected and
-// other pools' records skipped, both silently; anything else gets a signed
-// REJECTED event.
+// admission carries the acknowledgement.
 func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trust.Enrolled) (*admission, kgo.AckStatus) {
 	task, err := trust.VerifyRootTask(record.Value, r.userPub)
 	if err != nil {
@@ -138,7 +134,7 @@ func (r *Receiver) publishRejection(ctx context.Context, record *kgo.Record, tas
 	if err != nil {
 		return err
 	}
-	return r.base.ProduceSync(ctx, &kgo.Record{Topic: eventTopic, Key: []byte(task.RunID), Value: value}).FirstErr()
+	return r.base.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicEvent, Key: []byte(task.RunID), Value: value}).FirstErr()
 }
 
 // renewer keeps the share lock alive from claim until the final acknowledgement,
@@ -238,7 +234,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			if runCtx.Err() != nil && ctx.Err() == nil {
 				return run.fail(ctx, "timeout")
 			}
-			return run.fail(ctx, "dispatch: "+err.Error())
+			r.logger.Printf("run %s: dispatch failed: %T", task.RunID, err)
+			return run.fail(ctx, "dispatch failed")
 		}
 	}
 	handle.Adapter = run.adapter
@@ -333,7 +330,7 @@ func (run *activeRun) commit(ctx context.Context, records ...*kgo.Record) error 
 // abandon stops all activity for a run whose writes failed; a fenced holder leaves the run to its adopter.
 func (run *activeRun) abandon(err error) kgo.AckStatus {
 	if errors.Is(err, kerr.InvalidProducerEpoch) || errors.Is(err, kerr.ProducerFenced) {
-		run.receiver.logger.Printf("run %s: %v", run.task.RunID, errFenced)
+		run.receiver.logger.Printf("run %s: fenced by a newer holder", run.task.RunID)
 		return 0
 	}
 	run.receiver.logger.Printf("run %s: write failed: %v", run.task.RunID, err)
@@ -386,7 +383,7 @@ func (r *Receiver) adapterOf(handle Handle) Adapter {
 }
 
 func (run *activeRun) eventRecord(kind string, state wire.TaskState, offset *int64, reason *string) *kgo.Record {
-	return run.signed(eventTopic, wire.TypeEvent, run.receiver.event(run.task, run.taskHash, run.attempt, kind, state, offset, reason))
+	return run.signed(wire.TopicEvent, wire.TypeEvent, run.receiver.event(run.task, run.taskHash, run.attempt, kind, state, offset, reason))
 }
 
 func (r *Receiver) event(task *wire.Task, taskHash string, attempt int64, kind string, state wire.TaskState, offset *int64, reason *string) *wire.Event {
@@ -404,7 +401,7 @@ func (run *activeRun) transcriptRecord(line Line) *kgo.Record {
 		data := wire.Bytes(line.Data)
 		transcript.Line = &data
 	}
-	return run.signed(transcriptTopic, wire.TypeTranscript, transcript)
+	return run.signed(wire.TopicTranscript, wire.TypeTranscript, transcript)
 }
 
 func (run *activeRun) reply(state wire.TaskState, text string) *kgo.Record {
@@ -431,7 +428,7 @@ func (run *activeRun) signed(topic string, recordType wire.RecordType, payload a
 func (r *Receiver) lastOffset(ctx context.Context, runID string) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	records, err := readBounded(ctx, r.kafkaOpt, eventTopic)
+	records, err := readBounded(ctx, r.kafkaOpt, wire.TopicEvent)
 	if err != nil {
 		return 0, err
 	}

@@ -18,14 +18,6 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-const (
-	stateTopic      = "receivers.state"
-	capabilityTopic = "receivers.capabilities"
-	secretTopic     = "receivers.secrets"
-	taskTopic       = "tasks.queue"
-	eventTopic      = "tasks.events"
-)
-
 // Client implements the user-side agentbus operations.
 type Client struct {
 	kafka      *kgo.Client
@@ -194,14 +186,14 @@ func (client *Client) Approve(ctx context.Context, requestHash, pool string, lab
 	current := loaded.approvals[request.request.ReceiverID]
 	generation := current.generation + 1
 	envelope, err := trust.Approve(
-		request.envelope, client.userKey, labels, pool, grants, selector, renewal,
+		request.envelope, request.request, client.userKey, labels, pool, grants, selector, renewal,
 		generation, current.envelopeHash, time.Now().Add(time.Duration(days)*24*time.Hour),
 	)
 	if err != nil {
 		return ApprovalResult{}, err
 	}
 	if err := client.produce(ctx, &kgo.Record{
-		Topic: stateTopic, Key: []byte(request.request.ReceiverID), Value: envelope,
+		Topic: wire.TopicState, Key: []byte(request.request.ReceiverID), Value: envelope,
 	}); err != nil {
 		return ApprovalResult{}, err
 	}
@@ -229,8 +221,8 @@ func (client *Client) PutSecret(ctx context.Context, name, receiverID, path stri
 		return SecretResult{}, err
 	}
 	if err := client.produce(ctx,
-		&kgo.Record{Topic: stateTopic, Key: []byte(receiverID), Value: versionEnvelope},
-		&kgo.Record{Topic: secretTopic, Key: []byte(receiverID + "/" + name), Value: sealedEnvelope},
+		&kgo.Record{Topic: wire.TopicState, Key: []byte(receiverID), Value: versionEnvelope},
+		&kgo.Record{Topic: wire.TopicSecret, Key: []byte(receiverID + "/" + name), Value: sealedEnvelope},
 	); err != nil {
 		return SecretResult{}, err
 	}
@@ -244,7 +236,8 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 		return nil, 0, err
 	}
 	now := time.Now()
-	capabilities, skipped, err := client.loadCapabilities(ctx, loaded, now)
+	receivers := loaded.receiverSigners(now)
+	capabilities, skipped, err := client.loadCapabilities(ctx, receivers)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -254,7 +247,7 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 	}
 
 	result := make([]Receiver, 0, len(loaded.approvals))
-	for _, identity := range loaded.receiverSigners(now) {
+	for _, identity := range receivers {
 		receiver := Receiver{
 			ReceiverID: identity.id, Pool: identity.enrolled.Pool,
 			Generation: identity.enrolled.Generation, Labels: maps.Clone(identity.enrolled.Labels),
@@ -291,7 +284,7 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 		return SubmitResult{}, err
 	}
 	now := time.Now()
-	capabilities, skipped, err := client.loadCapabilities(ctx, loaded, now)
+	capabilities, skipped, err := client.loadCapabilities(ctx, loaded.receiverSigners(now))
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -307,8 +300,7 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 		}
 		if chosen == nil || spare(capability) > spare(chosen) ||
 			(spare(capability) == spare(chosen) && capability.ReceiverID < chosen.ReceiverID) {
-			copy := *capability
-			chosen = &copy
+			chosen = capability
 		}
 	}
 	if chosen == nil {
@@ -338,7 +330,7 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	if err := client.produce(ctx, &kgo.Record{Topic: taskTopic, Key: []byte(runID), Value: envelope}); err != nil {
+	if err := client.produce(ctx, &kgo.Record{Topic: wire.TopicTask, Key: []byte(runID), Value: envelope}); err != nil {
 		return SubmitResult{}, err
 	}
 	return SubmitResult{RunID: runID, Pool: chosen.Pool, Skipped: loaded.skipped}, nil
@@ -402,7 +394,7 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 		return EventsResult{}, err
 	}
 	receivers := loaded.receiverSigners(time.Now())
-	records, err := client.readBounded(ctx, eventTopic)
+	records, err := client.readBounded(ctx, wire.TopicEvent)
 	if err != nil {
 		return EventsResult{}, err
 	}
@@ -435,8 +427,8 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 	return result, nil
 }
 
-func (client *Client) loadCapabilities(ctx context.Context, loaded *loadedState, now time.Time) ([]verifiedCapability, int, error) {
-	records, err := client.readBounded(ctx, capabilityTopic)
+func (client *Client) loadCapabilities(ctx context.Context, receivers map[string]receiverIdentity) ([]verifiedCapability, int, error) {
+	records, err := client.readBounded(ctx, wire.TopicCapability)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -449,7 +441,6 @@ func (client *Client) loadCapabilities(ctx context.Context, loaded *loadedState,
 			latest[key] = append([]byte(nil), record.Value...)
 		}
 	}
-	receivers := loaded.receiverSigners(now)
 	result := make([]verifiedCapability, 0, len(latest))
 	skipped := 0
 	keys := make([]string, 0, len(latest))
@@ -465,16 +456,15 @@ func (client *Client) loadCapabilities(ctx context.Context, loaded *loadedState,
 			continue
 		}
 		receiver, ok := receivers[envelope.Signer]
-		if !ok || trust.CapabilityWithin(encoded, receiver.enrolled) != nil {
+		if !ok {
 			skipped++
 			continue
 		}
-		decoded, err := wire.DecodePayload(wire.TypeCapability, envelope.Payload)
+		capability, err := trust.CapabilityWithin(encoded, receiver.enrolled)
 		if err != nil {
 			skipped++
 			continue
 		}
-		capability := decoded.(*wire.Capability)
 		if capability.ReceiverID != receiver.id {
 			continue
 		}
@@ -484,7 +474,7 @@ func (client *Client) loadCapabilities(ctx context.Context, loaded *loadedState,
 }
 
 func (client *Client) loadState(ctx context.Context) (*loadedState, error) {
-	records, err := client.readBounded(ctx, stateTopic)
+	records, err := client.readBounded(ctx, wire.TopicState)
 	if err != nil {
 		return nil, err
 	}
@@ -494,47 +484,26 @@ func (client *Client) loadState(ctx context.Context) (*loadedState, error) {
 		approvedRequests: make(map[string]int64), secretVersions: make(map[secretKey]int64),
 	}
 	for _, record := range records {
-		if err := loaded.state.Apply(record.Value); err != nil {
-			loaded.skipped++
-			continue
-		}
-		envelope, err := wire.DecodeEnvelope(record.Value)
+		verified, err := loaded.state.Apply(record.Value)
 		if err != nil {
 			loaded.skipped++
 			continue
 		}
-		switch envelope.Type {
-		case wire.TypeEnrolRequest:
-			decoded, err := wire.DecodePayload(envelope.Type, envelope.Payload)
-			if err != nil {
-				loaded.skipped++
-				continue
-			}
+		switch payload := verified.(type) {
+		case *wire.EnrolRequest:
 			hash := trust.EnvelopeHash(record.Value)
-			loaded.requests[hash] = requestRecord{envelope: append([]byte(nil), record.Value...), request: decoded.(*wire.EnrolRequest)}
-		case wire.TypeEnrolApproval:
-			decoded, err := wire.DecodePayload(envelope.Type, envelope.Payload)
-			if err != nil {
-				loaded.skipped++
-				continue
-			}
-			approval := decoded.(*wire.EnrolApproval)
-			if approval.Generation > loaded.approvals[approval.ReceiverID].generation {
-				loaded.approvals[approval.ReceiverID] = approvalRecord{
-					generation: approval.Generation, envelopeHash: trust.EnvelopeHash(record.Value),
+			loaded.requests[hash] = requestRecord{envelope: append([]byte(nil), record.Value...), request: payload}
+		case *wire.EnrolApproval:
+			if payload.Generation > loaded.approvals[payload.ReceiverID].generation {
+				loaded.approvals[payload.ReceiverID] = approvalRecord{
+					generation: payload.Generation, envelopeHash: trust.EnvelopeHash(record.Value),
 				}
-				loaded.approvedRequests[approval.RequestHash] = approval.Generation
+				loaded.approvedRequests[payload.RequestHash] = payload.Generation
 			}
-		case wire.TypeSecretVersion:
-			decoded, err := wire.DecodePayload(envelope.Type, envelope.Payload)
-			if err != nil {
-				loaded.skipped++
-				continue
-			}
-			version := decoded.(*wire.SecretVersion)
-			key := secretKey{receiverID: version.ReceiverID, name: version.Name}
-			if version.Version > loaded.secretVersions[key] {
-				loaded.secretVersions[key] = version.Version
+		case *wire.SecretVersion:
+			key := secretKey{receiverID: payload.ReceiverID, name: payload.Name}
+			if payload.Version > loaded.secretVersions[key] {
+				loaded.secretVersions[key] = payload.Version
 			}
 		}
 	}

@@ -23,7 +23,6 @@ type Enrolled struct {
 	Pool       string
 	Adapters   []wire.AdapterGrant
 	Selector   []wire.Requirement
-	Renewal    string
 	Generation int64
 }
 
@@ -81,7 +80,7 @@ func NewEnrolRequest(receiverID string, signingKey ed25519.PrivateKey, sealingKe
 }
 
 // Approve verifies an enrolment request and signs its approval with the user key.
-func Approve(requestEnvelopeBytes []byte, userKey ed25519.PrivateKey, labels map[string]string, pool string, grants []wire.AdapterGrant, selector []wire.Requirement, renewal string, generation int64, prevStateHash string, exp time.Time) ([]byte, error) {
+func Approve(requestEnvelopeBytes []byte, request *wire.EnrolRequest, userKey ed25519.PrivateKey, labels map[string]string, pool string, grants []wire.AdapterGrant, selector []wire.Requirement, renewal string, generation int64, prevStateHash string, exp time.Time) ([]byte, error) {
 	envelope, err := wire.DecodeEnvelope(requestEnvelopeBytes)
 	if err != nil {
 		return nil, err
@@ -89,11 +88,6 @@ func Approve(requestEnvelopeBytes []byte, userKey ed25519.PrivateKey, labels map
 	if envelope.Type != wire.TypeEnrolRequest {
 		return nil, errors.New("not an enrolment request")
 	}
-	decoded, err := wire.DecodePayload(wire.TypeEnrolRequest, envelope.Payload)
-	if err != nil {
-		return nil, err
-	}
-	request := decoded.(*wire.EnrolRequest)
 	verified, err := wire.Verify(envelope, ed25519.PublicKey(request.SigningPub), wire.SignerReceiver)
 	if err != nil {
 		return nil, fmt.Errorf("verify enrolment request: %w", err)
@@ -114,11 +108,11 @@ func Approve(requestEnvelopeBytes []byte, userKey ed25519.PrivateKey, labels map
 	return marshalSigned(wire.TypeEnrolApproval, approval, userKey)
 }
 
-// Apply verifies and applies one append-only trust record.
-func (state *State) Apply(envelopeBytes []byte) error {
+// Apply verifies and applies one append-only trust record and returns its verified payload, nil for other record types.
+func (state *State) Apply(envelopeBytes []byte) (any, error) {
 	envelope, err := wire.DecodeEnvelope(envelopeBytes)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	switch envelope.Type {
 	case wire.TypeEnrolRequest:
@@ -128,7 +122,7 @@ func (state *State) Apply(envelopeBytes []byte) error {
 	case wire.TypeSecretVersion:
 		return state.applySecretVersion(envelope)
 	default:
-		return nil
+		return nil, nil
 	}
 }
 
@@ -144,44 +138,44 @@ func (state *State) Receiver(id string, now time.Time) (Enrolled, error) {
 	return cloneEnrolled(approval.enrolled), nil
 }
 
-// CapabilityWithin verifies that a receiver capability stays within its enrolment.
-func CapabilityWithin(capEnvelopeBytes []byte, enrolled Enrolled) error {
+// CapabilityWithin verifies that a receiver capability stays within its enrolment and returns it.
+func CapabilityWithin(capEnvelopeBytes []byte, enrolled Enrolled) (*wire.Capability, error) {
 	envelope, err := wire.DecodeEnvelope(capEnvelopeBytes)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	verified, err := wire.Verify(envelope, enrolled.SigningPub, wire.SignerReceiver)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	capability, ok := verified.(*wire.Capability)
 	if !ok {
-		return errors.New("not a capability")
+		return nil, errors.New("not a capability")
 	}
 	if capability.Pool != enrolled.Pool {
-		return errors.New("capability pool exceeds enrolment")
+		return nil, errors.New("capability pool exceeds enrolment")
 	}
-	if !wire.LabelsEqual(capability.Labels, enrolled.Labels) {
-		return errors.New("capability labels exceed enrolment")
+	if !maps.Equal(capability.Labels, enrolled.Labels) {
+		return nil, errors.New("capability labels exceed enrolment")
 	}
 	if !reflect.DeepEqual(capability.Selector, enrolled.Selector) {
-		return errors.New("capability selector exceeds enrolment")
+		return nil, errors.New("capability selector exceeds enrolment")
 	}
 	for _, offer := range capability.Offers {
 		index := slices.IndexFunc(enrolled.Adapters, func(grant wire.AdapterGrant) bool { return grant.Name == offer.Adapter })
 		if index < 0 {
-			return errors.New("capability offer names an ungranted adapter")
+			return nil, errors.New("capability offer names an ungranted adapter")
 		}
 		for key, value := range offer.Labels {
 			if !slices.Contains(enrolled.Adapters[index].Allowed[key], value) {
-				return errors.New("capability offer exceeds its grant")
+				return nil, errors.New("capability offer exceeds its grant")
 			}
 		}
 	}
 	if capability.Generation != enrolled.Generation {
-		return errors.New("capability generation does not match enrolment")
+		return nil, errors.New("capability generation does not match enrolment")
 	}
-	return nil
+	return capability, nil
 }
 
 // SignRootTask signs a root task with the user key.
@@ -212,44 +206,44 @@ func VerifyRootTask(envelopeBytes []byte, userPublicKey ed25519.PublicKey) (*wir
 	return task, nil
 }
 
-func (state *State) applyRequest(envelope wire.Envelope, envelopeBytes []byte) error {
+func (state *State) applyRequest(envelope wire.Envelope, envelopeBytes []byte) (any, error) {
 	decoded, err := wire.DecodePayload(wire.TypeEnrolRequest, envelope.Payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request := decoded.(*wire.EnrolRequest)
 	verified, err := wire.Verify(envelope, ed25519.PublicKey(request.SigningPub), wire.SignerReceiver)
 	if err != nil {
-		return fmt.Errorf("verify enrolment request: %w", err)
+		return nil, fmt.Errorf("verify enrolment request: %w", err)
 	}
 	state.requests[EnvelopeHash(envelopeBytes)] = verified.(*wire.EnrolRequest)
-	return nil
+	return verified, nil
 }
 
-func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) error {
+func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) (any, error) {
 	verified, err := wire.Verify(envelope, state.userPublicKey, wire.SignerUser)
 	if err != nil {
-		return fmt.Errorf("verify enrolment approval: %w", err)
+		return nil, fmt.Errorf("verify enrolment approval: %w", err)
 	}
 	approval := verified.(*wire.EnrolApproval)
 	current, enrolled := state.approvals[approval.ReceiverID]
 	if enrolled && approval.Generation <= current.enrolled.Generation {
-		return nil
+		return approval, nil
 	}
 	request, ok := state.requests[approval.RequestHash]
 	if !ok || request.ReceiverID != approval.ReceiverID {
-		return errors.New("approval refers to an unknown enrolment request")
+		return nil, errors.New("approval refers to an unknown enrolment request")
 	}
 	wantPreviousHash := ""
 	if enrolled {
 		wantPreviousHash = current.envelopeHash
 	}
 	if approval.PrevStateHash != wantPreviousHash {
-		return errors.New("approval has wrong previous state hash")
+		return nil, errors.New("approval has wrong previous state hash")
 	}
 	sealingPublicKey, err := ecdh.X25519().NewPublicKey(request.SealingPub)
 	if err != nil {
-		return fmt.Errorf("invalid request sealing key: %w", err)
+		return nil, fmt.Errorf("invalid request sealing key: %w", err)
 	}
 	state.approvals[approval.ReceiverID] = acceptedApproval{
 		enrolled: Enrolled{
@@ -259,19 +253,18 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 			Pool:       approval.Pool,
 			Adapters:   cloneGrants(approval.Adapters),
 			Selector:   slices.Clone(approval.Selector),
-			Renewal:    approval.Renewal,
 			Generation: approval.Generation,
 		},
 		expMS:        approval.ExpMS,
 		envelopeHash: EnvelopeHash(envelopeBytes),
 	}
-	return nil
+	return approval, nil
 }
 
-func (state *State) applySecretVersion(envelope wire.Envelope) error {
+func (state *State) applySecretVersion(envelope wire.Envelope) (any, error) {
 	verified, err := wire.Verify(envelope, state.userPublicKey, wire.SignerUser)
 	if err != nil {
-		return fmt.Errorf("verify secret version: %w", err)
+		return nil, fmt.Errorf("verify secret version: %w", err)
 	}
 	version := verified.(*wire.SecretVersion)
 	id := secretID{receiverID: version.ReceiverID, name: version.Name}
@@ -283,7 +276,7 @@ func (state *State) applySecretVersion(envelope wire.Envelope) error {
 	if !ok || version.Version > maximum {
 		state.maximumVersions[id] = version.Version
 	}
-	return nil
+	return version, nil
 }
 
 func marshalSigned(recordType wire.RecordType, value any, key ed25519.PrivateKey) ([]byte, error) {
@@ -302,7 +295,6 @@ func cloneEnrolled(enrolled Enrolled) Enrolled {
 		Pool:       enrolled.Pool,
 		Adapters:   cloneGrants(enrolled.Adapters),
 		Selector:   slices.Clone(enrolled.Selector),
-		Renewal:    enrolled.Renewal,
 		Generation: enrolled.Generation,
 	}
 }
