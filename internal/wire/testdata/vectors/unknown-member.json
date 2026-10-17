@@ -1,0 +1,9 @@
+{
+	"name": "unknown payload member",
+	"type": "cancel",
+	"signer_seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+	"signer_kind": "user",
+	"payload_b64": "eyJydW5faWQiOiJydW4tMSIsImF0X21zIjoxLCJ1bmV4cGVjdGVkIjp0cnVlfQ",
+	"envelope_b64": "eyJ2IjoxLCJ0eXBlIjoiY2FuY2VsIiwic2lnbmVyIjoic2hhMjU2OjU2NDc1YWE3NTQ2MzQ3NGMwMjg1ZGY1ZGJmMmJjYWI3M2RhNjUxMzU4ODM5ZTliNzc0ODFiMmVhYjEwNzcwOGMiLCJwYXlsb2FkIjoiZXlKeWRXNWZhV1FpT2lKeWRXNHRNU0lzSW1GMFgyMXpJam94TENKMWJtVjRjR1ZqZEdWa0lqcDBjblZsZlEiLCJzaWciOiJRY3o2X1Z4VlpnRWo1UDdpbEdzRll4MGVCaWdpOTl6UnlsY1FGcFhlY2FVdE1NT2NpTDloZFpWVmwxNlNKbWZMSkN0VGlvSG0xSV9hOWV3SDJLdFdBUSJ9",
+	"expect": "invalid_payload"
+}

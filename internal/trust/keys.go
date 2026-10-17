@@ -1,0 +1,105 @@
+package trust
+
+import (
+	"crypto/ecdh"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+)
+
+// GenerateSigningKeyFile creates an Ed25519 private-key file without replacing an existing file.
+func GenerateSigningKeyFile(path string) (ed25519.PrivateKey, error) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeKeyFile(path, privateKey); err != nil {
+		return nil, err
+	}
+	return privateKey, nil
+}
+
+// LoadSigningKeyFile loads an Ed25519 private-key file with private permissions.
+func LoadSigningKeyFile(path string) (ed25519.PrivateKey, error) {
+	key, err := readKeyFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(key) != ed25519.PrivateKeySize {
+		return nil, errors.New("invalid Ed25519 private key length")
+	}
+	return ed25519.PrivateKey(key), nil
+}
+
+// GenerateSealingKeyFile creates an X25519 private-key file without replacing an existing file.
+func GenerateSealingKeyFile(path string) (*ecdh.PrivateKey, error) {
+	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeKeyFile(path, privateKey.Bytes()); err != nil {
+		return nil, err
+	}
+	return privateKey, nil
+}
+
+// LoadSealingKeyFile loads an X25519 private-key file with private permissions.
+func LoadSealingKeyFile(path string) (*ecdh.PrivateKey, error) {
+	key, err := readKeyFile(path)
+	if err != nil {
+		return nil, err
+	}
+	privateKey, err := ecdh.X25519().NewPrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("invalid X25519 private key: %w", err)
+	}
+	return privateKey, nil
+}
+
+func writeKeyFile(path string, key []byte) (returnErr error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
+	defer func() {
+		if err := file.Close(); returnErr == nil && err != nil {
+			returnErr = err
+		}
+	}()
+	encoded := base64.RawURLEncoding.EncodeToString(key)
+	if _, err := file.WriteString(encoded); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readKeyFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("key file grants group or other access")
+	}
+	encoded, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+	key, err := base64.RawURLEncoding.Strict().DecodeString(string(encoded))
+	if err != nil {
+		return nil, fmt.Errorf("invalid base64url private key: %w", err)
+	}
+	return key, nil
+}
