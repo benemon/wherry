@@ -270,7 +270,7 @@ func TestLookupFindsExistingRun(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("lookup = %v, %v", ok, err)
 	}
-	if found.Job != dispatched.Job || found.Alloc != dispatched.Alloc || found.Format != dispatched.Format || found.Adapter != "" {
+	if found.Job != dispatched.Job || found.Alloc != dispatched.Alloc || found.Format != dispatched.Format {
 		t.Fatalf("lookup handle %#v, dispatch handle %#v", found, dispatched)
 	}
 	if got := output(t, ctx, adapter, found); !strings.Contains(got, "prompt=hello-prompt") {

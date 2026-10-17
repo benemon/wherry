@@ -379,7 +379,7 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 				continue
 			}
 			reply, ok := verified.(*wire.Reply)
-			if !ok || reply.RunID != runID || !attempts.Admit(reply.RunID, reply.Attempt) || !terminal(reply.State) {
+			if !ok || reply.RunID != runID || !attempts.Admit(reply.RunID, reply.Attempt) || !wire.Terminal(reply.State) {
 				continue
 			}
 			return AwaitResult{Reply: reply, Skipped: loaded.skipped}, nil
@@ -529,15 +529,6 @@ func (loaded *loadedState) receiverSigners(now time.Time) map[string]receiverIde
 
 func spare(capability *wire.Capability) int64 {
 	return capability.Capacity - capability.InFlight
-}
-
-func terminal(state wire.TaskState) bool {
-	switch state {
-	case wire.TaskStateCompleted, wire.TaskStateFailed, wire.TaskStateCanceled, wire.TaskStateRejected:
-		return true
-	default:
-		return false
-	}
 }
 
 func randomID(prefix string) (string, error) {

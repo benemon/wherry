@@ -13,6 +13,7 @@ func TestModeledA2AFieldsExistInVendoredProto(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fieldPattern := regexp.MustCompile(`(?m)^\s*(?:repeated\s+)?[\w.<>]+\s+([a-z][a-z0-9_]*)\s*=\s*\d+`)
 	for protoName, modeled := range map[string]any{
 		"Message":  Message{},
 		"Part":     Part{},
@@ -20,15 +21,21 @@ func TestModeledA2AFieldsExistInVendoredProto(t *testing.T) {
 	} {
 		block := protoBlock(t, string(proto), "message "+protoName)
 		fields := map[string]bool{}
-		fieldPattern := regexp.MustCompile(`(?m)^\s*(?:repeated\s+)?[\w.<>]+\s+([a-z][a-z0-9_]*)\s*=\s*\d+`)
 		for _, match := range fieldPattern.FindAllStringSubmatch(block, -1) {
 			fields[lowerCamel(match[1])] = true
 		}
+		modeledFields := map[string]bool{}
 		modeledType := reflect.TypeOf(modeled)
 		for i := 0; i < modeledType.NumField(); i++ {
 			jsonName := strings.Split(modeledType.Field(i).Tag.Get("json"), ",")[0]
+			modeledFields[jsonName] = true
 			if !fields[jsonName] {
 				t.Errorf("%s.%s is not in the vendored proto", protoName, jsonName)
+			}
+		}
+		for field := range fields {
+			if !modeledFields[field] {
+				t.Errorf("%s.%s is in the vendored proto but not modelled", protoName, field)
 			}
 		}
 	}

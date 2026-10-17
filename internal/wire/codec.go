@@ -52,6 +52,36 @@ func (value *Bytes) UnmarshalText(encoded []byte) error {
 	return nil
 }
 
+// StdBytes is padded standard base64 on the wire, as proto3 JSON writes bytes.
+type StdBytes []byte
+
+// MarshalText encodes bytes as padded standard base64.
+func (value StdBytes) MarshalText() ([]byte, error) {
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(value)))
+	base64.StdEncoding.Encode(encoded, value)
+	return encoded, nil
+}
+
+// UnmarshalText decodes strict base64 in the four forms proto3 JSON accepts:
+// standard or URL-safe, with or without padding.
+func (value *StdBytes) UnmarshalText(encoded []byte) error {
+	encoding := base64.StdEncoding
+	if bytes.ContainsAny(encoded, "-_") {
+		encoding = base64.URLEncoding
+	}
+	if len(encoded)%4 != 0 {
+		encoding = encoding.WithPadding(base64.NoPadding)
+	}
+	encoding = encoding.Strict()
+	decoded := make([]byte, encoding.DecodedLen(len(encoded)))
+	n, err := encoding.Decode(decoded, encoded)
+	if err != nil {
+		return err
+	}
+	*value = decoded[:n]
+	return nil
+}
+
 // Envelope is the signed Kafka record value.
 type Envelope struct {
 	V       int64      `json:"v"`
@@ -105,7 +135,8 @@ func MarshalPayload(recordType RecordType, payload any) ([]byte, error) {
 	if err := validatePayload(recordType, payload); err != nil {
 		return nil, err
 	}
-	encoded, err := json.Marshal(payload, json.Deterministic(true))
+	// Opaque JSON keeps its escapes; json/v2 still drops whitespace between its tokens.
+	encoded, err := json.Marshal(payload, json.Deterministic(true), jsontext.PreserveRawStrings(true))
 	if err != nil {
 		return nil, err
 	}

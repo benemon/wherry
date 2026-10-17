@@ -26,12 +26,11 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-// Handle identifies one platform instance of a run; Format is adapter-private and Adapter is set by the core.
+// Handle identifies one platform instance of a run; Format is adapter-private.
 type Handle struct {
-	Adapter string
-	Job     string
-	Alloc   string
-	Format  string
+	Job    string
+	Alloc  string
+	Format string
 }
 
 // Line is one output line, the byte offset where it starts and the offset after it.

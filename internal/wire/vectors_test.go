@@ -56,6 +56,11 @@ var vectorFilenames = []string{
 	"unentitled-signer.json",
 	"empty-label-value.json",
 	"attempt-zero.json",
+	"task-parts-ok.json",
+	"part-two-contents.json",
+	"part-no-content.json",
+	"metadata-not-object.json",
+	"raw-invalid-base64.json",
 }
 
 type publishedVector struct {
@@ -209,6 +214,20 @@ func writePublishedVectors(t *testing.T) {
 	taskPayload := mustPayload(TypeTask, payloads[TypeTask])
 	emptyLabel := strings.Replace(string(taskPayload), `"labels":{"lab/os":"linux"}`, `"labels":{"lab/os":""}`, 1)
 	add("empty-label-value.json", "empty label value", Sign(TypeTask, []byte(emptyLabel), privateKey), SignerUser, "invalid_payload")
+
+	parts := payloads[TypeTask].(*Task)
+	parts.Message.Metadata = jsontext.Value(`{"origin":"vector","tags":["a","b"]}`)
+	parts.Message.Parts = []Part{
+		{Text: "hello"},
+		{Raw: StdBytes{0xfb, 0xff}, MediaType: "application/octet-stream", Filename: "blob.bin"},
+		{URL: "https://example.test/report.pdf", MediaType: "application/pdf"},
+		{Data: jsontext.Value(`{"rows":[1,2.5,null]}`), MediaType: "application/json", Metadata: jsontext.Value(`{"schema":"v1"}`)},
+	}
+	add("task-parts-ok.json", "task with raw, url and data parts and metadata", Sign(TypeTask, mustPayload(TypeTask, parts), privateKey), SignerUser, "ok")
+	add("part-two-contents.json", "part with text and url", Sign(TypeTask, taskJSON(t, `"parts":[{"text":"hello","url":"https://example.test/a"}]`), privateKey), SignerUser, "invalid_payload")
+	add("part-no-content.json", "part with no content", Sign(TypeTask, taskJSON(t, `"parts":[{"mediaType":"text/plain"}]`), privateKey), SignerUser, "invalid_payload")
+	add("metadata-not-object.json", "message metadata array", Sign(TypeTask, taskJSON(t, `"parts":[{"text":"hello"}],"metadata":["a"]`), privateKey), SignerUser, "invalid_payload")
+	add("raw-invalid-base64.json", "raw not base64", Sign(TypeTask, taskJSON(t, `"parts":[{"raw":"aGk*"}]`), privateKey), SignerUser, "invalid_payload")
 
 	if err := os.MkdirAll("testdata/vectors", 0o755); err != nil {
 		t.Fatal(err)

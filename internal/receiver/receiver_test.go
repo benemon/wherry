@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"log"
@@ -434,7 +435,7 @@ func testActiveRun(t *testing.T, f fixture, runID string, attempt int64) *active
 		task:     &wire.Task{RunID: runID, ReplyTopic: "replies.test", CorrelationID: "corr"},
 		taskHash: strings.Repeat("a", 64),
 		attempt:  attempt,
-		adapter:  "nomad",
+		adapter:  f.receiver.adapters[0],
 	}
 }
 
@@ -498,7 +499,7 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 	t.Run("stop", func(t *testing.T) {
 		f := newFixture(t, resultStream)
 		run := testActiveRun(t, f, "run-release-stop", 1)
-		if status := run.finish(f.ctx, Handle{Adapter: "nomad", Alloc: "alloc"}, nil, agentResult{Result: "done"}); status != kgo.AckAccept {
+		if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"}); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
 		f.adapter.mu.Lock()
@@ -583,6 +584,49 @@ func TestAdmitRejections(t *testing.T) {
 	}
 }
 
+func TestReceiverRejectsNonTextParts(t *testing.T) {
+	for name, part := range map[string]wire.Part{
+		"raw":  {Raw: wire.StdBytes("hi"), MediaType: "text/plain"},
+		"url":  {URL: "https://example.test/a"},
+		"data": {Data: jsontext.Value(`{"k":1}`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, enrolled := admitFixture(t)
+			f.receiver.credentials["nomad"] = heldCredential{version: 1, value: []byte(testToken)}
+			f.cluster.SetGroupConfigs("p-"+enrolled.Pool, map[string]string{"share.auto.offset.reset": "earliest"})
+			record := signedRoot(t, f.userKey, func(task *wire.Task) {
+				task.Message.Parts = append(task.Message.Parts, part)
+			})
+			record.Topic = wire.TopicTask
+			if err := f.kafka.ProduceSync(f.ctx, record).FirstErr(); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.receiver.claimOne(f.ctx, enrolled); err != nil {
+				t.Fatal(err)
+			}
+			if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
+				t.Fatalf("dispatched %d runs", dispatches)
+			}
+			records, err := readBounded(f.ctx, f.receiver.kafkaOpt, wire.TopicEvent)
+			if err != nil || len(records) != 1 {
+				t.Fatalf("event records=%d err=%v, want one", len(records), err)
+			}
+			envelope, err := wire.DecodeEnvelope(records[0].Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			verified, err := wire.Verify(envelope, f.receiver.signing.Public().(ed25519.PublicKey), wire.SignerReceiver)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := verified.(*wire.Event)
+			if event.State != wire.TaskStateRejected || event.Kind != "terminal" || event.Reason == nil || *event.Reason != "unsupported message part" {
+				t.Fatalf("event %#v", event)
+			}
+		})
+	}
+}
+
 func TestAdmissionMismatchSkippedSilently(t *testing.T) {
 	f, enrolled := admitFixture(t)
 	record := signedRoot(t, f.userKey, func(task *wire.Task) {
@@ -621,7 +665,7 @@ func TestResultLineStopsAllocationBeforeTerminal(t *testing.T) {
 		}
 		return nil
 	}
-	status := run.finish(f.ctx, Handle{Adapter: "nomad", Alloc: "alloc"}, nil, agentResult{Result: "done"})
+	status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"})
 	if status != kgo.AckAccept {
 		t.Fatalf("finish status %v, want accept", status)
 	}
@@ -639,10 +683,10 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 		call func(*activeRun, context.Context) kgo.AckStatus
 	}{
 		{"result", func(run *activeRun, ctx context.Context) kgo.AckStatus {
-			return run.finish(ctx, Handle{Adapter: "nomad", Alloc: "alloc"}, nil, agentResult{Result: "done"})
+			return run.finish(ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"})
 		}},
 		{"failure", func(run *activeRun, ctx context.Context) kgo.AckStatus {
-			return run.stopAndFail(ctx, Handle{Adapter: "nomad", Alloc: "alloc"}, "timeout")
+			return run.stopAndFail(ctx, Handle{Alloc: "alloc"}, "timeout")
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

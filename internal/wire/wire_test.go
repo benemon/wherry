@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"reflect"
@@ -358,30 +359,14 @@ func TestVerifyRejectsUnentitledSigner(t *testing.T) {
 	}
 }
 
-func TestTransitionAllowsEveryNonterminalMove(t *testing.T) {
-	nonterminal := []TaskState{TaskStateUnspecified, TaskStateSubmitted, TaskStateWorking, TaskStateInputRequired, TaskStateAuthRequired}
-	all := []TaskState{
+func TestTerminalStates(t *testing.T) {
+	terminal := map[TaskState]bool{TaskStateCompleted: true, TaskStateFailed: true, TaskStateCanceled: true, TaskStateRejected: true}
+	for _, state := range []TaskState{
 		TaskStateUnspecified, TaskStateSubmitted, TaskStateWorking, TaskStateCompleted, TaskStateFailed,
 		TaskStateCanceled, TaskStateInputRequired, TaskStateRejected, TaskStateAuthRequired,
-	}
-	for _, previous := range nonterminal {
-		for _, next := range all {
-			if err := Transition(previous, next); err != nil {
-				t.Errorf("%s -> %s: %v", previous, next, err)
-			}
-		}
-	}
-	for _, state := range []TaskState{TaskStateCompleted, TaskStateFailed, TaskStateCanceled, TaskStateRejected} {
-		if err := Transition(state, state); err != nil {
-			t.Errorf("idempotent %s transition: %v", state, err)
-		}
-	}
-}
-
-func TestTransitionRejectsMoveOutOfTerminalStates(t *testing.T) {
-	for _, state := range []TaskState{TaskStateCompleted, TaskStateFailed, TaskStateCanceled, TaskStateRejected} {
-		if err := Transition(state, TaskStateWorking); err == nil {
-			t.Errorf("transition out of %s accepted", state)
+	} {
+		if Terminal(state) != terminal[state] {
+			t.Errorf("Terminal(%s) = %v, want %v", state, Terminal(state), terminal[state])
 		}
 	}
 }
@@ -689,5 +674,178 @@ func TestEnvelopeAndPayloadUseRawBase64URL(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), base64.StdEncoding.EncodeToString(payload)) {
 		t.Fatalf("envelope used standard base64: %s", encoded)
+	}
+}
+
+// taskJSON returns the valid task payload with its message parts member replaced by parts.
+func taskJSON(t *testing.T, parts string) []byte {
+	t.Helper()
+	encoded, err := MarshalPayload(TypeTask, validPayloads(t)[TypeTask])
+	if err != nil {
+		t.Fatal(err)
+	}
+	const original = `"parts":[{"text":"hello"}]`
+	if !bytes.Contains(encoded, []byte(original)) {
+		t.Fatalf("task payload lacks %s: %s", original, encoded)
+	}
+	return bytes.Replace(encoded, []byte(original), []byte(parts), 1)
+}
+
+func TestPartRequiresExactlyOneContent(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		parts string
+		ok    bool
+	}{
+		"text":         {`"parts":[{"text":"hello"}]`, true},
+		"raw":          {`"parts":[{"raw":"aGk=","mediaType":"text/plain","filename":"hi.txt"}]`, true},
+		"empty raw":    {`"parts":[{"raw":""}]`, true},
+		"url":          {`"parts":[{"url":"https://example.test/a"}]`, true},
+		"data":         {`"parts":[{"data":{"k":[1,2]}}]`, true},
+		"null data":    {`"parts":[{"data":null}]`, true},
+		"none":         {`"parts":[{"mediaType":"text/plain"}]`, false},
+		"empty text":   {`"parts":[{"text":""}]`, false},
+		"empty url":    {`"parts":[{"url":""}]`, false},
+		"text and url": {`"parts":[{"text":"hello","url":"https://example.test/a"}]`, false},
+		"text and raw": {`"parts":[{"text":"hello","raw":"aGk="}]`, false},
+		"raw and data": {`"parts":[{"raw":"aGk=","data":1}]`, false},
+		"url and data": {`"parts":[{"url":"https://example.test/a","data":"x"}]`, false},
+		"second part":  {`"parts":[{"text":"hello"},{"text":"hello","data":true}]`, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := DecodePayload(TypeTask, taskJSON(t, testCase.parts))
+			if (err == nil) != testCase.ok {
+				t.Fatalf("decode error %v, want ok=%v", err, testCase.ok)
+			}
+		})
+	}
+	for name, part := range map[string]Part{
+		"none":          {MediaType: "text/plain"},
+		"text and url":  {Text: "hello", URL: "https://example.test/a"},
+		"raw and data":  {Raw: StdBytes("hi"), Data: jsontext.Value(`1`)},
+		"text and data": {Text: "hello", Data: jsontext.Value(`null`)},
+	} {
+		t.Run("marshal "+name, func(t *testing.T) {
+			task := validPayloads(t)[TypeTask].(*Task)
+			task.Message.Parts = []Part{part}
+			if _, err := MarshalPayload(TypeTask, task); err == nil {
+				t.Fatal("part without exactly one content marshalled")
+			}
+		})
+	}
+}
+
+// Proto3 JSON writes bytes as padded standard base64 and accepts standard or
+// URL-safe, padded or not: https://protobuf.dev/programming-guides/json/
+func TestPartRawIsStandardBase64(t *testing.T) {
+	reply := validPayloads(t)[TypeReply].(*Reply)
+	reply.Artifacts[0].Parts = []Part{{Raw: StdBytes{0xfb, 0xff}, MediaType: "application/octet-stream"}}
+	encoded, err := MarshalPayload(TypeReply, reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"raw":"+/8="`)) {
+		t.Fatalf("raw is not padded standard base64: %s", encoded)
+	}
+	for input, ok := range map[string]bool{
+		"+/8=":  true,
+		"+/8":   true,
+		"-_8=":  true,
+		"-_8":   true,
+		"+_8=":  false,
+		"+/8==": false,
+		"+/9=":  false, // non-zero trailing bits: agentbus decodes strictly
+		"*":     false,
+	} {
+		t.Run(input, func(t *testing.T) {
+			decoded, err := DecodePayload(TypeTask, taskJSON(t, `"parts":[{"raw":"`+input+`"}]`))
+			if (err == nil) != ok {
+				t.Fatalf("decode error %v, want ok=%v", err, ok)
+			}
+			if ok && !bytes.Equal(decoded.(*Task).Message.Parts[0].Raw, []byte{0xfb, 0xff}) {
+				t.Fatalf("decoded raw %x", decoded.(*Task).Message.Parts[0].Raw)
+			}
+		})
+	}
+}
+
+func TestOpaqueJSONRelayedByteForByte(t *testing.T) {
+	// Unsorted names, exponent and trailing-zero numbers, an integer beyond int64 and escapes json/v2 would rewrite.
+	metadata := jsontext.Value(`{"z":1,"a":[1E2,1.50,-0,12345678901234567890,"\/\u0041"],"n":null}`)
+	data := jsontext.Value(`[{"y":"\u00e9"},1e-7]`)
+	task := validPayloads(t)[TypeTask].(*Task)
+	task.Message.Metadata = metadata
+	task.Message.Parts = []Part{{Data: data, Metadata: metadata}}
+	encoded, err := MarshalPayload(TypeTask, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"metadata":`+string(metadata))) || !bytes.Contains(encoded, []byte(`"data":`+string(data))) {
+		t.Fatalf("opaque JSON re-encoded: %s", encoded)
+	}
+	decoded, err := DecodePayload(TypeTask, encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := decoded.(*Task).Message
+	if !bytes.Equal(message.Metadata, metadata) || !bytes.Equal(message.Parts[0].Metadata, metadata) || !bytes.Equal(message.Parts[0].Data, data) {
+		t.Fatalf("decoded metadata %s, part metadata %s, data %s", message.Metadata, message.Parts[0].Metadata, message.Parts[0].Data)
+	}
+	spaced := `{ "z" : 1 ,` + "\n\t" + `"a" : [ ] }`
+	decoded, err = DecodePayload(TypeTask, taskJSON(t, `"parts":[{"text":"hello"}],"metadata":`+spaced))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(decoded.(*Task).Message.Metadata); got != spaced {
+		t.Fatalf("decoded metadata %q, want %q", got, spaced)
+	}
+}
+
+func TestMetadataMustBeObject(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		parts string
+		ok    bool
+	}{
+		"object":               {`"parts":[{"text":"hello"}],"metadata":{}`, true},
+		"part object":          {`"parts":[{"text":"hello","metadata":{"k":"v"}}]`, true},
+		"array":                {`"parts":[{"text":"hello"}],"metadata":[]`, false},
+		"string":               {`"parts":[{"text":"hello"}],"metadata":"x"`, false},
+		"number":               {`"parts":[{"text":"hello"}],"metadata":1`, false},
+		"null":                 {`"parts":[{"text":"hello"}],"metadata":null`, false},
+		"part array":           {`"parts":[{"text":"hello","metadata":[1]}]`, false},
+		"part data not object": {`"parts":[{"data":[1]}]`, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := DecodePayload(TypeTask, taskJSON(t, testCase.parts))
+			if (err == nil) != testCase.ok {
+				t.Fatalf("decode error %v, want ok=%v", err, testCase.ok)
+			}
+		})
+	}
+	for name, metadata := range map[string]jsontext.Value{"array": jsontext.Value(`[]`), "malformed": jsontext.Value(`{"k":`)} {
+		t.Run("marshal "+name, func(t *testing.T) {
+			reply := validPayloads(t)[TypeReply].(*Reply)
+			reply.Artifacts[0].Metadata = metadata
+			if _, err := MarshalPayload(TypeReply, reply); err == nil {
+				t.Fatal("artifact metadata that is not a JSON object marshalled")
+			}
+		})
+	}
+}
+
+func TestOpaqueJSONRejectsDuplicateNames(t *testing.T) {
+	for name, parts := range map[string]string{
+		"metadata": `"parts":[{"text":"hello"}],"metadata":{"k":1,"k":2}`,
+		"data":     `"parts":[{"data":{"x":{"k":1,"k":2}}}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodePayload(TypeTask, taskJSON(t, parts)); err == nil {
+				t.Fatal("duplicate member name inside opaque JSON accepted")
+			}
+		})
+	}
+	task := validPayloads(t)[TypeTask].(*Task)
+	task.Message.Metadata = jsontext.Value(`{"k":1,"k":2}`)
+	if _, err := MarshalPayload(TypeTask, task); err == nil {
+		t.Fatal("duplicate member name inside metadata marshalled")
 	}
 }

@@ -288,7 +288,7 @@ func runAwait(ctx context.Context, client *busclient.Client, args []string, stdo
 	fmt.Fprintln(stdout, result.Reply.State)
 	for _, artifact := range result.Reply.Artifacts {
 		for _, part := range artifact.Parts {
-			fmt.Fprintln(stdout, part.Text)
+			fmt.Fprintln(stdout, partText(part))
 		}
 	}
 	warnSkipped(stderr, result.Skipped)
@@ -296,6 +296,18 @@ func runAwait(ctx context.Context, client *busclient.Client, args []string, stdo
 		return fmt.Errorf("run ended in %s", result.Reply.State)
 	}
 	return nil
+}
+
+func partText(part wire.Part) string {
+	switch {
+	case part.Raw != nil:
+		return fmt.Sprintf("[raw %s %d bytes]", part.MediaType, len(part.Raw))
+	case part.URL != "":
+		return fmt.Sprintf("[url %s]", part.URL)
+	case part.Data != nil:
+		return fmt.Sprintf("[data %d bytes]", len(part.Data))
+	}
+	return part.Text
 }
 
 func runEvents(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {

@@ -2,6 +2,7 @@ package wire
 
 import (
 	"encoding/hex"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"maps"
@@ -98,37 +99,42 @@ var terminalStates = map[TaskState]bool{
 	TaskStateRejected:  true,
 }
 
-// Transition validates an A2A task-state transition.
-func Transition(previous, next TaskState) error {
-	if !taskStates[previous] || !taskStates[next] {
-		return errors.New("unknown task state")
-	}
-	if terminalStates[previous] && previous != next {
-		return fmt.Errorf("cannot transition from terminal state %s", previous)
-	}
-	return nil
+// Terminal reports whether an A2A task state ends a task.
+func Terminal(state TaskState) bool {
+	return terminalStates[state]
 }
 
-// Part is the text-only MVP subset of an A2A Part.
+// Part is an A2A Part with exactly one of Text, Raw, URL or Data.
 type Part struct {
-	Text string `json:"text"`
+	Text      string         `json:"text,omitzero"`
+	Raw       StdBytes       `json:"raw,omitzero"`
+	URL       string         `json:"url,omitzero"`
+	Data      jsontext.Value `json:"data,omitzero"`
+	Metadata  jsontext.Value `json:"metadata,omitzero"`
+	Filename  string         `json:"filename,omitzero"`
+	MediaType string         `json:"mediaType,omitzero"`
 }
 
-// Message is the MVP subset of an A2A Message.
+// Message is an A2A Message.
 type Message struct {
-	MessageID string `json:"messageId"`
-	ContextID string `json:"contextId,omitzero"`
-	TaskID    string `json:"taskId,omitzero"`
-	Role      Role   `json:"role"`
-	Parts     []Part `json:"parts"`
+	MessageID        string         `json:"messageId"`
+	ContextID        string         `json:"contextId,omitzero"`
+	TaskID           string         `json:"taskId,omitzero"`
+	Role             Role           `json:"role"`
+	Parts            []Part         `json:"parts"`
+	Metadata         jsontext.Value `json:"metadata,omitzero"`
+	Extensions       []string       `json:"extensions,omitzero"`
+	ReferenceTaskIDs []string       `json:"referenceTaskIds,omitzero"`
 }
 
-// Artifact is the MVP subset of an A2A Artifact.
+// Artifact is an A2A Artifact.
 type Artifact struct {
-	ArtifactID  string `json:"artifactId"`
-	Name        string `json:"name,omitzero"`
-	Description string `json:"description,omitzero"`
-	Parts       []Part `json:"parts"`
+	ArtifactID  string         `json:"artifactId"`
+	Name        string         `json:"name,omitzero"`
+	Description string         `json:"description,omitzero"`
+	Parts       []Part         `json:"parts"`
+	Metadata    jsontext.Value `json:"metadata,omitzero"`
+	Extensions  []string       `json:"extensions,omitzero"`
 }
 
 // Requirement is one selector condition.
@@ -677,12 +683,10 @@ func validateMessage(value *Message) error {
 	if value.Parts == nil {
 		return errors.New("message parts are required")
 	}
-	for _, part := range value.Parts {
-		if part.Text == "" {
-			return errors.New("text part is required")
-		}
+	if err := validateParts(value.Parts); err != nil {
+		return err
 	}
-	return nil
+	return validateMetadata(value.Metadata)
 }
 
 func validateArtifact(value *Artifact) error {
@@ -692,10 +696,37 @@ func validateArtifact(value *Artifact) error {
 	if value.Parts == nil {
 		return errors.New("artifact parts are required")
 	}
-	for _, part := range value.Parts {
-		if part.Text == "" {
-			return errors.New("text part is required")
+	if err := validateParts(value.Parts); err != nil {
+		return err
+	}
+	return validateMetadata(value.Metadata)
+}
+
+func validateParts(parts []Part) error {
+	for _, part := range parts {
+		contents := 0
+		for _, present := range []bool{part.Text != "", part.Raw != nil, part.URL != "", part.Data != nil} {
+			if present {
+				contents++
+			}
 		}
+		if contents != 1 {
+			return errors.New("part requires exactly one of text, raw, url or data")
+		}
+		if part.Data != nil && !part.Data.IsValid() {
+			return errors.New("part data must be valid JSON")
+		}
+		if err := validateMetadata(part.Metadata); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateMetadata applies RFC 7493 to opaque metadata, which Go callers can build without decoding.
+func validateMetadata(metadata jsontext.Value) error {
+	if metadata != nil && (!metadata.IsValid() || metadata.Kind() != '{') {
+		return errors.New("metadata must be a JSON object")
 	}
 	return nil
 }

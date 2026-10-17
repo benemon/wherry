@@ -87,7 +87,9 @@ func TestNewAdaptersRequiresCredentialEnv(t *testing.T) {
 	}
 }
 
-func TestReceiversJSONOutputShape(t *testing.T) {
+// enrolledReceiver returns a client whose bus holds an approved enrolment for receiver-a, and that receiver's signing key.
+func enrolledReceiver(t *testing.T) (context.Context, *kgo.Client, *busclient.Client, ed25519.PrivateKey) {
+	t.Helper()
 	cluster := kfake.MustCluster(kfake.NumBrokers(1))
 	t.Cleanup(cluster.Close)
 	kafka, err := kgo.NewClient(
@@ -137,8 +139,11 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
+	return ctx, kafka, busclient.New(kafka, userKey, "replies.test"), receiverKey
+}
 
-	client := busclient.New(kafka, userKey, "replies.test")
+func TestReceiversJSONOutputShape(t *testing.T) {
+	ctx, _, client, _ := enrolledReceiver(t)
 	var stdout, stderr bytes.Buffer
 	if err := runReceivers(ctx, client, []string{"--json"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
@@ -164,5 +169,41 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	}
 	if rows[0]["receiver_id"] != "receiver-a" || rows[0]["status"] != "silent" || rows[0]["pool"] != "default" {
 		t.Fatalf("unexpected JSON row: %#v", rows[0])
+	}
+}
+
+func TestAwaitPrintsNonTextPartPlaceholders(t *testing.T) {
+	ctx, kafka, client, receiverKey := enrolledReceiver(t)
+	if _, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, 1, nil, "replies.test"); err != nil {
+		t.Fatal(err)
+	}
+	reply := &wire.Reply{
+		RunID: "run-a", Attempt: 1, TaskHash: strings.Repeat("a", 64), CorrelationID: "corr",
+		State: wire.TaskStateCompleted, AtMS: time.Now().UnixMilli(),
+		Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{
+			{Text: "done"},
+			{Raw: wire.StdBytes("hello"), MediaType: "text/plain"},
+			{URL: "https://example.test/report.pdf"},
+			{Data: jsontext.Value(`{"k":[1,2]}`)},
+		}}},
+	}
+	payload, err := wire.MarshalPayload(wire.TypeReply, reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := wire.MarshalEnvelope(wire.Sign(wire.TypeReply, payload, receiverKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: "replies.test", Key: []byte("run-a"), Value: envelope}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runAwait(ctx, client, []string{"run-a", "--timeout", "5s"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	want := "TASK_STATE_COMPLETED\ndone\n[raw text/plain 5 bytes]\n[url https://example.test/report.pdf]\n[data 11 bytes]\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout %q, want %q", stdout.String(), want)
 	}
 }

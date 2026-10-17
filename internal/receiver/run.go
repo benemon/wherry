@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -124,6 +125,9 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 	if now.UnixMilli() > task.DeadlineMS {
 		return reject("run deadline passed")
 	}
+	if slices.ContainsFunc(task.Message.Parts, func(part wire.Part) bool { return part.Text == "" }) {
+		return reject("unsupported message part")
+	}
 	text := prompt(task)
 	return &admission{task: task, offer: offer, prompt: text}, 0
 }
@@ -185,7 +189,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		return kgo.AckRelease
 	}
 	defer producer.Close()
-	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: trust.EnvelopeHash(record.Value), attempt: attempt, adapter: admitted.offer.Adapter}
+	matched, ok := r.named(admitted.offer.Adapter)
+	if !ok {
+		r.logger.Printf("run %s: matched adapter %s is not configured", task.RunID, admitted.offer.Adapter)
+		return kgo.AckRelease
+	}
+	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: trust.EnvelopeHash(record.Value), attempt: attempt, adapter: matched}
 
 	if err := run.commit(ctx, run.eventRecord("claimed", wire.TaskStateWorking, nil, nil)); err != nil {
 		return run.abandon(err)
@@ -212,13 +221,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				return kgo.AckRelease
 			}
 			if ok {
-				handle, adopted, run.adapter = found, true, named.Name
+				handle, adopted, run.adapter = found, true, named
 				break
 			}
 		}
 	}
 	if !adopted {
-		named, _ := r.named(run.adapter)
+		named := run.adapter
 		var credential []byte
 		if named.Credential != "" {
 			r.mu.Lock()
@@ -238,8 +247,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			return run.fail(ctx, "dispatch failed")
 		}
 	}
-	handle.Adapter = run.adapter
-	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", task.RunID, attempt, run.adapter, wire.TermsText(admitted.offer.Labels), handle.Job)
+	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", task.RunID, attempt, run.adapter.Name, wire.TermsText(admitted.offer.Labels), handle.Job)
 	if err := run.commit(ctx, run.eventRecord("started", wire.TaskStateWorking, &offset, nil)); err != nil {
 		return run.abandon(err)
 	}
@@ -248,7 +256,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	defer stopFollow()
 	lines := make(chan Line, 64)
 	followed := make(chan error, 1)
-	go func() { followed <- r.adapterOf(handle).Follow(followCtx, handle, offset, lines) }()
+	go func() { followed <- run.adapter.Adapter.Follow(followCtx, handle, offset, lines) }()
 
 	heartbeat := time.NewTicker(renewInterval)
 	defer heartbeat.Stop()
@@ -309,8 +317,8 @@ type activeRun struct {
 	task     *wire.Task
 	taskHash string
 	attempt  int64
-	// adapter names the adapter holding the run's platform material, released at the end.
-	adapter string
+	// adapter holds the run's platform material, released at the end.
+	adapter Named
 }
 
 func (run *activeRun) commit(ctx context.Context, records ...*kgo.Record) error {
@@ -338,7 +346,7 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 }
 
 func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason string) kgo.AckStatus {
-	if err := run.receiver.adapterOf(handle).Stop(ctx, handle); err != nil {
+	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.logger.Printf("run %s: stop: %v", run.task.RunID, err)
 		return kgo.AckRelease
 	}
@@ -354,7 +362,7 @@ func (run *activeRun) fail(ctx context.Context, reason string) kgo.AckStatus {
 }
 
 func (run *activeRun) finish(ctx context.Context, handle Handle, pending []*kgo.Record, result agentResult) kgo.AckStatus {
-	if err := run.receiver.adapterOf(handle).Stop(ctx, handle); err != nil {
+	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.logger.Printf("run %s: stop: %v", run.task.RunID, err)
 		return kgo.AckRelease
 	}
@@ -371,15 +379,9 @@ func (run *activeRun) finish(ctx context.Context, handle Handle, pending []*kgo.
 }
 
 func (run *activeRun) release(ctx context.Context) {
-	named, _ := run.receiver.named(run.adapter)
-	if err := named.Adapter.Release(ctx, run.task.RunID); err != nil {
+	if err := run.adapter.Adapter.Release(ctx, run.task.RunID); err != nil {
 		run.receiver.logger.Printf("run %s: release: %v", run.task.RunID, err)
 	}
-}
-
-func (r *Receiver) adapterOf(handle Handle) Adapter {
-	named, _ := r.named(handle.Adapter)
-	return named.Adapter
 }
 
 func (run *activeRun) eventRecord(kind string, state wire.TaskState, offset *int64, reason *string) *kgo.Record {
