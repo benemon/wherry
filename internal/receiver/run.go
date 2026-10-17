@@ -346,7 +346,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				if runCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, "timeout", nil)
 				}
-				r.logger.Printf("run %s: lookup in adapter %s: %v", runID, named.Name, err)
+				r.logger.Printf("run %s: lookup in adapter %s: %T", runID, named.Name, err)
 				return kgo.AckRelease
 			}
 			if ok {
@@ -488,7 +488,7 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 
 func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason string, pending []Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
-		run.receiver.logger.Printf("run %s: stop: %v", run.task.Wherry.RunID, err)
+		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.RunID, err)
 		return kgo.AckRelease
 	}
 	return run.fail(ctx, reason, pending)
@@ -498,7 +498,7 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason str
 // trust this receiver's records, so the terminal status is best effort.
 func (run *activeRun) revoke(ctx context.Context, handle Handle, pending []Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
-		run.receiver.logger.Printf("run %s: stop: %v", run.task.Wherry.RunID, err)
+		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.RunID, err)
 		return kgo.AckRelease
 	}
 	const reason = "receiver revoked"
@@ -529,7 +529,7 @@ func (run *activeRun) interrupt(ctx context.Context, credential string) kgo.AckS
 
 func (run *activeRun) finish(ctx context.Context, handle Handle, pending []Line, result agentResult) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
-		run.receiver.logger.Printf("run %s: stop: %v", run.task.Wherry.RunID, err)
+		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.RunID, err)
 		return kgo.AckRelease
 	}
 	state, ack := wire.TaskStateCompleted, kgo.AckAccept
@@ -556,7 +556,7 @@ func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result st
 
 func (run *activeRun) release(ctx context.Context) {
 	if err := run.adapter.Adapter.Release(ctx, run.task.Wherry.RunID, run.task.Wherry.Turn); err != nil {
-		run.receiver.logger.Printf("run %s: release: %v", run.task.Wherry.RunID, err)
+		run.receiver.logger.Printf("run %s: release: %T", run.task.Wherry.RunID, err)
 	}
 }
 

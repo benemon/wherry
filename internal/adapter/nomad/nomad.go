@@ -475,9 +475,10 @@ func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) e
 
 // Sweep deletes per-run variables whose job has ended, been stopped, or never registered.
 func (adapter *Adapter) Sweep(ctx context.Context) error {
-	variables, _, err := adapter.client.Variables().PrefixList("nomad/jobs/"+jobPrefix, (&api.QueryOptions{}).WithContext(ctx))
+	prefix := "nomad/jobs/" + jobPrefix
+	variables, _, err := adapter.client.Variables().PrefixList(prefix, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return err
+		return redacted("list", prefix, err)
 	}
 	var errs []error
 	for _, variable := range variables {
@@ -492,7 +493,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 				continue
 			}
 		case err != nil:
-			errs = append(errs, err)
+			errs = append(errs, redacted("sweep", variable.Path, err))
 			continue
 		case *job.Status != "dead" && !*job.Stop:
 			continue

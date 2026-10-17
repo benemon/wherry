@@ -755,7 +755,9 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 				http.Error(response, "job not found", http.StatusNotFound)
 				return
 			}
-			_, _ = response.Write([]byte(`{"ID":"agent-run-urls-t1","TaskGroups":[{"Tasks":[{"Driver":"raw_exec"}]}]}`))
+			_, _ = response.Write([]byte(`{"ID":"agent-run-urls-t1","Status":"dead","Stop":false,"TaskGroups":[{"Tasks":[{"Driver":"raw_exec"}]}]}`))
+		case "GET /v1/vars":
+			_, _ = response.Write([]byte(`[{"Path":"nomad/jobs/agent-run-urls-t1"}]`))
 		case "PUT /v1/jobs":
 			registered = true
 			_, _ = response.Write([]byte(`{}`))
@@ -786,10 +788,13 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	if err := adapter.Release(ctx, run.ID, run.Turn); err != nil {
 		t.Fatal(err)
 	}
+	if err := adapter.Sweep(ctx); err != nil {
+		t.Fatal(err)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(urls) != 8 {
-		t.Fatalf("requests = %v, want dispatch, lookup, stop and release", urls)
+	if len(urls) != 11 {
+		t.Fatalf("requests = %v, want dispatch, lookup, stop, release and sweep", urls)
 	}
 	for _, url := range urls {
 		for _, secret := range []string{token, string(run.Credential), string(run.Prompt)} {
@@ -818,6 +823,9 @@ func TestRedactedDropsResponseBody(t *testing.T) {
 	got := redacted("write", "nomad/jobs/agent-run-redact", err).Error()
 	if strings.Contains(got, "test-credential") || strings.Contains(got, "hello-prompt") {
 		t.Fatalf("redacted error %q contains variable items", got)
+	}
+	if err := adapter.Sweep(context.Background()); err == nil || strings.Contains(err.Error(), "test-credential") {
+		t.Fatalf("sweep error %v, want a redacted failure", err)
 	}
 }
 

@@ -544,6 +544,25 @@ func TestSecretPutExpires(t *testing.T) {
 	}
 }
 
+func TestSecretPutNeverPrintsPlaintext(t *testing.T) {
+	const plaintext = "s3cr3t-sealed-plaintext"
+	ctx, _, client, _, _ := enrolledReceiver(t)
+	path := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(path, []byte(plaintext), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"token", ""} {
+		var stdout, stderr bytes.Buffer
+		err := runSecret(ctx, client, []string{"put", name, "--to", "receiver-a", "--from-file", path}, &stdout, &stderr)
+		if (err != nil) != (name == "") {
+			t.Fatalf("secret put %q: %v", name, err)
+		}
+		if strings.Contains(stdout.String()+stderr.String(), plaintext) || err != nil && strings.Contains(err.Error(), plaintext) {
+			t.Fatalf("secret put %q printed the plaintext: stdout %q stderr %q err %v", name, stdout.String(), stderr.String(), err)
+		}
+	}
+}
+
 func TestReceiversWarnsSealExpiry(t *testing.T) {
 	ctx, _, client, _, _ := enrolledReceiver(t)
 	putSecret(t, ctx, client, "short", "--expires", "72h")

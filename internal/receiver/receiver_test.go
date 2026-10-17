@@ -54,8 +54,10 @@ type fakeAdapter struct {
 	dispatchErr error
 	lastRun     Run
 	lookups     int
+	lookupErr   error
 	existing    bool
 	releases    int
+	releaseErr  error
 	releaseIDs  []string
 	sweeps      int
 	sweepErr    error
@@ -91,6 +93,9 @@ func (f *fakeAdapter) Lookup(_ context.Context, runID string, turn int64) (Handl
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lookups++
+	if f.lookupErr != nil {
+		return Handle{}, false, f.lookupErr
+	}
 	if !f.existing {
 		return Handle{}, false, nil
 	}
@@ -139,7 +144,7 @@ func (f *fakeAdapter) Release(_ context.Context, runID string, _ int64) error {
 	defer f.mu.Unlock()
 	f.releases++
 	f.releaseIDs = append(f.releaseIDs, runID)
-	return nil
+	return f.releaseErr
 }
 
 func (f *fakeAdapter) Sweep(context.Context) error {
@@ -1554,6 +1559,46 @@ func TestDispatchErrorReasonIsFixed(t *testing.T) {
 	logs := f.logs.String()
 	if strings.Contains(logs, secret) || !strings.Contains(logs, "*errors.errorString") {
 		t.Fatalf("unexpected dispatch error log: %q", logs)
+	}
+}
+
+func TestAdapterErrorLogsCarryOnlyType(t *testing.T) {
+	const secret = "token=s3cr3t-adapter-detail"
+	for _, test := range []struct {
+		name string
+		call func(*testing.T, fixture, *trust.Enrolled)
+	}{
+		{"lookup", func(t *testing.T, f fixture, enrolled *trust.Enrolled) {
+			f.adapter.lookupErr = errors.New(secret)
+			record := signedRoot(t, f.userKey, nil)
+			admitted, _ := f.receiver.admit(f.ctx, record, enrolled)
+			executeSubmission(t, f, record, admitted, 2)
+		}},
+		{"stop on result", func(t *testing.T, f fixture, _ *trust.Enrolled) {
+			f.adapter.stopErr = errors.New(secret)
+			testActiveRun(t, f, "run-log-result", 1).finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"})
+		}},
+		{"stop on failure", func(t *testing.T, f fixture, _ *trust.Enrolled) {
+			f.adapter.stopErr = errors.New(secret)
+			testActiveRun(t, f, "run-log-failure", 1).stopAndFail(f.ctx, Handle{Alloc: "alloc"}, "timeout", nil)
+		}},
+		{"stop on revoke", func(t *testing.T, f fixture, _ *trust.Enrolled) {
+			f.adapter.stopErr = errors.New(secret)
+			testActiveRun(t, f, "run-log-revoke", 1).revoke(f.ctx, Handle{Alloc: "alloc"}, nil)
+		}},
+		{"release", func(t *testing.T, f fixture, _ *trust.Enrolled) {
+			f.adapter.releaseErr = errors.New(secret)
+			testActiveRun(t, f, "run-log-release", 1).release(f.ctx)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, enrolled := admitFixture(t)
+			test.call(t, f, enrolled)
+			logs := f.logs.String()
+			if strings.Contains(logs, secret) || !strings.Contains(logs, "*errors.errorString") {
+				t.Fatalf("unexpected adapter error log: %q", logs)
+			}
+		})
 	}
 }
 
