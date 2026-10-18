@@ -163,13 +163,11 @@ The log prints this as one line. The receiver then waits for approval.
 3. Approve the request:
 
    ```sh
-   wherry enrol approve <hash> --labels region=eu-west \
-     --grants grants.json --selector example.com/team=platform
+   wherry enrol approve <hash> --labels region=eu-west --grants grants.json
    ```
 
    The command prints `receiver=receiver-a generation=1`. The receiver logs
-   `enrolled: pool=receiver-a generation=1`. The receiver accepts only tasks
-   whose labels include `example.com/team=platform`.
+   `enrolled: pool=receiver-a generation=1`.
 
 4. Wait up to 30 seconds for the first capability, then check that the
    receiver is live:
@@ -193,7 +191,6 @@ seal expires in 30 days by default.
 
 ```sh
 wherry submit --selector runtime=agent \
-  --labels example.com/team=platform \
   --prompt "Summarise the release notes in three sentences."
 ```
 

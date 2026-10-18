@@ -121,9 +121,8 @@ func runReceivers(ctx context.Context, client *busclient.Client, args []string, 
 					receiver.ReceiverID, receiver.Pool, receiver.Generation, receiver.Floor, receiver.Status)
 				continue
 			}
-			fmt.Fprintf(stdout, "receiver=%s pool=%s generation=%d labels=%s selector=%s capacity=%d in_flight=%d heartbeat_age=%s status=%s\n",
-				receiver.ReceiverID, receiver.Pool, receiver.Generation,
-				wire.TermsText(receiver.Labels), formatRequirements(receiver.Selector),
+			fmt.Fprintf(stdout, "receiver=%s pool=%s generation=%d labels=%s capacity=%d in_flight=%d heartbeat_age=%s status=%s\n",
+				receiver.ReceiverID, receiver.Pool, receiver.Generation, wire.TermsText(receiver.Labels),
 				receiver.Capacity, receiver.InFlight, receiver.HeartbeatAge, receiver.Status)
 			for _, grant := range receiver.Adapters {
 				fmt.Fprintf(stdout, "  adapter=%s platform=%s defaults=%s\n", grant.Name, grant.Platform, wire.TermsText(grant.Defaults))
@@ -198,7 +197,7 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 		warnSkipped(stderr, result.Skipped)
 		return nil
 	}
-	const enrolUsage = "usage: wherry enrol <list|revoke RECEIVER_ID|renew RECEIVER_ID|approve REQUEST_HASH [--pool POOL] --labels k=v,.. --grants FILE --selector k=v|v,.. [--expires DURATION]>"
+	const enrolUsage = "usage: wherry enrol <list|revoke RECEIVER_ID|renew RECEIVER_ID|approve REQUEST_HASH [--pool POOL] --labels k=v,.. --grants FILE [--expires DURATION]>"
 	if len(args) < 2 || args[0] != "approve" {
 		return errors.New(enrolUsage)
 	}
@@ -208,7 +207,6 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 	pool := flags.String("pool", "", "pool name (default: the receiver ID)")
 	labelsText := flags.String("labels", "", "approved receiver labels")
 	grantsPath := flags.String("grants", "", "JSON file holding the adapter grants")
-	selectorText := flags.String("selector", "", "approved selector")
 	renewal := flags.String("renewal", "auto", "renewal policy")
 	expires := flags.Duration("expires", 30*24*time.Hour, "approval lifetime")
 	if err := flags.Parse(args[2:]); err != nil {
@@ -217,8 +215,8 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 	if flags.NArg() != 0 {
 		return errors.New(enrolUsage)
 	}
-	if !flagSet(flags, "labels", "grants", "selector") {
-		return errors.New("enrol approve requires --labels, --grants and --selector")
+	if !flagSet(flags, "labels", "grants") {
+		return errors.New("enrol approve requires --labels and --grants")
 	}
 	if *renewal != "auto" && *renewal != "manual" {
 		return errors.New("renewal must be auto or manual")
@@ -238,11 +236,7 @@ func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdo
 	if err := json.Unmarshal(encodedGrants, &grants, json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)); err != nil {
 		return fmt.Errorf("grants: %w", err)
 	}
-	selector, err := parseRequirements(*selectorText)
-	if err != nil {
-		return fmt.Errorf("selector: %w", err)
-	}
-	result, err := client.Approve(ctx, requestHash, *pool, labels, grants, selector, *renewal, *expires)
+	result, err := client.Approve(ctx, requestHash, *pool, labels, grants, *renewal, *expires)
 	if err != nil {
 		return err
 	}
@@ -334,7 +328,6 @@ func runSubmit(ctx context.Context, client *busclient.Client, args []string, std
 	flags := flag.NewFlagSet("submit", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	selectorText := flags.String("selector", "", "task selector")
-	labelsText := flags.String("labels", "", "task labels")
 	prompt := flags.String("prompt", "", "prompt text")
 	promptFile := flags.String("prompt-file", "", "prompt file")
 	gitURL := flags.String("git", "", "git repository URL to check out for the agent")
@@ -346,7 +339,7 @@ func runSubmit(ctx context.Context, client *busclient.Client, args []string, std
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit --selector k=v|v,.. --labels k=v,.. <--prompt TEXT|--prompt-file PATH> [--git URL --git-ref REF [--git-path PATH]] [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit --selector k=v|v,.. <--prompt TEXT|--prompt-file PATH> [--git URL --git-ref REF [--git-path PATH]] [--deadline DURATION] [--queue-deadline DURATION]")
 	}
 	var parts []wire.Part
 	if wasSet(flags, "git") || wasSet(flags, "git-ref") || wasSet(flags, "git-path") {
@@ -356,8 +349,8 @@ func runSubmit(ctx context.Context, client *busclient.Client, args []string, std
 		metadata, _ := json.Marshal(wire.GitMetadata{Ref: *gitRef, Path: *gitPath}) // strings always encode
 		parts = append(parts, wire.Part{URL: *gitURL, MediaType: wire.GitMediaType, Metadata: metadata})
 	}
-	if !flagSet(flags, "selector", "labels") {
-		return errors.New("submit requires --selector and --labels")
+	if !wasSet(flags, "selector") {
+		return errors.New("submit requires --selector")
 	}
 	promptSet := wasSet(flags, "prompt")
 	promptFileSet := wasSet(flags, "prompt-file")
@@ -378,12 +371,8 @@ func runSubmit(ctx context.Context, client *busclient.Client, args []string, std
 	if err != nil {
 		return fmt.Errorf("selector: %w", err)
 	}
-	labels, err := parseTerms(*labelsText)
-	if err != nil {
-		return fmt.Errorf("labels: %w", err)
-	}
 	result, err := client.Submit(ctx, busclient.SubmitInput{
-		Selector: selector, Labels: labels, Prompt: *prompt, Parts: parts,
+		Selector: selector, Prompt: *prompt, Parts: parts,
 		Deadline: *deadline, QueueDeadline: *queueDeadline,
 	})
 	if err != nil {
@@ -541,15 +530,6 @@ func parseRequirements(value string) ([]wire.Requirement, error) {
 		requirements = append(requirements, wire.Requirement{Key: key, Operator: wire.OpIn, Values: values})
 	}
 	return requirements, nil
-}
-
-func formatRequirements(requirements []wire.Requirement) string {
-	formatted := make([]string, 0, len(requirements))
-	for _, requirement := range requirements {
-		formatted = append(formatted, requirement.Key+"="+strings.Join(requirement.Values, "|"))
-	}
-	sort.Strings(formatted)
-	return strings.Join(formatted, ",")
 }
 
 func flagSet(flags *flag.FlagSet, names ...string) bool {

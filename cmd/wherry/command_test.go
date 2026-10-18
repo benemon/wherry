@@ -62,7 +62,7 @@ func TestParseSelectorRejectsDuplicateKey(t *testing.T) {
 
 func TestApproveRequiresGrants(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	err := runEnrol(context.Background(), nil, []string{"approve", "request", "--labels", "", "--selector", "region=eu"}, &stdout, &stderr)
+	err := runEnrol(context.Background(), nil, []string{"approve", "request", "--labels", ""}, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "--grants") {
 		t.Fatalf("got %v, want required grants error", err)
 	}
@@ -132,7 +132,7 @@ func enrolledReceiver(t *testing.T) (context.Context, *kgo.Client, *busclient.Cl
 	if err != nil {
 		t.Fatal(err)
 	}
-	approval, err := trust.Approve(request, enrolRequest.(*wire.EnrolRequest), userKey, map[string]string{}, "default", grants, []wire.Requirement{{Key: "region", Operator: wire.OpIn, Values: []string{"eu"}}}, "auto", 1, "", time.Now().Add(time.Hour))
+	approval, err := trust.Approve(request, enrolRequest.(*wire.EnrolRequest), userKey, map[string]string{}, "default", grants, "auto", 1, "", time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	wantKeys := []string{"adapters", "capacity", "floor_generation", "generation", "heartbeat_age", "in_flight", "labels", "offers", "pool", "receiver_id", "revoked", "secrets", "selector", "status"}
+	wantKeys := []string{"adapters", "capacity", "floor_generation", "generation", "heartbeat_age", "in_flight", "labels", "offers", "pool", "receiver_id", "revoked", "secrets", "status"}
 	if !reflect.DeepEqual(keys, wantKeys) {
 		t.Fatalf("got JSON fields %v, want %v", keys, wantKeys)
 	}
@@ -188,7 +188,7 @@ func awaitOutput(t *testing.T, parts []wire.Part) string {
 			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
-			RunID: "run-a", Turn: 1, Attempt: 1, Pool: "default", Selector: []wire.Requirement{}, Labels: map[string]string{},
+			RunID: "run-a", Turn: 1, Attempt: 1, Pool: "default", Selector: []wire.Requirement{},
 			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
 			ReplyTopic: "replies.test", Lineage: wire.Lineage{RootRunID: "run-a", Ancestors: []string{}, Chain: []wire.Bytes{}},
 		},
@@ -256,7 +256,7 @@ func publishInterruptedRun(t *testing.T) (context.Context, *kgo.Client, *busclie
 			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
-			RunID: "run-auth", Turn: 1, Attempt: 1, Pool: "default", Selector: []wire.Requirement{}, Labels: map[string]string{},
+			RunID: "run-auth", Turn: 1, Attempt: 1, Pool: "default", Selector: []wire.Requirement{},
 			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
 			ReplyTopic: "replies.test", Lineage: wire.Lineage{RootRunID: "run-auth", Ancestors: []string{}, Chain: []wire.Bytes{}},
 		},
@@ -493,7 +493,7 @@ func TestManualRenewalCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if err := runEnrol(ctx, client, []string{"approve", enrolments[0].RequestHash, "--pool", "default", "--labels", "", "--grants", grantsPath, "--selector", "region=eu", "--renewal", "manual"}, &stdout, &stderr); err != nil {
+	if err := runEnrol(ctx, client, []string{"approve", enrolments[0].RequestHash, "--pool", "default", "--labels", "", "--grants", grantsPath, "--renewal", "manual"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	payload, err := wire.MarshalPayload(wire.TypeRenewRequest, &wire.RenewRequest{ReceiverID: "receiver-a", Generation: 2, AtMS: time.Now().UnixMilli()})
@@ -559,7 +559,7 @@ func TestApproveExpires(t *testing.T) {
 		}
 		var stdout, stderr bytes.Buffer
 		before := time.Now()
-		args := append([]string{"approve", enrolments[0].RequestHash, "--labels", "", "--grants", grantsPath, "--selector", "region=eu"}, test.flags...)
+		args := append([]string{"approve", enrolments[0].RequestHash, "--labels", "", "--grants", grantsPath}, test.flags...)
 		if err := runEnrol(ctx, client, args, &stdout, &stderr); err != nil {
 			t.Fatal(err)
 		}
@@ -592,7 +592,7 @@ func TestApproveExpires(t *testing.T) {
 		}
 	}
 	var stdout, stderr bytes.Buffer
-	if err := runEnrol(context.Background(), nil, []string{"approve", "request", "--labels", "", "--grants", "unused", "--selector", "region=eu", "--expires", "0s"}, &stdout, &stderr); err == nil || err.Error() != "expires must be positive" {
+	if err := runEnrol(context.Background(), nil, []string{"approve", "request", "--labels", "", "--grants", "unused", "--expires", "0s"}, &stdout, &stderr); err == nil || err.Error() != "expires must be positive" {
 		t.Fatalf("zero expiry: got %v", err)
 	}
 }
@@ -604,8 +604,14 @@ func TestUsageErrors(t *testing.T) {
 		want string
 	}{
 		{"submit argument", func(stderr *bytes.Buffer) error {
-			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--labels", "", "extra"}, stderr, stderr)
+			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "extra"}, stderr, stderr)
 		}, "usage: wherry submit"},
+		{"submit labels", func(stderr *bytes.Buffer) error {
+			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--labels", "region=eu", "--prompt", "p"}, stderr, stderr)
+		}, "flag provided but not defined: -labels"},
+		{"approve selector", func(stderr *bytes.Buffer) error {
+			return runEnrol(context.Background(), nil, []string{"approve", "request", "--labels", "", "--grants", "g", "--selector", "a=b"}, stderr, stderr)
+		}, "flag provided but not defined: -selector"},
 		{"continue argument", func(stderr *bytes.Buffer) error {
 			return runContinue(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
 		}, "usage: wherry continue"},
@@ -619,10 +625,10 @@ func TestUsageErrors(t *testing.T) {
 			return runSecret(context.Background(), nil, []string{"put", "token", "--to", "r", "--from-file", "f", "extra"}, stderr, stderr)
 		}, "usage: wherry secret put"},
 		{"approve argument", func(stderr *bytes.Buffer) error {
-			return runEnrol(context.Background(), nil, []string{"approve", "request", "--labels", "", "--grants", "g", "--selector", "a=b", "extra"}, stderr, stderr)
+			return runEnrol(context.Background(), nil, []string{"approve", "request", "--labels", "", "--grants", "g", "extra"}, stderr, stderr)
 		}, "usage: wherry enrol"},
 		{"submit deadline", func(stderr *bytes.Buffer) error {
-			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--labels", "", "--prompt", "p", "--deadline", "0s"}, stderr, stderr)
+			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--prompt", "p", "--deadline", "0s"}, stderr, stderr)
 		}, "deadlines must be positive"},
 		{"continue deadline", func(stderr *bytes.Buffer) error {
 			return runContinue(context.Background(), nil, []string{"run-a", "--deadline", "0s"}, stderr, stderr)
@@ -750,7 +756,6 @@ func TestSubmitGitFlags(t *testing.T) {
 	encoded, err := wire.MarshalPayload(wire.TypeCapability, &wire.Capability{
 		ReceiverID: "receiver-a", Labels: map[string]string{}, Pool: "default",
 		Offers:   []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}},
-		Selector: []wire.Requirement{{Key: "region", Operator: wire.OpIn, Values: []string{"eu"}}},
 		Capacity: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
 	})
 	if err != nil {
@@ -763,7 +768,7 @@ func TestSubmitGitFlags(t *testing.T) {
 	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicCapability, Key: []byte("receiver-a"), Value: capability}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
-	base := []string{"--selector", "runtime=exec", "--labels", "region=eu", "--prompt", "fix the bug"}
+	base := []string{"--selector", "runtime=exec", "--prompt", "fix the bug"}
 	for name, test := range map[string]struct {
 		flags []string
 		want  string

@@ -8,6 +8,7 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -31,7 +32,7 @@ func validPayloads(t *testing.T) map[RecordType]any {
 			Message: message,
 			Wherry: SubmissionExtension{
 				RunID: "run-1", Turn: 1, Attempt: 1, Pool: "linux",
-				Selector: []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}}, Labels: map[string]string{"lab/os": "linux"},
+				Selector:   []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}},
 				DeadlineMS: 2_000, QueueDeadlineMS: 1_000, ReplyTopic: "replies.client-1",
 				Lineage: Lineage{RootRunID: "run-1", Depth: 0, Ancestors: []string{}, ParentHash: "", Chain: []Bytes{}},
 			},
@@ -61,7 +62,6 @@ func validPayloads(t *testing.T) map[RecordType]any {
 		TypeCapability: &Capability{
 			ReceiverID: "receiver-1", Labels: map[string]string{"lab/os": "linux"}, Pool: "linux",
 			Offers:   []Offer{{Adapter: "nomad", Labels: map[string]string{"runtime": "exec"}}},
-			Selector: []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}},
 			Capacity: 4, InFlight: 1, Generation: 2, AtMS: 1_000,
 		},
 		TypeEnrolRequest: &EnrolRequest{
@@ -73,7 +73,6 @@ func validPayloads(t *testing.T) map[RecordType]any {
 		TypeEnrolApproval: &EnrolApproval{
 			ReceiverID: "receiver-1", RequestHash: hashA, Labels: map[string]string{"lab/os": "linux"}, Pool: "linux",
 			Adapters: []AdapterGrant{{Name: "nomad", Platform: "nomad", Allowed: map[string][]string{"runtime": {"exec"}}, Defaults: map[string]string{"runtime": "exec"}}},
-			Selector: []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}},
 			Renewal:  "auto", Generation: 2, PrevStateHash: hashB, ExpMS: 2_000,
 		},
 		TypeRenewRequest: &RenewRequest{ReceiverID: "receiver-1", Generation: 2, AtMS: 1_000},
@@ -170,7 +169,7 @@ func TestDecodePayloadRejectsMissingRequiredNumericMember(t *testing.T) {
 		"revocation at_ms":     {TypeRevocation, `{"receiver_id":"receiver-1","floor_generation":1}`},
 		"submission depth":     {TypeSubmission, string(withoutMember(t, TypeSubmission, `"depth":0,`))},
 		"artifact_update seq":  {TypeArtifactUpdate, string(withoutMember(t, TypeArtifactUpdate, `,"seq":1`))},
-		"capability in_flight": {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{},"offers":[],"selector":[],"capacity":1,"generation":1,"at_ms":1}`},
+		"capability in_flight": {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{},"offers":[],"capacity":1,"generation":1,"at_ms":1}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodePayload(testCase.recordType, []byte(testCase.payload)); err == nil {
@@ -282,7 +281,7 @@ func TestDecodePayloadRequiresExplicitEmptyLineageFields(t *testing.T) {
 		t.Fatal("missing parent_hash accepted")
 	}
 	hash := strings.Repeat("a", 64)
-	missingPreviousHash := `{"receiver_id":"receiver-1","request_hash":"` + hash + `","labels":{},"pool":"linux","adapters":[],"selector":[],"renewal":"auto","generation":1,"exp_ms":2}`
+	missingPreviousHash := `{"receiver_id":"receiver-1","request_hash":"` + hash + `","labels":{},"pool":"linux","adapters":[],"renewal":"auto","generation":1,"exp_ms":2}`
 	if _, err := DecodePayload(TypeEnrolApproval, []byte(missingPreviousHash)); err == nil {
 		t.Fatal("missing prev_state_hash accepted")
 	}
@@ -693,10 +692,9 @@ func TestDecodeRejectsEmptyLabelValue(t *testing.T) {
 		recordType RecordType
 		payload    string
 	}{
-		"labels":         {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{"lab/os":""},"offers":[],"selector":[],"capacity":1,"in_flight":0,"generation":1,"at_ms":1}`},
-		"selector":       {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{"lab/os":"linux"},"offers":[],"selector":[{"key":"region","operator":"In","values":[""]}],"capacity":1,"in_flight":0,"generation":1,"at_ms":1}`},
+		"labels":         {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{"lab/os":""},"offers":[],"capacity":1,"in_flight":0,"generation":1,"at_ms":1}`},
 		"request labels": {TypeEnrolRequest, `{"receiver_id":"receiver-1","signing_pub":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","sealing_pub":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","labels":{"lab/os":""},"adapters":[],"at_ms":1}`},
-		"offer labels":   {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{},"offers":[{"adapter":"nomad","labels":{"runtime":""}}],"selector":[],"capacity":1,"in_flight":0,"generation":1,"at_ms":1}`},
+		"offer labels":   {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{},"offers":[{"adapter":"nomad","labels":{"runtime":""}}],"capacity":1,"in_flight":0,"generation":1,"at_ms":1}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodePayload(testCase.recordType, []byte(testCase.payload)); err == nil {
@@ -707,7 +705,7 @@ func TestDecodeRejectsEmptyLabelValue(t *testing.T) {
 }
 
 func TestDecodeRejectsEmptyLabelKey(t *testing.T) {
-	payload := `{"receiver_id":"receiver-1","pool":"linux","labels":{"":"linux"},"offers":[],"selector":[],"capacity":1,"in_flight":0,"generation":1,"at_ms":1}`
+	payload := `{"receiver_id":"receiver-1","pool":"linux","labels":{"":"linux"},"offers":[],"capacity":1,"in_flight":0,"generation":1,"at_ms":1}`
 	if _, err := DecodePayload(TypeCapability, []byte(payload)); err == nil {
 		t.Fatal("empty map key accepted")
 	}
@@ -1013,5 +1011,63 @@ func TestGitPartValidation(t *testing.T) {
 	submission.Message.Parts = append(submission.Message.Parts, Part{URL: "https://token@git.example.test/org/repo.git", MediaType: GitMediaType, Metadata: jsontext.Value(`{"ref":"main"}`)})
 	if _, err := MarshalPayload(TypeSubmission, submission); err == nil || strings.Contains(err.Error(), "token") {
 		t.Fatalf("marshal error %v, want a fixed rejection", err)
+	}
+}
+
+func TestUnknownVersionRejected(t *testing.T) {
+	publicKey, privateKey := fixedKey(t)
+	payloads := validPayloads(t)
+	for name, test := range map[string]struct {
+		recordType RecordType
+		version    int64
+	}{
+		"v2 revocation": {TypeRevocation, 2},
+		"v3 submission": {TypeSubmission, 3},
+		"v0 revocation": {TypeRevocation, 0},
+		"v3 approval":   {TypeEnrolApproval, 3},
+		"v3 capability": {TypeCapability, 3},
+		"v2 status":     {TypeStatus, 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload, err := MarshalPayload(test.recordType, payloads[test.recordType])
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Signed under the domain of the version it claims, so only the version check can reject it.
+			envelope := Sign(test.recordType, payload, privateKey)
+			envelope.V, envelope.Sig = test.version, ed25519.Sign(privateKey, signatureInput(test.version, test.recordType, payload))
+			if _, err := Verify(envelope, publicKey, verificationKind(test.recordType)); err == nil {
+				t.Fatal("unknown version verified")
+			}
+			encoded, err := MarshalEnvelope(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DecodeEnvelope(encoded); err == nil {
+				t.Fatal("unknown version decoded")
+			}
+		})
+	}
+}
+
+func TestV1SubmissionRequiresLabels(t *testing.T) {
+	publicKey, privateKey := fixedKey(t)
+	encoded, err := os.ReadFile("testdata/vectors/v1/submission-ok.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vector publishedVector
+	if err := json.Unmarshal(encoded, &vector); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(vector.PayloadB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlabelled := replaceOnce(t, payload, `"labels":{"lab/os":"linux"},`, ``)
+	envelope := Envelope{V: 1, Type: TypeSubmission, Signer: Fingerprint(publicKey), Payload: unlabelled,
+		Sig: ed25519.Sign(privateKey, signatureInput(1, TypeSubmission, unlabelled))}
+	if _, err := Verify(envelope, publicKey, SignerUser); !errors.Is(err, errInvalidPayload) {
+		t.Fatalf("v1 submission without labels: got %v, want invalid payload", err)
 	}
 }

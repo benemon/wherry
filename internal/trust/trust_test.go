@@ -56,7 +56,7 @@ func newTrustFixture(t *testing.T) trustFixture {
 		t.Fatal(err)
 	}
 	enrolRequest := decoded.(*wire.EnrolRequest)
-	approval, err := Approve(request, enrolRequest, userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 1, "", testNow.Add(time.Hour))
+	approval, err := Approve(request, enrolRequest, userPrivateKey, testLabels(), "default", testGrants(), "auto", 1, "", testNow.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,6 @@ func TestEnrolRequestApproveState(t *testing.T) {
 	}
 	if !reflect.DeepEqual(fixture.enrolled.Labels, testLabels()) ||
 		!reflect.DeepEqual(fixture.enrolled.Adapters, testGrants()) ||
-		!reflect.DeepEqual(fixture.enrolled.Selector, testSelector()) ||
 		fixture.enrolled.Pool != "default" || fixture.enrolled.Generation != 1 || fixture.enrolled.ApprovalHash != EnvelopeHash(fixture.approval) {
 		t.Fatalf("unexpected enrolment: %#v", fixture.enrolled)
 	}
@@ -193,7 +192,7 @@ func testGrants() []wire.AdapterGrant {
 
 func testCapability(offers ...wire.Offer) *wire.Capability {
 	return &wire.Capability{
-		ReceiverID: "receiver-a", Pool: "default", Labels: testLabels(), Offers: offers, Selector: testSelector(),
+		ReceiverID: "receiver-a", Pool: "default", Labels: testLabels(), Offers: offers,
 		Capacity: 2, InFlight: 1, Generation: 1, AtMS: testNow.UnixMilli(),
 	}
 }
@@ -254,14 +253,14 @@ func TestApproveRejectsSwappedSealingKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Approve(tampered, request, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 1, "", testNow.Add(time.Hour)); err == nil {
+	if _, err := Approve(tampered, request, fixture.userPrivateKey, testLabels(), "default", testGrants(), "auto", 1, "", testNow.Add(time.Hour)); err == nil {
 		t.Fatal("request with swapped sealing key was approved")
 	}
 }
 
 func TestStateIgnoresOlderApprovalAppendedLater(t *testing.T) {
 	fixture := newTrustFixture(t)
-	approval2, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 2, EnvelopeHash(fixture.approval), testNow.Add(2*time.Hour))
+	approval2, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), "auto", 2, EnvelopeHash(fixture.approval), testNow.Add(2*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +282,7 @@ func TestStateIgnoresOlderApprovalAppendedLater(t *testing.T) {
 func TestStateRejectsApprovalWithWrongPrevHash(t *testing.T) {
 	fixture := newTrustFixture(t)
 	wrongHash := strings.Repeat("a", 64)
-	approval2, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", 2, wrongHash, testNow.Add(2*time.Hour))
+	approval2, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), "auto", 2, wrongHash, testNow.Add(2*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +317,7 @@ func TestStateRejectsReceiverSignedApproval(t *testing.T) {
 	}
 	approval := &wire.EnrolApproval{
 		ReceiverID: "receiver-a", RequestHash: EnvelopeHash(fixture.request),
-		Labels: testLabels(), Pool: "default", Adapters: testGrants(), Selector: testSelector(),
+		Labels: testLabels(), Pool: "default", Adapters: testGrants(),
 		Renewal: "auto", Generation: 1, PrevStateHash: "", ExpMS: testNow.Add(time.Hour).UnixMilli(),
 	}
 	if _, err := state.Apply(mustSigned(t, wire.TypeEnrolApproval, approval, fixture.receiverKey)); err == nil {
@@ -329,10 +328,9 @@ func TestStateRejectsReceiverSignedApproval(t *testing.T) {
 func TestCapabilityBroaderThanApprovalRejected(t *testing.T) {
 	fixture := newTrustFixture(t)
 	tests := map[string]func(*wire.Capability){
-		"extra label":        func(capability *wire.Capability) { capability.Labels["lab/arch"] = "arm64" },
-		"different selector": func(capability *wire.Capability) { capability.Selector[0].Values = []string{"us"} },
-		"different pool":     func(capability *wire.Capability) { capability.Pool = "other" },
-		"stale generation":   func(capability *wire.Capability) { capability.Generation = 0 },
+		"extra label":      func(capability *wire.Capability) { capability.Labels["lab/arch"] = "arm64" },
+		"different pool":   func(capability *wire.Capability) { capability.Pool = "other" },
+		"stale generation": func(capability *wire.Capability) { capability.Generation = 0 },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -533,7 +531,7 @@ func rootSubmission() wire.SubmissionRecord {
 			Parts: []wire.Part{{Text: "hello"}}, Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
-			RunID: "root", Turn: 1, Attempt: 1, Pool: "default", Selector: testSelector(), Labels: map[string]string{"lab/os": "linux"},
+			RunID: "root", Turn: 1, Attempt: 1, Pool: "default", Selector: testSelector(),
 			DeadlineMS: testNow.Add(time.Hour).UnixMilli(), QueueDeadlineMS: testNow.Add(time.Minute).UnixMilli(),
 			ReplyTopic: "replies.client",
 			Lineage:    wire.Lineage{RootRunID: "root", Depth: 0, Ancestors: []string{}, ParentHash: "", Chain: []wire.Bytes{}},
@@ -576,26 +574,6 @@ func decodeSealedSecret(t *testing.T, encoded []byte) *wire.SealedSecret {
 	return decoded.(*wire.SealedSecret)
 }
 
-func TestEmptySelectorSurvivesState(t *testing.T) {
-	fixture := newTrustFixture(t)
-	approval, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), []wire.Requirement{}, "auto", 2, EnvelopeHash(fixture.approval), testNow.Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.state.Apply(approval); err != nil {
-		t.Fatal(err)
-	}
-	enrolled, err := fixture.state.Receiver("receiver-a", testNow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	capability := testCapability()
-	capability.Offers, capability.Selector, capability.Generation = []wire.Offer{}, enrolled.Selector, 2
-	if _, err := marshalSigned(wire.TypeCapability, capability, fixture.receiverKey); err != nil {
-		t.Fatalf("capability built from an empty approved selector: %v", err)
-	}
-}
-
 // When history restarts, generation numbering restarts at 1; a secret sealed under the
 // superseded generation-1 approval must not open under the new one.
 func TestSealRejectedUnderDifferentApproval(t *testing.T) {
@@ -606,7 +584,7 @@ func TestSealRejectedUnderDifferentApproval(t *testing.T) {
 	}
 	reapprove := func(state *State, generation int64, previous string) Enrolled {
 		t.Helper()
-		approval, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", generation, previous, testNow.Add(2*time.Hour))
+		approval, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), "auto", generation, previous, testNow.Add(2*time.Hour))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -674,7 +652,7 @@ func (fixture trustFixture) revoke(t *testing.T, floor int64) {
 
 func (fixture trustFixture) approve(t *testing.T, generation int64, previous string) []byte {
 	t.Helper()
-	approval, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), testSelector(), "auto", generation, previous, testNow.Add(time.Hour))
+	approval, err := Approve(fixture.request, fixture.enrolRequest, fixture.userPrivateKey, testLabels(), "default", testGrants(), "auto", generation, previous, testNow.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,7 +830,6 @@ func TestRenewalRejectsChangedTerms(t *testing.T) {
 		"grants": func(approval *wire.EnrolApproval) {
 			approval.Adapters = []wire.AdapterGrant{{Name: "lab", Platform: "nomad", Allowed: map[string][]string{"runtime": {"exec"}}, Defaults: map[string]string{}}}
 		},
-		"selector":    func(approval *wire.EnrolApproval) { approval.Selector = []wire.Requirement{} },
 		"renewal":     func(approval *wire.EnrolApproval) { approval.Renewal = "manual" },
 		"earlier exp": func(approval *wire.EnrolApproval) { approval.ExpMS = testNow.Add(time.Minute).UnixMilli() },
 	} {

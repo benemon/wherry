@@ -17,8 +17,8 @@ To approve a receiver:
 2. Write a grants file: a JSON array with one grant per adapter to approve.
    Each grant names a detected adapter and its platform, and sets
    `allowed` and `defaults`.
-3. Run `wherry enrol approve REQUEST_HASH` with `--labels`, `--grants` and
-   `--selector`, and optionally `--pool`, `--renewal` and `--expires`.
+3. Run `wherry enrol approve REQUEST_HASH` with `--labels` and `--grants`,
+   and optionally `--pool`, `--renewal` and `--expires`.
 
 A grant's `allowed` maps each offer label key to the values the adapter may
 advertise. The receiver drops any offer with a label key or value missing
@@ -37,9 +37,14 @@ receiver whose approval holds a grant for an adapter it does not have, or
 with another platform, logs `enrolment rejected` and claims nothing. An
 adapter without a grant advertises no offers.
 
-To change a receiver's labels, pool, grants or selector, approve its request
-again. Each approval is a new generation. Credentials sealed under an
-earlier generation stop opening, so seal them again after re-approval.
+To change a receiver's labels, pool or grants, approve its request again.
+Each approval is a new generation. Credentials sealed under an earlier
+generation stop opening, so seal them again after re-approval.
+
+An approval that an earlier release signed with a non-empty receiver
+selector enrols nothing and cannot be renewed. `wherry receivers` does not
+list that receiver. Approve its request again to enrol it at the next
+generation, then seal its credentials again.
 
 ## Pools and high availability
 
@@ -54,10 +59,10 @@ Each pool reads `tasks.queue` through the Kafka share group `p-<pool>`.
 - Receivers in a pool accept each other's status records when they check a
   continuation or resume a transcript.
 
-Approve every receiver in a pool with the same labels, grants and selector,
-and give each the same adapters. A receiver that claims a task its offers or
-selector do not match acknowledges it without publishing a status, and the
-task leaves the pool's queue.
+Approve every receiver in a pool with the same labels and grants, and give
+each the same adapters. A receiver that claims a task its offers do not
+match acknowledges it without publishing a status, and the task leaves the
+pool's queue.
 
 Each receiver has its own keys, so seal credentials to each receiver in a
 pool separately.

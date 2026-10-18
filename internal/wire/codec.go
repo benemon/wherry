@@ -97,30 +97,49 @@ func Fingerprint(publicKey ed25519.PublicKey) string {
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
-// Sign signs exact payload bytes for a record type.
+// currentVersions holds the record types whose shape has changed since version 1 (ADR-0014).
+var currentVersions = map[RecordType]int64{
+	TypeSubmission:    2,
+	TypeCapability:    2,
+	TypeEnrolApproval: 2,
+}
+
+func currentVersion(recordType RecordType) int64 {
+	if version, ok := currentVersions[recordType]; ok {
+		return version
+	}
+	return 1
+}
+
+func knownVersion(envelope Envelope) bool {
+	return envelope.V >= 1 && envelope.V <= currentVersion(envelope.Type)
+}
+
+// Sign signs exact payload bytes for a record type at its current version.
 func Sign(recordType RecordType, payload []byte, privateKey ed25519.PrivateKey) Envelope {
 	publicKey := privateKey.Public().(ed25519.PublicKey)
+	version := currentVersion(recordType)
 	return Envelope{
-		V:       1,
+		V:       version,
 		Type:    recordType,
 		Signer:  Fingerprint(publicKey),
 		Payload: append(Bytes(nil), payload...),
-		Sig:     ed25519.Sign(privateKey, signatureInput(recordType, payload)),
+		Sig:     ed25519.Sign(privateKey, signatureInput(version, recordType, payload)),
 	}
 }
 
 // Verify authenticates an entitled envelope and returns its decoded payload.
 func Verify(envelope Envelope, publicKey ed25519.PublicKey, kind SignerKind) (any, error) {
-	if envelope.V != 1 || !validFingerprint(envelope.Signer) || envelope.Signer != Fingerprint(publicKey) {
+	if !knownVersion(envelope) || !validFingerprint(envelope.Signer) || envelope.Signer != Fingerprint(publicKey) {
 		return nil, errInvalidSignature
 	}
-	if !verifySignature(publicKey, signatureInput(envelope.Type, envelope.Payload), envelope.Sig) {
+	if !verifySignature(publicKey, signatureInput(envelope.V, envelope.Type, envelope.Payload), envelope.Sig) {
 		return nil, errInvalidSignature
 	}
 	if !entitled(envelope.Type, kind) {
 		return nil, errUnentitledSigner
 	}
-	decoded, err := DecodePayload(envelope.Type, envelope.Payload)
+	decoded, err := decodeVersion(envelope.V, envelope.Type, envelope.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errInvalidPayload, err)
 	}
@@ -146,10 +165,17 @@ func MarshalPayload(recordType RecordType, payload any) ([]byte, error) {
 	return encoded, nil
 }
 
-// DecodePayload strictly decodes and validates a payload by record type.
+// DecodePayload strictly decodes and validates a payload of the current version by record type.
 func DecodePayload(recordType RecordType, encoded []byte) (any, error) {
+	return decodeVersion(currentVersion(recordType), recordType, encoded)
+}
+
+func decodeVersion(version int64, recordType RecordType, encoded []byte) (any, error) {
 	if len(encoded) > maxPayloadSize {
 		return nil, errPayloadTooLarge
+	}
+	if version < currentVersion(recordType) {
+		return decodeV1(recordType, encoded)
 	}
 	payload, err := newPayload(recordType)
 	if err != nil {
@@ -185,14 +211,14 @@ func DecodeEnvelope(encoded []byte) (Envelope, error) {
 	if err := json.Unmarshal(encoded, &envelope, strictDecodeOptions); err != nil {
 		return Envelope{}, err
 	}
-	if envelope.V != 1 || envelope.Type == "" || !validFingerprint(envelope.Signer) || envelope.Payload == nil || len(envelope.Sig) != ed25519.SignatureSize {
+	if envelope.Type == "" || !knownVersion(envelope) || !validFingerprint(envelope.Signer) || envelope.Payload == nil || len(envelope.Sig) != ed25519.SignatureSize {
 		return Envelope{}, errors.New("invalid envelope")
 	}
 	return envelope, nil
 }
 
-func signatureInput(recordType RecordType, payload []byte) []byte {
-	prefix := []byte("wherry/v1/" + string(recordType) + "\x00")
+func signatureInput(version int64, recordType RecordType, payload []byte) []byte {
+	prefix := fmt.Appendf(nil, "wherry/v%d/%s\x00", version, recordType)
 	return append(prefix, payload...)
 }
 

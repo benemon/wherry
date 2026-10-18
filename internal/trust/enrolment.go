@@ -22,7 +22,6 @@ type Enrolled struct {
 	Labels     map[string]string
 	Pool       string
 	Adapters   []wire.AdapterGrant
-	Selector   []wire.Requirement
 	Generation int64
 	// ApprovalHash is the envelope hash of the generation's founding approval.
 	ApprovalHash string
@@ -34,6 +33,8 @@ type acceptedApproval struct {
 	// head is the latest accepted approval or renewal at that generation.
 	head     *wire.EnrolApproval
 	headHash string
+	// selector is the receiver selector of a version 1 approval, which the current version cannot express.
+	selector []wire.Requirement
 }
 
 type secretID struct {
@@ -43,6 +44,10 @@ type secretID struct {
 
 // ErrRevoked reports that a receiver's accepted approval is at or below its revocation floor.
 var ErrRevoked = errors.New("receiver is revoked")
+
+// ErrSelectorApproval reports that a receiver's accepted approval is a version 1 approval with a receiver selector,
+// which grants nothing and cannot be renewed.
+var ErrSelectorApproval = errors.New("approval carries a receiver selector and grants nothing")
 
 // State computes current trust state from records applied in log order.
 type State struct {
@@ -91,7 +96,7 @@ func NewEnrolRequest(receiverID string, signingKey ed25519.PrivateKey, sealingKe
 }
 
 // Approve verifies an enrolment request and signs its approval with the user key.
-func Approve(requestEnvelopeBytes []byte, request *wire.EnrolRequest, userKey ed25519.PrivateKey, labels map[string]string, pool string, grants []wire.AdapterGrant, selector []wire.Requirement, renewal string, generation int64, prevStateHash string, exp time.Time) ([]byte, error) {
+func Approve(requestEnvelopeBytes []byte, request *wire.EnrolRequest, userKey ed25519.PrivateKey, labels map[string]string, pool string, grants []wire.AdapterGrant, renewal string, generation int64, prevStateHash string, exp time.Time) ([]byte, error) {
 	envelope, err := wire.DecodeEnvelope(requestEnvelopeBytes)
 	if err != nil {
 		return nil, err
@@ -110,7 +115,6 @@ func Approve(requestEnvelopeBytes []byte, request *wire.EnrolRequest, userKey ed
 		Labels:        labels,
 		Pool:          pool,
 		Adapters:      grants,
-		Selector:      selector,
 		Renewal:       renewal,
 		Generation:    generation,
 		PrevStateHash: prevStateHash,
@@ -161,6 +165,9 @@ func (state *State) Receiver(id string, now time.Time) (Enrolled, error) {
 	if approval.enrolled.Generation <= state.floors[id] {
 		return Enrolled{}, ErrRevoked
 	}
+	if len(approval.selector) > 0 {
+		return Enrolled{}, ErrSelectorApproval
+	}
 	if now.UnixMilli() >= approval.head.ExpMS {
 		return Enrolled{}, errors.New("receiver enrolment is expired")
 	}
@@ -179,7 +186,7 @@ func (state *State) Approval(id string) (wire.EnrolApproval, string, bool) {
 // RenewRequest returns the receiver's unanswered renew request for its current, unrevoked generation.
 func (state *State) RenewRequest(id string) (wire.RenewRequest, bool) {
 	request, ok := state.renewRequests[id]
-	if !ok || request.Generation != state.approvals[id].enrolled.Generation || request.Generation <= state.floors[id] {
+	if !ok || len(state.approvals[id].selector) > 0 || request.Generation != state.approvals[id].enrolled.Generation || request.Generation <= state.floors[id] {
 		return wire.RenewRequest{}, false
 	}
 	return *request, true
@@ -209,9 +216,6 @@ func CapabilityWithin(capEnvelopeBytes []byte, enrolled Enrolled) (*wire.Capabil
 	}
 	if !maps.Equal(capability.Labels, enrolled.Labels) {
 		return nil, errors.New("capability labels exceed enrolment")
-	}
-	if !reflect.DeepEqual(capability.Selector, enrolled.Selector) {
-		return nil, errors.New("capability selector exceeds enrolment")
 	}
 	for _, offer := range capability.Offers {
 		index := slices.IndexFunc(enrolled.Adapters, func(grant wire.AdapterGrant) bool { return grant.Name == offer.Adapter })
@@ -299,12 +303,26 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 	if err != nil {
 		return nil, fmt.Errorf("verify enrolment approval: %w", err)
 	}
-	approval := verified.(*wire.EnrolApproval)
+	var approval *wire.EnrolApproval
+	var selector []wire.Requirement
+	switch payload := verified.(type) {
+	case *wire.EnrolApproval:
+		approval = payload
+	case *wire.SelectorApproval:
+		approval, selector = &payload.EnrolApproval, payload.Selector
+	}
 	if approval.Generation <= state.floors[approval.ReceiverID] {
 		return nil, errors.New("approval is at or below the revocation floor")
 	}
 	current, enrolled := state.approvals[approval.ReceiverID]
 	if enrolled && approval.Generation == current.enrolled.Generation {
+		// A v1 renewal of a v1 selector approval still chains, so later generations can chain to it.
+		if (len(current.selector) > 0) != (len(selector) > 0) {
+			return nil, ErrSelectorApproval
+		}
+		if !reflect.DeepEqual(current.selector, selector) {
+			return nil, errors.New("renewal changes the approved terms")
+		}
 		if err := renews(current, approval); err != nil {
 			return nil, err
 		}
@@ -339,12 +357,12 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 			Labels:       maps.Clone(approval.Labels),
 			Pool:         approval.Pool,
 			Adapters:     cloneGrants(approval.Adapters),
-			Selector:     slices.Clone(approval.Selector),
 			Generation:   approval.Generation,
 			ApprovalHash: approvalHash,
 		},
 		head:     approval,
 		headHash: approvalHash,
+		selector: selector,
 	}
 	return approval, nil
 }
@@ -431,7 +449,6 @@ func cloneEnrolled(enrolled Enrolled) Enrolled {
 		Labels:       maps.Clone(enrolled.Labels),
 		Pool:         enrolled.Pool,
 		Adapters:     cloneGrants(enrolled.Adapters),
-		Selector:     slices.Clone(enrolled.Selector),
 		Generation:   enrolled.Generation,
 		ApprovalHash: enrolled.ApprovalHash,
 	}

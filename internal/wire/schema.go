@@ -205,16 +205,15 @@ type Lineage struct {
 
 // SubmissionExtension is the wherry extension block of a submission.
 type SubmissionExtension struct {
-	RunID           string            `json:"run_id"`
-	Turn            int64             `json:"turn"`
-	Attempt         int64             `json:"attempt"`
-	Pool            string            `json:"pool"`
-	Selector        []Requirement     `json:"selector"`
-	Labels          map[string]string `json:"labels"`
-	DeadlineMS      int64             `json:"deadline_ms"`
-	QueueDeadlineMS int64             `json:"queue_deadline_ms"`
-	ReplyTopic      string            `json:"reply_topic"`
-	Lineage         Lineage           `json:"lineage"`
+	RunID           string        `json:"run_id"`
+	Turn            int64         `json:"turn"`
+	Attempt         int64         `json:"attempt"`
+	Pool            string        `json:"pool"`
+	Selector        []Requirement `json:"selector"`
+	DeadlineMS      int64         `json:"deadline_ms"`
+	QueueDeadlineMS int64         `json:"queue_deadline_ms"`
+	ReplyTopic      string        `json:"reply_topic"`
+	Lineage         Lineage       `json:"lineage"`
 }
 
 // SubmissionRecord is a submission payload: the A2A Message that starts a task.
@@ -409,7 +408,6 @@ type Capability struct {
 	Labels     map[string]string `json:"labels"`
 	Pool       string            `json:"pool"`
 	Offers     []Offer           `json:"offers"`
-	Selector   []Requirement     `json:"selector"`
 	Capacity   int64             `json:"capacity"`
 	InFlight   int64             `json:"in_flight"`
 	Generation int64             `json:"generation"`
@@ -433,7 +431,6 @@ type EnrolApproval struct {
 	Labels        map[string]string `json:"labels"`
 	Pool          string            `json:"pool"`
 	Adapters      []AdapterGrant    `json:"adapters"`
-	Selector      []Requirement     `json:"selector"`
 	Renewal       string            `json:"renewal"`
 	Generation    int64             `json:"generation"`
 	PrevStateHash string            `json:"prev_state_hash"`
@@ -475,8 +472,8 @@ type SealedSecret struct {
 	CT         Bytes  `json:"ct"`
 }
 
-// Satisfies reports whether every requirement holds against labels.
-func Satisfies(selector []Requirement, labels map[string]string) bool {
+// satisfies reports whether every requirement holds against labels.
+func satisfies(selector []Requirement, labels map[string]string) bool {
 	for _, requirement := range selector {
 		value, ok := labels[requirement.Key]
 		if !ok || requirement.Operator != OpIn || !slices.Contains(requirement.Values, value) {
@@ -503,7 +500,7 @@ func MatchOffer(selector []Requirement, labels map[string]string, grants []Adapt
 		combined := maps.Clone(labels)
 		combined["platform"] = grant.Platform
 		maps.Copy(combined, offer.Labels)
-		if Satisfies(effective, combined) {
+		if satisfies(effective, combined) {
 			return Offer{Adapter: offer.Adapter, Labels: maps.Clone(offer.Labels)}, true
 		}
 	}
@@ -645,11 +642,8 @@ func validateSubmission(value *SubmissionRecord) error {
 			return err
 		}
 	}
-	if extension.Turn < 1 || extension.Attempt < 1 || lineage.Depth < 0 || int64(len(lineage.Ancestors)) != lineage.Depth || lineage.Ancestors == nil || lineage.Chain == nil || extension.Labels == nil || extension.Selector == nil {
+	if extension.Turn < 1 || extension.Attempt < 1 || lineage.Depth < 0 || int64(len(lineage.Ancestors)) != lineage.Depth || lineage.Ancestors == nil || lineage.Chain == nil || extension.Selector == nil {
 		return errors.New("invalid submission lineage")
-	}
-	if err := validateTerms(extension.Labels, "labels"); err != nil {
-		return err
 	}
 	if err := validateRequirements(extension.Selector); err != nil {
 		return err
@@ -793,10 +787,7 @@ func validateCapability(value *Capability) error {
 	if err := validateReceiverLabels(value.Labels); err != nil {
 		return err
 	}
-	if err := validateOffers(value.Offers); err != nil {
-		return err
-	}
-	return validateRequirements(value.Selector)
+	return validateOffers(value.Offers)
 }
 
 func validateEnrolRequest(value *EnrolRequest) error {
@@ -853,9 +844,6 @@ func validateEnrolApproval(value *EnrolApproval) error {
 		if err := validateGrant(value.Labels, grant); err != nil {
 			return err
 		}
-	}
-	if err := validateRequirements(value.Selector); err != nil {
-		return err
 	}
 	if value.PrevStateHash != "" && !validHash(value.PrevStateHash) {
 		return errors.New("invalid previous state hash")

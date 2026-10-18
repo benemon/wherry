@@ -410,6 +410,10 @@ func (r *Receiver) requestRenewal(ctx context.Context, state *trust.State, issue
 	if !ok || current.Generation <= state.Floor(id) {
 		return nil
 	}
+	// A selector approval is never renewed, so its request would never stay pending and would repeat every refresh.
+	if _, err := state.Receiver(id, now); errors.Is(err, trust.ErrSelectorApproval) {
+		return nil
+	}
 	exp := time.UnixMilli(current.ExpMS)
 	if exp.Sub(now) >= exp.Sub(issued[hash])/3 {
 		return nil
@@ -532,7 +536,7 @@ func (r *Receiver) publishCapability(ctx context.Context) error {
 	inFlight := r.inFlight
 	r.mu.Unlock()
 	capability := &wire.Capability{
-		ReceiverID: r.config.ReceiverID, Labels: enrolled.Labels, Pool: enrolled.Pool, Offers: offers, Selector: enrolled.Selector,
+		ReceiverID: r.config.ReceiverID, Labels: enrolled.Labels, Pool: enrolled.Pool, Offers: offers,
 		Capacity: r.config.Capacity, InFlight: inFlight, Generation: enrolled.Generation, AtMS: time.Now().UnixMilli(),
 	}
 	value, err := sign(wire.TypeCapability, capability, r.signing)

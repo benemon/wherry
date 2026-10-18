@@ -34,8 +34,6 @@ Call `receivers` first. For each receiver it returns:
 - `offers`: label sets the receiver can run a task with. Build `selector`
   from these: each key maps to the values you accept, and an offer must
   match every key.
-- `selector`: the labels this receiver requires of a task. Your `labels`
-  must satisfy it.
 - `status`, `capacity` and `in_flight`: whether it is live and has room.
 - `secrets`: the credential names sealed to it.
 
@@ -44,8 +42,8 @@ them. The user's approval of each receiver still bounds what can run.
 
 ## Submit, then keep working
 
-Call `submit` with `prompt`, `selector`, `labels` and, when the agent needs
-a repository, `git` (`url`, `ref`, optional `path`). It returns `id` and
+Call `submit` with `prompt`, `selector` and, when the agent needs a
+repository, `git` (`url`, `ref`, optional `path`). It returns `id` and
 `pool` straight away. Note the id and carry on with other work.
 
 ## Collect the result

@@ -111,7 +111,6 @@ func publishCapability(t *testing.T, ctx context.Context, kafka *kgo.Client, rec
 	encoded, err := wire.MarshalPayload(wire.TypeCapability, &wire.Capability{
 		ReceiverID: "receiver-a", Labels: map[string]string{}, Pool: "default",
 		Offers:   []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}},
-		Selector: []wire.Requirement{{Key: "region", Operator: wire.OpIn, Values: []string{"eu"}}},
 		Capacity: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
 	})
 	if err != nil {
@@ -126,7 +125,7 @@ func publishCapability(t *testing.T, ctx context.Context, kafka *kgo.Client, rec
 	}
 }
 
-var submitArguments = map[string]any{"prompt": "fix the bug", "selector": map[string]any{"runtime": []string{"exec"}}, "labels": map[string]any{"region": "eu"}}
+var submitArguments = map[string]any{"prompt": "fix the bug", "selector": map[string]any{"runtime": []string{"exec"}}}
 
 func TestMCPToolsList(t *testing.T) {
 	_, kafka, _, userKey, _ := enrolledReceiver(t)
@@ -154,7 +153,7 @@ func TestMCPToolsList(t *testing.T) {
 	}
 	required := map[string][]string{
 		"await": {"id"}, "cancel": {"id"}, "continue": {"id"}, "events": {"id"}, "receivers": nil, "status": {"id"},
-		"submit": {"labels", "prompt", "selector"},
+		"submit": {"prompt", "selector"},
 	}
 	for name, tool := range schemas {
 		if tool.Description == "" {
@@ -435,7 +434,7 @@ func TestMCPErrorsCarryNoSecrets(t *testing.T) {
 	}{
 		"connect failure": {func() (*busclient.Client, error) { return busclient.Connect(broken) }, "status", map[string]any{"id": "run-a"}, "UNAVAILABLE"},
 		"git userinfo": {working, "submit", map[string]any{
-			"prompt": "x", "selector": map[string]any{}, "labels": map[string]any{},
+			"prompt": "x", "selector": map[string]any{},
 			"git": map[string]any{"url": "https://user:s3cr3t-password@git.example.test/org/repo.git", "ref": "main"},
 		}, "INVALID_ARGUMENT"},
 		"unknown run": {working, "status", map[string]any{"id": "run-missing"}, "RUN_NOT_FOUND"},

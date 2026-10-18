@@ -52,7 +52,7 @@ func toolFailure(err error) error {
 	case errors.Is(err, busclient.ErrRunNotFound):
 		return &toolError{Code: "RUN_NOT_FOUND", Message: "no verified submission has this run id"}
 	case errors.Is(err, busclient.ErrNoMatchingReceiver):
-		return &toolError{Code: "NO_MATCHING_RECEIVER", Message: "no live receiver matches the selector and labels"}
+		return &toolError{Code: "NO_MATCHING_RECEIVER", Message: "no live receiver matches the selector"}
 	case errors.Is(err, busclient.ErrNotAwaitingContinuation):
 		return &toolError{Code: "NOT_AWAITING_CONTINUATION", Message: "the run is not waiting for a continuation"}
 	case errors.Is(err, busclient.ErrRunCanceled):
@@ -81,7 +81,6 @@ type gitInput struct {
 type submitInput struct {
 	Prompt               string              `json:"prompt" jsonschema:"the task for the remote agent"`
 	Selector             map[string][]string `json:"selector" jsonschema:"offer label key to its accepted values"`
-	Labels               map[string]string   `json:"labels" jsonschema:"task labels the receiver's selector checks"`
 	Git                  *gitInput           `json:"git,omitempty" jsonschema:"repository to check out for the agent"`
 	DeadlineSeconds      int64               `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 1800"`
 	QueueDeadlineSeconds int64               `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`
@@ -371,13 +370,6 @@ func submitFromInput(input submitInput) (busclient.SubmitInput, error) {
 		}
 		selector = append(selector, wire.Requirement{Key: key, Operator: wire.OpIn, Values: values})
 	}
-	labels := map[string]string{}
-	for key, value := range input.Labels {
-		if key == "" || value == "" {
-			return busclient.SubmitInput{}, invalidArgument("labels need non-empty keys and values")
-		}
-		labels[key] = value
-	}
 	var parts []wire.Part
 	if input.Git != nil {
 		metadata, _ := json.Marshal(wire.GitMetadata{Ref: input.Git.Ref, Path: input.Git.Path}) // strings always encode
@@ -393,7 +385,7 @@ func submitFromInput(input submitInput) (busclient.SubmitInput, error) {
 		return busclient.SubmitInput{}, err
 	}
 	return busclient.SubmitInput{
-		Selector: selector, Labels: labels, Prompt: input.Prompt, Parts: parts,
+		Selector: selector, Prompt: input.Prompt, Parts: parts,
 		Deadline: deadline, QueueDeadline: queueDeadline,
 	}, nil
 }

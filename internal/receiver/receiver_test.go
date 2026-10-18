@@ -6,6 +6,8 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/json/jsontext"
 	"errors"
@@ -273,7 +275,7 @@ func runToTask(t *testing.T, f fixture) *wire.Task {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	tokenFile := filepath.Join(t.TempDir(), "token")
@@ -299,7 +301,7 @@ func runToTask(t *testing.T, f fixture) *wire.Task {
 	for {
 		var err error
 		submitted, err = client.Submit(f.ctx, busclient.SubmitInput{
-			Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Labels: map[string]string{}, Prompt: "hello",
+			Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Prompt: "hello",
 			Deadline: time.Minute, QueueDeadline: time.Minute,
 		})
 		if err == nil {
@@ -348,7 +350,7 @@ func startInterrupted(t *testing.T, f fixture, first string) (*busclient.Client,
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	var submitted busclient.SubmitResult
@@ -356,7 +358,7 @@ func startInterrupted(t *testing.T, f fixture, first string) (*busclient.Client,
 		var err error
 		submitted, err = client.Submit(f.ctx, busclient.SubmitInput{
 			Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
-			Labels:   map[string]string{}, Prompt: first, Deadline: time.Minute, QueueDeadline: time.Minute,
+			Prompt:   first, Deadline: time.Minute, QueueDeadline: time.Minute,
 		})
 		if err == nil {
 			break
@@ -523,7 +525,7 @@ func TestReceiverGrantPlatformMismatchNotEnrolled(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			approval, err := trust.Approve(request, enrolRequest.(*wire.EnrolRequest), f.userKey, map[string]string{}, "nomad", []wire.AdapterGrant{test.grant}, []wire.Requirement{}, "auto", 1, "", time.Now().Add(time.Hour))
+			approval, err := trust.Approve(request, enrolRequest.(*wire.EnrolRequest), f.userKey, map[string]string{}, "nomad", []wire.AdapterGrant{test.grant}, "auto", 1, "", time.Now().Add(time.Hour))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -554,7 +556,7 @@ func testSubmission(runID string) *wire.SubmissionRecord {
 			Parts: []wire.Part{{Text: "hi"}}, Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
-			RunID: runID, Turn: 1, Attempt: 1, Pool: "nomad", Labels: map[string]string{"lab/trust": "lab"},
+			RunID: runID, Turn: 1, Attempt: 1, Pool: "nomad",
 			Selector:   []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
 			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
 			ReplyTopic: "replies.test",
@@ -589,7 +591,6 @@ func admitFixture(t *testing.T) (fixture, *trust.Enrolled) {
 	}
 	enrolled := &trust.Enrolled{
 		Pool: "nomad", Labels: map[string]string{}, Adapters: nomadGrants(),
-		Selector: []wire.Requirement{{Key: "lab/trust", Operator: wire.OpIn, Values: []string{"lab"}}},
 	}
 	return f, enrolled
 }
@@ -673,7 +674,7 @@ func enrolReceiver(t *testing.T, f fixture, id, pool string, signing ed25519.Pri
 	if err != nil {
 		t.Fatal(err)
 	}
-	approval, err := trust.Approve(request, verified.(*wire.EnrolRequest), f.userKey, map[string]string{}, pool, nomadGrants(), []wire.Requirement{}, "auto", 1, "", time.Now().Add(time.Hour))
+	approval, err := trust.Approve(request, verified.(*wire.EnrolRequest), f.userKey, map[string]string{}, pool, nomadGrants(), "auto", 1, "", time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -848,7 +849,6 @@ func TestContinuationRejectedFromOtherPoolStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	enrolled := f.receiver.current()
-	enrolled.Selector = []wire.Requirement{{Key: "lab/trust", Operator: wire.OpIn, Values: []string{"lab"}}}
 	f.receiver.offers = []wire.Offer{{Adapter: "nomad", Labels: map[string]string{"runtime": "exec", "nomad.node_pool": "OCPv", "zone": "dc1"}}}
 	publishRunStatus(t, f, first, otherKey, "interrupted", wire.TaskStateAuthRequired)
 	continuation := signedTurn(t, f, "run-other-pool-status", 2)
@@ -922,7 +922,6 @@ func TestSubmissionsRequireSameBindings(t *testing.T) {
 			task.Wherry.Lineage.Depth = 1
 			task.Wherry.Lineage.Ancestors = []string{"parent"}
 		},
-		"labels":          func(task *wire.SubmissionRecord) { task.Wherry.Labels = map[string]string{"lab/trust": "other"} },
 		"selector":        func(task *wire.SubmissionRecord) { task.Wherry.Selector[0].Values = []string{"other"} },
 		"reply topic":     func(task *wire.SubmissionRecord) { task.Wherry.ReplyTopic = "replies.other" },
 		"message context": func(task *wire.SubmissionRecord) { task.Message.ContextID = "run-other" },
@@ -975,7 +974,7 @@ func TestAdmitAcceptsValidTask(t *testing.T) {
 func TestReceiverDropsOffersOutsideAllowed(t *testing.T) {
 	f := newFixture(t, resultStream)
 	enrolled := &trust.Enrolled{
-		Pool: "nomad", Labels: map[string]string{}, Selector: []wire.Requirement{}, Generation: 1,
+		Pool: "nomad", Labels: map[string]string{}, Generation: 1,
 		Adapters: []wire.AdapterGrant{{Name: "nomad", Platform: "nomad", Allowed: map[string][]string{"runtime": {"exec"}, "nomad.node_pool": {"OCPv"}, "zone": {"dc1"}}, Defaults: map[string]string{}}},
 	}
 	f.receiver.mu.Lock()
@@ -1529,7 +1528,7 @@ func TestAdoptionTrustsPeerHeartbeat(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		approval, err := trust.Approve(request, enrolRequest.(*wire.EnrolRequest), f.userKey, map[string]string{}, pool, nomadGrants(), []wire.Requirement{}, "auto", 1, "", time.Now().Add(time.Hour))
+		approval, err := trust.Approve(request, enrolRequest.(*wire.EnrolRequest), f.userKey, map[string]string{}, pool, nomadGrants(), "auto", 1, "", time.Now().Add(time.Hour))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1696,7 +1695,7 @@ func TestRunJoinsPeriodicWork(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	for !strings.Contains(f.logs.String(), "enrolled:") {
@@ -1876,7 +1875,7 @@ func newMultiFixture(t *testing.T) multiFixture {
 		{Name: "edge", Platform: "nomad", Allowed: map[string][]string{"runtime": {"podman"}}, Defaults: map[string]string{}},
 	}
 	client := busclient.New(f.kafka, f.userKey, "replies.test")
-	if _, err := client.Approve(f.ctx, trust.EnvelopeHash(request), "nomad", map[string]string{}, grants, []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
+	if _, err := client.Approve(f.ctx, trust.EnvelopeHash(request), "nomad", map[string]string{}, grants, "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	tokenFile := filepath.Join(t.TempDir(), "token")
@@ -2047,7 +2046,7 @@ func TestReceiverSweepsOnTick(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	for f.adapter.sweepCount() < 3 {
@@ -2140,7 +2139,7 @@ func TestReceiverStopsClaimingWhenRevoked(t *testing.T) {
 
 	capabilities := topicCount(t, f, wire.TopicCapability)
 	submission := testSubmission("run-after-revocation")
-	submission.Wherry.Pool, submission.Wherry.Labels = f.receiver.config.ReceiverID, map[string]string{}
+	submission.Wherry.Pool = f.receiver.config.ReceiverID
 	value, err := trust.SignRootSubmission(*submission, f.userKey)
 	if err != nil {
 		t.Fatal(err)
@@ -2179,7 +2178,7 @@ func TestReceiverStopsClaimingWhenRevoked(t *testing.T) {
 		}
 	}
 	_, err = client.Submit(f.ctx, busclient.SubmitInput{
-		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Labels: map[string]string{}, Prompt: "hello",
+		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Prompt: "hello",
 		Deadline: time.Minute, QueueDeadline: time.Minute,
 	})
 	if err == nil || !strings.Contains(err.Error(), "no matching live receiver") {
@@ -2199,7 +2198,7 @@ func startInFlight(t *testing.T, f fixture, runID string, exp time.Time) <-chan 
 	if err != nil {
 		t.Fatal(err)
 	}
-	approval, err := trust.Approve(request, verified.(*wire.EnrolRequest), f.userKey, map[string]string{}, "nomad", nomadGrants(), []wire.Requirement{}, "auto", 1, "", exp)
+	approval, err := trust.Approve(request, verified.(*wire.EnrolRequest), f.userKey, map[string]string{}, "nomad", nomadGrants(), "auto", 1, "", exp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2355,7 +2354,7 @@ func TestReceiverRequestsRenewalBeforeExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approval, err := trust.Approve(request, verified.(*wire.EnrolRequest), f.userKey, map[string]string{}, "nomad", nomadGrants(), []wire.Requirement{}, "auto", 1, "", time.Now().Add(time.Hour))
+	approval, err := trust.Approve(request, verified.(*wire.EnrolRequest), f.userKey, map[string]string{}, "nomad", nomadGrants(), "auto", 1, "", time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2779,7 +2778,7 @@ func enrolWithCredential(t *testing.T, f fixture, client *busclient.Client, expi
 		t.Fatal(err)
 	}
 	requestHash := trust.EnvelopeHash(request)
-	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	tokenFile := filepath.Join(t.TempDir(), "token")
@@ -2812,7 +2811,7 @@ func TestHeldCredentialDroppedWhenApprovalChanges(t *testing.T) {
 	if _, err := client.Revoke(f.ctx, f.receiver.config.ReceiverID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
+	if _, err := client.Approve(f.ctx, requestHash, "", map[string]string{}, nomadGrants(), "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.receiver.refresh(f.ctx); err == nil || err.Error() != "credential rejected" {
@@ -2908,5 +2907,45 @@ func TestHeldCredentialDroppedWhenSuperseded(t *testing.T) {
 	}
 	if held := heldValue(f.receiver); held != "" {
 		t.Fatal("superseded version 1 is still held")
+	}
+}
+
+func TestReceiverDoesNotAskToRenewSelectorApproval(t *testing.T) {
+	f := newFixture(t, resultStream)
+	encoded, err := os.ReadFile("../trust/testdata/v1-records.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var golden map[string]string
+	if err := json.Unmarshal(encoded, &golden); err != nil {
+		t.Fatal(err)
+	}
+	decode := func(name string, decoder func(string) ([]byte, error)) []byte {
+		value, err := decoder(golden[name])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	r := f.receiver
+	r.config.ReceiverID = "receiver-v1"
+	r.userPub = ed25519.NewKeyFromSeed(decode("user_seed_hex", hex.DecodeString)).Public().(ed25519.PublicKey)
+	r.signing = ed25519.NewKeyFromSeed(decode("receiver_seed_hex", hex.DecodeString))
+	for _, name := range []string{"enrol_request", "enrol_approval", "selector_approval"} {
+		record := &kgo.Record{Topic: wire.TopicState, Key: []byte("receiver-v1"), Value: decode(name, base64.RawURLEncoding.DecodeString)}
+		if err := f.kafka.ProduceSync(f.ctx, record).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if err := r.refresh(f.ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.current() != nil {
+		t.Fatal("selector approval enrolled the receiver")
+	}
+	if requests := renewRequests(t, f); len(requests) != 0 {
+		t.Fatalf("%d renew requests for a selector approval, want none", len(requests))
 	}
 }

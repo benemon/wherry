@@ -82,7 +82,6 @@ type WaitingTask struct {
 // SubmitInput contains the root-task routing and prompt fields; Parts follow the prompt's text part.
 type SubmitInput struct {
 	Selector      []wire.Requirement
-	Labels        map[string]string
 	Prompt        string
 	Parts         []wire.Part
 	Deadline      time.Duration
@@ -163,7 +162,6 @@ type Receiver struct {
 	Pool         string              `json:"pool"`
 	Generation   int64               `json:"generation"`
 	Labels       map[string]string   `json:"labels"`
-	Selector     []wire.Requirement  `json:"selector"`
 	Adapters     []wire.AdapterGrant `json:"adapters"`
 	Offers       []wire.Offer        `json:"offers"`
 	Capacity     int64               `json:"capacity"`
@@ -275,7 +273,7 @@ func (client *Client) Enrolments(ctx context.Context) ([]Enrolment, int, error) 
 }
 
 // Approve signs and publishes the next approval generation for a request; an empty pool is the receiver ID.
-func (client *Client) Approve(ctx context.Context, requestHash, pool string, labels map[string]string, grants []wire.AdapterGrant, selector []wire.Requirement, renewal string, expires time.Duration) (ApprovalResult, error) {
+func (client *Client) Approve(ctx context.Context, requestHash, pool string, labels map[string]string, grants []wire.AdapterGrant, renewal string, expires time.Duration) (ApprovalResult, error) {
 	loaded, err := client.loadState(ctx)
 	if err != nil {
 		return ApprovalResult{}, err
@@ -297,7 +295,7 @@ func (client *Client) Approve(ctx context.Context, requestHash, pool string, lab
 	current := loaded.approvals[request.request.ReceiverID]
 	generation := max(current.generation, loaded.state.Floor(request.request.ReceiverID)) + 1
 	envelope, err := trust.Approve(
-		request.envelope, request.request, client.userKey, labels, pool, grants, selector, renewal,
+		request.envelope, request.request, client.userKey, labels, pool, grants, renewal,
 		generation, current.envelopeHash, time.Now().Add(expires),
 	)
 	if err != nil {
@@ -422,7 +420,6 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 		receiver := Receiver{
 			ReceiverID: identity.id, Pool: identity.enrolled.Pool,
 			Generation: identity.enrolled.Generation, Labels: maps.Clone(identity.enrolled.Labels),
-			Selector: slices.Clone(identity.enrolled.Selector),
 			Adapters: identity.enrolled.Adapters, Offers: []wire.Offer{},
 			HeartbeatAge: "-", Status: "silent", Floor: loaded.state.Floor(identity.id),
 			Secrets: loaded.seals(identity.id, identity.enrolled.ApprovalHash),
@@ -444,7 +441,7 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 		if approval.generation <= loaded.state.Floor(id) {
 			result = append(result, Receiver{
 				ReceiverID: id, Pool: approval.pool, Generation: approval.generation,
-				Labels: map[string]string{}, Selector: []wire.Requirement{}, Adapters: []wire.AdapterGrant{}, Offers: []wire.Offer{},
+				Labels: map[string]string{}, Adapters: []wire.AdapterGrant{}, Offers: []wire.Offer{},
 				HeartbeatAge: "-", Status: "revoked", Revoked: true, Floor: loaded.state.Floor(id), Secrets: []Seal{},
 			})
 		}
@@ -476,7 +473,7 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 		if now.UnixMilli()-capability.AtMS > int64(120*time.Second/time.Millisecond) {
 			continue
 		}
-		if _, ok := wire.MatchOffer(input.Selector, capability.Labels, verified.enrolled.Adapters, capability.Offers); !ok || !wire.Satisfies(capability.Selector, input.Labels) {
+		if _, ok := wire.MatchOffer(input.Selector, capability.Labels, verified.enrolled.Adapters, capability.Offers); !ok {
 			continue
 		}
 		if chosen == nil || spare(capability) > spare(chosen) ||
@@ -501,7 +498,7 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 			Parts: append([]wire.Part{{Text: input.Prompt}}, input.Parts...), Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
-			RunID: runID, Turn: 1, Attempt: 1, Pool: chosen.Pool, Selector: slices.Clone(input.Selector), Labels: maps.Clone(input.Labels),
+			RunID: runID, Turn: 1, Attempt: 1, Pool: chosen.Pool, Selector: slices.Clone(input.Selector),
 			DeadlineMS: now.Add(input.Deadline).UnixMilli(), QueueDeadlineMS: now.Add(input.QueueDeadline).UnixMilli(),
 			ReplyTopic: client.replyTopic,
 			Lineage:    wire.Lineage{RootRunID: runID, Depth: 0, Ancestors: []string{}, ParentHash: "", Chain: []wire.Bytes{}},
@@ -567,7 +564,7 @@ func (client *Client) Continue(ctx context.Context, runID string, input Continue
 		},
 		Wherry: wire.SubmissionExtension{
 			RunID: runID, Turn: nextTurn, Attempt: 1, Pool: previous.record.Wherry.Pool,
-			Selector: slices.Clone(previous.record.Wherry.Selector), Labels: maps.Clone(previous.record.Wherry.Labels),
+			Selector:   slices.Clone(previous.record.Wherry.Selector),
 			DeadlineMS: now.Add(input.Deadline).UnixMilli(), QueueDeadlineMS: now.Add(input.QueueDeadline).UnixMilli(),
 			ReplyTopic: previous.record.Wherry.ReplyTopic, Lineage: previous.record.Wherry.Lineage,
 		},

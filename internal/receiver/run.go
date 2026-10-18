@@ -9,7 +9,6 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
-	"maps"
 	"reflect"
 	"strings"
 	"sync"
@@ -143,7 +142,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 		return reject(reason)
 	}
 	offer, matched := wire.MatchOffer(task.Wherry.Selector, enrolled.Labels, enrolled.Adapters, offers)
-	if !matched || !wire.Satisfies(enrolled.Selector, task.Wherry.Labels) {
+	if !matched {
 		return nil, kgo.AckAccept
 	}
 	history := []wire.Message{task.Message}
@@ -229,7 +228,6 @@ func (r *Receiver) submissions(ctx context.Context, expected *wire.SubmissionRec
 			submission.Message.ContextID != expected.Message.ContextID ||
 			submission.Wherry.Pool != expected.Wherry.Pool ||
 			submission.Wherry.ReplyTopic != expected.Wherry.ReplyTopic ||
-			!maps.Equal(submission.Wherry.Labels, expected.Wherry.Labels) ||
 			!reflect.DeepEqual(submission.Wherry.Selector, expected.Wherry.Selector) ||
 			!reflect.DeepEqual(submission.Wherry.Lineage, expected.Wherry.Lineage) {
 			continue

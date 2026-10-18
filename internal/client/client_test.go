@@ -95,7 +95,7 @@ func newClientFixture(t *testing.T, approve bool) clientFixture {
 	fixture.produce(t, wire.TopicState, "receiver-a", request)
 	if approve {
 		result, err := fixture.client.Approve(
-			ctx, trust.EnvelopeHash(request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 30*24*time.Hour,
+			ctx, trust.EnvelopeHash(request), "default", map[string]string{}, testGrants(), "auto", 30*24*time.Hour,
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -121,16 +121,12 @@ func (fixture clientFixture) capability(t *testing.T, mutate func(*wire.Capabili
 	capability := &wire.Capability{
 		ReceiverID: "receiver-a", Pool: "default", Labels: map[string]string{},
 		Offers:   []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec", "nomad.node_pool": "OCPv"}}},
-		Selector: testSelector(), Capacity: 3, InFlight: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
+		Capacity: 3, InFlight: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
 	}
 	if mutate != nil {
 		mutate(capability)
 	}
 	fixture.produceCapability(t, capability.ReceiverID, capability, fixture.receiverKey)
-}
-
-func testSelector() []wire.Requirement {
-	return []wire.Requirement{{Key: "region", Operator: wire.OpIn, Values: []string{"eu"}}}
 }
 
 func testDetected() []wire.DetectedAdapter {
@@ -151,7 +147,7 @@ func singleGrant() []wire.AdapterGrant {
 	return []wire.AdapterGrant{{Name: "lab", Platform: "nomad", Allowed: map[string][]string{"runtime": {"exec"}}, Defaults: map[string]string{}}}
 }
 
-func (fixture clientFixture) addReceiver(t *testing.T, receiverID, pool string, labels map[string]string, selector []wire.Requirement) ed25519.PrivateKey {
+func (fixture clientFixture) addReceiver(t *testing.T, receiverID, pool string, labels map[string]string) ed25519.PrivateKey {
 	t.Helper()
 	_, signingKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -167,7 +163,7 @@ func (fixture clientFixture) addReceiver(t *testing.T, receiverID, pool string, 
 		t.Fatal(err)
 	}
 	fixture.produce(t, wire.TopicState, receiverID, request)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(request), pool, labels, singleGrant(), selector, "auto", 30*24*time.Hour); err != nil {
+	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(request), pool, labels, singleGrant(), "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	return signingKey
@@ -181,7 +177,7 @@ func TestApproveGrantMustNameDetectedAdapter(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fixture := newClientFixture(t, false)
 			before := fixture.topicEnd(t, wire.TopicState)
-			_, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, []wire.AdapterGrant{grant}, []wire.Requirement{}, "auto", 30*24*time.Hour)
+			_, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, []wire.AdapterGrant{grant}, "auto", 30*24*time.Hour)
 			if err == nil || !strings.Contains(err.Error(), "detected adapter") {
 				t.Fatalf("got %v, want grant rejected", err)
 			}
@@ -194,7 +190,7 @@ func TestApproveGrantMustNameDetectedAdapter(t *testing.T) {
 
 func TestApproveDefaultsPoolToReceiverID(t *testing.T) {
 	fixture := newClientFixture(t, false)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, testGrants(), []wire.Requirement{}, "auto", 30*24*time.Hour); err != nil {
+	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, testGrants(), "auto", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	records, err := fixture.client.readBounded(fixture.ctx, wire.TopicState)
@@ -225,7 +221,6 @@ func (fixture clientFixture) submit(t *testing.T) SubmitResult {
 	t.Helper()
 	result, err := fixture.client.Submit(fixture.ctx, SubmitInput{
 		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
-		Labels:   map[string]string{"region": "eu"},
 		Prompt:   "do the work", Deadline: 30 * time.Minute, QueueDeadline: 10 * time.Minute,
 	})
 	if err != nil {
@@ -343,8 +338,8 @@ func TestSubmitNoMatchingReceiverProducesNothing(t *testing.T) {
 	fixture.capability(t, nil)
 	before := fixture.topicEnd(t, wire.TopicTask)
 	_, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"podman"}}}, Labels: map[string]string{"region": "eu"},
-		Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
+		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"podman"}}},
+		Prompt:   "work", Deadline: time.Minute, QueueDeadline: time.Minute,
 	})
 	if err == nil {
 		t.Fatal("submit without a matching receiver succeeded")
@@ -367,7 +362,7 @@ func TestSubmitMatchesOffersNotFlattenedSets(t *testing.T) {
 			{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}},
 			{Key: "nomad.node_pool", Operator: wire.OpIn, Values: []string{"default"}},
 		},
-		Labels: map[string]string{"region": "eu"}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
+		Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
 	})
 	if err == nil {
 		t.Fatal("submit matched values from different offers")
@@ -384,8 +379,8 @@ func TestSubmitMatchesAcrossAdapters(t *testing.T) {
 	})
 	submit := func(selector []wire.Requirement) error {
 		_, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-			Selector: selector, Labels: map[string]string{"region": "eu"},
-			Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
+			Selector: selector,
+			Prompt:   "work", Deadline: time.Minute, QueueDeadline: time.Minute,
 		})
 		return err
 	}
@@ -397,30 +392,14 @@ func TestSubmitMatchesAcrossAdapters(t *testing.T) {
 	}
 }
 
-func TestSubmitIgnoresOneWayMatch(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	fixture.capability(t, nil)
-	before := fixture.topicEnd(t, wire.TopicTask)
-	_, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Labels: map[string]string{"region": "us"},
-		Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
-	})
-	if err == nil {
-		t.Fatal("one-way match was accepted")
-	}
-	if after := fixture.topicEnd(t, wire.TopicTask); after != before {
-		t.Fatalf("tasks.queue changed from offset %d to %d", before, after)
-	}
-}
-
 func TestSubmitIgnoresStaleCapability(t *testing.T) {
 	fixture := newClientFixture(t, true)
 	fixture.capability(t, func(capability *wire.Capability) {
 		capability.AtMS = time.Now().Add(-121 * time.Second).UnixMilli()
 	})
 	if _, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Labels: map[string]string{"region": "eu"},
-		Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
+		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
+		Prompt:   "work", Deadline: time.Minute, QueueDeadline: time.Minute,
 	}); err == nil {
 		t.Fatal("stale capability was accepted")
 	}
@@ -432,8 +411,8 @@ func TestSubmitIgnoresCapabilityBeyondEnrolment(t *testing.T) {
 		capability.Labels["lab/arch"] = "arm64"
 	})
 	if _, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Labels: map[string]string{"region": "eu"},
-		Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
+		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
+		Prompt:   "work", Deadline: time.Minute, QueueDeadline: time.Minute,
 	}); err == nil {
 		t.Fatal("capability beyond enrolment was accepted")
 	}
@@ -442,11 +421,11 @@ func TestSubmitIgnoresCapabilityBeyondEnrolment(t *testing.T) {
 func TestReceiversListsLiveStaleAndSilent(t *testing.T) {
 	fixture := newClientFixture(t, true)
 	fixture.capability(t, nil)
-	batchKey := fixture.addReceiver(t, "receiver-b", "batch", map[string]string{}, testSelector())
-	fixture.addReceiver(t, "receiver-c", "quiet", map[string]string{}, testSelector())
+	batchKey := fixture.addReceiver(t, "receiver-b", "batch", map[string]string{})
+	fixture.addReceiver(t, "receiver-c", "quiet", map[string]string{})
 	fixture.produceCapability(t, "receiver-b", &wire.Capability{
 		ReceiverID: "receiver-b", Pool: "batch",
-		Labels: map[string]string{}, Offers: []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}}, Selector: testSelector(),
+		Labels: map[string]string{}, Offers: []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}},
 		Capacity: 4, InFlight: 2, Generation: 1, AtMS: time.Now().Add(-121 * time.Second).UnixMilli(),
 	}, batchKey)
 
@@ -475,7 +454,7 @@ func TestReceiversSkipsUnverifiableCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture.produceCapability(t, "unenrolled", &wire.Capability{
-		ReceiverID: "unenrolled", Pool: "default", Labels: map[string]string{}, Offers: []wire.Offer{}, Selector: []wire.Requirement{},
+		ReceiverID: "unenrolled", Pool: "default", Labels: map[string]string{}, Offers: []wire.Offer{},
 		Capacity: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
 	}, unenrolledKey)
 	fixture.capability(t, func(capability *wire.Capability) {
@@ -497,10 +476,10 @@ func TestReceiversSkipsUnverifiableCapability(t *testing.T) {
 func TestReceiversShowsOffers(t *testing.T) {
 	fixture := newClientFixture(t, false)
 	labels := map[string]string{"lab/site": "home"}
-	key := fixture.addReceiver(t, "receiver-nomad", "nomad", labels, testSelector())
+	key := fixture.addReceiver(t, "receiver-nomad", "nomad", labels)
 	offers := []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}}
 	fixture.produceCapability(t, "receiver-nomad", &wire.Capability{
-		ReceiverID: "receiver-nomad", Pool: "nomad", Labels: labels, Offers: offers, Selector: testSelector(),
+		ReceiverID: "receiver-nomad", Pool: "nomad", Labels: labels, Offers: offers,
 		Capacity: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
 	}, key)
 
@@ -519,16 +498,16 @@ func TestSubmitChoosesLeastLoadedAmongMatches(t *testing.T) {
 		capability.Capacity = 10
 		capability.InFlight = 0
 	})
-	namedKey := fixture.addReceiver(t, "receiver-b", "named", map[string]string{}, testSelector())
+	namedKey := fixture.addReceiver(t, "receiver-b", "named", map[string]string{})
 	fixture.produceCapability(t, "receiver-b", &wire.Capability{
 		ReceiverID: "receiver-b", Pool: "named",
-		Labels: map[string]string{}, Offers: []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}}, Selector: testSelector(),
+		Labels: map[string]string{}, Offers: []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}},
 		Capacity: 2, InFlight: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
 	}, namedKey)
 
 	result, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Labels: map[string]string{"region": "eu"},
-		Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
+		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
+		Prompt:   "work", Deadline: time.Minute, QueueDeadline: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -554,7 +533,7 @@ func TestAwaitIgnoresReplyFromUnenrolledKey(t *testing.T) {
 
 func TestAwaitRejectsForgedTaskFromOtherPool(t *testing.T) {
 	fixture := newClientFixture(t, true)
-	otherPoolKey := fixture.addReceiver(t, "receiver-other", "other", map[string]string{}, testSelector())
+	otherPoolKey := fixture.addReceiver(t, "receiver-other", "other", map[string]string{})
 	submission, hash := fixture.rootSubmission(t, "run-other-pool", "default")
 	task := testTask(submission, hash, 1, wire.TaskStateCompleted)
 	fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, otherPoolKey))
@@ -678,7 +657,7 @@ func TestAwaitStatusBindings(t *testing.T) {
 			return f.receiverKey, status
 		},
 		"pool": func(t *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
-			key := f.addReceiver(t, "receiver-other", "other", map[string]string{}, testSelector())
+			key := f.addReceiver(t, "receiver-other", "other", map[string]string{})
 			return key, testStatus(submission, hash, "receiver-other", "interrupted", wire.TaskStateAuthRequired)
 		},
 	} {
@@ -755,7 +734,7 @@ func TestLatestStatusesRequireBindings(t *testing.T) {
 			return f.receiverKey, testStatus(submission, hash, "receiver-other", "interrupted", wire.TaskStateAuthRequired)
 		},
 		"pool": func(t *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
-			key := f.addReceiver(t, "receiver-other", "other", map[string]string{}, testSelector())
+			key := f.addReceiver(t, "receiver-other", "other", map[string]string{})
 			return key, testStatus(submission, hash, "receiver-other", "interrupted", wire.TaskStateAuthRequired)
 		},
 	} {
@@ -939,7 +918,7 @@ func (fixture clientFixture) rootSubmission(t *testing.T, runID, pool string) (*
 			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
-			RunID: runID, Turn: 1, Attempt: 1, Pool: pool, Selector: []wire.Requirement{}, Labels: map[string]string{},
+			RunID: runID, Turn: 1, Attempt: 1, Pool: pool, Selector: []wire.Requirement{},
 			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
 			ReplyTopic: "replies.test",
 			Lineage:    wire.Lineage{RootRunID: runID, Ancestors: []string{}, Chain: []wire.Bytes{}},
@@ -961,7 +940,7 @@ func (fixture clientFixture) turnSubmission(t *testing.T, runID string, turn int
 			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
 		},
 		Wherry: wire.SubmissionExtension{
-			RunID: runID, Turn: turn, Attempt: 1, Pool: "default", Selector: []wire.Requirement{}, Labels: map[string]string{},
+			RunID: runID, Turn: turn, Attempt: 1, Pool: "default", Selector: []wire.Requirement{},
 			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
 			ReplyTopic: "replies.test",
 			Lineage:    wire.Lineage{RootRunID: runID, Ancestors: []string{}, Chain: []wire.Bytes{}},
@@ -1009,7 +988,7 @@ func TestReEnrolAboveFloor(t *testing.T) {
 	}
 	approve := func(want int64) {
 		t.Helper()
-		result, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 30*24*time.Hour)
+		result, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), "auto", 30*24*time.Hour)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1109,7 +1088,7 @@ func TestAutoRenewalByClient(t *testing.T) {
 
 func TestManualRenewalNotAutomatic(t *testing.T) {
 	fixture := newClientFixture(t, false)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "manual", 30*24*time.Hour); err != nil {
+	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), "manual", 30*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	fixture.requestRenewal(t, 1)
@@ -1128,7 +1107,7 @@ func TestManualRenewalNotAutomatic(t *testing.T) {
 
 func TestAutoRenewalLeavesLongerApproval(t *testing.T) {
 	fixture := newClientFixture(t, false)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), testSelector(), "auto", 120*24*time.Hour); err != nil {
+	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), "auto", 120*24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	fixture.requestRenewal(t, 1)

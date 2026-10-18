@@ -209,7 +209,7 @@ func TestHistoryVerifiesRevokedReceiverRecordsBeforeRevocation(t *testing.T) {
 	replies := fixture.replyTopic(t, "history", true)
 	client := fixture.clientFor(replies)
 	receiverID, pool, runID := "receiver-history-"+fixture.suffix, "pool-"+fixture.suffix, "run-history-"+fixture.suffix
-	key := fixture.addReceiver(t, receiverID, pool, map[string]string{}, testSelector())
+	key := fixture.addReceiver(t, receiverID, pool, map[string]string{})
 	submission, hash := fixture.rootSubmission(t, runID, pool)
 	task := receiverRecord(t, replies, runID, wire.TypeTask, testTask(submission, hash, 1, wire.TaskStateCompleted), key)
 	status := receiverRecord(t, wire.TopicEvent, runID, wire.TypeStatus, testStatus(submission, hash, receiverID, "terminal", wire.TaskStateCompleted), key)
@@ -254,7 +254,7 @@ func TestHistoryRejectsRecordsAfterRevocation(t *testing.T) {
 		replies := fixture.replyTopic(t, "after", true)
 		client := fixture.clientFor(replies)
 		receiverID, pool, runID := "receiver-after-"+fixture.suffix, "pool-"+fixture.suffix, "run-after-"+fixture.suffix
-		key := fixture.addReceiver(t, receiverID, pool, map[string]string{}, testSelector())
+		key := fixture.addReceiver(t, receiverID, pool, map[string]string{})
 		submission, hash := fixture.rootSubmission(t, runID, pool)
 		if _, err := client.Revoke(fixture.ctx, receiverID); err != nil {
 			t.Fatal(err)
@@ -285,7 +285,7 @@ func TestHistoryRejectsRecordsAfterRevocation(t *testing.T) {
 		pool := "pool-" + fixture.suffix
 		for try := range 50 {
 			receiverID, runID := fmt.Sprintf("receiver-equal-%s-%d", fixture.suffix, try), fmt.Sprintf("run-equal-%s-%d", fixture.suffix, try)
-			key := fixture.addReceiver(t, receiverID, pool, map[string]string{}, testSelector())
+			key := fixture.addReceiver(t, receiverID, pool, map[string]string{})
 			submission, hash := fixture.rootSubmission(t, runID, pool)
 			envelope, err := trust.NewRevocation(receiverID, 1, fixture.userKey, time.Now())
 			if err != nil {
@@ -312,7 +312,7 @@ func TestHistoryRequiresLogAppendTime(t *testing.T) {
 	fixture := newBrokerFixture(t)
 	createTime, logAppend := fixture.replyTopic(t, "create-time", false), fixture.replyTopic(t, "log-append", true)
 	receiverID, pool, runID := "receiver-create-time-"+fixture.suffix, "pool-"+fixture.suffix, "run-create-time-"+fixture.suffix
-	key := fixture.addReceiver(t, receiverID, pool, map[string]string{}, testSelector())
+	key := fixture.addReceiver(t, receiverID, pool, map[string]string{})
 	submission, hash := fixture.rootSubmission(t, runID, pool)
 	value := signed(t, wire.TypeTask, testTask(submission, hash, 1, wire.TaskStateCompleted), key)
 	onCreateTime := &kgo.Record{Topic: createTime, Key: []byte(runID), Value: value}
@@ -375,7 +375,7 @@ func TestBrokerRewritesForgedLogAppendBit(t *testing.T) {
 	fixture := newBrokerFixture(t)
 	createTime, logAppend := fixture.replyTopic(t, "forged-create-time", false), fixture.replyTopic(t, "forged-log-append", true)
 	receiverID, pool, runID := "receiver-forged-"+fixture.suffix, "pool-"+fixture.suffix, "run-forged-"+fixture.suffix
-	key := fixture.addReceiver(t, receiverID, pool, map[string]string{}, testSelector())
+	key := fixture.addReceiver(t, receiverID, pool, map[string]string{})
 	submission, hash := fixture.rootSubmission(t, runID, pool)
 	value := signed(t, wire.TypeTask, testTask(submission, hash, 1, wire.TaskStateCompleted), key)
 
@@ -404,8 +404,8 @@ func TestNewWorkNeverTrustsRevokedReceiver(t *testing.T) {
 	fixture.client = client
 	revokedID, liveID := "receiver-revoked-"+fixture.suffix, "receiver-live-"+fixture.suffix
 	pool, runID := "pool-"+fixture.suffix, "run-new-work-"+fixture.suffix
-	revokedKey := fixture.addReceiver(t, revokedID, pool, map[string]string{}, testSelector())
-	fixture.addReceiver(t, liveID, pool, map[string]string{}, testSelector())
+	revokedKey := fixture.addReceiver(t, revokedID, pool, map[string]string{})
+	fixture.addReceiver(t, liveID, pool, map[string]string{})
 	submission, hash := fixture.rootSubmission(t, runID, pool)
 	interrupted := testStatus(submission, hash, revokedID, "interrupted", wire.TaskStateAuthRequired)
 	interrupted.StatusUpdate.Metadata = jsontext.Value(`{"credential":"token"}`)
@@ -416,7 +416,7 @@ func TestNewWorkNeverTrustsRevokedReceiver(t *testing.T) {
 	capability := &wire.Capability{
 		ReceiverID: revokedID, Pool: pool, Labels: map[string]string{},
 		Offers:   []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}},
-		Selector: testSelector(), Capacity: 3, Generation: 1, AtMS: time.Now().UnixMilli(),
+		Capacity: 3, Generation: 1, AtMS: time.Now().UnixMilli(),
 	}
 	fixture.produceCapability(t, revokedID, capability, revokedKey)
 
@@ -440,7 +440,7 @@ func TestNewWorkNeverTrustsRevokedReceiver(t *testing.T) {
 	}
 	if _, err := client.Submit(fixture.ctx, SubmitInput{
 		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
-		Labels:   map[string]string{"region": "eu"}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
+		Prompt:   "work", Deadline: time.Minute, QueueDeadline: time.Minute,
 	}); err == nil || !strings.Contains(err.Error(), "no matching live receiver") {
 		t.Fatalf("Submit = %v, want no route to the revoked receiver's capability", err)
 	}

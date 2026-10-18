@@ -76,7 +76,6 @@ Signs an approval for the request and prints
 | --- | --- | --- |
 | `--labels` | required | approved receiver labels |
 | `--grants` | required | JSON file holding the adapter grants |
-| `--selector` | required | receiver selector, applied to task labels |
 | `--pool` | the receiver ID | pool name |
 | `--renewal` | `auto` | renewal policy, `auto` or `manual` |
 | `--expires` | `720h` | approval lifetime |
@@ -119,16 +118,15 @@ The receiver must hold a current, unexpired approval.
 Lists enrolled and revoked receivers, sorted by pool and receiver ID:
 
 ```
-receiver=<id> pool=<pool> generation=<n> labels=<labels>
-selector=<selector> capacity=<n> in_flight=<n> heartbeat_age=<age>
-status=<status>
+receiver=<id> pool=<pool> generation=<n> labels=<labels> capacity=<n>
+in_flight=<n> heartbeat_age=<age> status=<status>
   adapter=<name> platform=<platform> defaults=<labels>
     offer <labels>
   secret=<name> version=<n> expires=<RFC 3339 time>
 receiver=<id> pool=<pool> generation=<n> floor_generation=<n> status=revoked
 ```
 
-The first three lines print as one line. `status` is `live` when the latest
+The first two lines print as one line. `status` is `live` when the latest
 capability is at most 120 seconds old, `stale` when it is older, and
 `silent` when there is none. The command warns on standard error about each
 sealed credential that has expired or expires within 7 days.
@@ -140,7 +138,6 @@ sealed credential that has expired or expires within 7 days.
 | `receiver_id`, `pool` | strings |
 | `generation`, `floor_generation` | integers |
 | `labels` | approved receiver labels |
-| `selector` | array of `{key, operator, values}` |
 | `adapters` | grants: `{name, platform, allowed, defaults}` |
 | `offers` | `{adapter, labels}` from the latest capability |
 | `capacity`, `in_flight` | integers |
@@ -152,14 +149,12 @@ sealed credential that has expired or expires within 7 days.
 ### `wherry submit`
 
 Publishes a task to the live receiver, among those with an offer that
-matches `--selector` and a receiver selector that `--labels` satisfies,
-with the most spare capacity. Ties go to the lowest receiver ID. It prints
+matches `--selector`, with the most spare capacity. Ties go to the lowest receiver ID. It prints
 `run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--selector` | required | task selector, applied to offer labels |
-| `--labels` | required | task labels |
 | `--prompt` | | prompt text |
 | `--prompt-file` | | file holding the prompt |
 | `--git` | | repository URL to check out |
@@ -245,8 +240,8 @@ declared schema, and opens its own Kafka connection. Deadlines given as
 `0` or omitted take the CLI defaults, 1800 and 600 seconds.
 
 - `receivers` takes no input and returns `receivers` and `skipped`.
-- `submit` takes `prompt`, `selector`, `labels`, `git`, `deadline_seconds`
-  and `queue_deadline_seconds`, and returns `id`, `pool` and `skipped`.
+- `submit` takes `prompt`, `selector`, `git`, `deadline_seconds` and
+  `queue_deadline_seconds`, and returns `id`, `pool` and `skipped`.
 - `status` takes `id` and returns `id`, `state`, `turn`, `message`,
   `signer_revoked_before` and `skipped`.
 - `await` takes `id` and returns `id`, `state`, `retry_after`, `message`,
@@ -260,9 +255,8 @@ declared schema, and opens its own Kafka connection. Deadlines given as
 `skipped` counts the records that failed verification. Tool by tool:
 
 - `receivers` returns the objects `wherry receivers --json` prints.
-- `submit` requires `prompt`, `selector` and `labels`. `selector` maps each
-  key to the values it accepts, and `labels` maps keys to values. `git` is
-  `{url, ref, path}`, with `path` optional.
+- `submit` requires `prompt` and `selector`. `selector` maps each key to the
+  values it accepts. `git` is `{url, ref, path}`, with `path` optional.
 - `status` returns the latest verified state of the run's latest turn
   without waiting. The state is `TASK_STATE_SUBMITTED` until a receiver
   reports one.
@@ -285,7 +279,7 @@ underlying error text.
 | --- | --- |
 | `INVALID_ARGUMENT` | an input is missing or malformed |
 | `RUN_NOT_FOUND` | no verified submission has this run ID |
-| `NO_MATCHING_RECEIVER` | no live receiver matches the selector and labels |
+| `NO_MATCHING_RECEIVER` | no live receiver matches the selector |
 | `NOT_AWAITING_CONTINUATION` | the run is not interrupted |
 | `RUN_CANCELED` | the run is cancelled |
 | `TURN_ALREADY_SUBMITTED` | the next turn is already published |

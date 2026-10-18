@@ -41,13 +41,11 @@ old is live.
 
 ## Labels, pools and selectors
 
-A label is a `key=value` pair. Three kinds of label take part in placement:
+A label is a `key=value` pair. Two kinds of label take part in placement:
 
 - Receiver labels, such as `region=eu-west`, describe the receiver. The user
   sets them when approving it.
 - Offer labels come from the adapter.
-- Task labels, such as `example.com/team=platform`, describe the task. The
-  submitter sets them.
 
 A pool is a set of receivers that share one queue. A task is placed in a
 pool, and any live receiver in that pool can claim it. Each receiver
@@ -56,19 +54,14 @@ receiver's own ID.
 
 A selector is a list of requirements. Each requirement names a key and the
 values it accepts, and holds when the label with that key has one of them.
-Placement checks two selectors:
-
-- The task selector, chosen by the submitter, applies to the placement
-  labels of each offer: the receiver labels, `platform` set to the adapter's
-  platform, and the offer labels. A grant's defaults add a requirement for
-  each default key the task selector does not name.
-- The receiver selector, set by the user at approval, applies to the task
-  labels.
+The task selector, chosen by the submitter, applies to the placement labels
+of each offer: the receiver labels, `platform` set to the adapter's
+platform, and the offer labels. A grant's defaults add a requirement for
+each default key the task selector does not name.
 
 The client picks, among live receivers with an offer the task selector
-matches and a receiver selector the task labels satisfy, the one with the
-most spare capacity. It signs that receiver's pool into the task. The
-receiver that claims the task repeats both checks.
+matches, the one with the most spare capacity. It signs that receiver's pool
+into the task. The receiver that claims the task repeats the check.
 
 ## Signed records
 
@@ -104,14 +97,13 @@ user key. The approval sets:
 - the pool;
 - one grant per adapter: the values allowed for each offer label key, and
   defaults;
-- the receiver selector;
 - the renewal policy, `auto` or `manual`;
 - an expiry;
 - a generation, one more than the receiver's previous generation.
 
 The approval bounds what the receiver can advertise. A receiver drops each
 offer with a label value outside its grant. A client rejects a capability
-whose labels, pool or selector differ from the approval, or whose offers
+whose labels or pool differ from the approval, or whose offers
 fall outside the grants.
 
 ### Renewal

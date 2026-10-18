@@ -65,7 +65,15 @@ var vectorFilenames = []string{
 	"raw-invalid-base64.json",
 	"submission-task-id-mismatch.json",
 	"message-extension-missing.json",
+	"submission-task-labels.json",
+	"capability-selector.json",
+	"enrol-approval-selector.json",
+	"submission-v1-domain.json",
+	"revocation-v2-domain.json",
 }
+
+// v1VectorCount is the number of vectors published before version 2; testdata/vectors/v1 holds them unchanged.
+const v1VectorCount = 32
 
 type publishedVector struct {
 	Name          string     `json:"name"`
@@ -99,6 +107,21 @@ func TestPublishedVectors(t *testing.T) {
 			continue
 		}
 		t.Run(filename, func(t *testing.T) {
+			verifyPublishedVector(t, path)
+		})
+	}
+}
+
+func TestVersion1Vectors(t *testing.T) {
+	paths, err := filepath.Glob("testdata/vectors/v1/*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != v1VectorCount {
+		t.Fatalf("got %d version 1 vector files, want %d", len(paths), v1VectorCount)
+	}
+	for _, path := range paths {
+		t.Run(filepath.Base(path), func(t *testing.T) {
 			verifyPublishedVector(t, path)
 		})
 	}
@@ -223,8 +246,9 @@ func writePublishedVectors(t *testing.T) {
 	add("unentitled-signer.json", "receiver verifies submission", Sign(TypeSubmission, mustPayload(TypeSubmission, payloads[TypeSubmission]), privateKey), SignerReceiver, "unentitled_signer")
 
 	submissionPayload := mustPayload(TypeSubmission, payloads[TypeSubmission])
-	emptyLabel := replaceOnce(t, submissionPayload, `"labels":{"lab/os":"linux"}`, `"labels":{"lab/os":""}`)
-	add("empty-label-value.json", "empty label value", Sign(TypeSubmission, emptyLabel, privateKey), SignerUser, "invalid_payload")
+	capabilityPayload := mustPayload(TypeCapability, payloads[TypeCapability])
+	emptyLabel := replaceOnce(t, capabilityPayload, `"labels":{"lab/os":"linux"}`, `"labels":{"lab/os":""}`)
+	add("empty-label-value.json", "empty label value", Sign(TypeCapability, emptyLabel, privateKey), SignerReceiver, "invalid_payload")
 	mismatch := replaceOnce(t, submissionPayload, `"taskId":"run-1"`, `"taskId":"run-2"`)
 	add("submission-task-id-mismatch.json", "message taskId differs from run_id", Sign(TypeSubmission, mismatch, privateKey), SignerUser, "invalid_payload")
 	undeclared := replaceOnce(t, submissionPayload, `,"extensions":["`+ExtensionURI+`"]`, ``)
@@ -243,6 +267,21 @@ func writePublishedVectors(t *testing.T) {
 	add("part-no-content.json", "part with no content", Sign(TypeSubmission, submissionJSON(t, `"parts":[{"mediaType":"text/plain"}]`), privateKey), SignerUser, "invalid_payload")
 	add("metadata-not-object.json", "message metadata array", Sign(TypeSubmission, submissionJSON(t, `"parts":[{"text":"hello"}],"metadata":["a"]`), privateKey), SignerUser, "invalid_payload")
 	add("raw-invalid-base64.json", "raw not base64", Sign(TypeSubmission, submissionJSON(t, `"parts":[{"raw":"aGk*"}]`), privateKey), SignerUser, "invalid_payload")
+
+	selector := `"selector":[{"key":"region","operator":"In","values":["eu"]}]`
+	taskLabels := replaceOnce(t, submissionPayload, `"deadline_ms"`, `"labels":{"lab/os":"linux"},"deadline_ms"`)
+	add("submission-task-labels.json", "version 2 submission with task labels", Sign(TypeSubmission, taskLabels, privateKey), SignerUser, "invalid_payload")
+	capabilitySelector := replaceOnce(t, capabilityPayload, `"capacity"`, selector+`,"capacity"`)
+	add("capability-selector.json", "version 2 capability with a receiver selector", Sign(TypeCapability, capabilitySelector, privateKey), SignerReceiver, "invalid_payload")
+	approvalSelector := replaceOnce(t, mustPayload(TypeEnrolApproval, payloads[TypeEnrolApproval]), `"renewal"`, selector+`,"renewal"`)
+	add("enrol-approval-selector.json", "version 2 approval with a receiver selector", Sign(TypeEnrolApproval, approvalSelector, privateKey), SignerUser, "invalid_payload")
+	v1Domain := Sign(TypeSubmission, submissionPayload, privateKey)
+	v1Domain.Sig = ed25519.Sign(privateKey, signatureInput(1, TypeSubmission, submissionPayload))
+	add("submission-v1-domain.json", "version 2 submission signed under the version 1 domain", v1Domain, SignerUser, "invalid_signature")
+	revocationPayload := mustPayload(TypeRevocation, payloads[TypeRevocation])
+	v2Domain := Sign(TypeRevocation, revocationPayload, privateKey)
+	v2Domain.Sig = ed25519.Sign(privateKey, signatureInput(2, TypeRevocation, revocationPayload))
+	add("revocation-v2-domain.json", "version 1 revocation signed under the version 2 domain", v2Domain, SignerUser, "invalid_signature")
 
 	if err := os.MkdirAll("testdata/vectors", 0o755); err != nil {
 		t.Fatal(err)

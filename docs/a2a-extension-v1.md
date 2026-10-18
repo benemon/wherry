@@ -21,9 +21,8 @@ turn of a task, under `message`. Its `wherry` fields are `run_id` (string,
 the task id), `turn` (integer, from 1), `attempt` (integer, always 1; the
 delivery attempt appears in `status`, `artifact_update` and `task`), `pool`
 (string, the receiver pool that may claim it), `selector` (array of `{key,
-operator, values}` requirements on receiver labels), `labels` (object of
-string labels), `deadline_ms` and `queue_deadline_ms` (integers, Unix
-milliseconds by which the run must end and must be claimed), `reply_topic`
+operator, values}` requirements on receiver labels), `deadline_ms` and
+`queue_deadline_ms` (integers, Unix milliseconds by which the run must end and must be claimed), `reply_topic`
 (string, where the final task is published) and `lineage`.
 
 The `lineage` object holds `root_run_id` (string), `depth` (integer),
@@ -90,7 +89,7 @@ record.
 
 A continuation is a user-signed submission with `turn` greater than 1. It
 uses the run id as `message.taskId` and has a new `messageId`. It repeats the
-`contextId`, `pool`, `reply_topic`, `labels`, `selector` and `lineage` of the
+`contextId`, `pool`, `reply_topic`, `selector` and `lineage` of the
 run's earlier turns. A receiver admits it only after an interrupted status
 from a receiver in the same pool for the immediately preceding turn, and
 rejects a continuation that differs from the earlier turns in any of those
@@ -212,15 +211,35 @@ root task, so every task in one delegation tree shares a context.
 
 ## Signing and transport
 
-Each Kafka record value is a JSON envelope with members `v` (integer, 1),
-`type`, `signer`, `payload` and `sig`. The `signer` is
+Each Kafka record value is a JSON envelope with members `v` (integer, the
+record version), `type`, `signer`, `payload` and `sig`. The `signer` is
 `sha256:<hex SHA-256 of the signer's 32-byte Ed25519 public key>`. The
 `payload` member holds the record's exact JSON bytes, base64url-encoded
 without padding, and `sig` is base64url-encoded the same way. The signature
-is Ed25519 over `wherry/v1/<type>`, a zero byte, and those payload bytes,
-where `<type>` is the record type named above. A reader decodes `payload` to
-get the record. Verifiers check the signature over the bytes as transmitted
-before parsing them.
+is Ed25519 over `wherry/v<v>/<type>`, a zero byte, and those payload bytes,
+where `<v>` is the envelope's `v` and `<type>` is the record type named
+above. A reader decodes `payload` to get the record. Verifiers check the
+signature over the bytes as transmitted before parsing them.
+
+Writers emit `submission`, `capability` and `enrol_approval` at version 2 and
+every other type at version 1. Readers also accept version 1 of those three
+types, the shape before task labels and the receiver selector were removed:
+
+- A version 1 `submission` carries a `labels` object in `wherry`. A reader
+  validates it and discards it.
+- A version 1 `capability` carries a `selector` array. A reader validates it
+  and discards it.
+- A version 1 `enrol_approval` carries a `selector` array. With an empty
+  selector it is an ordinary approval. With a non-empty selector it still
+  holds its generation, so the next approval for that receiver takes a
+  higher one, but it enrols nothing and cannot be renewed. A version 1
+  renewal of it with the same selector still chains, so a later approval
+  can chain to that renewal.
+
+A version 2 record that carries `labels` in a submission's `wherry`, or
+`selector` in a capability or approval, is invalid. Hashes of a version 1
+record, such as a seal's approval hash or a status's `task_hash`, are over
+its version 1 envelope bytes.
 
 ## Topic timestamps
 
