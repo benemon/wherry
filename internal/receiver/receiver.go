@@ -231,7 +231,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 	// A separate step, so a control topic read failure never delays noticing a revocation.
 	go func() {
 		defer wg.Done()
-		r.every(ctx, refreshInterval, r.refreshCancelled)
+		r.every(ctx, cancelReadInterval, r.refreshCancelled)
 	}()
 	for slot := int64(0); slot < r.config.Capacity; slot++ {
 		wg.Add(1)

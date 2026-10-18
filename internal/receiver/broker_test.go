@@ -40,7 +40,7 @@ func startBrokerReceiver(t *testing.T) brokerReceiver {
 	if address == "" {
 		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
 	}
-	for _, interval := range []*time.Duration{&renewInterval, &capabilityInterval, &refreshInterval, &enrolPollInterval} {
+	for _, interval := range []*time.Duration{&renewInterval, &capabilityInterval, &refreshInterval, &cancelReadInterval, &enrolPollInterval} {
 		previous := *interval
 		*interval = 200 * time.Millisecond
 		t.Cleanup(func() { *interval = previous })

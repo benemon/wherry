@@ -155,17 +155,17 @@ Receivers do not publish git's error output.
 ## Cancellation
 
 A cancel applies to every turn of a run, including turns submitted after
-it. Receivers read the control topic at a fixed interval, when they claim a
-submission, and at each heartbeat of a running turn, and act on the cancels
-they hold:
+it. Receivers read the control topic every 10 seconds and when they claim a
+submission, and act on the cancels they hold:
 
 - A receiver that claims a submission for a cancelled run starts no job. It
   publishes a `task` record and a `terminal` status, both with
   `TASK_STATE_CANCELED` and the message text `canceled by user`. If an
   earlier delivery attempt left the turn's job running, the receiver stops
   that job first.
-- A receiver running a turn for a cancelled run stops its job at the next
-  heartbeat and publishes the same `task` record and `terminal` status.
+- A receiver running a turn for a cancelled run stops its job within a
+  second of reading the cancel and publishes the same `task` record and
+  `terminal` status.
 
 If stopping a job fails, the receiver releases the submission without a
 terminal status, and the next delivery tries again.

@@ -96,7 +96,7 @@ receiver's current generation.
   any record the broker appends after the revocation.
 - Within 15 seconds the receiver stops claiming and advertising and drops
   the credentials it holds.
-- At its next heartbeat, each in-flight run stops its job, publishes a
+- Within a second of that, each in-flight run stops its job, publishes a
   failed status with the message `receiver revoked`, and releases its task
   to the pool. Clients ignore that status, since the broker appends it after
   the revocation.

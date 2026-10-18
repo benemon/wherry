@@ -122,8 +122,8 @@ and delivering credentials until it is renewed.
 
 A revocation sets a floor at the receiver's current generation. Approvals at
 or below the floor are void. Within one trust refresh (15 seconds) the
-receiver stops claiming and advertising and drops its credentials, and it
-stops its in-flight runs at their next heartbeat.
+receiver stops claiming and advertising and drops its credentials, and
+within a second it stops its in-flight runs.
 
 ### The sealed credential
 
@@ -162,9 +162,9 @@ transactional producer, so an adopter fences the earlier holder's writes.
 ## Cancellation
 
 A cancel is a user-signed record that applies to every turn of a run. A
-receiver stops a running job at the next heartbeat, and a receiver that
-claims a turn of a cancelled run starts no job. Either way the turn ends in
-`TASK_STATE_CANCELED`. An interrupted run has no receiver holding it, so the
+receiver reads cancels every 10 seconds and stops a running job within a
+second of reading one, and a receiver that claims a turn of a cancelled run
+starts no job. Either way the turn ends in `TASK_STATE_CANCELED`. An interrupted run has no receiver holding it, so the
 client treats a cancel for it as the final state. The
 [extension](a2a-extension-v1.md#cancellation) gives the details.
 

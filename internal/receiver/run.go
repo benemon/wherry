@@ -33,6 +33,10 @@ var (
 	renewInterval      = 10 * time.Second
 	capabilityInterval = 30 * time.Second
 	refreshInterval    = 15 * time.Second
+	// cancelReadInterval is how often the receiver reads the control topic, once for every run it holds.
+	cancelReadInterval = 10 * time.Second
+	// stateCheckInterval is how often a running turn checks the cancels and revocation the receiver holds.
+	stateCheckInterval = time.Second
 	// shutdownTimeout bounds the final transcript commit and ack flush after the receiver is told to stop.
 	shutdownTimeout   = 5 * time.Second
 	enrolPollInterval = 10 * time.Second
@@ -468,6 +472,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 
 	heartbeat := time.NewTicker(renewInterval)
 	defer heartbeat.Stop()
+	checks := time.NewTicker(stateCheckInterval)
+	defer checks.Stop()
 	var pending []Line
 	position := offset
 	take := func(line Line) (agentResult, bool) {
@@ -517,15 +523,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		case <-ctx.Done():
 			stopFollow()
 			return shutdown()
-		case <-heartbeat.C:
-			if ctx.Err() != nil {
-				stopFollow()
-				return shutdown()
-			}
-			// Read at each heartbeat, so a cancel stops a run within one heartbeat, not after the next refresh too.
-			if err := r.refreshCancelled(ctx); err != nil {
-				r.logger.Printf("run %s: read cancellations: %v", runID, err)
-			}
+		case <-checks.C:
 			r.mu.Lock()
 			revoked, cancelled := r.revoked, r.cancelled[runID]
 			r.mu.Unlock()
@@ -536,6 +534,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			if cancelled {
 				stopFollow()
 				return run.stopAndCancel(ctx, handle, pending)
+			}
+		case <-heartbeat.C:
+			if ctx.Err() != nil {
+				stopFollow()
+				return shutdown()
 			}
 			// The newest line stays pending so the terminal transaction always holds the last chunk;
 			// the heartbeat offset is where that line starts, so an adopter reads it again.

@@ -203,7 +203,7 @@ type fixture struct {
 
 func newFixture(t *testing.T, stream []string) fixture {
 	t.Helper()
-	for _, interval := range []*time.Duration{&renewInterval, &capabilityInterval, &refreshInterval, &enrolPollInterval} {
+	for _, interval := range []*time.Duration{&renewInterval, &capabilityInterval, &refreshInterval, &cancelReadInterval, &enrolPollInterval} {
 		previous := *interval
 		*interval = 200 * time.Millisecond
 		t.Cleanup(func() { *interval = previous })
@@ -2522,25 +2522,19 @@ func TestCancelStopsInFlightRun(t *testing.T) {
 	}
 }
 
-func TestHeartbeatReadsCancelSinceLastRefresh(t *testing.T) {
+func TestRunningTurnSeesCancelBetweenHeartbeats(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	f.adapter.endDelay = 30 * time.Second
+	renewInterval = time.Minute // only the state check, not a heartbeat, can stop the run in time
 	done := startInFlight(t, f, f.ctx, "run-cancelled", time.Now().Add(time.Hour))
-	value, err := trust.NewCancel("run-cancelled", f.userKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// No refresh runs here: only the run's own heartbeat can see this cancel.
-	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicControl, Key: []byte("run-cancelled"), Value: value}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
+	publishCancel(t, f, "run-cancelled", f.userKey) // the receiver's shared read
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("in-flight run kept going after its cancel")
+	case <-time.After(3 * stateCheckInterval):
+		t.Fatal("running turn missed a cancel the receiver held")
 	}
 	if state, reason := terminalReason(t, f, "run-cancelled"); state != wire.TaskStateCanceled || reason != "canceled by user" {
 		t.Fatalf("terminal %s %q", state, reason)
