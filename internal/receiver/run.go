@@ -160,6 +160,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 			return reject("continuation history unavailable")
 		}
 	}
+	// A cancel published since the last refresh must still stop a task before it is dispatched.
+	if err := r.refreshCancelled(ctx); err != nil {
+		r.logger.Printf("read cancellations for %s: %v", task.Wherry.RunID, err)
+	}
 	r.mu.Lock()
 	cancelled := r.cancelled[task.Wherry.RunID]
 	r.mu.Unlock()

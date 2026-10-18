@@ -2472,6 +2472,21 @@ func TestCancelledSubmissionNotDispatched(t *testing.T) {
 	}
 }
 
+func TestCancelSinceLastRefreshStopsDispatch(t *testing.T) {
+	f, enrolled := admitFixture(t)
+	value, err := trust.NewCancel("run-a", f.userKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicControl, Key: []byte("run-a"), Value: value}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	admitted, ack := f.receiver.admit(f.ctx, signedRoot(t, f, f.userKey, nil), enrolled)
+	if admitted == nil || !admitted.cancelled {
+		t.Fatalf("admission %#v ack %v, want the run admitted for cancellation", admitted, ack)
+	}
+}
+
 func TestCancelStopsInFlightRun(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	f.adapter.endDelay = 30 * time.Second
