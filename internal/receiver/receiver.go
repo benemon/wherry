@@ -295,7 +295,6 @@ func (r *Receiver) enrol(ctx context.Context) error {
 			r.logger.Printf("refresh: %v", err)
 		}
 	}
-	r.logger.Printf("enrolled: pool=%s generation=%d", r.current().Pool, r.current().Generation)
 	return nil
 }
 
@@ -361,8 +360,12 @@ func (r *Receiver) refresh(ctx context.Context) error {
 		}
 	}
 	r.mu.Lock()
+	previous := r.enrolled
 	r.enrolled, r.signers, r.revoked = &enrolled, signers, false
 	r.mu.Unlock()
+	if previous == nil || previous.Pool != enrolled.Pool || previous.Generation != enrolled.Generation {
+		r.logger.Printf("enrolled: pool=%s generation=%d", enrolled.Pool, enrolled.Generation)
+	}
 
 	r.dropLapsed(state)
 	secrets, err := readBounded(ctx, r.kafkaOpt, wire.TopicSecret)

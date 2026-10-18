@@ -2966,3 +2966,23 @@ func TestShutdownCommitsHeldTranscriptLine(t *testing.T) {
 	}
 	t.Fatalf("the transcript line held for the next commit was lost at shutdown; logs:\n%s", f.logs.String())
 }
+
+func TestReceiverLogsReEnrolment(t *testing.T) {
+	f := newFixture(t, resultStream)
+	client := busclient.New(f.kafka, f.userKey, "replies.test")
+	requestHash := enrolWithCredential(t, f, client, 30*24*time.Hour)
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Revoke(f.ctx, f.receiver.config.ReceiverID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Approve(f.ctx, requestHash, "pool-b", map[string]string{}, nomadGrants(), "auto", 30*24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.receiver.refresh(f.ctx) // the generation-1 seal no longer opens
+	logs := f.logs.String()
+	if strings.Count(logs, "enrolled: pool=receiver-nomad generation=1") != 1 || !strings.Contains(logs, "enrolled: pool=pool-b generation=2") {
+		t.Fatalf("enrolment changes not logged once each; logs:\n%s", logs)
+	}
+}
