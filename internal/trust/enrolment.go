@@ -316,7 +316,7 @@ func (state *State) applyApproval(envelope wire.Envelope, envelopeBytes []byte) 
 	}
 	current, enrolled := state.approvals[approval.ReceiverID]
 	if enrolled && approval.Generation == current.enrolled.Generation {
-		// A v1 renewal of a v1 selector approval still chains, so later generations can chain to it.
+		// A v1 renewal of a v1 selector approval is accepted, or later generations could not chain to it.
 		if (len(current.selector) > 0) != (len(selector) > 0) {
 			return nil, ErrSelectorApproval
 		}

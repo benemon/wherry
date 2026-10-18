@@ -367,10 +367,8 @@ func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error
 	}, nil
 }
 
-// gitTask is the prestart task that clones the run's git context into the shared alloc directory,
-// using the runtime's driver and configuration with the clone script as its command. Its
-// template reads gitPath, its own variable. Repository access and host trust come from the
-// platform (ADR-0024); ssh never accepts an unknown or changed host key.
+// gitTask is the prestart task that clones the run's git context into the shared alloc directory;
+// repository access and host trust come from the platform (ADR-0024).
 func gitTask(runtime Runtime, gitPath string) *api.Task {
 	config := maps.Clone(runtime.Config)
 	if runtime.Driver == "podman" {

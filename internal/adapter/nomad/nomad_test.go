@@ -969,7 +969,7 @@ func TestSweepIgnoresNonRunVariables(t *testing.T) {
 
 // bareRepository creates a bare repository with two commits and returns its file URL and the
 // commits, oldest first. The URL is a test-only stand-in for the https and ssh URLs that
-// wire.ParseGitPart admits; Run takes a parsed context, so no scheme check is bypassed.
+// wire.ParseGitPart admits.
 func bareRepository(t *testing.T) (string, []string) {
 	t.Helper()
 	dir := t.TempDir()

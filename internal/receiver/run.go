@@ -198,8 +198,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 	return admitted, 0
 }
 
-// gitContext returns the run's git context; false means the turns carry a part other than text
-// and at most one git part, or a git part the adapter does not deliver.
+// gitContext returns the run's git context; false means a non-text part other than one git part the adapter delivers.
 func gitContext(history []wire.Message, delivered bool) (*wire.GitContext, bool) {
 	var found *wire.GitContext
 	for _, message := range history {

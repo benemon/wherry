@@ -27,8 +27,7 @@ type v1Records struct {
 	sealedSecret     []byte
 	submission       []byte
 	capability       []byte
-	// named holds every record in the file by its name.
-	named map[string][]byte
+	named            map[string][]byte
 }
 
 func loadV1Records(t *testing.T) v1Records {
