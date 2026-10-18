@@ -77,10 +77,20 @@ func (r *Receiver) claimOne(ctx context.Context, enrolled *trust.Enrolled) error
 	var record *kgo.Record
 	for record == nil {
 		pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// A receiver whose enrolment ends must not acquire a task: each release raises its delivery count.
+		go func() {
+			for pollCtx.Err() == nil && r.current() != nil {
+				sleep(pollCtx, 100*time.Millisecond)
+			}
+			cancel()
+		}()
 		fetches := share.PollRecords(pollCtx, 1)
 		cancel()
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if r.current() == nil && len(fetches.Records()) == 0 {
+			return nil
 		}
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			return fmt.Errorf("poll: %w", err)
