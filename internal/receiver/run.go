@@ -155,7 +155,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 	}
 	history := []wire.Message{task.Message}
 	if task.Wherry.Turn > 1 {
-		if history, err = turns(submissions, task, taskHash); err != nil {
+		if history, err = turns(submissions, task); err != nil {
 			r.logger.Printf("run %s: continuation history: %v", task.Wherry.RunID, err)
 			return reject("continuation history unavailable")
 		}
@@ -736,15 +736,12 @@ func (run *activeRun) taskRecord(status wire.TaskStatus, result string, resultMe
 	return run.signed(run.task.Wherry.ReplyTopic, wire.TypeTask, task)
 }
 
-func turns(submissions map[int64]runSubmission, task *wire.SubmissionRecord, taskHash string) ([]wire.Message, error) {
+func turns(submissions map[int64]runSubmission, task *wire.SubmissionRecord) ([]wire.Message, error) {
 	history := make([]wire.Message, 0, task.Wherry.Turn)
 	for turn := int64(1); turn <= task.Wherry.Turn; turn++ {
 		submission, ok := submissions[turn]
 		if !ok {
 			return nil, fmt.Errorf("submission turn %d not found", turn)
-		}
-		if turn == task.Wherry.Turn && submission.hash != taskHash {
-			return nil, errors.New("final submission hash does not match claimed task")
 		}
 		history = append(history, submission.record.Message)
 	}
