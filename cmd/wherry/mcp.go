@@ -59,6 +59,8 @@ func toolFailure(err error) error {
 		return &toolError{Code: "RUN_CANCELED", Message: "the run is canceled"}
 	case errors.Is(err, busclient.ErrTurnSubmitted):
 		return &toolError{Code: "TURN_ALREADY_SUBMITTED", Message: "a continuation for this turn is already submitted"}
+	case errors.Is(err, busclient.ErrInvalidInput):
+		return invalidArgument(err.Error())
 	case errors.Is(err, context.Canceled):
 		return &toolError{Code: "CANCELLED", Message: "the request was cancelled"}
 	}
@@ -80,7 +82,7 @@ type gitInput struct {
 
 type submitInput struct {
 	Prompt               string              `json:"prompt" jsonschema:"the task for the remote agent"`
-	Selector             map[string][]string `json:"selector" jsonschema:"offer label key to its accepted values"`
+	Selector             map[string][]string `json:"selector" jsonschema:"offer label key to its accepted values; a key is platform, runtime, region or zone, a platform key such as nomad.node_pool, or an operator key containing a slash such as example.com/gpu"`
 	Git                  *gitInput           `json:"git,omitempty" jsonschema:"repository to check out for the agent"`
 	DeadlineSeconds      int64               `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 1800"`
 	QueueDeadlineSeconds int64               `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`

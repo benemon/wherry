@@ -54,7 +54,7 @@ func decodeV1(recordType RecordType, encoded []byte) (any, error) {
 		if err := json.Unmarshal(encoded, record, strictDecodeOptions); err != nil {
 			return nil, err
 		}
-		if err := validateRequirements(record.Selector); err != nil {
+		if err := ValidateRequirements(record.Selector); err != nil {
 			return nil, err
 		}
 		if err := validateCapability(&record.Capability); err != nil {
@@ -66,7 +66,7 @@ func decodeV1(recordType RecordType, encoded []byte) (any, error) {
 		if err := json.Unmarshal(encoded, record, strictDecodeOptions); err != nil {
 			return nil, err
 		}
-		if err := validateRequirements(record.Selector); err != nil {
+		if err := ValidateRequirements(record.Selector); err != nil {
 			return nil, err
 		}
 		if err := validateEnrolApproval(&record.EnrolApproval); err != nil {

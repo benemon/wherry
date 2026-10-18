@@ -645,7 +645,7 @@ func validateSubmission(value *SubmissionRecord) error {
 	if extension.Turn < 1 || extension.Attempt < 1 || lineage.Depth < 0 || int64(len(lineage.Ancestors)) != lineage.Depth || lineage.Ancestors == nil || lineage.Chain == nil || extension.Selector == nil {
 		return errors.New("invalid submission lineage")
 	}
-	if err := validateRequirements(extension.Selector); err != nil {
+	if err := ValidateRequirements(extension.Selector); err != nil {
 		return err
 	}
 	if lineage.Depth == 0 {
@@ -960,7 +960,8 @@ func validateTerms(terms map[string]string, name string) error {
 	return nil
 }
 
-func validateRequirements(requirements []Requirement) error {
+// ValidateRequirements checks a selector's keys, operators and values.
+func ValidateRequirements(requirements []Requirement) error {
 	if requirements == nil {
 		return errors.New("selector is required")
 	}

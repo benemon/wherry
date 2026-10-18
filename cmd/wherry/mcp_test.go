@@ -413,6 +413,15 @@ func TestMCPContinueAndCancel(t *testing.T) {
 	})
 }
 
+func TestMCPSubmitNamesTheInvalidRule(t *testing.T) {
+	ctx, kafka, _, userKey, _ := enrolledReceiver(t)
+	session := mcpSession(t, connectTo(kafka, userKey, "replies.test"), nil)
+	failure := callToolError(t, ctx, session, "submit", map[string]any{"prompt": "x", "selector": map[string]any{"task": []any{"essay"}}})
+	if failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "invalid requirement key") {
+		t.Fatalf("error %#v, want INVALID_ARGUMENT naming the key rule", failure)
+	}
+}
+
 func TestMCPErrorsCarryNoSecrets(t *testing.T) {
 	const canary = "s3cr3t-canary"
 	ctx, kafka, _, userKey, _ := enrolledReceiver(t)
@@ -438,6 +447,9 @@ func TestMCPErrorsCarryNoSecrets(t *testing.T) {
 			"git": map[string]any{"url": "https://user:s3cr3t-password@git.example.test/org/repo.git", "ref": "main"},
 		}, "INVALID_ARGUMENT"},
 		"unknown run": {working, "status", map[string]any{"id": "run-missing"}, "RUN_NOT_FOUND"},
+		"invalid selector key": {working, "submit", map[string]any{
+			"prompt": "x", "selector": map[string]any{"s3cr3t-password": []any{"x"}},
+		}, "INVALID_ARGUMENT"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			session := mcpSession(t, call.connect, nil)

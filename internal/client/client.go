@@ -26,6 +26,8 @@ var (
 	ErrNotAwaitingContinuation = errors.New("task is not awaiting continuation")
 	ErrRunCanceled             = errors.New("task is canceled")
 	ErrTurnSubmitted           = errors.New("continuation turn already submitted")
+	// ErrInvalidInput wraps a submission the wire format rejects; its message names the rule, never the value.
+	ErrInvalidInput = errors.New("invalid input")
 )
 
 // renewalLifetime is how far a renewal extends an approval from the time it is signed.
@@ -460,6 +462,10 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 
 // Submit chooses the live matching receiver with the most spare capacity and publishes one root task.
 func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResult, error) {
+	// Checked before matching: an invalid key matches no offer and would read as no matching receiver.
+	if err := wire.ValidateRequirements(input.Selector); err != nil {
+		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
 	loaded, err := client.loadState(ctx)
 	if err != nil {
 		return SubmitResult{}, err
@@ -509,7 +515,7 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 	}
 	envelope, err := trust.SignRootSubmission(submission, client.userKey)
 	if err != nil {
-		return SubmitResult{}, err
+		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	if err := client.produce(ctx, &kgo.Record{Topic: wire.TopicTask, Key: []byte(runID), Value: envelope}); err != nil {
 		return SubmitResult{}, err

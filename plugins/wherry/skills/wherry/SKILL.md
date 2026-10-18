@@ -33,7 +33,8 @@ Call `receivers` first. For each receiver it returns:
 
 - `offers`: label sets the receiver can run a task with. Build `selector`
   from these: each key maps to the values you accept, and an offer must
-  match every key.
+  match every key. Use only keys that appear in offers; a made-up key is
+  rejected with `INVALID_ARGUMENT`.
 - `status`, `capacity` and `in_flight`: whether it is live and has room.
 - `secrets`: the credential names sealed to it.
 

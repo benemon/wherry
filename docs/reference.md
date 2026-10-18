@@ -279,7 +279,7 @@ underlying error text.
 
 | Code | Meaning |
 | --- | --- |
-| `INVALID_ARGUMENT` | an input is missing or malformed |
+| `INVALID_ARGUMENT` | an input is missing or malformed; the message names the rule it breaks |
 | `RUN_NOT_FOUND` | no verified submission has this run ID |
 | `NO_MATCHING_RECEIVER` | no live receiver matches the selector |
 | `NOT_AWAITING_CONTINUATION` | the run is not interrupted |
