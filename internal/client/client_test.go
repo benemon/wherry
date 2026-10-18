@@ -901,7 +901,7 @@ func TestEventsSkipsOnlyThisRun(t *testing.T) {
 
 func TestEventsBindsRecordsToTheSubmission(t *testing.T) {
 	fixture := newClientFixture(t, true)
-	otherPoolKey := fixture.addReceiver(t, "receiver-other", "other", map[string]string{}, testSelector())
+	otherPoolKey := fixture.addReceiver(t, "receiver-other", "other", map[string]string{})
 	submission, hash := fixture.rootSubmission(t, "run-bound", "default")
 	status := func(mutate func(*wire.StatusRecord)) []byte {
 		value := testStatus(submission, hash, "receiver-a", "started", wire.TaskStateWorking)
