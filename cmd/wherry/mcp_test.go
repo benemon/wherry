@@ -416,9 +416,15 @@ func TestMCPContinueAndCancel(t *testing.T) {
 func TestMCPSubmitNamesTheInvalidRule(t *testing.T) {
 	ctx, kafka, _, userKey, _ := enrolledReceiver(t)
 	session := mcpSession(t, connectTo(kafka, userKey, "replies.test"), nil)
-	failure := callToolError(t, ctx, session, "submit", map[string]any{"prompt": "x", "selector": map[string]any{"task": []any{"essay"}}})
-	if failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "invalid requirement key") {
-		t.Fatalf("error %#v, want INVALID_ARGUMENT naming the key rule", failure)
+	for rule, selector := range map[string]map[string]any{
+		"invalid requirement key":                         {"task": []any{"essay"}},
+		"requirement values are required":                 {"runtime": []any{}},
+		"requirement values must be non-empty and unique": {"runtime": []any{""}},
+	} {
+		failure := callToolError(t, ctx, session, "submit", map[string]any{"prompt": "x", "selector": selector})
+		if failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, rule) {
+			t.Fatalf("error %#v, want INVALID_ARGUMENT naming %q", failure, rule)
+		}
 	}
 }
 

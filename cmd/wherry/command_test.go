@@ -769,6 +769,15 @@ func TestReceiversWarnsSealExpiry(t *testing.T) {
 	}
 }
 
+func TestSubmitBadGitPartWithoutReceiver(t *testing.T) {
+	ctx, _, client, _, _ := enrolledReceiver(t)
+	var stdout, stderr bytes.Buffer
+	err := runSubmit(ctx, client, []string{"--selector", "runtime=exec", "--prompt", "x", "--git", "https://user:s3cr3t@git.example.test/r.git", "--git-ref", "main"}, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "https git url must not carry user information") || strings.Contains(err.Error(), "s3cr3t") {
+		t.Fatalf("submit error %v, want the git rule before receiver matching", err)
+	}
+}
+
 func TestSubmitGitFlags(t *testing.T) {
 	ctx, kafka, client, userKey, receiverKey := enrolledReceiver(t)
 	encoded, err := wire.MarshalPayload(wire.TypeCapability, &wire.Capability{

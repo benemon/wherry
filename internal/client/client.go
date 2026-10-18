@@ -466,6 +466,15 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 	if err := wire.ValidateRequirements(input.Selector); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
+	for _, part := range input.Parts {
+		if part.MediaType != wire.GitMediaType {
+			continue
+		}
+		// ParseGitPart never quotes the URL in its errors, so its text is safe to return.
+		if _, err := wire.ParseGitPart(part); err != nil {
+			return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		}
+	}
 	loaded, err := client.loadState(ctx)
 	if err != nil {
 		return SubmitResult{}, err

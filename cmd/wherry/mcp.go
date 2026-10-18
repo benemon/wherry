@@ -366,21 +366,12 @@ func submitFromInput(input submitInput) (busclient.SubmitInput, error) {
 	sort.Strings(keys)
 	selector := []wire.Requirement{}
 	for _, key := range keys {
-		values := input.Selector[key]
-		if key == "" || len(values) == 0 || containsEmpty(values) {
-			return busclient.SubmitInput{}, invalidArgument("selector keys need at least one non-empty value")
-		}
-		selector = append(selector, wire.Requirement{Key: key, Operator: wire.OpIn, Values: values})
+		selector = append(selector, wire.Requirement{Key: key, Operator: wire.OpIn, Values: input.Selector[key]})
 	}
 	var parts []wire.Part
 	if input.Git != nil {
 		metadata, _ := json.Marshal(wire.GitMetadata{Ref: input.Git.Ref, Path: input.Git.Path}) // strings always encode
-		part := wire.Part{URL: input.Git.URL, MediaType: wire.GitMediaType, Metadata: metadata}
-		// ParseGitPart never quotes the URL in its errors, so its text is safe to return.
-		if _, err := wire.ParseGitPart(part); err != nil {
-			return busclient.SubmitInput{}, invalidArgument(err.Error())
-		}
-		parts = append(parts, part)
+		parts = append(parts, wire.Part{URL: input.Git.URL, MediaType: wire.GitMediaType, Metadata: metadata})
 	}
 	deadline, queueDeadline, err := deadlines(input.DeadlineSeconds, input.QueueDeadlineSeconds)
 	if err != nil {
@@ -390,15 +381,6 @@ func submitFromInput(input submitInput) (busclient.SubmitInput, error) {
 		Selector: selector, Prompt: input.Prompt, Parts: parts,
 		Deadline: deadline, QueueDeadline: queueDeadline,
 	}, nil
-}
-
-func containsEmpty(values []string) bool {
-	for _, value := range values {
-		if value == "" {
-			return true
-		}
-	}
-	return false
 }
 
 // deadlines applies the CLI's defaults to unset deadlines.
