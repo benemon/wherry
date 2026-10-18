@@ -17,11 +17,25 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
-// TestShutdownReleasesClaimOnRealBroker needs a real broker: kfake does not model share-group acquisition locks.
-func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
+// brokerReceiver is a running, enrolled receiver with a credential on the real broker named by
+// WHERRY_KAFKA_TEST_BROKER, in a pool of its own. kfake does not model share-group acquisition.
+type brokerReceiver struct {
+	ctx     context.Context
+	opts    []kgo.Opt
+	kafka   *kgo.Client
+	client  *busclient.Client
+	r       *Receiver
+	adapter *fakeAdapter
+	logs    *syncBuffer
+	pool    string
+	stop    context.CancelFunc
+	done    chan error
+}
+
+func startBrokerReceiver(t *testing.T) brokerReceiver {
+	t.Helper()
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
 		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
@@ -40,7 +54,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	t.Cleanup(cancel)
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	receiverID, pool, replies := "receiver-gjl-"+suffix, "gjl-"+suffix, "replies.gjl-"+suffix
+	receiverID, pool, replies := "receiver-broker-"+suffix, "broker-"+suffix, "replies.broker-"+suffix
 	admin := kadm.NewClient(kafka)
 	if err := wire.ApplyTopics(ctx, admin, 1); err != nil {
 		t.Fatal(err)
@@ -99,71 +113,89 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	// A new share group starts at the log end; earliest lets the receiver see a task published before it joined.
-	alter := kmsg.NewPtrIncrementalAlterConfigsRequest()
-	resource := kmsg.NewIncrementalAlterConfigsRequestResource()
-	resource.ResourceType, resource.ResourceName = kmsg.ConfigResourceTypeGroupConfig, "p-"+pool
-	config := kmsg.NewIncrementalAlterConfigsRequestResourceConfig()
-	config.Name, config.Value = "share.auto.offset.reset", kmsg.StringPtr("earliest")
-	resource.Configs = append(resource.Configs, config)
-	alter.Resources = append(alter.Resources, resource)
-	altered, err := alter.RequestWith(ctx, kafka)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code := altered.Resources[0].ErrorCode; code != 0 {
-		t.Fatalf("share.auto.offset.reset: error code %d", code)
-	}
-	var submitted busclient.SubmitResult
+	// The pool's share group starts at the log end, so tasks are published only once the receiver holds the partition.
 	for {
-		submitted, err = client.Submit(ctx, busclient.SubmitInput{
+		groups, err := admin.DescribeShareGroups(ctx, "p-"+pool)
+		group := groups["p-"+pool]
+		if err == nil && len(group.AssignedPartitions()) > 0 {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("receiver never joined its pool's share group")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	time.Sleep(time.Second) // the first share fetch sets the group's start offset
+	return brokerReceiver{ctx: ctx, opts: opts, kafka: kafka, client: client, r: r, adapter: adapter, logs: logs, pool: pool, stop: stop, done: done}
+}
+
+func (b brokerReceiver) submit(t *testing.T) string {
+	t.Helper()
+	for {
+		submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{
 			Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Prompt: "hello",
 			Deadline: time.Minute, QueueDeadline: time.Minute,
 		})
 		if err == nil {
-			break
+			return submitted.RunID
 		}
-		if !strings.Contains(err.Error(), "no matching") || ctx.Err() != nil {
+		if !strings.Contains(err.Error(), "no matching") || b.ctx.Err() != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	for {
-		if _, _, follows, _ := adapter.counts(); follows == 1 {
-			break
-		}
-		if ctx.Err() != nil {
-			t.Fatalf("run never started; logs:\n%s", logs.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+}
 
-	member, err := kgo.NewClient(append(opts, kgo.ConsumeTopics(wire.TopicTask), kgo.ShareGroup("p-"+pool), kgo.ShareMaxRecords(1))...)
+// member joins the pool's share group as a plain consumer.
+func (b brokerReceiver) member(t *testing.T) *kgo.Client {
+	t.Helper()
+	member, err := kgo.NewClient(append(append([]kgo.Opt(nil), b.opts...), kgo.ConsumeTopics(wire.TopicTask), kgo.ShareGroup("p-"+b.pool), kgo.ShareMaxRecords(1))...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(member.Close)
-	stop()
-	if err := <-done; err != nil && ctx.Err() != nil {
-		t.Fatal(err)
-	}
-	done <- nil
-	stopped := time.Now()
+	return member
+}
+
+// nextDelivery polls the pool as member until runID arrives and returns it.
+func (b brokerReceiver) nextDelivery(t *testing.T, member *kgo.Client, runID string) *kgo.Record {
+	t.Helper()
 	for {
-		pollCtx, cancelPoll := context.WithTimeout(ctx, 2*time.Second)
+		pollCtx, cancelPoll := context.WithTimeout(b.ctx, 2*time.Second)
 		fetches := member.PollRecords(pollCtx, 1)
 		cancelPoll()
 		for _, record := range fetches.Records() {
-			if string(record.Key) == submitted.RunID {
-				if waited := time.Since(stopped); waited > 10*time.Second {
-					t.Fatalf("task returned to the pool %s after shutdown, want at once (the acquisition lock expired instead)", waited)
-				}
-				return
+			if string(record.Key) == runID {
+				return record
 			}
 			record.Ack(kgo.AckRelease)
 		}
-		if ctx.Err() != nil {
-			t.Fatal("task never returned to the pool after shutdown")
+		if b.ctx.Err() != nil {
+			t.Fatalf("%s never delivered to another member", runID)
 		}
+	}
+}
+
+func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
+	b := startBrokerReceiver(t)
+	runID := b.submit(t)
+	for {
+		if _, _, follows, _ := b.adapter.counts(); follows == 1 {
+			break
+		}
+		if b.ctx.Err() != nil {
+			t.Fatalf("run never started; logs:\n%s", b.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	b.stop()
+	if err := <-b.done; err != nil && b.ctx.Err() != nil {
+		t.Fatal(err)
+	}
+	b.done <- nil
+	stopped := time.Now()
+	b.nextDelivery(t, b.member(t), runID)
+	if waited := time.Since(stopped); waited > 10*time.Second {
+		t.Fatalf("task returned to the pool %s after shutdown, want at once (the acquisition lock expired instead)", waited)
 	}
 }
