@@ -146,7 +146,8 @@ A receiver interrupts a turn with `TASK_STATE_AUTH_REQUIRED` when the
 adapter that matched the task needs a credential the receiver does not
 hold. The user seals the credential and publishes a continuation, the next
 turn, with `wherry continue`. The continuation's job receives the text of
-every turn so far, each under a `--- turn N ---` heading.
+every turn so far as one request. It opens with a line saying that none of
+it was carried out, since an interrupted turn never reaches an agent.
 
 A receiver holds a claimed task through a Kafka share group lock for the
 whole turn. When a receiver stops renewing the lock, the broker delivers

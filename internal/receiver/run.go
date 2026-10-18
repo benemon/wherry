@@ -843,16 +843,20 @@ func agentResultMetadata(data []byte) jsontext.Value {
 	return metadata
 }
 
-// prompt is the first turn's text alone, or every turn's text under a turn separator.
+// resumedHeader opens a continuation's prompt. Every interrupt today happens before dispatch, so no
+// earlier turn reached an agent; a per-turn transcript would read as work already done.
+const resumedHeader = "This request was interrupted before any of it was carried out. Carry out all of it now. Its parts follow in the order they were sent."
+
+// prompt is the first turn's text alone, or every turn's text as one request under resumedHeader.
 func prompt(history []wire.Message) string {
 	if len(history) == 1 {
 		return text(history[0])
 	}
-	sections := make([]string, len(history))
-	for i, message := range history {
-		sections[i] = fmt.Sprintf("--- turn %d ---\n%s", i+1, text(message))
+	sections := []string{resumedHeader}
+	for _, message := range history {
+		sections = append(sections, text(message))
 	}
-	return strings.Join(sections, "\n")
+	return strings.Join(sections, "\n\n")
 }
 
 func text(message wire.Message) string {

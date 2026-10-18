@@ -446,7 +446,7 @@ func TestContinuationPromptIncludesAllTurns(t *testing.T) {
 	f.adapter.mu.Lock()
 	run := f.adapter.lastRun
 	f.adapter.mu.Unlock()
-	if want := "--- turn 1 ---\nwrite the report\n--- turn 2 ---\ncontinue"; string(run.Prompt) != want || run.Turn != 2 {
+	if want := resumedHeader + "\n\nwrite the report\n\ncontinue"; string(run.Prompt) != want || run.Turn != 2 {
 		t.Fatalf("turn %d prompt %q, want turn 2 prompt %q", run.Turn, run.Prompt, want)
 	}
 }
