@@ -1270,6 +1270,9 @@ func TestAdmitRejections(t *testing.T) {
 		{"ExpiredRunDeadlineRejected", "run deadline passed", func(task *wire.SubmissionRecord) {
 			task.Wherry.DeadlineMS = time.Now().Add(-time.Second).UnixMilli()
 		}},
+		{"NoMatchingOfferRejected", "no offer matches the task", func(task *wire.SubmissionRecord) {
+			task.Wherry.Selector = []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"lambda"}}}
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1330,17 +1333,6 @@ func TestReceiverRejectsNonTextParts(t *testing.T) {
 				t.Fatalf("status %#v", status)
 			}
 		})
-	}
-}
-
-func TestAdmissionMismatchSkippedSilently(t *testing.T) {
-	f, enrolled := admitFixture(t)
-	record := signedRoot(t, f, f.userKey, func(task *wire.SubmissionRecord) {
-		task.Wherry.Selector[0].Values = []string{"docker"}
-	})
-	admitted, ack := f.receiver.admit(f.ctx, record, enrolled)
-	if admitted != nil || ack != kgo.AckAccept || topicCount(t, f, wire.TopicEvent) != 0 {
-		t.Fatalf("admitted=%v ack=%v events=%d", admitted != nil, ack, topicCount(t, f, wire.TopicEvent))
 	}
 }
 

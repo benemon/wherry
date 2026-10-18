@@ -61,7 +61,9 @@ each default key the task selector does not name.
 
 The client picks, among live receivers with an offer the task selector
 matches, the one with the most spare capacity. It signs that receiver's pool
-into the task. The receiver that claims the task repeats the check.
+into the task. The receiver that claims the task repeats the check, and ends
+the task as `TASK_STATE_REJECTED` with `no offer matches the task` when none
+of its offers matches any more.
 
 ## Signed records
 

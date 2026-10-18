@@ -151,7 +151,8 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record, enrolled *trus
 	}
 	offer, matched := wire.MatchOffer(task.Wherry.Selector, enrolled.Labels, enrolled.Adapters, offers)
 	if !matched {
-		return nil, kgo.AckAccept
+		// Pool members are meant to be uniform; a mismatch is misconfiguration and must not drop the task unseen.
+		return reject("no offer matches the task")
 	}
 	history := []wire.Message{task.Message}
 	if task.Wherry.Turn > 1 {
