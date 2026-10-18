@@ -25,10 +25,13 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|enrol|secret|receivers|submit|continue|cancel|await|events|receiver|mcp>")
+		return errors.New("usage: wherry <init|key|enrol|secret|receivers|submit|continue|cancel|await|events|receiver|admin|mcp>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
+	}
+	if args[0] == "admin" {
+		return runAdmin(args[1:], stdout, stderr)
 	}
 	configPath, err := busclient.DefaultConfigPath()
 	if err != nil {

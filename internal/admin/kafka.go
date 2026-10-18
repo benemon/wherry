@@ -1,0 +1,385 @@
+package admin
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
+	"gopkg.in/yaml.v3"
+)
+
+type Service struct {
+	Admin           *kgo.Client
+	Operator        *kgo.Client
+	Broker          string
+	CA              string // PEM, copied into bundles
+	DeliveryCeiling int32
+}
+
+type Bundle struct {
+	Broker    string `yaml:"broker"`
+	CA        string `yaml:"ca"`
+	Principal string `yaml:"principal"`
+	Password  string `yaml:"password"`
+}
+
+func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms) error {
+	if service.DeliveryCeiling == 0 {
+		ceiling, err := service.brokerSetting(ctx, "group.share.max.delivery.count.limit", func(a, b int64) int64 { return min(a, b) })
+		if err != nil {
+			return err
+		}
+		service.DeliveryCeiling = int32(ceiling)
+	}
+	if terms.DeliveryLimit > service.DeliveryCeiling {
+		return fmt.Errorf("delivery limit exceeds broker ceiling %d", service.DeliveryCeiling)
+	}
+	record := Record{Kind: "pool", Pool: pool, Terms: &terms}
+	state, err := service.appendChecked(ctx, []byte("pool."+pool), record)
+	if err != nil {
+		return err
+	}
+	if err := service.createTopics(ctx, "-1", PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
+		return err
+	}
+	if err := service.configureGroup(ctx, pool, terms); err != nil {
+		return err
+	}
+	return service.reconcileACLs(ctx, state)
+}
+
+func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, bundlePath string) (err error) {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	terms, ok := state.Pools[config.Pool]
+	if !ok {
+		return errors.New("receiver names unknown pool")
+	}
+	if err := ValidateConfig(config, terms); err != nil {
+		return err
+	}
+	bundle, err := createBundle(bundlePath)
+	if err != nil {
+		return err
+	}
+	defer closeBundle(bundle, &err)
+	record := Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config}
+	state, err = service.appendChecked(ctx, []byte(config.Receiver), record)
+	if err != nil {
+		return err
+	}
+	password, err := service.upsertUser(ctx, ReceiverPrincipal(config.Receiver))
+	if err != nil {
+		return err
+	}
+	if err := service.createTopics(ctx, "-1", ReceiverTopic(config.Receiver)); err != nil {
+		return err
+	}
+	if err := service.reconcileACLs(ctx, state); err != nil {
+		return err
+	}
+	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(config.Receiver), password})
+}
+
+func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string) (err error) {
+	bundle, err := createBundle(bundlePath)
+	if err != nil {
+		return err
+	}
+	defer closeBundle(bundle, &err)
+	record := Record{Kind: "host", Tenant: tenant, Host: host}
+	state, err := service.appendChecked(ctx, []byte(tenant+"."+host), record)
+	if err != nil {
+		return err
+	}
+	principal := TenantPrincipal(tenant, host)
+	password, err := service.upsertUser(ctx, principal)
+	if err != nil {
+		return err
+	}
+	if err := service.createTopics(ctx, "-1", HostTopic(tenant, host), TenantTopic(tenant)); err != nil {
+		return err
+	}
+	if err := service.reconcileACLs(ctx, state); err != nil {
+		return err
+	}
+	if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
+		return err
+	}
+	return writeBundle(bundle, Bundle{service.Broker, service.CA, principal, password})
+}
+
+func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) error {
+	record := Record{Kind: "entitlement", Tenant: tenant, Pool: pool}
+	state, err := service.appendChecked(ctx, []byte("entitlement."+tenant+"."+pool), record)
+	if err != nil {
+		return err
+	}
+	if err := service.createTopics(ctx, "-1", TenantTopic(tenant)); err != nil {
+		return err
+	}
+	if err := service.reconcileACLs(ctx, state); err != nil {
+		return err
+	}
+	for principal, host := range state.Hosts {
+		if host.Tenant == tenant {
+			if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (service *Service) Check(ctx context.Context) error {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	if err := state.CheckNames(); err != nil {
+		return err
+	}
+	for receiver, config := range state.Receivers {
+		if err := ValidateConfig(config, state.Pools[config.Pool]); err != nil {
+			return fmt.Errorf("receiver %s: %w", receiver, err)
+		}
+	}
+	return service.verifyACLs(ctx, state)
+}
+
+func (service *Service) LoadState(ctx context.Context) (State, error) {
+	admin := kadm.NewClient(service.Operator)
+	starts, err := admin.ListStartOffsets(ctx, AdminTopic)
+	if err != nil {
+		return State{}, err
+	}
+	ends, err := admin.ListEndOffsets(ctx, AdminTopic)
+	if err != nil {
+		return State{}, err
+	}
+	start, ok := starts.Lookup(AdminTopic, 0)
+	if !ok || start.Err != nil {
+		return State{}, errors.New("wherry.admin partition 0 is unavailable")
+	}
+	end, ok := ends.Lookup(AdminTopic, 0)
+	if !ok || end.Err != nil {
+		return State{}, errors.New("wherry.admin end offset is unavailable")
+	}
+	if start.Offset == end.Offset {
+		return NewState(), nil
+	}
+	service.Operator.AddConsumePartitions(map[string]map[int32]kgo.Offset{AdminTopic: {0: kgo.NewOffset().At(start.Offset)}})
+	defer service.Operator.RemoveConsumePartitions(map[string][]int32{AdminTopic: {0}})
+	var records []Record
+	for {
+		fetches := service.Operator.PollFetches(ctx)
+		if err := fetches.Err(); err != nil {
+			return State{}, err
+		}
+		done := false
+		fetches.EachRecord(func(record *kgo.Record) {
+			if record.Offset < end.Offset {
+				decoded, decodeErr := DecodeRecord(record.Value)
+				if decodeErr != nil {
+					err = decodeErr
+					return
+				}
+				records = append(records, decoded)
+			}
+			if record.Offset >= end.Offset-1 {
+				done = true
+			}
+		})
+		if err != nil {
+			return State{}, err
+		}
+		if done {
+			break
+		}
+	}
+	return Fold(records)
+}
+
+// receiversRetentionMS bounds wherry.receivers: readers want only each
+// receiver's latest advertisement.
+const receiversRetentionMS = "604800000"
+
+func (service *Service) appendChecked(ctx context.Context, key []byte, record Record) (State, error) {
+	if err := service.createTopics(ctx, "-1", AdminTopic); err != nil {
+		return State{}, err
+	}
+	if err := service.createTopics(ctx, receiversRetentionMS, ReceiversTopic); err != nil {
+		return State{}, err
+	}
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return State{}, err
+	}
+	encoded, err := EncodeRecord(record)
+	if err != nil {
+		return State{}, err
+	}
+	decoded, _ := DecodeRecord(encoded)
+	if err := apply(&state, decoded); err != nil {
+		return State{}, err
+	}
+	if err := state.CheckNames(); err != nil {
+		return State{}, err
+	}
+	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Key: key, Value: encoded}).FirstErr(); err != nil {
+		return State{}, fmt.Errorf("write admin record: %w", err)
+	}
+	return state, nil
+}
+
+func (service *Service) createTopics(ctx context.Context, retentionMS string, topics ...string) error {
+	configs := map[string]*string{"cleanup.policy": kadm.StringPtr("delete"), "message.timestamp.type": kadm.StringPtr("LogAppendTime"), "retention.ms": &retentionMS}
+	responses, err := kadm.NewClient(service.Admin).CreateTopics(ctx, 1, -1, configs, topics...)
+	if err != nil {
+		return err
+	}
+	for _, response := range responses {
+		if response.Err != nil && !errors.Is(response.Err, kerr.TopicAlreadyExists) {
+			return fmt.Errorf("create topic %s: %w", response.Topic, response.Err)
+		}
+	}
+	return nil
+}
+
+func (service *Service) configureGroup(ctx context.Context, pool string, terms Terms) error {
+	values := map[string]string{"share.auto.offset.reset": "earliest", "share.delivery.count.limit": strconv.Itoa(int(terms.DeliveryLimit)), "share.record.lock.duration.ms": strconv.FormatInt(terms.LockDurationMS, 10), "share.isolation.level": "read_committed"}
+	resource := kmsg.NewIncrementalAlterConfigsRequestResource()
+	resource.ResourceType = kmsg.ConfigResourceTypeGroupConfig
+	resource.ResourceName = PoolGroup(pool)
+	for name, value := range values {
+		config := kmsg.NewIncrementalAlterConfigsRequestResourceConfig()
+		config.Name = name
+		config.Value = &value
+		config.Op = kmsg.IncrementalAlterConfigOpSet
+		resource.Configs = append(resource.Configs, config)
+	}
+	request := kmsg.NewPtrIncrementalAlterConfigsRequest()
+	request.Resources = []kmsg.IncrementalAlterConfigsRequestResource{resource}
+	response, err := service.Admin.Request(ctx, request)
+	if err != nil {
+		return err
+	}
+	result := response.(*kmsg.IncrementalAlterConfigsResponse).Resources[0]
+	if result.ErrorCode != 0 {
+		return fmt.Errorf("configure share group: %w", kerr.ErrorForCode(result.ErrorCode))
+	}
+	return nil
+}
+
+func (service *Service) upsertUser(ctx context.Context, user string) (string, error) {
+	random := make([]byte, 32)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	password := base64.RawURLEncoding.EncodeToString(random)
+	results, err := kadm.NewClient(service.Admin).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{{User: user, Mechanism: kadm.ScramSha512, Iterations: 8192, Password: password}})
+	if err != nil {
+		return "", err
+	}
+	if err := results.Error(); err != nil {
+		return "", fmt.Errorf("create SCRAM credential: %w", err)
+	}
+	return password, nil
+}
+
+func (service *Service) applyQuota(ctx context.Context, state State, tenant, principal string) error {
+	var rate int64
+	var request float64
+	for pool := range state.Entitlements[tenant] {
+		terms := state.Pools[pool]
+		if rate == 0 || terms.ProducerByteRate < rate {
+			rate = terms.ProducerByteRate
+		}
+		if request == 0 || terms.RequestPercentage < request {
+			request = terms.RequestPercentage
+		}
+	}
+	if rate == 0 {
+		return nil
+	}
+	results, err := kadm.NewClient(service.Admin).AlterClientQuotas(ctx, []kadm.AlterClientQuotaEntry{{Entity: kadm.ClientQuotaEntity{{Type: "user", Name: &principal}}, Ops: []kadm.AlterClientQuotaOp{{Key: "producer_byte_rate", Value: float64(rate)}, {Key: "request_percentage", Value: request}}}})
+	if err != nil {
+		return err
+	}
+	for _, result := range results {
+		if result.Err != nil {
+			return fmt.Errorf("alter client quota: %w", result.Err)
+		}
+	}
+	return nil
+}
+
+// brokerSetting reads a numeric setting from every broker, combining values with pick.
+func (service *Service) brokerSetting(ctx context.Context, name string, pick func(a, b int64) int64) (int64, error) {
+	client := kadm.NewClient(service.Admin)
+	brokers, err := client.ListBrokers(ctx)
+	if err != nil {
+		return 0, err
+	}
+	resources, err := client.DescribeBrokerConfigs(ctx, brokers.NodeIDs()...)
+	if err != nil {
+		return 0, err
+	}
+	var value int64
+	found := 0
+	for _, resource := range resources {
+		if resource.Err != nil {
+			return 0, resource.Err
+		}
+		for _, config := range resource.Configs {
+			if config.Key != name || config.Value == nil {
+				continue
+			}
+			parsed, err := strconv.ParseInt(*config.Value, 10, 64)
+			if err != nil {
+				return 0, err
+			}
+			if found == 0 {
+				value = parsed
+			} else {
+				value = pick(value, parsed)
+			}
+			found++
+		}
+	}
+	if found != len(brokers) {
+		return 0, fmt.Errorf("broker setting %s is not readable on every broker", name)
+	}
+	return value, nil
+}
+
+func createBundle(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+}
+
+// closeBundle removes a bundle whose command failed, so a retry can create it.
+func closeBundle(file *os.File, err *error) {
+	file.Close()
+	if *err != nil {
+		os.Remove(file.Name())
+	}
+}
+
+func writeBundle(file *os.File, bundle Bundle) error {
+	encoded, err := yaml.Marshal(bundle)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(encoded)
+	return err
+}
