@@ -154,8 +154,9 @@ Receivers do not publish git's error output.
 ## Cancellation
 
 A cancel applies to every turn of a run, including turns submitted after
-it. Receivers read the control topic at a fixed interval, and again when
-they claim a submission, and act on the cancels they hold:
+it. Receivers read the control topic at a fixed interval, when they claim a
+submission, and at each heartbeat of a running turn, and act on the cancels
+they hold:
 
 - A receiver that claims a submission for a cancelled run starts no job. It
   publishes a `task` record and a `terminal` status, both with

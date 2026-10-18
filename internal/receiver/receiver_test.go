@@ -2522,6 +2522,31 @@ func TestCancelStopsInFlightRun(t *testing.T) {
 	}
 }
 
+func TestHeartbeatReadsCancelSinceLastRefresh(t *testing.T) {
+	f := newFixture(t, noResultStream)
+	f.adapter.endDelay = 30 * time.Second
+	done := startInFlight(t, f, f.ctx, "run-cancelled", time.Now().Add(time.Hour))
+	value, err := trust.NewCancel("run-cancelled", f.userKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No refresh runs here: only the run's own heartbeat can see this cancel.
+	if err := f.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: wire.TopicControl, Key: []byte("run-cancelled"), Value: value}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight run kept going after its cancel")
+	}
+	if state, reason := terminalReason(t, f, "run-cancelled"); state != wire.TaskStateCanceled || reason != "canceled by user" {
+		t.Fatalf("terminal %s %q", state, reason)
+	}
+}
+
 func TestCancelMustBeUserSigned(t *testing.T) {
 	f, _ := admitFixture(t)
 	signedRoot(t, f, f.userKey, nil)

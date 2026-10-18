@@ -523,6 +523,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				stopFollow()
 				return shutdown()
 			}
+			// Read at each heartbeat, so a cancel stops a run within one heartbeat, not after the next refresh too.
+			if err := r.refreshCancelled(ctx); err != nil {
+				r.logger.Printf("run %s: read cancellations: %v", runID, err)
+			}
 			r.mu.Lock()
 			revoked, cancelled := r.revoked, r.cancelled[runID]
 			r.mu.Unlock()
