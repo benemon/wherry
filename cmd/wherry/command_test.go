@@ -391,7 +391,25 @@ func TestCancelCLI(t *testing.T) {
 }
 
 func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
-	ctx, kafka, client, _, receiverKey := enrolledReceiver(t)
+	ctx, kafka, client, userKey, receiverKey := enrolledReceiver(t)
+	submission := wire.SubmissionRecord{
+		Message: wire.Message{
+			MessageID: "msg-run-a", ContextID: "run-a", TaskID: "run-a", Role: wire.RoleUser,
+			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
+		},
+		Wherry: wire.SubmissionExtension{
+			RunID: "run-a", Turn: 1, Attempt: 1, Pool: "default", Selector: []wire.Requirement{}, Labels: map[string]string{},
+			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
+			ReplyTopic: "replies.test", Lineage: wire.Lineage{RootRunID: "run-a", Ancestors: []string{}, Chain: []wire.Bytes{}},
+		},
+	}
+	submissionEnvelope, err := trust.SignRootSubmission(submission, userKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicTask, Key: []byte("run-a"), Value: submissionEnvelope}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
 	publish := func(topic string, recordType wire.RecordType, payload any) {
 		t.Helper()
 		encoded, err := wire.MarshalPayload(recordType, payload)
@@ -412,7 +430,7 @@ func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 			State: wire.TaskStateRejected, Timestamp: "2026-10-17T10:00:00.000Z",
 			Message: &wire.Message{MessageID: "msg-1", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "queue deadline passed"}}, Extensions: extensions},
 		}},
-		Wherry: wire.StatusExtension{Turn: 1, Attempt: 1, TaskHash: strings.Repeat("a", 64), ReceiverID: "receiver-a", Kind: "terminal"},
+		Wherry: wire.StatusExtension{Turn: 1, Attempt: 1, TaskHash: trust.EnvelopeHash(submissionEnvelope), ReceiverID: "receiver-a", Kind: "terminal"},
 	})
 	for seq := range int64(2) {
 		publish(wire.TopicTranscript, wire.TypeArtifactUpdate, &wire.ArtifactUpdateRecord{

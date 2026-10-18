@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/json/jsontext"
 	"encoding/pem"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -895,6 +896,46 @@ func TestEventsSkipsOnlyThisRun(t *testing.T) {
 	}
 	if len(events.Statuses) != 1 || events.Statuses[0].StatusUpdate.TaskID != "run-events" || events.Skipped != 2 {
 		t.Fatalf("statuses %#v skipped %d, want this run's status and its two bad records", events.Statuses, events.Skipped)
+	}
+}
+
+func TestEventsBindsRecordsToTheSubmission(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	otherPoolKey := fixture.addReceiver(t, "receiver-other", "other", map[string]string{}, testSelector())
+	submission, hash := fixture.rootSubmission(t, "run-bound", "default")
+	status := func(mutate func(*wire.StatusRecord)) []byte {
+		value := testStatus(submission, hash, "receiver-a", "started", wire.TaskStateWorking)
+		mutate(value)
+		return signed(t, wire.TypeStatus, value, fixture.receiverKey)
+	}
+	chunk := func(contextID string, key ed25519.PrivateKey) []byte {
+		return signed(t, wire.TypeArtifactUpdate, &wire.ArtifactUpdateRecord{
+			ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: "run-bound", ContextID: contextID, Artifact: wire.Artifact{
+				ArtifactID: "transcript", Parts: []wire.Part{{Text: "line", MediaType: "application/x-ndjson"}}, Extensions: []string{wire.ExtensionURI},
+			}},
+			Wherry: wire.ArtifactUpdateExtension{Turn: 1, Attempt: 1},
+		}, key)
+	}
+	fixture.produce(t, wire.TopicEvent, "run-bound", status(func(*wire.StatusRecord) {}))
+	for _, mutate := range []func(*wire.StatusRecord){
+		func(value *wire.StatusRecord) { value.Wherry.TaskHash = strings.Repeat("a", 64) },
+		func(value *wire.StatusRecord) { value.StatusUpdate.ContextID = "run-elsewhere" },
+		func(value *wire.StatusRecord) { value.Wherry.Turn = 2 },
+	} {
+		fixture.produce(t, wire.TopicEvent, "run-bound", status(mutate))
+	}
+	fixture.produce(t, wire.TopicTranscript, "run-bound", chunk("run-bound", fixture.receiverKey))
+	fixture.produce(t, wire.TopicTranscript, "run-bound", chunk("run-elsewhere", fixture.receiverKey))
+	fixture.produce(t, wire.TopicTranscript, "run-bound", chunk("run-bound", otherPoolKey))
+	events, err := fixture.client.Events(fixture.ctx, "run-bound")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events.Statuses) != 1 || events.Chunks[TurnAttempt{Turn: 1, Attempt: 1}] != 1 || events.Skipped != 5 {
+		t.Fatalf("statuses %d chunks %v skipped %d, want 1, 1 and 5", len(events.Statuses), events.Chunks, events.Skipped)
+	}
+	if _, err := fixture.client.Events(fixture.ctx, "run-never-submitted"); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("events without a submission: %v, want ErrRunNotFound", err)
 	}
 }
 

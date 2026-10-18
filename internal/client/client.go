@@ -888,6 +888,12 @@ func turnStatus(value *wire.StatusRecord, receiver receiverIdentity, submission 
 		value.StatusUpdate.ContextID == submission.record.Wherry.Lineage.RootRunID
 }
 
+// turnChunk reports whether a transcript chunk belongs to runID's submission for its turn, from that run's pool.
+func turnChunk(value *wire.ArtifactUpdateRecord, receiver receiverIdentity, submission runSubmission, runID string) bool {
+	return submission.record != nil && receiver.enrolled.Pool == submission.record.Wherry.Pool &&
+		value.ArtifactUpdate.TaskID == runID && value.ArtifactUpdate.ContextID == submission.record.Wherry.Lineage.RootRunID
+}
+
 // Events reads and verifies the bounded status history and transcript chunks for runID.
 func (client *Client) Events(ctx context.Context, runID string) (EventsResult, error) {
 	loaded, err := client.loadState(ctx)
@@ -896,11 +902,19 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 	}
 	receivers := loaded.receiverSigners(time.Now())
 	revoked := loaded.revokedSigners()
+	submissions, skipped, err := client.readSubmissions(ctx)
+	if err != nil {
+		return EventsResult{}, err
+	}
+	turns := submissions[runID]
+	if len(turns) == 0 {
+		return EventsResult{}, fmt.Errorf("events %s: %w", runID, ErrRunNotFound)
+	}
 	records, err := client.readBounded(ctx, wire.TopicEvent)
 	if err != nil {
 		return EventsResult{}, err
 	}
-	result := EventsResult{Chunks: map[TurnAttempt]int{}, ChunksRevokedAt: map[TurnAttempt]time.Time{}, Skipped: loaded.skipped}
+	result := EventsResult{Chunks: map[TurnAttempt]int{}, ChunksRevokedAt: map[TurnAttempt]time.Time{}, Skipped: loaded.skipped + skipped}
 	for _, record := range records {
 		if string(record.Key) != runID {
 			continue
@@ -911,7 +925,7 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 			continue
 		}
 		status, ok := verified.(*wire.StatusRecord)
-		if !ok || status.Wherry.ReceiverID != receiver.id || status.StatusUpdate.TaskID != runID {
+		if !ok || turns[status.Wherry.Turn].record == nil || !turnStatus(status, receiver, turns[status.Wherry.Turn], status.Wherry.Turn, runID) {
 			result.Skipped++
 			continue
 		}
@@ -939,9 +953,9 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 		if string(record.Key) != runID {
 			continue
 		}
-		verified, _, revokedAt, err := verifyHistory(record, receivers, revoked)
+		verified, receiver, revokedAt, err := verifyHistory(record, receivers, revoked)
 		update, ok := verified.(*wire.ArtifactUpdateRecord)
-		if err != nil || !ok || update.ArtifactUpdate.TaskID != runID {
+		if err != nil || !ok || !turnChunk(update, receiver, turns[update.Wherry.Turn], runID) {
 			result.Skipped++
 			continue
 		}

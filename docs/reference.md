@@ -221,7 +221,9 @@ turn=<n> attempt=<n> transcript_chunks=<n>
 
 The first two lines print as one line. `message` appears when the status has
 one. A line from a since-revoked receiver ends with
-`signer=revoked-before=<time>`.
+`signer=revoked-before=<time>`. Only records bound to the run's verified
+submission for their turn are printed, and the command fails when the run has
+no verified submission.
 
 ### `wherry mcp`
 
