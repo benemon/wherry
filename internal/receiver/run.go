@@ -33,7 +33,9 @@ var (
 	renewInterval      = 10 * time.Second
 	capabilityInterval = 30 * time.Second
 	refreshInterval    = 15 * time.Second
-	enrolPollInterval  = 10 * time.Second
+	// shutdownTimeout bounds the final transcript commit and ack flush after the receiver is told to stop.
+	shutdownTimeout   = 5 * time.Second
+	enrolPollInterval = 10 * time.Second
 )
 
 // renewRequestInterval is the least time between renew requests for one generation.
@@ -66,6 +68,12 @@ func (r *Receiver) claimOne(ctx context.Context, enrolled *trust.Enrolled) error
 		return err
 	}
 	defer share.Close()
+	// Acks are flushed on shutdown too, so they must outlive ctx.
+	flush := func() error {
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cancel()
+		return share.FlushAcks(flushCtx)
+	}
 	var record *kgo.Record
 	for record == nil {
 		pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -84,18 +92,18 @@ func (r *Receiver) claimOne(ctx context.Context, enrolled *trust.Enrolled) error
 	if r.current() == nil {
 		// Enrolment ended while this poll was open.
 		record.Ack(kgo.AckRelease)
-		return share.FlushAcks(ctx)
+		return flush()
 	}
 	admitted, ack := r.admit(ctx, record, enrolled)
 	if admitted == nil {
 		record.Ack(ack)
-		return share.FlushAcks(ctx)
+		return flush()
 	}
 	r.adjustInFlight(1)
 	defer r.adjustInFlight(-1)
 	if status := r.execute(ctx, share, record, admitted, attemptOf(record)); status != 0 {
 		record.Ack(status)
-		return share.FlushAcks(ctx)
+		return flush()
 	}
 	return nil
 }
@@ -453,6 +461,15 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		position = line.Next
 		return resultLine(line.Data)
 	}
+	// shutdown commits what is pending under its own deadline, since ctx is already done, and returns the task.
+	shutdown := func() kgo.AckStatus {
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cancel()
+		if err := run.commit(shutdownCtx, run.chunks(pending, false)...); err != nil {
+			return run.abandon(err)
+		}
+		return kgo.AckRelease
+	}
 	for {
 		select {
 		case line := <-lines:
@@ -475,10 +492,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			case runCtx.Err() != nil && ctx.Err() == nil:
 				return run.stopAndFail(ctx, handle, "timeout", pending)
 			case ctx.Err() != nil:
-				if commitErr := run.commit(ctx, run.chunks(pending, false)...); commitErr != nil {
-					return run.abandon(commitErr)
-				}
-				return kgo.AckRelease
+				return shutdown()
 			case err != nil:
 				// A dropped stream does not mean the task ended; stop it rather than leave it running.
 				r.logger.Printf("run %s: follow failed: %T", runID, err)
@@ -486,7 +500,14 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			default:
 				return run.stopAndFail(ctx, handle, "agent ended without a result", pending)
 			}
+		case <-ctx.Done():
+			stopFollow()
+			return shutdown()
 		case <-heartbeat.C:
+			if ctx.Err() != nil {
+				stopFollow()
+				return shutdown()
+			}
 			r.mu.Lock()
 			revoked, cancelled := r.revoked, r.cancelled[runID]
 			r.mu.Unlock()

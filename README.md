@@ -80,3 +80,5 @@ The `wherry` binary must be on `PATH` for the harness.
 
 Tests that need a Kafka broker run when `WHERRY_KAFKA_TEST_BROKER` is set to
 a plaintext broker address, such as `127.0.0.1:9092`, and skip otherwise.
+The broker needs share groups for the receiver tests; they run against Kafka
+4.3.

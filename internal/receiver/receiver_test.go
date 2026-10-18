@@ -2187,7 +2187,7 @@ func TestReceiverStopsClaimingWhenRevoked(t *testing.T) {
 }
 
 // startInFlight enrols the fixture receiver until exp and returns once a claimed run is following its job.
-func startInFlight(t *testing.T, f fixture, runID string, exp time.Time) <-chan error {
+func startInFlight(t *testing.T, f fixture, ctx context.Context, runID string, exp time.Time) <-chan error {
 	t.Helper()
 	r := f.receiver
 	request, err := trust.NewEnrolRequest(r.config.ReceiverID, r.signing, r.sealing, map[string]string{}, []wire.DetectedAdapter{{Name: "nomad", Platform: "nomad", Offers: []wire.Offer{}}}, time.Now())
@@ -2223,7 +2223,7 @@ func startInFlight(t *testing.T, f fixture, runID string, exp time.Time) <-chan 
 	r.mu.Unlock()
 	f.cluster.SetGroupConfigs("p-nomad", map[string]string{"share.auto.offset.reset": "earliest"})
 	done := make(chan error, 1)
-	go func() { done <- r.claimOne(f.ctx, r.current()) }()
+	go func() { done <- r.claimOne(ctx, r.current()) }()
 	for {
 		if _, _, follows, _ := f.adapter.counts(); follows == 1 {
 			return done
@@ -2249,7 +2249,7 @@ func terminalReason(t *testing.T, f fixture, runID string) (wire.TaskState, stri
 func TestRevokedReceiverStopsInFlightRuns(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	f.adapter.endDelay = 30 * time.Second
-	done := startInFlight(t, f, "run-revoked", time.Now().Add(time.Hour))
+	done := startInFlight(t, f, f.ctx, "run-revoked", time.Now().Add(time.Hour))
 	revocation, err := trust.NewRevocation(f.receiver.config.ReceiverID, 1, f.userKey, time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -2301,7 +2301,7 @@ func TestExpiryDoesNotStopInFlightRuns(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	f.adapter.endDelay = 4 * time.Second
 	exp := time.Now().Add(time.Second)
-	done := startInFlight(t, f, "run-expired", exp)
+	done := startInFlight(t, f, f.ctx, "run-expired", exp)
 	time.Sleep(time.Until(exp))
 	if err := f.receiver.refresh(f.ctx); err != nil || f.receiver.current() != nil {
 		t.Fatalf("refresh after expiry: err=%v enrolled=%v", err, f.receiver.current())
@@ -2475,7 +2475,7 @@ func TestCancelledSubmissionNotDispatched(t *testing.T) {
 func TestCancelStopsInFlightRun(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	f.adapter.endDelay = 30 * time.Second
-	done := startInFlight(t, f, "run-cancelled", time.Now().Add(time.Hour))
+	done := startInFlight(t, f, f.ctx, "run-cancelled", time.Now().Add(time.Hour))
 	publishCancel(t, f, "run-cancelled", f.userKey)
 	select {
 	case err := <-done:
@@ -2948,4 +2948,21 @@ func TestReceiverDoesNotAskToRenewSelectorApproval(t *testing.T) {
 	if requests := renewRequests(t, f); len(requests) != 0 {
 		t.Fatalf("%d renew requests for a selector approval, want none", len(requests))
 	}
+}
+
+func TestShutdownCommitsHeldTranscriptLine(t *testing.T) {
+	f := newFixture(t, noResultStream)
+	f.adapter.endDelay = 30 * time.Second
+	ctx, shutdown := context.WithCancel(f.ctx)
+	done := startInFlight(t, f, ctx, "run-shutdown", time.Now().Add(time.Hour))
+	shutdown()
+	if status := <-done; status != nil && !errors.Is(status, context.Canceled) {
+		t.Fatalf("claimOne after shutdown: %v", status)
+	}
+	for _, payload := range published(t, f, wire.TopicTranscript) {
+		if chunk, ok := payload.(*wire.ArtifactUpdateRecord); ok && strings.Contains(chunk.ArtifactUpdate.Artifact.Parts[0].Text, "working") {
+			return
+		}
+	}
+	t.Fatalf("the transcript line held for the next commit was lost at shutdown; logs:\n%s", f.logs.String())
 }
