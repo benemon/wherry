@@ -490,6 +490,21 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		return kgo.AckRelease
 	}
+	// stopHeld ends the run when the receiver holds its revocation or cancel.
+	stopHeld := func() (kgo.AckStatus, bool) {
+		r.mu.Lock()
+		revoked, cancelled := r.revoked, r.cancelled[runID]
+		r.mu.Unlock()
+		switch {
+		case revoked:
+			stopFollow()
+			return run.revoke(ctx, handle, pending), true
+		case cancelled:
+			stopFollow()
+			return run.stopAndCancel(ctx, handle, pending), true
+		}
+		return 0, false
+	}
 	for {
 		select {
 		case line := <-lines:
@@ -524,21 +539,17 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			stopFollow()
 			return shutdown()
 		case <-checks.C:
-			r.mu.Lock()
-			revoked, cancelled := r.revoked, r.cancelled[runID]
-			r.mu.Unlock()
-			if revoked {
-				stopFollow()
-				return run.revoke(ctx, handle, pending)
-			}
-			if cancelled {
-				stopFollow()
-				return run.stopAndCancel(ctx, handle, pending)
+			if status, stop := stopHeld(); stop {
+				return status
 			}
 		case <-heartbeat.C:
 			if ctx.Err() != nil {
 				stopFollow()
 				return shutdown()
+			}
+			// The heartbeat can win the select against a due check; a held stop still comes first.
+			if status, stop := stopHeld(); stop {
+				return status
 			}
 			// The newest line stays pending so the terminal transaction always holds the last chunk;
 			// the heartbeat offset is where that line starts, so an adopter reads it again.
@@ -645,6 +656,13 @@ func (run *activeRun) interrupt(ctx context.Context, credential string) kgo.AckS
 }
 
 func (run *activeRun) finish(ctx context.Context, handle Handle, pending []Line, result agentResult) kgo.AckStatus {
+	// A result committed after a revocation is untrusted, so acknowledging it would lose the run.
+	run.receiver.mu.Lock()
+	revoked := run.receiver.revoked
+	run.receiver.mu.Unlock()
+	if revoked {
+		return run.revoke(ctx, handle, pending)
+	}
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.RunID, err)
 		return kgo.AckRelease

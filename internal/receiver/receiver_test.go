@@ -2541,6 +2541,40 @@ func TestRunningTurnSeesCancelBetweenHeartbeats(t *testing.T) {
 	}
 }
 
+func TestHeartbeatHonoursHeldCancel(t *testing.T) {
+	f := newFixture(t, noResultStream)
+	f.adapter.endDelay = 30 * time.Second
+	stateCheckInterval = time.Minute // only a heartbeat can stop the run in time
+	t.Cleanup(func() { stateCheckInterval = time.Second })
+	done := startInFlight(t, f, f.ctx, "run-cancelled", time.Now().Add(time.Hour))
+	publishCancel(t, f, "run-cancelled", f.userKey)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * renewInterval):
+		t.Fatal("heartbeat committed past a cancel the receiver held")
+	}
+	if state, _ := terminalReason(t, f, "run-cancelled"); state != wire.TaskStateCanceled {
+		t.Fatalf("terminal %s, want CANCELED", state)
+	}
+}
+
+func TestResultAfterHeldRevocationReleasesTask(t *testing.T) {
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-revoked-result", 1)
+	f.receiver.mu.Lock()
+	f.receiver.revoked = true
+	f.receiver.mu.Unlock()
+	if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"}); status != kgo.AckRelease {
+		t.Fatalf("status %v, want release: an untrusted result must not end the task", status)
+	}
+	if state, reason := terminalReason(t, f, "run-revoked-result"); state != wire.TaskStateFailed || reason != "receiver revoked" {
+		t.Fatalf("terminal %s %q, want FAILED receiver revoked", state, reason)
+	}
+}
+
 func TestCancelMustBeUserSigned(t *testing.T) {
 	f, _ := admitFixture(t)
 	signedRoot(t, f, f.userKey, nil)
