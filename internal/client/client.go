@@ -31,6 +31,9 @@ var (
 // renewalLifetime is how far a renewal extends an approval from the time it is signed.
 const renewalLifetime = 30 * 24 * time.Hour
 
+// taskGrace is how long Await waits after a terminal status for the task record that carries the artifacts.
+const taskGrace = 2 * time.Second
+
 // Client implements the user-side wherry operations.
 type Client struct {
 	kafka      *kgo.Client
@@ -749,8 +752,21 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 	}
 	defer stop()
 	var attempts wire.AttemptFilter
+	// terminal is a terminal status still waiting for its task record, which the receiver commits in the
+	// same transaction but a fetch can deliver later; it is returned alone once taskGrace passes.
+	var terminal *AwaitResult
+	var graceEnd time.Time
 	for {
-		fetches := client.kafka.PollFetches(waitCtx)
+		pollCtx, cancelPoll := waitCtx, context.CancelFunc(func() {})
+		if terminal != nil {
+			pollCtx, cancelPoll = context.WithDeadline(waitCtx, graceEnd)
+		}
+		fetches := client.kafka.PollFetches(pollCtx)
+		graceOver := terminal != nil && pollCtx.Err() != nil
+		cancelPoll()
+		if graceOver {
+			return *terminal, nil
+		}
 		if err := waitCtx.Err(); err != nil {
 			return AwaitResult{}, fmt.Errorf("await %s: %w", runID, err)
 		}
@@ -789,7 +805,13 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 					if value.Wherry.Kind == "interrupted" && cancelled[runID] {
 						return AwaitResult{Status: wire.TaskStatus{State: wire.TaskStateCanceled}, Skipped: loaded.skipped}, nil
 					}
-					return AwaitResult{Status: value.StatusUpdate.Status, RevokedAt: revokedAt, Skipped: loaded.skipped}, nil
+					result := AwaitResult{Status: value.StatusUpdate.Status, RevokedAt: revokedAt, Skipped: loaded.skipped}
+					if value.Wherry.Kind != "terminal" {
+						return result, nil
+					}
+					if terminal == nil {
+						terminal, graceEnd = &result, time.Now().Add(taskGrace)
+					}
 				}
 			}
 		}

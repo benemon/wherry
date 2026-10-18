@@ -643,6 +643,25 @@ func TestAwaitReturnsOnTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestAwaitKeepsArtifactsWhenTaskFollowsStatus(t *testing.T) {
+	fixture := newClientFixture(t, true)
+	submission, hash := fixture.rootSubmission(t, "run-split-fetch", "default")
+	status := testStatus(submission, hash, "receiver-a", "terminal", wire.TaskStateCompleted)
+	fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
+	task := testTask(submission, hash, 1, wire.TaskStateCompleted)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, fixture.receiverKey))
+	}()
+	awaited, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if awaited.Task == nil {
+		t.Fatalf("result %#v, want the task record that followed the terminal status", awaited)
+	}
+}
+
 func TestAwaitStatusBindings(t *testing.T) {
 	for name, setup := range map[string]func(*testing.T, clientFixture, *wire.SubmissionRecord, string) (ed25519.PrivateKey, *wire.StatusRecord){
 		"task hash": func(_ *testing.T, f clientFixture, submission *wire.SubmissionRecord, _ string) (ed25519.PrivateKey, *wire.StatusRecord) {
