@@ -58,23 +58,14 @@ wherry sends a task to other compute and returns the result to the caller.
 `wherry mcp` is an MCP server (protocol 2026-07-28 and earlier) on stdio.
 It reads the CLI's configuration and offers seven tools: `receivers`,
 `submit`, `status`, `await`, `continue`, `cancel` and `events`. Each takes
-and returns JSON with a declared schema. `await` returns within 45 seconds:
-with the result, with an interrupted, canceled or rejected state, or with
-`retry_after` while the run is unfinished. A failed call returns a `code`
-and a `message` that carry no underlying error text.
+and returns JSON with a declared schema. `await` waits up to 45 seconds,
+then returns the result, an interrupted, canceled or rejected state, or
+`retry_after` while the run is unfinished.
 
 [`plugins/wherry`](plugins/wherry) packages the server with a `wherry`
-Agent Skill that teaches the submit and await protocol:
-
-- `plugin.json`, `mcp.json` and `skills/` form an Agent Plugins 1.0 bundle.
-- `.claude-plugin/plugin.json` is the Claude Code manifest for the same
-  skill and server.
-- Other harnesses take `mcp.json` and `skills/wherry` directly.
-
-[`plugins/AGENTS.snippet.md`](plugins/AGENTS.snippet.md) covers harnesses
-without skills, using the CLI.
-
-The `wherry` binary must be on `PATH` for the harness.
+Agent Skill that teaches the submit and await protocol. The
+[operator guide](docs/operator-guide.md#harness-integration) covers
+installing it.
 
 ## Tests
 

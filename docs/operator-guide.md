@@ -61,8 +61,7 @@ Each pool reads `tasks.queue` through the Kafka share group `p-<pool>`.
 
 Approve every receiver in a pool with the same labels and grants, and give
 each the same adapters. A receiver that claims a task its offers do not
-match acknowledges it without publishing a status, and the task leaves the
-pool's queue.
+match ends it as `TASK_STATE_REJECTED` with `no offer matches the task`.
 
 Each receiver has its own keys, so seal credentials to each receiver in a
 pool separately.
@@ -322,8 +321,11 @@ running job, on the restarted receiver or on another in the pool, and
 resumes the transcript from the last heartbeat offset. To upgrade a
 receiver, replace the binary and restart it.
 
-Readers skip a record with a member they do not know. Run builds of the
-client and receiver that write the same record format.
+Readers skip a record with a member they do not know. A build reads every
+record version it has ever written, but an older build rejects a newer
+version: version 2 `submission`, `capability` and `enrol_approval` records
+need clients and receivers that know version 2. Upgrade every client and
+receiver together.
 
 ## Harness integration
 

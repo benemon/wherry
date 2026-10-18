@@ -7,7 +7,7 @@ prompt and, if given, a checkout of a pushed git ref.
 
 1. `wherry receivers --json` lists receivers. Build the selector from an
    offer's labels.
-2. `wherry submit --selector k=v|v,.. --prompt TEXT`
+2. `wherry submit --selector 'k=v|v,..' --prompt TEXT`
    prints `run_id` and `pool`. Add `--git URL --git-ref REF` for a
    repository. Keep working.
 3. `wherry await RUN_ID` blocks until the run ends (30 minutes at most by
@@ -21,5 +21,5 @@ prompt and, if given, a checkout of a pushed git ref.
 
 Where the `wherry` MCP server (`wherry mcp`) is configured, its tools do the
 same: `receivers`, `submit`, `status`, `await`, `continue`, `cancel` and
-`events`. Its `await` returns within 45 seconds; call it again while the
+`events`. Its `await` waits up to 45 seconds; call it again while the
 reply carries `retry_after`.

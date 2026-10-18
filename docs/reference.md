@@ -149,8 +149,9 @@ sealed credential that has expired or expires within 7 days.
 ### `wherry submit`
 
 Publishes a task to the live receiver, among those with an offer that
-matches `--selector`, with the most spare capacity. Ties go to the lowest receiver ID. It prints
-`run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
+matches `--selector`, with the most spare capacity. Ties go to the lowest
+receiver ID. It prints `run_id=<id> pool=<pool>`, or fails with `no matching
+live receiver`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -274,8 +275,8 @@ declared schema, and opens its own Kafka connection. Deadlines given as
   time, message, signer_revoked_before}`, and `transcripts`, each
   `{turn, attempt, chunks}`.
 
-A failed call returns `{"code", "message"}`. The message never carries the
-underlying error text.
+A failed call returns `{"code", "message"}`. The message never carries error
+text from the bus, the broker or the user key.
 
 | Code | Meaning |
 | --- | --- |

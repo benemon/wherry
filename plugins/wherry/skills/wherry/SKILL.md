@@ -33,8 +33,9 @@ Call `receivers` first. For each receiver it returns:
 
 - `offers`: label sets the receiver can run a task with. Build `selector`
   from these: each key maps to the values you accept, and an offer must
-  match every key. Use only keys that appear in offers; a made-up key is
-  rejected with `INVALID_ARGUMENT`.
+  match every key. Use only keys that appear in offers. A key outside the
+  key grammar is rejected with `INVALID_ARGUMENT`; a well-formed key no
+  offer has returns `NO_MATCHING_RECEIVER`.
 - `status`, `capacity` and `in_flight`: whether it is live and has room.
 - `secrets`: the credential names sealed to it.
 
@@ -71,7 +72,7 @@ state and the result, and exits non-zero for any state other than
 
 `TASK_STATE_AUTH_REQUIRED` means the receiver lacks a credential. The
 `message` names the credential and never holds its value. The receiver is
-the one in the run's `pool`, as `receivers` lists it. Tell the user which
+the `receiver` of the interrupted status in `events`. Tell the user which
 credential to seal to that receiver, with the command:
 
     wherry secret put NAME --to RECEIVER_ID --from-file PATH
@@ -89,5 +90,5 @@ ends in `TASK_STATE_CANCELED`.
 
 A failed call returns `{"code": ..., "message": ...}`. `RUN_NOT_FOUND`,
 `NO_MATCHING_RECEIVER` and `INVALID_ARGUMENT` call for a change to your
-input. `UNAVAILABLE` means the bus could not be reached; the user can run
-the same operation with the `wherry` CLI to see the cause.
+input. `UNAVAILABLE` is any other failure; the user can run the same
+operation with the `wherry` CLI to see the cause.

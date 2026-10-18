@@ -115,8 +115,8 @@ lifetime is left. Under `auto`, the next client command that reads the trust
 state signs a renewal, provided the renewal extends the approval. Under
 `manual`, the user runs `wherry enrol renew`. A renewal keeps the generation
 and every approved term and sets the expiry to 30 days from when it is
-signed. A receiver whose approval has expired stops
-claiming, advertising and delivering credentials until it is renewed.
+signed. A receiver whose approval has expired stops claiming, advertising
+and delivering credentials until it is renewed.
 
 ### Revocation
 

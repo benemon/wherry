@@ -22,8 +22,9 @@ the task id), `turn` (integer, from 1), `attempt` (integer, always 1; the
 delivery attempt appears in `status`, `artifact_update` and `task`), `pool`
 (string, the receiver pool that may claim it), `selector` (array of `{key,
 operator, values}` requirements on receiver labels), `deadline_ms` and
-`queue_deadline_ms` (integers, Unix milliseconds by which the run must end and must be claimed), `reply_topic`
-(string, where the final task is published) and `lineage`.
+`queue_deadline_ms` (integers, Unix milliseconds by which the run must end
+and must be claimed), `reply_topic` (string, where the final task is
+published) and `lineage`.
 
 The `lineage` object holds `root_run_id` (string), `depth` (integer),
 `ancestors` (array of run ids from the root), `parent_hash` (string, hex
@@ -234,8 +235,8 @@ types, the shape before task labels and the receiver selector were removed:
   selector it is an ordinary approval. With a non-empty selector it still
   holds its generation, so the next approval for that receiver takes a
   higher one, but it enrols nothing and cannot be renewed. A version 1
-  renewal of it with the same selector still chains, so a later approval
-  can chain to that renewal.
+  renewal of it with the same selector is accepted and keeps the
+  generation's chain.
 
 A version 2 record that carries `labels` in a submission's `wherry`, or
 `selector` in a capability or approval, is invalid. Hashes of a version 1
