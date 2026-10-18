@@ -780,21 +780,7 @@ func TestSubmitBadGitPartWithoutReceiver(t *testing.T) {
 
 func TestSubmitGitFlags(t *testing.T) {
 	ctx, kafka, client, userKey, receiverKey := enrolledReceiver(t)
-	encoded, err := wire.MarshalPayload(wire.TypeCapability, &wire.Capability{
-		ReceiverID: "receiver-a", Labels: map[string]string{}, Pool: "default",
-		Offers:   []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}},
-		Capacity: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	capability, err := wire.MarshalEnvelope(wire.Sign(wire.TypeCapability, encoded, receiverKey))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicCapability, Key: []byte("receiver-a"), Value: capability}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
+	publishCapability(t, ctx, kafka, receiverKey)
 	base := []string{"--selector", "runtime=exec", "--prompt", "fix the bug"}
 	for name, test := range map[string]struct {
 		flags []string
