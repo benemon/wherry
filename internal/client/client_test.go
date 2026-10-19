@@ -1357,3 +1357,52 @@ func TestSupersededCancelDoesNotMaskALaterAttempt(t *testing.T) {
 		t.Fatalf("status %#v, %v; want attempt 2's WORKING over attempt 1's CANCELED", status, err)
 	}
 }
+
+func TestAwaitIgnoresWhatAnEndedMemberWritesAfterItsEnd(t *testing.T) {
+	for name, stale := range map[string]func(*testing.T, *testReceiver, claimed) []byte{
+		"interrupted status with a high attempt": func(t *testing.T, ended *testReceiver, task claimed) []byte {
+			return ended.status(t, task, 9, "interrupted-9", "interrupted", wire.TaskStateAuthRequired, nil)
+		},
+		"echo for a later turn": func(t *testing.T, ended *testReceiver, task claimed) []byte {
+			task.submission.Wherry.Turn = 2
+			return ended.echo(t, task)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			ended, task := f.admitted(t)
+			runID := task.submission.Wherry.Run
+			peer := f.addReceiver(t, "receiver-b", "pool-a")
+			type outcome struct {
+				result AwaitResult
+				err    error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				result, err := f.host.Await(f.ctx, runID, 10*time.Second)
+				done <- outcome{result, err}
+			}()
+			time.Sleep(time.Second)
+			f.end(t, "receiver-a")
+			ended.feed(t, f.ctx, runID, stale(t, ended, task))
+			time.Sleep(500 * time.Millisecond)
+			peer.feed(t, f.ctx, runID, peer.echo(t, task), peer.result(t, task, 2, wire.TaskStateCompleted, nil))
+			got := <-done
+			if got.err != nil || got.result.Task == nil || got.result.Status.State != wire.TaskStateCompleted {
+				t.Fatalf("await %#v, %v; want the live member's result", got.result, got.err)
+			}
+		})
+	}
+}
+
+func TestReceiversDoesNotShowAFutureAdvertisementAsLive(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.AtMS = time.Now().Add(time.Hour).UnixMilli() })
+	receivers, err := f.host.Receivers(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receivers) != 1 || receivers[0].Status == "live" || strings.HasPrefix(receivers[0].HeartbeatAge, "-") || receivers[0].Adapters[0].Ready {
+		t.Fatalf("receivers %#v; want a future advertisement neither live, ready nor of negative age", receivers)
+	}
+}

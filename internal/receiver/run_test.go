@@ -1265,12 +1265,45 @@ func TestContinuationAfterHostKeyRotation(t *testing.T) {
 func TestBindTurnsPrefersTheTurnAMemberRan(t *testing.T) {
 	ran, forged := testSubmission("run-a"), testSubmission("run-a")
 	forged.Message.Parts = []wire.Part{{Text: "forged"}}
-	all := []runSubmission{{record: forged, hash: strings.Repeat("b", 64)}, {record: ran, hash: strings.Repeat("a", 64)}}
+	all := []runSubmission{{record: forged, hash: strings.Repeat("b", 64), current: true}, {record: ran, hash: strings.Repeat("a", 64), current: true}}
 	events := poolEvents{statuses: map[string][]wire.RunStatus{"run-a": {{Wherry: wire.StatusBinding{ReceiverBinding: wire.ReceiverBinding{Run: "run-a", Turn: 1}, TaskHash: strings.Repeat("a", 64)}}}}}
 	if bound := bindTurns(all, ran, events); bound[1].hash != strings.Repeat("a", 64) {
 		t.Fatalf("turn 1 bound to %s; want the submission a pool member's status names", bound[1].hash)
 	}
 	if bound := bindTurns(all, ran, poolEvents{}); bound[1].hash != strings.Repeat("b", 64) {
 		t.Fatal("without statuses the first submission of a turn should stand")
+	}
+	// Signed only by a retired key and run by no member: it does not count, even first.
+	all[0].current = false
+	if bound := bindTurns(all, ran, poolEvents{}); bound[1].hash != strings.Repeat("a", 64) {
+		t.Fatalf("turn 1 bound to %s; want the current-key submission over a retired-key one no member ran", bound[1].hash)
+	}
+}
+
+func TestRetiredKeyForgeryDoesNotBlockTheRealTurn(t *testing.T) {
+	f := newFixture(t, resultStream)
+	first := f.turn(t, "run-a", 1)
+	f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
+	retired := f.host
+	_, current, _ := ed25519.GenerateKey(rand.Reader)
+	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(signed.HostOwner(testTenant, testHost), retired, current, nil)))
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A leaked retired key forges turn 2 before the host writes it.
+	forged := f.submit(t, retired, func(task *wire.Submission) {
+		task.Wherry.Turn = 2
+		task.Message.MessageID, task.Message.Parts = "msg-forged", []wire.Part{{Text: "forged"}}
+	})
+	genuine := f.submit(t, current, func(task *wire.Submission) {
+		task.Wherry.Turn = 2
+		task.Message.MessageID, task.Message.Parts = "msg-2", []wire.Part{{Text: "continue"}}
+	})
+	admitted := f.admitted(t, genuine)
+	if len(admitted.history) != 2 || admitted.history[1].Parts[0].Text != "continue" {
+		t.Fatalf("history %#v, want the real turn 2", admitted.history)
+	}
+	if admitted, ack := f.receiver.admit(f.ctx, forged); admitted != nil || ack != kgo.AckReject {
+		t.Fatalf("the retired-key forgery admitted=%v ack=%v, want a silent rejection", admitted != nil, ack)
 	}
 }

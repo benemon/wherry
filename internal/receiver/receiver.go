@@ -247,16 +247,17 @@ func (r *Receiver) register(ctx context.Context) error {
 			return fmt.Errorf("register keys: %w", err)
 		}
 		r.logger.Printf("registered keys: signing=%s sealing=%s", signed.KeyID(public), signed.SealingKeyID(r.sealing.PublicKey()))
-		// Another instance may have registered at the same time; only one record may stand.
 		if records, err = admin.ReadTopic(ctx, r.base, topic); err != nil {
 			return fmt.Errorf("read key topic: %w", err)
 		}
 	}
-	if len(records) != 1 {
-		return errors.New("receiver key topic holds records other than this receiver's registration")
+	var state signed.KeyState
+	for _, record := range records {
+		if state, err = signed.ApplyKeyRecord(state, r.id, record.Value); err != nil {
+			return errors.New("receiver key topic holds a record that does not fold")
+		}
 	}
-	state, err := signed.ApplyKeyRecord(signed.KeyState{}, r.id, records[0].Value)
-	if err != nil || !public.Equal(state.Current) || state.Sealing == nil || !state.Sealing.Equal(r.sealing.PublicKey()) {
+	if !public.Equal(state.Current) || state.Sealing == nil || !state.Sealing.Equal(r.sealing.PublicKey()) {
 		return errors.New("receiver key topic holds other keys than the state directory")
 	}
 	return nil
@@ -275,10 +276,8 @@ func (r *Receiver) configure(ctx context.Context) error {
 			return errors.New("receiver membership has ended")
 		}
 		if config, ok := state.Receivers[r.id]; ok {
-			if config.Receiver != r.id {
-				return errors.New("configuration belongs to another receiver")
-			}
-			if err := admin.ValidateConfig(config, state.Pools[config.Pool]); err != nil {
+			record := admin.Record{Kind: "receiver", Pool: config.Pool, Receiver: r.id, Config: &config}
+			if err := admin.ValidateReceiverRecord(record, r.id, state.Pools[config.Pool]); err != nil {
 				return fmt.Errorf("configuration: %w", err)
 			}
 			adapters := make([]Named, 0, len(config.Adapters))

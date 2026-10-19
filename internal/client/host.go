@@ -417,7 +417,7 @@ func (h *Host) seals(ctx context.Context) (map[sealKey]signed.Seal, error) {
 }
 
 // Receivers returns the receivers of the pools the tenant is entitled to, with their latest advertisement and this
-// host's seals to them.
+// host's seals to them. An advertisement dated beyond the liveness window either side of now is not live.
 func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 	v, err := h.load(ctx)
 	if err != nil {
@@ -447,9 +447,9 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 		} else if advertised {
 			age := now.Sub(time.UnixMilli(ad.AtMS))
 			receiver.Capacity, receiver.InFlight = ad.Capacity, ad.InFlight
-			receiver.HeartbeatAge = age.Round(time.Second).String()
+			receiver.HeartbeatAge = max(age, 0).Round(time.Second).String()
 			receiver.Status = "stale"
-			if age <= liveness {
+			if age <= liveness && age >= -liveness {
 				receiver.Status = "live"
 			}
 		}
@@ -514,7 +514,10 @@ func (h *Host) localRun(runID string) (*runRecord, error) {
 }
 
 func (h *Host) writeRun(record runRecord) error {
-	path, _ := h.runPath(record.Run) // run IDs from randomID are local names
+	path, ok := h.runPath(record.Run)
+	if !ok {
+		return errors.New("run ID does not name a local run path")
+	}
 	return writeState(path, record)
 }
 

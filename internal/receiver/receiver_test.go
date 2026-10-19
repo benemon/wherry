@@ -647,6 +647,27 @@ func TestRegisterRefusesAKeyTopicThatIsNotEmpty(t *testing.T) {
 	}
 }
 
+func TestRegisterAcceptsARotationToItsKeys(t *testing.T) {
+	f := newFixture(t, resultStream)
+	_, next, _ := ed25519.GenerateKey(rand.Reader)
+	nextSealing, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	f.produce(t, admin.ReceiverTopic(testReceiver), testReceiver, must(t)(signed.RotateKey(testReceiver, f.receiver.signing, next, nextSealing.PublicKey())))
+	rotated := &Receiver{id: testReceiver, base: f.receiver.base, signing: next, sealing: nextSealing, logger: f.receiver.logger}
+	if err := rotated.register(f.ctx); err != nil {
+		t.Fatalf("a receiver holding the keys its topic rotated to did not start: %v", err)
+	}
+	if err := f.receiver.register(f.ctx); err == nil {
+		t.Fatal("a receiver holding the retired keys started")
+	}
+	f.produce(t, admin.ReceiverTopic(testReceiver), testReceiver, []byte("stray"))
+	if err := rotated.register(f.ctx); err == nil {
+		t.Fatal("started over a key topic with a stray record after its rotation")
+	}
+	if records := f.records(t, admin.ReceiverTopic(testReceiver)); len(records) != 3 {
+		t.Fatalf("key topic records = %d, want nothing appended", len(records))
+	}
+}
+
 func TestRegisterRefusesAnotherKey(t *testing.T) {
 	f := newFixture(t, resultStream)
 	for name, change := range map[string]func(*Receiver){

@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,9 +13,6 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
-
-// refreshInterval bounds how long Await trusts a snapshot of wherry.admin and the receivers' keys.
-const refreshInterval = 2 * time.Second
 
 // AwaitResult is the accepted outcome of the latest turn; Task is nil when a status record ended it.
 type AwaitResult struct {
@@ -53,39 +49,49 @@ type turn struct {
 	echo *wire.Echo
 }
 
+// entry is one authorised record of the run, kept so the run can be derived again against a newer view.
+type entry struct {
+	receiver string
+	echo     *wire.Echo
+	status   *wire.RunStatus
+	chunk    *wire.Chunk
+	result   *wire.Result
+}
+
 // runView is a run as the tenant feed and this host's local record show it. A run's pool comes from the local record,
-// or else from its first echo; records from any other pool are not the run's.
+// or else from its first echo; records from any other pool are not the run's. Everything below entries is derived
+// from them by derive.
 type runView struct {
-	h        *Host
-	v        view
-	run      string
-	pool     string
-	turns    map[int64]turn
-	latest   int64
-	statuses []*wire.RunStatus
-	chunks   []*wire.Chunk
-	skipped  int
+	h       *Host
+	v       view
+	run     string
+	local   *runRecord
+	pool    string
+	entries []entry
+	// unread counts records keyed by the run that authorise as none of its records.
+	unread int
 	// reread holds the kids whose owner's key topic has been re-read, which bounds re-reads to one per key.
 	reread map[string]bool
 
-	filter          wire.AttemptFilter
-	outcome         *AwaitResult
-	outcomeTurn     int64
-	outcomeReceiver string
+	turns       map[int64]turn
+	latest      int64
+	statuses    []*wire.RunStatus
+	chunks      []*wire.Chunk
+	skipped     int
+	outcome     *AwaitResult
+	outcomeTurn int64
 }
 
 func newRunView(h *Host, v view, runID string, local *runRecord) *runView {
-	r := &runView{h: h, v: v, run: runID, turns: map[int64]turn{}, reread: map[string]bool{}}
+	r := &runView{h: h, v: v, run: runID, local: local, reread: map[string]bool{}}
 	if local != nil {
-		r.pool, r.latest = local.Pool, local.Turn
-		r.turns[local.Turn] = turn{hash: local.TaskHash}
+		r.pool = local.Pool
 	}
 	return r
 }
 
-// authorize runs check against the view and, once per kid, again after re-reading what the kid may have outrun: the
-// whole view for an owner the view does not know, or the key topic of a live member of an entitled pool whose kid
-// names a key other than the one the view holds.
+// authorize runs check, and once per kid runs it again after re-reading the whole view, when the kid's owner is not
+// in it, or the owner's key topic, when the kid names a key other than a live entitled member's current one.
 func authorize[T any](ctx context.Context, r *runView, value []byte, check func(view) (T, error)) (T, error) {
 	result, err := check(r.v)
 	if err == nil {
@@ -122,8 +128,8 @@ func authorize[T any](ctx context.Context, r *runView, value []byte, check func(
 	return check(r.v)
 }
 
-// echo binds an echo of the run, reporting whether value was one.
-func (r *runView) echo(ctx context.Context, value []byte) bool {
+// addEcho keeps an echo of the run, reporting whether value was one.
+func (r *runView) addEcho(ctx context.Context, value []byte) bool {
 	echo, err := authorize(ctx, r, value, func(v view) (wire.Echo, error) { return admin.AuthorizeEcho(v.state, v.keys, value, r.h.tenant) })
 	if err != nil || echo.Run != r.run {
 		return false
@@ -131,104 +137,126 @@ func (r *runView) echo(ctx context.Context, value []byte) bool {
 	if r.pool == "" {
 		r.pool = echo.Pool
 	}
-	known, ok := r.turns[echo.Turn]
-	if echo.Pool != r.pool || ok && known.hash != echo.TaskHash {
-		r.skipped++
+	if echo.Pool != r.pool {
+		r.unread++
 		return true
 	}
-	if known.echo == nil {
-		r.turns[echo.Turn] = turn{hash: echo.TaskHash, echo: &echo}
-	}
-	r.latest = max(r.latest, echo.Turn)
+	r.entries = append(r.entries, entry{receiver: echo.Receiver, echo: &echo})
 	return true
 }
 
-func (r *runView) status(ctx context.Context, value []byte) (*wire.RunStatus, bool) {
-	if r.pool == "" {
-		return nil, false
+// add keeps a status, chunk or result of the run; a record keyed by the run that is none of them counts as unread.
+func (r *runView) add(ctx context.Context, record *kgo.Record) {
+	value := record.Value
+	if r.pool != "" {
+		if status, err := authorize(ctx, r, value, func(v view) (wire.RunStatus, error) {
+			return admin.AuthorizeStatus(v.state, v.keys, value, r.pool, r.h.tenant)
+		}); err == nil && status.Wherry.Run == r.run {
+			r.entries = append(r.entries, entry{receiver: status.Wherry.Receiver, status: &status})
+			return
+		}
+		if chunk, err := authorize(ctx, r, value, func(v view) (wire.Chunk, error) {
+			return admin.AuthorizeChunk(v.state, v.keys, value, r.pool, r.h.tenant)
+		}); err == nil && chunk.Wherry.Run == r.run {
+			r.entries = append(r.entries, entry{receiver: chunk.Wherry.Receiver, chunk: &chunk})
+			return
+		}
+		if result, err := authorize(ctx, r, value, func(v view) (wire.Result, error) {
+			return admin.AuthorizeResult(v.state, v.keys, value, r.pool, r.h.tenant)
+		}); err == nil && result.Wherry.Run == r.run {
+			r.entries = append(r.entries, entry{receiver: result.Wherry.Receiver, result: &result})
+			return
+		}
 	}
-	status, err := authorize(ctx, r, value, func(v view) (wire.RunStatus, error) {
-		return admin.AuthorizeStatus(v.state, v.keys, value, r.pool, r.h.tenant)
-	})
-	if err != nil || status.Wherry.Run != r.run || r.turns[status.Wherry.Turn].hash != status.Wherry.TaskHash {
-		return nil, false
+	if string(record.Key) == r.run {
+		r.unread++
 	}
-	return &status, true
-}
-
-func (r *runView) chunk(ctx context.Context, value []byte) (*wire.Chunk, bool) {
-	if r.pool == "" {
-		return nil, false
-	}
-	chunk, err := authorize(ctx, r, value, func(v view) (wire.Chunk, error) {
-		return admin.AuthorizeChunk(v.state, v.keys, value, r.pool, r.h.tenant)
-	})
-	if err != nil || chunk.Wherry.Run != r.run || r.turns[chunk.Wherry.Turn].hash != chunk.Wherry.TaskHash {
-		return nil, false
-	}
-	return &chunk, true
-}
-
-// result accepts a result for an echoed turn whose history ends with that turn's message.
-func (r *runView) result(ctx context.Context, value []byte) (*wire.Result, bool) {
-	if r.pool == "" {
-		return nil, false
-	}
-	result, err := authorize(ctx, r, value, func(v view) (wire.Result, error) {
-		return admin.AuthorizeResult(v.state, v.keys, value, r.pool, r.h.tenant)
-	})
-	if err != nil || result.Wherry.Run != r.run {
-		return nil, false
-	}
-	binding := r.turns[result.Wherry.Turn]
-	if binding.echo == nil || binding.hash != result.Wherry.TaskHash || int64(len(result.Task.History)) < result.Wherry.Turn ||
-		result.Task.History[result.Wherry.Turn-1].MessageID != binding.echo.MessageID {
-		return nil, false
-	}
-	return &result, true
 }
 
 // read takes a bounded read of the feed: echoes first, so a status committed before its turn's echo still binds.
 func (r *runView) read(ctx context.Context, records []*kgo.Record) {
 	echoes := make([]bool, len(records))
 	for i, record := range records {
-		echoes[i] = r.echo(ctx, record.Value)
+		echoes[i] = r.addEcho(ctx, record.Value)
 	}
 	for i, record := range records {
 		if !echoes[i] {
-			r.record(ctx, record)
+			r.add(ctx, record)
 		}
 	}
+	r.derive()
 }
 
-func (r *runView) record(ctx context.Context, record *kgo.Record) {
-	if status, ok := r.status(ctx, record.Value); ok {
-		r.statuses = append(r.statuses, status)
-		if ends(status) && admit(&r.filter, status) {
-			r.outcome, r.outcomeTurn, r.outcomeReceiver = &AwaitResult{Status: status.StatusUpdate.Status}, status.Wherry.Turn, status.Wherry.Receiver
-		}
-	} else if chunk, ok := r.chunk(ctx, record.Value); ok {
-		r.chunks = append(r.chunks, chunk)
-	} else if result, ok := r.result(ctx, record.Value); ok {
-		state := result.Task.Status.State
-		if (wire.Terminal(state) || wire.Interrupted(state)) && r.filter.Admit(r.run, result.Wherry.Turn, result.Wherry.Attempt) {
-			r.outcome, r.outcomeTurn, r.outcomeReceiver = &AwaitResult{Task: &result.Task, Status: result.Task.Status}, result.Wherry.Turn, result.Wherry.Receiver
-		}
-	} else if string(record.Key) == r.run {
-		r.skipped++
-	}
-}
-
-// accepted re-checks, against the current view, that the receivers of the outcome and of its turn's echo are still
-// live members of the run's pool, so nothing written after a membership end is returned. Signatures are not
-// re-verified: a key rotated since the record was read would refuse a record that was valid when written.
-func (r *runView) accepted() bool {
+// derive binds the kept records to the run against the current view: records from a receiver that is no longer a live
+// member of the run's pool are dropped, echoes bind turns, then statuses, chunks and results in feed order bind to
+// their turn and set the outcome.
+func (r *runView) derive() {
 	live := func(receiver string) bool {
 		config, ok := r.v.state.Receivers[receiver]
-		return ok && config.Pool == r.pool && !r.v.state.Ended[admin.ReceiverPrincipal(receiver)]
+		return ok && config.Pool == r.pool && !r.v.state.Ended[admin.ReceiverPrincipal(receiver)] && r.v.state.Entitlements[r.h.tenant][r.pool]
 	}
-	echo := r.turns[r.outcomeTurn].echo
-	return r.v.state.Entitlements[r.h.tenant][r.pool] && live(r.outcomeReceiver) && (echo == nil || live(echo.Receiver))
+	r.turns, r.latest, r.statuses, r.chunks, r.skipped, r.outcome, r.outcomeTurn = map[int64]turn{}, 0, nil, nil, r.unread, nil, 0
+	if r.local != nil {
+		r.latest = r.local.Turn
+		r.turns[r.local.Turn] = turn{hash: r.local.TaskHash}
+	}
+	for _, e := range r.entries {
+		if e.echo == nil || !live(e.receiver) {
+			continue
+		}
+		known, ok := r.turns[e.echo.Turn]
+		if ok && known.hash != e.echo.TaskHash {
+			r.skipped++
+			continue
+		}
+		if known.echo == nil {
+			r.turns[e.echo.Turn] = turn{hash: e.echo.TaskHash, echo: e.echo}
+		}
+		r.latest = max(r.latest, e.echo.Turn)
+	}
+	var filter wire.AttemptFilter
+	for _, e := range r.entries {
+		if e.echo != nil {
+			continue
+		}
+		if !live(e.receiver) {
+			r.skipped++
+			continue
+		}
+		switch {
+		case e.status != nil:
+			status := e.status
+			if r.turns[status.Wherry.Turn].hash != status.Wherry.TaskHash {
+				r.skipped++
+				continue
+			}
+			r.statuses = append(r.statuses, status)
+			if ends(status) && admit(&filter, status) {
+				r.outcome, r.outcomeTurn = &AwaitResult{Status: status.StatusUpdate.Status}, status.Wherry.Turn
+			}
+		case e.chunk != nil:
+			if r.turns[e.chunk.Wherry.Turn].hash != e.chunk.Wherry.TaskHash {
+				r.skipped++
+				continue
+			}
+			r.chunks = append(r.chunks, e.chunk)
+		default:
+			result := e.result
+			binding := r.turns[result.Wherry.Turn]
+			if binding.echo == nil || binding.hash != result.Wherry.TaskHash || int64(len(result.Task.History)) < result.Wherry.Turn ||
+				result.Task.History[result.Wherry.Turn-1].MessageID != binding.echo.MessageID {
+				r.skipped++
+				continue
+			}
+			state := result.Task.Status.State
+			if (wire.Terminal(state) || wire.Interrupted(state)) && filter.Admit(r.run, result.Wherry.Turn, result.Wherry.Attempt) {
+				r.outcome, r.outcomeTurn = &AwaitResult{Task: &result.Task, Status: result.Task.Status}, result.Wherry.Turn
+			}
+		}
+	}
+	if r.outcome != nil && r.outcomeTurn != r.latest {
+		r.outcome = nil
+	}
 }
 
 func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
@@ -321,8 +349,9 @@ func (h *Host) Events(ctx context.Context, runID string) (EventsResult, error) {
 
 // Await follows the tenant feed until the run's latest turn has an outcome: its result, which the receiver commits
 // with the turn's terminal or interrupted status, an interrupted or rejected status, or a CANCELED terminal. Records
-// already on the feed are read first, so a later outcome supersedes an earlier one. wherry.admin and the receivers'
-// keys are re-read every refreshInterval and before an outcome is returned.
+// already on the feed are read first, so a later outcome supersedes an earlier one. Whenever records of the run
+// arrive, wherry.admin and the receivers' keys are re-read and the run is derived again from every record kept, so
+// nothing from a member ended by then shapes the outcome.
 func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (AwaitResult, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -367,38 +396,41 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		return AwaitResult{}, err
 	}
 	defer reader.Close()
-	refresh := func() error {
+	rederive := func() error {
 		v, err := h.load(waitCtx)
 		if err != nil {
 			return fmt.Errorf("await %s: %w", runID, err)
 		}
 		r.v, r.reread = v, map[string]bool{}
+		r.derive()
 		return nil
 	}
+	if err := rederive(); err != nil {
+		return AwaitResult{}, err
+	}
 	for {
-		if r.outcome != nil && r.outcomeTurn == r.latest {
-			if err := refresh(); err != nil {
-				return AwaitResult{}, err
-			}
-			if r.accepted() {
-				r.outcome.Skipped = r.skipped
-				return *r.outcome, nil
-			}
-			r.outcome = nil
+		if r.outcome != nil {
+			r.outcome.Skipped = r.skipped
+			return *r.outcome, nil
 		}
-		pollCtx, cancelPoll := context.WithTimeout(waitCtx, refreshInterval)
-		fetches := reader.PollFetches(pollCtx)
-		cancelPoll()
+		fetches := reader.PollFetches(waitCtx)
 		if err := waitCtx.Err(); err != nil {
 			return AwaitResult{}, fmt.Errorf("await %s: %w", runID, err)
 		}
-		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		if err := fetches.Err(); err != nil {
 			return AwaitResult{}, err
 		}
+		kept, unread := len(r.entries), r.unread
 		fetches.EachRecord(func(record *kgo.Record) {
-			if !r.echo(waitCtx, record.Value) {
-				r.record(waitCtx, record)
+			if !r.addEcho(waitCtx, record.Value) {
+				r.add(waitCtx, record)
 			}
 		})
+		if len(r.entries) == kept && r.unread == unread {
+			continue
+		}
+		if err := rederive(); err != nil {
+			return AwaitResult{}, err
+		}
 	}
 }

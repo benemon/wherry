@@ -105,7 +105,6 @@ func (r *Receiver) claimOne(ctx context.Context) error {
 		}
 	}
 	if r.blocked() {
-		// Denied while this poll was open.
 		record.Ack(kgo.AckRelease)
 		return flush()
 	}
@@ -176,8 +175,6 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	offer, offered := r.offer(placement)
 	if !offered {
 		r.logger.Printf("run %s: no current offer for agent %s satisfying its selector", run, placement.Agent)
-		// The task goes back to the pool either way; a lost write is logged, and an authorisation error
-		// has entered denial, which stops claiming.
 		if err := r.admissionCommit(ctx, r.startFailure(&task, attempt, "offer-unavailable")); err != nil {
 			r.logger.Printf("publish start failure for %s: %v", run, err)
 		}
@@ -356,6 +353,8 @@ func (r *Receiver) startFailure(task *wire.Submission, attempt int64, class stri
 type runSubmission struct {
 	record *wire.Submission
 	hash   string
+	// current is set when the submission verifies against its host's current key, not only a retired one.
+	current bool
 }
 
 // readTurns reads the run's authorised submissions from the pool's task topic in log order.
@@ -375,14 +374,17 @@ func (r *Receiver) readTurns(ctx context.Context, run string) ([]runSubmission, 
 		}
 		submission, err := admin.AuthorizeEarlierTurn(state, hosts, record.Value, r.config.Pool)
 		if err == nil && submission.Wherry.Run == run {
-			result = append(result, runSubmission{record: &submission, hash: taskHash(record.Value)})
+			_, currentErr := admin.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
+			result = append(result, runSubmission{record: &submission, hash: taskHash(record.Value), current: currentErr == nil})
 		}
 	}
 	return result, nil
 }
 
 // bindTurns keeps, for each turn, the submission carrying the tenant and placement of expected that a pool member's
-// status names by hash, or else the first one; a later submission cannot displace a turn a member already ran.
+// status names by hash, or else the first one; a later submission cannot displace a turn a member already ran. A
+// submission that verifies only against a retired key counts only when a member's status names it: a leaked retired
+// key must not pre-empt a turn no member has run.
 func bindTurns(all []runSubmission, expected *wire.Submission, events poolEvents) map[int64]runSubmission {
 	ran := map[string]bool{}
 	for _, status := range events.statuses[expected.Wherry.Run] {
@@ -391,6 +393,9 @@ func bindTurns(all []runSubmission, expected *wire.Submission, events poolEvents
 	result := make(map[int64]runSubmission)
 	for _, submission := range all {
 		if submission.record.Wherry.Tenant != expected.Wherry.Tenant || !reflect.DeepEqual(submission.record.Wherry.Placement, expected.Wherry.Placement) {
+			continue
+		}
+		if !submission.current && !ran[submission.hash] {
 			continue
 		}
 		turn := submission.record.Wherry.Turn
