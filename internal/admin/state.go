@@ -366,12 +366,19 @@ func AuthorizeAdvertisement(state State, keys signed.Keys, encoded []byte) (wire
 	if err := state.liveMember(advertisement.Receiver, advertisement.Pool); err != nil {
 		return wire.Advertisement{}, err
 	}
-	// Hosts seal to the key on the receiver's own topic; an advertisement
-	// naming another cannot place work.
-	if sealing := keys[advertisement.Receiver].Sealing; sealing == nil || advertisement.SealingKey != signed.SealingKeyID(sealing) {
-		return wire.Advertisement{}, errors.New("advertisement names a sealing key the receiver has not registered")
-	}
 	return advertisement, nil
+}
+
+// AuthorizeSealRequest accepts a seal request from a live member of the run's placed pool.
+func AuthorizeSealRequest(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.SealRequest, error) {
+	var request wire.SealRequest
+	if err := wire.ParseRecord(encoded, keys, &request); err != nil {
+		return wire.SealRequest{}, err
+	}
+	if err := state.receiverRecord(request.ReceiverBinding, placedPool, runTenant); err != nil {
+		return wire.SealRequest{}, err
+	}
+	return request, nil
 }
 
 func ValidateReceiverRecord(record Record, receiver string, terms Terms) error {

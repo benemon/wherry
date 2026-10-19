@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,6 +10,7 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -77,8 +77,9 @@ type bus struct {
 	stateDir    string
 	credentials map[string]string
 	receiverKey ed25519.PrivateKey
-	sealing     *ecdh.PrivateKey
 	receiver    *kgo.Client
+	// logs holds what the bus's hosts log.
+	logs *syncBuffer
 }
 
 func newBus(t *testing.T) *bus {
@@ -100,7 +101,7 @@ func newBus(t *testing.T) *bus {
 	t.Cleanup(operator.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	b := &bus{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, stateDir: t.TempDir()}
+	b := &bus{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, stateDir: t.TempDir(), logs: &syncBuffer{}}
 	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, DefaultAgent: "claude",
 		SealLifetimeMS: int64(72 * time.Hour / time.Millisecond), DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := b.service.PoolCreate(ctx, "pool-a", terms); err != nil {
@@ -138,17 +139,13 @@ func newBus(t *testing.T) *bus {
 	if _, b.receiverKey, err = ed25519.GenerateKey(rand.Reader); err != nil {
 		t.Fatal(err)
 	}
-	if b.sealing, err = ecdh.X25519().GenerateKey(rand.Reader); err != nil {
-		t.Fatal(err)
-	}
-	registration, err := signed.RegisterKey("receiver-a", b.receiverKey, b.sealing.PublicKey())
+	registration, err := signed.RegisterKey("receiver-a", b.receiverKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b.produce(t, admin.ReceiverTopic("receiver-a"), "receiver-a", registration)
 	b.produce(t, admin.ReceiversTopic, "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
-		Offers: []wire.Offer{{Adapter: "lab", Agent: "claude"}}, Capacity: 1,
-		SealingKey: signed.SealingKeyID(b.sealing.PublicKey()), AtMS: time.Now().UnixMilli()}))
+		Offers: []wire.Offer{{Adapter: "lab", Agent: "claude"}}, Capacity: 1, AtMS: time.Now().UnixMilli()}))
 	return b
 }
 
@@ -190,7 +187,7 @@ func (b *bus) connect(t *testing.T) func() (*busclient.Host, error) {
 		if err != nil {
 			return nil, err
 		}
-		return busclient.NewHost(kafka, b.hostKey, principal, b.stateDir, b.credentials)
+		return busclient.NewHost(kafka, b.hostKey, principal, b.stateDir, b.credentials, log.New(b.logs, "", 0))
 	}
 }
 
@@ -325,7 +322,7 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	wantKeys := []string{"adapters", "capacity", "ended", "heartbeat_age", "in_flight", "pool", "receiver_id", "seals", "status"}
+	wantKeys := []string{"adapters", "capacity", "ended", "heartbeat_age", "in_flight", "pool", "receiver_id", "status"}
 	if !reflect.DeepEqual(keys, wantKeys) {
 		t.Fatalf("got JSON fields %v, want %v", keys, wantKeys)
 	}
@@ -352,33 +349,6 @@ func TestReceiversShowsEnded(t *testing.T) {
 	}
 }
 
-func TestReceiversWarnsSealExpiry(t *testing.T) {
-	b := newBus(t)
-	b.admitted(t)
-	var stdout, stderr bytes.Buffer
-	if err := runReceivers(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(stdout.String(), "\n  adapter=lab agent=claude ready=true labels=runtime=exec\n  seal=model pool=pool-a expires=") {
-		t.Fatalf("offer and seal not listed:\n%s", stdout.String())
-	}
-	if want := "seal model on receiver receiver-a expires in 3d\n"; stderr.String() != want {
-		t.Fatalf("stderr %q, want %q", stderr.String(), want)
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if err := runReceivers(b.ctx, b.client, []string{"--json"}, &stdout, &stderr); err != nil {
-		t.Fatal(err)
-	}
-	var rows []busclient.Receiver
-	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 1 || len(rows[0].Seals) != 1 || rows[0].Seals[0].Name != "model" || rows[0].Seals[0].ExpMS <= time.Now().UnixMilli() {
-		t.Fatalf("JSON seals %#v", rows)
-	}
-}
-
 func TestSubmitNeverPrintsCredential(t *testing.T) {
 	b := newBus(t)
 	var stdout, stderr bytes.Buffer
@@ -388,25 +358,9 @@ func TestSubmitNeverPrintsCredential(t *testing.T) {
 	if strings.Contains(stdout.String()+stderr.String(), credentialText) {
 		t.Fatalf("submit printed the credential: stdout %q stderr %q", stdout.String(), stderr.String())
 	}
-	records, err := admin.ReadTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sealed := 0
-	for _, record := range records {
-		if bytes.Contains(record.Value, []byte(credentialText)) {
-			t.Fatal("the host topic carries the credential in plaintext")
-		}
-		if seal, err := signed.DecodeSeal(record.Value); err == nil {
-			plaintext, err := signed.OpenCredential(seal, "tenant-a", "receiver-a", "pool-a", "model", time.Now(), []string{"model"}, b.sealing)
-			if err != nil || string(plaintext) != credentialText {
-				t.Fatalf("seal opens to %q, %v", plaintext, err)
-			}
-			sealed++
-		}
-	}
-	if sealed != 1 {
-		t.Fatalf("submit wrote %d seals, want 1", sealed)
+	// Submit seals nothing; the receiver that claims the task asks for the credential.
+	if records, err := admin.ReadTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
+		t.Fatalf("host topic holds %d records, %v; want the key registration alone", len(records), err)
 	}
 }
 

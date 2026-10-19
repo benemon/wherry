@@ -167,7 +167,8 @@ On the host, put the model credential in a file and write
 }
 ```
 
-The host seals the file's contents byte for byte.
+When a receiver claims a task and asks for the credential, `wherry await`
+seals the file's contents byte for byte to that receiver.
 
 ## 8. Register the host key
 
@@ -197,8 +198,7 @@ wherry submit --prompt "Summarise the release notes in three sentences."
 ```
 
 The task takes the pool's default agent, `coder`, and an empty selector.
-The host seals `model-api-key` to `nomad-1`, then prints the run ID and the
-pool:
+The host prints the run ID and the pool:
 
 ```
 run_id=run-<id> pool=build
@@ -214,16 +214,18 @@ wherry await run-<id>
 
 `await` prints the final state on its first line and the result after it,
 and exits non-zero for any state other than `TASK_STATE_COMPLETED`. It waits
-30 minutes by default.
+30 minutes by default. While it waits it answers `nomad-1`'s request for
+`model-api-key`. Start it within 5 minutes of `nomad-1` claiming the task,
+or the run ends `TASK_STATE_AUTH_REQUIRED`.
 
 `wherry events run-<id>` prints the run's status history.
 
 ### If the run needs a credential
 
-A run that ends in `TASK_STATE_AUTH_REQUIRED` found no member of the pool
-able to open a seal for the credential the message names.
+A run that ends in `TASK_STATE_AUTH_REQUIRED` received no seal for the
+credential the message names: the host was not running `await`, or does
+not configure the credential.
 
 1. Add the credential's file to `credentials` in the host configuration.
-2. Run `wherry continue run-<id>`, which seals it and publishes the next
-   turn.
-3. Run `wherry await run-<id>`.
+2. Run `wherry continue run-<id>`, which publishes the next turn.
+3. Run `wherry await run-<id>`, which answers the next turn's request.

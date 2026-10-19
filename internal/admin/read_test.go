@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"testing"
@@ -69,7 +68,6 @@ func TestReadKeysFoldsEachOwnersTopic(t *testing.T) {
 	_, host, _ := ed25519.GenerateKey(rand.Reader)
 	_, receiver, _ := ed25519.GenerateKey(rand.Reader)
 	_, intruder, _ := ed25519.GenerateKey(rand.Reader)
-	sealing, _ := ecdh.X25519().GenerateKey(rand.Reader)
 	hostOwner := signed.HostOwner("tenant-a", "host-a")
 	must := func(value []byte, err error) []byte {
 		t.Helper()
@@ -84,9 +82,9 @@ func TestReadKeysFoldsEachOwnersTopic(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	produce("keys-host", must(signed.RegisterKey(hostOwner, host, nil)))
-	produce("keys-host", must(signed.RegisterKey(hostOwner, intruder, nil)))
-	produce("keys-receiver", must(signed.RegisterKey("receiver-a", receiver, sealing.PublicKey())))
+	produce("keys-host", must(signed.RegisterKey(hostOwner, host)))
+	produce("keys-host", must(signed.RegisterKey(hostOwner, intruder)))
+	produce("keys-receiver", must(signed.RegisterKey("receiver-a", receiver)))
 	produce("keys-receiver", must(signed.RevokeKey("receiver-a", receiver)))
 	keys, err := ReadKeys(ctx, client, map[string]string{hostOwner: "keys-host", "receiver-a": "keys-receiver"})
 	if err != nil {
@@ -105,12 +103,11 @@ func TestReadAdvertisementsKeepsLatestLiveAuthorised(t *testing.T) {
 	ctx := context.Background()
 	state := modelState(t)
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	sealing, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey), Sealing: sealing.PublicKey()}, "receiver-b": {Current: key.Public().(ed25519.PublicKey), Sealing: sealing.PublicKey()}}
+	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}, "receiver-b": {Current: key.Public().(ed25519.PublicKey)}}
 	now := time.UnixMilli(1_800_000_000_000)
 	advertise := func(receiver, pool string, at time.Time, capacity int64) {
 		t.Helper()
-		encoded := sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Agent: "agent-a"}}, Capacity: capacity, SealingKey: signed.SealingKeyID(sealing.PublicKey()), AtMS: at.UnixMilli()}, key)
+		encoded := sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Agent: "agent-a"}}, Capacity: capacity, AtMS: at.UnixMilli()}, key)
 		if err := client.ProduceSync(ctx, &kgo.Record{Topic: ReceiversTopic, Value: encoded}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}

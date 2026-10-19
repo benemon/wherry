@@ -1,7 +1,6 @@
 package trust
 
 import (
-	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -33,31 +32,6 @@ func LoadSigningKeyFile(path string) (ed25519.PrivateKey, error) {
 		return nil, errors.New("invalid Ed25519 private key length")
 	}
 	return ed25519.PrivateKey(key), nil
-}
-
-// GenerateSealingKeyFile creates an X25519 private-key file without replacing an existing file.
-func GenerateSealingKeyFile(path string) (*ecdh.PrivateKey, error) {
-	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	if err := writeKeyFile(path, privateKey.Bytes()); err != nil {
-		return nil, err
-	}
-	return privateKey, nil
-}
-
-// LoadSealingKeyFile loads an X25519 private-key file with private permissions.
-func LoadSealingKeyFile(path string) (*ecdh.PrivateKey, error) {
-	key, err := readKeyFile(path)
-	if err != nil {
-		return nil, err
-	}
-	privateKey, err := ecdh.X25519().NewPrivateKey(key)
-	if err != nil {
-		return nil, fmt.Errorf("invalid X25519 private key: %w", err)
-	}
-	return privateKey, nil
 }
 
 func writeKeyFile(path string, key []byte) (returnErr error) {

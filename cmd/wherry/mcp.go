@@ -5,6 +5,8 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -23,11 +25,38 @@ const retryAfter = 5
 
 const progressInterval = 5 * time.Second
 
+// answerRetry separates the server's attempts to answer seal requests after a failure.
+const answerRetry = 5 * time.Second
+
 func runMCP(ctx context.Context, config busclient.Config, args []string) error {
 	if len(args) != 0 {
 		return errors.New("usage: wherry mcp")
 	}
-	return newMCPServer(func() (*busclient.Host, error) { return busclient.Connect(config) }).Run(ctx, &mcp.StdioTransport{})
+	logger := log.New(os.Stderr, "", 0)
+	connect := func() (*busclient.Host, error) { return busclient.Connect(config, logger) }
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	go answer(ctx, connect, logger)
+	return newMCPServer(connect).Run(ctx, &mcp.StdioTransport{})
+}
+
+// answer answers seal requests for as long as the server runs, so a credentialed task is sealed while the harness
+// is between await calls.
+func answer(ctx context.Context, connect func() (*busclient.Host, error), logger *log.Logger) {
+	for ctx.Err() == nil {
+		host, err := connect()
+		if err == nil {
+			err = host.Answer(ctx)
+			host.Close()
+		}
+		if err != nil {
+			logger.Printf("answer seal requests: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(answerRetry):
+		}
+	}
 }
 
 // toolError is a tool failure whose code and message carry no underlying error text.
@@ -190,7 +219,7 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receivers",
-		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended), capacity and the credentials this host has sealed to it, and each adapter's agent and labels as wherry.admin records them, with ready set when the receiver's live advertisement offers the adapter. A live receiver with no ready adapter lists every adapter with ready false. Read it to choose an agent and selector before submit.",
+		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each adapter's agent and labels as wherry.admin records them, with ready set when the receiver's live advertisement offers the adapter. A live receiver with no ready adapter lists every adapter with ready false. Read it to choose an agent and selector before submit.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()
@@ -207,7 +236,7 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector, sealing the agent's configured credentials to that pool's live receivers. Returns the run id at once; collect the result with await, or check the run without waiting with status.",
+		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with await, or check the run without waiting with status. While this server runs, it seals the agent's configured credentials to the receiver that claims the task when that receiver asks for them.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		client, err := connect()
 		if err != nil {
@@ -296,7 +325,7 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "continue",
-		Description: "Sign and publish the next turn of a run interrupted in AUTH_REQUIRED to the pool that admitted it, resealing its configured credentials; add a missing credential to the wherry config first.",
+		Description: "Sign and publish the next turn of a run interrupted in AUTH_REQUIRED to the pool that admitted it; add a missing credential to the wherry config first.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input continueInput) (*mcp.CallToolResult, continueOutput, error) {
 		client, err := connect()
 		if err != nil {

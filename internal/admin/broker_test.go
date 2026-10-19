@@ -83,7 +83,7 @@ func TestRealBrokerFixture(t *testing.T) {
 		peer := f.connect(t, ReceiverPrincipal(f.receiverA))
 		expectDenied(t, peer.ProduceSync(ctx, &kgo.Record{Topic: ReceiverTopic(f.receiverB), Value: []byte("x")}).FirstErr())
 		_, key, _ := ed25519.GenerateKey(rand.Reader)
-		registration, err := signed.RegisterKey(signed.HostOwner(f.tenantA, f.hostA1), key, nil)
+		registration, err := signed.RegisterKey(signed.HostOwner(f.tenantA, f.hostA1), key)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -306,6 +305,9 @@ func shortIntervals(t *testing.T) {
 		*interval = 200 * time.Millisecond
 		t.Cleanup(func() { *interval = previous })
 	}
+	previous := sealWait
+	sealWait = 1500 * time.Millisecond
+	t.Cleanup(func() { sealWait = previous })
 }
 
 func newService(t *testing.T, ctx context.Context, terms admin.Terms) (*kfake.Cluster, *admin.Service) {
@@ -352,7 +354,7 @@ func newFixtureWith(t *testing.T, stream []string, terms admin.Terms, config adm
 		t.Fatal(err)
 	}
 	f := fixture{ctx: ctx, cluster: cluster, service: service, host: host, adapters: adapters, adapter: adapters["nomad"]}
-	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RegisterKey(signed.HostOwner(testTenant, testHost), host, nil)))
+	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RegisterKey(signed.HostOwner(testTenant, testHost), host)))
 	f.receiver, f.logs = f.newReceiver(t, config)
 	r := f.receiver
 	if err := r.register(ctx); err != nil {
@@ -408,10 +410,6 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealing, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
 	logs := &syncBuffer{}
 	factory := func(pool string, settings admin.AdapterSettings) (Named, error) {
 		adapter, ok := f.adapters[settings.Name]
@@ -423,7 +421,7 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		adapter.mu.Unlock()
 		return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Adapter: adapter}, nil
 	}
-	return &Receiver{id: config.Receiver, kafkaOpt: opts, base: base, signing: signing, sealing: sealing, factory: factory, logger: log.New(logs, "", 0)}, logs
+	return &Receiver{id: config.Receiver, kafkaOpt: opts, base: base, signing: signing, factory: factory, logger: log.New(logs, "", 0)}, logs
 }
 
 func (f fixture) produce(t *testing.T, topic, key string, value []byte) *kgo.Record {
@@ -498,23 +496,76 @@ func (f fixture) publishCancel(t *testing.T, run string, turn int64, key ed25519
 	}
 }
 
-// seal puts a credential sealed to receiver's sealing key on the host's topic.
-func (f fixture) seal(t *testing.T, receiver string, key *ecdh.PublicKey, credential, value string, issued time.Time, lifetime time.Duration) {
+// sealRequests returns this receiver's seal requests on the tenant feed in log order.
+func (f fixture) sealRequests(t *testing.T) []wire.SealRequest {
 	t.Helper()
-	seal, err := signed.SealCredential(testTenant, receiver, testPool, credential, issued, issued.Add(lifetime), key, []byte(value))
+	var requests []wire.SealRequest
+	for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
+		var request wire.SealRequest
+		if wire.ParseRecord(record.Value, f.keys(), &request) == nil {
+			requests = append(requests, request)
+		}
+	}
+	return requests
+}
+
+// sealFor seals values to request's key with signed.Seal, as the host's answer does, and puts the seal on the host's
+// topic under the request's run.
+func (f fixture) sealFor(t *testing.T, request wire.SealRequest, values map[string][]byte) {
+	t.Helper()
+	sealed, err := signed.Seal(signed.SealBinding{
+		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
+		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
+	}, request.Key.Key.(*ecdsa.PublicKey), values)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.EncodeSeal(seal)))
+	f.produce(t, admin.HostTopic(testTenant, testHost), request.Run, sealed)
 }
 
-func (f fixture) sealOwn(t *testing.T, credential string, lifetime time.Duration) {
+// answer answers, until the test ends, each of this receiver's seal requests that names credential alone with
+// testToken, as a host holding that credential does.
+func (f fixture) answer(t *testing.T, credential string) {
 	t.Helper()
-	f.seal(t, testReceiver, f.receiver.sealing.PublicKey(), credential, testToken, time.Now(), lifetime)
+	answerSeals(t, f.ctx, f.service.Admin, f.keys(), testTenant, testHost, credential, testToken)
 }
 
-// addPeer provisions another member of the pool and registers its keys.
-func (f fixture) addPeer(t *testing.T, id, pool string) (ed25519.PrivateKey, *ecdh.PrivateKey) {
+// answerSeals answers, until the test ends, each seal request on tenant's feed signed under keys that names credential
+// alone: it seals value with signed.Seal, as the host's answer does, onto host's topic under the request's run.
+func answerSeals(t *testing.T, ctx context.Context, kafka *kgo.Client, keys signed.Keys, tenant, host, credential, value string) {
+	t.Helper()
+	ctx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	t.Cleanup(func() { stop(); <-done })
+	go func() {
+		defer close(done)
+		answered := map[string]bool{}
+		for ctx.Err() == nil {
+			records, err := admin.ReadTopic(ctx, kafka, admin.TenantTopic(tenant))
+			for _, record := range records {
+				var request wire.SealRequest
+				if err != nil || wire.ParseRecord(record.Value, keys, &request) != nil || answered[request.KeyID] || !slices.Equal(request.Credentials, []string{credential}) {
+					continue
+				}
+				answered[request.KeyID] = true
+				sealed, err := signed.Seal(signed.SealBinding{
+					Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
+					Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
+				}, request.Key.Key.(*ecdsa.PublicKey), map[string][]byte{credential: []byte(value)})
+				if err == nil {
+					err = kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.HostTopic(tenant, host), Key: []byte(request.Run), Value: sealed}).FirstErr()
+				}
+				if err != nil && ctx.Err() == nil {
+					panic(err)
+				}
+			}
+			sleep(ctx, 50*time.Millisecond)
+		}
+	}()
+}
+
+// addPeer provisions another member of the pool and registers its key.
+func (f fixture) addPeer(t *testing.T, id, pool string) ed25519.PrivateKey {
 	t.Helper()
 	config := testConfig(id)
 	config.Pool = pool
@@ -525,15 +576,11 @@ func (f fixture) addPeer(t *testing.T, id, pool string) (ed25519.PrivateKey, *ec
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealing, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.produce(t, admin.ReceiverTopic(id), id, must(t)(signed.RegisterKey(id, signing, sealing.PublicKey())))
+	f.produce(t, admin.ReceiverTopic(id), id, must(t)(signed.RegisterKey(id, signing)))
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	return signing, sealing
+	return signing
 }
 
 func (f fixture) records(t *testing.T, topic string) []*kgo.Record {
@@ -546,7 +593,7 @@ func (f fixture) records(t *testing.T, topic string) []*kgo.Record {
 }
 
 func (f fixture) keys() signed.Keys {
-	return signed.Keys{testReceiver: {Current: f.receiver.signing.Public().(ed25519.PublicKey), Sealing: f.receiver.sealing.PublicKey()}}
+	return signed.Keys{testReceiver: {Current: f.receiver.signing.Public().(ed25519.PublicKey)}}
 }
 
 // statuses returns this receiver's statuses on topic in log order.
@@ -659,12 +706,12 @@ func (f fixture) await(t *testing.T, run string, done func(wire.Task) bool) wire
 
 func anyTask(wire.Task) bool { return true }
 
-// runToTask runs the receiver, seals its credential, submits one task and returns its result.
+// runToTask runs the receiver, answers its seal request, submits one task and returns its result.
 func runToTask(t *testing.T, f fixture) wire.Task {
 	t.Helper()
 	ctx, stop := context.WithCancel(f.ctx)
 	t.Cleanup(stop)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.run(t, ctx)
 	f.submit(t, f.host, nil)
 	return f.await(t, "run-a", anyTask)
@@ -691,7 +738,7 @@ func TestEndToEndWithFakeAdapter(t *testing.T) {
 	}
 }
 
-func TestRegisterPutsBothKeysOnAnEmptyTopic(t *testing.T) {
+func TestRegisterPutsItsKeyOnAnEmptyTopic(t *testing.T) {
 	f := newFixture(t, resultStream)
 	records := f.records(t, admin.ReceiverTopic(testReceiver))
 	if len(records) != 1 {
@@ -702,8 +749,8 @@ func TestRegisterPutsBothKeysOnAnEmptyTopic(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := keys[testReceiver]
-	if !state.Current.Equal(f.receiver.signing.Public()) || state.Sealing == nil || !state.Sealing.Equal(f.receiver.sealing.PublicKey()) {
-		t.Fatalf("registered keys %#v do not match the state directory's", state)
+	if !state.Current.Equal(f.receiver.signing.Public()) {
+		t.Fatalf("registered key %#v does not match the state directory's", state)
 	}
 	// A restart with the same keys registers nothing more.
 	if err := f.receiver.register(f.ctx); err != nil {
@@ -729,9 +776,8 @@ func TestRegisterRefusesAKeyTopicThatIsNotEmpty(t *testing.T) {
 func TestRegisterAcceptsARotationToItsKeys(t *testing.T) {
 	f := newFixture(t, resultStream)
 	_, next, _ := ed25519.GenerateKey(rand.Reader)
-	nextSealing, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	f.produce(t, admin.ReceiverTopic(testReceiver), testReceiver, must(t)(signed.RotateKey(testReceiver, f.receiver.signing, next, nextSealing.PublicKey())))
-	rotated := &Receiver{id: testReceiver, base: f.receiver.base, signing: next, sealing: nextSealing, logger: f.receiver.logger}
+	f.produce(t, admin.ReceiverTopic(testReceiver), testReceiver, must(t)(signed.RotateKey(testReceiver, f.receiver.signing, next)))
+	rotated := &Receiver{id: testReceiver, base: f.receiver.base, signing: next, logger: f.receiver.logger}
 	if err := rotated.register(f.ctx); err != nil {
 		t.Fatalf("a receiver holding the keys its topic rotated to did not start: %v", err)
 	}
@@ -749,17 +795,10 @@ func TestRegisterAcceptsARotationToItsKeys(t *testing.T) {
 
 func TestRegisterRefusesAnotherKey(t *testing.T) {
 	f := newFixture(t, resultStream)
-	for name, change := range map[string]func(*Receiver){
-		"signing": func(r *Receiver) { _, r.signing, _ = ed25519.GenerateKey(rand.Reader) },
-		"sealing": func(r *Receiver) { r.sealing, _ = ecdh.X25519().GenerateKey(rand.Reader) },
-	} {
-		t.Run(name, func(t *testing.T) {
-			other := &Receiver{id: testReceiver, base: f.receiver.base, signing: f.receiver.signing, sealing: f.receiver.sealing, logger: f.receiver.logger}
-			change(other)
-			if err := other.register(f.ctx); err == nil {
-				t.Fatalf("started over a key topic holding another %s key", name)
-			}
-		})
+	other := &Receiver{id: testReceiver, base: f.receiver.base, logger: f.receiver.logger}
+	_, other.signing, _ = ed25519.GenerateKey(rand.Reader)
+	if err := other.register(f.ctx); err == nil {
+		t.Fatal("started over a key topic holding another signing key")
 	}
 	if records := f.records(t, admin.ReceiverTopic(testReceiver)); len(records) != 1 {
 		t.Fatalf("key topic records = %d, want the first registration alone", len(records))
@@ -884,8 +923,24 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer again.base.Close()
-	if !again.signing.Equal(r.signing) || !again.sealing.Equal(r.sealing) {
-		t.Fatal("keys were not kept in the state directory")
+	if !again.signing.Equal(r.signing) {
+		t.Fatal("the signing key was not kept in the state directory")
+	}
+}
+
+func TestNewDeletesTheRetiredSealingKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sealing.key")
+	if err := os.WriteFile(path, []byte("x25519-private-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(testCA(t)), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, dir, nil, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.base.Close()
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("sealing key left in the state directory: %v", err)
 	}
 }
 
@@ -911,8 +966,7 @@ func TestAdvertisement(t *testing.T) {
 	f := newFixture(t, resultStream)
 	advertisement := f.advertisedOffers(t)
 	want := []wire.Offer{{Adapter: "nomad", Agent: "claude"}}
-	if !reflect.DeepEqual(advertisement.Offers, want) || advertisement.Pool != testPool || advertisement.Capacity != 1 ||
-		advertisement.SealingKey != signed.SealingKeyID(f.receiver.sealing.PublicKey()) {
+	if !reflect.DeepEqual(advertisement.Offers, want) || advertisement.Pool != testPool || advertisement.Capacity != 1 {
 		t.Fatalf("advertisement %#v, want offers %#v", advertisement, want)
 	}
 }
@@ -1044,7 +1098,7 @@ type multiFixture struct {
 
 // newMultiFixture configures adapters lab, cloud and edge, in that order, for one agent with the labels
 // their operator declares: lab and cloud both carry class=cpu, only cloud an accelerator, edge class=arm.
-// Only lab's credential is sealed.
+// Only lab's credential is answered.
 func newMultiFixture(t *testing.T) multiFixture {
 	t.Helper()
 	m := multiFixture{lab: &fakeAdapter{stream: resultStream}, cloud: &fakeAdapter{stream: resultStream}, edge: &fakeAdapter{stream: resultStream}}
@@ -1055,7 +1109,7 @@ func newMultiFixture(t *testing.T) multiFixture {
 		{Name: "edge", Type: "fake", Agent: "claude", Labels: map[string]string{"site": "edge", "class": "arm"}, Config: map[string]any{}},
 	}
 	m.fixture = newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakeAdapter{"lab": m.lab, "cloud": m.cloud, "edge": m.edge})
-	m.sealOwn(t, "cred-lab", time.Hour)
+	m.answer(t, "cred-lab")
 	return m
 }
 

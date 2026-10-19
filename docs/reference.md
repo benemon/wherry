@@ -89,7 +89,6 @@ and receiver ID:
 ```
 receiver=<id> pool=<pool> capacity=<n> in_flight=<n> heartbeat_age=<age> status=<status>
   adapter=<name> agent=<agent> ready=<bool> labels=<k=v,...>
-  seal=<credential> pool=<pool> expires=<RFC 3339 time>
 ```
 
 `status` is `live` when the latest advertisement is at most 120 seconds
@@ -97,9 +96,7 @@ old, `stale` when it is older, `silent` when there is none, and `ended`
 after the receiver's membership end. Adapters and their labels come from the
 receiver's configuration record. `ready` is true when the receiver is live
 and its advertisement offers the adapter. A live receiver with no ready
-adapter lists each adapter with `ready=false`. `seal` lines list this host's
-latest seal of each credential to the receiver. The command warns on
-standard error about each seal that has expired or expires within 7 days.
+adapter lists each adapter with `ready=false`.
 
 `--json` prints a JSON array, one object per receiver:
 
@@ -111,12 +108,10 @@ standard error about each seal that has expired or expires within 7 days.
 | `heartbeat_age` | Go duration string, or `-` |
 | `status` | `live`, `stale`, `silent` or `ended` |
 | `ended` | boolean |
-| `seals` | `{name, pool, exp_ms}` |
 
 ### `wherry submit`
 
-Resolves a placement, seals the agent's credentials, signs the task and
-publishes it to the chosen pool. It prints `run_id=<id> pool=<pool>`, or
+Resolves a placement, signs the task and publishes it to the chosen pool. It prints `run_id=<id> pool=<pool>`, or
 fails with `no matching live receiver`.
 
 | Flag | Default | Meaning |
@@ -136,19 +131,16 @@ Exactly one of `--prompt` and `--prompt-file` is required. `--git` and
 [extension](a2a-extension-v1.md#git-context) gives the rules for the URL,
 ref and path.
 
-The command seals each credential that the pool's terms list for the agent
-and the host configuration names, to every live member of the pool that
-lacks a seal under its current sealing key lasting past the queue deadline.
-When there is a credential to seal, it fails if the pool's seal lifetime
-ends before the queue deadline, and if a receiver's sealing key differs from
-the one this host pinned.
+`submit` seals nothing. The receiver that claims the task asks for the
+credential its adapter delivers, and `wherry await` or `wherry mcp` answers
+([sealed credentials](concepts.md#sealed-credentials)).
 
 ### `wherry continue RUN_ID`
 
 Publishes the next turn of a run interrupted in `TASK_STATE_AUTH_REQUIRED`
-or `TASK_STATE_INPUT_REQUIRED`, to the pool and placement its echo names,
-sealing as `submit` does. It prints `run_id=<id> turn=<n>`. `resume` is an
-alias.
+or `TASK_STATE_INPUT_REQUIRED`, to the pool and placement its echo names.
+Like `submit`, it seals nothing. It prints `run_id=<id> turn=<n>`. `resume`
+is an alias.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -178,6 +170,11 @@ prints as its text, its JSON data, `[url <url>]`, or
 
 `await` exits with status 1, `run ended in <state>`, for any state other
 than `TASK_STATE_COMPLETED`, and with status 1 when the timeout passes.
+
+While it waits, `await` answers the seal requests on the tenant feed for
+every run this host submitted, once per attempt, and logs on standard error
+each answer and each verified request of its own runs that it skips or
+refuses, by run, receiver and credential names.
 
 ### `wherry status [RUN_ID]`
 
@@ -226,7 +223,8 @@ They fail with `run not found` when there is neither.
 
 ### `wherry mcp`
 
-Serves the [MCP tools](#mcp-tools) over stdio.
+Serves the [MCP tools](#mcp-tools) over stdio. For as long as it runs it
+answers seal requests as `await` does, logging to standard error.
 
 ## Admin commands
 
@@ -322,10 +320,11 @@ does not check an adapter's `type` or `config` section.
 ### `wherry receiver --bundle FILE --state-dir DIR --plugin-dir DIR`
 
 Runs a receiver as the bundle's principal. It creates the state directory
-with mode 0700 and keeps `signing.key` and `sealing.key` in it. On start it:
+with mode 0700 and keeps `signing.key` in it. On start it:
 
-1. registers both public keys on its key topic when the topic is empty,
-   and fails when the topic holds other keys;
+1. deletes `sealing.key`, a retired sealing key, when the directory holds
+   one, registers its public key on its key topic when the topic is empty,
+   and fails when the topic holds another key;
 2. waits for its configuration record on `wherry.admin` and validates it
    against the pool's terms;
 3. starts the [adapter plugins](#adapter-plugins) its adapters' types name
@@ -459,13 +458,18 @@ is expanded in `WHERRY_CONFIG` and in every path.
 | --- | --- | --- |
 | `bundle` | required | the host's bundle |
 | `host_key` | `~/.config/wherry/host.key` | host signing key file |
-| `state_dir` | `~/.config/wherry/state` | run records and sealing-key pins |
+| `state_dir` | `~/.config/wherry/state` | run records and answered seal requests |
 | `credentials` | none | credential name to the file holding its value |
 
 `state_dir` holds `runs/<run>.json` for each run this host submitted, and
-`pins.json`, the sealing-key fingerprint pinned for each receiver. A
-credential value is at most 16 KiB. The file is read at each seal, and its
-contents are sealed as they are.
+`answered/<run>.<turn>.<attempt>` for each attempt it answered, with a
+`.lock` beside it that every process sharing the directory holds while it
+answers that attempt. `submit` and `continue` write the run's record before
+they publish the turn, and put the previous record back when publishing
+fails. The
+credential file is read at each answer, and its contents are sealed as
+they are. A seal is at most 64 KiB, which bounds the values one seal
+carries.
 
 ## Bundle
 
@@ -488,7 +492,7 @@ The YAML file `pool create --terms` reads. Unknown fields are errors.
 | --- | --- |
 | `agents` | one or more `{name, credentials}`: an agent and the credential names it may take |
 | `default_agent` | an agent from `agents`, used when a task names none |
-| `seal_lifetime_ms` | lifetime of each seal a host writes |
+| `seal_lifetime_ms` | required and unused: seals expire with their [seal request](a2a-extension-v1.md#seal-request) |
 | `delivery_limit` | the share group's `share.delivery.count.limit` |
 | `lock_duration_ms` | the share group's `share.record.lock.duration.ms` |
 | `producer_byte_rate` | host quota, bytes per second |

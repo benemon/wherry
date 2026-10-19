@@ -2,8 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"io"
+	"log"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -12,8 +17,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -123,7 +131,7 @@ func TestMCPToolsList(t *testing.T) {
 		if tool.Description == "" {
 			t.Errorf("%s has no description", name)
 		}
-		for _, stale := range []string{"enrol", "after the user has sealed"} {
+		for _, stale := range []string{"enrol", "after the user has sealed", "resealing", "sealed to it"} {
 			if strings.Contains(tool.Description, stale) {
 				t.Errorf("%s description still says %q", name, stale)
 			}
@@ -380,7 +388,7 @@ func TestMCPErrorsCarryNoSecrets(t *testing.T) {
 	ctx := b.ctx
 	// A missing bundle under a canary directory: Connect's error names the path, as it would a real one.
 	broken := busclient.Config{Bundle: filepath.Join(t.TempDir(), canary, "bundle.yaml"), HostKey: filepath.Join(t.TempDir(), "host.key"), StateDir: t.TempDir()}
-	if _, err := busclient.Connect(broken); err == nil || !strings.Contains(err.Error(), canary) {
+	if _, err := busclient.Connect(broken, log.New(io.Discard, "", 0)); err == nil || !strings.Contains(err.Error(), canary) {
 		t.Fatalf("precondition: the connect error %v must carry the canary", err)
 	}
 	working := b.connect(t)
@@ -391,7 +399,7 @@ func TestMCPErrorsCarryNoSecrets(t *testing.T) {
 		arguments map[string]any
 		code      string
 	}{
-		"connect failure": {func() (*busclient.Host, error) { return busclient.Connect(broken) }, "status", map[string]any{"id": "run-a"}, "UNAVAILABLE"},
+		"connect failure": {func() (*busclient.Host, error) { return busclient.Connect(broken, log.New(io.Discard, "", 0)) }, "status", map[string]any{"id": "run-a"}, "UNAVAILABLE"},
 		"git userinfo": {working, "submit", map[string]any{
 			"prompt": "x", "selector": []any{},
 			"git": map[string]any{"url": "https://user:s3cr3t-password@git.example.test/org/repo.git", "ref": "main"},
@@ -423,5 +431,42 @@ func TestMCPErrorsCarryNoSecrets(t *testing.T) {
 				t.Fatalf("%s error %#v, want %s", call.tool, failure, call.code)
 			}
 		})
+	}
+}
+
+func TestMCPServerAnswersSealRequests(t *testing.T) {
+	b := newBus(t)
+	admitted := b.admitted(t)
+	runID := admitted.submission.Wherry.Run
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := wire.SealRequest{ReceiverBinding: b.binding(admitted), Key: jose.JSONWebKey{Key: &key.PublicKey}, KeyID: signed.SealKeyID(&key.PublicKey),
+		Credentials: []string{"model"}, ExpiryMS: time.Now().Add(time.Minute).UnixMilli()}
+	b.feed(t, runID, b.sign(t, &request))
+	ctx, stop := context.WithCancel(b.ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); answer(ctx, b.connect(t), log.New(io.Discard, "", 0)) }()
+	defer func() { stop(); <-done }()
+	binding := signed.SealBinding{Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
+		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS}
+	for {
+		records, err := admin.ReadTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range records {
+			if values, err := signed.OpenSeal(record.Value, binding, key, time.Now()); err == nil {
+				if string(values["model"]) != credentialText {
+					t.Fatalf("sealed %q, want the configured credential", values["model"])
+				}
+				return
+			}
+		}
+		if b.ctx.Err() != nil {
+			t.Fatalf("the server never answered; logs:\n%s", b.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

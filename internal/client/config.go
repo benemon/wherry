@@ -9,6 +9,8 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,7 +90,7 @@ func Init(ctx context.Context, config Config) (string, error) {
 			return "", err
 		}
 	}
-	host, err := Connect(config)
+	host, err := Connect(config, log.New(io.Discard, "", 0))
 	if err != nil {
 		return "", err
 	}
@@ -96,8 +98,8 @@ func Init(ctx context.Context, config Config) (string, error) {
 	return host.Register(ctx)
 }
 
-// Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal.
-func Connect(config Config) (*Host, error) {
+// Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal; the host logs to logger.
+func Connect(config Config, logger *log.Logger) (*Host, error) {
 	encoded, err := os.ReadFile(config.Bundle)
 	if err != nil {
 		return nil, fmt.Errorf("read bundle: %w", err)
@@ -127,7 +129,7 @@ func Connect(config Config) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
-	host, err := NewHost(kafka, key, bundle.Principal, config.StateDir, config.Credentials)
+	host, err := NewHost(kafka, key, bundle.Principal, config.StateDir, config.Credentials, logger)
 	if err != nil {
 		kafka.Close()
 		return nil, err

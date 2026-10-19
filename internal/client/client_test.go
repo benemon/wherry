@@ -1,20 +1,21 @@
 package client
 
 import (
+	"bytes"
 	"context"
-	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -37,14 +38,32 @@ type fixture struct {
 	stateDir  string
 	secret    string
 	receivers map[string]*testReceiver
+	// logs holds what every host of the fixture logs.
+	logs *syncBuffer
 }
 
 type testReceiver struct {
-	id      string
-	pool    string
-	key     ed25519.PrivateKey
-	sealing *ecdh.PrivateKey
-	kafka   *kgo.Client
+	id    string
+	pool  string
+	key   ed25519.PrivateKey
+	kafka *kgo.Client
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func testTerms() admin.Terms {
@@ -74,7 +93,7 @@ func newFixtureNoHost(t *testing.T) *fixture {
 	t.Cleanup(operator.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	f := &fixture{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, receivers: map[string]*testReceiver{}}
+	f := &fixture{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, receivers: map[string]*testReceiver{}, logs: &syncBuffer{}}
 	f.pool(t, "pool-a")
 	return f
 }
@@ -137,7 +156,7 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := NewHost(kafka, key, principal, stateDir, map[string]string{"model": f.secret, "openai": f.secret})
+	h, err := NewHost(kafka, key, principal, stateDir, map[string]string{"model": f.secret, "openai": f.secret}, log.New(f.logs, host+": ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +167,7 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 }
 
 // addReceiver provisions a receiver whose lab adapter launches claude and cloud adapter codex, and registers its signing
-// and sealing keys.
+// key.
 func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 	t.Helper()
 	config := admin.ReceiverConfig{Receiver: id, Pool: pool, Capacity: 2, Adapters: []admin.AdapterSettings{
@@ -164,12 +183,8 @@ func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealing, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	receiver := &testReceiver{id: id, pool: pool, key: key, sealing: sealing, kafka: kafka}
-	registration, err := signed.RegisterKey(id, key, sealing.PublicKey())
+	receiver := &testReceiver{id: id, pool: pool, key: key, kafka: kafka}
+	registration, err := signed.RegisterKey(id, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +221,7 @@ func bothOffers() []wire.Offer {
 // advertise publishes a live advertisement; mutate may change it before it is signed.
 func (r *testReceiver) advertise(t *testing.T, ctx context.Context, mutate func(*wire.Advertisement)) {
 	t.Helper()
-	ad := &wire.Advertisement{Receiver: r.id, Pool: r.pool, Offers: []wire.Offer{claudeOffer()}, Capacity: 2, SealingKey: signed.SealingKeyID(r.sealing.PublicKey()), AtMS: time.Now().UnixMilli()}
+	ad := &wire.Advertisement{Receiver: r.id, Pool: r.pool, Offers: []wire.Offer{claudeOffer()}, Capacity: 2, AtMS: time.Now().UnixMilli()}
 	if mutate != nil {
 		mutate(ad)
 	}
@@ -391,25 +406,9 @@ func TestHostEndToEnd(t *testing.T) {
 	if err != nil || status.Status.State != wire.TaskStateCompleted || status.Turn != 1 {
 		t.Fatalf("status %#v, %v", status, err)
 	}
-
-	seals, err := admin.ReadTopic(f.ctx, receiver.kafka, admin.HostTopic("tenant-a", "host-a"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var opened []string
-	for _, record := range seals {
-		seal, err := signed.DecodeSeal(record.Value)
-		if err != nil {
-			continue
-		}
-		plaintext, err := signed.OpenCredential(seal, "tenant-a", "receiver-a", "pool-a", "model", time.Now(), []string{"model"}, receiver.sealing)
-		if err != nil {
-			t.Fatal(err)
-		}
-		opened = append(opened, string(plaintext))
-	}
-	if len(opened) != 1 || opened[0] != "model-token" {
-		t.Fatalf("opened seals %q, want the model credential once", opened)
+	// Submit seals nothing: the host topic holds the host's key alone.
+	if records, err := admin.ReadTopic(f.ctx, receiver.kafka, admin.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
+		t.Fatalf("host topic holds %d records, %v; want the key registration alone", len(records), err)
 	}
 }
 
@@ -433,11 +432,11 @@ func TestRegisterIsIdempotentAndRefusesAnotherKey(t *testing.T) {
 
 func TestNewHostParsesPrincipal(t *testing.T) {
 	for _, principal := range []string{"wherry.rcv.receiver-a", "wherry.tnt.tenant-a", "wherry.tnt.tenant-a.host.a", "wherry.tnt.Tenant.host-a", "tnt.tenant-a.host-a"} {
-		if _, err := NewHost(nil, nil, principal, "", nil); err == nil {
+		if _, err := NewHost(nil, nil, principal, "", nil, nil); err == nil {
 			t.Errorf("accepted principal %q", principal)
 		}
 	}
-	host, err := NewHost(nil, nil, "wherry.tnt.tenant-a.host-a", "", nil)
+	host, err := NewHost(nil, nil, "wherry.tnt.tenant-a.host-a", "", nil, nil)
 	if err != nil || host.tenant != "tenant-a" || host.host != "host-a" {
 		t.Fatalf("host %#v, %v", host, err)
 	}
@@ -511,10 +510,6 @@ func TestSubmitIgnoresStaleOrUnauthorisedAdvertisements(t *testing.T) {
 			receiver := f.addReceiver(t, "receiver-a", "pool-a")
 			_, receiver.key, _ = ed25519.GenerateKey(rand.Reader)
 			receiver.advertise(t, f.ctx, nil)
-		},
-		"unregistered sealing key": func(t *testing.T, f *fixture) {
-			other, _ := ecdh.X25519().GenerateKey(rand.Reader)
-			f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.SealingKey = signed.SealingKeyID(other.PublicKey()) })
 		},
 		"ended member": func(t *testing.T, f *fixture) {
 			f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
@@ -639,92 +634,6 @@ func TestResolvePlacementChoosesMostSpareThenLowestID(t *testing.T) {
 	ads["receiver-d"] = wire.Advertisement{Receiver: "receiver-d", Pool: "pool-b", Capacity: 5, InFlight: 1, Offers: ads["receiver-d"].Offers}
 	if pool, _, _ := resolvePlacement(state, "tenant-a", "claude", nil, ads); pool != "pool-b" {
 		t.Fatalf("pool %q, want pool-b through receiver-d's larger spare capacity", pool)
-	}
-}
-
-// sealsTo returns the host's seals, newest last, addressed to receiver.
-func (f *fixture) sealsTo(t *testing.T, receiver string) []signed.Seal {
-	t.Helper()
-	records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", "host-a"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var seals []signed.Seal
-	for _, record := range records {
-		if seal, err := signed.DecodeSeal(record.Value); err == nil && seal.Receiver == receiver {
-			seals = append(seals, seal)
-		}
-	}
-	return seals
-}
-
-func TestSubmitSealsToEveryLiveMemberLackingASeal(t *testing.T) {
-	f := newFixture(t)
-	f.pool(t, "pool-b")
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-	f.addReceiver(t, "receiver-b", "pool-a").advertise(t, f.ctx, nil)
-	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.AtMS = time.Now().Add(-time.Hour).UnixMilli() })
-	f.addReceiver(t, "receiver-d", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers()[1:] })
-	f.submit(t, defaultSelector())
-	for receiver, want := range map[string]int{"receiver-a": 1, "receiver-b": 1, "receiver-c": 0, "receiver-d": 0} {
-		if got := len(f.sealsTo(t, receiver)); got != want {
-			t.Fatalf("%s holds %d seals after the first submit, want %d", receiver, got, want)
-		}
-	}
-	f.submit(t, defaultSelector())
-	if got := len(f.sealsTo(t, "receiver-a")) + len(f.sealsTo(t, "receiver-b")); got != 2 {
-		t.Fatalf("resealed to members holding a current seal: %d seals", got)
-	}
-	f.addReceiver(t, "receiver-e", "pool-a").advertise(t, f.ctx, nil)
-	f.submit(t, defaultSelector())
-	if got := len(f.sealsTo(t, "receiver-e")); got != 1 {
-		t.Fatalf("new member holds %d seals, want 1", got)
-	}
-	// A current seal must outlast the queue deadline: a newer seal ending in 30 minutes is replaced for a 40-minute one.
-	now := time.Now()
-	short, err := signed.SealCredential("tenant-a", "receiver-a", "pool-a", "model", now, now.Add(30*time.Minute), f.receivers["receiver-a"].sealing.PublicKey(), []byte("model-token"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded, err := signed.EncodeSeal(short)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.host.produce(f.ctx, &kgo.Record{Topic: admin.HostTopic("tenant-a", "host-a"), Value: encoded}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Hour, QueueDeadline: 40 * time.Minute}); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(f.sealsTo(t, "receiver-a")); got != 3 {
-		t.Fatalf("seal lasting less than the queue deadline counted as current: %d seals", got)
-	}
-}
-
-func TestSubmitPinsSealingKey(t *testing.T) {
-	f := newFixture(t)
-	receiver := f.addReceiver(t, "receiver-a", "pool-a")
-	receiver.advertise(t, f.ctx, nil)
-	f.submit(t, defaultSelector())
-	pins, err := f.host.readPins()
-	if err != nil || pins["receiver-a"] != signed.SealingKeyID(receiver.sealing.PublicKey()) {
-		t.Fatalf("pins %v, %v", pins, err)
-	}
-	next, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	_, nextKey, _ := ed25519.GenerateKey(rand.Reader)
-	rotation, err := signed.RotateKey("receiver-a", receiver.key, nextKey, next.PublicKey())
-	if err != nil {
-		t.Fatal(err)
-	}
-	receiver.produce(t, f.ctx, admin.ReceiverTopic("receiver-a"), "receiver-a", rotation)
-	receiver.key, receiver.sealing = nextKey, next
-	receiver.advertise(t, f.ctx, nil)
-	before := f.tasksEnd(t, "pool-a")
-	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
-		t.Fatal("sealed to a sealing key other than the pinned one")
-	}
-	if len(f.sealsTo(t, "receiver-a")) != 1 || f.tasksEnd(t, "pool-a") != before {
-		t.Fatal("a refused seal still wrote a seal or a task")
 	}
 }
 
@@ -943,18 +852,8 @@ func TestContinueThroughTheEcho(t *testing.T) {
 		!reflect.DeepEqual(next.Wherry.Placement.Selector, selector) || next.Message.Parts[0].Text != "again" || next.Message.ContextID != runID {
 		t.Fatalf("continuation %#v", next)
 	}
-	sealed := map[string]bool{}
-	records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", "host-b"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, record := range records {
-		if seal, err := signed.DecodeSeal(record.Value); err == nil {
-			sealed[seal.Receiver+"/"+seal.Pool+"/"+seal.Credential] = true
-		}
-	}
-	if len(sealed) != 1 || !sealed["receiver-a/pool-a/openai"] {
-		t.Fatalf("continuing host sealed %v, want codex's credential resealed to pool-a", sealed)
+	if records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", "host-b")); err != nil || len(records) != 1 {
+		t.Fatalf("continuing host's topic holds %d records, %v; want its key registration alone", len(records), err)
 	}
 	if _, err := other.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrTurnSubmitted) {
 		t.Fatalf("second continue: %v", err)
@@ -1037,7 +936,7 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	if want := []string{"receiver-a", "receiver-c", "receiver-d", "receiver-b"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] || order[2] != want[2] || order[3] != want[3] {
 		t.Fatalf("receivers %v, want %v", order, want)
 	}
-	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 || len(a.Seals) != 1 || a.Seals[0].Name != "model" || a.Seals[0].Pool != "pool-a" ||
+	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 ||
 		!reflect.DeepEqual(a.Adapters, []Adapter{
 			{Name: "lab", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
 			{Name: "cloud", Agent: "codex", Labels: map[string]string{"runtime": "exec"}, Ready: false},
@@ -1113,7 +1012,7 @@ func TestConnectErrorsOmitPassword(t *testing.T) {
 		if err := os.WriteFile(config.Bundle, []byte(bundle), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Connect(config); err == nil || strings.Contains(err.Error(), password) {
+		if _, err := Connect(config, log.New(io.Discard, "", 0)); err == nil || strings.Contains(err.Error(), password) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
@@ -1204,7 +1103,7 @@ func TestAwaitRereadsRotatedKey(t *testing.T) {
 	}()
 	time.Sleep(time.Second)
 	_, next, _ := ed25519.GenerateKey(rand.Reader)
-	rotation, err := signed.RotateKey("receiver-a", receiver.key, next, receiver.sealing.PublicKey())
+	rotation, err := signed.RotateKey("receiver-a", receiver.key, next)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1259,7 +1158,7 @@ func TestRegisterConcurrently(t *testing.T) {
 	for i := range hosts {
 		kafka, principal := f.connect(t, bundle)
 		_, key, _ := ed25519.GenerateKey(rand.Reader)
-		host, err := NewHost(kafka, key, principal, t.TempDir(), nil)
+		host, err := NewHost(kafka, key, principal, t.TempDir(), nil, log.New(io.Discard, "", 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1284,60 +1183,6 @@ func TestRegisterConcurrently(t *testing.T) {
 	}
 	if len(won) != 1 || !keys[owner].Current.Equal(hosts[won[0]].key.Public()) {
 		t.Fatalf("registrations %v succeeded; want exactly the host whose key is current", won)
-	}
-}
-
-func TestPinsSurviveConcurrentWriters(t *testing.T) {
-	dir := t.TempDir()
-	host, other := &Host{stateDir: dir}, &Host{stateDir: dir}
-	lock, err := os.OpenFile(filepath.Join(dir, "pins.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		t.Fatal(err)
-	}
-	a, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	b, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	done := make(chan error, 1)
-	go func() { done <- host.pin(map[string]*ecdh.PublicKey{"receiver-a": a.PublicKey()}) }()
-	select {
-	case err := <-done:
-		t.Fatalf("pin finished while another writer held the lock: %v", err)
-	case <-time.After(300 * time.Millisecond):
-	}
-	// The lock holder, as another process would, pins receiver-b.
-	if err := other.writePins(map[string]string{"receiver-b": signed.SealingKeyID(b.PublicKey())}); err != nil {
-		t.Fatal(err)
-	}
-	lock.Close()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	pins, err := host.readPins()
-	if err != nil || pins["receiver-a"] != signed.SealingKeyID(a.PublicKey()) || pins["receiver-b"] != signed.SealingKeyID(b.PublicKey()) {
-		t.Fatalf("pins %v, %v; want both writers' pins", pins, err)
-	}
-}
-
-func TestSealOutlivesTheQueueDeadline(t *testing.T) {
-	f := newFixture(t)
-	receiver := f.addReceiver(t, "receiver-a", "pool-a")
-	receiver.advertise(t, f.ctx, nil)
-	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Hour, QueueDeadline: 50 * time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
-	queueDeadline := receiver.claim(t, f.ctx, submitted.RunID)[0].submission.Wherry.QueueDeadlineMS
-	if seals := f.sealsTo(t, "receiver-a"); len(seals) != 1 || seals[0].ExpiryMS <= queueDeadline {
-		t.Fatalf("seals %#v; want one expiring after the queue deadline %d", seals, queueDeadline)
-	}
-	// The pool seals for an hour: a two-hour queue deadline cannot be covered.
-	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: 3 * time.Hour, QueueDeadline: 2 * time.Hour}); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "queue deadline") {
-		t.Fatalf("submit with a queue deadline past the seal lifetime: %v", err)
-	}
-	if len(f.sealsTo(t, "receiver-a")) != 1 || f.tasksEnd(t, "pool-a") != 1 {
-		t.Fatal("a refused submit still wrote a seal or a task")
 	}
 }
 

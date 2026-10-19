@@ -78,7 +78,9 @@ wherry admin pool create build --terms build-terms.yaml
 - `lock_duration_ms` is how long a claim survives without renewal, and how
   long a denied receiver keeps running its jobs. Receivers renew every 10
   seconds.
-- `seal_lifetime_ms` must outlast the queue deadlines tasks use.
+- `seal_lifetime_ms` is required and unused: a seal expires with its
+  [seal request](a2a-extension-v1.md#seal-request), 5 minutes after the
+  receiver asks.
 
 Running `pool create` again for an existing pool records the new terms.
 
@@ -352,8 +354,8 @@ the `wherry admin` environment.
 3. For a receiver, rotate each credential sealed to it at its source. The
    receiver has seen their values.
 
-Seals a revoked host wrote stop opening, since receivers no longer read its
-topic. Seals the tenant's other hosts wrote keep opening.
+Receivers stop reading a revoked host's topic, so no seal it writes reaches
+them.
 
 A revoked name cannot be reused. Provision a returning host or receiver
 under a new name.
@@ -365,7 +367,7 @@ A host or receiver key cannot be recovered or re-registered.
 - A host whose `host_key` is lost fails `wherry init` with
   `host key topic holds another key`.
 - A receiver whose state directory is lost fails at start with
-  `receiver key topic holds other keys than the state directory`.
+  `receiver key topic holds another key than the state directory`.
 
 Revoke it, then add a host or receiver under a new name.
 
@@ -399,20 +401,31 @@ each such record as `offset=<n> size=<n> sha256=<hex>`.
 The command refuses a record that decodes, so a skip cannot hide state such
 as a membership end.
 
-## Accept a changed receiver sealing key
+## Upgrade to per-run seals
 
-A host refuses to seal to a receiver whose sealing key differs from the one
-it [pinned](concepts.md#sealed-credentials), and `submit` and `continue`
-fail with `receiver sealing key changed`. No wherry command rotates a
-receiver's keys.
+Upgrade every receiver and every host together. Hosts reject the
+advertisements of earlier receivers, which carry `sealing_key`, and earlier
+hosts reject the advertisements of upgraded ones, so neither places work on
+the other. On first start an upgraded receiver deletes `sealing.key` from
+its state directory; its key topic needs no change. Hosts may delete
+`pins.json` and `pins.lock` from their state directory.
 
-Prerequisite: confirm with the operator, outside wherry, that the
-receiver's key topic was replaced on purpose.
+## Run credentialed tasks
 
-1. Remove the receiver's entry from `pins.json` in the host's state
-   directory.
-2. Run `wherry submit` or `wherry continue`. The host pins the receiver's
-   current key at its next seal.
+A receiver asks the submitting host for an adapter's credential when it
+claims the turn, and the host answers only while `wherry await` or
+`wherry mcp` runs on it. A parent that submits a task whose adapter takes
+a credential keeps one of them running until the task starts; without an
+answer within 5 minutes, the turn ends `TASK_STATE_AUTH_REQUIRED` with the
+message `credential <name> required`, and `wherry continue` followed by
+`wherry await` runs it again.
+
+The host answers only for a credential the pool's terms approve for the
+run's agent and that its configuration maps to a file, and only to the
+receiver that first claimed the turn. It logs each verified request of its
+own runs that it skips or refuses, by run, receiver and credential name, on
+standard error. A turn adopted by a second receiver gets no seal and ends
+`TASK_STATE_AUTH_REQUIRED`; `wherry continue` runs it again.
 
 ## Nomad ACL policy
 

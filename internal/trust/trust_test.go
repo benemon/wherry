@@ -25,22 +25,7 @@ func TestKeyFileRoundTrip(t *testing.T) {
 		t.Fatal("existing signing key was overwritten")
 	}
 
-	sealingPath := filepath.Join(directory, "sealing.key")
-	sealingKey, err := GenerateSealingKeyFile(sealingPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	loadedSealingKey, err := LoadSealingKeyFile(sealingPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !loadedSealingKey.Equal(sealingKey) {
-		t.Fatal("loaded sealing key differs")
-	}
-	if _, err := GenerateSealingKeyFile(sealingPath); err == nil {
-		t.Fatal("existing sealing key was overwritten")
-	}
-	for _, path := range []string{signingPath, sealingPath} {
+	for _, path := range []string{signingPath} {
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
@@ -65,16 +50,16 @@ func TestLoadKeyFileRejectsGroupReadable(t *testing.T) {
 			t.Fatal("group-readable signing key was loaded")
 		}
 	})
-	t.Run("sealing", func(t *testing.T) {
-		path := filepath.Join(directory, "sealing.key")
-		if _, err := GenerateSealingKeyFile(path); err != nil {
+	t.Run("other", func(t *testing.T) {
+		path := filepath.Join(directory, "other.key")
+		if _, err := GenerateSigningKeyFile(path); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Chmod(path, 0o604); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadSealingKeyFile(path); err == nil {
-			t.Fatal("other-readable sealing key was loaded")
+		if _, err := LoadSigningKeyFile(path); err == nil {
+			t.Fatal("other-readable signing key was loaded")
 		}
 	})
 }
