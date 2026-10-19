@@ -69,7 +69,11 @@ wherry admin pool create build --terms build-terms.yaml
 
 - `delivery_limit` bounds how often the broker delivers one task. Each
   start failure returns a task to the pool, so set it to at least the
-  number of receivers in the pool, plus a margin. The broker caps it at
+  number of receivers in the pool, plus a margin. From attempt
+  `delivery_limit` minus 1, a receiver ends a turn it would return to the
+  pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
+  cases the [extension](a2a-extension-v1.md#delivery-budget) lists. The
+  broker caps it at
   `group.share.max.delivery.count.limit`.
 - `lock_duration_ms` is how long a claim survives without renewal, and how
   long a denied receiver keeps running its jobs. Receivers renew every 10
@@ -158,7 +162,9 @@ wherry admin receiver configure nomad-1 --config nomad-1.yaml
 
 The receiver exits when it reads the new record at its next configuration
 check, which runs every 15 seconds, and its platform restarts it with the new configuration. Runs in flight are
-adopted on redelivery. The bundle and password do not change.
+adopted on redelivery. When the new configuration renames the adapter or
+changes its agent, the run's job is stopped and purged, and the run is
+dispatched again. The bundle and password do not change.
 
 ## Run a receiver
 
@@ -331,7 +337,7 @@ The adapter's calls need this policy, with the namespace adjusted:
 
 ```hcl
 namespace "agents" {
-  capabilities = ["submit-job", "read-job", "read-logs", "alloc-lifecycle"]
+  capabilities = ["submit-job", "list-jobs", "read-job", "read-logs", "alloc-lifecycle"]
 
   variables {
     path "nomad/jobs/agent-*" {
@@ -349,8 +355,10 @@ node_pool "default" {
 }
 ```
 
-- `submit-job`: register a run's job, and deregister one that outlives its
-  stop signal or its dispatch wait.
+- `submit-job`: register a run's job, deregister one that outlives its
+  stop signal or its dispatch wait, and purge one that never started or
+  has been dead for 10 minutes.
+- `list-jobs`: find dead agent jobs to purge.
 - `read-job`: read a job and its allocations.
 - `read-logs`: stream the agent task's standard output.
 - `alloc-lifecycle`: send `SIGTERM` to the agent task.
@@ -402,6 +410,9 @@ state directory.
    job, on the restarted receiver or another member, and resumes the
    transcript from the last heartbeat offset.
 3. Restart the harness sessions that run `wherry mcp`.
+
+Agent jobs and variables named before pool-scoped names,
+`agent-<run>-t<turn>`, are not swept; remove them by hand after upgrading.
 
 ## Harness integration
 

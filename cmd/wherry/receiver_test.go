@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewAdapterRejectsUnknownType(t *testing.T) {
-	_, err := newAdapter(admin.AdapterSettings{Name: "k8s", Type: "kubernetes", Agent: "claude", Config: map[string]any{}}, "")
+	_, err := newAdapter("build", admin.AdapterSettings{Name: "k8s", Type: "kubernetes", Agent: "claude", Config: map[string]any{}}, "")
 	if err == nil || !strings.Contains(err.Error(), `unknown type "kubernetes"`) {
 		t.Fatalf("got %v, want unknown type error", err)
 	}
@@ -19,15 +19,15 @@ func TestNewAdapterRejectsUnknownType(t *testing.T) {
 
 func TestNewAdapterDecodesSettingsStrictly(t *testing.T) {
 	config := map[string]any{"address": "http://127.0.0.1:1", "namespace": "wherry", "runtime": map[string]any{"driver": "exec"}}
-	if _, err := newAdapter(admin.AdapterSettings{Name: "lab", Type: "nomad", Agent: "claude", Credential: "token", Config: config}, ""); err == nil || !strings.Contains(err.Error(), "credential_env") {
+	if _, err := newAdapter("build", admin.AdapterSettings{Name: "lab", Type: "nomad", Agent: "claude", Credential: "token", Config: config}, ""); err == nil || !strings.Contains(err.Error(), "credential_env") {
 		t.Fatalf("got %v, want credential_env required", err)
 	}
 	unknown := map[string]any{"address": "http://127.0.0.1:1", "runtime": map[string]any{"driver": "exec"}, "token": "x"}
-	if _, err := newAdapter(admin.AdapterSettings{Name: "lab", Type: "nomad", Agent: "claude", Config: unknown}, ""); err == nil {
+	if _, err := newAdapter("build", admin.AdapterSettings{Name: "lab", Type: "nomad", Agent: "claude", Config: unknown}, ""); err == nil {
 		t.Fatal("accepted adapter settings with an unknown member")
 	}
 	labels := map[string]string{"zone": "dc1", "example.com/gpu": "none"}
-	named, err := newAdapter(admin.AdapterSettings{Name: "lab", Type: "nomad", Agent: "claude", Labels: labels, Config: config}, "platform-token")
+	named, err := newAdapter("build", admin.AdapterSettings{Name: "lab", Type: "nomad", Agent: "claude", Labels: labels, Config: config}, "platform-token")
 	if err != nil || named.Name != "lab" || named.Agent != "claude" || !named.Git || !maps.Equal(named.Labels, labels) {
 		t.Fatalf("adapter %#v, err %v; want a git-delivering adapter for its agent with its declared labels", named, err)
 	}

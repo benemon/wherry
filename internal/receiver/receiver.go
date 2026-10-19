@@ -30,11 +30,12 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-// Handle identifies one platform instance of a run; Format is adapter-private.
+// Handle identifies one platform instance of a run.
 type Handle struct {
-	Job    string
-	Alloc  string
-	Format string
+	// Data is adapter-private and at most maxHandle bytes; the adapter versions its encoding.
+	Data []byte
+	// Name is the platform's reference for the job, for diagnosis; the core logs it and never interprets it.
+	Name string
 	// Commit is the git commit checked out for a run with a git context.
 	Commit string
 }
@@ -46,13 +47,54 @@ type Line struct {
 	Data   []byte
 }
 
-// Run is the material needed to start one platform job.
+// Run is the material needed to start one platform job; the adapter records Attempt, Adapter and Agent
+// in platform metadata.
 type Run struct {
-	ID         string
-	Turn       int64
-	Prompt     []byte
-	Credential []byte
-	Git        *wire.GitContext
+	ID, Adapter, Agent string
+	Turn, Attempt      int64
+	Prompt, Credential []byte
+	Git                *wire.GitContext
+}
+
+// Outcome is what a Dispatch left on the platform.
+type Outcome int
+
+const (
+	// OutcomeUnknown means a job may exist; the core reconciles it with Lookup.
+	OutcomeUnknown Outcome = iota
+	// OutcomeNothingCreated means the adapter knows no job exists.
+	OutcomeNothingCreated
+	OutcomeCreated
+)
+
+// JobState is the state of a turn's job as Lookup finds it.
+type JobState int
+
+const (
+	JobAbsent JobState = iota
+	JobRunning
+	JobEnded
+	// JobNeverStarted means the platform ended the job before its agent task started.
+	JobNeverStarted
+)
+
+// Job is a turn's job as Lookup finds it, with the attempt, adapter and agent its platform metadata records.
+type Job struct {
+	State JobState
+	// Handle is set unless State is JobAbsent.
+	Handle         Handle
+	Attempt        int64
+	Adapter, Agent string
+}
+
+// Terminal is how a followed job ended.
+type Terminal struct {
+	Started  bool
+	ExitCode int
+	Signal   string
+	// Class is the platform's failure class for a job that never started.
+	Class string
+	Node  string
 }
 
 // ErrGitContext is the error an adapter returns when a run's git context cannot be checked out.
@@ -65,10 +107,17 @@ var ErrConfigChanged = errors.New("receiver configuration changed")
 type Adapter interface {
 	// Ready reports whether the adapter can currently start a job.
 	Ready(ctx context.Context) (bool, error)
-	Dispatch(ctx context.Context, run Run) (Handle, error)
-	Lookup(ctx context.Context, runID string, turn int64) (Handle, bool, error)
-	Follow(ctx context.Context, handle Handle, offset int64, lines chan<- Line) error
+	// Dispatch starts a turn's job, converging on an existing one, and returns once it has started or ended.
+	// The core treats an error as OutcomeUnknown.
+	Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
+	// Lookup finds a turn's job without creating one, and waits for it as Dispatch does.
+	Lookup(ctx context.Context, runID string, turn int64) (Job, error)
+	// Follow streams stdout lines from a byte offset and returns the Terminal once the job has ended;
+	// a Follow cut short returns an error and a zero Terminal.
+	Follow(ctx context.Context, handle Handle, from int64, lines chan<- Line) (Terminal, error)
 	Stop(ctx context.Context, handle Handle) error
+	// Purge removes a turn's job and its delivered material, with or without a handle; an absent job is success.
+	Purge(ctx context.Context, runID string, turn int64) error
 	Release(ctx context.Context, runID string, turn int64) error
 	Sweep(ctx context.Context) error
 }
@@ -85,8 +134,8 @@ type Named struct {
 	Adapter Adapter
 }
 
-// AdapterFactory builds one adapter from its settings in the receiver's configuration record.
-type AdapterFactory func(admin.AdapterSettings) (Named, error)
+// AdapterFactory builds one adapter for the receiver's pool from its settings in the receiver's configuration record.
+type AdapterFactory func(pool string, settings admin.AdapterSettings) (Named, error)
 
 // Receiver claims tasks for one pool and runs them through its adapters.
 type Receiver struct {
@@ -113,8 +162,8 @@ type Receiver struct {
 	deniedSince time.Time
 	// admissionMu serialises the admission transactional ID, which one producer at a time may hold.
 	admissionMu sync.Mutex
-	// cancelled holds, per run, the lowest turn a host of the run's tenant has cancelled.
-	cancelled map[string]int64
+	// cancelled holds, per tenant and run, the lowest turn a host of that tenant has cancelled.
+	cancelled map[runKey]int64
 }
 
 // New loads or creates the receiver's keys in stateDir and builds its Kafka client from bundle.
@@ -282,7 +331,7 @@ func (r *Receiver) configure(ctx context.Context) error {
 			}
 			adapters := make([]Named, 0, len(config.Adapters))
 			for _, settings := range config.Adapters {
-				named, err := r.factory(settings)
+				named, err := r.factory(config.Pool, settings)
 				if err != nil {
 					return fmt.Errorf("adapter %s: %w", settings.Name, err)
 				}
@@ -611,6 +660,8 @@ func (events poolEvents) committedTerminal(run, taskHash string) bool {
 	})
 }
 
+type runKey struct{ tenant, run string }
+
 // cancelledTurn returns the lowest turn of run that a live host of tenant has cancelled.
 func (r *Receiver) cancelledTurn(ctx context.Context, events poolEvents, run, tenant string) (int64, bool) {
 	var lowest int64
@@ -638,21 +689,28 @@ func (r *Receiver) readCancels(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	cancelled := map[string]int64{}
+	cancelled := map[runKey]int64{}
 	for run, statuses := range events.statuses {
 		if len(events.others[run]) == 0 {
 			continue
 		}
-		tenant := statuses[0].Wherry.Tenant
-		turn, ok := r.cancelledTurn(ctx, events, run, tenant)
-		if !ok {
-			continue
+		// A cancel counts for its own tenant only, so a status of another tenant under the run ID, such as a
+		// rejection, cannot lend that tenant's host the run.
+		tenants := map[string]bool{}
+		for _, status := range statuses {
+			tenants[status.Wherry.Tenant] = true
 		}
-		cancelled[run] = turn
-		latest := latestStatus(statuses, tenant)
-		if latest != nil && latest.Wherry.Kind == "interrupted" && latest.Wherry.Turn >= turn {
-			if err := r.cancelInterrupted(ctx, *latest); err != nil {
-				r.logger.Printf("run %s: cancel interrupted turn: %v", run, err)
+		for tenant := range tenants {
+			turn, ok := r.cancelledTurn(ctx, events, run, tenant)
+			if !ok {
+				continue
+			}
+			cancelled[runKey{tenant, run}] = turn
+			latest := latestStatus(statuses, tenant)
+			if latest != nil && latest.Wherry.Kind == "interrupted" && latest.Wherry.Turn >= turn {
+				if err := r.cancelInterrupted(ctx, *latest); err != nil {
+					r.logger.Printf("run %s: cancel interrupted turn: %v", run, err)
+				}
 			}
 		}
 	}

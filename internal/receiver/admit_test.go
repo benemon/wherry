@@ -422,16 +422,16 @@ func TestCancelledSubmissionNotDispatched(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		attempt int64
-		running bool
+		job     JobState
 		stops   int
 	}{
-		{"queued", 1, false, 0},
-		{"redelivered with its job running", 2, true, 1},
+		{"queued", 1, JobAbsent, 0},
+		{"redelivered with its job running", 2, JobRunning, 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.sealOwn(t, credentialName, time.Hour)
-			f.adapter.existing = test.running
+			f.adapter.job = test.job
 			record := f.submit(t, f.host, nil)
 			f.publishCancel(t, "run-a", 1, f.host, nil)
 			if status := f.execute(t, record, test.attempt); status != kgo.AckAccept {
@@ -487,12 +487,12 @@ func TestCancelMustBeHostSignedForTheRunsTenant(t *testing.T) {
 		"another tenant's host": {otherHost, func(cancel *wire.Cancel) { cancel.Tenant, cancel.Host = "tenant-b", "host-b" }},
 	} {
 		f.publishCancel(t, "run-a", 1, test.key, test.mutate)
-		if _, cancelled := f.receiver.cancelled["run-a"]; cancelled {
+		if _, cancelled := f.receiver.cancelled[runKey{testTenant, "run-a"}]; cancelled {
 			t.Fatalf("receiver honoured a cancel signed by the %s", name)
 		}
 	}
 	f.publishCancel(t, "run-a", 1, f.host, nil)
-	if _, cancelled := f.receiver.cancelled["run-a"]; !cancelled {
+	if _, cancelled := f.receiver.cancelled[runKey{testTenant, "run-a"}]; !cancelled {
 		t.Fatal("receiver ignored the host's cancel")
 	}
 }
@@ -827,5 +827,273 @@ func TestConcurrentInterruptedCancelIsOneFact(t *testing.T) {
 	}
 	if terminals != 1 {
 		t.Fatalf("a pool events reader sees %d CANCELED terminals, want one", terminals)
+	}
+}
+
+func TestAdmitReleasesAtTheBudgetFail(t *testing.T) {
+	terms := testTerms()
+	// With a limit of 2, a first attempt is already at the budget.
+	terms.DeliveryLimit = 2
+	for name, test := range map[string]struct {
+		mutate func(*wire.Submission)
+		fault  func(*testing.T, fixture)
+	}{
+		"offer unavailable": {func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" }, func(*testing.T, fixture) {}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+			record := f.submit(t, f.host, test.mutate)
+			test.fault(t, f)
+			if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+				t.Fatalf("admitted=%v ack=%v, want reject; logs:\n%s", admitted != nil, ack, f.logs.String())
+			}
+			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
+				t.Fatalf("terminal %s %q", state, reason)
+			}
+			if task := f.lastTask(t); task.Status.State != wire.TaskStateFailed {
+				t.Fatalf("result %#v, want FAILED", task.Status)
+			}
+			var echo wire.Echo
+			if records := f.records(t, admin.TenantTopic(testTenant)); len(records) == 0 || wire.ParseRecord(records[0].Value, f.keys(), &echo) != nil || echo.Run != "run-a" || echo.Pool != testPool {
+				t.Fatal("the feed does not open with the run's echo, which hosts need to find its pool")
+			}
+		})
+	}
+}
+
+// tenantB entitles tenant-b to the pool with a registered host and returns that host's key.
+func (f fixture) tenantB(t *testing.T) ed25519.PrivateKey {
+	t.Helper()
+	if err := f.service.TenantAdd(f.ctx, "tenant-b", testPool); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.HostAdd(f.ctx, "tenant-b", "host-b", t.TempDir()+"/host-b.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	f.produce(t, admin.HostTopic("tenant-b", "host-b"), "", must(t)(signed.RegisterKey(signed.HostOwner("tenant-b", "host-b"), key, nil)))
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+func asTenantB(task *wire.Submission) {
+	task.Wherry.Tenant, task.Wherry.Host, task.Message.MessageID = "tenant-b", "host-b", "msg-b"
+}
+
+func TestRunIDOfAnotherTenantIsRejected(t *testing.T) {
+	f := newFixture(t, resultStream)
+	keyB := f.tenantB(t)
+	holder := testActiveRun(t, f, "run-a", 1)
+	if err := holder.commit(f.ctx, holder.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.records(t, admin.TenantTopic(testTenant)))
+	f.rejected(t, f.submit(t, keyB, asTenantB), "run ID in use")
+	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
+		t.Fatalf("dispatches %d, want none", dispatches)
+	}
+	if err := holder.commit(f.ctx, holder.events(holder.status("heartbeat", taskStatus(wire.TaskStateWorking, ""), nil, nil))); err != nil {
+		t.Fatalf("tenant-b's turn fenced tenant-a's holder: %v", err)
+	}
+	if after := len(f.records(t, admin.TenantTopic(testTenant))); after != before {
+		t.Fatalf("tenant-a's feed %d -> %d records, want nothing from tenant-b's turn", before, after)
+	}
+	var kinds []string
+	for _, record := range f.records(t, admin.TenantTopic("tenant-b")) {
+		var echo wire.Echo
+		var status wire.RunStatus
+		switch {
+		case wire.ParseRecord(record.Value, f.keys(), &echo) == nil:
+			kinds = append(kinds, "echo")
+		case wire.ParseRecord(record.Value, f.keys(), &status) == nil:
+			kinds = append(kinds, status.Wherry.Kind+" "+status.StatusUpdate.Status.Message.Parts[0].Text)
+		default:
+			kinds = append(kinds, "other")
+		}
+	}
+	if !slices.Equal(kinds, []string{"echo", "rejected run ID in use"}) {
+		t.Fatalf("tenant-b's feed %v, want only its echo and rejection", kinds)
+	}
+}
+
+func TestRunIDRejectionIsTheSameForEveryMember(t *testing.T) {
+	f := newFixture(t, resultStream)
+	keyB := f.tenantB(t)
+	f.submit(t, f.host, nil)
+	record := f.submit(t, keyB, asTenantB)
+	peer := f.startPeer(t, "receiver-b")
+	if err := peer.advertise(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if admitted, ack := peer.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
+		t.Fatalf("second member admitted=%v ack=%v, want reject", admitted != nil, ack)
+	}
+	var reasons []string
+	keys := signed.Keys{"receiver-b": {Current: peer.signing.Public().(ed25519.PublicKey)}}
+	for _, record := range f.records(t, admin.TenantTopic("tenant-b")) {
+		var status wire.RunStatus
+		if wire.ParseRecord(record.Value, keys, &status) == nil {
+			reasons = append(reasons, status.Wherry.Receiver+" "+status.StatusUpdate.Status.Message.Parts[0].Text)
+		}
+	}
+	if !slices.Equal(reasons, []string{"receiver-b run ID in use"}) {
+		t.Fatalf("tenant-b statuses %v, want the second member's run ID rejection", reasons)
+	}
+}
+
+// failEventsReadOnce fails the next ListOffsets that names the pool's events, the first read of an admission.
+func (f fixture) failEventsReadOnce(t *testing.T) {
+	t.Helper()
+	failed := false
+	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		req := request.(*kmsg.ListOffsetsRequest)
+		if failed || !slices.ContainsFunc(req.Topics, func(topic kmsg.ListOffsetsRequestTopic) bool { return topic.Topic == admin.PoolEventsTopic(testPool) }) {
+			f.cluster.KeepControl()
+			return nil, nil, false
+		}
+		failed = true
+		response := kmsg.NewPtrListOffsetsResponse()
+		response.SetVersion(req.Version)
+		for _, topic := range req.Topics {
+			out := kmsg.ListOffsetsResponseTopic{Topic: topic.Topic}
+			for _, partition := range topic.Partitions {
+				out.Partitions = append(out.Partitions, kmsg.ListOffsetsResponseTopicPartition{Partition: partition.Partition, ErrorCode: kerr.UnknownServerError.Code})
+			}
+			response.Topics = append(response.Topics, out)
+		}
+		return response, nil, true
+	})
+}
+
+func budgetTerms() admin.Terms {
+	terms := testTerms()
+	// With a limit of 2, a first attempt is already at the budget.
+	terms.DeliveryLimit = 2
+	return terms
+}
+
+func (f fixture) terminals(t *testing.T, topic string) int {
+	t.Helper()
+	terminals := 0
+	for _, status := range f.statuses(t, topic) {
+		if status.Wherry.Kind == "terminal" {
+			terminals++
+		}
+	}
+	return terminals
+}
+
+func TestUnreadableEventsReleaseACompletedRunWithoutASecondTerminal(t *testing.T) {
+	f := newFixtureWith(t, resultStream, budgetTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f.sealOwn(t, credentialName, time.Hour)
+	record := f.submit(t, f.host, nil)
+	if status := f.execute(t, record, 1); status != kgo.AckAccept {
+		t.Fatalf("first delivery status %v, want accept", status)
+	}
+	f.failEventsReadOnce(t)
+	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
+		t.Fatalf("redelivery admitted=%v ack=%v, want release", admitted != nil, ack)
+	}
+	if terminals := f.terminals(t, admin.TenantTopic(testTenant)); terminals != 1 {
+		t.Fatalf("terminals %d, want only the run's own", terminals)
+	}
+}
+
+func TestUnreadableTurnsReleaseAtTheBudget(t *testing.T) {
+	f := newFixtureWith(t, resultStream, budgetTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	record := f.submit(t, f.host, nil)
+	if _, err := kadm.NewClient(f.service.Admin).DeleteTopics(f.ctx, admin.PoolTasksTopic(testPool)); err != nil {
+		t.Fatal(err)
+	}
+	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
+		t.Fatalf("admitted=%v ack=%v, want release: the run's owner is unknown", admitted != nil, ack)
+	}
+	if records := f.records(t, admin.TenantTopic(testTenant)); len(records) != 0 {
+		t.Fatalf("feed records %d, want nothing written under an unowned run ID", len(records))
+	}
+}
+
+func TestRunIDOfAnotherTenantIsCheckedBeforeAnyWrite(t *testing.T) {
+	f := newFixtureWith(t, resultStream, budgetTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	keyB := f.tenantB(t)
+	f.submit(t, f.host, nil)
+	// No adapter here launches codex, and attempt 1 is at the budget.
+	f.rejected(t, f.submit(t, keyB, func(task *wire.Submission) {
+		asTenantB(task)
+		task.Wherry.Placement.Agent = "codex"
+	}), "run ID in use")
+	if failures := f.startFailures(t); len(failures) != 0 {
+		t.Fatalf("start failures %#v, want none under another tenant's run ID", failures)
+	}
+	if terminals := f.terminals(t, admin.PoolEventsTopic(testPool)); terminals != 0 {
+		t.Fatalf("terminals %d, want none under another tenant's run ID", terminals)
+	}
+}
+
+func TestRunIDOwnershipSurvivesTheOwnersHostEnding(t *testing.T) {
+	f := newFixture(t, resultStream)
+	keyB := f.tenantB(t)
+	holder := testActiveRun(t, f, "run-a", 1)
+	if err := holder.commit(f.ctx, holder.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
+		t.Fatal(err)
+	}
+	denied := func(context.Context, string, string) error { return admin.ErrAuthorizationDenied }
+	if result := f.service.RevokeHost(f.ctx, testTenant, testHost, time.Millisecond, denied); !result.Complete {
+		t.Fatalf("revoke host: %#v", result.Steps)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.rejected(t, f.submit(t, keyB, asTenantB), "run ID in use")
+}
+
+func TestCancelOfAnotherTenantDoesNotStopTheRun(t *testing.T) {
+	f := newFixture(t, noResultStream)
+	keyB := f.tenantB(t)
+	f.sealOwn(t, credentialName, time.Hour)
+	f.adapter.endDelay = time.Minute
+	record := f.submit(t, f.host, nil)
+	// tenant-b's rejection is the first status under run-a.
+	f.rejected(t, f.submit(t, keyB, asTenantB), "run ID in use")
+	admitted := f.admitted(t, record)
+	ctx, stop := context.WithCancel(f.ctx)
+	defer stop()
+	done := make(chan kgo.AckStatus, 1)
+	go func() { done <- f.receiver.execute(ctx, f.service.Admin, record, admitted, 1) }()
+	for {
+		if _, _, follows, _ := f.adapter.counts(); follows > 0 {
+			break
+		}
+		if f.ctx.Err() != nil {
+			t.Fatal("the run never followed its job")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.publishCancel(t, "run-a", 1, keyB, func(cancel *wire.Cancel) { cancel.Tenant, cancel.Host = "tenant-b", "host-b" })
+	time.Sleep(3 * stateCheckInterval)
+	f.adapter.mu.Lock()
+	stops := f.adapter.stops
+	f.adapter.mu.Unlock()
+	select {
+	case status := <-done:
+		t.Fatalf("run ended with %v after tenant-b's cancel, want it still running", status)
+	default:
+	}
+	if stops != 0 {
+		t.Fatalf("stops %d, want tenant-a's run untouched by tenant-b's cancel", stops)
+	}
+	f.publishCancel(t, "run-a", 1, f.host, nil)
+	select {
+	case status := <-done:
+		if status != kgo.AckAccept {
+			t.Fatalf("status %v after tenant-a's cancel, want accept", status)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("tenant-a's own cancel did not stop its run")
+	}
+	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateCanceled || reason != "canceled by user" {
+		t.Fatalf("terminal %s %q, want CANCELED", state, reason)
 	}
 }

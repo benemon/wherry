@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -48,6 +49,9 @@ func TestRunEndingWithoutResultFails(t *testing.T) {
 	defer f.adapter.mu.Unlock()
 	if f.adapter.stops != 1 {
 		t.Fatalf("run ended without a result but Stop was called %d times, want 1", f.adapter.stops)
+	}
+	if logs := f.logs.String(); !strings.Contains(logs, `agent ended with exit code 1 signal "" on node node-1`) {
+		t.Fatalf("logs lack the terminal state:\n%s", logs)
 	}
 }
 
@@ -305,7 +309,7 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 	// The adopted job came from an earlier attempt, whose offer this attempt does not know.
 	t.Run("adopted", func(t *testing.T) {
 		m := newMultiFixture(t)
-		m.cloud.existing = true
+		m.cloud.job = JobRunning
 		if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
@@ -417,7 +421,7 @@ func TestTaskResultDataPartWhenJSON(t *testing.T) {
 		t.Run(result, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			run := testActiveRun(t, f, "run-json", 1)
-			if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: result}); status != kgo.AckAccept {
+			if status := run.finish(f.ctx, Handle{}, nil, agentResult{Result: result}); status != kgo.AckAccept {
 				t.Fatalf("status %v", status)
 			}
 			part := f.lastTask(t).Artifacts[0].Parts[0]
@@ -433,7 +437,7 @@ func TestTaskResultTextPartOtherwise(t *testing.T) {
 		t.Run(result, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			run := testActiveRun(t, f, "run-text", 1)
-			if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: result}); status != kgo.AckAccept {
+			if status := run.finish(f.ctx, Handle{}, nil, agentResult{Result: result}); status != kgo.AckAccept {
 				t.Fatalf("status %v", status)
 			}
 			task := f.lastTask(t)
@@ -451,7 +455,7 @@ func TestTaskResultTextPartOtherwise(t *testing.T) {
 func TestResultSharesTheTerminalTransaction(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-terminal", 1)
-	run.finish(f.ctx, Handle{Alloc: "alloc"}, []Line{{Offset: 0, Next: 5, Data: []byte("line")}}, agentResult{Result: "done"})
+	run.finish(f.ctx, Handle{}, []Line{{Offset: 0, Next: 5, Data: []byte("line")}}, agentResult{Result: "done"})
 	records := f.records(t, admin.TenantTopic(testTenant))
 	if len(records) != 3 {
 		t.Fatalf("feed records %d, want the last chunk, the result and the terminal", len(records))
@@ -473,7 +477,7 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 	t.Run("stop", func(t *testing.T) {
 		f := newFixture(t, resultStream)
 		run := testActiveRun(t, f, "run-release-stop", 1)
-		if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"}); status != kgo.AckAccept {
+		if status := run.finish(f.ctx, Handle{}, nil, agentResult{Result: "done"}); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
 		f.adapter.mu.Lock()
@@ -482,17 +486,17 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 			t.Fatalf("stops=%d releases=%v", f.adapter.stops, f.adapter.releaseIDs)
 		}
 	})
-	t.Run("dispatch error", func(t *testing.T) {
+	t.Run("dispatch error with no job", func(t *testing.T) {
 		f := newFixture(t, resultStream)
 		f.sealOwn(t, credentialName, time.Hour)
 		f.adapter.dispatchErr = errors.New("dispatch failed")
-		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckReject {
+		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 			t.Fatalf("status %v", status)
 		}
 		f.adapter.mu.Lock()
 		defer f.adapter.mu.Unlock()
-		if f.adapter.dispatches != 1 || f.adapter.releases != 1 {
-			t.Fatalf("dispatches=%d releases=%d", f.adapter.dispatches, f.adapter.releases)
+		if f.adapter.dispatches != 1 || f.adapter.lookups != 1 || f.adapter.releases != 1 {
+			t.Fatalf("dispatches=%d lookups=%d releases=%d", f.adapter.dispatches, f.adapter.lookups, f.adapter.releases)
 		}
 	})
 }
@@ -506,7 +510,7 @@ func TestResultLineStopsAllocationBeforeTerminal(t *testing.T) {
 		}
 		return nil
 	}
-	if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"}); status != kgo.AckAccept {
+	if status := run.finish(f.ctx, Handle{}, nil, agentResult{Result: "done"}); status != kgo.AckAccept {
 		t.Fatalf("finish status %v, want accept", status)
 	}
 	f.adapter.mu.Lock()
@@ -518,29 +522,52 @@ func TestResultLineStopsAllocationBeforeTerminal(t *testing.T) {
 }
 
 func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
+	pending := []Line{{Offset: 0, Next: 8, Data: []byte("working")}}
 	for _, test := range []struct {
 		name string
-		call func(*activeRun, context.Context) kgo.AckStatus
+		call func(*activeRun, context.Context, []Line) kgo.AckStatus
 	}{
-		{"result", func(run *activeRun, ctx context.Context) kgo.AckStatus {
-			return run.finish(ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"})
+		{"result", func(run *activeRun, ctx context.Context, pending []Line) kgo.AckStatus {
+			return run.finish(ctx, Handle{}, pending, agentResult{Result: "done"})
 		}},
-		{"failure", func(run *activeRun, ctx context.Context) kgo.AckStatus {
-			return run.stopAndFail(ctx, Handle{Alloc: "alloc"}, "timeout", nil)
+		{"failure", func(run *activeRun, ctx context.Context, pending []Line) kgo.AckStatus {
+			return run.stopAndFail(ctx, Handle{}, "timeout", pending)
 		}},
-		{"cancel", func(run *activeRun, ctx context.Context) kgo.AckStatus {
-			return run.stopAndCancel(ctx, Handle{Alloc: "alloc"}, nil)
+		{"cancel", func(run *activeRun, ctx context.Context, pending []Line) kgo.AckStatus {
+			return run.stopAndCancel(ctx, Handle{}, pending)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.adapter.stopErr = errors.New("stop failed")
 			run := testActiveRun(t, f, "run-stop-failure-"+test.name, 1)
-			if status := test.call(run, f.ctx); status != kgo.AckRelease {
+			if status := test.call(run, f.ctx, pending); status != kgo.AckRelease {
 				t.Fatalf("status %v, want release", status)
 			}
 			if feed, events := len(f.records(t, admin.TenantTopic(testTenant))), len(f.records(t, admin.PoolEventsTopic(testPool))); feed != 0 || events != 0 {
 				t.Fatalf("Stop failure published feed=%d events=%d", feed, events)
+			}
+		})
+		t.Run(test.name+" at the budget", func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.adapter.stopErr = errors.New("stop failed")
+			run := testActiveRun(t, f, "run-stop-budget-"+test.name, int64(testTerms().DeliveryLimit)-1)
+			status := test.call(run, f.ctx, pending)
+			if chunks := f.chunks(t); len(chunks) != 1 || chunks[0].ArtifactUpdate.Artifact.Parts[0].Text != "working" || !chunks[0].ArtifactUpdate.LastChunk {
+				t.Fatalf("chunks %#v, want the pending line as the last chunk", chunks)
+			}
+			if test.name == "result" {
+				// The agent's result stands; the job that would not stop is left to the sweep.
+				if task := f.lastTask(t); status != kgo.AckAccept || task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
+					t.Fatalf("status %v task %#v, want the completed result accepted", status, task.Status)
+				}
+				return
+			}
+			if status != kgo.AckReject {
+				t.Fatalf("status %v, want reject", status)
+			}
+			if state, reason := terminalReason(t, f, "run-stop-budget-"+test.name); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
+				t.Fatalf("terminal %s %q", state, reason)
 			}
 		})
 	}
@@ -689,16 +716,16 @@ func TestFollowErrorReasonIsFixed(t *testing.T) {
 	}
 }
 
-func TestDispatchErrorReasonIsFixed(t *testing.T) {
+func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 	const secret = "token=s3cr3t-dispatch-detail"
 	f := newFixture(t, resultStream)
 	f.sealOwn(t, credentialName, time.Hour)
 	f.adapter.dispatchErr = errors.New(secret)
-	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckReject {
+	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v", status)
 	}
-	if got := f.lastTask(t).Artifacts[0].Parts[0].Text; got != "dispatch failed" {
-		t.Fatalf("result reason %q, want fixed reason", got)
+	if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != "dispatch" {
+		t.Fatalf("start failures %#v, want one dispatch start failure", failures)
 	}
 	for _, topic := range []string{admin.PoolEventsTopic(testPool), admin.TenantTopic(testTenant)} {
 		for _, record := range f.records(t, topic) {
@@ -724,15 +751,15 @@ func TestAdapterErrorLogsCarryOnlyType(t *testing.T) {
 		}},
 		{"stop on result", func(t *testing.T, f fixture) {
 			f.adapter.stopErr = errors.New(secret)
-			testActiveRun(t, f, "run-log-result", 1).finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"})
+			testActiveRun(t, f, "run-log-result", 1).finish(f.ctx, Handle{}, nil, agentResult{Result: "done"})
 		}},
 		{"stop on failure", func(t *testing.T, f fixture) {
 			f.adapter.stopErr = errors.New(secret)
-			testActiveRun(t, f, "run-log-failure", 1).stopAndFail(f.ctx, Handle{Alloc: "alloc"}, "timeout", nil)
+			testActiveRun(t, f, "run-log-failure", 1).stopAndFail(f.ctx, Handle{}, "timeout", nil)
 		}},
 		{"stop on denial", func(t *testing.T, f fixture) {
 			f.adapter.stopErr = errors.New(secret)
-			testActiveRun(t, f, "run-log-denial", 1).deny(f.ctx, Handle{Alloc: "alloc"}, nil)
+			testActiveRun(t, f, "run-log-denial", 1).deny(f.ctx, Handle{}, nil)
 		}},
 		{"release", func(t *testing.T, f fixture) {
 			f.adapter.releaseErr = errors.New(secret)
@@ -865,7 +892,7 @@ func TestAgentResultOmittedWhenOversized(t *testing.T) {
 	}
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-oversized", 1)
-	if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, result); status != kgo.AckAccept {
+	if status := run.finish(f.ctx, Handle{}, nil, result); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
 	if artifact := f.lastTask(t).Artifacts[0]; artifact.Metadata != nil || artifact.Parts[0].Text != "done" {
@@ -886,7 +913,7 @@ func TestAgentResultOmittedWhenNotObject(t *testing.T) {
 	}
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-duplicate", 1)
-	if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, result); status != kgo.AckAccept {
+	if status := run.finish(f.ctx, Handle{}, nil, result); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
 	if artifact := f.lastTask(t).Artifacts[0]; artifact.Metadata != nil {
@@ -917,7 +944,7 @@ func TestReceiverRoutesToMatchedAdapter(t *testing.T) {
 
 func TestReceiverRedeliveryAdoptsViaLookup(t *testing.T) {
 	m := newMultiFixture(t)
-	m.cloud.existing = true
+	m.cloud.job = JobRunning
 	if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -939,7 +966,7 @@ func TestReceiverRedeliveryAdoptsViaLookup(t *testing.T) {
 
 func TestReceiverFirstAttemptSkipsLookup(t *testing.T) {
 	m := newMultiFixture(t)
-	m.cloud.existing = true
+	m.cloud.job = JobRunning
 	if status := m.execute(t, "run-first", cpu, 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -1136,7 +1163,7 @@ func TestResultAfterLastingDenialReleasesTask(t *testing.T) {
 	f.receiver.mu.Lock()
 	f.receiver.deniedSince = time.Now().Add(-time.Hour)
 	f.receiver.mu.Unlock()
-	if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"}); status != kgo.AckRelease {
+	if status := run.finish(f.ctx, Handle{}, nil, agentResult{Result: "done"}); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release: an untrusted result must not end the task", status)
 	}
 	if state, reason := terminalReason(t, f, "run-denied-result"); state != wire.TaskStateFailed || reason != "receiver denied" {
@@ -1226,7 +1253,7 @@ func TestAmbiguousCommitReadBack(t *testing.T) {
 				}
 				return kerr.RequestTimedOut
 			}
-			if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"}); status != test.ack {
+			if status := run.finish(f.ctx, Handle{}, nil, agentResult{Result: "done"}); status != test.ack {
 				t.Fatalf("status %v, want %v; logs:\n%s", status, test.ack, f.logs.String())
 			}
 			if _, _, _, releases := f.adapter.counts(); releases != test.releases {
@@ -1325,5 +1352,386 @@ func TestRetiredKeyForgeryDoesNotBlockTheRealTurn(t *testing.T) {
 	}
 	if admitted, ack := f.receiver.admit(f.ctx, forged); admitted != nil || ack != kgo.AckReject {
 		t.Fatalf("the retired-key forgery admitted=%v ack=%v, want a silent rejection", admitted != nil, ack)
+	}
+}
+
+func (f fixture) startFailures(t *testing.T) []wire.StartFailure {
+	t.Helper()
+	var failures []wire.StartFailure
+	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
+		var failure wire.StartFailure
+		if wire.ParseRecord(record.Value, f.keys(), &failure) == nil {
+			failures = append(failures, failure)
+		}
+	}
+	return failures
+}
+
+func (f fixture) kinds(t *testing.T) []string {
+	t.Helper()
+	var kinds []string
+	for _, status := range f.eventStatuses(t) {
+		kinds = append(kinds, status.Wherry.Kind)
+	}
+	return kinds
+}
+
+func TestAmbiguousDispatchAdoptsTheExistingJob(t *testing.T) {
+	t.Run("lookup finds it", func(t *testing.T) {
+		f := newFixture(t, resultStream)
+		f.sealOwn(t, credentialName, time.Hour)
+		f.adapter.dispatchErr = errors.New("register response lost")
+		f.adapter.job = JobRunning
+		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
+			t.Fatalf("status %v, want the existing job followed to its result", status)
+		}
+		f.adapter.mu.Lock()
+		defer f.adapter.mu.Unlock()
+		if f.adapter.dispatches != 1 || f.adapter.follows != 1 || f.adapter.purges != 0 {
+			t.Fatalf("dispatches=%d follows=%d purges=%d", f.adapter.dispatches, f.adapter.follows, f.adapter.purges)
+		}
+	})
+	t.Run("redelivery finds it", func(t *testing.T) {
+		f := newFixture(t, resultStream)
+		f.sealOwn(t, credentialName, time.Hour)
+		f.adapter.dispatchErr = errors.New("register response lost")
+		f.adapter.lookupErr = errors.New("lookup failed")
+		record := f.submit(t, f.host, nil)
+		if status := f.execute(t, record, 1); status != kgo.AckRelease {
+			t.Fatalf("unresolved dispatch status %v, want release", status)
+		}
+		f.adapter.mu.Lock()
+		lookups, purges, releases := f.adapter.lookups, f.adapter.purges, f.adapter.releases
+		f.adapter.lookupErr, f.adapter.job = nil, JobRunning
+		f.adapter.mu.Unlock()
+		if lookups != 3 || purges != 0 || releases != 0 || len(f.startFailures(t)) != 0 {
+			t.Fatalf("lookups=%d purges=%d releases=%d start failures=%d; want three lookups and nothing removed", lookups, purges, releases, len(f.startFailures(t)))
+		}
+		if status := f.execute(t, record, 2); status != kgo.AckAccept {
+			t.Fatalf("redelivery status %v, want the job adopted", status)
+		}
+		if dispatches, _, follows, _ := f.adapter.counts(); dispatches != 1 || follows != 1 {
+			t.Fatalf("dispatches=%d follows=%d, want the one job adopted", dispatches, follows)
+		}
+	})
+}
+
+func TestReturnTaskAtTheBudgetFailsWithoutRemoving(t *testing.T) {
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-a", int64(testTerms().DeliveryLimit)-1)
+	if status := run.returnTask(f.ctx, nil); status != kgo.AckReject {
+		t.Fatalf("status %v, want reject", status)
+	}
+	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
+		t.Fatalf("terminal %s %q", state, reason)
+	}
+	f.adapter.mu.Lock()
+	calls := f.adapter.calls
+	f.adapter.mu.Unlock()
+	if len(calls) != 0 {
+		t.Fatalf("calls %v, want the job and material left in place", calls)
+	}
+	run.attempt--
+	if status := run.returnTask(f.ctx, nil); status != kgo.AckRelease {
+		t.Fatalf("status %v below the budget, want release", status)
+	}
+}
+
+func TestMismatchedJobIsPurgedNotAdopted(t *testing.T) {
+	for name, mismatch := range map[string]func(*fakeAdapter){
+		"adapter": func(adapter *fakeAdapter) { adapter.jobAdapter = "renamed" },
+		"agent":   func(adapter *fakeAdapter) { adapter.jobAgent = "codex" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := newMultiFixture(t)
+			m.cloud.job = JobRunning
+			mismatch(m.cloud)
+			if status := m.execute(t, "run-mismatch", cpu, 2); status != kgo.AckAccept {
+				t.Fatalf("status %v", status)
+			}
+			m.cloud.mu.Lock()
+			stops, purges, follows, adapter, agent := m.cloud.stops, m.cloud.purges, m.cloud.follows, cmp.Or(m.cloud.jobAdapter, "cloud"), cmp.Or(m.cloud.jobAgent, "claude")
+			m.cloud.mu.Unlock()
+			if stops != 1 || purges != 1 || follows != 0 {
+				t.Fatalf("mismatched job: stops=%d purges=%d follows=%d, want stopped and purged, not followed", stops, purges, follows)
+			}
+			if dispatches, _, follows, _ := m.lab.counts(); dispatches != 1 || follows != 1 {
+				t.Fatalf("matched adapter dispatches=%d follows=%d, want a fresh dispatch", dispatches, follows)
+			}
+			if want := fmt.Sprintf("run run-mismatch: purged a job from adapter %q agent %q", adapter, agent); !strings.Contains(m.logs.String(), want) {
+				t.Fatalf("logs lack %q:\n%s", want, m.logs.String())
+			}
+		})
+	}
+}
+
+func TestNeverStartedJobIsAPlatformStartFailure(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.sealOwn(t, credentialName, time.Hour)
+	f.adapter.job = JobNeverStarted
+	if status := f.execute(t, f.submit(t, f.host, nil), 2); status != kgo.AckRelease {
+		t.Fatalf("status %v, want release", status)
+	}
+	if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != "platform" || failures[0].Adapter != "nomad" {
+		t.Fatalf("start failures %#v, want one platform start failure", failures)
+	}
+	if kinds := f.kinds(t); slices.Contains(kinds, "started") {
+		t.Fatalf("statuses %v, want no started status for a job that never started", kinds)
+	}
+	if dispatches, _, follows, _ := f.adapter.counts(); dispatches != 0 || follows != 0 {
+		t.Fatalf("dispatches=%d follows=%d, want neither", dispatches, follows)
+	}
+}
+
+func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		attempt int64
+		class   string
+		setup   func(*testing.T, fixture)
+	}{
+		{"seal unavailable", 1, "seal-unavailable", func(t *testing.T, f fixture) {
+			_, sealing := f.addPeer(t, "receiver-b", testPool)
+			f.seal(t, "receiver-b", sealing.PublicKey(), credentialName, testToken, time.Now(), time.Hour)
+		}},
+		{"nothing created", 1, "dispatch", func(t *testing.T, f fixture) { f.adapter.outcome = OutcomeNothingCreated }},
+		{"unknown and absent", 1, "dispatch", func(t *testing.T, f fixture) { f.adapter.dispatchErr = errors.New("register failed") }},
+		{"unknown and never started", 1, "platform", func(t *testing.T, f fixture) {
+			f.adapter.dispatchErr, f.adapter.job = errors.New("wait failed"), JobNeverStarted
+		}},
+		{"adopted never started", 2, "platform", func(t *testing.T, f fixture) { f.adapter.job = JobNeverStarted }},
+		{"followed never started", 1, "platform", func(t *testing.T, f fixture) { f.adapter.stream, f.adapter.neverStarted = nil, true }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			test.setup(t, f)
+			if test.class != "seal-unavailable" {
+				f.sealOwn(t, credentialName, time.Hour)
+			}
+			if status := f.execute(t, f.submit(t, f.host, nil), test.attempt); status != kgo.AckRelease {
+				t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
+			}
+			if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != test.class {
+				t.Fatalf("start failures %#v, want one %s", failures, test.class)
+			}
+			f.adapter.mu.Lock()
+			calls := f.adapter.calls
+			f.adapter.mu.Unlock()
+			if !slices.Equal(calls, []string{"purge", "release"}) {
+				t.Fatalf("calls %v, want purge then release", calls)
+			}
+		})
+	}
+}
+
+func TestPurgeRetriedUntilItSucceeds(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.sealOwn(t, credentialName, time.Hour)
+	f.adapter.outcome, f.adapter.purgeFailures = OutcomeNothingCreated, 2
+	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
+		t.Fatalf("status %v, want release", status)
+	}
+	f.adapter.mu.Lock()
+	defer f.adapter.mu.Unlock()
+	if f.adapter.purges != 3 || f.adapter.releases != 1 {
+		t.Fatalf("purges=%d releases=%d, want 3 and 1", f.adapter.purges, f.adapter.releases)
+	}
+}
+
+func TestPurgeFailingPastTheDeadlineFails(t *testing.T) {
+	previous := purgeDeadline
+	purgeDeadline = time.Second
+	t.Cleanup(func() { purgeDeadline = previous })
+	f := newFixture(t, resultStream)
+	f.sealOwn(t, credentialName, time.Hour)
+	f.adapter.outcome, f.adapter.purgeErr = OutcomeNothingCreated, errors.New("deregister denied")
+	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckReject {
+		t.Fatalf("status %v, want reject", status)
+	}
+	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "start failed and the job could not be removed" {
+		t.Fatalf("terminal %s %q", state, reason)
+	}
+	f.adapter.mu.Lock()
+	defer f.adapter.mu.Unlock()
+	if f.adapter.purges < 3 {
+		t.Fatalf("purges %d, want retries every renew interval", f.adapter.purges)
+	}
+}
+
+func TestStartFailureAtTheDeliveryBudgetFails(t *testing.T) {
+	limit := int64(testTerms().DeliveryLimit)
+	for _, test := range []struct {
+		attempt int64
+		ack     kgo.AckStatus
+	}{
+		{limit - 2, kgo.AckRelease},
+		{limit - 1, kgo.AckReject},
+	} {
+		t.Run(fmt.Sprint(test.attempt), func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.sealOwn(t, credentialName, time.Hour)
+			f.adapter.outcome = OutcomeNothingCreated
+			if status := f.execute(t, f.submit(t, f.host, nil), test.attempt); status != test.ack {
+				t.Fatalf("status %v, want %v", status, test.ack)
+			}
+			if len(f.startFailures(t)) != 1 {
+				t.Fatal("no start failure")
+			}
+			if test.ack != kgo.AckReject {
+				return
+			}
+			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
+				t.Fatalf("terminal %s %q", state, reason)
+			}
+		})
+	}
+}
+
+func TestOversizedHandleIsRejected(t *testing.T) {
+	for _, test := range []struct {
+		size int
+		ack  kgo.AckStatus
+	}{
+		{maxHandle, kgo.AckAccept},
+		{maxHandle + 1, kgo.AckRelease},
+	} {
+		t.Run(fmt.Sprint(test.size), func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.sealOwn(t, credentialName, time.Hour)
+			f.adapter.handleSize = test.size
+			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != test.ack {
+				t.Fatalf("status %v, want %v", status, test.ack)
+			}
+			if test.ack == kgo.AckAccept {
+				return
+			}
+			if _, _, follows, releases := f.adapter.counts(); follows != 0 || releases != 0 || slices.Contains(f.kinds(t), "started") {
+				t.Fatalf("follows=%d releases=%d statuses %v, want the handle refused before started", follows, releases, f.kinds(t))
+			}
+			f.adapter.mu.Lock()
+			defer f.adapter.mu.Unlock()
+			if f.adapter.stops != 1 {
+				t.Fatalf("stops %d, want the job behind the refused handle stopped", f.adapter.stops)
+			}
+		})
+	}
+}
+
+func TestReleasesAtTheBudgetFail(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*testing.T, fixture)
+		// readable is false when the fault also blocks reading the feed back.
+		readable bool
+	}{
+		{"read seals", func(t *testing.T, f fixture) {
+			if _, err := kadm.NewClient(f.service.Admin).DeleteTopics(f.ctx, admin.HostTopic(testTenant, testHost)); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"read events", func(t *testing.T, f fixture) {
+			f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+				f.cluster.KeepControl()
+				req := request.(*kmsg.ListOffsetsRequest)
+				response := kmsg.NewPtrListOffsetsResponse()
+				response.SetVersion(req.Version)
+				for _, topic := range req.Topics {
+					out := kmsg.ListOffsetsResponseTopic{Topic: topic.Topic}
+					for _, partition := range topic.Partitions {
+						out.Partitions = append(out.Partitions, kmsg.ListOffsetsResponseTopicPartition{Partition: partition.Partition, ErrorCode: kerr.UnknownServerError.Code})
+					}
+					response.Topics = append(response.Topics, out)
+				}
+				return response, nil, true
+			})
+		}, false},
+		{"adoption lookup", func(t *testing.T, f fixture) { f.adapter.lookupErr = errors.New("lookup failed") }, true},
+		{"mismatch stop", func(t *testing.T, f fixture) {
+			f.adapter.job, f.adapter.jobAgent, f.adapter.stopErr = JobRunning, "codex", errors.New("stop failed")
+		}, true},
+		{"mismatch purge", func(t *testing.T, f fixture) {
+			f.adapter.job, f.adapter.jobAgent, f.adapter.purgeErr = JobRunning, "codex", errors.New("purge failed")
+		}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.sealOwn(t, credentialName, time.Hour)
+			record := f.submit(t, f.host, nil)
+			admitted := f.admitted(t, record)
+			test.setup(t, f)
+			if status := f.receiver.execute(f.ctx, f.service.Admin, record, admitted, int64(testTerms().DeliveryLimit)-1); status != kgo.AckReject {
+				t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
+			}
+			if !test.readable {
+				return
+			}
+			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
+				t.Fatalf("terminal %s %q", state, reason)
+			}
+		})
+	}
+}
+
+func TestShutdownAtTheBudgetStillReleases(t *testing.T) {
+	f := newFixture(t, noResultStream)
+	f.sealOwn(t, credentialName, time.Hour)
+	f.adapter.endDelay = 30 * time.Second
+	record := f.submit(t, f.host, nil)
+	admitted := f.admitted(t, record)
+	ctx, shutdown := context.WithCancel(f.ctx)
+	defer shutdown()
+	done := make(chan kgo.AckStatus, 1)
+	go func() {
+		done <- f.receiver.execute(ctx, f.service.Admin, record, admitted, int64(testTerms().DeliveryLimit)-1)
+	}()
+	for {
+		if _, _, follows, _ := f.adapter.counts(); follows > 0 {
+			break
+		}
+		if f.ctx.Err() != nil {
+			t.Fatal("the run never followed its job")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	shutdown()
+	if status := <-done; status != kgo.AckRelease {
+		t.Fatalf("status %v, want release: an adopter continues the run", status)
+	}
+	if kinds := f.kinds(t); slices.Contains(kinds, "terminal") {
+		t.Fatalf("statuses %v, want no terminal at shutdown", kinds)
+	}
+}
+
+func TestJobOfAnotherAdapterIsLeftToIt(t *testing.T) {
+	m := newMultiFixture(t)
+	// lab and cloud share one backend: both find the job, labelled with cloud.
+	m.lab.job, m.lab.jobAdapter = JobRunning, "cloud"
+	m.cloud.job = JobRunning
+	if status := m.execute(t, "run-shared", cpu, 2); status != kgo.AckAccept {
+		t.Fatalf("status %v", status)
+	}
+	m.lab.mu.Lock()
+	stops, purges, labFollows := m.lab.stops, m.lab.purges, m.lab.follows
+	m.lab.mu.Unlock()
+	if stops != 0 || purges != 0 || labFollows != 0 {
+		t.Fatalf("lab stops=%d purges=%d follows=%d, want the job left to cloud", stops, purges, labFollows)
+	}
+	if dispatches, _, follows, _ := m.cloud.counts(); dispatches != 0 || follows != 1 {
+		t.Fatalf("cloud dispatches=%d follows=%d, want the job adopted by cloud", dispatches, follows)
+	}
+}
+
+func TestNothingCreatedSkipsReconcile(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.sealOwn(t, credentialName, time.Hour)
+	f.adapter.outcome = OutcomeNothingCreated
+	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
+		t.Fatalf("status %v, want release", status)
+	}
+	if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != "dispatch" {
+		t.Fatalf("start failures %#v, want one dispatch", failures)
+	}
+	if _, lookups, _, _ := f.adapter.counts(); lookups != 0 {
+		t.Fatalf("lookups %d, want none for an outcome the adapter knows", lookups)
 	}
 }

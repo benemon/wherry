@@ -180,12 +180,13 @@ part. The fixed texts are:
   `duplicate continuation`, `stale submission`,
   `task is not awaiting continuation`, `continuation turn out of order`,
   `continuation history unavailable`, `queue deadline passed`,
-  `run deadline passed`, `unsupported message part`;
+  `run deadline passed`, `unsupported message part`, `run ID in use`;
 - interrupted: `credential <name> required`;
-- failed: `timeout`, `dispatch failed`, `log stream failed`,
+- failed: `timeout`, `log stream failed`,
   `agent ended without a result`, `git context unavailable`,
-  `receiver denied`. A failure the agent reports carries no message; its
-  result holds the agent's text;
+  `receiver denied`, `delivery budget exhausted`,
+  `start failed and the job could not be removed`. A failure the agent
+  reports carries no message; its result holds the agent's text;
 - canceled: `canceled by user`.
 
 `metadata.credential` names the credential. The `wherry` CLI and MCP
@@ -264,8 +265,9 @@ The `metadata` of a result's `Task` says where the turn ran:
   dispatched the job to. It is absent when no job was dispatched, when the
   attempt adopted an earlier attempt's job, and when the adapter declares no
   labels.
-- `job` (string): the platform's ID for the job. It is absent when no job
-  was dispatched.
+- `job` (string): the adapter's reference for the job on its platform, for
+  diagnosis only. It is absent when no job was dispatched or adopted, and
+  when the adapter gives none.
 
 The `metadata` of the `result` artifact holds `agent_result` (object): the
 agent's final result line, decoded as a JSON object, with its `result`
@@ -332,7 +334,10 @@ An advertisement reports a receiver's liveness and capacity.
 
 A start failure records that a receiver could not start a turn's attempt.
 The receiver writes it to the pool's events and releases the task to the
-pool.
+pool. For every class but `offer-unavailable`, the receiver first removes
+the turn's job from the platform. When it cannot, it retries for 5 minutes,
+then ends the turn `TASK_STATE_FAILED` with the message text
+`start failed and the job could not be removed`.
 
 ```json
 {
@@ -348,9 +353,37 @@ pool.
 | --- | --- |
 | `offer-unavailable` | no ready adapter satisfies the task's agent and selector |
 | `seal-unavailable` | this receiver opens no seal for the credential, and another live member holds an unexpired one |
+| `dispatch` | the adapter created no job for the turn |
+| `platform` | the platform ended the job before its agent task started, for example when the image cannot be pulled |
+
+A `platform` start failure can follow the turn's `started` status, when the
+job ended before its agent task started.
 
 `adapter` is the adapter the receiver routed the task to. For
 `offer-unavailable` it is `none`, since no adapter was chosen.
+
+### Delivery budget
+
+From an attempt of the pool's `delivery_limit` minus 1, a receiver that
+would release a task to the pool ends the turn `TASK_STATE_FAILED` with the
+message text `delivery budget exhausted` instead. This covers start
+failures, a dispatch whose outcome the receiver cannot resolve, a failed
+read of the pool's events or the tenant's seals once the turn is claimed,
+and a failure to find, stop or remove the turn's job. When the agent has
+written its result and only stopping the job fails, the turn ends with that
+result. These releases are exempt:
+
+- a receiver that cannot read the pool's events at admission releases the
+  task, since it cannot check for a committed terminal;
+- a receiver that cannot read the run's turns at admission releases the
+  task, since it cannot tell whose run ID it is;
+- a receiver that is shutting down releases the task, since an adopter
+  continues the run;
+- a denied receiver releases the task, since it cannot write;
+- a receiver that cannot build the run's transactional producer releases
+  the task, since it cannot write.
+
+A receiver whose write of the terminal fails releases the task.
 
 ## Key records
 
@@ -482,15 +515,21 @@ A receiver that claims a submission:
 3. rejects it when its agent is outside the pool's terms;
 4. writes an `offer-unavailable` start failure and releases it when no
    ready adapter satisfies the placement;
-5. rejects a duplicate, stale or out-of-order turn, unless a cancel covers
+5. rejects it with `run ID in use` when the run ID belongs to another
+   tenant: the tenant of the run's earliest submission on the pool's task
+   topic that a live host's key verifies, or of the run's earliest status
+   other than a rejection on the pool's events. Ownership survives the
+   owner's host being ended, since the run's statuses still name its
+   tenant. This check comes before any record is written under the run ID;
+6. rejects a duplicate, stale or out-of-order turn, unless a cancel covers
    it;
-6. rejects a continuation whose earlier turns it cannot read;
-7. rejects it when its queue deadline or run deadline has passed;
-8. rejects it when a part other than text, or other than one git part the
+7. rejects a continuation whose earlier turns it cannot read;
+8. rejects it when its queue deadline or run deadline has passed;
+9. rejects it when a part other than text, or other than one git part the
    adapter delivers, appears in the run's turns;
-9. writes the echo and the `claimed` status.
+10. writes the echo and the `claimed` status.
 
-A turn a cancel covers skips steps 7 and 8, and ends `TASK_STATE_CANCELED`
+A turn a cancel covers skips steps 8 and 9, and ends `TASK_STATE_CANCELED`
 after its `claimed` status.
 
 ## Git context

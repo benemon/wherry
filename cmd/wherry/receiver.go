@@ -37,8 +37,8 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	logger := log.New(stdout, "receiver: ", log.LstdFlags|log.LUTC)
-	r, err := receiver.New(bundle, *stateDir, func(settings admin.AdapterSettings) (receiver.Named, error) {
-		return newAdapter(settings, platformToken(bundle, settings.Name))
+	r, err := receiver.New(bundle, *stateDir, func(pool string, settings admin.AdapterSettings) (receiver.Named, error) {
+		return newAdapter(pool, settings, platformToken(bundle, settings.Name))
 	}, logger)
 	if err != nil {
 		return err
@@ -83,7 +83,7 @@ func platformToken(bundle admin.Bundle, name string) string {
 }
 
 // newAdapter builds one configured adapter; token is the bundle's platform credential for its name.
-func newAdapter(settings admin.AdapterSettings, token string) (receiver.Named, error) {
+func newAdapter(pool string, settings admin.AdapterSettings, token string) (receiver.Named, error) {
 	switch settings.Type {
 	case "nomad":
 		encoded, err := json.Marshal(settings.Config)
@@ -97,7 +97,7 @@ func newAdapter(settings admin.AdapterSettings, token string) (receiver.Named, e
 		if settings.Credential != "" && config.CredentialEnv == "" {
 			return receiver.Named{}, fmt.Errorf("adapter %s has a credential but no credential_env", settings.Name)
 		}
-		adapter, err := nomad.New(config, token)
+		adapter, err := nomad.New(config, pool, token)
 		if err != nil {
 			return receiver.Named{}, fmt.Errorf("adapter %s: %w", settings.Name, err)
 		}

@@ -443,7 +443,10 @@ receiver renews its lock every 10 seconds; wherry does not check this. The
 broker bounds it between
 `group.share.min.record.lock.duration.ms` and
 `group.share.max.record.lock.duration.ms`. Every delivery counts against
-`delivery_limit`, including a release after a start failure.
+`delivery_limit`, including a release after a start failure. From attempt
+`delivery_limit` minus 1, a receiver ends a turn `TASK_STATE_FAILED` with
+`delivery budget exhausted` where it would release it, except in the cases
+the [extension](a2a-extension-v1.md#delivery-budget) lists.
 
 ```yaml
 agents:
@@ -540,16 +543,30 @@ adapters:
 #### Agent jobs
 
 The Nomad adapter registers one batch job per turn,
-`agent-<run>-t<turn>`, in its namespace, node pool and datacenters, with
+`agent-<pool>-<run>-t<turn>`, in its namespace, node pool and datacenters, with
 restarts and rescheduling disabled. Its task group `agent` holds the task
 `agent`, built from the adapter's `runtime`, and the prestart task `git`
-when the run carries a git context.
+when the run carries a git context. The job's metadata holds `run_id`,
+`turn`, `attempt`, `adapter` and `agent`. A receiver adopts an existing
+job only when its `adapter` and `agent` match the adapter that finds it.
+It leaves a job whose `adapter` names another of its adapters to that
+adapter, and stops and purges any other job under the turn's ID and
+dispatches the turn again.
 
 The prompt, the credential and the git context travel in Nomad variables
-under `nomad/jobs/agent-<run>-t<turn>`, which the job's own workload
+under `nomad/jobs/agent-<pool>-<run>-t<turn>`, which the job's own workload
 identity reads. The adapter deletes them when the turn ends. Every 30
 seconds it also deletes the variables of jobs that have stopped, and of
-jobs never registered within 10 minutes.
+jobs never registered within 10 minutes, and purges agent jobs that have
+been dead for 10 minutes. `<pool>` is the first 12 hexadecimal digits of
+the SHA-256 of the pool name, since Nomad limits a variable path to 128
+characters. A receiver sweeps only its own pool's jobs and variables. The 10 minutes run from a job's last allocation
+change, so a turn whose job ended while no pool member could hold it for
+longer than that runs again from the start on its next delivery.
+
+An agent task with no `Started` event in a terminal allocation never
+started. The receiver records a `platform` start failure, purges the job
+and its variables, and returns the task to the pool.
 
 An adapter is ready when some ready, eligible node in its node pool and
 datacenters has the runtime's driver detected and healthy. A receiver with
