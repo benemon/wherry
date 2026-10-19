@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"path/filepath"
@@ -14,31 +13,12 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
-	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/twmb/franz-go/pkg/kadm"
-	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// connectTo opens a client per call on the cluster kafka is connected to, as Connect does for the configured broker.
-func connectTo(kafka *kgo.Client, userKey ed25519.PrivateKey, replyTopic string) func() (*busclient.Client, error) {
-	return func() (*busclient.Client, error) {
-		connection, err := kgo.NewClient(
-			kgo.SeedBrokers(kafka.OptValue(kgo.SeedBrokers).([]string)...),
-			kgo.FetchMaxWait(10*time.Millisecond),
-			kgo.FetchIsolationLevel(kgo.ReadCommitted()),
-			kgo.KeepControlRecords(),
-		)
-		if err != nil {
-			return nil, err
-		}
-		return busclient.New(connection, userKey, replyTopic), nil
-	}
-}
-
 // mcpSession connects an MCP client to newMCPServer over in-memory transports; progress counts notifications received.
-func mcpSession(t *testing.T, connect func() (*busclient.Client, error), progress *atomic.Int64) *mcp.ClientSession {
+func mcpSession(t *testing.T, connect func() (*busclient.Host, error), progress *atomic.Int64) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -105,31 +85,11 @@ func toolText(result *mcp.CallToolResult) string {
 	return strings.Join(texts, "\n")
 }
 
-// publishCapability publishes a live capability for receiver-a matching enrolledReceiver's approval.
-func publishCapability(t *testing.T, ctx context.Context, kafka *kgo.Client, receiverKey ed25519.PrivateKey) {
-	t.Helper()
-	encoded, err := wire.MarshalPayload(wire.TypeCapability, &wire.Capability{
-		ReceiverID: "receiver-a", Labels: map[string]string{}, Pool: "default",
-		Offers:   []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}},
-		Capacity: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	capability, err := wire.MarshalEnvelope(wire.Sign(wire.TypeCapability, encoded, receiverKey))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicCapability, Key: []byte("receiver-a"), Value: capability}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 var submitArguments = map[string]any{"prompt": "fix the bug", "selector": map[string]any{"runtime": []string{"exec"}}}
 
 func TestMCPToolsList(t *testing.T) {
-	_, kafka, _, userKey, _ := enrolledReceiver(t)
-	session := mcpSession(t, connectTo(kafka, userKey, "replies.test"), nil)
+	b := newBus(t)
+	session := mcpSession(t, b.connect(t), nil)
 	if version := session.InitializeResult().ProtocolVersion; version != "2026-07-28" {
 		t.Fatalf("negotiated protocol %q, want 2026-07-28", version)
 	}
@@ -159,10 +119,18 @@ func TestMCPToolsList(t *testing.T) {
 		if tool.Description == "" {
 			t.Errorf("%s has no description", name)
 		}
+		for _, stale := range []string{"enrol", "after the user has sealed"} {
+			if strings.Contains(tool.Description, stale) {
+				t.Errorf("%s description still says %q", name, stale)
+			}
+		}
 		for kind, schema := range map[string]any{"input": tool.InputSchema, "output": tool.OutputSchema} {
 			encoded, err := json.Marshal(schema)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), "revoked") {
+				t.Errorf("%s %s schema keeps a revocation field: %s", name, kind, encoded)
 			}
 			var decoded struct {
 				Type       string         `json:"type"`
@@ -200,21 +168,18 @@ func TestMCPToolsList(t *testing.T) {
 }
 
 func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
-	ctx, kafka, _, userKey, receiverKey := enrolledReceiver(t)
-	if _, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, 1, nil, "replies.test"); err != nil {
-		t.Fatal(err)
-	}
-	publishCapability(t, ctx, kafka, receiverKey)
-	session := mcpSession(t, connectTo(kafka, userKey, "replies.test"), nil)
+	b := newBus(t)
+	ctx := b.ctx
+	session := mcpSession(t, b.connect(t), nil)
 
 	var receivers receiversOutput
 	callTool(t, ctx, session, "receivers", map[string]any{}, &receivers)
-	if len(receivers.Receivers) != 1 || receivers.Receivers[0].ReceiverID != "receiver-a" || receivers.Receivers[0].Pool != "default" {
+	if len(receivers.Receivers) != 1 || receivers.Receivers[0].ReceiverID != "receiver-a" || receivers.Receivers[0].Pool != "pool-a" || receivers.Receivers[0].Status != "live" {
 		t.Fatalf("receivers %#v", receivers)
 	}
 	var submitted submitOutput
 	callTool(t, ctx, session, "submit", submitArguments, &submitted)
-	if !strings.HasPrefix(submitted.ID, "run-") || submitted.Pool != "default" {
+	if !strings.HasPrefix(submitted.ID, "run-") || submitted.Pool != "pool-a" {
 		t.Fatalf("submit %#v", submitted)
 	}
 	var status statusOutput
@@ -234,75 +199,18 @@ func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 		awaited <- reply
 	}()
 
-	// The receiver's side: claim the verified submission, then publish the records run.go commits on completion.
-	reader, err := kgo.NewClient(kgo.SeedBrokers(kafka.OptValue(kgo.SeedBrokers).([]string)...), kgo.FetchMaxWait(10*time.Millisecond),
-		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{wire.TopicTask: {0: kgo.NewOffset().AtStart()}}))
-	if err != nil {
-		t.Fatal(err)
+	// The receiver's side: claim the authorised task, then commit what admission and completion commit.
+	admitted := b.tasks(t, submitted.ID)[0]
+	if placement := admitted.submission.Wherry.Placement; placement.Agent != "claude" || placement.Runtime != "exec" {
+		t.Fatalf("placement %#v", placement)
 	}
-	defer reader.Close()
-	var submission *wire.SubmissionRecord
-	var submissionHash string
-	for submission == nil {
-		fetches := reader.PollFetches(ctx)
-		if err := fetches.Err(); err != nil {
-			t.Fatal(err)
-		}
-		for _, record := range fetches.Records() {
-			if verified, err := trust.VerifyRootSubmission(record.Value, userKey.Public().(ed25519.PublicKey)); err == nil && verified.Wherry.RunID == submitted.ID {
-				submission, submissionHash = verified, trust.EnvelopeHash(record.Value)
-			}
-		}
-	}
-	signed := func(topic string, recordType wire.RecordType, payload any) *kgo.Record {
-		encoded, err := wire.MarshalPayload(recordType, payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		envelope, err := wire.MarshalEnvelope(wire.Sign(recordType, encoded, receiverKey))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return &kgo.Record{Topic: topic, Key: []byte(submitted.ID), Value: envelope}
-	}
-	statusRecord := func(kind string, state wire.TaskState) *kgo.Record {
-		return signed(wire.TopicEvent, wire.TypeStatus, &wire.StatusRecord{
-			StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: submitted.ID, ContextID: submission.Wherry.Lineage.RootRunID, Status: wire.TaskStatus{
-				State: state, Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
-			}},
-			Wherry: wire.StatusExtension{Turn: 1, Attempt: 1, TaskHash: submissionHash, ReceiverID: "receiver-a", Kind: kind},
-		})
-	}
-	if err := kafka.ProduceSync(ctx, statusRecord("claimed", wire.TaskStateWorking)).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
+	b.feed(t, submitted.ID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
 	callTool(t, ctx, session, "status", map[string]any{"id": submitted.ID}, &status)
 	if status.State != string(wire.TaskStateWorking) {
 		t.Fatalf("status after claim %#v", status)
 	}
-	completed := wire.TaskStatus{State: wire.TaskStateCompleted, Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
-	task := signed("replies.test", wire.TypeTask, &wire.TaskRecord{
-		Task: wire.Task{
-			ID: submitted.ID, ContextID: submission.Wherry.Lineage.RootRunID, Status: completed, History: []wire.Message{submission.Message},
-			Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{{Data: jsontext.Value(`{"answer":42}`), MediaType: "application/json"}}, Extensions: []string{wire.ExtensionURI}}},
-		},
-		Wherry: wire.TaskExtension{Turn: 1, Attempt: 1, TaskHash: submissionHash},
-	})
-	// run.go commits the final task and its terminal status in one transaction.
-	producer, err := kgo.NewClient(kgo.SeedBrokers(kafka.OptValue(kgo.SeedBrokers).([]string)...), kgo.TransactionalID(submitted.ID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer producer.Close()
-	if err := producer.BeginTransaction(); err != nil {
-		t.Fatal(err)
-	}
-	if err := producer.ProduceSync(ctx, task, statusRecord("terminal", wire.TaskStateCompleted)).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
-	if err := producer.EndTransaction(ctx, kgo.TryCommit); err != nil {
-		t.Fatal(err)
-	}
+	b.feed(t, submitted.ID, b.result(t, admitted, []wire.Part{{Data: jsontext.Value(`{"answer":42}`), MediaType: "application/json"}}),
+		b.status(t, admitted, "terminal-1", "terminal", now(wire.TaskStateCompleted)))
 
 	reply := <-awaited
 	if reply.ID != submitted.ID || reply.State != string(wire.TaskStateCompleted) || reply.RetryAfter != 0 || len(reply.Artifacts) != 1 ||
@@ -312,20 +220,18 @@ func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 	}
 	var events eventsOutput
 	callTool(t, ctx, session, "events", map[string]any{"id": submitted.ID}, &events)
-	if len(events.Events) != 2 || events.Events[0].Kind != "claimed" || events.Events[1].State != string(wire.TaskStateCompleted) || events.Cancelled {
+	if len(events.Events) != 2 || events.Events[0].Kind != "claimed" || events.Events[1].State != string(wire.TaskStateCompleted) ||
+		events.Events[1].Receiver != "receiver-a" || events.Cancelled {
 		t.Fatalf("events %#v", events)
 	}
 }
 
 func TestMCPAwaitBoundedRetry(t *testing.T) {
 	t.Parallel()
-	ctx, kafka, _, userKey, receiverKey := enrolledReceiver(t)
-	if _, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, 1, nil, "replies.test"); err != nil {
-		t.Fatal(err)
-	}
-	publishCapability(t, ctx, kafka, receiverKey)
+	b := newBus(t)
+	ctx := b.ctx
 	var progress atomic.Int64
-	session := mcpSession(t, connectTo(kafka, userKey, "replies.test"), &progress)
+	session := mcpSession(t, b.connect(t), &progress)
 	var submitted submitOutput
 	callTool(t, ctx, session, "submit", submitArguments, &submitted)
 
@@ -360,51 +266,54 @@ func TestMCPAwaitBoundedRetry(t *testing.T) {
 
 func TestMCPContinueAndCancel(t *testing.T) {
 	t.Run("continue", func(t *testing.T) {
-		ctx, kafka, _, userKey := publishInterruptedRun(t)
-		session := mcpSession(t, connectTo(kafka, userKey, "replies.test"), nil)
+		b, admitted := publishInterruptedRun(t)
+		ctx, runID := b.ctx, admitted.submission.Wherry.Run
+		session := mcpSession(t, b.connect(t), nil)
 		var reply awaitReply
-		callTool(t, ctx, session, "await", map[string]any{"id": "run-auth"}, &reply)
+		callTool(t, ctx, session, "await", map[string]any{"id": runID}, &reply)
 		if reply.State != string(wire.TaskStateAuthRequired) || reply.Message != "credential token required" || reply.RetryAfter != 0 {
 			t.Fatalf("await %#v", reply)
 		}
 		var status statusOutput
-		callTool(t, ctx, session, "status", map[string]any{"id": "run-auth"}, &status)
+		callTool(t, ctx, session, "status", map[string]any{"id": runID}, &status)
 		if status.State != string(wire.TaskStateAuthRequired) || status.Turn != 1 || status.Message != "credential token required" {
 			t.Fatalf("status %#v", status)
 		}
 		var continued continueOutput
-		callTool(t, ctx, session, "continue", map[string]any{"id": "run-auth"}, &continued)
-		if continued.ID != "run-auth" || continued.Turn != 2 {
+		callTool(t, ctx, session, "continue", map[string]any{"id": runID}, &continued)
+		if continued.ID != runID || continued.Turn != 2 {
 			t.Fatalf("continue %#v", continued)
 		}
-		if failure := callToolError(t, ctx, session, "continue", map[string]any{"id": "run-auth"}); failure.Code != "TURN_ALREADY_SUBMITTED" {
+		if failure := callToolError(t, ctx, session, "continue", map[string]any{"id": runID}); failure.Code != "TURN_ALREADY_SUBMITTED" {
 			t.Fatalf("second continue %#v", failure)
 		}
 	})
 	t.Run("cancel", func(t *testing.T) {
-		ctx, kafka, _, userKey := publishInterruptedRun(t)
-		session := mcpSession(t, connectTo(kafka, userKey, "replies.test"), nil)
+		b, admitted := publishInterruptedRun(t)
+		ctx, runID := b.ctx, admitted.submission.Wherry.Run
+		session := mcpSession(t, b.connect(t), nil)
 		var cancelled cancelOutput
-		callTool(t, ctx, session, "cancel", map[string]any{"id": "run-auth"}, &cancelled)
-		if cancelled.ID != "run-auth" {
+		callTool(t, ctx, session, "cancel", map[string]any{"id": runID}, &cancelled)
+		if cancelled.ID != runID {
 			t.Fatalf("cancel %#v", cancelled)
 		}
+		b.cancelInterrupted(t, admitted)
 		var reply awaitReply
-		callTool(t, ctx, session, "await", map[string]any{"id": "run-auth"}, &reply)
+		callTool(t, ctx, session, "await", map[string]any{"id": runID}, &reply)
 		if reply.State != string(wire.TaskStateCanceled) {
 			t.Fatalf("await after cancel %#v", reply)
 		}
 		var status statusOutput
-		callTool(t, ctx, session, "status", map[string]any{"id": "run-auth"}, &status)
+		callTool(t, ctx, session, "status", map[string]any{"id": runID}, &status)
 		if status.State != string(wire.TaskStateCanceled) {
 			t.Fatalf("status after cancel %#v", status)
 		}
 		var events eventsOutput
-		callTool(t, ctx, session, "events", map[string]any{"id": "run-auth"}, &events)
-		if !events.Cancelled || len(events.Events) != 1 || events.Events[0].Kind != "interrupted" {
+		callTool(t, ctx, session, "events", map[string]any{"id": runID}, &events)
+		if !events.Cancelled || len(events.Events) != 3 || events.Events[1].Kind != "interrupted" || events.Events[2].State != string(wire.TaskStateCanceled) {
 			t.Fatalf("events %#v", events)
 		}
-		if failure := callToolError(t, ctx, session, "continue", map[string]any{"id": "run-auth"}); failure.Code != "RUN_CANCELED" {
+		if failure := callToolError(t, ctx, session, "continue", map[string]any{"id": runID}); failure.Code != "RUN_CANCELED" {
 			t.Fatalf("continue after cancel %#v", failure)
 		}
 		if failure := callToolError(t, ctx, session, "cancel", map[string]any{"id": "run-missing"}); failure.Code != "RUN_NOT_FOUND" {
@@ -414,8 +323,9 @@ func TestMCPContinueAndCancel(t *testing.T) {
 }
 
 func TestMCPSubmitNamesTheInvalidRule(t *testing.T) {
-	ctx, kafka, _, userKey, _ := enrolledReceiver(t)
-	session := mcpSession(t, connectTo(kafka, userKey, "replies.test"), nil)
+	b := newBus(t)
+	ctx := b.ctx
+	session := mcpSession(t, b.connect(t), nil)
 	for rule, selector := range map[string]map[string]any{
 		"invalid requirement key":                         {"task": []any{"essay"}},
 		"requirement values are required":                 {"runtime": []any{}},
@@ -430,24 +340,22 @@ func TestMCPSubmitNamesTheInvalidRule(t *testing.T) {
 
 func TestMCPErrorsCarryNoSecrets(t *testing.T) {
 	const canary = "s3cr3t-canary"
-	ctx, kafka, _, userKey, _ := enrolledReceiver(t)
-	// A missing CA file under a canary directory: Connect's error names the path, as it would a real one.
-	broken := busclient.Config{
-		Broker: strings.Join(kafka.OptValue(kgo.SeedBrokers).([]string), ","), CAFile: filepath.Join(t.TempDir(), canary, "ca.pem"),
-		KafkaUser: "user", KafkaPasswordFile: filepath.Join(t.TempDir(), "password"), UserKey: filepath.Join(t.TempDir(), "user.key"),
-	}
+	b := newBus(t)
+	ctx := b.ctx
+	// A missing bundle under a canary directory: Connect's error names the path, as it would a real one.
+	broken := busclient.Config{Bundle: filepath.Join(t.TempDir(), canary, "bundle.yaml"), HostKey: filepath.Join(t.TempDir(), "host.key"), StateDir: t.TempDir()}
 	if _, err := busclient.Connect(broken); err == nil || !strings.Contains(err.Error(), canary) {
 		t.Fatalf("precondition: the connect error %v must carry the canary", err)
 	}
-	working := connectTo(kafka, userKey, "replies.test")
-	secrets := []string{canary, "s3cr3t-password", string(userKey)}
+	working := b.connect(t)
+	secrets := []string{canary, "s3cr3t-password", string(b.hostKey), credentialText}
 	for name, call := range map[string]struct {
-		connect   func() (*busclient.Client, error)
+		connect   func() (*busclient.Host, error)
 		tool      string
 		arguments map[string]any
 		code      string
 	}{
-		"connect failure": {func() (*busclient.Client, error) { return busclient.Connect(broken) }, "status", map[string]any{"id": "run-a"}, "UNAVAILABLE"},
+		"connect failure": {func() (*busclient.Host, error) { return busclient.Connect(broken) }, "status", map[string]any{"id": "run-a"}, "UNAVAILABLE"},
 		"git userinfo": {working, "submit", map[string]any{
 			"prompt": "x", "selector": map[string]any{},
 			"git": map[string]any{"url": "https://user:s3cr3t-password@git.example.test/org/repo.git", "ref": "main"},
@@ -456,6 +364,9 @@ func TestMCPErrorsCarryNoSecrets(t *testing.T) {
 		"invalid selector key": {working, "submit", map[string]any{
 			"prompt": "x", "selector": map[string]any{"s3cr3t-password": []any{"x"}},
 		}, "INVALID_ARGUMENT"},
+		"no matching receiver": {working, "submit", map[string]any{
+			"prompt": "x", "selector": map[string]any{"runtime": []any{"podman"}},
+		}, "NO_MATCHING_RECEIVER"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			session := mcpSession(t, call.connect, nil)

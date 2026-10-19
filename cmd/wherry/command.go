@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/base64"
-	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"flag"
@@ -19,13 +17,14 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 )
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|enrol|secret|receivers|submit|continue|cancel|await|events|receiver|admin|mcp>")
+		return errors.New("usage: wherry <init|key|receivers|submit|continue|cancel|await|events|receiver|admin|mcp>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -45,58 +44,43 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if len(args) != 1 {
 			return errors.New("usage: wherry init")
 		}
-		fingerprint, err := busclient.InitUserKey(config.UserKey)
+		keyID, err := busclient.Init(context.Background(), config)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(stdout, fingerprint)
+		fmt.Fprintln(stdout, keyID)
 		return nil
 	}
 	if args[0] == "key" {
 		if len(args) != 1 {
 			return errors.New("usage: wherry key")
 		}
-		key, err := trust.LoadSigningKeyFile(config.UserKey)
+		key, err := trust.LoadSigningKeyFile(config.HostKey)
 		if err != nil {
 			return err
 		}
-		public := key.Public().(ed25519.PublicKey)
-		fmt.Fprintf(stdout, "public_key=%s fingerprint=%s\n", base64.RawURLEncoding.EncodeToString(public), wire.Fingerprint(public))
+		fmt.Fprintln(stdout, signed.KeyID(key.Public().(ed25519.PublicKey)))
 		return nil
 	}
 	if args[0] == "mcp" {
 		return runMCP(context.Background(), config, args[1:])
+	}
+	command, ok := map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
+		"receivers": runReceivers, "submit": runSubmit, "continue": runContinue, "resume": runContinue,
+		"cancel": runCancel, "await": runAwait, "events": runEvents,
+	}[args[0]]
+	if !ok {
+		return fmt.Errorf("unknown command %q", args[0])
 	}
 	client, err := busclient.Connect(config)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
-	ctx := context.Background()
-
-	switch args[0] {
-	case "enrol":
-		return runEnrol(ctx, client, args[1:], stdout, stderr)
-	case "secret":
-		return runSecret(ctx, client, args[1:], stdout, stderr)
-	case "receivers":
-		return runReceivers(ctx, client, args[1:], stdout, stderr)
-	case "submit":
-		return runSubmit(ctx, client, args[1:], stdout, stderr)
-	case "continue", "resume":
-		return runContinue(ctx, client, args[1:], stdout, stderr)
-	case "cancel":
-		return runCancel(ctx, client, args[1:], stdout, stderr)
-	case "await":
-		return runAwait(ctx, client, args[1:], stdout, stderr)
-	case "events":
-		return runEvents(ctx, client, args[1:], stdout, stderr)
-	default:
-		return fmt.Errorf("unknown command %q", args[0])
-	}
+	return command(context.Background(), client, args[1:], stdout, stderr)
 }
 
-func runReceivers(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
+func runReceivers(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("receivers", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
@@ -106,7 +90,7 @@ func runReceivers(ctx context.Context, client *busclient.Client, args []string, 
 	if flags.NArg() != 0 {
 		return errors.New("usage: wherry receivers [--json]")
 	}
-	receivers, skipped, err := client.Receivers(ctx)
+	receivers, err := client.Receivers(ctx)
 	if err != nil {
 		return err
 	}
@@ -119,171 +103,29 @@ func runReceivers(ctx context.Context, client *busclient.Client, args []string, 
 		fmt.Fprintln(stdout, string(encoded))
 	} else {
 		for _, receiver := range receivers {
-			if receiver.Revoked {
-				fmt.Fprintf(stdout, "receiver=%s pool=%s generation=%d floor_generation=%d status=%s\n",
-					receiver.ReceiverID, receiver.Pool, receiver.Generation, receiver.Floor, receiver.Status)
-				continue
+			fmt.Fprintf(stdout, "receiver=%s pool=%s capacity=%d in_flight=%d heartbeat_age=%s status=%s\n",
+				receiver.ReceiverID, receiver.Pool, receiver.Capacity, receiver.InFlight, receiver.HeartbeatAge, receiver.Status)
+			for _, offer := range receiver.Offers {
+				fmt.Fprintf(stdout, "  offer adapter=%s %s\n", offer.Adapter, wire.TermsText(offer.Labels))
 			}
-			fmt.Fprintf(stdout, "receiver=%s pool=%s generation=%d labels=%s capacity=%d in_flight=%d heartbeat_age=%s status=%s\n",
-				receiver.ReceiverID, receiver.Pool, receiver.Generation, wire.TermsText(receiver.Labels),
-				receiver.Capacity, receiver.InFlight, receiver.HeartbeatAge, receiver.Status)
-			for _, grant := range receiver.Adapters {
-				fmt.Fprintf(stdout, "  adapter=%s platform=%s defaults=%s\n", grant.Name, grant.Platform, wire.TermsText(grant.Defaults))
-				for _, offer := range receiver.Offers {
-					if offer.Adapter == grant.Name {
-						fmt.Fprintf(stdout, "    offer %s\n", wire.TermsText(offer.Labels))
-					}
-				}
-			}
-			for _, seal := range receiver.Secrets {
-				fmt.Fprintf(stdout, "  secret=%s version=%d expires=%s\n", seal.Name, seal.Version, time.UnixMilli(seal.ExpMS).UTC().Format(time.RFC3339))
+			for _, seal := range receiver.Seals {
+				fmt.Fprintf(stdout, "  seal=%s pool=%s expires=%s\n", seal.Name, seal.Pool, time.UnixMilli(seal.ExpMS).UTC().Format(time.RFC3339))
 			}
 		}
 	}
 	for _, receiver := range receivers {
-		for _, seal := range receiver.Secrets {
+		for _, seal := range receiver.Seals {
 			if left := time.UnixMilli(seal.ExpMS).Sub(now); left <= 0 {
-				fmt.Fprintf(stderr, "secret %s on receiver %s has expired\n", seal.Name, receiver.ReceiverID)
+				fmt.Fprintf(stderr, "seal %s on receiver %s has expired\n", seal.Name, receiver.ReceiverID)
 			} else if left < 7*24*time.Hour {
-				fmt.Fprintf(stderr, "secret %s on receiver %s expires in %dd\n", seal.Name, receiver.ReceiverID, int(math.Ceil(left.Hours()/24)))
+				fmt.Fprintf(stderr, "seal %s on receiver %s expires in %dd\n", seal.Name, receiver.ReceiverID, int(math.Ceil(left.Hours()/24)))
 			}
 		}
 	}
-	warnSkipped(stderr, skipped)
 	return nil
 }
 
-func runEnrol(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
-	if len(args) == 1 && args[0] == "list" {
-		enrolments, skipped, err := client.Enrolments(ctx)
-		if err != nil {
-			return err
-		}
-		for _, enrolment := range enrolments {
-			if enrolment.Approved {
-				renewal := ""
-				if enrolment.RenewalRequested {
-					renewal = " renewal=requested"
-				}
-				fmt.Fprintf(stdout, "receiver=%s request=%s labels=%s approved=true generation=%d%s\n",
-					enrolment.ReceiverID, enrolment.RequestHash, wire.TermsText(enrolment.Labels), enrolment.Generation, renewal)
-			} else {
-				fmt.Fprintf(stdout, "receiver=%s request=%s labels=%s approved=false\n",
-					enrolment.ReceiverID, enrolment.RequestHash, wire.TermsText(enrolment.Labels))
-			}
-			for _, adapter := range enrolment.Adapters {
-				fmt.Fprintf(stdout, "  adapter=%s platform=%s\n", adapter.Name, adapter.Platform)
-				for _, offer := range adapter.Offers {
-					fmt.Fprintf(stdout, "    offer %s\n", wire.TermsText(offer.Labels))
-				}
-			}
-		}
-		warnSkipped(stderr, skipped)
-		return nil
-	}
-	if len(args) == 2 && args[0] == "revoke" {
-		result, err := client.Revoke(ctx, args[1])
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "receiver=%s floor_generation=%d\n", result.ReceiverID, result.Floor)
-		fmt.Fprintln(stderr, "credentials sealed to this receiver are not rotated; rotate them at their source")
-		warnSkipped(stderr, result.Skipped)
-		return nil
-	}
-	if len(args) == 2 && args[0] == "renew" {
-		result, err := client.Renew(ctx, args[1])
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "receiver=%s generation=%d renewed=true\n", result.ReceiverID, result.Generation)
-		warnSkipped(stderr, result.Skipped)
-		return nil
-	}
-	const enrolUsage = "usage: wherry enrol <list|revoke RECEIVER_ID|renew RECEIVER_ID|approve REQUEST_HASH [--pool POOL] --labels k=v,.. --grants FILE [--expires DURATION]>"
-	if len(args) < 2 || args[0] != "approve" {
-		return errors.New(enrolUsage)
-	}
-	requestHash := args[1]
-	flags := flag.NewFlagSet("enrol approve", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	pool := flags.String("pool", "", "pool name (default: the receiver ID)")
-	labelsText := flags.String("labels", "", "approved receiver labels")
-	grantsPath := flags.String("grants", "", "JSON file holding the adapter grants")
-	renewal := flags.String("renewal", "auto", "renewal policy")
-	expires := flags.Duration("expires", 30*24*time.Hour, "approval lifetime")
-	if err := flags.Parse(args[2:]); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New(enrolUsage)
-	}
-	if !flagSet(flags, "labels", "grants") {
-		return errors.New("enrol approve requires --labels and --grants")
-	}
-	if *renewal != "auto" && *renewal != "manual" {
-		return errors.New("renewal must be auto or manual")
-	}
-	if *expires <= 0 {
-		return errors.New("expires must be positive")
-	}
-	labels, err := parseTerms(*labelsText)
-	if err != nil {
-		return fmt.Errorf("labels: %w", err)
-	}
-	encodedGrants, err := os.ReadFile(*grantsPath)
-	if err != nil {
-		return fmt.Errorf("grants: %w", err)
-	}
-	var grants []wire.AdapterGrant
-	if err := json.Unmarshal(encodedGrants, &grants, json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)); err != nil {
-		return fmt.Errorf("grants: %w", err)
-	}
-	result, err := client.Approve(ctx, requestHash, *pool, labels, grants, *renewal, *expires)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "receiver=%s generation=%d\n", result.ReceiverID, result.Generation)
-	warnSkipped(stderr, result.Skipped)
-	return nil
-}
-
-func runSecret(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
-	const secretUsage = "usage: wherry secret put NAME --to RECEIVER_ID --from-file PATH [--expires DURATION]"
-	if len(args) < 3 || args[0] != "put" {
-		return errors.New(secretUsage)
-	}
-	name := args[1]
-	flags := flag.NewFlagSet("secret put", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	receiverID := flags.String("to", "", "receiver ID")
-	path := flags.String("from-file", "", "secret file")
-	expires := flags.Duration("expires", 30*24*time.Hour, "seal lifetime")
-	if err := flags.Parse(args[2:]); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New(secretUsage)
-	}
-	if !flagSet(flags, "to", "from-file") {
-		return errors.New("secret put requires --to and --from-file")
-	}
-	if *expires <= 0 {
-		return errors.New("expires must be positive")
-	}
-	result, err := client.PutSecret(ctx, name, *receiverID, *path, *expires)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "name=%s receiver=%s version=%d\n", result.Name, result.ReceiverID, result.Version)
-	for _, waiting := range result.Waiting {
-		fmt.Fprintf(stdout, "waiting run_id=%s turn=%d\n", waiting.RunID, waiting.Turn)
-	}
-	warnSkipped(stderr, result.Skipped)
-	return nil
-}
-
-func runContinue(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
+func runContinue(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	const continueUsage = "usage: wherry continue RUN_ID [--prompt TEXT] [--deadline DURATION] [--queue-deadline DURATION]"
 	if len(args) == 0 {
 		return errors.New(continueUsage)
@@ -314,7 +156,7 @@ func runContinue(ctx context.Context, client *busclient.Client, args []string, s
 	return nil
 }
 
-func runCancel(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
+func runCancel(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	if len(args) != 1 {
 		return errors.New("usage: wherry cancel RUN_ID")
 	}
@@ -327,7 +169,7 @@ func runCancel(ctx context.Context, client *busclient.Client, args []string, std
 	return nil
 }
 
-func runSubmit(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
+func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("submit", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	selectorText := flags.String("selector", "", "task selector")
@@ -386,7 +228,7 @@ func runSubmit(ctx context.Context, client *busclient.Client, args []string, std
 	return nil
 }
 
-func runAwait(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
+func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	const awaitUsage = "usage: wherry await RUN_ID [--timeout 30m]"
 	if len(args) == 0 {
 		return errors.New(awaitUsage)
@@ -420,9 +262,6 @@ func runAwait(ctx context.Context, client *busclient.Client, args []string, stdo
 			fmt.Fprintln(stdout, partText(part))
 		}
 	}
-	if !result.RevokedAt.IsZero() {
-		fmt.Fprintln(stderr, strings.TrimSpace(revokedSigner(result.RevokedAt)))
-	}
 	if result.Status.State == wire.TaskStateAuthRequired {
 		fmt.Fprintf(stderr, "continue with: wherry continue %s\n", runID)
 	}
@@ -431,14 +270,6 @@ func runAwait(ctx context.Context, client *busclient.Client, args []string, stdo
 		return fmt.Errorf("run ended in %s", result.Status.State)
 	}
 	return nil
-}
-
-// revokedSigner marks a record signed by a receiver revoked at revokedAt, or returns "" when revokedAt is zero.
-func revokedSigner(revokedAt time.Time) string {
-	if revokedAt.IsZero() {
-		return ""
-	}
-	return " signer=revoked-before=" + revokedAt.UTC().Format(time.RFC3339Nano)
 }
 
 func partText(part wire.Part) string {
@@ -453,7 +284,7 @@ func partText(part wire.Part) string {
 	return part.Text
 }
 
-func runEvents(ctx context.Context, client *busclient.Client, args []string, stdout, stderr io.Writer) error {
+func runEvents(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	if len(args) != 1 {
 		return errors.New("usage: wherry events RUN_ID")
 	}
@@ -464,7 +295,7 @@ func runEvents(ctx context.Context, client *busclient.Client, args []string, std
 	for _, record := range result.Statuses {
 		status := record.StatusUpdate.Status
 		fmt.Fprintf(stdout, "turn=%d attempt=%d kind=%s state=%s receiver=%s time=%s",
-			record.Wherry.Turn, record.Wherry.Attempt, record.Wherry.Kind, status.State, record.Wherry.ReceiverID, status.Timestamp)
+			record.Wherry.Turn, record.Wherry.Attempt, record.Wherry.Kind, status.State, record.Wherry.Receiver, status.Timestamp)
 		if status.Message != nil {
 			texts := make([]string, 0, len(status.Message.Parts))
 			for _, part := range status.Message.Parts {
@@ -472,10 +303,7 @@ func runEvents(ctx context.Context, client *busclient.Client, args []string, std
 			}
 			fmt.Fprintf(stdout, " message=%q", strings.Join(texts, " "))
 		}
-		fmt.Fprintln(stdout, revokedSigner(record.RevokedAt))
-	}
-	if result.Cancelled {
-		fmt.Fprintf(stdout, "kind=cancel state=%s signer=user\n", wire.TaskStateCanceled)
+		fmt.Fprintln(stdout)
 	}
 	positions := slices.Collect(maps.Keys(result.Chunks))
 	sort.Slice(positions, func(i, j int) bool {
@@ -485,28 +313,10 @@ func runEvents(ctx context.Context, client *busclient.Client, args []string, std
 		return positions[i].Attempt < positions[j].Attempt
 	})
 	for _, position := range positions {
-		fmt.Fprintf(stdout, "turn=%d attempt=%d transcript_chunks=%d%s\n", position.Turn, position.Attempt, result.Chunks[position], revokedSigner(result.ChunksRevokedAt[position]))
+		fmt.Fprintf(stdout, "turn=%d attempt=%d transcript_chunks=%d\n", position.Turn, position.Attempt, result.Chunks[position])
 	}
 	warnSkipped(stderr, result.Skipped)
 	return nil
-}
-
-func parseTerms(value string) (map[string]string, error) {
-	terms := make(map[string]string)
-	if value == "" {
-		return terms, nil
-	}
-	for _, term := range strings.Split(value, ",") {
-		key, item, ok := strings.Cut(term, "=")
-		if !ok || key == "" || item == "" {
-			return nil, fmt.Errorf("invalid term %q", term)
-		}
-		if _, exists := terms[key]; exists {
-			return nil, fmt.Errorf("duplicate key %q", key)
-		}
-		terms[key] = item
-	}
-	return terms, nil
 }
 
 func parseRequirements(value string) ([]wire.Requirement, error) {
@@ -533,15 +343,6 @@ func parseRequirements(value string) ([]wire.Requirement, error) {
 		requirements = append(requirements, wire.Requirement{Key: key, Operator: wire.OpIn, Values: values})
 	}
 	return requirements, nil
-}
-
-func flagSet(flags *flag.FlagSet, names ...string) bool {
-	for _, name := range names {
-		if !wasSet(flags, name) {
-			return false
-		}
-	}
-	return true
 }
 
 func wasSet(flags *flag.FlagSet, name string) bool {
