@@ -116,7 +116,8 @@ type Chunk struct {
 // ChunkBinding is the wherry block of a chunk.
 type ChunkBinding struct {
 	ReceiverBinding
-	Seq int64 `json:"seq"`
+	TaskHash string `json:"task_hash"`
+	Seq      int64  `json:"seq"`
 }
 
 // Result is a turn's final A2A task on the tenant feed.
@@ -296,7 +297,7 @@ func (value *Chunk) validate() error {
 	if err := value.Wherry.ReceiverBinding.validate(); err != nil {
 		return err
 	}
-	if update.TaskID != value.Wherry.Run || update.ContextID != value.Wherry.Run || value.Wherry.Seq < 0 {
+	if update.TaskID != value.Wherry.Run || update.ContextID != value.Wherry.Run || value.Wherry.Seq < 0 || !validHash(value.Wherry.TaskHash) {
 		return errors.New("invalid chunk")
 	}
 	return validateArtifactUpdate(&ArtifactUpdateRecord{ArtifactUpdate: *update, Wherry: ArtifactUpdateExtension{Turn: value.Wherry.Turn, Attempt: value.Wherry.Attempt, Seq: value.Wherry.Seq}})

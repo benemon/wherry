@@ -30,7 +30,7 @@ func testRecords() map[string]Record {
 		"status": &RunStatus{StatusUpdate: TaskStatusUpdateEvent{TaskID: "run-a", ContextID: "run-a", Status: status},
 			Wherry: StatusBinding{ReceiverBinding: testBinding(), EventID: "event-a", Kind: "started", TaskHash: testHash}},
 		"chunk": &Chunk{ArtifactUpdate: TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", Artifact: Artifact{ArtifactID: "transcript", Parts: []Part{{Text: "line"}}, Extensions: []string{ExtensionURI}}},
-			Wherry: ChunkBinding{ReceiverBinding: testBinding(), Seq: 0}},
+			Wherry: ChunkBinding{ReceiverBinding: testBinding(), TaskHash: testHash, Seq: 0}},
 		"result": &Result{Task: Task{ID: "run-a", ContextID: "run-a", Status: TaskStatus{State: "TASK_STATE_COMPLETED", Timestamp: testTime}, Artifacts: []Artifact{}, History: []Message{testMessage("run-a")}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
 		"echo":          &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Turn: 1, Placement: placement, TaskHash: testHash, MessageID: "message-a"},
@@ -130,6 +130,11 @@ func TestRecordValidation(t *testing.T) {
 		"chunk with two parts": func(r map[string]Record) Record {
 			value := r["chunk"].(*Chunk)
 			value.ArtifactUpdate.Artifact.Parts = append(value.ArtifactUpdate.Artifact.Parts, Part{Text: "more"})
+			return value
+		},
+		"chunk without task hash": func(r map[string]Record) Record {
+			value := r["chunk"].(*Chunk)
+			value.Wherry.TaskHash = ""
 			return value
 		},
 		"result for another run": func(r map[string]Record) Record {

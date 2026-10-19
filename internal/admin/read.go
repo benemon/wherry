@@ -143,7 +143,7 @@ func HostKeyTopics(state State, pool string) map[string]string {
 }
 
 // ReadAdvertisements returns each receiver's latest authorised advertisement
-// that is no older than liveness at now.
+// that is no older than liveness at now and no later than liveness ahead of it.
 func ReadAdvertisements(ctx context.Context, client *kgo.Client, state State, keys signed.Keys, now time.Time, liveness time.Duration) (map[string]wire.Advertisement, error) {
 	records, err := ReadTopic(ctx, client, ReceiversTopic)
 	if err != nil {
@@ -152,7 +152,7 @@ func ReadAdvertisements(ctx context.Context, client *kgo.Client, state State, ke
 	latest := map[string]wire.Advertisement{}
 	for _, record := range records {
 		advertisement, err := AuthorizeAdvertisement(state, keys, record.Value)
-		if err != nil || now.Sub(time.UnixMilli(advertisement.AtMS)) > liveness {
+		if age := now.Sub(time.UnixMilli(advertisement.AtMS)); err != nil || age > liveness || age < -liveness {
 			continue
 		}
 		if previous, ok := latest[advertisement.Receiver]; !ok || advertisement.AtMS >= previous.AtMS {

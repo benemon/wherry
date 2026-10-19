@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -507,12 +508,20 @@ func TestEchoAndAdvertisementBindTheirPool(t *testing.T) {
 	if _, err := AuthorizeEcho(state, keys, echo("tenant-a", "pool-b"), "tenant-a"); err == nil {
 		t.Fatal("accepted an echo placing a run in a pool the receiver is not in")
 	}
+	sealing, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	keys["receiver-a"] = signed.KeyState{Current: key.Public().(ed25519.PublicKey), Sealing: sealing.PublicKey()}
+	fingerprint := signed.SealingKeyID(sealing.PublicKey())
 	advertisement := func(pool string) []byte {
-		return sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Labels: map[string]string{"agent": "agent-a"}}}, Capacity: 1, SealingKey: "key", AtMS: 1}, key)
+		return sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Labels: map[string]string{"agent": "agent-a"}}}, Capacity: 1, SealingKey: fingerprint, AtMS: 1}, key)
 	}
 	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-a")); err != nil {
 		t.Fatal(err)
 	}
+	fingerprint = "sha256:other"
+	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-a")); err == nil {
+		t.Fatal("accepted an advertisement naming a sealing key the receiver has not registered")
+	}
+	fingerprint = signed.SealingKeyID(sealing.PublicKey())
 	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-b")); err == nil {
 		t.Fatal("accepted an advertisement for a pool the receiver is not in")
 	}

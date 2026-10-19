@@ -364,6 +364,11 @@ func AuthorizeAdvertisement(state State, keys signed.Keys, encoded []byte) (wire
 	if err := state.liveMember(advertisement.Receiver, advertisement.Pool); err != nil {
 		return wire.Advertisement{}, err
 	}
+	// Hosts seal to the key on the receiver's own topic; an advertisement
+	// naming another cannot place work.
+	if sealing := keys[advertisement.Receiver].Sealing; sealing == nil || advertisement.SealingKey != signed.SealingKeyID(sealing) {
+		return wire.Advertisement{}, errors.New("advertisement names a sealing key the receiver has not registered")
+	}
 	return advertisement, nil
 }
 
