@@ -38,32 +38,33 @@ type platform struct {
 
 func (p *platform) Ready(context.Context) (bool, error) { return true, nil }
 
-func (p *platform) Dispatch(_ context.Context, run receiver.Run) (receiver.Handle, error) {
+func (p *platform) Dispatch(_ context.Context, run receiver.Run) (receiver.Outcome, receiver.Handle, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.runs = append(p.runs, run)
-	return receiver.Handle{Job: run.ID}, nil
+	return receiver.OutcomeCreated, receiver.Handle{Data: []byte(run.ID), Name: run.ID}, nil
 }
 
-func (p *platform) Lookup(context.Context, string, int64) (receiver.Handle, bool, error) {
-	return receiver.Handle{}, false, nil
+func (p *platform) Lookup(context.Context, string, int64) (receiver.Job, error) {
+	return receiver.Job{}, nil
 }
 
-func (p *platform) Follow(ctx context.Context, _ receiver.Handle, _ int64, lines chan<- receiver.Line) error {
+func (p *platform) Follow(ctx context.Context, _ receiver.Handle, _ int64, lines chan<- receiver.Line) (receiver.Terminal, error) {
 	var offset int64
 	for _, data := range []string{`{"type":"assistant","message":"working"}`, `{"type":"result","result":"done","is_error":false}`} {
 		select {
 		case lines <- receiver.Line{Offset: offset, Next: offset + int64(len(data)+1), Data: []byte(data)}:
 		case <-ctx.Done():
-			return ctx.Err()
+			return receiver.Terminal{}, ctx.Err()
 		}
 		offset += int64(len(data) + 1)
 	}
 	<-ctx.Done()
-	return ctx.Err()
+	return receiver.Terminal{}, ctx.Err()
 }
 
 func (p *platform) Stop(context.Context, receiver.Handle) error  { return nil }
+func (p *platform) Purge(context.Context, string, int64) error   { return nil }
 func (p *platform) Release(context.Context, string, int64) error { return nil }
 func (p *platform) Sweep(context.Context) error                  { return nil }
 func (p *platform) dispatched() []receiver.Run {
@@ -171,7 +172,7 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := &platform{}
-	r, err := receiver.New(bundle, filepath.Join(dir, "receiver-state"), func(settings admin.AdapterSettings) (receiver.Named, error) {
+	r, err := receiver.New(bundle, filepath.Join(dir, "receiver-state"), func(_ string, settings admin.AdapterSettings) (receiver.Named, error) {
 		return receiver.Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Adapter: backend}, nil
 	}, log.New(io.Discard, "", 0))
 	if err != nil {

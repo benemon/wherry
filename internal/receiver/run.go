@@ -29,6 +29,8 @@ const (
 	maxAgentResult = 16 << 10
 	maxRunDuration = time.Hour // receiver cap on any task's run deadline (ADR-0013)
 	readTimeout    = 30 * time.Second
+	maxHandle      = 4 << 10
+	budgetReason   = "delivery budget exhausted"
 )
 
 // Intervals are variables so tests can shorten them; renew stays below the 30 s default lock.
@@ -42,6 +44,10 @@ var (
 	stateCheckInterval = time.Second
 	// shutdownTimeout bounds the final transcript commit and ack flush after the receiver is told to stop.
 	shutdownTimeout = 5 * time.Second
+	// reconcileInterval separates the Lookups that resolve an ambiguous Dispatch.
+	reconcileInterval = time.Second
+	// purgeDeadline bounds the Purge retries of a start failure.
+	purgeDeadline = 5 * time.Minute
 )
 
 // claimLoop holds one slot: a dedicated share client per claimed record,
@@ -142,6 +148,7 @@ func taskHash(encoded []byte) string {
 // builds the prompt from the run's history. A nil admission carries the acknowledgement.
 func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, kgo.AckStatus) {
 	hash := taskHash(record.Value)
+	// Released even at the delivery budget: without the events, a terminal could repeat a committed one.
 	events, err := r.readEvents(ctx)
 	if err != nil {
 		r.logger.Printf("read pool events: %v", err)
@@ -166,6 +173,29 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		}
 		return nil, kgo.AckReject
 	}
+	// giveBack is returnTask for a task no run holds yet: the terminal goes out with the echo under the
+	// admission transactional ID.
+	giveBack := func() (*admission, kgo.AckStatus) {
+		if !r.budgetSpent(attempt) {
+			return nil, kgo.AckRelease
+		}
+		held := &activeRun{receiver: r, task: &task, taskHash: hash, history: []wire.Message{task.Message}, attempt: attempt}
+		echo := &kgo.Record{Topic: admin.TenantTopic(task.Wherry.Tenant), Key: []byte(run), Value: r.sign(r.echo(&task, hash))}
+		if err := r.admissionCommit(ctx, append([]*kgo.Record{echo}, held.budgetRecords(nil)...)...); err != nil {
+			r.logger.Printf("publish terminal for %s: %v", run, err)
+			return nil, kgo.AckRelease
+		}
+		return nil, kgo.AckReject
+	}
+	// Nothing is written under the run key before its owner is known; unreadable turns leave it unknown.
+	all, err := r.readTurns(ctx, run)
+	if err != nil {
+		r.logger.Printf("read run %s turns: %v", run, err)
+		return nil, kgo.AckRelease
+	}
+	if foreignRun(all, events.statuses[run], task.Wherry.Tenant) {
+		return reject("run ID in use")
+	}
 	state, _, _ := r.snapshot()
 	terms := state.Pools[r.config.Pool]
 	placement := task.Wherry.Placement
@@ -178,12 +208,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		if err := r.admissionCommit(ctx, r.startFailure(&task, attempt, "none", "offer-unavailable")); err != nil {
 			r.logger.Printf("publish start failure for %s: %v", run, err)
 		}
-		return nil, kgo.AckRelease
-	}
-	all, err := r.readTurns(ctx, run)
-	if err != nil {
-		r.logger.Printf("read run %s turns: %v", run, err)
-		return nil, kgo.AckRelease
+		return giveBack()
 	}
 	submissions := bindTurns(all, &task, events)
 	cancelledTurn, cancelled := r.cancelledTurn(ctx, events, run, task.Wherry.Tenant)
@@ -217,6 +242,18 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	}
 	admitted.git = git
 	return admitted, 0
+}
+
+// foreignRun reports that a run ID belongs to a tenant other than tenant: the tenant of its earliest
+// submission a live host's key verifies, or of its earliest status a holder wrote. Receivers cannot read
+// an ended host's key topic, so for a run whose host has ended the status is the only source.
+// Every non-rejected status counts as a claim, so admission writes nothing else under the run key before this check.
+func foreignRun(all []runSubmission, statuses []wire.RunStatus, tenant string) bool {
+	if len(all) > 0 && all[0].record.Wherry.Tenant != tenant {
+		return true
+	}
+	held := slices.IndexFunc(statuses, func(status wire.RunStatus) bool { return status.Wherry.Kind != "rejected" })
+	return held >= 0 && statuses[held].Wherry.Tenant != tenant
 }
 
 // gitContext returns the run's git context; false means a non-text part other than one git part the adapter delivers.
@@ -496,15 +533,15 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		offset, err = r.lastOffset(runCtx, task, run.taskHash)
 		if err != nil {
 			r.logger.Printf("run %s: read events: %v", runID, err)
-			return kgo.AckRelease
+			return run.returnTask(ctx, nil)
 		}
 	}
 	var handle Handle
-	adopted := false
+	adopted, neverStarted := false, false
 	if attempt > 1 {
 		// Offers can change between attempts, so the run may live in an adapter other than the matched one.
 		for _, named := range r.adapters {
-			found, ok, err := named.Adapter.Lookup(runCtx, runID, task.Wherry.Turn)
+			job, err := named.Adapter.Lookup(runCtx, runID, task.Wherry.Turn)
 			if err != nil {
 				if runCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, "timeout", nil)
@@ -515,20 +552,42 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 					return run.fail(ctx, ErrGitContext.Error(), nil)
 				}
 				r.logger.Printf("run %s: lookup in adapter %s: %T", runID, named.Name, err)
-				return kgo.AckRelease
+				return run.returnTask(ctx, nil)
 			}
-			if ok {
-				handle, adopted, run.adapter = found, true, named
-				break
+			if job.State == JobAbsent {
+				continue
 			}
+			// A job of another adapter of this receiver on the same backend is that adapter's Lookup to judge.
+			if job.Adapter != named.Name && slices.ContainsFunc(r.adapters, func(other Named) bool { return other.Name == job.Adapter }) {
+				continue
+			}
+			if job.Adapter != named.Name || job.Agent != task.Wherry.Placement.Agent {
+				if err := named.Adapter.Stop(ctx, job.Handle); err != nil {
+					r.logger.Printf("run %s: stop: %T", runID, err)
+					return run.returnTask(ctx, nil)
+				}
+				if err := named.Adapter.Purge(ctx, runID, task.Wherry.Turn); err != nil {
+					r.logger.Printf("run %s: purge: %T", runID, err)
+					return run.returnTask(ctx, nil)
+				}
+				r.logger.Printf("run %s: purged a job from adapter %q agent %q", runID, job.Adapter, job.Agent)
+				continue
+			}
+			r.logger.Printf("run %s: found attempt %d's job in adapter %s", runID, job.Attempt, named.Name)
+			handle, run.adapter = job.Handle, named
+			adopted, neverStarted = job.State != JobNeverStarted, job.State == JobNeverStarted
+			break
 		}
 	}
 	if admitted.cancelled {
 		if adopted {
-			run.job = handle.Job
+			run.job = handle.Name
 			return run.stopAndCancel(ctx, handle, nil)
 		}
 		return run.cancel(ctx, nil)
+	}
+	if neverStarted {
+		return run.startFailure(ctx, "platform")
 	}
 	if !adopted {
 		named := run.adapter
@@ -536,32 +595,57 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		switch {
 		case err != nil:
 			r.logger.Printf("run %s: read seals: %v", runID, err)
-			return kgo.AckRelease
+			return run.returnTask(ctx, nil)
 		case outcome == credentialWithPeer:
 			return run.startFailure(ctx, "seal-unavailable")
 		case outcome == credentialMissing:
 			return run.interrupt(ctx, named.Credential)
 		}
-		handle, err = named.Adapter.Dispatch(runCtx, Run{
-			ID: runID, Turn: task.Wherry.Turn, Prompt: []byte(prompt(admitted.history)), Credential: credential,
-			Git: admitted.git,
+		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, Run{
+			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Turn: task.Wherry.Turn, Attempt: attempt,
+			Prompt: []byte(prompt(admitted.history)), Credential: credential, Git: admitted.git,
 		})
-		if err != nil {
-			if runCtx.Err() != nil && ctx.Err() == nil {
-				return run.fail(ctx, "timeout", nil)
-			}
-			if errors.Is(err, ErrGitContext) {
-				// Git error text can echo URLs, so only the type is logged.
-				r.logger.Printf("run %s: git context unavailable: %T", runID, err)
-				return run.fail(ctx, ErrGitContext.Error(), nil)
-			}
+		switch {
+		case err != nil && runCtx.Err() != nil && ctx.Err() == nil:
+			return run.fail(ctx, "timeout", nil)
+		case errors.Is(err, ErrGitContext):
+			// Git error text can echo URLs, so only the type is logged.
+			r.logger.Printf("run %s: git context unavailable: %T", runID, err)
+			return run.fail(ctx, ErrGitContext.Error(), nil)
+		case err != nil:
 			r.logger.Printf("run %s: dispatch failed: %T", runID, err)
-			return run.fail(ctx, "dispatch failed", nil)
+			dispatched = OutcomeUnknown
 		}
+		switch dispatched {
+		case OutcomeCreated:
+		case OutcomeNothingCreated:
+			r.logger.Printf("run %s: adapter %s created no job", runID, named.Name)
+			return run.startFailure(ctx, "dispatch")
+		default:
+			job, resolved := run.reconcile(runCtx)
+			switch {
+			case !resolved:
+				r.logger.Printf("run %s: dispatch unresolved", runID)
+				return run.returnTask(ctx, nil)
+			case job.State == JobAbsent:
+				return run.startFailure(ctx, "dispatch")
+			case job.State == JobNeverStarted:
+				return run.startFailure(ctx, "platform")
+			}
+			dispatchedHandle = job.Handle
+		}
+		handle = dispatchedHandle
 		run.labels = admitted.adapter.Labels
 	}
-	run.job = handle.Job
-	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.adapter.Labels), handle.Job)
+	if len(handle.Data) > maxHandle {
+		r.logger.Printf("run %s: adapter %s returned a handle over %d bytes", runID, run.adapter.Name, maxHandle)
+		if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
+			r.logger.Printf("run %s: stop: %T", runID, err)
+		}
+		return run.returnTask(ctx, nil)
+	}
+	run.job = handle.Name
+	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.adapter.Labels), handle.Name)
 	var startedMetadata jsontext.Value
 	if handle.Commit != "" {
 		startedMetadata, _ = json.Marshal(wire.CommitMetadata{GitCommit: handle.Commit}) // a string always encodes
@@ -573,8 +657,15 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	followCtx, stopFollow := context.WithCancel(runCtx)
 	defer stopFollow()
 	lines := make(chan Line, 64)
-	followed := make(chan error, 1)
-	go func() { followed <- run.adapter.Adapter.Follow(followCtx, handle, offset, lines) }()
+	type followed struct {
+		terminal Terminal
+		err      error
+	}
+	ended := make(chan followed, 1)
+	go func() {
+		terminal, err := run.adapter.Adapter.Follow(followCtx, handle, offset, lines)
+		ended <- followed{terminal, err}
+	}()
 
 	heartbeat := time.NewTicker(renewInterval)
 	defer heartbeat.Stop()
@@ -588,6 +679,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		return resultLine(line.Data)
 	}
 	// shutdown commits what is pending under its own deadline, since ctx is already done, and returns the task.
+	// It ignores the delivery budget: the receiver is going away and an adopter continues the run.
 	shutdown := func() kgo.AckStatus {
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 		defer cancel()
@@ -599,7 +691,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	// stopHeld ends the run when the receiver holds its cancel or a denial lasting one lock interval.
 	stopHeld := func() (kgo.AckStatus, bool) {
 		r.mu.Lock()
-		cancelledTurn, cancelled := r.cancelled[runID]
+		cancelledTurn, cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
 		r.mu.Unlock()
 		switch {
 		case r.stopForDenial():
@@ -618,7 +710,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				stopFollow()
 				return run.finish(ctx, handle, pending, result)
 			}
-		case err := <-followed:
+		case end := <-ended:
 			for drained := false; !drained; {
 				select {
 				case line := <-lines:
@@ -634,11 +726,15 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				return run.stopAndFail(ctx, handle, "timeout", pending)
 			case ctx.Err() != nil:
 				return shutdown()
-			case err != nil:
+			case end.err != nil:
 				// A dropped stream does not mean the task ended; stop it rather than leave it running.
-				r.logger.Printf("run %s: follow failed: %T", runID, err)
+				r.logger.Printf("run %s: follow failed: %T", runID, end.err)
 				return run.stopAndFail(ctx, handle, "log stream failed", pending)
+			case !end.terminal.Started:
+				r.logger.Printf("run %s: job never started (%s)", runID, end.terminal.Class)
+				return run.startFailure(ctx, "platform")
 			default:
+				r.logger.Printf("run %s: agent ended with exit code %d signal %q on node %s", runID, end.terminal.ExitCode, end.terminal.Signal, end.terminal.Node)
 				return run.stopAndFail(ctx, handle, "agent ended without a result", pending)
 			}
 		case <-ctx.Done():
@@ -705,7 +801,7 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason string, pending []Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
-		return kgo.AckRelease
+		return run.returnTask(ctx, pending)
 	}
 	return run.fail(ctx, reason, pending)
 }
@@ -713,7 +809,7 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason str
 func (run *activeRun) stopAndCancel(ctx context.Context, handle Handle, pending []Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
-		return kgo.AckRelease
+		return run.returnTask(ctx, pending)
 	}
 	return run.cancel(ctx, pending)
 }
@@ -755,13 +851,73 @@ func (run *activeRun) interrupt(ctx context.Context, credential string) kgo.AckS
 	return kgo.AckAccept
 }
 
-// startFailure returns the task to the pool for a member that can start it.
+// startFailure purges the turn's job and returns the task to the pool for a member that can start it.
 func (run *activeRun) startFailure(ctx context.Context, class string) kgo.AckStatus {
 	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.attempt, run.adapter.Name, class)); err != nil {
 		return run.abandon(err)
 	}
+	if err := run.purge(ctx); err != nil {
+		// Shutdown: the next holder's Lookup finds the job again.
+		if ctx.Err() != nil {
+			return kgo.AckRelease
+		}
+		return run.fail(ctx, "start failed and the job could not be removed", nil)
+	}
 	run.release(ctx)
-	return kgo.AckRelease
+	return run.returnTask(ctx, nil)
+}
+
+// purge retries Purge every renew interval, while the renewer holds the claim, until purgeDeadline.
+func (run *activeRun) purge(ctx context.Context) error {
+	deadline := time.Now().Add(purgeDeadline)
+	for {
+		err := run.adapter.Adapter.Purge(ctx, run.task.Wherry.Run, run.task.Wherry.Turn)
+		if err == nil || ctx.Err() != nil || !time.Now().Before(deadline) {
+			return err
+		}
+		run.receiver.logger.Printf("run %s: purge: %T", run.task.Wherry.Run, err)
+		sleep(ctx, renewInterval)
+	}
+}
+
+// budgetSpent reports an attempt at which a released task could reach the broker's delivery limit and be
+// archived with no terminal record.
+func (r *Receiver) budgetSpent(attempt int64) bool {
+	state, _, _ := r.snapshot()
+	return attempt >= int64(state.Pools[r.config.Pool].DeliveryLimit)-1
+}
+
+// reconcile looks up the job an ambiguous Dispatch may have created; false means it stays unresolved.
+func (run *activeRun) reconcile(ctx context.Context) (Job, bool) {
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			sleep(ctx, reconcileInterval)
+		}
+		job, err := run.adapter.Adapter.Lookup(ctx, run.task.Wherry.Run, run.task.Wherry.Turn)
+		if err == nil {
+			return job, true
+		}
+		run.receiver.logger.Printf("run %s: lookup in adapter %s: %T", run.task.Wherry.Run, run.adapter.Name, err)
+	}
+	return Job{}, false
+}
+
+// returnTask hands the task back to the pool with any job and its material in place, so the next holder's
+// Lookup finds them. Once the delivery budget is spent it ends the run FAILED instead, and leaves the
+// material to the adapter's sweep.
+func (run *activeRun) returnTask(ctx context.Context, pending []Line) kgo.AckStatus {
+	if !run.receiver.budgetSpent(run.attempt) {
+		return kgo.AckRelease
+	}
+	if err := run.commit(ctx, run.budgetRecords(pending)...); err != nil {
+		return run.abandon(err)
+	}
+	return kgo.AckReject
+}
+
+func (run *activeRun) budgetRecords(pending []Line) []*kgo.Record {
+	status := taskStatus(wire.TaskStateFailed, budgetReason)
+	return append(append(run.chunks(pending, true), run.result(status, budgetReason, nil)), run.statusRecords("terminal", status, nil, nil)...)
 }
 
 func (run *activeRun) finish(ctx context.Context, handle Handle, pending []Line, result agentResult) kgo.AckStatus {
@@ -771,7 +927,10 @@ func (run *activeRun) finish(ctx context.Context, handle Handle, pending []Line,
 	}
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
-		return kgo.AckRelease
+		// At the budget the agent's result stands, and the job is left to the adapter's sweep.
+		if !run.receiver.budgetSpent(run.attempt) {
+			return kgo.AckRelease
+		}
 	}
 	state, ack := wire.TaskStateCompleted, kgo.AckAccept
 	if result.IsError {

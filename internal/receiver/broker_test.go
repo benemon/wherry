@@ -83,7 +83,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 	logs := &syncBuffer{}
 	adapter := &fakeAdapter{stream: noResultStream, endDelay: time.Minute}
 	r := &Receiver{id: receiverID, kafkaOpt: opts, base: base, signing: signing, sealing: sealing, logger: log.New(logs, "", 0),
-		factory: func(settings admin.AdapterSettings) (Named, error) {
+		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: adapter}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)

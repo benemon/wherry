@@ -5,11 +5,15 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"regexp"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/benemon/wherry/internal/receiver"
@@ -85,19 +89,22 @@ type Adapter struct {
 	runtime       Runtime
 	nodePool      string
 	datacenters   []string
+	// prefix starts every job ID of the adapter's pool; agentJob matches those IDs, runVariable a run
+	// variable, or a task variable of a run with a git context, of one of those jobs.
+	prefix      string
+	agentJob    *regexp.Regexp
+	runVariable *regexp.Regexp
 }
 
 var (
 	envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	// A run variable, or a task variable of a run with a git context.
-	runVariable = regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(jobPrefix) + `.+-t[0-9]+)(` + regexp.QuoteMeta(promptSuffix) + `|` + regexp.QuoteMeta(gitSuffix) + `)?$`)
-	commit      = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+	commit  = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 	// sweepGrace covers Dispatch's window between writing the variable and registering the job.
 	sweepGrace = 10 * time.Minute
 )
 
-// New builds a Nomad client; the token is the receiver's workload identity.
-func New(config Config, token string) (*Adapter, error) {
+// New builds a Nomad client for a pool's jobs; the token is the receiver's workload identity.
+func New(config Config, pool, token string) (*Adapter, error) {
 	if config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv) {
 		return nil, errors.New("credential_env must be an environment variable name")
 	}
@@ -117,7 +124,16 @@ func New(config Config, token string) (*Adapter, error) {
 	if len(datacenters) == 0 {
 		datacenters = []string{"*"}
 	}
-	return &Adapter{client: client, namespace: config.Namespace, credentialEnv: config.CredentialEnv, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters}, nil
+	// Job IDs carry a digest of the pool, since a full 63-character pool name and run ID would pass Nomad's
+	// 128-character variable path limit.
+	sum := sha256.Sum256([]byte(pool))
+	prefix := jobPrefix + hex.EncodeToString(sum[:])[:12] + "-"
+	return &Adapter{
+		client: client, namespace: config.Namespace, credentialEnv: config.CredentialEnv, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters,
+		prefix:      prefix,
+		agentJob:    regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+$`),
+		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+)(` + regexp.QuoteMeta(promptSuffix) + `|` + regexp.QuoteMeta(gitSuffix) + `)?$`),
+	}, nil
 }
 
 // Ready reports whether some ready, eligible node in the adapter's node pool
@@ -145,64 +161,68 @@ func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// Dispatch starts one run idempotently and returns once its task has started or ended.
-func (adapter *Adapter) Dispatch(ctx context.Context, run receiver.Run) (_ receiver.Handle, dispatchErr error) {
-	path := variablePath(run.ID, run.Turn)
+// Dispatch starts one run idempotently and returns once its task has started or ended. It removes the
+// turn's material only when Info confirms that no job exists.
+func (adapter *Adapter) Dispatch(ctx context.Context, run receiver.Run) (receiver.Outcome, receiver.Handle, error) {
+	path := adapter.variablePath(run.ID, run.Turn)
 	job, err := adapter.buildJob(run, path)
 	if err != nil {
-		return receiver.Handle{}, err
+		return receiver.OutcomeNothingCreated, receiver.Handle{}, err
 	}
+	jobID := *job.ID
 	items := map[string]string{"prompt": string(run.Prompt)}
 	if run.Credential != nil {
 		items["credential"] = string(run.Credential)
 	}
 	variable := &api.Variable{Namespace: adapter.namespace, Path: path, Items: items}
 	if _, _, err := adapter.client.Variables().Update(variable, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-		return receiver.Handle{}, redacted("write", path, err)
+		return adapter.notStarted(ctx, run, redacted("write", path, err))
 	}
-	defer func() {
-		if dispatchErr == nil {
-			return
-		}
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
-		defer cancel()
-		if err := adapter.Release(cleanupCtx, run.ID, run.Turn); err != nil {
-			dispatchErr = errors.Join(dispatchErr, err)
-		}
-	}()
 	if run.Git != nil {
 		gitItems := map[string]string{"git_url": run.Git.URL, "git_ref": run.Git.Ref, "git_path": run.Git.Path}
 		gitPath := path + gitSuffix
 		if _, _, err := adapter.client.Variables().Update(&api.Variable{Namespace: adapter.namespace, Path: gitPath, Items: gitItems}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-			return receiver.Handle{}, redacted("write", gitPath, err)
+			return adapter.notStarted(ctx, run, redacted("write", gitPath, err))
 		}
 	}
-
-	jobID := *job.ID
 	if _, _, err := adapter.client.Jobs().Info(jobID, (&api.QueryOptions{}).WithContext(ctx)); err != nil {
 		if !notFound(err) {
-			return receiver.Handle{}, err
+			return receiver.OutcomeUnknown, receiver.Handle{}, err
 		}
 		if _, _, err := adapter.client.Jobs().RegisterOpts(job, &api.RegisterOptions{EnforceIndex: true, ModifyIndex: 0}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-			if _, _, existsErr := adapter.client.Jobs().Info(jobID, (&api.QueryOptions{}).WithContext(ctx)); existsErr != nil {
-				return receiver.Handle{}, fmt.Errorf("register: %w", err)
-			}
+			return adapter.notStarted(ctx, run, fmt.Errorf("register: %w", err))
 		}
 	}
-	return adapter.wait(ctx, jobID, job.TaskGroups[0].Tasks[0].Driver, run.Git != nil, path)
+	handle, _, err := adapter.wait(ctx, jobID, job.TaskGroups[0].Tasks[0].Driver, run.Git != nil, path)
+	if err != nil {
+		return receiver.OutcomeUnknown, receiver.Handle{}, err
+	}
+	return receiver.OutcomeCreated, handle, nil
+}
+
+// notStarted returns OutcomeNothingCreated, with the turn's material released, when Info finds no job;
+// otherwise OutcomeUnknown with cause and everything left in place. A failed release is an error, which
+// the core resolves with Lookup.
+func (adapter *Adapter) notStarted(ctx context.Context, run receiver.Run, cause error) (receiver.Outcome, receiver.Handle, error) {
+	if _, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), (&api.QueryOptions{}).WithContext(ctx)); !notFound(err) {
+		return receiver.OutcomeUnknown, receiver.Handle{}, cause
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
+	defer cancel()
+	return receiver.OutcomeNothingCreated, receiver.Handle{}, adapter.Release(cleanupCtx, run.ID, run.Turn)
 }
 
 // Lookup finds a turn's existing job and waits for it as Dispatch does.
-func (adapter *Adapter) Lookup(ctx context.Context, runID string, turn int64) (receiver.Handle, bool, error) {
-	job, _, err := adapter.client.Jobs().Info(jobID(runID, turn), (&api.QueryOptions{}).WithContext(ctx))
+func (adapter *Adapter) Lookup(ctx context.Context, runID string, turn int64) (receiver.Job, error) {
+	job, _, err := adapter.client.Jobs().Info(adapter.jobID(runID, turn), (&api.QueryOptions{}).WithContext(ctx))
 	if notFound(err) {
-		return receiver.Handle{}, false, nil
+		return receiver.Job{}, nil
 	}
 	if err != nil {
-		return receiver.Handle{}, false, err
+		return receiver.Job{}, err
 	}
 	if len(job.TaskGroups) != 1 {
-		return receiver.Handle{}, false, errors.New("existing job is not an agent job")
+		return receiver.Job{}, errors.New("existing job is not an agent job")
 	}
 	driver, git := "", false
 	for _, task := range job.TaskGroups[0].Tasks {
@@ -212,22 +232,43 @@ func (adapter *Adapter) Lookup(ctx context.Context, runID string, turn int64) (r
 		case gitTaskName:
 			git = true
 		default:
-			return receiver.Handle{}, false, errors.New("existing job is not an agent job")
+			return receiver.Job{}, errors.New("existing job is not an agent job")
 		}
 	}
 	if driver == "" {
-		return receiver.Handle{}, false, errors.New("existing job is not an agent job")
+		return receiver.Job{}, errors.New("existing job is not an agent job")
 	}
-	handle, err := adapter.wait(ctx, *job.ID, driver, git, variablePath(runID, turn))
+	handle, state, err := adapter.wait(ctx, *job.ID, driver, git, adapter.variablePath(runID, turn))
 	if err != nil {
-		return receiver.Handle{}, false, err
+		return receiver.Job{}, err
 	}
-	return handle, true, nil
+	// A job registered without the key reads as attempt 0.
+	attempt, _ := strconv.ParseInt(job.Meta["attempt"], 10, 64)
+	return receiver.Job{State: state, Handle: handle, Attempt: attempt, Adapter: job.Meta["adapter"], Agent: job.Meta["agent"]}, nil
+}
+
+// handle is the version 1 encoding of receiver.Handle.Data.
+type handle struct {
+	V      int    `json:"v"`
+	Job    string `json:"job"`
+	Alloc  string `json:"alloc"`
+	Format string `json:"format"`
+}
+
+func decodeHandle(encoded receiver.Handle) (handle, error) {
+	var decoded handle
+	if err := json.Unmarshal(encoded.Data, &decoded); err != nil {
+		return handle{}, err
+	}
+	if decoded.V != 1 {
+		return handle{}, fmt.Errorf("handle version %d", decoded.V)
+	}
+	return decoded, nil
 }
 
 // wait returns once the job's agent task has started or ended; a wait cut short deregisters the job.
 // With a git context, it delivers the agent's prompt once the clone task has finished.
-func (adapter *Adapter) wait(ctx context.Context, jobID, driver string, git bool, path string) (receiver.Handle, error) {
+func (adapter *Adapter) wait(ctx context.Context, jobID, driver string, git bool, path string) (receiver.Handle, receiver.JobState, error) {
 	format := ""
 	if driver == "podman" {
 		format = formatCRI
@@ -237,31 +278,43 @@ func (adapter *Adapter) wait(ctx context.Context, jobID, driver string, git bool
 		allocs, _, err := adapter.client.Jobs().Allocations(jobID, false, (&api.QueryOptions{}).WithContext(ctx))
 		if err != nil {
 			if ctx.Err() != nil {
-				return receiver.Handle{}, adapter.deregisterTimedOut(ctx, jobID)
+				return receiver.Handle{}, 0, adapter.deregisterTimedOut(ctx, jobID)
 			}
-			return receiver.Handle{}, err
+			return receiver.Handle{}, 0, err
 		}
 		alloc := current(allocs)
 		if alloc != nil && git && checkedOut == "" {
 			switch state := alloc.TaskStates[gitTaskName]; {
 			case state != nil && state.Failed:
-				return receiver.Handle{}, receiver.ErrGitContext
+				return receiver.Handle{}, 0, receiver.ErrGitContext
 			case state != nil && state.State == "dead":
 				if checkedOut, err = adapter.deliverPrompt(ctx, alloc.ID, format == formatCRI, path); err != nil {
-					return receiver.Handle{}, err
+					return receiver.Handle{}, 0, err
 				}
 			}
 		}
 		// The logs API answers 404 until the task has started.
-		if alloc != nil && (terminal(alloc.ClientStatus) || started(alloc)) {
-			return receiver.Handle{Job: jobID, Alloc: alloc.ID, Format: format, Commit: checkedOut}, nil
+		if alloc != nil && (terminal(alloc.ClientStatus) || started(alloc.TaskStates[taskName])) {
+			data, _ := json.Marshal(handle{V: 1, Job: jobID, Alloc: alloc.ID, Format: format}) // strings always encode
+			return receiver.Handle{Data: data, Name: jobID, Commit: checkedOut}, jobState(alloc), nil
 		}
 		select {
 		case <-ctx.Done():
-			return receiver.Handle{}, adapter.deregisterTimedOut(ctx, jobID)
+			return receiver.Handle{}, 0, adapter.deregisterTimedOut(ctx, jobID)
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// jobState keys never-started on a terminal allocation whose agent task has no Started event.
+func jobState(alloc *api.AllocationListStub) receiver.JobState {
+	switch {
+	case !terminal(alloc.ClientStatus):
+		return receiver.JobRunning
+	case started(alloc.TaskStates[taskName]):
+		return receiver.JobEnded
+	}
+	return receiver.JobNeverStarted
 }
 
 // deliverPrompt reads the clone task's checkout and commit and writes the agent's prompt with a
@@ -326,7 +379,7 @@ func (adapter *Adapter) deliverPrompt(ctx context.Context, allocID string, cri b
 // buildJob takes nothing from the task except the run ID and the matched offer.
 func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error) {
 	runtime := adapter.runtime
-	jobID := jobID(run.ID, run.Turn)
+	jobID := adapter.jobID(run.ID, run.Turn)
 	env := maps.Clone(runtime.Env)
 	if env == nil {
 		env = make(map[string]string)
@@ -357,7 +410,10 @@ func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error
 	return &api.Job{
 		ID: new(jobID), Name: new(jobID), Namespace: new(adapter.namespace), Type: new(api.JobTypeBatch),
 		NodePool: nodePool(adapter.nodePool), Datacenters: adapter.datacenters,
-		Meta: map[string]string{"run_id": run.ID},
+		Meta: map[string]string{
+			"run_id": run.ID, "turn": strconv.FormatInt(run.Turn, 10), "attempt": strconv.FormatInt(run.Attempt, 10),
+			"adapter": run.Adapter, "agent": run.Agent,
+		},
 		TaskGroups: []*api.TaskGroup{{
 			Name:             new(taskName),
 			ReschedulePolicy: &api.ReschedulePolicy{Attempts: new(0), Unlimited: new(false)},
@@ -406,12 +462,12 @@ func gitTask(runtime Runtime, gitPath string) *api.Task {
 	}
 }
 
-func jobID(runID string, turn int64) string {
-	return fmt.Sprintf("%s%s-t%d", jobPrefix, runID, turn)
+func (adapter *Adapter) jobID(runID string, turn int64) string {
+	return fmt.Sprintf("%s%s-t%d", adapter.prefix, runID, turn)
 }
 
-func variablePath(runID string, turn int64) string {
-	return jobVariablePrefix + jobID(runID, turn)
+func (adapter *Adapter) variablePath(runID string, turn int64) string {
+	return jobVariablePrefix + adapter.jobID(runID, turn)
 }
 
 func notFound(err error) bool {
@@ -451,42 +507,82 @@ func terminal(status string) bool {
 	return false
 }
 
-func started(alloc *api.AllocationListStub) bool {
-	state, ok := alloc.TaskStates[taskName]
-	return ok && state != nil && !state.StartedAt.IsZero()
+// started reads StartedAt as well as the Started event, since Nomad keeps only a task's latest events.
+func started(state *api.TaskState) bool {
+	return state != nil && (!state.StartedAt.IsZero() || slices.ContainsFunc(state.Events, func(event *api.TaskEvent) bool { return event.Type == api.TaskStarted }))
 }
 
-// Follow streams stdout lines from a byte offset until the task ends.
-func (adapter *Adapter) Follow(ctx context.Context, handle receiver.Handle, offset int64, lines chan<- receiver.Line) error {
+// failureClasses maps the task events that end a task before it starts to Terminal.Class.
+var failureClasses = map[string]string{
+	api.TaskDriverFailure:    "driver",
+	api.TaskSetupFailure:     "setup",
+	api.TaskFailedValidation: "validation",
+}
+
+// terminalOf reads the agent task's final state; the class is that of its last failure event.
+func terminalOf(alloc *api.Allocation) receiver.Terminal {
+	state := alloc.TaskStates[taskName]
+	result := receiver.Terminal{Started: started(state), Node: alloc.NodeName}
+	if state == nil {
+		return result
+	}
+	for _, event := range state.Events {
+		if class, ok := failureClasses[event.Type]; ok && !result.Started {
+			result.Class = class
+		}
+		if event.Type == api.TaskTerminated {
+			result.ExitCode = event.ExitCode
+			if event.Signal != 0 {
+				result.Signal = strconv.Itoa(event.Signal)
+			}
+		}
+	}
+	return result
+}
+
+// Follow streams stdout lines from a byte offset until the task ends, then returns its final state.
+func (adapter *Adapter) Follow(ctx context.Context, encoded receiver.Handle, offset int64, lines chan<- receiver.Line) (receiver.Terminal, error) {
+	handle, err := decodeHandle(encoded)
+	if err != nil {
+		return receiver.Terminal{}, err
+	}
 	alloc, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return err
+		return receiver.Terminal{}, err
+	}
+	// The logs API answers 404 for a task that never started.
+	if alloc.ClientTerminalStatus() && !started(alloc.TaskStates[taskName]) {
+		return terminalOf(alloc), nil
 	}
 	reader := lineReader{lines: lines, position: offset, cri: handle.Format == formatCRI}
 	streamCtx, stopStream := context.WithCancel(ctx)
 	defer stopStream()
 	frames, errs := adapter.logs(streamCtx, alloc, taskName, true, offset)
-	// A followed stream can stay open with no frames after the task ends, and can
-	// lag a task that ended before it opened; completion is polled instead.
+	// A followed stream can stay open with no frames after the task ends, can close before the task ends,
+	// and can lag a task that ended before it opened; completion is polled instead.
 	poll := time.NewTicker(followPoll)
 	defer poll.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return receiver.Terminal{}, ctx.Err()
 		case err := <-errs:
-			return err
+			return receiver.Terminal{}, err
 		case <-poll.C:
-			if adapter.finished(ctx, handle) {
+			if final := adapter.finished(ctx, handle.Alloc); final != nil {
 				stopStream()
-				return adapter.drain(ctx, alloc, &reader)
+				if err := adapter.drain(ctx, final, &reader); err != nil {
+					return receiver.Terminal{}, err
+				}
+				return terminalOf(final), nil
 			}
 		case frame, ok := <-frames:
 			if !ok {
-				return reader.flush(ctx)
+				frames = nil
+				continue
 			}
 			if err := reader.take(ctx, frame.Data); err != nil {
-				return err
+				return receiver.Terminal{}, err
 			}
 		}
 	}
@@ -607,15 +703,23 @@ func (reader *lineReader) emit(ctx context.Context, data []byte, advance int64) 
 	}
 }
 
-func (adapter *Adapter) finished(ctx context.Context, handle receiver.Handle) bool {
-	alloc, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
-	return err == nil && alloc.ClientTerminalStatus()
+// finished returns the allocation once it is terminal, else nil.
+func (adapter *Adapter) finished(ctx context.Context, allocID string) *api.Allocation {
+	alloc, _, err := adapter.client.Allocations().Info(allocID, (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil || !alloc.ClientTerminalStatus() {
+		return nil
+	}
+	return alloc
 }
 
 // Stop sends SIGTERM and stops the job if the task outlives the grace period;
 // stopping a batch allocation instead would migrate it to a replacement.
 // Requires the alloc-lifecycle and submit-job capabilities.
-func (adapter *Adapter) Stop(ctx context.Context, handle receiver.Handle) error {
+func (adapter *Adapter) Stop(ctx context.Context, encoded receiver.Handle) error {
+	handle, err := decodeHandle(encoded)
+	if err != nil {
+		return err
+	}
 	alloc, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
 		return err
@@ -625,7 +729,7 @@ func (adapter *Adapter) Stop(ctx context.Context, handle receiver.Handle) error 
 	}
 	if err := adapter.client.Allocations().Signal(alloc, (&api.QueryOptions{}).WithContext(ctx), taskName, "SIGTERM"); err == nil {
 		for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); time.Sleep(time.Second) {
-			if adapter.finished(ctx, handle) {
+			if adapter.finished(ctx, handle.Alloc) != nil {
 				return nil
 			}
 		}
@@ -636,20 +740,59 @@ func (adapter *Adapter) Stop(ctx context.Context, handle receiver.Handle) error 
 
 // Release deletes the per-turn variables holding the credential, the prompt and the git context.
 func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) error {
-	path := variablePath(runID, turn)
+	return adapter.release(ctx, adapter.jobID(runID, turn))
+}
+
+func (adapter *Adapter) release(ctx context.Context, jobID string) error {
+	path := jobVariablePrefix + jobID
 	return errors.Join(adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+promptSuffix), adapter.deleteVariable(ctx, path+gitSuffix))
 }
 
-// Sweep deletes per-run variables whose job has ended, been stopped, or never registered.
+// Purge deregisters the turn's job with purge, then deletes its variables.
+func (adapter *Adapter) Purge(ctx context.Context, runID string, turn int64) error {
+	return adapter.purge(ctx, adapter.jobID(runID, turn))
+}
+
+func (adapter *Adapter) purge(ctx context.Context, jobID string) error {
+	if _, _, err := adapter.client.Jobs().Deregister(jobID, true, (&api.WriteOptions{}).WithContext(ctx)); err != nil && !notFound(err) {
+		return err
+	}
+	return adapter.release(ctx, jobID)
+}
+
+// Sweep purges agent jobs dead for the grace period, and deletes per-run variables whose job has ended,
+// been stopped, or never registered.
 func (adapter *Adapter) Sweep(ctx context.Context) error {
-	prefix := jobVariablePrefix + jobPrefix
-	variables, _, err := adapter.client.Variables().PrefixList(prefix, (&api.QueryOptions{}).WithContext(ctx))
+	jobs, _, err := adapter.client.Jobs().List((&api.QueryOptions{Prefix: adapter.prefix}).WithContext(ctx))
 	if err != nil {
-		return redacted("list", prefix, err)
+		return redacted("list jobs", adapter.prefix, err)
 	}
 	var errs []error
+	for _, job := range jobs {
+		if job.Status != "dead" || !adapter.agentJob.MatchString(job.ID) {
+			continue
+		}
+		allocs, _, err := adapter.client.Jobs().Allocations(job.ID, true, (&api.QueryOptions{}).WithContext(ctx))
+		if err != nil {
+			errs = append(errs, redacted("list allocations of", job.ID, err))
+			continue
+		}
+		// An adopter may still read a dead job's log, so its age runs from its last allocation change.
+		ended := job.SubmitTime
+		for _, alloc := range allocs {
+			ended = max(ended, alloc.ModifyTime)
+		}
+		if time.Since(time.Unix(0, ended)) >= sweepGrace {
+			errs = append(errs, adapter.purge(ctx, job.ID))
+		}
+	}
+	prefix := jobVariablePrefix + adapter.prefix
+	variables, _, err := adapter.client.Variables().PrefixList(prefix, (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return errors.Join(append(errs, redacted("list", prefix, err))...)
+	}
 	for _, variable := range variables {
-		match := runVariable.FindStringSubmatch(variable.Path)
+		match := adapter.runVariable.FindStringSubmatch(variable.Path)
 		if match == nil {
 			continue
 		}
@@ -681,7 +824,7 @@ func (adapter *Adapter) deleteVariable(ctx context.Context, path string) error {
 func redacted(op, path string, err error) error {
 	var response api.UnexpectedResponseError
 	if errors.As(err, &response) {
-		return fmt.Errorf("%s variable %s: status %d", op, path, response.StatusCode())
+		return fmt.Errorf("%s %s: status %d", op, path, response.StatusCode())
 	}
-	return fmt.Errorf("%s variable %s failed", op, path)
+	return fmt.Errorf("%s %s failed", op, path)
 }

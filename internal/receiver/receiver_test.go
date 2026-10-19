@@ -2,6 +2,7 @@ package receiver
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
@@ -53,6 +54,8 @@ var (
 
 type fakeAdapter struct {
 	mu sync.Mutex
+	// pool, name and agent are the ones the fixture's factory builds the adapter with.
+	pool, name, agent string
 	// unready and readyErr make Ready report the adapter unable to start a job.
 	unready     bool
 	readyErr    error
@@ -64,16 +67,30 @@ type fakeAdapter struct {
 	follows     int
 	dispatches  int
 	dispatchErr error
-	lastRun     Run
-	lookups     int
-	lookupErr   error
-	existing    bool
-	commit      string
-	releases    int
-	releaseErr  error
-	releaseIDs  []string
-	sweeps      int
-	sweepErr    error
+	// outcome is what Dispatch reports, OutcomeCreated when zero.
+	outcome Outcome
+	// handleSize is the length of the handle data Dispatch and Lookup return.
+	handleSize int
+	lastRun    Run
+	lookups    int
+	lookupErr  error
+	// job is the state Lookup reports; jobAdapter and jobAgent override the metadata it reports.
+	job                  JobState
+	jobAdapter, jobAgent string
+	// neverStarted makes Follow report a job whose agent never started.
+	neverStarted bool
+	commit       string
+	purges       int
+	// purgeFailures fail that many Purges; purgeErr fails every one.
+	purgeFailures int
+	purgeErr      error
+	releases      int
+	releaseErr    error
+	releaseIDs    []string
+	// calls records Purge and Release in order.
+	calls    []string
+	sweeps   int
+	sweepErr error
 	// endDelay holds a stream without a result line open before it ends.
 	endDelay time.Duration
 }
@@ -84,61 +101,71 @@ func (f *fakeAdapter) Ready(context.Context) (bool, error) {
 	return !f.unready && f.readyErr == nil, f.readyErr
 }
 
-func (f *fakeAdapter) Dispatch(_ context.Context, run Run) (Handle, error) {
+func (f *fakeAdapter) handle(runID string, turn int64) Handle {
+	return Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: fmt.Sprintf("agent-%s-t%d", runID, turn)}
+}
+
+func (f *fakeAdapter) Dispatch(_ context.Context, run Run) (Outcome, Handle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dispatches++
 	f.lastRun = run
 	if f.dispatchErr != nil {
-		return Handle{}, f.dispatchErr
+		return OutcomeUnknown, Handle{}, f.dispatchErr
 	}
-	handle := Handle{Job: fmt.Sprintf("agent-%s-t%d", run.ID, run.Turn), Alloc: run.ID}
+	if f.outcome == OutcomeNothingCreated {
+		return f.outcome, Handle{}, nil
+	}
+	handle := f.handle(run.ID, run.Turn)
 	if run.Git != nil {
 		handle.Commit = f.commit
 	}
-	return handle, nil
+	return cmp.Or(f.outcome, OutcomeCreated), handle, nil
 }
 
-func (f *fakeAdapter) Lookup(_ context.Context, runID string, turn int64) (Handle, bool, error) {
+func (f *fakeAdapter) Lookup(_ context.Context, runID string, turn int64) (Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lookups++
 	if f.lookupErr != nil {
-		return Handle{}, false, f.lookupErr
+		return Job{}, f.lookupErr
 	}
-	if !f.existing {
-		return Handle{}, false, nil
+	if f.job == JobAbsent {
+		return Job{}, nil
 	}
-	return Handle{Job: fmt.Sprintf("agent-%s-t%d", runID, turn), Alloc: runID}, true, nil
+	return Job{State: f.job, Handle: f.handle(runID, turn), Attempt: 1, Adapter: cmp.Or(f.jobAdapter, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
 }
 
 // Follow emits the stream; a stream with a result keeps running like a live task, one without ends.
-func (f *fakeAdapter) Follow(ctx context.Context, _ Handle, _ int64, lines chan<- Line) error {
+func (f *fakeAdapter) Follow(ctx context.Context, _ Handle, _ int64, lines chan<- Line) (Terminal, error) {
 	f.mu.Lock()
 	f.follows++
-	stream, followErr, endDelay := append([]string(nil), f.stream...), f.followErr, f.endDelay
+	stream, followErr, endDelay, neverStarted := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.neverStarted
 	f.mu.Unlock()
 	var offset int64
 	for _, data := range stream {
 		select {
 		case lines <- Line{Offset: offset, Next: offset + int64(len(data)+1), Data: []byte(data)}:
 		case <-ctx.Done():
-			return ctx.Err()
+			return Terminal{}, ctx.Err()
 		}
 		offset += int64(len(data) + 1)
 	}
 	if followErr != nil {
-		return followErr
+		return Terminal{}, followErr
 	}
 	if !slices.ContainsFunc(stream, func(data string) bool { _, ok := resultLine([]byte(data)); return ok }) {
 		select {
 		case <-time.After(endDelay):
 		case <-ctx.Done():
 		}
-		return nil
+		if neverStarted {
+			return Terminal{Class: "driver", Node: "node-1"}, nil
+		}
+		return Terminal{Started: true, ExitCode: 1, Node: "node-1"}, nil
 	}
 	<-ctx.Done()
-	return ctx.Err()
+	return Terminal{}, ctx.Err()
 }
 
 func (f *fakeAdapter) Stop(context.Context, Handle) error {
@@ -152,11 +179,23 @@ func (f *fakeAdapter) Stop(context.Context, Handle) error {
 	return err
 }
 
+func (f *fakeAdapter) Purge(context.Context, string, int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.purges++
+	f.calls = append(f.calls, "purge")
+	if f.purges <= f.purgeFailures {
+		return errors.New("purge failed")
+	}
+	return f.purgeErr
+}
+
 func (f *fakeAdapter) Release(_ context.Context, runID string, _ int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releases++
 	f.releaseIDs = append(f.releaseIDs, runID)
+	f.calls = append(f.calls, "release")
 	return f.releaseErr
 }
 
@@ -225,7 +264,7 @@ func testConfig(receiver string) admin.ReceiverConfig {
 }
 
 func shortIntervals(t *testing.T) {
-	for _, interval := range []*time.Duration{&renewInterval, &advertiseInterval, &refreshInterval, &cancelReadInterval} {
+	for _, interval := range []*time.Duration{&renewInterval, &advertiseInterval, &refreshInterval, &cancelReadInterval, &reconcileInterval} {
 		previous := *interval
 		*interval = 200 * time.Millisecond
 		t.Cleanup(func() { *interval = previous })
@@ -337,11 +376,14 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		t.Fatal(err)
 	}
 	logs := &syncBuffer{}
-	factory := func(settings admin.AdapterSettings) (Named, error) {
+	factory := func(pool string, settings admin.AdapterSettings) (Named, error) {
 		adapter, ok := f.adapters[settings.Name]
 		if !ok || settings.Type != "fake" {
 			return Named{}, errors.New("no fake adapter")
 		}
+		adapter.mu.Lock()
+		adapter.pool, adapter.name, adapter.agent = pool, settings.Name, settings.Agent
+		adapter.mu.Unlock()
 		return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Adapter: adapter}, nil
 	}
 	return &Receiver{id: config.Receiver, kafkaOpt: opts, base: base, signing: signing, sealing: sealing, factory: factory, logger: log.New(logs, "", 0)}, logs
@@ -1035,5 +1077,14 @@ func TestUnreadyAdapterIsNeverChosen(t *testing.T) {
 	record := m.submit(t, m.host, func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("site", "lab")} })
 	if admitted, ack := m.receiver.admit(m.ctx, record); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("admitted=%v ack=%v, want a start failure and release", admitted != nil, ack)
+	}
+}
+
+func TestAdaptersAreBuiltForTheReceiversPool(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.adapter.mu.Lock()
+	defer f.adapter.mu.Unlock()
+	if f.adapter.pool != testPool {
+		t.Fatalf("adapter built for pool %q, want %q", f.adapter.pool, testPool)
 	}
 }

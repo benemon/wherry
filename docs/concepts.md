@@ -204,9 +204,11 @@ Each pool reads its tasks through the Kafka
 acquisition lock for the whole turn and renews it every 10 seconds. When a
 receiver stops renewing, the broker delivers the task again, and that
 delivery is the next attempt. The receiver that takes it looks for the
-turn's job in each of its adapters. If the job exists, the receiver adopts
-it and resumes the transcript from the last log offset recorded in a
-heartbeat. Each run writes through its own
+turn's job in each of its adapters. If the job exists and came from the
+same adapter and agent, the receiver adopts it and resumes the transcript
+from the last log offset recorded in a heartbeat. Any other job under the
+turn's ID is stopped and purged, and the turn is dispatched again. Each
+run writes through its own
 [transactional producer](https://kafka.apache.org/documentation/#semantics),
 `p.<pool>.<run>`, so an adopter fences the earlier holder's writes.
 
