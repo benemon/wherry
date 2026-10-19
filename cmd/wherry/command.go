@@ -8,8 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"maps"
-	"math"
 	"os"
 	"slices"
 	"sort"
@@ -72,7 +72,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if !ok {
 		return fmt.Errorf("unknown command %q", args[0])
 	}
-	client, err := busclient.Connect(config)
+	client, err := busclient.Connect(config, log.New(stderr, "", 0))
 	if err != nil {
 		return err
 	}
@@ -94,7 +94,6 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 	if err != nil {
 		return err
 	}
-	now := time.Now()
 	if *jsonOutput {
 		encoded, err := json.Marshal(receivers, json.Deterministic(true))
 		if err != nil {
@@ -107,18 +106,6 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 				receiver.ReceiverID, receiver.Pool, receiver.Capacity, receiver.InFlight, receiver.HeartbeatAge, receiver.Status)
 			for _, adapter := range receiver.Adapters {
 				fmt.Fprintf(stdout, "  adapter=%s agent=%s ready=%t labels=%s\n", adapter.Name, adapter.Agent, adapter.Ready, wire.TermsText(adapter.Labels))
-			}
-			for _, seal := range receiver.Seals {
-				fmt.Fprintf(stdout, "  seal=%s pool=%s expires=%s\n", seal.Name, seal.Pool, time.UnixMilli(seal.ExpMS).UTC().Format(time.RFC3339))
-			}
-		}
-	}
-	for _, receiver := range receivers {
-		for _, seal := range receiver.Seals {
-			if left := time.UnixMilli(seal.ExpMS).Sub(now); left <= 0 {
-				fmt.Fprintf(stderr, "seal %s on receiver %s has expired\n", seal.Name, receiver.ReceiverID)
-			} else if left < 7*24*time.Hour {
-				fmt.Fprintf(stderr, "seal %s on receiver %s expires in %dd\n", seal.Name, receiver.ReceiverID, int(math.Ceil(left.Hours()/24)))
 			}
 		}
 	}

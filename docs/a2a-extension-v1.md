@@ -51,6 +51,7 @@ algorithm `EdDSA` (Ed25519). The protected header holds:
 | echo | `application/vnd.wherry.echo.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
 | advertisement | `application/vnd.wherry.advertisement.v1+jws` | receiver | `wherry.receivers` | receiver ID |
 | start failure | `application/vnd.wherry.start-failure.v1+jws` | receiver | `wherry.pool.<pool>.events` | run ID |
+| seal request | `application/vnd.wherry.seal-request.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
 
 A reader accepts a signed record only when all of these hold:
 
@@ -310,7 +311,6 @@ An advertisement reports a receiver's liveness and capacity.
   "receiver": "nomad-1", "pool": "build",
   "offers": [{"adapter": "container", "agent": "coder"}],
   "capacity": 2, "in_flight": 0,
-  "sealing_key": "sha256:...",
   "at_ms": 1789998000000
 }
 ```
@@ -320,10 +320,6 @@ An advertisement reports a receiver's liveness and capacity.
   no adapter is ready. Readers take an adapter's agent and labels from the
   receiver's configuration record on `wherry.admin`, and use `offers` only
   to learn which adapters are ready. Each `adapter` appears at most once.
-- `sealing_key` is the fingerprint of the receiver's sealing key: `sha256:`
-  and the unpadded base64url SHA-256 of the raw X25519 public key. Readers
-  reject an advertisement whose `sealing_key` is not the key registered on
-  the receiver's key topic.
 - A receiver advertises every 30 seconds, with or without a ready adapter.
   Placement passes over a receiver whose `offers` is empty. Readers take
   each receiver's
@@ -345,14 +341,13 @@ then ends the turn `TASK_STATE_FAILED` with the message text
   "wherry": {"receiver": "nomad-1", "tenant": "alice", "pool": "build", "run": "run-0f3c...", "turn": 1, "attempt": 2},
   "adapter": "container",
   "agent": "coder",
-  "class": "seal-unavailable"
+  "class": "dispatch"
 }
 ```
 
 | `class` | Meaning |
 | --- | --- |
 | `offer-unavailable` | no ready adapter satisfies the task's agent and selector |
-| `seal-unavailable` | this receiver opens no seal for the credential, and another live member holds an unexpired one |
 | `dispatch` | the adapter created no job for the turn |
 | `platform` | the platform ended the job before its agent task started, for example when the image cannot be pulled |
 
@@ -368,7 +363,7 @@ From an attempt of the pool's `delivery_limit` minus 1, a receiver that
 would release a task to the pool ends the turn `TASK_STATE_FAILED` with the
 message text `delivery budget exhausted` instead. This covers start
 failures, a dispatch whose outcome the receiver cannot resolve, a failed
-read of the pool's events or the tenant's seals once the turn is claimed,
+read of the pool's events or of the host's topic once the turn is claimed,
 and a failure to find, stop or remove the turn's job. When the agent has
 written its result and only stopping the job fails, the turn ends with that
 result. These releases are exempt:
@@ -399,15 +394,14 @@ signature's protected header carrying its public key as `jwk`.
   "owner": "nomad-1",
   "action": "rotate",
   "key": {"kty": "OKP", "crv": "Ed25519", "x": "...", "kid": "sha256:...", "alg": "EdDSA", "use": "sig"},
-  "previous_key_id": "sha256:...",
-  "sealing_key": "<base64url X25519 public key>"
+  "previous_key_id": "sha256:..."
 }
 ```
 
 - `owner` is the topic's owner. `key` is the owner's Ed25519 public key as
-  a JWK. `sealing_key` is a receiver's raw X25519 public key, unpadded
-  base64url. A host record has no `sealing_key`; only `rotate` has
-  `previous_key_id`.
+  a JWK. Only `rotate` has `previous_key_id`. A receiver record written by an
+  earlier release may carry `sealing_key`, a retired sealing key; readers
+  accept it and ignore it.
 - `register` is the first record on the topic, self-signed by `key`. A
   later `register` is rejected.
 - `rotate` replaces the current key with `key`. It carries two signatures,
@@ -422,38 +416,117 @@ Readers fold the topic in order. Once the topic holds a key, every record
 must verify against the current key; a record that breaks a rule is
 ignored.
 
-## Sealed credentials
+## Seal request
 
-A host writes each seal to its own topic, unsigned, keyed
-`<receiver>/<credential>`.
+A receiver that claims a turn whose adapter delivers a credential asks the
+run's host for it. It makes a P-256 key pair for the attempt and commits a
+seal request to the tenant feed in a transaction of its own, after the
+turn's `claimed` status.
 
 ```json
 {
   "v": 1,
-  "tenant": "alice", "receiver": "nomad-1", "pool": "build",
-  "key_fingerprint": "sha256:...",
-  "credential": "model-api-key",
-  "issued_ms": 1789998000000,
-  "expiry_ms": 1790084400000,
-  "ciphertext": "<base64>"
+  "receiver": "nomad-1", "tenant": "alice", "pool": "build",
+  "run": "run-0f3c...", "turn": 1, "attempt": 2,
+  "key": {"kty": "EC", "crv": "P-256", "x": "...", "y": "..."},
+  "key_id": "hs9I_DeEnEcQZjRh56OShK8IHP_rXpmv2UZ2DQxMXz0",
+  "credentials": ["model-api-key"],
+  "expiry_ms": 1789998300000
 }
 ```
 
-- The ciphertext is [HPKE](https://datatracker.ietf.org/doc/html/rfc9180)
-  in base mode with DHKEM(X25519, HKDF-SHA256), HKDF-SHA256 and
-  AES-256-GCM: the 32-byte encapsulated key followed by the sealed
-  plaintext, with empty associated data. The plaintext is at most 16 KiB.
-- The HPKE `info` is the bytes `wherry hpke seal`, a zero byte, and the
-  JSON object `{"v", "tenant", "receiver", "pool", "key", "credential",
-  "issued_ms", "expiry_ms"}` in that member order, where `key` is
-  `key_fingerprint`.
-- `key_fingerprint` is the receiver's sealing-key fingerprint, as in an
-  [advertisement](#advertisement). `expiry_ms` is after `issued_ms`.
+- `key` is the attempt's public key as a JWK. `key_id` is its
+  [RFC 7638](https://datatracker.ietf.org/doc/html/rfc7638) SHA-256
+  thumbprint, unpadded base64url.
+- `credentials` names the credentials the attempt needs. Today it is the
+  credential of the adapter the turn was routed to.
+- `expiry_ms` is 5 minutes after the request. The receiver holds the claim
+  until a seal opens, a cancel of the turn arrives, or `expiry_ms` passes.
+  At expiry it interrupts the turn `TASK_STATE_AUTH_REQUIRED` (see [Turns
+  and continuations](#turns-and-continuations)).
+- The private key lives only in the receiver's memory and is gone once the
+  wait ends. A redelivered or adopted attempt makes a new key and a new
+  request; a seal answering an earlier request does not open for it.
 
-A receiver opens, for a task's tenant, pool and credential, the seal
-addressed to it with the latest `issued_ms` across the tenant's live hosts'
-topics. It refuses a seal past its expiry, for another receiver or pool, or
-for a credential the pool's terms do not allow for the task's agent.
+The host that submitted the run answers while `wherry await` or `wherry
+mcp` runs, at most once per run, turn and attempt. It answers only when
+all of these hold:
+
+1. The request verifies as a [signed record](#signed-records) from a live
+   member of the run's pool, for the run's tenant.
+2. The host holds a local record of the run, written when it submitted the
+   run's latest turn.
+3. `expiry_ms` has not passed and is at most 6 minutes away: the receiver's
+   5-minute wait and a minute of clock skew.
+4. Every `claimed` status of the run's latest turn comes from one receiver,
+   and the request comes from it.
+5. The request names the turn this host last submitted or continued, which
+   is the run's latest turn, and the receiver and attempt of that turn's
+   latest status, which is `claimed`, `started` or `heartbeat`.
+6. Every name in `credentials` is in the pool's terms for the run's agent
+   and in the host's configuration.
+
+A host records a run locally before it publishes the run's turn, so a
+request can follow the task at once; a request read while the record is
+absent is checked again on each later pass until it expires. The host holds
+an exclusive lock on the attempt, shared by every process using its state
+directory, from these checks to the record of its answer, and gives up
+waiting for the lock when its own work ends.
+Just before it writes the seal it reads the run again and repeats checks 3
+to 5, so a status that ends the attempt, or another claim, while the seal
+is built stops the write. It records the attempt as answered once the write
+is acknowledged. A host that
+stops between the two answers again on its next start; the receiver opens
+the first seal that opens. Each start removes the records of attempts whose
+request has expired or whose run's latest turn has ended.
+
+A host logs a skipped request that verifies and belongs to a run it
+submitted, by run, receiver and credential names, never a value. It logs
+nothing for any other request.
+
+Check 4 is the only trace a forged claim leaves. The broker's share-group
+claim is invisible to hosts, so a live pool member can sign a `claimed`
+status it never received. A turn that a second receiver claims, by
+adoption or by forgery, gets no seal and ends `TASK_STATE_AUTH_REQUIRED`.
+
+## Seal
+
+A seal answers one seal request. The host writes it to its own topic,
+`wherry.host.<tenant>.<host>`, unsigned, keyed by run ID, as a compact
+[JWE](https://datatracker.ietf.org/doc/html/rfc7516) encrypted to the
+request's `key`.
+
+- `alg` is `ECDH-ES+A256KW` and `enc` is `A256GCM`. Readers accept only
+  these algorithms and the compact serialization, and reject `zip`.
+- The protected header holds `alg`, `enc`, `epk`, `typ`
+  `application/vnd.wherry.seal.v2+jwe` and the binding: `tenant`, `pool`,
+  `receiver`, `key_id`, `run`, `turn`, `attempt`, `credentials` and
+  `expiry_ms`, copied from the request. Readers reject any other member.
+- The plaintext is a JSON object: `v`, `binding`, an object holding the
+  binding members again, and `values`, mapping each credential name in
+  `credentials` to its value as padded standard base64.
+- A seal is at most 64 KiB in compact form. A host refuses to build a larger
+  one and logs the credential names.
+
+The receiver reads the host's topic from its end at the time of the
+request. It opens a seal only when the header's binding equals its request,
+with `key_id` the thumbprint of its own key, `expiry_ms` has not passed, the
+plaintext's `binding` equals the header's, and `values` holds exactly the
+named credentials. It checks for a cancel, its shutdown, the run deadline
+and the request's expiry before it takes a seal, so a turn stopped while its
+seal arrives is never dispatched. It passes the values to the adapter in
+Dispatch. It logs a seal that does not open by run, turn and attempt, never
+the reason.
+
+Before it signs any transcript chunk, result text or status message of the
+attempt, the receiver replaces every occurrence of the exact bytes of each
+credential value it delivered with `[redacted:<name>]`, or `[redacted]`
+when the name contains the value. In result metadata it replaces within
+JSON string values only, so the metadata stays valid. A value shorter than
+8 bytes is not redacted; the receiver logs `credential <name> too short to
+redact` once for the attempt. A value that appears in another encoding,
+such as JSON-escaped, is not replaced, and an adopted attempt delivered
+nothing to redact.
 
 ## Admin records
 
@@ -488,10 +561,10 @@ job. Readers order a run's statuses, chunks and results by
 `(turn, attempt)`, and records of an earlier turn or attempt do not change
 the outcome of a later one.
 
-A receiver interrupts a turn with `TASK_STATE_AUTH_REQUIRED` when it opens
-no seal for the credential its adapter delivers and no pool member holds
-one. It writes the result and the `interrupted` status, and acknowledges the
-task.
+A receiver interrupts a turn with `TASK_STATE_AUTH_REQUIRED` when no seal
+for the credential its adapter delivers opens before its
+[seal request](#seal-request) expires. It writes the result and the
+`interrupted` status, and acknowledges the task.
 
 A continuation is a submission with `turn` greater than 1 and a new
 `messageId`. It repeats the tenant, pool and placement of the run's

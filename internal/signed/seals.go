@@ -1,118 +1,125 @@
 package signed
 
 import (
-	"crypto/ecdh"
-	"crypto/hpke"
-	"crypto/sha256"
+	"crypto"
+	"crypto/ecdsa"
 	"encoding/base64"
+	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
+
+	jose "github.com/go-jose/go-jose/v4"
 )
 
-const MaxPlaintext = 16 << 10
+const SealType = "application/vnd.wherry.seal.v2+jwe"
 
-// sealOverhead is the X25519 encapsulated key plus the AES-GCM tag.
-const sealOverhead = 32 + 16
+// maxSeal bounds a seal's compact serialisation, and with it the credentials it carries.
+const maxSeal = 64 << 10
 
-type Seal struct {
-	Version        int    `json:"v"`
-	Tenant         string `json:"tenant"`
-	Receiver       string `json:"receiver"`
-	Pool           string `json:"pool"`
-	KeyFingerprint string `json:"key_fingerprint"`
-	Credential     string `json:"credential"`
-	IssuedMS       int64  `json:"issued_ms"`
-	ExpiryMS       int64  `json:"expiry_ms"`
-	Ciphertext     []byte `json:"ciphertext"`
+// SealBinding is the one attempt and key a seal is for. A seal carries it in its protected header and again in its
+// plaintext.
+type SealBinding struct {
+	Tenant      string   `json:"tenant"`
+	Pool        string   `json:"pool"`
+	Receiver    string   `json:"receiver"`
+	KeyID       string   `json:"key_id"`
+	Run         string   `json:"run"`
+	Turn        int64    `json:"turn"`
+	Attempt     int64    `json:"attempt"`
+	Credentials []string `json:"credentials"`
+	ExpiryMS    int64    `json:"expiry_ms"`
 }
 
-func SealingKeyID(key *ecdh.PublicKey) string {
-	sum := sha256.Sum256(key.Bytes())
-	return "sha256:" + base64.RawURLEncoding.EncodeToString(sum[:])
+// sealHeader is every member a seal's protected header may hold.
+type sealHeader struct {
+	Algorithm  string         `json:"alg"`
+	Encryption string         `json:"enc"`
+	Type       string         `json:"typ"`
+	Ephemeral  jsontext.Value `json:"epk"`
+	SealBinding
 }
 
-// SealCredential seals plaintext to a receiver. A receiver takes the seal
-// with the latest issued time across its tenant's host topics.
-func SealCredential(tenant, receiver, pool, credential string, issued, expiry time.Time, key *ecdh.PublicKey, plaintext []byte) (Seal, error) {
-	if tenant == "" || receiver == "" || pool == "" || credential == "" || issued.IsZero() || !issued.Before(expiry) || len(plaintext) > MaxPlaintext {
-		return Seal{}, errors.New("invalid seal")
-	}
-	hpkeKey, err := hpke.NewDHKEMPublicKey(key)
-	if err != nil {
-		return Seal{}, err
-	}
-	seal := Seal{Version: 1, Tenant: tenant, Receiver: receiver, Pool: pool, KeyFingerprint: SealingKeyID(key), Credential: credential, IssuedMS: issued.UnixMilli(), ExpiryMS: expiry.UnixMilli()}
-	seal.Ciphertext, err = hpke.Seal(hpkeKey, hpke.HKDFSHA256(), hpke.AES256GCM(), sealInfo(seal), plaintext)
-	if err != nil {
-		return Seal{}, errors.New("seal credential")
-	}
-	return seal, nil
+type sealPlaintext struct {
+	Version int               `json:"v"`
+	Binding SealBinding       `json:"binding"`
+	Values  map[string][]byte `json:"values"`
 }
 
-// OpenCredential opens a seal read from the host topic of tenant.
-func OpenCredential(seal Seal, tenant, receiver, pool, credential string, now time.Time, allowed []string, key *ecdh.PrivateKey) ([]byte, error) {
-	if seal.Version != 1 || seal.Tenant != tenant || seal.Receiver != receiver || seal.Pool != pool || seal.Credential != credential || !now.Before(time.UnixMilli(seal.ExpiryMS)) || !contains(allowed, credential) {
-		return nil, errors.New("seal is not valid for receiver terms")
-	}
-	hpkeKey, err := hpke.NewDHKEMPrivateKey(key)
+// SealKeyID is the RFC 7638 SHA-256 thumbprint of a seal key, base64url.
+func SealKeyID(key *ecdsa.PublicKey) string {
+	thumbprint, _ := (&jose.JSONWebKey{Key: key}).Thumbprint(crypto.SHA256) // fails only for a key of another type
+	return base64.RawURLEncoding.EncodeToString(thumbprint)
+}
+
+// Seal encrypts values, one per credential binding names, to key as a compact JWE.
+func Seal(binding SealBinding, key *ecdsa.PublicKey, values map[string][]byte) ([]byte, error) {
+	plaintext, err := json.Marshal(sealPlaintext{Version: 1, Binding: binding, Values: values}, json.Deterministic(true))
 	if err != nil {
 		return nil, err
 	}
-	plaintext, err := hpke.Open(hpkeKey, hpke.HKDFSHA256(), hpke.AES256GCM(), sealInfo(seal), seal.Ciphertext)
+	options := new(jose.EncrypterOptions).WithType(SealType).
+		WithHeader("tenant", binding.Tenant).WithHeader("pool", binding.Pool).WithHeader("receiver", binding.Receiver).
+		WithHeader("key_id", binding.KeyID).WithHeader("run", binding.Run).WithHeader("turn", binding.Turn).
+		WithHeader("attempt", binding.Attempt).WithHeader("credentials", binding.Credentials).WithHeader("expiry_ms", binding.ExpiryMS)
+	encrypter, err := jose.NewEncrypter(jose.A256GCM, jose.Recipient{Algorithm: jose.ECDH_ES_A256KW, Key: key}, options)
 	if err != nil {
-		return nil, errors.New("open credential")
+		return nil, err
 	}
-	if len(plaintext) > MaxPlaintext {
-		return nil, errors.New("credential exceeds 16 KiB")
+	jwe, err := encrypter.Encrypt(plaintext)
+	if err != nil {
+		return nil, errors.New("seal credentials")
 	}
-	return plaintext, nil
+	compact, err := jwe.CompactSerialize()
+	if err != nil {
+		return nil, err
+	}
+	if len(compact) > maxSeal {
+		return nil, fmt.Errorf("a seal of %v is %d bytes, over the 64 KiB limit", binding.Credentials, len(compact))
+	}
+	return []byte(compact), nil
 }
 
-func CheckPinnedKey(pins map[string]string, receiver string, key *ecdh.PublicKey) error {
-	fingerprint := SealingKeyID(key)
-	if pinned, ok := pins[receiver]; ok && pinned != fingerprint {
-		return errors.New("receiver sealing key changed")
+// OpenSeal opens a seal for expected with key, the private half of expected.KeyID, and returns its values by
+// credential name.
+func OpenSeal(encoded []byte, expected SealBinding, key *ecdsa.PrivateKey, now time.Time) (map[string][]byte, error) {
+	if expected.KeyID != SealKeyID(&key.PublicKey) {
+		return nil, errors.New("seal key is not the expected key")
 	}
-	if _, ok := pins[receiver]; !ok {
-		pins[receiver] = fingerprint
+	if len(encoded) > maxSeal {
+		return nil, errors.New("seal exceeds its size limit")
 	}
-	return nil
-}
-
-func sealInfo(seal Seal) []byte {
-	info, _ := json.Marshal(struct {
-		Version    int    `json:"v"`
-		Tenant     string `json:"tenant"`
-		Receiver   string `json:"receiver"`
-		Pool       string `json:"pool"`
-		Key        string `json:"key"`
-		Credential string `json:"credential"`
-		IssuedMS   int64  `json:"issued_ms"`
-		ExpiryMS   int64  `json:"expiry_ms"`
-	}{seal.Version, seal.Tenant, seal.Receiver, seal.Pool, seal.KeyFingerprint, seal.Credential, seal.IssuedMS, seal.ExpiryMS}, json.Deterministic(true))
-	return append([]byte("wherry hpke seal\x00"), info...)
-}
-
-func contains(values []string, value string) bool {
-	for _, candidate := range values {
-		if candidate == value {
-			return true
+	jwe, err := jose.ParseEncryptedCompact(string(encoded), []jose.KeyAlgorithm{jose.ECDH_ES_A256KW}, []jose.ContentEncryption{jose.A256GCM})
+	if err != nil {
+		return nil, errors.New("seal is not a compact JWE of the allowed algorithms")
+	}
+	protected, _, _ := strings.Cut(string(encoded), ".")
+	decoded, err := base64.RawURLEncoding.DecodeString(protected)
+	var header sealHeader
+	if err != nil || json.Unmarshal(decoded, &header, strict) != nil || header.Type != SealType {
+		return nil, errors.New("seal protected header holds other members than a seal's")
+	}
+	if !reflect.DeepEqual(header.SealBinding, expected) {
+		return nil, errors.New("seal is bound to another attempt or key")
+	}
+	if !now.Before(time.UnixMilli(header.ExpiryMS)) {
+		return nil, errors.New("seal has expired")
+	}
+	plaintext, err := jwe.Decrypt(key)
+	if err != nil {
+		return nil, errors.New("seal does not decrypt")
+	}
+	var opened sealPlaintext
+	if json.Unmarshal(plaintext, &opened, strict) != nil || opened.Version != 1 || !reflect.DeepEqual(opened.Binding, header.SealBinding) {
+		return nil, errors.New("seal plaintext is bound otherwise than its header")
+	}
+	for _, name := range header.Credentials {
+		if _, ok := opened.Values[name]; !ok || len(opened.Values) != len(header.Credentials) {
+			return nil, errors.New("seal values are not the credentials it names")
 		}
 	}
-	return false
-}
-
-func EncodeSeal(seal Seal) ([]byte, error) { return json.Marshal(seal, json.Deterministic(true)) }
-
-func DecodeSeal(encoded []byte) (Seal, error) {
-	var seal Seal
-	if err := json.Unmarshal(encoded, &seal, strict); err != nil {
-		return Seal{}, fmt.Errorf("decode seal: %w", err)
-	}
-	if seal.Version != 1 || seal.Tenant == "" || seal.Receiver == "" || seal.Pool == "" || seal.KeyFingerprint == "" || seal.Credential == "" || seal.IssuedMS <= 0 || seal.ExpiryMS <= seal.IssuedMS || len(seal.Ciphertext) == 0 || len(seal.Ciphertext) > MaxPlaintext+sealOverhead {
-		return Seal{}, errors.New("invalid seal")
-	}
-	return seal, nil
+	return opened.Values, nil
 }

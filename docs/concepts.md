@@ -25,15 +25,14 @@ writes.
   is a compromise of its tenant.
 - **A pool** is a set of receivers that share terms and trust each other
   fully. Its terms name the agents it runs, the credentials each agent
-  takes, the seal lifetime, the share-group delivery limit and lock
-  duration, and the quotas its tenants' hosts get. A tenant is entitled to
-  one or more pools. A host entitled through several pools gets the lowest
+  takes, the share-group delivery limit and lock duration, and the quotas
+  its tenants' hosts get. A tenant is entitled to one or more pools. A host entitled through several pools gets the lowest
   of their quotas.
 - **A receiver** is a long-running `wherry receiver` process in one pool.
   It claims tasks, runs each as a platform job, and publishes the job's
   statuses, transcript and result. Each receiver is its own principal with
-  an Ed25519 signing key and an X25519 sealing key, which it creates on
-  first start and keeps in its state directory.
+  an Ed25519 signing key, which it creates on first start and keeps in its
+  state directory.
 - **An adapter** is the part of a receiver that runs jobs on one platform.
   Adapters are plugins: the receiver ships with none, and runs one plugin
   process per adapter type from its plugin directory, linked to it by
@@ -83,10 +82,10 @@ differently live on different topics.
 | `wherry.receiver.<receiver>` | that receiver | its pool's members, entitled tenants' hosts | its keys |
 | `wherry.pool.<pool>.tasks` | entitled tenants' hosts | the pool's receivers, through its share group | submissions |
 | `wherry.pool.<pool>.events` | the pool's receivers, entitled tenants' hosts | the pool's receivers | statuses, heartbeats, start failures, cancels |
-| `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, transcript chunks, results, echoes |
-| `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key, sealed credentials |
+| `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, transcript chunks, results, echoes, seal requests |
+| `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key, seals |
 
-`wherry.admin` records and sealed credentials carry no signature: each
+`wherry.admin` records and seals carry no signature: each
 sits on a topic only one principal can write, so Kafka authenticates it.
 Every other record, key records included, is a versioned EdDSA
 [JWS](https://datatracker.ietf.org/doc/html/rfc7515). A record on a shared
@@ -165,22 +164,34 @@ that tenant's own credential. The pool's terms name the credentials each
 agent may take, and the receiver configuration names the one an adapter
 delivers. The host's configuration maps each credential name to a file.
 
-At every submit and continue, the host seals each credential the agent
-takes, and that the host has a file for, to each live member of the chosen
-pool lacking a current seal. A seal is HPKE encryption to the receiver's
-sealing key, using the Go standard library's
-[`crypto/hpke`](https://pkg.go.dev/crypto/hpke), bound to the tenant, the
-receiver, the pool, the sealing key's fingerprint, the credential name, and
-the seal's issue and expiry times. The seal lifetime comes from the pool's
-terms. Seals live on the host's own topic, and a receiver opens the newest
-one by issue time across its tenant's hosts.
+A host seals nothing when it submits. The receiver that claims a turn
+whose adapter delivers a credential makes a P-256 key pair for that
+attempt and publishes a signed **seal request** on the tenant feed: the
+run, turn and attempt, the public key, the credential names and an expiry
+5 minutes out. The host that submitted the run answers it while `wherry
+await` or `wherry mcp` runs. It checks the request's signature against the
+receiver's registered key, that the receiver is a live member of the run's
+pool and holds the run's current attempt, and that the pool's terms
+approve each credential for the run's agent. It then writes a **seal** to
+its own topic: a compact JWE (`ECDH-ES+A256KW` with `A256GCM`, through
+[go-jose](https://github.com/go-jose/go-jose)) encrypted to the request's
+key and bound in its protected header to the tenant, pool, receiver, key
+thumbprint, run, turn, attempt, credential names and expiry.
 
-The host pins each receiver's sealing-key fingerprint the first time it
-seals to it, and refuses to seal to a changed key.
+Only the requesting receiver can open a seal, and only for that attempt.
+The private key lives in the receiver's memory until the seal opens or the
+wait ends, so a seal on the host's topic opens for no later attempt and for
+no restarted receiver. A redelivered turn asks again. Hosts cannot see the
+broker's claim, so a host seals only to the receiver that wrote the turn's
+first `claimed` status, and refuses when a second receiver claims the same
+turn; a turn adopted by another receiver ends `TASK_STATE_AUTH_REQUIRED`.
+The receiver redacts the exact bytes of each credential of 8 bytes or more
+that it delivered from everything it publishes for the attempt.
 
-A receiver that holds no seal for the task's tenant returns the task to
-the pool when another member holds one. When no member holds one, the turn
-ends in `TASK_STATE_AUTH_REQUIRED` and waits for the tenant.
+A turn whose seal does not arrive within 5 minutes ends in
+`TASK_STATE_AUTH_REQUIRED` and waits for the tenant. A parent that submits
+a task needing credentials keeps `wherry await` or `wherry mcp` running
+until the task starts.
 
 Everything else the agent needs comes from the platform: the image or
 host install, network access, CA bundles, SSH known hosts and repository
@@ -194,7 +205,8 @@ turn ends in a terminal state, or is interrupted.
 
 A turn interrupted in `TASK_STATE_AUTH_REQUIRED` (see [Sealed
 credentials](#sealed-credentials)) resumes when the tenant adds the
-credential and runs `wherry continue`, which seals it. The continuation's
+credential to its configuration and runs `wherry continue`, then `wherry
+await`, which answers the continuation's seal request. The continuation's
 job receives the text of every turn so far as one request, opening with a
 line saying none of it was carried out, since an interrupted turn never
 reaches an agent.

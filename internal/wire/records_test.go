@@ -1,17 +1,22 @@
 package wire
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"strings"
 	"testing"
 
 	"github.com/benemon/wherry/internal/signed"
+	jose "github.com/go-jose/go-jose/v4"
 )
 
 const testTime = "2026-10-19T10:00:00Z"
 
 var testHash = strings.Repeat("a", 64)
+
+var testSealKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 
 func testMessage(run string) Message {
 	return Message{MessageID: "message-a", ContextID: run, TaskID: run, Role: RoleUser, Parts: []Part{{Text: "hello"}}, Extensions: []string{ExtensionURI}}
@@ -34,9 +39,11 @@ func testRecords() map[string]Record {
 		"result": &Result{Task: Task{ID: "run-a", ContextID: "run-a", Status: TaskStatus{State: "TASK_STATE_COMPLETED", Timestamp: testTime}, Artifacts: []Artifact{}, History: []Message{testMessage("run-a")}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
 		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Turn: 1, Placement: placement, TaskHash: testHash, MessageID: "message-a"},
-		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Adapter: "nomad", Agent: "claude"}}, Capacity: 2, SealingKey: "sha256:x", AtMS: 1},
-		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, SealingKey: "sha256:x", AtMS: 1},
+		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Adapter: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
+		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 1},
 		"start failure":                &StartFailure{Wherry: testBinding(), Adapter: "nomad", Agent: "claude", Class: "launch"},
+		"seal request": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
+			Credentials: []string{"model"}, ExpiryMS: 1},
 	}
 }
 
@@ -163,9 +170,21 @@ func TestRecordValidation(t *testing.T) {
 			value.Offers = append(value.Offers, value.Offers[0])
 			return value
 		},
-		"advertisement without sealing key": func(r map[string]Record) Record {
-			value := r["advertisement"].(*Advertisement)
-			value.SealingKey = ""
+		"seal request naming another key": func(r map[string]Record) Record {
+			value := r["seal request"].(*SealRequest)
+			other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			value.KeyID = signed.SealKeyID(&other.PublicKey)
+			return value
+		},
+		"seal request with a P-384 key": func(r map[string]Record) Record {
+			value := r["seal request"].(*SealRequest)
+			other, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+			value.Key, value.KeyID = jose.JSONWebKey{Key: &other.PublicKey}, signed.SealKeyID(&other.PublicKey)
+			return value
+		},
+		"seal request without credentials": func(r map[string]Record) Record {
+			value := r["seal request"].(*SealRequest)
+			value.Credentials = []string{}
 			return value
 		},
 		"start failure without class": func(r map[string]Record) Record {

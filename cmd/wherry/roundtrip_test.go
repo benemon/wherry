@@ -114,7 +114,8 @@ func resalt(t *testing.T, service *admin.Service, bundlePath string) {
 
 // TestRoundTrip runs a task from a host's Submit through a receiver and the test plugin process to the host's Await,
 // on records each side produces for the other: provisioning through wherry admin, bundles, the host and receiver
-// constructors, plugin discovery and the adapter link, the real claim, admission, sealing, dual write and feed reads.
+// constructors, plugin discovery and the adapter link, the real claim, admission, the seal request Await answers, dual
+// write and feed reads.
 func TestRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -187,7 +188,8 @@ func TestRoundTrip(t *testing.T) {
 	if _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
 	}
-	host, err := busclient.Connect(hostConfig)
+	hostLogs := &syncBuffer{}
+	host, err := busclient.Connect(hostConfig, log.New(hostLogs, "host: ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,6 +210,7 @@ func TestRoundTrip(t *testing.T) {
 	if submitted.Pool != "pool-a" {
 		t.Fatalf("placed in %q, want pool-a", submitted.Pool)
 	}
+	// Await answers the receiver's seal request; nothing else seals.
 	awaited, err := host.Await(ctx, submitted.RunID, 20*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +222,7 @@ func TestRoundTrip(t *testing.T) {
 	if _, err := busclient.Init(ctx, otherConfig); err != nil {
 		t.Fatal(err)
 	}
-	other, err := busclient.Connect(otherConfig)
+	other, err := busclient.Connect(otherConfig, log.New(hostLogs, "other: ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,6 +260,12 @@ func TestRoundTrip(t *testing.T) {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("receiver or plugin logs carry a credential:\n%s", logs.String())
 		}
+		if strings.Contains(hostLogs.String(), secret) {
+			t.Fatalf("host logs carry a credential:\n%s", hostLogs.String())
+		}
+	}
+	if !strings.Contains(hostLogs.String(), "host: run "+submitted.RunID+": sealed [model] to receiver-a for turn 1 attempt 1") {
+		t.Fatalf("the host did not answer the seal request; logs:\n%s", hostLogs.String())
 	}
 
 	if _, err := host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpDoesNotExist}},

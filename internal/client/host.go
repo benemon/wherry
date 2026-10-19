@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,6 +10,7 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"math"
 	"os"
@@ -18,7 +18,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
@@ -81,8 +80,8 @@ type CancelResult struct {
 	Skipped int
 }
 
-// Receiver describes a receiver of a pool the tenant is entitled to, its adapters as wherry.admin records them, its
-// latest advertisement and this host's seals to it.
+// Receiver describes a receiver of a pool the tenant is entitled to, its adapters as wherry.admin records them and its
+// latest advertisement.
 type Receiver struct {
 	ReceiverID   string    `json:"receiver_id"`
 	Pool         string    `json:"pool"`
@@ -92,7 +91,6 @@ type Receiver struct {
 	HeartbeatAge string    `json:"heartbeat_age"`
 	Status       string    `json:"status"`
 	Ended        bool      `json:"ended"`
-	Seals        []Seal    `json:"seals"`
 }
 
 // Adapter is one adapter of a receiver: the agent and labels from its config record, and whether the receiver's live
@@ -104,13 +102,6 @@ type Adapter struct {
 	Ready  bool              `json:"ready"`
 }
 
-// Seal is this host's latest seal of one credential to a receiver.
-type Seal struct {
-	Name  string `json:"name"`
-	Pool  string `json:"pool"`
-	ExpMS int64  `json:"exp_ms"`
-}
-
 // Host implements the operations of a tenant's host principal.
 type Host struct {
 	kafka       *kgo.Client
@@ -119,16 +110,17 @@ type Host struct {
 	host        string
 	stateDir    string
 	credentials map[string]string
+	logger      *log.Logger
 }
 
 // NewHost constructs a host over a plain Kafka connection authenticated as principal.
-func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir string, credentials map[string]string) (*Host, error) {
+func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir string, credentials map[string]string, logger *log.Logger) (*Host, error) {
 	names, prefixed := strings.CutPrefix(principal, "wherry.tnt.")
 	tenant, host, split := strings.Cut(names, ".")
 	if !prefixed || !split || !admin.ValidName(tenant) || !admin.ValidName(host) {
 		return nil, errors.New("principal is not a host principal wherry.tnt.<tenant>.<host>")
 	}
-	return &Host{kafka: kafka, key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials}, nil
+	return &Host{kafka: kafka, key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, logger: logger}, nil
 }
 
 // Close closes the Kafka connection.
@@ -149,7 +141,7 @@ func (h *Host) Register(ctx context.Context) (string, error) {
 	case state.Revoked:
 		return "", errors.New("host key topic is closed by revocation")
 	case state.Current == nil:
-		record, err := signed.RegisterKey(owner, h.key, nil)
+		record, err := signed.RegisterKey(owner, h.key)
 		if err != nil {
 			return "", err
 		}
@@ -229,7 +221,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	if err := h.publish(ctx, v, ads, submission, now); err != nil {
+	if err := h.publish(ctx, submission, now); err != nil {
 		return SubmitResult{}, err
 	}
 	return SubmitResult{RunID: runID, Pool: pool}, nil
@@ -266,15 +258,11 @@ func (h *Host) Continue(ctx context.Context, runID string, input ContinueInput) 
 		return ContinueResult{}, ErrNotAwaitingContinuation
 	}
 	now := time.Now()
-	ads, err := admin.ReadAdvertisements(ctx, h.kafka, r.v.state, r.v.keys, now, liveness)
-	if err != nil {
-		return ContinueResult{}, err
-	}
 	submission, err := h.submission(runID, next, echo.Pool, echo.Placement, []wire.Part{{Text: input.Prompt}}, input.Deadline, input.QueueDeadline, now)
 	if err != nil {
 		return ContinueResult{}, err
 	}
-	if err := h.publish(ctx, r.v, ads, submission, now); err != nil {
+	if err := h.publish(ctx, submission, now); err != nil {
 		return ContinueResult{}, err
 	}
 	return ContinueResult{RunID: runID, Turn: next, Skipped: r.skipped}, nil
@@ -313,114 +301,36 @@ func (h *Host) submission(runID string, turn int64, pool string, placement wire.
 	}, nil
 }
 
-// publish writes the submission's seals before the task, so no member claims the task before its credential exists.
-func (h *Host) publish(ctx context.Context, v view, ads map[string]wire.Advertisement, submission *wire.Submission, now time.Time) error {
+// publish records the run locally, then writes the submission to its pool's task topic. The record comes first so
+// this host answers the seal request a receiver may send as soon as it claims the task; a failed write restores the
+// record it replaced.
+func (h *Host) publish(ctx context.Context, submission *wire.Submission, now time.Time) error {
 	encoded, err := wire.SignRecord(submission, h.key)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	binding := submission.Wherry
-	if err := h.seal(ctx, v, ads, binding.Pool, binding.Placement.Agent, time.UnixMilli(binding.QueueDeadlineMS), now); err != nil {
-		return err
-	}
-	if err := h.produce(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(binding.Pool), Key: []byte(binding.Run), Value: encoded}); err != nil {
+	previous, err := h.localRun(binding.Run)
+	if err != nil {
 		return err
 	}
 	sum := sha256.Sum256(encoded)
-	return h.writeRun(runRecord{Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: hex.EncodeToString(sum[:]), SubmittedMS: now.UnixMilli()})
-}
-
-type sealKey struct{ receiver, pool, credential string }
-
-// seal seals each configured credential of agent to every live member of pool that lacks a seal under its current
-// sealing key lasting past until. A sealing key that differs from its receiver's pin stops the seal.
-func (h *Host) seal(ctx context.Context, v view, ads map[string]wire.Advertisement, pool, agent string, until, now time.Time) error {
-	terms := v.state.Pools[pool]
-	index := slices.IndexFunc(terms.Agents, func(terms admin.AgentTerms) bool { return terms.Name == agent })
-	if index < 0 {
-		return fmt.Errorf("agent %s is outside the terms of pool %s", agent, pool)
-	}
-	var credentials []string
-	for _, credential := range terms.Agents[index].Credentials {
-		if _, ok := h.credentials[credential]; ok {
-			credentials = append(credentials, credential)
-		}
-	}
-	if len(credentials) == 0 {
-		return nil
-	}
-	lifetime := time.Duration(terms.SealLifetimeMS) * time.Millisecond
-	if !now.Add(lifetime).After(until) {
-		return fmt.Errorf("%w: pool %s seals credentials for %s, which ends before the queue deadline", ErrInvalidInput, pool, lifetime)
-	}
-	existing, err := h.seals(ctx)
-	if err != nil {
+	if err := h.writeRun(runRecord{Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: hex.EncodeToString(sum[:]), SubmittedMS: now.UnixMilli()}); err != nil {
 		return err
 	}
-	members := map[string]*ecdh.PublicKey{}
-	for receiver, ad := range ads {
-		if sealing := v.keys[receiver].Sealing; ad.Pool == pool && sealing != nil {
-			members[receiver] = sealing
+	if err := h.produce(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(binding.Pool), Key: []byte(binding.Run), Value: encoded}); err != nil {
+		if previous != nil {
+			h.writeRun(*previous)
+		} else if path, ok := h.runPath(binding.Run); ok {
+			os.Remove(path)
 		}
-	}
-	if err := h.pin(members); err != nil {
 		return err
 	}
-	plaintexts := map[string][]byte{}
-	var records []*kgo.Record
-	for _, receiver := range slices.Sorted(maps.Keys(members)) {
-		sealing := members[receiver]
-		for _, credential := range credentials {
-			current := existing[sealKey{receiver, pool, credential}]
-			if current.KeyFingerprint == signed.SealingKeyID(sealing) && current.ExpiryMS > until.UnixMilli() {
-				continue
-			}
-			plaintext, ok := plaintexts[credential]
-			if !ok {
-				if plaintext, err = os.ReadFile(h.credentials[credential]); err != nil {
-					return fmt.Errorf("read credential %s: %w", credential, err)
-				}
-				plaintexts[credential] = plaintext
-			}
-			seal, err := signed.SealCredential(h.tenant, receiver, pool, credential, now, now.Add(lifetime), sealing, plaintext)
-			if err != nil {
-				return fmt.Errorf("seal credential %s: %w", credential, err)
-			}
-			encoded, err := signed.EncodeSeal(seal)
-			if err != nil {
-				return err
-			}
-			records = append(records, &kgo.Record{Topic: admin.HostTopic(h.tenant, h.host), Key: []byte(receiver + "/" + credential), Value: encoded})
-		}
-	}
-	if len(records) == 0 {
-		return nil
-	}
-	return h.produce(ctx, records...)
+	return nil
 }
 
-// seals returns this host's latest seal, by issued time, per receiver, pool and credential.
-func (h *Host) seals(ctx context.Context) (map[sealKey]signed.Seal, error) {
-	records, err := admin.ReadTopic(ctx, h.kafka, admin.HostTopic(h.tenant, h.host))
-	if err != nil {
-		return nil, err
-	}
-	latest := map[sealKey]signed.Seal{}
-	for _, record := range records {
-		seal, err := signed.DecodeSeal(record.Value)
-		if err != nil || seal.Tenant != h.tenant {
-			continue
-		}
-		key := sealKey{seal.Receiver, seal.Pool, seal.Credential}
-		if seal.IssuedMS >= latest[key].IssuedMS {
-			latest[key] = seal
-		}
-	}
-	return latest, nil
-}
-
-// Receivers returns the receivers of the pools the tenant is entitled to, with their latest advertisement and this
-// host's seals to them. An advertisement dated beyond the liveness window either side of now is not live.
+// Receivers returns the receivers of the pools the tenant is entitled to, with their latest advertisement. An
+// advertisement dated beyond the liveness window either side of now is not live.
 func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 	v, err := h.load(ctx)
 	if err != nil {
@@ -431,10 +341,6 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 	if err != nil {
 		return nil, err
 	}
-	seals, err := h.seals(ctx)
-	if err != nil {
-		return nil, err
-	}
 	result := []Receiver{}
 	for id, config := range v.state.Receivers {
 		if !v.state.Entitlements[h.tenant][config.Pool] {
@@ -442,7 +348,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 		}
 		receiver := Receiver{
 			ReceiverID: id, Pool: config.Pool, Adapters: []Adapter{}, HeartbeatAge: "-", Status: "silent",
-			Ended: v.state.Ended[admin.ReceiverPrincipal(id)], Seals: []Seal{},
+			Ended: v.state.Ended[admin.ReceiverPrincipal(id)],
 		}
 		ad, advertised := ads[id]
 		if receiver.Ended {
@@ -467,12 +373,6 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			ready := receiver.Status == "live" && slices.ContainsFunc(ad.Offers, func(offer wire.Offer) bool { return offer.Adapter == adapter.Name })
 			receiver.Adapters = append(receiver.Adapters, Adapter{Name: adapter.Name, Agent: adapter.Agent, Labels: labels, Ready: ready})
 		}
-		for key, seal := range seals {
-			if key.receiver == id {
-				receiver.Seals = append(receiver.Seals, Seal{Name: seal.Credential, Pool: seal.Pool, ExpMS: seal.ExpiryMS})
-			}
-		}
-		sort.Slice(receiver.Seals, func(i, j int) bool { return receiver.Seals[i].Name < receiver.Seals[j].Name })
 		result = append(result, receiver)
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -530,44 +430,6 @@ func (h *Host) writeRun(record runRecord) error {
 		return errors.New("run ID does not name a local run path")
 	}
 	return writeState(path, record)
-}
-
-// pin checks each receiver's sealing key against its pin and pins new ones, holding an exclusive lock on the state
-// directory so concurrent submits, in this process or another, never lose a pin.
-func (h *Host) pin(keys map[string]*ecdh.PublicKey) error {
-	if err := os.MkdirAll(h.stateDir, 0o700); err != nil {
-		return err
-	}
-	lock, err := os.OpenFile(filepath.Join(h.stateDir, "pins.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("lock pins: %w", err)
-	}
-	pins, err := h.readPins()
-	if err != nil {
-		return err
-	}
-	for _, receiver := range slices.Sorted(maps.Keys(keys)) {
-		if err := signed.CheckPinnedKey(pins, receiver, keys[receiver]); err != nil {
-			return fmt.Errorf("receiver %s: %w", receiver, err)
-		}
-	}
-	return h.writePins(pins)
-}
-
-func (h *Host) readPins() (map[string]string, error) {
-	pins := map[string]string{}
-	if err := readState(filepath.Join(h.stateDir, "pins.json"), &pins); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	return pins, nil
-}
-
-func (h *Host) writePins(pins map[string]string) error {
-	return writeState(filepath.Join(h.stateDir, "pins.json"), pins)
 }
 
 func readState(path string, value any) error {

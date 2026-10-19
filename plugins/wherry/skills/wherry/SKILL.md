@@ -37,7 +37,6 @@ Call `receivers` first. For each receiver it returns:
   is placed on it.
 - `status` (`live`, `stale`, `silent` or `ended`), `capacity` and
   `in_flight`: whether it is live and has room.
-- `seals`: the credentials this host has sealed to it.
 
 Pick an `agent` from the adapters, or omit it to take the pool's default.
 Build `selector` from the labels of the adapters you want: a list of
@@ -83,13 +82,15 @@ state and the result, and exits non-zero for any state other than
 
 ## A run that needs a credential
 
-`TASK_STATE_AUTH_REQUIRED` means no receiver in the pool could open a
-sealed credential the agent needs. The `message` names the credential and never
-holds its value. Tell the user to put the credential in a file and add it
-under that name to `credentials` in their wherry configuration. Never ask
-for the value or handle it yourself. When the user says it is in place,
-call `continue` with the id (and a `prompt` if the agent needs more to go
-on), which seals it, then `await` again.
+The receiver that claims a task asks this host for the credential the
+agent needs, and the wherry MCP server answers while it runs, as `wherry
+await` does. `TASK_STATE_AUTH_REQUIRED` means no answer arrived in time,
+usually because the credential is not configured. The `message` names the
+credential and never holds its value. Tell the user to put the credential
+in a file and add it under that name to `credentials` in their wherry
+configuration. Never ask for the value or handle it yourself. When the
+user says it is in place, call `continue` with the id (and a `prompt` if
+the agent needs more to go on), then `await` again.
 
 ## Cancel unneeded work
 

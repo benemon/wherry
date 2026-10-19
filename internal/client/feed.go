@@ -179,6 +179,12 @@ func (r *runView) add(ctx context.Context, record *kgo.Record) {
 			r.entries = append(r.entries, entry{receiver: result.Wherry.Receiver, result: &result})
 			return
 		}
+		// Answer reads seal requests; they shape no outcome.
+		if request, err := authorize(ctx, r, value, func(v view) (wire.SealRequest, error) {
+			return admin.AuthorizeSealRequest(v.state, v.keys, value, r.pool, r.h.tenant)
+		}); err == nil && request.Run == r.run {
+			return
+		}
 	}
 	if string(record.Key) == r.run {
 		r.unread++
@@ -436,10 +442,18 @@ func (h *Host) Events(ctx context.Context, runID string) (EventsResult, error) {
 // with the turn's terminal or interrupted status, an interrupted or rejected status, or a CANCELED terminal. Records
 // already on the feed are read first, so a later outcome supersedes an earlier one. Whenever records of the run
 // arrive, wherry.admin and the receivers' keys are re-read and the run is derived again from every record kept, so
-// nothing from a member ended by then shapes the outcome.
+// nothing from a member ended by then shapes the outcome. While it waits, the host answers seal requests.
 func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (AwaitResult, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	answered := make(chan struct{})
+	defer func() { cancel(); <-answered }()
+	go func() {
+		defer close(answered)
+		if err := h.Answer(waitCtx); err != nil {
+			h.logger.Printf("answer seal requests: %v", err)
+		}
+	}()
 	v, err := h.load(waitCtx)
 	if err != nil {
 		return AwaitResult{}, err

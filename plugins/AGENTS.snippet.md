@@ -12,8 +12,10 @@ only the prompt and, if given, a checkout of a pushed git ref.
    terms (`key=v1|v2`, `key!=v`, `key`, `!key`) to require labels. Add
    `--git URL --git-ref REF` for a repository. Keep working.
 3. `wherry await RUN_ID` blocks until the run ends (30 minutes at most by
-   default), then prints the state and the result. Run it in the
-   background where your harness reports background command completion.
+   default), then prints the state and the result. It also answers the
+   receiver's request for the agent's credential, so start it within 5
+   minutes of submitting. Run it in the background where your harness
+   reports background command completion.
 4. On `TASK_STATE_AUTH_REQUIRED`, tell the user which credential the
    message names, and to add a file holding it to `credentials` in their
    wherry configuration. Never handle the value yourself. Then run

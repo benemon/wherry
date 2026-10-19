@@ -58,7 +58,7 @@ func TestRunEndingWithoutResultFails(t *testing.T) {
 
 func TestStatusesAreDualWritten(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -77,7 +77,7 @@ func TestStatusesAreDualWritten(t *testing.T) {
 
 func TestEchoSharesTheClaimedTransaction(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	record := f.submit(t, f.host, nil)
 	f.execute(t, record, 1)
 	records := f.records(t, admin.TenantTopic(testTenant))
@@ -113,21 +113,21 @@ func TestInterruptedStatusSharesItsResultsTransaction(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.execute(t, f.submit(t, f.host, nil), 1)
 	records := f.records(t, admin.TenantTopic(testTenant))
-	// echo and claimed, then the AUTH_REQUIRED result and the interrupted status.
-	if len(records) != 4 {
-		t.Fatalf("feed records %d, want 4", len(records))
+	// echo and claimed, the seal request, then the AUTH_REQUIRED result and the interrupted status.
+	if len(records) != 5 {
+		t.Fatalf("feed records %d, want 5", len(records))
 	}
 	var result wire.Result
 	var interrupted wire.RunStatus
-	if wire.ParseRecord(records[2].Value, f.keys(), &result) != nil || wire.ParseRecord(records[3].Value, f.keys(), &interrupted) != nil || interrupted.Wherry.Kind != "interrupted" {
+	if wire.ParseRecord(records[3].Value, f.keys(), &result) != nil || wire.ParseRecord(records[4].Value, f.keys(), &interrupted) != nil || interrupted.Wherry.Kind != "interrupted" {
 		t.Fatal("the result is not followed by the interrupted status")
 	}
-	if !oneTransaction(records[2:]) || oneTransaction(records[1:3]) {
+	if !oneTransaction(records[3:]) || oneTransaction(records[2:4]) {
 		t.Fatal("the AUTH_REQUIRED result and its interrupted status are not one transaction of their own")
 	}
 }
 
-func TestNoSealAnywhereInterrupts(t *testing.T) {
+func TestNoSealWithinTheWaitInterrupts(t *testing.T) {
 	f := newFixture(t, resultStream)
 	record := f.submit(t, f.host, nil)
 	before := time.Now().Add(-time.Second)
@@ -163,138 +163,23 @@ func TestNoSealAnywhereInterrupts(t *testing.T) {
 	}
 }
 
-func TestPeerSealIsStartFailure(t *testing.T) {
-	f := newFixture(t, resultStream)
-	_, peerSealing := f.addPeer(t, "receiver-b", testPool)
-	f.seal(t, "receiver-b", peerSealing.PublicKey(), credentialName, testToken, time.Now(), time.Hour)
-	record := f.submit(t, f.host, nil)
-	if status := f.execute(t, record, 1); status != kgo.AckRelease {
-		t.Fatalf("status %v, want release", status)
-	}
-	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
-		t.Fatalf("dispatched %d jobs without a seal", dispatches)
-	}
-	var failures []wire.StartFailure
-	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
-		var failure wire.StartFailure
-		if wire.ParseRecord(record.Value, f.keys(), &failure) == nil {
-			failures = append(failures, failure)
-		}
-	}
-	if len(failures) != 1 || failures[0].Class != "seal-unavailable" || failures[0].Adapter != "nomad" || failures[0].Agent != "claude" {
-		t.Fatalf("start failures %#v", failures)
-	}
-	for _, status := range f.feedStatuses(t) {
-		if status.Wherry.Kind == "interrupted" {
-			t.Fatal("a missing seal with a peer holding one interrupted the run")
-		}
-	}
-	// An expired peer seal is not held: the run waits for the tenant.
-	f2 := newFixture(t, resultStream)
-	_, expiredSealing := f2.addPeer(t, "receiver-b", testPool)
-	f2.seal(t, "receiver-b", expiredSealing.PublicKey(), credentialName, testToken, time.Now().Add(-2*time.Hour), time.Hour)
-	if status := f2.execute(t, f2.submit(t, f2.host, nil), 1); status != kgo.AckAccept {
-		t.Fatalf("status %v with only an expired peer seal, want AUTH_REQUIRED", status)
-	}
-}
-
 // lab and cloud both launch claude; a task routed to cloud names cloud in its start failure.
 func TestStartFailureNamesTheRoutedAdapter(t *testing.T) {
 	m := newMultiFixture(t)
-	_, peerSealing := m.addPeer(t, "receiver-b", testPool)
-	m.seal(t, "receiver-b", peerSealing.PublicKey(), "cred-cloud", testToken, time.Now(), time.Hour)
+	m.answer(t, "cred-cloud")
+	m.cloud.outcome = adapter.OutcomeNothingCreated
 	if status := m.execute(t, "run-a", accelerated, 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
-	var failures []wire.StartFailure
-	for _, record := range m.records(t, admin.PoolEventsTopic(testPool)) {
-		var failure wire.StartFailure
-		if wire.ParseRecord(record.Value, m.keys(), &failure) == nil {
-			failures = append(failures, failure)
-		}
-	}
-	if len(failures) != 1 || failures[0].Class != "seal-unavailable" || failures[0].Adapter != "cloud" {
-		t.Fatalf("start failures %#v, want one seal-unavailable naming cloud", failures)
-	}
-}
-
-func TestLatestSealByIssuedTimeIsUsed(t *testing.T) {
-	f := newFixture(t, resultStream)
-	public := f.receiver.sealing.PublicKey()
-	now := time.Now()
-	// Written newest first: log order must not decide.
-	f.seal(t, testReceiver, public, credentialName, "newer", now, time.Hour)
-	f.seal(t, testReceiver, public, credentialName, "older", now.Add(-time.Minute), time.Hour)
-	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
-		t.Fatalf("status %v", status)
-	}
-	if got := string(f.adapter.lastRun.Credential); got != "newer" {
-		t.Fatalf("dispatched credential %q, want the seal with the latest issued time", got)
-	}
-}
-
-func TestExpiredLatestSealIsNotUsed(t *testing.T) {
-	f := newFixture(t, resultStream)
-	public := f.receiver.sealing.PublicKey()
-	f.seal(t, testReceiver, public, credentialName, "older", time.Now().Add(-time.Minute), time.Hour)
-	f.seal(t, testReceiver, public, credentialName, "expired", time.Now().Add(-time.Second), 500*time.Millisecond)
-	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
-		t.Fatalf("status %v", status)
-	}
-	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
-		t.Fatal("dispatched with a credential although the latest seal has expired")
-	}
-}
-
-func TestSealsReadFailureReleases(t *testing.T) {
-	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
-	record := f.submit(t, f.host, nil)
-	admitted := f.admitted(t, record)
-	if _, err := kadm.NewClient(f.service.Admin).DeleteTopics(f.ctx, admin.HostTopic(testTenant, testHost)); err != nil {
-		t.Fatal(err)
-	}
-	if status := f.receiver.execute(f.ctx, f.service.Admin, record, admitted, 1); status != kgo.AckRelease {
-		t.Fatalf("status %v, want release", status)
-	}
-	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
-		t.Fatal("dispatched without reading the seals")
-	}
-}
-
-func TestSecretNeverLogged(t *testing.T) {
-	f := newFixture(t, resultStream)
-	runToTask(t, f)
-	// A newer seal that does not open is refused without echoing anything.
-	seal, err := signed.SealCredential(testTenant, testReceiver, testPool, credentialName, time.Now(), time.Now().Add(time.Hour), f.receiver.sealing.PublicKey(), []byte(testToken))
-	if err != nil {
-		t.Fatal(err)
-	}
-	seal.Ciphertext[0] ^= 1
-	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.EncodeSeal(seal)))
-	if _, outcome, err := f.receiver.credential(f.ctx, testTenant, "claude", credentialName); err != nil || outcome != credentialMissing {
-		t.Fatalf("tampered seal: outcome %v err %v, want missing", outcome, err)
-	}
-	if logs := f.logs.String(); strings.Contains(logs, testToken) || !strings.Contains(logs, "latest seal does not open") {
-		t.Fatalf("unexpected logs:\n%s", logs)
-	}
-}
-
-func TestSealOpensOnlyForTheAgentsCredentials(t *testing.T) {
-	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
-	if _, outcome, _ := f.receiver.credential(f.ctx, testTenant, "codex", credentialName); outcome == credentialOpened {
-		t.Fatal("opened a credential outside the agent's terms")
-	}
-	if value, outcome, _ := f.receiver.credential(f.ctx, testTenant, "claude", credentialName); outcome != credentialOpened || string(value) != testToken {
-		t.Fatal("did not open the agent's own credential")
+	if failures := m.startFailures(t); len(failures) != 1 || failures[0].Class != "dispatch" || failures[0].Adapter != "cloud" {
+		t.Fatalf("start failures %#v, want one dispatch naming cloud", failures)
 	}
 }
 
 func TestTaskMetadataRecordsPlacement(t *testing.T) {
 	t.Run("dispatched", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		f.sealOwn(t, credentialName, time.Hour)
+		f.answer(t, credentialName)
 		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
@@ -336,7 +221,7 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.sealOwn(t, credentialName, time.Hour)
+			f.answer(t, credentialName)
 			f.adapter.stream = test.stream
 			if test.heartbeat {
 				f.adapter.endDelay = 3 * renewInterval
@@ -397,7 +282,7 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 
 func TestHeartbeatsStayOffTheFeed(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.adapter.stream = noResultStream
 	f.adapter.endDelay = 4 * renewInterval
 	f.execute(t, f.submit(t, f.host, nil), 1)
@@ -489,7 +374,7 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 	})
 	t.Run("dispatch error with no job", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		f.sealOwn(t, credentialName, time.Hour)
+		f.answer(t, credentialName)
 		f.adapter.dispatchErr = errors.New("dispatch failed")
 		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 			t.Fatalf("status %v", status)
@@ -663,11 +548,11 @@ func TestAdoptionReadFailureReleases(t *testing.T) {
 
 func TestAdoptionTrustsPeerHeartbeat(t *testing.T) {
 	f := newFixture(t, resultStream)
-	peerSigning, _ := f.addPeer(t, "receiver-peer", testPool)
+	peerSigning := f.addPeer(t, "receiver-peer", testPool)
 	if err := f.service.PoolCreate(f.ctx, "pool-b", testTerms()); err != nil {
 		t.Fatal(err)
 	}
-	otherSigning, _ := f.addPeer(t, "receiver-other-pool", "pool-b")
+	otherSigning := f.addPeer(t, "receiver-other-pool", "pool-b")
 	task := testSubmission("run-peer")
 	hash := strings.Repeat("a", 64)
 	f.produce(t, admin.PoolEventsTopic(testPool), "run-peer", f.heartbeat(t, task, hash, "receiver-peer", peerSigning, 42, nil))
@@ -729,7 +614,7 @@ func shortLock(f fixture, lock time.Duration) {
 func TestFollowLinkLossResumesFromOffset(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.adapter.linkLost = 1
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.submit(t, f.host, nil)
 	if err := f.receiver.claimOne(f.ctx); err != nil {
 		t.Fatal(err)
@@ -757,7 +642,7 @@ func TestFollowLinkLossFailsAfterOneLockDuration(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	f.adapter.linkLost = 1 << 20
 	shortLock(f, 2*time.Second)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.submit(t, f.host, nil)
 	done := make(chan error, 1)
 	started := time.Now()
@@ -783,7 +668,7 @@ func TestFollowLinkLossFailsAfterOneLockDuration(t *testing.T) {
 
 func TestOversizedDispatchIsLoggedByName(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.adapter.dispatchErr = adapter.ErrMessageTooLarge
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v", status)
@@ -796,7 +681,7 @@ func TestOversizedDispatchIsLoggedByName(t *testing.T) {
 func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 	const secret = "token=s3cr3t-dispatch-detail"
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.adapter.dispatchErr = errors.New(secret)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v", status)
@@ -857,7 +742,7 @@ func TestGitCloneFailureFixedReason(t *testing.T) {
 	const secret = "fatal: could not read from https://user:s3cr3t-git-token@git.example.test/org/repo.git"
 	f := newFixture(t, resultStream)
 	f.receiver.adapters[0].Git = true
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.adapter.dispatchErr = fmt.Errorf("%w: %s", adapter.ErrGitContext, secret)
 	if status := f.execute(t, f.submit(t, f.host, withGitPart), 1); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject", status)
@@ -890,7 +775,7 @@ func TestStartedStatusRecordsGitCommit(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.receiver.adapters[0].Git = true
-			f.sealOwn(t, credentialName, time.Hour)
+			f.answer(t, credentialName)
 			f.adapter.commit = commit
 			if status := f.execute(t, f.submit(t, f.host, test.mutate), 1); status != kgo.AckAccept {
 				t.Fatalf("status %v", status)
@@ -938,7 +823,7 @@ func podmanResultLine(t *testing.T) string {
 func TestResultArtifactCarriesAgentResult(t *testing.T) {
 	line := podmanResultLine(t)
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.adapter.stream = []string{line}
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
@@ -1000,7 +885,7 @@ func TestAgentResultOmittedWhenNotObject(t *testing.T) {
 
 func TestReceiverRoutesToMatchedAdapter(t *testing.T) {
 	m := newMultiFixture(t)
-	m.sealOwn(t, "cred-cloud", time.Hour)
+	m.answer(t, "cred-cloud")
 	if status := m.execute(t, "run-lambda", accelerated, 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -1110,7 +995,7 @@ func TestContinuationResumesInterruptedTask(t *testing.T) {
 	if interrupted.Status.State != wire.TaskStateAuthRequired {
 		t.Fatalf("first turn %#v, want AUTH_REQUIRED", interrupted)
 	}
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Turn = 2
 		task.Message.MessageID, task.Message.Parts = "msg-2", []wire.Part{{Text: "continue"}}
@@ -1153,7 +1038,7 @@ func TestDenialStopsClaimingAndAccessResumesIt(t *testing.T) {
 	f := newFixture(t, resultStream)
 	ctx, stop := context.WithCancel(f.ctx)
 	defer stop()
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.run(t, ctx)
 	f.submit(t, f.host, nil)
 	f.await(t, "run-a", anyTask)
@@ -1183,7 +1068,7 @@ func TestDenialStopsClaimingAndAccessResumesIt(t *testing.T) {
 
 func TestDeniedReceiverDoesNotClaim(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	// A transactional ID denial must classify as denial: claiming with it would fail every run's first write.
 	f.receiver.deny(kerr.TransactionalIDAuthorizationFailed, capWrite)
 	f.submit(t, f.host, nil)
@@ -1250,7 +1135,7 @@ func TestResultAfterLastingDenialReleasesTask(t *testing.T) {
 
 func TestShareGroupDenialRetestedByClaim(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.receiver.deny(kerr.GroupAuthorizationFailed, capRead)
 	f.submit(t, f.host, nil)
 	ctx, stop := context.WithTimeout(f.ctx, 5*time.Second)
@@ -1351,10 +1236,10 @@ func TestAmbiguousCommitReadBack(t *testing.T) {
 
 func TestAdoptionTrustsRotatedPeerKey(t *testing.T) {
 	f := newFixture(t, resultStream)
-	peerSigning, peerSealing := f.addPeer(t, "receiver-peer", testPool)
+	peerSigning := f.addPeer(t, "receiver-peer", testPool)
 	// The peer rotates after the receiver's last refresh.
 	_, next, _ := ed25519.GenerateKey(rand.Reader)
-	f.produce(t, admin.ReceiverTopic("receiver-peer"), "receiver-peer", must(t)(signed.RotateKey("receiver-peer", peerSigning, next, peerSealing.PublicKey())))
+	f.produce(t, admin.ReceiverTopic("receiver-peer"), "receiver-peer", must(t)(signed.RotateKey("receiver-peer", peerSigning, next)))
 	task := testSubmission("run-peer")
 	hash := strings.Repeat("a", 64)
 	f.produce(t, admin.PoolEventsTopic(testPool), "run-peer", f.heartbeat(t, task, hash, "receiver-peer", next, 42, nil))
@@ -1374,8 +1259,8 @@ func TestContinuationAfterHostKeyRotation(t *testing.T) {
 	}
 	_, rotated, _ := ed25519.GenerateKey(rand.Reader)
 	owner := signed.HostOwner(testTenant, testHost)
-	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(owner, f.host, rotated, nil)))
-	f.sealOwn(t, credentialName, time.Hour)
+	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(owner, f.host, rotated)))
+	f.answer(t, credentialName)
 	f.submit(t, rotated, func(task *wire.Submission) {
 		task.Wherry.Turn = 2
 		task.Message.MessageID, task.Message.Parts = "msg-2", []wire.Part{{Text: "continue"}}
@@ -1410,7 +1295,7 @@ func TestRetiredKeyForgeryDoesNotBlockTheRealTurn(t *testing.T) {
 	f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
 	retired := f.host
 	_, current, _ := ed25519.GenerateKey(rand.Reader)
-	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(signed.HostOwner(testTenant, testHost), retired, current, nil)))
+	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(signed.HostOwner(testTenant, testHost), retired, current)))
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1456,7 +1341,7 @@ func (f fixture) kinds(t *testing.T) []string {
 func TestAmbiguousDispatchAdoptsTheExistingJob(t *testing.T) {
 	t.Run("lookup finds it", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		f.sealOwn(t, credentialName, time.Hour)
+		f.answer(t, credentialName)
 		f.adapter.dispatchErr = errors.New("register response lost")
 		f.adapter.job = adapter.JobRunning
 		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
@@ -1470,7 +1355,7 @@ func TestAmbiguousDispatchAdoptsTheExistingJob(t *testing.T) {
 	})
 	t.Run("redelivery finds it", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		f.sealOwn(t, credentialName, time.Hour)
+		f.answer(t, credentialName)
 		f.adapter.dispatchErr = errors.New("register response lost")
 		f.adapter.lookupErr = errors.New("lookup failed")
 		record := f.submit(t, f.host, nil)
@@ -1544,7 +1429,7 @@ func TestMismatchedJobIsPurgedNotAdopted(t *testing.T) {
 
 func TestNeverStartedJobIsAPlatformStartFailure(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.adapter.job = adapter.JobNeverStarted
 	if status := f.execute(t, f.submit(t, f.host, nil), 2); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
@@ -1567,10 +1452,6 @@ func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 		class   string
 		setup   func(*testing.T, fixture)
 	}{
-		{"seal unavailable", 1, "seal-unavailable", func(t *testing.T, f fixture) {
-			_, sealing := f.addPeer(t, "receiver-b", testPool)
-			f.seal(t, "receiver-b", sealing.PublicKey(), credentialName, testToken, time.Now(), time.Hour)
-		}},
 		{"nothing created", 1, "dispatch", func(t *testing.T, f fixture) { f.adapter.outcome = adapter.OutcomeNothingCreated }},
 		{"unknown and absent", 1, "dispatch", func(t *testing.T, f fixture) { f.adapter.dispatchErr = errors.New("register failed") }},
 		{"unknown and never started", 1, "platform", func(t *testing.T, f fixture) {
@@ -1582,9 +1463,7 @@ func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			test.setup(t, f)
-			if test.class != "seal-unavailable" {
-				f.sealOwn(t, credentialName, time.Hour)
-			}
+			f.answer(t, credentialName)
 			if status := f.execute(t, f.submit(t, f.host, nil), test.attempt); status != kgo.AckRelease {
 				t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
 			}
@@ -1603,7 +1482,7 @@ func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 
 func TestPurgeRetriedUntilItSucceeds(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.adapter.outcome, f.adapter.purgeFailures = adapter.OutcomeNothingCreated, 2
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
@@ -1620,7 +1499,7 @@ func TestPurgeFailingPastTheDeadlineFails(t *testing.T) {
 	purgeDeadline = time.Second
 	t.Cleanup(func() { purgeDeadline = previous })
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.adapter.outcome, f.adapter.purgeErr = adapter.OutcomeNothingCreated, errors.New("deregister denied")
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject", status)
@@ -1646,7 +1525,7 @@ func TestStartFailureAtTheDeliveryBudgetFails(t *testing.T) {
 	} {
 		t.Run(fmt.Sprint(test.attempt), func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.sealOwn(t, credentialName, time.Hour)
+			f.answer(t, credentialName)
 			f.adapter.outcome = adapter.OutcomeNothingCreated
 			if status := f.execute(t, f.submit(t, f.host, nil), test.attempt); status != test.ack {
 				t.Fatalf("status %v, want %v", status, test.ack)
@@ -1674,7 +1553,7 @@ func TestOversizedHandleIsRejected(t *testing.T) {
 	} {
 		t.Run(fmt.Sprint(test.size), func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.sealOwn(t, credentialName, time.Hour)
+			f.answer(t, credentialName)
 			f.adapter.handleSize = test.size
 			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != test.ack {
 				t.Fatalf("status %v, want %v", status, test.ack)
@@ -1732,7 +1611,7 @@ func TestReleasesAtTheBudgetFail(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.sealOwn(t, credentialName, time.Hour)
+			f.answer(t, credentialName)
 			record := f.submit(t, f.host, nil)
 			admitted := f.admitted(t, record)
 			test.setup(t, f)
@@ -1751,7 +1630,7 @@ func TestReleasesAtTheBudgetFail(t *testing.T) {
 
 func TestShutdownAtTheBudgetStillReleases(t *testing.T) {
 	f := newFixture(t, noResultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.adapter.endDelay = 30 * time.Second
 	record := f.submit(t, f.host, nil)
 	admitted := f.admitted(t, record)
@@ -1800,7 +1679,7 @@ func TestJobOfAnotherAdapterIsLeftToIt(t *testing.T) {
 
 func TestNothingCreatedSkipsReconcile(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.adapter.outcome = adapter.OutcomeNothingCreated
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)

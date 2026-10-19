@@ -1,35 +1,19 @@
 package signed
 
 import (
-	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"strings"
 	"testing"
-	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
 )
-
-func TestErrorsDoNotExposeCredential(t *testing.T) {
-	key, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	secret := "plaintext-credential-canary"
-	seal, err := SealCredential("tenant-a", "receiver-a", "pool-a", "model", time.Now(), time.Now().Add(time.Hour), key.PublicKey(), []byte(secret))
-	if err != nil {
-		t.Fatal(err)
-	}
-	seal.Ciphertext[len(seal.Ciphertext)-1] ^= 1
-	_, err = OpenCredential(seal, "tenant-a", "receiver-a", "pool-a", "model", time.Now(), []string{"model"}, key)
-	if err == nil || strings.Contains(err.Error(), secret) {
-		t.Fatalf("unsafe credential error: %v", err)
-	}
-}
 
 func TestP04KeysOnlyFollowRegistrationRules(t *testing.T) {
 	_, first, _ := ed25519.GenerateKey(rand.Reader)
 	_, second, _ := ed25519.GenerateKey(rand.Reader)
 	owner := HostOwner("tenant-a", "host-a")
-	registration, err := RegisterKey(owner, first, nil)
+	registration, err := RegisterKey(owner, first)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +24,7 @@ func TestP04KeysOnlyFollowRegistrationRules(t *testing.T) {
 	if _, err := ApplyKeyRecord(KeyState{}, HostOwner("tenant-b", "host-a"), registration); err == nil {
 		t.Fatal("accepted a registration for another owner's topic")
 	}
-	bareSecond, err := RegisterKey(owner, second, nil)
+	bareSecond, err := RegisterKey(owner, second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +46,7 @@ func TestP04KeysOnlyFollowRegistrationRules(t *testing.T) {
 	if _, err := ApplyKeyRecord(state, owner, misbound); err == nil {
 		t.Fatal("accepted a rotation naming another previous key")
 	}
-	rotation, err := RotateKey(owner, first, second, nil)
+	rotation, err := RotateKey(owner, first, second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +54,7 @@ func TestP04KeysOnlyFollowRegistrationRules(t *testing.T) {
 	if err != nil || !rotated.Current.Equal(second.Public()) {
 		t.Fatalf("dual-signed rotation: %v", err)
 	}
-	reregistration, err := RegisterKey(owner, second, nil)
+	reregistration, err := RegisterKey(owner, second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,48 +106,6 @@ func TestP07RecordTypeIsExact(t *testing.T) {
 	other, err := jose.ParseSignedCompact(string(current), []jose.SignatureAlgorithm{jose.EdDSA})
 	if err != nil || len(other.Signatures) != 1 {
 		t.Fatalf("fixture is not a pinned EdDSA JWS: %v", err)
-	}
-}
-
-func TestP10SealBindingsAndFingerprintPinning(t *testing.T) {
-	first, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	other, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	expiry := time.Now().Add(time.Hour)
-	seal, err := SealCredential("tenant-a", "receiver-a", "pool-a", "model", time.Now(), expiry, first.PublicKey(), []byte("canary-secret"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	opened, err := OpenCredential(seal, "tenant-a", "receiver-a", "pool-a", "model", time.Now(), []string{"model"}, first)
-	if err != nil || string(opened) != "canary-secret" {
-		t.Fatalf("open: %q %v", opened, err)
-	}
-	if _, err := OpenCredential(seal, "tenant-a", "receiver-b", "pool-a", "model", time.Now(), []string{"model"}, first); err == nil {
-		t.Fatal("opened seal for another receiver")
-	}
-	if _, err := OpenCredential(seal, "tenant-a", "receiver-a", "pool-b", "model", time.Now(), []string{"model"}, first); err == nil {
-		t.Fatal("opened seal for another pool")
-	}
-	if _, err := OpenCredential(seal, "tenant-a", "receiver-a", "pool-a", "other", time.Now(), []string{"other"}, first); err == nil {
-		t.Fatal("opened a seal under another credential name")
-	}
-	if _, err := OpenCredential(seal, "tenant-a", "receiver-a", "pool-a", "model", time.Now(), []string{"other"}, first); err == nil {
-		t.Fatal("opened a credential the terms do not allow for the agent")
-	}
-	if _, err := OpenCredential(seal, "tenant-b", "receiver-a", "pool-a", "model", time.Now(), []string{"model"}, first); err == nil {
-		t.Fatal("opened a seal naming another tenant than its host topic")
-	}
-	if _, err := OpenCredential(seal, "tenant-a", "receiver-a", "pool-a", "model", time.Now(), []string{"model"}, other); err == nil {
-		t.Fatal("opened a seal with another receiver key")
-	}
-	if _, err := OpenCredential(seal, "tenant-a", "receiver-a", "pool-a", "model", expiry, []string{"model"}, first); err == nil {
-		t.Fatal("opened expired seal with leeway")
-	}
-	pins := map[string]string{}
-	if err := CheckPinnedKey(pins, "receiver-a", first.PublicKey()); err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckPinnedKey(pins, "receiver-a", other.PublicKey()); err == nil {
-		t.Fatal("host accepted a changed receiver key")
 	}
 }
 
@@ -230,23 +172,33 @@ func signRaw(typ, kid string, payload []byte, key ed25519.PrivateKey) ([]byte, e
 	return []byte(compact), err
 }
 
-func TestKeyRecordCarriesTheSealingKey(t *testing.T) {
+func TestKeyRecordWithARetiredSealingKeyStillFolds(t *testing.T) {
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
-	sealing, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	registration, err := RegisterKey("receiver-a", signing, sealing.PublicKey())
+	registration, err := RegisterKey("receiver-a", signing)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := ApplyKeyRecord(KeyState{}, "receiver-a", registration)
-	if err != nil || state.Sealing == nil || !state.Sealing.Equal(sealing.PublicKey()) {
-		t.Fatalf("sealing key not registered: %v", err)
+	if strings.Contains(string(registration), "sealing_key") {
+		t.Fatal("a new key record carries a sealing key")
 	}
-	bad, err := signKeys(KeyRecord{Version: 1, Owner: "receiver-a", Action: "register", Key: publicJWK(signing), SealingKey: "AAAA"}, signing)
+	// The payload receivers registered before seals moved to per-run keys, signed as signKeys signs.
+	jwk, err := publicJWK(signing).MarshalJSON()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ApplyKeyRecord(KeyState{}, "receiver-a", bad); err == nil {
-		t.Fatal("accepted a malformed sealing key")
+	options := &jose.SignerOptions{EmbedJWK: true}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: jose.JSONWebKey{Key: signing, KeyID: KeyID(signing.Public().(ed25519.PublicKey)), Algorithm: string(jose.EdDSA)}},
+		options.WithType(jose.ContentType(KeyType)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jws, err := signer.Sign([]byte(`{"v":1,"owner":"receiver-a","action":"register","key":` + string(jwk) + `,"sealing_key":"gTpG8sVq3XzF4qFQ1zH4Bz0mFj1lN6p9cE2rK7tY3wA"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := []byte(jws.FullSerialize())
+	if state, err := ApplyKeyRecord(KeyState{}, "receiver-a", old); err != nil || !state.Current.Equal(signing.Public()) {
+		t.Fatalf("a registration carrying a sealing key does not fold: %v", err)
 	}
 }
 
@@ -254,7 +206,7 @@ func TestRetiredKeysVerifyHistoryOnly(t *testing.T) {
 	_, first, _ := ed25519.GenerateKey(rand.Reader)
 	_, second, _ := ed25519.GenerateKey(rand.Reader)
 	owner := HostOwner("tenant-a", "host-a")
-	state, err := ApplyKeyRecord(KeyState{}, owner, must(RegisterKey(owner, first, nil)))
+	state, err := ApplyKeyRecord(KeyState{}, owner, must(RegisterKey(owner, first)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +214,7 @@ func TestRetiredKeysVerifyHistoryOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state, err = ApplyKeyRecord(state, owner, must(RotateKey(owner, first, second, nil))); err != nil {
+	if state, err = ApplyKeyRecord(state, owner, must(RotateKey(owner, first, second))); err != nil {
 		t.Fatal(err)
 	}
 	var decoded testRecord

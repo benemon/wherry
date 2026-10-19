@@ -3,7 +3,6 @@ package receiver
 
 import (
 	"context"
-	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
@@ -55,7 +54,6 @@ type Receiver struct {
 	kafkaOpt []kgo.Opt
 	base     *kgo.Client
 	signing  ed25519.PrivateKey
-	sealing  *ecdh.PrivateKey
 	factory  AdapterFactory
 	logger   *log.Logger
 	// config and adapters are set by configure before any claim and never change.
@@ -78,7 +76,7 @@ type Receiver struct {
 	cancelled map[runKey]int64
 }
 
-// New loads or creates the receiver's keys in stateDir and builds its Kafka client from bundle.
+// New loads or creates the receiver's signing key in stateDir and builds its Kafka client from bundle.
 func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *log.Logger) (*Receiver, error) {
 	id, ok := strings.CutPrefix(bundle.Principal, admin.ReceiverPrincipal(""))
 	if !ok || !admin.ValidName(id) {
@@ -98,9 +96,9 @@ func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *l
 	if err != nil {
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	sealing, err := loadOrCreate(filepath.Join(stateDir, "sealing.key"), trust.LoadSealingKeyFile, trust.GenerateSealingKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("sealing key: %w", err)
+	// Seals to the retired long-lived sealing key must never open again.
+	if err := os.Remove(filepath.Join(stateDir, "sealing.key")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("remove sealing key: %w", err)
 	}
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(bundle.Broker),
@@ -111,7 +109,7 @@ func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *l
 	if err != nil {
 		return nil, err
 	}
-	return &Receiver{id: id, kafkaOpt: opts, base: base, signing: signing, sealing: sealing, factory: factory, logger: logger}, nil
+	return &Receiver{id: id, kafkaOpt: opts, base: base, signing: signing, factory: factory, logger: logger}, nil
 }
 
 func loadOrCreate[K any](path string, load func(string) (K, error), create func(string) (K, error)) (K, error) {
@@ -190,8 +188,8 @@ func (r *Receiver) every(ctx context.Context, interval time.Duration, step func(
 	}
 }
 
-// register puts the signing and sealing keys on a key topic with no records at all, and refuses a topic
-// holding anything but this receiver's own registration.
+// register puts the signing key on a key topic with no records at all, and refuses a topic holding anything but
+// this receiver's own registration.
 func (r *Receiver) register(ctx context.Context) error {
 	topic := admin.ReceiverTopic(r.id)
 	public := r.signing.Public().(ed25519.PublicKey)
@@ -200,14 +198,14 @@ func (r *Receiver) register(ctx context.Context) error {
 		return fmt.Errorf("read key topic: %w", err)
 	}
 	if len(records) == 0 {
-		record, err := signed.RegisterKey(r.id, r.signing, r.sealing.PublicKey())
+		record, err := signed.RegisterKey(r.id, r.signing)
 		if err != nil {
 			return err
 		}
 		if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(r.id), Value: record}).FirstErr(); err != nil {
 			return fmt.Errorf("register keys: %w", err)
 		}
-		r.logger.Printf("registered keys: signing=%s sealing=%s", signed.KeyID(public), signed.SealingKeyID(r.sealing.PublicKey()))
+		r.logger.Printf("registered key: signing=%s", signed.KeyID(public))
 		if records, err = admin.ReadTopic(ctx, r.base, topic); err != nil {
 			return fmt.Errorf("read key topic: %w", err)
 		}
@@ -218,8 +216,8 @@ func (r *Receiver) register(ctx context.Context) error {
 			return errors.New("receiver key topic holds a record that does not fold")
 		}
 	}
-	if !public.Equal(state.Current) || state.Sealing == nil || !state.Sealing.Equal(r.sealing.PublicKey()) {
-		return errors.New("receiver key topic holds other keys than the state directory")
+	if !public.Equal(state.Current) {
+		return errors.New("receiver key topic holds another key than the state directory")
 	}
 	return nil
 }
@@ -498,8 +496,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	inFlight := r.inFlight
 	r.mu.Unlock()
 	value, err := wire.SignRecord(&wire.Advertisement{
-		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: r.config.Capacity, InFlight: inFlight,
-		SealingKey: signed.SealingKeyID(r.sealing.PublicKey()), AtMS: time.Now().UnixMilli(),
+		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: r.config.Capacity, InFlight: inFlight, AtMS: time.Now().UnixMilli(),
 	}, r.signing)
 	if err != nil {
 		return err
@@ -653,66 +650,4 @@ func latestStatus(statuses []wire.RunStatus, tenant string) *wire.RunStatus {
 		latest = status
 	}
 	return latest
-}
-
-// credentialOutcome is what the seals on a tenant's host topics say about one credential.
-type credentialOutcome int
-
-const (
-	credentialOpened credentialOutcome = iota
-	// credentialWithPeer means another pool member holds a current seal: a start failure.
-	credentialWithPeer
-	// credentialMissing means no member holds one: the run waits for the tenant (AUTH_REQUIRED).
-	credentialMissing
-)
-
-// credential opens the latest seal by issued time for this receiver, pool and credential across
-// the tenant's host topics; the agent's terms name the credentials it may take.
-func (r *Receiver) credential(ctx context.Context, tenant, agent, name string) ([]byte, credentialOutcome, error) {
-	if name == "" {
-		return nil, credentialOpened, nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, readTimeout)
-	defer cancel()
-	state, _, _ := r.snapshot()
-	latest := map[string]signed.Seal{}
-	for principal, host := range state.Hosts {
-		if host.Tenant != tenant || state.Ended[principal] {
-			continue
-		}
-		records, err := admin.ReadTopic(ctx, r.base, admin.HostTopic(host.Tenant, host.Name))
-		if err != nil {
-			r.deny(err, capRead)
-			return nil, 0, err
-		}
-		for _, record := range records {
-			seal, err := signed.DecodeSeal(record.Value)
-			if err != nil || seal.Tenant != tenant || seal.Pool != r.config.Pool || seal.Credential != name {
-				continue
-			}
-			if previous, ok := latest[seal.Receiver]; !ok || seal.IssuedMS > previous.IssuedMS {
-				latest[seal.Receiver] = seal
-			}
-		}
-	}
-	now := time.Now()
-	if seal, ok := latest[r.id]; ok {
-		var allowed []string
-		if index := slices.IndexFunc(state.Pools[r.config.Pool].Agents, func(terms admin.AgentTerms) bool { return terms.Name == agent }); index >= 0 {
-			allowed = state.Pools[r.config.Pool].Agents[index].Credentials
-		}
-		value, err := signed.OpenCredential(seal, tenant, r.id, r.config.Pool, name, now, allowed, r.sealing)
-		if err == nil {
-			return value, credentialOpened, nil
-		}
-		// never log err: the cause may describe secret material
-		r.logger.Printf("credential %s for tenant %s: latest seal does not open", name, tenant)
-	}
-	for receiver, seal := range latest {
-		config, member := state.Receivers[receiver]
-		if receiver != r.id && member && config.Pool == r.config.Pool && !state.Ended[admin.ReceiverPrincipal(receiver)] && now.Before(time.UnixMilli(seal.ExpiryMS)) {
-			return nil, credentialWithPeer, nil
-		}
-	}
-	return nil, credentialMissing, nil
 }

@@ -98,7 +98,7 @@ func TestHostKeyReReadOnUnknownKeyID(t *testing.T) {
 	f := newFixture(t, resultStream)
 	_, next, _ := ed25519.GenerateKey(rand.Reader)
 	owner := signed.HostOwner(testTenant, testHost)
-	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(owner, f.host, next, nil)))
+	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(owner, f.host, next)))
 	// The receiver's last refresh holds the old key; the task is signed with the new one.
 	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, next, nil)); admitted == nil {
 		t.Fatalf("task signed by the host's rotated key was not admitted: ack %v", ack)
@@ -254,7 +254,7 @@ func TestContinuationRejectedFromOtherPoolStatus(t *testing.T) {
 	if err := f.service.TenantAdd(f.ctx, testTenant, "pool-b"); err != nil {
 		t.Fatal(err)
 	}
-	otherKey, _ := f.addPeer(t, "receiver-other-pool", "pool-b")
+	otherKey := f.addPeer(t, "receiver-other-pool", "pool-b")
 	first := f.turn(t, "run-other-pool-status", 1)
 	f.publishStatus(t, first, "receiver-other-pool", otherKey, "interrupted", wire.TaskStateAuthRequired, nil)
 	f.rejected(t, f.turn(t, "run-other-pool-status", 2), "task is not awaiting continuation")
@@ -262,7 +262,7 @@ func TestContinuationRejectedFromOtherPoolStatus(t *testing.T) {
 
 func TestContinuationAcceptsPeerInterruption(t *testing.T) {
 	f := newFixture(t, resultStream)
-	peerKey, _ := f.addPeer(t, "receiver-b", testPool)
+	peerKey := f.addPeer(t, "receiver-b", testPool)
 	first := f.turn(t, "run-peer-interrupted", 1)
 	f.publishStatus(t, first, "receiver-b", peerKey, "interrupted", wire.TaskStateAuthRequired, nil)
 	f.admitted(t, f.turn(t, "run-peer-interrupted", 2))
@@ -329,7 +329,7 @@ func TestReceiverRejectsNonTextParts(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.sealOwn(t, credentialName, time.Hour)
+			f.answer(t, credentialName)
 			f.submit(t, f.host, func(task *wire.Submission) { task.Message.Parts = append(task.Message.Parts, part) })
 			if err := f.receiver.claimOne(f.ctx); err != nil {
 				t.Fatal(err)
@@ -402,7 +402,7 @@ func TestGitPartAdmittedOnlyWithGitAdapter(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.receiver.adapters[0].Git = test.git
-			f.sealOwn(t, credentialName, time.Hour)
+			f.answer(t, credentialName)
 			record := f.submit(t, f.host, test.mutate)
 			if !test.admit {
 				f.rejected(t, record, "unsupported message part")
@@ -431,7 +431,7 @@ func TestCancelledSubmissionNotDispatched(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.sealOwn(t, credentialName, time.Hour)
+			f.answer(t, credentialName)
 			f.adapter.job = test.job
 			record := f.submit(t, f.host, nil)
 			f.publishCancel(t, "run-a", 1, f.host, nil)
@@ -472,7 +472,7 @@ func TestCancelMustBeHostSignedForTheRunsTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, otherHost, _ := ed25519.GenerateKey(rand.Reader)
-	f.produce(t, admin.HostTopic("tenant-b", "host-b"), "", must(t)(signed.RegisterKey(signed.HostOwner("tenant-b", "host-b"), otherHost, nil)))
+	f.produce(t, admin.HostTopic("tenant-b", "host-b"), "", must(t)(signed.RegisterKey(signed.HostOwner("tenant-b", "host-b"), otherHost)))
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +512,7 @@ func terminalReason(t *testing.T, f fixture, run string) (wire.TaskState, string
 // startInFlight claims a submitted run with the receiver and returns once it is following its job.
 func startInFlight(t *testing.T, f fixture, ctx context.Context, run string) <-chan error {
 	t.Helper()
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
 	})
@@ -668,7 +668,7 @@ func TestCancelInterruptedTaskEndsIt(t *testing.T) {
 	}
 
 	// A continuation published without the host's own check is cancelled too, and never dispatched.
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	if status := f.execute(t, f.turn(t, "run-a", 2), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -711,9 +711,9 @@ func TestCommittedRejectionAcknowledged(t *testing.T) {
 
 func TestCommittedTerminalUnderRotatedPeerKey(t *testing.T) {
 	f := newFixture(t, resultStream)
-	peerSigning, peerSealing := f.addPeer(t, "receiver-b", testPool)
+	peerSigning := f.addPeer(t, "receiver-b", testPool)
 	_, next, _ := ed25519.GenerateKey(rand.Reader)
-	f.produce(t, admin.ReceiverTopic("receiver-b"), "receiver-b", must(t)(signed.RotateKey("receiver-b", peerSigning, next, peerSealing.PublicKey())))
+	f.produce(t, admin.ReceiverTopic("receiver-b"), "receiver-b", must(t)(signed.RotateKey("receiver-b", peerSigning, next)))
 	record := f.submit(t, f.host, nil)
 	f.publishStatus(t, record, "receiver-b", next, "terminal", wire.TaskStateCompleted, nil)
 	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckAccept {
@@ -872,7 +872,7 @@ func (f fixture) tenantB(t *testing.T) ed25519.PrivateKey {
 		t.Fatal(err)
 	}
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	f.produce(t, admin.HostTopic("tenant-b", "host-b"), "", must(t)(signed.RegisterKey(signed.HostOwner("tenant-b", "host-b"), key, nil)))
+	f.produce(t, admin.HostTopic("tenant-b", "host-b"), "", must(t)(signed.RegisterKey(signed.HostOwner("tenant-b", "host-b"), key)))
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -988,7 +988,7 @@ func (f fixture) terminals(t *testing.T, topic string) int {
 
 func TestUnreadableEventsReleaseACompletedRunWithoutASecondTerminal(t *testing.T) {
 	f := newFixtureWith(t, resultStream, budgetTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	record := f.submit(t, f.host, nil)
 	if status := f.execute(t, record, 1); status != kgo.AckAccept {
 		t.Fatalf("first delivery status %v, want accept", status)
@@ -1053,7 +1053,7 @@ func TestRunIDOwnershipSurvivesTheOwnersHostEnding(t *testing.T) {
 func TestCancelOfAnotherTenantDoesNotStopTheRun(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	keyB := f.tenantB(t)
-	f.sealOwn(t, credentialName, time.Hour)
+	f.answer(t, credentialName)
 	f.adapter.endDelay = time.Minute
 	record := f.submit(t, f.host, nil)
 	// tenant-b's rejection is the first status under run-a.

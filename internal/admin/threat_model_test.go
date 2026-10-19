@@ -2,8 +2,9 @@ package admin
 
 import (
 	"context"
-	"crypto/ecdh"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -493,7 +495,7 @@ func TestAdminSkipRestoresState(t *testing.T) {
 	}
 }
 
-func TestEchoAndAdvertisementBindTheirPool(t *testing.T) {
+func TestEchoAdvertisementAndSealRequestBindTheirPool(t *testing.T) {
 	state := modelState(t)
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}}
@@ -509,26 +511,35 @@ func TestEchoAndAdvertisementBindTheirPool(t *testing.T) {
 	if _, err := AuthorizeEcho(state, keys, echo("tenant-a", "pool-b"), "tenant-a"); err == nil {
 		t.Fatal("accepted an echo placing a run in a pool the receiver is not in")
 	}
-	sealing, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	keys["receiver-a"] = signed.KeyState{Current: key.Public().(ed25519.PublicKey), Sealing: sealing.PublicKey()}
-	fingerprint := signed.SealingKeyID(sealing.PublicKey())
 	advertisement := func(pool string) []byte {
-		return sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Agent: "agent-a"}}, Capacity: 1, SealingKey: fingerprint, AtMS: 1}, key)
+		return sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Agent: "agent-a"}}, Capacity: 1, AtMS: 1}, key)
 	}
 	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-a")); err != nil {
 		t.Fatal(err)
 	}
-	fingerprint = "sha256:other"
-	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-a")); err == nil {
-		t.Fatal("accepted an advertisement naming a sealing key the receiver has not registered")
+	sealKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	request := func(tenant, pool string) []byte {
+		return sign(t, &wire.SealRequest{ReceiverBinding: wire.ReceiverBinding{Receiver: "receiver-a", Tenant: tenant, Pool: pool, Run: "run-a", Turn: 1, Attempt: 1},
+			Key: jose.JSONWebKey{Key: &sealKey.PublicKey}, KeyID: signed.SealKeyID(&sealKey.PublicKey), Credentials: []string{"model"}, ExpiryMS: 1}, key)
 	}
-	fingerprint = signed.SealingKeyID(sealing.PublicKey())
+	if _, err := AuthorizeSealRequest(state, keys, request("tenant-a", "pool-a"), "pool-a", "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AuthorizeSealRequest(state, keys, request("tenant-a", "pool-b"), "pool-b", "tenant-a"); err == nil {
+		t.Fatal("accepted a seal request for a pool the receiver is not in")
+	}
+	if _, err := AuthorizeSealRequest(state, keys, request("tenant-b", "pool-a"), "pool-a", "tenant-a"); err == nil {
+		t.Fatal("accepted a seal request naming another tenant than its run")
+	}
 	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-b")); err == nil {
 		t.Fatal("accepted an advertisement for a pool the receiver is not in")
 	}
 	state.Ended[ReceiverPrincipal("receiver-a")] = true
 	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-a")); err == nil {
 		t.Fatal("accepted an advertisement after the receiver's membership end")
+	}
+	if _, err := AuthorizeSealRequest(state, keys, request("tenant-a", "pool-a"), "pool-a", "tenant-a"); err == nil {
+		t.Fatal("accepted a seal request after the receiver's membership end")
 	}
 }
 

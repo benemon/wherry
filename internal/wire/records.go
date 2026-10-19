@@ -1,11 +1,14 @@
 package wire
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"errors"
 	"regexp"
 
 	"github.com/benemon/wherry/internal/signed"
+	jose "github.com/go-jose/go-jose/v4"
 )
 
 // Record is a Kafka-native record: a versioned JWS signed by its owner.
@@ -161,14 +164,25 @@ type Echo struct {
 
 // Advertisement is a receiver's live offers on wherry.receivers.
 type Advertisement struct {
-	V          int     `json:"v"`
-	Receiver   string  `json:"receiver"`
-	Pool       string  `json:"pool"`
-	Offers     []Offer `json:"offers"`
-	Capacity   int64   `json:"capacity"`
-	InFlight   int64   `json:"in_flight"`
-	SealingKey string  `json:"sealing_key"`
-	AtMS       int64   `json:"at_ms"`
+	V        int     `json:"v"`
+	Receiver string  `json:"receiver"`
+	Pool     string  `json:"pool"`
+	Offers   []Offer `json:"offers"`
+	Capacity int64   `json:"capacity"`
+	InFlight int64   `json:"in_flight"`
+	AtMS     int64   `json:"at_ms"`
+}
+
+const SealRequestType = "application/vnd.wherry.seal-request.v1+jws"
+
+// SealRequest asks a run's host, on the tenant feed, to seal credentials to key for one attempt.
+type SealRequest struct {
+	V int `json:"v"`
+	ReceiverBinding
+	Key         jose.JSONWebKey `json:"key"`
+	KeyID       string          `json:"key_id"`
+	Credentials []string        `json:"credentials"`
+	ExpiryMS    int64           `json:"expiry_ms"`
 }
 
 // StartFailure records that a receiver could not start a run's attempt.
@@ -188,6 +202,7 @@ func (*Result) jwsType() string        { return "application/vnd.wherry.result.v
 func (*Echo) jwsType() string          { return "application/vnd.wherry.echo.v1+jws" }
 func (*Advertisement) jwsType() string { return "application/vnd.wherry.advertisement.v1+jws" }
 func (*StartFailure) jwsType() string  { return "application/vnd.wherry.start-failure.v1+jws" }
+func (*SealRequest) jwsType() string   { return SealRequestType }
 
 func (value *Submission) owner() string {
 	return signed.HostOwner(value.Wherry.Tenant, value.Wherry.Host)
@@ -199,6 +214,7 @@ func (value *Result) owner() string        { return value.Wherry.Receiver }
 func (value *Echo) owner() string          { return value.Receiver }
 func (value *Advertisement) owner() string { return value.Receiver }
 func (value *StartFailure) owner() string  { return value.Wherry.Receiver }
+func (value *SealRequest) owner() string   { return value.Receiver }
 
 func (value *Submission) version() *int    { return &value.V }
 func (value *Cancel) version() *int        { return &value.V }
@@ -208,6 +224,7 @@ func (value *Result) version() *int        { return &value.V }
 func (value *Echo) version() *int          { return &value.V }
 func (value *Advertisement) version() *int { return &value.V }
 func (value *StartFailure) version() *int  { return &value.V }
+func (value *SealRequest) version() *int   { return &value.V }
 
 // runID keeps run IDs to name characters: a run's transactional ID
 // p.<pool>.<run> can then never equal another producer's, such as a receiver's
@@ -345,7 +362,7 @@ func (value *Advertisement) validate() error {
 	if err := validateIDs(map[string]string{"receiver": value.Receiver, "pool": value.Pool}); err != nil {
 		return err
 	}
-	if value.Capacity < 0 || value.InFlight < 0 || value.AtMS <= 0 || value.SealingKey == "" {
+	if value.Capacity < 0 || value.InFlight < 0 || value.AtMS <= 0 {
 		return errors.New("invalid advertisement")
 	}
 	return validateOffers(value.Offers)
@@ -356,4 +373,20 @@ func (value *StartFailure) validate() error {
 		return err
 	}
 	return validateIDs(map[string]string{"adapter": value.Adapter, "agent": value.Agent, "class": value.Class})
+}
+
+func (value *SealRequest) validate() error {
+	if err := value.ReceiverBinding.validate(); err != nil {
+		return err
+	}
+	key, ok := value.Key.Key.(*ecdsa.PublicKey)
+	if !ok || key.Curve != elliptic.P256() || value.KeyID != signed.SealKeyID(key) || value.ExpiryMS <= 0 || len(value.Credentials) == 0 {
+		return errors.New("invalid seal request")
+	}
+	for _, credential := range value.Credentials {
+		if err := validateID(credential, "credential"); err != nil {
+			return err
+		}
+	}
+	return nil
 }

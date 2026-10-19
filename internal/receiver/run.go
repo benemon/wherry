@@ -3,6 +3,8 @@ package receiver
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +12,7 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"slices"
 	"strings"
@@ -21,6 +24,8 @@ import (
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	jose "github.com/go-jose/go-jose/v4"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -32,6 +37,7 @@ const (
 	readTimeout    = 30 * time.Second
 	maxHandle      = 4 << 10
 	budgetReason   = "delivery budget exhausted"
+	minRedact      = 8
 )
 
 // Intervals are variables so tests can shorten them; renew stays below the 30 s default lock.
@@ -51,6 +57,9 @@ var (
 	purgeDeadline = 5 * time.Minute
 	// followRetryInterval separates the Follows of a run whose plugin link is lost.
 	followRetryInterval = time.Second
+	// sealWait bounds how long a claimed turn waits for its host's seal, which comes only while the parent runs
+	// await or the MCP server; beyond it the turn holds a slot for a parent that is not answering.
+	sealWait = 5 * time.Minute
 )
 
 // claimLoop holds one slot: a dedicated share client per claimed record,
@@ -338,6 +347,9 @@ func (r *Receiver) probeWrite(ctx context.Context) error {
 	return producer.EndTransaction(ctx, kgo.TryAbort)
 }
 
+// newSealKey is a variable so tests can watch the key a turn's seal is opened with.
+var newSealKey = func() (*ecdsa.PrivateKey, error) { return ecdsa.GenerateKey(elliptic.P256(), rand.Reader) }
+
 // commitTransaction is a variable so tests can lose the answer to a commit the broker applied, which
 // kfake cannot do: its EndTxn faults all fail before the commit.
 var commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
@@ -594,15 +606,19 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	if !adopted {
 		named := run.adapter
-		credential, outcome, err := r.credential(runCtx, task.Wherry.Tenant, task.Wherry.Placement.Agent, named.Credential)
-		switch {
-		case err != nil:
-			r.logger.Printf("run %s: read seals: %v", runID, err)
-			return run.returnTask(ctx, nil)
-		case outcome == credentialWithPeer:
-			return run.startFailure(ctx, "seal-unavailable")
-		case outcome == credentialMissing:
-			return run.interrupt(ctx, named.Credential)
+		var credential []byte
+		if named.Credential != "" {
+			values, status, sealed := run.awaitSeal(ctx, runCtx, named.Credential)
+			if !sealed {
+				return status
+			}
+			credential = values[named.Credential]
+			run.delivered = values
+			for name, value := range values {
+				if len(value) < minRedact {
+					r.logger.Printf("run %s: credential %s too short to redact", runID, name)
+				}
+			}
 		}
 		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, adapter.Run{
 			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Turn: task.Wherry.Turn, Attempt: attempt,
@@ -793,6 +809,87 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 }
 
+// awaitSeal asks the run's host for credential under a key made for this attempt, and waits for the seal while the
+// claim is renewed. The key never leaves this call. False carries the acknowledgement.
+func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credential string) (map[string][]byte, kgo.AckStatus, bool) {
+	r, task := run.receiver, run.task
+	runID := task.Wherry.Run
+	key, err := newSealKey()
+	if err != nil {
+		r.logger.Printf("run %s: seal key: %v", runID, err)
+		return nil, run.returnTask(ctx, nil), false
+	}
+	request := &wire.SealRequest{
+		ReceiverBinding: r.binding(task, run.attempt), Key: jose.JSONWebKey{Key: &key.PublicKey}, KeyID: signed.SealKeyID(&key.PublicKey),
+		Credentials: []string{credential}, ExpiryMS: time.Now().Add(sealWait).UnixMilli(),
+	}
+	expected := signed.SealBinding{
+		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
+		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
+	}
+	// Reading from the host topic's end before the request is committed sees every answer to it.
+	topic := admin.HostTopic(task.Wherry.Tenant, task.Wherry.Host)
+	ends, err := kadm.NewClient(r.base).ListEndOffsets(runCtx, topic)
+	if err == nil {
+		err = ends.Error()
+	}
+	if err != nil {
+		r.deny(err, capRead)
+		r.logger.Printf("run %s: read host topic: %v", runID, err)
+		return nil, run.returnTask(ctx, nil), false
+	}
+	partitions := map[int32]kgo.Offset{}
+	ends.Each(func(end kadm.ListedOffset) { partitions[end.Partition] = kgo.NewOffset().At(end.Offset) })
+	reader, err := kgo.NewClient(append(slices.Clone(r.kafkaOpt), kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: partitions}))...)
+	if err != nil {
+		r.logger.Printf("run %s: host topic reader: %v", runID, err)
+		return nil, run.returnTask(ctx, nil), false
+	}
+	defer reader.Close()
+	if err := run.commit(ctx, run.feed(request)); err != nil {
+		return nil, run.abandon(err), false
+	}
+	waitCtx, cancel := context.WithDeadline(runCtx, time.UnixMilli(request.ExpiryMS))
+	defer cancel()
+	for {
+		pollCtx, cancelPoll := context.WithTimeout(waitCtx, stateCheckInterval)
+		fetches := reader.PollFetches(pollCtx)
+		cancelPoll()
+		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			r.deny(err, capRead)
+		}
+		var values map[string][]byte
+		fetches.EachRecord(func(record *kgo.Record) {
+			if values != nil || string(record.Key) != runID {
+				return
+			}
+			opened, err := signed.OpenSeal(record.Value, expected, key, time.Now())
+			if err != nil {
+				// never log err: the cause may describe secret material
+				r.logger.Printf("run %s: a seal for turn %d attempt %d does not open", runID, task.Wherry.Turn, run.attempt)
+				return
+			}
+			values = opened
+		})
+		r.mu.Lock()
+		cancelledTurn, cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
+		r.mu.Unlock()
+		// A stop seen in the same iteration as a seal wins, so a cancelled or expired turn never dispatches.
+		switch {
+		case ctx.Err() != nil:
+			return nil, kgo.AckRelease, false
+		case cancelled && cancelledTurn <= task.Wherry.Turn:
+			return nil, run.cancel(ctx, nil), false
+		case runCtx.Err() != nil:
+			return nil, run.fail(ctx, "timeout", nil), false
+		case waitCtx.Err() != nil:
+			return nil, run.interrupt(ctx, credential), false
+		case values != nil:
+			return values, 0, true
+		}
+	}
+}
+
 type activeRun struct {
 	receiver *Receiver
 	producer *kgo.Client
@@ -805,6 +902,50 @@ type activeRun struct {
 	// labels is set when this attempt dispatched the job; an adopted job's adapter labels are unknown.
 	labels map[string]string
 	job    string
+	// delivered holds the credential values this attempt passed to its adapter, by name.
+	delivered map[string][]byte
+}
+
+// redact replaces each delivered credential value in data with [redacted:<name>].
+// Values shorter than minRedact are not redacted: they match ordinary text and JSON literals.
+func (run *activeRun) redact(data []byte) []byte {
+	for name, value := range run.delivered {
+		if len(value) < minRedact {
+			continue
+		}
+		replacement := "[redacted:" + name + "]"
+		// The replacement must not carry the value it replaces.
+		if strings.Contains(name, string(value)) {
+			replacement = "[redacted]"
+		}
+		data = bytes.ReplaceAll(data, value, []byte(replacement))
+	}
+	return data
+}
+
+// redactJSON redacts within the string values of an encoded JSON value, leaving names, literals and numbers, so the
+// result stays valid; nil when value does not decode.
+func (run *activeRun) redactJSON(value jsontext.Value) jsontext.Value {
+	decoder := jsontext.NewDecoder(bytes.NewReader(value))
+	var out bytes.Buffer
+	encoder := jsontext.NewEncoder(&out)
+	for {
+		kind, length := decoder.StackIndex(decoder.StackDepth())
+		name := kind == '{' && length%2 == 0
+		token, err := decoder.ReadToken()
+		if errors.Is(err, io.EOF) {
+			return bytes.TrimSpace(out.Bytes())
+		}
+		if err != nil {
+			return nil
+		}
+		if token.Kind() == '"' && !name {
+			token = jsontext.String(string(run.redact([]byte(token.String()))))
+		}
+		if err := encoder.WriteToken(token); err != nil {
+			return nil
+		}
+	}
 }
 
 func (run *activeRun) commit(ctx context.Context, records ...*kgo.Record) error {
@@ -980,6 +1121,14 @@ func (run *activeRun) release(ctx context.Context) {
 }
 
 func (run *activeRun) status(kind string, status wire.TaskStatus, offset *int64, metadata jsontext.Value) *wire.RunStatus {
+	if status.Message != nil {
+		message := *status.Message
+		message.Parts = slices.Clone(message.Parts)
+		for i := range message.Parts {
+			message.Parts[i].Text = string(run.redact([]byte(message.Parts[i].Text)))
+		}
+		status.Message = &message
+	}
 	value := run.receiver.status(run.task, run.taskHash, run.attempt, kind, status, offset)
 	value.StatusUpdate.Metadata = metadata
 	return value
@@ -1053,6 +1202,7 @@ func taskStatus(state wire.TaskState, reason string) wire.TaskStatus {
 func (run *activeRun) chunks(lines []adapter.Line, last bool) []*kgo.Record {
 	records := make([]*kgo.Record, 0, len(lines))
 	for i, line := range lines {
+		line.Data = run.redact(line.Data)
 		part := wire.Part{Text: string(line.Data), MediaType: "application/x-ndjson"}
 		switch {
 		case len(line.Data) > maxLine:
@@ -1088,6 +1238,10 @@ type placement struct {
 
 // result builds the turn's final task for the feed; a result that is JSON travels as a data part.
 func (run *activeRun) result(status wire.TaskStatus, result string, resultMetadata jsontext.Value) *kgo.Record {
+	result = string(run.redact([]byte(result)))
+	if resultMetadata != nil {
+		resultMetadata = run.redactJSON(resultMetadata)
+	}
 	part := wire.Part{Text: result}
 	switch {
 	case result == "":
