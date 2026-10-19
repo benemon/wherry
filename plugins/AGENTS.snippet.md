@@ -19,6 +19,9 @@ only the prompt and, if given, a checkout of a pushed git ref.
    wherry configuration. Never handle the value yourself. Then run
    `wherry continue RUN_ID` and await again.
 5. `wherry cancel RUN_ID` when the result is no longer needed.
+6. `wherry status RUN_ID` prints a run's state without waiting.
+   `wherry status` alone lists every run this host can see, latest update
+   first.
 
 Where the `wherry` MCP server (`wherry mcp`) is configured, its tools do the
 same: `receivers`, `submit`, `status`, `await`, `continue`, `cancel` and

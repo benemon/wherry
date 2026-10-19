@@ -10,8 +10,8 @@ description: >-
 
 wherry sends a task to a receiver on other compute. The receiver runs an
 agent on the task and returns the result over Kafka. The tools come from the
-`wherry` MCP server (`wherry mcp`). Every tool except `status` has a
-`wherry` CLI command of the same name.
+`wherry` MCP server (`wherry mcp`). Every tool has a `wherry` CLI command
+of the same name.
 
 ## When to delegate
 
@@ -32,8 +32,11 @@ Do short or interactive work yourself.
 Call `receivers` first. For each receiver it returns:
 
 - `adapters`: each with the `agent` it runs, its `labels`, and `ready`,
-  whether the receiver can start it now.
-- `status`, `capacity` and `in_flight`: whether it is live and has room.
+  whether the receiver's live advertisement offers it now. A live receiver
+  with no ready adapter lists every adapter with `ready` false, and no task
+  is placed on it.
+- `status` (`live`, `stale`, `silent` or `ended`), `capacity` and
+  `in_flight`: whether it is live and has room.
 - `seals`: the credentials this host has sealed to it.
 
 Pick an `agent` from the adapters, or omit it to take the pool's default.
@@ -67,8 +70,10 @@ Call `await` with the id. It waits up to 45 seconds and returns one of:
 - `retry_after` with the current `state`: the run has not finished. Wait
   that many seconds, or do other work, then call `await` again.
 
-`status` returns the latest state without waiting. `events` returns the
-run's status history.
+`status` with the id returns the run's latest state without waiting. Without
+an id it lists every run this host can see, latest update first, each with
+its `pool`, `turn`, `state` and `updated` time; use it to find a run whose
+id you no longer hold. `events` returns the run's status history.
 
 Where your harness runs shell commands in the background and tells you when
 they finish, run `wherry await <id>` as a background command. It blocks

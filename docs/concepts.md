@@ -238,8 +238,10 @@ steps:
 
 1. Rotate the principal's SCRAM password.
 2. Delete its ACLs.
-3. Probe every broker as the principal, with the new password. The step
-   fails when any broker still authorises it.
+3. Probe every broker as the principal, with the new password. While any
+   broker still authorises it, the step probes again every second for up
+   to 2 minutes, then fails. A failed login or any other probe error fails
+   the step at once.
 4. Delete its SCRAM credential.
 5. Wait the longest of the broker's re-authentication, share-group lock
    and transaction timeout intervals.

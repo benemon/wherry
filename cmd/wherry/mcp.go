@@ -97,12 +97,22 @@ type runInput struct {
 	ID string `json:"id" jsonschema:"run id"`
 }
 
-type statusOutput struct {
+type statusInput struct {
+	ID string `json:"id,omitempty" jsonschema:"run id; omit to list every run this host can see"`
+}
+
+type runOutput struct {
 	ID      string `json:"id"`
-	State   string `json:"state"`
+	Pool    string `json:"pool"`
 	Turn    int64  `json:"turn"`
+	State   string `json:"state"`
 	Message string `json:"message,omitempty"`
-	Skipped int    `json:"skipped,omitempty"`
+	Updated string `json:"updated" jsonschema:"RFC 3339 time of the latest status; while the run has none, of this host's submission, else of the receiver's echo"`
+}
+
+type statusOutput struct {
+	Runs    []runOutput `json:"runs"`
+	Skipped int         `json:"skipped,omitempty"`
 }
 
 type resultPart struct {
@@ -164,7 +174,6 @@ type transcriptOutput struct {
 type eventsOutput struct {
 	ID          string             `json:"id"`
 	Events      []eventOutput      `json:"events"`
-	Cancelled   bool               `json:"cancelled" jsonschema:"whether the run ended canceled"`
 	Transcripts []transcriptOutput `json:"transcripts"`
 	Skipped     int                `json:"skipped,omitempty"`
 }
@@ -181,7 +190,7 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receivers",
-		Description: "List the receivers of the pools this tenant may use, with each adapter's agent and labels as wherry.admin records them, whether the receiver's live advertisement offers it, spare capacity and the credentials this host has sealed to them. Read it to choose an agent and selector before submit.",
+		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended), capacity and the credentials this host has sealed to it, and each adapter's agent and labels as wherry.admin records them, with ready set when the receiver's live advertisement offers the adapter. A live receiver with no ready adapter lists every adapter with ready false. Read it to choose an agent and selector before submit.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()
@@ -198,7 +207,7 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector, sealing the agent's configured credentials to that pool's live receivers. Returns the run id at once; collect the result with await.",
+		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector, sealing the agent's configured credentials to that pool's live receivers. Returns the run id at once; collect the result with await, or check the run without waiting with status.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		client, err := connect()
 		if err != nil {
@@ -217,28 +226,41 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "status",
-		Description: "Return the latest verified state of a run's latest turn without waiting.",
+		Name: "status",
+		Description: "Return the latest verified state of a run's latest turn without waiting. With id, runs holds that run; " +
+			"without it, runs holds every run this host submitted or the tenant's receivers admitted, latest update first.",
 		Annotations: readOnly,
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, statusOutput, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input statusInput) (*mcp.CallToolResult, statusOutput, error) {
 		client, err := connect()
 		if err != nil {
 			return nil, statusOutput{}, toolFailure(err)
 		}
 		defer client.Close()
-		result, err := client.Status(ctx, input.ID)
-		if err != nil {
+		var runs busclient.RunsResult
+		if input.ID != "" {
+			result, err := client.Status(ctx, input.ID)
+			if err != nil {
+				return nil, statusOutput{}, toolFailure(err)
+			}
+			runs = busclient.RunsResult{Runs: []busclient.StatusResult{result}, Skipped: result.Skipped}
+		} else if runs, err = client.Runs(ctx); err != nil {
 			return nil, statusOutput{}, toolFailure(err)
 		}
-		return nil, statusOutput{
-			ID: input.ID, State: string(result.Status.State), Turn: result.Turn, Message: statusText(result.Status), Skipped: result.Skipped,
-		}, nil
+		output := statusOutput{Runs: []runOutput{}, Skipped: runs.Skipped}
+		for _, result := range runs.Runs {
+			output.Runs = append(output.Runs, runOutput{
+				ID: result.RunID, Pool: result.Pool, Turn: result.Turn, State: string(result.Status.State), Message: statusText(result.Status),
+				Updated: result.Updated.UTC().Format(time.RFC3339Nano),
+			})
+		}
+		return nil, output, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "await",
 		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish or stop for input. Returns the result, an interrupted, "+
-			"canceled or rejected state with its message, or {id, state, retry_after} while the run is unfinished: call await again.", int(awaitBound.Seconds())),
+			"canceled or rejected state with its message, or {id, state, retry_after} while the run is unfinished: call await again. "+
+			"Use status to check a run without waiting.", int(awaitBound.Seconds())),
 		Annotations: readOnly,
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, awaitReply, error) {
 		client, err := connect()
@@ -274,7 +296,7 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "continue",
-		Description: "Sign and publish the next turn of a run interrupted in AUTH_REQUIRED or INPUT_REQUIRED to the pool that admitted it, resealing its configured credentials; add a missing credential to the wherry config first.",
+		Description: "Sign and publish the next turn of a run interrupted in AUTH_REQUIRED to the pool that admitted it, resealing its configured credentials; add a missing credential to the wherry config first.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input continueInput) (*mcp.CallToolResult, continueOutput, error) {
 		client, err := connect()
 		if err != nil {
@@ -314,7 +336,7 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "events",
-		Description: "Return a run's verified status history, whether it was cancelled, and its transcript chunk counts.",
+		Description: "Return a run's verified status history and its transcript chunk counts.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, eventsOutput, error) {
 		client, err := connect()
@@ -326,7 +348,7 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 		if err != nil {
 			return nil, eventsOutput{}, toolFailure(err)
 		}
-		output := eventsOutput{ID: input.ID, Events: []eventOutput{}, Cancelled: result.Cancelled, Transcripts: []transcriptOutput{}, Skipped: result.Skipped}
+		output := eventsOutput{ID: input.ID, Events: []eventOutput{}, Transcripts: []transcriptOutput{}, Skipped: result.Skipped}
 		for _, record := range result.Statuses {
 			status := record.StatusUpdate.Status
 			output.Events = append(output.Events, eventOutput{

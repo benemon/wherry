@@ -255,10 +255,11 @@ the `wherry admin` environment.
    `step=<n> complete=<bool> name=<name>`. The wait in step 5 is usually the
    longest; `--wait DURATION` replaces it.
 
-2. If it fails with `revocation incomplete`, the output names the failed
-   step but not its cause. Check what that step depends on (the broker
+2. If it fails with `revocation incomplete`, the line of the failed step
+   ends in ` error=<cause>`. Check what that step depends on (the broker
    connection, the broker settings), then run the command again. It starts
-   again from step 1.
+   again from step 1. Step 3 already retries for up to 2 minutes while a
+   broker still authorises the principal.
 
 3. For a receiver, rotate each credential sealed to it at its source. The
    receiver has seen their values.

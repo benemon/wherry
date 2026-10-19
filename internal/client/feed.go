@@ -2,7 +2,11 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,8 +27,13 @@ type AwaitResult struct {
 
 // StatusResult is the latest verified status of a run's latest turn.
 type StatusResult struct {
-	Turn    int64
-	Status  wire.TaskStatus
+	RunID  string
+	Pool   string
+	Turn   int64
+	Status wire.TaskStatus
+	// Updated is the time of Status; while no receiver has reported one, this host's submission of the turn, else the
+	// Kafka timestamp of the turn's echo.
+	Updated time.Time
 	Skipped int
 }
 
@@ -34,28 +43,30 @@ type TurnAttempt struct {
 	Attempt int64
 }
 
-// EventsResult contains a run's verified statuses, whether it ended canceled, and its transcript chunk count per turn
-// and attempt.
+// EventsResult contains a run's verified statuses and its transcript chunk count per turn and attempt.
 type EventsResult struct {
-	Statuses  []wire.RunStatus
-	Cancelled bool
-	Chunks    map[TurnAttempt]int
-	Skipped   int
+	Statuses []wire.RunStatus
+	Chunks   map[TurnAttempt]int
+	Skipped  int
 }
 
-// turn binds a turn's records: its task hash, and the echo of its admission once a receiver has written one.
+// turn binds a turn's records: its task hash, and the echo of its admission and the echo's Kafka timestamp once a
+// receiver has written one.
 type turn struct {
-	hash string
-	echo *wire.Echo
+	hash     string
+	echo     *wire.Echo
+	echoedAt time.Time
 }
 
 // entry is one authorised record of the run, kept so the run can be derived again against a newer view.
 type entry struct {
 	receiver string
 	echo     *wire.Echo
-	status   *wire.RunStatus
-	chunk    *wire.Chunk
-	result   *wire.Result
+	// at is the echo's Kafka timestamp.
+	at     time.Time
+	status *wire.RunStatus
+	chunk  *wire.Chunk
+	result *wire.Result
 }
 
 // runView is a run as the tenant feed and this host's local record show it. A run's pool comes from the local record,
@@ -128,8 +139,9 @@ func authorize[T any](ctx context.Context, r *runView, value []byte, check func(
 	return check(r.v)
 }
 
-// addEcho keeps an echo of the run, reporting whether value was one.
-func (r *runView) addEcho(ctx context.Context, value []byte) bool {
+// addEcho keeps an echo of the run, reporting whether record was one.
+func (r *runView) addEcho(ctx context.Context, record *kgo.Record) bool {
+	value := record.Value
 	echo, err := authorize(ctx, r, value, func(v view) (wire.Echo, error) { return admin.AuthorizeEcho(v.state, v.keys, value, r.h.tenant) })
 	if err != nil || echo.Run != r.run {
 		return false
@@ -141,7 +153,7 @@ func (r *runView) addEcho(ctx context.Context, value []byte) bool {
 		r.unread++
 		return true
 	}
-	r.entries = append(r.entries, entry{receiver: echo.Receiver, echo: &echo})
+	r.entries = append(r.entries, entry{receiver: echo.Receiver, echo: &echo, at: record.Timestamp})
 	return true
 }
 
@@ -177,7 +189,7 @@ func (r *runView) add(ctx context.Context, record *kgo.Record) {
 func (r *runView) read(ctx context.Context, records []*kgo.Record) {
 	echoes := make([]bool, len(records))
 	for i, record := range records {
-		echoes[i] = r.addEcho(ctx, record.Value)
+		echoes[i] = r.addEcho(ctx, record)
 	}
 	for i, record := range records {
 		if !echoes[i] {
@@ -210,7 +222,7 @@ func (r *runView) derive() {
 			continue
 		}
 		if known.echo == nil {
-			r.turns[e.echo.Turn] = turn{hash: e.echo.TaskHash, echo: e.echo}
+			r.turns[e.echo.Turn] = turn{hash: e.echo.TaskHash, echo: e.echo, echoedAt: e.at}
 		}
 		r.latest = max(r.latest, e.echo.Turn)
 	}
@@ -312,14 +324,88 @@ func (h *Host) Status(ctx context.Context, runID string) (StatusResult, error) {
 	if r.pool == "" {
 		return StatusResult{}, fmt.Errorf("status %s: %w", runID, ErrRunNotFound)
 	}
-	result := StatusResult{Turn: r.latest, Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Skipped: r.skipped}
+	return r.status(), nil
+}
+
+// RunsResult lists runs, latest update first; Skipped counts their unverifiable records and undecodable local records.
+type RunsResult struct {
+	Runs    []StatusResult
+	Skipped int
+}
+
+// Runs returns the status of every run in this host's local records or echoed on the tenant feed. Each run is derived
+// from its own records on one read of wherry.admin and the feed. Feed records are grouped by Kafka key, so a record
+// keyed other than its run counts as unreadable under that key.
+func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
+	v, err := h.load(ctx)
+	if err != nil {
+		return RunsResult{}, err
+	}
+	records, err := admin.ReadTopic(ctx, h.kafka, admin.TenantTopic(h.tenant))
+	if err != nil {
+		return RunsResult{}, err
+	}
+	byRun := map[string][]*kgo.Record{}
+	for _, record := range records {
+		byRun[string(record.Key)] = append(byRun[string(record.Key)], record)
+	}
+	files, err := os.ReadDir(filepath.Join(h.stateDir, "runs"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return RunsResult{}, err
+	}
+	for _, file := range files {
+		if runID, ok := strings.CutSuffix(file.Name(), ".json"); ok && !file.IsDir() {
+			if _, ok := byRun[runID]; !ok {
+				byRun[runID] = nil
+			}
+		}
+	}
+	result := RunsResult{Runs: []StatusResult{}}
+	// One reread map and a view carried forward bound the reloads to one per unknown kid across all runs.
+	reread := map[string]bool{}
+	for runID, records := range byRun {
+		local, err := h.localRun(runID)
+		if errors.Is(err, errUndecodable) {
+			local = nil
+			result.Skipped++
+		} else if err != nil {
+			return RunsResult{}, err
+		}
+		r := newRunView(h, v, runID, local)
+		r.reread = reread
+		r.read(ctx, records)
+		v = r.v
+		if r.pool != "" {
+			status := r.status()
+			result.Runs = append(result.Runs, status)
+			result.Skipped += status.Skipped
+		}
+	}
+	sort.Slice(result.Runs, func(i, j int) bool {
+		if !result.Runs[i].Updated.Equal(result.Runs[j].Updated) {
+			return result.Runs[i].Updated.After(result.Runs[j].Updated)
+		}
+		return result.Runs[i].RunID < result.Runs[j].RunID
+	})
+	return result, nil
+}
+
+// status is the latest verified status of the run's latest turn, SUBMITTED until a receiver reports one.
+func (r *runView) status() StatusResult {
+	result := StatusResult{RunID: r.run, Pool: r.pool, Turn: r.latest, Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Skipped: r.skipped}
+	if r.local != nil && r.local.SubmittedMS > 0 {
+		result.Updated = time.UnixMilli(r.local.SubmittedMS)
+	} else {
+		result.Updated = r.turns[r.latest].echoedAt
+	}
 	var filter wire.AttemptFilter
 	for _, status := range r.statuses {
 		if status.Wherry.Turn == r.latest && admit(&filter, status) {
 			result.Status = status.StatusUpdate.Status
+			result.Updated, _ = time.Parse(time.RFC3339, result.Status.Timestamp) // decoding validated it
 		}
 	}
-	return result, nil
+	return result
 }
 
 // Events returns runID's verified statuses, one per event ID, and its transcript chunk counts.
@@ -339,7 +425,6 @@ func (h *Host) Events(ctx context.Context, runID string) (EventsResult, error) {
 		}
 		seen[status.Wherry.EventID] = true
 		result.Statuses = append(result.Statuses, *status)
-		result.Cancelled = result.Cancelled || status.StatusUpdate.Status.State == wire.TaskStateCanceled
 	}
 	for _, chunk := range r.chunks {
 		result.Chunks[TurnAttempt{Turn: chunk.Wherry.Turn, Attempt: chunk.Wherry.Attempt}]++
@@ -422,7 +507,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		}
 		kept, unread := len(r.entries), r.unread
 		fetches.EachRecord(func(record *kgo.Record) {
-			if !r.addEcho(waitCtx, record.Value) {
+			if !r.addEcho(waitCtx, record) {
 				r.add(waitCtx, record)
 			}
 		})
