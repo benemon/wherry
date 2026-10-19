@@ -162,8 +162,8 @@ func TestP09RevocationRunsAllSixStepsInOrder(t *testing.T) {
 	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
 	}
-	config := ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Agents: terms.Agents, Runtimes: terms.Runtimes}
-	if err := service.ReceiverAdd(ctx, config, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	config := modelConfig("receiver-a", "pool-a")
+	if err := service.ReceiverAdd(ctx, config, nil, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	wait := 500 * time.Millisecond
@@ -248,9 +248,9 @@ func TestP12ProvisioningSurvivesReconciliation(t *testing.T) {
 	if err := service.PoolCreate(ctx, pool, terms); err != nil {
 		t.Fatal(err)
 	}
-	config := ReceiverConfig{Receiver: receiver, Pool: pool, Agents: terms.Agents, Runtimes: terms.Runtimes}
+	config := modelConfig(receiver, pool)
 	bundlePath := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := service.ReceiverAdd(ctx, config, bundlePath); err != nil {
+	if err := service.ReceiverAdd(ctx, config, nil, bundlePath); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
@@ -292,7 +292,7 @@ func TestP13ShareGroupStartsAtEarliest(t *testing.T) {
 
 func TestP15ReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 	terms := modelTerms()
-	config := ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Agents: terms.Agents, Runtimes: terms.Runtimes}
+	config := modelConfig("receiver-b", "pool-a")
 	record := Record{Version: 1, Kind: "receiver", Pool: "pool-a", Receiver: "receiver-b", Config: &config, AtMS: 1}
 	if err := ValidateReceiverRecord(record, "receiver-a", terms); err == nil {
 		t.Fatal("accepted another receiver's configuration")
@@ -302,10 +302,14 @@ func TestP15ReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 	if err := ValidateReceiverRecord(record, "receiver-a", terms); err != nil {
 		t.Fatal(err)
 	}
+	outsideRuntime, outsideAgent, outsideCredential := modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a")
+	outsideRuntime.Runtimes = []string{"runtime-z"}
+	outsideAgent.Adapters[0].Agent = "agent-z"
+	outsideCredential.Adapters[0].Credential = "other"
 	for name, outside := range map[string]ReceiverConfig{
-		"runtime":    {Receiver: "receiver-a", Pool: "pool-a", Agents: terms.Agents, Runtimes: []string{"runtime-z"}},
-		"agent":      {Receiver: "receiver-a", Pool: "pool-a", Agents: []AgentTerms{{Name: "agent-z"}}, Runtimes: terms.Runtimes},
-		"credential": {Receiver: "receiver-a", Pool: "pool-a", Agents: []AgentTerms{{Name: "agent-a", Credentials: []string{"other"}}}, Runtimes: terms.Runtimes},
+		"runtime":    outsideRuntime,
+		"agent":      outsideAgent,
+		"credential": outsideCredential,
 	} {
 		record.Config = &outside
 		if err := ValidateReceiverRecord(record, "receiver-a", terms); err == nil {
@@ -329,10 +333,14 @@ func modelTerms() Terms {
 	return Terms{Agents: []AgentTerms{{Name: "agent-a", Credentials: []string{"model"}}}, Runtimes: []string{"runtime-a"}, DefaultAgent: "agent-a", DefaultRuntime: "runtime-a", SealLifetimeMS: 60000, DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1000000, RequestPercentage: 50}
 }
 
+func modelConfig(receiver, pool string) ReceiverConfig {
+	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Runtimes: []string{"runtime-a"}, Adapters: []AdapterSettings{{Name: "adapter-a", Type: "fake", Agent: "agent-a", Credential: "model"}}}
+}
+
 func modelState(t *testing.T) State {
 	terms := modelTerms()
 	records := []Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "pool", Pool: "pool-b", Terms: &terms, AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-a", Host: "host-a", AtMS: 1}, {Version: 1, Kind: "host", Tenant: "tenant-b", Host: "host-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-a", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-a", Pool: "pool-b", AtMS: 1}, {Version: 1, Kind: "entitlement", Tenant: "tenant-b", Pool: "pool-a", AtMS: 1}}
-	for _, config := range []ReceiverConfig{{Receiver: "receiver-a", Pool: "pool-a", Agents: terms.Agents, Runtimes: terms.Runtimes}, {Receiver: "receiver-b", Pool: "pool-b", Agents: terms.Agents, Runtimes: terms.Runtimes}} {
+	for _, config := range []ReceiverConfig{modelConfig("receiver-a", "pool-a"), modelConfig("receiver-b", "pool-b")} {
 		copy := config
 		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
 	}

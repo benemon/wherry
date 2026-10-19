@@ -59,7 +59,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return service.PoolCreate(ctx, pos[2], terms)
 	case "receiver add":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver add ID --pool POOL --config FILE --bundle FILE")
+			return errors.New("usage: wherry admin receiver add ID --pool POOL --config FILE --bundle FILE [--platform-credential ADAPTER=FILE]")
 		}
 		var config admin.ReceiverConfig
 		if err := readYAML(options["config"], &config); err != nil {
@@ -69,7 +69,19 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			return errors.New("receiver config identity does not match command")
 		}
 		config.Receiver, config.Pool = pos[2], options["pool"]
-		return service.ReceiverAdd(ctx, config, options["bundle"])
+		var platform map[string]string
+		if value := options["platform-credential"]; value != "" {
+			adapter, path, ok := strings.Cut(value, "=")
+			if !ok {
+				return errors.New("--platform-credential takes ADAPTER=FILE")
+			}
+			credential, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			platform = map[string]string{adapter: strings.TrimRight(string(credential), "\r\n")}
+		}
+		return service.ReceiverAdd(ctx, config, platform, options["bundle"])
 	case "tenant add":
 		if len(pos) != 3 {
 			return errors.New("usage: wherry admin tenant add TENANT --pool POOL")

@@ -18,7 +18,7 @@ import (
 func TestErrorsDoNotExposeCredential(t *testing.T) {
 	key, _ := ecdh.X25519().GenerateKey(rand.Reader)
 	secret := "plaintext-credential-canary"
-	seal, err := SealCredential("tenant-a", "receiver-a", "pool-a", "model", time.Now().Add(time.Hour), key.PublicKey(), []byte(secret))
+	seal, err := SealCredential("tenant-a", "receiver-a", "pool-a", "model", time.Now(), time.Now().Add(time.Hour), key.PublicKey(), []byte(secret))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestP10SealBindingsAndFingerprintPinning(t *testing.T) {
 	first, _ := ecdh.X25519().GenerateKey(rand.Reader)
 	other, _ := ecdh.X25519().GenerateKey(rand.Reader)
 	expiry := time.Now().Add(time.Hour)
-	seal, err := SealCredential("tenant-a", "receiver-a", "pool-a", "model", expiry, first.PublicKey(), []byte("canary-secret"))
+	seal, err := SealCredential("tenant-a", "receiver-a", "pool-a", "model", time.Now(), expiry, first.PublicKey(), []byte("canary-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}

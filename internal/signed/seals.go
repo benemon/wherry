@@ -23,6 +23,7 @@ type Seal struct {
 	Pool           string `json:"pool"`
 	KeyFingerprint string `json:"key_fingerprint"`
 	Credential     string `json:"credential"`
+	IssuedMS       int64  `json:"issued_ms"`
 	ExpiryMS       int64  `json:"expiry_ms"`
 	Ciphertext     []byte `json:"ciphertext"`
 }
@@ -32,15 +33,17 @@ func SealingKeyID(key *ecdh.PublicKey) string {
 	return "sha256:" + base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-func SealCredential(tenant, receiver, pool, credential string, expiry time.Time, key *ecdh.PublicKey, plaintext []byte) (Seal, error) {
-	if tenant == "" || receiver == "" || pool == "" || credential == "" || expiry.IsZero() || len(plaintext) > MaxPlaintext {
+// SealCredential seals plaintext to a receiver. A receiver takes the seal
+// with the latest issued time across its tenant's host topics.
+func SealCredential(tenant, receiver, pool, credential string, issued, expiry time.Time, key *ecdh.PublicKey, plaintext []byte) (Seal, error) {
+	if tenant == "" || receiver == "" || pool == "" || credential == "" || issued.IsZero() || !issued.Before(expiry) || len(plaintext) > MaxPlaintext {
 		return Seal{}, errors.New("invalid seal")
 	}
 	hpkeKey, err := hpke.NewDHKEMPublicKey(key)
 	if err != nil {
 		return Seal{}, err
 	}
-	seal := Seal{Version: 1, Tenant: tenant, Receiver: receiver, Pool: pool, KeyFingerprint: SealingKeyID(key), Credential: credential, ExpiryMS: expiry.UnixMilli()}
+	seal := Seal{Version: 1, Tenant: tenant, Receiver: receiver, Pool: pool, KeyFingerprint: SealingKeyID(key), Credential: credential, IssuedMS: issued.UnixMilli(), ExpiryMS: expiry.UnixMilli()}
 	seal.Ciphertext, err = hpke.Seal(hpkeKey, hpke.HKDFSHA256(), hpke.AES256GCM(), sealInfo(seal), plaintext)
 	if err != nil {
 		return Seal{}, errors.New("seal credential")
@@ -86,8 +89,9 @@ func sealInfo(seal Seal) []byte {
 		Pool       string `json:"pool"`
 		Key        string `json:"key"`
 		Credential string `json:"credential"`
+		IssuedMS   int64  `json:"issued_ms"`
 		ExpiryMS   int64  `json:"expiry_ms"`
-	}{seal.Version, seal.Tenant, seal.Receiver, seal.Pool, seal.KeyFingerprint, seal.Credential, seal.ExpiryMS}, json.Deterministic(true))
+	}{seal.Version, seal.Tenant, seal.Receiver, seal.Pool, seal.KeyFingerprint, seal.Credential, seal.IssuedMS, seal.ExpiryMS}, json.Deterministic(true))
 	return append([]byte("wherry hpke seal\x00"), info...)
 }
 
@@ -107,7 +111,7 @@ func DecodeSeal(encoded []byte) (Seal, error) {
 	if err := json.Unmarshal(encoded, &seal, strict); err != nil {
 		return Seal{}, fmt.Errorf("decode seal: %w", err)
 	}
-	if seal.Version != 1 || seal.Tenant == "" || seal.Receiver == "" || seal.Pool == "" || seal.KeyFingerprint == "" || seal.Credential == "" || seal.ExpiryMS <= 0 || len(seal.Ciphertext) == 0 || len(seal.Ciphertext) > MaxPlaintext+sealOverhead {
+	if seal.Version != 1 || seal.Tenant == "" || seal.Receiver == "" || seal.Pool == "" || seal.KeyFingerprint == "" || seal.Credential == "" || seal.IssuedMS <= 0 || seal.ExpiryMS <= seal.IssuedMS || len(seal.Ciphertext) == 0 || len(seal.Ciphertext) > MaxPlaintext+sealOverhead {
 		return Seal{}, errors.New("invalid seal")
 	}
 	return seal, nil

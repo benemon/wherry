@@ -31,6 +31,9 @@ type Bundle struct {
 	CA        string `yaml:"ca"`
 	Principal string `yaml:"principal"`
 	Password  string `yaml:"password"`
+	// Platform holds platform credentials by adapter name, such as a Nomad
+	// token, for platforms that do not issue one by their own identity.
+	Platform map[string]string `yaml:"platform,omitempty"`
 }
 
 func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms) error {
@@ -58,7 +61,7 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 	return service.reconcileACLs(ctx, state)
 }
 
-func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, bundlePath string) (err error) {
+func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, platform map[string]string, bundlePath string) (err error) {
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return err
@@ -90,7 +93,7 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	if err := service.reconcileACLs(ctx, state); err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(config.Receiver), password})
+	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(config.Receiver), password, platform})
 }
 
 func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string) (err error) {
@@ -121,7 +124,7 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{service.Broker, service.CA, principal, password})
+	return writeBundle(bundle, Bundle{service.Broker, service.CA, principal, password, nil})
 }
 
 func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) error {

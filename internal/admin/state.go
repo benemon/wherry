@@ -31,12 +31,27 @@ type Terms struct {
 	ProducerByteRate  int64        `json:"producer_byte_rate" yaml:"producer_byte_rate"`
 	RequestPercentage float64      `json:"request_percentage" yaml:"request_percentage"`
 }
+// ReceiverConfig is a receiver's whole configuration, recorded on
+// wherry.admin and read by the receiver after it authenticates.
 type ReceiverConfig struct {
-	Receiver string       `json:"receiver" yaml:"receiver"`
-	Pool     string       `json:"pool" yaml:"pool"`
-	Agents   []AgentTerms `json:"agents" yaml:"agents"`
-	Runtimes []string     `json:"runtimes" yaml:"runtimes"`
+	Receiver string            `json:"receiver" yaml:"receiver"`
+	Pool     string            `json:"pool" yaml:"pool"`
+	Capacity int64             `json:"capacity" yaml:"capacity"`
+	Labels   map[string]string `json:"labels" yaml:"labels"`
+	Runtimes []string          `json:"runtimes" yaml:"runtimes"`
+	Adapters []AdapterSettings `json:"adapters" yaml:"adapters"`
 }
+
+// AdapterSettings configures one adapter: the agent it launches, the
+// credential that agent takes, and settings its type decodes.
+type AdapterSettings struct {
+	Name       string         `json:"name" yaml:"name"`
+	Type       string         `json:"type" yaml:"type"`
+	Agent      string         `json:"agent" yaml:"agent"`
+	Credential string         `json:"credential,omitzero" yaml:"credential"`
+	Config     map[string]any `json:"config" yaml:"config"`
+}
+
 type Record struct {
 	Version  int             `json:"v"`
 	Kind     string          `json:"kind"`
@@ -180,34 +195,31 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	if err := validateNames(config.Receiver, config.Pool); err != nil {
 		return err
 	}
-	if len(config.Agents) == 0 || len(config.Runtimes) == 0 {
-		return errors.New("receiver config has no offers")
+	if config.Capacity <= 0 || len(config.Adapters) == 0 || len(config.Runtimes) == 0 {
+		return errors.New("receiver config needs a capacity, adapters and runtimes")
 	}
-	allowedRuntimes := map[string]bool{}
-	for _, runtime := range terms.Runtimes {
-		allowedRuntimes[runtime] = true
-	}
-	allowedAgents := map[string]map[string]bool{}
-	for _, agent := range terms.Agents {
-		allowedAgents[agent.Name] = map[string]bool{}
-		for _, credential := range agent.Credentials {
-			allowedAgents[agent.Name][credential] = true
+	for key, value := range config.Labels {
+		if key == "" || value == "" {
+			return errors.New("receiver labels need keys and values")
 		}
 	}
 	for _, runtime := range config.Runtimes {
-		if !allowedRuntimes[runtime] {
+		if !slices.Contains(terms.Runtimes, runtime) {
 			return errors.New("receiver runtime is outside pool terms")
 		}
 	}
-	for _, agent := range config.Agents {
-		credentials, ok := allowedAgents[agent.Name]
-		if !ok {
+	names := map[string]bool{}
+	for _, adapter := range config.Adapters {
+		if validateNames(adapter.Name) != nil || names[adapter.Name] || adapter.Type == "" {
+			return errors.New("adapters need unique valid names and a type")
+		}
+		names[adapter.Name] = true
+		index := slices.IndexFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == adapter.Agent })
+		if index < 0 {
 			return errors.New("receiver agent is outside pool terms")
 		}
-		for _, credential := range agent.Credentials {
-			if !credentials[credential] {
-				return errors.New("receiver credential is outside pool terms")
-			}
+		if adapter.Credential != "" && !slices.Contains(terms.Agents[index].Credentials, adapter.Credential) {
+			return errors.New("receiver credential is outside pool terms")
 		}
 	}
 	return nil
