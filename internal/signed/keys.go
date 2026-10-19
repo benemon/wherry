@@ -51,6 +51,8 @@ type Keys map[string]KeyState
 
 func HostOwner(tenant, host string) string { return tenant + "." + host }
 
+// current returns the owner's current key. The key ID is not the guard (the
+// signature is); a mismatch tells the reader to re-read the owner's key topic.
 func (keys Keys) current(owner, keyID string) (ed25519.PublicKey, error) {
 	state := keys[owner]
 	if state.Revoked || state.Current == nil || KeyID(state.Current) != keyID {

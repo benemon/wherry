@@ -90,15 +90,16 @@ func TestP04KeysOnlyFollowRegistrationRules(t *testing.T) {
 func TestP07RecordSchemaVersionIsExact(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := Keys{HostOwner("tenant-a", "host-a"): {Current: key.Public().(ed25519.PublicKey)}}
-	task := Task{Version: 1, Tenant: "tenant-a", Host: "host-a", KeyID: KeyID(key.Public().(ed25519.PublicKey)), Run: "run-a", Pool: "pool-a", Agent: "agent-a"}
-	current, err := sign(TaskType, task, key)
+	owner := HostOwner("tenant-a", "host-a")
+	task := Task{Version: 1, Tenant: "tenant-a", Host: "host-a", Run: "run-a", Pool: "pool-a", Agent: "agent-a"}
+	current, err := Sign(TaskType, owner, task, key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ParseTask(current, keys); err != nil {
 		t.Fatalf("v1 task: %v", err)
 	}
-	underV2, err := sign("application/vnd.wherry.task.v2+jws", task, key)
+	underV2, err := Sign("application/vnd.wherry.task.v2+jws", owner, task, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,15 +107,15 @@ func TestP07RecordSchemaVersionIsExact(t *testing.T) {
 		t.Fatal("accepted a v1 payload under a v2 type")
 	}
 	task.Version = 2
-	v2Payload, err := sign(TaskType, task, key)
+	v2Payload, err := Sign(TaskType, owner, task, key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ParseTask(v2Payload, keys); err == nil {
 		t.Fatal("accepted a v2 payload under a v1 type")
 	}
-	status := Status{Version: 1, EventID: "event-a", Receiver: "host-a", KeyID: task.KeyID, Tenant: "tenant-a", Run: "run-a", Pool: "pool-a", State: "running"}
-	statusUnderTask, err := sign(TaskType, status, key)
+	status := Status{Version: 1, EventID: "event-a", Receiver: "host-a", Tenant: "tenant-a", Run: "run-a", Pool: "pool-a", State: "running"}
+	statusUnderTask, err := Sign(TaskType, owner, status, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,22 +216,38 @@ func TestP01SignatureMustVerifyAgainstNamedKey(t *testing.T) {
 	_, victim, _ := ed25519.GenerateKey(rand.Reader)
 	_, attacker, _ := ed25519.GenerateKey(rand.Reader)
 	keys := Keys{HostOwner("tenant-a", "host-a"): {Current: victim.Public().(ed25519.PublicKey)}}
-	forged, err := sign(TaskType, Task{Version: 1, Tenant: "tenant-a", Host: "host-a", KeyID: KeyID(victim.Public().(ed25519.PublicKey)), Run: "run-a", Pool: "pool-a", Agent: "agent-a"}, attacker)
+	kid := HostOwner("tenant-a", "host-a") + "/" + KeyID(victim.Public().(ed25519.PublicKey))
+	forged, err := signRaw(TaskType, kid, []byte(`{"v":1,"tenant":"tenant-a","host":"host-a","run":"run-a","turn":0,"attempt":0,"pool":"pool-a","agent":"agent-a"}`), attacker)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ParseTask(forged, keys); err == nil {
 		t.Fatal("accepted a task naming the victim's key but signed by another")
 	}
+	keys[HostOwner("tenant-b", "host-b")] = KeyState{Current: attacker.Public().(ed25519.PublicKey)}
+	borrowed, err := Sign(TaskType, HostOwner("tenant-b", "host-b"), Task{Version: 1, Tenant: "tenant-a", Host: "host-a", Run: "run-a", Pool: "pool-a", Agent: "agent-a"}, attacker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseTask(borrowed, keys); err == nil {
+		t.Fatal("accepted a task claiming one host but signed under another's kid")
+	}
+	malformed, err := signRaw(TaskType, kid, []byte(`{"v":1,"tenant":`), attacker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseTask(malformed, keys); err == nil || err.Error() != "invalid JWS signature" {
+		t.Fatalf("decoded a payload before verifying its signature: %v", err)
+	}
 }
 
 func TestP07PayloadDecodeIsStrict(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := Keys{HostOwner("tenant-a", "host-a"): {Current: key.Public().(ed25519.PublicKey)}}
-	id := KeyID(key.Public().(ed25519.PublicKey))
-	base := `{"v":1,"tenant":"tenant-a","host":"host-a","key_id":"` + id + `","run":"run-a","turn":0,"attempt":0,"pool":"pool-a","agent":"agent-a"`
+	kid := HostOwner("tenant-a", "host-a") + "/" + KeyID(key.Public().(ed25519.PublicKey))
+	base := `{"v":1,"tenant":"tenant-a","host":"host-a","run":"run-a","turn":0,"attempt":0,"pool":"pool-a","agent":"agent-a"`
 	for name, payload := range map[string]string{"unknown member": base + `,"extra":1}`, "duplicate member": base + `,"pool":"pool-b"}`} {
-		encoded, err := signRaw(TaskType, []byte(payload), key)
+		encoded, err := signRaw(TaskType, kid, []byte(payload), key)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -240,8 +257,9 @@ func TestP07PayloadDecodeIsStrict(t *testing.T) {
 	}
 }
 
-func signRaw(typ string, payload []byte, key ed25519.PrivateKey) ([]byte, error) {
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: key}, new(jose.SignerOptions).WithType(jose.ContentType(typ)))
+// signRaw signs payload bytes under an arbitrary kid, for forgeries.
+func signRaw(typ, kid string, payload []byte, key ed25519.PrivateKey) ([]byte, error) {
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: key}, new(jose.SignerOptions).WithType(jose.ContentType(typ)).WithHeader(jose.HeaderKey("kid"), kid))
 	if err != nil {
 		return nil, err
 	}
