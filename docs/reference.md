@@ -263,17 +263,18 @@ each host's [quotas](#quotas).
 Records the host, creates its principal, its key topic and the tenant
 feed, grants its ACLs, applies its quotas, and writes its bundle.
 
-### `wherry admin receiver add RECEIVER --pool POOL --config FILE --bundle FILE`
+### `wherry admin receiver add RECEIVER --pool POOL --config PATH --bundle FILE`
 
-Validates the [receiver configuration](#receiver-configuration) against the
-pool's terms, records it, creates the receiver's principal and key topic,
+Reads the [receiver configuration](#receiver-configuration) from `PATH`, a
+directory or a single file, validates it against the pool's terms, records
+it, creates the receiver's principal and key topic,
 grants its ACLs, and writes its bundle. It refuses an existing receiver.
 
 `--platform-credential ADAPTER=FILE` puts the contents of `FILE`, less
 trailing CR and LF, in the bundle as the platform credential of the named
 adapter.
 
-### `wherry admin receiver configure RECEIVER --config FILE`
+### `wherry admin receiver configure RECEIVER --config PATH`
 
 Records a new configuration for a live receiver in its pool. The
 principal, password and bundle stay as they are. The receiver exits when it
@@ -451,7 +452,8 @@ the [extension](a2a-extension-v1.md#delivery-budget) lists.
 ```yaml
 agents:
   - name: coder
-    credentials: [model-api-key]
+    credentials:
+      - model-api-key
 default_agent: coder
 seal_lifetime_ms: 86400000
 delivery_limit: 5
@@ -468,8 +470,10 @@ entitled to.
 
 ## Receiver configuration
 
-The YAML file `receiver add` and `receiver configure` read, recorded on
-`wherry.admin`. Unknown fields are errors.
+What `receiver add` and `receiver configure` read from `--config`,
+recorded on `wherry.admin`. `--config` names a
+[directory](#receiver-configuration-directory), or a single YAML file with
+these fields. Unknown fields are errors.
 
 | Field | Content |
 | --- | --- |
@@ -488,6 +492,40 @@ Each adapter entry:
 | `credential` | optional; a credential the terms allow for the agent, delivered to the job |
 | `labels` | optional; [labels](#labels) for placement |
 | `config` | the adapter type's settings |
+
+### Receiver configuration directory
+
+The directory holds:
+
+```
+receiver.yaml
+platforms/
+  <platform>.yaml
+adapters/
+  <adapter>.yaml
+```
+
+| File | Fields |
+| --- | --- |
+| `receiver.yaml` | `capacity` |
+| `platforms/*.yaml` | one platform: `name`, unique in the directory; `type`; `config`, settings shared by its adapters |
+| `adapters/*.yaml` | one adapter: `name`, `platform`, `agent`, `credential`, `labels` and `config`, as in an adapter entry |
+
+The receiver and pool come from the command. Each adapter file becomes one
+adapter entry:
+
+- Routing order is the lexical order of the file names in `adapters/`.
+- `platform` names a platform in `platforms/`, and the entry takes that
+  platform's `type`.
+- The entry's `config` is the platform's `config` merged with the
+  adapter's at the top level. A top-level key set in both is an error that
+  names the adapter file and the key. Nested values do not merge.
+
+Unknown fields, an unknown platform, a repeated adapter or platform name,
+an empty `adapters/`, a nested directory, and any file other than
+`receiver.yaml` and `.yaml` files in `platforms/` and `adapters/` are
+errors. Files and directories whose names start with `.` are ignored. The
+command writes nothing when the directory has an error.
 
 ### Nomad adapter settings
 
@@ -525,7 +563,8 @@ adapters:
     type: nomad
     agent: coder
     credential: model-api-key
-    labels: {isolation: container}
+    labels:
+      isolation: container
     config:
       address: https://nomad.example.com:4646
       ca_file: /secrets/nomad-ca.pem
@@ -536,8 +575,12 @@ adapters:
         config:
           image: registry.example.com/agent:1.0
           command: /bin/sh
-          args: ["-c", "exec agent-run < \"$NOMAD_TASK_DIR/prompt.txt\""]
-        resources: {cpu: 1000, memory_mb: 2048}
+          args:
+            - -c
+            - exec agent-run < "$NOMAD_TASK_DIR/prompt.txt"
+        resources:
+          cpu: 1000
+          memory_mb: 2048
 ```
 
 #### Agent jobs

@@ -108,26 +108,72 @@ A tenant can be entitled to several pools; run `tenant add` once per pool.
 ## Add a receiver
 
 A receiver's configuration lists its adapters in routing order. Each adapter
-launches one agent, may deliver one credential, and carries the labels
-tasks select on. Two adapters can launch the same agent with different
-labels, such as one running in containers and one on the host:
+launches one agent on a platform, may deliver one credential, and carries
+the labels tasks select on. Two adapters can launch the same agent with
+different labels, such as one running in containers and one on the host.
+
+Write the configuration as a directory:
+
+```
+nomad-1/
+  receiver.yaml
+  platforms/
+    nomad.yaml
+  adapters/
+    10-container.yaml
+    20-host.yaml
+```
+
+`receiver.yaml` holds the receiver's `capacity`:
 
 ```yaml
 capacity: 2
-adapters:
-  - name: container
-    type: nomad
-    agent: coder
-    credential: model-api-key
-    labels: {isolation: container}
-    config: { ... }
-  - name: host
-    type: nomad
-    agent: coder
-    credential: model-api-key
-    labels: {isolation: host}
-    config: { ... }
 ```
+
+Each file in `platforms/` names a platform, its adapter type and the
+connection settings its adapters share:
+
+```yaml
+name: nomad
+type: nomad
+config:
+  address: https://nomad.example.com:4646
+  ca_file: /etc/wherry/nomad-ca.pem
+  namespace: agents
+  credential_env: MODEL_API_KEY
+```
+
+Each file in `adapters/` is one adapter on one of those platforms, with the
+settings particular to it:
+
+```yaml
+name: container
+platform: nomad
+agent: coder
+credential: model-api-key
+labels:
+  isolation: container
+config:
+  node_pool: default
+  runtime:
+    driver: docker
+    config:
+      image: registry.example.com/agent:1.0
+```
+
+`20-host.yaml` declares `name: host`, `labels` with `isolation: host`, and
+an `exec` runtime on a node pool whose nodes have the agent installed.
+
+The adapter files' names set routing order, lowest first, so a numeric
+prefix orders them. An adapter takes its platform's `type`, and its `config`
+is the platform's `config` plus its own. The two share no top-level key: a
+key set in both is an error. The
+[directory layout](reference.md#receiver-configuration-directory) lists
+every rule.
+
+A single YAML file holding the whole
+[receiver configuration](reference.md#receiver-configuration) also works in
+place of the directory.
 
 A task with no selector runs on the first ready adapter, `container` here,
 and `--selector isolation=host` runs on the second. Every member of a pool
@@ -142,7 +188,7 @@ matching adapter records a start failure and returns the task.
 
    ```sh
    wherry admin receiver add nomad-1 --pool build \
-     --config nomad-1.yaml --bundle nomad-1.bundle
+     --config nomad-1 --bundle nomad-1.bundle
    ```
 
    When the platform does not issue the receiver's credential itself, add
@@ -157,7 +203,7 @@ matching adapter records a start failure and returns the task.
 ### Change a receiver's configuration
 
 ```sh
-wherry admin receiver configure nomad-1 --config nomad-1.yaml
+wherry admin receiver configure nomad-1 --config nomad-1
 ```
 
 The receiver exits when it reads the new record at its next configuration

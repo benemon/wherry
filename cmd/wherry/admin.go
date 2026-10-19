@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -59,10 +60,10 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return service.PoolCreate(ctx, pos[2], terms)
 	case "receiver add":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver add ID --pool POOL --config FILE --bundle FILE [--platform-credential ADAPTER=FILE]")
+			return errors.New("usage: wherry admin receiver add ID --pool POOL --config PATH --bundle FILE [--platform-credential ADAPTER=FILE]")
 		}
-		var config admin.ReceiverConfig
-		if err := readYAML(options["config"], &config); err != nil {
+		config, err := readReceiverConfig(options["config"])
+		if err != nil {
 			return err
 		}
 		if (config.Receiver != "" && config.Receiver != pos[2]) || (config.Pool != "" && config.Pool != options["pool"]) {
@@ -84,10 +85,10 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return service.ReceiverAdd(ctx, config, platform, options["bundle"])
 	case "receiver configure":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver configure ID --config FILE")
+			return errors.New("usage: wherry admin receiver configure ID --config PATH")
 		}
-		var config admin.ReceiverConfig
-		if err := readYAML(options["config"], &config); err != nil {
+		config, err := readReceiverConfig(options["config"])
+		if err != nil {
 			return err
 		}
 		if config.Receiver != "" && config.Receiver != pos[2] {
@@ -181,6 +182,114 @@ func readYAML(path string, value any) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
 	decoder.KnownFields(true)
 	return decoder.Decode(value)
+}
+
+// readReceiverConfig reads a receiver config from a single file or from a
+// directory holding receiver.yaml, platforms/*.yaml and adapters/*.yaml, where
+// adapter file order is routing order and an adapter's config takes its
+// platform's top-level keys, which it must not repeat.
+func readReceiverConfig(path string) (admin.ReceiverConfig, error) {
+	var config admin.ReceiverConfig
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		return config, readYAML(path, &config)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return config, err
+	}
+	for _, entry := range entries {
+		if name := entry.Name(); !strings.HasPrefix(name, ".") && name != "receiver.yaml" && name != "platforms" && name != "adapters" {
+			return config, fmt.Errorf("%s does not belong in a receiver config directory", filepath.Join(path, name))
+		}
+	}
+	var receiver struct {
+		Capacity int64 `yaml:"capacity"`
+	}
+	if err := readYAML(filepath.Join(path, "receiver.yaml"), &receiver); err != nil {
+		return config, err
+	}
+	config.Capacity = receiver.Capacity
+	type platform struct {
+		Name   string         `yaml:"name"`
+		Type   string         `yaml:"type"`
+		Config map[string]any `yaml:"config"`
+	}
+	platforms := map[string]platform{}
+	files, err := yamlFiles(filepath.Join(path, "platforms"))
+	if err != nil {
+		return config, err
+	}
+	for _, file := range files {
+		var p platform
+		if err := readYAML(file, &p); err != nil {
+			return config, fmt.Errorf("%s: %w", file, err)
+		}
+		if _, ok := platforms[p.Name]; ok || p.Name == "" {
+			return config, fmt.Errorf("%s: platform name %q is empty or repeated", file, p.Name)
+		}
+		platforms[p.Name] = p
+	}
+	files, err = yamlFiles(filepath.Join(path, "adapters"))
+	if err != nil {
+		return config, err
+	}
+	if len(files) == 0 {
+		return config, fmt.Errorf("%s holds no adapters", filepath.Join(path, "adapters"))
+	}
+	names := map[string]bool{}
+	for _, file := range files {
+		var adapter struct {
+			Name       string            `yaml:"name"`
+			Platform   string            `yaml:"platform"`
+			Agent      string            `yaml:"agent"`
+			Credential string            `yaml:"credential"`
+			Labels     map[string]string `yaml:"labels"`
+			Config     map[string]any    `yaml:"config"`
+		}
+		if err := readYAML(file, &adapter); err != nil {
+			return config, fmt.Errorf("%s: %w", file, err)
+		}
+		if names[adapter.Name] {
+			return config, fmt.Errorf("%s: adapter name %q is repeated", file, adapter.Name)
+		}
+		names[adapter.Name] = true
+		p, ok := platforms[adapter.Platform]
+		if !ok {
+			return config, fmt.Errorf("%s: unknown platform %q", file, adapter.Platform)
+		}
+		if adapter.Config == nil {
+			adapter.Config = map[string]any{}
+		}
+		for key, value := range p.Config {
+			if _, ok := adapter.Config[key]; ok {
+				return config, fmt.Errorf("%s: config key %q is also set by platform %q", file, key, p.Name)
+			}
+			adapter.Config[key] = value
+		}
+		config.Adapters = append(config.Adapters, admin.AdapterSettings{Name: adapter.Name, Type: p.Type, Agent: adapter.Agent, Credential: adapter.Credential, Labels: adapter.Labels, Config: adapter.Config})
+	}
+	return config, nil
+}
+
+// yamlFiles lists dir's files in lexical order and rejects anything other
+// than a .yaml file, so a misnamed file fails instead of being skipped.
+func yamlFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		file := filepath.Join(dir, entry.Name())
+		if entry.IsDir() || filepath.Ext(file) != ".yaml" {
+			return nil, fmt.Errorf("%s is not a .yaml file", file)
+		}
+		files = append(files, file)
+	}
+	return files, nil
 }
 
 func adminKafka(userEnv, passwordEnv string) (*kgo.Client, error) {
