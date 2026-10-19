@@ -24,7 +24,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|receivers|submit|continue|cancel|await|events|receiver|admin|mcp>")
+		return errors.New("usage: wherry <init|key|receivers|submit|continue|cancel|await|status|events|receiver|admin|mcp>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -67,7 +67,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	command, ok := map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
 		"receivers": runReceivers, "submit": runSubmit, "continue": runContinue, "resume": runContinue,
-		"cancel": runCancel, "await": runAwait, "events": runEvents,
+		"cancel": runCancel, "await": runAwait, "status": runStatus, "events": runEvents,
 	}[args[0]]
 	if !ok {
 		return fmt.Errorf("unknown command %q", args[0])
@@ -267,6 +267,39 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 		return fmt.Errorf("run ended in %s", result.Status.State)
 	}
 	return nil
+}
+
+func runStatus(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
+	switch len(args) {
+	case 0:
+		result, err := client.Runs(ctx)
+		if err != nil {
+			return err
+		}
+		for _, run := range result.Runs {
+			fmt.Fprintf(stdout, "%s pool=%s turn=%d %s\n", run.RunID, run.Pool, run.Turn, run.Status.State)
+		}
+		warnSkipped(stderr, result.Skipped)
+		return nil
+	case 1:
+		result, err := client.Status(ctx, args[0])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, result.Status.State)
+		fmt.Fprintf(stdout, "turn=%d\n", result.Turn)
+		if result.Status.Message != nil {
+			for _, part := range result.Status.Message.Parts {
+				fmt.Fprintln(stdout, partText(part))
+			}
+		}
+		if result.Status.State == wire.TaskStateAuthRequired {
+			fmt.Fprintf(stderr, "continue with: wherry continue %s\n", args[0])
+		}
+		warnSkipped(stderr, result.Skipped)
+		return nil
+	}
+	return errors.New("usage: wherry status [RUN_ID]")
 }
 
 func partText(part wire.Part) string {

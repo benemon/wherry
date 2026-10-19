@@ -116,7 +116,7 @@ func TestMCPToolsList(t *testing.T) {
 		t.Fatalf("tools %v, want %v", names, want)
 	}
 	required := map[string][]string{
-		"await": {"id"}, "cancel": {"id"}, "continue": {"id"}, "events": {"id"}, "receivers": nil, "status": {"id"},
+		"await": {"id"}, "cancel": {"id"}, "continue": {"id"}, "events": {"id"}, "receivers": nil, "status": nil,
 		"submit": {"prompt"},
 	}
 	for name, tool := range schemas {
@@ -189,8 +189,11 @@ func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 	}
 	var status statusOutput
 	callTool(t, ctx, session, "status", map[string]any{"id": submitted.ID}, &status)
-	if status.State != string(wire.TaskStateSubmitted) || status.Turn != 1 {
+	if len(status.Runs) != 1 || status.Runs[0].ID != submitted.ID || status.Runs[0].Pool != "pool-a" || status.Runs[0].State != string(wire.TaskStateSubmitted) || status.Runs[0].Turn != 1 {
 		t.Fatalf("status before a receiver reports %#v", status)
+	}
+	if _, err := time.Parse(time.RFC3339, status.Runs[0].Updated); err != nil {
+		t.Fatalf("updated %q: %v", status.Runs[0].Updated, err)
 	}
 
 	awaited := make(chan awaitReply, 1)
@@ -213,7 +216,7 @@ func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 	}
 	b.feed(t, submitted.ID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
 	callTool(t, ctx, session, "status", map[string]any{"id": submitted.ID}, &status)
-	if status.State != string(wire.TaskStateWorking) {
+	if len(status.Runs) != 1 || status.Runs[0].State != string(wire.TaskStateWorking) {
 		t.Fatalf("status after claim %#v", status)
 	}
 	b.feed(t, submitted.ID, b.result(t, admitted, []wire.Part{{Data: jsontext.Value(`{"answer":42}`), MediaType: "application/json"}}),
@@ -228,8 +231,32 @@ func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 	var events eventsOutput
 	callTool(t, ctx, session, "events", map[string]any{"id": submitted.ID}, &events)
 	if len(events.Events) != 2 || events.Events[0].Kind != "claimed" || events.Events[1].State != string(wire.TaskStateCompleted) ||
-		events.Events[1].Receiver != "receiver-a" || events.Cancelled {
+		events.Events[1].Receiver != "receiver-a" {
 		t.Fatalf("events %#v", events)
+	}
+}
+
+func TestMCPStatusWithoutIDListsRuns(t *testing.T) {
+	b := newBus(t)
+	ctx := b.ctx
+	session := mcpSession(t, b.connect(t), nil)
+	var status statusOutput
+	callTool(t, ctx, session, "status", map[string]any{}, &status)
+	if status.Runs == nil || len(status.Runs) != 0 {
+		t.Fatalf("status of no runs %#v, want an empty list", status)
+	}
+	working := b.admitted(t).submission.Wherry.Run
+	var submitted submitOutput
+	callTool(t, ctx, session, "submit", submitArguments, &submitted)
+	callTool(t, ctx, session, "status", map[string]any{}, &status)
+	if len(status.Runs) != 2 || status.Runs[0].ID != submitted.ID || status.Runs[0].State != string(wire.TaskStateSubmitted) ||
+		status.Runs[1].ID != working || status.Runs[1].State != string(wire.TaskStateWorking) || status.Runs[1].Pool != "pool-a" {
+		t.Fatalf("status %#v, want the submitted run then the working one", status)
+	}
+	for _, run := range status.Runs {
+		if _, err := time.Parse(time.RFC3339, run.Updated); err != nil {
+			t.Fatalf("run %s updated %q: %v", run.ID, run.Updated, err)
+		}
 	}
 }
 
@@ -283,7 +310,7 @@ func TestMCPContinueAndCancel(t *testing.T) {
 		}
 		var status statusOutput
 		callTool(t, ctx, session, "status", map[string]any{"id": runID}, &status)
-		if status.State != string(wire.TaskStateAuthRequired) || status.Turn != 1 || status.Message != "credential token required" {
+		if len(status.Runs) != 1 || status.Runs[0].State != string(wire.TaskStateAuthRequired) || status.Runs[0].Turn != 1 || status.Runs[0].Message != "credential token required" {
 			t.Fatalf("status %#v", status)
 		}
 		var continued continueOutput
@@ -312,12 +339,12 @@ func TestMCPContinueAndCancel(t *testing.T) {
 		}
 		var status statusOutput
 		callTool(t, ctx, session, "status", map[string]any{"id": runID}, &status)
-		if status.State != string(wire.TaskStateCanceled) {
+		if len(status.Runs) != 1 || status.Runs[0].State != string(wire.TaskStateCanceled) {
 			t.Fatalf("status after cancel %#v", status)
 		}
 		var events eventsOutput
 		callTool(t, ctx, session, "events", map[string]any{"id": runID}, &events)
-		if !events.Cancelled || len(events.Events) != 3 || events.Events[1].Kind != "interrupted" || events.Events[2].State != string(wire.TaskStateCanceled) {
+		if len(events.Events) != 3 || events.Events[1].Kind != "interrupted" || events.Events[2].State != string(wire.TaskStateCanceled) {
 			t.Fatalf("events %#v", events)
 		}
 		if failure := callToolError(t, ctx, session, "continue", map[string]any{"id": runID}); failure.Code != "RUN_CANCELED" {

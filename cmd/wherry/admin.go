@@ -124,7 +124,11 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			return errors.New("invalid revoke command")
 		}
 		for _, step := range result.Steps {
-			fmt.Fprintf(stdout, "step=%d complete=%t name=%s\n", step.Number, step.Complete, step.Name)
+			fmt.Fprintf(stdout, "step=%d complete=%t name=%s", step.Number, step.Complete, step.Name)
+			if step.Err != nil {
+				fmt.Fprintf(stdout, " error=%v", step.Err)
+			}
+			fmt.Fprintln(stdout)
 		}
 		if !result.Complete {
 			return errors.New("revocation incomplete")

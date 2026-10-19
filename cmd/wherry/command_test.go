@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -146,7 +147,7 @@ func newBus(t *testing.T) *bus {
 	}
 	b.produce(t, admin.ReceiverTopic("receiver-a"), "receiver-a", registration)
 	b.produce(t, admin.ReceiversTopic, "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
-		Offers: []wire.Offer{{Adapter: "lab", Agent: "claude", Labels: map[string]string{"runtime": "advertised"}}}, Capacity: 1,
+		Offers: []wire.Offer{{Adapter: "lab", Agent: "claude"}}, Capacity: 1,
 		SealingKey: signed.SealingKeyID(b.sealing.PublicKey()), AtMS: time.Now().UnixMilli()}))
 	return b
 }
@@ -546,6 +547,59 @@ func TestCancelCLI(t *testing.T) {
 	}
 }
 
+func TestStatusOfAWorkingRunExitsZero(t *testing.T) {
+	b := newBus(t)
+	runID := b.admitted(t).submission.Wherry.Run
+	var stdout, stderr bytes.Buffer
+	if err := runStatus(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatalf("status of a WORKING run: %v", err)
+	}
+	if want := "TASK_STATE_WORKING\nturn=1\n"; stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+	}
+}
+
+func TestStatusPrintsAuthRequiredAndContinuation(t *testing.T) {
+	b, admitted := publishInterruptedRun(t)
+	runID := admitted.submission.Wherry.Run
+	var stdout, stderr bytes.Buffer
+	if err := runStatus(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	want := "TASK_STATE_AUTH_REQUIRED\nturn=1\ncredential token required\n"
+	if stdout.String() != want || stderr.String() != "continue with: wherry continue "+runID+"\n" {
+		t.Fatalf("stdout %q stderr %q, want %q and the continue hint", stdout.String(), stderr.String(), want)
+	}
+}
+
+func TestStatusOfAnUnknownRunFails(t *testing.T) {
+	b := newBus(t)
+	var stdout, stderr bytes.Buffer
+	if err := runStatus(b.ctx, b.client, []string{"run-missing"}, &stdout, &stderr); !errors.Is(err, busclient.ErrRunNotFound) || stdout.Len() != 0 {
+		t.Fatalf("status of an unknown run: %v, stdout %q", err, stdout.String())
+	}
+}
+
+func TestStatusListsRuns(t *testing.T) {
+	b := newBus(t)
+	var stdout, stderr bytes.Buffer
+	if err := runStatus(b.ctx, b.client, nil, &stdout, &stderr); err != nil || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("empty list: %v, stdout %q stderr %q", err, stdout.String(), stderr.String())
+	}
+	working := b.admitted(t).submission.Wherry.Run
+	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runStatus(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	want := submitted.RunID + " pool=pool-a turn=1 TASK_STATE_SUBMITTED\n" + working + " pool=pool-a turn=1 TASK_STATE_WORKING\n"
+	if stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+	}
+}
+
 func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 	b := newBus(t)
 	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
@@ -598,6 +652,9 @@ func TestUsageErrors(t *testing.T) {
 		{"await argument", func(stderr *bytes.Buffer) error {
 			return runAwait(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
 		}, "usage: wherry await"},
+		{"status argument", func(stderr *bytes.Buffer) error {
+			return runStatus(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
+		}, "usage: wherry status"},
 		{"submit selector", func(stderr *bytes.Buffer) error {
 			return runSubmit(context.Background(), nil, []string{"--selector", "runtime==exec", "--prompt", "p"}, stderr, stderr)
 		}, "selector: requirement values must be valid and unique"},

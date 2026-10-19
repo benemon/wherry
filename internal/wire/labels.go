@@ -24,12 +24,11 @@ const (
 	OpDoesNotExist = "DoesNotExist"
 )
 
-// Offer is an adapter a receiver can currently dispatch to, the agent it
-// launches and the labels its operator declared for it.
+// Offer is an adapter a receiver can currently dispatch to and the agent it
+// launches. Its labels live in the receiver's configuration record.
 type Offer struct {
-	Adapter string            `json:"adapter"`
-	Agent   string            `json:"agent"`
-	Labels  map[string]string `json:"labels"`
+	Adapter string `json:"adapter"`
+	Agent   string `json:"agent"`
 }
 
 // reservedPrefix is held back for labels wherry itself may define.
@@ -121,18 +120,12 @@ func Satisfies(selector []Requirement, labels map[string]string) bool {
 }
 
 func validateOffers(offers []Offer) error {
-	if len(offers) == 0 {
-		return errors.New("offers are required")
-	}
 	for i, offer := range offers {
 		if err := validateIDs(map[string]string{"offer adapter": offer.Adapter, "offer agent": offer.Agent}); err != nil {
 			return err
 		}
 		if slices.ContainsFunc(offers[:i], func(other Offer) bool { return other.Adapter == offer.Adapter }) {
 			return errors.New("duplicate offer adapter")
-		}
-		if err := ValidateLabels(offer.Labels); err != nil {
-			return err
 		}
 	}
 	return nil

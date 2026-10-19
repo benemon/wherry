@@ -17,8 +17,9 @@ One `wherry` binary with three sides:
   signing key. `receivers` lists the receivers the tenant may use with their
   adapters and labels. `submit` places a task by agent and label selector,
   seals the agent's credentials to the chosen pool, and publishes it.
-  `await`, `events`, `continue` (alias `resume`) and `cancel` follow, extend
-  and stop a run. `mcp` serves `receivers`, `submit`, `status`, `await`,
+  `await`, `status`, `events`, `continue` (alias `resume`) and `cancel`
+  follow, extend and stop a run; `status` without a run ID lists every run
+  the host can see. `mcp` serves `receivers`, `submit`, `status`, `await`,
   `continue`, `cancel` and `events` as MCP tools; see
   [Harness integration](#harness-integration).
 - **Receiver:** `wherry receiver` claims its pool's tasks and runs each one

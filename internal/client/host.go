@@ -38,6 +38,9 @@ var (
 	ErrInvalidInput = errors.New("invalid input")
 )
 
+// errUndecodable wraps a local state file that does not decode.
+var errUndecodable = errors.New("decode")
+
 // liveness is how old an advertisement may be for its receiver to count as live.
 const liveness = 120 * time.Second
 
@@ -324,7 +327,7 @@ func (h *Host) publish(ctx context.Context, v view, ads map[string]wire.Advertis
 		return err
 	}
 	sum := sha256.Sum256(encoded)
-	return h.writeRun(runRecord{Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: hex.EncodeToString(sum[:])})
+	return h.writeRun(runRecord{Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: hex.EncodeToString(sum[:]), SubmittedMS: now.UnixMilli()})
 }
 
 type sealKey struct{ receiver, pool, credential string }
@@ -489,6 +492,8 @@ type runRecord struct {
 	Turn      int64          `json:"turn"`
 	Placement wire.Placement `json:"placement"`
 	TaskHash  string         `json:"task_hash"`
+	// SubmittedMS is when this host published the turn; records written before it existed hold zero.
+	SubmittedMS int64 `json:"submitted_ms,omitzero"`
 }
 
 func (h *Host) runPath(runID string) (string, bool) {
@@ -509,6 +514,12 @@ func (h *Host) localRun(runID string) (*runRecord, error) {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
+	}
+	// A record written before submitted_ms existed takes its file's modification time.
+	if record.SubmittedMS == 0 {
+		if info, err := os.Stat(path); err == nil {
+			record.SubmittedMS = info.ModTime().UnixMilli()
+		}
 	}
 	return &record, nil
 }
@@ -565,7 +576,7 @@ func readState(path string, value any) error {
 		return err
 	}
 	if err := json.Unmarshal(encoded, value, json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)); err != nil {
-		return fmt.Errorf("decode %s: %w", path, err)
+		return fmt.Errorf("%w %s: %w", errUndecodable, path, err)
 	}
 	return nil
 }

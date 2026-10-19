@@ -17,6 +17,10 @@ import (
 
 var ErrAuthenticationFailure = errors.New("authentication failure")
 var ErrAuthorizationDenied = errors.New("authorisation denied")
+var ErrStillAuthorised = errors.New("broker still authorises the principal")
+
+// ACL deletion reaches each broker on its own schedule, so step 3 retries a broker that still authorises.
+var probeWindow, probeInterval = 2 * time.Minute, time.Second
 
 type RevocationStep struct {
 	Number   int
@@ -55,18 +59,19 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 		if probe == nil {
 			return errors.New("probe is not configured")
 		}
+		deadline := time.Now().Add(probeWindow)
 		for {
 			err := probe(ctx, principal, password)
 			if errors.Is(err, ErrAuthorizationDenied) {
 				return nil
 			}
-			if err != nil {
+			if !errors.Is(err, ErrStillAuthorised) || time.Now().After(deadline) {
 				return fmt.Errorf("probe incomplete: %w", err)
 			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(probeInterval):
 			}
 		}
 	}) {
@@ -145,7 +150,7 @@ func (service *Service) Probe(topic string) func(context.Context, string, string
 			}
 			topics := response.(*kmsg.MetadataResponse).Topics
 			if len(topics) != 1 || topics[0].ErrorCode != kerr.TopicAuthorizationFailed.Code {
-				return fmt.Errorf("broker %d still authorises the principal", id)
+				return fmt.Errorf("broker %d: %w", id, ErrStillAuthorised)
 			}
 		}
 		return ErrAuthorizationDenied

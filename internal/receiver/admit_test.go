@@ -44,7 +44,7 @@ func TestFirstTurnPromptUnchanged(t *testing.T) {
 func TestAdmitAcceptsValidTask(t *testing.T) {
 	f := newFixture(t, resultStream)
 	admitted := f.admitted(t, f.submit(t, f.host, nil))
-	if admitted.offer.Adapter != "nomad" || admitted.offer.Agent != "claude" || admitted.offer.Labels["zone"] != "dc1" || prompt(admitted.history) != "hi" {
+	if admitted.adapter.Name != "nomad" || admitted.adapter.Agent != "claude" || admitted.adapter.Labels["zone"] != "dc1" || prompt(admitted.history) != "hi" {
 		t.Fatalf("got %#v", admitted)
 	}
 }
@@ -151,7 +151,7 @@ func TestPlacementOutsideOffersIsStartFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			placement := f.parse(t, record).Wherry.Placement
-			if failure.Class != "offer-unavailable" || failure.Agent != placement.Agent || failure.Wherry.Run != "run-a" {
+			if failure.Class != "offer-unavailable" || failure.Adapter != "none" || failure.Agent != placement.Agent || failure.Wherry.Run != "run-a" {
 				t.Fatalf("start failure %#v", failure)
 			}
 		})
@@ -166,8 +166,8 @@ func TestPlacementSelectorSelectsAnOffer(t *testing.T) {
 	admitted := f.admitted(t, f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Placement.Selector = []wire.Requirement{in("zone", "dc1"), exists("example.com/gpu")}
 	}))
-	if admitted.offer.Adapter != "nomad" || admitted.offer.Labels["example.com/gpu"] != "none" {
-		t.Fatalf("offer %#v", admitted.offer)
+	if admitted.adapter.Name != "nomad" || admitted.adapter.Labels["example.com/gpu"] != "none" {
+		t.Fatalf("adapter %#v", admitted.adapter)
 	}
 }
 

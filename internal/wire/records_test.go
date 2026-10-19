@@ -33,9 +33,10 @@ func testRecords() map[string]Record {
 			Wherry: ChunkBinding{ReceiverBinding: testBinding(), TaskHash: testHash, Seq: 0}},
 		"result": &Result{Task: Task{ID: "run-a", ContextID: "run-a", Status: TaskStatus{State: "TASK_STATE_COMPLETED", Timestamp: testTime}, Artifacts: []Artifact{}, History: []Message{testMessage("run-a")}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
-		"echo":          &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Turn: 1, Placement: placement, TaskHash: testHash, MessageID: "message-a"},
-		"advertisement": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Adapter: "nomad", Agent: "claude"}}, Capacity: 2, SealingKey: "sha256:x", AtMS: 1},
-		"start failure": &StartFailure{Wherry: testBinding(), Adapter: "nomad", Agent: "claude", Class: "launch"},
+		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Turn: 1, Placement: placement, TaskHash: testHash, MessageID: "message-a"},
+		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Adapter: "nomad", Agent: "claude"}}, Capacity: 2, SealingKey: "sha256:x", AtMS: 1},
+		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, SealingKey: "sha256:x", AtMS: 1},
+		"start failure":                &StartFailure{Wherry: testBinding(), Adapter: "nomad", Agent: "claude", Class: "launch"},
 	}
 }
 
@@ -157,9 +158,9 @@ func TestRecordValidation(t *testing.T) {
 			value.TaskHash = ""
 			return value
 		},
-		"advertisement without offers": func(r map[string]Record) Record {
+		"advertisement with a duplicate offer adapter": func(r map[string]Record) Record {
 			value := r["advertisement"].(*Advertisement)
-			value.Offers = nil
+			value.Offers = append(value.Offers, value.Offers[0])
 			return value
 		},
 		"advertisement without sealing key": func(r map[string]Record) Record {

@@ -306,23 +306,25 @@ An advertisement reports a receiver's liveness and capacity.
 {
   "v": 1,
   "receiver": "nomad-1", "pool": "build",
-  "offers": [{"adapter": "container", "agent": "coder", "labels": {"isolation": "container"}}],
+  "offers": [{"adapter": "container", "agent": "coder"}],
   "capacity": 2, "in_flight": 0,
   "sealing_key": "sha256:...",
   "at_ms": 1789998000000
 }
 ```
 
-- `offers` lists the receiver's ready adapters in declared order and is
-  never empty. Readers take an adapter's agent and labels from the
+- `offers` lists the receiver's ready adapters in declared order, each as
+  `adapter` and `agent`. An offer carries no other member. It is empty when
+  no adapter is ready. Readers take an adapter's agent and labels from the
   receiver's configuration record on `wherry.admin`, and use `offers` only
-  to learn which adapters are ready.
+  to learn which adapters are ready. Each `adapter` appears at most once.
 - `sealing_key` is the fingerprint of the receiver's sealing key: `sha256:`
   and the unpadded base64url SHA-256 of the raw X25519 public key. Readers
   reject an advertisement whose `sealing_key` is not the key registered on
   the receiver's key topic.
-- A receiver advertises every 30 seconds. A receiver with no ready adapter
-  writes no advertisement. Readers take each receiver's
+- A receiver advertises every 30 seconds, with or without a ready adapter.
+  Placement passes over a receiver whose `offers` is empty. Readers take
+  each receiver's
   latest valid advertisement, and treat it as live when `at_ms` is within
   120 seconds of their own clock.
 
@@ -347,7 +349,8 @@ pool.
 | `offer-unavailable` | no ready adapter satisfies the task's agent and selector |
 | `seal-unavailable` | this receiver opens no seal for the credential, and another live member holds an unexpired one |
 
-`adapter` is the receiver's first adapter for the agent, or `none`.
+`adapter` is the adapter the receiver routed the task to. For
+`offer-unavailable` it is `none`, since no adapter was chosen.
 
 ## Key records
 

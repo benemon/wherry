@@ -125,7 +125,7 @@ func (r *Receiver) claimOne(ctx context.Context) error {
 type admission struct {
 	task     *wire.Submission
 	taskHash string
-	offer    wire.Offer
+	adapter  Named
 	history  []wire.Message
 	git      *wire.GitContext
 	// cancelled is set when a host of the run's tenant cancelled the run; it ends CANCELED without a dispatch.
@@ -172,10 +172,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if !slices.ContainsFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == placement.Agent }) {
 		return reject("agent is outside the pool terms")
 	}
-	offer, offered := r.offer(placement)
+	adapter, offered := r.offer(placement)
 	if !offered {
 		r.logger.Printf("run %s: no current offer for agent %s satisfying its selector", run, placement.Agent)
-		if err := r.admissionCommit(ctx, r.startFailure(&task, attempt, "offer-unavailable")); err != nil {
+		if err := r.admissionCommit(ctx, r.startFailure(&task, attempt, "none", "offer-unavailable")); err != nil {
 			r.logger.Printf("publish start failure for %s: %v", run, err)
 		}
 		return nil, kgo.AckRelease
@@ -200,7 +200,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 			return reject("continuation history unavailable")
 		}
 	}
-	admitted := &admission{task: &task, taskHash: hash, offer: offer, history: history, cancelled: cancelled}
+	admitted := &admission{task: &task, taskHash: hash, adapter: adapter, history: history, cancelled: cancelled}
 	if cancelled {
 		return admitted, 0
 	}
@@ -211,8 +211,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if now.UnixMilli() > task.Wherry.DeadlineMS {
 		return reject("run deadline passed")
 	}
-	named, _ := r.named(offer.Adapter)
-	git, supported := gitContext(history, named.Git)
+	git, supported := gitContext(history, adapter.Git)
 	if !supported {
 		return reject("unsupported message part")
 	}
@@ -340,12 +339,8 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 	return err
 }
 
-// startFailure names the adapter configured for the task's agent, or "none" when this receiver has no such adapter.
-func (r *Receiver) startFailure(task *wire.Submission, attempt int64, class string) *kgo.Record {
-	adapter := "none"
-	if index := slices.IndexFunc(r.adapters, func(named Named) bool { return named.Agent == task.Wherry.Placement.Agent }); index >= 0 {
-		adapter = r.adapters[index].Name
-	}
+// startFailure names the adapter the task was routed to, "none" when it was routed to none.
+func (r *Receiver) startFailure(task *wire.Submission, attempt int64, adapter, class string) *kgo.Record {
 	failure := &wire.StartFailure{Wherry: r.binding(task, attempt), Adapter: adapter, Agent: task.Wherry.Placement.Agent, Class: class}
 	return &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: r.sign(failure)}
 }
@@ -491,12 +486,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		return kgo.AckRelease
 	}
 	defer producer.Close()
-	matched, ok := r.named(admitted.offer.Adapter)
-	if !ok {
-		r.logger.Printf("run %s: matched adapter %s is not configured", runID, admitted.offer.Adapter)
-		return kgo.AckRelease
-	}
-	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, adapter: matched}
+	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, adapter: admitted.adapter}
 
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
 		return run.abandon(err)
@@ -568,10 +558,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.logger.Printf("run %s: dispatch failed: %T", runID, err)
 			return run.fail(ctx, "dispatch failed", nil)
 		}
-		run.offer = admitted.offer.Labels
+		run.labels = admitted.adapter.Labels
 	}
 	run.job = handle.Job
-	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.offer.Labels), handle.Job)
+	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.adapter.Labels), handle.Job)
 	var startedMetadata jsontext.Value
 	if handle.Commit != "" {
 		startedMetadata, _ = json.Marshal(wire.CommitMetadata{GitCommit: handle.Commit}) // a string always encodes
@@ -692,9 +682,9 @@ type activeRun struct {
 	attempt  int64
 	// adapter holds the run's platform material, released at the end.
 	adapter Named
-	// offer is set when this attempt dispatched the job; an adopted job's offer is unknown.
-	offer map[string]string
-	job   string
+	// labels is set when this attempt dispatched the job; an adopted job's adapter labels are unknown.
+	labels map[string]string
+	job    string
 }
 
 func (run *activeRun) commit(ctx context.Context, records ...*kgo.Record) error {
@@ -767,7 +757,7 @@ func (run *activeRun) interrupt(ctx context.Context, credential string) kgo.AckS
 
 // startFailure returns the task to the pool for a member that can start it.
 func (run *activeRun) startFailure(ctx context.Context, class string) kgo.AckStatus {
-	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.attempt, class)); err != nil {
+	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.attempt, run.adapter.Name, class)); err != nil {
 		return run.abandon(err)
 	}
 	run.release(ctx)
@@ -923,7 +913,7 @@ func (run *activeRun) result(status wire.TaskStatus, result string, resultMetada
 		part = wire.Part{Data: jsontext.Value(result), MediaType: "application/json"}
 	}
 	metadata, _ := json.Marshal(placement{ // strings and a string map always encode
-		ReceiverID: run.receiver.id, Pool: run.receiver.config.Pool, Adapter: run.adapter.Name, Labels: run.offer, Job: run.job,
+		ReceiverID: run.receiver.id, Pool: run.receiver.config.Pool, Adapter: run.adapter.Name, Labels: run.labels, Job: run.job,
 	})
 	return run.feed(&wire.Result{
 		Task: wire.Task{

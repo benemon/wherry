@@ -831,29 +831,41 @@ func (f fixture) advertisedOffers(t *testing.T) wire.Advertisement {
 func TestAdvertisement(t *testing.T) {
 	f := newFixture(t, resultStream)
 	advertisement := f.advertisedOffers(t)
-	settings := testConfig(testReceiver).Adapters[0]
-	want := []wire.Offer{{Adapter: "nomad", Agent: "claude", Labels: settings.Labels}}
+	want := []wire.Offer{{Adapter: "nomad", Agent: "claude"}}
 	if !reflect.DeepEqual(advertisement.Offers, want) || advertisement.Pool != testPool || advertisement.Capacity != 1 ||
 		advertisement.SealingKey != signed.SealingKeyID(f.receiver.sealing.PublicKey()) {
 		t.Fatalf("advertisement %#v, want offers %#v", advertisement, want)
 	}
 }
 
-func TestAdvertisedLabelsAreTheConfigRecords(t *testing.T) {
+func TestAdvertisedOffersAreTheConfiguredAdapters(t *testing.T) {
 	m := newMultiFixture(t)
 	state, err := m.service.LoadState(m.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	offers := m.advertisedOffers(t).Offers
-	settings := state.Receivers[testReceiver].Adapters
-	if len(offers) != len(settings) {
-		t.Fatalf("offers %#v, want one per configured adapter", offers)
+	var want []wire.Offer
+	for _, settings := range state.Receivers[testReceiver].Adapters {
+		want = append(want, wire.Offer{Adapter: settings.Name, Agent: settings.Agent})
 	}
-	for i, offer := range offers {
-		if offer.Adapter != settings[i].Name || offer.Agent != settings[i].Agent || !reflect.DeepEqual(offer.Labels, settings[i].Labels) {
-			t.Fatalf("offer %#v, want the labels adapter %s declares in wherry.admin: %v", offer, settings[i].Name, settings[i].Labels)
-		}
+	if offers := m.advertisedOffers(t).Offers; !reflect.DeepEqual(offers, want) {
+		t.Fatalf("offers %#v, want each adapter wherry.admin configures, in order: %#v", offers, want)
+	}
+}
+
+func TestReceiverWithNoReadyAdapterAdvertisesNoOffers(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.adapter.mu.Lock()
+	f.adapter.unready = true
+	f.adapter.mu.Unlock()
+	if err := f.receiver.advertise(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if advertisement := f.advertisedOffers(t); len(advertisement.Offers) != 0 || advertisement.Capacity != 1 {
+		t.Fatalf("advertisement %#v, want a live advertisement with no offers", advertisement)
+	}
+	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, nil)); admitted != nil || ack != kgo.AckRelease {
+		t.Fatalf("admitted=%v ack=%v, want a start failure and release", admitted != nil, ack)
 	}
 }
 
@@ -978,7 +990,7 @@ func (m multiFixture) routed(t *testing.T, selector ...wire.Requirement) string 
 	record := m.submit(t, m.host, func(task *wire.Submission) {
 		task.Wherry.Placement.Selector = append([]wire.Requirement{}, selector...)
 	})
-	return m.admitted(t, record).offer.Adapter
+	return m.admitted(t, record).adapter.Name
 }
 
 func TestEachSelectorOperatorRoutes(t *testing.T) {

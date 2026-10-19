@@ -622,27 +622,49 @@ func TestSatisfies(t *testing.T) {
 }
 
 func TestValidateOffers(t *testing.T) {
-	offer := Offer{Adapter: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}}
+	offer := Offer{Adapter: "nomad", Agent: "claude"}
 	for name, test := range map[string]struct {
 		offers []Offer
 		ok     bool
 	}{
 		"one":               {[]Offer{offer}, true},
-		"no labels":         {[]Offer{{Adapter: "nomad", Agent: "claude"}}, true},
 		"distinct adapters": {[]Offer{offer, {Adapter: "kubernetes", Agent: "claude"}}, true},
-		"same agent twice":  {[]Offer{offer, {Adapter: "kubernetes", Agent: offer.Agent, Labels: offer.Labels}}, true},
-		"none":              {nil, false},
+		"none":              {nil, true},
+		"empty":             {[]Offer{}, true},
 		"duplicate adapter": {[]Offer{offer, {Adapter: "nomad", Agent: "codex"}}, false},
-		"missing agent":     {[]Offer{{Adapter: "nomad", Labels: offer.Labels}}, false},
+		"missing agent":     {[]Offer{{Adapter: "nomad"}}, false},
 		"uppercase agent":   {[]Offer{{Adapter: "nomad", Agent: "Claude"}}, false},
 		"missing adapter":   {[]Offer{{Agent: "claude"}}, false},
-		"invalid label":     {[]Offer{{Adapter: "nomad", Agent: "claude", Labels: map[string]string{"runtime": ""}}}, false},
-		"reserved label":    {[]Offer{{Adapter: "nomad", Agent: "claude", Labels: map[string]string{"wherry.io/runtime": "podman"}}}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateOffers(test.offers); (err == nil) != test.ok {
 				t.Fatalf("error %v, want ok=%v", err, test.ok)
 			}
 		})
+	}
+}
+
+// An offer is an adapter and its agent; labels belong to the configuration record, so a signed offer carrying them
+// does not decode. The payload is the producer's advertisement with labels added to its offer.
+func TestAdvertisementOfferWithLabelsDoesNotDecode(t *testing.T) {
+	keys, _, receiver := testKeys(t)
+	produced := testRecords()["advertisement"].(*Advertisement)
+	produced.V = 1
+	encoded, err := json.Marshal(produced)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["offers"].([]any)[0].(map[string]any)["labels"] = map[string]any{"runtime": "podman"}
+	signedPayload, err := signed.Sign(produced.jwsType(), produced.owner(), payload, receiver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Advertisement
+	if err := ParseRecord(signedPayload, keys, &decoded); err == nil {
+		t.Fatalf("decoded an offer with labels: %#v", decoded.Offers)
 	}
 }

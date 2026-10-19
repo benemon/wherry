@@ -193,6 +193,26 @@ func TestPeerSealIsStartFailure(t *testing.T) {
 	}
 }
 
+// lab and cloud both launch claude; a task routed to cloud names cloud in its start failure.
+func TestStartFailureNamesTheRoutedAdapter(t *testing.T) {
+	m := newMultiFixture(t)
+	_, peerSealing := m.addPeer(t, "receiver-b", testPool)
+	m.seal(t, "receiver-b", peerSealing.PublicKey(), "cred-cloud", testToken, time.Now(), time.Hour)
+	if status := m.execute(t, "run-a", accelerated, 1); status != kgo.AckRelease {
+		t.Fatalf("status %v, want release", status)
+	}
+	var failures []wire.StartFailure
+	for _, record := range m.records(t, admin.PoolEventsTopic(testPool)) {
+		var failure wire.StartFailure
+		if wire.ParseRecord(record.Value, m.keys(), &failure) == nil {
+			failures = append(failures, failure)
+		}
+	}
+	if len(failures) != 1 || failures[0].Class != "seal-unavailable" || failures[0].Adapter != "cloud" {
+		t.Fatalf("start failures %#v, want one seal-unavailable naming cloud", failures)
+	}
+}
+
 func TestLatestSealByIssuedTimeIsUsed(t *testing.T) {
 	f := newFixture(t, resultStream)
 	public := f.receiver.sealing.PublicKey()

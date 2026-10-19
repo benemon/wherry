@@ -13,7 +13,7 @@
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
   positive; a `revoke --wait` of zero or less takes the broker-derived
   wait.
-- `continue`, `cancel`, `await` and `events` print
+- `continue`, `cancel`, `await`, `status` and `events` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
 
@@ -96,7 +96,8 @@ receiver=<id> pool=<pool> capacity=<n> in_flight=<n> heartbeat_age=<age> status=
 old, `stale` when it is older, `silent` when there is none, and `ended`
 after the receiver's membership end. Adapters and their labels come from the
 receiver's configuration record. `ready` is true when the receiver is live
-and its advertisement offers the adapter. `seal` lines list this host's
+and its advertisement offers the adapter. A live receiver with no ready
+adapter lists each adapter with `ready=false`. `seal` lines list this host's
 latest seal of each credential to the receiver. The command warns on
 standard error about each seal that has expired or expires within 7 days.
 
@@ -178,6 +179,33 @@ prints as its text, its JSON data, `[url <url>]`, or
 `await` exits with status 1, `run ended in <state>`, for any state other
 than `TASK_STATE_COMPLETED`, and with status 1 when the timeout passes.
 
+### `wherry status [RUN_ID]`
+
+Reads the latest verified state of a run's latest turn without waiting.
+With `RUN_ID` it prints the state on the first line, `turn=<n>` on the
+second, then one line per part of the status message. The state is
+`TASK_STATE_SUBMITTED` until a receiver reports one. For
+`TASK_STATE_AUTH_REQUIRED` it prints `continue with: wherry continue <id>`
+on standard error.
+
+Without `RUN_ID` it prints one line per run, latest update first:
+
+```
+<run> pool=<pool> turn=<n> <state>
+```
+
+The list holds the runs in this host's records in `state_dir` and the runs
+a receiver echoed on the tenant feed, which include runs from the tenant's
+other hosts. A run's update time is that of its latest status. While it has
+none, the time is this host's submission of the turn, else the modification
+time of this host's record of the run when the record predates submission
+times, else the Kafka timestamp of the turn's echo. A record in `state_dir`
+that does not decode counts as skipped, and its run is listed only through
+its echo. With no runs it prints nothing.
+
+`status` exits with status 0 whenever it reads a state, whatever the
+state. It fails when the run is not found or the read fails.
+
 ### `wherry events RUN_ID`
 
 Prints a run's verified history: one line per status, one per event ID, in
@@ -192,7 +220,7 @@ turn=<n> attempt=<n> transcript_chunks=<n>
 `message` appears when the status has one. Heartbeats are not on the feed,
 so they do not appear.
 
-`await`, `events`, `continue` and `cancel` find a run from this host's
+`await`, `status`, `events`, `continue` and `cancel` find a run from this host's
 record of it in `state_dir`, or from a receiver's echo on the tenant feed.
 They fail with `run not found` when there is neither.
 
@@ -262,10 +290,13 @@ prints one line per step it ran:
 step=<n> complete=<bool> name=<step name>
 ```
 
-It stops at the first incomplete step and fails with
-`revocation incomplete`. The output does not print the step's cause. The probe asks every broker for the metadata of
-the principal's own key topic, and step 3 completes when every broker
-answers `TOPIC_AUTHORIZATION_FAILED`. Step 5 waits the largest of
+The line of a failed step ends in ` error=<cause>`. It stops at the first
+incomplete step and fails with `revocation incomplete`. The probe asks every
+broker for the metadata of the principal's own key topic, and step 3
+completes when every broker answers `TOPIC_AUTHORIZATION_FAILED`. While a
+broker still authorises the principal, step 3 probes again every second for
+up to 2 minutes. It fails at once when the login fails or the probe returns
+any other error. Step 5 waits the largest of
 `connections.max.reauth.ms`, `group.share.max.record.lock.duration.ms` and
 `transaction.max.timeout.ms` across the brokers, and fails when one of them
 is unbounded. `--wait DURATION` replaces that wait.
@@ -317,18 +348,24 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
 | `submit` | `prompt`, `agent`, `selector`, `git`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool` |
-| `status` | `id` | `id`, `state`, `turn`, `message`, `skipped` |
+| `status` | `id`, optional | `runs`, `skipped` |
 | `await` | `id` | `id`, `state`, `retry_after`, `message`, `artifacts`, `skipped` |
 | `continue` | `id`, `prompt`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `turn`, `skipped` |
 | `cancel` | `id` | `id`, `skipped` |
-| `events` | `id` | `id`, `events`, `cancelled`, `transcripts`, `skipped` |
+| `events` | `id` | `id`, `events`, `transcripts`, `skipped` |
 
 - `submit` requires `prompt`. `selector` is an array of
   `{key, operator, values}`. `git` is `{url, ref, path}`, with `path`
   optional.
-- `status` returns the latest verified state of the run's latest turn
-  without waiting. The state is `TASK_STATE_SUBMITTED` until a receiver
-  reports one.
+- `status` returns the latest verified state of a run's latest turn
+  without waiting. `runs` holds one entry for the run `id` names, or,
+  without `id`, one per run `wherry status` lists, latest update first.
+  Each entry is `{id, pool, turn, state, message, updated}`. The state is
+  `TASK_STATE_SUBMITTED` until a receiver reports one. `updated` is the
+  RFC 3339 time of the latest status. While the run has none, it is this
+  host's submission of the turn, else the modification time of this host's
+  record of the run when the record predates submission times, else the
+  Kafka timestamp of the turn's echo.
 - `await` waits up to 45 seconds. It returns the outcome with `message` and
   `artifacts`, or, while the run is unfinished, its current `state` with
   `retry_after` set to 5. With a progress token it sends a progress
@@ -339,7 +376,8 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 - `events` returns `events`, each
   `{turn, attempt, kind, state, receiver, time, message}`, and
   `transcripts`, each `{turn, attempt, chunks}`.
-- `skipped` counts the run's records that failed verification.
+- `skipped` counts the run's records that failed verification; for a
+  `status` list, the records of every listed run.
 
 A failed call returns `{"code", "message"}`. The message never carries
 error text from the bus, the broker or the host key.
@@ -515,7 +553,8 @@ jobs never registered within 10 minutes.
 
 An adapter is ready when some ready, eligible node in its node pool and
 datacenters has the runtime's driver detected and healthy. A receiver with
-no ready adapter publishes no advertisement, and hosts see it go `stale`.
+no ready adapter advertises with no offers, so it stays `live` with every
+adapter `ready=false`, and placement passes over it.
 
 The receiver stops a job by sending `SIGTERM` to the agent task. If the
 task is still running 15 seconds later, it deregisters the job.

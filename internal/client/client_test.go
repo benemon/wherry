@@ -195,12 +195,12 @@ func (r *testReceiver) sign(t *testing.T, record wire.Record) []byte {
 }
 
 func claudeOffer() wire.Offer {
-	return wire.Offer{Adapter: "lab", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}}
+	return wire.Offer{Adapter: "lab", Agent: "claude"}
 }
 
 // bothOffers makes both of addReceiver's adapters ready.
 func bothOffers() []wire.Offer {
-	return []wire.Offer{claudeOffer(), {Adapter: "cloud", Agent: "codex", Labels: map[string]string{"runtime": "exec"}}}
+	return []wire.Offer{claudeOffer(), {Adapter: "cloud", Agent: "codex"}}
 }
 
 // advertise publishes a live advertisement; mutate may change it before it is signed.
@@ -383,7 +383,7 @@ func TestHostEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events.Statuses) != 2 || events.Statuses[1].Wherry.Kind != "terminal" || events.Cancelled ||
+	if len(events.Statuses) != 2 || events.Statuses[1].Wherry.Kind != "terminal" ||
 		events.Chunks[TurnAttempt{1, 1}] != 2 || events.Chunks[TurnAttempt{1, 2}] != 1 || len(events.Chunks) != 2 {
 		t.Fatalf("events %#v", events)
 	}
@@ -571,9 +571,8 @@ func TestResolvePlacement(t *testing.T) {
 	state.Pools["pool-a"] = terms
 	state.Receivers["receiver-a"] = config
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
-	// Advertised labels deliberately disagree with the config record; only the record counts.
 	offer := func(adapter, agent string) wire.Offer {
-		return wire.Offer{Adapter: adapter, Agent: agent, Labels: map[string]string{"runtime": "wasm", "region": "mars"}}
+		return wire.Offer{Adapter: adapter, Agent: agent}
 	}
 	ready := []wire.Offer{offer("lab", "claude"), offer("batch", "gemini"), offer("cloud", "codex"), offer("rogue", "other")}
 	requirement := func(key, operator string, values ...string) wire.Requirement {
@@ -596,7 +595,6 @@ func TestResolvePlacement(t *testing.T) {
 		"Exists":                              {"", []wire.Requirement{requirement("gpu", wire.OpExists)}, ready, "claude"},
 		"DoesNotExist":                        {"", []wire.Requirement{requirement("region", wire.OpDoesNotExist)}, ready, "codex"},
 		"all requirements on one adapter":     {"", []wire.Requirement{requirement("runtime", wire.OpIn, "exec"), requirement("gpu", wire.OpExists)}, ready, ""},
-		"labels from the record, not the ad":  {"", []wire.Requirement{requirement("region", wire.OpIn, "mars")}, ready, ""},
 		"not-ready adapter never chosen":      {"", []wire.Requirement{requirement("runtime", wire.OpIn, "wasm")}, ready, ""},
 		"not-ready default falls to declared": {"", nil, ready[:2], "claude"},
 		"advertised agent ignored":            {"claude", nil, []wire.Offer{offer("cloud", "claude")}, ""},
@@ -627,7 +625,7 @@ func TestResolvePlacementChoosesMostSpareThenLowestID(t *testing.T) {
 		state.Receivers[id] = admin.ReceiverConfig{Receiver: id, Pool: pool, Adapters: []admin.AdapterSettings{
 			{Name: "lab", Type: "nomad", Agent: "claude"}, {Name: "cloud", Type: "aws", Agent: "codex"},
 		}}
-		ads[id] = wire.Advertisement{Receiver: id, Pool: pool, Capacity: capacity, InFlight: inFlight, Offers: []wire.Offer{{Adapter: adapter, Agent: "x", Labels: map[string]string{}}}}
+		ads[id] = wire.Advertisement{Receiver: id, Pool: pool, Capacity: capacity, InFlight: inFlight, Offers: []wire.Offer{{Adapter: adapter, Agent: "x"}}}
 	}
 	member("receiver-d", "pool-b", 5, 2, "lab")   // spare 3
 	member("receiver-c", "pool-a", 5, 2, "lab")   // spare 3, lower ID
@@ -736,7 +734,7 @@ func TestStatusBeforeAndAfterEcho(t *testing.T) {
 	receiver.advertise(t, f.ctx, nil)
 	submitted := f.submit(t, defaultSelector())
 	status, err := f.host.Status(f.ctx, submitted.RunID)
-	if err != nil || status.Status.State != wire.TaskStateSubmitted || status.Turn != 1 {
+	if err != nil || status.Status.State != wire.TaskStateSubmitted || status.Turn != 1 || status.RunID != submitted.RunID || status.Pool != "pool-a" || status.Updated.IsZero() {
 		t.Fatalf("status before the echo %#v, %v", status, err)
 	}
 	other := f.newHost(t, "host-b", t.TempDir())
@@ -1014,11 +1012,7 @@ func TestCancelWritesToTheEchosPool(t *testing.T) {
 func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	f := newFixture(t)
 	f.pool(t, "pool-b")
-	// The advertisement's labels disagree with the config record; the listing shows the record's.
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.Capacity, ad.InFlight = 3, 1
-		ad.Offers[0].Labels = map[string]string{"runtime": "wasm"}
-	})
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 3, 1 })
 	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Capacity, ad.InFlight, ad.AtMS = 4, 2, time.Now().Add(-121*time.Second).UnixMilli()
 	})
@@ -1404,5 +1398,188 @@ func TestReceiversDoesNotShowAFutureAdvertisementAsLive(t *testing.T) {
 	}
 	if len(receivers) != 1 || receivers[0].Status == "live" || strings.HasPrefix(receivers[0].HeartbeatAge, "-") || receivers[0].Adapters[0].Ready {
 		t.Fatalf("receivers %#v; want a future advertisement neither live, ready nor of negative age", receivers)
+	}
+}
+
+func TestReceiversListsALiveReceiverWithNoOffers(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = []wire.Offer{} })
+	receivers, err := f.host.Receivers(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receivers) != 1 || receivers[0].Status != "live" || !reflect.DeepEqual(receivers[0].Adapters, []Adapter{
+		{Name: "lab", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: false},
+		{Name: "cloud", Agent: "codex", Labels: map[string]string{"runtime": "exec"}, Ready: false},
+	}) {
+		t.Fatalf("receivers %#v; want the live receiver with its configured adapters, none ready", receivers)
+	}
+}
+
+// claimedAt writes task's echo and a claimed status stamped at, as admission does.
+func (r *testReceiver) claimedAt(t *testing.T, ctx context.Context, task claimed, at time.Time) {
+	t.Helper()
+	r.feed(t, ctx, task.submission.Wherry.Run, r.echo(t, task), r.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, func(status *wire.RunStatus) {
+		status.StatusUpdate.Status.Timestamp = at.UTC().Format(time.RFC3339)
+	}))
+}
+
+func runIDs(runs []StatusResult) []string {
+	ids := make([]string, 0, len(runs))
+	for _, run := range runs {
+		ids = append(ids, run.RunID)
+	}
+	return ids
+}
+
+func TestRunsListsLocalAndEchoedRuns(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	before := time.Now()
+	local := f.submit(t, defaultSelector())
+	other := f.newHost(t, "host-b", t.TempDir())
+	elsewhere, err := other.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	receiver.claimedAt(t, f.ctx, receiver.claim(t, f.ctx, elsewhere.RunID)[0], claimedAt)
+	runs, err := f.host.Runs(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := runIDs(runs.Runs), []string{local.RunID, elsewhere.RunID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("runs %v, want this host's unadmitted run then the other host's echoed run: %v", got, want)
+	}
+	if run := runs.Runs[0]; run.Status.State != wire.TaskStateSubmitted || run.Pool != "pool-a" || run.Turn != 1 || run.Updated.Before(before.Truncate(time.Millisecond)) {
+		t.Fatalf("unadmitted run %#v, want SUBMITTED at its local submit time", run)
+	}
+	if run := runs.Runs[1]; run.Status.State != wire.TaskStateWorking || run.Pool != "pool-a" || run.Turn != 1 || !run.Updated.Equal(claimedAt) {
+		t.Fatalf("echoed run %#v, want WORKING at its status time %v", run, claimedAt)
+	}
+}
+
+func TestRunsNewestFirst(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	now := time.Now().Truncate(time.Second)
+	first, second := f.submit(t, defaultSelector()), f.submit(t, defaultSelector())
+	receiver.claimedAt(t, f.ctx, receiver.claim(t, f.ctx, second.RunID)[0], now.Add(-2*time.Hour))
+	receiver.claimedAt(t, f.ctx, receiver.claim(t, f.ctx, first.RunID)[0], now.Add(-time.Hour))
+	unadmitted := f.submit(t, defaultSelector())
+	runs, err := f.host.Runs(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := runIDs(runs.Runs), []string{unadmitted.RunID, first.RunID, second.RunID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("runs %v, want latest update first: %v", got, want)
+	}
+}
+
+func TestRunsEmpty(t *testing.T) {
+	f := newFixture(t)
+	runs, err := f.host.Runs(f.ctx)
+	if err != nil || len(runs.Runs) != 0 || runs.Skipped != 0 {
+		t.Fatalf("runs %#v, %v; want none", runs, err)
+	}
+}
+
+func TestRunsSkipsUndecodableLocalRecords(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	good := f.submit(t, defaultSelector())
+	encoded, err := os.ReadFile(filepath.Join(f.stateDir, "runs", good.RunID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer := strings.Replace(string(encoded), "{", `{"from_a_newer_wherry":true,`, 1)
+	for name, contents := range map[string]string{"run-corrupt": "{", "run-newer": newer} {
+		if err := os.WriteFile(filepath.Join(f.stateDir, "runs", name+".json"), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs, err := f.host.Runs(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runIDs(runs.Runs); !reflect.DeepEqual(got, []string{good.RunID}) || runs.Skipped != 2 {
+		t.Fatalf("runs %v skipped %d, want the good run and both undecodable records skipped", got, runs.Skipped)
+	}
+	if _, err := f.host.Status(f.ctx, "run-corrupt"); err == nil || errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("status of an undecodable local record: %v, want the decode error", err)
+	}
+}
+
+func TestRunsDropsUnauthorisedRuns(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	other := f.newHost(t, "host-b", t.TempDir())
+	submit := func() string {
+		t.Helper()
+		submitted, err := other.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return submitted.RunID
+	}
+	impostor := *receiver
+	_, impostor.key, _ = ed25519.GenerateKey(rand.Reader)
+	forged := submit()
+	task := receiver.claim(t, f.ctx, forged)[0]
+	impostor.feed(t, f.ctx, forged, impostor.echo(t, task), impostor.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+	if runs, err := f.host.Runs(f.ctx); err != nil || len(runs.Runs) != 0 {
+		t.Fatalf("runs %#v, %v; want none from an impostor's echo", runs, err)
+	}
+	ended := submit()
+	receiver.feed(t, f.ctx, ended, receiver.echo(t, receiver.claim(t, f.ctx, ended)[0]))
+	if runs, err := f.host.Runs(f.ctx); err != nil || !reflect.DeepEqual(runIDs(runs.Runs), []string{ended}) {
+		t.Fatalf("runs %#v, %v; want the echoed run while its receiver is a member", runs, err)
+	}
+	f.end(t, "receiver-a")
+	if runs, err := f.host.Runs(f.ctx); err != nil || len(runs.Runs) != 0 {
+		t.Fatalf("runs %#v, %v; want none once the echoing receiver has ended", runs, err)
+	}
+}
+
+func TestRunsUpdatedFallsBackToFileTimeAndEcho(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	local := f.submit(t, defaultSelector())
+	path := filepath.Join(f.stateDir, "runs", local.RunID+".json")
+	var record map[string]any
+	if err := readState(path, &record); err != nil {
+		t.Fatal(err)
+	}
+	delete(record, "submitted_ms")
+	if err := writeState(path, record); err != nil {
+		t.Fatal(err)
+	}
+	modified := time.Now().Add(-3 * time.Hour).Truncate(time.Millisecond)
+	if err := os.Chtimes(path, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	other := f.newHost(t, "host-b", t.TempDir())
+	echoed, err := other.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().Add(-time.Second)
+	receiver.feed(t, f.ctx, echoed.RunID, receiver.echo(t, receiver.claim(t, f.ctx, echoed.RunID)[0]))
+	runs, err := f.host.Runs(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runIDs(runs.Runs); !reflect.DeepEqual(got, []string{echoed.RunID, local.RunID}) {
+		t.Fatalf("runs %v, want the echoed run then the older local one", got)
+	}
+	if run := runs.Runs[0]; run.Updated.IsZero() || run.Updated.Before(before) {
+		t.Fatalf("echo-only run updated %v, want its echo's timestamp", run.Updated)
+	}
+	if run := runs.Runs[1]; !run.Updated.Equal(modified) {
+		t.Fatalf("local run without submitted_ms updated %v, want its file time %v", run.Updated, modified)
 	}
 }

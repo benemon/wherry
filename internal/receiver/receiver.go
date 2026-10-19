@@ -504,16 +504,8 @@ func kid(encoded []byte) (string, string, bool) {
 	return strings.Cut(protected.KID, "/")
 }
 
-func (r *Receiver) named(name string) (Named, bool) {
-	for _, named := range r.adapters {
-		if named.Name == name {
-			return named, true
-		}
-	}
-	return Named{}, false
-}
-
-// advertise sweeps each adapter, then publishes one offer per ready adapter with its agent and declared labels.
+// advertise sweeps each adapter, then publishes one offer per ready adapter with its agent; with none ready it
+// publishes no offers and keeps its liveness and capacity visible.
 func (r *Receiver) advertise(ctx context.Context) error {
 	for _, named := range r.adapters {
 		if err := named.Adapter.Sweep(ctx); err != nil {
@@ -528,7 +520,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 			continue
 		}
 		if ready {
-			offers = append(offers, wire.Offer{Adapter: named.Name, Agent: named.Agent, Labels: named.Labels})
+			offers = append(offers, wire.Offer{Adapter: named.Name, Agent: named.Agent})
 		}
 	}
 	r.mu.Lock()
@@ -549,17 +541,18 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	return nil
 }
 
-// offer returns this receiver's first current offer, in declared adapter order, that launches the placement's
-// agent with labels satisfying its selector.
-func (r *Receiver) offer(placement wire.Placement) (wire.Offer, bool) {
+// offer returns this receiver's first adapter, in declared order, that is in its current offers and launches the
+// placement's agent with configured labels satisfying its selector.
+func (r *Receiver) offer(placement wire.Placement) (Named, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, offer := range r.offers {
-		if offer.Agent == placement.Agent && wire.Satisfies(placement.Selector, offer.Labels) {
-			return offer, true
+	for _, named := range r.adapters {
+		if named.Agent == placement.Agent && wire.Satisfies(placement.Selector, named.Labels) &&
+			slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Adapter == named.Name }) {
+			return named, true
 		}
 	}
-	return wire.Offer{}, false
+	return Named{}, false
 }
 
 // poolEvents is one read of the pool's events topic.
