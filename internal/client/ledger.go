@@ -1,10 +1,10 @@
 package client
 
+// The ledger client below stays only while internal/receiver tests call it; it goes at the cut-over.
+
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -16,18 +16,8 @@ import (
 
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
-)
-
-// Errors the client returns for a run or placement that cannot proceed.
-var (
-	ErrNoMatchingReceiver      = errors.New("no matching live receiver")
-	ErrRunNotFound             = errors.New("verified root submission not found")
-	ErrNotAwaitingContinuation = errors.New("task is not awaiting continuation")
-	ErrRunCanceled             = errors.New("task is canceled")
-	ErrTurnSubmitted           = errors.New("continuation turn already submitted")
-	// ErrInvalidInput wraps a submission the wire format rejects; its message names the rule, never the value.
-	ErrInvalidInput = errors.New("invalid input")
 )
 
 // renewalLifetime is how far a renewal extends an approval from the time it is signed.
@@ -84,70 +74,10 @@ type WaitingTask struct {
 	Turn  int64
 }
 
-// SubmitInput contains the root-task routing and prompt fields; Parts follow the prompt's text part.
-type SubmitInput struct {
-	Selector      []wire.Requirement
-	Prompt        string
-	Parts         []wire.Part
-	Deadline      time.Duration
-	QueueDeadline time.Duration
-}
-
-// SubmitResult describes a produced root task.
-type SubmitResult struct {
-	RunID   string
-	Pool    string
-	Skipped int
-}
-
-// ContinueInput contains the new prompt and deadlines for a continuation.
-type ContinueInput struct {
-	Prompt        string
-	Deadline      time.Duration
-	QueueDeadline time.Duration
-}
-
-// ContinueResult describes a produced continuation.
-type ContinueResult struct {
-	RunID   string
-	Turn    int64
-	Skipped int
-}
-
-// CancelResult describes a produced cancel.
-type CancelResult struct {
-	RunID   string
-	Skipped int
-}
-
-// AwaitResult is the accepted outcome of the latest turn; Task is nil when a status record ended it.
-type AwaitResult struct {
-	Task   *wire.Task
-	Status wire.TaskStatus
-	// RevokedAt is the revocation time of the receiver that signed the outcome, zero while it is enrolled.
-	RevokedAt time.Time
-	Skipped   int
-}
-
-// StatusResult is the latest verified status of a run's latest turn.
-type StatusResult struct {
-	Turn   int64
-	Status wire.TaskStatus
-	// RevokedAt is the revocation time of the receiver that signed the status, zero while it is enrolled.
-	RevokedAt time.Time
-	Skipped   int
-}
-
-// TurnAttempt identifies one delivery attempt within one submission turn.
-type TurnAttempt struct {
-	Turn    int64
-	Attempt int64
-}
-
-// EventsResult contains a run's verified status records, whether the user cancelled it, and its
+// ledgerEvents contains a run's verified status records, whether the user cancelled it, and its
 // transcript chunk count per turn and attempt.
-type EventsResult struct {
-	Statuses  []EventStatus
+type ledgerEvents struct {
+	Statuses  []ledgerEventStatus
 	Cancelled bool
 	Chunks    map[TurnAttempt]int
 	// ChunksRevokedAt holds, per turn and attempt, the revocation time of a revoked receiver that signed its chunks.
@@ -155,14 +85,14 @@ type EventsResult struct {
 	Skipped         int
 }
 
-// EventStatus is one verified status record and the revocation time of its signer, zero while it is enrolled.
-type EventStatus struct {
+// ledgerEventStatus is one verified status record and the revocation time of its signer, zero while it is enrolled.
+type ledgerEventStatus struct {
 	wire.StatusRecord
 	RevokedAt time.Time
 }
 
 // Receiver describes one enrolled receiver and its latest verified capability.
-type Receiver struct {
+type ledgerReceiver struct {
 	ReceiverID   string              `json:"receiver_id"`
 	Pool         string              `json:"pool"`
 	Generation   int64               `json:"generation"`
@@ -175,11 +105,11 @@ type Receiver struct {
 	Status       string              `json:"status"`
 	Revoked      bool                `json:"revoked"`
 	Floor        int64               `json:"floor_generation"`
-	Secrets      []Seal              `json:"secrets"`
+	Secrets      []ledgerSeal        `json:"secrets"`
 }
 
 // Seal is the current sealed version of one credential under a receiver's current approval.
-type Seal struct {
+type ledgerSeal struct {
 	Name    string `json:"name"`
 	Version int64  `json:"version"`
 	ExpMS   int64  `json:"exp_ms"`
@@ -404,7 +334,7 @@ func (client *Client) PutSecret(ctx context.Context, name, receiverID, path stri
 }
 
 // Receivers returns every enrolled or revoked receiver with its latest verified capability status.
-func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
+func (client *Client) Receivers(ctx context.Context) ([]ledgerReceiver, int, error) {
 	loaded, err := client.loadState(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -420,9 +350,9 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 		byReceiver[capability.receiverID] = capability.capability
 	}
 
-	result := make([]Receiver, 0, len(loaded.approvals))
+	result := make([]ledgerReceiver, 0, len(loaded.approvals))
 	for _, identity := range receivers {
-		receiver := Receiver{
+		receiver := ledgerReceiver{
 			ReceiverID: identity.id, Pool: identity.enrolled.Pool,
 			Generation: identity.enrolled.Generation, Labels: maps.Clone(identity.enrolled.Labels),
 			Adapters: identity.enrolled.Adapters, Offers: []wire.Offer{},
@@ -444,10 +374,10 @@ func (client *Client) Receivers(ctx context.Context) ([]Receiver, int, error) {
 	}
 	for id, approval := range loaded.approvals {
 		if approval.generation <= loaded.state.Floor(id) {
-			result = append(result, Receiver{
+			result = append(result, ledgerReceiver{
 				ReceiverID: id, Pool: approval.pool, Generation: approval.generation,
 				Labels: map[string]string{}, Adapters: []wire.AdapterGrant{}, Offers: []wire.Offer{},
-				HeartbeatAge: "-", Status: "revoked", Revoked: true, Floor: loaded.state.Floor(id), Secrets: []Seal{},
+				HeartbeatAge: "-", Status: "revoked", Revoked: true, Floor: loaded.state.Floor(id), Secrets: []ledgerSeal{},
 			})
 		}
 	}
@@ -494,8 +424,8 @@ func (client *Client) Submit(ctx context.Context, input SubmitInput) (SubmitResu
 		if _, ok := wire.MatchOffer(input.Selector, capability.Labels, verified.enrolled.Adapters, capability.Offers); !ok {
 			continue
 		}
-		if chosen == nil || spare(capability) > spare(chosen) ||
-			(spare(capability) == spare(chosen) && capability.ReceiverID < chosen.ReceiverID) {
+		if chosen == nil || capabilitySpare(capability) > capabilitySpare(chosen) ||
+			(capabilitySpare(capability) == capabilitySpare(chosen) && capability.ReceiverID < chosen.ReceiverID) {
 			chosen = capability
 		}
 	}
@@ -794,7 +724,7 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 				if record.Topic != topic || record.Attrs.IsControl() || string(record.Key) != runID {
 					continue
 				}
-				verified, receiver, revokedAt, err := verifyHistory(record, receivers, revoked)
+				verified, receiver, _, err := verifyHistory(record, receivers, revoked)
 				if err != nil {
 					loaded.skipped++
 					continue
@@ -808,7 +738,7 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 						!attempts.Admit(value.Task.ID, value.Wherry.Turn, value.Wherry.Attempt) {
 						continue
 					}
-					return AwaitResult{Task: &value.Task, Status: value.Task.Status, RevokedAt: revokedAt, Skipped: loaded.skipped}, nil
+					return AwaitResult{Task: &value.Task, Status: value.Task.Status, Skipped: loaded.skipped}, nil
 				case *wire.StatusRecord:
 					acceptable := value.Wherry.Kind == "interrupted" && wire.Interrupted(value.StatusUpdate.Status.State) ||
 						value.Wherry.Kind == "terminal" && wire.Terminal(value.StatusUpdate.Status.State) ||
@@ -820,7 +750,7 @@ func (client *Client) Await(ctx context.Context, runID string, timeout time.Dura
 					if value.Wherry.Kind == "interrupted" && cancelled[runID] {
 						return AwaitResult{Status: wire.TaskStatus{State: wire.TaskStateCanceled}, Skipped: loaded.skipped}, nil
 					}
-					result := AwaitResult{Status: value.StatusUpdate.Status, RevokedAt: revokedAt, Skipped: loaded.skipped}
+					result := AwaitResult{Status: value.StatusUpdate.Status, Skipped: loaded.skipped}
 					if value.Wherry.Kind != "terminal" {
 						return result, nil
 					}
@@ -865,7 +795,7 @@ func (client *Client) Status(ctx context.Context, runID string) (StatusResult, e
 		if string(record.Key) != runID {
 			continue
 		}
-		verified, receiver, revokedAt, err := verifyHistory(record, receivers, revoked)
+		verified, receiver, _, err := verifyHistory(record, receivers, revoked)
 		if err != nil {
 			result.Skipped++
 			continue
@@ -875,11 +805,11 @@ func (client *Client) Status(ctx context.Context, runID string) (StatusResult, e
 			continue
 		}
 		if attempts.Admit(runID, value.Wherry.Turn, value.Wherry.Attempt) {
-			result.Status, result.RevokedAt, kind = value.StatusUpdate.Status, revokedAt, value.Wherry.Kind
+			result.Status, kind = value.StatusUpdate.Status, value.Wherry.Kind
 		}
 	}
 	if kind == "interrupted" && cancelled[runID] {
-		result.Status, result.RevokedAt = wire.TaskStatus{State: wire.TaskStateCanceled}, time.Time{}
+		result.Status = wire.TaskStatus{State: wire.TaskStateCanceled}
 	}
 	return result, nil
 }
@@ -910,26 +840,26 @@ func turnChunk(value *wire.ArtifactUpdateRecord, receiver receiverIdentity, subm
 }
 
 // Events reads and verifies the bounded status history and transcript chunks for runID.
-func (client *Client) Events(ctx context.Context, runID string) (EventsResult, error) {
+func (client *Client) Events(ctx context.Context, runID string) (ledgerEvents, error) {
 	loaded, err := client.loadState(ctx)
 	if err != nil {
-		return EventsResult{}, err
+		return ledgerEvents{}, err
 	}
 	receivers := loaded.receiverSigners(time.Now())
 	revoked := loaded.revokedSigners()
 	submissions, skipped, err := client.readSubmissions(ctx)
 	if err != nil {
-		return EventsResult{}, err
+		return ledgerEvents{}, err
 	}
 	turns := submissions[runID]
 	if len(turns) == 0 {
-		return EventsResult{}, fmt.Errorf("events %s: %w", runID, ErrRunNotFound)
+		return ledgerEvents{}, fmt.Errorf("events %s: %w", runID, ErrRunNotFound)
 	}
 	records, err := client.readBounded(ctx, wire.TopicEvent)
 	if err != nil {
-		return EventsResult{}, err
+		return ledgerEvents{}, err
 	}
-	result := EventsResult{Chunks: map[TurnAttempt]int{}, ChunksRevokedAt: map[TurnAttempt]time.Time{}, Skipped: loaded.skipped + skipped}
+	result := ledgerEvents{Chunks: map[TurnAttempt]int{}, ChunksRevokedAt: map[TurnAttempt]time.Time{}, Skipped: loaded.skipped + skipped}
 	for _, record := range records {
 		if string(record.Key) != runID {
 			continue
@@ -944,11 +874,11 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 			result.Skipped++
 			continue
 		}
-		result.Statuses = append(result.Statuses, EventStatus{StatusRecord: *status, RevokedAt: revokedAt})
+		result.Statuses = append(result.Statuses, ledgerEventStatus{StatusRecord: *status, RevokedAt: revokedAt})
 	}
 	controls, err := client.readBounded(ctx, wire.TopicControl)
 	if err != nil {
-		return EventsResult{}, err
+		return ledgerEvents{}, err
 	}
 	for _, record := range controls {
 		if string(record.Key) != runID {
@@ -962,7 +892,7 @@ func (client *Client) Events(ctx context.Context, runID string) (EventsResult, e
 	}
 	transcripts, err := client.readBounded(ctx, wire.TopicTranscript)
 	if err != nil {
-		return EventsResult{}, err
+		return ledgerEvents{}, err
 	}
 	for _, record := range transcripts {
 		if string(record.Key) != runID {
@@ -1080,11 +1010,11 @@ func (client *Client) loadState(ctx context.Context) (*loadedState, error) {
 }
 
 // seals returns a receiver's current secret versions sealed under approvalHash, by name.
-func (loaded *loadedState) seals(receiverID, approvalHash string) []Seal {
-	seals := []Seal{}
+func (loaded *loadedState) seals(receiverID, approvalHash string) []ledgerSeal {
+	seals := []ledgerSeal{}
 	for key, version := range loaded.secretVersions {
 		if key.receiverID == receiverID && version.ApprovalHash == approvalHash {
-			seals = append(seals, Seal{Name: version.Name, Version: version.Version, ExpMS: version.ExpMS})
+			seals = append(seals, ledgerSeal{Name: version.Name, Version: version.Version, ExpMS: version.ExpMS})
 		}
 	}
 	sort.Slice(seals, func(i, j int) bool { return seals[i].Name < seals[j].Name })
@@ -1175,14 +1105,116 @@ func verifyHistory(record *kgo.Record, receivers map[string]receiverIdentity, re
 	return verified, receiver, revokedAt, nil
 }
 
-func spare(capability *wire.Capability) int64 {
+func capabilitySpare(capability *wire.Capability) int64 {
 	return capability.Capacity - capability.InFlight
 }
 
-func randomID(prefix string) (string, error) {
-	bytes := make([]byte, 16)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
+func (client *Client) produce(ctx context.Context, records ...*kgo.Record) error {
+	if err := client.kafka.ProduceSync(ctx, records...).FirstErr(); err != nil {
+		return fmt.Errorf("produce: %w", err)
 	}
-	return prefix + hex.EncodeToString(bytes), nil
+	return nil
+}
+
+func (client *Client) readBounded(ctx context.Context, topic string) ([]*kgo.Record, error) {
+	admin := kadm.NewClient(client.kafka)
+	starts, err := admin.ListStartOffsets(ctx, topic)
+	if err != nil {
+		return nil, err
+	}
+	if err := starts.Error(); err != nil {
+		return nil, err
+	}
+	ends, err := admin.ListCommittedOffsets(ctx, topic)
+	if err != nil {
+		return nil, err
+	}
+	if err := ends.Error(); err != nil {
+		return nil, err
+	}
+	startPartitions, ok := starts[topic]
+	if !ok {
+		return nil, fmt.Errorf("topic %s has no partitions", topic)
+	}
+	assignments := map[string]map[int32]kgo.Offset{topic: {}}
+	remove := map[string][]int32{topic: {}}
+	endOffsets := make(map[int32]int64)
+	for partition, start := range startPartitions {
+		end, ok := ends.Lookup(topic, partition)
+		if partition < 0 || !ok || start.Err != nil || end.Err != nil {
+			continue
+		}
+		if start.Offset < end.Offset {
+			assignments[topic][partition] = kgo.NewOffset().At(start.Offset)
+			remove[topic] = append(remove[topic], partition)
+			endOffsets[partition] = end.Offset
+		}
+	}
+	if len(endOffsets) == 0 {
+		return nil, nil
+	}
+	client.kafka.AddConsumePartitions(assignments)
+	defer client.kafka.RemoveConsumePartitions(remove)
+
+	var records []*kgo.Record
+	for len(endOffsets) > 0 {
+		fetches := client.kafka.PollFetches(ctx)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := fetches.Err(); err != nil {
+			return nil, err
+		}
+		fetches.EachPartition(func(partition kgo.FetchTopicPartition) {
+			end, wanted := endOffsets[partition.Partition]
+			if partition.Topic != topic || !wanted {
+				return
+			}
+			for _, record := range partition.Records {
+				if record.Offset < end && !record.Attrs.IsControl() {
+					records = append(records, record)
+				}
+				if record.Offset >= end-1 {
+					delete(endOffsets, partition.Partition)
+				}
+			}
+			// Compaction or aborted records can leave nothing to return below the bound.
+			if len(partition.Records) == 0 && partition.LastStableOffset >= end {
+				delete(endOffsets, partition.Partition)
+			}
+		})
+	}
+	return records, nil
+}
+
+func (client *Client) followFromStart(ctx context.Context, topics ...string) (func(), error) {
+	starts, err := kadm.NewClient(client.kafka).ListStartOffsets(ctx, topics...)
+	if err != nil {
+		return nil, err
+	}
+	if err := starts.Error(); err != nil {
+		return nil, err
+	}
+	assignments := make(map[string]map[int32]kgo.Offset, len(topics))
+	remove := make(map[string][]int32, len(topics))
+	for _, topic := range topics {
+		partitions, ok := starts[topic]
+		if !ok {
+			return nil, fmt.Errorf("topic %s has no partitions", topic)
+		}
+		assignments[topic] = map[int32]kgo.Offset{}
+		remove[topic] = []int32{}
+		for partition, offset := range partitions {
+			if partition < 0 || offset.Err != nil {
+				continue
+			}
+			assignments[topic][partition] = kgo.NewOffset().At(offset.Offset)
+			remove[topic] = append(remove[topic], partition)
+		}
+		if len(assignments[topic]) == 0 {
+			return nil, fmt.Errorf("topic %s has no readable partitions", topic)
+		}
+	}
+	client.kafka.AddConsumePartitions(assignments)
+	return func() { client.kafka.RemoveConsumePartitions(remove) }, nil
 }

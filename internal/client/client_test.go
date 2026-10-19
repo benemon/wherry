@@ -5,844 +5,1027 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/json/jsontext"
-	"encoding/pem"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/trust"
+	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/sasl/plain"
+	"github.com/twmb/franz-go/pkg/sasl/scram"
+	"gopkg.in/yaml.v3"
 )
 
-type clientFixture struct {
-	ctx           context.Context
-	kafka         *kgo.Client
-	client        *Client
-	userPublicKey ed25519.PublicKey
-	userKey       ed25519.PrivateKey
-	receiverKey   ed25519.PrivateKey
-	sealingKey    *ecdh.PrivateKey
-	request       []byte
+// fixture is a kfake cluster provisioned through admin.Service, with a host connected as its own principal.
+type fixture struct {
+	ctx       context.Context
+	service   *admin.Service
+	host      *Host
+	stateDir  string
+	secret    string
+	receivers map[string]*testReceiver
 }
 
-func newClientFixture(t *testing.T, approve bool) clientFixture {
+type testReceiver struct {
+	id      string
+	pool    string
+	key     ed25519.PrivateKey
+	sealing *ecdh.PrivateKey
+	kafka   *kgo.Client
+}
+
+func testTerms() admin.Terms {
+	return admin.Terms{
+		Agents:   []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}, {Name: "codex", Credentials: []string{"openai"}}},
+		Runtimes: []string{"podman", "exec"}, DefaultAgent: "claude", DefaultRuntime: "podman",
+		SealLifetimeMS: int64(time.Hour / time.Millisecond), DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
+	}
+}
+
+func newFixtureNoHost(t *testing.T) *fixture {
 	t.Helper()
-	cluster := kfake.MustCluster(kfake.NumBrokers(1))
+	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("PLAIN", "wherry.operator", "operator-password"))
 	t.Cleanup(cluster.Close)
-	kafka, err := kgo.NewClient(
-		kgo.SeedBrokers(cluster.ListenAddrs()...),
-		kgo.FetchMaxWait(10*time.Millisecond),
-		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
-		kgo.KeepControlRecords(),
-	)
+	if err := cluster.CreateTopic(admin.AdminTopic, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	root, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(root.Close)
+	operator, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(plain.Auth{User: "wherry.operator", Pass: "operator-password"}.AsMechanism()), kgo.FetchMaxWait(10*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(operator.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	f := &fixture{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, receivers: map[string]*testReceiver{}}
+	f.pool(t, "pool-a")
+	return f
+}
+
+func newFixture(t *testing.T) *fixture {
+	t.Helper()
+	f := newFixtureNoHost(t)
+	f.stateDir = t.TempDir()
+	f.secret = filepath.Join(t.TempDir(), "model")
+	if err := os.WriteFile(f.secret, []byte("model-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.host = f.newHost(t, "host-a", f.stateDir)
+	return f
+}
+
+func (f *fixture) pool(t *testing.T, pool string) {
+	t.Helper()
+	if err := f.service.PoolCreate(f.ctx, pool, testTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantAdd(f.ctx, "tenant-a", pool); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// connect opens a plain client as the principal of the bundle at path.
+func (f *fixture) connect(t *testing.T, path string) (*kgo.Client, string) {
+	t.Helper()
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle admin.Bundle
+	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	// kfake's SCRAM server always offers 4096 iterations, so the 8192 that admin provisions never authenticates.
+	if _, err := kadm.NewClient(f.service.Admin).AlterUserSCRAMs(f.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
+		t.Fatal(err)
+	}
+	kafka, err := kgo.NewClient(kgo.SeedBrokers(f.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
+		kgo.FetchMaxWait(10*time.Millisecond), kgo.FetchIsolationLevel(kgo.ReadCommitted()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(kafka.Close)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	t.Cleanup(cancel)
-	if err := wire.ApplyTopics(ctx, kadm.NewClient(kafka), 1); err != nil {
-		t.Fatal(err)
-	}
-	created, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, 1, nil, "replies.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if created["replies.test"].Err != nil {
-		t.Fatal(created["replies.test"].Err)
-	}
-	keyPath := filepath.Join(t.TempDir(), "user.key")
-	fingerprint, err := InitUserKey(keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	userKey, err := trust.LoadSigningKeyFile(keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	userPublicKey := userKey.Public().(ed25519.PublicKey)
-	if fingerprint != wire.Fingerprint(userPublicKey) {
-		t.Fatalf("init printed fingerprint %q, want %q", fingerprint, wire.Fingerprint(userPublicKey))
-	}
-	_, receiverKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sealingKey, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request, err := trust.NewEnrolRequest(
-		"receiver-a", receiverKey, sealingKey, map[string]string{}, testDetected(), time.Now(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture := clientFixture{
-		ctx: ctx, kafka: kafka, client: New(kafka, userKey, "replies.test"),
-		userPublicKey: userPublicKey, userKey: userKey,
-		receiverKey: receiverKey, sealingKey: sealingKey, request: request,
-	}
-	fixture.produce(t, wire.TopicState, "receiver-a", request)
-	if approve {
-		result, err := fixture.client.Approve(
-			ctx, trust.EnvelopeHash(request), "default", map[string]string{}, testGrants(), "auto", 30*24*time.Hour,
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if result.ReceiverID != "receiver-a" || result.Generation != 1 {
-			t.Fatalf("unexpected approval result: %#v", result)
-		}
-	}
-	return fixture
+	return kafka, bundle.Principal
 }
 
-func (fixture clientFixture) produce(t *testing.T, topic, key string, value []byte) {
+// newHost provisions host in tenant-a and registers its key, as wherry init does.
+func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 	t.Helper()
-	if err := fixture.kafka.ProduceSync(fixture.ctx, &kgo.Record{
-		Topic: topic, Key: []byte(key), Value: value,
-	}).FirstErr(); err != nil {
+	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
+	if err := f.service.HostAdd(f.ctx, "tenant-a", host, bundle); err != nil {
+		t.Fatal(err)
+	}
+	kafka, principal := f.connect(t, bundle)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHost(kafka, key, principal, stateDir, map[string]string{"model": f.secret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Register(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// addReceiver provisions a receiver whose one adapter launches claude, and registers its signing and sealing keys.
+func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
+	t.Helper()
+	config := admin.ReceiverConfig{Receiver: id, Pool: pool, Capacity: 2, Runtimes: []string{"podman", "exec"},
+		Adapters: []admin.AdapterSettings{{Name: "lab", Type: "nomad", Agent: "claude", Credential: "model"}, {Name: "cloud", Type: "aws", Agent: "codex", Credential: "openai"}}}
+	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
+	if err := f.service.ReceiverAdd(f.ctx, config, nil, bundle); err != nil {
+		t.Fatal(err)
+	}
+	kafka, _ := f.connect(t, bundle)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealing, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := &testReceiver{id: id, pool: pool, key: key, sealing: sealing, kafka: kafka}
+	registration, err := signed.RegisterKey(id, key, sealing.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver.produce(t, f.ctx, admin.ReceiverTopic(id), id, registration)
+	f.receivers[id] = receiver
+	return receiver
+}
+
+func (r *testReceiver) produce(t *testing.T, ctx context.Context, topic, key string, value []byte) {
+	t.Helper()
+	if err := r.kafka.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(key), Value: value}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func (fixture clientFixture) capability(t *testing.T, mutate func(*wire.Capability)) {
+func (r *testReceiver) sign(t *testing.T, record wire.Record) []byte {
 	t.Helper()
-	capability := &wire.Capability{
-		ReceiverID: "receiver-a", Pool: "default", Labels: map[string]string{},
-		Offers:   []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec", "nomad.node_pool": "OCPv"}}},
-		Capacity: 3, InFlight: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
+	encoded, err := wire.SignRecord(record, r.key)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return encoded
+}
+
+func claudeOffer() wire.Offer {
+	return wire.Offer{Adapter: "lab", Labels: map[string]string{"agent": "claude", "runtime": "podman"}}
+}
+
+// advertise publishes a live advertisement; mutate may change it before it is signed.
+func (r *testReceiver) advertise(t *testing.T, ctx context.Context, mutate func(*wire.Advertisement)) {
+	t.Helper()
+	ad := &wire.Advertisement{Receiver: r.id, Pool: r.pool, Offers: []wire.Offer{claudeOffer()}, Capacity: 2, SealingKey: signed.SealingKeyID(r.sealing.PublicKey()), AtMS: time.Now().UnixMilli()}
 	if mutate != nil {
-		mutate(capability)
+		mutate(ad)
 	}
-	fixture.produceCapability(t, capability.ReceiverID, capability, fixture.receiverKey)
+	r.produce(t, ctx, admin.ReceiversTopic, r.id, r.sign(t, ad))
 }
 
-func testDetected() []wire.DetectedAdapter {
-	return []wire.DetectedAdapter{
-		{Name: "lab", Platform: "nomad", Offers: []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec", "nomad.node_pool": "OCPv"}}}},
-		{Name: "cloud", Platform: "aws", Offers: []wire.Offer{{Adapter: "cloud", Labels: map[string]string{"runtime": "lambda"}}}},
-	}
+func defaultSelector() []wire.Requirement {
+	return []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"podman"}}}
 }
 
-func testGrants() []wire.AdapterGrant {
-	return []wire.AdapterGrant{
-		{Name: "lab", Platform: "nomad", Allowed: map[string][]string{"runtime": {"exec", "podman"}, "nomad.node_pool": {"OCPv", "default"}}, Defaults: map[string]string{}},
-		{Name: "cloud", Platform: "aws", Allowed: map[string][]string{"runtime": {"lambda", "exec"}}, Defaults: map[string]string{}},
-	}
-}
-
-func singleGrant() []wire.AdapterGrant {
-	return []wire.AdapterGrant{{Name: "lab", Platform: "nomad", Allowed: map[string][]string{"runtime": {"exec"}}, Defaults: map[string]string{}}}
-}
-
-func (fixture clientFixture) addReceiver(t *testing.T, receiverID, pool string, labels map[string]string) ed25519.PrivateKey {
+func (f *fixture) submit(t *testing.T, selector []wire.Requirement) SubmitResult {
 	t.Helper()
-	_, signingKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sealingKey, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	detected := []wire.DetectedAdapter{{Name: "lab", Platform: "nomad", Offers: []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}}}}
-	request, err := trust.NewEnrolRequest(receiverID, signingKey, sealingKey, labels, detected, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.produce(t, wire.TopicState, receiverID, request)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(request), pool, labels, singleGrant(), "auto", 30*24*time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	return signingKey
-}
-
-func TestApproveGrantMustNameDetectedAdapter(t *testing.T) {
-	for name, grant := range map[string]wire.AdapterGrant{
-		"unknown name":   {Name: "other", Platform: "nomad", Allowed: map[string][]string{}, Defaults: map[string]string{}},
-		"wrong platform": {Name: "lab", Platform: "aws", Allowed: map[string][]string{}, Defaults: map[string]string{}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			fixture := newClientFixture(t, false)
-			before := fixture.topicEnd(t, wire.TopicState)
-			_, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, []wire.AdapterGrant{grant}, "auto", 30*24*time.Hour)
-			if err == nil || !strings.Contains(err.Error(), "detected adapter") {
-				t.Fatalf("got %v, want grant rejected", err)
-			}
-			if after := fixture.topicEnd(t, wire.TopicState); after != before {
-				t.Fatalf("receivers.state changed from offset %d to %d", before, after)
-			}
-		})
-	}
-}
-
-func TestApproveDefaultsPoolToReceiverID(t *testing.T) {
-	fixture := newClientFixture(t, false)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "", map[string]string{}, testGrants(), "auto", 30*24*time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	records, err := fixture.client.readBounded(fixture.ctx, wire.TopicState)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state := trust.NewState(fixture.userPublicKey)
-	for _, record := range records {
-		if _, err := state.Apply(record.Value); err != nil {
-			t.Fatal(err)
-		}
-	}
-	enrolled, err := state.Receiver("receiver-a", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if enrolled.Pool != "receiver-a" {
-		t.Fatalf("pool %q, want the receiver ID", enrolled.Pool)
-	}
-}
-
-func (fixture clientFixture) produceCapability(t *testing.T, key string, capability *wire.Capability, signingKey ed25519.PrivateKey) {
-	t.Helper()
-	fixture.produce(t, wire.TopicCapability, key, signed(t, wire.TypeCapability, capability, signingKey))
-}
-
-func (fixture clientFixture) submit(t *testing.T) SubmitResult {
-	t.Helper()
-	result, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
-		Prompt:   "do the work", Deadline: 30 * time.Minute, QueueDeadline: 10 * time.Minute,
-	})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: selector, Prompt: "do the work", Deadline: 30 * time.Minute, QueueDeadline: 10 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return result
 }
 
-func TestClientEndToEnd(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	enrolments, skipped, err := fixture.client.Enrolments(fixture.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if skipped != 0 || len(enrolments) != 1 || !enrolments[0].Approved || enrolments[0].Generation != 1 {
-		t.Fatalf("unexpected enrolments: %#v, skipped %d", enrolments, skipped)
-	}
-	fixture.capability(t, nil)
-	submission := fixture.submit(t)
-	if !strings.HasPrefix(submission.RunID, "run-") || submission.Pool != "default" {
-		t.Fatalf("unexpected submission: %#v", submission)
-	}
-	tasks, err := fixture.client.readBounded(fixture.ctx, wire.TopicTask)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tasks) != 1 || string(tasks[0].Key) != submission.RunID {
-		t.Fatalf("got %d tasks for %q", len(tasks), submission.RunID)
-	}
-	verified, err := trust.VerifyRootSubmission(tasks[0].Value, fixture.userPublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runID := verified.Wherry.RunID
-	if message := verified.Message; message.TaskID != runID || message.ContextID != runID || !slices.Equal(message.Extensions, []string{wire.ExtensionURI}) {
-		t.Fatalf("submitted message %#v does not carry the run ID, root context and extension", message)
-	}
-	task := testTask(verified, trust.EnvelopeHash(tasks[0].Value), 1, wire.TaskStateCompleted)
-	task.Task.Artifacts = []wire.Artifact{{ArtifactID: "answer", Parts: []wire.Part{{Text: "finished"}}, Extensions: []string{wire.ExtensionURI}}}
-	fixture.produce(t, "replies.test", runID, signed(t, wire.TypeTask, task, fixture.receiverKey))
-	awaited, err := fixture.client.Await(fixture.ctx, runID, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if awaited.Task.Status.State != wire.TaskStateCompleted || awaited.Task.Artifacts[0].Parts[0].Text != "finished" {
-		t.Fatalf("unexpected task: %#v", awaited.Task)
-	}
+// claimed is a task as a receiver reads and authorises it from its pool's task topic.
+type claimed struct {
+	submission wire.Submission
+	hash       string
+}
 
-	status := &wire.StatusRecord{
-		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: runID, ContextID: runID, Status: wire.TaskStatus{
-			State: wire.TaskStateCompleted, Timestamp: time.Now().UTC().Format(time.RFC3339),
-		}},
-		Wherry: wire.StatusExtension{Turn: 1, Attempt: 1, TaskHash: trust.EnvelopeHash(tasks[0].Value), ReceiverID: "receiver-a", Kind: "terminal"},
+// claim reads the tasks for runID from the pool's task topic as receiver r and authorises them against the host keys
+// of the pool's entitled tenants, as admission does.
+func (r *testReceiver) claim(t *testing.T, ctx context.Context, runID string) []claimed {
+	t.Helper()
+	state, err := admin.Load(ctx, r.kafka)
+	if err != nil {
+		t.Fatal(err)
 	}
-	fixture.produce(t, wire.TopicEvent, runID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
-	for _, attempt := range []int64{1, 1, 2} {
-		chunk := &wire.ArtifactUpdateRecord{
-			ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: runID, ContextID: runID, Artifact: wire.Artifact{
-				ArtifactID: "transcript", Parts: []wire.Part{{Text: "line"}}, Extensions: []string{wire.ExtensionURI},
-			}},
-			Wherry: wire.ArtifactUpdateExtension{Turn: 1, Attempt: attempt, Seq: 0},
+	keys, err := admin.ReadKeys(ctx, r.kafka, admin.HostKeyTopics(state, r.pool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := admin.ReadTopic(ctx, r.kafka, admin.PoolTasksTopic(r.pool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tasks []claimed
+	for _, record := range records {
+		submission, err := admin.AuthorizeSubmission(state, keys, record.Value, r.pool)
+		if err != nil {
+			t.Fatalf("task does not authorise: %v", err)
 		}
-		fixture.produce(t, wire.TopicTranscript, runID, signed(t, wire.TypeArtifactUpdate, chunk, fixture.receiverKey))
+		if submission.Wherry.Run == runID {
+			sum := sha256.Sum256(record.Value)
+			tasks = append(tasks, claimed{submission, hex.EncodeToString(sum[:])})
+		}
 	}
-	events, err := fixture.client.Events(fixture.ctx, runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(events.Statuses) != 1 || events.Statuses[0].Wherry.Kind != "terminal" || !reflect.DeepEqual(events.Chunks, map[TurnAttempt]int{{Turn: 1, Attempt: 1}: 2, {Turn: 1, Attempt: 2}: 1}) {
-		t.Fatalf("unexpected events: %#v", events)
-	}
+	return tasks
+}
 
-	secretPath := filepath.Join(t.TempDir(), "secret")
-	if err := os.WriteFile(secretPath, []byte("super secret"), 0o600); err != nil {
-		t.Fatal(err)
+func (r *testReceiver) binding(task claimed, attempt int64) wire.ReceiverBinding {
+	return wire.ReceiverBinding{Receiver: r.id, Tenant: task.submission.Wherry.Tenant, Pool: r.pool, Run: task.submission.Wherry.Run, Turn: task.submission.Wherry.Turn, Attempt: attempt}
+}
+
+func (r *testReceiver) echo(t *testing.T, task claimed) []byte {
+	binding := task.submission.Wherry
+	return r.sign(t, &wire.Echo{Receiver: r.id, Tenant: binding.Tenant, Pool: r.pool, Run: binding.Run, Turn: binding.Turn, Placement: binding.Placement,
+		TaskHash: task.hash, MessageID: task.submission.Message.MessageID, DeadlineMS: binding.DeadlineMS, QueueDeadlineMS: binding.QueueDeadlineMS})
+}
+
+func (r *testReceiver) status(t *testing.T, task claimed, attempt int64, eventID, kind string, state wire.TaskState, mutate func(*wire.RunStatus)) []byte {
+	t.Helper()
+	run := task.submission.Wherry.Run
+	status := &wire.RunStatus{
+		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: run, ContextID: run, Status: wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format(time.RFC3339)}},
+		Wherry:       wire.StatusBinding{ReceiverBinding: r.binding(task, attempt), EventID: eventID, Kind: kind, TaskHash: task.hash},
 	}
-	secret, err := fixture.client.PutSecret(fixture.ctx, "token", "receiver-a", secretPath, 30*24*time.Hour)
+	if mutate != nil {
+		mutate(status)
+	}
+	return r.sign(t, status)
+}
+
+func (r *testReceiver) chunk(t *testing.T, task claimed, attempt, seq int64) []byte {
+	run := task.submission.Wherry.Run
+	return r.sign(t, &wire.Chunk{
+		ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: run, ContextID: run, Artifact: wire.Artifact{ArtifactID: "transcript", Parts: []wire.Part{{Text: "line"}}, Extensions: []string{wire.ExtensionURI}}},
+		Wherry:         wire.ChunkBinding{ReceiverBinding: r.binding(task, attempt), Seq: seq},
+	})
+}
+
+func (r *testReceiver) result(t *testing.T, task claimed, attempt int64, state wire.TaskState, mutate func(*wire.Result)) []byte {
+	t.Helper()
+	run := task.submission.Wherry.Run
+	result := &wire.Result{
+		Task: wire.Task{ID: run, ContextID: run, Status: wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format(time.RFC3339)},
+			Artifacts: []wire.Artifact{{ArtifactID: "answer", Parts: []wire.Part{{Text: "finished"}}, Extensions: []string{wire.ExtensionURI}}},
+			History:   []wire.Message{task.submission.Message}},
+		Wherry: wire.ResultBinding{ReceiverBinding: r.binding(task, attempt), TaskHash: task.hash},
+	}
+	if mutate != nil {
+		mutate(result)
+	}
+	return r.sign(t, result)
+}
+
+// feed writes records to the tenant feed under the run's key in one transaction, as a receiver commits them.
+func (r *testReceiver) feed(t *testing.T, ctx context.Context, runID string, values ...[]byte) {
+	t.Helper()
+	producer, err := kgo.NewClient(append(r.kafka.Opts(), kgo.TransactionalID(admin.TransactionalPrefix(r.pool)+runID))...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if secret.Version != 1 {
-		t.Fatalf("got secret version %d, want 1", secret.Version)
-	}
-	stateRecords, err := fixture.client.readBounded(fixture.ctx, wire.TopicState)
-	if err != nil {
+	defer producer.Close()
+	if err := producer.BeginTransaction(); err != nil {
 		t.Fatal(err)
 	}
-	state := trust.NewState(fixture.userPublicKey)
-	for _, record := range stateRecords {
-		if _, err := state.Apply(record.Value); err != nil {
+	for _, value := range values {
+		if err := producer.ProduceSync(ctx, &kgo.Record{Topic: admin.TenantTopic("tenant-a"), Key: []byte(runID), Value: value}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	sealedRecords, err := fixture.client.readBounded(fixture.ctx, wire.TopicSecret)
-	if err != nil {
+	if err := producer.EndTransaction(ctx, kgo.TryCommit); err != nil {
 		t.Fatal(err)
-	}
-	if len(sealedRecords) != 1 || string(sealedRecords[0].Key) != "receiver-a/token" {
-		t.Fatalf("unexpected sealed-secret records: %#v", sealedRecords)
-	}
-	plaintext, _, _, err := trust.Open(
-		sealedRecords[0].Value, state, "receiver-a", "token", fixture.sealingKey,
-		fixture.userPublicKey, time.Now(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(plaintext) != "super secret" {
-		t.Fatalf("got plaintext %q", plaintext)
 	}
 }
 
-func TestSubmitNoMatchingReceiverProducesNothing(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	fixture.capability(t, nil)
-	before := fixture.topicEnd(t, wire.TopicTask)
-	_, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"podman"}}},
-		Prompt:   "work", Deadline: time.Minute, QueueDeadline: time.Minute,
-	})
-	if err == nil {
-		t.Fatal("submit without a matching receiver succeeded")
+// admitted submits a task through receiver-a and writes its echo and claimed status, as admission does.
+func (f *fixture) admitted(t *testing.T) (*testReceiver, claimed) {
+	t.Helper()
+	receiver := f.receivers["receiver-a"]
+	if receiver == nil {
+		receiver = f.addReceiver(t, "receiver-a", "pool-a")
+		receiver.advertise(t, f.ctx, nil)
 	}
-	if after := fixture.topicEnd(t, wire.TopicTask); after != before {
-		t.Fatalf("tasks.queue changed from offset %d to %d", before, after)
+	submitted := f.submit(t, defaultSelector())
+	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+	receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+	return receiver, task
+}
+
+func (f *fixture) end(t *testing.T, receiver string) {
+	t.Helper()
+	encoded, err := admin.EncodeRecord(admin.Record{Kind: "end", Receiver: receiver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHostEndToEnd(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	if binding := task.submission.Wherry; binding.Tenant != "tenant-a" || binding.Host != "host-a" || binding.Pool != "pool-a" || binding.Turn != 1 ||
+		binding.Placement.Agent != "claude" || binding.Placement.Runtime != "podman" {
+		t.Fatalf("submitted binding %#v", binding)
+	}
+	if message := task.submission.Message; message.TaskID != runID || message.ContextID != runID || message.Parts[0].Text != "do the work" {
+		t.Fatalf("submitted message %#v", message)
+	}
+	local, err := f.host.localRun(runID)
+	if err != nil || local == nil || local.Run != runID || local.Pool != "pool-a" || local.Turn != 1 || local.TaskHash != task.hash || local.Placement.Agent != "claude" || local.Placement.Runtime != "podman" {
+		t.Fatalf("local record %#v, %v", local, err)
+	}
+	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, 0), receiver.chunk(t, task, 1, 1))
+	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 2, 0), receiver.result(t, task, 2, wire.TaskStateCompleted, nil),
+		receiver.status(t, task, 2, "terminal-2", "terminal", wire.TaskStateCompleted, nil))
+	awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if awaited.Task == nil || awaited.Status.State != wire.TaskStateCompleted || awaited.Task.Artifacts[0].Parts[0].Text != "finished" {
+		t.Fatalf("awaited %#v", awaited)
+	}
+	events, err := f.host.Events(f.ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events.Statuses) != 2 || events.Statuses[1].Wherry.Kind != "terminal" || events.Cancelled ||
+		events.Chunks[TurnAttempt{1, 1}] != 2 || events.Chunks[TurnAttempt{1, 2}] != 1 || len(events.Chunks) != 2 {
+		t.Fatalf("events %#v", events)
+	}
+	status, err := f.host.Status(f.ctx, runID)
+	if err != nil || status.Status.State != wire.TaskStateCompleted || status.Turn != 1 {
+		t.Fatalf("status %#v, %v", status, err)
+	}
+
+	seals, err := admin.ReadTopic(f.ctx, receiver.kafka, admin.HostTopic("tenant-a", "host-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opened []string
+	for _, record := range seals {
+		seal, err := signed.DecodeSeal(record.Value)
+		if err != nil {
+			continue
+		}
+		plaintext, err := signed.OpenCredential(seal, "tenant-a", "receiver-a", "pool-a", "model", time.Now(), []string{"model"}, receiver.sealing)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opened = append(opened, string(plaintext))
+	}
+	if len(opened) != 1 || opened[0] != "model-token" {
+		t.Fatalf("opened seals %q, want the model credential once", opened)
+	}
+}
+
+func TestRegisterIsIdempotentAndRefusesAnotherKey(t *testing.T) {
+	f := newFixture(t)
+	id, err := f.host.Register(f.ctx)
+	if err != nil || id != signed.KeyID(f.host.key.Public().(ed25519.PublicKey)) {
+		t.Fatalf("second register %q, %v", id, err)
+	}
+	records, err := admin.ReadTopic(f.ctx, f.host.kafka, admin.HostTopic("tenant-a", "host-a"))
+	if err != nil || len(records) != 1 {
+		t.Fatalf("host topic holds %d records, %v; want one registration", len(records), err)
+	}
+	_, other, _ := ed25519.GenerateKey(rand.Reader)
+	impostor := *f.host
+	impostor.key = other
+	if _, err := impostor.Register(f.ctx); err == nil {
+		t.Fatal("registered a second key on the host topic")
+	}
+}
+
+func TestNewHostParsesPrincipal(t *testing.T) {
+	for _, principal := range []string{"wherry.rcv.receiver-a", "wherry.tnt.tenant-a", "wherry.tnt.tenant-a.host.a", "wherry.tnt.Tenant.host-a", "tnt.tenant-a.host-a"} {
+		if _, err := NewHost(nil, nil, principal, "", nil); err == nil {
+			t.Errorf("accepted principal %q", principal)
+		}
+	}
+	host, err := NewHost(nil, nil, "wherry.tnt.tenant-a.host-a", "", nil)
+	if err != nil || host.tenant != "tenant-a" || host.host != "host-a" {
+		t.Fatalf("host %#v, %v", host, err)
+	}
+}
+
+func (f *fixture) tasksEnd(t *testing.T, pool string) int {
+	t.Helper()
+	records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic(pool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(records)
+}
+
+func TestSubmitNoMatchingReceiverProducesNothing(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrNoMatchingReceiver) {
+		t.Fatalf("submit = %v, want no matching receiver", err)
+	}
+	if n := f.tasksEnd(t, "pool-a"); n != 0 {
+		t.Fatalf("pool tasks hold %d records", n)
 	}
 }
 
 func TestSubmitMatchesOffersNotFlattenedSets(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	fixture.capability(t, func(capability *wire.Capability) {
-		capability.Offers = []wire.Offer{
-			{Adapter: "lab", Labels: map[string]string{"runtime": "exec", "nomad.node_pool": "OCPv"}},
-			{Adapter: "lab", Labels: map[string]string{"runtime": "podman", "nomad.node_pool": "default"}},
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Offers = []wire.Offer{
+			{Adapter: "lab", Labels: map[string]string{"agent": "claude", "runtime": "podman", "nomad.node_pool": "OCPv"}},
+			{Adapter: "lab", Labels: map[string]string{"agent": "claude", "runtime": "exec", "nomad.node_pool": "default"}},
 		}
 	})
-	_, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-		Selector: []wire.Requirement{
-			{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}},
-			{Key: "nomad.node_pool", Operator: wire.OpIn, Values: []string{"default"}},
-		},
-		Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute,
-	})
-	if err == nil {
-		t.Fatal("submit matched values from different offers")
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{
+		{Key: "runtime", Operator: wire.OpIn, Values: []string{"podman"}}, {Key: "nomad.node_pool", Operator: wire.OpIn, Values: []string{"default"}},
+	}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrNoMatchingReceiver) {
+		t.Fatalf("submit matched values from different offers: %v", err)
 	}
 }
 
 func TestSubmitMatchesAcrossAdapters(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	fixture.capability(t, func(capability *wire.Capability) {
-		capability.Offers = []wire.Offer{
-			{Adapter: "lab", Labels: map[string]string{"runtime": "exec", "nomad.node_pool": "OCPv"}},
-			{Adapter: "cloud", Labels: map[string]string{"runtime": "lambda"}},
-		}
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Offers = []wire.Offer{claudeOffer(), {Adapter: "cloud", Labels: map[string]string{"agent": "codex", "runtime": "exec"}}}
 	})
-	submit := func(selector []wire.Requirement) error {
-		_, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-			Selector: selector,
-			Prompt:   "work", Deadline: time.Minute, QueueDeadline: time.Minute,
-		})
-		return err
-	}
-	if err := submit([]wire.Requirement{{Key: "platform", Operator: wire.OpIn, Values: []string{"aws"}}, {Key: "runtime", Operator: wire.OpIn, Values: []string{"lambda"}}}); err != nil {
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{{Key: "platform", Operator: wire.OpIn, Values: []string{"aws"}}}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
 		t.Fatalf("second adapter's offer did not match: %v", err)
 	}
-	if err := submit([]wire.Requirement{{Key: "platform", Operator: wire.OpIn, Values: []string{"aws"}}, {Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}); err == nil {
-		t.Fatal("matched exec on aws, which only the nomad adapter offers")
+	if placement := receiver.claim(t, f.ctx, result.RunID)[0].submission.Wherry.Placement; placement.Agent != "codex" || placement.Runtime != "exec" {
+		t.Fatalf("placement %#v, want codex on exec", placement)
+	}
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{{Key: "platform", Operator: wire.OpIn, Values: []string{"aws"}}, {Key: "runtime", Operator: wire.OpIn, Values: []string{"podman"}}}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrNoMatchingReceiver) {
+		t.Fatalf("matched podman on aws, which only the nomad adapter offers: %v", err)
 	}
 }
 
-func TestSubmitIgnoresStaleCapability(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	fixture.capability(t, func(capability *wire.Capability) {
-		capability.AtMS = time.Now().Add(-121 * time.Second).UnixMilli()
-	})
-	if _, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
-		Prompt:   "work", Deadline: time.Minute, QueueDeadline: time.Minute,
-	}); err == nil {
-		t.Fatal("stale capability was accepted")
+func TestSubmitIgnoresStaleOrUnauthorisedAdvertisements(t *testing.T) {
+	for name, setup := range map[string]func(*testing.T, *fixture){
+		"stale": func(t *testing.T, f *fixture) {
+			f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.AtMS = time.Now().Add(-121 * time.Second).UnixMilli() })
+		},
+		"unregistered key": func(t *testing.T, f *fixture) {
+			receiver := f.addReceiver(t, "receiver-a", "pool-a")
+			_, receiver.key, _ = ed25519.GenerateKey(rand.Reader)
+			receiver.advertise(t, f.ctx, nil)
+		},
+		"ended member": func(t *testing.T, f *fixture) {
+			f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+			f.end(t, "receiver-a")
+		},
+		"pool not entitled": func(t *testing.T, f *fixture) {
+			if err := f.service.PoolCreate(f.ctx, "pool-b", testTerms()); err != nil {
+				t.Fatal(err)
+			}
+			f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			setup(t, f)
+			if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrNoMatchingReceiver) {
+				t.Fatalf("submit = %v, want no matching receiver", err)
+			}
+		})
 	}
 }
 
-func TestSubmitIgnoresCapabilityBeyondEnrolment(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	fixture.capability(t, func(capability *wire.Capability) {
-		capability.Labels["lab/arch"] = "arm64"
-	})
-	if _, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
-		Prompt:   "work", Deadline: time.Minute, QueueDeadline: time.Minute,
-	}); err == nil {
-		t.Fatal("capability beyond enrolment was accepted")
+func TestSubmitChoosesPoolOfMostSpareMember(t *testing.T) {
+	f := newFixture(t)
+	f.pool(t, "pool-b")
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 3 })
+	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 1 })
+	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 9, 0; ad.Offers = []wire.Offer{} })
+	if result := f.submit(t, defaultSelector()); result.Pool != "pool-b" {
+		t.Fatalf("pool %q, want pool-b through its member with most spare capacity", result.Pool)
+	}
+	f.receivers["receiver-a"].advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 1 })
+	if result := f.submit(t, defaultSelector()); result.Pool != "pool-a" {
+		t.Fatalf("pool %q, want pool-a through the lower receiver ID on equal spare capacity", result.Pool)
 	}
 }
 
-func TestReceiversListsLiveStaleAndSilent(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	fixture.capability(t, nil)
-	batchKey := fixture.addReceiver(t, "receiver-b", "batch", map[string]string{})
-	fixture.addReceiver(t, "receiver-c", "quiet", map[string]string{})
-	fixture.produceCapability(t, "receiver-b", &wire.Capability{
-		ReceiverID: "receiver-b", Pool: "batch",
-		Labels: map[string]string{}, Offers: []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}},
-		Capacity: 4, InFlight: 2, Generation: 1, AtMS: time.Now().Add(-121 * time.Second).UnixMilli(),
-	}, batchKey)
+func TestResolvePlacement(t *testing.T) {
+	terms := testTerms()
+	terms.Agents = append(terms.Agents, admin.AgentTerms{Name: "gemini"})
+	terms.Runtimes = append(terms.Runtimes, "lambda")
+	terms.DefaultAgent, terms.DefaultRuntime = "codex", "exec"
+	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Adapters: []admin.AdapterSettings{{Name: "lab", Type: "nomad"}, {Name: "cloud", Type: "aws"}}}
+	state := admin.NewState()
+	state.Pools["pool-a"] = terms
+	state.Receivers["receiver-a"] = config
+	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
+	offer := func(adapter, agent, runtime string) wire.Offer {
+		return wire.Offer{Adapter: adapter, Labels: map[string]string{"agent": agent, "runtime": runtime}}
+	}
+	all := []wire.Offer{offer("lab", "claude", "podman"), offer("lab", "gemini", "lambda"), offer("cloud", "codex", "podman"), offer("lab", "codex", "exec"), offer("cloud", "claude", "exec")}
+	requirement := func(key string, values ...string) wire.Requirement {
+		return wire.Requirement{Key: key, Operator: wire.OpIn, Values: values}
+	}
+	for name, test := range map[string]struct {
+		selector []wire.Requirement
+		offers   []wire.Offer
+		want     string
+	}{
+		"defaults first":                {nil, all, "codex/exec"},
+		"default runtime within agent":  {[]wire.Requirement{requirement("agent", "claude")}, all, "claude/exec"},
+		"declared runtime order":        {[]wire.Requirement{requirement("agent", "claude"), requirement("runtime", "podman", "lambda")}, all, "claude/podman"},
+		"declared agent order":          {[]wire.Requirement{requirement("agent", "gemini", "claude"), requirement("runtime", "lambda", "podman")}, all, "claude/podman"},
+		"default agent before declared": {[]wire.Requirement{requirement("runtime", "podman")}, all, "codex/podman"},
+		"platform from adapter":         {[]wire.Requirement{requirement("platform", "aws")}, all, "codex/podman"},
+		"agent outside terms":           {nil, []wire.Offer{offer("lab", "other", "exec")}, ""},
+		"runtime outside terms":         {nil, []wire.Offer{offer("lab", "claude", "wasm")}, ""},
+		"adapter outside configuration": {nil, []wire.Offer{offer("edge", "claude", "exec")}, ""},
+		"selector against offer labels": {[]wire.Requirement{requirement("region", "eu")}, all, ""},
+		"only the last offer satisfies": {[]wire.Requirement{requirement("agent", "gemini")}, all, "gemini/lambda"},
+		"no offers":                     {nil, []wire.Offer{}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: test.offers, Capacity: 1}}
+			pool, placement, ok := resolvePlacement(state, "tenant-a", test.selector, ads)
+			got := ""
+			if ok {
+				got = placement.Agent + "/" + placement.Runtime
+				if pool != "pool-a" || placement.Labels["agent"] != placement.Agent || placement.Labels["runtime"] != placement.Runtime || placement.Labels["platform"] != "" {
+					t.Fatalf("pool %q placement %#v", pool, placement)
+				}
+			}
+			if got != test.want {
+				t.Fatalf("placed %q, want %q", got, test.want)
+			}
+		})
+	}
+	if _, _, ok := resolvePlacement(state, "tenant-b", nil, map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: all}}); ok {
+		t.Fatal("placed a task for a tenant not entitled to the pool")
+	}
+}
 
-	receivers, skipped, err := fixture.client.Receivers(fixture.ctx)
+// sealsTo returns the host's seals, newest last, addressed to receiver.
+func (f *fixture) sealsTo(t *testing.T, receiver string) []signed.Seal {
+	t.Helper()
+	records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", "host-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if skipped != 0 || len(receivers) != 3 {
-		t.Fatalf("got %d receivers and %d skipped, want 3 and 0", len(receivers), skipped)
+	var seals []signed.Seal
+	for _, record := range records {
+		if seal, err := signed.DecodeSeal(record.Value); err == nil && seal.Receiver == receiver {
+			seals = append(seals, seal)
+		}
 	}
-	if receivers[0].ReceiverID != "receiver-b" || receivers[0].Status != "stale" || receivers[0].Capacity != 4 || receivers[0].InFlight != 2 {
-		t.Fatalf("unexpected stale receiver: %#v", receivers[0])
-	}
-	if receivers[1].ReceiverID != "receiver-a" || receivers[1].Status != "live" {
-		t.Fatalf("unexpected live receiver: %#v", receivers[1])
-	}
-	if receivers[2].ReceiverID != "receiver-c" || receivers[2].Status != "silent" || receivers[2].HeartbeatAge != "-" {
-		t.Fatalf("unexpected silent receiver: %#v", receivers[2])
-	}
+	return seals
 }
 
-func TestReceiversSkipsUnverifiableCapability(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	_, unenrolledKey, err := ed25519.GenerateKey(rand.Reader)
+func TestSubmitSealsToEveryLiveMemberLackingASeal(t *testing.T) {
+	f := newFixture(t)
+	f.pool(t, "pool-b")
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	f.addReceiver(t, "receiver-b", "pool-a").advertise(t, f.ctx, nil)
+	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.AtMS = time.Now().Add(-time.Hour).UnixMilli() })
+	f.addReceiver(t, "receiver-d", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = []wire.Offer{} })
+	f.submit(t, defaultSelector())
+	for receiver, want := range map[string]int{"receiver-a": 1, "receiver-b": 1, "receiver-c": 0, "receiver-d": 0} {
+		if got := len(f.sealsTo(t, receiver)); got != want {
+			t.Fatalf("%s holds %d seals after the first submit, want %d", receiver, got, want)
+		}
+	}
+	f.submit(t, defaultSelector())
+	if got := len(f.sealsTo(t, "receiver-a")) + len(f.sealsTo(t, "receiver-b")); got != 2 {
+		t.Fatalf("resealed to members holding a current seal: %d seals", got)
+	}
+	f.addReceiver(t, "receiver-e", "pool-a").advertise(t, f.ctx, nil)
+	f.submit(t, defaultSelector())
+	if got := len(f.sealsTo(t, "receiver-e")); got != 1 {
+		t.Fatalf("new member holds %d seals, want 1", got)
+	}
+	short, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: 3 * time.Hour, QueueDeadline: 2 * time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.produceCapability(t, "unenrolled", &wire.Capability{
-		ReceiverID: "unenrolled", Pool: "default", Labels: map[string]string{}, Offers: []wire.Offer{},
-		Capacity: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
-	}, unenrolledKey)
-	fixture.capability(t, func(capability *wire.Capability) {
-		capability.Labels["lab/arch"] = "arm64"
-	})
+	if got := len(f.sealsTo(t, "receiver-a")); got != 2 || short.Pool != "pool-a" {
+		t.Fatalf("seal lasting less than the queue deadline counted as current: %d seals", got)
+	}
+}
 
-	receivers, skipped, err := fixture.client.Receivers(fixture.ctx)
+func TestSubmitPinsSealingKey(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	f.submit(t, defaultSelector())
+	pins, err := f.host.readPins()
+	if err != nil || pins["receiver-a"] != signed.SealingKeyID(receiver.sealing.PublicKey()) {
+		t.Fatalf("pins %v, %v", pins, err)
+	}
+	next, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	_, nextKey, _ := ed25519.GenerateKey(rand.Reader)
+	rotation, err := signed.RotateKey("receiver-a", receiver.key, nextKey, next.PublicKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if skipped != 2 {
-		t.Fatalf("got skipped count %d, want 2", skipped)
+	receiver.produce(t, f.ctx, admin.ReceiverTopic("receiver-a"), "receiver-a", rotation)
+	receiver.key, receiver.sealing = nextKey, next
+	receiver.advertise(t, f.ctx, nil)
+	before := f.tasksEnd(t, "pool-a")
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
+		t.Fatal("sealed to a sealing key other than the pinned one")
 	}
-	if len(receivers) != 1 || receivers[0].Status != "silent" {
-		t.Fatalf("unexpected receivers: %#v", receivers)
-	}
-}
-
-func TestReceiversShowsOffers(t *testing.T) {
-	fixture := newClientFixture(t, false)
-	labels := map[string]string{"lab/site": "home"}
-	key := fixture.addReceiver(t, "receiver-nomad", "nomad", labels)
-	offers := []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}}
-	fixture.produceCapability(t, "receiver-nomad", &wire.Capability{
-		ReceiverID: "receiver-nomad", Pool: "nomad", Labels: labels, Offers: offers,
-		Capacity: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
-	}, key)
-
-	receivers, _, err := fixture.client.Receivers(fixture.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(receivers) != 1 || receivers[0].Pool != "nomad" || !reflect.DeepEqual(receivers[0].Offers, offers) || !reflect.DeepEqual(receivers[0].Adapters, singleGrant()) {
-		t.Fatalf("unexpected receivers: %#v", receivers)
+	if len(f.sealsTo(t, "receiver-a")) != 1 || f.tasksEnd(t, "pool-a") != before {
+		t.Fatal("a refused seal still wrote a seal or a task")
 	}
 }
 
-func TestSubmitChoosesLeastLoadedAmongMatches(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	fixture.capability(t, func(capability *wire.Capability) {
-		capability.Capacity = 10
-		capability.InFlight = 0
-	})
-	namedKey := fixture.addReceiver(t, "receiver-b", "named", map[string]string{})
-	fixture.produceCapability(t, "receiver-b", &wire.Capability{
-		ReceiverID: "receiver-b", Pool: "named",
-		Labels: map[string]string{}, Offers: []wire.Offer{{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}}},
-		Capacity: 2, InFlight: 1, Generation: 1, AtMS: time.Now().UnixMilli(),
-	}, namedKey)
-
-	result, err := fixture.client.Submit(fixture.ctx, SubmitInput{
-		Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
-		Prompt:   "work", Deadline: time.Minute, QueueDeadline: time.Minute,
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestStatusBeforeAndAfterEcho(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	submitted := f.submit(t, defaultSelector())
+	status, err := f.host.Status(f.ctx, submitted.RunID)
+	if err != nil || status.Status.State != wire.TaskStateSubmitted || status.Turn != 1 {
+		t.Fatalf("status before the echo %#v, %v", status, err)
 	}
-	if result.Pool != "default" {
-		t.Fatalf("got pool %q, want least-loaded default", result.Pool)
+	other := f.newHost(t, "host-b", t.TempDir())
+	if _, err := other.Status(f.ctx, submitted.RunID); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("another host's status before the echo: %v, want run not found", err)
 	}
-}
-
-func TestAwaitIgnoresReplyFromUnenrolledKey(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	_, key, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
+	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+	receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+	for _, host := range []*Host{f.host, other} {
+		if status, err := host.Status(f.ctx, submitted.RunID); err != nil || status.Status.State != wire.TaskStateWorking {
+			t.Fatalf("status after the claim %#v, %v", status, err)
+		}
 	}
-	submission, hash := fixture.rootSubmission(t, "run-unenrolled", "default")
-	task := testTask(submission, hash, 1, wire.TaskStateCompleted)
-	fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, key))
-	if _, err := fixture.client.Await(fixture.ctx, task.Task.ID, 100*time.Millisecond); err == nil {
-		t.Fatal("task from unenrolled key was accepted")
+	if _, err := f.host.Status(f.ctx, "run-missing"); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("status of an unknown run: %v", err)
 	}
 }
 
-func TestAwaitRejectsForgedTaskFromOtherPool(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	otherPoolKey := fixture.addReceiver(t, "receiver-other", "other", map[string]string{})
-	submission, hash := fixture.rootSubmission(t, "run-other-pool", "default")
-	task := testTask(submission, hash, 1, wire.TaskStateCompleted)
-	fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, otherPoolKey))
-	if _, err := fixture.client.Await(fixture.ctx, task.Task.ID, 100*time.Millisecond); err == nil {
-		t.Fatal("task forged by a receiver in another pool was accepted")
-	}
-}
-
-func TestAwaitRejectsTaskHashMismatch(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	submission, _ := fixture.rootSubmission(t, "run-hash-mismatch", "default")
-	task := testTask(submission, strings.Repeat("a", 64), 1, wire.TaskStateCompleted)
-	fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, fixture.receiverKey))
-	if _, err := fixture.client.Await(fixture.ctx, task.Task.ID, 100*time.Millisecond); err == nil {
-		t.Fatal("task with a mismatched submission hash was accepted")
+func TestAwaitAcceptsOnlyBoundRecords(t *testing.T) {
+	for name, forge := range map[string]func(*testing.T, *fixture, *testReceiver, claimed) []byte{
+		"unregistered key": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) []byte {
+			impostor := *receiver
+			_, impostor.key, _ = ed25519.GenerateKey(rand.Reader)
+			return impostor.result(t, task, 1, wire.TaskStateCompleted, nil)
+		},
+		"task hash": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) []byte {
+			task.hash = hex.EncodeToString(make([]byte, 32))
+			return receiver.result(t, task, 1, wire.TaskStateCompleted, nil)
+		},
+		"history": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) []byte {
+			return receiver.result(t, task, 1, wire.TaskStateCompleted, func(result *wire.Result) { result.Task.History = []wire.Message{} })
+		},
+		"message": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) []byte {
+			return receiver.result(t, task, 1, wire.TaskStateCompleted, func(result *wire.Result) { result.Task.History[0].MessageID = "msg-other" })
+		},
+		"turn": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) []byte {
+			task.submission.Wherry.Turn = 2
+			task.submission.Message.MessageID = "msg-turn"
+			return receiver.result(t, task, 1, wire.TaskStateCompleted, func(result *wire.Result) {
+				result.Task.History = append([]wire.Message{task.submission.Message}, task.submission.Message)
+			})
+		},
+		"other pool": func(t *testing.T, f *fixture, _ *testReceiver, task claimed) []byte {
+			f.pool(t, "pool-b")
+			other := f.addReceiver(t, "receiver-b", "pool-b")
+			return other.result(t, task, 1, wire.TaskStateCompleted, nil)
+		},
+		"working": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) []byte {
+			return receiver.result(t, task, 1, wire.TaskStateWorking, nil)
+		},
+		"terminal status alone": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) []byte {
+			return receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil)
+		},
+		"status hash": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) []byte {
+			task.hash = hex.EncodeToString(make([]byte, 32))
+			return receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil)
+		},
+		"status from other pool": func(t *testing.T, f *fixture, _ *testReceiver, task claimed) []byte {
+			f.pool(t, "pool-b")
+			other := f.addReceiver(t, "receiver-b", "pool-b")
+			return other.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			receiver, task := f.admitted(t)
+			forged := forge(t, f, receiver, task)
+			receiver.feed(t, f.ctx, task.submission.Wherry.Run, forged)
+			if awaited, err := f.host.Await(f.ctx, task.submission.Wherry.Run, 300*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("await = %#v, %v; want the %s record ignored", awaited, err, name)
+			}
+		})
 	}
 }
 
 func TestAwaitHighAttemptDoesNotMaskResult(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	submission, hash := fixture.rootSubmission(t, "run-attempts", "default")
-	fixture.produce(t, "replies.test", submission.Wherry.RunID, signed(t, wire.TypeTask, testTask(submission, hash, 2, wire.TaskStateWorking), fixture.receiverKey))
-	fixture.produce(t, "replies.test", submission.Wherry.RunID, signed(t, wire.TypeTask, testTask(submission, hash, 1, wire.TaskStateCompleted), fixture.receiverKey))
-	awaited, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if awaited.Task.Status.State != wire.TaskStateCompleted {
-		t.Fatalf("state %s, want COMPLETED", awaited.Task.Status.State)
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 2, wire.TaskStateWorking, nil))
+	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateCompleted, nil))
+	awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
+	if err != nil || awaited.Task == nil || awaited.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("await %#v, %v", awaited, err)
 	}
 }
 
-func TestAwaitFailsClosedWithoutSubmission(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	if _, err := fixture.client.Await(fixture.ctx, "run-missing", time.Second); err == nil || !strings.Contains(err.Error(), "verified root submission not found") {
-		t.Fatalf("got %v, want missing verified submission error", err)
+func TestAwaitFailsClosedWithoutRun(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.host.Await(f.ctx, "run-missing", time.Second); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("await = %v, want run not found", err)
 	}
 }
 
-func TestAwaitRejectsTaskLineageMismatch(t *testing.T) {
-	for name, mutate := range map[string]func(*wire.TaskRecord){
-		"context": func(task *wire.TaskRecord) { task.Task.ContextID = "run-other" },
-		"history": func(task *wire.TaskRecord) { task.Task.History = []wire.Message{} },
-		"message": func(task *wire.TaskRecord) { task.Task.History[0].MessageID = "msg-other" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			fixture := newClientFixture(t, true)
-			submission, hash := fixture.rootSubmission(t, "run-lineage-"+name, "default")
-			task := testTask(submission, hash, 1, wire.TaskStateCompleted)
-			mutate(task)
-			fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, fixture.receiverKey))
-			if _, err := fixture.client.Await(fixture.ctx, task.Task.ID, 100*time.Millisecond); err == nil {
-				t.Fatal("task with mismatched lineage was accepted")
-			}
-		})
-	}
+func TestAwaitReturnsOnInterruptedOrRejected(t *testing.T) {
+	t.Run("interrupted", func(t *testing.T) {
+		f := newFixture(t)
+		receiver, task := f.admitted(t)
+		receiver.feed(t, f.ctx, task.submission.Wherry.Run, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
+		awaited, err := f.host.Await(f.ctx, task.submission.Wherry.Run, 5*time.Second)
+		if err != nil || awaited.Task != nil || awaited.Status.State != wire.TaskStateAuthRequired {
+			t.Fatalf("await %#v, %v; want AUTH_REQUIRED without a task", awaited, err)
+		}
+	})
+	t.Run("rejected before any echo", func(t *testing.T) {
+		f := newFixture(t)
+		receiver := f.addReceiver(t, "receiver-a", "pool-a")
+		receiver.advertise(t, f.ctx, nil)
+		submitted := f.submit(t, defaultSelector())
+		task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+		receiver.feed(t, f.ctx, submitted.RunID, receiver.status(t, task, 1, "rejected-1", "rejected", wire.TaskStateRejected, nil))
+		awaited, err := f.host.Await(f.ctx, submitted.RunID, 5*time.Second)
+		if err != nil || awaited.Task != nil || awaited.Status.State != wire.TaskStateRejected {
+			t.Fatalf("await %#v, %v; want REJECTED", awaited, err)
+		}
+	})
 }
 
-func TestAwaitReturnsOnInterrupted(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	submission, hash := fixture.rootSubmission(t, "run-auth", "default")
-	status := &wire.StatusRecord{
-		StatusUpdate: wire.TaskStatusUpdateEvent{
-			TaskID: submission.Wherry.RunID, ContextID: submission.Wherry.Lineage.RootRunID,
-			Status: wire.TaskStatus{
-				State: wire.TaskStateAuthRequired, Timestamp: time.Now().UTC().Format(time.RFC3339),
-				Message: &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "credential token required"}}, Extensions: []string{wire.ExtensionURI}},
-			},
-		},
-		Wherry: wire.StatusExtension{Turn: 1, Attempt: 1, TaskHash: hash, ReceiverID: "receiver-a", Kind: "interrupted"},
-	}
-	fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
-	awaited, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if awaited.Task != nil || awaited.Status.State != wire.TaskStateAuthRequired {
-		t.Fatalf("result %#v, want AUTH_REQUIRED without a task", awaited)
-	}
-}
-
-func TestAwaitReturnsOnRejection(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	submission, hash := fixture.rootSubmission(t, "run-rejected", "default")
-	status := testStatus(submission, hash, "receiver-a", "rejected", wire.TaskStateRejected)
-	fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
-	awaited, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if awaited.Task != nil || awaited.Status.State != wire.TaskStateRejected {
-		t.Fatalf("result %#v, want REJECTED without a task", awaited)
-	}
-}
-
-func TestAwaitReturnsOnTerminalStatus(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	submission, hash := fixture.rootSubmission(t, "run-terminal-status", "default")
-	status := testStatus(submission, hash, "receiver-a", "terminal", wire.TaskStateCompleted)
-	fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
-	awaited, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if awaited.Task != nil || awaited.Status.State != wire.TaskStateCompleted {
-		t.Fatalf("result %#v, want terminal status", awaited)
-	}
-}
-
-func TestAwaitKeepsArtifactsWhenTaskFollowsStatus(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	submission, hash := fixture.rootSubmission(t, "run-split-fetch", "default")
-	status := testStatus(submission, hash, "receiver-a", "terminal", wire.TaskStateCompleted)
-	fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
-	task := testTask(submission, hash, 1, wire.TaskStateCompleted)
+func TestAwaitKeepsArtifactsWhenResultFollows(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		fixture.produce(t, "replies.test", task.Task.ID, signed(t, wire.TypeTask, task, fixture.receiverKey))
+		receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil), receiver.result(t, task, 1, wire.TaskStateCompleted, nil))
 	}()
-	awaited, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 10*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if awaited.Task == nil {
-		t.Fatalf("result %#v, want the task record that followed the terminal status", awaited)
+	awaited, err := f.host.Await(f.ctx, runID, 10*time.Second)
+	if err != nil || awaited.Task == nil {
+		t.Fatalf("await %#v, %v; want the result", awaited, err)
 	}
 }
 
-func TestAwaitStatusBindings(t *testing.T) {
-	for name, setup := range map[string]func(*testing.T, clientFixture, *wire.SubmissionRecord, string) (ed25519.PrivateKey, *wire.StatusRecord){
-		"task hash": func(_ *testing.T, f clientFixture, submission *wire.SubmissionRecord, _ string) (ed25519.PrivateKey, *wire.StatusRecord) {
-			return f.receiverKey, testStatus(submission, strings.Repeat("a", 64), "receiver-a", "interrupted", wire.TaskStateAuthRequired)
+func TestAwaitTakesLaterCancelOfInterruptedRun(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 3, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
+	peer := f.addReceiver(t, "receiver-b", "pool-a")
+	receiver.feed(t, f.ctx, runID, peer.status(t, task, 1, runID+"/1/canceled", "terminal", wire.TaskStateCanceled, nil))
+	for _, read := range []func() (wire.TaskState, error){
+		func() (wire.TaskState, error) {
+			awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
+			return awaited.Status.State, err
 		},
-		"receiver id": func(_ *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
-			return f.receiverKey, testStatus(submission, hash, "receiver-other", "interrupted", wire.TaskStateAuthRequired)
-		},
-		"turn": func(_ *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
-			status := testStatus(submission, hash, "receiver-a", "interrupted", wire.TaskStateAuthRequired)
-			status.Wherry.Turn++
-			return f.receiverKey, status
-		},
-		"pool": func(t *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
-			key := f.addReceiver(t, "receiver-other", "other", map[string]string{})
-			return key, testStatus(submission, hash, "receiver-other", "interrupted", wire.TaskStateAuthRequired)
+		func() (wire.TaskState, error) {
+			status, err := f.host.Status(f.ctx, runID)
+			return status.Status.State, err
 		},
 	} {
-		t.Run(name, func(t *testing.T) {
-			fixture := newClientFixture(t, true)
-			submission, hash := fixture.rootSubmission(t, "run-await-status-binding", "default")
-			key, status := setup(t, fixture, submission, hash)
-			fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, key))
-			if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 100*time.Millisecond); err == nil {
-				t.Fatalf("status with mismatched %s was accepted", name)
-			}
-		})
-	}
-}
-
-func TestAwaitTaskRequiresLatestTurn(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	submission, hash := fixture.rootSubmission(t, "run-task-turn", "default")
-	task := testTask(submission, hash, 1, wire.TaskStateCompleted)
-	task.Wherry.Turn++
-	fixture.produce(t, "replies.test", submission.Wherry.RunID, signed(t, wire.TypeTask, task, fixture.receiverKey))
-	if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 100*time.Millisecond); err == nil {
-		t.Fatal("task from a non-latest turn was accepted")
-	}
-}
-
-func TestAwaitEnforcesRecordTopics(t *testing.T) {
-	t.Run("task only from reply topic", func(t *testing.T) {
-		fixture := newClientFixture(t, true)
-		submission, hash := fixture.rootSubmission(t, "run-task-topic", "default")
-		fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeTask, testTask(submission, hash, 1, wire.TaskStateCompleted), fixture.receiverKey))
-		if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 100*time.Millisecond); err == nil {
-			t.Fatal("task record from tasks.events was accepted")
+		if state, err := read(); err != nil || state != wire.TaskStateCanceled {
+			t.Fatalf("state %s, %v; want the CANCELED terminal written after the interrupt", state, err)
 		}
-	})
-	t.Run("status only from event topic", func(t *testing.T) {
-		fixture := newClientFixture(t, true)
-		submission, hash := fixture.rootSubmission(t, "run-status-topic", "default")
-		status := testStatus(submission, hash, "receiver-a", "interrupted", wire.TaskStateAuthRequired)
-		fixture.produce(t, "replies.test", submission.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
-		if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 100*time.Millisecond); err == nil {
-			t.Fatal("status record from the reply topic was accepted")
+	}
+	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrRunCanceled) {
+		t.Fatalf("continue after cancel: %v", err)
+	}
+}
+
+func TestEchoFromAnotherPoolDoesNotMoveTheRun(t *testing.T) {
+	f := newFixture(t)
+	_, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	f.pool(t, "pool-b")
+	forger := f.addReceiver(t, "receiver-b", "pool-b")
+	forger.feed(t, f.ctx, runID, forger.echo(t, task), forger.result(t, task, 1, wire.TaskStateCompleted, nil))
+	other := f.newHost(t, "host-b", t.TempDir())
+	for name, host := range map[string]*Host{"submitting host": f.host, "other host": other} {
+		if awaited, err := host.Await(f.ctx, runID, 300*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("%s accepted a result through another pool's echo: %#v, %v", name, awaited, err)
 		}
+	}
+}
+
+func TestRecordsAfterMembershipEndAreRejected(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateCompleted, nil))
+	if _, err := f.host.Await(f.ctx, runID, 5*time.Second); err != nil {
+		t.Fatalf("before the membership end: %v", err)
+	}
+	f.end(t, "receiver-a")
+	if awaited, err := f.host.Await(f.ctx, runID, 300*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("await after the membership end %#v, %v", awaited, err)
+	}
+	if status, err := f.host.Status(f.ctx, runID); err != nil || status.Status.State != wire.TaskStateSubmitted {
+		t.Fatalf("status after the membership end %#v, %v; want only the local record", status, err)
+	}
+}
+
+func TestContinueThroughTheEcho(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
+	// Another host of the tenant has no local record: the pool and placement come from the echo alone.
+	other := f.newHost(t, "host-b", t.TempDir())
+	if _, err := f.host.Continue(f.ctx, "run-missing", ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("continue of an unknown run: %v", err)
+	}
+	result, err := other.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil || result.Turn != 2 {
+		t.Fatalf("continue %#v, %v", result, err)
+	}
+	tasks := receiver.claim(t, f.ctx, runID)
+	if len(tasks) != 2 {
+		t.Fatalf("pool tasks hold %d turns", len(tasks))
+	}
+	next := tasks[1].submission
+	if next.Wherry.Turn != 2 || next.Wherry.Host != "host-b" || next.Wherry.Pool != "pool-a" || next.Wherry.Placement.Agent != task.submission.Wherry.Placement.Agent ||
+		next.Wherry.Placement.Runtime != task.submission.Wherry.Placement.Runtime || next.Message.Parts[0].Text != "again" || next.Message.ContextID != runID {
+		t.Fatalf("continuation %#v", next)
+	}
+	sealedByOther := 0
+	records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", "host-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if _, err := signed.DecodeSeal(record.Value); err == nil {
+			sealedByOther++
+		}
+	}
+	if sealedByOther != 1 {
+		t.Fatalf("continuing host wrote %d seals, want to reseal the model credential", sealedByOther)
+	}
+	if _, err := other.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrTurnSubmitted) {
+		t.Fatalf("second continue: %v", err)
+	}
+}
+
+func TestContinueRequiresInterruptedTurn(t *testing.T) {
+	f := newFixture(t)
+	_, task := f.admitted(t)
+	if _, err := f.host.Continue(f.ctx, task.submission.Wherry.Run, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrNotAwaitingContinuation) {
+		t.Fatalf("continued a working run: %v", err)
+	}
+}
+
+func TestContinueIgnoresRejectedStatus(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil),
+		receiver.status(t, task, 2, "rejected-1", "rejected", wire.TaskStateRejected, nil))
+	if result, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil || result.Turn != 2 {
+		t.Fatalf("continue %#v, %v", result, err)
+	}
+}
+
+func TestCancelWritesToTheEchosPool(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	other := f.newHost(t, "host-b", t.TempDir())
+	if _, err := other.Cancel(f.ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Cancel(f.ctx, "run-missing"); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("cancel of an unknown run: %v", err)
+	}
+	state, err := admin.Load(f.ctx, receiver.kafka)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := admin.ReadKeys(f.ctx, receiver.kafka, admin.HostKeyTopics(state, "pool-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := admin.ReadTopic(f.ctx, receiver.kafka, admin.PoolEventsTopic("pool-a"))
+	if err != nil || len(records) != 1 {
+		t.Fatalf("pool events hold %d records, %v", len(records), err)
+	}
+	cancel, err := admin.AuthorizeCancel(state, keys, records[0].Value, "pool-a", "tenant-a")
+	if err != nil || cancel.Run != runID || cancel.Turn != 1 || cancel.Host != "host-b" {
+		t.Fatalf("cancel %#v, %v", cancel, err)
+	}
+}
+
+func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
+	f := newFixture(t)
+	f.pool(t, "pool-b")
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 3, 1 })
+	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Capacity, ad.InFlight, ad.AtMS = 4, 2, time.Now().Add(-121*time.Second).UnixMilli()
 	})
-}
-
-func TestClientContinueRefusesDuplicateTurn(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	first, hash := fixture.turnSubmission(t, "run-duplicate-turn", 1, "msg-1")
-	status := testStatus(first, hash, "receiver-a", "interrupted", wire.TaskStateAuthRequired)
-	fixture.produce(t, wire.TopicEvent, first.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
-	fixture.turnSubmission(t, first.Wherry.RunID, 2, "msg-2")
-	if _, err := fixture.client.Continue(fixture.ctx, first.Wherry.RunID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil || !strings.Contains(err.Error(), "already submitted") {
-		t.Fatalf("Continue = %v, want duplicate-turn refusal", err)
+	f.addReceiver(t, "receiver-c", "pool-a")
+	f.addReceiver(t, "receiver-d", "pool-a").advertise(t, f.ctx, nil)
+	f.submit(t, defaultSelector())
+	f.end(t, "receiver-d")
+	if err := f.service.PoolCreate(f.ctx, "pool-c", testTerms()); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestClientContinueRequiresInterruptedTask(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	first, hash := fixture.turnSubmission(t, "run-working", 1, "msg-1")
-	status := testStatus(first, hash, "receiver-a", "claimed", wire.TaskStateWorking)
-	fixture.produce(t, wire.TopicEvent, first.Wherry.RunID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
-	if _, err := fixture.client.Continue(fixture.ctx, first.Wherry.RunID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
-		t.Fatal("continued a task that was not interrupted")
-	}
-}
-
-func TestLatestStatusesRequireBindings(t *testing.T) {
-	for name, setup := range map[string]func(*testing.T, clientFixture, *wire.SubmissionRecord, string) (ed25519.PrivateKey, *wire.StatusRecord){
-		"task hash": func(_ *testing.T, f clientFixture, submission *wire.SubmissionRecord, _ string) (ed25519.PrivateKey, *wire.StatusRecord) {
-			return f.receiverKey, testStatus(submission, strings.Repeat("a", 64), "receiver-a", "interrupted", wire.TaskStateAuthRequired)
-		},
-		"receiver id": func(_ *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
-			return f.receiverKey, testStatus(submission, hash, "receiver-other", "interrupted", wire.TaskStateAuthRequired)
-		},
-		"pool": func(t *testing.T, f clientFixture, submission *wire.SubmissionRecord, hash string) (ed25519.PrivateKey, *wire.StatusRecord) {
-			key := f.addReceiver(t, "receiver-other", "other", map[string]string{})
-			return key, testStatus(submission, hash, "receiver-other", "interrupted", wire.TaskStateAuthRequired)
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			fixture := newClientFixture(t, true)
-			submission, hash := fixture.rootSubmission(t, "run-latest-binding", "default")
-			key, status := setup(t, fixture, submission, hash)
-			fixture.produce(t, wire.TopicEvent, submission.Wherry.RunID, signed(t, wire.TypeStatus, status, key))
-			submissions, _, err := fixture.client.readSubmissions(fixture.ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			loaded, err := fixture.client.loadState(fixture.ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			statuses, _, err := fixture.client.latestStatuses(fixture.ctx, submissions, loaded.receiverSigners(time.Now()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if statuses[submission.Wherry.RunID] != nil {
-				t.Fatalf("status with mismatched %s was accepted", name)
-			}
-		})
-	}
-}
-
-func TestLatestStatusesIgnoresRejected(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	first, hash := fixture.turnSubmission(t, "run-ignore-rejected", 1, "msg-1")
-	interrupted := testStatus(first, hash, "receiver-a", "interrupted", wire.TaskStateAuthRequired)
-	fixture.produce(t, wire.TopicEvent, first.Wherry.RunID, signed(t, wire.TypeStatus, interrupted, fixture.receiverKey))
-	third, thirdHash := fixture.turnSubmission(t, first.Wherry.RunID, 3, "msg-3")
-	rejected := testStatus(third, thirdHash, "receiver-a", "rejected", wire.TaskStateRejected)
-	fixture.produce(t, wire.TopicEvent, first.Wherry.RunID, signed(t, wire.TypeStatus, rejected, fixture.receiverKey))
-	result, err := fixture.client.Continue(fixture.ctx, first.Wherry.RunID, ContinueInput{Prompt: "second", Deadline: time.Minute, QueueDeadline: time.Minute})
+	f.addReceiver(t, "receiver-e", "pool-c").advertise(t, f.ctx, nil)
+	receivers, err := f.host.Receivers(f.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Turn != 2 {
-		t.Fatalf("continued at turn %d, want 2", result.Turn)
+	got := map[string]Receiver{}
+	var order []string
+	for _, receiver := range receivers {
+		got[receiver.ReceiverID] = receiver
+		order = append(order, receiver.ReceiverID)
+	}
+	if want := []string{"receiver-a", "receiver-c", "receiver-d", "receiver-b"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] || order[2] != want[2] || order[3] != want[3] {
+		t.Fatalf("receivers %v, want %v", order, want)
+	}
+	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 || len(a.Offers) != 1 || len(a.Seals) != 1 || a.Seals[0].Name != "model" || a.Seals[0].Pool != "pool-a" {
+		t.Fatalf("live receiver %#v", a)
+	}
+	if b := got["receiver-b"]; b.Status != "stale" || b.Capacity != 4 || b.InFlight != 2 {
+		t.Fatalf("stale receiver %#v", b)
+	}
+	if c := got["receiver-c"]; c.Status != "silent" || c.HeartbeatAge != "-" {
+		t.Fatalf("silent receiver %#v", c)
+	}
+	if d := got["receiver-d"]; d.Status != "ended" || !d.Ended {
+		t.Fatalf("ended receiver %#v", d)
 	}
 }
 
-// Each status's message text names the other credential; only the metadata decides.
-func TestWaitingTasksUsesStructuredCredential(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	interrupt := func(runID, text, metadata string) {
-		submission, hash := fixture.rootSubmission(t, runID, "default")
-		status := testStatus(submission, hash, "receiver-a", "interrupted", wire.TaskStateAuthRequired)
-		status.StatusUpdate.Status.Message = &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: text}}, Extensions: []string{wire.ExtensionURI}}
-		status.StatusUpdate.Metadata = jsontext.Value(metadata)
-		fixture.produce(t, wire.TopicEvent, runID, signed(t, wire.TypeStatus, status, fixture.receiverKey))
-	}
-	interrupt("run-token", "credential other required", `{"credential":"token"}`)
-	interrupt("run-other", "credential token required", `{"credential":"other"}`)
-	path := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result, err := fixture.client.PutSecret(fixture.ctx, "token", "receiver-a", path, 30*24*time.Hour)
+func TestEventsBindsRecordsToTheRun(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	f.pool(t, "pool-b")
+	other := f.addReceiver(t, "receiver-b", "pool-b")
+	_, otherTask := f.admitted(t)
+	wrongHash := task
+	wrongHash.hash = hex.EncodeToString(make([]byte, 32))
+	wrongTurn := task
+	wrongTurn.submission.Wherry.Turn = 2
+	receiver.feed(t, f.ctx, runID,
+		receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil),
+		receiver.status(t, wrongHash, 1, "started-1", "started", wire.TaskStateWorking, nil),
+		receiver.status(t, wrongTurn, 1, "started-2", "started", wire.TaskStateWorking, nil),
+		other.status(t, task, 1, "started-3", "started", wire.TaskStateWorking, nil),
+		receiver.chunk(t, task, 1, 0),
+		receiver.chunk(t, wrongTurn, 1, 0),
+		other.chunk(t, task, 1, 1),
+		[]byte("not a record"),
+	)
+	receiver.feed(t, f.ctx, otherTask.submission.Wherry.Run, receiver.status(t, otherTask, 1, "started-4", "started", wire.TaskStateWorking, nil), []byte("not a record"))
+	events, err := f.host.Events(f.ctx, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Waiting) != 1 || result.Waiting[0].RunID != "run-token" || result.Waiting[0].Turn != 1 {
-		t.Fatalf("waiting tasks %#v, want run-token alone", result.Waiting)
+	if len(events.Statuses) != 1 || events.Statuses[0].Wherry.EventID != "claimed-1" || events.Chunks[TurnAttempt{1, 1}] != 1 || len(events.Chunks) != 1 || events.Skipped != 6 {
+		t.Fatalf("statuses %d chunks %v skipped %d, want the one claimed status, one chunk and six skipped", len(events.Statuses), events.Chunks, events.Skipped)
 	}
-}
-
-func TestStateLoadSkipsUnsignedRecords(t *testing.T) {
-	fixture := newClientFixture(t, false)
-	fixture.produce(t, wire.TopicState, "unsigned", []byte(`{"not":"an envelope"}`))
-	enrolments, skipped, err := fixture.client.Enrolments(fixture.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(enrolments) != 1 {
-		t.Fatalf("got %d verified enrolments, want 1", len(enrolments))
-	}
-	if skipped != 1 {
-		t.Fatalf("got skipped count %d, want 1", skipped)
+	if _, err := f.host.Events(f.ctx, "run-missing"); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("events of an unknown run: %v", err)
 	}
 }
 
 func TestConfigRejectsUnknownField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	encoded := `{"broker":"localhost:9092","ca_file":"ca.pem","kafka_user":"user","kafka_password_file":"password","unknown":true}`
-	if err := os.WriteFile(path, []byte(encoded), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"bundle":"bundle.yaml","unknown":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadConfig(path); err == nil {
@@ -853,329 +1036,18 @@ func TestConfigRejectsUnknownField(t *testing.T) {
 func TestConnectErrorsOmitPassword(t *testing.T) {
 	const password = "kafka-password-secret"
 	dir := t.TempDir()
-	server := httptest.NewTLSServer(nil)
-	server.Close()
-	config := Config{
-		Broker: "localhost:9092", KafkaUser: "user",
-		CAFile:            filepath.Join(dir, "ca.pem"),
-		KafkaPasswordFile: filepath.Join(dir, "password"),
-		UserKey:           filepath.Join(dir, "missing.key"),
-	}
-	if err := os.WriteFile(config.CAFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.KafkaPasswordFile, []byte(password+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Connect(config); err == nil || strings.Contains(err.Error(), password) {
-		t.Fatalf("missing user key: %v", err)
-	}
-	config.UserKey = filepath.Join(dir, "user.key")
-	if _, err := InitUserKey(config.UserKey); err != nil {
-		t.Fatal(err)
-	}
-	config.Broker = "localhost:not-a-port"
-	if _, err := Connect(config); err == nil || strings.Contains(err.Error(), password) {
-		t.Fatalf("bad broker: %v", err)
-	}
-}
-
-func TestEventsSkipsOnlyThisRun(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	submission, hash := fixture.rootSubmission(t, "run-events", "default")
-	other, otherHash := fixture.rootSubmission(t, "run-other", "default")
-	fixture.produce(t, wire.TopicEvent, "run-events", signed(t, wire.TypeStatus, testStatus(submission, hash, "receiver-a", "started", wire.TaskStateWorking), fixture.receiverKey))
-	fixture.produce(t, wire.TopicEvent, "run-other", signed(t, wire.TypeStatus, testStatus(other, otherHash, "receiver-a", "started", wire.TaskStateWorking), fixture.receiverKey))
-	for _, topic := range []string{wire.TopicEvent, wire.TopicTranscript} {
-		fixture.produce(t, topic, "run-events", []byte("not an envelope"))
-		fixture.produce(t, topic, "run-other", []byte("not an envelope"))
-	}
-	events, err := fixture.client.Events(fixture.ctx, "run-events")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(events.Statuses) != 1 || events.Statuses[0].StatusUpdate.TaskID != "run-events" || events.Skipped != 2 {
-		t.Fatalf("statuses %#v skipped %d, want this run's status and its two bad records", events.Statuses, events.Skipped)
-	}
-}
-
-func TestEventsBindsRecordsToTheSubmission(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	otherPoolKey := fixture.addReceiver(t, "receiver-other", "other", map[string]string{})
-	submission, hash := fixture.rootSubmission(t, "run-bound", "default")
-	status := func(mutate func(*wire.StatusRecord)) []byte {
-		value := testStatus(submission, hash, "receiver-a", "started", wire.TaskStateWorking)
-		mutate(value)
-		return signed(t, wire.TypeStatus, value, fixture.receiverKey)
-	}
-	chunk := func(contextID string, key ed25519.PrivateKey) []byte {
-		return signed(t, wire.TypeArtifactUpdate, &wire.ArtifactUpdateRecord{
-			ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: "run-bound", ContextID: contextID, Artifact: wire.Artifact{
-				ArtifactID: "transcript", Parts: []wire.Part{{Text: "line", MediaType: "application/x-ndjson"}}, Extensions: []string{wire.ExtensionURI},
-			}},
-			Wherry: wire.ArtifactUpdateExtension{Turn: 1, Attempt: 1},
-		}, key)
-	}
-	fixture.produce(t, wire.TopicEvent, "run-bound", status(func(*wire.StatusRecord) {}))
-	for _, mutate := range []func(*wire.StatusRecord){
-		func(value *wire.StatusRecord) { value.Wherry.TaskHash = strings.Repeat("a", 64) },
-		func(value *wire.StatusRecord) { value.StatusUpdate.ContextID = "run-elsewhere" },
-		func(value *wire.StatusRecord) { value.Wherry.Turn = 2 },
+	config := Config{Bundle: filepath.Join(dir, "bundle.yaml"), HostKey: filepath.Join(dir, "missing.key"), StateDir: dir}
+	for name, bundle := range map[string]string{
+		"missing key": "broker: localhost:9092\nca: x\nprincipal: wherry.tnt.tenant-a.host-a\npassword: " + password + "\n",
+		"bad yaml":    "broker: [localhost\npassword: " + password + "\n",
+		"wrong type":  "broker: localhost:9092\nprincipal: wherry.tnt.tenant-a.host-a\npassword: [" + password + "]\n",
+		"unknown":     "broker: localhost:9092\npassword: " + password + "\nextra: " + password + "\n",
 	} {
-		fixture.produce(t, wire.TopicEvent, "run-bound", status(mutate))
-	}
-	fixture.produce(t, wire.TopicTranscript, "run-bound", chunk("run-bound", fixture.receiverKey))
-	fixture.produce(t, wire.TopicTranscript, "run-bound", chunk("run-elsewhere", fixture.receiverKey))
-	fixture.produce(t, wire.TopicTranscript, "run-bound", chunk("run-bound", otherPoolKey))
-	events, err := fixture.client.Events(fixture.ctx, "run-bound")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(events.Statuses) != 1 || events.Chunks[TurnAttempt{Turn: 1, Attempt: 1}] != 1 || events.Skipped != 5 {
-		t.Fatalf("statuses %d chunks %v skipped %d, want 1, 1 and 5", len(events.Statuses), events.Chunks, events.Skipped)
-	}
-	if _, err := fixture.client.Events(fixture.ctx, "run-never-submitted"); !errors.Is(err, ErrRunNotFound) {
-		t.Fatalf("events without a submission: %v, want ErrRunNotFound", err)
-	}
-}
-
-func (fixture clientFixture) topicEnd(t *testing.T, topic string) int64 {
-	t.Helper()
-	offsets, err := kadm.NewClient(fixture.kafka).ListEndOffsets(fixture.ctx, topic)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := offsets.Error(); err != nil {
-		t.Fatal(err)
-	}
-	var total int64
-	for _, offset := range offsets[topic] {
-		if offset.Partition >= 0 {
-			total += offset.Offset
-		}
-	}
-	return total
-}
-
-func signed(t *testing.T, recordType wire.RecordType, value any, key ed25519.PrivateKey) []byte {
-	t.Helper()
-	payload, err := wire.MarshalPayload(recordType, value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	envelope, err := wire.MarshalEnvelope(wire.Sign(recordType, payload, key))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return envelope
-}
-
-func (fixture clientFixture) rootSubmission(t *testing.T, runID, pool string) (*wire.SubmissionRecord, string) {
-	t.Helper()
-	submission := &wire.SubmissionRecord{
-		Message: wire.Message{
-			MessageID: "msg-" + runID, ContextID: runID, TaskID: runID, Role: wire.RoleUser,
-			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
-		},
-		Wherry: wire.SubmissionExtension{
-			RunID: runID, Turn: 1, Attempt: 1, Pool: pool, Selector: []wire.Requirement{},
-			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
-			ReplyTopic: "replies.test",
-			Lineage:    wire.Lineage{RootRunID: runID, Ancestors: []string{}, Chain: []wire.Bytes{}},
-		},
-	}
-	envelope, err := trust.SignRootSubmission(*submission, fixture.userKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.produce(t, wire.TopicTask, runID, envelope)
-	return submission, trust.EnvelopeHash(envelope)
-}
-
-func (fixture clientFixture) turnSubmission(t *testing.T, runID string, turn int64, messageID string) (*wire.SubmissionRecord, string) {
-	t.Helper()
-	submission := &wire.SubmissionRecord{
-		Message: wire.Message{
-			MessageID: messageID, ContextID: runID, TaskID: runID, Role: wire.RoleUser,
-			Parts: []wire.Part{{Text: "work"}}, Extensions: []string{wire.ExtensionURI},
-		},
-		Wherry: wire.SubmissionExtension{
-			RunID: runID, Turn: turn, Attempt: 1, Pool: "default", Selector: []wire.Requirement{},
-			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
-			ReplyTopic: "replies.test",
-			Lineage:    wire.Lineage{RootRunID: runID, Ancestors: []string{}, Chain: []wire.Bytes{}},
-		},
-	}
-	envelope, err := trust.SignRootSubmission(*submission, fixture.userKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.produce(t, wire.TopicTask, runID, envelope)
-	return submission, trust.EnvelopeHash(envelope)
-}
-
-func testStatus(submission *wire.SubmissionRecord, hash, receiverID, kind string, state wire.TaskState) *wire.StatusRecord {
-	return &wire.StatusRecord{
-		StatusUpdate: wire.TaskStatusUpdateEvent{
-			TaskID: submission.Wherry.RunID, ContextID: submission.Wherry.Lineage.RootRunID,
-			Status: wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format(time.RFC3339)},
-		},
-		Wherry: wire.StatusExtension{
-			Turn: submission.Wherry.Turn, Attempt: 1, TaskHash: hash, ReceiverID: receiverID, Kind: kind,
-		},
-	}
-}
-
-func testTask(submission *wire.SubmissionRecord, taskHash string, attempt int64, state wire.TaskState) *wire.TaskRecord {
-	return &wire.TaskRecord{
-		Task: wire.Task{
-			ID: submission.Wherry.RunID, ContextID: submission.Wherry.Lineage.RootRunID,
-			Artifacts: []wire.Artifact{}, History: []wire.Message{submission.Message},
-			Status: wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format(time.RFC3339)},
-		},
-		Wherry: wire.TaskExtension{Turn: submission.Wherry.Turn, Attempt: attempt, TaskHash: taskHash},
-	}
-}
-
-func TestReEnrolAboveFloor(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	revoked, err := fixture.client.Revoke(fixture.ctx, "receiver-a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if revoked.Floor != 1 {
-		t.Fatalf("floor %d, want 1", revoked.Floor)
-	}
-	approve := func(want int64) {
-		t.Helper()
-		result, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), "auto", 30*24*time.Hour)
-		if err != nil {
+		if err := os.WriteFile(config.Bundle, []byte(bundle), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if result.Generation != want {
-			t.Fatalf("approved generation %d, want %d", result.Generation, want)
+		if _, err := Connect(config); err == nil || strings.Contains(err.Error(), password) {
+			t.Fatalf("%s: %v", name, err)
 		}
-		loaded, err := fixture.client.loadState(fixture.ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if enrolled, err := loaded.state.Receiver("receiver-a", time.Now()); err != nil || enrolled.Generation != want {
-			t.Fatalf("enrolled generation %d, err %v; want %d", enrolled.Generation, err, want)
-		}
-	}
-	approve(2)
-	// A floor above the current generation: the next approval must clear it, not follow the current generation.
-	revocation, err := trust.NewRevocation("receiver-a", 5, fixture.userKey, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.produce(t, wire.TopicState, "receiver-a", revocation)
-	approve(6)
-}
-
-func TestClientDistrustsRevokedReceiverRecords(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	submission, hash := fixture.rootSubmission(t, "run-revoked", "default")
-	fixture.produce(t, "replies.test", submission.Wherry.RunID, signed(t, wire.TypeTask, testTask(submission, hash, 1, wire.TaskStateCompleted), fixture.receiverKey))
-	if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, time.Second); err != nil {
-		t.Fatalf("before revocation: %v", err)
-	}
-	if _, err := fixture.client.Revoke(fixture.ctx, "receiver-a"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.client.Await(fixture.ctx, submission.Wherry.RunID, 200*time.Millisecond); err == nil {
-		t.Fatal("task signed by a revoked receiver was accepted")
-	}
-}
-
-func (fixture clientFixture) requestRenewal(t *testing.T, generation int64) {
-	t.Helper()
-	request := &wire.RenewRequest{ReceiverID: "receiver-a", Generation: generation, AtMS: time.Now().UnixMilli()}
-	fixture.produce(t, wire.TopicState, "receiver-a", signed(t, wire.TypeRenewRequest, request, fixture.receiverKey))
-}
-
-func TestAutoRenewalByClient(t *testing.T) {
-	fixture := newClientFixture(t, true)
-	before, err := fixture.client.loadState(fixture.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	founding, err := before.state.Receiver("receiver-a", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.requestRenewal(t, 1)
-	end := fixture.topicEnd(t, wire.TopicState)
-	if _, _, err := fixture.client.Receivers(fixture.ctx); err != nil {
-		t.Fatal(err)
-	}
-	if after := fixture.topicEnd(t, wire.TopicState); after != end+1 {
-		t.Fatalf("state records %d after answering one renew request, want %d", after, end+1)
-	}
-	loaded, err := fixture.client.loadState(fixture.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fixture.topicEnd(t, wire.TopicState) != end+1 {
-		t.Fatal("an answered renew request was renewed again")
-	}
-	renewed, err := loaded.state.Receiver("receiver-a", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	current, _, _ := loaded.state.Approval("receiver-a")
-	if renewed.Generation != 1 || renewed.ApprovalHash != founding.ApprovalHash || current.PrevStateHash != founding.ApprovalHash {
-		t.Fatalf("renewal generation %d hash %s prev %s", renewed.Generation, renewed.ApprovalHash, current.PrevStateHash)
-	}
-	if loaded.skipped != 0 {
-		t.Fatalf("skipped %d records", loaded.skipped)
-	}
-
-	t.Run("revoked", func(t *testing.T) {
-		if _, err := fixture.client.Revoke(fixture.ctx, "receiver-a"); err != nil {
-			t.Fatal(err)
-		}
-		fixture.requestRenewal(t, 1)
-		end := fixture.topicEnd(t, wire.TopicState)
-		if _, _, err := fixture.client.Enrolments(fixture.ctx); err != nil {
-			t.Fatal(err)
-		}
-		if after := fixture.topicEnd(t, wire.TopicState); after != end {
-			t.Fatal("client renewed a revoked receiver")
-		}
-	})
-}
-
-func TestManualRenewalNotAutomatic(t *testing.T) {
-	fixture := newClientFixture(t, false)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), "manual", 30*24*time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	fixture.requestRenewal(t, 1)
-	end := fixture.topicEnd(t, wire.TopicState)
-	enrolments, _, err := fixture.client.Enrolments(fixture.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fixture.topicEnd(t, wire.TopicState) != end {
-		t.Fatal("client answered a manual renew request")
-	}
-	if len(enrolments) != 1 || !enrolments[0].RenewalRequested {
-		t.Fatalf("enrolments %#v, want the renew request listed", enrolments)
-	}
-}
-
-func TestAutoRenewalLeavesLongerApproval(t *testing.T) {
-	fixture := newClientFixture(t, false)
-	if _, err := fixture.client.Approve(fixture.ctx, trust.EnvelopeHash(fixture.request), "default", map[string]string{}, testGrants(), "auto", 120*24*time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	fixture.requestRenewal(t, 1)
-	end := fixture.topicEnd(t, wire.TopicState)
-	if _, _, err := fixture.client.Receivers(fixture.ctx); err != nil {
-		t.Fatalf("a renew request that cannot extend the approval broke the client: %v", err)
-	}
-	if fixture.topicEnd(t, wire.TopicState) != end {
-		t.Fatal("client published a renewal that does not extend the approval")
 	}
 }

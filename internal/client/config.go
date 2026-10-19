@@ -1,7 +1,8 @@
 package client
 
 import (
-	"crypto/ed25519"
+	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json/jsontext"
@@ -12,20 +13,20 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/trust"
-	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
+	"gopkg.in/yaml.v3"
 )
 
-// Config is the on-disk wherry client configuration.
+// Config is the on-disk wherry host configuration. Credentials maps a
+// credential name to the file holding its value.
 type Config struct {
-	Broker            string `json:"broker"`
-	CAFile            string `json:"ca_file"`
-	KafkaUser         string `json:"kafka_user"`
-	KafkaPasswordFile string `json:"kafka_password_file"`
-	UserKey           string `json:"user_key,omitzero"`
-	ReplyTopic        string `json:"reply_topic,omitzero"`
+	Bundle      string            `json:"bundle"`
+	HostKey     string            `json:"host_key,omitzero"`
+	StateDir    string            `json:"state_dir,omitzero"`
+	Credentials map[string]string `json:"credentials,omitzero"`
 }
 
 // DefaultConfigPath returns WHERRY_CONFIG or the per-user default path.
@@ -40,84 +41,98 @@ func DefaultConfigPath() (string, error) {
 	return filepath.Join(home, ".config", "wherry", "config.json"), nil
 }
 
-// LoadConfig decodes the config at path, defaulting user_key and reply_topic.
+// LoadConfig decodes the config at path, defaulting host_key and state_dir.
 func LoadConfig(path string) (Config, error) {
 	encoded, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, err
 	}
 	var config Config
-	if err := json.Unmarshal(encoded, &config,
-		json.RejectUnknownMembers(true),
-		jsontext.AllowDuplicateNames(false),
-	); err != nil {
+	if err := json.Unmarshal(encoded, &config, json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
-	if config.Broker == "" || config.CAFile == "" || config.KafkaUser == "" || config.KafkaPasswordFile == "" {
-		return Config{}, errors.New("config requires broker, ca_file, kafka_user, and kafka_password_file")
+	if config.Bundle == "" {
+		return Config{}, errors.New("config requires bundle")
 	}
-	if config.UserKey == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Config{}, err
+	}
+	if config.HostKey == "" {
+		config.HostKey = filepath.Join(home, ".config", "wherry", "host.key")
+	}
+	if config.StateDir == "" {
+		config.StateDir = filepath.Join(home, ".config", "wherry", "state")
+	}
+	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir} {
+		if *path, err = expandHome(*path); err != nil {
 			return Config{}, err
 		}
-		config.UserKey = filepath.Join(home, ".config", "wherry", "user.key")
 	}
-	if config.ReplyTopic == "" {
-		config.ReplyTopic = "replies." + config.KafkaUser
-	}
-	for _, path := range []*string{&config.CAFile, &config.KafkaPasswordFile, &config.UserKey} {
-		*path, err = expandHome(*path)
-		if err != nil {
+	for name, path := range config.Credentials {
+		if config.Credentials[name], err = expandHome(path); err != nil {
 			return Config{}, err
 		}
 	}
 	return config, nil
 }
 
-// InitUserKey creates the configured user key and returns its fingerprint.
-func InitUserKey(path string) (string, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", err
+// Init creates the host key if it is missing and registers it on the host's
+// key topic, returning its key ID.
+func Init(ctx context.Context, config Config) (string, error) {
+	if _, err := os.Stat(config.HostKey); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(config.HostKey), 0o700); err != nil {
+			return "", err
+		}
+		if _, err := trust.GenerateSigningKeyFile(config.HostKey); err != nil {
+			return "", err
+		}
 	}
-	key, err := trust.GenerateSigningKeyFile(path)
+	host, err := Connect(config)
 	if err != nil {
 		return "", err
 	}
-	return wire.Fingerprint(key.Public().(ed25519.PublicKey)), nil
+	defer host.Close()
+	return host.Register(ctx)
 }
 
-// Connect opens the configured TLS and SCRAM-SHA-512 Kafka connection.
-func Connect(config Config) (*Client, error) {
-	caPEM, err := os.ReadFile(config.CAFile)
+// Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal.
+func Connect(config Config) (*Host, error) {
+	encoded, err := os.ReadFile(config.Bundle)
 	if err != nil {
-		return nil, fmt.Errorf("read CA file: %w", err)
+		return nil, fmt.Errorf("read bundle: %w", err)
+	}
+	var bundle admin.Bundle
+	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
+	decoder.KnownFields(true)
+	// YAML errors can quote the bundle's text, which holds the password.
+	if decoder.Decode(&bundle) != nil || bundle.Broker == "" || bundle.Principal == "" || bundle.Password == "" {
+		return nil, errors.New("bundle is not a valid wherry bundle")
 	}
 	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(caPEM) {
-		return nil, errors.New("CA file contains no certificates")
+	if !roots.AppendCertsFromPEM([]byte(bundle.CA)) {
+		return nil, errors.New("bundle CA contains no certificates")
 	}
-	password, err := os.ReadFile(config.KafkaPasswordFile)
+	key, err := trust.LoadSigningKeyFile(config.HostKey)
 	if err != nil {
-		return nil, fmt.Errorf("read Kafka password: %w", err)
-	}
-	userKey, err := trust.LoadSigningKeyFile(config.UserKey)
-	if err != nil {
-		return nil, fmt.Errorf("load user key: %w", err)
+		return nil, fmt.Errorf("load host key: %w", err)
 	}
 	kafka, err := kgo.NewClient(
-		kgo.SeedBrokers(config.Broker),
+		kgo.SeedBrokers(bundle.Broker),
 		kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
-		kgo.SASL(scram.Auth{User: config.KafkaUser, Pass: strings.TrimRight(string(password), "\r\n")}.AsSha512Mechanism()),
+		kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
 		// Aborted transactions are a fenced holder's writes (ADR-0010) and must never be read.
 		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
-		// A trailing abort marker is the last offset below a read bound; it must be seen to finish.
-		kgo.KeepControlRecords(),
 	)
 	if err != nil {
 		return nil, err
 	}
-	return New(kafka, userKey, config.ReplyTopic), nil
+	host, err := NewHost(kafka, key, bundle.Principal, config.StateDir, config.Credentials)
+	if err != nil {
+		kafka.Close()
+		return nil, err
+	}
+	return host, nil
 }
 
 func expandHome(path string) (string, error) {
