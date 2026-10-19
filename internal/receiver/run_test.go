@@ -29,7 +29,9 @@ func testActiveRun(t *testing.T, f fixture, run string, attempt int64) *activeRu
 		t.Fatal(err)
 	}
 	t.Cleanup(producer.Close)
-	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run })
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+	})
 	task := f.parse(t, record)
 	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: taskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, adapter: f.receiver.adapters[0]}
 }
@@ -1003,7 +1005,9 @@ func TestDenialStopsClaimingAndAccessResumesIt(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b" })
+	f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
+	})
 	time.Sleep(2 * time.Second)
 	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 1 {
 		t.Fatalf("dispatches %d while denied, want only the task before it", dispatches)
@@ -1015,6 +1019,23 @@ func TestDenialStopsClaimingAndAccessResumesIt(t *testing.T) {
 	f.await(t, "run-b", anyTask)
 	if !strings.Contains(f.logs.String(), "access restored") {
 		t.Fatalf("logs:\n%s", f.logs.String())
+	}
+}
+
+func TestDeniedReceiverDoesNotClaim(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.sealOwn(t, credentialName, time.Hour)
+	f.receiver.deny(kerr.GroupAuthorizationFailed)
+	f.submit(t, f.host, nil)
+	ctx, stop := context.WithTimeout(f.ctx, 2*time.Second)
+	defer stop()
+	// The broker still grants access: only the held denial keeps the receiver from claiming.
+	f.receiver.claimLoop(ctx)
+	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 || len(f.records(t, admin.PoolEventsTopic(testPool))) != 0 {
+		t.Fatalf("a denied receiver claimed: dispatches %d", dispatches)
+	}
+	if record, delivered := f.pollPool(t, "run-a", 5*time.Second); !delivered || record.DeliveryCount() != 1 {
+		t.Fatal("the task was acquired while the receiver was denied")
 	}
 }
 

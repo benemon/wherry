@@ -511,7 +511,9 @@ func terminalReason(t *testing.T, f fixture, run string) (wire.TaskState, string
 func startInFlight(t *testing.T, f fixture, ctx context.Context, run string) <-chan error {
 	t.Helper()
 	f.sealOwn(t, credentialName, time.Hour)
-	f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run })
+	f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+	})
 	done := make(chan error, 1)
 	go func() { done <- f.receiver.claimOne(ctx) }()
 	for {
