@@ -80,17 +80,17 @@ type gitInput struct {
 }
 
 type submitInput struct {
-	Prompt               string              `json:"prompt" jsonschema:"the task for the remote agent"`
-	Selector             map[string][]string `json:"selector" jsonschema:"offer label key to its accepted values; a key is agent, platform, runtime, region or zone, a platform key such as nomad.node_pool, or an operator key containing a slash such as example.com/gpu"`
-	Git                  *gitInput           `json:"git,omitempty" jsonschema:"repository to check out for the agent"`
-	DeadlineSeconds      int64               `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 1800"`
-	QueueDeadlineSeconds int64               `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`
+	Prompt               string             `json:"prompt" jsonschema:"the task for the remote agent"`
+	Agent                string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
+	Selector             []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the adapter must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
+	Git                  *gitInput          `json:"git,omitempty" jsonschema:"repository to check out for the agent"`
+	DeadlineSeconds      int64              `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 1800"`
+	QueueDeadlineSeconds int64              `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`
 }
 
 type submitOutput struct {
-	ID      string `json:"id" jsonschema:"run id"`
-	Pool    string `json:"pool" jsonschema:"pool the task was placed in"`
-	Skipped int    `json:"skipped,omitempty" jsonschema:"records that failed verification and were ignored"`
+	ID   string `json:"id" jsonschema:"run id"`
+	Pool string `json:"pool" jsonschema:"pool the task was placed in"`
 }
 
 type runInput struct {
@@ -181,7 +181,7 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receivers",
-		Description: "List the receivers of the pools this tenant may use, with their offers, spare capacity and the credentials this host has sealed to them. Read it to choose a selector before submit.",
+		Description: "List the receivers of the pools this tenant may use, with each adapter's agent and labels as wherry.admin records them, whether the receiver's live advertisement offers it, spare capacity and the credentials this host has sealed to them. Read it to choose an agent and selector before submit.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()
@@ -213,7 +213,7 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 		if err != nil {
 			return nil, submitOutput{}, toolFailure(err)
 		}
-		return nil, submitOutput{ID: result.RunID, Pool: result.Pool, Skipped: result.Skipped}, nil
+		return nil, submitOutput{ID: result.RunID, Pool: result.Pool}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -352,14 +352,9 @@ func submitFromInput(input submitInput) (busclient.SubmitInput, error) {
 	if input.Prompt == "" {
 		return busclient.SubmitInput{}, invalidArgument("prompt is required")
 	}
-	keys := make([]string, 0, len(input.Selector))
-	for key := range input.Selector {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	selector := []wire.Requirement{}
-	for _, key := range keys {
-		selector = append(selector, wire.Requirement{Key: key, Operator: wire.OpIn, Values: input.Selector[key]})
+	selector := input.Selector
+	if selector == nil {
+		selector = []wire.Requirement{}
 	}
 	var parts []wire.Part
 	if input.Git != nil {
@@ -371,7 +366,7 @@ func submitFromInput(input submitInput) (busclient.SubmitInput, error) {
 		return busclient.SubmitInput{}, err
 	}
 	return busclient.SubmitInput{
-		Selector: selector, Prompt: input.Prompt, Parts: parts,
+		Agent: input.Agent, Selector: selector, Prompt: input.Prompt, Parts: parts,
 		Deadline: deadline, QueueDeadline: queueDeadline,
 	}, nil
 }

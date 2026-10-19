@@ -43,11 +43,11 @@ func ParseRecord(encoded []byte, keys signed.Keys, value Record) error {
 	return nil
 }
 
-// Placement is the resolved agent, runtime and offer labels of a run.
+// Placement is what a run asks of its pool: an agent and the labels an
+// adapter must carry (ADR-0027 Placement).
 type Placement struct {
-	Agent   string            `json:"agent"`
-	Runtime string            `json:"runtime"`
-	Labels  map[string]string `json:"labels"`
+	Agent    string        `json:"agent"`
+	Selector []Requirement `json:"selector"`
 }
 
 // SubmissionBinding is the wherry block of a submission.
@@ -166,7 +166,6 @@ type StartFailure struct {
 	Wherry  ReceiverBinding `json:"wherry"`
 	Adapter string          `json:"adapter"`
 	Agent   string          `json:"agent"`
-	Runtime string          `json:"runtime"`
 	Class   string          `json:"class"`
 }
 
@@ -209,10 +208,10 @@ func validateIDs(values map[string]string) error {
 }
 
 func (value Placement) validate() error {
-	if err := validateIDs(map[string]string{"agent": value.Agent, "runtime": value.Runtime}); err != nil {
+	if err := validateID(value.Agent, "agent"); err != nil {
 		return err
 	}
-	return validateTerms(value.Labels, "labels")
+	return ValidateRequirements(value.Selector)
 }
 
 func (value *Submission) validate() error {
@@ -300,17 +299,17 @@ func (value *Chunk) validate() error {
 	if update.TaskID != value.Wherry.Run || update.ContextID != value.Wherry.Run || value.Wherry.Seq < 0 || !validHash(value.Wherry.TaskHash) {
 		return errors.New("invalid chunk")
 	}
-	return validateArtifactUpdate(&ArtifactUpdateRecord{ArtifactUpdate: *update, Wherry: ArtifactUpdateExtension{Turn: value.Wherry.Turn, Attempt: value.Wherry.Attempt, Seq: value.Wherry.Seq}})
+	return validateArtifactUpdate(update)
 }
 
 func (value *Result) validate() error {
 	if err := value.Wherry.ReceiverBinding.validate(); err != nil {
 		return err
 	}
-	if value.Task.ID != value.Wherry.Run || value.Task.ContextID != value.Wherry.Run {
+	if value.Task.ID != value.Wherry.Run || value.Task.ContextID != value.Wherry.Run || !validHash(value.Wherry.TaskHash) {
 		return errors.New("invalid result")
 	}
-	return validateTaskRecord(&TaskRecord{Task: value.Task, Wherry: TaskExtension{Turn: value.Wherry.Turn, Attempt: value.Wherry.Attempt, TaskHash: value.Wherry.TaskHash}})
+	return validateTask(&value.Task)
 }
 
 func (value *Echo) validate() error {
@@ -337,5 +336,5 @@ func (value *StartFailure) validate() error {
 	if err := value.Wherry.validate(); err != nil {
 		return err
 	}
-	return validateIDs(map[string]string{"adapter": value.Adapter, "agent": value.Agent, "runtime": value.Runtime, "class": value.Class})
+	return validateIDs(map[string]string{"adapter": value.Adapter, "agent": value.Agent, "class": value.Class})
 }

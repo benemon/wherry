@@ -11,6 +11,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
+	"strings"
 	"syscall"
 
 	"github.com/benemon/wherry/internal/adapter/nomad"
@@ -36,7 +38,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	logger := log.New(stdout, "receiver: ", log.LstdFlags|log.LUTC)
 	r, err := receiver.New(bundle, *stateDir, func(settings admin.AdapterSettings) (receiver.Named, error) {
-		return newAdapter(settings, bundle.Platform[settings.Name])
+		return newAdapter(settings, platformToken(bundle, settings.Name))
 	}, logger)
 	if err != nil {
 		return err
@@ -58,9 +60,26 @@ func readBundle(path string) (admin.Bundle, error) {
 	decoder.KnownFields(true)
 	var bundle admin.Bundle
 	if err := decoder.Decode(&bundle); err != nil {
-		return admin.Bundle{}, fmt.Errorf("decode bundle: %w", err)
+		// The decoder quotes keys and values, and a credential pasted in the wrong place is still a
+		// credential: only the line numbers it names are kept.
+		lines := strings.Join(yamlLine.FindAllString(err.Error(), -1), ", ")
+		if lines == "" {
+			return admin.Bundle{}, errors.New("decode bundle: not a valid bundle")
+		}
+		return admin.Bundle{}, fmt.Errorf("decode bundle: invalid or unknown field at %s", lines)
 	}
 	return bundle, nil
+}
+
+var yamlLine = regexp.MustCompile(`line \d+`)
+
+// platformToken is the bundle's platform credential for an adapter, or, for a platform that issues
+// the receiver's identity itself as Nomad workload identity does, NOMAD_TOKEN from the environment.
+func platformToken(bundle admin.Bundle, name string) string {
+	if token, ok := bundle.Platform[name]; ok {
+		return token
+	}
+	return os.Getenv("NOMAD_TOKEN")
 }
 
 // newAdapter builds one configured adapter; token is the bundle's platform credential for its name.
@@ -82,7 +101,7 @@ func newAdapter(settings admin.AdapterSettings, token string) (receiver.Named, e
 		if err != nil {
 			return receiver.Named{}, fmt.Errorf("adapter %s: %w", settings.Name, err)
 		}
-		return receiver.Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Git: true, Adapter: adapter}, nil
+		return receiver.Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Git: true, Adapter: adapter}, nil
 	default:
 		return receiver.Named{}, fmt.Errorf("adapter %s has unknown type %q", settings.Name, settings.Type)
 	}

@@ -4,250 +4,196 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
-	"errors"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	jose "github.com/go-jose/go-jose/v4"
+
+	"github.com/benemon/wherry/internal/signed"
 )
 
-func validPayloads(t *testing.T) map[RecordType]any {
-	t.Helper()
-	hashA := strings.Repeat("a", 64)
-	hashB := strings.Repeat("b", 64)
-	signingPublicKey, _ := fixedKey(t)
-	logOffset := int64(42)
-	extensions := []string{ExtensionURI}
-	status := TaskStatus{
-		State:     TaskStateCompleted,
-		Message:   &Message{MessageID: "status-1", Role: RoleAgent, Parts: []Part{{Text: "done"}}, Extensions: extensions},
-		Timestamp: "2026-10-17T10:00:00.000Z",
+var (
+	wireKey  = ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	wireKeys = signed.Keys{
+		signed.HostOwner("tenant-1", "host-1"): {Current: wireKey.Public().(ed25519.PublicKey)},
+		"receiver-1":                           {Current: wireKey.Public().(ed25519.PublicKey)},
 	}
-	message := Message{MessageID: "message-1", ContextID: "run-1", TaskID: "run-1", Role: RoleUser, Parts: []Part{{Text: "hello"}}, Extensions: extensions}
-	return map[RecordType]any{
-		TypeSubmission: &SubmissionRecord{
-			Message: message,
-			Wherry: SubmissionExtension{
-				RunID: "run-1", Turn: 1, Attempt: 1, Pool: "linux",
-				Selector:   []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}},
-				DeadlineMS: 2_000, QueueDeadlineMS: 1_000, ReplyTopic: "replies.client-1",
-				Lineage: Lineage{RootRunID: "run-1", Depth: 0, Ancestors: []string{}, ParentHash: "", Chain: []Bytes{}},
-			},
+	wireHash = strings.Repeat("a", 64)
+)
+
+func validSubmission() *Submission {
+	return &Submission{
+		V:       1,
+		Message: Message{MessageID: "message-1", ContextID: "run-1", TaskID: "run-1", Role: RoleUser, Parts: []Part{{Text: "hello"}}, Extensions: []string{ExtensionURI}},
+		Wherry: SubmissionBinding{
+			Tenant: "tenant-1", Host: "host-1", Pool: "linux", Run: "run-1", Turn: 1,
+			Placement:  Placement{Agent: "claude", Selector: []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}}},
+			DeadlineMS: 2_000, QueueDeadlineMS: 1_000,
 		},
-		TypeCancel: &CancelRecord{CancelRequest: CancelTaskRequest{ID: "run-1"}},
-		TypeStatus: &StatusRecord{
-			StatusUpdate: TaskStatusUpdateEvent{TaskID: "run-1", ContextID: "run-1", Status: TaskStatus{
-				State: TaskStateWorking, Timestamp: "2026-10-17T10:00:00.000Z",
-				Message: &Message{MessageID: "status-2", Role: RoleAgent, Parts: []Part{{Text: "working"}}, Extensions: extensions},
-			}},
-			Wherry: StatusExtension{Turn: 1, Attempt: 1, TaskHash: hashA, ReceiverID: "receiver-1", Kind: "heartbeat", LogOffset: &logOffset},
-		},
-		TypeTask: &TaskRecord{
-			Task: Task{
-				ID: "run-1", ContextID: "run-1", Status: status, History: []Message{message},
-				Artifacts: []Artifact{{ArtifactID: "artifact-1", Name: "answer", Description: "result", Parts: []Part{{Text: "done"}}, Extensions: extensions}},
-			},
-			Wherry: TaskExtension{Turn: 1, Attempt: 1, TaskHash: hashA},
-		},
-		TypeArtifactUpdate: &ArtifactUpdateRecord{
-			ArtifactUpdate: TaskArtifactUpdateEvent{
-				TaskID: "run-1", ContextID: "run-1", Append: true, LastChunk: true,
-				Artifact: Artifact{ArtifactID: "transcript", Parts: []Part{{Text: `{"type":"assistant"}`, MediaType: "application/x-ndjson"}}, Extensions: extensions},
-			},
-			Wherry: ArtifactUpdateExtension{Turn: 1, Attempt: 1, Seq: 1},
-		},
-		TypeCapability: &Capability{
-			ReceiverID: "receiver-1", Labels: map[string]string{"lab/os": "linux"}, Pool: "linux",
-			Offers:   []Offer{{Adapter: "nomad", Labels: map[string]string{"runtime": "exec"}}},
-			Capacity: 4, InFlight: 1, Generation: 2, AtMS: 1_000,
-		},
-		TypeEnrolRequest: &EnrolRequest{
-			ReceiverID: "receiver-1", SigningPub: Bytes(signingPublicKey), SealingPub: bytes.Repeat([]byte{2}, 32),
-			Labels:   map[string]string{"lab/os": "linux"},
-			Adapters: []DetectedAdapter{{Name: "nomad", Platform: "nomad", Offers: []Offer{{Adapter: "nomad", Labels: map[string]string{"runtime": "exec"}}}}},
-			AtMS:     1_000,
-		},
-		TypeEnrolApproval: &EnrolApproval{
-			ReceiverID: "receiver-1", RequestHash: hashA, Labels: map[string]string{"lab/os": "linux"}, Pool: "linux",
-			Adapters: []AdapterGrant{{Name: "nomad", Platform: "nomad", Allowed: map[string][]string{"runtime": {"exec"}}, Defaults: map[string]string{"runtime": "exec"}}},
-			Renewal:  "auto", Generation: 2, PrevStateHash: hashB, ExpMS: 2_000,
-		},
-		TypeRenewRequest: &RenewRequest{ReceiverID: "receiver-1", Generation: 2, AtMS: 1_000},
-		TypeRevocation:   &Revocation{ReceiverID: "receiver-1", FloorGeneration: 2, AtMS: 1_000},
-		TypeSecretVersion: &SecretVersion{
-			ReceiverID: "receiver-1", Name: "token", Version: 3, SealingKeyFP: "sha256:" + hashA,
-			Generation: 2, ApprovalHash: hashA, CiphertextHash: hashB, ExpMS: 2_000,
-		},
-		TypeSealedSecret: &SealedSecret{ReceiverID: "receiver-1", Name: "token", Version: 3, Enc: Bytes("enc"), CT: Bytes("ciphertext")},
 	}
 }
 
-func fixedKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+func receiverBinding() ReceiverBinding {
+	return ReceiverBinding{Receiver: "receiver-1", Tenant: "tenant-1", Pool: "linux", Run: "run-1", Turn: 1, Attempt: 1}
+}
+
+func validStatus() *RunStatus {
+	return &RunStatus{
+		V: 1,
+		StatusUpdate: TaskStatusUpdateEvent{TaskID: "run-1", ContextID: "run-1", Status: TaskStatus{
+			State: TaskStateWorking, Timestamp: "2026-10-17T10:00:00.000Z",
+			Message: &Message{MessageID: "status-1", Role: RoleAgent, Parts: []Part{{Text: "working"}}, Extensions: []string{ExtensionURI}},
+		}},
+		Wherry: StatusBinding{ReceiverBinding: receiverBinding(), EventID: "event-1", Kind: "heartbeat", TaskHash: wireHash},
+	}
+}
+
+func validChunk() *Chunk {
+	return &Chunk{
+		V: 1,
+		ArtifactUpdate: TaskArtifactUpdateEvent{
+			TaskID: "run-1", ContextID: "run-1", Append: true, LastChunk: true,
+			Artifact: Artifact{ArtifactID: "transcript", Parts: []Part{{Text: `{"type":"assistant"}`, MediaType: "application/x-ndjson"}}, Extensions: []string{ExtensionURI}},
+		},
+		Wherry: ChunkBinding{ReceiverBinding: receiverBinding(), TaskHash: wireHash, Seq: 1},
+	}
+}
+
+func validResult() *Result {
+	return &Result{
+		V: 1,
+		Task: Task{
+			ID: "run-1", ContextID: "run-1",
+			Status:    TaskStatus{State: TaskStateCompleted, Timestamp: "2026-10-17T10:00:00.000Z"},
+			History:   []Message{validSubmission().Message},
+			Artifacts: []Artifact{{ArtifactID: "artifact-1", Name: "answer", Parts: []Part{{Text: "done"}}, Extensions: []string{ExtensionURI}}},
+		},
+		Wherry: ResultBinding{ReceiverBinding: receiverBinding(), TaskHash: wireHash},
+	}
+}
+
+func validEcho() *Echo {
+	submission := validSubmission()
+	return &Echo{V: 1, Receiver: "receiver-1", Tenant: "tenant-1", Pool: "linux", Run: "run-1", Turn: 1, Placement: submission.Wherry.Placement, TaskHash: wireHash, MessageID: "message-1"}
+}
+
+// recordJSON marshals value as signed.Sign does.
+func recordJSON(t *testing.T, value Record) []byte {
 	t.Helper()
-	seed, err := hex.DecodeString("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+	encoded, err := json.Marshal(value, json.Deterministic(true))
 	if err != nil {
 		t.Fatal(err)
 	}
-	privateKey := ed25519.NewKeyFromSeed(seed)
-	return privateKey.Public().(ed25519.PublicKey), privateKey
+	return encoded
 }
 
-func verificationKind(recordType RecordType) SignerKind {
-	switch recordType {
-	case TypeSubmission, TypeCancel, TypeEnrolApproval, TypeRevocation, TypeSecretVersion, TypeSealedSecret:
-		return SignerUser
-	default:
-		return SignerReceiver
+// parseJSON signs payload verbatim under the fixture key as owner's record of
+// into's type and parses it into into.
+func parseJSON(t *testing.T, owner string, payload []byte, into Record) error {
+	t.Helper()
+	options := new(jose.SignerOptions).WithType(jose.ContentType(into.jwsType())).WithHeader("kid", owner+"/"+signed.KeyID(wireKey.Public().(ed25519.PublicKey)))
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: wireKey}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jws, err := signer.Sign(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := jws.CompactSerialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ParseRecord([]byte(compact), wireKeys, into)
+}
+
+func replaceOnce(t *testing.T, encoded []byte, old, replacement string) []byte {
+	t.Helper()
+	if bytes.Count(encoded, []byte(old)) != 1 {
+		t.Fatalf("payload does not hold %s once: %s", old, encoded)
+	}
+	return bytes.Replace(encoded, []byte(old), []byte(replacement), 1)
+}
+
+func withoutMember(t *testing.T, encoded []byte, member string) []byte {
+	t.Helper()
+	if bytes.Count(encoded, []byte(member+",")) == 1 {
+		return replaceOnce(t, encoded, member+",", "")
+	}
+	return replaceOnce(t, encoded, ","+member, "")
+}
+
+// parseSubmissionParts parses the valid submission with its message parts member replaced by parts.
+func parseSubmissionParts(t *testing.T, parts string) (*Submission, error) {
+	t.Helper()
+	payload := replaceOnce(t, recordJSON(t, validSubmission()), `"parts":[{"text":"hello"}]`, parts)
+	var submission Submission
+	err := parseJSON(t, "tenant-1.host-1", payload, &submission)
+	return &submission, err
+}
+
+func TestFixturesParse(t *testing.T) {
+	for name, fixture := range map[string]func() Record{
+		"submission": func() Record { return validSubmission() }, "status": func() Record { return validStatus() },
+		"chunk": func() Record { return validChunk() }, "result": func() Record { return validResult() }, "echo": func() Record { return validEcho() },
+	} {
+		encoded, err := SignRecord(fixture(), wireKey)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := ParseRecord(encoded, wireKeys, fixture()); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
 	}
 }
 
-func TestSignVerifyAndStrictDecodeEveryRecordType(t *testing.T) {
-	publicKey, privateKey := fixedKey(t)
-	for recordType, value := range validPayloads(t) {
-		t.Run(string(recordType), func(t *testing.T) {
-			payload, err := MarshalPayload(recordType, value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			decodedPayload, err := DecodePayload(recordType, payload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(decodedPayload, value) {
-				t.Fatalf("decoded payload differs:\n got: %#v\nwant: %#v", decodedPayload, value)
-			}
-
-			envelope := Sign(recordType, payload, privateKey)
-			encodedEnvelope, err := MarshalEnvelope(envelope)
-			if err != nil {
-				t.Fatal(err)
-			}
-			decodedEnvelope, err := DecodeEnvelope(encodedEnvelope)
-			if err != nil {
-				t.Fatal(err)
-			}
-			verified, err := Verify(decodedEnvelope, publicKey, verificationKind(recordType))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(verified, value) {
-				t.Fatalf("verified payload differs:\n got: %#v\nwant: %#v", verified, value)
-			}
-		})
-	}
-}
-
-func TestDecodePayloadRejectsDuplicateMember(t *testing.T) {
-	_, err := DecodePayload(TypeRevocation, []byte(`{"receiver_id":"receiver-1","receiver_id":"receiver-2","floor_generation":1,"at_ms":1}`))
-	if err == nil {
-		t.Fatal("duplicate member accepted")
-	}
-}
-
-func TestDecodePayloadRejectsUnknownMember(t *testing.T) {
-	_, err := DecodePayload(TypeRevocation, []byte(`{"receiver_id":"receiver-1","floor_generation":1,"at_ms":1,"unexpected":true}`))
-	if err == nil {
-		t.Fatal("unknown member accepted")
-	}
-}
-
-func TestDecodePayloadRejectsTrailingValue(t *testing.T) {
-	_, err := DecodePayload(TypeRevocation, []byte(`{"receiver_id":"receiver-1","floor_generation":1,"at_ms":1} {}`))
-	if err == nil {
-		t.Fatal("trailing value accepted")
-	}
-}
-
-func TestDecodePayloadRejectsMissingRequiredNumericMember(t *testing.T) {
-	for name, testCase := range map[string]struct {
-		recordType RecordType
-		payload    string
-	}{
-		"revocation at_ms":     {TypeRevocation, `{"receiver_id":"receiver-1","floor_generation":1}`},
-		"submission depth":     {TypeSubmission, string(withoutMember(t, TypeSubmission, `"depth":0,`))},
-		"artifact_update seq":  {TypeArtifactUpdate, string(withoutMember(t, TypeArtifactUpdate, `,"seq":1`))},
-		"capability in_flight": {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{},"offers":[],"capacity":1,"generation":1,"at_ms":1}`},
+func TestParseRecordIsStrict(t *testing.T) {
+	encoded := recordJSON(t, validSubmission())
+	for name, payload := range map[string][]byte{
+		"duplicate member": replaceOnce(t, encoded, `"run":"run-1"`, `"run":"run-1","run":"run-1"`),
+		"unknown member":   replaceOnce(t, encoded, `"run":"run-1"`, `"run":"run-1","unexpected":true`),
+		"trailing value":   append(bytes.Clone(encoded), " {}"...),
+		"float integer":    replaceOnce(t, encoded, `"turn":1`, `"turn":1.5`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := DecodePayload(testCase.recordType, []byte(testCase.payload)); err == nil {
-				t.Fatal("missing required numeric member accepted")
+			if err := parseJSON(t, "tenant-1.host-1", payload, &Submission{}); err == nil {
+				t.Fatal("non-strict payload accepted")
 			}
 		})
 	}
 }
 
-func TestAttemptRequired(t *testing.T) {
-	for recordType, value := range validPayloads(t) {
-		if recordType != TypeSubmission && recordType != TypeStatus && recordType != TypeTask && recordType != TypeArtifactUpdate {
-			continue
+func TestTurnAndAttemptRequired(t *testing.T) {
+	for name, test := range map[string]struct {
+		value   Record
+		members []string
+	}{
+		"submission":    {validSubmission(), []string{`"turn":1`}},
+		"cancel":        {&Cancel{V: 1, Tenant: "tenant-1", Host: "host-1", Pool: "linux", Run: "run-1", Turn: 1}, []string{`"turn":1`}},
+		"echo":          {validEcho(), []string{`"turn":1`}},
+		"status":        {validStatus(), []string{`"turn":1`, `"attempt":1`}},
+		"chunk":         {validChunk(), []string{`"turn":1`, `"attempt":1`}},
+		"result":        {validResult(), []string{`"turn":1`, `"attempt":1`}},
+		"start failure": {&StartFailure{V: 1, Wherry: receiverBinding(), Adapter: "nomad", Agent: "claude", Class: "launch"}, []string{`"turn":1`, `"attempt":1`}},
+	} {
+		empty := func() Record { return reflect.New(reflect.TypeOf(test.value).Elem()).Interface().(Record) }
+		encoded := recordJSON(t, test.value)
+		if err := parseJSON(t, test.value.owner(), encoded, empty()); err != nil {
+			t.Fatalf("%s: valid fixture rejected: %v", name, err)
 		}
-		t.Run(string(recordType), func(t *testing.T) {
-			payload, err := MarshalPayload(recordType, value)
-			if err != nil {
-				t.Fatal(err)
+		for _, member := range test.members {
+			zero := strings.TrimSuffix(member, "1") + "0"
+			for variant, payload := range map[string][]byte{"missing": withoutMember(t, encoded, member), "zero": replaceOnce(t, encoded, member, zero)} {
+				t.Run(name+" "+variant+" "+member, func(t *testing.T) {
+					if err := parseJSON(t, test.value.owner(), payload, empty()); err == nil {
+						t.Fatal("accepted")
+					}
+				})
 			}
-			payload = bytes.Replace(payload, []byte(`"attempt":1,`), nil, 1)
-			if _, err := DecodePayload(recordType, payload); err == nil {
-				t.Fatal("missing attempt accepted")
-			}
-		})
-	}
-}
-
-func TestTurnRequired(t *testing.T) {
-	for recordType, value := range validPayloads(t) {
-		if recordType != TypeSubmission && recordType != TypeStatus && recordType != TypeTask && recordType != TypeArtifactUpdate {
-			continue
 		}
-		t.Run(string(recordType), func(t *testing.T) {
-			payload, err := MarshalPayload(recordType, value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			payload = bytes.Replace(payload, []byte(`"turn":1,`), nil, 1)
-			if _, err := DecodePayload(recordType, payload); err == nil {
-				t.Fatal("missing turn accepted")
-			}
-		})
-	}
-}
-
-func TestTurnZeroRejected(t *testing.T) {
-	for recordType, value := range validPayloads(t) {
-		if recordType != TypeSubmission && recordType != TypeStatus && recordType != TypeTask && recordType != TypeArtifactUpdate {
-			continue
-		}
-		t.Run(string(recordType), func(t *testing.T) {
-			payload, err := MarshalPayload(recordType, value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			payload = bytes.Replace(payload, []byte(`"turn":1`), []byte(`"turn":0`), 1)
-			if _, err := DecodePayload(recordType, payload); err == nil {
-				t.Fatal("zero turn accepted")
-			}
-		})
-	}
-}
-
-func TestAttemptZeroRejected(t *testing.T) {
-	for recordType, value := range validPayloads(t) {
-		if recordType != TypeSubmission && recordType != TypeStatus && recordType != TypeTask && recordType != TypeArtifactUpdate {
-			continue
-		}
-		t.Run(string(recordType), func(t *testing.T) {
-			payload, err := MarshalPayload(recordType, value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			payload = bytes.Replace(payload, []byte(`"attempt":1`), []byte(`"attempt":0`), 1)
-			if _, err := DecodePayload(recordType, payload); err == nil {
-				t.Fatal("zero attempt accepted")
-			}
-		})
 	}
 }
 
@@ -276,149 +222,6 @@ func TestAttemptFilterOrdersByTurn(t *testing.T) {
 	}
 }
 
-func TestDecodePayloadRequiresExplicitEmptyLineageFields(t *testing.T) {
-	if _, err := DecodePayload(TypeSubmission, withoutMember(t, TypeSubmission, `"parent_hash":"",`)); err == nil {
-		t.Fatal("missing parent_hash accepted")
-	}
-	hash := strings.Repeat("a", 64)
-	missingPreviousHash := `{"receiver_id":"receiver-1","request_hash":"` + hash + `","labels":{},"pool":"linux","adapters":[],"renewal":"auto","generation":1,"exp_ms":2}`
-	if _, err := DecodePayload(TypeEnrolApproval, []byte(missingPreviousHash)); err == nil {
-		t.Fatal("missing prev_state_hash accepted")
-	}
-}
-
-func TestDecodeEnvelopeIsStrict(t *testing.T) {
-	for name, input := range map[string]string{
-		"duplicate": `{"v":1,"v":1}`,
-		"unknown":   `{"v":1,"unknown":true}`,
-		"trailing":  `{"v":1} {}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := DecodeEnvelope([]byte(input)); err == nil {
-				t.Fatal("non-strict envelope accepted")
-			}
-		})
-	}
-}
-
-func TestVerifyRejectsCrossTypeSignature(t *testing.T) {
-	publicKey, privateKey := fixedKey(t)
-	payload, err := MarshalPayload(TypeStatus, validPayloads(t)[TypeStatus])
-	if err != nil {
-		t.Fatal(err)
-	}
-	envelope := Sign(TypeStatus, payload, privateKey)
-	envelope.Type = TypeTask
-	if _, err := Verify(envelope, publicKey, SignerReceiver); !errors.Is(err, errInvalidSignature) {
-		t.Fatalf("got %v, want invalid signature", err)
-	}
-}
-
-func TestVerifyRejectsAlteredPayload(t *testing.T) {
-	publicKey, privateKey := fixedKey(t)
-	payload, err := MarshalPayload(TypeCancel, validPayloads(t)[TypeCancel])
-	if err != nil {
-		t.Fatal(err)
-	}
-	envelope := Sign(TypeCancel, payload, privateKey)
-	envelope.Payload[len(envelope.Payload)-2] ^= 1
-	if _, err := Verify(envelope, publicKey, SignerUser); !errors.Is(err, errInvalidSignature) {
-		t.Fatalf("got %v, want invalid signature", err)
-	}
-}
-
-func TestVerifyChecksSignatureBeforePayloadDecode(t *testing.T) {
-	publicKey, privateKey := fixedKey(t)
-	envelope := Sign(TypeCancel, []byte(`not-json`), privateKey)
-	if _, err := Verify(envelope, publicKey, SignerUser); err == nil || errors.Is(err, errInvalidSignature) {
-		t.Fatalf("got %v, want payload decode error after valid signature", err)
-	}
-	envelope.Sig[0] ^= 1
-	if _, err := Verify(envelope, publicKey, SignerUser); !errors.Is(err, errInvalidSignature) {
-		t.Fatalf("got %v, want invalid signature before payload decode", err)
-	}
-}
-
-func TestDecodeEnvelopeRejectsOversizeBeforeDecode(t *testing.T) {
-	_, err := DecodeEnvelope(bytes.Repeat([]byte{'{'}, maxEnvelopeSize+1))
-	if !errors.Is(err, errEnvelopeTooLarge) {
-		t.Fatalf("got %v, want envelope too large", err)
-	}
-}
-
-func TestEntitledRejectsWrongSignerKind(t *testing.T) {
-	if entitled(TypeCancel, SignerReceiver) {
-		t.Fatal("receiver was entitled to sign cancel")
-	}
-	if !entitled(TypeSubmission, SignerUser) || entitled(TypeSubmission, SignerReceiver) {
-		t.Fatal("submission signer entitlements are not user-only")
-	}
-}
-
-func TestEntitlementTable(t *testing.T) {
-	want := map[RecordType]map[SignerKind]bool{
-		TypeSubmission:     {SignerUser: true},
-		TypeCancel:         {SignerUser: true},
-		TypeStatus:         {SignerReceiver: true},
-		TypeTask:           {SignerReceiver: true},
-		TypeArtifactUpdate: {SignerReceiver: true},
-		TypeCapability:     {SignerReceiver: true},
-		TypeEnrolRequest:   {SignerReceiver: true},
-		TypeEnrolApproval:  {SignerUser: true},
-		TypeRenewRequest:   {SignerReceiver: true},
-		TypeRevocation:     {SignerUser: true},
-		TypeSecretVersion:  {SignerUser: true},
-		TypeSealedSecret:   {SignerUser: true},
-	}
-	for recordType, kinds := range want {
-		for _, kind := range []SignerKind{SignerUser, SignerReceiver} {
-			if entitled(recordType, kind) != kinds[kind] {
-				t.Errorf("entitled(%q, %q) = %t, want %t", recordType, kind, entitled(recordType, kind), kinds[kind])
-			}
-		}
-	}
-}
-
-func TestVerifyRejectsWrongSignerFingerprint(t *testing.T) {
-	publicKey, privateKey := fixedKey(t)
-	payload, err := MarshalPayload(TypeCancel, validPayloads(t)[TypeCancel])
-	if err != nil {
-		t.Fatal(err)
-	}
-	envelope := Sign(TypeCancel, payload, privateKey)
-	envelope.Signer = "sha256:" + strings.Repeat("0", 64)
-	if _, err := Verify(envelope, publicKey, SignerUser); !errors.Is(err, errInvalidSignature) {
-		t.Fatalf("got %v, want invalid signature", err)
-	}
-	if Fingerprint(publicKey) == envelope.Signer {
-		t.Fatal("test signer fingerprint unexpectedly matched")
-	}
-}
-
-func TestVerifyRejectsEnrolmentRequestSignedByDifferentKey(t *testing.T) {
-	publicKey, privateKey := fixedKey(t)
-	request := validPayloads(t)[TypeEnrolRequest].(*EnrolRequest)
-	request.SigningPub = bytes.Repeat([]byte{9}, ed25519.PublicKeySize)
-	payload, err := MarshalPayload(TypeEnrolRequest, request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Verify(Sign(TypeEnrolRequest, payload, privateKey), publicKey, SignerReceiver); err == nil {
-		t.Fatal("enrolment request signed by a different key was accepted")
-	}
-}
-
-func TestVerifyRejectsUnentitledSigner(t *testing.T) {
-	publicKey, privateKey := fixedKey(t)
-	payload, err := MarshalPayload(TypeCancel, validPayloads(t)[TypeCancel])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Verify(Sign(TypeCancel, payload, privateKey), publicKey, SignerReceiver); !errors.Is(err, errUnentitledSigner) {
-		t.Fatalf("got %v, want unentitled signer", err)
-	}
-}
-
 func TestTerminalStates(t *testing.T) {
 	terminal := map[TaskState]bool{TaskStateCompleted: true, TaskStateFailed: true, TaskStateCanceled: true, TaskStateRejected: true}
 	for _, state := range []TaskState{
@@ -431,350 +234,32 @@ func TestTerminalStates(t *testing.T) {
 	}
 }
 
-func TestRequirementUnknownOperatorRejected(t *testing.T) {
-	submission := validPayloads(t)[TypeSubmission].(*SubmissionRecord)
-	submission.Wherry.Selector[0].Operator = "Exists"
-	if _, err := MarshalPayload(TypeSubmission, submission); err == nil || !strings.Contains(err.Error(), "unknown operator") {
-		t.Fatalf("got %v, want unknown operator", err)
-	}
-}
-
-func TestKeyGrammar(t *testing.T) {
-	for _, key := range []string{"platform", "runtime", "region", "zone", "nomad.node_pool", "lab/gpu"} {
-		if !validKey(key) {
-			t.Errorf("valid key %q rejected", key)
-		}
-	}
-	for _, key := range []string{"team", "Nomad.pool", "/x", "a/"} {
-		if validKey(key) {
-			t.Errorf("invalid key %q accepted", key)
-		}
-	}
-}
-
-func nomadGrant(defaults map[string]string) []AdapterGrant {
-	return []AdapterGrant{{Name: "nomad", Platform: "nomad", Allowed: map[string][]string{}, Defaults: defaults}}
-}
-
-func nomadOffers(offers ...map[string]string) []Offer {
-	result := make([]Offer, 0, len(offers))
-	for _, labels := range offers {
-		result = append(result, Offer{Adapter: "nomad", Labels: labels})
-	}
-	return result
-}
-
-func TestMatchOfferRespectsCombinations(t *testing.T) {
-	selector := []Requirement{{Key: "runtime", Operator: OpIn, Values: []string{"exec"}}, {Key: "nomad.node_pool", Operator: OpIn, Values: []string{"default"}}}
-	offers := nomadOffers(map[string]string{"runtime": "exec", "nomad.node_pool": "OCPv"}, map[string]string{"runtime": "podman", "nomad.node_pool": "default"})
-	if _, ok := MatchOffer(selector, map[string]string{}, nomadGrant(map[string]string{}), offers); ok {
-		t.Fatal("matched a flattened combination that no offer contains")
-	}
-}
-
-func TestMatchOfferAppliesDefaults(t *testing.T) {
-	offers := nomadOffers(map[string]string{"runtime": "exec"}, map[string]string{"runtime": "podman"})
-	matched, ok := MatchOffer([]Requirement{}, map[string]string{}, nomadGrant(map[string]string{"runtime": "podman"}), offers)
-	if !ok || matched.Labels["runtime"] != "podman" {
-		t.Fatalf("matched %#v, %v", matched, ok)
-	}
-}
-
-func TestMatchOfferExplicitOverridesDefault(t *testing.T) {
-	selector := []Requirement{{Key: "runtime", Operator: OpIn, Values: []string{"exec"}}}
-	offers := nomadOffers(map[string]string{"runtime": "exec"}, map[string]string{"runtime": "podman"})
-	matched, ok := MatchOffer(selector, map[string]string{}, nomadGrant(map[string]string{"runtime": "podman"}), offers)
-	if !ok || matched.Labels["runtime"] != "exec" {
-		t.Fatalf("matched %#v, %v", matched, ok)
-	}
-}
-
-func twoAdapterGrants() []AdapterGrant {
-	return []AdapterGrant{
-		{Name: "lab", Platform: "nomad", Allowed: map[string][]string{"runtime": {"exec", "podman"}}, Defaults: map[string]string{}},
-		{Name: "cloud", Platform: "aws", Allowed: map[string][]string{"runtime": {"lambda", "exec"}}, Defaults: map[string]string{}},
-	}
-}
-
-func TestMatchOfferGrantOrderPreference(t *testing.T) {
-	grants := twoAdapterGrants()
-	offers := []Offer{
-		{Adapter: "cloud", Labels: map[string]string{"runtime": "exec"}},
-		{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}},
-	}
-	SortOffers(grants, offers)
-	matched, ok := MatchOffer([]Requirement{{Key: "runtime", Operator: OpIn, Values: []string{"exec"}}}, map[string]string{}, grants, offers)
-	if !ok || matched.Adapter != "lab" {
-		t.Fatalf("matched %#v, %v; want the first grant's adapter", matched, ok)
-	}
-}
-
-func TestMatchOfferPlatformFromGrant(t *testing.T) {
-	grants := twoAdapterGrants()
-	offers := []Offer{
-		{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}},
-		{Adapter: "cloud", Labels: map[string]string{"runtime": "lambda"}},
-		{Adapter: "cloud", Labels: map[string]string{"runtime": "exec"}},
-	}
-	selector := []Requirement{{Key: "platform", Operator: OpIn, Values: []string{"aws"}}}
-	matched, ok := MatchOffer(selector, map[string]string{}, grants, offers)
-	if !ok || matched.Adapter != "cloud" || matched.Labels["runtime"] != "lambda" {
-		t.Fatalf("matched %#v, %v; want the first aws offer", matched, ok)
-	}
-	selector = append(selector, Requirement{Key: "runtime", Operator: OpIn, Values: []string{"podman"}})
-	if matched, ok := MatchOffer(selector, map[string]string{}, grants, offers); ok {
-		t.Fatalf("matched %#v; podman is offered by no aws adapter", matched)
-	}
-}
-
-func TestMatchOfferDefaultsPerAdapter(t *testing.T) {
-	grants := twoAdapterGrants()
-	grants[0].Defaults = map[string]string{"runtime": "podman"}
-	grants[1].Defaults = map[string]string{"runtime": "lambda"}
-	offers := []Offer{
-		{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}},
-		{Adapter: "cloud", Labels: map[string]string{"runtime": "exec"}},
-		{Adapter: "cloud", Labels: map[string]string{"runtime": "lambda"}},
-	}
-	matched, ok := MatchOffer([]Requirement{}, map[string]string{}, grants, offers)
-	if !ok || matched.Adapter != "cloud" || matched.Labels["runtime"] != "lambda" {
-		t.Fatalf("matched %#v, %v; want cloud's own default, not lab's", matched, ok)
-	}
-	matched, ok = MatchOffer([]Requirement{{Key: "runtime", Operator: OpIn, Values: []string{"exec"}}}, map[string]string{}, grants, offers)
-	if !ok || matched.Adapter != "lab" {
-		t.Fatalf("matched %#v, %v; a named key must ignore defaults", matched, ok)
-	}
-}
-
-func TestOfferWithoutGrantNeverMatches(t *testing.T) {
-	offers := []Offer{{Adapter: "ungranted", Labels: map[string]string{"runtime": "exec"}}}
-	if matched, ok := MatchOffer([]Requirement{}, map[string]string{}, twoAdapterGrants(), offers); ok {
-		t.Fatalf("matched %#v from an adapter without a grant", matched)
-	}
-}
-
-func TestSortOffersByGrantThenLabels(t *testing.T) {
-	offers := []Offer{
-		{Adapter: "ungranted", Labels: map[string]string{"runtime": "a"}},
-		{Adapter: "cloud", Labels: map[string]string{"runtime": "exec"}},
-		{Adapter: "lab", Labels: map[string]string{"runtime": "podman"}},
-		{Adapter: "lab", Labels: map[string]string{"runtime": "exec"}},
-	}
-	SortOffers(twoAdapterGrants(), offers)
-	var got []string
-	for _, offer := range offers {
-		got = append(got, offer.Adapter+":"+TermsText(offer.Labels))
-	}
-	want := []string{"lab:runtime=exec", "lab:runtime=podman", "cloud:runtime=exec", "ungranted:runtime=a"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-}
-
-func TestTermsTextIsDeterministic(t *testing.T) {
-	if got, want := TermsText(map[string]string{"region": "eu", "lab/arch": "arm64"}), "lab/arch=arm64,region=eu"; got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
-func TestReceiverLabelsRejectPlatform(t *testing.T) {
-	payloads := validPayloads(t)
-	payloads[TypeEnrolRequest].(*EnrolRequest).Labels["platform"] = "nomad"
-	payloads[TypeEnrolApproval].(*EnrolApproval).Labels["platform"] = "nomad"
-	payloads[TypeCapability].(*Capability).Labels["platform"] = "nomad"
-	for _, recordType := range []RecordType{TypeEnrolRequest, TypeEnrolApproval, TypeCapability} {
-		if _, err := MarshalPayload(recordType, payloads[recordType]); err == nil || !strings.Contains(err.Error(), "platform") {
-			t.Errorf("%s: got %v, want platform label rejected", recordType, err)
-		}
-	}
-}
-
-func TestGrantAllowedRejectsPlatformAndLabelKeys(t *testing.T) {
-	for name, key := range map[string]string{"platform": "platform", "receiver label": "lab/os"} {
-		t.Run(name, func(t *testing.T) {
-			approval := validPayloads(t)[TypeEnrolApproval].(*EnrolApproval)
-			approval.Adapters[0].Allowed[key] = []string{"linux"}
-			if _, err := MarshalPayload(TypeEnrolApproval, approval); err == nil || !strings.Contains(err.Error(), "exclude platform and receiver label keys") {
-				t.Fatalf("got %v, want allowed key rejected", err)
-			}
-		})
-	}
-}
-
-func TestAdapterNamesValidated(t *testing.T) {
-	for name, mutate := range map[string]func(*EnrolApproval){
-		"duplicate": func(value *EnrolApproval) { value.Adapters = append(value.Adapters, value.Adapters[0]) },
-		"uppercase": func(value *EnrolApproval) { value.Adapters[0].Name = "Nomad" },
-		"platform":  func(value *EnrolApproval) { value.Adapters[0].Platform = "" },
-		"pool":      func(value *EnrolApproval) { value.Pool = "Linux" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			approval := validPayloads(t)[TypeEnrolApproval].(*EnrolApproval)
-			mutate(approval)
-			if _, err := MarshalPayload(TypeEnrolApproval, approval); err == nil {
-				t.Fatal("invalid approval accepted")
-			}
-		})
-	}
-}
-
-func TestOfferValidation(t *testing.T) {
-	for name, offer := range map[string]Offer{
-		"empty labels":    {Adapter: "nomad", Labels: map[string]string{}},
-		"platform key":    {Adapter: "nomad", Labels: map[string]string{"platform": "nomad"}},
-		"invalid key":     {Adapter: "nomad", Labels: map[string]string{"team": "a"}},
-		"missing adapter": {Adapter: "", Labels: map[string]string{"runtime": "exec"}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			capability := validPayloads(t)[TypeCapability].(*Capability)
-			capability.Offers = []Offer{offer}
-			if _, err := MarshalPayload(TypeCapability, capability); err == nil {
-				t.Fatal("invalid offer accepted")
-			}
-		})
-	}
-	request := validPayloads(t)[TypeEnrolRequest].(*EnrolRequest)
-	request.Adapters[0].Offers[0].Adapter = "other"
-	if _, err := MarshalPayload(TypeEnrolRequest, request); err == nil {
-		t.Fatal("detected offer naming another adapter accepted")
-	}
-}
-
-func TestApprovalAllowedValidation(t *testing.T) {
-	for name, mutate := range map[string]func(*AdapterGrant){
-		"overlap":         func(grant *AdapterGrant) { grant.Allowed = map[string][]string{"lab/os": {"linux"}} },
-		"default outside": func(grant *AdapterGrant) { grant.Defaults = map[string]string{"runtime": "podman"} },
-		"empty values":    func(grant *AdapterGrant) { grant.Allowed = map[string][]string{"runtime": {}} },
-	} {
-		t.Run(name, func(t *testing.T) {
-			approval := validPayloads(t)[TypeEnrolApproval].(*EnrolApproval)
-			mutate(&approval.Adapters[0])
-			if _, err := MarshalPayload(TypeEnrolApproval, approval); err == nil {
-				t.Fatal("invalid approval accepted")
-			}
-		})
-	}
-}
-
 func TestArtifactUpdateRequiresOnePart(t *testing.T) {
-	hash := strings.Repeat("a", 64)
-	for name, testCase := range map[string]struct {
+	pointer := Part{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + wireHash + `","size":4}`)}
+	for name, test := range map[string]struct {
 		parts []Part
 		ok    bool
 	}{
 		"text":                {[]Part{{Text: "line"}}, true},
-		"pointer":             {[]Part{{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + hash + `","size":4}`)}}, true},
-		"line and pointer":    {[]Part{{Text: "line"}, {URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + hash + `","size":4}`)}}, false},
+		"pointer":             {[]Part{pointer}, true},
+		"line and pointer":    {[]Part{{Text: "line"}, pointer}, false},
 		"neither":             {[]Part{}, false},
 		"pointer no metadata": {[]Part{{URL: "unstored:oversize"}}, false},
 		"pointer bad hash":    {[]Part{{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"x","size":4}`)}}, false},
-		"pointer zero size":   {[]Part{{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + hash + `","size":0}`)}}, false},
+		"pointer zero size":   {[]Part{{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + wireHash + `","size":0}`)}}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			update := validPayloads(t)[TypeArtifactUpdate].(*ArtifactUpdateRecord)
-			update.ArtifactUpdate.Artifact.Parts = testCase.parts
-			if _, err := MarshalPayload(TypeArtifactUpdate, update); (err == nil) != testCase.ok {
-				t.Fatalf("marshal error %v, want ok=%v", err, testCase.ok)
+			chunk := validChunk()
+			chunk.ArtifactUpdate.Artifact.Parts = test.parts
+			if err := chunk.validate(); (err == nil) != test.ok {
+				t.Fatalf("validate error %v, want ok=%v", err, test.ok)
 			}
 		})
 	}
-}
-
-func TestDecodePayloadRejectsFloatNumericField(t *testing.T) {
-	_, err := DecodePayload(TypeRevocation, []byte(`{"receiver_id":"receiver-1","floor_generation":1,"at_ms":1.5}`))
-	if err == nil {
-		t.Fatal("float accepted for integer field")
-	}
-}
-
-func TestDecodeRejectsEmptyLabelValue(t *testing.T) {
-	for name, testCase := range map[string]struct {
-		recordType RecordType
-		payload    string
-	}{
-		"labels":         {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{"lab/os":""},"offers":[],"capacity":1,"in_flight":0,"generation":1,"at_ms":1}`},
-		"request labels": {TypeEnrolRequest, `{"receiver_id":"receiver-1","signing_pub":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","sealing_pub":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","labels":{"lab/os":""},"adapters":[],"at_ms":1}`},
-		"offer labels":   {TypeCapability, `{"receiver_id":"receiver-1","pool":"linux","labels":{},"offers":[{"adapter":"nomad","labels":{"runtime":""}}],"capacity":1,"in_flight":0,"generation":1,"at_ms":1}`},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := DecodePayload(testCase.recordType, []byte(testCase.payload)); err == nil {
-				t.Fatal("empty map value accepted")
-			}
-		})
-	}
-}
-
-func TestDecodeRejectsEmptyLabelKey(t *testing.T) {
-	payload := `{"receiver_id":"receiver-1","pool":"linux","labels":{"":"linux"},"offers":[],"capacity":1,"in_flight":0,"generation":1,"at_ms":1}`
-	if _, err := DecodePayload(TypeCapability, []byte(payload)); err == nil {
-		t.Fatal("empty map key accepted")
-	}
-}
-
-func TestBytesUseUnpaddedBase64URL(t *testing.T) {
-	encoded, err := json.Marshal(&SealedSecret{ReceiverID: "receiver-1", Name: "token", Version: 1, Enc: Bytes{0xfb, 0xff}, CT: Bytes{0xff}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.ContainsAny(string(encoded), "+/=") || !strings.Contains(string(encoded), "-_8") {
-		t.Fatalf("not unpadded base64url: %s", encoded)
-	}
-	bad := `{"receiver_id":"receiver-1","name":"token","version":1,"enc":"+/8=","ct":"_w"}`
-	if _, err := DecodePayload(TypeSealedSecret, []byte(bad)); err == nil {
-		t.Fatal("padded standard base64 accepted")
-	}
-}
-
-func TestRFC8032Vector1(t *testing.T) {
-	publicKey, _ := hex.DecodeString("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
-	signature, _ := hex.DecodeString("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b")
-	if !verifySignature(publicKey, nil, signature) {
-		t.Fatal("RFC 8032 section 7.1 vector 1 failed")
-	}
-}
-
-func TestEnvelopeAndPayloadUseRawBase64URL(t *testing.T) {
-	_, privateKey := fixedKey(t)
-	payload := []byte{0xfb, 0xff}
-	envelope := Sign(TypeCancel, payload, privateKey)
-	encoded, err := MarshalEnvelope(envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(encoded), base64.StdEncoding.EncodeToString(payload)) {
-		t.Fatalf("envelope used standard base64: %s", encoded)
-	}
-}
-
-// withoutMember returns the valid payload of recordType with member, which must occur once, removed.
-func withoutMember(t *testing.T, recordType RecordType, member string) []byte {
-	t.Helper()
-	encoded, err := MarshalPayload(recordType, validPayloads(t)[recordType])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Count(encoded, []byte(member)) != 1 {
-		t.Fatalf("payload does not hold %s once: %s", member, encoded)
-	}
-	return bytes.Replace(encoded, []byte(member), nil, 1)
-}
-
-// submissionJSON returns the valid submission payload with its message parts member replaced by parts.
-func submissionJSON(t *testing.T, parts string) []byte {
-	t.Helper()
-	encoded, err := MarshalPayload(TypeSubmission, validPayloads(t)[TypeSubmission])
-	if err != nil {
-		t.Fatal(err)
-	}
-	const original = `"parts":[{"text":"hello"}]`
-	if !bytes.Contains(encoded, []byte(original)) {
-		t.Fatalf("task payload lacks %s: %s", original, encoded)
-	}
-	return bytes.Replace(encoded, []byte(original), []byte(parts), 1)
 }
 
 func TestPartRequiresExactlyOneContent(t *testing.T) {
-	for name, testCase := range map[string]struct {
+	for name, test := range map[string]struct {
 		parts string
 		ok    bool
 	}{
@@ -794,9 +279,8 @@ func TestPartRequiresExactlyOneContent(t *testing.T) {
 		"second part":  {`"parts":[{"text":"hello"},{"text":"hello","data":true}]`, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := DecodePayload(TypeSubmission, submissionJSON(t, testCase.parts))
-			if (err == nil) != testCase.ok {
-				t.Fatalf("decode error %v, want ok=%v", err, testCase.ok)
+			if _, err := parseSubmissionParts(t, test.parts); (err == nil) != test.ok {
+				t.Fatalf("parse error %v, want ok=%v", err, test.ok)
 			}
 		})
 	}
@@ -806,11 +290,11 @@ func TestPartRequiresExactlyOneContent(t *testing.T) {
 		"raw and data":  {Raw: StdBytes("hi"), Data: jsontext.Value(`1`)},
 		"text and data": {Text: "hello", Data: jsontext.Value(`null`)},
 	} {
-		t.Run("marshal "+name, func(t *testing.T) {
-			submission := validPayloads(t)[TypeSubmission].(*SubmissionRecord)
+		t.Run("built "+name, func(t *testing.T) {
+			submission := validSubmission()
 			submission.Message.Parts = []Part{part}
-			if _, err := MarshalPayload(TypeSubmission, submission); err == nil {
-				t.Fatal("part without exactly one content marshalled")
+			if err := submission.validate(); err == nil {
+				t.Fatal("part without exactly one content accepted")
 			}
 		})
 	}
@@ -819,13 +303,9 @@ func TestPartRequiresExactlyOneContent(t *testing.T) {
 // Proto3 JSON writes bytes as padded standard base64 and accepts standard or
 // URL-safe, padded or not: https://protobuf.dev/programming-guides/json/
 func TestPartRawIsStandardBase64(t *testing.T) {
-	task := validPayloads(t)[TypeTask].(*TaskRecord)
-	task.Task.Artifacts[0].Parts = []Part{{Raw: StdBytes{0xfb, 0xff}, MediaType: "application/octet-stream"}}
-	encoded, err := MarshalPayload(TypeTask, task)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(encoded, []byte(`"raw":"+/8="`)) {
+	result := validResult()
+	result.Task.Artifacts[0].Parts = []Part{{Raw: StdBytes{0xfb, 0xff}, MediaType: "application/octet-stream"}}
+	if encoded := recordJSON(t, result); !bytes.Contains(encoded, []byte(`"raw":"+/8="`)) {
 		t.Fatalf("raw is not padded standard base64: %s", encoded)
 	}
 	for input, ok := range map[string]bool{
@@ -839,12 +319,12 @@ func TestPartRawIsStandardBase64(t *testing.T) {
 		"*":     false,
 	} {
 		t.Run(input, func(t *testing.T) {
-			decoded, err := DecodePayload(TypeSubmission, submissionJSON(t, `"parts":[{"raw":"`+input+`"}]`))
+			submission, err := parseSubmissionParts(t, `"parts":[{"raw":"`+input+`"}]`)
 			if (err == nil) != ok {
-				t.Fatalf("decode error %v, want ok=%v", err, ok)
+				t.Fatalf("parse error %v, want ok=%v", err, ok)
 			}
-			if ok && !bytes.Equal(decoded.(*SubmissionRecord).Message.Parts[0].Raw, []byte{0xfb, 0xff}) {
-				t.Fatalf("decoded raw %x", decoded.(*SubmissionRecord).Message.Parts[0].Raw)
+			if ok && !bytes.Equal(submission.Message.Parts[0].Raw, []byte{0xfb, 0xff}) {
+				t.Fatalf("decoded raw %x", submission.Message.Parts[0].Raw)
 			}
 		})
 	}
@@ -852,38 +332,42 @@ func TestPartRawIsStandardBase64(t *testing.T) {
 
 func TestOpaqueJSONRelayedByteForByte(t *testing.T) {
 	// Unsorted names, exponent and trailing-zero numbers, an integer beyond int64 and escapes json/v2 would rewrite.
-	metadata := jsontext.Value(`{"z":1,"a":[1E2,1.50,-0,12345678901234567890,"\/\u0041"],"n":null}`)
-	data := jsontext.Value(`[{"y":"\u00e9"},1e-7]`)
-	submission := validPayloads(t)[TypeSubmission].(*SubmissionRecord)
+	metadata := jsontext.Value(`{"z":1,"a":[1E2,1.50,-0,12345678901234567890,"\/A"],"n":null}`)
+	data := jsontext.Value(`[{"y":"é"},1e-7]`)
+	submission := validSubmission()
 	submission.Message.Metadata = metadata
 	submission.Message.Parts = []Part{{Data: data, Metadata: metadata}}
-	encoded, err := MarshalPayload(TypeSubmission, submission)
+	encoded, err := SignRecord(submission, wireKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(encoded, []byte(`"metadata":`+string(metadata))) || !bytes.Contains(encoded, []byte(`"data":`+string(data))) {
-		t.Fatalf("opaque JSON re-encoded: %s", encoded)
-	}
-	decoded, err := DecodePayload(TypeSubmission, encoded)
+	payload, err := base64.RawURLEncoding.DecodeString(strings.Split(string(encoded), ".")[1])
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := decoded.(*SubmissionRecord).Message
+	if !bytes.Contains(payload, []byte(`"metadata":`+string(metadata))) || !bytes.Contains(payload, []byte(`"data":`+string(data))) {
+		t.Fatalf("opaque JSON re-encoded: %s", payload)
+	}
+	var decoded Submission
+	if err := ParseRecord(encoded, wireKeys, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	message := decoded.Message
 	if !bytes.Equal(message.Metadata, metadata) || !bytes.Equal(message.Parts[0].Metadata, metadata) || !bytes.Equal(message.Parts[0].Data, data) {
 		t.Fatalf("decoded metadata %s, part metadata %s, data %s", message.Metadata, message.Parts[0].Metadata, message.Parts[0].Data)
 	}
 	spaced := `{ "z" : 1 ,` + "\n\t" + `"a" : [ ] }`
-	decoded, err = DecodePayload(TypeSubmission, submissionJSON(t, `"parts":[{"text":"hello"}],"metadata":`+spaced))
+	parsed, err := parseSubmissionParts(t, `"parts":[{"text":"hello"}],"metadata":`+spaced)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(decoded.(*SubmissionRecord).Message.Metadata); got != spaced {
+	if got := string(parsed.Message.Metadata); got != spaced {
 		t.Fatalf("decoded metadata %q, want %q", got, spaced)
 	}
 }
 
 func TestMetadataMustBeObject(t *testing.T) {
-	for name, testCase := range map[string]struct {
+	for name, test := range map[string]struct {
 		parts string
 		ok    bool
 	}{
@@ -897,18 +381,17 @@ func TestMetadataMustBeObject(t *testing.T) {
 		"part data not object": {`"parts":[{"data":[1]}]`, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := DecodePayload(TypeSubmission, submissionJSON(t, testCase.parts))
-			if (err == nil) != testCase.ok {
-				t.Fatalf("decode error %v, want ok=%v", err, testCase.ok)
+			if _, err := parseSubmissionParts(t, test.parts); (err == nil) != test.ok {
+				t.Fatalf("parse error %v, want ok=%v", err, test.ok)
 			}
 		})
 	}
 	for name, metadata := range map[string]jsontext.Value{"array": jsontext.Value(`[]`), "malformed": jsontext.Value(`{"k":`)} {
-		t.Run("marshal "+name, func(t *testing.T) {
-			task := validPayloads(t)[TypeTask].(*TaskRecord)
-			task.Task.Artifacts[0].Metadata = metadata
-			if _, err := MarshalPayload(TypeTask, task); err == nil {
-				t.Fatal("artifact metadata that is not a JSON object marshalled")
+		t.Run("built "+name, func(t *testing.T) {
+			result := validResult()
+			result.Task.Artifacts[0].Metadata = metadata
+			if err := result.validate(); err == nil {
+				t.Fatal("artifact metadata that is not a JSON object accepted")
 			}
 		})
 	}
@@ -920,15 +403,15 @@ func TestOpaqueJSONRejectsDuplicateNames(t *testing.T) {
 		"data":     `"parts":[{"data":{"x":{"k":1,"k":2}}}]`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := DecodePayload(TypeSubmission, submissionJSON(t, parts)); err == nil {
+			if _, err := parseSubmissionParts(t, parts); err == nil {
 				t.Fatal("duplicate member name inside opaque JSON accepted")
 			}
 		})
 	}
-	submission := validPayloads(t)[TypeSubmission].(*SubmissionRecord)
+	submission := validSubmission()
 	submission.Message.Metadata = jsontext.Value(`{"k":1,"k":2}`)
-	if _, err := MarshalPayload(TypeSubmission, submission); err == nil {
-		t.Fatal("duplicate member name inside metadata marshalled")
+	if err := submission.validate(); err == nil {
+		t.Fatal("duplicate member name inside built metadata accepted")
 	}
 }
 
@@ -942,13 +425,13 @@ func TestStatusTimestampIsRFC3339(t *testing.T) {
 		"2026-10-17 10:00:00Z":        false,
 	} {
 		t.Run(timestamp, func(t *testing.T) {
-			status := validPayloads(t)[TypeStatus].(*StatusRecord)
+			status := validStatus()
 			status.StatusUpdate.Status.Timestamp = timestamp
-			task := validPayloads(t)[TypeTask].(*TaskRecord)
-			task.Task.Status.Timestamp = timestamp
-			for recordType, payload := range map[RecordType]any{TypeStatus: status, TypeTask: task} {
-				if _, err := MarshalPayload(recordType, payload); (err == nil) != ok {
-					t.Errorf("%s: marshal error %v, want ok=%v", recordType, err, ok)
+			result := validResult()
+			result.Task.Status.Timestamp = timestamp
+			for name, value := range map[string]Record{"status": status, "result": result} {
+				if err := value.validate(); (err == nil) != ok {
+					t.Errorf("%s: validate error %v, want ok=%v", name, err, ok)
 				}
 			}
 		})
@@ -961,7 +444,7 @@ func TestGitPartValidation(t *testing.T) {
 		return `{"url":"` + url + `","mediaType":"application/vnd.wherry.git","metadata":` + metadata + `}`
 	}
 	valid := part("https://git.example.test/org/repo.git", `{"ref":"main"}`)
-	for name, testCase := range map[string]struct {
+	for name, test := range map[string]struct {
 		parts string
 		want  string
 	}{
@@ -1001,9 +484,9 @@ func TestGitPartValidation(t *testing.T) {
 		"plain url scheme": {`{"url":"file:///srv/repo.git"}`, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := DecodePayload(TypeSubmission, submissionJSON(t, `"parts":[`+prompt+testCase.parts+`]`))
-			if testCase.want == "" && err != nil || testCase.want != "" && (err == nil || err.Error() != testCase.want) {
-				t.Fatalf("decode error %v, want %q", err, testCase.want)
+			_, err := parseSubmissionParts(t, `"parts":[`+prompt+test.parts+`]`)
+			if test.want == "" && err != nil || test.want != "" && (err == nil || err.Error() != test.want) {
+				t.Fatalf("parse error %v, want %q", err, test.want)
 			}
 		})
 	}
@@ -1011,67 +494,155 @@ func TestGitPartValidation(t *testing.T) {
 	if err != nil || git != (GitContext{URL: "https://git.example.test/org/repo.git", Ref: "main", Path: "repo"}) {
 		t.Fatalf("parsed %#v, %v; want the repository name as the default path", git, err)
 	}
-	submission := validPayloads(t)[TypeSubmission].(*SubmissionRecord)
+	submission := validSubmission()
 	submission.Message.Parts = append(submission.Message.Parts, Part{URL: "https://token@git.example.test/org/repo.git", MediaType: GitMediaType, Metadata: jsontext.Value(`{"ref":"main"}`)})
-	if _, err := MarshalPayload(TypeSubmission, submission); err == nil || strings.Contains(err.Error(), "token") {
-		t.Fatalf("marshal error %v, want a fixed rejection", err)
+	if err := submission.validate(); err == nil || strings.Contains(err.Error(), "token") {
+		t.Fatalf("validate error %v, want a fixed rejection", err)
 	}
 }
 
-func TestUnknownVersionRejected(t *testing.T) {
-	publicKey, privateKey := fixedKey(t)
-	payloads := validPayloads(t)
+func TestTermsTextIsDeterministic(t *testing.T) {
+	if got, want := TermsText(map[string]string{"region": "eu", "lab/arch": "arm64"}), "lab/arch=arm64,region=eu"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestLabelKeyGrammar(t *testing.T) {
+	for _, key := range []string{
+		"a", "region", "Region", "nomad.node_pool", "lab/gpu", "lab.example.com/gpu", "team-1/a.b_c",
+		strings.Repeat("a", 63), strings.Repeat("a", 253) + "/x",
+		"notwherry.io/x", "wherry.io.example/x", "wherry.iox/x",
+	} {
+		if !validKey(key) {
+			t.Errorf("valid key %q rejected", key)
+		}
+	}
+	for _, key := range []string{
+		"", "/x", "a/", "a/b/c", "-a", "a-", ".a", "a b", "a:b", "é",
+		strings.Repeat("a", 64), "lab/" + strings.Repeat("a", 64), strings.Repeat("a", 254) + "/x",
+		"Lab/x", "lab_x/y", "-lab/x", "lab-/x", "lab..x/y", ".lab/x",
+		"wherry.io/x", "sub.wherry.io/x", "a.b.wherry.io/x",
+	} {
+		if validKey(key) {
+			t.Errorf("invalid key %q accepted", key)
+		}
+	}
+}
+
+func TestValidateLabels(t *testing.T) {
 	for name, test := range map[string]struct {
-		recordType RecordType
-		version    int64
+		labels map[string]string
+		ok     bool
 	}{
-		"v2 revocation": {TypeRevocation, 2},
-		"v3 submission": {TypeSubmission, 3},
-		"v0 revocation": {TypeRevocation, 0},
-		"v3 approval":   {TypeEnrolApproval, 3},
-		"v3 capability": {TypeCapability, 3},
-		"v2 status":     {TypeStatus, 2},
+		"nil":            {nil, true},
+		"empty":          {map[string]string{}, true},
+		"valid":          {map[string]string{"region": "eu", "lab/gpu": "a100", "zone": "Eu-West_1.b"}, true},
+		"empty value":    {map[string]string{"region": ""}, false},
+		"long value":     {map[string]string{"region": strings.Repeat("a", 64)}, false},
+		"bad value":      {map[string]string{"region": "eu west"}, false},
+		"dash value":     {map[string]string{"region": "-eu"}, false},
+		"empty key":      {map[string]string{"": "eu"}, false},
+		"bad key":        {map[string]string{"re gion": "eu"}, false},
+		"reserved key":   {map[string]string{"wherry.io/pool": "linux"}, false},
+		"one bad of two": {map[string]string{"region": "eu", "zone": ""}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			payload, err := MarshalPayload(test.recordType, payloads[test.recordType])
-			if err != nil {
-				t.Fatal(err)
-			}
-			// Signed under the domain of the version it claims, so only the version check can reject it.
-			envelope := Sign(test.recordType, payload, privateKey)
-			envelope.V, envelope.Sig = test.version, ed25519.Sign(privateKey, signatureInput(test.version, test.recordType, payload))
-			if _, err := Verify(envelope, publicKey, verificationKind(test.recordType)); err == nil {
-				t.Fatal("unknown version verified")
-			}
-			encoded, err := MarshalEnvelope(envelope)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := DecodeEnvelope(encoded); err == nil {
-				t.Fatal("unknown version decoded")
+			if err := ValidateLabels(test.labels); (err == nil) != test.ok {
+				t.Fatalf("error %v, want ok=%v", err, test.ok)
 			}
 		})
 	}
 }
 
-func TestV1SubmissionRequiresLabels(t *testing.T) {
-	publicKey, privateKey := fixedKey(t)
-	encoded, err := os.ReadFile("testdata/vectors/v1/submission-ok.json")
-	if err != nil {
-		t.Fatal(err)
+func TestValidateRequirements(t *testing.T) {
+	for name, test := range map[string]struct {
+		requirements []Requirement
+		ok           bool
+	}{
+		"none":                    {nil, true},
+		"in":                      {[]Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu", "us"}}}, true},
+		"not in":                  {[]Requirement{{Key: "region", Operator: OpNotIn, Values: []string{"eu"}}}, true},
+		"exists":                  {[]Requirement{{Key: "lab/gpu", Operator: OpExists}}, true},
+		"does not exist":          {[]Requirement{{Key: "lab/gpu", Operator: OpDoesNotExist}}, true},
+		"distinct keys":           {[]Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}, {Key: "lab/gpu", Operator: OpExists}}, true},
+		"in without values":       {[]Requirement{{Key: "region", Operator: OpIn}}, false},
+		"in empty values":         {[]Requirement{{Key: "region", Operator: OpIn, Values: []string{}}}, false},
+		"not in without values":   {[]Requirement{{Key: "region", Operator: OpNotIn}}, false},
+		"in duplicate values":     {[]Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu", "eu"}}}, false},
+		"in invalid value":        {[]Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu west"}}}, false},
+		"not in empty value":      {[]Requirement{{Key: "region", Operator: OpNotIn, Values: []string{""}}}, false},
+		"exists with values":      {[]Requirement{{Key: "lab/gpu", Operator: OpExists, Values: []string{"a100"}}}, false},
+		"does not exist values":   {[]Requirement{{Key: "lab/gpu", Operator: OpDoesNotExist, Values: []string{"a100"}}}, false},
+		"unknown operator":        {[]Requirement{{Key: "region", Operator: "Gt", Values: []string{"1"}}}, false},
+		"lowercase operator":      {[]Requirement{{Key: "region", Operator: "in", Values: []string{"eu"}}}, false},
+		"empty operator":          {[]Requirement{{Key: "region"}}, false},
+		"duplicate key":           {[]Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}, {Key: "region", Operator: OpExists}}, false},
+		"invalid key":             {[]Requirement{{Key: "re gion", Operator: OpExists}}, false},
+		"reserved key":            {[]Requirement{{Key: "wherry.io/pool", Operator: OpExists}}, false},
+		"invalid after valid one": {[]Requirement{{Key: "region", Operator: OpExists}, {Key: "zone", Operator: OpIn}}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateRequirements(test.requirements); (err == nil) != test.ok {
+				t.Fatalf("error %v, want ok=%v", err, test.ok)
+			}
+		})
 	}
-	var vector publishedVector
-	if err := json.Unmarshal(encoded, &vector); err != nil {
-		t.Fatal(err)
+}
+
+func TestSatisfies(t *testing.T) {
+	labels := map[string]string{"region": "eu", "lab/gpu": "a100"}
+	for name, test := range map[string]struct {
+		selector []Requirement
+		want     bool
+	}{
+		"empty selector":         {nil, true},
+		"in match":               {[]Requirement{{Key: "region", Operator: OpIn, Values: []string{"us", "eu"}}}, true},
+		"in mismatch":            {[]Requirement{{Key: "region", Operator: OpIn, Values: []string{"us"}}}, false},
+		"in absent":              {[]Requirement{{Key: "zone", Operator: OpIn, Values: []string{"eu"}}}, false},
+		"not in match":           {[]Requirement{{Key: "region", Operator: OpNotIn, Values: []string{"eu"}}}, false},
+		"not in mismatch":        {[]Requirement{{Key: "region", Operator: OpNotIn, Values: []string{"us"}}}, true},
+		"not in absent":          {[]Requirement{{Key: "zone", Operator: OpNotIn, Values: []string{"eu"}}}, true},
+		"exists present":         {[]Requirement{{Key: "lab/gpu", Operator: OpExists}}, true},
+		"exists absent":          {[]Requirement{{Key: "lab/tpu", Operator: OpExists}}, false},
+		"does not exist present": {[]Requirement{{Key: "lab/gpu", Operator: OpDoesNotExist}}, false},
+		"does not exist absent":  {[]Requirement{{Key: "lab/tpu", Operator: OpDoesNotExist}}, true},
+		"unknown operator":       {[]Requirement{{Key: "region", Operator: "Gt", Values: []string{"eu"}}}, false},
+		"all hold":               {[]Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}, {Key: "lab/gpu", Operator: OpExists}}, true},
+		"one fails":              {[]Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}, {Key: "lab/gpu", Operator: OpDoesNotExist}}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := Satisfies(test.selector, labels); got != test.want {
+				t.Fatalf("Satisfies = %v, want %v", got, test.want)
+			}
+		})
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(vector.PayloadB64)
-	if err != nil {
-		t.Fatal(err)
+	if !Satisfies([]Requirement{{Key: "region", Operator: OpDoesNotExist}}, nil) || Satisfies([]Requirement{{Key: "region", Operator: OpExists}}, nil) {
+		t.Fatal("nil labels must hold no keys")
 	}
-	unlabelled := replaceOnce(t, payload, `"labels":{"lab/os":"linux"},`, ``)
-	envelope := Envelope{V: 1, Type: TypeSubmission, Signer: Fingerprint(publicKey), Payload: unlabelled,
-		Sig: ed25519.Sign(privateKey, signatureInput(1, TypeSubmission, unlabelled))}
-	if _, err := Verify(envelope, publicKey, SignerUser); !errors.Is(err, errInvalidPayload) {
-		t.Fatalf("v1 submission without labels: got %v, want invalid payload", err)
+}
+
+func TestValidateOffers(t *testing.T) {
+	offer := Offer{Adapter: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}}
+	for name, test := range map[string]struct {
+		offers []Offer
+		ok     bool
+	}{
+		"one":               {[]Offer{offer}, true},
+		"no labels":         {[]Offer{{Adapter: "nomad", Agent: "claude"}}, true},
+		"distinct adapters": {[]Offer{offer, {Adapter: "kubernetes", Agent: "claude"}}, true},
+		"same agent twice":  {[]Offer{offer, {Adapter: "kubernetes", Agent: offer.Agent, Labels: offer.Labels}}, true},
+		"none":              {nil, false},
+		"duplicate adapter": {[]Offer{offer, {Adapter: "nomad", Agent: "codex"}}, false},
+		"missing agent":     {[]Offer{{Adapter: "nomad", Labels: offer.Labels}}, false},
+		"uppercase agent":   {[]Offer{{Adapter: "nomad", Agent: "Claude"}}, false},
+		"missing adapter":   {[]Offer{{Agent: "claude"}}, false},
+		"invalid label":     {[]Offer{{Adapter: "nomad", Agent: "claude", Labels: map[string]string{"runtime": ""}}}, false},
+		"reserved label":    {[]Offer{{Adapter: "nomad", Agent: "claude", Labels: map[string]string{"wherry.io/runtime": "podman"}}}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateOffers(test.offers); (err == nil) != test.ok {
+				t.Fatalf("error %v, want ok=%v", err, test.ok)
+			}
+		})
 	}
 }

@@ -32,23 +32,34 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestParseSelectorAlternatives(t *testing.T) {
-	got, err := parseRequirements("runtime=exec|podman,nomad.node_pool=default")
+func TestParseSelectorForms(t *testing.T) {
+	got, err := parseRequirements("runtime=exec|podman,example.com/segment!=batch|test,gpu,!spot")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []wire.Requirement{
 		{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec", "podman"}},
-		{Key: "nomad.node_pool", Operator: wire.OpIn, Values: []string{"default"}},
+		{Key: "example.com/segment", Operator: wire.OpNotIn, Values: []string{"batch", "test"}},
+		{Key: "gpu", Operator: wire.OpExists},
+		{Key: "spot", Operator: wire.OpDoesNotExist},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
+	if got, err := parseRequirements(""); err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("empty selector %#v, %v; want an empty selector", got, err)
+	}
 }
 
-func TestParseSelectorRejectsDuplicateKey(t *testing.T) {
-	if _, err := parseRequirements("runtime=exec,runtime=podman"); err == nil {
-		t.Fatal("duplicate key accepted")
+func TestParseSelectorRejectsInvalidInput(t *testing.T) {
+	for _, value := range []string{
+		"runtime=exec,runtime=podman", "runtime=exec,runtime!=podman", "gpu,!gpu",
+		"runtime=", "runtime!=", "=exec", "!=exec", "!", "runtime=exec||podman", "runtime=exec|exec", "runtime==exec",
+		"!gpu=a100", "wherry.io/owner=x", "a,,b", "runtime=exec,",
+	} {
+		if got, err := parseRequirements(value); err == nil {
+			t.Errorf("accepted %q as %#v", value, got)
+		}
 	}
 }
 
@@ -89,7 +100,7 @@ func newBus(t *testing.T) *bus {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	b := &bus{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, stateDir: t.TempDir()}
-	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, Runtimes: []string{"exec"}, DefaultAgent: "claude", DefaultRuntime: "exec",
+	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, DefaultAgent: "claude",
 		SealLifetimeMS: int64(72 * time.Hour / time.Millisecond), DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := b.service.PoolCreate(ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
@@ -102,7 +113,7 @@ func newBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	receiverBundle := filepath.Join(t.TempDir(), "receiver.yaml")
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Runtimes: []string{"exec"}, Adapters: []admin.AdapterSettings{{Name: "lab", Type: "nomad", Agent: "claude", Credential: "model"}}}
+	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Adapters: []admin.AdapterSettings{{Name: "lab", Type: "nomad", Agent: "claude", Credential: "model", Labels: map[string]string{"runtime": "exec"}}}}
 	if err := b.service.ReceiverAdd(ctx, config, nil, receiverBundle); err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +146,7 @@ func newBus(t *testing.T) *bus {
 	}
 	b.produce(t, admin.ReceiverTopic("receiver-a"), "receiver-a", registration)
 	b.produce(t, admin.ReceiversTopic, "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
-		Offers: []wire.Offer{{Adapter: "lab", Labels: map[string]string{"agent": "claude", "runtime": "exec"}}}, Capacity: 1,
+		Offers: []wire.Offer{{Adapter: "lab", Agent: "claude", Labels: map[string]string{"runtime": "advertised"}}}, Capacity: 1,
 		SealingKey: signed.SealingKeyID(b.sealing.PublicKey()), AtMS: time.Now().UnixMilli()}))
 	return b
 }
@@ -313,7 +324,7 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	wantKeys := []string{"capacity", "ended", "heartbeat_age", "in_flight", "offers", "pool", "receiver_id", "seals", "status"}
+	wantKeys := []string{"adapters", "capacity", "ended", "heartbeat_age", "in_flight", "pool", "receiver_id", "seals", "status"}
 	if !reflect.DeepEqual(keys, wantKeys) {
 		t.Fatalf("got JSON fields %v, want %v", keys, wantKeys)
 	}
@@ -347,7 +358,7 @@ func TestReceiversWarnsSealExpiry(t *testing.T) {
 	if err := runReceivers(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "\n  offer adapter=lab agent=claude,runtime=exec\n  seal=model pool=pool-a expires=") {
+	if !strings.Contains(stdout.String(), "\n  adapter=lab agent=claude ready=true labels=runtime=exec\n  seal=model pool=pool-a expires=") {
 		t.Fatalf("offer and seal not listed:\n%s", stdout.String())
 	}
 	if want := "seal model on receiver receiver-a expires in 3d\n"; stderr.String() != want {
@@ -370,7 +381,7 @@ func TestReceiversWarnsSealExpiry(t *testing.T) {
 func TestSubmitNeverPrintsCredential(t *testing.T) {
 	b := newBus(t)
 	var stdout, stderr bytes.Buffer
-	if err := runSubmit(b.ctx, b.client, []string{"--selector", "runtime=exec", "--prompt", "work"}, &stdout, &stderr); err != nil {
+	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "work"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(stdout.String()+stderr.String(), credentialText) {
@@ -587,6 +598,9 @@ func TestUsageErrors(t *testing.T) {
 		{"await argument", func(stderr *bytes.Buffer) error {
 			return runAwait(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
 		}, "usage: wherry await"},
+		{"submit selector", func(stderr *bytes.Buffer) error {
+			return runSubmit(context.Background(), nil, []string{"--selector", "runtime==exec", "--prompt", "p"}, stderr, stderr)
+		}, "selector: requirement values must be valid and unique"},
 		{"submit deadline", func(stderr *bytes.Buffer) error {
 			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--prompt", "p", "--deadline", "0s"}, stderr, stderr)
 		}, "deadlines must be positive"},
@@ -658,7 +672,7 @@ func TestSubmitBadGitPartWithoutReceiver(t *testing.T) {
 
 func TestSubmitGitFlags(t *testing.T) {
 	b := newBus(t)
-	base := []string{"--selector", "runtime=exec", "--prompt", "fix the bug"}
+	base := []string{"--agent", "claude", "--selector", "runtime=exec,!gpu", "--prompt", "fix the bug"}
 	for name, test := range map[string]struct {
 		flags []string
 		want  string
@@ -683,7 +697,13 @@ func TestSubmitGitFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	runID, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
-	parts := b.tasks(t, runID)[0].submission.Message.Parts
+	submission := b.tasks(t, runID)[0].submission
+	if placement := submission.Wherry.Placement; placement.Agent != "claude" || !reflect.DeepEqual(placement.Selector, []wire.Requirement{
+		{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}, {Key: "gpu", Operator: wire.OpDoesNotExist},
+	}) {
+		t.Fatalf("placement %#v, want the --agent and --selector flags", placement)
+	}
+	parts := submission.Message.Parts
 	if len(parts) != 2 || parts[0].Text != "fix the bug" || parts[1].URL != "https://git.example.test/org/repo.git" ||
 		parts[1].MediaType != wire.GitMediaType || string(parts[1].Metadata) != `{"ref":"v1.2.0","path":"src/repo"}` {
 		t.Fatalf("submitted parts %#v", parts)

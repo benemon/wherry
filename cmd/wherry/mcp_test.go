@@ -85,7 +85,11 @@ func toolText(result *mcp.CallToolResult) string {
 	return strings.Join(texts, "\n")
 }
 
-var submitArguments = map[string]any{"prompt": "fix the bug", "selector": map[string]any{"runtime": []string{"exec"}}}
+var submitArguments = map[string]any{"prompt": "fix the bug", "agent": "claude", "selector": []any{
+	map[string]any{"key": "runtime", "operator": "In", "values": []string{"exec"}},
+	map[string]any{"key": "region", "operator": "NotIn", "values": []string{"us"}},
+	map[string]any{"key": "gpu", "operator": "DoesNotExist"},
+}}
 
 func TestMCPToolsList(t *testing.T) {
 	b := newBus(t)
@@ -113,7 +117,7 @@ func TestMCPToolsList(t *testing.T) {
 	}
 	required := map[string][]string{
 		"await": {"id"}, "cancel": {"id"}, "continue": {"id"}, "events": {"id"}, "receivers": nil, "status": {"id"},
-		"submit": {"prompt", "selector"},
+		"submit": {"prompt"},
 	}
 	for name, tool := range schemas {
 		if tool.Description == "" {
@@ -174,7 +178,8 @@ func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 
 	var receivers receiversOutput
 	callTool(t, ctx, session, "receivers", map[string]any{}, &receivers)
-	if len(receivers.Receivers) != 1 || receivers.Receivers[0].ReceiverID != "receiver-a" || receivers.Receivers[0].Pool != "pool-a" || receivers.Receivers[0].Status != "live" {
+	if len(receivers.Receivers) != 1 || receivers.Receivers[0].ReceiverID != "receiver-a" || receivers.Receivers[0].Pool != "pool-a" || receivers.Receivers[0].Status != "live" ||
+		!reflect.DeepEqual(receivers.Receivers[0].Adapters, []busclient.Adapter{{Name: "lab", Agent: "claude", Labels: map[string]string{"runtime": "exec"}, Ready: true}}) {
 		t.Fatalf("receivers %#v", receivers)
 	}
 	var submitted submitOutput
@@ -201,7 +206,9 @@ func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 
 	// The receiver's side: claim the authorised task, then commit what admission and completion commit.
 	admitted := b.tasks(t, submitted.ID)[0]
-	if placement := admitted.submission.Wherry.Placement; placement.Agent != "claude" || placement.Runtime != "exec" {
+	if placement := admitted.submission.Wherry.Placement; placement.Agent != "claude" || !reflect.DeepEqual(placement.Selector, []wire.Requirement{
+		{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}, {Key: "region", Operator: wire.OpNotIn, Values: []string{"us"}}, {Key: "gpu", Operator: wire.OpDoesNotExist},
+	}) {
 		t.Fatalf("placement %#v", placement)
 	}
 	b.feed(t, submitted.ID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
@@ -326,12 +333,14 @@ func TestMCPSubmitNamesTheInvalidRule(t *testing.T) {
 	b := newBus(t)
 	ctx := b.ctx
 	session := mcpSession(t, b.connect(t), nil)
-	for rule, selector := range map[string]map[string]any{
-		"invalid requirement key":                         {"task": []any{"essay"}},
-		"requirement values are required":                 {"runtime": []any{}},
-		"requirement values must be non-empty and unique": {"runtime": []any{""}},
+	for rule, requirement := range map[string]map[string]any{
+		"invalid requirement key":                             {"key": "wherry.io/owner", "operator": "In", "values": []any{"x"}},
+		"In and NotIn requirements need values":               {"key": "runtime", "operator": "NotIn", "values": []any{}},
+		"requirement values must be valid and unique":         {"key": "runtime", "operator": "In", "values": []any{""}},
+		"Exists and DoesNotExist requirements take no values": {"key": "gpu", "operator": "Exists", "values": []any{"a100"}},
+		"unknown operator":                                    {"key": "gpu", "operator": "Gt", "values": []any{"1"}},
 	} {
-		failure := callToolError(t, ctx, session, "submit", map[string]any{"prompt": "x", "selector": selector})
+		failure := callToolError(t, ctx, session, "submit", map[string]any{"prompt": "x", "selector": []any{requirement}})
 		if failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, rule) {
 			t.Fatalf("error %#v, want INVALID_ARGUMENT naming %q", failure, rule)
 		}
@@ -357,15 +366,15 @@ func TestMCPErrorsCarryNoSecrets(t *testing.T) {
 	}{
 		"connect failure": {func() (*busclient.Host, error) { return busclient.Connect(broken) }, "status", map[string]any{"id": "run-a"}, "UNAVAILABLE"},
 		"git userinfo": {working, "submit", map[string]any{
-			"prompt": "x", "selector": map[string]any{},
+			"prompt": "x", "selector": []any{},
 			"git": map[string]any{"url": "https://user:s3cr3t-password@git.example.test/org/repo.git", "ref": "main"},
 		}, "INVALID_ARGUMENT"},
 		"unknown run": {working, "status", map[string]any{"id": "run-missing"}, "RUN_NOT_FOUND"},
 		"invalid selector key": {working, "submit", map[string]any{
-			"prompt": "x", "selector": map[string]any{"s3cr3t-password": []any{"x"}},
+			"prompt": "x", "selector": []any{map[string]any{"key": "s3cr3t-password!", "operator": "Exists"}},
 		}, "INVALID_ARGUMENT"},
 		"no matching receiver": {working, "submit", map[string]any{
-			"prompt": "x", "selector": map[string]any{"runtime": []any{"podman"}},
+			"prompt": "x", "selector": []any{map[string]any{"key": "runtime", "operator": "In", "values": []any{"podman"}}},
 		}, "NO_MATCHING_RECEIVER"},
 	} {
 		t.Run(name, func(t *testing.T) {

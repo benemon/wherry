@@ -8,9 +8,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -45,8 +49,8 @@ type testReceiver struct {
 
 func testTerms() admin.Terms {
 	return admin.Terms{
-		Agents:   []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}, {Name: "codex", Credentials: []string{"openai"}}},
-		Runtimes: []string{"podman", "exec"}, DefaultAgent: "claude", DefaultRuntime: "podman",
+		Agents:         []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}, {Name: "codex", Credentials: []string{"openai"}}},
+		DefaultAgent:   "claude",
 		SealLifetimeMS: int64(time.Hour / time.Millisecond), DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
 	}
 }
@@ -143,11 +147,14 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 	return h
 }
 
-// addReceiver provisions a receiver whose one adapter launches claude, and registers its signing and sealing keys.
+// addReceiver provisions a receiver whose lab adapter launches claude and cloud adapter codex, and registers its signing
+// and sealing keys.
 func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 	t.Helper()
-	config := admin.ReceiverConfig{Receiver: id, Pool: pool, Capacity: 2, Runtimes: []string{"podman", "exec"},
-		Adapters: []admin.AdapterSettings{{Name: "lab", Type: "nomad", Agent: "claude", Credential: "model"}, {Name: "cloud", Type: "aws", Agent: "codex", Credential: "openai"}}}
+	config := admin.ReceiverConfig{Receiver: id, Pool: pool, Capacity: 2, Adapters: []admin.AdapterSettings{
+		{Name: "lab", Type: "nomad", Agent: "claude", Credential: "model", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
+		{Name: "cloud", Type: "aws", Agent: "codex", Credential: "openai", Labels: map[string]string{"runtime": "exec"}},
+	}}
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
 	if err := f.service.ReceiverAdd(f.ctx, config, nil, bundle); err != nil {
 		t.Fatal(err)
@@ -188,7 +195,12 @@ func (r *testReceiver) sign(t *testing.T, record wire.Record) []byte {
 }
 
 func claudeOffer() wire.Offer {
-	return wire.Offer{Adapter: "lab", Labels: map[string]string{"agent": "claude", "runtime": "podman"}}
+	return wire.Offer{Adapter: "lab", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}}
+}
+
+// bothOffers makes both of addReceiver's adapters ready.
+func bothOffers() []wire.Offer {
+	return []wire.Offer{claudeOffer(), {Adapter: "cloud", Agent: "codex", Labels: map[string]string{"runtime": "exec"}}}
 }
 
 // advertise publishes a live advertisement; mutate may change it before it is signed.
@@ -347,14 +359,14 @@ func TestHostEndToEnd(t *testing.T) {
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
 	if binding := task.submission.Wherry; binding.Tenant != "tenant-a" || binding.Host != "host-a" || binding.Pool != "pool-a" || binding.Turn != 1 ||
-		binding.Placement.Agent != "claude" || binding.Placement.Runtime != "podman" {
+		binding.Placement.Agent != "claude" || !reflect.DeepEqual(binding.Placement.Selector, defaultSelector()) {
 		t.Fatalf("submitted binding %#v", binding)
 	}
 	if message := task.submission.Message; message.TaskID != runID || message.ContextID != runID || message.Parts[0].Text != "do the work" {
 		t.Fatalf("submitted message %#v", message)
 	}
 	local, err := f.host.localRun(runID)
-	if err != nil || local == nil || local.Run != runID || local.Pool != "pool-a" || local.Turn != 1 || local.TaskHash != task.hash || local.Placement.Agent != "claude" || local.Placement.Runtime != "podman" {
+	if err != nil || local == nil || local.Run != runID || local.Pool != "pool-a" || local.Turn != 1 || local.TaskHash != task.hash || local.Placement.Agent != "claude" || !reflect.DeepEqual(local.Placement.Selector, defaultSelector()) {
 		t.Fatalf("local record %#v, %v", local, err)
 	}
 	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, 0), receiver.chunk(t, task, 1, 1))
@@ -442,6 +454,7 @@ func (f *fixture) tasksEnd(t *testing.T, pool string) int {
 
 func TestSubmitNoMatchingReceiverProducesNothing(t *testing.T) {
 	f := newFixture(t)
+	// cloud would launch codex with runtime=exec, but it is not ready: the advertisement offers only lab.
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
 	if !errors.Is(err, ErrNoMatchingReceiver) {
@@ -452,37 +465,37 @@ func TestSubmitNoMatchingReceiverProducesNothing(t *testing.T) {
 	}
 }
 
-func TestSubmitMatchesOffersNotFlattenedSets(t *testing.T) {
+func TestSubmitMatchesOneAdaptersLabels(t *testing.T) {
 	f := newFixture(t)
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.Offers = []wire.Offer{
-			{Adapter: "lab", Labels: map[string]string{"agent": "claude", "runtime": "podman", "nomad.node_pool": "OCPv"}},
-			{Adapter: "lab", Labels: map[string]string{"agent": "claude", "runtime": "exec", "nomad.node_pool": "default"}},
-		}
-	})
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{
-		{Key: "runtime", Operator: wire.OpIn, Values: []string{"podman"}}, {Key: "nomad.node_pool", Operator: wire.OpIn, Values: []string{"default"}},
+		{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}, {Key: "region", Operator: wire.OpIn, Values: []string{"eu"}},
 	}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
 	if !errors.Is(err, ErrNoMatchingReceiver) {
-		t.Fatalf("submit matched values from different offers: %v", err)
+		t.Fatalf("submit matched labels of two different adapters: %v", err)
 	}
 }
 
 func TestSubmitMatchesAcrossAdapters(t *testing.T) {
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
-	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.Offers = []wire.Offer{claudeOffer(), {Adapter: "cloud", Labels: map[string]string{"agent": "codex", "runtime": "exec"}}}
-	})
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{{Key: "platform", Operator: wire.OpIn, Values: []string{"aws"}}}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
+	selector := []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: selector, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
 	if err != nil {
-		t.Fatalf("second adapter's offer did not match: %v", err)
+		t.Fatalf("second adapter did not match: %v", err)
 	}
-	if placement := receiver.claim(t, f.ctx, result.RunID)[0].submission.Wherry.Placement; placement.Agent != "codex" || placement.Runtime != "exec" {
-		t.Fatalf("placement %#v, want codex on exec", placement)
+	if placement := receiver.claim(t, f.ctx, result.RunID)[0].submission.Wherry.Placement; placement.Agent != "codex" || !reflect.DeepEqual(placement.Selector, selector) {
+		t.Fatalf("placement %#v, want codex under the submitted selector", placement)
 	}
-	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{{Key: "platform", Operator: wire.OpIn, Values: []string{"aws"}}, {Key: "runtime", Operator: wire.OpIn, Values: []string{"podman"}}}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrNoMatchingReceiver) {
-		t.Fatalf("matched podman on aws, which only the nomad adapter offers: %v", err)
+	for name, input := range map[string]SubmitInput{
+		"explicit agent the matching adapter does not launch": {Agent: "claude", Selector: selector},
+		"agent outside the pool's terms":                      {Agent: "gemini"},
+	} {
+		input.Prompt, input.Deadline, input.QueueDeadline = "work", time.Minute, time.Minute
+		if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrNoMatchingReceiver) {
+			t.Fatalf("%s: %v", name, err)
+		}
 	}
 }
 
@@ -491,10 +504,17 @@ func TestSubmitIgnoresStaleOrUnauthorisedAdvertisements(t *testing.T) {
 		"stale": func(t *testing.T, f *fixture) {
 			f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.AtMS = time.Now().Add(-121 * time.Second).UnixMilli() })
 		},
+		"from the future": func(t *testing.T, f *fixture) {
+			f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.AtMS = time.Now().Add(time.Hour).UnixMilli() })
+		},
 		"unregistered key": func(t *testing.T, f *fixture) {
 			receiver := f.addReceiver(t, "receiver-a", "pool-a")
 			_, receiver.key, _ = ed25519.GenerateKey(rand.Reader)
 			receiver.advertise(t, f.ctx, nil)
+		},
+		"unregistered sealing key": func(t *testing.T, f *fixture) {
+			other, _ := ecdh.X25519().GenerateKey(rand.Reader)
+			f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.SealingKey = signed.SealingKeyID(other.PublicKey()) })
 		},
 		"ended member": func(t *testing.T, f *fixture) {
 			f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
@@ -522,7 +542,10 @@ func TestSubmitChoosesPoolOfMostSpareMember(t *testing.T) {
 	f.pool(t, "pool-b")
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 3 })
 	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 4, 1 })
-	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 9, 0; ad.Offers = []wire.Offer{} })
+	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Capacity, ad.InFlight = 9, 0
+		ad.Offers = bothOffers()[1:]
+	})
 	if result := f.submit(t, defaultSelector()); result.Pool != "pool-b" {
 		t.Fatalf("pool %q, want pool-b through its member with most spare capacity", result.Pool)
 	}
@@ -535,55 +558,89 @@ func TestSubmitChoosesPoolOfMostSpareMember(t *testing.T) {
 func TestResolvePlacement(t *testing.T) {
 	terms := testTerms()
 	terms.Agents = append(terms.Agents, admin.AgentTerms{Name: "gemini"})
-	terms.Runtimes = append(terms.Runtimes, "lambda")
-	terms.DefaultAgent, terms.DefaultRuntime = "codex", "exec"
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Adapters: []admin.AdapterSettings{{Name: "lab", Type: "nomad"}, {Name: "cloud", Type: "aws"}}}
+	terms.DefaultAgent = "codex"
+	// The declared agent order is claude, codex, gemini; codex is the default.
+	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Adapters: []admin.AdapterSettings{
+		{Name: "lab", Type: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "a100"}},
+		{Name: "batch", Type: "nomad", Agent: "gemini", Labels: map[string]string{"runtime": "exec", "region": "us"}},
+		{Name: "cloud", Type: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
+		{Name: "spare", Type: "nomad", Agent: "codex", Labels: map[string]string{"runtime": "wasm"}},
+		{Name: "rogue", Type: "nomad", Agent: "other"},
+	}}
 	state := admin.NewState()
 	state.Pools["pool-a"] = terms
 	state.Receivers["receiver-a"] = config
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
-	offer := func(adapter, agent, runtime string) wire.Offer {
-		return wire.Offer{Adapter: adapter, Labels: map[string]string{"agent": agent, "runtime": runtime}}
+	// Advertised labels deliberately disagree with the config record; only the record counts.
+	offer := func(adapter, agent string) wire.Offer {
+		return wire.Offer{Adapter: adapter, Agent: agent, Labels: map[string]string{"runtime": "wasm", "region": "mars"}}
 	}
-	all := []wire.Offer{offer("lab", "claude", "podman"), offer("lab", "gemini", "lambda"), offer("cloud", "codex", "podman"), offer("lab", "codex", "exec"), offer("cloud", "claude", "exec")}
-	requirement := func(key string, values ...string) wire.Requirement {
-		return wire.Requirement{Key: key, Operator: wire.OpIn, Values: values}
+	ready := []wire.Offer{offer("lab", "claude"), offer("batch", "gemini"), offer("cloud", "codex"), offer("rogue", "other")}
+	requirement := func(key, operator string, values ...string) wire.Requirement {
+		return wire.Requirement{Key: key, Operator: operator, Values: values}
 	}
 	for name, test := range map[string]struct {
+		agent    string
 		selector []wire.Requirement
 		offers   []wire.Offer
 		want     string
 	}{
-		"defaults first":                {nil, all, "codex/exec"},
-		"default runtime within agent":  {[]wire.Requirement{requirement("agent", "claude")}, all, "claude/exec"},
-		"declared runtime order":        {[]wire.Requirement{requirement("agent", "claude"), requirement("runtime", "podman", "lambda")}, all, "claude/podman"},
-		"declared agent order":          {[]wire.Requirement{requirement("agent", "gemini", "claude"), requirement("runtime", "lambda", "podman")}, all, "claude/podman"},
-		"default agent before declared": {[]wire.Requirement{requirement("runtime", "podman")}, all, "codex/podman"},
-		"platform from adapter":         {[]wire.Requirement{requirement("platform", "aws")}, all, "codex/podman"},
-		"agent outside terms":           {nil, []wire.Offer{offer("lab", "other", "exec")}, ""},
-		"runtime outside terms":         {nil, []wire.Offer{offer("lab", "claude", "wasm")}, ""},
-		"adapter outside configuration": {nil, []wire.Offer{offer("edge", "claude", "exec")}, ""},
-		"selector against offer labels": {[]wire.Requirement{requirement("region", "eu")}, all, ""},
-		"only the last offer satisfies": {[]wire.Requirement{requirement("agent", "gemini")}, all, "gemini/lambda"},
-		"no offers":                     {nil, []wire.Offer{}, ""},
+		"default agent first":                     {"", nil, ready, "codex"},
+		"declared order after the default":        {"", []wire.Requirement{requirement("region", wire.OpExists)}, ready, "claude"},
+		"explicit agent":                          {"gemini", nil, ready, "gemini"},
+		"explicit agent outside the terms":        {"other", nil, ready, ""},
+		"explicit agent no ready adapter matches": {"claude", []wire.Requirement{requirement("region", wire.OpIn, "us")}, ready, ""},
+		"In":                                  {"", []wire.Requirement{requirement("region", wire.OpIn, "us", "ap")}, ready, "gemini"},
+		"NotIn":                               {"", []wire.Requirement{requirement("runtime", wire.OpNotIn, "exec")}, ready, "claude"},
+		"NotIn passes an absent key":          {"", []wire.Requirement{requirement("gpu", wire.OpNotIn, "a100")}, ready, "codex"},
+		"Exists":                              {"", []wire.Requirement{requirement("gpu", wire.OpExists)}, ready, "claude"},
+		"DoesNotExist":                        {"", []wire.Requirement{requirement("region", wire.OpDoesNotExist)}, ready, "codex"},
+		"all requirements on one adapter":     {"", []wire.Requirement{requirement("runtime", wire.OpIn, "exec"), requirement("gpu", wire.OpExists)}, ready, ""},
+		"labels from the record, not the ad":  {"", []wire.Requirement{requirement("region", wire.OpIn, "mars")}, ready, ""},
+		"not-ready adapter never chosen":      {"", []wire.Requirement{requirement("runtime", wire.OpIn, "wasm")}, ready, ""},
+		"not-ready default falls to declared": {"", nil, ready[:2], "claude"},
+		"advertised agent ignored":            {"claude", nil, []wire.Offer{offer("cloud", "claude")}, ""},
+		"adapter outside the record":          {"", nil, []wire.Offer{offer("edge", "codex")}, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: test.offers, Capacity: 1}}
-			pool, placement, ok := resolvePlacement(state, "tenant-a", test.selector, ads)
-			got := ""
-			if ok {
-				got = placement.Agent + "/" + placement.Runtime
-				if pool != "pool-a" || placement.Labels["agent"] != placement.Agent || placement.Labels["runtime"] != placement.Runtime || placement.Labels["platform"] != "" {
-					t.Fatalf("pool %q placement %#v", pool, placement)
-				}
+			pool, placement, ok := resolvePlacement(state, "tenant-a", test.agent, test.selector, ads)
+			if ok && (pool != "pool-a" || !reflect.DeepEqual(placement.Selector, test.selector)) {
+				t.Fatalf("pool %q placement %#v, want pool-a under the submitted selector", pool, placement)
 			}
-			if got != test.want {
-				t.Fatalf("placed %q, want %q", got, test.want)
+			if placement.Agent != test.want {
+				t.Fatalf("placed %q, want %q", placement.Agent, test.want)
 			}
 		})
 	}
-	if _, _, ok := resolvePlacement(state, "tenant-b", nil, map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: all}}); ok {
+	if _, _, ok := resolvePlacement(state, "tenant-b", "", nil, map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: ready}}); ok {
 		t.Fatal("placed a task for a tenant not entitled to the pool")
+	}
+}
+
+func TestResolvePlacementChoosesMostSpareThenLowestID(t *testing.T) {
+	state := admin.NewState()
+	state.Pools["pool-a"], state.Pools["pool-b"], state.Pools["pool-c"] = testTerms(), testTerms(), testTerms()
+	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true, "pool-b": true}
+	ads := map[string]wire.Advertisement{}
+	member := func(id, pool string, capacity, inFlight int64, adapter string) {
+		state.Receivers[id] = admin.ReceiverConfig{Receiver: id, Pool: pool, Adapters: []admin.AdapterSettings{
+			{Name: "lab", Type: "nomad", Agent: "claude"}, {Name: "cloud", Type: "aws", Agent: "codex"},
+		}}
+		ads[id] = wire.Advertisement{Receiver: id, Pool: pool, Capacity: capacity, InFlight: inFlight, Offers: []wire.Offer{{Adapter: adapter, Agent: "x", Labels: map[string]string{}}}}
+	}
+	member("receiver-d", "pool-b", 5, 2, "lab")   // spare 3
+	member("receiver-c", "pool-a", 5, 2, "lab")   // spare 3, lower ID
+	member("receiver-b", "pool-a", 9, 0, "cloud") // most spare, but its ready adapter launches codex
+	member("receiver-a", "pool-c", 9, 0, "lab")   // most spare, pool not entitled
+	member("receiver-e", "pool-a", 4, 2, "lab")   // spare 2
+	pool, placement, ok := resolvePlacement(state, "tenant-a", "claude", nil, ads)
+	if !ok || pool != "pool-a" || placement.Agent != "claude" {
+		t.Fatalf("placed %q %#v %v, want pool-a through receiver-c", pool, placement, ok)
+	}
+	ads["receiver-d"] = wire.Advertisement{Receiver: "receiver-d", Pool: "pool-b", Capacity: 5, InFlight: 1, Offers: ads["receiver-d"].Offers}
+	if pool, _, _ := resolvePlacement(state, "tenant-a", "claude", nil, ads); pool != "pool-b" {
+		t.Fatalf("pool %q, want pool-b through receiver-d's larger spare capacity", pool)
 	}
 }
 
@@ -609,7 +666,7 @@ func TestSubmitSealsToEveryLiveMemberLackingASeal(t *testing.T) {
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	f.addReceiver(t, "receiver-b", "pool-a").advertise(t, f.ctx, nil)
 	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.AtMS = time.Now().Add(-time.Hour).UnixMilli() })
-	f.addReceiver(t, "receiver-d", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = []wire.Offer{} })
+	f.addReceiver(t, "receiver-d", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers()[1:] })
 	f.submit(t, defaultSelector())
 	for receiver, want := range map[string]int{"receiver-a": 1, "receiver-b": 1, "receiver-c": 0, "receiver-d": 0} {
 		if got := len(f.sealsTo(t, receiver)); got != want {
@@ -625,11 +682,23 @@ func TestSubmitSealsToEveryLiveMemberLackingASeal(t *testing.T) {
 	if got := len(f.sealsTo(t, "receiver-e")); got != 1 {
 		t.Fatalf("new member holds %d seals, want 1", got)
 	}
-	short, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: 3 * time.Hour, QueueDeadline: 2 * time.Hour})
+	// A current seal must outlast the queue deadline: a newer seal ending in 30 minutes is replaced for a 40-minute one.
+	now := time.Now()
+	short, err := signed.SealCredential("tenant-a", "receiver-a", "pool-a", "model", now, now.Add(30*time.Minute), f.receivers["receiver-a"].sealing.PublicKey(), []byte("model-token"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(f.sealsTo(t, "receiver-a")); got != 2 || short.Pool != "pool-a" {
+	encoded, err := signed.EncodeSeal(short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.host.produce(f.ctx, &kgo.Record{Topic: admin.HostTopic("tenant-a", "host-a"), Value: encoded}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Hour, QueueDeadline: 40 * time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(f.sealsTo(t, "receiver-a")); got != 3 {
 		t.Fatalf("seal lasting less than the queue deadline counted as current: %d seals", got)
 	}
 }
@@ -772,18 +841,6 @@ func TestAwaitReturnsOnInterruptedOrRejected(t *testing.T) {
 			t.Fatalf("await %#v, %v; want AUTH_REQUIRED without a task", awaited, err)
 		}
 	})
-	t.Run("rejected before any echo", func(t *testing.T) {
-		f := newFixture(t)
-		receiver := f.addReceiver(t, "receiver-a", "pool-a")
-		receiver.advertise(t, f.ctx, nil)
-		submitted := f.submit(t, defaultSelector())
-		task := receiver.claim(t, f.ctx, submitted.RunID)[0]
-		receiver.feed(t, f.ctx, submitted.RunID, receiver.status(t, task, 1, "rejected-1", "rejected", wire.TaskStateRejected, nil))
-		awaited, err := f.host.Await(f.ctx, submitted.RunID, 5*time.Second)
-		if err != nil || awaited.Task != nil || awaited.Status.State != wire.TaskStateRejected {
-			t.Fatalf("await %#v, %v; want REJECTED", awaited, err)
-		}
-	})
 }
 
 func TestAwaitKeepsArtifactsWhenResultFollows(t *testing.T) {
@@ -861,10 +918,9 @@ func TestRecordsAfterMembershipEndAreRejected(t *testing.T) {
 func TestContinueThroughTheEcho(t *testing.T) {
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
-	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.Offers = []wire.Offer{claudeOffer(), {Adapter: "cloud", Labels: map[string]string{"agent": "codex", "runtime": "exec"}}}
-	})
-	submitted := f.submit(t, []wire.Requirement{{Key: "platform", Operator: wire.OpIn, Values: []string{"aws"}}})
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
+	selector := []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}
+	submitted := f.submit(t, selector)
 	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
 	runID := task.submission.Wherry.Run
 	receiver.feed(t, f.ctx, runID, receiver.echo(t, task), receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
@@ -886,7 +942,7 @@ func TestContinueThroughTheEcho(t *testing.T) {
 	}
 	next := tasks[1].submission
 	if next.Wherry.Turn != 2 || next.Wherry.Host != "host-b" || next.Wherry.Pool != "pool-a" || next.Wherry.Placement.Agent != "codex" ||
-		next.Wherry.Placement.Runtime != "exec" || next.Message.Parts[0].Text != "again" || next.Message.ContextID != runID {
+		!reflect.DeepEqual(next.Wherry.Placement.Selector, selector) || next.Message.Parts[0].Text != "again" || next.Message.ContextID != runID {
 		t.Fatalf("continuation %#v", next)
 	}
 	sealed := map[string]bool{}
@@ -958,7 +1014,11 @@ func TestCancelWritesToTheEchosPool(t *testing.T) {
 func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	f := newFixture(t)
 	f.pool(t, "pool-b")
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 3, 1 })
+	// The advertisement's labels disagree with the config record; the listing shows the record's.
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Capacity, ad.InFlight = 3, 1
+		ad.Offers[0].Labels = map[string]string{"runtime": "wasm"}
+	})
 	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Capacity, ad.InFlight, ad.AtMS = 4, 2, time.Now().Add(-121*time.Second).UnixMilli()
 	})
@@ -983,11 +1043,15 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	if want := []string{"receiver-a", "receiver-c", "receiver-d", "receiver-b"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] || order[2] != want[2] || order[3] != want[3] {
 		t.Fatalf("receivers %v, want %v", order, want)
 	}
-	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 || len(a.Offers) != 1 || len(a.Seals) != 1 || a.Seals[0].Name != "model" || a.Seals[0].Pool != "pool-a" {
+	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 || len(a.Seals) != 1 || a.Seals[0].Name != "model" || a.Seals[0].Pool != "pool-a" ||
+		!reflect.DeepEqual(a.Adapters, []Adapter{
+			{Name: "lab", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
+			{Name: "cloud", Agent: "codex", Labels: map[string]string{"runtime": "exec"}, Ready: false},
+		}) {
 		t.Fatalf("live receiver %#v", a)
 	}
-	if b := got["receiver-b"]; b.Status != "stale" || b.Capacity != 4 || b.InFlight != 2 {
-		t.Fatalf("stale receiver %#v", b)
+	if b := got["receiver-b"]; b.Status != "stale" || b.Capacity != 4 || b.InFlight != 2 || len(b.Adapters) != 2 || b.Adapters[0].Ready || b.Adapters[1].Ready {
+		t.Fatalf("stale receiver %#v; want its adapters listed, none ready", b)
 	}
 	if c := got["receiver-c"]; c.Status != "silent" || c.HeartbeatAge != "-" {
 		t.Fatalf("silent receiver %#v", c)
@@ -1015,6 +1079,7 @@ func TestEventsBindsRecordsToTheRun(t *testing.T) {
 		other.status(t, task, 1, "started-3", "started", wire.TaskStateWorking, nil),
 		receiver.chunk(t, task, 1, 0),
 		receiver.chunk(t, wrongTurn, 1, 0),
+		receiver.chunk(t, wrongHash, 1, 2),
 		other.chunk(t, task, 1, 1),
 		[]byte("not a record"),
 	)
@@ -1023,8 +1088,8 @@ func TestEventsBindsRecordsToTheRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events.Statuses) != 1 || events.Statuses[0].Wherry.EventID != "claimed-1" || events.Chunks[TurnAttempt{1, 1}] != 1 || len(events.Chunks) != 1 || events.Skipped != 6 {
-		t.Fatalf("statuses %d chunks %v skipped %d, want the one claimed status, one chunk and six skipped", len(events.Statuses), events.Chunks, events.Skipped)
+	if len(events.Statuses) != 1 || events.Statuses[0].Wherry.EventID != "claimed-1" || events.Chunks[TurnAttempt{1, 1}] != 1 || len(events.Chunks) != 1 || events.Skipped != 7 {
+		t.Fatalf("statuses %d chunks %v skipped %d, want the one claimed status, one chunk and seven skipped", len(events.Statuses), events.Chunks, events.Skipped)
 	}
 	if _, err := f.host.Events(f.ctx, "run-missing"); !errors.Is(err, ErrRunNotFound) {
 		t.Fatalf("events of an unknown run: %v", err)
@@ -1057,5 +1122,238 @@ func TestConnectErrorsOmitPassword(t *testing.T) {
 		if _, err := Connect(config); err == nil || strings.Contains(err.Error(), password) {
 			t.Fatalf("%s: %v", name, err)
 		}
+	}
+}
+
+// awaitInBackground starts Await and returns a channel with its result, once the follower has had time to start.
+func awaitInBackground(f *fixture, host *Host, runID string, timeout time.Duration) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		awaited, err := host.Await(f.ctx, runID, timeout)
+		if err == nil {
+			err = fmt.Errorf("accepted %s, task %t", awaited.Status.State, awaited.Task != nil)
+		}
+		done <- err
+	}()
+	time.Sleep(time.Second)
+	return done
+}
+
+func TestAwaitRejectsRecordsFromMemberEndedDuringAwait(t *testing.T) {
+	for name, outcome := range map[string]func(*testing.T, *testReceiver, claimed) []byte{
+		"result": func(t *testing.T, receiver *testReceiver, task claimed) []byte {
+			return receiver.result(t, task, 1, wire.TaskStateCompleted, nil)
+		},
+		"interrupted status": func(t *testing.T, receiver *testReceiver, task claimed) []byte {
+			return receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			receiver, task := f.admitted(t)
+			runID := task.submission.Wherry.Run
+			done := awaitInBackground(f, f.host, runID, 4*time.Second)
+			f.end(t, "receiver-a")
+			receiver.feed(t, f.ctx, runID, outcome(t, receiver, task))
+			if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("await = %v; want the ended member's %s refused", err, name)
+			}
+		})
+	}
+}
+
+func TestAwaitRejectsOutcomeWhoseEchoingMemberEnded(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	peer := f.addReceiver(t, "receiver-b", "pool-a")
+	other := f.newHost(t, "host-b", t.TempDir())
+	done := awaitInBackground(f, other, runID, 4*time.Second)
+	f.end(t, "receiver-a")
+	receiver.feed(t, f.ctx, runID, peer.result(t, task, 2, wire.TaskStateCompleted, nil))
+	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("await = %v; want a run bound only by an ended member's echo refused", err)
+	}
+}
+
+func TestAwaitAcceptsMemberAddedDuringAwait(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	done := make(chan error, 1)
+	go func() {
+		awaited, err := f.host.Await(f.ctx, runID, 10*time.Second)
+		if err == nil && awaited.Status.State != wire.TaskStateCompleted {
+			err = fmt.Errorf("state %s", awaited.Status.State)
+		}
+		done <- err
+	}()
+	time.Sleep(time.Second)
+	adopter := f.addReceiver(t, "receiver-b", "pool-a")
+	receiver.feed(t, f.ctx, runID, adopter.result(t, task, 2, wire.TaskStateCompleted, nil))
+	if err := <-done; err != nil {
+		t.Fatalf("await of a result from a member added since it started: %v", err)
+	}
+}
+
+func TestAwaitRereadsRotatedKey(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	done := make(chan error, 1)
+	go func() {
+		awaited, err := f.host.Await(f.ctx, runID, 10*time.Second)
+		if err == nil && awaited.Task == nil {
+			err = fmt.Errorf("state %s without the result", awaited.Status.State)
+		}
+		done <- err
+	}()
+	time.Sleep(time.Second)
+	_, next, _ := ed25519.GenerateKey(rand.Reader)
+	rotation, err := signed.RotateKey("receiver-a", receiver.key, next, receiver.sealing.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver.produce(t, f.ctx, admin.ReceiverTopic("receiver-a"), "receiver-a", rotation)
+	receiver.key = next
+	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateCompleted, nil))
+	if err := <-done; err != nil {
+		t.Fatalf("await of a result signed with the rotated key: %v", err)
+	}
+}
+
+func TestAwaitEndsOnCanceledTerminal(t *testing.T) {
+	for name, eventID := range map[string]string{"holder's own event ID": "terminal-1", "interrupted run's event ID": ""} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			receiver, task := f.admitted(t)
+			runID := task.submission.Wherry.Run
+			if eventID == "" {
+				eventID = runID + "/1/canceled"
+			}
+			receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, eventID, "terminal", wire.TaskStateCanceled, nil))
+			awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
+			if err != nil || awaited.Status.State != wire.TaskStateCanceled {
+				t.Fatalf("await %#v, %v; want CANCELED", awaited, err)
+			}
+		})
+	}
+}
+
+func TestRejectionIsFoundThroughItsEcho(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	submitted := f.submit(t, defaultSelector())
+	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+	receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "rejected-1", "rejected", wire.TaskStateRejected, nil))
+	for name, host := range map[string]*Host{"submitting host": f.host, "another host of the tenant": f.newHost(t, "host-b", t.TempDir())} {
+		awaited, err := host.Await(f.ctx, submitted.RunID, 5*time.Second)
+		if err != nil || awaited.Task != nil || awaited.Status.State != wire.TaskStateRejected {
+			t.Fatalf("%s: await %#v, %v; want REJECTED", name, awaited, err)
+		}
+	}
+}
+
+func TestRegisterConcurrently(t *testing.T) {
+	f := newFixture(t)
+	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle); err != nil {
+		t.Fatal(err)
+	}
+	hosts := make([]*Host, 8)
+	for i := range hosts {
+		kafka, principal := f.connect(t, bundle)
+		_, key, _ := ed25519.GenerateKey(rand.Reader)
+		host, err := NewHost(kafka, key, principal, t.TempDir(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hosts[i] = host
+	}
+	errs := make([]error, len(hosts))
+	var wg sync.WaitGroup
+	for i, host := range hosts {
+		wg.Go(func() { _, errs[i] = host.Register(f.ctx) })
+	}
+	wg.Wait()
+	owner := signed.HostOwner("tenant-a", "host-c")
+	keys, err := admin.ReadKeys(f.ctx, f.service.Admin, map[string]string{owner: admin.HostTopic("tenant-a", "host-c")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var won []int
+	for i, err := range errs {
+		if err == nil {
+			won = append(won, i)
+		}
+	}
+	if len(won) != 1 || !keys[owner].Current.Equal(hosts[won[0]].key.Public()) {
+		t.Fatalf("registrations %v succeeded; want exactly the host whose key is current", won)
+	}
+}
+
+func TestPinsSurviveConcurrentWriters(t *testing.T) {
+	dir := t.TempDir()
+	host, other := &Host{stateDir: dir}, &Host{stateDir: dir}
+	lock, err := os.OpenFile(filepath.Join(dir, "pins.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	b, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	done := make(chan error, 1)
+	go func() { done <- host.pin(map[string]*ecdh.PublicKey{"receiver-a": a.PublicKey()}) }()
+	select {
+	case err := <-done:
+		t.Fatalf("pin finished while another writer held the lock: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	// The lock holder, as another process would, pins receiver-b.
+	if err := other.writePins(map[string]string{"receiver-b": signed.SealingKeyID(b.PublicKey())}); err != nil {
+		t.Fatal(err)
+	}
+	lock.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	pins, err := host.readPins()
+	if err != nil || pins["receiver-a"] != signed.SealingKeyID(a.PublicKey()) || pins["receiver-b"] != signed.SealingKeyID(b.PublicKey()) {
+		t.Fatalf("pins %v, %v; want both writers' pins", pins, err)
+	}
+}
+
+func TestSealOutlivesTheQueueDeadline(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Hour, QueueDeadline: 50 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueDeadline := receiver.claim(t, f.ctx, submitted.RunID)[0].submission.Wherry.QueueDeadlineMS
+	if seals := f.sealsTo(t, "receiver-a"); len(seals) != 1 || seals[0].ExpiryMS <= queueDeadline {
+		t.Fatalf("seals %#v; want one expiring after the queue deadline %d", seals, queueDeadline)
+	}
+	// The pool seals for an hour: a two-hour queue deadline cannot be covered.
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: 3 * time.Hour, QueueDeadline: 2 * time.Hour}); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "queue deadline") {
+		t.Fatalf("submit with a queue deadline past the seal lifetime: %v", err)
+	}
+	if len(f.sealsTo(t, "receiver-a")) != 1 || f.tasksEnd(t, "pool-a") != 1 {
+		t.Fatal("a refused submit still wrote a seal or a task")
+	}
+}
+
+func TestSupersededCancelDoesNotMaskALaterAttempt(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "started-2", "started", wire.TaskStateWorking, nil),
+		receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCanceled, nil))
+	if status, err := f.host.Status(f.ctx, runID); err != nil || status.Status.State != wire.TaskStateWorking {
+		t.Fatalf("status %#v, %v; want attempt 2's WORKING over attempt 1's CANCELED", status, err)
 	}
 }

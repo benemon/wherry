@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -47,12 +48,12 @@ var (
 // because renews do not survive a poll and held records are tied to the connection.
 func (r *Receiver) claimLoop(ctx context.Context) {
 	for ctx.Err() == nil {
-		if r.denied() {
+		if r.blocked() {
 			sleep(ctx, time.Second)
 			continue
 		}
 		if err := r.claimOne(ctx); err != nil && ctx.Err() == nil {
-			r.deny(err)
+			r.deny(err, capClaim)
 			r.logger.Printf("claim: %v", err)
 			sleep(ctx, 2*time.Second)
 		}
@@ -81,7 +82,7 @@ func (r *Receiver) claimOne(ctx context.Context) error {
 		pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		// A denied receiver must not acquire a task: each release raises its delivery count.
 		go func() {
-			for pollCtx.Err() == nil && !r.denied() {
+			for pollCtx.Err() == nil && !r.blocked() {
 				sleep(pollCtx, 100*time.Millisecond)
 			}
 			cancel()
@@ -91,17 +92,19 @@ func (r *Receiver) claimOne(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if r.denied() && len(fetches.Records()) == 0 {
+		if r.blocked() && len(fetches.Records()) == 0 {
 			return nil
 		}
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			return fmt.Errorf("poll: %w", err)
 		}
+		// A poll without an error is the claim attempt that re-tests a share group denial.
+		r.restore(capClaim)
 		if records := fetches.Records(); len(records) > 0 {
 			record = records[0]
 		}
 	}
-	if r.denied() {
+	if r.blocked() {
 		// Denied while this poll was open.
 		record.Ack(kgo.AckRelease)
 		return flush()
@@ -167,13 +170,15 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	state, _, _ := r.snapshot()
 	terms := state.Pools[r.config.Pool]
 	placement := task.Wherry.Placement
-	if !slices.ContainsFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == placement.Agent }) || !slices.Contains(terms.Runtimes, placement.Runtime) {
-		return reject("placement is outside the pool terms")
+	if !slices.ContainsFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == placement.Agent }) {
+		return reject("agent is outside the pool terms")
 	}
 	offer, offered := r.offer(placement)
 	if !offered {
-		r.logger.Printf("run %s: no current offer for agent %s on %s", run, placement.Agent, placement.Runtime)
-		if err := r.publishStartFailure(ctx, &task, attempt, "offer-unavailable"); err != nil {
+		r.logger.Printf("run %s: no current offer for agent %s satisfying its selector", run, placement.Agent)
+		// The task goes back to the pool either way; a lost write is logged, and an authorisation error
+		// has entered denial, which stops claiming.
+		if err := r.admissionCommit(ctx, r.startFailure(&task, attempt, "offer-unavailable")); err != nil {
 			r.logger.Printf("publish start failure for %s: %v", run, err)
 		}
 		return nil, kgo.AckRelease
@@ -239,13 +244,103 @@ func gitContext(history []wire.Message, delivered bool) (*wire.GitContext, bool)
 	return found, true
 }
 
+// publishRejection writes the echo, so every host of the tenant can find the run's pool, and the rejected
+// status on the pool's events and the feed, in one admission transaction.
 func (r *Receiver) publishRejection(ctx context.Context, task *wire.Submission, hash string, attempt int64, reason string) error {
 	status := r.status(task, hash, attempt, "rejected", taskStatus(wire.TaskStateRejected, reason), nil)
-	return r.base.ProduceSync(ctx, r.statusRecords(task, status)...).FirstErr()
+	echo := &kgo.Record{Topic: admin.TenantTopic(task.Wherry.Tenant), Key: []byte(task.Wherry.Run), Value: r.sign(r.echo(task, hash))}
+	return r.admissionCommit(ctx, append([]*kgo.Record{echo}, r.statusRecords(task, status)...)...)
 }
 
-func (r *Receiver) publishStartFailure(ctx context.Context, task *wire.Submission, attempt int64, class string) error {
-	return r.base.ProduceSync(ctx, r.startFailure(task, attempt, class)).FirstErr()
+func (r *Receiver) echo(task *wire.Submission, hash string) *wire.Echo {
+	return &wire.Echo{
+		Receiver: r.id, Tenant: task.Wherry.Tenant, Pool: r.config.Pool, Run: task.Wherry.Run, Turn: task.Wherry.Turn, Placement: task.Wherry.Placement,
+		TaskHash: hash, MessageID: task.Message.MessageID, DeadlineMS: task.Wherry.DeadlineMS, QueueDeadlineMS: task.Wherry.QueueDeadlineMS,
+	}
+}
+
+// admissionTransactionalID is this receiver's own transactional ID inside its pool's prefix, for the writes
+// it makes while holding no run; using a run's ID would fence that run's holder.
+func (r *Receiver) admissionTransactionalID() string {
+	return admin.TransactionalPrefix(r.config.Pool) + "admission." + r.id
+}
+
+// admissionCommit writes records in one transaction under the admission transactional ID; an
+// authorisation error enters denial.
+func (r *Receiver) admissionCommit(ctx context.Context, records ...*kgo.Record) error {
+	r.admissionMu.Lock()
+	defer r.admissionMu.Unlock()
+	producer, err := kgo.NewClient(append(append([]kgo.Opt(nil), r.kafkaOpt...), kgo.TransactionalID(r.admissionTransactionalID()))...)
+	if err != nil {
+		return err
+	}
+	defer producer.Close()
+	if err := r.transact(ctx, producer, records...); err != nil {
+		r.deny(err, capWrite)
+		return err
+	}
+	return nil
+}
+
+// probeWrite proves the write and transactional ID ACLs with an aborted admission transaction on the
+// pool's events, which no read_committed reader sees.
+func (r *Receiver) probeWrite(ctx context.Context) error {
+	r.admissionMu.Lock()
+	defer r.admissionMu.Unlock()
+	producer, err := kgo.NewClient(append(append([]kgo.Opt(nil), r.kafkaOpt...), kgo.TransactionalID(r.admissionTransactionalID()))...)
+	if err != nil {
+		return err
+	}
+	defer producer.Close()
+	if err := producer.BeginTransaction(); err != nil {
+		return err
+	}
+	if err := producer.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte("probe")}).FirstErr(); err != nil {
+		_ = producer.EndTransaction(ctx, kgo.TryAbort)
+		return err
+	}
+	return producer.EndTransaction(ctx, kgo.TryAbort)
+}
+
+// commitTransaction is a variable so tests can lose the answer to a commit the broker applied, which
+// kfake cannot do: its EndTxn faults all fail before the commit.
+var commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+	return producer.EndTransaction(ctx, kgo.TryCommit)
+}
+
+// transact commits records in one transaction on producer. An EndTransaction error leaves the outcome
+// ambiguous, so the transaction's record on the pool's events is read back: present means committed.
+func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records ...*kgo.Record) error {
+	if len(records) == 0 {
+		return nil
+	}
+	if err := producer.BeginTransaction(); err != nil {
+		return err
+	}
+	if err := producer.ProduceSync(ctx, records...).FirstErr(); err != nil {
+		_ = producer.EndTransaction(ctx, kgo.TryAbort)
+		return err
+	}
+	err := commitTransaction(ctx, producer)
+	if err == nil || errors.Is(err, kerr.ProducerFenced) || errors.Is(err, kerr.InvalidProducerEpoch) || authorisationError(err) {
+		return err
+	}
+	index := slices.IndexFunc(records, func(record *kgo.Record) bool { return record.Topic == admin.PoolEventsTopic(r.config.Pool) })
+	if index < 0 {
+		return err
+	}
+	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	events, readErr := admin.ReadTopic(readCtx, r.base, admin.PoolEventsTopic(r.config.Pool))
+	if readErr != nil {
+		r.logger.Printf("read back transaction: %v", readErr)
+		return err
+	}
+	if slices.ContainsFunc(events, func(event *kgo.Record) bool { return bytes.Equal(event.Value, records[index].Value) }) {
+		r.logger.Printf("transaction read back as committed after: %v", err)
+		return nil
+	}
+	return err
 }
 
 // startFailure names the adapter configured for the task's agent, or "none" when this receiver has no such adapter.
@@ -254,7 +349,7 @@ func (r *Receiver) startFailure(task *wire.Submission, attempt int64, class stri
 	if index := slices.IndexFunc(r.adapters, func(named Named) bool { return named.Agent == task.Wherry.Placement.Agent }); index >= 0 {
 		adapter = r.adapters[index].Name
 	}
-	failure := &wire.StartFailure{Wherry: r.binding(task, attempt), Adapter: adapter, Agent: task.Wherry.Placement.Agent, Runtime: task.Wherry.Placement.Runtime, Class: class}
+	failure := &wire.StartFailure{Wherry: r.binding(task, attempt), Adapter: adapter, Agent: task.Wherry.Placement.Agent, Class: class}
 	return &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: r.sign(failure)}
 }
 
@@ -269,7 +364,7 @@ func (r *Receiver) readTurns(ctx context.Context, run string) ([]runSubmission, 
 	defer cancel()
 	records, err := admin.ReadTopic(ctx, r.base, admin.PoolTasksTopic(r.config.Pool))
 	if err != nil {
-		r.deny(err)
+		r.deny(err, capRead)
 		return nil, err
 	}
 	state, _, hosts := r.snapshot()
@@ -392,11 +487,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, adapter: matched}
 
-	echo := &wire.Echo{
-		Receiver: r.id, Tenant: task.Wherry.Tenant, Pool: r.config.Pool, Run: runID, Turn: task.Wherry.Turn, Placement: task.Wherry.Placement,
-		TaskHash: admitted.taskHash, MessageID: task.Message.MessageID, DeadlineMS: task.Wherry.DeadlineMS, QueueDeadlineMS: task.Wherry.QueueDeadlineMS,
-	}
-	if err := run.commit(ctx, append([]*kgo.Record{run.feed(echo)}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
+	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
 		return run.abandon(err)
 	}
 	offset := int64(0)
@@ -451,7 +542,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			return run.interrupt(ctx, named.Credential)
 		}
 		handle, err = named.Adapter.Dispatch(runCtx, Run{
-			ID: runID, Turn: task.Wherry.Turn, Offer: admitted.offer.Labels, Prompt: []byte(prompt(admitted.history)), Credential: credential,
+			ID: runID, Turn: task.Wherry.Turn, Prompt: []byte(prompt(admitted.history)), Credential: credential,
 			Git: admitted.git,
 		})
 		if err != nil {
@@ -596,17 +687,7 @@ type activeRun struct {
 }
 
 func (run *activeRun) commit(ctx context.Context, records ...*kgo.Record) error {
-	if len(records) == 0 {
-		return nil
-	}
-	if err := run.producer.BeginTransaction(); err != nil {
-		return err
-	}
-	if err := run.producer.ProduceSync(ctx, records...).FirstErr(); err != nil {
-		_ = run.producer.EndTransaction(ctx, kgo.TryAbort)
-		return err
-	}
-	return run.producer.EndTransaction(ctx, kgo.TryCommit)
+	return run.receiver.transact(ctx, run.producer, records...)
 }
 
 // abandon stops all activity for a run whose writes failed; a fenced holder leaves the run to its adopter.
@@ -615,7 +696,7 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 		run.receiver.logger.Printf("run %s: fenced by a newer holder", run.task.Wherry.Run)
 		return 0
 	}
-	run.receiver.deny(err)
+	run.receiver.deny(err, capWrite)
 	run.receiver.logger.Printf("run %s: write failed: %v", run.task.Wherry.Run, err)
 	return kgo.AckRelease
 }
@@ -817,7 +898,7 @@ type placement struct {
 	ReceiverID string            `json:"receiver_id"`
 	Pool       string            `json:"pool"`
 	Adapter    string            `json:"adapter,omitempty"`
-	Offer      map[string]string `json:"offer,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
 	Job        string            `json:"job,omitempty"`
 }
 
@@ -831,7 +912,7 @@ func (run *activeRun) result(status wire.TaskStatus, result string, resultMetada
 		part = wire.Part{Data: jsontext.Value(result), MediaType: "application/json"}
 	}
 	metadata, _ := json.Marshal(placement{ // strings and a string map always encode
-		ReceiverID: run.receiver.id, Pool: run.receiver.config.Pool, Adapter: run.adapter.Name, Offer: run.offer, Job: run.job,
+		ReceiverID: run.receiver.id, Pool: run.receiver.config.Pool, Adapter: run.adapter.Name, Labels: run.offer, Job: run.job,
 	})
 	return run.feed(&wire.Result{
 		Task: wire.Task{
@@ -874,14 +955,10 @@ func (r *Receiver) cancelInterrupted(ctx context.Context, interrupted wire.RunSt
 	if err != nil {
 		return err
 	}
-	producer, err := r.newProducer(runID)
-	if err != nil {
-		return err
-	}
-	defer producer.Close()
-	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: interrupted.Wherry.TaskHash, history: history, attempt: interrupted.Wherry.Attempt}
+	// The run's own transactional ID would fence a member that has meanwhile claimed a continuation.
+	run := &activeRun{receiver: r, task: task, taskHash: interrupted.Wherry.TaskHash, history: history, attempt: interrupted.Wherry.Attempt}
 	status := taskStatus(wire.TaskStateCanceled, cancelReason)
-	if err := run.commit(ctx, append([]*kgo.Record{run.result(status, cancelReason, nil)}, run.statusRecords("terminal", status, nil, nil)...)...); err != nil {
+	if err := r.admissionCommit(ctx, append([]*kgo.Record{run.result(status, cancelReason, nil)}, run.statusRecords("terminal", status, nil, nil)...)...); err != nil {
 		return err
 	}
 	r.logger.Printf("run %s: canceled interrupted turn %d", runID, turn)

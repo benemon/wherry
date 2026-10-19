@@ -110,7 +110,7 @@ func TestReadAdvertisementsKeepsLatestLiveAuthorised(t *testing.T) {
 	now := time.UnixMilli(1_800_000_000_000)
 	advertise := func(receiver, pool string, at time.Time, capacity int64) {
 		t.Helper()
-		encoded := sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Labels: map[string]string{"agent": "agent-a"}}}, Capacity: capacity, SealingKey: signed.SealingKeyID(sealing.PublicKey()), AtMS: at.UnixMilli()}, key)
+		encoded := sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Agent: "agent-a"}}, Capacity: capacity, SealingKey: signed.SealingKeyID(sealing.PublicKey()), AtMS: at.UnixMilli()}, key)
 		if err := client.ProduceSync(ctx, &kgo.Record{Topic: ReceiversTopic, Value: encoded}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}

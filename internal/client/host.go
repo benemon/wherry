@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,6 +18,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
@@ -41,6 +43,8 @@ const liveness = 120 * time.Second
 
 // SubmitInput contains the root-task routing and prompt fields; Parts follow the prompt's text part.
 type SubmitInput struct {
+	// Agent names what runs; empty takes the pool's default.
+	Agent         string
 	Selector      []wire.Requirement
 	Prompt        string
 	Parts         []wire.Part
@@ -50,9 +54,8 @@ type SubmitInput struct {
 
 // SubmitResult describes a produced root task.
 type SubmitResult struct {
-	RunID   string
-	Pool    string
-	Skipped int
+	RunID string
+	Pool  string
 }
 
 // ContinueInput contains the new prompt and deadlines for a continuation.
@@ -75,17 +78,27 @@ type CancelResult struct {
 	Skipped int
 }
 
-// Receiver describes a receiver of a pool the tenant is entitled to, its latest advertisement and this host's seals to it.
+// Receiver describes a receiver of a pool the tenant is entitled to, its adapters as wherry.admin records them, its
+// latest advertisement and this host's seals to it.
 type Receiver struct {
-	ReceiverID   string       `json:"receiver_id"`
-	Pool         string       `json:"pool"`
-	Offers       []wire.Offer `json:"offers"`
-	Capacity     int64        `json:"capacity"`
-	InFlight     int64        `json:"in_flight"`
-	HeartbeatAge string       `json:"heartbeat_age"`
-	Status       string       `json:"status"`
-	Ended        bool         `json:"ended"`
-	Seals        []Seal       `json:"seals"`
+	ReceiverID   string    `json:"receiver_id"`
+	Pool         string    `json:"pool"`
+	Adapters     []Adapter `json:"adapters"`
+	Capacity     int64     `json:"capacity"`
+	InFlight     int64     `json:"in_flight"`
+	HeartbeatAge string    `json:"heartbeat_age"`
+	Status       string    `json:"status"`
+	Ended        bool      `json:"ended"`
+	Seals        []Seal    `json:"seals"`
+}
+
+// Adapter is one adapter of a receiver: the agent and labels from its config record, and whether the receiver's live
+// advertisement offers it.
+type Adapter struct {
+	Name   string            `json:"name"`
+	Agent  string            `json:"agent"`
+	Labels map[string]string `json:"labels"`
+	Ready  bool              `json:"ready"`
 }
 
 // Seal is this host's latest seal of one credential to a receiver.
@@ -140,6 +153,14 @@ func (h *Host) Register(ctx context.Context) (string, error) {
 		if err := h.produce(ctx, &kgo.Record{Topic: topic, Key: []byte(owner), Value: record}); err != nil {
 			return "", err
 		}
+		// A concurrent first registration may have landed first; only the first counts.
+		keys, err := admin.ReadKeys(ctx, h.kafka, map[string]string{owner: topic})
+		if err != nil {
+			return "", err
+		}
+		if current := keys[owner].Current; current == nil || !current.Equal(public) {
+			return "", errors.New("another host key won the registration of this host's key topic")
+		}
 	case !state.Current.Equal(public):
 		return "", errors.New("host key topic holds another key")
 	}
@@ -193,7 +214,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	pool, placement, ok := resolvePlacement(v.state, h.tenant, input.Selector, ads)
+	pool, placement, ok := resolvePlacement(v.state, h.tenant, input.Agent, input.Selector, ads)
 	if !ok {
 		return SubmitResult{}, ErrNoMatchingReceiver
 	}
@@ -289,8 +310,7 @@ func (h *Host) submission(runID string, turn int64, pool string, placement wire.
 	}, nil
 }
 
-// publish seals the placed agent's credentials to the pool, writes the task to the pool's task topic and records the
-// run locally.
+// publish writes the submission's seals before the task, so no member claims the task before its credential exists.
 func (h *Host) publish(ctx context.Context, v view, ads map[string]wire.Advertisement, submission *wire.Submission, now time.Time) error {
 	encoded, err := wire.SignRecord(submission, h.key)
 	if err != nil {
@@ -310,7 +330,7 @@ func (h *Host) publish(ctx context.Context, v view, ads map[string]wire.Advertis
 type sealKey struct{ receiver, pool, credential string }
 
 // seal seals each configured credential of agent to every live member of pool that lacks a seal under its current
-// sealing key lasting until until. A sealing key that differs from the one pinned for its receiver stops the seal.
+// sealing key lasting past until. A sealing key that differs from its receiver's pin stops the seal.
 func (h *Host) seal(ctx context.Context, v view, ads map[string]wire.Advertisement, pool, agent string, until, now time.Time) error {
 	terms := v.state.Pools[pool]
 	index := slices.IndexFunc(terms.Agents, func(terms admin.AgentTerms) bool { return terms.Name == agent })
@@ -326,24 +346,27 @@ func (h *Host) seal(ctx context.Context, v view, ads map[string]wire.Advertiseme
 	if len(credentials) == 0 {
 		return nil
 	}
+	lifetime := time.Duration(terms.SealLifetimeMS) * time.Millisecond
+	if !now.Add(lifetime).After(until) {
+		return fmt.Errorf("%w: pool %s seals credentials for %s, which ends before the queue deadline", ErrInvalidInput, pool, lifetime)
+	}
 	existing, err := h.seals(ctx)
 	if err != nil {
 		return err
 	}
-	pins, err := h.readPins()
-	if err != nil {
+	members := map[string]*ecdh.PublicKey{}
+	for receiver, ad := range ads {
+		if sealing := v.keys[receiver].Sealing; ad.Pool == pool && sealing != nil {
+			members[receiver] = sealing
+		}
+	}
+	if err := h.pin(members); err != nil {
 		return err
 	}
 	plaintexts := map[string][]byte{}
 	var records []*kgo.Record
-	for _, receiver := range slices.Sorted(maps.Keys(ads)) {
-		sealing := v.keys[receiver].Sealing
-		if ads[receiver].Pool != pool || sealing == nil {
-			continue
-		}
-		if err := signed.CheckPinnedKey(pins, receiver, sealing); err != nil {
-			return fmt.Errorf("receiver %s: %w", receiver, err)
-		}
+	for _, receiver := range slices.Sorted(maps.Keys(members)) {
+		sealing := members[receiver]
 		for _, credential := range credentials {
 			current := existing[sealKey{receiver, pool, credential}]
 			if current.KeyFingerprint == signed.SealingKeyID(sealing) && current.ExpiryMS > until.UnixMilli() {
@@ -356,7 +379,7 @@ func (h *Host) seal(ctx context.Context, v view, ads map[string]wire.Advertiseme
 				}
 				plaintexts[credential] = plaintext
 			}
-			seal, err := signed.SealCredential(h.tenant, receiver, pool, credential, now, now.Add(time.Duration(terms.SealLifetimeMS)*time.Millisecond), sealing, plaintext)
+			seal, err := signed.SealCredential(h.tenant, receiver, pool, credential, now, now.Add(lifetime), sealing, plaintext)
 			if err != nil {
 				return fmt.Errorf("seal credential %s: %w", credential, err)
 			}
@@ -366,9 +389,6 @@ func (h *Host) seal(ctx context.Context, v view, ads map[string]wire.Advertiseme
 			}
 			records = append(records, &kgo.Record{Topic: admin.HostTopic(h.tenant, h.host), Key: []byte(receiver + "/" + credential), Value: encoded})
 		}
-	}
-	if err := h.writePins(pins); err != nil {
-		return err
 	}
 	if len(records) == 0 {
 		return nil
@@ -418,19 +438,31 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			continue
 		}
 		receiver := Receiver{
-			ReceiverID: id, Pool: config.Pool, Offers: []wire.Offer{}, HeartbeatAge: "-", Status: "silent",
+			ReceiverID: id, Pool: config.Pool, Adapters: []Adapter{}, HeartbeatAge: "-", Status: "silent",
 			Ended: v.state.Ended[admin.ReceiverPrincipal(id)], Seals: []Seal{},
 		}
-		if ad, ok := ads[id]; receiver.Ended {
+		ad, advertised := ads[id]
+		if receiver.Ended {
 			receiver.Status = "ended"
-		} else if ok {
+		} else if advertised {
 			age := now.Sub(time.UnixMilli(ad.AtMS))
-			receiver.Offers, receiver.Capacity, receiver.InFlight = ad.Offers, ad.Capacity, ad.InFlight
+			receiver.Capacity, receiver.InFlight = ad.Capacity, ad.InFlight
 			receiver.HeartbeatAge = age.Round(time.Second).String()
 			receiver.Status = "stale"
 			if age <= liveness {
 				receiver.Status = "live"
 			}
+		}
+		for _, adapter := range config.Adapters {
+			if receiver.Ended {
+				break
+			}
+			labels := adapter.Labels
+			if labels == nil {
+				labels = map[string]string{}
+			}
+			ready := receiver.Status == "live" && slices.ContainsFunc(ad.Offers, func(offer wire.Offer) bool { return offer.Adapter == adapter.Name })
+			receiver.Adapters = append(receiver.Adapters, Adapter{Name: adapter.Name, Agent: adapter.Agent, Labels: labels, Ready: ready})
 		}
 		for key, seal := range seals {
 			if key.receiver == id {
@@ -486,6 +518,32 @@ func (h *Host) writeRun(record runRecord) error {
 	return writeState(path, record)
 }
 
+// pin checks each receiver's sealing key against its pin and pins new ones, holding an exclusive lock on the state
+// directory so concurrent submits, in this process or another, never lose a pin.
+func (h *Host) pin(keys map[string]*ecdh.PublicKey) error {
+	if err := os.MkdirAll(h.stateDir, 0o700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(filepath.Join(h.stateDir, "pins.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock pins: %w", err)
+	}
+	pins, err := h.readPins()
+	if err != nil {
+		return err
+	}
+	for _, receiver := range slices.Sorted(maps.Keys(keys)) {
+		if err := signed.CheckPinnedKey(pins, receiver, keys[receiver]); err != nil {
+			return fmt.Errorf("receiver %s: %w", receiver, err)
+		}
+	}
+	return h.writePins(pins)
+}
+
 func (h *Host) readPins() (map[string]string, error) {
 	pins := map[string]string{}
 	if err := readState(filepath.Join(h.stateDir, "pins.json"), &pins); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -517,7 +575,20 @@ func writeState(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, encoded, 0o600)
+	// A reader sees the old file or the new one, never a partial write.
+	temp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(temp.Name())
+	if _, err := temp.Write(encoded); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temp.Name(), path)
 }
 
 func (h *Host) produce(ctx context.Context, records ...*kgo.Record) error {

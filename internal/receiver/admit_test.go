@@ -7,12 +7,15 @@ import (
 	"encoding/json/jsontext"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -41,7 +44,7 @@ func TestFirstTurnPromptUnchanged(t *testing.T) {
 func TestAdmitAcceptsValidTask(t *testing.T) {
 	f := newFixture(t, resultStream)
 	admitted := f.admitted(t, f.submit(t, f.host, nil))
-	if admitted.offer.Adapter != "nomad" || admitted.offer.Labels["runtime"] != "exec" || admitted.offer.Labels["agent"] != "claude" || prompt(admitted.history) != "hi" {
+	if admitted.offer.Adapter != "nomad" || admitted.offer.Agent != "claude" || admitted.offer.Labels["zone"] != "dc1" || prompt(admitted.history) != "hi" {
 		t.Fatalf("got %#v", admitted)
 	}
 }
@@ -113,8 +116,7 @@ func TestAdmitRejections(t *testing.T) {
 		{"ExpiredRunDeadline", "run deadline passed", func(task *wire.Submission) {
 			task.Wherry.DeadlineMS = time.Now().Add(-time.Second).UnixMilli()
 		}},
-		{"AgentOutsideTerms", "placement is outside the pool terms", func(task *wire.Submission) { task.Wherry.Placement.Agent = "gemini" }},
-		{"RuntimeOutsideTerms", "placement is outside the pool terms", func(task *wire.Submission) { task.Wherry.Placement.Runtime = "wasm" }},
+		{"AgentOutsideTerms", "agent is outside the pool terms", func(task *wire.Submission) { task.Wherry.Placement.Agent = "gemini" }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
@@ -130,8 +132,9 @@ func TestAdmitRejections(t *testing.T) {
 func TestPlacementOutsideOffersIsStartFailure(t *testing.T) {
 	f := newFixture(t, resultStream)
 	for name, mutate := range map[string]func(*wire.Submission){
-		"agent":  func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" },
-		"labels": func(task *wire.Submission) { task.Wherry.Placement.Labels = map[string]string{"zone": "dc9"} },
+		// codex is inside the terms, but no adapter here launches it.
+		"agent":    func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" },
+		"selector": func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("zone", "dc9")} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			before := len(f.records(t, admin.PoolEventsTopic(testPool)))
@@ -148,7 +151,7 @@ func TestPlacementOutsideOffersIsStartFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			placement := f.parse(t, record).Wherry.Placement
-			if failure.Class != "offer-unavailable" || failure.Agent != placement.Agent || failure.Runtime != placement.Runtime || failure.Wherry.Run != "run-a" {
+			if failure.Class != "offer-unavailable" || failure.Agent != placement.Agent || failure.Wherry.Run != "run-a" {
 				t.Fatalf("start failure %#v", failure)
 			}
 		})
@@ -158,13 +161,12 @@ func TestPlacementOutsideOffersIsStartFailure(t *testing.T) {
 	}
 }
 
-func TestPlacementLabelsSelectAnOffer(t *testing.T) {
+func TestPlacementSelectorSelectsAnOffer(t *testing.T) {
 	f := newFixture(t, resultStream)
 	admitted := f.admitted(t, f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Placement.Runtime = "podman"
-		task.Wherry.Placement.Labels = map[string]string{"nomad.node_pool": "default"}
+		task.Wherry.Placement.Selector = []wire.Requirement{in("zone", "dc1"), exists("example.com/gpu")}
 	}))
-	if admitted.offer.Labels["runtime"] != "podman" || admitted.offer.Labels["nomad.node_pool"] != "default" {
+	if admitted.offer.Adapter != "nomad" || admitted.offer.Labels["example.com/gpu"] != "none" {
 		t.Fatalf("offer %#v", admitted.offer)
 	}
 }
@@ -298,10 +300,9 @@ func TestContinuationStatusOrdering(t *testing.T) {
 
 func TestBindTurnsRequireSameBindings(t *testing.T) {
 	for name, mutate := range map[string]func(*wire.Submission){
-		"tenant":  func(task *wire.Submission) { task.Wherry.Tenant = "tenant-b" },
-		"agent":   func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" },
-		"runtime": func(task *wire.Submission) { task.Wherry.Placement.Runtime = "podman" },
-		"labels":  func(task *wire.Submission) { task.Wherry.Placement.Labels = map[string]string{"zone": "dc1"} },
+		"tenant":   func(task *wire.Submission) { task.Wherry.Tenant = "tenant-b" },
+		"agent":    func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" },
+		"selector": func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("zone", "dc1")} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
@@ -692,4 +693,139 @@ func (f fixture) startPeer(t *testing.T, id string) *Receiver {
 		t.Fatal(err)
 	}
 	return peer
+}
+
+func TestCommittedRejectionAcknowledged(t *testing.T) {
+	f := newFixture(t, resultStream)
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli() })
+	f.rejected(t, record, "queue deadline passed")
+	before := len(f.records(t, admin.PoolEventsTopic(testPool)))
+	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckAccept {
+		t.Fatalf("redelivered rejection admitted=%v ack=%v, want accept", admitted != nil, ack)
+	}
+	if after := len(f.records(t, admin.PoolEventsTopic(testPool))); after != before {
+		t.Fatalf("a redelivered rejection was written again: events %d -> %d", before, after)
+	}
+}
+
+func TestCommittedTerminalUnderRotatedPeerKey(t *testing.T) {
+	f := newFixture(t, resultStream)
+	peerSigning, peerSealing := f.addPeer(t, "receiver-b", testPool)
+	_, next, _ := ed25519.GenerateKey(rand.Reader)
+	f.produce(t, admin.ReceiverTopic("receiver-b"), "receiver-b", must(t)(signed.RotateKey("receiver-b", peerSigning, next, peerSealing.PublicKey())))
+	record := f.submit(t, f.host, nil)
+	f.publishStatus(t, record, "receiver-b", next, "terminal", wire.TaskStateCompleted, nil)
+	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckAccept {
+		t.Fatalf("admitted=%v ack=%v: a terminal under the peer's rotated key must be acknowledged, not run again", admitted != nil, ack)
+	}
+}
+
+func TestRejectionCarriesItsEcho(t *testing.T) {
+	f := newFixture(t, resultStream)
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Placement.Agent = "gemini" })
+	f.rejected(t, record, "agent is outside the pool terms")
+	feed := f.records(t, admin.TenantTopic(testTenant))
+	var echo wire.Echo
+	var rejected wire.RunStatus
+	if len(feed) != 2 || wire.ParseRecord(feed[0].Value, f.keys(), &echo) != nil || wire.ParseRecord(feed[1].Value, f.keys(), &rejected) != nil {
+		t.Fatalf("feed records %d, want the echo then the rejected status", len(feed))
+	}
+	if echo.Pool != testPool || echo.Run != "run-a" || echo.TaskHash != taskHash(record.Value) || rejected.Wherry.Kind != "rejected" {
+		t.Fatalf("echo %#v status %#v", echo, rejected.Wherry)
+	}
+	if feed[1].Offset != feed[0].Offset+1 || feed[1].ProducerID != feed[0].ProducerID {
+		t.Fatal("the echo and the rejected status are not one transaction")
+	}
+}
+
+func TestRejectionIsAllOrNothing(t *testing.T) {
+	f := newFixture(t, resultStream)
+	// Only the feed write is taken away: the pool's events must not get the rejection alone.
+	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.TenantTopic(testTenant)).Operations(kadm.OpWrite))
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli() })
+	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
+		t.Fatalf("admitted=%v ack=%v, want release", admitted != nil, ack)
+	}
+	if n := len(f.eventStatuses(t)); n != 0 {
+		t.Fatalf("pool events hold %d statuses of a rejection the feed never got", n)
+	}
+	if !f.receiver.denied() {
+		t.Fatal("an authorisation error writing the rejection did not enter denial")
+	}
+}
+
+func TestStartFailureWriteDenialEntersDenial(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.PoolEventsTopic(testPool)).Operations(kadm.OpWrite))
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" })
+	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
+		t.Fatalf("admitted=%v ack=%v, want release", admitted != nil, ack)
+	}
+	if !f.receiver.holds(capWrite) || !strings.Contains(f.logs.String(), "publish start failure for run-a") {
+		t.Fatalf("a start failure that could not be written was not denied and logged; logs:\n%s", f.logs.String())
+	}
+}
+
+func TestConcurrentInterruptedCancelIsOneFact(t *testing.T) {
+	f := newFixture(t, resultStream)
+	peer := f.startPeer(t, "receiver-b")
+	f.interrupt(t, "run-a", "first")
+	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: "run-a", Turn: 1}, f.host)))
+	// The first commit waits until the second member's commit arrives, so both members write.
+	second := make(chan struct{})
+	var commits atomic.Int32
+	f.cluster.ControlKey(kmsg.EndTxn.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		if !strings.Contains(request.(*kmsg.EndTxnRequest).TransactionalID, ".admission.") {
+			return nil, nil, false
+		}
+		switch commits.Add(1) {
+		case 1:
+			f.cluster.SleepControl(func() {
+				select {
+				case <-second:
+				case <-time.After(10 * time.Second):
+				}
+			})
+		case 2:
+			close(second)
+			f.cluster.DropControl()
+		}
+		return nil, nil, false
+	})
+	var wg sync.WaitGroup
+	for _, member := range []*Receiver{f.receiver, peer} {
+		wg.Go(func() {
+			if err := member.readCancels(f.ctx); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if commits.Load() != 2 {
+		t.Fatalf("admission commits %d, want both members to write", commits.Load())
+	}
+	keys := signed.Keys{"receiver-b": {Current: peer.signing.Public().(ed25519.PublicKey)}, testReceiver: f.keys()[testReceiver]}
+	feedIDs := map[string]bool{}
+	for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
+		var status wire.RunStatus
+		if wire.ParseRecord(record.Value, keys, &status) == nil && status.Wherry.Kind == "terminal" {
+			feedIDs[status.Wherry.EventID] = true
+		}
+	}
+	if len(feedIDs) != 1 || !feedIDs["run-a/1/canceled"] {
+		t.Fatalf("CANCELED event IDs on the feed %v, want run-a/1/canceled alone", feedIDs)
+	}
+	events, err := f.receiver.readEvents(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminals := 0
+	for _, status := range events.statuses["run-a"] {
+		if status.Wherry.Kind == "terminal" {
+			terminals++
+		}
+	}
+	if terminals != 1 {
+		t.Fatalf("a pool events reader sees %d CANCELED terminals, want one", terminals)
+	}
 }

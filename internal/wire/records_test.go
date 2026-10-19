@@ -22,7 +22,7 @@ func testBinding() ReceiverBinding {
 }
 
 func testRecords() map[string]Record {
-	placement := Placement{Agent: "claude", Runtime: "podman", Labels: map[string]string{}}
+	placement := Placement{Agent: "claude"}
 	status := TaskStatus{State: "TASK_STATE_WORKING", Timestamp: testTime}
 	return map[string]Record{
 		"submission": &Submission{Message: testMessage("run-a"), Wherry: SubmissionBinding{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a", Turn: 1, Placement: placement}},
@@ -34,8 +34,8 @@ func testRecords() map[string]Record {
 		"result": &Result{Task: Task{ID: "run-a", ContextID: "run-a", Status: TaskStatus{State: "TASK_STATE_COMPLETED", Timestamp: testTime}, Artifacts: []Artifact{}, History: []Message{testMessage("run-a")}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
 		"echo":          &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Turn: 1, Placement: placement, TaskHash: testHash, MessageID: "message-a"},
-		"advertisement": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Adapter: "nomad", Labels: map[string]string{"agent": "claude", "runtime": "podman"}}}, Capacity: 2, SealingKey: "sha256:x", AtMS: 1},
-		"start failure": &StartFailure{Wherry: testBinding(), Adapter: "nomad", Agent: "claude", Runtime: "podman", Class: "launch"},
+		"advertisement": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Adapter: "nomad", Agent: "claude"}}, Capacity: 2, SealingKey: "sha256:x", AtMS: 1},
+		"start failure": &StartFailure{Wherry: testBinding(), Adapter: "nomad", Agent: "claude", Class: "launch"},
 	}
 }
 

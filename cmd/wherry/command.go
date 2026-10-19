@@ -105,8 +105,8 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 		for _, receiver := range receivers {
 			fmt.Fprintf(stdout, "receiver=%s pool=%s capacity=%d in_flight=%d heartbeat_age=%s status=%s\n",
 				receiver.ReceiverID, receiver.Pool, receiver.Capacity, receiver.InFlight, receiver.HeartbeatAge, receiver.Status)
-			for _, offer := range receiver.Offers {
-				fmt.Fprintf(stdout, "  offer adapter=%s %s\n", offer.Adapter, wire.TermsText(offer.Labels))
+			for _, adapter := range receiver.Adapters {
+				fmt.Fprintf(stdout, "  adapter=%s agent=%s ready=%t labels=%s\n", adapter.Name, adapter.Agent, adapter.Ready, wire.TermsText(adapter.Labels))
 			}
 			for _, seal := range receiver.Seals {
 				fmt.Fprintf(stdout, "  seal=%s pool=%s expires=%s\n", seal.Name, seal.Pool, time.UnixMilli(seal.ExpMS).UTC().Format(time.RFC3339))
@@ -172,7 +172,8 @@ func runCancel(ctx context.Context, client *busclient.Host, args []string, stdou
 func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("submit", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	selectorText := flags.String("selector", "", "task selector")
+	agent := flags.String("agent", "", "agent to run (default: the pool's default agent)")
+	selectorText := flags.String("selector", "", "labels the adapter must carry: key=v|v, key!=v|v, key, !key, comma-separated")
 	prompt := flags.String("prompt", "", "prompt text")
 	promptFile := flags.String("prompt-file", "", "prompt file")
 	gitURL := flags.String("git", "", "git repository URL to check out for the agent")
@@ -184,7 +185,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit --selector k=v|v,.. <--prompt TEXT|--prompt-file PATH> [--git URL --git-ref REF [--git-path PATH]] [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit [--agent NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git URL --git-ref REF [--git-path PATH]] [--deadline DURATION] [--queue-deadline DURATION]")
 	}
 	var parts []wire.Part
 	if wasSet(flags, "git") || wasSet(flags, "git-ref") || wasSet(flags, "git-path") {
@@ -193,9 +194,6 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		}
 		metadata, _ := json.Marshal(wire.GitMetadata{Ref: *gitRef, Path: *gitPath}) // strings always encode
 		parts = append(parts, wire.Part{URL: *gitURL, MediaType: wire.GitMediaType, Metadata: metadata})
-	}
-	if !wasSet(flags, "selector") {
-		return errors.New("submit requires --selector")
 	}
 	promptSet := wasSet(flags, "prompt")
 	promptFileSet := wasSet(flags, "prompt-file")
@@ -217,14 +215,13 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return fmt.Errorf("selector: %w", err)
 	}
 	result, err := client.Submit(ctx, busclient.SubmitInput{
-		Selector: selector, Prompt: *prompt, Parts: parts,
+		Agent: *agent, Selector: selector, Prompt: *prompt, Parts: parts,
 		Deadline: *deadline, QueueDeadline: *queueDeadline,
 	})
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "run_id=%s pool=%s\n", result.RunID, result.Pool)
-	warnSkipped(stderr, result.Skipped)
 	return nil
 }
 
@@ -319,28 +316,25 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 	return nil
 }
 
+// parseRequirements reads key=v|v (In), key!=v|v (NotIn), key (Exists) and !key (DoesNotExist), comma-separated.
 func parseRequirements(value string) ([]wire.Requirement, error) {
 	requirements := []wire.Requirement{}
 	if value == "" {
 		return requirements, nil
 	}
-	seen := make(map[string]bool)
 	for _, term := range strings.Split(value, ",") {
-		key, item, ok := strings.Cut(term, "=")
-		if !ok || key == "" || item == "" {
-			return nil, fmt.Errorf("invalid term %q", term)
+		requirement := wire.Requirement{Key: term, Operator: wire.OpExists}
+		if key, values, ok := strings.Cut(term, "!="); ok {
+			requirement = wire.Requirement{Key: key, Operator: wire.OpNotIn, Values: strings.Split(values, "|")}
+		} else if key, values, ok := strings.Cut(term, "="); ok {
+			requirement = wire.Requirement{Key: key, Operator: wire.OpIn, Values: strings.Split(values, "|")}
+		} else if key, ok := strings.CutPrefix(term, "!"); ok {
+			requirement = wire.Requirement{Key: key, Operator: wire.OpDoesNotExist}
 		}
-		if seen[key] {
-			return nil, fmt.Errorf("duplicate key %q", key)
-		}
-		seen[key] = true
-		values := strings.Split(item, "|")
-		for _, value := range values {
-			if value == "" {
-				return nil, fmt.Errorf("invalid term %q", term)
-			}
-		}
-		requirements = append(requirements, wire.Requirement{Key: key, Operator: wire.OpIn, Values: values})
+		requirements = append(requirements, requirement)
+	}
+	if err := wire.ValidateRequirements(requirements); err != nil {
+		return nil, err
 	}
 	return requirements, nil
 }

@@ -27,12 +27,13 @@ func testConfig(address string) Config {
 	script := `printf '{"type":"result","result":"prompt=%s token=%s env=%s home=%s"}\n' "$(cat ${NOMAD_TASK_DIR}/prompt.txt)" "$` + credentialEnv + `" "$WHERRY_TEST_ENV" "$HOME"`
 	return Config{
 		Address: address, Namespace: "default", CredentialEnv: credentialEnv,
-		Runtimes: map[string]Runtime{"exec": {
+		Runtime: Runtime{
 			Driver:    "raw_exec",
 			Config:    map[string]any{"command": "/bin/sh", "args": []any{"-c", script}},
 			Env:       map[string]string{"WHERRY_TEST_ENV": "from-runtime"},
 			Resources: Resources{CPU: new(100), MemoryMB: new(64)},
-		}},
+		},
+		NodePool: "default", Datacenters: []string{"dc1"},
 	}
 }
 
@@ -54,7 +55,7 @@ func devAdapter(t *testing.T) (*Adapter, context.Context) {
 func testRun(name string) receiver.Run {
 	id := fmt.Sprintf("run-%s-%d", name, time.Now().UnixNano())
 	return receiver.Run{
-		ID: id, Turn: 1, Offer: map[string]string{"runtime": "exec", "nomad.node_pool": "default", "zone": "dc1"},
+		ID: id, Turn: 1,
 		Prompt: []byte("hello-prompt"), Credential: []byte("test-credential"),
 	}
 }
@@ -106,21 +107,14 @@ func collect(t *testing.T, ctx context.Context, adapter *Adapter, handle receive
 	}
 }
 
-func TestOffersFromReadyNodes(t *testing.T) {
+func TestReadyFromReadyNodes(t *testing.T) {
 	adapter, ctx := devAdapter(t)
-	offers, err := adapter.Offers(ctx)
-	if err != nil {
-		t.Fatal(err)
+	if ready, err := adapter.Ready(ctx); err != nil || !ready {
+		t.Fatalf("ready = %v, %v; want a ready dev node with raw_exec", ready, err)
 	}
-	want := map[string]string{"runtime": "exec", "nomad.node_pool": "default", "zone": "dc1"}
-	found := false
-	for _, offer := range offers {
-		if wire.TermsText(offer) == wire.TermsText(want) {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("offers %#v do not contain %#v", offers, want)
+	adapter.nodePool = "wherry-no-such-pool"
+	if ready, err := adapter.Ready(ctx); err != nil || ready {
+		t.Fatalf("ready = %v, %v; want no node in another node pool", ready, err)
 	}
 }
 
@@ -147,7 +141,7 @@ func TestBuildJobFromRuntime(t *testing.T) {
 	if len(job.TaskGroups) != 1 || retriesOn(job.TaskGroups[0]) {
 		t.Fatalf("retries not forced off: groups=%#v", job.TaskGroups)
 	}
-	runtime := testConfig("").Runtimes["exec"]
+	runtime := testConfig("").Runtime
 	tasks := job.TaskGroups[0].Tasks
 	if len(tasks) != 1 || tasks[0].Name != taskName || tasks[0].Driver != "raw_exec" || !reflect.DeepEqual(tasks[0].Config, runtime.Config) ||
 		*tasks[0].Resources.CPU != 100 || *tasks[0].Resources.MemoryMB != 64 ||
@@ -198,7 +192,7 @@ func TestPerTurnJobIDs(t *testing.T) {
 
 func TestNewValidatesConfig(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
-		"driver":         func(config *Config) { config.Runtimes["exec"] = Runtime{} },
+		"driver":         func(config *Config) { config.Runtime = Runtime{} },
 		"credential env": func(config *Config) { config.CredentialEnv = `X={{ .prompt }}` },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -314,7 +308,7 @@ func TestLookupMissingRun(t *testing.T) {
 func TestLookupWaitsForUnplacedJob(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("lookup-unplaced")
-	run.Offer["zone"] = "wherry-no-such-datacenter"
+	adapter.datacenters = []string{"wherry-no-such-datacenter"}
 	cleanupRun(t, adapter, run)
 	job, err := adapter.buildJob(run, variablePath(run.ID, run.Turn))
 	if err != nil {
@@ -355,7 +349,7 @@ func TestReleaseDeletesVariable(t *testing.T) {
 func TestDispatchErrorDeletesVariable(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("error-cleanup")
-	run.Offer["zone"] = "wherry-no-such-datacenter"
+	adapter.datacenters = []string{"wherry-no-such-datacenter"}
 	cleanupRun(t, adapter, run)
 	dispatchCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
@@ -412,10 +406,8 @@ func TestLineReaderFlushesFinalLine(t *testing.T) {
 
 // scriptRun returns a run whose task is the given shell script.
 func scriptRun(adapter *Adapter, name, script string) receiver.Run {
-	adapter.runtimes[name] = Runtime{Driver: "raw_exec", Config: map[string]any{"command": "/bin/sh", "args": []any{"-c", script}}}
-	run := testRun(name)
-	run.Offer["runtime"] = name
-	return run
+	adapter.runtime = Runtime{Driver: "raw_exec", Config: map[string]any{"command": "/bin/sh", "args": []any{"-c", script}}}
+	return testRun(name)
 }
 
 func waitRunning(t *testing.T, ctx context.Context, adapter *Adapter, handle receiver.Handle) {
@@ -497,7 +489,7 @@ func TestStopAlreadyTerminalDoesNotSignal(t *testing.T) {
 		http.Error(response, "unexpected request", http.StatusInternalServerError)
 	}))
 	defer server.Close()
-	adapter, err := New(Config{Address: server.URL}, "")
+	adapter, err := New(Config{Address: server.URL, Runtime: Runtime{Driver: "raw_exec"}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +504,7 @@ func TestStopAlreadyTerminalDoesNotSignal(t *testing.T) {
 func TestDispatchTimeoutDeregisters(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("dispatch-timeout")
-	run.Offer["zone"] = "wherry-no-such-datacenter"
+	adapter.datacenters = []string{"wherry-no-such-datacenter"}
 	cleanupRun(t, adapter, run)
 	dispatchCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -535,7 +527,7 @@ func TestDeregisterTimedOutPurgesJob(t *testing.T) {
 		_, _ = response.Write([]byte(`{"EvalID":""}`))
 	}))
 	defer server.Close()
-	adapter, err := New(Config{Address: server.URL}, "")
+	adapter, err := New(Config{Address: server.URL, Runtime: Runtime{Driver: "raw_exec"}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -826,7 +818,7 @@ func TestRedactedDropsResponseBody(t *testing.T) {
 		http.Error(response, echoed, http.StatusInternalServerError)
 	}))
 	defer server.Close()
-	adapter, err := New(Config{Address: server.URL}, "")
+	adapter, err := New(Config{Address: server.URL, Runtime: Runtime{Driver: "raw_exec"}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -867,9 +859,8 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 }
 
 func sleepRun(adapter *Adapter, name string) receiver.Run {
-	adapter.runtimes["sleep"] = Runtime{Driver: "raw_exec", Config: map[string]any{"command": "/bin/sleep", "args": []any{"300"}}}
+	adapter.runtime = Runtime{Driver: "raw_exec", Config: map[string]any{"command": "/bin/sleep", "args": []any{"300"}}}
 	run := testRun(name)
-	run.Offer["runtime"] = "sleep"
 	return run
 }
 
@@ -1050,9 +1041,7 @@ func TestCloneUsesStrictHostKeyChecking(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("strict")
-	runtime := adapter.runtimes[run.Offer["runtime"]]
-	runtime.Env = map[string]string{"GIT_SSH_COMMAND": "ssh -o StrictHostKeyChecking=accept-new"}
-	adapter.runtimes[run.Offer["runtime"]] = runtime
+	adapter.runtime.Env = map[string]string{"GIT_SSH_COMMAND": "ssh -o StrictHostKeyChecking=accept-new"}
 	run.Git = &wire.GitContext{URL: "ssh://git@git.example.test/org/repo.git", Ref: "main", Path: "repo"}
 	job, err := adapter.buildJob(run, variablePath(run.ID, run.Turn))
 	if err != nil {
@@ -1123,5 +1112,22 @@ func TestRunVariableHoldsNoGitMaterial(t *testing.T) {
 	}
 	if git, _, err := adapter.client.Variables().Peek(path+gitSuffix, nil); err != nil || git != nil {
 		t.Fatalf("git task variable after release = %v, %v", git != nil, err)
+	}
+}
+
+func TestBuildJobLeavesUnsetPlacementToNomad(t *testing.T) {
+	config := testConfig("http://127.0.0.1:1")
+	config.NodePool, config.Datacenters = "", nil
+	adapter, err := New(config, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := testRun("defaults")
+	job, err := adapter.buildJob(run, variablePath(run.ID, run.Turn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.NodePool != nil || !reflect.DeepEqual(job.Datacenters, []string{"*"}) {
+		t.Fatalf("node pool %v, datacenters %v; want Nomad's defaults", job.NodePool, job.Datacenters)
 	}
 }

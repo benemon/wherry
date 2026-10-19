@@ -50,7 +50,6 @@ type Line struct {
 type Run struct {
 	ID         string
 	Turn       int64
-	Offer      map[string]string
 	Prompt     []byte
 	Credential []byte
 	Git        *wire.GitContext
@@ -64,8 +63,8 @@ var ErrConfigChanged = errors.New("receiver configuration changed")
 
 // Adapter is the platform seam of ADR-0018; implementations hold platform credentials only.
 type Adapter interface {
-	Platform() string
-	Offers(ctx context.Context) ([]map[string]string, error)
+	// Ready reports whether the adapter can currently start a job.
+	Ready(ctx context.Context) (bool, error)
 	Dispatch(ctx context.Context, run Run) (Handle, error)
 	Lookup(ctx context.Context, runID string, turn int64) (Handle, bool, error)
 	Follow(ctx context.Context, handle Handle, offset int64, lines chan<- Line) error
@@ -79,6 +78,8 @@ type Named struct {
 	Name       string
 	Agent      string
 	Credential string
+	// Labels are the operator's declared labels for the adapter (ADR-0027 Placement).
+	Labels map[string]string
 	// Git is set when the adapter delivers git context parts (ADR-0024).
 	Git     bool
 	Adapter Adapter
@@ -106,8 +107,12 @@ type Receiver struct {
 	hosts    signed.Keys
 	offers   []wire.Offer
 	inFlight int64
-	// deniedSince is when an authorisation error was first seen; zero while access holds.
+	// denials holds the capabilities an authorisation error took away; deniedSince is when the first was
+	// lost, zero while access holds.
+	denials     map[capability]bool
 	deniedSince time.Time
+	// admissionMu serialises the admission transactional ID, which one producer at a time may hold.
+	admissionMu sync.Mutex
 	// cancelled holds, per run, the lowest turn a host of the run's tenant has cancelled.
 	cancelled map[string]int64
 }
@@ -224,32 +229,37 @@ func (r *Receiver) every(ctx context.Context, interval time.Duration, step func(
 	}
 }
 
-// register puts the signing and sealing keys on an empty key topic and refuses a topic holding other keys.
+// register puts the signing and sealing keys on a key topic with no records at all, and refuses a topic
+// holding anything but this receiver's own registration.
 func (r *Receiver) register(ctx context.Context) error {
 	topic := admin.ReceiverTopic(r.id)
 	public := r.signing.Public().(ed25519.PublicKey)
-	for attempt := 0; ; attempt++ {
-		keys, err := admin.ReadKeys(ctx, r.base, map[string]string{r.id: topic})
+	records, err := admin.ReadTopic(ctx, r.base, topic)
+	if err != nil {
+		return fmt.Errorf("read key topic: %w", err)
+	}
+	if len(records) == 0 {
+		record, err := signed.RegisterKey(r.id, r.signing, r.sealing.PublicKey())
 		if err != nil {
+			return err
+		}
+		if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(r.id), Value: record}).FirstErr(); err != nil {
+			return fmt.Errorf("register keys: %w", err)
+		}
+		r.logger.Printf("registered keys: signing=%s sealing=%s", signed.KeyID(public), signed.SealingKeyID(r.sealing.PublicKey()))
+		// Another instance may have registered at the same time; only one record may stand.
+		if records, err = admin.ReadTopic(ctx, r.base, topic); err != nil {
 			return fmt.Errorf("read key topic: %w", err)
 		}
-		state := keys[r.id]
-		if state.Current == nil && !state.Revoked && attempt == 0 {
-			record, err := signed.RegisterKey(r.id, r.signing, r.sealing.PublicKey())
-			if err != nil {
-				return err
-			}
-			if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(r.id), Value: record}).FirstErr(); err != nil {
-				return fmt.Errorf("register keys: %w", err)
-			}
-			r.logger.Printf("registered keys: signing=%s sealing=%s", signed.KeyID(public), signed.SealingKeyID(r.sealing.PublicKey()))
-			continue
-		}
-		if state.Revoked || !public.Equal(state.Current) || state.Sealing == nil || !state.Sealing.Equal(r.sealing.PublicKey()) {
-			return errors.New("receiver key topic holds other keys than the state directory")
-		}
-		return nil
 	}
+	if len(records) != 1 {
+		return errors.New("receiver key topic holds records other than this receiver's registration")
+	}
+	state, err := signed.ApplyKeyRecord(signed.KeyState{}, r.id, records[0].Value)
+	if err != nil || !public.Equal(state.Current) || state.Sealing == nil || !state.Sealing.Equal(r.sealing.PublicKey()) {
+		return errors.New("receiver key topic holds other keys than the state directory")
+	}
+	return nil
 }
 
 // configure waits for this receiver's configuration record, validates it against its pool's
@@ -310,40 +320,89 @@ func (r *Receiver) refresh(ctx context.Context) error {
 		hosts, err = admin.ReadKeys(ctx, r.base, admin.HostKeyTopics(state, r.config.Pool))
 	}
 	if err != nil {
-		r.deny(err)
+		r.deny(err, capRead)
 		return err
 	}
 	if !reflect.DeepEqual(state.Receivers[r.id], r.config) {
 		return ErrConfigChanged
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.state, r.peers, r.hosts = state, peers, hosts
+	r.mu.Unlock()
 	if state.Ended[admin.ReceiverPrincipal(r.id)] {
-		if r.deniedSince.IsZero() {
-			r.deniedSince = time.Now()
-			r.logger.Printf("denied: membership ended")
-		}
+		r.deny(kerr.ClusterAuthorizationFailed, capMembership)
 		return nil
 	}
-	if !r.deniedSince.IsZero() {
-		r.deniedSince = time.Time{}
-		r.logger.Printf("access restored")
+	r.restore(capRead)
+	if r.holds(capWrite) || r.holds(capTransactional) {
+		if err := r.probeWrite(ctx); err != nil {
+			r.deny(err, capWrite)
+			return nil
+		}
+		r.restore(capWrite)
+		r.restore(capTransactional)
 	}
 	return nil
 }
 
-// deny records an authorisation error; claiming stops until a refresh succeeds.
-func (r *Receiver) deny(err error) {
+// capability is what an authorisation error took away. Each is restored only by an operation that
+// exercises it: a refresh for reads, an aborted admission transaction for writes and the transactional
+// ID, and the next claim for the share group.
+type capability string
+
+const (
+	capRead          capability = "read"
+	capWrite         capability = "write"
+	capTransactional capability = "transactional ID"
+	capClaim         capability = "share group"
+	// capMembership is never restored: an ended member is re-provisioned under a new principal.
+	capMembership capability = "membership"
+)
+
+// deny records an authorisation error from an operation that used capability.
+func (r *Receiver) deny(err error, used capability) {
 	if !authorisationError(err) {
 		return
 	}
+	switch {
+	case errors.Is(err, kerr.TransactionalIDAuthorizationFailed):
+		used = capTransactional
+	case errors.Is(err, kerr.GroupAuthorizationFailed):
+		used = capClaim
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.deniedSince.IsZero() {
-		r.deniedSince = time.Now()
-		r.logger.Printf("denied: %v", err)
+	if r.denials[used] {
+		return
 	}
+	if r.denials == nil {
+		r.denials = map[capability]bool{}
+	}
+	if len(r.denials) == 0 {
+		r.deniedSince = time.Now()
+	}
+	r.denials[used] = true
+	r.logger.Printf("denied (%s): %v", used, err)
+}
+
+// restore clears a denial of capability; access is restored once no denial remains.
+func (r *Receiver) restore(c capability) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.denials[c] {
+		return
+	}
+	delete(r.denials, c)
+	if len(r.denials) == 0 {
+		r.deniedSince = time.Time{}
+		r.logger.Printf("access restored")
+	}
+}
+
+func (r *Receiver) holds(c capability) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.denials[c]
 }
 
 func authorisationError(err error) bool {
@@ -358,7 +417,14 @@ func authorisationError(err error) bool {
 func (r *Receiver) denied() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return !r.deniedSince.IsZero()
+	return len(r.denials) > 0
+}
+
+// blocked reports a denial other than the share group's, which only a claim attempt can re-test.
+func (r *Receiver) blocked() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.denials) > 1 || len(r.denials) == 1 && !r.denials[capClaim]
 }
 
 // stopForDenial reports whether denial has lasted one lock interval, after which the broker
@@ -384,22 +450,40 @@ func (r *Receiver) authorizeHost(ctx context.Context, encoded []byte, authorize 
 	if err == nil {
 		return nil
 	}
-	owner, keyID, ok := kid(encoded)
-	topic, live := admin.HostKeyTopics(state, r.config.Pool)[owner]
-	if !ok || !live || (hosts[owner].Current != nil && signed.KeyID(hosts[owner].Current) == keyID) {
+	owner, topic, stale := staleKey(encoded, hosts, admin.HostKeyTopics(state, r.config.Pool))
+	if !stale {
 		return err
 	}
-	fresh, readErr := admin.ReadKeys(ctx, r.base, map[string]string{owner: topic})
+	hosts, readErr := r.rereadKey(ctx, &r.hosts, owner, topic)
 	if readErr != nil {
-		r.deny(readErr)
 		return readErr
 	}
-	r.mu.Lock()
-	r.hosts = maps.Clone(r.hosts)
-	r.hosts[owner] = fresh[owner]
-	hosts = r.hosts
-	r.mu.Unlock()
 	return authorize(state, hosts)
+}
+
+// staleKey reports that encoded names, in its kid, a key ID other than the current one of an owner in
+// topics, and returns that owner's key topic.
+func staleKey(encoded []byte, keys signed.Keys, topics map[string]string) (string, string, bool) {
+	owner, keyID, ok := kid(encoded)
+	topic, live := topics[owner]
+	if !ok || !live || (keys[owner].Current != nil && signed.KeyID(keys[owner].Current) == keyID) {
+		return "", "", false
+	}
+	return owner, topic, true
+}
+
+// rereadKey refolds owner's key topic into keys, which is r.hosts or r.peers, and returns the new keys.
+func (r *Receiver) rereadKey(ctx context.Context, keys *signed.Keys, owner, topic string) (signed.Keys, error) {
+	fresh, err := admin.ReadKeys(ctx, r.base, map[string]string{owner: topic})
+	if err != nil {
+		r.deny(err, capRead)
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	*keys = maps.Clone(*keys)
+	(*keys)[owner] = fresh[owner]
+	return *keys, nil
 }
 
 // kid returns the owner and key ID a compact JWS names in its protected header.
@@ -430,8 +514,7 @@ func (r *Receiver) named(name string) (Named, bool) {
 	return Named{}, false
 }
 
-// advertise sweeps each adapter, then publishes its offers within the configured runtimes,
-// labelled with the adapter's agent and the receiver's labels.
+// advertise sweeps each adapter, then publishes one offer per ready adapter with its agent and declared labels.
 func (r *Receiver) advertise(ctx context.Context) error {
 	for _, named := range r.adapters {
 		if err := named.Adapter.Sweep(ctx); err != nil {
@@ -440,20 +523,13 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	}
 	offers := []wire.Offer{}
 	for _, named := range r.adapters {
-		found, err := named.Adapter.Offers(ctx)
+		ready, err := named.Adapter.Ready(ctx)
 		if err != nil {
-			r.logger.Printf("adapter %s offers: %v", named.Name, err)
+			r.logger.Printf("adapter %s readiness: %v", named.Name, err)
 			continue
 		}
-		for _, labels := range found {
-			if !slices.Contains(r.config.Runtimes, labels["runtime"]) {
-				continue
-			}
-			offer := map[string]string{}
-			maps.Copy(offer, r.config.Labels)
-			maps.Copy(offer, labels)
-			offer["agent"] = named.Agent
-			offers = append(offers, wire.Offer{Adapter: named.Name, Labels: offer})
+		if ready {
+			offers = append(offers, wire.Offer{Adapter: named.Name, Agent: named.Agent, Labels: named.Labels})
 		}
 	}
 	r.mu.Lock()
@@ -468,25 +544,19 @@ func (r *Receiver) advertise(ctx context.Context) error {
 		return err
 	}
 	if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: admin.ReceiversTopic, Key: []byte(r.id), Value: value}).FirstErr(); err != nil {
-		r.deny(err)
+		r.deny(err, capWrite)
 		return err
 	}
 	return nil
 }
 
-// offer returns this receiver's first current offer for the placement.
+// offer returns this receiver's first current offer, in declared adapter order, that launches the placement's
+// agent with labels satisfying its selector.
 func (r *Receiver) offer(placement wire.Placement) (wire.Offer, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, offer := range r.offers {
-		if offer.Labels["agent"] != placement.Agent || offer.Labels["runtime"] != placement.Runtime {
-			continue
-		}
-		matched := true
-		for key, value := range placement.Labels {
-			matched = matched && offer.Labels[key] == value
-		}
-		if matched {
+		if offer.Agent == placement.Agent && wire.Satisfies(placement.Selector, offer.Labels) {
 			return offer, true
 		}
 	}
@@ -506,16 +576,27 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	defer cancel()
 	records, err := admin.ReadTopic(ctx, r.base, admin.PoolEventsTopic(r.config.Pool))
 	if err != nil {
-		r.deny(err)
+		r.deny(err, capRead)
 		return poolEvents{}, err
 	}
 	state, peers, _ := r.snapshot()
+	peerTopics := admin.PoolKeyTopics(state, r.config.Pool)
+	reread := map[string]bool{}
 	events := poolEvents{statuses: map[string][]wire.RunStatus{}, others: map[string][][]byte{}}
 	seen := map[string]bool{}
 	for _, record := range records {
 		run := string(record.Key)
 		var named wire.RunStatus
-		if wire.ParseRecord(record.Value, peers, &named) != nil {
+		err := wire.ParseRecord(record.Value, peers, &named)
+		// A member that rotated its key since the last refresh is re-read once per read of the topic.
+		if owner, topic, stale := staleKey(record.Value, peers, peerTopics); err != nil && stale && !reread[owner] {
+			reread[owner] = true
+			if peers, err = r.rereadKey(ctx, &r.peers, owner, topic); err != nil {
+				return poolEvents{}, err
+			}
+			err = wire.ParseRecord(record.Value, peers, &named)
+		}
+		if err != nil {
 			events.others[run] = append(events.others[run], record.Value)
 			continue
 		}
@@ -530,10 +611,11 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	return events, nil
 }
 
-// committedTerminal reports a terminal status for the exact task record on the pool's events.
+// committedTerminal reports a status in a terminal A2A state, a rejection included, for the exact task
+// record on the pool's events.
 func (events poolEvents) committedTerminal(run, taskHash string) bool {
 	return slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
-		return status.Wherry.Kind == "terminal" && status.Wherry.TaskHash == taskHash
+		return wire.Terminal(status.StatusUpdate.Status.State) && status.Wherry.TaskHash == taskHash
 	})
 }
 
@@ -629,7 +711,7 @@ func (r *Receiver) credential(ctx context.Context, tenant, agent, name string) (
 		}
 		records, err := admin.ReadTopic(ctx, r.base, admin.HostTopic(host.Tenant, host.Name))
 		if err != nil {
-			r.deny(err)
+			r.deny(err, capRead)
 			return nil, 0, err
 		}
 		for _, record := range records {

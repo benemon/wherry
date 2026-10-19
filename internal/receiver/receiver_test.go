@@ -52,9 +52,10 @@ var (
 )
 
 type fakeAdapter struct {
-	mu          sync.Mutex
-	offers      []map[string]string
-	offersErr   error
+	mu sync.Mutex
+	// unready and readyErr make Ready report the adapter unable to start a job.
+	unready     bool
+	readyErr    error
 	stream      []string
 	stops       int
 	stopErr     error
@@ -77,12 +78,10 @@ type fakeAdapter struct {
 	endDelay time.Duration
 }
 
-func (f *fakeAdapter) Platform() string { return "nomad" }
-
-func (f *fakeAdapter) Offers(context.Context) ([]map[string]string, error) {
+func (f *fakeAdapter) Ready(context.Context) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]map[string]string(nil), f.offers...), f.offersErr
+	return !f.unready && f.readyErr == nil, f.readyErr
 }
 
 func (f *fakeAdapter) Dispatch(_ context.Context, run Run) (Handle, error) {
@@ -213,16 +212,15 @@ type fixture struct {
 
 func testTerms() admin.Terms {
 	return admin.Terms{
-		Agents:   []admin.AgentTerms{{Name: "claude", Credentials: []string{credentialName, "cred-lab", "cred-cloud"}}, {Name: "codex", Credentials: []string{}}},
-		Runtimes: []string{"exec", "podman", "lambda"}, DefaultAgent: "claude", DefaultRuntime: "exec",
-		SealLifetimeMS: time.Hour.Milliseconds(), DeliveryLimit: 10, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
+		Agents:       []admin.AgentTerms{{Name: "claude", Credentials: []string{credentialName, "cred-lab", "cred-cloud"}}, {Name: "codex", Credentials: []string{}}},
+		DefaultAgent: "claude", SealLifetimeMS: time.Hour.Milliseconds(), DeliveryLimit: 10, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
 	}
 }
 
 func testConfig(receiver string) admin.ReceiverConfig {
 	return admin.ReceiverConfig{
-		Receiver: receiver, Pool: testPool, Capacity: 1, Labels: map[string]string{}, Runtimes: []string{"exec", "podman"},
-		Adapters: []admin.AdapterSettings{{Name: "nomad", Type: "fake", Agent: "claude", Credential: credentialName, Config: map[string]any{}}},
+		Receiver: receiver, Pool: testPool, Capacity: 1,
+		Adapters: []admin.AdapterSettings{{Name: "nomad", Type: "fake", Agent: "claude", Credential: credentialName, Labels: map[string]string{"zone": "dc1", "example.com/gpu": "none"}, Config: map[string]any{}}},
 	}
 }
 
@@ -263,10 +261,7 @@ func newService(t *testing.T, ctx context.Context, terms admin.Terms) (*kfake.Cl
 
 func newFixture(t *testing.T, stream []string) fixture {
 	return newFixtureWith(t, stream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{
-		"nomad": {stream: stream, offers: []map[string]string{
-			{"runtime": "exec", "nomad.node_pool": "OCPv", "zone": "dc1"},
-			{"runtime": "podman", "nomad.node_pool": "default", "zone": "dc1"},
-		}},
+		"nomad": {stream: stream},
 	})
 }
 
@@ -347,7 +342,7 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		if !ok || settings.Type != "fake" {
 			return Named{}, errors.New("no fake adapter")
 		}
-		return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: adapter}, nil
+		return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Adapter: adapter}, nil
 	}
 	return &Receiver{id: config.Receiver, kafkaOpt: opts, base: base, signing: signing, sealing: sealing, factory: factory, logger: log.New(logs, "", 0)}, logs
 }
@@ -367,7 +362,7 @@ func testSubmission(run string) *wire.Submission {
 		Message: wire.Message{MessageID: "msg-a", ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "hi"}}, Extensions: []string{wire.ExtensionURI}},
 		Wherry: wire.SubmissionBinding{
 			Tenant: testTenant, Host: testHost, Pool: testPool, Run: run, Turn: 1,
-			Placement:  wire.Placement{Agent: "claude", Runtime: "exec", Labels: map[string]string{}},
+			Placement:  wire.Placement{Agent: "claude", Selector: []wire.Requirement{}},
 			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
 		},
 	}
@@ -640,6 +635,18 @@ func TestRegisterPutsBothKeysOnAnEmptyTopic(t *testing.T) {
 	}
 }
 
+func TestRegisterRefusesAKeyTopicThatIsNotEmpty(t *testing.T) {
+	f := newFixture(t, resultStream)
+	fresh, _ := f.newReceiver(t, testConfig("receiver-c"))
+	f.produce(t, admin.ReceiverTopic("receiver-c"), "receiver-c", []byte("not a key record"))
+	if err := fresh.register(f.ctx); err == nil {
+		t.Fatal("registered over a key topic that already holds a record")
+	}
+	if records := f.records(t, admin.ReceiverTopic("receiver-c")); len(records) != 1 {
+		t.Fatalf("key topic records = %d, want the invalid record alone", len(records))
+	}
+}
+
 func TestRegisterRefusesAnotherKey(t *testing.T) {
 	f := newFixture(t, resultStream)
 	for name, change := range map[string]func(*Receiver){
@@ -688,7 +695,7 @@ func (f fixture) appendConfig(t *testing.T, config admin.ReceiverConfig) {
 func TestConfigureRefusesConfigOutsideTerms(t *testing.T) {
 	f := newFixture(t, resultStream)
 	config := testConfig(testReceiver)
-	config.Runtimes = []string{"exec", "wasm"}
+	config.Adapters[0].Agent = "gemini"
 	f.appendConfig(t, config)
 	restarted := &Receiver{id: testReceiver, base: f.receiver.base, logger: f.receiver.logger, factory: f.receiver.factory}
 	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "outside pool terms") {
@@ -782,12 +789,9 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 	}
 }
 
-func TestAdvertisement(t *testing.T) {
-	config := testConfig(testReceiver)
-	config.Labels = map[string]string{"region": "eu"}
-	f := newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakeAdapter{
-		"nomad": {stream: resultStream, offers: []map[string]string{{"runtime": "exec", "zone": "dc1"}, {"runtime": "lambda", "zone": "dc1"}}},
-	})
+// advertisedOffers reads this receiver's latest live advertisement as a host does.
+func (f fixture) advertisedOffers(t *testing.T) wire.Advertisement {
+	t.Helper()
 	state, err := f.service.LoadState(f.ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -800,34 +804,55 @@ func TestAdvertisement(t *testing.T) {
 	if !ok {
 		t.Fatal("no live advertisement")
 	}
-	want := []wire.Offer{{Adapter: "nomad", Labels: map[string]string{"agent": "claude", "runtime": "exec", "zone": "dc1", "region": "eu"}}}
+	return advertisement
+}
+
+func TestAdvertisement(t *testing.T) {
+	f := newFixture(t, resultStream)
+	advertisement := f.advertisedOffers(t)
+	settings := testConfig(testReceiver).Adapters[0]
+	want := []wire.Offer{{Adapter: "nomad", Agent: "claude", Labels: settings.Labels}}
 	if !reflect.DeepEqual(advertisement.Offers, want) || advertisement.Pool != testPool || advertisement.Capacity != 1 ||
 		advertisement.SealingKey != signed.SealingKeyID(f.receiver.sealing.PublicKey()) {
 		t.Fatalf("advertisement %#v, want offers %#v", advertisement, want)
 	}
 }
 
-func TestAdapterOffersErrorIsolated(t *testing.T) {
+func TestAdvertisedLabelsAreTheConfigRecords(t *testing.T) {
+	m := newMultiFixture(t)
+	state, err := m.service.LoadState(m.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offers := m.advertisedOffers(t).Offers
+	settings := state.Receivers[testReceiver].Adapters
+	if len(offers) != len(settings) {
+		t.Fatalf("offers %#v, want one per configured adapter", offers)
+	}
+	for i, offer := range offers {
+		if offer.Adapter != settings[i].Name || offer.Agent != settings[i].Agent || !reflect.DeepEqual(offer.Labels, settings[i].Labels) {
+			t.Fatalf("offer %#v, want the labels adapter %s declares in wherry.admin: %v", offer, settings[i].Name, settings[i].Labels)
+		}
+	}
+}
+
+func TestReadinessErrorLogsAndLeavesAdapterOut(t *testing.T) {
 	m := newMultiFixture(t)
 	m.lab.mu.Lock()
-	m.lab.offersErr = errors.New("nomad unreachable")
+	m.lab.readyErr = errors.New("nomad unreachable")
 	m.lab.mu.Unlock()
 	if err := m.receiver.advertise(m.ctx); err != nil {
 		t.Fatal(err)
 	}
-	m.receiver.mu.Lock()
-	offers := m.receiver.offers
-	m.receiver.mu.Unlock()
 	var got []string
-	for _, offer := range offers {
-		got = append(got, offer.Adapter+":"+wire.TermsText(offer.Labels))
+	for _, offer := range m.advertisedOffers(t).Offers {
+		got = append(got, offer.Adapter)
 	}
-	want := []string{"cloud:agent=claude,runtime=lambda", "cloud:agent=claude,runtime=exec", "edge:agent=claude,runtime=podman"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("published offers %v, want %v", got, want)
+	if want := []string{"cloud", "edge"}; !slices.Equal(got, want) {
+		t.Fatalf("advertised adapters %v, want %v", got, want)
 	}
-	if !strings.Contains(m.logs.String(), "adapter lab offers: nomad unreachable") {
-		t.Fatalf("offers error not logged: %q", m.logs.String())
+	if !strings.Contains(m.logs.String(), "adapter lab readiness: nomad unreachable") {
+		t.Fatalf("readiness error not logged: %q", m.logs.String())
 	}
 }
 
@@ -850,8 +875,8 @@ func TestSweepErrorIsolated(t *testing.T) {
 	m.receiver.mu.Lock()
 	offers := len(m.receiver.offers)
 	m.receiver.mu.Unlock()
-	if offers != 4 {
-		t.Fatalf("published %d offers after a sweep error, want 4", offers)
+	if offers != 3 {
+		t.Fatalf("published %d offers after a sweep error, want 3", offers)
 	}
 	logs := m.logs.String()
 	if !strings.Contains(logs, "adapter lab sweep: *errors.errorString") || strings.Contains(logs, detail) {
@@ -877,31 +902,105 @@ type multiFixture struct {
 	lab, cloud, edge *fakeAdapter
 }
 
-// newMultiFixture configures adapters lab, cloud and edge for one agent; only lab's credential is sealed.
+// newMultiFixture configures adapters lab, cloud and edge, in that order, for one agent with the labels
+// their operator declares: lab and cloud both carry class=cpu, only cloud an accelerator, edge class=arm.
+// Only lab's credential is sealed.
 func newMultiFixture(t *testing.T) multiFixture {
 	t.Helper()
-	m := multiFixture{
-		lab:   &fakeAdapter{stream: resultStream, offers: []map[string]string{{"runtime": "exec"}}},
-		cloud: &fakeAdapter{stream: resultStream, offers: []map[string]string{{"runtime": "lambda"}, {"runtime": "exec"}}},
-		edge:  &fakeAdapter{stream: resultStream, offers: []map[string]string{{"runtime": "podman"}}},
-	}
+	m := multiFixture{lab: &fakeAdapter{stream: resultStream}, cloud: &fakeAdapter{stream: resultStream}, edge: &fakeAdapter{stream: resultStream}}
 	config := testConfig(testReceiver)
-	config.Runtimes = []string{"exec", "podman", "lambda"}
 	config.Adapters = []admin.AdapterSettings{
-		{Name: "lab", Type: "fake", Agent: "claude", Credential: "cred-lab", Config: map[string]any{}},
-		{Name: "cloud", Type: "fake", Agent: "claude", Credential: "cred-cloud", Config: map[string]any{}},
-		{Name: "edge", Type: "fake", Agent: "claude", Config: map[string]any{}},
+		{Name: "lab", Type: "fake", Agent: "claude", Credential: "cred-lab", Labels: map[string]string{"site": "lab", "class": "cpu"}, Config: map[string]any{}},
+		{Name: "cloud", Type: "fake", Agent: "claude", Credential: "cred-cloud", Labels: map[string]string{"site": "cloud", "class": "cpu", "example.com/accelerator": "gpu"}, Config: map[string]any{}},
+		{Name: "edge", Type: "fake", Agent: "claude", Labels: map[string]string{"site": "edge", "class": "arm"}, Config: map[string]any{}},
 	}
 	m.fixture = newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakeAdapter{"lab": m.lab, "cloud": m.cloud, "edge": m.edge})
 	m.sealOwn(t, "cred-lab", time.Hour)
 	return m
 }
 
-func (m multiFixture) execute(t *testing.T, run, runtime string, attempt int64) kgo.AckStatus {
+func in(key string, values ...string) wire.Requirement {
+	return wire.Requirement{Key: key, Operator: wire.OpIn, Values: values}
+}
+
+func notIn(key string, values ...string) wire.Requirement {
+	return wire.Requirement{Key: key, Operator: wire.OpNotIn, Values: values}
+}
+
+func exists(key string) wire.Requirement {
+	return wire.Requirement{Key: key, Operator: wire.OpExists}
+}
+
+func doesNotExist(key string) wire.Requirement {
+	return wire.Requirement{Key: key, Operator: wire.OpDoesNotExist}
+}
+
+// Selectors for the multi fixture: cpu matches lab then cloud, accelerated cloud alone, arm edge alone.
+var (
+	cpu         = []wire.Requirement{in("class", "cpu")}
+	accelerated = []wire.Requirement{exists("example.com/accelerator")}
+	arm         = []wire.Requirement{in("class", "arm")}
+)
+
+func (m multiFixture) execute(t *testing.T, run string, selector []wire.Requirement, attempt int64) kgo.AckStatus {
 	t.Helper()
 	record := m.submit(t, m.host, func(task *wire.Submission) {
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
-		task.Wherry.Placement.Runtime = runtime
+		task.Wherry.Placement.Selector = selector
 	})
 	return m.fixture.execute(t, record, attempt)
+}
+
+// routed admits a task with selector and returns the adapter it was routed to.
+func (m multiFixture) routed(t *testing.T, selector ...wire.Requirement) string {
+	t.Helper()
+	record := m.submit(t, m.host, func(task *wire.Submission) {
+		task.Wherry.Placement.Selector = append([]wire.Requirement{}, selector...)
+	})
+	return m.admitted(t, record).offer.Adapter
+}
+
+func TestEachSelectorOperatorRoutes(t *testing.T) {
+	m := newMultiFixture(t)
+	for _, test := range []struct {
+		name     string
+		selector []wire.Requirement
+		want     string
+	}{
+		{"none, first in declared order", nil, "lab"},
+		{"In", []wire.Requirement{in("class", "arm")}, "edge"},
+		{"In, several values", []wire.Requirement{in("site", "edge", "cloud")}, "cloud"},
+		{"NotIn", []wire.Requirement{notIn("site", "lab")}, "cloud"},
+		{"NotIn, key absent", []wire.Requirement{notIn("example.com/accelerator", "gpu")}, "lab"},
+		{"Exists", []wire.Requirement{exists("example.com/accelerator")}, "cloud"},
+		{"DoesNotExist", []wire.Requirement{doesNotExist("example.com/accelerator"), in("class", "cpu")}, "lab"},
+		{"conjunction", []wire.Requirement{in("class", "cpu"), notIn("site", "lab"), exists("example.com/accelerator")}, "cloud"},
+	} {
+		if got := m.routed(t, test.selector...); got != test.want {
+			t.Errorf("%s: routed to %s, want %s", test.name, got, test.want)
+		}
+	}
+}
+
+func TestUnreadyAdapterIsNeverChosen(t *testing.T) {
+	m := newMultiFixture(t)
+	m.lab.mu.Lock()
+	m.lab.unready = true
+	m.lab.mu.Unlock()
+	if err := m.receiver.advertise(m.ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, offer := range m.advertisedOffers(t).Offers {
+		if offer.Adapter == "lab" {
+			t.Fatal("an adapter that is not ready was advertised")
+		}
+	}
+	if got := m.routed(t, in("class", "cpu")); got != "cloud" {
+		t.Fatalf("routed to %s, want cloud: lab is not ready", got)
+	}
+	// Only the unready adapter satisfies this selector: a start failure, not a dispatch.
+	record := m.submit(t, m.host, func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("site", "lab")} })
+	if admitted, ack := m.receiver.admit(m.ctx, record); admitted != nil || ack != kgo.AckRelease {
+		t.Fatalf("admitted=%v ack=%v, want a start failure and release", admitted != nil, ack)
+	}
 }

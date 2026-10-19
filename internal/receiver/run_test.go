@@ -2,6 +2,8 @@ package receiver
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -86,8 +88,37 @@ func TestEchoSharesTheClaimedTransaction(t *testing.T) {
 		t.Fatalf("echo %#v", echo)
 	}
 	// Both records come from one committed transaction: a reader stopping at the claimed status sees the echo.
-	if records[0].ProducerID != records[1].ProducerID || records[0].ProducerEpoch != records[1].ProducerEpoch {
-		t.Fatal("echo and claimed status come from different producers")
+	if !oneTransaction(records[:2]) {
+		t.Fatal("echo and claimed status come from different transactions")
+	}
+}
+
+// oneTransaction reports records of one partition written by one transaction: a commit marker takes an
+// offset after every transaction, so records of two transactions are never adjacent.
+func oneTransaction(records []*kgo.Record) bool {
+	for i := 1; i < len(records); i++ {
+		if records[i].Offset != records[i-1].Offset+1 || records[i].ProducerID != records[0].ProducerID || records[i].ProducerEpoch != records[0].ProducerEpoch {
+			return false
+		}
+	}
+	return true
+}
+
+func TestInterruptedStatusSharesItsResultsTransaction(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.execute(t, f.submit(t, f.host, nil), 1)
+	records := f.records(t, admin.TenantTopic(testTenant))
+	// echo and claimed, then the AUTH_REQUIRED result and the interrupted status.
+	if len(records) != 4 {
+		t.Fatalf("feed records %d, want 4", len(records))
+	}
+	var result wire.Result
+	var interrupted wire.RunStatus
+	if wire.ParseRecord(records[2].Value, f.keys(), &result) != nil || wire.ParseRecord(records[3].Value, f.keys(), &interrupted) != nil || interrupted.Wherry.Kind != "interrupted" {
+		t.Fatal("the result is not followed by the interrupted status")
+	}
+	if !oneTransaction(records[2:]) || oneTransaction(records[1:3]) {
+		t.Fatal("the AUTH_REQUIRED result and its interrupted status are not one transaction of their own")
 	}
 }
 
@@ -145,7 +176,7 @@ func TestPeerSealIsStartFailure(t *testing.T) {
 			failures = append(failures, failure)
 		}
 	}
-	if len(failures) != 1 || failures[0].Class != "seal-unavailable" || failures[0].Adapter != "nomad" || failures[0].Agent != "claude" || failures[0].Runtime != "exec" {
+	if len(failures) != 1 || failures[0].Class != "seal-unavailable" || failures[0].Adapter != "nomad" || failures[0].Agent != "claude" {
 		t.Fatalf("start failures %#v", failures)
 	}
 	for _, status := range f.feedStatuses(t) {
@@ -244,8 +275,8 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 		}
 		want := map[string]any{
 			"receiver_id": testReceiver, "pool": testPool, "adapter": "nomad",
-			"offer": map[string]any{"agent": "claude", "runtime": "exec", "nomad.node_pool": "OCPv", "zone": "dc1"},
-			"job":   "agent-run-a-t1",
+			"labels": map[string]any{"zone": "dc1", "example.com/gpu": "none"},
+			"job":    "agent-run-a-t1",
 		}
 		if got := decodeObject(t, f.lastTask(t).Metadata); !reflect.DeepEqual(got, want) {
 			t.Fatalf("task metadata %v, want %v", got, want)
@@ -255,7 +286,7 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 	t.Run("adopted", func(t *testing.T) {
 		m := newMultiFixture(t)
 		m.cloud.existing = true
-		if status := m.execute(t, "run-moved", "exec", 2); status != kgo.AckAccept {
+		if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
 		want := map[string]any{"receiver_id": testReceiver, "pool": testPool, "adapter": "cloud", "job": "agent-run-moved-t1"}
@@ -410,10 +441,8 @@ func TestResultSharesTheTerminalTransaction(t *testing.T) {
 	if wire.ParseRecord(records[1].Value, f.keys(), &result) != nil || wire.ParseRecord(records[2].Value, f.keys(), &terminal) != nil || terminal.Wherry.Kind != "terminal" {
 		t.Fatal("the result is not followed by the terminal")
 	}
-	for _, record := range records[1:] {
-		if record.ProducerID != records[0].ProducerID || record.ProducerEpoch != records[0].ProducerEpoch {
-			t.Fatal("feed records of the turn's end come from different producers")
-		}
+	if !oneTransaction(records) {
+		t.Fatal("feed records of the turn's end come from different transactions")
 	}
 	if result.Wherry.TaskHash != run.taskHash || result.Wherry.Tenant != testTenant {
 		t.Fatalf("result binding %#v", result.Wherry)
@@ -848,15 +877,15 @@ func TestAgentResultOmittedWhenNotObject(t *testing.T) {
 func TestReceiverRoutesToMatchedAdapter(t *testing.T) {
 	m := newMultiFixture(t)
 	m.sealOwn(t, "cred-cloud", time.Hour)
-	if status := m.execute(t, "run-lambda", "lambda", 1); status != kgo.AckAccept {
+	if status := m.execute(t, "run-lambda", accelerated, 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
 	labDispatches, _, _, _ := m.lab.counts()
 	cloudDispatches, _, cloudFollows, cloudReleases := m.cloud.counts()
-	if labDispatches != 0 || cloudDispatches != 1 || cloudFollows != 1 || cloudReleases != 1 || m.cloud.lastRun.Offer["runtime"] != "lambda" {
+	if labDispatches != 0 || cloudDispatches != 1 || cloudFollows != 1 || cloudReleases != 1 {
 		t.Fatalf("lab dispatches=%d; cloud dispatches=%d follows=%d releases=%d run=%#v", labDispatches, cloudDispatches, cloudFollows, cloudReleases, m.cloud.lastRun)
 	}
-	if status := m.execute(t, "run-exec", "exec", 1); status != kgo.AckAccept {
+	if status := m.execute(t, "run-exec", cpu, 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
 	labDispatches, _, _, _ = m.lab.counts()
@@ -869,7 +898,7 @@ func TestReceiverRoutesToMatchedAdapter(t *testing.T) {
 func TestReceiverRedeliveryAdoptsViaLookup(t *testing.T) {
 	m := newMultiFixture(t)
 	m.cloud.existing = true
-	if status := m.execute(t, "run-moved", "exec", 2); status != kgo.AckAccept {
+	if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
 	labDispatches, labLookups, labFollows, labReleases := m.lab.counts()
@@ -891,7 +920,7 @@ func TestReceiverRedeliveryAdoptsViaLookup(t *testing.T) {
 func TestReceiverFirstAttemptSkipsLookup(t *testing.T) {
 	m := newMultiFixture(t)
 	m.cloud.existing = true
-	if status := m.execute(t, "run-first", "exec", 1); status != kgo.AckAccept {
+	if status := m.execute(t, "run-first", cpu, 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
 	labDispatches, labLookups, _, _ := m.lab.counts()
@@ -903,19 +932,19 @@ func TestReceiverFirstAttemptSkipsLookup(t *testing.T) {
 
 func TestReceiverCredentialPerAdapter(t *testing.T) {
 	m := newMultiFixture(t)
-	if status := m.execute(t, "run-lab", "exec", 1); status != kgo.AckAccept {
+	if status := m.execute(t, "run-lab", cpu, 1); status != kgo.AckAccept {
 		t.Fatalf("lab status %v", status)
 	}
 	if got := string(m.lab.lastRun.Credential); got != testToken {
 		t.Fatal("lab adapter did not receive its own credential")
 	}
-	if status := m.execute(t, "run-edge", "podman", 1); status != kgo.AckAccept {
+	if status := m.execute(t, "run-edge", arm, 1); status != kgo.AckAccept {
 		t.Fatalf("edge status %v", status)
 	}
 	if m.edge.lastRun.Credential != nil {
 		t.Fatal("adapter without a configured credential received one")
 	}
-	if status := m.execute(t, "run-cloud", "lambda", 1); status != kgo.AckAccept {
+	if status := m.execute(t, "run-cloud", accelerated, 1); status != kgo.AckAccept {
 		t.Fatalf("cloud status %v, want accept", status)
 	}
 	if dispatches, _, _, releases := m.cloud.counts(); dispatches != 0 || releases != 1 {
@@ -977,7 +1006,13 @@ func TestContinuationResumesInterruptedTask(t *testing.T) {
 // deleteACLs removes every ACL of the receiver's principal, as revocation's second step does.
 func (f fixture) deleteACLs(t *testing.T) {
 	t.Helper()
-	builder := kadm.NewACLs().AnyResource().Allow(admin.ReceiverPrincipal(testReceiver)).AllowHosts("*").Operations(kadm.OpAny).ResourcePatternType(kadm.ACLPatternAny)
+	f.deleteReceiverACLs(t, kadm.NewACLs().AnyResource().Operations(kadm.OpAny))
+}
+
+// deleteReceiverACLs removes the receiver principal's ACLs that builder's resources and operations select.
+func (f fixture) deleteReceiverACLs(t *testing.T, builder *kadm.ACLBuilder) {
+	t.Helper()
+	builder = builder.Allow(admin.ReceiverPrincipal(testReceiver)).AllowHosts("*").ResourcePatternType(kadm.ACLPatternAny)
 	builder.PrefixUser()
 	results, err := kadm.NewClient(f.service.Admin).DeleteACLs(f.ctx, builder)
 	if err != nil {
@@ -1025,7 +1060,8 @@ func TestDenialStopsClaimingAndAccessResumesIt(t *testing.T) {
 func TestDeniedReceiverDoesNotClaim(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.sealOwn(t, credentialName, time.Hour)
-	f.receiver.deny(kerr.GroupAuthorizationFailed)
+	// A transactional ID denial must classify as denial: claiming with it would fail every run's first write.
+	f.receiver.deny(kerr.TransactionalIDAuthorizationFailed, capWrite)
 	f.submit(t, f.host, nil)
 	ctx, stop := context.WithTimeout(f.ctx, 2*time.Second)
 	defer stop()
@@ -1049,7 +1085,7 @@ func TestDeniedReceiverStopsInFlightRunsAfterOneLockInterval(t *testing.T) {
 	f.receiver.state.Pools[testPool] = terms
 	f.receiver.mu.Unlock()
 	done := startInFlight(t, f, f.ctx, "run-denied")
-	f.receiver.deny(kerr.TopicAuthorizationFailed)
+	f.receiver.deny(kerr.TopicAuthorizationFailed, capRead)
 	deniedAt := time.Now()
 	select {
 	case err := <-done:
@@ -1085,5 +1121,120 @@ func TestResultAfterLastingDenialReleasesTask(t *testing.T) {
 	}
 	if state, reason := terminalReason(t, f, "run-denied-result"); state != wire.TaskStateFailed || reason != "receiver denied" {
 		t.Fatalf("terminal %s %q, want FAILED receiver denied", state, reason)
+	}
+}
+
+func TestShareGroupDenialRetestedByClaim(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.sealOwn(t, credentialName, time.Hour)
+	f.receiver.deny(kerr.GroupAuthorizationFailed, capRead)
+	f.submit(t, f.host, nil)
+	ctx, stop := context.WithTimeout(f.ctx, 5*time.Second)
+	defer stop()
+	go f.receiver.claimLoop(ctx)
+	f.await(t, "run-a", anyTask)
+	if f.receiver.denied() {
+		t.Fatal("a claim that worked left the share group denial in place")
+	}
+}
+
+func TestAdmissionWritesDoNotFenceTheRunsHolder(t *testing.T) {
+	f := newFixture(t, resultStream)
+	holder := testActiveRun(t, f, "run-a", 1)
+	if err := holder.commit(f.ctx, holder.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
+		t.Fatal(err)
+	}
+	// A duplicate of the held turn is rejected while the holder runs.
+	duplicate := f.submit(t, f.host, func(task *wire.Submission) { task.Message.MessageID = "msg-duplicate" })
+	f.rejected(t, duplicate, "duplicate submission")
+	if err := holder.commit(f.ctx, holder.events(holder.status("heartbeat", taskStatus(wire.TaskStateWorking, ""), nil, nil))); err != nil {
+		t.Fatalf("the rejection fenced the run's holder: %v", err)
+	}
+}
+
+func TestTransactionalDenialClearsOnlyWhenTransactionsWork(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.deleteReceiverACLs(t, kadm.NewACLs().TransactionalIDs(admin.TransactionalPrefix(testPool)).Operations(kadm.OpAny))
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli() })
+	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
+		t.Fatalf("admitted=%v ack=%v, want release when the rejection cannot be written", admitted != nil, ack)
+	}
+	if !f.receiver.holds(capTransactional) {
+		t.Fatalf("the rejection's transactional ID error did not enter denial; logs:\n%s", f.logs.String())
+	}
+	// Reads still work, but they say nothing about the transactional ID.
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !f.receiver.denied() {
+		t.Fatal("a read-only refresh cleared a transactional ID denial")
+	}
+	if err := f.service.TenantAdd(f.ctx, testTenant, testPool); err != nil { // reconciles the ACLs
+		t.Fatal(err)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.receiver.denied() {
+		t.Fatalf("denial held after the transactional ID worked again; logs:\n%s", f.logs.String())
+	}
+}
+
+func TestAmbiguousCommitReadBack(t *testing.T) {
+	for name, test := range map[string]struct {
+		// applied is whether the broker applies the commit whose answer is lost.
+		applied   bool
+		ack       kgo.AckStatus
+		releases  int
+		terminals int
+	}{
+		"committed":     {true, kgo.AckAccept, 1, 1},
+		"not committed": {false, kgo.AckRelease, 0, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			run := testActiveRun(t, f, "run-ambiguous", 1)
+			previous := commitTransaction
+			t.Cleanup(func() { commitTransaction = previous })
+			commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+				try := kgo.TryAbort
+				if test.applied {
+					try = kgo.TryCommit
+				}
+				if err := producer.EndTransaction(ctx, try); err != nil {
+					return err
+				}
+				return kerr.RequestTimedOut
+			}
+			if status := run.finish(f.ctx, Handle{Alloc: "alloc"}, nil, agentResult{Result: "done"}); status != test.ack {
+				t.Fatalf("status %v, want %v; logs:\n%s", status, test.ack, f.logs.String())
+			}
+			if _, _, _, releases := f.adapter.counts(); releases != test.releases {
+				t.Fatalf("releases %d, want %d", releases, test.releases)
+			}
+			terminals := 0
+			for _, status := range f.eventStatuses(t) {
+				if status.Wherry.Kind == "terminal" {
+					terminals++
+				}
+			}
+			if terminals != test.terminals {
+				t.Fatalf("terminals on the pool's events %d, want %d", terminals, test.terminals)
+			}
+		})
+	}
+}
+
+func TestAdoptionTrustsRotatedPeerKey(t *testing.T) {
+	f := newFixture(t, resultStream)
+	peerSigning, peerSealing := f.addPeer(t, "receiver-peer", testPool)
+	// The peer rotates after the receiver's last refresh.
+	_, next, _ := ed25519.GenerateKey(rand.Reader)
+	f.produce(t, admin.ReceiverTopic("receiver-peer"), "receiver-peer", must(t)(signed.RotateKey("receiver-peer", peerSigning, next, peerSealing.PublicKey())))
+	task := testSubmission("run-peer")
+	hash := strings.Repeat("a", 64)
+	f.produce(t, admin.PoolEventsTopic(testPool), "run-peer", f.heartbeat(t, task, hash, "receiver-peer", next, 42, nil))
+	if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
+		t.Fatalf("heartbeat under the peer's rotated key: offset %d err %v, want 42", got, err)
 	}
 }

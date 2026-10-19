@@ -28,7 +28,7 @@ import (
 func testSubmission(tenant, host, pool, run string) *wire.Submission {
 	return &wire.Submission{
 		Message: wire.Message{MessageID: "message-" + run, ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "hello"}}, Extensions: []string{wire.ExtensionURI}},
-		Wherry:  wire.SubmissionBinding{Tenant: tenant, Host: host, Pool: pool, Run: run, Turn: 1, Placement: wire.Placement{Agent: "agent-a", Runtime: "runtime-a", Labels: map[string]string{}}},
+		Wherry:  wire.SubmissionBinding{Tenant: tenant, Host: host, Pool: pool, Run: run, Turn: 1, Placement: wire.Placement{Agent: "agent-a"}},
 	}
 }
 
@@ -303,14 +303,14 @@ func TestP15ReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 	if err := ValidateReceiverRecord(record, "receiver-a", terms); err != nil {
 		t.Fatal(err)
 	}
-	outsideRuntime, outsideAgent, outsideCredential := modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a")
-	outsideRuntime.Runtimes = []string{"runtime-z"}
+	badLabels, outsideAgent, outsideCredential := modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a")
+	badLabels.Adapters[0].Labels = map[string]string{"wherry.io/gpu": "yes"}
 	outsideAgent.Adapters[0].Agent = "agent-z"
 	outsideCredential.Adapters[0].Credential = "other"
 	for name, outside := range map[string]ReceiverConfig{
-		"runtime":    outsideRuntime,
-		"agent":      outsideAgent,
-		"credential": outsideCredential,
+		"reserved label": badLabels,
+		"agent":          outsideAgent,
+		"credential":     outsideCredential,
 	} {
 		record.Config = &outside
 		if err := ValidateReceiverRecord(record, "receiver-a", terms); err == nil {
@@ -331,11 +331,11 @@ func TestAdminRecordDecodeIsStrict(t *testing.T) {
 }
 
 func modelTerms() Terms {
-	return Terms{Agents: []AgentTerms{{Name: "agent-a", Credentials: []string{"model"}}}, Runtimes: []string{"runtime-a"}, DefaultAgent: "agent-a", DefaultRuntime: "runtime-a", SealLifetimeMS: 60000, DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1000000, RequestPercentage: 50}
+	return Terms{Agents: []AgentTerms{{Name: "agent-a", Credentials: []string{"model"}}}, DefaultAgent: "agent-a", SealLifetimeMS: 60000, DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1000000, RequestPercentage: 50}
 }
 
 func modelConfig(receiver, pool string) ReceiverConfig {
-	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Runtimes: []string{"runtime-a"}, Adapters: []AdapterSettings{{Name: "adapter-a", Type: "fake", Agent: "agent-a", Credential: "model"}}}
+	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Adapters: []AdapterSettings{{Name: "adapter-a", Type: "fake", Agent: "agent-a", Credential: "model"}}}
 }
 
 func modelState(t *testing.T) State {
@@ -497,7 +497,7 @@ func TestEchoAndAdvertisementBindTheirPool(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}}
 	echo := func(tenant, pool string) []byte {
-		return sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: tenant, Pool: pool, Run: "run-a", Turn: 1, Placement: wire.Placement{Agent: "agent-a", Runtime: "runtime-a", Labels: map[string]string{}}, TaskHash: strings.Repeat("a", 64), MessageID: "message-a"}, key)
+		return sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: tenant, Pool: pool, Run: "run-a", Turn: 1, Placement: wire.Placement{Agent: "agent-a"}, TaskHash: strings.Repeat("a", 64), MessageID: "message-a"}, key)
 	}
 	if _, err := AuthorizeEcho(state, keys, echo("tenant-a", "pool-a"), "tenant-a"); err != nil {
 		t.Fatal(err)
@@ -512,7 +512,7 @@ func TestEchoAndAdvertisementBindTheirPool(t *testing.T) {
 	keys["receiver-a"] = signed.KeyState{Current: key.Public().(ed25519.PublicKey), Sealing: sealing.PublicKey()}
 	fingerprint := signed.SealingKeyID(sealing.PublicKey())
 	advertisement := func(pool string) []byte {
-		return sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Labels: map[string]string{"agent": "agent-a"}}}, Capacity: 1, SealingKey: fingerprint, AtMS: 1}, key)
+		return sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Agent: "agent-a"}}, Capacity: 1, SealingKey: fingerprint, AtMS: 1}, key)
 	}
 	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-a")); err != nil {
 		t.Fatal(err)

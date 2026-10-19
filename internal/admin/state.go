@@ -22,34 +22,33 @@ type AgentTerms struct {
 }
 type Terms struct {
 	Agents            []AgentTerms `json:"agents" yaml:"agents"`
-	Runtimes          []string     `json:"runtimes" yaml:"runtimes"`
 	DefaultAgent      string       `json:"default_agent" yaml:"default_agent"`
-	DefaultRuntime    string       `json:"default_runtime" yaml:"default_runtime"`
 	SealLifetimeMS    int64        `json:"seal_lifetime_ms" yaml:"seal_lifetime_ms"`
 	DeliveryLimit     int32        `json:"delivery_limit" yaml:"delivery_limit"`
 	LockDurationMS    int64        `json:"lock_duration_ms" yaml:"lock_duration_ms"`
 	ProducerByteRate  int64        `json:"producer_byte_rate" yaml:"producer_byte_rate"`
 	RequestPercentage float64      `json:"request_percentage" yaml:"request_percentage"`
 }
+
 // ReceiverConfig is a receiver's whole configuration, recorded on
 // wherry.admin and read by the receiver after it authenticates.
 type ReceiverConfig struct {
 	Receiver string            `json:"receiver" yaml:"receiver"`
 	Pool     string            `json:"pool" yaml:"pool"`
 	Capacity int64             `json:"capacity" yaml:"capacity"`
-	Labels   map[string]string `json:"labels" yaml:"labels"`
-	Runtimes []string          `json:"runtimes" yaml:"runtimes"`
 	Adapters []AdapterSettings `json:"adapters" yaml:"adapters"`
 }
 
 // AdapterSettings configures one adapter: the agent it launches, the
-// credential that agent takes, and settings its type decodes.
+// credential that agent takes, the labels its operator declares for it, and
+// settings its type decodes (runtime, node pool and the like stay there).
 type AdapterSettings struct {
-	Name       string         `json:"name" yaml:"name"`
-	Type       string         `json:"type" yaml:"type"`
-	Agent      string         `json:"agent" yaml:"agent"`
-	Credential string         `json:"credential,omitzero" yaml:"credential"`
-	Config     map[string]any `json:"config" yaml:"config"`
+	Name       string            `json:"name" yaml:"name"`
+	Type       string            `json:"type" yaml:"type"`
+	Agent      string            `json:"agent" yaml:"agent"`
+	Credential string            `json:"credential,omitzero" yaml:"credential"`
+	Labels     map[string]string `json:"labels,omitzero" yaml:"labels"`
+	Config     map[string]any    `json:"config" yaml:"config"`
 }
 
 type Record struct {
@@ -195,18 +194,8 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	if err := validateNames(config.Receiver, config.Pool); err != nil {
 		return err
 	}
-	if config.Capacity <= 0 || len(config.Adapters) == 0 || len(config.Runtimes) == 0 {
-		return errors.New("receiver config needs a capacity, adapters and runtimes")
-	}
-	for key, value := range config.Labels {
-		if key == "" || value == "" {
-			return errors.New("receiver labels need keys and values")
-		}
-	}
-	for _, runtime := range config.Runtimes {
-		if !slices.Contains(terms.Runtimes, runtime) {
-			return errors.New("receiver runtime is outside pool terms")
-		}
+	if config.Capacity <= 0 || len(config.Adapters) == 0 {
+		return errors.New("receiver config needs a capacity and adapters")
 	}
 	names := map[string]bool{}
 	for _, adapter := range config.Adapters {
@@ -214,6 +203,9 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 			return errors.New("adapters need unique valid names and a type")
 		}
 		names[adapter.Name] = true
+		if err := wire.ValidateLabels(adapter.Labels); err != nil {
+			return err
+		}
 		index := slices.IndexFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == adapter.Agent })
 		if index < 0 {
 			return errors.New("receiver agent is outside pool terms")
@@ -467,11 +459,11 @@ func load(raw []rawRecord) (State, error) {
 }
 
 func validateTerms(terms Terms) error {
-	if len(terms.Agents) == 0 || len(terms.Runtimes) == 0 || terms.SealLifetimeMS <= 0 || terms.DeliveryLimit <= 0 || terms.LockDurationMS <= 0 || terms.ProducerByteRate <= 0 || terms.RequestPercentage <= 0 {
+	if len(terms.Agents) == 0 || terms.SealLifetimeMS <= 0 || terms.DeliveryLimit <= 0 || terms.LockDurationMS <= 0 || terms.ProducerByteRate <= 0 || terms.RequestPercentage <= 0 {
 		return errors.New("invalid pool terms")
 	}
-	if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == terms.DefaultAgent }) || !slices.Contains(terms.Runtimes, terms.DefaultRuntime) {
-		return errors.New("defaults are outside pool terms")
+	if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == terms.DefaultAgent }) {
+		return errors.New("default agent is outside pool terms")
 	}
 	for _, agent := range terms.Agents {
 		if validateNames(agent.Name) != nil {
@@ -481,11 +473,6 @@ func validateTerms(terms Terms) error {
 			if validateNames(credential) != nil {
 				return errors.New("invalid credential name")
 			}
-		}
-	}
-	for _, runtime := range terms.Runtimes {
-		if validateNames(runtime) != nil {
-			return errors.New("invalid runtime name")
 		}
 	}
 	return nil
