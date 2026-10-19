@@ -133,7 +133,7 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := NewHost(kafka, key, principal, stateDir, map[string]string{"model": f.secret})
+	h, err := NewHost(kafka, key, principal, stateDir, map[string]string{"model": f.secret, "openai": f.secret})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -860,9 +860,17 @@ func TestRecordsAfterMembershipEndAreRejected(t *testing.T) {
 
 func TestContinueThroughTheEcho(t *testing.T) {
 	f := newFixture(t)
-	receiver, task := f.admitted(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Offers = []wire.Offer{claudeOffer(), {Adapter: "cloud", Labels: map[string]string{"agent": "codex", "runtime": "exec"}}}
+	})
+	submitted := f.submit(t, []wire.Requirement{{Key: "platform", Operator: wire.OpIn, Values: []string{"aws"}}})
+	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
 	runID := task.submission.Wherry.Run
-	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
+	receiver.feed(t, f.ctx, runID, receiver.echo(t, task), receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
+	// A pool with more spare capacity appears: a continuation placed afresh would go there, with the default agent.
+	f.pool(t, "pool-b")
+	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity = 9 })
 	// Another host of the tenant has no local record: the pool and placement come from the echo alone.
 	other := f.newHost(t, "host-b", t.TempDir())
 	if _, err := f.host.Continue(f.ctx, "run-missing", ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrRunNotFound) {
@@ -874,25 +882,25 @@ func TestContinueThroughTheEcho(t *testing.T) {
 	}
 	tasks := receiver.claim(t, f.ctx, runID)
 	if len(tasks) != 2 {
-		t.Fatalf("pool tasks hold %d turns", len(tasks))
+		t.Fatalf("pool-a tasks hold %d turns", len(tasks))
 	}
 	next := tasks[1].submission
-	if next.Wherry.Turn != 2 || next.Wherry.Host != "host-b" || next.Wherry.Pool != "pool-a" || next.Wherry.Placement.Agent != task.submission.Wherry.Placement.Agent ||
-		next.Wherry.Placement.Runtime != task.submission.Wherry.Placement.Runtime || next.Message.Parts[0].Text != "again" || next.Message.ContextID != runID {
+	if next.Wherry.Turn != 2 || next.Wherry.Host != "host-b" || next.Wherry.Pool != "pool-a" || next.Wherry.Placement.Agent != "codex" ||
+		next.Wherry.Placement.Runtime != "exec" || next.Message.Parts[0].Text != "again" || next.Message.ContextID != runID {
 		t.Fatalf("continuation %#v", next)
 	}
-	sealedByOther := 0
+	sealed := map[string]bool{}
 	records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", "host-b"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, record := range records {
-		if _, err := signed.DecodeSeal(record.Value); err == nil {
-			sealedByOther++
+		if seal, err := signed.DecodeSeal(record.Value); err == nil {
+			sealed[seal.Receiver+"/"+seal.Pool+"/"+seal.Credential] = true
 		}
 	}
-	if sealedByOther != 1 {
-		t.Fatalf("continuing host wrote %d seals, want to reseal the model credential", sealedByOther)
+	if len(sealed) != 1 || !sealed["receiver-a/pool-a/openai"] {
+		t.Fatalf("continuing host sealed %v, want codex's credential resealed to pool-a", sealed)
 	}
 	if _, err := other.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrTurnSubmitted) {
 		t.Fatalf("second continue: %v", err)
