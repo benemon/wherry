@@ -7,21 +7,25 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json/jsontext"
+	"encoding/base64"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
-	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
@@ -55,6 +59,9 @@ type Run struct {
 // ErrGitContext is the error an adapter returns when a run's git context cannot be checked out.
 var ErrGitContext = errors.New("git context unavailable")
 
+// ErrConfigChanged is returned by Run when wherry.admin holds a configuration other than the one it started with.
+var ErrConfigChanged = errors.New("receiver configuration changed")
+
 // Adapter is the platform seam of ADR-0018; implementations hold platform credentials only.
 type Adapter interface {
 	Platform() string
@@ -67,137 +74,78 @@ type Adapter interface {
 	Sweep(ctx context.Context) error
 }
 
-// Config is the receiver's local configuration.
-type Config struct {
-	Broker            string            `json:"broker"`
-	CAFile            string            `json:"ca_file"`
-	KafkaUser         string            `json:"kafka_user"`
-	KafkaPasswordFile string            `json:"kafka_password_file"`
-	ReceiverID        string            `json:"receiver_id"`
-	StateDir          string            `json:"state_dir"`
-	UserPublicKey     wire.Bytes        `json:"user_public_key"`
-	Capacity          int64             `json:"capacity,omitzero"`
-	Labels            map[string]string `json:"labels,omitzero"`
-	Adapters          []AdapterConfig   `json:"adapters"`
-}
-
-// AdapterConfig configures one adapter instance; Config is decoded by the adapter type.
-type AdapterConfig struct {
-	Name       string         `json:"name"`
-	Type       string         `json:"type"`
-	Credential string         `json:"credential,omitzero"`
-	Config     jsontext.Value `json:"config"`
-}
-
-// Named is a constructed adapter with its configured name and sealed-secret name.
+// Named is a constructed adapter with its configured name, the agent it launches and that agent's credential.
 type Named struct {
 	Name       string
+	Agent      string
 	Credential string
 	// Git is set when the adapter delivers git context parts (ADR-0024).
 	Git     bool
 	Adapter Adapter
 }
 
-// LoadConfig strictly decodes the receiver configuration.
-func LoadConfig(path string) (Config, error) {
-	encoded, err := os.ReadFile(path)
-	if err != nil {
-		return Config{}, err
-	}
-	var config Config
-	if err := json.Unmarshal(encoded, &config, json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)); err != nil {
-		return Config{}, fmt.Errorf("decode receiver config: %w", err)
-	}
-	if config.Broker == "" || config.CAFile == "" || config.KafkaUser == "" || config.KafkaPasswordFile == "" ||
-		config.ReceiverID == "" || config.StateDir == "" || len(config.UserPublicKey) != ed25519.PublicKeySize {
-		return Config{}, errors.New("receiver config requires broker, ca_file, kafka_user, kafka_password_file, receiver_id, state_dir and a 32-byte user_public_key")
-	}
-	if len(config.Adapters) == 0 {
-		return Config{}, errors.New("receiver config requires at least one adapter")
-	}
-	names := make(map[string]bool, len(config.Adapters))
-	for _, adapter := range config.Adapters {
-		if adapter.Name == "" || names[adapter.Name] {
-			return Config{}, errors.New("adapter names must be non-empty and unique")
-		}
-		names[adapter.Name] = true
-	}
-	if config.Capacity == 0 {
-		config.Capacity = 2
-	}
-	if config.Labels == nil {
-		config.Labels = map[string]string{}
-	}
-	return config, nil
-}
+// AdapterFactory builds one adapter from its settings in the receiver's configuration record.
+type AdapterFactory func(admin.AdapterSettings) (Named, error)
 
 // Receiver claims tasks for one pool and runs them through its adapters.
 type Receiver struct {
-	config      Config
-	adapters    []Named
-	kafkaOpt    []kgo.Opt
-	base        *kgo.Client
-	userPub     ed25519.PublicKey
-	signing     ed25519.PrivateKey
-	sealing     *ecdh.PrivateKey
-	logger      *log.Logger
-	mu          sync.Mutex
-	enrolled    *trust.Enrolled
-	offers      []wire.Offer
-	signers     []ed25519.PublicKey
-	inFlight    int64
-	credentials map[string]heldCredential
-	// revoked is set when refresh last saw this receiver revoked; in-flight runs stop on their next heartbeat.
-	revoked bool
-	// cancelled holds the runs the user has cancelled, as of the last control topic read.
-	cancelled map[string]bool
+	id       string
+	kafkaOpt []kgo.Opt
+	base     *kgo.Client
+	signing  ed25519.PrivateKey
+	sealing  *ecdh.PrivateKey
+	factory  AdapterFactory
+	logger   *log.Logger
+	// config and adapters are set by configure before any claim and never change.
+	config   admin.ReceiverConfig
+	adapters []Named
+	mu       sync.Mutex
+	state    admin.State
+	// peers holds the pool's receiver keys, this receiver's included; hosts the keys of entitled tenants' hosts.
+	peers    signed.Keys
+	hosts    signed.Keys
+	offers   []wire.Offer
+	inFlight int64
+	// deniedSince is when an authorisation error was first seen; zero while access holds.
+	deniedSince time.Time
+	// cancelled holds, per run, the lowest turn a host of the run's tenant has cancelled.
+	cancelled map[string]int64
 }
 
-type heldCredential struct {
-	version int64
-	value   []byte
-	exp     time.Time
-}
-
-// New loads or creates the receiver's keys and builds its Kafka client; adapters are in configuration order.
-func New(config Config, adapters []Named, logger *log.Logger) (*Receiver, error) {
-	caPEM, err := os.ReadFile(config.CAFile)
-	if err != nil {
-		return nil, fmt.Errorf("read CA file: %w", err)
+// New loads or creates the receiver's keys in stateDir and builds its Kafka client from bundle.
+func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *log.Logger) (*Receiver, error) {
+	id, ok := strings.CutPrefix(bundle.Principal, admin.ReceiverPrincipal(""))
+	if !ok || !admin.ValidName(id) {
+		return nil, errors.New("bundle principal is not a receiver principal")
 	}
 	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(caPEM) {
-		return nil, errors.New("CA file contains no certificates")
+	if !roots.AppendCertsFromPEM([]byte(bundle.CA)) {
+		return nil, errors.New("bundle CA contains no certificates")
 	}
-	password, err := os.ReadFile(config.KafkaPasswordFile)
-	if err != nil {
-		return nil, fmt.Errorf("read Kafka password: %w", err)
+	if stateDir == "" {
+		return nil, errors.New("receiver requires a state directory")
 	}
-	if err := os.MkdirAll(config.StateDir, 0o700); err != nil {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, err
 	}
-	signing, err := loadOrCreate(filepath.Join(config.StateDir, "signing.key"), trust.LoadSigningKeyFile, trust.GenerateSigningKeyFile)
+	signing, err := loadOrCreate(filepath.Join(stateDir, "signing.key"), trust.LoadSigningKeyFile, trust.GenerateSigningKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	sealing, err := loadOrCreate(filepath.Join(config.StateDir, "sealing.key"), trust.LoadSealingKeyFile, trust.GenerateSealingKeyFile)
+	sealing, err := loadOrCreate(filepath.Join(stateDir, "sealing.key"), trust.LoadSealingKeyFile, trust.GenerateSealingKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("sealing key: %w", err)
 	}
 	opts := []kgo.Opt{
-		kgo.SeedBrokers(config.Broker),
+		kgo.SeedBrokers(bundle.Broker),
 		kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
-		kgo.SASL(scram.Auth{User: config.KafkaUser, Pass: strings.TrimRight(string(password), "\r\n")}.AsSha512Mechanism()),
+		kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
 	}
 	base, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, err
 	}
-	return &Receiver{
-		config: config, adapters: adapters, kafkaOpt: opts, base: base,
-		userPub: ed25519.PublicKey(config.UserPublicKey), signing: signing, sealing: sealing, logger: logger,
-		credentials: make(map[string]heldCredential),
-	}, nil
+	return &Receiver{id: id, kafkaOpt: opts, base: base, signing: signing, sealing: sealing, factory: factory, logger: logger}, nil
 }
 
 func loadOrCreate[K any](path string, load func(string) (K, error), create func(string) (K, error)) (K, error) {
@@ -208,30 +156,46 @@ func loadOrCreate[K any](path string, load func(string) (K, error), create func(
 	return key, err
 }
 
-// Run enrols, publishes capabilities, delivers credentials and claims tasks until ctx ends.
+// Run registers the receiver's keys, waits for its configuration, then advertises and claims
+// until ctx ends or the configuration changes.
 func (r *Receiver) Run(ctx context.Context) error {
 	defer r.base.Close()
-	if err := r.enrol(ctx); err != nil {
+	if err := r.register(ctx); err != nil {
 		return err
 	}
-	// Claiming waits for one read of the control topic, so a cancelled submission is not dispatched on start.
-	if err := r.refreshCancelled(ctx); err != nil {
+	if err := r.configure(ctx); err != nil {
 		return err
 	}
+	// Claiming waits for one read of the pool's events, so a cancelled submission is not dispatched on start.
+	if err := r.readCancels(ctx); err != nil {
+		return err
+	}
+	if err := r.advertise(ctx); err != nil {
+		r.logger.Printf("advertise: %v", err)
+	}
+	ctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		r.every(ctx, capabilityInterval, r.publishCapability)
+		r.every(ctx, advertiseInterval, r.advertise)
 	}()
 	go func() {
 		defer wg.Done()
-		r.every(ctx, refreshInterval, r.refresh)
+		r.every(ctx, refreshInterval, func(ctx context.Context) error {
+			err := r.refresh(ctx)
+			if errors.Is(err, ErrConfigChanged) {
+				r.logger.Printf("configuration changed; exiting")
+				stop(ErrConfigChanged)
+			}
+			return err
+		})
 	}()
-	// A separate step, so a control topic read failure never delays noticing a revocation.
+	// A separate step, so a pool events read failure never delays noticing a configuration change.
 	go func() {
 		defer wg.Done()
-		r.every(ctx, cancelReadInterval, r.refreshCancelled)
+		r.every(ctx, cancelReadInterval, r.readCancels)
 	}()
 	for slot := int64(0); slot < r.config.Capacity; slot++ {
 		wg.Add(1)
@@ -241,265 +205,220 @@ func (r *Receiver) Run(ctx context.Context) error {
 		}()
 	}
 	wg.Wait()
-	return ctx.Err()
+	return context.Cause(ctx)
 }
 
+// every runs step at each interval until ctx ends; Run has already run each step once.
 func (r *Receiver) every(ctx context.Context, interval time.Duration, step func(context.Context) error) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		if err := step(ctx); err != nil && ctx.Err() == nil {
-			r.logger.Printf("periodic step: %v", err)
-		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
+		if err := step(ctx); err != nil && ctx.Err() == nil && !errors.Is(err, ErrConfigChanged) {
+			r.logger.Printf("periodic step: %v", err)
+		}
 	}
 }
 
-func (r *Receiver) enrol(ctx context.Context) error {
-	if err := r.refresh(ctx); err != nil {
-		return err
-	}
-	if r.current() == nil {
-		detected := make([]wire.DetectedAdapter, 0, len(r.adapters))
-		for _, named := range r.adapters {
-			found, err := named.Adapter.Offers(ctx)
-			if err != nil {
-				return fmt.Errorf("discover offers for adapter %s: %w", named.Name, err)
-			}
-			offers := make([]wire.Offer, 0, len(found))
-			for _, labels := range found {
-				offers = append(offers, wire.Offer{Adapter: named.Name, Labels: labels})
-			}
-			detected = append(detected, wire.DetectedAdapter{Name: named.Name, Platform: named.Adapter.Platform(), Offers: offers})
-		}
-		request, err := trust.NewEnrolRequest(r.config.ReceiverID, r.signing, r.sealing, r.config.Labels, detected, time.Now())
+// register puts the signing and sealing keys on an empty key topic and refuses a topic holding other keys.
+func (r *Receiver) register(ctx context.Context) error {
+	topic := admin.ReceiverTopic(r.id)
+	public := r.signing.Public().(ed25519.PublicKey)
+	for attempt := 0; ; attempt++ {
+		keys, err := admin.ReadKeys(ctx, r.base, map[string]string{r.id: topic})
 		if err != nil {
-			return err
+			return fmt.Errorf("read key topic: %w", err)
 		}
-		if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(r.config.ReceiverID), Value: request}).FirstErr(); err != nil {
-			return fmt.Errorf("publish enrolment request: %w", err)
+		state := keys[r.id]
+		if state.Current == nil && !state.Revoked && attempt == 0 {
+			record, err := signed.RegisterKey(r.id, r.signing, r.sealing.PublicKey())
+			if err != nil {
+				return err
+			}
+			if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(r.id), Value: record}).FirstErr(); err != nil {
+				return fmt.Errorf("register keys: %w", err)
+			}
+			r.logger.Printf("registered keys: signing=%s sealing=%s", signed.KeyID(public), signed.SealingKeyID(r.sealing.PublicKey()))
+			continue
 		}
-		r.logger.Printf("enrolment requested: receiver=%s request=%s signing=%s", r.config.ReceiverID, trust.EnvelopeHash(request), wire.Fingerprint(r.signing.Public().(ed25519.PublicKey)))
+		if state.Revoked || !public.Equal(state.Current) || state.Sealing == nil || !state.Sealing.Equal(r.sealing.PublicKey()) {
+			return errors.New("receiver key topic holds other keys than the state directory")
+		}
+		return nil
 	}
-	for r.current() == nil {
+}
+
+// configure waits for this receiver's configuration record, validates it against its pool's
+// terms and builds its adapters.
+func (r *Receiver) configure(ctx context.Context) error {
+	waiting := false
+	for {
+		state, err := admin.Load(ctx, r.base)
+		if err != nil {
+			return fmt.Errorf("read wherry.admin: %w", err)
+		}
+		if state.Ended[admin.ReceiverPrincipal(r.id)] {
+			return errors.New("receiver membership has ended")
+		}
+		if config, ok := state.Receivers[r.id]; ok {
+			if config.Receiver != r.id {
+				return errors.New("configuration belongs to another receiver")
+			}
+			if err := admin.ValidateConfig(config, state.Pools[config.Pool]); err != nil {
+				return fmt.Errorf("configuration: %w", err)
+			}
+			adapters := make([]Named, 0, len(config.Adapters))
+			for _, settings := range config.Adapters {
+				named, err := r.factory(settings)
+				if err != nil {
+					return fmt.Errorf("adapter %s: %w", settings.Name, err)
+				}
+				adapters = append(adapters, named)
+			}
+			r.config, r.adapters = config, adapters
+			r.logger.Printf("configured: pool=%s adapters=%d capacity=%d", config.Pool, len(adapters), config.Capacity)
+			return r.refresh(ctx)
+		}
+		if !waiting {
+			r.logger.Printf("waiting for configuration")
+			waiting = true
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(enrolPollInterval):
-		}
-		if err := r.refresh(ctx); err != nil {
-			r.logger.Printf("refresh: %v", err)
+		case <-time.After(refreshInterval):
 		}
 	}
-	return nil
 }
 
-func (r *Receiver) current() *trust.Enrolled {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.enrolled
-}
-
-// refresh rebuilds trust state from the append-only log and delivers a newer credential.
+// refresh folds wherry.admin and the pool's key topics; it returns ErrConfigChanged when the
+// configuration record is no longer the one the receiver started with.
 func (r *Receiver) refresh(ctx context.Context) error {
 	// A bounded read can wait on another holder's open transaction; never longer than this.
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	records, err := readBounded(ctx, r.kafkaOpt, wire.TopicState)
+	state, err := admin.Load(ctx, r.base)
+	var peers, hosts signed.Keys
+	if err == nil {
+		peers, err = admin.ReadKeys(ctx, r.base, admin.PoolKeyTopics(state, r.config.Pool))
+	}
+	if err == nil {
+		hosts, err = admin.ReadKeys(ctx, r.base, admin.HostKeyTopics(state, r.config.Pool))
+	}
 	if err != nil {
+		r.deny(err)
 		return err
 	}
-	state := trust.NewState(r.userPub)
-	var approved []string
-	issued := make(map[string]time.Time)
-	for _, record := range records {
-		verified, _ := state.Apply(record.Value) // unverifiable records change nothing
-		if approval, ok := verified.(*wire.EnrolApproval); ok {
-			approved = append(approved, approval.ReceiverID)
-			issued[trust.EnvelopeHash(record.Value)] = record.Timestamp
-		}
-	}
-	now := time.Now()
-	if err := r.requestRenewal(ctx, state, issued, now); err != nil {
-		r.logger.Printf("renew request: %v", err)
-	}
-	enrolled, err := state.Receiver(r.config.ReceiverID, now)
-	if err != nil || !enrolled.SigningPub.Equal(r.signing.Public()) {
-		revoked := errors.Is(err, trust.ErrRevoked)
-		if revoked {
-			r.logger.Printf("revoked at generation %d", state.Floor(r.config.ReceiverID))
-		}
-		// Expired, revoked or re-keyed: stop claiming, advertising and delivering credentials.
-		r.mu.Lock()
-		r.enrolled, r.offers, r.signers, r.revoked = nil, nil, nil, revoked
-		clear(r.credentials)
-		r.mu.Unlock()
-		return nil
-	}
-	if reason := r.grantMismatch(enrolled.Adapters); reason != "" {
-		r.logger.Printf("enrolment rejected: %s", reason)
-		r.mu.Lock()
-		r.enrolled, r.offers, r.signers = nil, nil, nil
-		r.mu.Unlock()
-		return nil
-	}
-	ids := make(map[string]bool)
-	var signers []ed25519.PublicKey
-	for _, id := range approved {
-		if ids[id] {
-			continue
-		}
-		peer, err := state.Receiver(id, now)
-		if err == nil && peer.Pool == enrolled.Pool {
-			ids[id] = true
-			signers = append(signers, peer.SigningPub)
-		}
+	if !reflect.DeepEqual(state.Receivers[r.id], r.config) {
+		return ErrConfigChanged
 	}
 	r.mu.Lock()
-	previous := r.enrolled
-	r.enrolled, r.signers, r.revoked = &enrolled, signers, false
-	r.mu.Unlock()
-	if previous == nil || previous.Pool != enrolled.Pool || previous.Generation != enrolled.Generation {
-		r.logger.Printf("enrolled: pool=%s generation=%d", enrolled.Pool, enrolled.Generation)
-	}
-
-	r.dropLapsed(state)
-	secrets, err := readBounded(ctx, r.kafkaOpt, wire.TopicSecret)
-	if err != nil {
-		return err
-	}
-	rejected := false
-	for _, named := range r.adapters {
-		if named.Credential != "" && !r.openCredential(state, secrets, named.Credential) {
-			rejected = true
+	defer r.mu.Unlock()
+	r.state, r.peers, r.hosts = state, peers, hosts
+	if state.Ended[admin.ReceiverPrincipal(r.id)] {
+		if r.deniedSince.IsZero() {
+			r.deniedSince = time.Now()
+			r.logger.Printf("denied: membership ended")
 		}
+		return nil
 	}
-	if rejected {
-		return errors.New("credential rejected") // never wrap: the cause may describe secret material
+	if !r.deniedSince.IsZero() {
+		r.deniedSince = time.Time{}
+		r.logger.Printf("access restored")
 	}
 	return nil
 }
 
-// refreshCancelled rebuilds the set of runs the user has cancelled from the control topic.
-func (r *Receiver) refreshCancelled(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, readTimeout)
-	defer cancel()
-	records, err := readBounded(ctx, r.kafkaOpt, wire.TopicControl)
-	if err != nil {
-		return err
-	}
-	cancelled := make(map[string]bool)
-	for _, record := range records {
-		if runID, err := trust.VerifyCancel(record.Value, r.userPub); err == nil && string(record.Key) == runID {
-			cancelled[runID] = true
-		}
+// deny records an authorisation error; claiming stops until a refresh succeeds.
+func (r *Receiver) deny(err error) {
+	if !authorisationError(err) {
+		return
 	}
 	r.mu.Lock()
-	r.cancelled = cancelled
-	r.mu.Unlock()
-	return nil
+	defer r.mu.Unlock()
+	if r.deniedSince.IsZero() {
+		r.deniedSince = time.Now()
+		r.logger.Printf("denied: %v", err)
+	}
 }
 
-// requestRenewal publishes a renew request for the current generation once less than a third of
-// the approval's lifetime is left; expired generations ask too.
-// The lifetime starts at the approval record's broker timestamp, which is unsigned and only schedules the request.
-func (r *Receiver) requestRenewal(ctx context.Context, state *trust.State, issued map[string]time.Time, now time.Time) error {
-	id := r.config.ReceiverID
-	current, hash, ok := state.Approval(id)
-	if !ok || current.Generation <= state.Floor(id) {
+func authorisationError(err error) bool {
+	for _, denial := range []error{kerr.TopicAuthorizationFailed, kerr.GroupAuthorizationFailed, kerr.TransactionalIDAuthorizationFailed, kerr.ClusterAuthorizationFailed, kerr.SaslAuthenticationFailed} {
+		if errors.Is(err, denial) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Receiver) denied() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.deniedSince.IsZero()
+}
+
+// stopForDenial reports whether denial has lasted one lock interval, after which the broker
+// can hand this receiver's held tasks to another member.
+func (r *Receiver) stopForDenial() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	lock := time.Duration(r.state.Pools[r.config.Pool].LockDurationMS) * time.Millisecond
+	return !r.deniedSince.IsZero() && time.Since(r.deniedSince) >= lock
+}
+
+func (r *Receiver) snapshot() (admin.State, signed.Keys, signed.Keys) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state, r.peers, r.hosts
+}
+
+// authorizeHost calls authorize with the host keys, and once more after re-reading the signing
+// owner's key topic when the record names a key ID other than the owner's current one.
+func (r *Receiver) authorizeHost(ctx context.Context, encoded []byte, authorize func(admin.State, signed.Keys) error) error {
+	state, _, hosts := r.snapshot()
+	err := authorize(state, hosts)
+	if err == nil {
 		return nil
 	}
-	// A selector approval is never renewed, so its request would never stay pending and would repeat every refresh.
-	if _, err := state.Receiver(id, now); errors.Is(err, trust.ErrSelectorApproval) {
-		return nil
-	}
-	exp := time.UnixMilli(current.ExpMS)
-	if exp.Sub(now) >= exp.Sub(issued[hash])/3 {
-		return nil
-	}
-	if pending, ok := state.RenewRequest(id); ok && now.Sub(time.UnixMilli(pending.AtMS)) < renewRequestInterval {
-		return nil
-	}
-	request, err := sign(wire.TypeRenewRequest, &wire.RenewRequest{ReceiverID: id, Generation: current.Generation, AtMS: now.UnixMilli()}, r.signing)
-	if err != nil {
+	owner, keyID, ok := kid(encoded)
+	topic, live := admin.HostKeyTopics(state, r.config.Pool)[owner]
+	if !ok || !live || (hosts[owner].Current != nil && signed.KeyID(hosts[owner].Current) == keyID) {
 		return err
 	}
-	// Applying first checks the request is signed by the enrolled key; a re-keyed receiver does not ask.
-	if _, err := state.Apply(request); err != nil {
-		return nil
-	}
-	if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicState, Key: []byte(id), Value: request}).FirstErr(); err != nil {
-		return err
-	}
-	r.logger.Printf("renewal requested: generation=%d expires=%s", current.Generation, exp.UTC().Format(time.RFC3339))
-	return nil
-}
-
-// dropLapsed forgets held credentials whose seal is no longer current. It reads only user-signed trust
-// state, so a forged secrets record cannot evict a credential, and it runs before the secrets read can fail.
-func (r *Receiver) dropLapsed(state *trust.State) {
-	for _, named := range r.adapters {
-		if named.Credential == "" {
-			continue
-		}
-		r.mu.Lock()
-		held, ok := r.credentials[named.Credential]
-		dropped := ok && !state.SecretCurrent(r.config.ReceiverID, named.Credential, held.version, time.Now())
-		if dropped {
-			delete(r.credentials, named.Credential)
-		}
-		r.mu.Unlock()
-		if dropped {
-			r.logger.Printf("credential %s version %d no longer current; dropped", named.Credential, held.version)
-		}
-	}
-}
-
-// openCredential holds the newest verified version of a sealed secret; false means rejected.
-func (r *Receiver) openCredential(state *trust.State, secrets []*kgo.Record, name string) bool {
-	key := r.config.ReceiverID + "/" + name
-	var latest []byte
-	for _, record := range secrets {
-		if string(record.Key) == key {
-			latest = record.Value
-		}
-	}
-	if latest == nil {
-		return true
-	}
-	// Open first: an unverified record must not decide which version is current.
-	value, version, exp, err := trust.Open(latest, state, r.config.ReceiverID, name, r.sealing, r.userPub, time.Now())
-	if err != nil {
-		return false
+	fresh, readErr := admin.ReadKeys(ctx, r.base, map[string]string{owner: topic})
+	if readErr != nil {
+		r.deny(readErr)
+		return readErr
 	}
 	r.mu.Lock()
-	newer := version > r.credentials[name].version
-	if newer {
-		r.credentials[name] = heldCredential{version: version, value: value, exp: exp}
-	}
+	r.hosts = maps.Clone(r.hosts)
+	r.hosts[owner] = fresh[owner]
+	hosts = r.hosts
 	r.mu.Unlock()
-	if newer {
-		r.logger.Printf("credential %s version %d opened", name, version)
-	}
-	return true
+	return authorize(state, hosts)
 }
 
-// grantMismatch explains why the approved grants do not fit the configured adapters, or returns "".
-func (r *Receiver) grantMismatch(grants []wire.AdapterGrant) string {
-	for _, grant := range grants {
-		named, ok := r.named(grant.Name)
-		if !ok {
-			return fmt.Sprintf("grant %q names no configured adapter", grant.Name)
-		}
-		if platform := named.Adapter.Platform(); grant.Platform != platform {
-			return fmt.Sprintf("grant %q platform %q does not match adapter platform %q", grant.Name, grant.Platform, platform)
-		}
+// kid returns the owner and key ID a compact JWS names in its protected header.
+func kid(encoded []byte) (string, string, bool) {
+	header, _, ok := strings.Cut(string(encoded), ".")
+	if !ok {
+		return "", "", false
 	}
-	return ""
+	decoded, err := base64.RawURLEncoding.DecodeString(header)
+	if err != nil {
+		return "", "", false
+	}
+	var protected struct {
+		KID string `json:"kid"`
+	}
+	if json.Unmarshal(decoded, &protected) != nil {
+		return "", "", false
+	}
+	return strings.Cut(protected.KID, "/")
 }
 
 func (r *Receiver) named(name string) (Named, bool) {
@@ -511,15 +430,13 @@ func (r *Receiver) named(name string) (Named, bool) {
 	return Named{}, false
 }
 
-func (r *Receiver) publishCapability(ctx context.Context) error {
+// advertise sweeps each adapter, then publishes its offers within the configured runtimes,
+// labelled with the adapter's agent and the receiver's labels.
+func (r *Receiver) advertise(ctx context.Context) error {
 	for _, named := range r.adapters {
 		if err := named.Adapter.Sweep(ctx); err != nil {
 			r.logger.Printf("adapter %s sweep: %T", named.Name, err)
 		}
-	}
-	enrolled := r.current()
-	if enrolled == nil {
-		return nil
 	}
 	offers := []wire.Offer{}
 	for _, named := range r.adapters {
@@ -529,132 +446,220 @@ func (r *Receiver) publishCapability(ctx context.Context) error {
 			continue
 		}
 		for _, labels := range found {
-			offers = append(offers, wire.Offer{Adapter: named.Name, Labels: labels})
+			if !slices.Contains(r.config.Runtimes, labels["runtime"]) {
+				continue
+			}
+			offer := map[string]string{}
+			maps.Copy(offer, r.config.Labels)
+			maps.Copy(offer, labels)
+			offer["agent"] = named.Agent
+			offers = append(offers, wire.Offer{Adapter: named.Name, Labels: offer})
 		}
 	}
-	offers = r.filterOffers(enrolled, offers)
-	wire.SortOffers(enrolled.Adapters, offers)
 	r.mu.Lock()
 	r.offers = offers
 	inFlight := r.inFlight
 	r.mu.Unlock()
-	capability := &wire.Capability{
-		ReceiverID: r.config.ReceiverID, Labels: enrolled.Labels, Pool: enrolled.Pool, Offers: offers,
-		Capacity: r.config.Capacity, InFlight: inFlight, Generation: enrolled.Generation, AtMS: time.Now().UnixMilli(),
-	}
-	value, err := sign(wire.TypeCapability, capability, r.signing)
+	value, err := wire.SignRecord(&wire.Advertisement{
+		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: r.config.Capacity, InFlight: inFlight,
+		SealingKey: signed.SealingKeyID(r.sealing.PublicKey()), AtMS: time.Now().UnixMilli(),
+	}, r.signing)
 	if err != nil {
 		return err
 	}
-	return r.base.ProduceSync(ctx, &kgo.Record{Topic: wire.TopicCapability, Key: []byte(r.config.ReceiverID), Value: value}).FirstErr()
+	if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: admin.ReceiversTopic, Key: []byte(r.id), Value: value}).FirstErr(); err != nil {
+		r.deny(err)
+		return err
+	}
+	return nil
 }
 
-func (r *Receiver) filterOffers(enrolled *trust.Enrolled, offers []wire.Offer) []wire.Offer {
-	filtered := make([]wire.Offer, 0, len(offers))
-	for _, offer := range offers {
-		index := slices.IndexFunc(enrolled.Adapters, func(grant wire.AdapterGrant) bool { return grant.Name == offer.Adapter })
-		if index < 0 {
-			r.logger.Printf("dropping offer from adapter %s without a grant", offer.Adapter)
+// offer returns this receiver's first current offer for the placement.
+func (r *Receiver) offer(placement wire.Placement) (wire.Offer, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, offer := range r.offers {
+		if offer.Labels["agent"] != placement.Agent || offer.Labels["runtime"] != placement.Runtime {
 			continue
 		}
-		if outside := outsideKeys(enrolled.Adapters[index], offer); len(outside) > 0 {
-			r.logger.Printf("dropping offer outside grant: adapter=%s key=%s", offer.Adapter, strings.Join(outside, ","))
+		matched := true
+		for key, value := range placement.Labels {
+			matched = matched && offer.Labels[key] == value
+		}
+		if matched {
+			return offer, true
+		}
+	}
+	return wire.Offer{}, false
+}
+
+// poolEvents is one read of the pool's events topic.
+type poolEvents struct {
+	// statuses holds, per run, the statuses from live pool members in log order, one per event ID.
+	statuses map[string][]wire.RunStatus
+	// others holds, per run, every other record, such as cancels.
+	others map[string][][]byte
+}
+
+func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	records, err := admin.ReadTopic(ctx, r.base, admin.PoolEventsTopic(r.config.Pool))
+	if err != nil {
+		r.deny(err)
+		return poolEvents{}, err
+	}
+	state, peers, _ := r.snapshot()
+	events := poolEvents{statuses: map[string][]wire.RunStatus{}, others: map[string][][]byte{}}
+	seen := map[string]bool{}
+	for _, record := range records {
+		run := string(record.Key)
+		var named wire.RunStatus
+		if wire.ParseRecord(record.Value, peers, &named) != nil {
+			events.others[run] = append(events.others[run], record.Value)
 			continue
 		}
-		filtered = append(filtered, offer)
-	}
-	return filtered
-}
-
-func outsideKeys(grant wire.AdapterGrant, offer wire.Offer) []string {
-	var keys []string
-	for key, value := range offer.Labels {
-		if !slices.Contains(grant.Allowed[key], value) {
-			keys = append(keys, key)
+		// A status binds its run's tenant through the task hash; the pool and membership are checked here.
+		status, err := admin.AuthorizeStatus(state, peers, record.Value, r.config.Pool, named.Wherry.Tenant)
+		if err != nil || status.Wherry.Run != run || seen[status.Wherry.EventID] {
+			continue
 		}
+		seen[status.Wherry.EventID] = true
+		events.statuses[run] = append(events.statuses[run], status)
 	}
-	slices.Sort(keys)
-	return keys
+	return events, nil
 }
 
-func sign(recordType wire.RecordType, payload any, key ed25519.PrivateKey) ([]byte, error) {
-	encoded, err := wire.MarshalPayload(recordType, payload)
-	if err != nil {
-		return nil, err
-	}
-	return wire.MarshalEnvelope(wire.Sign(recordType, encoded, key))
-}
-
-// readBounded reads committed records from a topic's start to the last stable
-// offset captured at call time; aborted transactions (fenced holders) are never seen.
-func readBounded(ctx context.Context, opts []kgo.Opt, topic string) ([]*kgo.Record, error) {
-	probe, err := kgo.NewClient(opts...)
-	if err != nil {
-		return nil, err
-	}
-	admin := kadm.NewClient(probe)
-	starts, err := admin.ListStartOffsets(ctx, topic)
-	if err == nil {
-		err = starts.Error()
-	}
-	var ends kadm.ListedOffsets
-	if err == nil {
-		ends, err = admin.ListCommittedOffsets(ctx, topic)
-	}
-	if err == nil {
-		err = ends.Error()
-	}
-	probe.Close()
-	if err != nil {
-		return nil, err
-	}
-	remaining := make(map[int32]int64)
-	partitions := make(map[int32]kgo.Offset)
-	ends.Each(func(end kadm.ListedOffset) {
-		if start, ok := starts.Lookup(topic, end.Partition); ok && start.Offset < end.Offset {
-			remaining[end.Partition] = end.Offset
-			partitions[end.Partition] = kgo.NewOffset().At(start.Offset)
-		}
+// committedTerminal reports a terminal status for the exact task record on the pool's events.
+func (events poolEvents) committedTerminal(run, taskHash string) bool {
+	return slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
+		return status.Wherry.Kind == "terminal" && status.Wherry.TaskHash == taskHash
 	})
-	if len(remaining) == 0 {
-		return nil, nil
-	}
-	reader, err := kgo.NewClient(append(append([]kgo.Opt(nil), opts...),
-		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
-		// A trailing abort marker is the last offset below the bound; it must be seen to finish.
-		kgo.KeepControlRecords(),
-		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: partitions}))...)
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-	var records []*kgo.Record
-	for len(remaining) > 0 {
-		fetches := reader.PollFetches(ctx)
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if err := fetches.Err(); err != nil {
-			return nil, err
-		}
-		fetches.EachPartition(func(partition kgo.FetchTopicPartition) {
-			end, wanted := remaining[partition.Partition]
-			if !wanted {
-				return
+}
+
+// cancelledTurn returns the lowest turn of run that a live host of tenant has cancelled.
+func (r *Receiver) cancelledTurn(ctx context.Context, events poolEvents, run, tenant string) (int64, bool) {
+	var lowest int64
+	found := false
+	for _, encoded := range events.others[run] {
+		err := r.authorizeHost(ctx, encoded, func(state admin.State, hosts signed.Keys) error {
+			cancel, err := admin.AuthorizeCancel(state, hosts, encoded, r.config.Pool, tenant)
+			if err == nil && cancel.Run != run {
+				return errors.New("cancel names another run than its key")
 			}
-			for _, record := range partition.Records {
-				if record.Offset < end && !record.Attrs.IsControl() {
-					records = append(records, record)
-				}
-				if record.Offset >= end-1 {
-					delete(remaining, partition.Partition)
-				}
+			if err == nil && (!found || cancel.Turn < lowest) {
+				lowest, found = cancel.Turn, true
 			}
-			// Compaction or aborted records can leave nothing to return below the bound.
-			if len(partition.Records) == 0 && partition.LastStableOffset >= end {
-				delete(remaining, partition.Partition)
-			}
+			return err
 		})
+		_ = err // a record that is not an authorised cancel changes nothing
 	}
-	return records, nil
+	return lowest, found
+}
+
+// readCancels rebuilds the cancelled runs from the pool's events, and ends each cancelled run
+// that waits interrupted, held by no member.
+func (r *Receiver) readCancels(ctx context.Context) error {
+	events, err := r.readEvents(ctx)
+	if err != nil {
+		return err
+	}
+	cancelled := map[string]int64{}
+	for run, statuses := range events.statuses {
+		if len(events.others[run]) == 0 {
+			continue
+		}
+		tenant := statuses[0].Wherry.Tenant
+		turn, ok := r.cancelledTurn(ctx, events, run, tenant)
+		if !ok {
+			continue
+		}
+		cancelled[run] = turn
+		latest := latestStatus(statuses, tenant)
+		if latest != nil && latest.Wherry.Kind == "interrupted" && latest.Wherry.Turn >= turn {
+			if err := r.cancelInterrupted(ctx, *latest); err != nil {
+				r.logger.Printf("run %s: cancel interrupted turn: %v", run, err)
+			}
+		}
+	}
+	r.mu.Lock()
+	r.cancelled = cancelled
+	r.mu.Unlock()
+	return nil
+}
+
+// latestStatus is the run's latest status of tenant, superseded attempts and rejections dropped.
+func latestStatus(statuses []wire.RunStatus, tenant string) *wire.RunStatus {
+	var latest *wire.RunStatus
+	var order wire.AttemptFilter
+	for i := range statuses {
+		status := &statuses[i]
+		if status.Wherry.Tenant != tenant || status.Wherry.Kind == "rejected" || !order.Admit(status.Wherry.Run, status.Wherry.Turn, status.Wherry.Attempt) {
+			continue
+		}
+		latest = status
+	}
+	return latest
+}
+
+// credentialOutcome is what the seals on a tenant's host topics say about one credential.
+type credentialOutcome int
+
+const (
+	credentialOpened credentialOutcome = iota
+	// credentialWithPeer means another pool member holds a current seal: a start failure.
+	credentialWithPeer
+	// credentialMissing means no member holds one: the run waits for the tenant (AUTH_REQUIRED).
+	credentialMissing
+)
+
+// credential opens the latest seal by issued time for this receiver, pool and credential across
+// the tenant's host topics; the agent's terms name the credentials it may take.
+func (r *Receiver) credential(ctx context.Context, tenant, agent, name string) ([]byte, credentialOutcome, error) {
+	if name == "" {
+		return nil, credentialOpened, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	state, _, _ := r.snapshot()
+	latest := map[string]signed.Seal{}
+	for principal, host := range state.Hosts {
+		if host.Tenant != tenant || state.Ended[principal] {
+			continue
+		}
+		records, err := admin.ReadTopic(ctx, r.base, admin.HostTopic(host.Tenant, host.Name))
+		if err != nil {
+			r.deny(err)
+			return nil, 0, err
+		}
+		for _, record := range records {
+			seal, err := signed.DecodeSeal(record.Value)
+			if err != nil || seal.Tenant != tenant || seal.Pool != r.config.Pool || seal.Credential != name {
+				continue
+			}
+			if previous, ok := latest[seal.Receiver]; !ok || seal.IssuedMS > previous.IssuedMS {
+				latest[seal.Receiver] = seal
+			}
+		}
+	}
+	now := time.Now()
+	if seal, ok := latest[r.id]; ok {
+		var allowed []string
+		if index := slices.IndexFunc(state.Pools[r.config.Pool].Agents, func(terms admin.AgentTerms) bool { return terms.Name == agent }); index >= 0 {
+			allowed = state.Pools[r.config.Pool].Agents[index].Credentials
+		}
+		value, err := signed.OpenCredential(seal, tenant, r.id, r.config.Pool, name, now, allowed, r.sealing)
+		if err == nil {
+			return value, credentialOpened, nil
+		}
+		// never log err: the cause may describe secret material
+		r.logger.Printf("credential %s for tenant %s: latest seal does not open", name, tenant)
+	}
+	for receiver, seal := range latest {
+		config, member := state.Receivers[receiver]
+		if receiver != r.id && member && config.Pool == r.config.Pool && !state.Ended[admin.ReceiverPrincipal(receiver)] && now.Before(time.UnixMilli(seal.ExpiryMS)) {
+			return nil, credentialWithPeer, nil
+		}
+	}
+	return nil, credentialMissing, nil
 }
