@@ -1,0 +1,453 @@
+package adapter
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/benemon/wherry/adapter/internal/adapterv1"
+	"github.com/hashicorp/go-hclog"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+)
+
+const (
+	runCredential      = "sk-ant-oat01-run-credential-never-logged"
+	platformCredential = "nomad-platform-token-never-logged"
+)
+
+var testPlugin string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "wherry-adapter-test")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	testPlugin = filepath.Join(dir, "wherry-plugin-fake")
+	if output, err := exec.Command("go", "build", "-o", testPlugin, "./internal/testplugin").CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "build test plugin: %v\n%s", err, output)
+		os.Exit(1)
+	}
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+type recorded struct {
+	PID      int      `json:"pid"`
+	Env      string   `json:"env"`
+	Call     string   `json:"call"`
+	Settings Settings `json:"settings"`
+	Run      *Run     `json:"run"`
+}
+
+func fixed(path string) func() (string, error) {
+	return func() (string, error) { return path, nil }
+}
+
+// launch starts the test plugin with a fresh record file and returns both.
+func launch(t *testing.T) (*Plugin, string, *syncBuffer) {
+	t.Helper()
+	record := filepath.Join(t.TempDir(), "record.jsonl")
+	t.Setenv("WHERRY_TESTPLUGIN_RECORD", record)
+	logs := &syncBuffer{}
+	p, err := Launch(fixed(testPlugin), logs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+	return p, record, logs
+}
+
+func records(t *testing.T, path string) []recorded {
+	t.Helper()
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	var all []recorded
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var entry recorded
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, entry)
+	}
+	return all
+}
+
+func configured(t *testing.T, p *Plugin, name, config string) Adapter {
+	t.Helper()
+	a, err := p.Configure(Settings{Name: name, Pool: "pool-a", Agent: "claude", Config: []byte(config)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func pid(p *Plugin) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.client.ReattachConfig().Pid
+}
+
+func kill(t *testing.T, p *Plugin) int {
+	t.Helper()
+	killed := pid(p)
+	if err := syscall.Kill(killed, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	return killed
+}
+
+func shortRestart(t *testing.T) {
+	previous := restartBackoff
+	restartBackoff = 300 * time.Millisecond
+	t.Cleanup(func() { restartBackoff = previous })
+}
+
+// eventually polls check until it returns nil or ten seconds pass.
+func eventually(t *testing.T, what string, check func() error) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err := check()
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: %v", what, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestCallsReachTheAdapterTheyName(t *testing.T) {
+	p, record, _ := launch(t)
+	a, b := configured(t, p, "a", "{}"), configured(t, p, "b", "{}")
+	for name, adapter := range map[string]Adapter{"a": a, "b": b} {
+		outcome, handle, err := adapter.Dispatch(context.Background(), Run{ID: "run-" + name, Adapter: name, Agent: "claude", Turn: 1})
+		if err != nil || outcome != OutcomeCreated || handle.Name != name+"/run-"+name {
+			t.Fatalf("adapter %s dispatch: %v %+v %v; want its own instance's handle", name, outcome, handle, err)
+		}
+	}
+	for _, entry := range records(t, record) {
+		if entry.Call == "dispatch" && entry.Run.ID != "run-"+entry.Settings.Name {
+			t.Fatalf("instance %s dispatched %s", entry.Settings.Name, entry.Run.ID)
+		}
+	}
+}
+
+func TestDispatchCarriesTheRun(t *testing.T) {
+	t.Setenv("WHERRY_TESTPLUGIN_ENV", "from-the-receiver")
+	p, record, _ := launch(t)
+	a := configured(t, p, "a", "{}")
+	run := Run{ID: "run-a", Adapter: "a", Agent: "claude", Turn: 2, Attempt: 3, Prompt: []byte("hello"), Credential: []byte(runCredential),
+		Git: &GitContext{URL: "https://git.example.test/org/repo.git", Ref: "main", Path: "repo"}}
+	if _, _, err := a.Dispatch(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-b", Adapter: "a", Agent: "claude", Turn: 1}); err != nil {
+		t.Fatal(err)
+	}
+	var dispatched []*Run
+	for _, entry := range records(t, record) {
+		if entry.Call == "dispatch" {
+			dispatched = append(dispatched, entry.Run)
+			if entry.Env != "from-the-receiver" {
+				t.Fatalf("plugin environment %q; want the receiver's", entry.Env)
+			}
+		}
+	}
+	got := dispatched[0]
+	if len(dispatched) != 2 || got.ID != run.ID || got.Turn != 2 || got.Attempt != 3 || string(got.Prompt) != "hello" || string(got.Credential) != runCredential || *got.Git != *run.Git {
+		t.Fatalf("plugin got %+v; want %+v", got, run)
+	}
+	if dispatched[1].Credential != nil || dispatched[1].Git != nil {
+		t.Fatalf("run without credential or git context arrived as %+v", dispatched[1])
+	}
+}
+
+func TestFollowResumesFromOffset(t *testing.T) {
+	p, _, _ := launch(t)
+	a := configured(t, p, "a", "{}")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lines := make(chan Line, 4)
+	ended := make(chan error, 1)
+	go func() {
+		_, err := a.Follow(ctx, Handle{Data: []byte("h")}, 41, lines)
+		ended <- err
+	}()
+	line := <-lines
+	if line.Offset != 41 || !strings.Contains(string(line.Data), `"result"`) {
+		t.Fatalf("first line %+v from offset 41; want the result line", line)
+	}
+	cancel()
+	if err := <-ended; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled follow returned %v", err)
+	}
+}
+
+func TestPanicStaysInItsCall(t *testing.T) {
+	p, _, logs := launch(t)
+	a, b := configured(t, p, "a", `{"panic":"Sweep"}`), configured(t, p, "b", "{}")
+	before := pid(p)
+	if err := a.Sweep(context.Background()); err == nil || errors.Is(err, ErrLinkLost) || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("panicking sweep returned %v; want that call's error", err)
+	}
+	if err := b.Sweep(context.Background()); err != nil {
+		t.Fatalf("other adapter after a panic: %v", err)
+	}
+	if ready, err := a.Ready(context.Background()); !ready || err != nil {
+		t.Fatalf("panicked adapter's next call: %v %v", ready, err)
+	}
+	streaming := configured(t, p, "c", `{"panic":"Follow"}`)
+	if _, err := streaming.Follow(context.Background(), Handle{}, 0, make(chan Line, 4)); err == nil || errors.Is(err, ErrLinkLost) {
+		t.Fatalf("panicking follow returned %v; want that call's error", err)
+	}
+	if err := b.Sweep(context.Background()); err != nil {
+		t.Fatalf("other adapter after a follow panic: %v", err)
+	}
+	if !strings.Contains(logs.String(), "adapter=c method=/wherry.adapter.v1.Adapter/Follow") {
+		t.Fatalf("follow panic logged without its adapter:\n%s", logs.String())
+	}
+	if after := pid(p); after != before {
+		t.Fatalf("plugin process changed from %d to %d", before, after)
+	}
+}
+
+func TestConfigureFailureStaysWithItsAdapter(t *testing.T) {
+	p, _, _ := launch(t)
+	a := configured(t, p, "a", "{}")
+	if _, err := p.Configure(Settings{Name: "bad", Config: []byte(`{"fail":true}`)}); err == nil || !strings.Contains(err.Error(), "configured to fail") {
+		t.Fatalf("failing configure returned %v", err)
+	}
+	if ready, err := a.Ready(context.Background()); !ready || err != nil {
+		t.Fatalf("adapter after another's configure failure: %v %v", ready, err)
+	}
+}
+
+func TestRestartConfiguresEveryAdapter(t *testing.T) {
+	shortRestart(t)
+	p, record, _ := launch(t)
+	a, b := configured(t, p, "a", "{}"), configured(t, p, "b", "{}")
+	killed := kill(t, p)
+	eventually(t, "link lost while the plugin is down", func() error {
+		if _, err := a.Ready(context.Background()); !errors.Is(err, ErrLinkLost) {
+			return fmt.Errorf("ready returned %v", err)
+		}
+		return nil
+	})
+	eventually(t, "both adapters back after the restart", func() error {
+		for _, adapter := range []Adapter{a, b} {
+			if _, _, err := adapter.Dispatch(context.Background(), Run{ID: "after", Turn: 1}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	configured := map[string]bool{}
+	for _, entry := range records(t, record) {
+		if entry.Call == "configure" && entry.PID != killed {
+			configured[entry.Settings.Name] = true
+		}
+	}
+	if !configured["a"] || !configured["b"] {
+		t.Fatalf("restarted process configured %v; want a and b", configured)
+	}
+}
+
+func TestOneProcessPerPlugin(t *testing.T) {
+	p, record, _ := launch(t)
+	configured(t, p, "a", "{}")
+	configured(t, p, "b", "{}")
+	pids := map[int]bool{}
+	for _, entry := range records(t, record) {
+		pids[entry.PID] = true
+	}
+	if len(pids) != 1 {
+		t.Fatalf("adapters configured in processes %v; want one", pids)
+	}
+}
+
+func TestFollowLinkLossIsDistinct(t *testing.T) {
+	shortRestart(t)
+	p, _, _ := launch(t)
+	a := configured(t, p, "a", "{}")
+	lines := make(chan Line, 4)
+	ended := make(chan error, 1)
+	go func() {
+		_, err := a.Follow(context.Background(), Handle{}, 0, lines)
+		ended <- err
+	}()
+	<-lines
+	kill(t, p)
+	if err := <-ended; !errors.Is(err, ErrLinkLost) {
+		t.Fatalf("follow over a killed plugin returned %v; want ErrLinkLost", err)
+	}
+}
+
+// dial connects to the plugin's socket as a party other than the receiver.
+func dial(t *testing.T, p *Plugin, creds credentials.TransportCredentials) adapterv1.AdapterClient {
+	t.Helper()
+	p.mu.Lock()
+	addr := p.client.ReattachConfig().Addr
+	p.mu.Unlock()
+	conn, err := grpc.NewClient("passthrough:///plugin", grpc.WithTransportCredentials(creds),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, addr.Network(), addr.String())
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return adapterv1.NewAdapterClient(conn)
+}
+
+func TestPlaintextConnectionFails(t *testing.T) {
+	p, _, _ := launch(t)
+	configured(t, p, "a", "{}")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := dial(t, p, insecure.NewCredentials()).Ready(ctx, &adapterv1.ReadyRequest{Adapter: "a"}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("plaintext call returned %v; want a refused connection", err)
+	}
+}
+
+func TestTLSWithoutClientCertificateFails(t *testing.T) {
+	p, _, _ := launch(t)
+	configured(t, p, "a", "{}")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// The server's certificate is accepted, so only the missing client certificate can fail the call.
+	creds := credentials.NewTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	if _, err := dial(t, p, creds).Ready(ctx, &adapterv1.ReadyRequest{Adapter: "a"}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("call without a client certificate returned %v; want a refused connection", err)
+	}
+}
+
+func TestRefusesPluginWithoutMutualTLS(t *testing.T) {
+	record := filepath.Join(t.TempDir(), "record.jsonl")
+	t.Setenv("WHERRY_TESTPLUGIN_RECORD", record)
+	t.Setenv("WHERRY_TESTPLUGIN_PLAINTEXT", "1")
+	p, err := Launch(fixed(testPlugin), &syncBuffer{})
+	if err == nil {
+		_, configureErr := p.Configure(Settings{Name: "a", Platform: platformCredential})
+		p.Close()
+		t.Fatalf("launched a plugin that offered no mutual TLS; configure returned %v", configureErr)
+	}
+	if got := records(t, record); len(got) != 0 {
+		t.Fatalf("plugin without mutual TLS received %+v", got)
+	}
+}
+
+func TestSecretsStayOutOfLogs(t *testing.T) {
+	shortRestart(t)
+	previous := logLevel
+	logLevel = hclog.Trace
+	t.Cleanup(func() { logLevel = previous })
+	p, record, logs := launch(t)
+	a, err := p.Configure(Settings{Name: "a", Pool: "pool-a", Agent: "claude", Credential: "model", Config: []byte("{}"), Platform: platformCredential})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-a", Turn: 1, Prompt: []byte("hello"), Credential: []byte(runCredential)}); err != nil {
+		t.Fatal(err)
+	}
+	killed := kill(t, p)
+	eventually(t, "adapter back after the restart", func() error {
+		_, err := a.Ready(context.Background())
+		return err
+	})
+	reconfigured := false
+	for _, entry := range records(t, record) {
+		reconfigured = reconfigured || entry.Call == "configure" && entry.PID != killed && entry.Settings.Platform == platformCredential
+	}
+	output := logs.String()
+	if !reconfigured || !strings.Contains(output, "plugin restarted") || !strings.Contains(output, "starting plugin") {
+		t.Fatalf("restart did not carry the platform credential, or the logs miss the link's own lines:\n%s", output)
+	}
+	for _, secret := range []string{runCredential, platformCredential} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("logs carry a credential:\n%s", output)
+		}
+	}
+}
+
+func TestConfigureReportsGit(t *testing.T) {
+	p, _, _ := launch(t)
+	if a := configured(t, p, "git", `{"git":true}`); !a.Git() {
+		t.Fatal("adapter delivering git context reported none")
+	}
+	if a := configured(t, p, "plain", "{}"); a.Git() {
+		t.Fatal("adapter without git context reported it")
+	}
+}
+
+func TestLargeDispatch(t *testing.T) {
+	p, _, _ := launch(t)
+	a := configured(t, p, "a", "{}")
+	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-large", Turn: 1, Prompt: bytes.Repeat([]byte("p"), 5<<20)}); err != nil {
+		t.Fatalf("5 MiB prompt: %v", err)
+	}
+	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-huge", Turn: 1, Prompt: bytes.Repeat([]byte("p"), maxMessage+1)}); !errors.Is(err, ErrMessageTooLarge) {
+		t.Fatalf("prompt over the limit returned %v; want ErrMessageTooLarge", err)
+	}
+	if ready, err := a.Ready(context.Background()); !ready || err != nil {
+		t.Fatalf("adapter after an oversized message: %v %v", ready, err)
+	}
+}
+
+func TestCloseStopsRestarts(t *testing.T) {
+	shortRestart(t)
+	p, record, _ := launch(t)
+	configured(t, p, "a", "{}")
+	closed := pid(p)
+	p.Close()
+	time.Sleep(4 * restartBackoff)
+	for _, entry := range records(t, record) {
+		if entry.PID != closed {
+			t.Fatalf("plugin started again as %d after Close", entry.PID)
+		}
+	}
+}

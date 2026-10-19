@@ -23,7 +23,9 @@ One `wherry` binary with three sides:
   `continue`, `cancel` and `events` as MCP tools; see
   [Harness integration](#harness-integration).
 - **Receiver:** `wherry receiver` claims its pool's tasks and runs each one
-  as a job through a compile-time Nomad adapter.
+  as a job through an adapter plugin, such as the Nomad plugin from
+  [wherry-plugins](https://github.com/benemon/wherry-plugins). The adapter
+  protocol is the Go module in [`adapter`](adapter).
 
 Submissions, statuses, transcript chunks and results are A2A v1.0 objects;
 [the wherry A2A extension](docs/a2a-extension-v1.md) specifies every
@@ -53,6 +55,9 @@ installing it.
 
 ## Tests
 
+The adapter protocol is its own module: run `go test ./...` in `adapter`
+as well as at the root.
+
 Unit tests run against an in-process Kafka. Tests that need real services
 run when their variables are set and skip otherwise:
 
@@ -62,4 +67,3 @@ run when their variables are set and skip otherwise:
   `wherry admin`: a TLS broker with an authoriser, for the provisioning,
   ACL and revocation tests. `WHERRY_TRUST_RECONCILE_WAIT` adds the check
   that provisioning survives a Strimzi reconciliation.
-- `WHERRY_NOMAD_DEV_ADDR`: a Nomad dev agent, for the adapter tests.

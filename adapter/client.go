@@ -1,0 +1,329 @@
+package adapter
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os/exec"
+	"sync"
+	"time"
+
+	"github.com/benemon/wherry/adapter/internal/adapterv1"
+	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/go-plugin"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// Variables so tests can change them.
+var (
+	logLevel          = hclog.Info
+	exitPoll          = 100 * time.Millisecond
+	restartBackoff    = time.Second
+	maxRestartBackoff = 30 * time.Second
+	configureTimeout  = 30 * time.Second
+)
+
+// Plugin is one plugin process and every adapter configured in it. When the process exits, Plugin starts
+// it again with back-off and configures every adapter again; until then their calls return ErrLinkLost.
+type Plugin struct {
+	// resolve checks the plugin binary and returns its path, before every start.
+	resolve func() (string, error)
+	// path is the binary the latest start ran, for log lines.
+	path   string
+	logger hclog.Logger
+	// configure serialises Configure with a restart, which configures every adapter in settings.
+	configure sync.Mutex
+	settings  []Settings
+	mu        sync.Mutex
+	client    *plugin.Client
+	// rpc is nil while the process is down.
+	rpc    adapterv1.AdapterClient
+	closed bool
+}
+
+// Launch starts the plugin binary resolve returns over mutual TLS, and calls resolve again before every
+// restart; logs receives the link's and the plugin's log lines.
+func Launch(resolve func() (string, error), logs io.Writer) (*Plugin, error) {
+	p := &Plugin{resolve: resolve, logger: hclog.New(&hclog.LoggerOptions{Name: "plugin", Output: logs, Level: logLevel})}
+	client, rpc, err := p.start()
+	if err != nil {
+		return nil, err
+	}
+	p.client, p.rpc = client, rpc
+	go p.supervise(client)
+	return p, nil
+}
+
+// start launches the process and configures every adapter in settings; the caller holds configure.
+func (p *Plugin) start() (*plugin.Client, adapterv1.AdapterClient, error) {
+	path, err := p.resolve()
+	if err != nil {
+		return nil, nil, err
+	}
+	p.path = path
+	config := &plugin.ClientConfig{
+		HandshakeConfig:  handshake,
+		Plugins:          plugin.PluginSet{pluginName: &grpcPlugin{}},
+		Cmd:              exec.Command(path),
+		AllowedProtocols: []plugin.Protocol{plugin.ProtocolGRPC},
+		AutoMTLS:         true,
+		Logger:           p.logger,
+	}
+	client := plugin.NewClient(config)
+	protocol, err := client.Client()
+	if err != nil {
+		client.Kill()
+		return nil, nil, fmt.Errorf("plugin %s: %w", path, err)
+	}
+	// AutoMTLS makes the certificate the plugin's handshake offers the link's only root; a plugin that
+	// offered none would otherwise get a link without one.
+	if config.TLSConfig == nil || config.TLSConfig.RootCAs == nil {
+		client.Kill()
+		return nil, nil, fmt.Errorf("plugin %s offered no mutual TLS", path)
+	}
+	raw, err := protocol.Dispense(pluginName)
+	if err != nil {
+		client.Kill()
+		return nil, nil, err
+	}
+	rpc := raw.(adapterv1.AdapterClient)
+	for _, settings := range p.settings {
+		if _, err := configure(rpc, settings); err != nil {
+			client.Kill()
+			return nil, nil, fmt.Errorf("adapter %s: %w", settings.Name, err)
+		}
+	}
+	return client, rpc, nil
+}
+
+// configure builds settings' adapter in the plugin and returns whether it delivers git context.
+func configure(rpc adapterv1.AdapterClient, settings Settings) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), configureTimeout)
+	defer cancel()
+	resp, err := rpc.Configure(ctx, &adapterv1.ConfigureRequest{
+		Adapter: settings.Name, Pool: settings.Pool, Agent: settings.Agent, Credential: settings.Credential, Config: settings.Config, Platform: settings.Platform,
+	})
+	if err != nil {
+		return false, callError(ctx, err)
+	}
+	return resp.Git, nil
+}
+
+// supervise restarts the process each time it exits, until Close.
+func (p *Plugin) supervise(client *plugin.Client) {
+	for {
+		for !client.Exited() {
+			time.Sleep(exitPoll)
+		}
+		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return
+		}
+		p.rpc = nil
+		p.mu.Unlock()
+		p.logger.Warn("plugin exited; restarting", "path", p.path)
+		for backoff := restartBackoff; ; backoff = min(2*backoff, maxRestartBackoff) {
+			time.Sleep(backoff)
+			p.mu.Lock()
+			closed := p.closed
+			p.mu.Unlock()
+			if closed {
+				return
+			}
+			p.configure.Lock()
+			next, rpc, err := p.start()
+			p.configure.Unlock()
+			if err != nil {
+				p.logger.Error("plugin restart failed", "path", p.path, "error", err)
+				continue
+			}
+			p.mu.Lock()
+			if p.closed {
+				p.mu.Unlock()
+				next.Kill()
+				return
+			}
+			p.client, p.rpc = next, rpc
+			p.mu.Unlock()
+			p.logger.Info("plugin restarted", "path", p.path)
+			client = next
+			break
+		}
+	}
+}
+
+// Configure builds an adapter in the plugin and returns it; the plugin configures it again after a restart.
+func (p *Plugin) Configure(settings Settings) (Adapter, error) {
+	p.configure.Lock()
+	defer p.configure.Unlock()
+	rpc, err := p.link()
+	if err != nil {
+		return nil, err
+	}
+	git, err := configure(rpc, settings)
+	if err != nil {
+		return nil, err
+	}
+	p.settings = append(p.settings, settings)
+	return &remote{plugin: p, name: settings.Name, git: git}, nil
+}
+
+// Close stops the process and its restarts.
+func (p *Plugin) Close() {
+	p.mu.Lock()
+	p.closed, p.rpc = true, nil
+	client := p.client
+	p.mu.Unlock()
+	client.Kill()
+}
+
+func (p *Plugin) link() (adapterv1.AdapterClient, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.rpc == nil {
+		return nil, ErrLinkLost
+	}
+	return p.rpc, nil
+}
+
+// callError maps a call's status back to the errors the core distinguishes. A connection closed under a
+// call that its caller did not cancel is a lost link.
+func callError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	switch status.Code(err) {
+	case codes.Unavailable, codes.Canceled:
+		return ErrLinkLost
+	case codes.FailedPrecondition:
+		return ErrGitContext
+	case codes.DeadlineExceeded:
+		return context.DeadlineExceeded
+	case codes.ResourceExhausted:
+		return ErrMessageTooLarge
+	}
+	return errors.New(status.Convert(err).Message())
+}
+
+// remote is one adapter in a plugin process.
+type remote struct {
+	plugin *Plugin
+	name   string
+	git    bool
+}
+
+func (r *remote) Git() bool { return r.git }
+
+func (r *remote) Ready(ctx context.Context) (bool, error) {
+	rpc, err := r.plugin.link()
+	if err != nil {
+		return false, err
+	}
+	resp, err := rpc.Ready(ctx, &adapterv1.ReadyRequest{Adapter: r.name})
+	if err != nil {
+		return false, callError(ctx, err)
+	}
+	return resp.Ready, nil
+}
+
+func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error) {
+	rpc, err := r.plugin.link()
+	if err != nil {
+		return OutcomeUnknown, Handle{}, err
+	}
+	message := &adapterv1.Run{
+		Id: run.ID, Adapter: run.Adapter, Agent: run.Agent, Turn: run.Turn, Attempt: run.Attempt, Prompt: run.Prompt, Credential: run.Credential,
+	}
+	if run.Git != nil {
+		message.Git = &adapterv1.GitContext{Url: run.Git.URL, Ref: run.Git.Ref, Path: run.Git.Path}
+	}
+	resp, err := rpc.Dispatch(ctx, &adapterv1.DispatchRequest{Adapter: r.name, Run: message})
+	if err != nil {
+		return OutcomeUnknown, Handle{}, callError(ctx, err)
+	}
+	return Outcome(resp.Outcome), handleOf(resp.Handle), nil
+}
+
+func (r *remote) Lookup(ctx context.Context, runID string, turn int64) (Job, error) {
+	rpc, err := r.plugin.link()
+	if err != nil {
+		return Job{}, err
+	}
+	resp, err := rpc.Lookup(ctx, &adapterv1.LookupRequest{Adapter: r.name, RunId: runID, Turn: turn})
+	if err != nil {
+		return Job{}, callError(ctx, err)
+	}
+	job := resp.GetJob()
+	return Job{State: JobState(job.GetState()), Handle: handleOf(job.GetHandle()), Attempt: job.GetAttempt(), Adapter: job.GetAdapter(), Agent: job.GetAgent()}, nil
+}
+
+func (r *remote) Follow(ctx context.Context, handle Handle, from int64, lines chan<- Line) (Terminal, error) {
+	rpc, err := r.plugin.link()
+	if err != nil {
+		return Terminal{}, err
+	}
+	stream, err := rpc.Follow(ctx, &adapterv1.FollowRequest{Adapter: r.name, Handle: handleMessage(handle), From: from})
+	if err != nil {
+		return Terminal{}, callError(ctx, err)
+	}
+	for {
+		resp, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return Terminal{}, errors.New("follow ended without a terminal")
+		}
+		if err != nil {
+			return Terminal{}, callError(ctx, err)
+		}
+		if terminal := resp.GetTerminal(); terminal != nil {
+			return Terminal{Started: terminal.Started, ExitCode: int(terminal.ExitCode), Signal: terminal.Signal, Class: terminal.Class, Node: terminal.Node}, nil
+		}
+		line := resp.GetLine()
+		select {
+		case lines <- Line{Offset: line.GetOffset(), Next: line.GetNext(), Data: line.GetData()}:
+		case <-ctx.Done():
+			return Terminal{}, ctx.Err()
+		}
+	}
+}
+
+func (r *remote) Stop(ctx context.Context, handle Handle) error {
+	rpc, err := r.plugin.link()
+	if err != nil {
+		return err
+	}
+	_, err = rpc.Stop(ctx, &adapterv1.StopRequest{Adapter: r.name, Handle: handleMessage(handle)})
+	return callError(ctx, err)
+}
+
+func (r *remote) Purge(ctx context.Context, runID string, turn int64) error {
+	rpc, err := r.plugin.link()
+	if err != nil {
+		return err
+	}
+	_, err = rpc.Purge(ctx, &adapterv1.PurgeRequest{Adapter: r.name, RunId: runID, Turn: turn})
+	return callError(ctx, err)
+}
+
+func (r *remote) Release(ctx context.Context, runID string, turn int64) error {
+	rpc, err := r.plugin.link()
+	if err != nil {
+		return err
+	}
+	_, err = rpc.Release(ctx, &adapterv1.ReleaseRequest{Adapter: r.name, RunId: runID, Turn: turn})
+	return callError(ctx, err)
+}
+
+func (r *remote) Sweep(ctx context.Context) error {
+	rpc, err := r.plugin.link()
+	if err != nil {
+		return err
+	}
+	_, err = rpc.Sweep(ctx, &adapterv1.SweepRequest{Adapter: r.name})
+	return callError(ctx, err)
+}

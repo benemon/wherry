@@ -31,8 +31,8 @@ type Bundle struct {
 	CA        string `yaml:"ca"`
 	Principal string `yaml:"principal"`
 	Password  string `yaml:"password"`
-	// Platform holds platform credentials by adapter name, such as a Nomad
-	// token, for platforms that do not issue one by their own identity.
+	// Platform holds platform credentials by adapter name, for platforms that
+	// do not issue one by their own identity.
 	Platform map[string]string `yaml:"platform,omitempty"`
 }
 

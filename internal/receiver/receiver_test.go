@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -68,14 +69,14 @@ type fakeAdapter struct {
 	dispatches  int
 	dispatchErr error
 	// outcome is what Dispatch reports, OutcomeCreated when zero.
-	outcome Outcome
+	outcome adapter.Outcome
 	// handleSize is the length of the handle data Dispatch and Lookup return.
 	handleSize int
-	lastRun    Run
+	lastRun    adapter.Run
 	lookups    int
 	lookupErr  error
 	// job is the state Lookup reports; jobAdapter and jobAgent override the metadata it reports.
-	job                  JobState
+	job                  adapter.JobState
 	jobAdapter, jobAgent string
 	// neverStarted makes Follow report a job whose agent never started.
 	neverStarted bool
@@ -93,66 +94,88 @@ type fakeAdapter struct {
 	sweepErr error
 	// endDelay holds a stream without a result line open before it ends.
 	endDelay time.Duration
+	// linkLost makes that many Follows end with adapter.ErrLinkLost after at most one line; froms
+	// records the offset of every Follow.
+	linkLost int
+	froms    []int64
+	// hang makes Sweep and Ready block until their context ends.
+	hang bool
 }
 
-func (f *fakeAdapter) Ready(context.Context) (bool, error) {
+func (f *fakeAdapter) Git() bool { return false }
+
+func (f *fakeAdapter) Ready(ctx context.Context) (bool, error) {
+	if f.hung(ctx) {
+		return false, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return !f.unready && f.readyErr == nil, f.readyErr
 }
 
-func (f *fakeAdapter) handle(runID string, turn int64) Handle {
-	return Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: fmt.Sprintf("agent-%s-t%d", runID, turn)}
+func (f *fakeAdapter) handle(runID string, turn int64) adapter.Handle {
+	return adapter.Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: fmt.Sprintf("agent-%s-t%d", runID, turn)}
 }
 
-func (f *fakeAdapter) Dispatch(_ context.Context, run Run) (Outcome, Handle, error) {
+func (f *fakeAdapter) Dispatch(_ context.Context, run adapter.Run) (adapter.Outcome, adapter.Handle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dispatches++
 	f.lastRun = run
 	if f.dispatchErr != nil {
-		return OutcomeUnknown, Handle{}, f.dispatchErr
+		return adapter.OutcomeUnknown, adapter.Handle{}, f.dispatchErr
 	}
-	if f.outcome == OutcomeNothingCreated {
-		return f.outcome, Handle{}, nil
+	if f.outcome == adapter.OutcomeNothingCreated {
+		return f.outcome, adapter.Handle{}, nil
 	}
 	handle := f.handle(run.ID, run.Turn)
 	if run.Git != nil {
 		handle.Commit = f.commit
 	}
-	return cmp.Or(f.outcome, OutcomeCreated), handle, nil
+	return cmp.Or(f.outcome, adapter.OutcomeCreated), handle, nil
 }
 
-func (f *fakeAdapter) Lookup(_ context.Context, runID string, turn int64) (Job, error) {
+func (f *fakeAdapter) Lookup(_ context.Context, runID string, turn int64) (adapter.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lookups++
 	if f.lookupErr != nil {
-		return Job{}, f.lookupErr
+		return adapter.Job{}, f.lookupErr
 	}
-	if f.job == JobAbsent {
-		return Job{}, nil
+	if f.job == adapter.JobAbsent {
+		return adapter.Job{}, nil
 	}
-	return Job{State: f.job, Handle: f.handle(runID, turn), Attempt: 1, Adapter: cmp.Or(f.jobAdapter, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
+	return adapter.Job{State: f.job, Handle: f.handle(runID, turn), Attempt: 1, Adapter: cmp.Or(f.jobAdapter, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
 }
 
 // Follow emits the stream; a stream with a result keeps running like a live task, one without ends.
-func (f *fakeAdapter) Follow(ctx context.Context, _ Handle, _ int64, lines chan<- Line) (Terminal, error) {
+func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, lines chan<- adapter.Line) (adapter.Terminal, error) {
 	f.mu.Lock()
 	f.follows++
+	f.froms = append(f.froms, from)
+	lost := f.follows <= f.linkLost
 	stream, followErr, endDelay, neverStarted := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.neverStarted
 	f.mu.Unlock()
 	var offset int64
 	for _, data := range stream {
-		select {
-		case lines <- Line{Offset: offset, Next: offset + int64(len(data)+1), Data: []byte(data)}:
-		case <-ctx.Done():
-			return Terminal{}, ctx.Err()
+		next := offset + int64(len(data)+1)
+		if offset >= from {
+			select {
+			case lines <- adapter.Line{Offset: offset, Next: next, Data: []byte(data)}:
+			case <-ctx.Done():
+				return adapter.Terminal{}, ctx.Err()
+			}
+			if lost {
+				return adapter.Terminal{}, adapter.ErrLinkLost
+			}
 		}
-		offset += int64(len(data) + 1)
+		offset = next
+	}
+	if lost {
+		return adapter.Terminal{}, adapter.ErrLinkLost
 	}
 	if followErr != nil {
-		return Terminal{}, followErr
+		return adapter.Terminal{}, followErr
 	}
 	if !slices.ContainsFunc(stream, func(data string) bool { _, ok := resultLine([]byte(data)); return ok }) {
 		select {
@@ -160,15 +183,15 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ Handle, _ int64, lines chan<
 		case <-ctx.Done():
 		}
 		if neverStarted {
-			return Terminal{Class: "driver", Node: "node-1"}, nil
+			return adapter.Terminal{Class: "driver", Node: "node-1"}, nil
 		}
-		return Terminal{Started: true, ExitCode: 1, Node: "node-1"}, nil
+		return adapter.Terminal{Started: true, ExitCode: 1, Node: "node-1"}, nil
 	}
 	<-ctx.Done()
-	return Terminal{}, ctx.Err()
+	return adapter.Terminal{}, ctx.Err()
 }
 
-func (f *fakeAdapter) Stop(context.Context, Handle) error {
+func (f *fakeAdapter) Stop(context.Context, adapter.Handle) error {
 	f.mu.Lock()
 	f.stops++
 	err, check := f.stopErr, f.stopCheck
@@ -199,7 +222,21 @@ func (f *fakeAdapter) Release(_ context.Context, runID string, _ int64) error {
 	return f.releaseErr
 }
 
-func (f *fakeAdapter) Sweep(context.Context) error {
+// hung blocks until ctx ends when the adapter hangs, and reports whether it did.
+func (f *fakeAdapter) hung(ctx context.Context) bool {
+	f.mu.Lock()
+	hang := f.hang
+	f.mu.Unlock()
+	if hang {
+		<-ctx.Done()
+	}
+	return hang
+}
+
+func (f *fakeAdapter) Sweep(ctx context.Context) error {
+	if f.hung(ctx) {
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sweeps++
@@ -928,6 +965,34 @@ func TestReadinessErrorLogsAndLeavesAdapterOut(t *testing.T) {
 	}
 	if !strings.Contains(m.logs.String(), "adapter lab readiness: nomad unreachable") {
 		t.Fatalf("readiness error not logged: %q", m.logs.String())
+	}
+}
+
+func TestHungAdapterDoesNotStopAdvertising(t *testing.T) {
+	m := newMultiFixture(t)
+	m.lab.mu.Lock()
+	m.lab.hang = true
+	m.lab.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- m.receiver.advertise(m.ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("advertise waited on a hung adapter")
+	}
+	var got []string
+	for _, offer := range m.advertisedOffers(t).Offers {
+		got = append(got, offer.Adapter)
+	}
+	if want := []string{"cloud", "edge"}; !slices.Equal(got, want) {
+		t.Fatalf("advertised adapters %v, want %v", got, want)
+	}
+	logs := m.logs.String()
+	if !strings.Contains(logs, "adapter lab sweep: timed out") || !strings.Contains(logs, "adapter lab readiness: context deadline exceeded") {
+		t.Fatalf("hung adapter's calls not logged: %q", logs)
 	}
 }
 

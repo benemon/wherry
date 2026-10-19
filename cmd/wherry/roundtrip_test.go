@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,16 +10,18 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"io"
 	"log"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/receiver"
@@ -30,47 +33,24 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// platform stands in for a platform behind the adapter seam; everything above it is production code.
-type platform struct {
-	mu   sync.Mutex
-	runs []receiver.Run
+// platformText is the receiver bundle's platform credential for the test plugin's adapter.
+const platformText = "s3cr3t-platform-credential"
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
 }
 
-func (p *platform) Ready(context.Context) (bool, error) { return true, nil }
-
-func (p *platform) Dispatch(_ context.Context, run receiver.Run) (receiver.Outcome, receiver.Handle, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.runs = append(p.runs, run)
-	return receiver.OutcomeCreated, receiver.Handle{Data: []byte(run.ID), Name: run.ID}, nil
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
 }
 
-func (p *platform) Lookup(context.Context, string, int64) (receiver.Job, error) {
-	return receiver.Job{}, nil
-}
-
-func (p *platform) Follow(ctx context.Context, _ receiver.Handle, _ int64, lines chan<- receiver.Line) (receiver.Terminal, error) {
-	var offset int64
-	for _, data := range []string{`{"type":"assistant","message":"working"}`, `{"type":"result","result":"done","is_error":false}`} {
-		select {
-		case lines <- receiver.Line{Offset: offset, Next: offset + int64(len(data)+1), Data: []byte(data)}:
-		case <-ctx.Done():
-			return receiver.Terminal{}, ctx.Err()
-		}
-		offset += int64(len(data) + 1)
-	}
-	<-ctx.Done()
-	return receiver.Terminal{}, ctx.Err()
-}
-
-func (p *platform) Stop(context.Context, receiver.Handle) error  { return nil }
-func (p *platform) Purge(context.Context, string, int64) error   { return nil }
-func (p *platform) Release(context.Context, string, int64) error { return nil }
-func (p *platform) Sweep(context.Context) error                  { return nil }
-func (p *platform) dispatched() []receiver.Run {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]receiver.Run(nil), p.runs...)
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // tlsCluster is kfake behind TLS with a throwaway CA, so bundles carry a real CA and principals log in as they
@@ -132,9 +112,9 @@ func resalt(t *testing.T, service *admin.Service, bundlePath string) {
 	}
 }
 
-// TestRoundTrip runs a task from a host's Submit through a receiver to the host's Await, on records each side
-// produces for the other: provisioning through wherry admin, bundles, the host and receiver constructors, the real
-// claim, admission, sealing, dual write and feed reads.
+// TestRoundTrip runs a task from a host's Submit through a receiver and the test plugin process to the host's Await,
+// on records each side produces for the other: provisioning through wherry admin, bundles, the host and receiver
+// constructors, plugin discovery and the adapter link, the real claim, admission, sealing, dual write and feed reads.
 func TestRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -147,13 +127,15 @@ func TestRoundTrip(t *testing.T) {
 		SealLifetimeMS: int64(time.Hour / time.Millisecond), DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	hostBundle, otherBundle, receiverBundle := filepath.Join(dir, "host.yaml"), filepath.Join(dir, "other.yaml"), filepath.Join(dir, "receiver.yaml")
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2,
-		Adapters: []admin.AdapterSettings{{Name: "fake", Type: "fake", Agent: "claude", Credential: "model", Labels: map[string]string{"gpu": "yes"}}}}
+		Adapters: []admin.AdapterSettings{{Name: "fake", Type: "fake", Agent: "claude", Credential: "model", Labels: map[string]string{"gpu": "yes"}, Config: map[string]any{}}}}
 	for _, step := range []func() error{
 		func() error { return service.PoolCreate(ctx, "pool-a", terms) },
 		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle) },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle) },
-		func() error { return service.ReceiverAdd(ctx, config, nil, receiverBundle) },
+		func() error {
+			return service.ReceiverAdd(ctx, config, map[string]string{"fake": platformText}, receiverBundle)
+		},
 	} {
 		if err := step(); err != nil {
 			t.Fatal(err)
@@ -171,13 +153,27 @@ func TestRoundTrip(t *testing.T) {
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	backend := &platform{}
-	r, err := receiver.New(bundle, filepath.Join(dir, "receiver-state"), func(_ string, settings admin.AdapterSettings) (receiver.Named, error) {
-		return receiver.Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Adapter: backend}, nil
-	}, log.New(io.Discard, "", 0))
-	if err != nil {
-		t.Fatal(err)
+	stateDir := filepath.Join(dir, "receiver-state")
+	logs := &syncBuffer{}
+	logger := log.New(logs, "receiver: ", 0)
+	newReceiver := func(plugins *plugins) *receiver.Receiver {
+		t.Helper()
+		r, err := receiver.New(bundle, stateDir, func(pool string, settings admin.AdapterSettings) (receiver.Named, error) {
+			return plugins.adapter(pool, settings, bundle.Platform[settings.Name])
+		}, logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
 	}
+	missing := &plugins{dir: t.TempDir(), logs: logs, running: map[string]*adapter.Plugin{}}
+	if err := newReceiver(missing).Run(ctx); err == nil || err.Error() != "adapter fake: no plugin for type fake" {
+		t.Fatalf("receiver without its plugin: %v; want a configuration error", err)
+	}
+	read := recordPlugin(t)
+	plugins := &plugins{dir: pluginDir, logs: logs, running: map[string]*adapter.Plugin{}}
+	defer plugins.close()
+	r := newReceiver(plugins)
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	go func() { _ = r.Run(runCtx) }()
@@ -231,9 +227,36 @@ func TestRoundTrip(t *testing.T) {
 	if seen, err := other.Await(ctx, submitted.RunID, 20*time.Second); err != nil || seen.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("another host of the tenant: await = %+v, %v; want the run found through its echo", seen, err)
 	}
-	runs := backend.dispatched()
+	var runs []*adapter.Run
+	var configured adapter.Settings
+	for _, record := range read() {
+		switch record.Call {
+		case "dispatch":
+			runs = append(runs, record.Run)
+		case "configure":
+			configured = record.Settings
+		}
+	}
 	if len(runs) != 1 || runs[0].ID != submitted.RunID || string(runs[0].Credential) != credentialText || string(runs[0].Prompt) == "" {
-		t.Fatalf("platform runs %+v; want one dispatch with the host's sealed credential", runs)
+		t.Fatalf("plugin runs %+v; want one dispatch with the host's sealed credential", runs)
+	}
+	if configured.Platform != platformText || configured.Pool != "pool-a" || configured.Agent != "claude" || configured.Credential != "model" {
+		t.Fatalf("plugin configured with %+v; want the bundle's platform credential and the adapter's settings", configured)
+	}
+	// A plugin crash: the receiver restarts it and configures its adapter again, platform credential included.
+	if err := syscall.Kill(read()[0].PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	for !strings.Contains(logs.String(), "plugin restarted") {
+		if ctx.Err() != nil {
+			t.Fatalf("plugin never restarted; logs:\n%s", logs.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	for _, secret := range []string{credentialText, platformText} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("receiver or plugin logs carry a credential:\n%s", logs.String())
+		}
 	}
 
 	if _, err := host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpDoesNotExist}},
