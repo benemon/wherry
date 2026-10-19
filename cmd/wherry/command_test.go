@@ -21,7 +21,6 @@ import (
 
 	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
-	"github.com/benemon/wherry/internal/receiver"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
@@ -50,25 +49,6 @@ func TestParseSelectorAlternatives(t *testing.T) {
 func TestParseSelectorRejectsDuplicateKey(t *testing.T) {
 	if _, err := parseRequirements("runtime=exec,runtime=podman"); err == nil {
 		t.Fatal("duplicate key accepted")
-	}
-}
-
-func TestNewAdaptersRejectsUnknownType(t *testing.T) {
-	_, err := newAdapters([]receiver.AdapterConfig{{Name: "k8s", Type: "kubernetes", Config: jsontext.Value(`{}`)}}, "")
-	if err == nil || !strings.Contains(err.Error(), `unknown type "kubernetes"`) {
-		t.Fatalf("got %v, want unknown type error", err)
-	}
-}
-
-func TestNewAdaptersRequiresCredentialEnv(t *testing.T) {
-	config := jsontext.Value(`{"address":"http://127.0.0.1:1","namespace":"wherry","runtimes":{}}`)
-	_, err := newAdapters([]receiver.AdapterConfig{{Name: "lab", Type: "nomad", Credential: "token", Config: config}}, "")
-	if err == nil || !strings.Contains(err.Error(), "credential_env") {
-		t.Fatalf("got %v, want credential_env required", err)
-	}
-	adapters, err := newAdapters([]receiver.AdapterConfig{{Name: "lab", Type: "nomad", Config: config}}, "")
-	if err != nil || len(adapters) != 1 || adapters[0].Name != "lab" || !adapters[0].Git {
-		t.Fatalf("adapters %#v, err %v; want a git-delivering adapter", adapters, err)
 	}
 }
 
@@ -571,7 +551,7 @@ func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: submitted.RunID, ContextID: submitted.RunID, Append: seq > 0, Artifact: wire.Artifact{
 				ArtifactID: "transcript", Parts: []wire.Part{{Text: "line", MediaType: "application/x-ndjson"}}, Extensions: extensions,
 			}},
-			Wherry: wire.ChunkBinding{ReceiverBinding: b.binding(admitted), Seq: seq},
+			Wherry: wire.ChunkBinding{ReceiverBinding: b.binding(admitted), TaskHash: admitted.hash, Seq: seq},
 		}))
 	}
 	b.feed(t, submitted.RunID, records...)

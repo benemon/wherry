@@ -472,7 +472,7 @@ func (f fixture) records(t *testing.T, topic string) []*kgo.Record {
 }
 
 func (f fixture) keys() signed.Keys {
-	return signed.Keys{testReceiver: {Current: f.receiver.signing.Public().(ed25519.PublicKey)}}
+	return signed.Keys{testReceiver: {Current: f.receiver.signing.Public().(ed25519.PublicKey), Sealing: f.receiver.sealing.PublicKey()}}
 }
 
 // statuses returns this receiver's statuses on topic in log order.

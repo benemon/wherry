@@ -277,7 +277,7 @@ func (r *testReceiver) chunk(t *testing.T, task claimed, attempt, seq int64) []b
 	run := task.submission.Wherry.Run
 	return r.sign(t, &wire.Chunk{
 		ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: run, ContextID: run, Artifact: wire.Artifact{ArtifactID: "transcript", Parts: []wire.Part{{Text: "line"}}, Extensions: []string{wire.ExtensionURI}}},
-		Wherry:         wire.ChunkBinding{ReceiverBinding: r.binding(task, attempt), Seq: seq},
+		Wherry:         wire.ChunkBinding{ReceiverBinding: r.binding(task, attempt), TaskHash: task.hash, Seq: seq},
 	})
 }
 

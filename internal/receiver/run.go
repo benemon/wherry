@@ -805,7 +805,7 @@ func (run *activeRun) chunks(lines []Line, last bool) []*kgo.Record {
 				Append:    line.Offset > 0,
 				LastChunk: last && i == len(lines)-1,
 			},
-			Wherry: wire.ChunkBinding{ReceiverBinding: run.receiver.binding(run.task, run.attempt), Seq: line.Offset},
+			Wherry: wire.ChunkBinding{ReceiverBinding: run.receiver.binding(run.task, run.attempt), TaskHash: run.taskHash, Seq: line.Offset},
 		}
 		records = append(records, run.feed(chunk))
 	}
