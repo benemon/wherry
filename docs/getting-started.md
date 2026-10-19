@@ -36,7 +36,8 @@ Write `build-terms.yaml`:
 ```yaml
 agents:
   - name: coder
-    credentials: [model-api-key]
+    credentials:
+      - model-api-key
 default_agent: coder
 seal_lifetime_ms: 86400000
 delivery_limit: 5
@@ -66,28 +67,57 @@ Copy `alice-laptop.bundle` to `~/.config/wherry/` on the host, keeping mode
 
 ## 5. Add the receiver
 
-Write `nomad-1.yaml`:
+Write the configuration as a directory, `nomad-1/`, with one file for the
+receiver, one for each platform, and one for each adapter:
+
+```
+nomad-1/
+  receiver.yaml
+  platforms/
+    nomad.yaml
+  adapters/
+    10-container.yaml
+```
+
+`nomad-1/receiver.yaml`:
 
 ```yaml
 capacity: 2
-adapters:
-  - name: container
-    type: nomad
-    agent: coder
-    credential: model-api-key
-    labels: {isolation: container}
+```
+
+`nomad-1/platforms/nomad.yaml`:
+
+```yaml
+name: nomad
+type: nomad
+config:
+  address: https://nomad.example.com:4646
+  ca_file: /etc/wherry/nomad-ca.pem
+  namespace: agents
+  credential_env: MODEL_API_KEY
+```
+
+`nomad-1/adapters/10-container.yaml`:
+
+```yaml
+name: container
+platform: nomad
+agent: coder
+credential: model-api-key
+labels:
+  isolation: container
+config:
+  runtime:
+    driver: docker
     config:
-      address: https://nomad.example.com:4646
-      ca_file: /etc/wherry/nomad-ca.pem
-      namespace: agents
-      credential_env: MODEL_API_KEY
-      runtime:
-        driver: docker
-        config:
-          image: registry.example.com/agent:1.0
-          command: /bin/sh
-          args: ["-c", "exec agent-run < \"$NOMAD_TASK_DIR/prompt.txt\""]
-        resources: {cpu: 1000, memory_mb: 2048}
+      image: registry.example.com/agent:1.0
+      command: /bin/sh
+      args:
+        - -c
+        - exec agent-run < "$NOMAD_TASK_DIR/prompt.txt"
+    resources:
+      cpu: 1000
+      memory_mb: 2048
 ```
 
 `agent-run` stands for the agent's headless command. The adapter delivers
@@ -95,7 +125,7 @@ the tenant's sealed `model-api-key` to the job as `MODEL_API_KEY`.
 
 ```sh
 wherry admin receiver add nomad-1 --pool build \
-  --config nomad-1.yaml --bundle nomad-1.bundle
+  --config nomad-1 --bundle nomad-1.bundle
 ```
 
 Copy `nomad-1.bundle` to `/etc/wherry/` on the receiver host, keeping mode
