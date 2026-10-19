@@ -33,7 +33,7 @@ func TestP04KeysOnlyFollowRegistrationRules(t *testing.T) {
 	_, first, _ := ed25519.GenerateKey(rand.Reader)
 	_, second, _ := ed25519.GenerateKey(rand.Reader)
 	owner := HostOwner("tenant-a", "host-a")
-	registration, err := RegisterKey(owner, first)
+	registration, err := RegisterKey(owner, first, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestP04KeysOnlyFollowRegistrationRules(t *testing.T) {
 	if _, err := ApplyKeyRecord(KeyState{}, HostOwner("tenant-b", "host-a"), registration); err == nil {
 		t.Fatal("accepted a registration for another owner's topic")
 	}
-	bareSecond, err := RegisterKey(owner, second)
+	bareSecond, err := RegisterKey(owner, second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestP04KeysOnlyFollowRegistrationRules(t *testing.T) {
 	if _, err := ApplyKeyRecord(state, owner, misbound); err == nil {
 		t.Fatal("accepted a rotation naming another previous key")
 	}
-	rotation, err := RotateKey(owner, first, second)
+	rotation, err := RotateKey(owner, first, second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,40 +87,34 @@ func TestP04KeysOnlyFollowRegistrationRules(t *testing.T) {
 	}
 }
 
-func TestP07RecordSchemaVersionIsExact(t *testing.T) {
+type testRecord struct {
+	V      int    `json:"v"`
+	Tenant string `json:"tenant"`
+	Host   string `json:"host"`
+	Run    string `json:"run"`
+}
+
+const testType = "application/vnd.wherry.test.v1+jws"
+
+func TestP07RecordTypeIsExact(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	keys := Keys{HostOwner("tenant-a", "host-a"): {Current: key.Public().(ed25519.PublicKey)}}
 	owner := HostOwner("tenant-a", "host-a")
-	task := Task{Version: 1, Tenant: "tenant-a", Host: "host-a", Run: "run-a", Pool: "pool-a", Agent: "agent-a"}
-	current, err := Sign(TaskType, owner, task, key)
+	keys := Keys{owner: {Current: key.Public().(ed25519.PublicKey)}}
+	record := testRecord{V: 1, Tenant: "tenant-a", Host: "host-a", Run: "run-a"}
+	current, err := Sign(testType, owner, record, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseTask(current, keys); err != nil {
-		t.Fatalf("v1 task: %v", err)
+	var decoded testRecord
+	if _, err := Verify(current, testType, keys, &decoded); err != nil || decoded != record {
+		t.Fatalf("v1 record: %v", err)
 	}
-	underV2, err := Sign("application/vnd.wherry.task.v2+jws", owner, task, key)
+	underV2, err := Sign("application/vnd.wherry.test.v2+jws", owner, record, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseTask(underV2, keys); err == nil {
-		t.Fatal("accepted a v1 payload under a v2 type")
-	}
-	task.Version = 2
-	v2Payload, err := Sign(TaskType, owner, task, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ParseTask(v2Payload, keys); err == nil {
-		t.Fatal("accepted a v2 payload under a v1 type")
-	}
-	status := Status{Version: 1, EventID: "event-a", Receiver: "host-a", Tenant: "tenant-a", Run: "run-a", Pool: "pool-a", State: "running"}
-	statusUnderTask, err := Sign(TaskType, owner, status, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ParseTask(statusUnderTask, keys); err == nil {
-		t.Fatal("accepted a status payload under the task type")
+	if _, err := Verify(underV2, testType, keys, &decoded); err == nil {
+		t.Fatal("accepted a record under another typ")
 	}
 	other, err := jose.ParseSignedCompact(string(current), []jose.SignatureAlgorithm{jose.EdDSA})
 	if err != nil || len(other.Signatures) != 1 {
@@ -215,43 +209,47 @@ func TestP14StatusIsAtomicallyDualWritten(t *testing.T) {
 func TestP01SignatureMustVerifyAgainstNamedKey(t *testing.T) {
 	_, victim, _ := ed25519.GenerateKey(rand.Reader)
 	_, attacker, _ := ed25519.GenerateKey(rand.Reader)
-	keys := Keys{HostOwner("tenant-a", "host-a"): {Current: victim.Public().(ed25519.PublicKey)}}
-	kid := HostOwner("tenant-a", "host-a") + "/" + KeyID(victim.Public().(ed25519.PublicKey))
-	forged, err := signRaw(TaskType, kid, []byte(`{"v":1,"tenant":"tenant-a","host":"host-a","run":"run-a","turn":0,"attempt":0,"pool":"pool-a","agent":"agent-a"}`), attacker)
+	owner := HostOwner("tenant-a", "host-a")
+	keys := Keys{owner: {Current: victim.Public().(ed25519.PublicKey)}}
+	kid := owner + "/" + KeyID(victim.Public().(ed25519.PublicKey))
+	var decoded testRecord
+	forged, err := signRaw(testType, kid, []byte(`{"v":1,"tenant":"tenant-a","host":"host-a","run":"run-a"}`), attacker)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseTask(forged, keys); err == nil {
-		t.Fatal("accepted a task naming the victim's key but signed by another")
+	if _, err := Verify(forged, testType, keys, &decoded); err == nil {
+		t.Fatal("accepted a record naming the victim's key but signed by another")
 	}
 	keys[HostOwner("tenant-b", "host-b")] = KeyState{Current: attacker.Public().(ed25519.PublicKey)}
-	borrowed, err := Sign(TaskType, HostOwner("tenant-b", "host-b"), Task{Version: 1, Tenant: "tenant-a", Host: "host-a", Run: "run-a", Pool: "pool-a", Agent: "agent-a"}, attacker)
+	borrowed, err := Sign(testType, HostOwner("tenant-b", "host-b"), testRecord{V: 1, Tenant: "tenant-a", Host: "host-a", Run: "run-a"}, attacker)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseTask(borrowed, keys); err == nil {
-		t.Fatal("accepted a task claiming one host but signed under another's kid")
+	if signer, err := Verify(borrowed, testType, keys, &decoded); err != nil || signer != HostOwner("tenant-b", "host-b") {
+		t.Fatalf("Verify must report the kid's owner for the caller to match: %q %v", signer, err)
 	}
-	malformed, err := signRaw(TaskType, kid, []byte(`{"v":1,"tenant":`), attacker)
+	malformed, err := signRaw(testType, kid, []byte(`{"v":1,"tenant":`), attacker)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseTask(malformed, keys); err == nil || err.Error() != "invalid JWS signature" {
+	if _, err := Verify(malformed, testType, keys, &decoded); err == nil || err.Error() != "invalid JWS signature" {
 		t.Fatalf("decoded a payload before verifying its signature: %v", err)
 	}
 }
 
 func TestP07PayloadDecodeIsStrict(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	keys := Keys{HostOwner("tenant-a", "host-a"): {Current: key.Public().(ed25519.PublicKey)}}
-	kid := HostOwner("tenant-a", "host-a") + "/" + KeyID(key.Public().(ed25519.PublicKey))
-	base := `{"v":1,"tenant":"tenant-a","host":"host-a","run":"run-a","turn":0,"attempt":0,"pool":"pool-a","agent":"agent-a"`
-	for name, payload := range map[string]string{"unknown member": base + `,"extra":1}`, "duplicate member": base + `,"pool":"pool-b"}`} {
-		encoded, err := signRaw(TaskType, kid, []byte(payload), key)
+	owner := HostOwner("tenant-a", "host-a")
+	keys := Keys{owner: {Current: key.Public().(ed25519.PublicKey)}}
+	kid := owner + "/" + KeyID(key.Public().(ed25519.PublicKey))
+	base := `{"v":1,"tenant":"tenant-a","host":"host-a","run":"run-a"`
+	for name, payload := range map[string]string{"unknown member": base + `,"extra":1}`, "duplicate member": base + `,"run":"run-b"}`} {
+		encoded, err := signRaw(testType, kid, []byte(payload), key)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ParseTask(encoded, keys); err == nil {
+		var decoded testRecord
+		if _, err := Verify(encoded, testType, keys, &decoded); err == nil {
 			t.Fatalf("accepted a payload with a %s", name)
 		}
 	}
@@ -269,4 +267,24 @@ func signRaw(typ, kid string, payload []byte, key ed25519.PrivateKey) ([]byte, e
 	}
 	compact, err := jws.CompactSerialize()
 	return []byte(compact), err
+}
+
+func TestKeyRecordCarriesTheSealingKey(t *testing.T) {
+	_, signing, _ := ed25519.GenerateKey(rand.Reader)
+	sealing, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	registration, err := RegisterKey("receiver-a", signing, sealing.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := ApplyKeyRecord(KeyState{}, "receiver-a", registration)
+	if err != nil || state.Sealing == nil || !state.Sealing.Equal(sealing.PublicKey()) {
+		t.Fatalf("sealing key not registered: %v", err)
+	}
+	bad, err := signKeys(KeyRecord{Version: 1, Owner: "receiver-a", Action: "register", Key: publicJWK(signing), SealingKey: "AAAA"}, signing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyKeyRecord(KeyState{}, "receiver-a", bad); err == nil {
+		t.Fatal("accepted a malformed sealing key")
+	}
 }

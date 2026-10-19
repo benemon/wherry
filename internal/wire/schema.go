@@ -945,7 +945,7 @@ var (
 
 func validKey(key string) bool {
 	switch key {
-	case "platform", "runtime", "region", "zone":
+	case "platform", "agent", "runtime", "region", "zone":
 		return true
 	}
 	return platformKey.MatchString(key) || operatorKey.MatchString(key)

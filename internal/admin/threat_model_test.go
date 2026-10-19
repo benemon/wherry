@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -23,67 +24,69 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
+func testSubmission(tenant, host, pool, run string) *wire.Submission {
+	return &wire.Submission{
+		Message: wire.Message{MessageID: "message-" + run, ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "hello"}}, Extensions: []string{wire.ExtensionURI}},
+		Wherry:  wire.SubmissionBinding{Tenant: tenant, Host: host, Pool: pool, Run: run, Turn: 1, Placement: wire.Placement{Agent: "agent-a", Runtime: "runtime-a", Labels: map[string]string{}}},
+	}
+}
+
+func testStatus(receiver, tenant, pool, run string) *wire.RunStatus {
+	return &wire.RunStatus{
+		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: run, ContextID: run, Status: wire.TaskStatus{State: wire.TaskStateWorking, Timestamp: "2026-10-19T10:00:00Z"}},
+		Wherry:       wire.StatusBinding{ReceiverBinding: wire.ReceiverBinding{Receiver: receiver, Tenant: tenant, Pool: pool, Run: run, Turn: 1, Attempt: 1}, EventID: "event-" + run, Kind: "started", TaskHash: strings.Repeat("a", 64)},
+	}
+}
+
+func sign(t *testing.T, record wire.Record, key ed25519.PrivateKey) []byte {
+	t.Helper()
+	encoded, err := wire.SignRecord(record, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
 func TestP01TaskKeyMustBelongToSubmittingTenant(t *testing.T) {
 	state := modelState(t)
 	_, own, _ := ed25519.GenerateKey(rand.Reader)
 	_, foreign, _ := ed25519.GenerateKey(rand.Reader)
 	keys := signed.Keys{signed.HostOwner("tenant-a", "host-a"): {Current: own.Public().(ed25519.PublicKey)}, signed.HostOwner("tenant-b", "host-b"): {Current: foreign.Public().(ed25519.PublicKey)}}
-	task, err := signed.SignTask(signed.Task{Tenant: "tenant-a", Host: "host-a", Run: "run-a", Pool: "pool-a", Agent: "agent-a"}, own)
-	if err != nil {
+	task := sign(t, testSubmission("tenant-a", "host-a", "pool-a", "run-a"), own)
+	if _, err := AuthorizeSubmission(state, keys, task, "pool-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := AuthorizeTask(state, keys, task, "pool-a"); err != nil {
-		t.Fatal(err)
-	}
-	forged, err := signed.SignTask(signed.Task{Tenant: "tenant-a", Host: "host-a", Run: "run-a", Pool: "pool-a", Agent: "agent-a"}, foreign)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := AuthorizeTask(state, keys, forged, "pool-a"); err == nil {
+	if _, err := AuthorizeSubmission(state, keys, sign(t, testSubmission("tenant-a", "host-a", "pool-a", "run-a"), foreign), "pool-a"); err == nil {
 		t.Fatal("accepted a task signed by a key on another tenant's host topic")
 	}
-	claimed, err := signed.SignTask(signed.Task{Tenant: "tenant-a", Host: "host-b", Run: "run-a", Pool: "pool-a", Agent: "agent-a"}, foreign)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := AuthorizeTask(state, keys, claimed, "pool-a"); err == nil {
+	if _, err := AuthorizeSubmission(state, keys, sign(t, testSubmission("tenant-a", "host-b", "pool-a", "run-a"), foreign), "pool-a"); err == nil {
 		t.Fatal("accepted a task naming a host its tenant does not own")
 	}
-	if err := AuthorizeTask(state, keys, task, "pool-b"); err == nil {
+	if _, err := AuthorizeSubmission(state, keys, task, "pool-b"); err == nil {
 		t.Fatal("accepted a task on a pool topic it does not name")
 	}
 	keys[signed.HostOwner("tenant-a", "host-z")] = signed.KeyState{Current: own.Public().(ed25519.PublicKey)}
-	unmapped, err := signed.SignTask(signed.Task{Tenant: "tenant-a", Host: "host-z", Run: "run-a", Pool: "pool-a", Agent: "agent-a"}, own)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := AuthorizeTask(state, keys, unmapped, "pool-a"); err == nil {
+	if _, err := AuthorizeSubmission(state, keys, sign(t, testSubmission("tenant-a", "host-z", "pool-a", "run-a"), own), "pool-a"); err == nil {
 		t.Fatal("accepted a task from a host with no host-to-tenant mapping")
 	}
-	unentitled, err := signed.SignTask(signed.Task{Tenant: "tenant-b", Host: "host-b", Run: "run-b", Pool: "pool-b", Agent: "agent-a"}, foreign)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := AuthorizeTask(state, keys, unentitled, "pool-b"); err == nil {
+	if _, err := AuthorizeSubmission(state, keys, sign(t, testSubmission("tenant-b", "host-b", "pool-b", "run-b"), foreign), "pool-b"); err == nil {
 		t.Fatal("accepted a task for a pool the tenant is not entitled to")
 	}
 	state.Ended[TenantPrincipal("tenant-a", "host-a")] = true
-	if err := AuthorizeTask(state, keys, task, "pool-a"); err == nil {
+	if _, err := AuthorizeSubmission(state, keys, task, "pool-a"); err == nil {
 		t.Fatal("accepted a task from a host after its membership end")
 	}
 }
 
 func TestP02CancelMustMatchRunTenant(t *testing.T) {
+	state := modelState(t)
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := signed.Keys{signed.HostOwner("tenant-b", "host-b"): {Current: key.Public().(ed25519.PublicKey)}}
-	cancel, err := signed.SignCancel(signed.Cancel{Tenant: "tenant-b", Host: "host-b", Run: "run-a", Pool: "pool-a"}, key)
-	if err != nil {
+	cancel := sign(t, &wire.Cancel{Tenant: "tenant-b", Host: "host-b", Pool: "pool-a", Run: "run-a", Turn: 1}, key)
+	if _, err := AuthorizeCancel(state, keys, cancel, "pool-a", "tenant-b"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := signed.ParseCancel(cancel, keys, "tenant-b"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := signed.ParseCancel(cancel, keys, "tenant-a"); err == nil {
+	if _, err := AuthorizeCancel(state, keys, cancel, "pool-a", "tenant-a"); err == nil {
 		t.Fatal("accepted another tenant's cancel")
 	}
 }
@@ -114,43 +117,28 @@ func TestP06StatusBindsPlacedPool(t *testing.T) {
 	state := modelState(t)
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}}
-	status, err := signed.SignStatus(signed.Status{EventID: "event-a", Receiver: "receiver-a", Tenant: "tenant-a", Run: "run-a", Pool: "pool-a", State: "running"}, key)
-	if err != nil {
+	status := sign(t, testStatus("receiver-a", "tenant-a", "pool-a", "run-a"), key)
+	if _, err := AuthorizeStatus(state, keys, status, "pool-a", "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := AuthorizeStatus(state, keys, status, "pool-a", "tenant-a"); err != nil {
-		t.Fatal(err)
-	}
-	if err := AuthorizeStatus(state, keys, status, "pool-b", "tenant-a"); err == nil {
+	if _, err := AuthorizeStatus(state, keys, status, "pool-b", "tenant-a"); err == nil {
 		t.Fatal("accepted pool-a receiver status for a pool-b run")
 	}
-	if err := AuthorizeStatus(state, keys, status, "pool-a", "tenant-b"); err == nil {
+	if _, err := AuthorizeStatus(state, keys, status, "pool-a", "tenant-b"); err == nil {
 		t.Fatal("accepted a status moved to another tenant's run")
 	}
-	forged, err := signed.SignStatus(signed.Status{EventID: "event-a", Receiver: "receiver-b", Tenant: "tenant-a", Run: "run-a", Pool: "pool-a", State: "running"}, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := AuthorizeStatus(state, keys, forged, "pool-a", "tenant-a"); err == nil {
+	if _, err := AuthorizeStatus(state, keys, sign(t, testStatus("receiver-b", "tenant-a", "pool-a", "run-a"), key), "pool-a", "tenant-a"); err == nil {
 		t.Fatal("accepted a status naming a receiver whose key did not sign it")
 	}
-	claimed, err := signed.SignStatus(signed.Status{EventID: "event-a", Receiver: "receiver-a", Tenant: "tenant-a", Run: "run-b", Pool: "pool-b", State: "running"}, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := AuthorizeStatus(state, keys, claimed, "pool-b", "tenant-a"); err == nil {
+	if _, err := AuthorizeStatus(state, keys, sign(t, testStatus("receiver-a", "tenant-a", "pool-b", "run-b"), key), "pool-b", "tenant-a"); err == nil {
 		t.Fatal("accepted a pool-b status from a pool-a receiver")
 	}
 	keys["receiver-b"] = signed.KeyState{Current: key.Public().(ed25519.PublicKey)}
-	unentitled, err := signed.SignStatus(signed.Status{EventID: "event-b", Receiver: "receiver-b", Tenant: "tenant-b", Run: "run-b", Pool: "pool-b", State: "running"}, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := AuthorizeStatus(state, keys, unentitled, "pool-b", "tenant-b"); err == nil {
+	if _, err := AuthorizeStatus(state, keys, sign(t, testStatus("receiver-b", "tenant-b", "pool-b", "run-b"), key), "pool-b", "tenant-b"); err == nil {
 		t.Fatal("accepted a status for a tenant not entitled to the pool")
 	}
 	state.Ended[ReceiverPrincipal("receiver-a")] = true
-	if err := AuthorizeStatus(state, keys, status, "pool-a", "tenant-a"); err == nil {
+	if _, err := AuthorizeStatus(state, keys, status, "pool-a", "tenant-a"); err == nil {
 		t.Fatal("accepted a status from a receiver after its membership end")
 	}
 }
@@ -431,7 +419,7 @@ func TestAdminSkipRecoversOnlyUndecodableRecords(t *testing.T) {
 	if _, err := service.LoadState(ctx); err == nil || !strings.Contains(err.Error(), "sha256="+hash) {
 		t.Fatalf("loaded state over an uncovered undecodable record: %v", err)
 	}
-	raw, err := service.readAdmin(ctx)
+	raw, err := readRaw(ctx, service.Operator)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,5 +480,36 @@ func TestAdminSkipRestoresState(t *testing.T) {
 	}
 	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatalf("admin commands still fail after the skip: %v", err)
+	}
+}
+
+func TestEchoAndAdvertisementBindTheirPool(t *testing.T) {
+	state := modelState(t)
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}}
+	echo := func(tenant, pool string) []byte {
+		return sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: tenant, Pool: pool, Run: "run-a", Turn: 1, Placement: wire.Placement{Agent: "agent-a", Runtime: "runtime-a", Labels: map[string]string{}}, TaskHash: strings.Repeat("a", 64), MessageID: "message-a"}, key)
+	}
+	if _, err := AuthorizeEcho(state, keys, echo("tenant-a", "pool-a"), "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AuthorizeEcho(state, keys, echo("tenant-a", "pool-a"), "tenant-b"); err == nil {
+		t.Fatal("accepted an echo on another tenant's feed")
+	}
+	if _, err := AuthorizeEcho(state, keys, echo("tenant-a", "pool-b"), "tenant-a"); err == nil {
+		t.Fatal("accepted an echo placing a run in a pool the receiver is not in")
+	}
+	advertisement := func(pool string) []byte {
+		return sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Labels: map[string]string{"agent": "agent-a"}}}, Capacity: 1, SealingKey: "key", AtMS: 1}, key)
+	}
+	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-b")); err == nil {
+		t.Fatal("accepted an advertisement for a pool the receiver is not in")
+	}
+	state.Ended[ReceiverPrincipal("receiver-a")] = true
+	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-a")); err == nil {
+		t.Fatal("accepted an advertisement after the receiver's membership end")
 	}
 }

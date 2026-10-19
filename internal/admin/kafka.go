@@ -109,7 +109,10 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err != nil {
 		return err
 	}
-	if err := service.createTopics(ctx, "-1", HostTopic(tenant, host), TenantTopic(tenant)); err != nil {
+	if err := service.createTopics(ctx, "-1", HostTopic(tenant, host)); err != nil {
+		return err
+	}
+	if err := service.createTopics(ctx, tenantRetentionMS, TenantTopic(tenant)); err != nil {
 		return err
 	}
 	if err := service.reconcileACLs(ctx, state); err != nil {
@@ -127,7 +130,7 @@ func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) erro
 	if err != nil {
 		return err
 	}
-	if err := service.createTopics(ctx, "-1", TenantTopic(tenant)); err != nil {
+	if err := service.createTopics(ctx, tenantRetentionMS, TenantTopic(tenant)); err != nil {
 		return err
 	}
 	if err := service.reconcileACLs(ctx, state); err != nil {
@@ -160,18 +163,14 @@ func (service *Service) Check(ctx context.Context) error {
 }
 
 func (service *Service) LoadState(ctx context.Context) (State, error) {
-	raw, err := service.readAdmin(ctx)
-	if err != nil {
-		return State{}, err
-	}
-	return load(raw)
+	return Load(ctx, service.Operator)
 }
 
 // Skip records the operator's decision to pass over the undecodable record at
 // offset, bound to its SHA-256. It writes directly: loading state fails until
 // the skip exists.
 func (service *Service) Skip(ctx context.Context, offset int64, hash string) error {
-	raw, err := service.readAdmin(ctx)
+	raw, err := readRaw(ctx, service.Operator)
 	if err != nil {
 		return err
 	}
@@ -195,49 +194,9 @@ func (service *Service) Skip(ctx context.Context, offset int64, hash string) err
 	return fmt.Errorf("wherry.admin has no record at offset %d", offset)
 }
 
-func (service *Service) readAdmin(ctx context.Context) ([]rawRecord, error) {
-	admin := kadm.NewClient(service.Operator)
-	starts, err := admin.ListStartOffsets(ctx, AdminTopic)
-	if err != nil {
-		return nil, err
-	}
-	ends, err := admin.ListEndOffsets(ctx, AdminTopic)
-	if err != nil {
-		return nil, err
-	}
-	start, ok := starts.Lookup(AdminTopic, 0)
-	if !ok || start.Err != nil {
-		return nil, errors.New("wherry.admin partition 0 is unavailable")
-	}
-	end, ok := ends.Lookup(AdminTopic, 0)
-	if !ok || end.Err != nil {
-		return nil, errors.New("wherry.admin end offset is unavailable")
-	}
-	if start.Offset == end.Offset {
-		return nil, nil
-	}
-	service.Operator.AddConsumePartitions(map[string]map[int32]kgo.Offset{AdminTopic: {0: kgo.NewOffset().At(start.Offset)}})
-	defer service.Operator.RemoveConsumePartitions(map[string][]int32{AdminTopic: {0}})
-	var raw []rawRecord
-	for {
-		fetches := service.Operator.PollFetches(ctx)
-		if err := fetches.Err(); err != nil {
-			return nil, err
-		}
-		done := false
-		fetches.EachRecord(func(record *kgo.Record) {
-			if record.Offset < end.Offset {
-				raw = append(raw, rawRecord{record.Offset, record.Value})
-			}
-			if record.Offset >= end.Offset-1 {
-				done = true
-			}
-		})
-		if done {
-			return raw, nil
-		}
-	}
-}
+// tenantRetentionMS is the tenant feed's default: it carries transcripts,
+// which hold anything the agent printed (Ben, 2026-10-19).
+const tenantRetentionMS = "2592000000"
 
 // receiversRetentionMS bounds wherry.receivers: readers want only each
 // receiver's latest advertisement.

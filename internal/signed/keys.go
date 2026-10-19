@@ -2,6 +2,7 @@ package signed
 
 import (
 	"crypto"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -20,6 +21,9 @@ type KeyRecord struct {
 	Action        string          `json:"action"`
 	Key           jose.JSONWebKey `json:"key"`
 	PreviousKeyID string          `json:"previous_key_id,omitzero"`
+	// SealingKey is a receiver's raw X25519 public key, base64url; go-jose
+	// JWKs carry only Ed25519 among the OKP curves.
+	SealingKey string `json:"sealing_key,omitzero"`
 }
 
 func KeyID(key ed25519.PublicKey) string {
@@ -27,12 +31,34 @@ func KeyID(key ed25519.PublicKey) string {
 	return "sha256:" + base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-func RegisterKey(owner string, key ed25519.PrivateKey) ([]byte, error) {
-	return signKeys(KeyRecord{Version: 1, Owner: owner, Action: "register", Key: publicJWK(key)}, key)
+// RegisterKey registers an owner's first signing key and, for a receiver, its
+// sealing key; sealing is nil for a host.
+func RegisterKey(owner string, key ed25519.PrivateKey, sealing *ecdh.PublicKey) ([]byte, error) {
+	return signKeys(KeyRecord{Version: 1, Owner: owner, Action: "register", Key: publicJWK(key), SealingKey: encodeSealing(sealing)}, key)
 }
 
-func RotateKey(owner string, current, next ed25519.PrivateKey) ([]byte, error) {
-	return signKeys(KeyRecord{Version: 1, Owner: owner, Action: "rotate", Key: publicJWK(next), PreviousKeyID: KeyID(current.Public().(ed25519.PublicKey))}, current, next)
+// RotateKey replaces the signing key and sets the sealing key, signed by both
+// signing keys.
+func RotateKey(owner string, current, next ed25519.PrivateKey, sealing *ecdh.PublicKey) ([]byte, error) {
+	return signKeys(KeyRecord{Version: 1, Owner: owner, Action: "rotate", Key: publicJWK(next), PreviousKeyID: KeyID(current.Public().(ed25519.PublicKey)), SealingKey: encodeSealing(sealing)}, current, next)
+}
+
+func encodeSealing(key *ecdh.PublicKey) string {
+	if key == nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(key.Bytes())
+}
+
+func decodeSealing(encoded string) (*ecdh.PublicKey, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	if err != nil {
+		return nil, errors.New("invalid sealing key encoding")
+	}
+	return ecdh.X25519().NewPublicKey(raw)
 }
 
 func RevokeKey(owner string, current ed25519.PrivateKey) ([]byte, error) {
@@ -43,6 +69,7 @@ func RevokeKey(owner string, current ed25519.PrivateKey) ([]byte, error) {
 // its owner is re-provisioned under a new principal.
 type KeyState struct {
 	Current ed25519.PublicKey
+	Sealing *ecdh.PublicKey
 	Revoked bool
 }
 
@@ -96,17 +123,21 @@ func ApplyKeyRecord(state KeyState, topicOwner string, encoded []byte) (KeyState
 	if !ok || !record.Key.IsPublic() || record.Version != 1 || record.Owner != topicOwner {
 		return state, errors.New("invalid key record")
 	}
+	sealing, err := decodeSealing(record.SealingKey)
+	if err != nil {
+		return state, err
+	}
 	switch record.Action {
 	case "register":
 		if len(jws.Signatures) != 1 || !verifiedBy(jws, key) {
 			return state, errors.New("registration is not first and self-signed")
 		}
-		return KeyState{Current: key}, nil
+		return KeyState{Current: key, Sealing: sealing}, nil
 	case "rotate":
 		if state.Current == nil || len(jws.Signatures) != 2 || record.PreviousKeyID != KeyID(state.Current) || key.Equal(state.Current) || !verifiedBy(jws, state.Current) || !verifiedBy(jws, key) {
 			return state, errors.New("rotation is not signed by current and new keys")
 		}
-		return KeyState{Current: key}, nil
+		return KeyState{Current: key, Sealing: sealing}, nil
 	case "revoke":
 		if state.Current == nil || len(jws.Signatures) != 1 || !key.Equal(state.Current) || !verifiedBy(jws, key) {
 			return state, errors.New("revocation is not signed by retiring key")

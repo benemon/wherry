@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/wire"
 )
 
 type AgentTerms struct {
@@ -212,33 +213,146 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	return nil
 }
 
-// AuthorizeTask accepts a task that verifies against its host's own key topic,
-// from a live host of the named tenant, entitled to the pool whose topic it
-// arrived on.
-func AuthorizeTask(state State, keys signed.Keys, encoded []byte, topicPool string) error {
-	task, err := signed.ParseTask(encoded, keys)
-	if err != nil {
-		return err
-	}
-	principal := TenantPrincipal(task.Tenant, task.Host)
-	if _, ok := state.Hosts[principal]; !ok || state.Ended[principal] || task.Pool != topicPool || !state.Entitlements[task.Tenant][topicPool] {
-		return errors.New("task is not authorised")
+func (state State) liveHost(tenant, host, pool string) error {
+	principal := TenantPrincipal(tenant, host)
+	if _, ok := state.Hosts[principal]; !ok || state.Ended[principal] || !state.Entitlements[tenant][pool] {
+		return errors.New("record is not from a live host of a tenant entitled to the pool")
 	}
 	return nil
 }
 
-// AuthorizeStatus accepts a status from a live member of the run's placed pool
-// whose tenant is entitled to that pool.
-func AuthorizeStatus(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) error {
-	status, err := signed.ParseStatus(encoded, keys, placedPool, runTenant)
-	if err != nil {
-		return err
-	}
-	config, ok := state.Receivers[status.Receiver]
-	if !ok || config.Pool != placedPool || state.Ended[ReceiverPrincipal(status.Receiver)] || !state.Entitlements[status.Tenant][placedPool] {
-		return errors.New("status is not authorised")
+func (state State) liveMember(receiver, pool string) error {
+	config, ok := state.Receivers[receiver]
+	if !ok || config.Pool != pool || state.Ended[ReceiverPrincipal(receiver)] {
+		return errors.New("record is not from a live member of the pool")
 	}
 	return nil
+}
+
+// receiverRecord checks a receiver record against the run it belongs to.
+func (state State) receiverRecord(binding wire.ReceiverBinding, placedPool, runTenant string) error {
+	if binding.Pool != placedPool || binding.Tenant != runTenant {
+		return errors.New("record names another pool or tenant than its run")
+	}
+	if err := state.liveMember(binding.Receiver, placedPool); err != nil {
+		return err
+	}
+	if !state.Entitlements[runTenant][placedPool] {
+		return errors.New("tenant is not entitled to the pool")
+	}
+	return nil
+}
+
+// AuthorizeSubmission accepts a submission that verifies against its host's
+// own key topic, from a live host of a tenant entitled to the pool whose topic
+// it arrived on.
+func AuthorizeSubmission(state State, keys signed.Keys, encoded []byte, topicPool string) (wire.Submission, error) {
+	var submission wire.Submission
+	if err := wire.ParseRecord(encoded, keys, &submission); err != nil {
+		return wire.Submission{}, err
+	}
+	if submission.Wherry.Pool != topicPool {
+		return wire.Submission{}, errors.New("submission names another pool than its topic")
+	}
+	if err := state.liveHost(submission.Wherry.Tenant, submission.Wherry.Host, topicPool); err != nil {
+		return wire.Submission{}, err
+	}
+	return submission, nil
+}
+
+// AuthorizeCancel accepts a cancel from a live host of the run's own tenant.
+func AuthorizeCancel(state State, keys signed.Keys, encoded []byte, topicPool, runTenant string) (wire.Cancel, error) {
+	var cancel wire.Cancel
+	if err := wire.ParseRecord(encoded, keys, &cancel); err != nil {
+		return wire.Cancel{}, err
+	}
+	if cancel.Pool != topicPool || cancel.Tenant != runTenant {
+		return wire.Cancel{}, errors.New("cancel names another pool or tenant than its run")
+	}
+	if err := state.liveHost(cancel.Tenant, cancel.Host, topicPool); err != nil {
+		return wire.Cancel{}, err
+	}
+	return cancel, nil
+}
+
+// AuthorizeStatus accepts a status from a live member of the run's placed pool.
+func AuthorizeStatus(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.RunStatus, error) {
+	var status wire.RunStatus
+	if err := wire.ParseRecord(encoded, keys, &status); err != nil {
+		return wire.RunStatus{}, err
+	}
+	if err := state.receiverRecord(status.Wherry.ReceiverBinding, placedPool, runTenant); err != nil {
+		return wire.RunStatus{}, err
+	}
+	return status, nil
+}
+
+// AuthorizeChunk accepts a transcript chunk from a live member of the run's placed pool.
+func AuthorizeChunk(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.Chunk, error) {
+	var chunk wire.Chunk
+	if err := wire.ParseRecord(encoded, keys, &chunk); err != nil {
+		return wire.Chunk{}, err
+	}
+	if err := state.receiverRecord(chunk.Wherry.ReceiverBinding, placedPool, runTenant); err != nil {
+		return wire.Chunk{}, err
+	}
+	return chunk, nil
+}
+
+// AuthorizeResult accepts a result from a live member of the run's placed pool.
+func AuthorizeResult(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.Result, error) {
+	var result wire.Result
+	if err := wire.ParseRecord(encoded, keys, &result); err != nil {
+		return wire.Result{}, err
+	}
+	if err := state.receiverRecord(result.Wherry.ReceiverBinding, placedPool, runTenant); err != nil {
+		return wire.Result{}, err
+	}
+	return result, nil
+}
+
+// AuthorizeStartFailure accepts a start failure from a live member of the run's placed pool.
+func AuthorizeStartFailure(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.StartFailure, error) {
+	var failure wire.StartFailure
+	if err := wire.ParseRecord(encoded, keys, &failure); err != nil {
+		return wire.StartFailure{}, err
+	}
+	if err := state.receiverRecord(failure.Wherry, placedPool, runTenant); err != nil {
+		return wire.StartFailure{}, err
+	}
+	return failure, nil
+}
+
+// AuthorizeEcho accepts an echo on feedTenant's feed from a live member of the
+// pool it names. The echo is what places a run, so its pool comes from itself.
+func AuthorizeEcho(state State, keys signed.Keys, encoded []byte, feedTenant string) (wire.Echo, error) {
+	var echo wire.Echo
+	if err := wire.ParseRecord(encoded, keys, &echo); err != nil {
+		return wire.Echo{}, err
+	}
+	if echo.Tenant != feedTenant {
+		return wire.Echo{}, errors.New("echo names another tenant than its feed")
+	}
+	if err := state.liveMember(echo.Receiver, echo.Pool); err != nil {
+		return wire.Echo{}, err
+	}
+	if !state.Entitlements[feedTenant][echo.Pool] {
+		return wire.Echo{}, errors.New("tenant is not entitled to the pool")
+	}
+	return echo, nil
+}
+
+// AuthorizeAdvertisement accepts an advertisement from a live member of the
+// pool it names.
+func AuthorizeAdvertisement(state State, keys signed.Keys, encoded []byte) (wire.Advertisement, error) {
+	var advertisement wire.Advertisement
+	if err := wire.ParseRecord(encoded, keys, &advertisement); err != nil {
+		return wire.Advertisement{}, err
+	}
+	if err := state.liveMember(advertisement.Receiver, advertisement.Pool); err != nil {
+		return wire.Advertisement{}, err
+	}
+	return advertisement, nil
 }
 
 func ValidateReceiverRecord(record Record, receiver string, terms Terms) error {
