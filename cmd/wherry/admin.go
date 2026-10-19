@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +25,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(pos) == 0 {
-		return errors.New("usage: wherry admin <pool create|receiver add|tenant add|host add|revoke host|revoke receiver|check>")
+		return errors.New("usage: wherry admin <pool create|receiver add|tenant add|host add|revoke host|revoke receiver|skip|check>")
 	}
 	root, err := adminKafka("WHERRY_TRUST_ADMIN_USER", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
 	if err != nil {
@@ -42,7 +43,11 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	}
 	service := admin.Service{Admin: root, Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: string(ca)}
 	ctx := context.Background()
-	switch strings.Join(pos[:min(len(pos), 2)], " ") {
+	command := strings.Join(pos[:min(len(pos), 2)], " ")
+	if pos[0] == "skip" {
+		command = "skip"
+	}
+	switch command {
 	case "pool create":
 		if len(pos) != 3 {
 			return errors.New("usage: wherry admin pool create NAME --terms FILE")
@@ -100,6 +105,15 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			return errors.New("revocation incomplete")
 		}
 		return nil
+	case "skip":
+		if len(pos) != 2 || options["sha256"] == "" {
+			return errors.New("usage: wherry admin skip OFFSET --sha256 HASH")
+		}
+		offset, err := strconv.ParseInt(pos[1], 10, 64)
+		if err != nil {
+			return err
+		}
+		return service.Skip(ctx, offset, options["sha256"])
 	case "check":
 		if len(pos) != 1 {
 			return errors.New("usage: wherry admin check")

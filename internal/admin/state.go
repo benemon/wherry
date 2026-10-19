@@ -1,11 +1,15 @@
 package admin
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/benemon/wherry/internal/signed"
@@ -41,6 +45,8 @@ type Record struct {
 	Receiver string          `json:"receiver,omitzero"`
 	Terms    *Terms          `json:"terms,omitzero"`
 	Config   *ReceiverConfig `json:"config,omitzero"`
+	Offset   int64           `json:"offset,omitzero"`
+	SHA256   string          `json:"sha256,omitzero"`
 	AtMS     int64           `json:"at_ms"`
 }
 type Host struct{ Tenant, Name string }
@@ -270,6 +276,10 @@ func validateRecord(record Record) error {
 		if validateNames(record.Tenant, record.Pool) != nil {
 			return errors.New("invalid entitlement record")
 		}
+	case "skip":
+		if record.Offset < 0 || !sha256Pattern.MatchString(record.SHA256) {
+			return errors.New("invalid skip record")
+		}
 	case "end":
 		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil {
 			return errors.New("invalid membership end")
@@ -278,6 +288,51 @@ func validateRecord(record Record) error {
 		return errors.New("unknown admin record kind")
 	}
 	return nil
+}
+
+var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+type rawRecord struct {
+	Offset int64
+	Value  []byte
+}
+
+// load folds wherry.admin. An undecodable record is tolerated only when a
+// skip record names its offset and hash; a skip naming a decodable record is
+// refused, so a skip can never hide state such as a membership end.
+func load(raw []rawRecord) (State, error) {
+	undecodable := map[int64]string{}
+	var records, skips []Record
+	for _, entry := range raw {
+		record, err := DecodeRecord(entry.Value)
+		if err != nil {
+			sum := sha256.Sum256(entry.Value)
+			undecodable[entry.Offset] = hex.EncodeToString(sum[:])
+			continue
+		}
+		if record.Kind == "skip" {
+			skips = append(skips, record)
+		} else {
+			records = append(records, record)
+		}
+	}
+	for _, skip := range skips {
+		// A decodable offset is absent from undecodable, and "" never matches.
+		if undecodable[skip.Offset] != skip.SHA256 {
+			return State{}, fmt.Errorf("skip record for offset %d names no undecodable record with that hash", skip.Offset)
+		}
+		delete(undecodable, skip.Offset)
+	}
+	if len(undecodable) > 0 {
+		var uncovered []string
+		for _, entry := range raw {
+			if hash, ok := undecodable[entry.Offset]; ok {
+				uncovered = append(uncovered, fmt.Sprintf("offset=%d size=%d sha256=%s", entry.Offset, len(entry.Value), hash))
+			}
+		}
+		return State{}, fmt.Errorf("wherry.admin has undecodable records; review each and run wherry admin skip: %s", strings.Join(uncovered, "; "))
+	}
+	return Fold(records)
 }
 
 func validateTerms(terms Terms) error {

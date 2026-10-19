@@ -3,7 +3,9 @@ package admin
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -158,56 +160,83 @@ func (service *Service) Check(ctx context.Context) error {
 }
 
 func (service *Service) LoadState(ctx context.Context) (State, error) {
+	raw, err := service.readAdmin(ctx)
+	if err != nil {
+		return State{}, err
+	}
+	return load(raw)
+}
+
+// Skip records the operator's decision to pass over the undecodable record at
+// offset, bound to its SHA-256. It writes directly: loading state fails until
+// the skip exists.
+func (service *Service) Skip(ctx context.Context, offset int64, hash string) error {
+	raw, err := service.readAdmin(ctx)
+	if err != nil {
+		return err
+	}
+	for _, entry := range raw {
+		if entry.Offset != offset {
+			continue
+		}
+		if _, err := DecodeRecord(entry.Value); err == nil {
+			return fmt.Errorf("record at offset %d decodes and cannot be skipped", offset)
+		}
+		sum := sha256.Sum256(entry.Value)
+		if hex.EncodeToString(sum[:]) != hash {
+			return fmt.Errorf("record at offset %d does not have that SHA-256", offset)
+		}
+		encoded, err := EncodeRecord(Record{Kind: "skip", Offset: offset, SHA256: hash})
+		if err != nil {
+			return err
+		}
+		return service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Key: []byte("skip." + strconv.FormatInt(offset, 10)), Value: encoded}).FirstErr()
+	}
+	return fmt.Errorf("wherry.admin has no record at offset %d", offset)
+}
+
+func (service *Service) readAdmin(ctx context.Context) ([]rawRecord, error) {
 	admin := kadm.NewClient(service.Operator)
 	starts, err := admin.ListStartOffsets(ctx, AdminTopic)
 	if err != nil {
-		return State{}, err
+		return nil, err
 	}
 	ends, err := admin.ListEndOffsets(ctx, AdminTopic)
 	if err != nil {
-		return State{}, err
+		return nil, err
 	}
 	start, ok := starts.Lookup(AdminTopic, 0)
 	if !ok || start.Err != nil {
-		return State{}, errors.New("wherry.admin partition 0 is unavailable")
+		return nil, errors.New("wherry.admin partition 0 is unavailable")
 	}
 	end, ok := ends.Lookup(AdminTopic, 0)
 	if !ok || end.Err != nil {
-		return State{}, errors.New("wherry.admin end offset is unavailable")
+		return nil, errors.New("wherry.admin end offset is unavailable")
 	}
 	if start.Offset == end.Offset {
-		return NewState(), nil
+		return nil, nil
 	}
 	service.Operator.AddConsumePartitions(map[string]map[int32]kgo.Offset{AdminTopic: {0: kgo.NewOffset().At(start.Offset)}})
 	defer service.Operator.RemoveConsumePartitions(map[string][]int32{AdminTopic: {0}})
-	var records []Record
+	var raw []rawRecord
 	for {
 		fetches := service.Operator.PollFetches(ctx)
 		if err := fetches.Err(); err != nil {
-			return State{}, err
+			return nil, err
 		}
 		done := false
 		fetches.EachRecord(func(record *kgo.Record) {
 			if record.Offset < end.Offset {
-				decoded, decodeErr := DecodeRecord(record.Value)
-				if decodeErr != nil {
-					err = decodeErr
-					return
-				}
-				records = append(records, decoded)
+				raw = append(raw, rawRecord{record.Offset, record.Value})
 			}
 			if record.Offset >= end.Offset-1 {
 				done = true
 			}
 		})
-		if err != nil {
-			return State{}, err
-		}
 		if done {
-			break
+			return raw, nil
 		}
 	}
-	return Fold(records)
 }
 
 // receiversRetentionMS bounds wherry.receivers: readers want only each

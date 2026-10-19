@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -410,4 +411,86 @@ func realService(t *testing.T) (*Service, func()) {
 	root := connect(os.Getenv("WHERRY_TRUST_ADMIN_USER"), os.Getenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE"))
 	operator := connect(os.Getenv("WHERRY_TRUST_OPERATOR_USER"), os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
 	return &Service{Admin: root, Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: string(ca)}, func() { operator.Close(); root.Close() }
+}
+
+func TestAdminSkipRecoversOnlyUndecodableRecords(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	bad := []byte("not a record")
+	produced := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: bad})
+	if err := produced.FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	badOffset := produced[0].Record.Offset
+	sum := sha256.Sum256(bad)
+	hash := hex.EncodeToString(sum[:])
+	if _, err := service.LoadState(ctx); err == nil || !strings.Contains(err.Error(), "sha256="+hash) {
+		t.Fatalf("loaded state over an uncovered undecodable record: %v", err)
+	}
+	raw, err := service.readAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validSum := sha256.Sum256(raw[0].Value)
+	if err := service.Skip(ctx, raw[0].Offset, hex.EncodeToString(validSum[:])); err == nil {
+		t.Fatal("skipped a record that decodes")
+	}
+	if err := service.Skip(ctx, badOffset, strings.Repeat("0", 64)); err == nil {
+		t.Fatal("skipped with the wrong hash")
+	}
+	if err := service.Skip(ctx, badOffset+100, hash); err == nil {
+		t.Fatal("skipped an offset that does not exist")
+	}
+	misbound, err := EncodeRecord(Record{Kind: "skip", Offset: badOffset, SHA256: strings.Repeat("0", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: misbound}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.LoadState(ctx); err == nil {
+		t.Fatal("accepted a skip record whose hash does not match")
+	}
+	forged, err := EncodeRecord(Record{Kind: "skip", Offset: raw[0].Offset, SHA256: hex.EncodeToString(validSum[:])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: forged}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.LoadState(ctx); err == nil {
+		t.Fatal("accepted a skip record naming a decodable record")
+	}
+}
+
+func TestAdminSkipRestoresState(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	bad := []byte("not a record")
+	produced := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: bad})
+	if err := produced.FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(bad)
+	if err := service.Skip(ctx, produced[0].Record.Offset, hex.EncodeToString(sum[:])); err != nil {
+		t.Fatal(err)
+	}
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Pools["pool-a"]; !ok {
+		t.Fatal("state lost the pool after the skip")
+	}
+	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+		t.Fatalf("admin commands still fail after the skip: %v", err)
+	}
 }
