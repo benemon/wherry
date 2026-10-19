@@ -3,12 +3,14 @@ module github.com/benemon/wherry
 go 1.27
 
 require (
+	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/hashicorp/nomad/api v0.0.0-20261016150620-df630b26e78a
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/twmb/franz-go v1.22.2
 	github.com/twmb/franz-go/pkg/kadm v1.19.0
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261013022759-7b6cac30a57a
 	github.com/twmb/franz-go/pkg/kmsg v1.15.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -30,5 +32,4 @@ require (
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

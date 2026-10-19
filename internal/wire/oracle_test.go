@@ -42,7 +42,6 @@ func TestModeledA2AFieldsExistInVendoredProto(t *testing.T) {
 		"TaskStatus":              TaskStatus{},
 		"TaskStatusUpdateEvent":   TaskStatusUpdateEvent{},
 		"TaskArtifactUpdateEvent": TaskArtifactUpdateEvent{},
-		"CancelTaskRequest":       CancelTaskRequest{},
 	} {
 		fields := protoFields(t, proto, protoName)
 		modeledFields := map[string]bool{}
@@ -73,91 +72,49 @@ func TestUsedTaskStatesExistInVendoredProto(t *testing.T) {
 
 func TestRecordsAreA2AObjects(t *testing.T) {
 	proto := vendoredProto(t)
-	payloads := validPayloads(t)
-	runID := payloads[TypeSubmission].(*SubmissionRecord).Wherry.RunID
-	rootRunID := payloads[TypeSubmission].(*SubmissionRecord).Wherry.Lineage.RootRunID
-	for recordType, test := range map[RecordType]struct {
+	for name, test := range map[string]struct {
+		value                             Record
 		field, message, taskID, contextID string
 	}{
-		TypeSubmission:     {"message", "Message", "taskId", "contextId"},
-		TypeStatus:         {"statusUpdate", "TaskStatusUpdateEvent", "taskId", "contextId"},
-		TypeArtifactUpdate: {"artifactUpdate", "TaskArtifactUpdateEvent", "taskId", "contextId"},
-		TypeTask:           {"task", "Task", "id", "contextId"},
+		"submission": {validSubmission(), "message", "Message", "taskId", "contextId"},
+		"status":     {validStatus(), "statusUpdate", "TaskStatusUpdateEvent", "taskId", "contextId"},
+		"chunk":      {validChunk(), "artifactUpdate", "TaskArtifactUpdateEvent", "taskId", "contextId"},
+		"result":     {validResult(), "task", "Task", "id", "contextId"},
 	} {
-		t.Run(string(recordType), func(t *testing.T) {
-			encoded, err := MarshalPayload(recordType, payloads[recordType])
-			if err != nil {
-				t.Fatal(err)
-			}
+		t.Run(name, func(t *testing.T) {
 			var record map[string]jsontext.Value
-			if err := json.Unmarshal(encoded, &record); err != nil {
+			if err := json.Unmarshal(recordJSON(t, test.value), &record); err != nil {
 				t.Fatal(err)
 			}
-			if len(record) != 2 || record["wherry"] == nil || record[test.field] == nil {
-				t.Fatalf("record members %v, want %s and wherry", reflect.ValueOf(record).MapKeys(), test.field)
+			if len(record) != 3 || record["v"] == nil || record["wherry"] == nil || record[test.field] == nil {
+				t.Fatalf("record members %v, want v, %s and wherry", reflect.ValueOf(record).MapKeys(), test.field)
 			}
 			var object map[string]any
 			if err := json.Unmarshal(record[test.field], &object); err != nil {
 				t.Fatal(err)
 			}
 			checkProtoValue(t, proto, test.message, test.field, object)
-			if got := object[test.taskID]; got != runID {
-				t.Errorf("%s.%s = %v, want run_id %q", test.field, test.taskID, got, runID)
-			}
-			if got := object[test.contextID]; got != rootRunID {
-				t.Errorf("%s.%s = %v, want root run id %q", test.field, test.contextID, got, rootRunID)
+			for _, id := range []string{test.taskID, test.contextID} {
+				if got := object[id]; got != "run-1" {
+					t.Errorf("%s.%s = %v, want the run ID", test.field, id, got)
+				}
 			}
 		})
 	}
 }
 
-func TestCancelRecordIsA2ACancelTaskRequest(t *testing.T) {
-	proto := vendoredProto(t)
-	cancel := &CancelRecord{CancelRequest: CancelTaskRequest{ID: "run-1", Metadata: jsontext.Value(`{"reason":"superseded"}`)}}
-	encoded, err := MarshalPayload(TypeCancel, cancel)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var record map[string]jsontext.Value
-	if err := json.Unmarshal(encoded, &record); err != nil {
-		t.Fatal(err)
-	}
-	if len(record) != 1 || record["cancelRequest"] == nil {
-		t.Fatalf("record members %v, want cancelRequest alone", reflect.ValueOf(record).MapKeys())
-	}
-	var object map[string]any
-	if err := json.Unmarshal(record["cancelRequest"], &object); err != nil {
-		t.Fatal(err)
-	}
-	checkProtoValue(t, proto, "CancelTaskRequest", "cancelRequest", object)
-	if object["id"] != "run-1" || object["tenant"] != nil {
-		t.Errorf("cancelRequest %v, want id run-1 and no tenant", object)
-	}
-	for name, mutate := range map[string]func(*CancelRecord){
-		"no id":     func(value *CancelRecord) { value.CancelRequest.ID = "" },
-		"tenant":    func(value *CancelRecord) { value.CancelRequest.Tenant = "acme" },
-		"metadata":  func(value *CancelRecord) { value.CancelRequest.Metadata = jsontext.Value(`["a"]`) },
-		"uppercase": func(value *CancelRecord) { value.CancelRequest.ID = "Run-1" },
-	} {
-		invalid := *cancel
-		mutate(&invalid)
-		if _, err := MarshalPayload(TypeCancel, &invalid); err == nil {
-			t.Errorf("%s: invalid cancel marshalled", name)
-		}
-	}
-}
-
-func TestSubmissionIDsMustMatchExtension(t *testing.T) {
-	for name, mutate := range map[string]func(*SubmissionRecord){
-		"taskId":    func(value *SubmissionRecord) { value.Message.TaskID = "run-2" },
-		"no taskId": func(value *SubmissionRecord) { value.Message.TaskID = "" },
-		"contextId": func(value *SubmissionRecord) { value.Message.ContextID = "run-2" },
+func TestSubmissionIDsMustBeRunID(t *testing.T) {
+	for name, mutate := range map[string]func(*Submission){
+		"taskId":       func(value *Submission) { value.Message.TaskID = "run-2" },
+		"no taskId":    func(value *Submission) { value.Message.TaskID = "" },
+		"contextId":    func(value *Submission) { value.Message.ContextID = "run-2" },
+		"no contextId": func(value *Submission) { value.Message.ContextID = "" },
 	} {
 		t.Run(name, func(t *testing.T) {
-			submission := validPayloads(t)[TypeSubmission].(*SubmissionRecord)
+			submission := validSubmission()
 			mutate(submission)
-			if _, err := MarshalPayload(TypeSubmission, submission); err == nil {
-				t.Fatal("submission whose message ids disagree with its extension marshalled")
+			if err := submission.validate(); err == nil {
+				t.Fatal("submission whose message ids are not the run ID accepted")
 			}
 		})
 	}

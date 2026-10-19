@@ -3,6 +3,7 @@ package nomad
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/receiver"
-	"github.com/benemon/wherry/internal/wire"
 	"github.com/hashicorp/nomad/api"
 )
 
@@ -52,14 +52,18 @@ git rev-parse HEAD
 
 // Config is the adapter's section of the receiver configuration.
 type Config struct {
-	Address       string             `json:"address"`
-	CAFile        string             `json:"ca_file"`
-	Namespace     string             `json:"namespace"`
-	CredentialEnv string             `json:"credential_env"`
-	Runtimes      map[string]Runtime `json:"runtimes"`
+	Address       string  `json:"address"`
+	CAFile        string  `json:"ca_file"`
+	Namespace     string  `json:"namespace"`
+	CredentialEnv string  `json:"credential_env"`
+	Runtime       Runtime `json:"runtime"`
+	// NodePool and Datacenters bound where Nomad may place the adapter's
+	// jobs; unset, Nomad's defaults apply.
+	NodePool    string   `json:"node_pool,omitzero"`
+	Datacenters []string `json:"datacenters,omitzero"`
 }
 
-// Runtime defines the agent task for one advertised runtime value.
+// Runtime defines the agent task the adapter launches.
 type Runtime struct {
 	Driver    string            `json:"driver"`
 	Config    map[string]any    `json:"config"`
@@ -78,7 +82,9 @@ type Adapter struct {
 	client        *api.Client
 	namespace     string
 	credentialEnv string
-	runtimes      map[string]Runtime
+	runtime       Runtime
+	nodePool      string
+	datacenters   []string
 }
 
 var (
@@ -95,10 +101,8 @@ func New(config Config, token string) (*Adapter, error) {
 	if config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv) {
 		return nil, errors.New("credential_env must be an environment variable name")
 	}
-	for name, runtime := range config.Runtimes {
-		if runtime.Driver == "" {
-			return nil, fmt.Errorf("runtime %s requires a driver", name)
-		}
+	if config.Runtime.Driver == "" {
+		return nil, errors.New("runtime requires a driver")
 	}
 	apiConfig := api.DefaultConfig()
 	apiConfig.Address = config.Address
@@ -109,37 +113,36 @@ func New(config Config, token string) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Adapter{client: client, namespace: config.Namespace, credentialEnv: config.CredentialEnv, runtimes: config.Runtimes}, nil
+	datacenters := config.Datacenters
+	if len(datacenters) == 0 {
+		datacenters = []string{"*"}
+	}
+	return &Adapter{client: client, namespace: config.Namespace, credentialEnv: config.CredentialEnv, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters}, nil
 }
 
-// Platform names the scheduler domain for labels.
-func (adapter *Adapter) Platform() string { return "nomad" }
-
-// Offers derives available runtime, node-pool and datacenter combinations from ready nodes.
-func (adapter *Adapter) Offers(ctx context.Context) ([]map[string]string, error) {
+// Ready reports whether some ready, eligible node in the adapter's node pool
+// and datacenters has the runtime's driver healthy.
+func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 	nodes, _, err := adapter.client.Nodes().List((&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-	unique := make(map[string]map[string]string)
 	for _, node := range nodes {
 		if node.Status != api.NodeStatusReady || node.SchedulingEligibility != api.NodeSchedulingEligible {
 			continue
 		}
-		for name, runtime := range adapter.runtimes {
-			info := node.Drivers[runtime.Driver]
-			if info == nil || !info.Detected || !info.Healthy {
-				continue
-			}
-			offer := map[string]string{"runtime": name, "nomad.node_pool": node.NodePool, "zone": node.Datacenter}
-			unique[wire.TermsText(offer)] = offer
+		// A job without a node pool lands in Nomad's default pool.
+		if pool := cmp.Or(adapter.nodePool, "default"); node.NodePool != pool {
+			continue
+		}
+		if !slices.Contains(adapter.datacenters, "*") && !slices.Contains(adapter.datacenters, node.Datacenter) {
+			continue
+		}
+		if info := node.Drivers[adapter.runtime.Driver]; info != nil && info.Detected && info.Healthy {
+			return true, nil
 		}
 	}
-	offers := make([]map[string]string, 0, len(unique))
-	for _, key := range slices.Sorted(maps.Keys(unique)) {
-		offers = append(offers, unique[key])
-	}
-	return offers, nil
+	return false, nil
 }
 
 // Dispatch starts one run idempotently and returns once its task has started or ended.
@@ -322,10 +325,7 @@ func (adapter *Adapter) deliverPrompt(ctx context.Context, allocID string, cri b
 
 // buildJob takes nothing from the task except the run ID and the matched offer.
 func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error) {
-	runtime, ok := adapter.runtimes[run.Offer["runtime"]]
-	if !ok {
-		return nil, errors.New("unknown runtime")
-	}
+	runtime := adapter.runtime
 	jobID := jobID(run.ID, run.Turn)
 	env := maps.Clone(runtime.Env)
 	if env == nil {
@@ -356,7 +356,7 @@ func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error
 	}
 	return &api.Job{
 		ID: new(jobID), Name: new(jobID), Namespace: new(adapter.namespace), Type: new(api.JobTypeBatch),
-		NodePool: new(run.Offer["nomad.node_pool"]), Datacenters: []string{run.Offer["zone"]},
+		NodePool: nodePool(adapter.nodePool), Datacenters: adapter.datacenters,
 		Meta: map[string]string{"run_id": run.ID},
 		TaskGroups: []*api.TaskGroup{{
 			Name:             new(taskName),
@@ -365,6 +365,13 @@ func (adapter *Adapter) buildJob(run receiver.Run, path string) (*api.Job, error
 			Tasks:            tasks,
 		}},
 	}, nil
+}
+
+func nodePool(name string) *string {
+	if name == "" {
+		return nil
+	}
+	return &name
 }
 
 // gitTask is the prestart task that clones the run's git context into the shared alloc directory;

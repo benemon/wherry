@@ -1,206 +1,177 @@
 # Getting started
 
-This guide enrols one receiver on a Nomad cluster and runs a first task on
-it. [Concepts](concepts.md) explains the parts involved.
+This guide provisions one pool with one Nomad receiver, entitles one tenant
+with one host, and runs a first task. [Concepts](concepts.md) explains the
+parts involved.
 
 ## Prerequisites
 
-- A Kafka 4.x cluster with share groups enabled. Both the client and the
-  receiver connect over TLS with SCRAM-SHA-512, so the cluster needs a TLS
-  listener and two SCRAM users: one for the user (`alice` below) and one
-  for the receiver (`receiver-a`). The wherry topics and a reply topic for
-  the user must exist with the settings in
-  [Kafka topics](operator-guide.md#kafka-topics), and each user needs the
-  [ACLs](operator-guide.md#kafka-acls) listed there.
-- A Nomad cluster, a namespace for agent jobs (`agents` below) and an ACL
-  token with the [receiver policy](operator-guide.md#nomad-acl-policy).
-- The `wherry` binary on both the user's machine and the receiver host.
-  Build it with Go 1.27 or later from a checkout of this repository:
+- A Kafka cluster prepared as in
+  [Prepare Kafka](operator-guide.md#prepare-kafka), with its super user and
+  `wherry.operator` credentials on the operator's machine.
+- A Nomad cluster with a namespace for agent jobs (`agents` below) and a
+  token or workload identity carrying the
+  [receiver policy](operator-guide.md#nomad-acl-policy).
+- The `wherry` binary on the operator's machine, the host and the receiver
+  host. Build it with Go 1.27 or later from a checkout of this repository:
 
   ```sh
   go build -o wherry ./cmd/wherry
   ```
 
 - An agent the Nomad nodes can run: an image for a container driver, or an
-  install on the host for `raw_exec` or `exec`. The
-  [agent contract](operator-guide.md#agent-contract) lists what the agent
-  must do.
-- The model credential the agent needs, in a file on the user's machine.
+  install on the node for `exec`. The
+  [agent contract](reference.md#agent-contract) lists what it must do.
+- The model credential the agent needs, in a file on the host.
 
-## 1. Write the client configuration
+## 1. Set up `wherry admin`
 
-The client reads `~/.config/wherry/config.json`, or the file that
-`WHERRY_CONFIG` names. Write it on the user's machine:
+On the operator's machine, export the six `WHERRY_TRUST_*` variables in
+[Set up `wherry admin`](operator-guide.md#set-up-wherry-admin).
+
+## 2. Create a pool
+
+Write `build-terms.yaml`:
+
+```yaml
+agents:
+  - name: coder
+    credentials: [model-api-key]
+default_agent: coder
+seal_lifetime_ms: 86400000
+delivery_limit: 5
+lock_duration_ms: 15000
+producer_byte_rate: 1048576
+request_percentage: 10
+```
+
+```sh
+wherry admin pool create build --terms build-terms.yaml
+```
+
+## 3. Entitle a tenant
+
+```sh
+wherry admin tenant add alice --pool build
+```
+
+## 4. Add the host
+
+```sh
+wherry admin host add alice laptop --bundle alice-laptop.bundle
+```
+
+Copy `alice-laptop.bundle` to `~/.config/wherry/` on the host, keeping mode
+0600.
+
+## 5. Add the receiver
+
+Write `nomad-1.yaml`:
+
+```yaml
+capacity: 2
+adapters:
+  - name: container
+    type: nomad
+    agent: coder
+    credential: model-api-key
+    labels: {isolation: container}
+    config:
+      address: https://nomad.example.com:4646
+      ca_file: /etc/wherry/nomad-ca.pem
+      namespace: agents
+      credential_env: MODEL_API_KEY
+      runtime:
+        driver: docker
+        config:
+          image: registry.example.com/agent:1.0
+          command: /bin/sh
+          args: ["-c", "exec agent-run < \"$NOMAD_TASK_DIR/prompt.txt\""]
+        resources: {cpu: 1000, memory_mb: 2048}
+```
+
+`agent-run` stands for the agent's headless command. The adapter delivers
+the tenant's sealed `model-api-key` to the job as `MODEL_API_KEY`.
+
+```sh
+wherry admin receiver add nomad-1 --pool build \
+  --config nomad-1.yaml --bundle nomad-1.bundle
+```
+
+Copy `nomad-1.bundle` to `/etc/wherry/` on the receiver host, keeping mode
+0600.
+
+## 6. Start the receiver
+
+```sh
+NOMAD_TOKEN=<token> wherry receiver \
+  --bundle /etc/wherry/nomad-1.bundle --state-dir /var/lib/wherry
+```
+
+The receiver creates its keys in `/var/lib/wherry`, registers them, and
+logs:
+
+```
+receiver: <time> configured: pool=build adapters=1 capacity=2
+```
+
+[Run a receiver](operator-guide.md#run-a-receiver) covers running it
+under a supervisor, or as a Nomad job.
+
+## 7. Configure the host
+
+On the host, put the model credential in a file and write
+`~/.config/wherry/config.json`:
 
 ```json
 {
-  "broker": "kafka.example.com:9093",
-  "ca_file": "~/.config/wherry/kafka-ca.pem",
-  "kafka_user": "alice",
-  "kafka_password_file": "~/.config/wherry/kafka-password"
+  "bundle": "~/.config/wherry/alice-laptop.bundle",
+  "credentials": {
+    "model-api-key": "~/.config/wherry/model-api-key"
+  }
 }
 ```
 
-Place the Kafka CA bundle and the SCRAM password at those paths. The reply
-topic defaults to `replies.alice`.
+The host seals the file's contents byte for byte.
 
-## 2. Create the user key
+## 8. Register the host key
 
 ```sh
 wherry init
-wherry key
 ```
 
-`init` writes the user key to `~/.config/wherry/user.key` and prints its
-fingerprint. It refuses to replace an existing key. `key` prints the public
-key and fingerprint:
+`init` creates `~/.config/wherry/host.key`, registers it on the host's key
+topic, and prints its key ID, `sha256:<base64url>`. `wherry key` prints the
+same ID later.
 
-```
-public_key=<base64url public key> fingerprint=sha256:<hex>
-```
-
-Keep the `public_key` value for the receiver configuration.
-
-## 3. Write the receiver configuration
-
-On the receiver host, write `/etc/wherry/receiver.json`. Set
-`user_public_key` to the value from step 2:
-
-```json
-{
-  "broker": "kafka.example.com:9093",
-  "ca_file": "/etc/wherry/kafka-ca.pem",
-  "kafka_user": "receiver-a",
-  "kafka_password_file": "/etc/wherry/kafka-password",
-  "receiver_id": "receiver-a",
-  "state_dir": "/var/lib/wherry",
-  "user_public_key": "<base64url public key>",
-  "labels": {"region": "eu-west"},
-  "adapters": [
-    {
-      "name": "nomad",
-      "type": "nomad",
-      "credential": "model-api-key",
-      "config": {
-        "address": "https://nomad.example.com:4646",
-        "ca_file": "/etc/wherry/nomad-ca.pem",
-        "namespace": "agents",
-        "credential_env": "MODEL_API_KEY",
-        "runtimes": {
-          "agent": {
-            "driver": "docker",
-            "config": {
-              "image": "registry.example.com/agent:1.0",
-              "command": "/bin/sh",
-              "args": ["-c", "exec agent-run < \"$NOMAD_TASK_DIR/prompt.txt\""]
-            },
-            "env": {},
-            "resources": {"cpu": 1000, "memory_mb": 2048}
-          }
-        }
-      }
-    }
-  ]
-}
-```
-
-`agent-run` stands for the agent's headless command. The runtime named
-`agent` becomes the offer label `runtime=agent`. The adapter delivers the
-sealed credential `model-api-key` to the agent as `MODEL_API_KEY`.
-[Configuration reference](reference.md#receiver-configuration) describes
-every field.
-
-## 4. Start the receiver
+## 9. Check the receiver
 
 ```sh
-NOMAD_TOKEN=<token> wherry receiver --config /etc/wherry/receiver.json
+wherry receivers
 ```
 
-On first start the receiver creates its keys in `state_dir` and publishes an
-enrolment request. It logs the request hash:
-
 ```
-receiver: <time> enrolment requested: receiver=receiver-a request=<hash>
-signing=sha256:<hex>
+receiver=nomad-1 pool=build capacity=2 in_flight=0 heartbeat_age=12s status=live
+  adapter=container agent=coder ready=true labels=isolation=container
 ```
 
-The log prints this as one line. The receiver then waits for approval.
-
-## 5. Approve the receiver
-
-1. List the requests on the user's machine:
-
-   ```sh
-   wherry enrol list
-   ```
-
-   ```
-   receiver=receiver-a request=<hash> labels=region=eu-west approved=false
-     adapter=nomad platform=nomad
-       offer nomad.node_pool=default,runtime=agent,zone=dc1
-   ```
-
-   Check that the request hash matches the one in the receiver's log.
-
-2. Write `grants.json`, allowing each offer label value the receiver may
-   advertise:
-
-   ```json
-   [
-     {
-       "name": "nomad",
-       "platform": "nomad",
-       "allowed": {
-         "runtime": ["agent"],
-         "nomad.node_pool": ["default"],
-         "zone": ["dc1"]
-       },
-       "defaults": {}
-     }
-   ]
-   ```
-
-3. Approve the request:
-
-   ```sh
-   wherry enrol approve <hash> --labels region=eu-west --grants grants.json
-   ```
-
-   The command prints `receiver=receiver-a generation=1`. The receiver logs
-   `enrolled: pool=receiver-a generation=1`.
-
-4. Wait up to 30 seconds for the first capability, then check that the
-   receiver is live:
-
-   ```sh
-   wherry receivers
-   ```
-
-   The receiver's line shows `status=live`.
-
-## 6. Seal the model credential
+## 10. Submit a task
 
 ```sh
-wherry secret put model-api-key --to receiver-a --from-file ./model-api-key
+wherry submit --prompt "Summarise the release notes in three sentences."
 ```
 
-The command prints `name=model-api-key receiver=receiver-a version=1`. The
-seal expires in 30 days by default.
-
-## 7. Submit a task
-
-```sh
-wherry submit --selector runtime=agent \
-  --prompt "Summarise the release notes in three sentences."
-```
-
-The command prints the run ID and the pool:
+The task takes the pool's default agent, `coder`, and an empty selector.
+The host seals `model-api-key` to `nomad-1`, then prints the run ID and the
+pool:
 
 ```
-run_id=run-<id> pool=receiver-a
+run_id=run-<id> pool=build
 ```
 
-## 8. Await the result
+`--selector isolation=container` asks for the adapter's label explicitly.
+
+## 11. Await the result
 
 ```sh
 wherry await run-<id>
@@ -210,8 +181,14 @@ wherry await run-<id>
 and exits non-zero for any state other than `TASK_STATE_COMPLETED`. It waits
 30 minutes by default.
 
-If the run ends in `TASK_STATE_AUTH_REQUIRED`, the receiver did not hold the
-credential when it claimed the task. Seal it as in step 6, then run
-`wherry continue run-<id>` and await again.
-
 `wherry events run-<id>` prints the run's status history.
+
+### If the run needs a credential
+
+A run that ends in `TASK_STATE_AUTH_REQUIRED` found no member of the pool
+able to open a seal for the credential the message names.
+
+1. Add the credential's file to `credentials` in the host configuration.
+2. Run `wherry continue run-<id>`, which seals it and publishes the next
+   turn.
+3. Run `wherry await run-<id>`.

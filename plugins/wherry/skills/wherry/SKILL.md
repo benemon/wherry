@@ -10,8 +10,8 @@ description: >-
 
 wherry sends a task to a receiver on other compute. The receiver runs an
 agent on the task and returns the result over Kafka. The tools come from the
-`wherry` MCP server (`wherry mcp`). The same operations exist as `wherry`
-CLI commands.
+`wherry` MCP server (`wherry mcp`). Every tool except `status` has a
+`wherry` CLI command of the same name.
 
 ## When to delegate
 
@@ -20,7 +20,7 @@ Delegate a task when all of these hold:
 - The prompt can stand on its own. The remote agent sees the prompt and,
   if you pass one, a checkout of a pushed git ref. It does not see this
   session, your files or uncommitted changes.
-- The task takes minutes or more, or needs labels this machine does not
+- The task takes minutes or more, or needs something this machine does not
   have (an OS, architecture, isolation level or network).
 - You have other work to do while it runs, or several such tasks to run
   at once.
@@ -31,30 +31,38 @@ Do short or interactive work yourself.
 
 Call `receivers` first. For each receiver it returns:
 
-- `offers`: label sets the receiver can run a task with. Build `selector`
-  from these: each key maps to the values you accept, and an offer must
-  match every key. Use only keys that appear in offers. A key outside the
-  key grammar is rejected with `INVALID_ARGUMENT`; a well-formed key no
-  offer has returns `NO_MATCHING_RECEIVER`.
+- `adapters`: each with the `agent` it runs, its `labels`, and `ready`,
+  whether the receiver can start it now.
 - `status`, `capacity` and `in_flight`: whether it is live and has room.
-- `secrets`: the credential names sealed to it.
+- `seals`: the credentials this host has sealed to it.
 
-Pick the offer that fits the task. Labels are descriptive, so reason from
-them. The user's approval of each receiver still bounds what can run.
+Pick an `agent` from the adapters, or omit it to take the pool's default.
+Build `selector` from the labels of the adapters you want: a list of
+`{key, operator, values}` where `operator` is `In` or `NotIn` (with
+`values`), or `Exists` or `DoesNotExist` (without). Every requirement must
+hold. Omit `selector` when any adapter will do. A malformed key or value
+returns `INVALID_ARGUMENT`; a selector no live adapter satisfies returns
+`NO_MATCHING_RECEIVER`.
+
+Labels are the operator's description of each adapter. wherry matches them
+literally and interprets only the agent name.
 
 ## Submit, then keep working
 
-Call `submit` with `prompt`, `selector` and, when the agent needs a
-repository, `git` (`url`, `ref`, optional `path`). It returns `id` and
-`pool` straight away. Note the id and carry on with other work.
+Call `submit` with `prompt`, and `agent`, `selector` and `git` (`url`,
+`ref`, optional `path`) when you need them. It returns `id` and `pool`
+straight away. Note the id and carry on with other work.
 
 ## Collect the result
 
 Call `await` with the id. It waits up to 45 seconds and returns one of:
 
 - `TASK_STATE_COMPLETED` with `artifacts`: the result.
-- `TASK_STATE_FAILED`, `TASK_STATE_REJECTED` or `TASK_STATE_CANCELED`
-  with a `message` that says why.
+- `TASK_STATE_FAILED` with `artifacts` holding the agent's result when the
+  agent reported the failure, or a `message` when the receiver could not
+  run it.
+- `TASK_STATE_REJECTED` or `TASK_STATE_CANCELED` with a `message` that
+  says why.
 - `TASK_STATE_AUTH_REQUIRED`: see the next section.
 - `retry_after` with the current `state`: the run has not finished. Wait
   that many seconds, or do other work, then call `await` again.
@@ -70,16 +78,13 @@ state and the result, and exits non-zero for any state other than
 
 ## A run that needs a credential
 
-`TASK_STATE_AUTH_REQUIRED` means the receiver lacks a credential. The
-`message` names the credential and never holds its value. The receiver is
-the `receiver` of the interrupted status in `events`. Tell the user which
-credential to seal to that receiver, with the command:
-
-    wherry secret put NAME --to RECEIVER_ID --from-file PATH
-
-Never ask for the credential value or handle it yourself. When the user says
-it is sealed, call `continue` with the id (and a `prompt` if the agent needs
-more to go on), then `await` again.
+`TASK_STATE_AUTH_REQUIRED` means no receiver in the pool could open a
+sealed credential the agent needs. The `message` names the credential and never
+holds its value. Tell the user to put the credential in a file and add it
+under that name to `credentials` in their wherry configuration. Never ask
+for the value or handle it yourself. When the user says it is in place,
+call `continue` with the id (and a `prompt` if the agent needs more to go
+on), which seals it, then `await` again.
 
 ## Cancel unneeded work
 
@@ -89,6 +94,8 @@ ends in `TASK_STATE_CANCELED`.
 ## Errors
 
 A failed call returns `{"code": ..., "message": ...}`. `RUN_NOT_FOUND`,
-`NO_MATCHING_RECEIVER` and `INVALID_ARGUMENT` call for a change to your
-input. `UNAVAILABLE` is any other failure; the user can run the same
-operation with the `wherry` CLI to see the cause.
+`NO_MATCHING_RECEIVER`, `INVALID_ARGUMENT`, `NOT_AWAITING_CONTINUATION`,
+`RUN_CANCELED` and `TURN_ALREADY_SUBMITTED` call for a change to your input
+or end the run's handling. `CANCELLED` means the call itself was cancelled.
+`UNAVAILABLE` is any other failure; the user can run the same operation
+with the `wherry` CLI to see the cause.

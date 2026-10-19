@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	json "encoding/json/v2"
 	"errors"
@@ -10,32 +11,35 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
+	"strings"
 	"syscall"
 
 	"github.com/benemon/wherry/internal/adapter/nomad"
+	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/receiver"
+	"gopkg.in/yaml.v3"
 )
 
 func runReceiver(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("receiver", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", "", "receiver configuration file")
+	bundlePath := flags.String("bundle", "", "receiver bundle file")
+	stateDir := flags.String("state-dir", "", "directory holding the receiver's keys")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *configPath == "" {
-		return errors.New("usage: wherry receiver --config PATH")
+	if *bundlePath == "" || *stateDir == "" {
+		return errors.New("usage: wherry receiver --bundle FILE --state-dir DIR")
 	}
-	config, err := receiver.LoadConfig(*configPath)
-	if err != nil {
-		return err
-	}
-	adapters, err := newAdapters(config.Adapters, os.Getenv("NOMAD_TOKEN"))
+	bundle, err := readBundle(*bundlePath)
 	if err != nil {
 		return err
 	}
 	logger := log.New(stdout, "receiver: ", log.LstdFlags|log.LUTC)
-	r, err := receiver.New(config, adapters, logger)
+	r, err := receiver.New(bundle, *stateDir, func(settings admin.AdapterSettings) (receiver.Named, error) {
+		return newAdapter(settings, platformToken(bundle, settings.Name))
+	}, logger)
 	if err != nil {
 		return err
 	}
@@ -47,26 +51,58 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func newAdapters(configs []receiver.AdapterConfig, nomadToken string) ([]receiver.Named, error) {
-	adapters := make([]receiver.Named, 0, len(configs))
-	for _, config := range configs {
-		switch config.Type {
-		case "nomad":
-			var adapterConfig nomad.Config
-			if err := json.Unmarshal(config.Config, &adapterConfig, json.RejectUnknownMembers(true)); err != nil {
-				return nil, fmt.Errorf("decode adapter %s config: %w", config.Name, err)
-			}
-			if config.Credential != "" && adapterConfig.CredentialEnv == "" {
-				return nil, fmt.Errorf("adapter %s has a credential but no credential_env", config.Name)
-			}
-			adapter, err := nomad.New(adapterConfig, nomadToken)
-			if err != nil {
-				return nil, fmt.Errorf("adapter %s: %w", config.Name, err)
-			}
-			adapters = append(adapters, receiver.Named{Name: config.Name, Credential: config.Credential, Git: true, Adapter: adapter})
-		default:
-			return nil, fmt.Errorf("adapter %s has unknown type %q", config.Name, config.Type)
-		}
+func readBundle(path string) (admin.Bundle, error) {
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return admin.Bundle{}, err
 	}
-	return adapters, nil
+	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
+	decoder.KnownFields(true)
+	var bundle admin.Bundle
+	if err := decoder.Decode(&bundle); err != nil {
+		// The decoder quotes keys and values, and a credential pasted in the wrong place is still a
+		// credential: only the line numbers it names are kept.
+		lines := strings.Join(yamlLine.FindAllString(err.Error(), -1), ", ")
+		if lines == "" {
+			return admin.Bundle{}, errors.New("decode bundle: not a valid bundle")
+		}
+		return admin.Bundle{}, fmt.Errorf("decode bundle: invalid or unknown field at %s", lines)
+	}
+	return bundle, nil
+}
+
+var yamlLine = regexp.MustCompile(`line \d+`)
+
+// platformToken is the bundle's platform credential for an adapter, or, for a platform that issues
+// the receiver's identity itself as Nomad workload identity does, NOMAD_TOKEN from the environment.
+func platformToken(bundle admin.Bundle, name string) string {
+	if token, ok := bundle.Platform[name]; ok {
+		return token
+	}
+	return os.Getenv("NOMAD_TOKEN")
+}
+
+// newAdapter builds one configured adapter; token is the bundle's platform credential for its name.
+func newAdapter(settings admin.AdapterSettings, token string) (receiver.Named, error) {
+	switch settings.Type {
+	case "nomad":
+		encoded, err := json.Marshal(settings.Config)
+		if err != nil {
+			return receiver.Named{}, err
+		}
+		var config nomad.Config
+		if err := json.Unmarshal(encoded, &config, json.RejectUnknownMembers(true)); err != nil {
+			return receiver.Named{}, fmt.Errorf("decode adapter %s config: %w", settings.Name, err)
+		}
+		if settings.Credential != "" && config.CredentialEnv == "" {
+			return receiver.Named{}, fmt.Errorf("adapter %s has a credential but no credential_env", settings.Name)
+		}
+		adapter, err := nomad.New(config, token)
+		if err != nil {
+			return receiver.Named{}, fmt.Errorf("adapter %s: %w", settings.Name, err)
+		}
+		return receiver.Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Git: true, Adapter: adapter}, nil
+	default:
+		return receiver.Named{}, fmt.Errorf("adapter %s has unknown type %q", settings.Name, settings.Type)
+	}
 }

@@ -27,7 +27,7 @@ func runMCP(ctx context.Context, config busclient.Config, args []string) error {
 	if len(args) != 0 {
 		return errors.New("usage: wherry mcp")
 	}
-	return newMCPServer(func() (*busclient.Client, error) { return busclient.Connect(config) }).Run(ctx, &mcp.StdioTransport{})
+	return newMCPServer(func() (*busclient.Host, error) { return busclient.Connect(config) }).Run(ctx, &mcp.StdioTransport{})
 }
 
 // toolError is a tool failure whose code and message carry no underlying error text.
@@ -50,9 +50,9 @@ func invalidArgument(message string) error {
 func toolFailure(err error) error {
 	switch {
 	case errors.Is(err, busclient.ErrRunNotFound):
-		return &toolError{Code: "RUN_NOT_FOUND", Message: "no verified submission has this run id"}
+		return &toolError{Code: "RUN_NOT_FOUND", Message: "this host has not submitted the run and no receiver has admitted it"}
 	case errors.Is(err, busclient.ErrNoMatchingReceiver):
-		return &toolError{Code: "NO_MATCHING_RECEIVER", Message: "no live receiver matches the selector"}
+		return &toolError{Code: "NO_MATCHING_RECEIVER", Message: "no live receiver of an entitled pool offers a placement matching the selector"}
 	case errors.Is(err, busclient.ErrNotAwaitingContinuation):
 		return &toolError{Code: "NOT_AWAITING_CONTINUATION", Message: "the run is not waiting for a continuation"}
 	case errors.Is(err, busclient.ErrRunCanceled):
@@ -71,7 +71,6 @@ type receiversInput struct{}
 
 type receiversOutput struct {
 	Receivers []busclient.Receiver `json:"receivers"`
-	Skipped   int                  `json:"skipped,omitempty" jsonschema:"records that failed verification and were ignored"`
 }
 
 type gitInput struct {
@@ -81,17 +80,17 @@ type gitInput struct {
 }
 
 type submitInput struct {
-	Prompt               string              `json:"prompt" jsonschema:"the task for the remote agent"`
-	Selector             map[string][]string `json:"selector" jsonschema:"offer label key to its accepted values; a key is platform, runtime, region or zone, a platform key such as nomad.node_pool, or an operator key containing a slash such as example.com/gpu"`
-	Git                  *gitInput           `json:"git,omitempty" jsonschema:"repository to check out for the agent"`
-	DeadlineSeconds      int64               `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 1800"`
-	QueueDeadlineSeconds int64               `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`
+	Prompt               string             `json:"prompt" jsonschema:"the task for the remote agent"`
+	Agent                string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
+	Selector             []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the adapter must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
+	Git                  *gitInput          `json:"git,omitempty" jsonschema:"repository to check out for the agent"`
+	DeadlineSeconds      int64              `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 1800"`
+	QueueDeadlineSeconds int64              `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`
 }
 
 type submitOutput struct {
-	ID      string `json:"id" jsonschema:"run id"`
-	Pool    string `json:"pool" jsonschema:"pool the task was placed in"`
-	Skipped int    `json:"skipped,omitempty" jsonschema:"records that failed verification and were ignored"`
+	ID   string `json:"id" jsonschema:"run id"`
+	Pool string `json:"pool" jsonschema:"pool the task was placed in"`
 }
 
 type runInput struct {
@@ -99,12 +98,11 @@ type runInput struct {
 }
 
 type statusOutput struct {
-	ID                  string `json:"id"`
-	State               string `json:"state"`
-	Turn                int64  `json:"turn"`
-	Message             string `json:"message,omitempty"`
-	SignerRevokedBefore string `json:"signer_revoked_before,omitempty" jsonschema:"set when a since-revoked receiver signed the status"`
-	Skipped             int    `json:"skipped,omitempty"`
+	ID      string `json:"id"`
+	State   string `json:"state"`
+	Turn    int64  `json:"turn"`
+	Message string `json:"message,omitempty"`
+	Skipped int    `json:"skipped,omitempty"`
 }
 
 type resultPart struct {
@@ -121,13 +119,12 @@ type resultArtifact struct {
 }
 
 type awaitReply struct {
-	ID                  string           `json:"id"`
-	State               string           `json:"state"`
-	RetryAfter          int              `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling await again"`
-	Message             string           `json:"message,omitempty" jsonschema:"status message, such as the credential an AUTH_REQUIRED run needs"`
-	Artifacts           []resultArtifact `json:"artifacts,omitempty"`
-	SignerRevokedBefore string           `json:"signer_revoked_before,omitempty" jsonschema:"set when a since-revoked receiver signed the result"`
-	Skipped             int              `json:"skipped,omitempty"`
+	ID         string           `json:"id"`
+	State      string           `json:"state"`
+	RetryAfter int              `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling await again"`
+	Message    string           `json:"message,omitempty" jsonschema:"status message, such as the credential an AUTH_REQUIRED run needs"`
+	Artifacts  []resultArtifact `json:"artifacts,omitempty"`
+	Skipped    int              `json:"skipped,omitempty"`
 }
 
 type continueInput struct {
@@ -149,14 +146,13 @@ type cancelOutput struct {
 }
 
 type eventOutput struct {
-	Turn                int64  `json:"turn"`
-	Attempt             int64  `json:"attempt"`
-	Kind                string `json:"kind"`
-	State               string `json:"state"`
-	Receiver            string `json:"receiver"`
-	Time                string `json:"time"`
-	Message             string `json:"message,omitempty"`
-	SignerRevokedBefore string `json:"signer_revoked_before,omitempty"`
+	Turn     int64  `json:"turn"`
+	Attempt  int64  `json:"attempt"`
+	Kind     string `json:"kind"`
+	State    string `json:"state"`
+	Receiver string `json:"receiver"`
+	Time     string `json:"time"`
+	Message  string `json:"message,omitempty"`
 }
 
 type transcriptOutput struct {
@@ -168,14 +164,14 @@ type transcriptOutput struct {
 type eventsOutput struct {
 	ID          string             `json:"id"`
 	Events      []eventOutput      `json:"events"`
-	Cancelled   bool               `json:"cancelled" jsonschema:"whether the user signed a cancel for the run"`
+	Cancelled   bool               `json:"cancelled" jsonschema:"whether the run ended canceled"`
 	Transcripts []transcriptOutput `json:"transcripts"`
 	Skipped     int                `json:"skipped,omitempty"`
 }
 
 // newMCPServer serves the wherry tools. Each call opens its own connection: a Client's consumer serves one
 // operation at a time, and a harness may call status while an await is in flight.
-func newMCPServer(connect func() (*busclient.Client, error)) *mcp.Server {
+func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 	version := "(devel)"
 	if info, ok := debug.ReadBuildInfo(); ok {
 		version = info.Main.Version
@@ -185,7 +181,7 @@ func newMCPServer(connect func() (*busclient.Client, error)) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receivers",
-		Description: "List enrolled receivers with their pools, labels, offers, spare capacity and sealed credential names. Read it to choose a selector before submit.",
+		Description: "List the receivers of the pools this tenant may use, with each adapter's agent and labels as wherry.admin records them, whether the receiver's live advertisement offers it, spare capacity and the credentials this host has sealed to them. Read it to choose an agent and selector before submit.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()
@@ -193,16 +189,16 @@ func newMCPServer(connect func() (*busclient.Client, error)) *mcp.Server {
 			return nil, receiversOutput{}, toolFailure(err)
 		}
 		defer client.Close()
-		receivers, skipped, err := client.Receivers(ctx)
+		receivers, err := client.Receivers(ctx)
 		if err != nil {
 			return nil, receiversOutput{}, toolFailure(err)
 		}
-		return nil, receiversOutput{Receivers: receivers, Skipped: skipped}, nil
+		return nil, receiversOutput{Receivers: receivers}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the live receiver whose offers match the selector. Returns the run id at once; collect the result with await.",
+		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector, sealing the agent's configured credentials to that pool's live receivers. Returns the run id at once; collect the result with await.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		client, err := connect()
 		if err != nil {
@@ -217,7 +213,7 @@ func newMCPServer(connect func() (*busclient.Client, error)) *mcp.Server {
 		if err != nil {
 			return nil, submitOutput{}, toolFailure(err)
 		}
-		return nil, submitOutput{ID: result.RunID, Pool: result.Pool, Skipped: result.Skipped}, nil
+		return nil, submitOutput{ID: result.RunID, Pool: result.Pool}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -235,8 +231,7 @@ func newMCPServer(connect func() (*busclient.Client, error)) *mcp.Server {
 			return nil, statusOutput{}, toolFailure(err)
 		}
 		return nil, statusOutput{
-			ID: input.ID, State: string(result.Status.State), Turn: result.Turn, Message: statusText(result.Status),
-			SignerRevokedBefore: revokedBefore(result.RevokedAt), Skipped: result.Skipped,
+			ID: input.ID, State: string(result.Status.State), Turn: result.Turn, Message: statusText(result.Status), Skipped: result.Skipped,
 		}, nil
 	})
 
@@ -267,8 +262,7 @@ func newMCPServer(connect func() (*busclient.Client, error)) *mcp.Server {
 			return nil, awaitReply{}, toolFailure(err)
 		}
 		output := awaitReply{
-			ID: input.ID, State: string(result.Status.State), Message: statusText(result.Status),
-			SignerRevokedBefore: revokedBefore(result.RevokedAt), Skipped: result.Skipped,
+			ID: input.ID, State: string(result.Status.State), Message: statusText(result.Status), Skipped: result.Skipped,
 		}
 		if result.Task != nil {
 			for _, artifact := range result.Task.Artifacts {
@@ -280,7 +274,7 @@ func newMCPServer(connect func() (*busclient.Client, error)) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "continue",
-		Description: "Sign and publish the next turn of a run interrupted in AUTH_REQUIRED, after the user has sealed the missing credential.",
+		Description: "Sign and publish the next turn of a run interrupted in AUTH_REQUIRED or INPUT_REQUIRED to the pool that admitted it, resealing its configured credentials; add a missing credential to the wherry config first.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input continueInput) (*mcp.CallToolResult, continueOutput, error) {
 		client, err := connect()
 		if err != nil {
@@ -337,8 +331,7 @@ func newMCPServer(connect func() (*busclient.Client, error)) *mcp.Server {
 			status := record.StatusUpdate.Status
 			output.Events = append(output.Events, eventOutput{
 				Turn: record.Wherry.Turn, Attempt: record.Wherry.Attempt, Kind: record.Wherry.Kind, State: string(status.State),
-				Receiver: record.Wherry.ReceiverID, Time: status.Timestamp, Message: statusText(status),
-				SignerRevokedBefore: revokedBefore(record.RevokedAt),
+				Receiver: record.Wherry.Receiver, Time: status.Timestamp, Message: statusText(status),
 			})
 		}
 		for position, chunks := range result.Chunks {
@@ -359,14 +352,9 @@ func submitFromInput(input submitInput) (busclient.SubmitInput, error) {
 	if input.Prompt == "" {
 		return busclient.SubmitInput{}, invalidArgument("prompt is required")
 	}
-	keys := make([]string, 0, len(input.Selector))
-	for key := range input.Selector {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	selector := []wire.Requirement{}
-	for _, key := range keys {
-		selector = append(selector, wire.Requirement{Key: key, Operator: wire.OpIn, Values: input.Selector[key]})
+	selector := input.Selector
+	if selector == nil {
+		selector = []wire.Requirement{}
 	}
 	var parts []wire.Part
 	if input.Git != nil {
@@ -378,7 +366,7 @@ func submitFromInput(input submitInput) (busclient.SubmitInput, error) {
 		return busclient.SubmitInput{}, err
 	}
 	return busclient.SubmitInput{
-		Selector: selector, Prompt: input.Prompt, Parts: parts,
+		Agent: input.Agent, Selector: selector, Prompt: input.Prompt, Parts: parts,
 		Deadline: deadline, QueueDeadline: queueDeadline,
 	}, nil
 }
@@ -436,13 +424,6 @@ func statusText(status wire.TaskStatus) string {
 		texts = append(texts, partText(part))
 	}
 	return strings.Join(texts, "\n")
-}
-
-func revokedBefore(revokedAt time.Time) string {
-	if revokedAt.IsZero() {
-		return ""
-	}
-	return revokedAt.UTC().Format(time.RFC3339Nano)
 }
 
 func resultParts(parts []wire.Part) []resultPart {

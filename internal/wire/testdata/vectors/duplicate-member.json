@@ -1,9 +1,0 @@
-{
-	"name": "duplicate payload member",
-	"type": "revocation",
-	"signer_seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-	"signer_kind": "user",
-	"payload_b64": "eyJyZWNlaXZlcl9pZCI6InJlY2VpdmVyLTEiLCJyZWNlaXZlcl9pZCI6InJlY2VpdmVyLTIiLCJmbG9vcl9nZW5lcmF0aW9uIjoxLCJhdF9tcyI6MX0",
-	"envelope_b64": "eyJ2IjoxLCJ0eXBlIjoicmV2b2NhdGlvbiIsInNpZ25lciI6InNoYTI1Njo1NjQ3NWFhNzU0NjM0NzRjMDI4NWRmNWRiZjJiY2FiNzNkYTY1MTM1ODgzOWU5Yjc3NDgxYjJlYWIxMDc3MDhjIiwicGF5bG9hZCI6ImV5SnlaV05sYVhabGNsOXBaQ0k2SW5KbFkyVnBkbVZ5TFRFaUxDSnlaV05sYVhabGNsOXBaQ0k2SW5KbFkyVnBkbVZ5TFRJaUxDSm1iRzl2Y2w5blpXNWxjbUYwYVc5dUlqb3hMQ0poZEY5dGN5STZNWDAiLCJzaWciOiJoaFRCaGJoYVpvd2pKT3VpMHl2RngyMFNvYUZPalduYVU3NWJnaWZvOEZrbGdPU2VTdWJQRm1hY0tUekM5bmg2Y0RDckhkSU5FMG94TVdfM1F5WUlCZyJ9",
-	"expect": "invalid_payload"
-}

@@ -8,193 +8,137 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// brokerReceiver is a running, enrolled receiver with a credential on the real broker named by
-// WHERRY_KAFKA_TEST_BROKER, in a pool of its own. kfake does not model share-group acquisition.
-type brokerReceiver struct {
-	ctx     context.Context
-	opts    []kgo.Opt
-	kafka   *kgo.Client
-	client  *busclient.Client
-	r       *Receiver
-	adapter *fakeAdapter
-	logs    *syncBuffer
-	pool    string
-	stop    context.CancelFunc
-	done    chan error
-}
-
-func startBrokerReceiver(t *testing.T) brokerReceiver {
-	t.Helper()
+// TestShutdownReleasesClaimOnRealBroker runs a receiver in a pool of its own on the plaintext broker
+// named by WHERRY_KAFKA_TEST_BROKER; kfake does not model share-group acquisition. That broker has no
+// authoriser, so the admin records are written with admin.EncodeRecord rather than admin.Service.
+func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
 		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
 	}
-	for _, interval := range []*time.Duration{&renewInterval, &capabilityInterval, &refreshInterval, &cancelReadInterval, &enrolPollInterval} {
-		previous := *interval
-		*interval = 200 * time.Millisecond
-		t.Cleanup(func() { *interval = previous })
-	}
+	shortIntervals(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
 	opts := []kgo.Opt{kgo.SeedBrokers(address), kgo.FetchMaxWait(10 * time.Millisecond)}
-	kafka, err := kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.KeepControlRecords())...)
+	kafka, err := kgo.NewClient(opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(kafka.Close)
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	t.Cleanup(cancel)
+	defer kafka.Close()
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	receiverID, pool, replies := "receiver-broker-"+suffix, "broker-"+suffix, "replies.broker-"+suffix
-	admin := kadm.NewClient(kafka)
-	if err := wire.ApplyTopics(ctx, admin, 1); err != nil {
+	receiverID, pool, tenant, host := "receiver-"+suffix, "pool-"+suffix, "tenant-"+suffix, "host-"+suffix
+	topics := []string{admin.AdminTopic, admin.ReceiversTopic, admin.PoolTasksTopic(pool), admin.PoolEventsTopic(pool), admin.TenantTopic(tenant), admin.HostTopic(tenant, host), admin.ReceiverTopic(receiverID)}
+	if _, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, -1, nil, topics...); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admin.CreateTopics(ctx, 1, 1, nil, replies); err != nil {
-		t.Fatal(err)
+	terms := testTerms()
+	config := testConfig(receiverID)
+	config.Pool = pool
+	for _, record := range []admin.Record{
+		{Kind: "pool", Pool: pool, Terms: &terms},
+		{Kind: "host", Tenant: tenant, Host: host},
+		{Kind: "entitlement", Tenant: tenant, Pool: pool},
+		{Kind: "receiver", Pool: pool, Receiver: receiverID, Config: &config},
+	} {
+		encoded, err := admin.EncodeRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
 	}
-	_, userKey, _ := ed25519.GenerateKey(rand.Reader)
+	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	sealing, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	registration, err := signed.RegisterKey(signed.HostOwner(tenant, host), hostKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seal, err := signed.SealCredential(tenant, receiverID, pool, credentialName, time.Now(), time.Now().Add(time.Hour), sealing.PublicKey(), []byte(testToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedSeal, err := signed.EncodeSeal(seal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.HostTopic(tenant, host), Value: registration}, &kgo.Record{Topic: admin.HostTopic(tenant, host), Value: encodedSeal}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
 	base, err := kgo.NewClient(opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	logs := &syncBuffer{}
-	adapter := &fakeAdapter{stream: noResultStream, endDelay: time.Minute, offers: []map[string]string{{"runtime": "exec", "nomad.node_pool": "OCPv", "zone": "dc1"}}}
-	r := &Receiver{
-		config:   Config{ReceiverID: receiverID, Capacity: 1, Labels: map[string]string{}},
-		adapters: []Named{{Name: "nomad", Credential: credentialName, Adapter: adapter}},
-		kafkaOpt: opts, base: base,
-		userPub: userKey.Public().(ed25519.PublicKey), signing: signing, sealing: sealing,
-		logger: log.New(logs, "", 0), credentials: make(map[string]heldCredential),
-	}
+	adapter := &fakeAdapter{stream: noResultStream, endDelay: time.Minute}
+	r := &Receiver{id: receiverID, kafkaOpt: opts, base: base, signing: signing, sealing: sealing, logger: log.New(logs, "", 0),
+		factory: func(settings admin.AdapterSettings) (Named, error) {
+			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: adapter}, nil
+		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- r.Run(runCtx) }()
-	t.Cleanup(func() { stop(); <-done })
-
-	client := busclient.New(kafka, userKey, replies)
-	var requestHash string
-	for requestHash == "" {
-		enrolments, _, err := client.Enrolments(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, enrolment := range enrolments {
-			if enrolment.ReceiverID == receiverID && len(enrolment.Adapters) == 1 && len(enrolment.Adapters[0].Offers) == 1 {
-				requestHash = enrolment.RequestHash
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if _, err := client.Approve(ctx, requestHash, pool, map[string]string{}, nomadGrants(), "auto", time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte(testToken), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.PutSecret(ctx, credentialName, receiverID, tokenFile, time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	for heldValue(r) != testToken {
-		if ctx.Err() != nil {
-			t.Fatal("credential never delivered")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	// The pool's share group starts at the log end, so tasks are published only once the receiver holds the partition.
+	defer func() { stop(); <-done }()
+	// The pool's share group starts at the log end, so the task is published only once the receiver holds the partition.
 	for {
-		groups, err := admin.DescribeShareGroups(ctx, "p-"+pool)
-		group := groups["p-"+pool]
-		if err == nil && len(group.AssignedPartitions()) > 0 {
+		groups, err := kadm.NewClient(kafka).DescribeShareGroups(ctx, admin.PoolGroup(pool))
+		if group := groups[admin.PoolGroup(pool)]; err == nil && len(group.AssignedPartitions()) > 0 {
 			break
 		}
 		if ctx.Err() != nil {
-			t.Fatal("receiver never joined its pool's share group")
+			t.Fatalf("receiver never joined its pool's share group; logs:\n%s", logs.String())
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	time.Sleep(time.Second) // the first share fetch sets the group's start offset
-	return brokerReceiver{ctx: ctx, opts: opts, kafka: kafka, client: client, r: r, adapter: adapter, logs: logs, pool: pool, stop: stop, done: done}
-}
-
-func (b brokerReceiver) submit(t *testing.T) string {
-	t.Helper()
-	for {
-		submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{
-			Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Prompt: "hello",
-			Deadline: time.Minute, QueueDeadline: time.Minute,
-		})
-		if err == nil {
-			return submitted.RunID
-		}
-		if !strings.Contains(err.Error(), "no matching") || b.ctx.Err() != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-// member joins the pool's share group as a plain consumer.
-func (b brokerReceiver) member(t *testing.T) *kgo.Client {
-	t.Helper()
-	member, err := kgo.NewClient(append(append([]kgo.Opt(nil), b.opts...), kgo.ConsumeTopics(wire.TopicTask), kgo.ShareGroup("p-"+b.pool), kgo.ShareMaxRecords(1))...)
+	submission := testSubmission("run-broker")
+	submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = tenant, host, pool
+	value, err := wire.SignRecord(submission, hostKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(member.Close)
-	return member
-}
-
-// nextDelivery polls the pool as member until runID arrives and returns it.
-func (b brokerReceiver) nextDelivery(t *testing.T, member *kgo.Client, runID string) *kgo.Record {
-	t.Helper()
-	for {
-		pollCtx, cancelPoll := context.WithTimeout(b.ctx, 2*time.Second)
-		fetches := member.PollRecords(pollCtx, 1)
-		cancelPoll()
-		for _, record := range fetches.Records() {
-			if string(record.Key) == runID {
-				return record
-			}
-			record.Ack(kgo.AckRelease)
-		}
-		if b.ctx.Err() != nil {
-			t.Fatalf("%s never delivered to another member", runID)
-		}
+	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(pool), Key: []byte("run-broker"), Value: value}).FirstErr(); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
-	b := startBrokerReceiver(t)
-	runID := b.submit(t)
 	for {
-		if _, _, follows, _ := b.adapter.counts(); follows == 1 {
+		if _, _, follows, _ := adapter.counts(); follows == 1 {
 			break
 		}
-		if b.ctx.Err() != nil {
-			t.Fatalf("run never started; logs:\n%s", b.logs.String())
+		if ctx.Err() != nil {
+			t.Fatalf("run never started; logs:\n%s", logs.String())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	b.stop()
-	if err := <-b.done; err != nil && b.ctx.Err() != nil {
+	stop()
+	<-done
+	done <- nil
+	stopped := time.Now()
+	member, err := kgo.NewClient(append(append([]kgo.Opt(nil), opts...), kgo.ConsumeTopics(admin.PoolTasksTopic(pool)), kgo.ShareGroup(admin.PoolGroup(pool)), kgo.ShareMaxRecords(1))...)
+	if err != nil {
 		t.Fatal(err)
 	}
-	b.done <- nil
-	stopped := time.Now()
-	b.nextDelivery(t, b.member(t), runID)
+	defer member.Close()
+	for redelivered := false; !redelivered; {
+		pollCtx, cancelPoll := context.WithTimeout(ctx, 2*time.Second)
+		for _, record := range member.PollRecords(pollCtx, 1).Records() {
+			redelivered = redelivered || string(record.Key) == "run-broker"
+		}
+		cancelPoll()
+		if ctx.Err() != nil {
+			t.Fatal("run-broker never delivered to another member")
+		}
+	}
 	if waited := time.Since(stopped); waited > 10*time.Second {
 		t.Fatalf("task returned to the pool %s after shutdown, want at once (the acquisition lock expired instead)", waited)
 	}
