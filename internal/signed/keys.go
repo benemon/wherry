@@ -145,7 +145,7 @@ func ApplyKeyRecord(state KeyState, topicOwner string, encoded []byte) (KeyState
 	}
 	switch record.Action {
 	case "register":
-		if len(jws.Signatures) != 1 || !verifiedBy(jws, key) {
+		if state.Current != nil || len(jws.Signatures) != 1 || !verifiedBy(jws, key) {
 			return state, errors.New("registration is not first and self-signed")
 		}
 		return KeyState{Current: key, Sealing: sealing}, nil

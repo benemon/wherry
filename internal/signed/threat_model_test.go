@@ -70,6 +70,13 @@ func TestP04KeysOnlyFollowRegistrationRules(t *testing.T) {
 	if err != nil || !rotated.Current.Equal(second.Public()) {
 		t.Fatalf("dual-signed rotation: %v", err)
 	}
+	reregistration, err := RegisterKey(owner, second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyKeyRecord(rotated, owner, reregistration); err == nil {
+		t.Fatal("accepted a registration signed by the current key, which would drop the retired keys")
+	}
 	revocation, err := RevokeKey(owner, second)
 	if err != nil {
 		t.Fatal(err)
