@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -11,6 +12,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,5 +53,37 @@ func TestP11KafkaClientRejectsPlaintextListener(t *testing.T) {
 	defer cancel()
 	if err := client.Ping(ctx); err == nil {
 		t.Fatal("TLS client accepted a plaintext Kafka listener")
+	}
+}
+
+func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
+	cluster, ca := tlsCluster(t)
+	dir := t.TempDir()
+	files := map[string]string{"ca.pem": ca, "admin": "password", "operator": "operator-password"}
+	for name, contents := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("WHERRY_TRUST_BROKER", cluster.ListenAddrs()[0])
+	t.Setenv("WHERRY_TRUST_CA", filepath.Join(dir, "ca.pem"))
+	t.Setenv("WHERRY_TRUST_ADMIN_USER", "admin")
+	t.Setenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE", filepath.Join(dir, "admin"))
+	t.Setenv("WHERRY_TRUST_OPERATOR_USER", "wherry.operator")
+	t.Setenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE", filepath.Join(dir, "operator"))
+	var stdout, stderr bytes.Buffer
+	err := runAdmin([]string{"revoke", "receiver", "receiver-a", "--wait", "1ms"}, &stdout, &stderr)
+	if err == nil || err.Error() != "revocation incomplete" {
+		t.Fatalf("revoke = %v, want revocation incomplete", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "complete=false") || !strings.Contains(last, " error=") || strings.HasSuffix(last, " error=") {
+		t.Fatalf("last step line %q, want the failed step with its cause", last)
+	}
+	for _, line := range lines[:len(lines)-1] {
+		if !strings.Contains(line, "complete=true") || strings.Contains(line, "error=") {
+			t.Fatalf("step line %q, want completed steps without a cause", line)
+		}
 	}
 }

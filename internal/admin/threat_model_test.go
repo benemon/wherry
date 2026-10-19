@@ -589,3 +589,53 @@ func TestReceiverConfigureKeepsThePrincipal(t *testing.T) {
 		t.Fatal("configured a receiver that was never added")
 	}
 }
+
+func TestRevocationProbeRetriesOnlyWhileABrokerAuthorises(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), nil, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	window, interval := probeWindow, probeInterval
+	defer func() { probeWindow, probeInterval = window, interval }()
+	probeInterval = time.Millisecond
+	probe := func(answers ...error) (func(context.Context, string, string) error, *int, *string) {
+		calls, password := 0, ""
+		return func(_ context.Context, _, rotated string) error {
+			password = rotated
+			calls++
+			return answers[min(calls, len(answers))-1]
+		}, &calls, &password
+	}
+	stepThree := func(result RevocationResult) RevocationStep {
+		if len(result.Steps) < 3 {
+			t.Fatalf("revocation stopped before the probe: %+v", result)
+		}
+		return result.Steps[2]
+	}
+
+	lagging, calls, _ := probe(ErrStillAuthorised, ErrStillAuthorised, ErrAuthorizationDenied)
+	if step := stepThree(service.RevokeReceiver(ctx, "receiver-a", time.Millisecond, lagging)); !step.Complete || *calls != 3 {
+		t.Fatalf("lagging broker: step %+v after %d probes; want complete after 3", step, *calls)
+	}
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), nil, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	login, calls, password := probe(ErrAuthenticationFailure)
+	step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, login))
+	if step.Complete || *calls != 1 {
+		t.Fatalf("failed login: step %+v after %d probes; want one failed probe", step, *calls)
+	}
+	if *password == "" || strings.Contains(step.Err.Error(), *password) {
+		t.Fatal("a revocation step error carries the rotated password")
+	}
+	probeWindow = 5 * time.Millisecond
+	stuck, _, _ := probe(ErrStillAuthorised)
+	if step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, stuck)); step.Complete || !errors.Is(step.Err, ErrStillAuthorised) {
+		t.Fatalf("broker never denies: step %+v; want failure after the probe window", step)
+	}
+}
