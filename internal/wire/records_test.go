@@ -142,6 +142,16 @@ func TestRecordValidation(t *testing.T) {
 			value.Task.ID = "run-b"
 			return value
 		},
+		"run naming another producer's transactional ID": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.Run, value.StatusUpdate.TaskID, value.StatusUpdate.ContextID = "admission.receiver-a", "admission.receiver-a", "admission.receiver-a"
+			return value
+		},
+		"run with a slash": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.Run, value.StatusUpdate.TaskID, value.StatusUpdate.ContextID = "run/a", "run/a", "run/a"
+			return value
+		},
 		"echo without hash": func(r map[string]Record) Record {
 			value := r["echo"].(*Echo)
 			value.TaskHash = ""

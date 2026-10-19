@@ -1131,3 +1131,39 @@ func TestBuildJobLeavesUnsetPlacementToNomad(t *testing.T) {
 		t.Fatalf("node pool %v, datacenters %v; want Nomad's defaults", job.NodePool, job.Datacenters)
 	}
 }
+
+func TestReadyFiltersNodesByPoolDatacenterAndDriver(t *testing.T) {
+	node := func(pool, datacenter, driver string, healthy bool) map[string]any {
+		return map[string]any{"ID": pool + datacenter + driver, "Status": "ready", "SchedulingEligibility": "eligible", "NodePool": pool, "Datacenter": datacenter,
+			"Drivers": map[string]any{driver: map[string]any{"Detected": true, "Healthy": healthy}}}
+	}
+	cases := []struct {
+		name  string
+		pool  string
+		dcs   []string
+		nodes []map[string]any
+		want  bool
+	}{
+		{"default pool when unset", "", nil, []map[string]any{node("OCPv", "dc1", "raw_exec", true)}, false},
+		{"unset pool finds default", "", nil, []map[string]any{node("default", "dc1", "raw_exec", true)}, true},
+		{"configured pool", "OCPv", nil, []map[string]any{node("OCPv", "dc1", "raw_exec", true)}, true},
+		{"datacenter outside the list", "", []string{"dc2"}, []map[string]any{node("default", "dc1", "raw_exec", true)}, false},
+		{"unhealthy driver", "", nil, []map[string]any{node("default", "dc1", "raw_exec", false)}, false},
+		{"other driver", "", nil, []map[string]any{node("default", "dc1", "podman", true)}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(c.nodes)
+			}))
+			defer server.Close()
+			adapter, err := New(Config{Address: server.URL, Runtime: Runtime{Driver: "raw_exec"}, NodePool: c.pool, Datacenters: c.dcs}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ready, err := adapter.Ready(context.Background()); err != nil || ready != c.want {
+				t.Fatalf("ready = %v, %v; want %v", ready, err, c.want)
+			}
+		})
+	}
+}

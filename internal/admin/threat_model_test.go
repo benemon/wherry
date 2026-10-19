@@ -23,6 +23,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
+	"gopkg.in/yaml.v3"
 )
 
 func testSubmission(tenant, host, pool, run string) *wire.Submission {
@@ -528,5 +529,63 @@ func TestEchoAndAdvertisementBindTheirPool(t *testing.T) {
 	state.Ended[ReceiverPrincipal("receiver-a")] = true
 	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-a")); err == nil {
 		t.Fatal("accepted an advertisement after the receiver's membership end")
+	}
+}
+
+func TestReceiverConfigureKeepsThePrincipal(t *testing.T) {
+	cluster, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "bundle.yaml")
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), nil, path); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle Bundle
+	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	// kfake's SCRAM handshake always names 4096 iterations.
+	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
+	if altered, err := kadm.NewClient(service.Admin).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
+		t.Fatalf("re-salt: %v %v", err, altered.Error())
+	}
+	login := func() error {
+		client, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()))
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		return client.Ping(ctx)
+	}
+	if err := login(); err != nil {
+		t.Fatal(err)
+	}
+	changed := modelConfig("receiver-a", "pool-b")
+	changed.Capacity = 3
+	if err := service.ReceiverConfigure(ctx, changed); err != nil {
+		t.Fatal(err)
+	}
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config := state.Receivers["receiver-a"]; config.Capacity != 3 || config.Pool != "pool-a" {
+		t.Fatalf("configuration %+v; want capacity 3 in the receiver's own pool", config)
+	}
+	if err := login(); err != nil {
+		t.Fatalf("configure changed the receiver's credential: %v", err)
+	}
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), nil, filepath.Join(t.TempDir(), "again.yaml")); err == nil {
+		t.Fatal("re-added an existing receiver, rotating its password")
+	}
+	if err := service.ReceiverConfigure(ctx, modelConfig("receiver-z", "pool-a")); err == nil {
+		t.Fatal("configured a receiver that was never added")
 	}
 }

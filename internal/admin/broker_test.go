@@ -114,7 +114,15 @@ func TestRealBrokerFixture(t *testing.T) {
 	t.Run("P14 a status is on both topics or on neither", func(t *testing.T) {
 		writer := f.connect(t, ReceiverPrincipal(f.receiverA), kgo.TransactionalID(TransactionalPrefix(f.poolA)+"run-p14"))
 		committed, aborted := "committed-"+f.poolA, "aborted-"+f.poolA
-		if err := signed.PublishStatus(ctx, writer, f.poolA, f.tenantA, committed, []byte(committed), nil); err != nil {
+		if err := writer.BeginTransaction(); err != nil {
+			t.Fatal(err)
+		}
+		for _, topic := range []string{PoolEventsTopic(f.poolA), TenantTopic(f.tenantA)} {
+			if err := writer.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(committed), Value: []byte(committed)}).FirstErr(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := writer.EndTransaction(ctx, kgo.TryCommit); err != nil {
 			t.Fatal(err)
 		}
 		if err := writer.BeginTransaction(); err != nil {

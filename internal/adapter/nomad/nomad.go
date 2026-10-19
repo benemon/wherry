@@ -3,6 +3,7 @@ package nomad
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -130,7 +131,8 @@ func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 		if node.Status != api.NodeStatusReady || node.SchedulingEligibility != api.NodeSchedulingEligible {
 			continue
 		}
-		if adapter.nodePool != "" && node.NodePool != adapter.nodePool {
+		// A job without a node pool lands in Nomad's default pool.
+		if pool := cmp.Or(adapter.nodePool, "default"); node.NodePool != pool {
 			continue
 		}
 		if !slices.Contains(adapter.datacenters, "*") && !slices.Contains(adapter.datacenters, node.Datacenter) {

@@ -3,6 +3,7 @@ package wire
 import (
 	"crypto/ed25519"
 	"errors"
+	"regexp"
 
 	"github.com/benemon/wherry/internal/signed"
 )
@@ -208,11 +209,19 @@ func (value *Echo) version() *int          { return &value.V }
 func (value *Advertisement) version() *int { return &value.V }
 func (value *StartFailure) version() *int  { return &value.V }
 
+// runID keeps run IDs to name characters: a run's transactional ID
+// p.<pool>.<run> can then never equal another producer's, such as a receiver's
+// p.<pool>.admission.<receiver>, and a run ID is safe in logs and job names.
+var runID = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
 func validateIDs(values map[string]string) error {
 	for name, value := range values {
 		if err := validateID(value, name); err != nil {
 			return err
 		}
+	}
+	if run, ok := values["run"]; ok && !runID.MatchString(run) {
+		return errors.New("run must be lowercase letters, digits and hyphens, at most 63")
 	}
 	return nil
 }

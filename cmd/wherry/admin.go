@@ -25,7 +25,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(pos) == 0 {
-		return errors.New("usage: wherry admin <pool create|receiver add|tenant add|host add|revoke host|revoke receiver|skip|check>")
+		return errors.New("usage: wherry admin <pool create|receiver add|receiver configure|tenant add|host add|revoke host|revoke receiver|skip|check>")
 	}
 	root, err := adminKafka("WHERRY_TRUST_ADMIN_USER", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
 	if err != nil {
@@ -82,6 +82,19 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			platform = map[string]string{adapter: strings.TrimRight(string(credential), "\r\n")}
 		}
 		return service.ReceiverAdd(ctx, config, platform, options["bundle"])
+	case "receiver configure":
+		if len(pos) != 3 {
+			return errors.New("usage: wherry admin receiver configure ID --config FILE")
+		}
+		var config admin.ReceiverConfig
+		if err := readYAML(options["config"], &config); err != nil {
+			return err
+		}
+		if config.Receiver != "" && config.Receiver != pos[2] {
+			return errors.New("receiver config identity does not match command")
+		}
+		config.Receiver = pos[2]
+		return service.ReceiverConfigure(ctx, config)
 	case "tenant add":
 		if len(pos) != 3 {
 			return errors.New("usage: wherry admin tenant add TENANT --pool POOL")

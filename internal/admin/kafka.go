@@ -66,6 +66,9 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	if err != nil {
 		return err
 	}
+	if _, exists := state.Receivers[config.Receiver]; exists {
+		return errors.New("receiver exists; change its configuration with receiver configure")
+	}
 	terms, ok := state.Pools[config.Pool]
 	if !ok {
 		return errors.New("receiver names unknown pool")
@@ -94,6 +97,26 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 		return err
 	}
 	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(config.Receiver), password, platform})
+}
+
+// ReceiverConfigure records a new configuration for an existing receiver in its
+// pool. The principal, its password and the bundle are untouched; the receiver
+// exits on the new record and its platform restarts it.
+func (service *Service) ReceiverConfigure(ctx context.Context, config ReceiverConfig) error {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	current, ok := state.Receivers[config.Receiver]
+	if !ok || state.Ended[ReceiverPrincipal(config.Receiver)] {
+		return errors.New("no live receiver by that name")
+	}
+	config.Pool = current.Pool
+	if err := ValidateConfig(config, state.Pools[config.Pool]); err != nil {
+		return err
+	}
+	_, err = service.appendChecked(ctx, []byte(config.Receiver), Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config})
+	return err
 }
 
 func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string) (err error) {
