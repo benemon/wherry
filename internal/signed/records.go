@@ -38,6 +38,16 @@ func Sign(typ, owner string, payload any, key ed25519.PrivateKey) ([]byte, error
 // only then decodes the payload strictly into dst. It returns the owner, which
 // the caller must match against the payload's own claims.
 func Verify(encoded []byte, typ string, keys Keys, dst any) (string, error) {
+	return verify(encoded, typ, keys.current, dst)
+}
+
+// VerifyHistory is Verify for records an owner signed before rotating its key:
+// it also accepts the owner's retired keys. Never use it to admit new work.
+func VerifyHistory(encoded []byte, typ string, keys Keys, dst any) (string, error) {
+	return verify(encoded, typ, keys.signedBy, dst)
+}
+
+func verify(encoded []byte, typ string, key func(owner, keyID string) (ed25519.PublicKey, error), dst any) (string, error) {
 	jws, err := jose.ParseSignedCompact(string(encoded), []jose.SignatureAlgorithm{jose.EdDSA})
 	if err != nil {
 		return "", fmt.Errorf("parse JWS: %w", err)
@@ -49,7 +59,7 @@ func Verify(encoded []byte, typ string, keys Keys, dst any) (string, error) {
 	if !ok {
 		return "", errors.New("JWS kid does not name an owner and key")
 	}
-	public, err := keys.current(owner, keyID)
+	public, err := key(owner, keyID)
 	if err != nil {
 		return "", err
 	}

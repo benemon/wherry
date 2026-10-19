@@ -27,7 +27,17 @@ func SignRecord(value Record, key ed25519.PrivateKey) ([]byte, error) {
 // ParseRecord verifies encoded against the current key of the owner its kid names,
 // decodes it into value and requires the payload to name that owner.
 func ParseRecord(encoded []byte, keys signed.Keys, value Record) error {
-	owner, err := signed.Verify(encoded, value.jwsType(), keys, value)
+	return parse(signed.Verify, encoded, keys, value)
+}
+
+// ParseHistoryRecord is ParseRecord for a run's earlier records: it also
+// accepts keys the owner has since rotated away.
+func ParseHistoryRecord(encoded []byte, keys signed.Keys, value Record) error {
+	return parse(signed.VerifyHistory, encoded, keys, value)
+}
+
+func parse(verify func([]byte, string, signed.Keys, any) (string, error), encoded []byte, keys signed.Keys, value Record) error {
+	owner, err := verify(encoded, value.jwsType(), keys, value)
 	if err != nil {
 		return err
 	}

@@ -1238,3 +1238,39 @@ func TestAdoptionTrustsRotatedPeerKey(t *testing.T) {
 		t.Fatalf("heartbeat under the peer's rotated key: offset %d err %v, want 42", got, err)
 	}
 }
+
+func TestContinuationAfterHostKeyRotation(t *testing.T) {
+	f := newFixture(t, resultStream)
+	ctx, stop := context.WithCancel(f.ctx)
+	defer stop()
+	f.run(t, ctx)
+	f.turn(t, "run-a", 1)
+	if interrupted := f.await(t, "run-a", anyTask); interrupted.Status.State != wire.TaskStateAuthRequired {
+		t.Fatalf("first turn %#v, want AUTH_REQUIRED", interrupted)
+	}
+	_, rotated, _ := ed25519.GenerateKey(rand.Reader)
+	owner := signed.HostOwner(testTenant, testHost)
+	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(owner, f.host, rotated, nil)))
+	f.sealOwn(t, credentialName, time.Hour)
+	f.submit(t, rotated, func(task *wire.Submission) {
+		task.Wherry.Turn = 2
+		task.Message.MessageID, task.Message.Parts = "msg-2", []wire.Part{{Text: "continue"}}
+	})
+	completed := f.await(t, "run-a", func(task wire.Task) bool { return wire.Terminal(task.Status.State) })
+	if completed.Status.State != wire.TaskStateCompleted || len(completed.History) != 2 || completed.History[0].Parts[0].Text != "hi" {
+		t.Fatalf("continuation after rotation %#v; want turn 1, signed before the rotation, in the history", completed)
+	}
+}
+
+func TestBindTurnsPrefersTheTurnAMemberRan(t *testing.T) {
+	ran, forged := testSubmission("run-a"), testSubmission("run-a")
+	forged.Message.Parts = []wire.Part{{Text: "forged"}}
+	all := []runSubmission{{record: forged, hash: strings.Repeat("b", 64)}, {record: ran, hash: strings.Repeat("a", 64)}}
+	events := poolEvents{statuses: map[string][]wire.RunStatus{"run-a": {{Wherry: wire.StatusBinding{ReceiverBinding: wire.ReceiverBinding{Run: "run-a", Turn: 1}, TaskHash: strings.Repeat("a", 64)}}}}}
+	if bound := bindTurns(all, ran, events); bound[1].hash != strings.Repeat("a", 64) {
+		t.Fatalf("turn 1 bound to %s; want the submission a pool member's status names", bound[1].hash)
+	}
+	if bound := bindTurns(all, ran, poolEvents{}); bound[1].hash != strings.Repeat("b", 64) {
+		t.Fatal("without statuses the first submission of a turn should stand")
+	}
+}

@@ -188,7 +188,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		r.logger.Printf("read run %s turns: %v", run, err)
 		return nil, kgo.AckRelease
 	}
-	submissions := bindTurns(all, &task)
+	submissions := bindTurns(all, &task, events)
 	cancelledTurn, cancelled := r.cancelledTurn(ctx, events, run, task.Wherry.Tenant)
 	cancelled = cancelled && cancelledTurn <= task.Wherry.Turn
 	if !cancelled {
@@ -373,7 +373,7 @@ func (r *Receiver) readTurns(ctx context.Context, run string) ([]runSubmission, 
 		if string(record.Key) != run {
 			continue
 		}
-		submission, err := admin.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
+		submission, err := admin.AuthorizeEarlierTurn(state, hosts, record.Value, r.config.Pool)
 		if err == nil && submission.Wherry.Run == run {
 			result = append(result, runSubmission{record: &submission, hash: taskHash(record.Value)})
 		}
@@ -381,15 +381,21 @@ func (r *Receiver) readTurns(ctx context.Context, run string) ([]runSubmission, 
 	return result, nil
 }
 
-// bindTurns keeps the first submission of each turn that carries the tenant and placement of expected.
-func bindTurns(all []runSubmission, expected *wire.Submission) map[int64]runSubmission {
+// bindTurns keeps, for each turn, the submission carrying the tenant and placement of expected that a pool member's
+// status names by hash, or else the first one; a later submission cannot displace a turn a member already ran.
+func bindTurns(all []runSubmission, expected *wire.Submission, events poolEvents) map[int64]runSubmission {
+	ran := map[string]bool{}
+	for _, status := range events.statuses[expected.Wherry.Run] {
+		ran[status.Wherry.TaskHash] = true
+	}
 	result := make(map[int64]runSubmission)
 	for _, submission := range all {
 		if submission.record.Wherry.Tenant != expected.Wherry.Tenant || !reflect.DeepEqual(submission.record.Wherry.Placement, expected.Wherry.Placement) {
 			continue
 		}
-		if _, duplicate := result[submission.record.Wherry.Turn]; !duplicate {
-			result[submission.record.Wherry.Turn] = submission
+		turn := submission.record.Wherry.Turn
+		if previous, duplicate := result[turn]; !duplicate || ran[submission.hash] && !ran[previous.hash] {
+			result[turn] = submission
 		}
 	}
 	return result
@@ -951,7 +957,7 @@ func (r *Receiver) cancelInterrupted(ctx context.Context, interrupted wire.RunSt
 		return errors.New("interrupted turn not found")
 	}
 	task := all[index].record
-	history, err := turns(bindTurns(all, task), task)
+	history, err := turns(bindTurns(all, task, events), task)
 	if err != nil {
 		return err
 	}

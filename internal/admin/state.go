@@ -251,8 +251,18 @@ func (state State) receiverRecord(binding wire.ReceiverBinding, placedPool, runT
 // own key topic, from a live host of a tenant entitled to the pool whose topic
 // it arrived on.
 func AuthorizeSubmission(state State, keys signed.Keys, encoded []byte, topicPool string) (wire.Submission, error) {
+	return authorizeSubmission(wire.ParseRecord, state, keys, encoded, topicPool)
+}
+
+// AuthorizeEarlierTurn is AuthorizeSubmission for a run's earlier turns, which
+// its host may have signed with a key since rotated away.
+func AuthorizeEarlierTurn(state State, keys signed.Keys, encoded []byte, topicPool string) (wire.Submission, error) {
+	return authorizeSubmission(wire.ParseHistoryRecord, state, keys, encoded, topicPool)
+}
+
+func authorizeSubmission(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, topicPool string) (wire.Submission, error) {
 	var submission wire.Submission
-	if err := wire.ParseRecord(encoded, keys, &submission); err != nil {
+	if err := parse(encoded, keys, &submission); err != nil {
 		return wire.Submission{}, err
 	}
 	if submission.Wherry.Pool != topicPool {

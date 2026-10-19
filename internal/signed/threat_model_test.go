@@ -288,3 +288,40 @@ func TestKeyRecordCarriesTheSealingKey(t *testing.T) {
 		t.Fatal("accepted a malformed sealing key")
 	}
 }
+
+func TestRetiredKeysVerifyHistoryOnly(t *testing.T) {
+	_, first, _ := ed25519.GenerateKey(rand.Reader)
+	_, second, _ := ed25519.GenerateKey(rand.Reader)
+	owner := HostOwner("tenant-a", "host-a")
+	state, err := ApplyKeyRecord(KeyState{}, owner, must(RegisterKey(owner, first, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := Sign(testType, owner, testRecord{V: 1, Tenant: "tenant-a", Host: "host-a", Run: "run-a"}, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state, err = ApplyKeyRecord(state, owner, must(RotateKey(owner, first, second, nil))); err != nil {
+		t.Fatal(err)
+	}
+	var decoded testRecord
+	if _, err := Verify(old, testType, Keys{owner: state}, &decoded); err == nil {
+		t.Fatal("admitted a record signed with a retired key")
+	}
+	if _, err := VerifyHistory(old, testType, Keys{owner: state}, &decoded); err != nil {
+		t.Fatalf("history refused a record signed before the rotation: %v", err)
+	}
+	if state, err = ApplyKeyRecord(state, owner, must(RevokeKey(owner, second))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyHistory(old, testType, Keys{owner: state}, &decoded); err == nil {
+		t.Fatal("history accepted a retired key after the owner's revocation")
+	}
+}
+
+func must(value []byte, err error) []byte {
+	if err != nil {
+		panic(err)
+	}
+	return value
+}

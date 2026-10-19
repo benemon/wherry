@@ -313,7 +313,7 @@ func TestBindTurnsRequireSameBindings(t *testing.T) {
 			}
 			expected := testSubmission("run-submission-binding")
 			mutate(expected)
-			if bound := bindTurns(all, expected); len(bound) != 0 {
+			if bound := bindTurns(all, expected, poolEvents{}); len(bound) != 0 {
 				t.Fatalf("mismatched %s was accepted", name)
 			}
 		})

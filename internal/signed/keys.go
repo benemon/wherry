@@ -9,6 +9,7 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"slices"
 
 	jose "github.com/go-jose/go-jose/v4"
 )
@@ -69,6 +70,9 @@ func RevokeKey(owner string, current ed25519.PrivateKey) ([]byte, error) {
 // its owner is re-provisioned under a new principal.
 type KeyState struct {
 	Current ed25519.PublicKey
+	// Retired holds keys rotated away; they verify the owner's history,
+	// never new work. A revocation drops them with the topic.
+	Retired []ed25519.PublicKey
 	Sealing *ecdh.PublicKey
 	Revoked bool
 }
@@ -86,6 +90,18 @@ func (keys Keys) current(owner, keyID string) (ed25519.PublicKey, error) {
 		return nil, errors.New("signing key is not the owner's current key")
 	}
 	return state.Current, nil
+}
+
+// signedBy returns the owner's current or retired key with keyID.
+func (keys Keys) signedBy(owner, keyID string) (ed25519.PublicKey, error) {
+	if current, err := keys.current(owner, keyID); err == nil {
+		return current, nil
+	}
+	state := keys[owner]
+	if index := slices.IndexFunc(state.Retired, func(key ed25519.PublicKey) bool { return KeyID(key) == keyID }); index >= 0 {
+		return state.Retired[index], nil
+	}
+	return nil, errors.New("signing key is not one of the owner's keys")
 }
 
 func ApplyKeyRecord(state KeyState, topicOwner string, encoded []byte) (KeyState, error) {
@@ -137,7 +153,7 @@ func ApplyKeyRecord(state KeyState, topicOwner string, encoded []byte) (KeyState
 		if state.Current == nil || len(jws.Signatures) != 2 || record.PreviousKeyID != KeyID(state.Current) || key.Equal(state.Current) || !verifiedBy(jws, state.Current) || !verifiedBy(jws, key) {
 			return state, errors.New("rotation is not signed by current and new keys")
 		}
-		return KeyState{Current: key, Sealing: sealing}, nil
+		return KeyState{Current: key, Retired: append(slices.Clone(state.Retired), state.Current), Sealing: sealing}, nil
 	case "revoke":
 		if state.Current == nil || len(jws.Signatures) != 1 || !key.Equal(state.Current) || !verifiedBy(jws, key) {
 			return state, errors.New("revocation is not signed by retiring key")
