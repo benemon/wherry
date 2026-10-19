@@ -19,6 +19,10 @@ parts involved.
   go build -o wherry ./cmd/wherry
   ```
 
+- `wherry-plugin-nomad` on the receiver host, built from
+  [wherry-plugins](https://github.com/benemon/wherry-plugins/tree/main/nomad)
+  and installed in `/usr/local/libexec/wherry/plugins` as in
+  [Install adapter plugins](operator-guide.md#install-adapter-plugins).
 - An agent the Nomad nodes can run: an image for a container driver, or an
   install on the node for `exec`. The
   [agent contract](reference.md#agent-contract) lists what it must do.
@@ -135,7 +139,8 @@ Copy `nomad-1.bundle` to `/etc/wherry/` on the receiver host, keeping mode
 
 ```sh
 NOMAD_TOKEN=<token> wherry receiver \
-  --bundle /etc/wherry/nomad-1.bundle --state-dir /var/lib/wherry
+  --bundle /etc/wherry/nomad-1.bundle --state-dir /var/lib/wherry \
+  --plugin-dir /usr/local/libexec/wherry/plugins
 ```
 
 The receiver creates its keys in `/var/lib/wherry`, registers them, and

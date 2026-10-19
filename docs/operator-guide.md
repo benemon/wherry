@@ -181,8 +181,8 @@ must honour the labels its adapters declare. The client places a task by
 one member's labels, but any member can claim it. A member with no
 matching adapter records a start failure and returns the task.
 
-[Nomad adapter settings](reference.md#nomad-adapter-settings) covers the
-`config` section.
+The [Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
+cover the `config` section.
 
 1. Write the configuration and add the receiver:
 
@@ -214,22 +214,50 @@ dispatched again. The bundle and password do not change.
 
 ## Run a receiver
 
-`wherry receiver --bundle FILE --state-dir DIR` needs:
+`wherry receiver --bundle FILE --state-dir DIR --plugin-dir DIR` needs:
 
 - the bundle, readable by the receiver alone;
 - a state directory that survives restarts. It holds the receiver's
   private keys, and a receiver that loses them cannot start under the same
   name again;
+- a plugin directory holding the plugin for every adapter type in its
+  configuration, as in [Install adapter plugins](#install-adapter-plugins);
 - a supervisor that restarts the process when it exits, since a
   configuration change ends it;
-- for the Nomad adapter, a Nomad token with the
-  [receiver policy](#nomad-acl-policy), from the bundle or `NOMAD_TOKEN`.
+- for the Nomad plugin, a Nomad token with the
+  [receiver policy](#nomad-acl-policy), from the bundle or `NOMAD_TOKEN`
+  in the receiver's environment.
 
 On first start the receiver logs `registered keys`, then
 `configured: pool=<pool> adapters=<n> capacity=<n>`. It logs
 `waiting for configuration` while its record is missing. After its first
 advertisement, `wherry receivers` on a host of an entitled tenant shows it
 `live`.
+
+A plugin that exits is started again and its adapters configured again;
+the receiver logs `plugin exited; restarting`, then `plugin restarted`.
+[Adapter plugins](reference.md#adapter-plugins) covers what runs in flight
+meanwhile.
+
+### Install adapter plugins
+
+The receiver ships with no adapters. Build each plugin from
+[wherry-plugins](https://github.com/benemon/wherry-plugins) and install it
+as `wherry-plugin-<type>` in one directory on the receiver host, owned by
+root and writable by no one else:
+
+```sh
+install -d -o root -g root -m 0755 /usr/local/libexec/wherry/plugins
+install -o root -g root -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
+```
+
+The receiver refuses a plugin directory or binary owned by a user other
+than root or the receiver's, or that group or others can write, and a
+plugin that is not a regular file. It checks again before restarting a
+plugin. It exits with
+`adapter <name>: no plugin for type <type>` when a type's plugin is
+missing. Install a new plugin version while the receiver is stopped, or
+restart the receiver after replacing it.
 
 ### As a Nomad job
 
@@ -255,7 +283,8 @@ job "wherry-receiver" {
       config {
         command = "/usr/local/bin/wherry"
         args    = ["receiver", "--bundle", "${NOMAD_SECRETS_DIR}/bundle.yaml",
-                   "--state-dir", "${NOMAD_ALLOC_DIR}/data"]
+                   "--state-dir", "${NOMAD_ALLOC_DIR}/data",
+                   "--plugin-dir", "/usr/local/libexec/wherry/plugins"]
       }
 
       identity {
@@ -275,6 +304,13 @@ job "wherry-receiver" {
   }
 }
 ```
+
+The plugin directory is the one installed on the node, as in
+[Install adapter plugins](#install-adapter-plugins). As the task sees them,
+root or the receiver's user must own the directory and the binary, neither
+group nor others may write them, and the binary must be a regular file. The plugin runs in the
+receiver's task with its environment, so the workload identity's
+`NOMAD_TOKEN` reaches it.
 
 Nomad treats a sticky, migrating ephemeral disk as best effort. If the node
 is lost, the keys go with it and the receiver is re-provisioned under a new
@@ -341,8 +377,9 @@ wherry admin check
 
 It loads `wherry.admin`, validates every receiver configuration against its
 pool's current terms, and confirms that every ACL the state calls for
-exists. It does not check an adapter's `type` or `config` section; the
-receiver checks them at start and exits with `adapter <name>: ...`. Run it after changing a pool's terms, since receivers keep the
+exists. It does not check an adapter's `type` or `config` section; at
+start the receiver finds the type's plugin, the plugin checks the section,
+and the receiver exits with `adapter <name>: ...` on an error. Run it after changing a pool's terms, since receivers keep the
 configuration they started with.
 
 ## Recover from an undecodable `wherry.admin` record
@@ -379,7 +416,7 @@ receiver's key topic was replaced on purpose.
 
 ## Nomad ACL policy
 
-The adapter's calls need this policy, with the namespace adjusted:
+The Nomad plugin's calls need this policy, with the namespace adjusted:
 
 ```hcl
 namespace "agents" {

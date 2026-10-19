@@ -35,9 +35,10 @@ writes.
   an Ed25519 signing key and an X25519 sealing key, which it creates on
   first start and keeps in its state directory.
 - **An adapter** is the part of a receiver that runs jobs on one platform.
-  Adapters are compiled into the binary; the Nomad adapter is the only
-  one. A receiver holds one or more adapters, and each adapter launches one
-  agent.
+  Adapters are plugins: the receiver ships with none, and runs one plugin
+  process per adapter type from its plugin directory, linked to it by
+  mutual TLS. Nomad's plugin is the only one. A receiver holds one or more
+  adapters, and each adapter launches one agent.
 - **The agent** is the program a job runs, such as a coding agent's
   headless command. wherry does not modify it. The receiver passes it a
   prompt file and reads its standard output.

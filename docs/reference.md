@@ -319,25 +319,80 @@ does not check an adapter's `type` or `config` section.
 
 ## Receiver command
 
-### `wherry receiver --bundle FILE --state-dir DIR`
+### `wherry receiver --bundle FILE --state-dir DIR --plugin-dir DIR`
 
-Runs a receiver as the bundle's principal. It creates `DIR` with mode 0700
-and keeps `signing.key` and `sealing.key` in it. On start it:
+Runs a receiver as the bundle's principal. It creates the state directory
+with mode 0700 and keeps `signing.key` and `sealing.key` in it. On start it:
 
 1. registers both public keys on its key topic when the topic is empty,
    and fails when the topic holds other keys;
 2. waits for its configuration record on `wherry.admin` and validates it
    against the pool's terms;
-3. builds its adapters, reads its pool's events once, and starts
-   advertising and claiming.
+3. starts the [adapter plugins](#adapter-plugins) its adapters' types name
+   from the plugin directory and configures each adapter, reads its pool's
+   events once, and starts advertising and claiming.
 
 It logs to standard output with the prefix `receiver: `. It exits on
 `SIGINT` or `SIGTERM` without stopping its jobs, and fails with
 `receiver configuration changed` when a new configuration record appears.
 It refuses to start after its membership end.
 
-Each adapter takes its platform credential from the bundle's `platform`
-entry for its name, or else from `NOMAD_TOKEN`.
+### Adapter plugins
+
+The receiver ships with no adapters. For each adapter type in its
+configuration it runs `wherry-plugin-<type>` from the plugin directory, one
+process per type, and configures every adapter of that type in it.
+[wherry-plugins](https://github.com/benemon/wherry-plugins) holds the
+plugins, `nomad` among them.
+
+The plugin directory is made absolute, so the binary checked is the one
+run and `PATH` is never searched. The receiver refuses a plugin directory
+or binary owned by a user other than root or the receiver's, or that group
+or others can write, and a binary that is not a regular file; a symbolic
+link is refused. It checks again before every restart. A type with no binary in the directory is a configuration error,
+and the receiver exits with `adapter <name>: no plugin for type <type>`. A
+plugin checks its adapter's `config` section when the receiver configures
+it, and the receiver exits with `adapter <name>: ...` on an error.
+
+A plugin inherits the receiver's environment. The receiver passes each
+adapter its name, pool, agent, credential name and `config` section, and
+the bundle's `platform` entry for its name when there is one. The plugin
+answers whether the adapter delivers git context; the receiver rejects a
+task with a git context part when its adapter does not.
+
+The receiver and a plugin talk gRPC over
+[go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
+certificate pair made for each start, protocol version 1. The receiver
+refuses a plugin that offers no TLS certificate. Every call names its
+adapter. A plugin accepts messages up to 64 MiB; the receiver logs a larger
+Dispatch as `dispatch rejected: message too large`.
+
+Each advertisement gives every adapter's sweep and readiness call one
+advertise interval, 30 seconds; a call that runs out counts as not ready
+and is logged.
+
+When a plugin exits, the receiver logs `plugin exited; restarting`, starts
+it again after one second, waiting twice as long after each failed start
+up to 30 seconds, and configures every adapter of its type again. Until then those
+adapters are not ready and the next advertisement withdraws their offers.
+A run whose job the receiver is following reads again from its last
+offset once the plugin is back; when the plugin stays down for one lock
+duration, the run fails with `log stream failed`.
+
+A receiver with no ready adapter advertises with no offers, so it stays
+`live` with every adapter `ready=false`, and placement passes over it. A
+job its adapter reports never started is a `platform` start failure: the
+receiver purges the job and returns the task to the pool.
+
+A receiver adopts a turn's existing job only when the adapter and agent
+recorded with it match the adapter that finds it. It leaves a job whose
+adapter is another of its adapters to that adapter, and stops and purges
+any other job under the turn's ID and dispatches the turn again.
+
+The protocol is the Go module `github.com/benemon/wherry/adapter` in this
+repository. [`adapter.proto`](../adapter/proto/wherry/adapter/v1/adapter.proto)
+defines the service, `adapter.Serve` runs a plugin, and `adaptertest` is
+the conformance suite a plugin runs against its platform.
 
 ## MCP tools
 
@@ -487,7 +542,7 @@ Each adapter entry:
 | Field | Content |
 | --- | --- |
 | `name` | adapter name, unique in the receiver |
-| `type` | `nomad` |
+| `type` | the adapter type; the receiver runs `wherry-plugin-<type>` for it |
 | `agent` | the agent it launches, from the pool's terms |
 | `credential` | optional; a credential the terms allow for the agent, delivered to the job |
 | `labels` | optional; [labels](#labels) for placement |
@@ -527,107 +582,17 @@ an empty `adapters/`, a nested directory, and any file other than
 errors. Files and directories whose names start with `.` are ignored. The
 command writes nothing when the directory has an error.
 
-### Nomad adapter settings
+### Adapter settings
 
-| Field | Default | Content |
-| --- | --- | --- |
-| `address` | `NOMAD_ADDR`, else `http://127.0.0.1:4646` | Nomad API address |
-| `ca_file` | none | CA bundle for the Nomad API, a path on the receiver |
-| `namespace` | `default` | namespace for agent jobs and variables; `NOMAD_NAMESPACE` is not read |
-| `credential_env` | none | environment variable the job receives the credential in |
-| `node_pool` | `default` | node pool for agent jobs |
-| `datacenters` | every datacenter | datacenters for agent jobs |
-| `runtime` | required | the agent task's definition |
+An adapter's `config` section belongs to its plugin. The
+[Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
+lists its settings and the jobs it runs.
 
-`credential_env` is required when the adapter sets `credential`, and
-matches `[A-Za-z_][A-Za-z0-9_]*`. Unknown fields are errors. `wherry admin`
-does not check `type` or the `config` section; the receiver checks them at
-start and exits with `adapter <name>: ...`.
+### Agent contract
 
-`runtime` has these fields:
-
-| Field | Content |
-| --- | --- |
-| `driver` | Nomad task driver, required |
-| `config` | the driver's task configuration |
-| `env` | environment variables for the agent task |
-| `resources` | `cpu` (MHz) and `memory_mb`; unset values take Nomad defaults |
-
-The adapter sets `HOME` in `env`. [Agent jobs](#agent-jobs) describes the
-job it builds.
-
-```yaml
-capacity: 2
-adapters:
-  - name: container
-    type: nomad
-    agent: coder
-    credential: model-api-key
-    labels:
-      isolation: container
-    config:
-      address: https://nomad.example.com:4646
-      ca_file: /secrets/nomad-ca.pem
-      namespace: agents
-      credential_env: MODEL_API_KEY
-      runtime:
-        driver: docker
-        config:
-          image: registry.example.com/agent:1.0
-          command: /bin/sh
-          args:
-            - -c
-            - exec agent-run < "$NOMAD_TASK_DIR/prompt.txt"
-        resources:
-          cpu: 1000
-          memory_mb: 2048
-```
-
-#### Agent jobs
-
-The Nomad adapter registers one batch job per turn,
-`agent-<pool>-<run>-t<turn>`, in its namespace, node pool and datacenters, with
-restarts and rescheduling disabled. Its task group `agent` holds the task
-`agent`, built from the adapter's `runtime`, and the prestart task `git`
-when the run carries a git context. The job's metadata holds `run_id`,
-`turn`, `attempt`, `adapter` and `agent`. A receiver adopts an existing
-job only when its `adapter` and `agent` match the adapter that finds it.
-It leaves a job whose `adapter` names another of its adapters to that
-adapter, and stops and purges any other job under the turn's ID and
-dispatches the turn again.
-
-The prompt, the credential and the git context travel in Nomad variables
-under `nomad/jobs/agent-<pool>-<run>-t<turn>`, which the job's own workload
-identity reads. The adapter deletes them when the turn ends. Every 30
-seconds it also deletes the variables of jobs that have stopped, and of
-jobs never registered within 10 minutes, and purges agent jobs that have
-been dead for 10 minutes. `<pool>` is the first 12 hexadecimal digits of
-the SHA-256 of the pool name, since Nomad limits a variable path to 128
-characters. A receiver sweeps only its own pool's jobs and variables. The 10 minutes run from a job's last allocation
-change, so a turn whose job ended while no pool member could hold it for
-longer than that runs again from the start on its next delivery.
-
-An agent task with no `Started` event in a terminal allocation never
-started. The receiver records a `platform` start failure, purges the job
-and its variables, and returns the task to the pool.
-
-An adapter is ready when some ready, eligible node in its node pool and
-datacenters has the runtime's driver detected and healthy. A receiver with
-no ready adapter advertises with no offers, so it stays `live` with every
-adapter `ready=false`, and placement passes over it.
-
-The receiver stops a job by sending `SIGTERM` to the agent task. If the
-task is still running 15 seconds later, it deregisters the job.
-
-#### Agent contract
-
-The agent task receives:
-
-- the prompt in `$NOMAD_TASK_DIR/prompt.txt`;
-- the credential in the environment variable `credential_env` names, when
-  the adapter delivers one;
-- `HOME` set to the task directory;
-- the runtime's `env`, driver `config` and `resources`.
+The agent receives the prompt in a file and the credential, when its
+adapter delivers one, as its plugin documents; for Nomad, in
+[the plugin's agent jobs](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs).
 
 The agent writes JSON lines to standard output. The receiver publishes each
 line as a transcript chunk. The line that decodes as a JSON object with
@@ -640,10 +605,6 @@ output writes this format.
 
 A turn's run time is capped at its deadline, and at one hour after its
 queue deadline.
-
-For the `podman` driver the adapter reads the logs in CRI format, and the
-git task gets `entrypoint` and `args` in place of `command`. For other
-drivers the git task's `command` and `args` are replaced.
 
 ## Kafka resources
 
@@ -704,8 +665,9 @@ A principal whose membership has ended has no grants.
 | `WHERRY_TRUST_ADMIN_PASSWORD_FILE` | `wherry admin` | file holding the super user's SCRAM password |
 | `WHERRY_TRUST_OPERATOR_USER` | `wherry admin` | operator principal name; must be `wherry.operator` |
 | `WHERRY_TRUST_OPERATOR_PASSWORD_FILE` | `wherry admin` | file holding the operator's SCRAM password |
-| `NOMAD_TOKEN` | `wherry receiver` | Nomad token for adapters without a platform credential in the bundle |
-| `NOMAD_ADDR` | `wherry receiver` | Nomad address when `address` is empty |
-| `NOMAD_REGION` | `wherry receiver` | Nomad region for API requests |
+
+A plugin reads its own variables from the receiver's environment; the
+[Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#credentials)
+lists its.
 
 Trailing CR and LF are trimmed from password files.

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -410,7 +411,7 @@ func TestGitPartAdmittedOnlyWithGitAdapter(t *testing.T) {
 			if status := f.execute(t, record, 1); status != kgo.AckAccept {
 				t.Fatalf("status %v", status)
 			}
-			want := wire.GitContext{URL: gitPart.URL, Ref: "main", Path: "repo"}
+			want := adapter.GitContext{URL: gitPart.URL, Ref: "main", Path: "repo"}
 			if run := f.adapter.lastRun; run.Git == nil || *run.Git != want || string(run.Prompt) != "hi" {
 				t.Fatalf("dispatched git %#v prompt %q, want %#v and the text alone", run.Git, run.Prompt, want)
 			}
@@ -422,11 +423,11 @@ func TestCancelledSubmissionNotDispatched(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		attempt int64
-		job     JobState
+		job     adapter.JobState
 		stops   int
 	}{
-		{"queued", 1, JobAbsent, 0},
-		{"redelivered with its job running", 2, JobRunning, 1},
+		{"queued", 1, adapter.JobAbsent, 0},
+		{"redelivered with its job running", 2, adapter.JobRunning, 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)

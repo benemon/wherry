@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -48,6 +49,8 @@ var (
 	reconcileInterval = time.Second
 	// purgeDeadline bounds the Purge retries of a start failure.
 	purgeDeadline = 5 * time.Minute
+	// followRetryInterval separates the Follows of a run whose plugin link is lost.
+	followRetryInterval = time.Second
 )
 
 // claimLoop holds one slot: a dedicated share client per claimed record,
@@ -536,7 +539,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			return run.returnTask(ctx, nil)
 		}
 	}
-	var handle Handle
+	var handle adapter.Handle
 	adopted, neverStarted := false, false
 	if attempt > 1 {
 		// Offers can change between attempts, so the run may live in an adapter other than the matched one.
@@ -546,15 +549,15 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				if runCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, "timeout", nil)
 				}
-				if errors.Is(err, ErrGitContext) {
+				if errors.Is(err, adapter.ErrGitContext) {
 					r.logger.Printf("run %s: git context unavailable: %T", runID, err)
 					run.adapter = named
-					return run.fail(ctx, ErrGitContext.Error(), nil)
+					return run.fail(ctx, adapter.ErrGitContext.Error(), nil)
 				}
 				r.logger.Printf("run %s: lookup in adapter %s: %T", runID, named.Name, err)
 				return run.returnTask(ctx, nil)
 			}
-			if job.State == JobAbsent {
+			if job.State == adapter.JobAbsent {
 				continue
 			}
 			// A job of another adapter of this receiver on the same backend is that adapter's Lookup to judge.
@@ -575,7 +578,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 			r.logger.Printf("run %s: found attempt %d's job in adapter %s", runID, job.Attempt, named.Name)
 			handle, run.adapter = job.Handle, named
-			adopted, neverStarted = job.State != JobNeverStarted, job.State == JobNeverStarted
+			adopted, neverStarted = job.State != adapter.JobNeverStarted, job.State == adapter.JobNeverStarted
 			break
 		}
 	}
@@ -601,24 +604,27 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		case outcome == credentialMissing:
 			return run.interrupt(ctx, named.Credential)
 		}
-		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, Run{
+		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, adapter.Run{
 			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Turn: task.Wherry.Turn, Attempt: attempt,
-			Prompt: []byte(prompt(admitted.history)), Credential: credential, Git: admitted.git,
+			Prompt: []byte(prompt(admitted.history)), Credential: credential, Git: (*adapter.GitContext)(admitted.git),
 		})
 		switch {
 		case err != nil && runCtx.Err() != nil && ctx.Err() == nil:
 			return run.fail(ctx, "timeout", nil)
-		case errors.Is(err, ErrGitContext):
+		case errors.Is(err, adapter.ErrGitContext):
 			// Git error text can echo URLs, so only the type is logged.
 			r.logger.Printf("run %s: git context unavailable: %T", runID, err)
-			return run.fail(ctx, ErrGitContext.Error(), nil)
+			return run.fail(ctx, adapter.ErrGitContext.Error(), nil)
+		case errors.Is(err, adapter.ErrMessageTooLarge):
+			r.logger.Printf("run %s: dispatch rejected: message too large", runID)
+			dispatched = adapter.OutcomeUnknown
 		case err != nil:
 			r.logger.Printf("run %s: dispatch failed: %T", runID, err)
-			dispatched = OutcomeUnknown
+			dispatched = adapter.OutcomeUnknown
 		}
 		switch dispatched {
-		case OutcomeCreated:
-		case OutcomeNothingCreated:
+		case adapter.OutcomeCreated:
+		case adapter.OutcomeNothingCreated:
 			r.logger.Printf("run %s: adapter %s created no job", runID, named.Name)
 			return run.startFailure(ctx, "dispatch")
 		default:
@@ -627,9 +633,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			case !resolved:
 				r.logger.Printf("run %s: dispatch unresolved", runID)
 				return run.returnTask(ctx, nil)
-			case job.State == JobAbsent:
+			case job.State == adapter.JobAbsent:
 				return run.startFailure(ctx, "dispatch")
-			case job.State == JobNeverStarted:
+			case job.State == adapter.JobNeverStarted:
 				return run.startFailure(ctx, "platform")
 			}
 			dispatchedHandle = job.Handle
@@ -656,24 +662,31 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 
 	followCtx, stopFollow := context.WithCancel(runCtx)
 	defer stopFollow()
-	lines := make(chan Line, 64)
+	lines := make(chan adapter.Line, 64)
 	type followed struct {
-		terminal Terminal
+		terminal adapter.Terminal
 		err      error
 	}
 	ended := make(chan followed, 1)
-	go func() {
-		terminal, err := run.adapter.Adapter.Follow(followCtx, handle, offset, lines)
-		ended <- followed{terminal, err}
-	}()
+	follow := func(from int64) {
+		go func() {
+			terminal, err := run.adapter.Adapter.Follow(followCtx, handle, from, lines)
+			ended <- followed{terminal, err}
+		}()
+	}
+	follow(offset)
+	// retryUntil bounds following again over a lost plugin link to one lock duration from the loss, after
+	// which another member may hold the task; zero while the link holds, and reset by every line.
+	var retryUntil time.Time
+	var retry <-chan time.Time
 
 	heartbeat := time.NewTicker(renewInterval)
 	defer heartbeat.Stop()
 	checks := time.NewTicker(stateCheckInterval)
 	defer checks.Stop()
-	var pending []Line
+	var pending []adapter.Line
 	position := offset
-	take := func(line Line) (agentResult, bool) {
+	take := func(line adapter.Line) (agentResult, bool) {
 		pending = append(pending, line)
 		position = line.Next
 		return resultLine(line.Data)
@@ -706,10 +719,14 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	for {
 		select {
 		case line := <-lines:
+			retryUntil = time.Time{}
 			if result, ok := take(line); ok {
 				stopFollow()
 				return run.finish(ctx, handle, pending, result)
 			}
+		case <-retry:
+			retry = nil
+			follow(position)
 		case end := <-ended:
 			for drained := false; !drained; {
 				select {
@@ -726,6 +743,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				return run.stopAndFail(ctx, handle, "timeout", pending)
 			case ctx.Err() != nil:
 				return shutdown()
+			case errors.Is(end.err, adapter.ErrLinkLost) && (retryUntil.IsZero() || time.Now().Before(retryUntil)):
+				if retryUntil.IsZero() {
+					state, _, _ := r.snapshot()
+					retryUntil = time.Now().Add(time.Duration(state.Pools[r.config.Pool].LockDurationMS) * time.Millisecond)
+					r.logger.Printf("run %s: plugin link lost; following again from offset %d", runID, position)
+				}
+				retry = time.After(followRetryInterval)
 			case end.err != nil:
 				// A dropped stream does not mean the task ended; stop it rather than leave it running.
 				r.logger.Printf("run %s: follow failed: %T", runID, end.err)
@@ -798,7 +822,7 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 	return kgo.AckRelease
 }
 
-func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason string, pending []Line) kgo.AckStatus {
+func (run *activeRun) stopAndFail(ctx context.Context, handle adapter.Handle, reason string, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
 		return run.returnTask(ctx, pending)
@@ -806,7 +830,7 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle Handle, reason str
 	return run.fail(ctx, reason, pending)
 }
 
-func (run *activeRun) stopAndCancel(ctx context.Context, handle Handle, pending []Line) kgo.AckStatus {
+func (run *activeRun) stopAndCancel(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
 		return run.returnTask(ctx, pending)
@@ -815,7 +839,7 @@ func (run *activeRun) stopAndCancel(ctx context.Context, handle Handle, pending 
 }
 
 // deny stops a run on a denied receiver and releases its task to the pool; the terminal status is best effort.
-func (run *activeRun) deny(ctx context.Context, handle Handle, pending []Line) kgo.AckStatus {
+func (run *activeRun) deny(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
 		return kgo.AckRelease
@@ -829,11 +853,11 @@ func (run *activeRun) deny(ctx context.Context, handle Handle, pending []Line) k
 	return kgo.AckRelease
 }
 
-func (run *activeRun) fail(ctx context.Context, reason string, pending []Line) kgo.AckStatus {
+func (run *activeRun) fail(ctx context.Context, reason string, pending []adapter.Line) kgo.AckStatus {
 	return run.end(ctx, taskStatus(wire.TaskStateFailed, reason), reason, nil, pending, kgo.AckReject)
 }
 
-func (run *activeRun) cancel(ctx context.Context, pending []Line) kgo.AckStatus {
+func (run *activeRun) cancel(ctx context.Context, pending []adapter.Line) kgo.AckStatus {
 	return run.end(ctx, taskStatus(wire.TaskStateCanceled, cancelReason), cancelReason, nil, pending, kgo.AckAccept)
 }
 
@@ -888,7 +912,7 @@ func (r *Receiver) budgetSpent(attempt int64) bool {
 }
 
 // reconcile looks up the job an ambiguous Dispatch may have created; false means it stays unresolved.
-func (run *activeRun) reconcile(ctx context.Context) (Job, bool) {
+func (run *activeRun) reconcile(ctx context.Context) (adapter.Job, bool) {
 	for i := 0; i < 3; i++ {
 		if i > 0 {
 			sleep(ctx, reconcileInterval)
@@ -899,13 +923,13 @@ func (run *activeRun) reconcile(ctx context.Context) (Job, bool) {
 		}
 		run.receiver.logger.Printf("run %s: lookup in adapter %s: %T", run.task.Wherry.Run, run.adapter.Name, err)
 	}
-	return Job{}, false
+	return adapter.Job{}, false
 }
 
 // returnTask hands the task back to the pool with any job and its material in place, so the next holder's
 // Lookup finds them. Once the delivery budget is spent it ends the run FAILED instead, and leaves the
 // material to the adapter's sweep.
-func (run *activeRun) returnTask(ctx context.Context, pending []Line) kgo.AckStatus {
+func (run *activeRun) returnTask(ctx context.Context, pending []adapter.Line) kgo.AckStatus {
 	if !run.receiver.budgetSpent(run.attempt) {
 		return kgo.AckRelease
 	}
@@ -915,12 +939,12 @@ func (run *activeRun) returnTask(ctx context.Context, pending []Line) kgo.AckSta
 	return kgo.AckReject
 }
 
-func (run *activeRun) budgetRecords(pending []Line) []*kgo.Record {
+func (run *activeRun) budgetRecords(pending []adapter.Line) []*kgo.Record {
 	status := taskStatus(wire.TaskStateFailed, budgetReason)
 	return append(append(run.chunks(pending, true), run.result(status, budgetReason, nil)), run.statusRecords("terminal", status, nil, nil)...)
 }
 
-func (run *activeRun) finish(ctx context.Context, handle Handle, pending []Line, result agentResult) kgo.AckStatus {
+func (run *activeRun) finish(ctx context.Context, handle adapter.Handle, pending []adapter.Line, result agentResult) kgo.AckStatus {
 	// A result committed after access lapsed is untrusted, so acknowledging it would lose the run.
 	if run.receiver.stopForDenial() {
 		return run.deny(ctx, handle, pending)
@@ -940,7 +964,7 @@ func (run *activeRun) finish(ctx context.Context, handle Handle, pending []Line,
 }
 
 // end commits the remaining transcript, the result and the terminal status in one transaction.
-func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, resultMetadata jsontext.Value, pending []Line, ack kgo.AckStatus) kgo.AckStatus {
+func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, resultMetadata jsontext.Value, pending []adapter.Line, ack kgo.AckStatus) kgo.AckStatus {
 	records := append(append(run.chunks(pending, true), run.result(status, result, resultMetadata)), run.statusRecords("terminal", status, nil, nil)...)
 	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
@@ -1026,7 +1050,7 @@ func taskStatus(state wire.TaskState, reason string) wire.TaskStatus {
 }
 
 // chunks are the transcript lines as artifact updates on the tenant's feed.
-func (run *activeRun) chunks(lines []Line, last bool) []*kgo.Record {
+func (run *activeRun) chunks(lines []adapter.Line, last bool) []*kgo.Record {
 	records := make([]*kgo.Record, 0, len(lines))
 	for i, line := range lines {
 		part := wire.Part{Text: string(line.Data), MediaType: "application/x-ndjson"}

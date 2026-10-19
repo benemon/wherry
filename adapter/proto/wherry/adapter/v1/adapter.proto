@@ -1,0 +1,165 @@
+// The adapter protocol, version 1: the receiver core calls a plugin's adapters
+// over this service, and every request names its adapter.
+syntax = "proto3";
+
+package wherry.adapter.v1;
+
+option go_package = "github.com/benemon/wherry/adapter/internal/adapterv1";
+
+service Adapter {
+  // Configure builds an adapter in the plugin, replacing one of the same name.
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  rpc Ready(ReadyRequest) returns (ReadyResponse);
+  rpc Dispatch(DispatchRequest) returns (DispatchResponse);
+  rpc Lookup(LookupRequest) returns (LookupResponse);
+  // Follow streams lines, then one terminal message.
+  rpc Follow(FollowRequest) returns (stream FollowResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+  rpc Purge(PurgeRequest) returns (PurgeResponse);
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  rpc Sweep(SweepRequest) returns (SweepResponse);
+}
+
+// Outcome numbers match adapter.Outcome.
+enum Outcome {
+  OUTCOME_UNKNOWN = 0;
+  OUTCOME_NOTHING_CREATED = 1;
+  OUTCOME_CREATED = 2;
+}
+
+// JobState numbers match adapter.JobState.
+enum JobState {
+  JOB_STATE_ABSENT = 0;
+  JOB_STATE_RUNNING = 1;
+  JOB_STATE_ENDED = 2;
+  JOB_STATE_NEVER_STARTED = 3;
+}
+
+message Handle {
+  bytes data = 1;
+  string name = 2;
+  string commit = 3;
+}
+
+message GitContext {
+  string url = 1;
+  string ref = 2;
+  string path = 3;
+}
+
+message Run {
+  string id = 1;
+  string adapter = 2;
+  string agent = 3;
+  int64 turn = 4;
+  int64 attempt = 5;
+  bytes prompt = 6;
+  optional bytes credential = 7;
+  GitContext git = 8;
+}
+
+message Job {
+  JobState state = 1;
+  Handle handle = 2;
+  int64 attempt = 3;
+  string adapter = 4;
+  string agent = 5;
+}
+
+message Terminal {
+  bool started = 1;
+  int64 exit_code = 2;
+  string signal = 3;
+  string class = 4;
+  string node = 5;
+}
+
+message Line {
+  int64 offset = 1;
+  int64 next = 2;
+  bytes data = 3;
+}
+
+message ConfigureRequest {
+  string adapter = 1;
+  string pool = 2;
+  string agent = 3;
+  string credential = 4;
+  bytes config = 5;
+  string platform = 6;
+}
+
+message ConfigureResponse {
+  // git reports whether the adapter delivers a run's git context.
+  bool git = 1;
+}
+
+message ReadyRequest {
+  string adapter = 1;
+}
+
+message ReadyResponse {
+  bool ready = 1;
+}
+
+message DispatchRequest {
+  string adapter = 1;
+  Run run = 2;
+}
+
+message DispatchResponse {
+  Outcome outcome = 1;
+  Handle handle = 2;
+}
+
+message LookupRequest {
+  string adapter = 1;
+  string run_id = 2;
+  int64 turn = 3;
+}
+
+message LookupResponse {
+  Job job = 1;
+}
+
+message FollowRequest {
+  string adapter = 1;
+  Handle handle = 2;
+  int64 from = 3;
+}
+
+message FollowResponse {
+  oneof event {
+    Line line = 1;
+    Terminal terminal = 2;
+  }
+}
+
+message StopRequest {
+  string adapter = 1;
+  Handle handle = 2;
+}
+
+message StopResponse {}
+
+message PurgeRequest {
+  string adapter = 1;
+  string run_id = 2;
+  int64 turn = 3;
+}
+
+message PurgeResponse {}
+
+message ReleaseRequest {
+  string adapter = 1;
+  string run_id = 2;
+  int64 turn = 3;
+}
+
+message ReleaseResponse {}
+
+message SweepRequest {
+  string adapter = 1;
+}
+
+message SweepResponse {}

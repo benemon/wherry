@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
@@ -30,97 +31,8 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-// Handle identifies one platform instance of a run.
-type Handle struct {
-	// Data is adapter-private and at most maxHandle bytes; the adapter versions its encoding.
-	Data []byte
-	// Name is the platform's reference for the job, for diagnosis; the core logs it and never interprets it.
-	Name string
-	// Commit is the git commit checked out for a run with a git context.
-	Commit string
-}
-
-// Line is one output line, the byte offset where it starts and the offset after it.
-type Line struct {
-	Offset int64
-	Next   int64
-	Data   []byte
-}
-
-// Run is the material needed to start one platform job; the adapter records Attempt, Adapter and Agent
-// in platform metadata.
-type Run struct {
-	ID, Adapter, Agent string
-	Turn, Attempt      int64
-	Prompt, Credential []byte
-	Git                *wire.GitContext
-}
-
-// Outcome is what a Dispatch left on the platform.
-type Outcome int
-
-const (
-	// OutcomeUnknown means a job may exist; the core reconciles it with Lookup.
-	OutcomeUnknown Outcome = iota
-	// OutcomeNothingCreated means the adapter knows no job exists.
-	OutcomeNothingCreated
-	OutcomeCreated
-)
-
-// JobState is the state of a turn's job as Lookup finds it.
-type JobState int
-
-const (
-	JobAbsent JobState = iota
-	JobRunning
-	JobEnded
-	// JobNeverStarted means the platform ended the job before its agent task started.
-	JobNeverStarted
-)
-
-// Job is a turn's job as Lookup finds it, with the attempt, adapter and agent its platform metadata records.
-type Job struct {
-	State JobState
-	// Handle is set unless State is JobAbsent.
-	Handle         Handle
-	Attempt        int64
-	Adapter, Agent string
-}
-
-// Terminal is how a followed job ended.
-type Terminal struct {
-	Started  bool
-	ExitCode int
-	Signal   string
-	// Class is the platform's failure class for a job that never started.
-	Class string
-	Node  string
-}
-
-// ErrGitContext is the error an adapter returns when a run's git context cannot be checked out.
-var ErrGitContext = errors.New("git context unavailable")
-
 // ErrConfigChanged is returned by Run when wherry.admin holds a configuration other than the one it started with.
 var ErrConfigChanged = errors.New("receiver configuration changed")
-
-// Adapter is the platform seam of ADR-0018; implementations hold platform credentials only.
-type Adapter interface {
-	// Ready reports whether the adapter can currently start a job.
-	Ready(ctx context.Context) (bool, error)
-	// Dispatch starts a turn's job, converging on an existing one, and returns once it has started or ended.
-	// The core treats an error as OutcomeUnknown.
-	Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
-	// Lookup finds a turn's job without creating one, and waits for it as Dispatch does.
-	Lookup(ctx context.Context, runID string, turn int64) (Job, error)
-	// Follow streams stdout lines from a byte offset and returns the Terminal once the job has ended;
-	// a Follow cut short returns an error and a zero Terminal.
-	Follow(ctx context.Context, handle Handle, from int64, lines chan<- Line) (Terminal, error)
-	Stop(ctx context.Context, handle Handle) error
-	// Purge removes a turn's job and its delivered material, with or without a handle; an absent job is success.
-	Purge(ctx context.Context, runID string, turn int64) error
-	Release(ctx context.Context, runID string, turn int64) error
-	Sweep(ctx context.Context) error
-}
 
 // Named is a constructed adapter with its configured name, the agent it launches and that agent's credential.
 type Named struct {
@@ -131,7 +43,7 @@ type Named struct {
 	Labels map[string]string
 	// Git is set when the adapter delivers git context parts (ADR-0024).
 	Git     bool
-	Adapter Adapter
+	Adapter adapter.Adapter
 }
 
 // AdapterFactory builds one adapter for the receiver's pool from its settings in the receiver's configuration record.
@@ -554,16 +466,25 @@ func kid(encoded []byte) (string, string, bool) {
 }
 
 // advertise sweeps each adapter, then publishes one offer per ready adapter with its agent; with none ready it
-// publishes no offers and keeps its liveness and capacity visible.
+// publishes no offers and keeps its liveness and capacity visible. Each adapter call has one advertise
+// interval, so a hung adapter delays the next advertisement by at most that much per call.
 func (r *Receiver) advertise(ctx context.Context) error {
 	for _, named := range r.adapters {
-		if err := named.Adapter.Sweep(ctx); err != nil {
+		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)
+		err := named.Adapter.Sweep(callCtx)
+		cancel()
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			r.logger.Printf("adapter %s sweep: timed out", named.Name)
+		case err != nil:
 			r.logger.Printf("adapter %s sweep: %T", named.Name, err)
 		}
 	}
 	offers := []wire.Offer{}
 	for _, named := range r.adapters {
-		ready, err := named.Adapter.Ready(ctx)
+		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)
+		ready, err := named.Adapter.Ready(callCtx)
+		cancel()
 		if err != nil {
 			r.logger.Printf("adapter %s readiness: %v", named.Name, err)
 			continue
