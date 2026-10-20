@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -9,10 +10,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -44,6 +49,11 @@ func newRequest(t *testing.T, binding wire.ReceiverBinding, credentials ...strin
 // open opens the seal answering r from host's topic, failing the test unless there is exactly one.
 func (r request) open(t *testing.T, f *fixture, host string) map[string][]byte {
 	t.Helper()
+	return r.openSealed(t, f, host).Values
+}
+
+func (r request) openSealed(t *testing.T, f *fixture, host string) signed.SealValues {
+	t.Helper()
 	records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", host))
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +61,7 @@ func (r request) open(t *testing.T, f *fixture, host string) map[string][]byte {
 	binding := signed.SealBinding{Tenant: r.record.Tenant, Pool: r.record.Pool, Receiver: r.record.Receiver, KeyID: r.record.KeyID, Run: r.record.Run,
 		Turn: r.record.Turn, Attempt: r.record.Attempt, Credentials: r.record.Credentials, TaskCredentials: r.record.TaskCredentials,
 		S3Inputs: r.record.S3Inputs, S3Outputs: r.record.S3Outputs, ExpiryMS: r.record.ExpiryMS}
-	var opened []map[string][]byte
+	var opened []signed.SealValues
 	for _, record := range records {
 		if values, err := signed.OpenSeal(record.Value, binding, r.key, time.Now()); err == nil && string(record.Key) == r.record.Run {
 			opened = append(opened, values)
@@ -188,7 +198,7 @@ func TestARequestExpiringBeforeTheWriteIsNotAnswered(t *testing.T) {
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	asked.record.ExpiryMS = time.Now().Add(2 * time.Second).UnixMilli()
 	built := make(chan struct{})
-	seal = func(binding signed.SealBinding, key *ecdsa.PublicKey, values map[string][]byte) ([]byte, error) {
+	seal = func(binding signed.SealBinding, key *ecdsa.PublicKey, values signed.SealValues) ([]byte, error) {
 		time.Sleep(time.Until(time.UnixMilli(binding.ExpiryMS)))
 		defer close(built)
 		return previous(binding, key, values)
@@ -438,7 +448,7 @@ func TestAnEndWhileSealingStopsTheWrite(t *testing.T) {
 	previous := seal
 	t.Cleanup(func() { seal = previous })
 	built := make(chan struct{})
-	seal = func(binding signed.SealBinding, key *ecdsa.PublicKey, values map[string][]byte) ([]byte, error) {
+	seal = func(binding signed.SealBinding, key *ecdsa.PublicKey, values signed.SealValues) ([]byte, error) {
 		defer close(built)
 		receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
 		return previous(binding, key, values)
@@ -464,7 +474,7 @@ func TestConcurrentAnswerersWriteOneSeal(t *testing.T) {
 	}
 	previous := seal
 	t.Cleanup(func() { seal = previous })
-	seal = func(binding signed.SealBinding, key *ecdsa.PublicKey, values map[string][]byte) ([]byte, error) {
+	seal = func(binding signed.SealBinding, key *ecdsa.PublicKey, values signed.SealValues) ([]byte, error) {
 		time.Sleep(500 * time.Millisecond)
 		return previous(binding, key, values)
 	}
@@ -665,18 +675,286 @@ func TestSubmitRefusesAnUnconfiguredCredential(t *testing.T) {
 	}
 }
 
-// A continuation's local record keeps the task credentials the first turn declared, so its seal request is answered.
+// A continuation's local record keeps the task credentials the first turn declared, so its seal request is answered,
+// and the run's redaction key, so its markers stay the run's.
 func TestContinuationKeepsTheTaskCredentials(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admittedWith(t, []wire.TaskCredential{{Name: "openai", File: "token"}})
 	runID := task.submission.Wherry.Run
+	local, err := f.host.localRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redactionKey := bytes.Repeat([]byte{7}, 32)
+	local.RedactionKey = redactionKey
+	if err := f.host.writeRun(*local); err != nil {
+		t.Fatal(err)
+	}
 	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
 	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
 		t.Fatal(err)
 	}
+	local, err = f.host.localRun(runID)
+	if err != nil || local.Turn != 2 || !slices.Equal(local.TaskCredentials, []string{"openai"}) || !bytes.Equal(local.RedactionKey, redactionKey) {
+		t.Fatalf("local record %+v, %v; want turn 2 keeping the task credentials and the redaction key", local, err)
+	}
+}
+
+// Submit mints the run's redaction key into its local record, and every seal of every turn and attempt carries it.
+func TestEverySealCarriesTheKeyMintedAtSubmit(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
 	local, err := f.host.localRun(runID)
-	if err != nil || local.Turn != 2 || !slices.Equal(local.TaskCredentials, []string{"openai"}) {
-		t.Fatalf("local record %+v, %v; want turn 2 keeping the task credentials", local, err)
+	if err != nil || local == nil || len(local.RedactionKey) != 32 {
+		t.Fatalf("local record %+v, %v; want a 32-byte redaction key before any seal", local, err)
+	}
+	answering(t, f, f.host)
+	first := newRequest(t, receiver.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &first.record))
+	f.waitSeals(t, "host-a", 1)
+	second := newRequest(t, receiver.binding(task, 2), "model")
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "claimed-2", "claimed", wire.TaskStateWorking, nil), receiver.sign(t, &second.record))
+	f.waitSeals(t, "host-a", 2)
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "interrupted-2", "interrupted", wire.TaskStateAuthRequired, nil))
+	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	next := receiver.claim(t, f.ctx, runID)[1]
+	third := newRequest(t, receiver.binding(next, 1), "model")
+	receiver.feed(t, f.ctx, runID, receiver.echo(t, next), receiver.status(t, next, 1, "claimed-2-1", "claimed", wire.TaskStateWorking, nil), receiver.sign(t, &third.record))
+	f.waitSeals(t, "host-a", 3)
+	for _, asked := range []request{first, second, third} {
+		if opened := asked.openSealed(t, f, "host-a"); !bytes.Equal(opened.RedactionKey, local.RedactionKey) {
+			t.Fatalf("turn %d attempt %d sealed redaction key %x, want the key minted at submit %x", asked.record.Turn, asked.record.Attempt, opened.RedactionKey, local.RedactionKey)
+		}
+	}
+}
+
+// fifo makes a named pipe for a credential, so an answerer reading it blocks until the test writes the value.
+func fifo(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "credential")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// reading returns the write end of a credential pipe once an answerer has opened it to read.
+func (f *fixture) reading(t *testing.T, path string) *os.File {
+	t.Helper()
+	opened := make(chan *os.File, 1)
+	go func() {
+		if writer, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
+			opened <- writer
+		}
+	}()
+	select {
+	case writer := <-opened:
+		return writer
+	case <-f.ctx.Done():
+		t.Fatalf("no answerer read %s; logs:\n%s", path, f.logs.String())
+		return nil
+	}
+}
+
+// Two answerers each reading the run's record before either seals, for different attempts, seal the one key.
+func TestConcurrentAnswerersForTwoAttemptsSealOneKey(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	first, second := fifo(t), fifo(t)
+	f.host.credentials = map[string]string{"model": first}
+	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, map[string]string{"model": second}, f.host.logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := seal
+	t.Cleanup(func() { seal = previous })
+	var mu sync.Mutex
+	sealed := map[int64][]byte{}
+	seal = func(binding signed.SealBinding, key *ecdsa.PublicKey, values signed.SealValues) ([]byte, error) {
+		mu.Lock()
+		sealed[binding.Attempt] = values.RedactionKey
+		mu.Unlock()
+		return previous(binding, key, values)
+	}
+	// Attempt 1's request expires while its answer is held, so the twin, starting later, passes over it to attempt 2.
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	asked.record.ExpiryMS = time.Now().Add(2 * time.Second).UnixMilli()
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	answering(t, f, f.host)
+	held := f.reading(t, first)
+	time.Sleep(time.Until(time.UnixMilli(asked.record.ExpiryMS)))
+	later := newRequest(t, receiver.binding(task, 2), "model")
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "claimed-2", "claimed", wire.TaskStateWorking, nil), receiver.sign(t, &later.record))
+	answering(t, f, twin)
+	twinHeld := f.reading(t, second)
+	for _, writer := range []*os.File{held, twinHeld} {
+		writer.WriteString("model-token")
+		writer.Close()
+	}
+	f.waitSeals(t, "host-a", 1)
+	local, err := f.host.localRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for len(sealed) < 2 {
+		mu.Unlock()
+		if f.ctx.Err() != nil {
+			t.Fatalf("attempt 1's seal was never built; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+	}
+	if !bytes.Equal(sealed[1], local.RedactionKey) || !bytes.Equal(sealed[2], local.RedactionKey) {
+		t.Fatalf("attempts sealed redaction keys %x, want both the run's %x", sealed, local.RedactionKey)
+	}
+}
+
+// A Continue landing while an answer is in flight is not reverted by that answer.
+func TestAnAnswerKeepsAContinueMadeWhileItSeals(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	held := fifo(t)
+	f.host.credentials = map[string]string{"model": held}
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	answering(t, f, f.host)
+	writer := f.reading(t, held)
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
+	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	continued, err := f.host.localRun(runID)
+	if err != nil || continued.Turn != 2 {
+		t.Fatalf("local record %+v, %v; want turn 2", continued, err)
+	}
+	writer.WriteString("model-token")
+	writer.Close()
+	// The continued turn stops the answer before its write, and the answer logs why.
+	for !strings.Contains(f.logs.String(), "run "+runID+": ") {
+		if f.ctx.Err() != nil {
+			t.Fatalf("the answer never finished; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if local, err := f.host.localRun(runID); err != nil || !reflect.DeepEqual(local, continued) {
+		t.Fatalf("local record %+v, %v; want the continued %+v", local, err, continued)
+	}
+}
+
+// A record whose key is not 32 bytes is never sealed or re-keyed, and its markers stay unnamed.
+func TestACorruptRedactionKeyIsRefused(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	local, err := f.host.localRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local.RedactionKey = local.RedactionKey[:31]
+	if err := f.host.writeRun(*local); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := f.host.runPath(runID)
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	answering(t, f, f.host)
+	for !strings.Contains(f.logs.String(), "run "+runID+": refused to seal: the redaction key in "+path+" is 31 bytes, not 32") {
+		if f.ctx.Err() != nil {
+			t.Fatalf("no refusal naming the record; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if seals := f.seals(t, "host-a"); seals != 0 {
+		t.Fatalf("wrote %d seals under a corrupt redaction key", seals)
+	}
+	if after, err := f.host.localRun(runID); err != nil || !bytes.Equal(after.RedactionKey, local.RedactionKey) {
+		t.Fatalf("local record %+v, %v; want the corrupt key kept", after, err)
+	}
+	marker := signed.RedactionMarker(local.RedactionKey, "model")
+	receiver.feed(t, f.ctx, runID,
+		receiver.result(t, task, 1, wire.TaskStateCompleted, func(result *wire.Result) {
+			result.Task.Artifacts[0].Parts = []wire.Part{{Text: "printed " + marker}}
+		}),
+		receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, func(status *wire.RunStatus) {
+			status.StatusUpdate.Status.Message = &wire.Message{MessageID: "msg-s", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "done with " + marker}}, Extensions: []string{wire.ExtensionURI}}
+		}))
+	awaited, err := f.host.Await(f.ctx, runID, 10*time.Second)
+	if err != nil || awaited.Task == nil || awaited.Task.Artifacts[0].Parts[0].Text != "printed "+marker || len(awaited.Redacted) != 0 {
+		t.Fatalf("await %#v, %v; want the marker unmapped", awaited, err)
+	}
+	status, err := f.host.Status(f.ctx, runID)
+	if err != nil || status.Status.Message.Parts[0].Text != "done with "+marker || len(status.Redacted) != 0 {
+		t.Fatalf("status %#v, %v; want the marker unmapped", status, err)
+	}
+}
+
+// A local record turning unreadable while await waits does not turn the delivered outcome into an error.
+func TestAwaitDeliversTheOutcomeOfARecordTurnedUnreadable(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	local, err := f.host.localRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := signed.RedactionMarker(local.RedactionKey, "model")
+	done := make(chan error, 1)
+	var awaited AwaitResult
+	go func() {
+		var err error
+		awaited, err = f.host.Await(f.ctx, runID, 20*time.Second)
+		done <- err
+	}()
+	time.Sleep(time.Second)
+	path, _ := f.host.runPath(runID)
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiver.feed(t, f.ctx, runID,
+		receiver.result(t, task, 1, wire.TaskStateCompleted, func(result *wire.Result) {
+			result.Task.Artifacts[0].Parts = []wire.Part{{Text: "printed " + marker}}
+		}),
+		receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil))
+	if err := <-done; err != nil || awaited.Status.State != wire.TaskStateCompleted || awaited.Task.Artifacts[0].Parts[0].Text != "printed [redacted:model]" {
+		t.Fatalf("await %#v, %v; want the completed outcome", awaited, err)
+	}
+}
+
+// Await and status name each marker the run's key gives a credential; the feed carries only the marker.
+func TestAwaitAndStatusNameTheRunsMarkers(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	answering(t, f, f.host)
+	f.waitSeals(t, "host-a", 1)
+	sealed := asked.openSealed(t, f, "host-a")
+	marker, other := signed.RedactionMarker(sealed.RedactionKey, "model"), signed.RedactionMarker(bytes.Repeat([]byte{1}, 32), "model")
+	receiver.feed(t, f.ctx, runID,
+		receiver.result(t, task, 1, wire.TaskStateCompleted, func(result *wire.Result) {
+			result.Task.Artifacts[0].Parts = []wire.Part{{Text: "printed " + marker + " and " + marker + " and " + other}}
+		}),
+		receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, func(status *wire.RunStatus) {
+			status.StatusUpdate.Status.Message = &wire.Message{MessageID: "msg-s", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "done with " + marker}}, Extensions: []string{wire.ExtensionURI}}
+		}))
+	awaited, err := f.host.Await(f.ctx, runID, 10*time.Second)
+	if err != nil || awaited.Task == nil {
+		t.Fatalf("await %#v, %v", awaited, err)
+	}
+	if text := awaited.Task.Artifacts[0].Parts[0].Text; text != "printed [redacted:model] and [redacted:model] and "+other || !maps.Equal(awaited.Redacted, map[string]int{"model": 2}) {
+		t.Fatalf("await shows %q counting %v, want model's two markers named and another run's left", text, awaited.Redacted)
+	}
+	status, err := f.host.Status(f.ctx, runID)
+	if err != nil || status.Status.Message.Parts[0].Text != "done with [redacted:model]" || !maps.Equal(status.Redacted, map[string]int{"model": 1}) {
+		t.Fatalf("status %#v, %v; want the marker named", status, err)
 	}
 }
 

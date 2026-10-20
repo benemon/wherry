@@ -1,15 +1,18 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +39,9 @@ type AwaitResult struct {
 	NotReturned []wire.UnreturnedOutput
 	// Rejected are the outputs this host could not verify.
 	Rejected []wire.UnreturnedOutput
+	// Redacted counts, by name, the redaction markers of the run's values in Task's artifacts and Status, where each
+	// marker reads [redacted:<name>] instead.
+	Redacted map[string]int
 	Skipped  int
 }
 
@@ -58,7 +64,10 @@ type StatusResult struct {
 	// Updated is the time of Status; while no receiver has reported one, this host's submission of the turn, else the
 	// Kafka timestamp of the turn's echo.
 	Updated time.Time
-	Skipped int
+	// Redacted counts, by name, the redaction markers of the run's values in Status, where each reads
+	// [redacted:<name>] instead.
+	Redacted map[string]int
+	Skipped  int
 }
 
 // TurnAttempt identifies one delivery attempt within one submission turn.
@@ -449,7 +458,63 @@ func (r *runView) status() StatusResult {
 			result.Updated, _ = time.Parse(time.RFC3339, result.Status.Timestamp) // decoding validated it
 		}
 	}
+	result.Redacted = map[string]int{}
+	result.Status = unredactStatus(result.Status, r.h.markers(r.local), result.Redacted)
 	return result
+}
+
+// markers maps each redaction marker the run's key gives to its name: the credentials this host configures, the
+// run's task credentials, and its S3 objects' URLs. The feed carries only the markers.
+func (h *Host) markers(local *runRecord) map[string]string {
+	if local == nil || len(local.RedactionKey) != 32 {
+		return nil
+	}
+	names := slices.Concat(slices.Collect(maps.Keys(h.credentials)), local.TaskCredentials)
+	for _, input := range local.S3Inputs {
+		names = append(names, signed.S3InputValue(input))
+	}
+	for _, output := range local.S3Outputs {
+		names = append(names, signed.S3OutputValue(output))
+	}
+	markers := map[string]string{}
+	for _, name := range names {
+		markers[signed.RedactionMarker(local.RedactionKey, name)] = name
+	}
+	return markers
+}
+
+// unredact replaces each marker in text with [redacted:<name>] and counts it under its name.
+func unredact(text []byte, markers map[string]string, counts map[string]int) []byte {
+	for marker, name := range markers {
+		if n := bytes.Count(text, []byte(marker)); n > 0 {
+			counts[name] += n
+			text = bytes.ReplaceAll(text, []byte(marker), []byte("[redacted:"+name+"]"))
+		}
+	}
+	return text
+}
+
+func unredactParts(parts []wire.Part, markers map[string]string, counts map[string]int) []wire.Part {
+	parts = slices.Clone(parts)
+	for i, part := range parts {
+		parts[i].Text = string(unredact([]byte(part.Text), markers, counts))
+		if part.Raw != nil {
+			parts[i].Raw = unredact(part.Raw, markers, counts)
+		}
+		if part.Data != nil {
+			parts[i].Data = unredact(part.Data, markers, counts)
+		}
+	}
+	return parts
+}
+
+func unredactStatus(status wire.TaskStatus, markers map[string]string, counts map[string]int) wire.TaskStatus {
+	if status.Message != nil {
+		message := *status.Message
+		message.Parts = unredactParts(message.Parts, markers, counts)
+		status.Message = &message
+	}
+	return status
 }
 
 // Events returns runID's verified statuses, one per event ID, and its transcript chunk counts.
@@ -545,11 +610,23 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	}
 	for {
 		if r.outcome != nil {
-			r.outcome.Skipped, r.outcome.Turn = r.skipped, r.outcomeTurn
+			outcome := *r.outcome
+			outcome.Skipped, outcome.Turn = r.skipped, r.outcomeTurn
 			if r.result != nil {
-				r.outcome.Outputs, r.outcome.Stored, r.outcome.NotReturned, r.outcome.Rejected = r.verifiedOutputs(r.result)
+				outcome.Outputs, outcome.Stored, outcome.NotReturned, outcome.Rejected = r.verifiedOutputs(r.result)
 			}
-			return *r.outcome, nil
+			markers := h.markers(local)
+			outcome.Redacted = map[string]int{}
+			outcome.Status = unredactStatus(outcome.Status, markers, outcome.Redacted)
+			if outcome.Task != nil {
+				task := *outcome.Task
+				task.Status, task.Artifacts = outcome.Status, slices.Clone(task.Artifacts)
+				for i := range task.Artifacts {
+					task.Artifacts[i].Parts = unredactParts(task.Artifacts[i].Parts, markers, outcome.Redacted)
+				}
+				outcome.Task = &task
+			}
+			return outcome, nil
 		}
 		fetches := reader.PollFetches(waitCtx)
 		if err := waitCtx.Err(); err != nil {

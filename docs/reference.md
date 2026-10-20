@@ -18,6 +18,12 @@
 - `continue`, `cancel`, `await`, `status` and `events` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
+- `await` and `status` print each redaction marker of a run this host
+  submitted as `[redacted:<name>]`, naming the credential or S3 object,
+  and `<name> redacted N times` on standard error for each name whose
+  markers they printed. A host maps a marker with the run's redaction key
+  in `state_dir`, and prints a marker as it is when the run's record holds
+  no 32-byte key.
 
 ### Names
 
@@ -532,7 +538,7 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
 | `submit` | `prompt`, `agent`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool` |
 | `status` | `id`, optional | `runs`, `skipped` |
-| `await` | `id` | `id`, `state`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `skipped` |
+| `await` | `id` | `id`, `state`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped` |
 | `continue` | `id`, `prompt`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `turn`, `skipped` |
 | `cancel` | `id` | `id`, `skipped` |
 | `events` | `id` | `id`, `events`, `transcripts`, `skipped` |
@@ -552,9 +558,9 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 - `status` returns the latest verified state of a run's latest turn
   without waiting. `runs` holds one entry for the run `id` names, or,
   without `id`, one per run `wherry status` lists, latest update first.
-  Each entry is `{id, pool, turn, state, message, updated}`. The state is
-  `TASK_STATE_SUBMITTED` until a receiver reports one. `updated` is the
-  RFC 3339 time of the latest status. While the run has none, it is this
+  Each entry is `{id, pool, turn, state, message, updated, redacted}`. The
+  state is `TASK_STATE_SUBMITTED` until a receiver reports one. `updated` is
+  the RFC 3339 time of the latest status. While the run has none, it is this
   host's submission of the turn, else the modification time of this host's
   record of the run when the record predates submission times, else the
   Kafka timestamp of the turn's echo.
@@ -569,6 +575,9 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
   it downloads and verifies, then deletes the run's prefix, as `wherry await`
   does. `not_returned` holds `{name, size, reason}` for each output the result
   lists as not returned and each one that fails verification.
+- `status` and `await` show each redaction marker as `wherry status` and
+  `wherry await` print it, and `redacted` maps each name to the number of
+  its markers in `message` and `artifacts`.
 - `continue` requires `id`. `prompt` defaults to `continue`.
 - `events` returns `events`, each
   `{turn, attempt, kind, state, receiver, time, message}`, and
@@ -606,6 +615,8 @@ A JSON object at `~/.config/wherry/config.json`, or at the host command's
 | `storage` | none | `{access_key_file, secret_key_file}`: files holding the access key and secret key of the host's S3 credential, each readable and writable by its owner alone; a host without it uses no S3 lane |
 
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
+readable by its owner alone, with `redaction_key`, the run's redaction key,
+made when this host first records a turn of the run,
 `runs/<run>/outputs/<turn>/` for the outputs `await` writes by default, and
 `answered/<run>.<turn>.<attempt>` for each attempt it answered, with a
 `.lock` beside it that every process sharing the directory holds while it

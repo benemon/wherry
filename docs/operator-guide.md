@@ -465,7 +465,9 @@ maps to a file, and only to the receiver that first claimed the turn.
 `wherry submit` refuses a task credential its configuration does not map
 to a file. It logs each verified request of its
 own runs that it skips or refuses, by run, receiver and credential name, on
-standard error. A turn adopted by a second receiver gets no seal and ends
+standard error. A receiver that adopts a running job asks for its own seal
+and publishes nothing of the job until it opens. A turn adopted by a second
+receiver gets no seal, so that receiver stops the job and the turn ends
 `TASK_STATE_AUTH_REQUIRED`; `wherry continue` runs it again.
 
 ## Inputs and outputs
@@ -732,7 +734,10 @@ the DNS resolvers as well.
 ## Upgrade wherry
 
 Readers reject records with unknown members or versions, so hosts and
-receivers run the same release.
+receivers run the same release. A host's run records carry `redaction_key`,
+so an older `wherry` cannot read a run this release submitted. A run an older
+release submitted holds no redaction key, so this release answers no seal
+request for it until `wherry continue` records its next turn.
 
 Prerequisites: the new `wherry` binary, and each receiver's bundle and
 state directory.

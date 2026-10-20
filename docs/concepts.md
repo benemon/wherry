@@ -190,7 +190,10 @@ first `claimed` status, and refuses when a second receiver claims the same
 turn; a turn adopted by another receiver ends `TASK_STATE_AUTH_REQUIRED`.
 The receiver redacts each credential of 8 bytes or more that it delivered,
 with or without its trailing newline and as JSON escapes it, from
-everything it publishes for the attempt.
+everything it publishes for the attempt. Each marker is an HMAC of the
+credential's name under a key the host makes for the run and sends in every
+seal, so no marker maps to a name without that key. Seal requests and
+`interrupted` statuses name credentials, by design.
 
 A turn whose seal does not arrive within 5 minutes ends in
 `TASK_STATE_AUTH_REQUIRED` and waits for the tenant. A parent that submits
@@ -267,8 +270,9 @@ acquisition lock for the whole turn and renews it every 10 seconds. When a
 receiver stops renewing, the broker delivers the task again, and that
 delivery is the next attempt. The receiver that takes it looks for the
 turn's job in each of its adapters. If the job exists and came from the
-same adapter and agent, the receiver adopts it and resumes the transcript
-from the last log offset recorded in a heartbeat. Any other job under the
+same adapter and agent, the receiver adopts it, asks for a seal of its own,
+and once it opens resumes the transcript from the last log offset recorded
+in a heartbeat. Any other job under the
 turn's ID is stopped and purged, and the turn is dispatched again. Each
 run writes through its own
 [transactional producer](https://kafka.apache.org/documentation/#semantics),

@@ -428,6 +428,7 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	for _, output := range append(result.NotReturned, result.Rejected...) {
 		fmt.Fprintf(stderr, "output %s not returned: %s\n", output.Name, output.Reason)
 	}
+	warnRedacted(stderr, result.Redacted)
 	warnSkipped(stderr, result.Skipped)
 	if result.Status.State != wire.TaskStateCompleted {
 		return fmt.Errorf("run ended in %s", result.Status.State)
@@ -502,6 +503,7 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		if result.Status.State == wire.TaskStateAuthRequired {
 			fmt.Fprintf(stderr, "continue with: wherry continue %s\n", flags.Arg(0))
 		}
+		warnRedacted(stderr, result.Redacted)
 		warnSkipped(stderr, result.Skipped)
 		return nil
 	}
@@ -597,6 +599,12 @@ func wasSet(flags *flag.FlagSet, name string) bool {
 		}
 	})
 	return found
+}
+
+func warnRedacted(stderr io.Writer, counts map[string]int) {
+	for _, name := range slices.Sorted(maps.Keys(counts)) {
+		fmt.Fprintf(stderr, "%s redacted %d times\n", name, counts[name])
+	}
 }
 
 func warnSkipped(stderr io.Writer, count int) {

@@ -167,12 +167,13 @@ type statusInput struct {
 }
 
 type runOutput struct {
-	ID      string `json:"id"`
-	Pool    string `json:"pool"`
-	Turn    int64  `json:"turn"`
-	State   string `json:"state"`
-	Message string `json:"message,omitempty"`
-	Updated string `json:"updated" jsonschema:"RFC 3339 time of the latest status; while the run has none, of this host's submission, else of the receiver's echo"`
+	ID       string         `json:"id"`
+	Pool     string         `json:"pool"`
+	Turn     int64          `json:"turn"`
+	State    string         `json:"state"`
+	Message  string         `json:"message,omitempty"`
+	Updated  string         `json:"updated" jsonschema:"RFC 3339 time of the latest status; while the run has none, of this host's submission, else of the receiver's echo"`
+	Redacted map[string]int `json:"redacted,omitempty" jsonschema:"redaction markers in the message by the credential or S3 object each names"`
 }
 
 type statusOutput struct {
@@ -208,6 +209,7 @@ type awaitReply struct {
 	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
 	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the turn's outputs, verified and written locally"`
 	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the turn did not return or this host could not verify, each with its reason"`
+	Redacted    map[string]int          `json:"redacted,omitempty" jsonschema:"redaction markers in the message and artifacts by the credential or S3 object each names"`
 	Skipped     int                     `json:"skipped,omitempty"`
 }
 
@@ -329,7 +331,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		for _, result := range runs.Runs {
 			output.Runs = append(output.Runs, runOutput{
 				ID: result.RunID, Pool: result.Pool, Turn: result.Turn, State: string(result.Status.State), Message: statusText(result.Status),
-				Updated: result.Updated.UTC().Format(time.RFC3339Nano),
+				Updated: result.Updated.UTC().Format(time.RFC3339Nano), Redacted: result.Redacted,
 			})
 		}
 		return nil, output, nil
@@ -363,7 +365,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			return nil, awaitReply{}, toolFailure(err)
 		}
 		output := awaitReply{
-			ID: input.ID, State: string(result.Status.State), Message: statusText(result.Status), Skipped: result.Skipped,
+			ID: input.ID, State: string(result.Status.State), Message: statusText(result.Status), Redacted: result.Redacted, Skipped: result.Skipped,
 		}
 		if result.Task != nil {
 			for _, artifact := range result.Task.Artifacts {

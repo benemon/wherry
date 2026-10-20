@@ -255,6 +255,17 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 		h.logger.Printf("run %s: %s", runID, reason)
 		return true
 	}
+	local, err = h.localRun(runID)
+	if err != nil || local == nil {
+		h.logger.Printf("run %s: read the local record before sealing: %v", runID, err)
+		return true
+	}
+	// A new key would stop the markers already on the feed mapping to their names.
+	if len(local.RedactionKey) != 32 {
+		path, _ := h.runPath(runID)
+		h.logger.Printf("run %s: refused to seal: the redaction key in %s is %d bytes, not 32", runID, path, len(local.RedactionKey))
+		return true
+	}
 	terms := r.v.state.Pools[r.pool].Agents
 	agent := slices.IndexFunc(terms, func(terms admin.AgentTerms) bool { return terms.Name == local.Placement.Agent })
 	values := map[string][]byte{}
@@ -306,7 +317,7 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
 		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
 		S3Inputs: request.S3Inputs, S3Outputs: request.S3Outputs, ExpiryMS: request.ExpiryMS,
-	}, request.Key.Key.(*ecdsa.PublicKey), values)
+	}, request.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: values, RedactionKey: local.RedactionKey})
 	if err != nil {
 		// Seal's errors name credentials, never values.
 		h.logger.Printf("run %s: seal for %s not built: %v", runID, request.Receiver, err)

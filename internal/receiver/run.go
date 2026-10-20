@@ -44,6 +44,8 @@ const (
 	budgetReason   = "delivery budget exhausted"
 	minRedact      = 8
 	redactPiece    = 64 << 10
+	// heldLimit bounds the transcript an adopter holds while it waits for its seal.
+	heldLimit = 4 << 20
 )
 
 // Intervals are variables so tests can shorten them; renew stays below the 30 s default lock.
@@ -643,31 +645,33 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if neverStarted {
 		return run.startFailure(ctx, "platform")
 	}
+	// The agent credential is asked for under the pool's terms; a task credential of the same name rides with it.
+	agentCredentials, taskCredentials := []string{}, []string{}
+	if run.adapter.Credential != "" {
+		agentCredentials = append(agentCredentials, run.adapter.Credential)
+	}
+	for _, credential := range admitted.credentials {
+		if !slices.Contains(agentCredentials, credential.Name) && !slices.Contains(taskCredentials, credential.Name) {
+			taskCredentials = append(taskCredentials, credential.Name)
+		}
+	}
+	inputNames := make([]string, 0, len(admitted.s3Inputs))
+	for _, input := range admitted.s3Inputs {
+		inputNames = append(inputNames, input.Name)
+	}
+	outputNames := s3Outputs(admitted.outputs)
 	if !adopted {
 		named := run.adapter
-		// The agent credential is asked for under the pool's terms; a task credential of the same name rides with it.
-		agentCredentials, taskCredentials := []string{}, []string{}
-		if named.Credential != "" {
-			agentCredentials = append(agentCredentials, named.Credential)
-		}
-		for _, credential := range admitted.credentials {
-			if !slices.Contains(agentCredentials, credential.Name) && !slices.Contains(taskCredentials, credential.Name) {
-				taskCredentials = append(taskCredentials, credential.Name)
-			}
-		}
 		var credential []byte
 		var secrets []adapter.Secret
 		var fetches []adapter.Fetch
-		inputNames := make([]string, 0, len(admitted.s3Inputs))
-		for _, input := range admitted.s3Inputs {
-			inputNames = append(inputNames, input.Name)
-		}
-		outputNames := s3Outputs(admitted.outputs)
 		if len(agentCredentials)+len(taskCredentials)+len(inputNames)+len(outputNames) > 0 {
-			values, status, sealed := run.awaitSeal(ctx, runCtx, agentCredentials, taskCredentials, inputNames, outputNames)
-			if !sealed {
+			sealed, status, ok := run.awaitSeal(ctx, runCtx, nil, agentCredentials, taskCredentials, inputNames, outputNames)
+			if !ok {
 				return status
 			}
+			values := sealed.Values
+			run.redactionKey = sealed.RedactionKey
 			if named.Credential != "" {
 				credential = values[named.Credential]
 			}
@@ -736,10 +740,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		return run.returnTask(ctx, nil)
 	}
 	run.job = handle.Name
-	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.adapter.Labels), handle.Name)
-	if err := run.commit(ctx, run.statusRecords("started", taskStatus(wire.TaskStateWorking, ""), &offset, nil)...); err != nil {
-		return run.abandon(err)
-	}
 
 	followCtx, stopFollow := context.WithCancel(runCtx)
 	defer stopFollow()
@@ -756,6 +756,27 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}()
 	}
 	follow(offset)
+	// An adopter holds the job's lines until its own seal gives it the values to redact; the input URLs the job
+	// fetched with are not asked for again.
+	var held []adapter.Line
+	if adopted && len(agentCredentials)+len(taskCredentials)+len(outputNames) > 0 {
+		release := run.hold(lines)
+		sealed, status, ok := run.awaitSeal(ctx, runCtx, &handle, agentCredentials, taskCredentials, nil, outputNames)
+		held = release()
+		if !ok {
+			return status
+		}
+		run.redactionKey = sealed.RedactionKey
+		run.deliver(sealed.Values)
+		if _, run.puts, err = run.presigned(sealed.Values, nil, outputNames); err != nil {
+			r.logger.Printf("run %s: %v", runID, err)
+			return run.stopAndFail(ctx, handle, err.Error(), nil)
+		}
+	}
+	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.adapter.Labels), handle.Name)
+	if err := run.commit(ctx, run.statusRecords("started", taskStatus(wire.TaskStateWorking, ""), &offset, nil)...); err != nil {
+		return run.abandon(err)
+	}
 	// retryUntil bounds following again over a lost plugin link to one lock duration from the loss, after
 	// which another member may hold the task; zero while the link holds, and reset by every line.
 	var retryUntil time.Time
@@ -771,6 +792,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		pending = append(pending, line)
 		position = line.Next
 		return resultLine(line.Data)
+	}
+	for _, line := range held {
+		if result, ok := take(line); ok {
+			stopFollow()
+			return run.finish(ctx, handle, pending, result)
+		}
 	}
 	// shutdown commits what is pending under its own deadline, since ctx is already done, and returns the task.
 	// It ignores the delivery budget: the receiver is going away and an adopter continues the run.
@@ -879,14 +906,14 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 
 // awaitSeal asks the run's host for the agent's credentials, the task's, and presigned URLs for its S3 inputs and
 // outputs under a key made for this attempt, and waits for the seal while the claim is renewed. The key never leaves
-// this call. False carries the acknowledgement.
-func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credentials, taskCredentials, s3Inputs, s3Outputs []string) (map[string][]byte, kgo.AckStatus, bool) {
+// this call. A turn that ends while it waits stops job, the adopted job, first. False carries the acknowledgement.
+func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle, credentials, taskCredentials, s3Inputs, s3Outputs []string) (signed.SealValues, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
 	runID := task.Wherry.Run
 	key, err := newSealKey()
 	if err != nil {
 		r.logger.Printf("run %s: seal key: %v", runID, err)
-		return nil, run.returnTask(ctx, nil), false
+		return signed.SealValues{}, run.returnTask(ctx, nil), false
 	}
 	request := &wire.SealRequest{
 		ReceiverBinding: r.binding(task, run.attempt), Key: jose.JSONWebKey{Key: &key.PublicKey}, KeyID: signed.SealKeyID(&key.PublicKey),
@@ -915,18 +942,18 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credentials, taskCr
 	if err != nil {
 		r.deny(err, capRead)
 		r.logger.Printf("run %s: read host topic: %v", runID, err)
-		return nil, run.returnTask(ctx, nil), false
+		return signed.SealValues{}, run.returnTask(ctx, nil), false
 	}
 	partitions := map[int32]kgo.Offset{}
 	ends.Each(func(end kadm.ListedOffset) { partitions[end.Partition] = kgo.NewOffset().At(end.Offset) })
 	reader, err := kgo.NewClient(append(slices.Clone(r.kafkaOpt), kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: partitions}))...)
 	if err != nil {
 		r.logger.Printf("run %s: host topic reader: %v", runID, err)
-		return nil, run.returnTask(ctx, nil), false
+		return signed.SealValues{}, run.returnTask(ctx, nil), false
 	}
 	defer reader.Close()
 	if err := run.commit(ctx, run.feed(request)); err != nil {
-		return nil, run.abandon(err), false
+		return signed.SealValues{}, run.abandon(err), false
 	}
 	waitCtx, cancel := context.WithDeadline(runCtx, time.UnixMilli(request.ExpiryMS))
 	defer cancel()
@@ -937,7 +964,7 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credentials, taskCr
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			r.deny(err, capRead)
 		}
-		var values map[string][]byte
+		var values *signed.SealValues
 		fetches.EachRecord(func(record *kgo.Record) {
 			if values != nil || string(record.Key) != runID {
 				return
@@ -948,7 +975,7 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credentials, taskCr
 				r.logger.Printf("run %s: a seal for turn %d attempt %d does not open", runID, task.Wherry.Turn, run.attempt)
 				return
 			}
-			values = opened
+			values = &opened
 		})
 		r.mu.Lock()
 		cancelledTurn, cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
@@ -956,39 +983,84 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credentials, taskCr
 		// A stop seen in the same iteration as a seal wins, so a cancelled or expired turn never dispatches.
 		switch {
 		case ctx.Err() != nil:
-			return nil, kgo.AckRelease, false
+			return signed.SealValues{}, kgo.AckRelease, false
+		case cancelled && cancelledTurn <= task.Wherry.Turn && job != nil:
+			return signed.SealValues{}, run.stopAndCancel(ctx, *job, nil), false
 		case cancelled && cancelledTurn <= task.Wherry.Turn:
-			return nil, run.cancel(ctx, nil), false
+			return signed.SealValues{}, run.cancel(ctx, nil), false
+		case runCtx.Err() != nil && job != nil:
+			return signed.SealValues{}, run.stopAndFail(ctx, *job, "timeout", nil), false
 		case runCtx.Err() != nil:
-			return nil, run.fail(ctx, "timeout", nil), false
+			return signed.SealValues{}, run.fail(ctx, "timeout", nil), false
 		case waitCtx.Err() != nil:
-			return nil, run.interrupt(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
+			if job != nil {
+				if err := run.adapter.Adapter.Stop(ctx, *job); err != nil {
+					r.logger.Printf("run %s: stop: %T", runID, err)
+					return signed.SealValues{}, run.returnTask(ctx, nil), false
+				}
+			}
+			return signed.SealValues{}, run.interrupt(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
 		case values != nil:
-			return values, 0, true
+			return *values, 0, true
 		}
 	}
 }
 
+// hold reads lines until the returned release, which gives back the most recent of them within heldLimit bytes and
+// logs the lines it dropped. Nothing held is published before the attempt can redact it.
+func (run *activeRun) hold(lines <-chan adapter.Line) func() []adapter.Line {
+	stop, done := make(chan struct{}), make(chan []adapter.Line)
+	go func() {
+		var held []adapter.Line
+		size, dropped := 0, 0
+		for {
+			select {
+			case line := <-lines:
+				held = append(held, line)
+				for size += len(line.Data); size > heldLimit; dropped++ {
+					size -= len(held[0].Data)
+					held = held[1:]
+				}
+			case <-stop:
+				if dropped > 0 {
+					next := int64(-1)
+					if len(held) > 0 {
+						next = held[0].Offset
+					}
+					run.receiver.logger.Printf("run %s: dropped %d transcript lines held before the seal; the transcript resumes at offset %d", run.task.Wherry.Run, dropped, next)
+				}
+				done <- held
+				return
+			}
+		}
+	}()
+	return func() []adapter.Line {
+		close(stop)
+		return <-done
+	}
+}
+
 // presigned checks the seal's URLs against the pool's storage and returns the run's fetches and the turn's PUT URLs. An
-// error names its input or output, never the URL. Each URL's signature joins the redacted forms, so a transcript
-// quoting a URL in part is redacted too.
+// error names its input or output, never the URL. Each URL's signature joins the redacted forms under the URL's name, so
+// a transcript quoting a URL in part is redacted too, with the URL's marker.
 func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input, outputs []string) ([]adapter.Fetch, map[string]string, error) {
 	state, _, _ := run.receiver.snapshot()
 	storage := state.Pools[run.receiver.config.Pool].Storage
 	tenant, runID := run.task.Wherry.Tenant, run.task.Wherry.Run
 	signatures := map[string][]byte{}
-	check := func(value []byte, key string) (string, bool) {
+	check := func(name, key string) (string, bool) {
+		value := values[name]
 		parsed, err := url.Parse(string(value))
 		if err != nil || storage == nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" ||
 			parsed.Hostname()+":"+cmp.Or(parsed.Port(), "443") != storage.Host() || parsed.EscapedPath() != "/"+storage.Bucket+"/"+key {
 			return "", false
 		}
-		signatures[key] = []byte(parsed.Query().Get("X-Amz-Signature"))
+		signatures[name] = []byte(parsed.Query().Get("X-Amz-Signature"))
 		return string(value), true
 	}
 	var fetches []adapter.Fetch
 	for _, input := range inputs {
-		get, ok := check(values[signed.S3InputValue(input.Name)], wire.S3InputKey(tenant, runID, input.Name))
+		get, ok := check(signed.S3InputValue(input.Name), wire.S3InputKey(tenant, runID, input.Name))
 		if !ok {
 			return nil, nil, errors.New("the URL for S3 input " + input.Name + " is not one of pool " + run.receiver.config.Pool + "'s storage")
 		}
@@ -996,7 +1068,7 @@ func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input,
 	}
 	puts := map[string]string{}
 	for _, output := range outputs {
-		put, ok := check(values[signed.S3OutputValue(output)], wire.S3OutputKey(tenant, runID, run.task.Wherry.Turn, output))
+		put, ok := check(signed.S3OutputValue(output), wire.S3OutputKey(tenant, runID, run.task.Wherry.Turn, output))
 		if !ok {
 			return nil, nil, errors.New("the URL for S3 output " + output + " is not one of pool " + run.receiver.config.Pool + "'s storage")
 		}
@@ -1026,14 +1098,14 @@ type activeRun struct {
 	// labels is set when this attempt dispatched the job; an adopted job's adapter labels are unknown.
 	labels map[string]string
 	job    string
-	// deadline is the turn's; puts are the presigned PUT URLs of its S3 outputs, by name, which only a dispatching
-	// attempt holds.
+	// deadline is the turn's; puts are the presigned PUT URLs of its S3 outputs, by name, which an attempt holds once
+	// sealed.
 	deadline time.Time
 	puts     map[string]string
-	// redactions are the forms of the credential values this attempt passed to its adapter, longest first, and marker
-	// what replaces each of them.
-	redactions [][]byte
-	marker     []byte
+	// redactions are the forms of the values this attempt received, longest first, and redactionKey the run's key
+	// from its seal.
+	redactions   []redaction
+	redactionKey []byte
 	// expected are the outputs the run declares; outputs are the chunks of those the turn returns, and returned and
 	// unreturned list them for the result.
 	expected   []wire.ExpectedOutput
@@ -1043,10 +1115,17 @@ type activeRun struct {
 	unreturned []wire.UnreturnedOutput
 }
 
+// redaction is a form of a delivered value and the marker that replaces it.
+type redaction struct {
+	value, marker []byte
+}
+
 // deliver keeps the forms each credential value is published in: the value without trailing CR and LF, as credential
 // files written by echo or a CLI end in a newline that transcripts and outputs drop, and that form escaped as a JSON
 // string, as a transcript line carries it. A value shorter than minRedact once trimmed matches ordinary text and JSON
-// literals, so it is logged and left. The marker names no credential, so it cannot carry or rebuild one.
+// literals, so it is logged and left. Both forms take the marker of the value's name under the run's key, which names
+// no credential. A marker holding a form of any delivered value would publish it, so that marker is [*], which no form
+// of minRedact bytes fits in.
 func (run *activeRun) deliver(values map[string][]byte) {
 	for name, value := range values {
 		trimmed := bytes.TrimRight(value, "\r\n")
@@ -1055,20 +1134,21 @@ func (run *activeRun) deliver(values map[string][]byte) {
 			continue
 		}
 		escaped, _ := jsontext.AppendQuote(nil, trimmed) // invalid UTF-8 is replaced, and that form never appears in a transcript
-		run.redactions = append(run.redactions, trimmed)
+		marker := []byte(signed.RedactionMarker(run.redactionKey, name))
+		run.redactions = append(run.redactions, redaction{value: trimmed, marker: marker})
 		if escaped = escaped[1 : len(escaped)-1]; !bytes.Equal(escaped, trimmed) {
-			run.redactions = append(run.redactions, escaped)
+			run.redactions = append(run.redactions, redaction{value: escaped, marker: marker})
 		}
 	}
-	slices.SortFunc(run.redactions, func(a, b []byte) int { return len(b) - len(a) })
-	run.marker = []byte("[redacted]")
-	// No form of minRedact bytes fits within the fallback.
-	if slices.ContainsFunc(run.redactions, func(form []byte) bool { return bytes.Contains(run.marker, form) }) {
-		run.marker = []byte("[*]")
+	for i, form := range run.redactions {
+		if slices.ContainsFunc(run.redactions, func(other redaction) bool { return bytes.Contains(form.marker, other.value) }) {
+			run.redactions[i].marker = []byte("[*]")
+		}
 	}
+	slices.SortFunc(run.redactions, func(a, b redaction) int { return len(b.value) - len(a.value) })
 }
 
-// redact replaces each form of each delivered credential value in data with the marker, in order, as bytes.ReplaceAll
+// redact replaces each form of each delivered credential value in data with its marker, in order, as bytes.ReplaceAll
 // would; the result is held only while it fits limit.
 func (run *activeRun) redact(data []byte, limit int64) *redactedForm {
 	out := &redactedForm{limit: limit, sum: sha256.New()}
@@ -1081,7 +1161,7 @@ func (run *activeRun) redact(data []byte, limit int64) *redactedForm {
 func (run *activeRun) redactTo(out io.Writer, data []byte) {
 	w := out
 	for i := len(run.redactions) - 1; i >= 0; i-- {
-		w = &replacer{value: run.redactions[i], marker: run.marker, next: w}
+		w = &replacer{value: run.redactions[i].value, marker: run.redactions[i].marker, next: w}
 	}
 	for piece := range slices.Chunk(data, redactPiece) {
 		w.Write(piece)

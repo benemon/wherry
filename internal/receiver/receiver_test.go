@@ -47,6 +47,8 @@ const (
 	testReceiver   = "receiver-a"
 )
 
+var testRedactionKey = []byte("0123456789abcdef0123456789abcdef")
+
 var (
 	resultStream   = []string{`{"type":"assistant","message":"working"}`, `{"type":"result","result":"done","is_error":false}`}
 	noResultStream = []string{`{"type":"assistant","message":"working"}`}
@@ -548,7 +550,7 @@ func (f fixture) sealFor(t *testing.T, request wire.SealRequest, values map[stri
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
 		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
 		S3Inputs: request.S3Inputs, S3Outputs: request.S3Outputs, ExpiryMS: request.ExpiryMS,
-	}, request.Key.Key.(*ecdsa.PublicKey), values)
+	}, request.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: values, RedactionKey: testRedactionKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,7 +585,7 @@ func answerSeals(t *testing.T, ctx context.Context, kafka *kgo.Client, keys sign
 				sealed, err := signed.Seal(signed.SealBinding{
 					Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
 					Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
-				}, request.Key.Key.(*ecdsa.PublicKey), map[string][]byte{credential: []byte(value)})
+				}, request.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: map[string][]byte{credential: []byte(value)}, RedactionKey: testRedactionKey})
 				if err == nil {
 					err = kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.HostTopic(tenant, host), Key: []byte(request.Run), Value: sealed}).FirstErr()
 				}

@@ -248,11 +248,12 @@ func TestTaskCredentialIsRedactedFromTranscriptAndOutputs(t *testing.T) {
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
-	if text := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0].Text; text != `{"type":"assistant","message":"key [redacted]"}` {
+	marker := signed.RedactionMarker(testRedactionKey, "deploy-key")
+	if text := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0].Text; text != `{"type":"assistant","message":"key `+marker+`"}` {
 		t.Fatalf("transcript line %q, want the task credential redacted", text)
 	}
 	outputs := f.outputChunks(t)
-	want := []byte("key [redacted]\n")
+	want := []byte("key " + marker + "\n")
 	if len(outputs) != 1 || !bytes.Equal(outputs[0].ArtifactUpdate.Artifact.Parts[0].Raw, want) {
 		t.Fatalf("output chunks %+v, want report.md redacted", outputs)
 	}
@@ -382,7 +383,7 @@ func TestRedactionMatchesReplaceAll(t *testing.T) {
 		"long-value-1234567tail123"} {
 		want := []byte(data)
 		for _, form := range run.redactions {
-			want = bytes.ReplaceAll(want, form, run.marker)
+			want = bytes.ReplaceAll(want, form.value, form.marker)
 		}
 		got := run.redact([]byte(data), 1<<20)
 		if !bytes.Equal(got.data, want) || got.size != int64(len(want)) || got.hash() != fmt.Sprintf("%x", sha256.Sum256(want)) {
@@ -397,7 +398,8 @@ func TestRedactionCannotExpandPastTheLimits(t *testing.T) {
 	terms := testTerms()
 	terms.OutputLimit = 4096
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
-	name, value, marker := "c", "12345678", "[redacted]"
+	name, value := "c", "12345678"
+	marker := signed.RedactionMarker(testRedactionKey, name)
 	collect := func(outputs ...adapter.Output) *activeRun {
 		run := testActiveRun(t, f, "run-x", 1)
 		run.deliver(map[string][]byte{name: []byte(value)})
@@ -507,10 +509,13 @@ func TestResultTextIsBounded(t *testing.T) {
 	}
 }
 
-// The largest result the receiver builds from bounded fields fits a default producer's batch.
+// The largest result the receiver builds from bounded fields fits a default producer's batch, with the agent's result
+// metadata made of an 8-byte value that each 27-byte marker replaces.
 func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-w", 1)
+	value := "12345678"
+	run.deliver(map[string][]byte{"c": []byte(value)})
 	parts := []wire.Part{{Text: "p"}}
 	for i := 1; i < wire.MaxParts; i++ {
 		parts = append(parts, wire.Part{Raw: wire.StdBytes{byte(i)}, Filename: fmt.Sprintf("%0255d", i)})
@@ -521,12 +526,13 @@ func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: strings.Repeat("0", 64), Size: 1 << 62})
 		run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: name, Size: 1 << 62, Reason: "rejected: size changed while read"})
 	}
-	metadata := agentResultMetadata([]byte(`{"type":"result","usage":{"k":"` + strings.Repeat("x", wire.MaxAgentResult-40) + `"}}`))
+	metadata := agentResultMetadata([]byte(`{"type":"result","usage":{"k":"` + strings.Repeat(value, (wire.MaxAgentResult-40)/len(value)) + `"}}`))
 	record := run.result(taskStatus(wire.TaskStateFailed, strings.Repeat("x", wire.MaxText)), strings.Repeat("\x01", wire.MaxText), metadata)
 	size := len(record.Key) + len(record.Value) + 97
 	t.Logf("largest result: %d-byte batch", size)
-	if metadata == nil || size > 1000012 {
-		t.Fatalf("largest result is a %d-byte batch, metadata %v", size, metadata != nil)
+	marker := []byte(signed.RedactionMarker(testRedactionKey, "c"))
+	if markers := bytes.Count(decodedPayload(record.Value), marker); metadata == nil || markers != (wire.MaxAgentResult-40)/len(value) || size > 1000012 {
+		t.Fatalf("largest result is a %d-byte batch with %d markers, metadata %v", size, markers, metadata != nil)
 	}
 }
 
@@ -669,7 +675,7 @@ func TestCredentialFormsAreRedacted(t *testing.T) {
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
-	agent, task := "[redacted]", "[redacted]"
+	agent, task := signed.RedactionMarker(testRedactionKey, credentialName), signed.RedactionMarker(testRedactionKey, "deploy-key")
 	if line := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0].Text; line != `{"type":"assistant","message":"cat gives `+agent+`\n and `+task+`\r\n"}` {
 		t.Fatalf("transcript line %q", line)
 	}
