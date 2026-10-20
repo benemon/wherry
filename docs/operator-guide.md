@@ -845,8 +845,13 @@ plugins in each receiver's plugin directory with the receiver binary.
 the client configuration and opens a Kafka connection for each tool call.
 [Reference](reference.md#mcp-tools) lists the tools.
 
-The packaged `plugins/wherry/mcp.json` uses the default configuration path.
-Add `--config-file` and its path to the server's `args` for another path.
+The packaged `plugins/wherry/mcp.json` starts `wherry mcp` with the default
+configuration path. For a configuration elsewhere, keep it at the default
+path or link the default path to it, or register a server of your own that
+runs `wherry mcp --config-file PATH` and disable the packaged one, for
+example with `claude mcp add wherry -- wherry mcp --config-file PATH` in
+Claude Code. A plugin update replaces the packaged `mcp.json`, so edits to
+it do not last.
 
 `plugins/wherry` packages the server with the `wherry` Agent Skill:
 

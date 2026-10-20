@@ -318,7 +318,8 @@ They fail with `run not found` when there is neither.
 Serves the [MCP tools](#mcp-tools) over stdio. For as long as it runs it
 answers seal requests as `await` does, logging to standard error.
 The packaged MCP launch uses `["mcp"]` and the default configuration path.
-Add `--config-file` and its path to its `args` for another path.
+A server that runs `wherry mcp --config-file PATH` uses another; see the
+[operator guide](operator-guide.md#harness-integration).
 
 ## Admin commands
 
