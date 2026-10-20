@@ -255,7 +255,14 @@ func TestPanicStaysInItsCall(t *testing.T) {
 	if err := b.Sweep(context.Background()); err != nil {
 		t.Fatalf("other adapter after a follow panic: %v", err)
 	}
-	if !strings.Contains(logs.String(), "adapter=c method=/wherry.adapter.v1.Adapter/Follow") {
+	// go-plugin re-logs a plugin's fields in map order, so the entry is matched field by field.
+	logged := false
+	for _, entry := range strings.Split(logs.String(), "[ERROR]") {
+		if strings.Contains(entry, "method=/wherry.adapter.v1.Adapter/Follow") && strings.Contains(entry, "adapter=c") {
+			logged = true
+		}
+	}
+	if !logged {
 		t.Fatalf("follow panic logged without its adapter:\n%s", logs.String())
 	}
 	if after := pid(p); after != before {
