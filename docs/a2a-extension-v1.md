@@ -277,8 +277,10 @@ A chunk is one line of the agent's standard output, as the A2A artifact
   `size` in bytes. The line itself is then not stored.
 - `seq` is the line's byte offset in the agent's output and orders the
   chunks. An adopter follows from the last heartbeat's log offset, so a
-  `seq` can repeat across attempts of a turn. A reader keeps the chunks of
-  the attempt that wrote the turn's terminal status.
+  `seq` can repeat across attempts of a turn. A reader takes the latest
+  attempt's chunks, and the lines below that attempt's first `seq` from the
+  highest earlier attempt that has them, so a turn's transcript starts at
+  offset 0.
 - `append` is false for the line at offset 0 and true after it. `lastChunk`
   is true on the turn's final chunk, written with its terminal status.
 

@@ -140,9 +140,10 @@ prints `run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
 | `--deadline` | `30m` | time from now by which the run must end |
 | `--queue-deadline` | `10m` | time from now by which a receiver must claim it |
 
-Exactly one of `--prompt` and `--prompt-file` is required. The other
-`--git-` flags need `--git`, which splits at its last `@`. `submit` writes
-a `user@host:path` remote as `ssh://user@host/path`. The
+Exactly one of `--prompt` and `--prompt-file` is required, and an empty
+prompt file fails with `--prompt-file is empty`. The other `--git-` flags
+need `--git`, which splits at its last `@`. `submit` writes a
+`user@host:path` remote as `ssh://user@host/path`. The
 [extension](a2a-extension-v1.md#git-input) gives the rules for the remote,
 ref, path and host key. `submit` refuses, before it publishes, a remote
 whose host is not one of the pool's [`vcs`](#pool-terms) hosts:
@@ -205,8 +206,9 @@ is an alias.
 | `--deadline` | `30m` | run deadline for the turn |
 | `--queue-deadline` | `10m` | queue deadline for the turn |
 
-`--prompt` and `--prompt-file` are mutually exclusive. With neither, the
-prompt is `continue`.
+`--prompt` and `--prompt-file` are mutually exclusive, and an empty prompt
+file fails with `--prompt-file is empty`. With neither, the prompt is
+`continue`.
 
 It fails when the run is not interrupted, is cancelled, or already has a
 next turn.
@@ -272,7 +274,9 @@ its pool's bucket with the host's storage credential, and prints
 `run_id=<id>`. It deletes only objects whose keys a listing of that prefix
 returns and that start with it, so the prefix of another run or tenant is
 never touched. It finds the run as `status` does, and fails with `run not
-found` otherwise. Use it for a run the client never saw finish.
+found` otherwise. It refuses a run whose latest turn has not ended, since its
+receiver may still read the inputs or write the outputs there. Use it for a
+run the client never saw finish.
 
 ### `wherry status [RUN_ID]`
 
@@ -312,12 +316,37 @@ turn=<n> attempt=<n> kind=<kind> state=<state> receiver=<id> time=<time> message
 turn=<n> attempt=<n> transcript_chunks=<n>
 ```
 
-`message` appears when the status has one. Heartbeats are not on the feed,
-so they do not appear.
+`message` appears when the status has one, with each redaction marker shown
+as `wherry status` shows it. Heartbeats are not on the feed, so they do not
+appear.
 
-`await`, `status`, `events`, `cleanup`, `continue` and `cancel` find a run from
-this host's record of it in `state_dir`, or from a receiver's echo on the tenant
-feed. They fail with `run not found` when there is neither.
+### `wherry transcript RUN_ID`
+
+Prints a turn's transcript: each line of the agent's standard output, in
+output order, as the receiver redacted it. The lines are those the turn's
+highest delivery attempt published. Before that attempt's first line, or in
+place of its lines while it has none, each line comes from the highest earlier
+attempt that has it. An adopter resumes the job's output past the last
+heartbeat's offset, so an adopted turn reads from offset 0. The CANCELED
+terminal of an interrupted run, which every pool member writes with its own
+attempt, does not count as an attempt.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--turn` | the latest | turn to read |
+| `--offset` | `0` | lines to skip |
+| `--limit` | `0`, every line | most lines to print |
+
+A line that is not UTF-8 prints as its bytes. For a line over 512 KiB, which
+the receiver did not store, it prints `line at offset <seq> not stored:
+sha256=<hex> size=<bytes>` on standard error. Each redaction marker reads
+`[redacted:<name>]`, and `<name> redacted <n> times` on standard error counts
+the markers in every line of the transcript. The transcript grows while the turn
+runs. `transcript` fails with `invalid input` for a turn the run does not have.
+
+`await`, `status`, `events`, `transcript`, `cleanup`, `continue` and `cancel`
+find a run from this host's record of it in `state_dir`, or from a receiver's
+echo on the tenant feed. They fail with `run not found` when there is neither.
 
 ### `wherry mcp`
 
@@ -537,22 +566,25 @@ the conformance suite a plugin runs against its platform.
 
 ## MCP tools
 
-`wherry mcp` serves seven tools over stdio. Each takes and returns JSON with
+`wherry mcp` serves nine tools over stdio. Each takes and returns JSON with
 a declared schema and opens its own Kafka connection. Deadlines given as `0`
 or omitted take the CLI defaults, 1800 and 600 seconds.
 
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
-| `submit` | `prompt`, `agent`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `await` | `id` | `id`, `state`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped` |
-| `continue` | `id`, `prompt`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `turn`, `skipped` |
+| `continue` | `id`, `prompt`, `prompt_file`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `turn`, `skipped` |
 | `cancel` | `id` | `id`, `skipped` |
-| `events` | `id` | `id`, `events`, `transcripts`, `skipped` |
+| `events` | `id` | `id`, `events`, `transcripts`, `redacted`, `skipped` |
+| `transcript` | `id`, `turn`, `offset`, `limit` | `id`, `turn`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
+| `cleanup` | `id` | `id` |
 
-- `submit` requires `prompt`. `selector` is an array of
-  `{key, operator, values}`. `git` is
+- `submit` requires exactly one of `prompt` and `prompt_file`, a file path read
+  as an input is; an empty file fails with `prompt_file is empty`.
+  `selector` is an array of `{key, operator, values}`. `git` is
   `{remote, ref, path, credential, host_key, changes}`, as `--git`,
   `--git-path`, `--git-credential`, `--git-host-key` and `--git-changes` take
   them, with `remote` and `ref` required; `host_key` is a file path, read as an
@@ -583,13 +615,35 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
   it downloads and verifies, then deletes the run's prefix, as `wherry await`
   does. `not_returned` holds `{name, size, reason}` for each output the result
   lists as not returned and each one that fails verification.
-- `status` and `await` show each redaction marker as `wherry status` and
-  `wherry await` print it, and `redacted` maps each name to the number of
-  its markers in `message` and `artifacts`.
-- `continue` requires `id`. `prompt` defaults to `continue`.
+- `status`, `await`, `events` and `transcript` show each redaction marker as
+  `wherry status` and `wherry await` print it, and `redacted` maps each name
+  to the number of its markers in the messages, the artifacts, or every line
+  of the transcript's attempt.
+- `continue` requires `id`. `prompt` defaults to `continue`; `prompt_file`, a
+  file path read as an input is, replaces it, and the two are exclusive. An
+  empty file fails with `prompt_file is empty`. `submit` and `continue` check
+  their arguments before they connect to the bus.
 - `events` returns `events`, each
   `{turn, attempt, kind, state, receiver, time, message}`, and
   `transcripts`, each `{turn, attempt, chunks}`.
+- `transcript` returns the lines `wherry transcript` prints, of `turn`, by
+  default the latest, from `offset` lines in. `attempt` is the turn's highest
+  attempt, 0 while no receiver has reported on the turn. `total` counts the
+  transcript's lines on the feed so far, and `next_offset` is set while lines
+  remain past the page.
+- Each line is `{seq, attempt, text}`, with `seq` its byte offset in the
+  agent's output and `attempt` the attempt that published it. `text` is empty
+  for an empty line, and for a line that is not UTF-8, which has `raw_bytes`,
+  its size, instead, and a line over 512 KiB, which has `unstored`,
+  `{sha256, size}`.
+- A harness caps a tool's output; Claude Code's `MAX_MCP_OUTPUT_TOKENS`
+  defaults to about 25,000 tokens. A `transcript` page fits it: it holds at
+  most `limit` lines, 100 by default and 500 at most, and at most 24 KiB of
+  JSON. It ends before the line that would take it past that. A line too long
+  for a page alone comes back as the start of its text that fits, with
+  `truncated` true and `bytes` its full size, and `next_offset` passes it.
+- `cleanup` deletes the run's S3 objects as `wherry cleanup` does, and refuses
+  with `INVALID_ARGUMENT` while the run's latest turn has not ended.
 - `skipped` counts the run's records that failed verification; for a
   `status` list, the records of every listed run.
 

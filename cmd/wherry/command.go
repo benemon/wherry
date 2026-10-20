@@ -25,7 +25,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|receivers|submit|continue|cancel|await|status|events|cleanup|receiver|admin|mcp>")
+		return errors.New("usage: wherry <init|key|receivers|submit|continue|cancel|await|status|events|transcript|cleanup|receiver|admin|mcp>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -80,7 +80,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	command, ok := map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
 		"receivers": runReceivers, "submit": runSubmit, "continue": runContinue, "resume": runContinue,
-		"cancel": runCancel, "await": runAwait, "status": runStatus, "events": runEvents, "cleanup": runCleanup,
+		"cancel": runCancel, "await": runAwait, "status": runStatus, "events": runEvents, "transcript": runTranscript, "cleanup": runCleanup,
 	}[args[0]]
 	if !ok {
 		return fmt.Errorf("unknown command %q", args[0])
@@ -180,6 +180,9 @@ func runContinue(ctx context.Context, client *busclient.Host, args []string, std
 		contents, err := os.ReadFile(*promptFile)
 		if err != nil {
 			return err
+		}
+		if len(contents) == 0 {
+			return errors.New("--prompt-file is empty")
 		}
 		*prompt = string(contents)
 	}
@@ -313,6 +316,9 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		contents, err := os.ReadFile(*promptFile)
 		if err != nil {
 			return err
+		}
+		if len(contents) == 0 {
+			return errors.New("--prompt-file is empty")
 		}
 		*prompt = string(contents)
 	}
@@ -564,6 +570,58 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 	for _, position := range positions {
 		fmt.Fprintf(stdout, "turn=%d attempt=%d transcript_chunks=%d\n", position.Turn, position.Attempt, result.Chunks[position])
 	}
+	warnRedacted(stderr, result.Redacted)
+	warnSkipped(stderr, result.Skipped)
+	return nil
+}
+
+func runTranscript(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
+	const transcriptUsage = "usage: wherry transcript RUN_ID [--turn N] [--offset N] [--limit N]"
+	if len(args) == 0 {
+		return errors.New(transcriptUsage)
+	}
+	runID := args[0]
+	flags := flag.NewFlagSet("transcript", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configFile := flags.String("config-file", "", "host configuration file")
+	turn := flags.Int64("turn", 0, "turn to read (default: the latest)")
+	offset := flags.Int("offset", 0, "lines to skip")
+	limit := flags.Int("limit", 0, "most lines to print (default: all)")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New(transcriptUsage)
+	}
+	if *turn < 0 || *offset < 0 || *limit < 0 {
+		return errors.New("--turn, --offset and --limit must not be negative")
+	}
+	client, closeClient, err := commandClient(client, *configFile, stderr)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
+	result, err := client.Transcript(ctx, runID, *turn)
+	if err != nil {
+		return err
+	}
+	lines := result.Lines[min(*offset, len(result.Lines)):]
+	if *limit > 0 {
+		lines = lines[:min(*limit, len(lines))]
+	}
+	for _, line := range lines {
+		switch part := line.Part; {
+		case part.URL != "":
+			var pointer wire.PointerMetadata
+			json.Unmarshal(part.Metadata, &pointer) // validation decoded it
+			fmt.Fprintf(stderr, "line at offset %d not stored: sha256=%s size=%d\n", line.Seq, pointer.SHA256, pointer.Size)
+		case part.Raw != nil:
+			fmt.Fprintf(stdout, "%s\n", part.Raw)
+		default:
+			fmt.Fprintln(stdout, part.Text)
+		}
+	}
+	warnRedacted(stderr, result.Redacted)
 	warnSkipped(stderr, result.Skipped)
 	return nil
 }

@@ -53,8 +53,11 @@ literally and interprets only the agent name.
 ## Submit, then keep working
 
 Call `submit` with `prompt`, and `agent`, `selector` and `git` when you
-need them. It returns `id` and `pool` straight away. Note the id and carry
-on with other work.
+need them. For a long brief, write it to a file and pass its path as
+`prompt_file` instead of `prompt`; the server reads it as it reads `inputs`,
+and refuses an empty one.
+It returns `id` and `pool` straight away. Note the id and carry on with other
+work.
 
 `git` names a repository the agent clones itself: `remote` (an `https` or `ssh`
 URL, or `user@host:path`) and `ref` are required. Add `credential`, the name of
@@ -85,7 +88,9 @@ return it through the bucket. Both need a pool with storage and a storage
 credential in the user's wherry configuration; without them `submit`
 returns `INVALID_ARGUMENT` saying which is missing. `await` downloads S3
 outputs like any output, and deletes the run's objects from the bucket
-once the run has ended and every one has verified.
+once the run has ended and every one has verified. A run that ended while
+nothing awaited it keeps them until you call `cleanup` with its id;
+`cleanup` refuses a run that has not ended.
 
 ## Collect the result
 
@@ -108,6 +113,16 @@ Call `await` with the id. It waits up to 45 seconds and returns one of:
 an id it lists every run this host can see, latest update first, each with
 its `pool`, `turn`, `state` and `updated` time; use it to find a run whose
 id you no longer hold. `events` returns the run's status history.
+
+`transcript` with the id returns the agent's standard output for the latest
+turn, or `turn`, as the receiver redacted it: up to 100 lines from `offset`,
+and `next_offset` while more remain. Call it again with `next_offset` to read
+on. Use it to follow a long run or to see why one failed. Each line names the
+delivery attempt that published it; a turn another receiver took over reads
+from the start, the earlier attempt's lines first. A page stays within 24 KiB,
+which fits a harness's default limit on tool output, such as Claude Code's
+`MAX_MCP_OUTPUT_TOKENS`. A line too long for a page comes back as its start,
+with `truncated` set and its full size in `bytes`.
 
 Where your harness runs shell commands in the background and tells you when
 they finish, run `wherry await <id>` as a background command. It blocks

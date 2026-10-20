@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -127,12 +129,12 @@ func TestMCPToolsList(t *testing.T) {
 			}
 		}
 	})
-	if want := []string{"await", "cancel", "continue", "events", "receivers", "status", "submit"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"await", "cancel", "cleanup", "continue", "events", "receivers", "status", "submit", "transcript"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools %v, want %v", names, want)
 	}
 	required := map[string][]string{
-		"await": {"id"}, "cancel": {"id"}, "continue": {"id"}, "events": {"id"}, "receivers": nil, "status": nil,
-		"submit": {"prompt"},
+		"await": {"id"}, "cancel": {"id"}, "cleanup": {"id"}, "continue": {"id"}, "events": {"id"}, "receivers": nil, "status": nil,
+		"submit": nil, "transcript": {"id"},
 	}
 	for name, tool := range schemas {
 		if tool.Description == "" {
@@ -481,5 +483,237 @@ func TestMCPServerAnswersSealRequests(t *testing.T) {
 			t.Fatalf("the server never answered; logs:\n%s", b.logs.String())
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// redactionMarker is the marker receiver-a writes for the run's value name, from the key in this host's record of the run.
+func (b *bus) redactionMarker(t *testing.T, runID, name string) string {
+	t.Helper()
+	encoded, err := os.ReadFile(filepath.Join(b.stateDir, "runs", runID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		RedactionKey []byte `json:"redaction_key"`
+	}
+	if err := json.Unmarshal(encoded, &record); err != nil {
+		t.Fatal(err)
+	}
+	return signed.RedactionMarker(record.RedactionKey, name)
+}
+
+// attemptBinding is receiver-a's binding for attempt of the admitted task's turn.
+func (b *bus) attemptBinding(admitted task, attempt int64) wire.ReceiverBinding {
+	binding := b.binding(admitted)
+	binding.Attempt = attempt
+	return binding
+}
+
+// chunk signs a transcript line of attempt at seq as receiver-a does.
+func (b *bus) chunk(t *testing.T, admitted task, attempt, seq int64, part wire.Part) []byte {
+	t.Helper()
+	runID := admitted.submission.Wherry.Run
+	part.MediaType = "application/x-ndjson"
+	return b.sign(t, &wire.Chunk{
+		ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: runID, ContextID: runID, Append: seq > 0, Artifact: wire.Artifact{
+			ArtifactID: "transcript", Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI},
+		}},
+		Wherry: wire.ChunkBinding{ReceiverBinding: b.attemptBinding(admitted, attempt), TaskHash: admitted.hash, Seq: seq},
+	})
+}
+
+// transcriptBig is a line over the transcript page bound.
+var transcriptBig = strings.Repeat("b", 300<<10)
+
+// transcriptRun admits a run whose first turn has a stale first attempt's line and a second attempt's lines, fed out
+// of order and one twice, a CANCELED terminal under a third attempt, and a working status whose message carries a
+// redaction marker.
+func transcriptRun(t *testing.T) (*bus, string) {
+	t.Helper()
+	b := newBus(t)
+	admitted := b.admitted(t)
+	runID := admitted.submission.Wherry.Run
+	marker := b.redactionMarker(t, runID, "model")
+	working := now(wire.TaskStateWorking)
+	working.Message = &wire.Message{MessageID: "msg-working", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "using " + marker}}, Extensions: []string{wire.ExtensionURI}}
+	canceled := now(wire.TaskStateCanceled)
+	b.feed(t, runID,
+		b.status(t, admitted, "working-1", "started", working),
+		b.chunk(t, admitted, 1, 0, wire.Part{Text: "stale"}),
+		b.chunk(t, admitted, 1, 70, wire.Part{Text: "stale past the second attempt's first line"}),
+		b.chunk(t, admitted, 2, 10, wire.Part{Text: "second " + marker}),
+		b.chunk(t, admitted, 2, 0, wire.Part{Text: `{"type":"start"}`}),
+		b.chunk(t, admitted, 2, 20, wire.Part{Raw: wire.StdBytes{0xff, 0xfe}}),
+		b.chunk(t, admitted, 2, 30, wire.Part{Raw: wire.StdBytes(`"q"`)}),
+		b.chunk(t, admitted, 2, 35, wire.Part{Raw: wire.StdBytes{}}),
+		b.chunk(t, admitted, 2, 10, wire.Part{Text: "second " + marker}),
+		b.chunk(t, admitted, 2, 40, wire.Part{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + hashOf("x") + `","size":600000}`)}),
+		b.chunk(t, admitted, 2, 50, wire.Part{Text: transcriptBig}),
+		b.chunk(t, admitted, 2, 60, wire.Part{Text: "tail"}),
+		b.sign(t, &wire.RunStatus{StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: runID, ContextID: runID, Status: canceled},
+			Wherry: wire.StatusBinding{ReceiverBinding: b.attemptBinding(admitted, 3), EventID: runID + "/1/canceled", Kind: "terminal", TaskHash: admitted.hash}}),
+	)
+	return b, runID
+}
+
+func TestMCPTranscript(t *testing.T) {
+	b, runID := transcriptRun(t)
+	ctx := b.ctx
+	session := mcpSession(t, b.connect(t), nil)
+	var reply transcriptReply
+	callTool(t, ctx, session, "transcript", map[string]any{"id": runID}, &reply)
+	want := transcriptReply{ID: runID, Turn: 1, Attempt: 2, Total: 8, NextOffset: 6, Redacted: map[string]int{"model": 1}, Lines: []transcriptLine{
+		{Seq: 0, Attempt: 2, Text: `{"type":"start"}`}, {Seq: 10, Attempt: 2, Text: "second [redacted:model]"}, {Seq: 20, Attempt: 2, RawBytes: 2},
+		{Seq: 30, Attempt: 2, Text: `"q"`}, {Seq: 35, Attempt: 2}, {Seq: 40, Attempt: 2, Unstored: &wire.PointerMetadata{SHA256: hashOf("x"), Size: 600000}},
+	}}
+	if !reflect.DeepEqual(reply, want) {
+		t.Fatalf("transcript %+v, want %+v", reply, want)
+	}
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "transcript", Arguments: map[string]any{"id": runID, "offset": 4, "limit": 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := toolText(result); !strings.Contains(text, `{"attempt":2,"seq":35,"text":""}`) {
+		t.Fatalf("an empty line %s, want its empty text", text)
+	}
+	var over transcriptReply
+	callTool(t, ctx, session, "transcript", map[string]any{"id": runID, "offset": 6}, &over)
+	if over.NextOffset != 7 || len(over.Lines) != 1 || !over.Lines[0].Truncated || over.Lines[0].Bytes != len(transcriptBig) ||
+		over.Lines[0].Text == "" || !strings.HasPrefix(transcriptBig, over.Lines[0].Text) {
+		t.Fatalf("a line over the page bound: next %d, %d lines", over.NextOffset, len(over.Lines))
+	}
+	overResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "transcript", Arguments: map[string]any{"id": runID, "offset": 6}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoded, _ := json.Marshal(overResult.StructuredContent); len(encoded) > transcriptBytes {
+		t.Fatalf("a truncated page of %d bytes, over the %d bound", len(encoded), transcriptBytes)
+	}
+	var last transcriptReply
+	callTool(t, ctx, session, "transcript", map[string]any{"id": runID, "offset": 7}, &last)
+	if last.NextOffset != 0 || !reflect.DeepEqual(last.Lines, []transcriptLine{{Seq: 60, Attempt: 2, Text: "tail"}}) {
+		t.Fatalf("the last page: %+v", last)
+	}
+	var page transcriptReply
+	callTool(t, ctx, session, "transcript", map[string]any{"id": runID, "turn": 1, "offset": 1, "limit": 2}, &page)
+	if page.NextOffset != 3 || !reflect.DeepEqual(page.Lines, want.Lines[1:3]) {
+		t.Fatalf("offset 1 limit 2: %+v", page)
+	}
+	for name, call := range map[string]struct {
+		arguments map[string]any
+		code      string
+	}{
+		"a turn past the latest": {map[string]any{"id": runID, "turn": 2}, "INVALID_ARGUMENT"},
+		"a limit over the most":  {map[string]any{"id": runID, "limit": transcriptMaxLimit + 1}, "INVALID_ARGUMENT"},
+		"an unknown run":         {map[string]any{"id": "run-missing"}, "RUN_NOT_FOUND"},
+	} {
+		if failure := callToolError(t, ctx, session, "transcript", call.arguments); failure.Code != call.code {
+			t.Errorf("%s: %+v, want %s", name, failure, call.code)
+		}
+	}
+	var events eventsOutput
+	callTool(t, ctx, session, "events", map[string]any{"id": runID}, &events)
+	if events.Events[1].Message != "using [redacted:model]" || !reflect.DeepEqual(events.Redacted, map[string]int{"model": 1}) {
+		t.Fatalf("events %+v", events)
+	}
+}
+
+func TestMCPTranscriptFillsFromEarlierAttempts(t *testing.T) {
+	b := newBus(t)
+	admitted := b.admitted(t)
+	runID := admitted.submission.Wherry.Run
+	session := mcpSession(t, b.connect(t), nil)
+	var records [][]byte
+	for seq := range int64(5) {
+		records = append(records, b.chunk(t, admitted, 1, seq, wire.Part{Text: fmt.Sprintf("a1-%d", seq)}))
+	}
+	for seq := int64(3); seq < 7; seq++ {
+		records = append(records, b.chunk(t, admitted, 2, seq, wire.Part{Text: fmt.Sprintf("a2-%d", seq)}))
+	}
+	b.feed(t, runID, records...)
+	adopted := []transcriptLine{{Seq: 0, Attempt: 1, Text: "a1-0"}, {Seq: 1, Attempt: 1, Text: "a1-1"}, {Seq: 2, Attempt: 1, Text: "a1-2"},
+		{Seq: 3, Attempt: 2, Text: "a2-3"}, {Seq: 4, Attempt: 2, Text: "a2-4"}, {Seq: 5, Attempt: 2, Text: "a2-5"}, {Seq: 6, Attempt: 2, Text: "a2-6"}}
+	var reply transcriptReply
+	callTool(t, b.ctx, session, "transcript", map[string]any{"id": runID}, &reply)
+	if reply.Attempt != 2 || !reflect.DeepEqual(reply.Lines, adopted) {
+		t.Fatalf("an adopted turn: attempt %d, lines %+v", reply.Attempt, reply.Lines)
+	}
+	// A third attempt that has published no line yet: every line comes from the highest earlier attempt that has it.
+	b.feed(t, runID, b.sign(t, &wire.RunStatus{StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: runID, ContextID: runID, Status: now(wire.TaskStateWorking)},
+		Wherry: wire.StatusBinding{ReceiverBinding: b.attemptBinding(admitted, 3), EventID: "started-3", Kind: "started", TaskHash: admitted.hash}}))
+	var later transcriptReply
+	callTool(t, b.ctx, session, "transcript", map[string]any{"id": runID}, &later)
+	if later.Attempt != 3 || !reflect.DeepEqual(later.Lines, adopted) {
+		t.Fatalf("a turn whose last attempt has no lines: attempt %d, lines %+v", later.Attempt, later.Lines)
+	}
+}
+
+func TestMCPPromptFile(t *testing.T) {
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "brief.md"), []byte("the brief"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "empty.md"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("submit", func(t *testing.T) {
+		b := newBus(t)
+		session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{}))
+		var submitted submitOutput
+		callTool(t, b.ctx, session, "submit", map[string]any{"prompt_file": "brief.md"}, &submitted)
+		if text := b.tasks(t, submitted.ID)[0].submission.Message.Parts[0].Text; !strings.Contains(text, "the brief") {
+			t.Fatalf("prompt %q, want the file's", text)
+		}
+		for name, arguments := range map[string]map[string]any{
+			"both":    {"prompt": "x", "prompt_file": "brief.md"},
+			"neither": {},
+			"outside": {"prompt_file": filepath.Join(t.TempDir(), "brief.md")},
+			"empty":   {"prompt_file": "empty.md"},
+		} {
+			if failure := callToolError(t, b.ctx, session, "submit", arguments); failure.Code != "INVALID_ARGUMENT" {
+				t.Errorf("%s: %+v", name, failure)
+			}
+		}
+		if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt_file": "empty.md"}); failure.Message != "prompt_file is empty" {
+			t.Errorf("empty prompt file: %+v", failure)
+		}
+	})
+	t.Run("continue", func(t *testing.T) {
+		b, admitted := publishInterruptedRun(t)
+		runID := admitted.submission.Wherry.Run
+		session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{}))
+		// The arguments are checked before the server connects, so a bus that is down does not hide a bad call.
+		down := mcpSessionReading(t, func() (*busclient.Host, error) { return nil, errors.New("down") }, nil, inputOpener(work, busclient.Config{}))
+		for name, arguments := range map[string]map[string]any{
+			"both":  {"id": runID, "prompt": "x", "prompt_file": "brief.md"},
+			"empty": {"id": runID, "prompt_file": "empty.md"},
+		} {
+			if failure := callToolError(t, b.ctx, down, "continue", arguments); failure.Code != "INVALID_ARGUMENT" {
+				t.Errorf("%s: %+v", name, failure)
+			}
+		}
+		var continued continueOutput
+		callTool(t, b.ctx, session, "continue", map[string]any{"id": runID, "prompt_file": "brief.md"}, &continued)
+		if text := b.tasks(t, runID)[1].submission.Message.Parts[0].Text; !strings.Contains(text, "the brief") {
+			t.Fatalf("continuation %q, want the file's", text)
+		}
+	})
+}
+
+func TestMCPCleanup(t *testing.T) {
+	b := newBus(t)
+	admitted := b.admitted(t)
+	runID := admitted.submission.Wherry.Run
+	session := mcpSession(t, b.connect(t), nil)
+	if failure := callToolError(t, b.ctx, session, "cleanup", map[string]any{"id": runID}); failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "has not ended") {
+		t.Fatalf("cleanup of a working run: %+v", failure)
+	}
+	b.feed(t, runID, b.status(t, admitted, "rejected-1", "rejected", now(wire.TaskStateRejected)))
+	failure := callToolError(t, b.ctx, session, "cleanup", map[string]any{"id": runID})
+	if failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "no storage credential") {
+		t.Fatalf("cleanup on a host without storage: %+v", failure)
+	}
+	if failure := callToolError(t, b.ctx, session, "cleanup", map[string]any{"id": "run-missing"}); failure.Code != "RUN_NOT_FOUND" {
+		t.Fatalf("cleanup of an unknown run: %+v", failure)
 	}
 }
