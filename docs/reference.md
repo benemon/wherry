@@ -8,6 +8,8 @@
 - `wherry admin` and `wherry receiver` read no client configuration. Every
   other command reads it first, and every command except `key` and `mcp`
   then connects to Kafka.
+- Every host command takes `--config-file FILE`. It defaults to
+  `~/.config/wherry/config.json`. A leading `~/` is expanded.
 - A failed command prints `wherry: <error>` on standard error and exits
   with status 1.
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
@@ -193,8 +195,12 @@ is an alias.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--prompt` | `continue` | text of the new turn |
+| `--prompt-file` | | file holding the new turn's prompt |
 | `--deadline` | `30m` | run deadline for the turn |
 | `--queue-deadline` | `10m` | queue deadline for the turn |
+
+`--prompt` and `--prompt-file` are mutually exclusive. With neither, the
+prompt is `continue`.
 
 It fails when the run is not interrupted, is cancelled, or already has a
 next turn.
@@ -311,6 +317,8 @@ They fail with `run not found` when there is neither.
 
 Serves the [MCP tools](#mcp-tools) over stdio. For as long as it runs it
 answers seal requests as `await` does, logging to standard error.
+The packaged MCP launch uses `["mcp"]` and the default configuration path.
+Add `--config-file` and its path to its `args` for another path.
 
 ## Admin commands
 
@@ -326,9 +334,9 @@ is missing.
 A bundle file must not exist beforehand. A command that fails removes the
 bundle it created.
 
-### `wherry admin pool create POOL --terms FILE`
+### `wherry admin pool create POOL <--config-file FILE|--config-dir DIR>`
 
-Records the [pool terms](#pool-terms) in `FILE`, creates the pool's tasks
+Records the [pool terms](#pool-terms), creates the pool's tasks
 and events topics, and sets the configuration of share group `p-<pool>`:
 `share.auto.offset.reset=earliest`, `share.isolation.level=read_committed`,
 `share.delivery.count.limit` and `share.record.lock.duration.ms` from the
@@ -345,23 +353,23 @@ when the pool's records do not fit the [record limit](#record-limit) with
 the tenant's feed counted, and records nothing. It applies
 each host's [quotas](#quotas).
 
-### `wherry admin host add TENANT HOST --bundle FILE`
+### `wherry admin host add TENANT HOST --bundle-file FILE`
 
 Records the host, creates its principal, its key topic and the tenant
 feed, grants its ACLs, applies its quotas, and writes its bundle.
 
-### `wherry admin receiver add RECEIVER --pool POOL --config PATH --bundle FILE`
+### `wherry admin receiver add RECEIVER --pool POOL <--config-file FILE|--config-dir DIR> --bundle-file FILE`
 
-Reads the [receiver configuration](#receiver-configuration) from `PATH`, a
+Reads the [receiver configuration](#receiver-configuration) from a
 directory or a single file, validates it against the pool's terms, records
 it, creates the receiver's principal and key topic,
 grants its ACLs, and writes its bundle. It refuses an existing receiver.
 
-`--platform-credential ADAPTER=FILE` puts the contents of `FILE`, less
+`--platform-credential-file ADAPTER=FILE` puts the contents of `FILE`, less
 trailing CR and LF, in the bundle as the platform credential of the named
 adapter.
 
-### `wherry admin receiver configure RECEIVER --config PATH`
+### `wherry admin receiver configure RECEIVER <--config-file FILE|--config-dir DIR>`
 
 Records a new configuration for a live receiver in its pool. The
 principal, password and bundle stay as they are. The receiver exits when it
@@ -407,7 +415,7 @@ does not check an adapter's `type` or `config` section.
 
 ## Receiver command
 
-### `wherry receiver --bundle FILE --state-dir DIR --plugin-dir DIR`
+### `wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir DIR`
 
 Runs a receiver as the bundle's principal. It creates the state directory
 with mode 0700 and keeps `signing.key` in it. On start it:
@@ -575,9 +583,9 @@ error text from the bus, the broker or the host key.
 
 ## Client configuration
 
-A JSON object at `~/.config/wherry/config.json`, or at the path in
-`WHERRY_CONFIG`. Unknown and duplicate members are errors. A leading `~/`
-is expanded in `WHERRY_CONFIG` and in every path.
+A JSON object at `~/.config/wherry/config.json`, or at the host command's
+`--config-file` path. Unknown and duplicate members are errors. A leading
+`~/` is expanded in the flag and in every path.
 
 | Member | Default | Content |
 | --- | --- | --- |
@@ -630,7 +638,10 @@ errors.
 
 ## Pool terms
 
-The YAML file `pool create --terms` reads. Unknown fields are errors.
+The YAML file `pool create --config-file` reads. Unknown fields are errors.
+With `--config-dir`, `pool.yaml` holds every field except `agents`, and
+`agents/*.yaml` each hold one agent in file-name order. Hidden entries are
+ignored. Any other entry and a directory with no agent files are errors.
 
 | Field | Content |
 | --- | --- |
@@ -875,7 +886,6 @@ A principal whose membership has ended has no grants.
 
 | Variable | Read by | Effect |
 | --- | --- | --- |
-| `WHERRY_CONFIG` | host commands | client configuration path |
 | `SSL_CERT_FILE` | host commands | PEM CA file trusted beside the system roots for a pool's S3 endpoint |
 | `WHERRY_TRUST_BROKER` | `wherry admin` | Kafka bootstrap address, also written into bundles |
 | `WHERRY_TRUST_CA` | `wherry admin` | PEM CA file for the broker, also written into bundles |

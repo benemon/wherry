@@ -33,17 +33,19 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if args[0] == "admin" {
 		return runAdmin(args[1:], stdout, stderr)
 	}
-	configPath, err := busclient.DefaultConfigPath()
-	if err != nil {
-		return err
-	}
-	config, err := busclient.LoadConfig(configPath)
-	if err != nil {
-		return err
-	}
 	if args[0] == "init" {
-		if len(args) != 1 {
+		flags := flag.NewFlagSet("init", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		configFile := flags.String("config-file", "", "host configuration file")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
 			return errors.New("usage: wherry init")
+		}
+		config, err := loadConfig(*configFile)
+		if err != nil {
+			return err
 		}
 		keyID, err := busclient.Init(context.Background(), config)
 		if err != nil {
@@ -53,8 +55,18 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	if args[0] == "key" {
-		if len(args) != 1 {
+		flags := flag.NewFlagSet("key", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		configFile := flags.String("config-file", "", "host configuration file")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
 			return errors.New("usage: wherry key")
+		}
+		config, err := loadConfig(*configFile)
+		if err != nil {
+			return err
 		}
 		key, err := trust.LoadSigningKeyFile(config.HostKey)
 		if err != nil {
@@ -64,7 +76,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	if args[0] == "mcp" {
-		return runMCP(context.Background(), config, args[1:])
+		return runMCP(context.Background(), args[1:])
 	}
 	command, ok := map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
 		"receivers": runReceivers, "submit": runSubmit, "continue": runContinue, "resume": runContinue,
@@ -73,17 +85,38 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if !ok {
 		return fmt.Errorf("unknown command %q", args[0])
 	}
-	client, err := busclient.Connect(config, log.New(stderr, "", 0))
-	if err != nil {
-		return err
+	return command(context.Background(), nil, args[1:], stdout, stderr)
+}
+
+func loadConfig(path string) (busclient.Config, error) {
+	if path == "" {
+		var err error
+		if path, err = busclient.DefaultConfigPath(); err != nil {
+			return busclient.Config{}, err
+		}
 	}
-	defer client.Close()
-	return command(context.Background(), client, args[1:], stdout, stderr)
+	return busclient.LoadConfig(path)
+}
+
+func commandClient(client *busclient.Host, configFile string, stderr io.Writer) (*busclient.Host, func(), error) {
+	if client != nil {
+		return client, func() {}, nil
+	}
+	config, err := loadConfig(configFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	client, err = busclient.Connect(config, log.New(stderr, "", 0))
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, client.Close, nil
 }
 
 func runReceivers(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("receivers", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	configFile := flags.String("config-file", "", "host configuration file")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -91,6 +124,11 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 	if flags.NArg() != 0 {
 		return errors.New("usage: wherry receivers [--json]")
 	}
+	client, closeClient, err := commandClient(client, *configFile, stderr)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
 	receivers, err := client.Receivers(ctx)
 	if err != nil {
 		return err
@@ -114,14 +152,16 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 }
 
 func runContinue(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const continueUsage = "usage: wherry continue RUN_ID [--prompt TEXT] [--deadline DURATION] [--queue-deadline DURATION]"
+	const continueUsage = "usage: wherry continue RUN_ID [--prompt TEXT|--prompt-file FILE] [--deadline DURATION] [--queue-deadline DURATION]"
 	if len(args) == 0 {
 		return errors.New(continueUsage)
 	}
 	runID := args[0]
 	flags := flag.NewFlagSet("continue", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	configFile := flags.String("config-file", "", "host configuration file")
 	prompt := flags.String("prompt", "continue", "continuation prompt")
+	promptFile := flags.String("prompt-file", "", "continuation prompt file")
 	deadline := flags.Duration("deadline", 30*time.Minute, "task deadline")
 	queueDeadline := flags.Duration("queue-deadline", 10*time.Minute, "queue deadline")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -133,6 +173,21 @@ func runContinue(ctx context.Context, client *busclient.Host, args []string, std
 	if *deadline <= 0 || *queueDeadline <= 0 {
 		return errors.New("deadlines must be positive")
 	}
+	if wasSet(flags, "prompt") && wasSet(flags, "prompt-file") {
+		return errors.New("--prompt and --prompt-file are mutually exclusive")
+	}
+	if wasSet(flags, "prompt-file") {
+		contents, err := os.ReadFile(*promptFile)
+		if err != nil {
+			return err
+		}
+		*prompt = string(contents)
+	}
+	client, closeClient, err := commandClient(client, *configFile, stderr)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
 	result, err := client.Continue(ctx, runID, busclient.ContinueInput{
 		Prompt: *prompt, Deadline: *deadline, QueueDeadline: *queueDeadline,
 	})
@@ -145,10 +200,21 @@ func runContinue(ctx context.Context, client *busclient.Host, args []string, std
 }
 
 func runCancel(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	if len(args) != 1 {
+	flags := flag.NewFlagSet("cancel", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configFile := flags.String("config-file", "", "host configuration file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
 		return errors.New("usage: wherry cancel RUN_ID")
 	}
-	result, err := client.Cancel(ctx, args[0])
+	client, closeClient, err := commandClient(client, *configFile, stderr)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
+	result, err := client.Cancel(ctx, flags.Arg(0))
 	if err != nil {
 		return err
 	}
@@ -160,6 +226,7 @@ func runCancel(ctx context.Context, client *busclient.Host, args []string, stdou
 func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("submit", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	configFile := flags.String("config-file", "", "host configuration file")
 	agent := flags.String("agent", "", "agent to run (default: the pool's default agent)")
 	selectorText := flags.String("selector", "", "labels the adapter must carry: key=v|v, key!=v|v, key, !key, comma-separated")
 	prompt := flags.String("prompt", "", "prompt text")
@@ -262,6 +329,11 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		defer file.Close()
 		stored = append(stored, busclient.S3File{Name: filepath.Base(path), File: file})
 	}
+	client, closeClient, err := commandClient(client, *configFile, stderr)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
 	result, err := client.Submit(ctx, busclient.SubmitInput{
 		Agent: *agent, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Outputs: outputs, Git: git, GitChanges: *gitChanges,
 		S3Inputs: stored, Deadline: *deadline, QueueDeadline: *queueDeadline,
@@ -294,6 +366,7 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	runID := args[0]
 	flags := flag.NewFlagSet("await", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	configFile := flags.String("config-file", "", "host configuration file")
 	timeout := flags.Duration("timeout", 30*time.Minute, "wait timeout")
 	outputsDir := flags.String("outputs-dir", "", "directory for the turn's outputs (default: <state_dir>/runs/RUN_ID/outputs/TURN)")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -305,6 +378,11 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	if *timeout <= 0 {
 		return errors.New("timeout must be positive")
 	}
+	client, closeClient, err := commandClient(client, *configFile, stderr)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
 	result, err := client.Await(ctx, runID, *timeout)
 	if err != nil {
 		return err
@@ -360,19 +438,45 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	return nil
 }
 
-func runCleanup(ctx context.Context, client *busclient.Host, args []string, stdout, _ io.Writer) error {
-	if len(args) != 1 {
-		return errors.New("usage: wherry cleanup RUN_ID")
-	}
-	if err := client.Cleanup(ctx, args[0]); err != nil {
+func runCleanup(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("cleanup", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configFile := flags.String("config-file", "", "host configuration file")
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "run_id=%s\n", args[0])
+	if flags.NArg() != 1 {
+		return errors.New("usage: wherry cleanup RUN_ID")
+	}
+	client, closeClient, err := commandClient(client, *configFile, stderr)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
+	runID := flags.Arg(0)
+	if err := client.Cleanup(ctx, runID); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "run_id=%s\n", runID)
 	return nil
 }
 
 func runStatus(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	switch len(args) {
+	flags := flag.NewFlagSet("status", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configFile := flags.String("config-file", "", "host configuration file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 1 {
+		return errors.New("usage: wherry status [RUN_ID]")
+	}
+	client, closeClient, err := commandClient(client, *configFile, stderr)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
+	switch flags.NArg() {
 	case 0:
 		result, err := client.Runs(ctx)
 		if err != nil {
@@ -384,7 +488,7 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		warnSkipped(stderr, result.Skipped)
 		return nil
 	case 1:
-		result, err := client.Status(ctx, args[0])
+		result, err := client.Status(ctx, flags.Arg(0))
 		if err != nil {
 			return err
 		}
@@ -396,7 +500,7 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 			}
 		}
 		if result.Status.State == wire.TaskStateAuthRequired {
-			fmt.Fprintf(stderr, "continue with: wherry continue %s\n", args[0])
+			fmt.Fprintf(stderr, "continue with: wherry continue %s\n", flags.Arg(0))
 		}
 		warnSkipped(stderr, result.Skipped)
 		return nil
@@ -417,10 +521,21 @@ func partText(part wire.Part) string {
 }
 
 func runEvents(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	if len(args) != 1 {
+	flags := flag.NewFlagSet("events", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configFile := flags.String("config-file", "", "host configuration file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
 		return errors.New("usage: wherry events RUN_ID")
 	}
-	result, err := client.Events(ctx, args[0])
+	client, closeClient, err := commandClient(client, *configFile, stderr)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
+	result, err := client.Events(ctx, flags.Arg(0))
 	if err != nil {
 		return err
 	}

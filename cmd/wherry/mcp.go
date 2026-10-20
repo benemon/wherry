@@ -4,6 +4,7 @@ import (
 	"context"
 	json "encoding/json/v2"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -31,9 +32,18 @@ const progressInterval = 5 * time.Second
 // answerRetry separates the server's attempts to answer seal requests after a failure.
 const answerRetry = 5 * time.Second
 
-func runMCP(ctx context.Context, config busclient.Config, args []string) error {
-	if len(args) != 0 {
+func runMCP(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	configFile := flags.String("config-file", "", "host configuration file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
 		return errors.New("usage: wherry mcp")
+	}
+	config, err := loadConfig(*configFile)
+	if err != nil {
+		return err
 	}
 	logger := log.New(os.Stderr, "", 0)
 	connect := func() (*busclient.Host, error) { return busclient.Connect(config, logger) }

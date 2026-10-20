@@ -51,18 +51,26 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	switch command {
 	case "pool create":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin pool create NAME --terms FILE")
+			return errors.New("usage: wherry admin pool create NAME <--config-file FILE|--config-dir DIR>")
 		}
-		var terms admin.Terms
-		if err := readYAML(options["terms"], &terms); err != nil {
+		path, directory, err := configInput(options)
+		if err != nil {
+			return err
+		}
+		terms, err := readPoolConfig(path, directory)
+		if err != nil {
 			return err
 		}
 		return service.PoolCreate(ctx, pos[2], terms)
 	case "receiver add":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver add ID --pool POOL --config PATH --bundle FILE [--platform-credential ADAPTER=FILE]")
+			return errors.New("usage: wherry admin receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> --bundle-file FILE [--platform-credential-file ADAPTER=FILE]")
 		}
-		config, err := readReceiverConfig(options["config"])
+		path, directory, err := configInput(options)
+		if err != nil {
+			return err
+		}
+		config, err := readReceiverConfig(path, directory)
 		if err != nil {
 			return err
 		}
@@ -71,10 +79,10 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		}
 		config.Receiver, config.Pool = pos[2], options["pool"]
 		var platform map[string]string
-		if value := options["platform-credential"]; value != "" {
+		if value := options["platform-credential-file"]; value != "" {
 			adapter, path, ok := strings.Cut(value, "=")
 			if !ok {
-				return errors.New("--platform-credential takes ADAPTER=FILE")
+				return errors.New("--platform-credential-file takes ADAPTER=FILE")
 			}
 			credential, err := os.ReadFile(path)
 			if err != nil {
@@ -82,12 +90,16 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			}
 			platform = map[string]string{adapter: strings.TrimRight(string(credential), "\r\n")}
 		}
-		return service.ReceiverAdd(ctx, config, platform, options["bundle"])
+		return service.ReceiverAdd(ctx, config, platform, options["bundle-file"])
 	case "receiver configure":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver configure ID --config PATH")
+			return errors.New("usage: wherry admin receiver configure ID <--config-file FILE|--config-dir DIR>")
 		}
-		config, err := readReceiverConfig(options["config"])
+		path, directory, err := configInput(options)
+		if err != nil {
+			return err
+		}
+		config, err := readReceiverConfig(path, directory)
 		if err != nil {
 			return err
 		}
@@ -103,9 +115,9 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return service.TenantAdd(ctx, pos[2], options["pool"])
 	case "host add":
 		if len(pos) != 4 {
-			return errors.New("usage: wherry admin host add TENANT HOST --bundle FILE")
+			return errors.New("usage: wherry admin host add TENANT HOST --bundle-file FILE")
 		}
-		return service.HostAdd(ctx, pos[2], pos[3], options["bundle"])
+		return service.HostAdd(ctx, pos[2], pos[3], options["bundle-file"])
 	case "revoke host", "revoke receiver":
 		wait, err := time.ParseDuration(defaultValue(options["wait"], "0s"))
 		if err != nil {
@@ -156,6 +168,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 
 func adminArgs(args []string) ([]string, map[string]string, error) {
 	var positional []string
+	var optionNames []string
 	options := map[string]string{}
 	for i := 0; i < len(args); i++ {
 		if !strings.HasPrefix(args[i], "--") {
@@ -165,10 +178,57 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 		if i+1 == len(args) {
 			return nil, nil, errors.New("admin option requires a value")
 		}
-		options[strings.TrimPrefix(args[i], "--")] = args[i+1]
+		name := strings.TrimPrefix(args[i], "--")
+		options[name] = args[i+1]
+		optionNames = append(optionNames, name)
 		i++
 	}
+	command := strings.Join(positional[:min(len(positional), 2)], " ")
+	if len(positional) > 0 && positional[0] == "skip" {
+		command = "skip"
+	}
+	allowed := map[string]map[string]bool{
+		"pool create":        {"config-file": true, "config-dir": true},
+		"receiver add":       {"pool": true, "config-file": true, "config-dir": true, "bundle-file": true, "platform-credential-file": true},
+		"receiver configure": {"config-file": true, "config-dir": true},
+		"tenant add":         {"pool": true},
+		"host add":           {"bundle-file": true},
+		"revoke host":        {"wait": true},
+		"revoke receiver":    {"wait": true},
+		"skip":               {"sha256": true},
+		"check":              {},
+	}[command]
+	if allowed != nil {
+		for _, name := range optionNames {
+			if !allowed[name] {
+				return nil, nil, fmt.Errorf("unknown option --%s", name)
+			}
+		}
+	}
 	return positional, options, nil
+}
+
+func configInput(options map[string]string) (string, bool, error) {
+	file, dir := options["config-file"], options["config-dir"]
+	if (file == "") == (dir == "") {
+		return "", false, errors.New("exactly one of --config-file or --config-dir is required")
+	}
+	path, directory, flagName := file, false, "--config-file"
+	if dir != "" {
+		path, directory, flagName = dir, true, "--config-dir"
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", false, err
+	}
+	if info.IsDir() != directory {
+		kind := "file"
+		if directory {
+			kind = "directory"
+		}
+		return "", false, fmt.Errorf("%s requires a %s: %s", flagName, kind, path)
+	}
+	return path, directory, nil
 }
 
 func readYAML(path string, value any) error {
@@ -188,9 +248,9 @@ func readYAML(path string, value any) error {
 // directory holding receiver.yaml, platforms/*.yaml and adapters/*.yaml, where
 // adapter file order is routing order and an adapter's config takes its
 // platform's top-level keys, which it must not repeat.
-func readReceiverConfig(path string) (admin.ReceiverConfig, error) {
+func readReceiverConfig(path string, directory bool) (admin.ReceiverConfig, error) {
 	var config admin.ReceiverConfig
-	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+	if !directory {
 		return config, readYAML(path, &config)
 	}
 	entries, err := os.ReadDir(path)
@@ -269,6 +329,43 @@ func readReceiverConfig(path string) (admin.ReceiverConfig, error) {
 		config.Adapters = append(config.Adapters, admin.AdapterSettings{Name: adapter.Name, Type: p.Type, Agent: adapter.Agent, Credential: adapter.Credential, Labels: adapter.Labels, Config: adapter.Config})
 	}
 	return config, nil
+}
+
+func readPoolConfig(path string, directory bool) (admin.Terms, error) {
+	var terms admin.Terms
+	if !directory {
+		return terms, readYAML(path, &terms)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return terms, err
+	}
+	for _, entry := range entries {
+		if name := entry.Name(); !strings.HasPrefix(name, ".") && name != "pool.yaml" && name != "agents" {
+			return terms, fmt.Errorf("%s does not belong in a pool config directory", filepath.Join(path, name))
+		}
+	}
+	if err := readYAML(filepath.Join(path, "pool.yaml"), &terms); err != nil {
+		return terms, err
+	}
+	if len(terms.Agents) > 0 {
+		return terms, fmt.Errorf("%s: agents belong in %s", filepath.Join(path, "pool.yaml"), filepath.Join(path, "agents"))
+	}
+	files, err := yamlFiles(filepath.Join(path, "agents"))
+	if err != nil {
+		return terms, err
+	}
+	if len(files) == 0 {
+		return terms, fmt.Errorf("%s holds no agents", filepath.Join(path, "agents"))
+	}
+	for _, file := range files {
+		var agent admin.AgentTerms
+		if err := readYAML(file, &agent); err != nil {
+			return terms, fmt.Errorf("%s: %w", file, err)
+		}
+		terms.Agents = append(terms.Agents, agent)
+	}
+	return terms, nil
 }
 
 // yamlFiles lists dir's files in lexical order and rejects anything other

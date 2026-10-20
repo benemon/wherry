@@ -470,6 +470,27 @@ func TestContinuePrintsRunAndTurn(t *testing.T) {
 	}
 }
 
+func TestContinuePromptFile(t *testing.T) {
+	b, admitted := publishInterruptedRun(t)
+	runID := admitted.submission.Wherry.Run
+	promptFile := filepath.Join(t.TempDir(), "prompt.txt")
+	if err := os.WriteFile(promptFile, []byte("use the refreshed credential\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runContinue(b.ctx, b.client, []string{runID, "--prompt-file", promptFile}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	tasks := b.tasks(t, runID)
+	if got := tasks[1].submission.Message.Parts[0].Text; got != "use the refreshed credential\n" {
+		t.Fatalf("continuation prompt %q, want the prompt file's contents", got)
+	}
+	err := runContinue(b.ctx, b.client, []string{runID, "--prompt", "text", "--prompt-file", promptFile}, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "--prompt") || !strings.Contains(err.Error(), "--prompt-file") {
+		t.Fatalf("both prompt flags = %v, want an error naming both", err)
+	}
+}
+
 func TestCancelCLI(t *testing.T) {
 	b, admitted := publishInterruptedRun(t)
 	runID := admitted.submission.Wherry.Run
@@ -630,12 +651,6 @@ func TestUsageErrors(t *testing.T) {
 		}, "unknown command \"secret\""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			// run needs a config to reach command dispatch; its bundle refuses to connect, so nothing leaves the test.
-			config := filepath.Join(t.TempDir(), "config.json")
-			if err := os.WriteFile(config, []byte(`{"bundle":"`+filepath.Join(t.TempDir(), "missing.yaml")+`"}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("WHERRY_CONFIG", config)
 			var output bytes.Buffer
 			if err := test.call(&output); err == nil || !strings.HasPrefix(err.Error(), test.want) {
 				t.Fatalf("got %v, want %q", err, test.want)
@@ -651,25 +666,24 @@ func TestKeyAndInit(t *testing.T) {
 	if err := os.WriteFile(config, []byte(`{"bundle":"`+filepath.Join(dir, "missing.yaml")+`","host_key":"`+keyPath+`","state_dir":"`+dir+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("WHERRY_CONFIG", config)
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"init"}, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), "read bundle") {
+	if err := run([]string{"init", "--config-file", config}, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), "read bundle") {
 		t.Fatalf("init without a bundle: %v", err)
 	}
 	key, err := trust.LoadSigningKeyFile(keyPath)
 	if err != nil {
 		t.Fatalf("init did not create the host key: %v", err)
 	}
-	if err := run([]string{"init"}, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), "read bundle") {
+	if err := run([]string{"init", "--config-file", config}, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), "read bundle") {
 		t.Fatalf("second init: %v", err)
 	}
 	if again, err := trust.LoadSigningKeyFile(keyPath); err != nil || !again.Equal(key) {
 		t.Fatal("second init replaced the host key")
 	}
-	if err := run([]string{"key", "extra"}, &stdout, &stderr); err == nil || err.Error() != "usage: wherry key" {
+	if err := run([]string{"key", "--config-file", config, "extra"}, &stdout, &stderr); err == nil || err.Error() != "usage: wherry key" {
 		t.Fatalf("got %v, want key usage error", err)
 	}
-	if err := run([]string{"key"}, &stdout, &stderr); err != nil || stdout.String() != signed.KeyID(key.Public().(ed25519.PublicKey))+"\n" {
+	if err := run([]string{"key", "--config-file", config}, &stdout, &stderr); err != nil || stdout.String() != signed.KeyID(key.Public().(ed25519.PublicKey))+"\n" {
 		t.Fatalf("key: %v, stdout %q", err, stdout.String())
 	}
 }

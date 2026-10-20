@@ -39,11 +39,8 @@ type StorageConfig struct {
 	SecretKeyFile string `json:"secret_key_file"`
 }
 
-// DefaultConfigPath returns WHERRY_CONFIG or the per-user default path.
+// DefaultConfigPath returns the per-user default path.
 func DefaultConfigPath() (string, error) {
-	if path := os.Getenv("WHERRY_CONFIG"); path != "" {
-		return expandHome(path)
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -53,6 +50,10 @@ func DefaultConfigPath() (string, error) {
 
 // LoadConfig decodes the config at path, defaulting host_key and state_dir.
 func LoadConfig(path string) (Config, error) {
+	path, err := expandHome(path)
+	if err != nil {
+		return Config{}, err
+	}
 	encoded, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, err
