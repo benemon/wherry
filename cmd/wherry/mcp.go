@@ -5,7 +5,9 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -108,9 +110,12 @@ type receiversOutput struct {
 }
 
 type gitInput struct {
-	URL  string `json:"url" jsonschema:"https repository url, or ssh url whose only user information is the user git"`
-	Ref  string `json:"ref" jsonschema:"branch, tag or commit to check out"`
-	Path string `json:"path,omitempty" jsonschema:"checkout directory, relative; defaults to the repository name"`
+	Remote     string `json:"remote" jsonschema:"repository the agent clones: an https or ssh url, or user@host:path"`
+	Ref        string `json:"ref" jsonschema:"branch, tag or commit to check out"`
+	Path       string `json:"path,omitempty" jsonschema:"checkout directory, relative; defaults to the repository name"`
+	Credential string `json:"credential,omitempty" jsonschema:"name of one of the credentials, which the agent clones with: a token for https, a private key for ssh"`
+	HostKey    string `json:"host_key,omitempty" jsonschema:"local file of OpenSSH known_hosts lines for the host of an ssh remote; required for ssh"`
+	Changes    string `json:"changes,omitempty" jsonschema:"patch or bundle: ask for the agent's commits back as the output changes.patch or changes.bundle"`
 }
 
 type credentialInput struct {
@@ -127,7 +132,7 @@ type submitInput struct {
 	Prompt               string             `json:"prompt" jsonschema:"the task for the remote agent"`
 	Agent                string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
 	Selector             []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the adapter must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
-	Git                  *gitInput          `json:"git,omitempty" jsonschema:"repository to check out for the agent"`
+	Git                  *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's forges"`
 	Inputs               []string           `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names; the pool's inline limit in all, 256 KiB by default"`
 	Credentials          []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent as files in WHERRY_CREDENTIALS_DIR"`
 	Outputs              []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; await writes the returned ones locally"`
@@ -236,7 +241,7 @@ type eventsOutput struct {
 
 // newMCPServer serves the wherry tools; submit reads its inputs with readInput. Each call opens its own connection:
 // a Client's consumer serves one operation at a time, and a harness may call status while an await is in flight.
-func newMCPServer(connect func() (*busclient.Host, error), readInput func(string) (wire.Part, error)) *mcp.Server {
+func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error)) *mcp.Server {
 	version := "(devel)"
 	if info, ok := debug.ReadBuildInfo(); ok {
 		version = info.Main.Version
@@ -436,7 +441,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	return server
 }
 
-func submitFromInput(input submitInput, readInput func(string) (wire.Part, error)) (busclient.SubmitInput, error) {
+func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part, error)) (busclient.SubmitInput, error) {
 	if input.Prompt == "" {
 		return busclient.SubmitInput{}, invalidArgument("prompt is required")
 	}
@@ -446,15 +451,11 @@ func submitFromInput(input submitInput, readInput func(string) (wire.Part, error
 	}
 	var parts []wire.Part
 	for _, path := range input.Inputs {
-		part, err := readInput(path)
+		part, err := readInput(path, math.MaxInt64)
 		if err != nil {
 			return busclient.SubmitInput{}, err
 		}
 		parts = append(parts, part)
-	}
-	if input.Git != nil {
-		metadata, _ := json.Marshal(wire.GitMetadata{Ref: input.Git.Ref, Path: input.Git.Path}) // strings always encode
-		parts = append(parts, wire.Part{URL: input.Git.URL, MediaType: wire.GitMediaType, Metadata: metadata})
 	}
 	deadline, queueDeadline, err := deadlines(input.DeadlineSeconds, input.QueueDeadlineSeconds)
 	if err != nil {
@@ -463,6 +464,18 @@ func submitFromInput(input submitInput, readInput func(string) (wire.Part, error
 	submission := busclient.SubmitInput{
 		Agent: input.Agent, Selector: selector, Prompt: input.Prompt, Parts: parts,
 		Deadline: deadline, QueueDeadline: queueDeadline,
+	}
+	if input.Git != nil {
+		submission.Git = &wire.GitInput{Remote: input.Git.Remote, Ref: input.Git.Ref, Path: input.Git.Path, Credential: input.Git.Credential}
+		submission.GitChanges = input.Git.Changes
+		if input.Git.HostKey != "" {
+			// One byte over the bound is read, so validation refuses a longer file without reading all of it.
+			key, err := readInput(input.Git.HostKey, wire.MaxGitHostKey+1)
+			if err != nil {
+				return busclient.SubmitInput{}, err
+			}
+			submission.Git.HostKey = string(key.Raw)
+		}
 	}
 	for _, credential := range input.Credentials {
 		submission.Credentials = append(submission.Credentials, wire.TaskCredential{Name: credential.Name, File: credential.File})
@@ -543,9 +556,10 @@ func resultParts(parts []wire.Part) []resultPart {
 	return result
 }
 
-// inputReader reads an MCP input: a regular file beneath dir once symbolic links are resolved, and none of the host's
-// own files, so a client steered by its prompt cannot send the host key, the bundle, the state or a credential.
-func inputReader(dir string, config busclient.Config) func(string) (wire.Part, error) {
+// inputReader reads at most limit bytes of an MCP input: a regular file beneath dir once symbolic links are resolved,
+// and none of the host's own files, so a client steered by its prompt cannot send the host key, the bundle, the state
+// or a credential.
+func inputReader(dir string, config busclient.Config) func(string, int64) (wire.Part, error) {
 	resolve := func(path string) string {
 		if resolved, err := filepath.EvalSymlinks(path); err == nil {
 			return resolved
@@ -558,7 +572,7 @@ func inputReader(dir string, config busclient.Config) func(string) (wire.Part, e
 		protected = append(protected, resolve(path))
 	}
 	refused := invalidArgument("inputs must be readable regular files beneath the MCP server's working directory, outside the wherry configuration")
-	return func(path string) (wire.Part, error) {
+	return func(path string, limit int64) (wire.Part, error) {
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(dir, path)
 		}
@@ -577,7 +591,12 @@ func inputReader(dir string, config busclient.Config) func(string) (wire.Part, e
 		if info, err := os.Stat(resolved); err != nil || !info.Mode().IsRegular() {
 			return wire.Part{}, refused
 		}
-		data, err := os.ReadFile(resolved)
+		file, err := os.Open(resolved)
+		if err != nil {
+			return wire.Part{}, refused
+		}
+		defer file.Close()
+		data, err := io.ReadAll(io.LimitReader(file, limit))
 		if err != nil {
 			return wire.Part{}, refused
 		}

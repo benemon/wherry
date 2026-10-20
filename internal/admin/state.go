@@ -30,6 +30,8 @@ type Terms struct {
 	RequestPercentage float64      `json:"request_percentage" yaml:"request_percentage"`
 	InlineLimit       int64        `json:"inline_limit,omitzero" yaml:"inline_limit"`
 	OutputLimit       int64        `json:"output_limit,omitzero" yaml:"output_limit"`
+	// Forges are the hosts, as wire.GitInput.Forge names them, a git input may clone from; none allows no git input.
+	Forges []string `json:"forges,omitzero" yaml:"forges"`
 }
 
 // DefaultInlineLimit and DefaultOutputLimit are a pool's limits where its terms leave them out.
@@ -512,6 +514,11 @@ func validateTerms(terms Terms) error {
 	}
 	if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == terms.DefaultAgent }) {
 		return errors.New("default agent is outside pool terms")
+	}
+	for i, forge := range terms.Forges {
+		if !wire.ValidForge(forge) || slices.Contains(terms.Forges[:i], forge) {
+			return errors.New("forges must be unique lowercase host names, each optionally with :port")
+		}
 	}
 	for _, agent := range terms.Agents {
 		if validateNames(agent.Name) != nil {

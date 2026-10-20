@@ -18,8 +18,8 @@ of the same name.
 Delegate a task when all of these hold:
 
 - The prompt can stand on its own. The remote agent sees the prompt, the
-  input files you pass and, if you pass one, a checkout of a pushed git
-  ref. It does not see this session, your other files or uncommitted
+  input files you pass and, if you pass one, a pushed git ref it clones
+  itself. It does not see this session, your other files or uncommitted
   changes.
 - The task takes minutes or more, or needs something this machine does not
   have (an OS, architecture, isolation level or network).
@@ -52,9 +52,20 @@ literally and interprets only the agent name.
 
 ## Submit, then keep working
 
-Call `submit` with `prompt`, and `agent`, `selector` and `git` (`url`,
-`ref`, optional `path`) when you need them. It returns `id` and `pool`
-straight away. Note the id and carry on with other work.
+Call `submit` with `prompt`, and `agent`, `selector` and `git` when you
+need them. It returns `id` and `pool` straight away. Note the id and carry
+on with other work.
+
+`git` names a repository the agent clones itself: `remote` (an `https` or
+`ssh` URL, or `user@host:path`) and `ref` are required. Add `credential`,
+the name of one of your `credentials`, for a private repository;
+`host_key`, a file of `known_hosts` lines naming the host (or
+`[host]:port`), for an `ssh` remote; and `changes`, `patch` or `bundle`, to get its commits back as the
+output `changes.patch` or `changes.bundle`, which you apply with `git am`
+or `git fetch`. The remote's host must be one of the pool's forges, or
+`submit` returns `INVALID_ARGUMENT` naming the host and the pool. The
+agent pushes only when your prompt asks it to, and only to the branch
+`wherry/<run>`.
 
 To send files, add `inputs`: paths of regular files beneath the directory
 the wherry MCP server runs in, the pool's inline limit in all (256 KiB by

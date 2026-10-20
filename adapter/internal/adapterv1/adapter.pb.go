@@ -131,7 +131,6 @@ type Handle struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
 	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Commit        string                 `protobuf:"bytes,3,opt,name=commit,proto3" json:"commit,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -180,73 +179,6 @@ func (x *Handle) GetName() string {
 	return ""
 }
 
-func (x *Handle) GetCommit() string {
-	if x != nil {
-		return x.Commit
-	}
-	return ""
-}
-
-type GitContext struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Url           string                 `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
-	Ref           string                 `protobuf:"bytes,2,opt,name=ref,proto3" json:"ref,omitempty"`
-	Path          string                 `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *GitContext) Reset() {
-	*x = GitContext{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[1]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *GitContext) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GitContext) ProtoMessage() {}
-
-func (x *GitContext) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[1]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GitContext.ProtoReflect.Descriptor instead.
-func (*GitContext) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{1}
-}
-
-func (x *GitContext) GetUrl() string {
-	if x != nil {
-		return x.Url
-	}
-	return ""
-}
-
-func (x *GitContext) GetRef() string {
-	if x != nil {
-		return x.Ref
-	}
-	return ""
-}
-
-func (x *GitContext) GetPath() string {
-	if x != nil {
-		return x.Path
-	}
-	return ""
-}
-
 type Run struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -256,7 +188,6 @@ type Run struct {
 	Attempt       int64                  `protobuf:"varint,5,opt,name=attempt,proto3" json:"attempt,omitempty"`
 	Prompt        []byte                 `protobuf:"bytes,6,opt,name=prompt,proto3" json:"prompt,omitempty"`
 	Credential    []byte                 `protobuf:"bytes,7,opt,name=credential,proto3,oneof" json:"credential,omitempty"`
-	Git           *GitContext            `protobuf:"bytes,8,opt,name=git,proto3" json:"git,omitempty"`
 	Inputs        []*File                `protobuf:"bytes,9,rep,name=inputs,proto3" json:"inputs,omitempty"`
 	Credentials   []*Secret              `protobuf:"bytes,10,rep,name=credentials,proto3" json:"credentials,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -265,7 +196,7 @@ type Run struct {
 
 func (x *Run) Reset() {
 	*x = Run{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[2]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -277,7 +208,7 @@ func (x *Run) String() string {
 func (*Run) ProtoMessage() {}
 
 func (x *Run) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[2]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -290,7 +221,7 @@ func (x *Run) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Run.ProtoReflect.Descriptor instead.
 func (*Run) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{2}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Run) GetId() string {
@@ -342,13 +273,6 @@ func (x *Run) GetCredential() []byte {
 	return nil
 }
 
-func (x *Run) GetGit() *GitContext {
-	if x != nil {
-		return x.Git
-	}
-	return nil
-}
-
 func (x *Run) GetInputs() []*File {
 	if x != nil {
 		return x.Inputs
@@ -373,7 +297,7 @@ type File struct {
 
 func (x *File) Reset() {
 	*x = File{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[3]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -385,7 +309,7 @@ func (x *File) String() string {
 func (*File) ProtoMessage() {}
 
 func (x *File) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[3]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -398,7 +322,7 @@ func (x *File) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use File.ProtoReflect.Descriptor instead.
 func (*File) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{3}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *File) GetName() string {
@@ -426,7 +350,7 @@ type Secret struct {
 
 func (x *Secret) Reset() {
 	*x = Secret{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[4]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -438,7 +362,7 @@ func (x *Secret) String() string {
 func (*Secret) ProtoMessage() {}
 
 func (x *Secret) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[4]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -451,7 +375,7 @@ func (x *Secret) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Secret.ProtoReflect.Descriptor instead.
 func (*Secret) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{4}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Secret) GetName() string {
@@ -488,7 +412,7 @@ type Job struct {
 
 func (x *Job) Reset() {
 	*x = Job{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[5]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -500,7 +424,7 @@ func (x *Job) String() string {
 func (*Job) ProtoMessage() {}
 
 func (x *Job) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[5]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -513,7 +437,7 @@ func (x *Job) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Job.ProtoReflect.Descriptor instead.
 func (*Job) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{5}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Job) GetState() JobState {
@@ -564,7 +488,7 @@ type Terminal struct {
 
 func (x *Terminal) Reset() {
 	*x = Terminal{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[6]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -576,7 +500,7 @@ func (x *Terminal) String() string {
 func (*Terminal) ProtoMessage() {}
 
 func (x *Terminal) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[6]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -589,7 +513,7 @@ func (x *Terminal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Terminal.ProtoReflect.Descriptor instead.
 func (*Terminal) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{6}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Terminal) GetStarted() bool {
@@ -638,7 +562,7 @@ type Line struct {
 
 func (x *Line) Reset() {
 	*x = Line{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[7]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -650,7 +574,7 @@ func (x *Line) String() string {
 func (*Line) ProtoMessage() {}
 
 func (x *Line) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[7]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -663,7 +587,7 @@ func (x *Line) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Line.ProtoReflect.Descriptor instead.
 func (*Line) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{7}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Line) GetOffset() int64 {
@@ -701,7 +625,7 @@ type ConfigureRequest struct {
 
 func (x *ConfigureRequest) Reset() {
 	*x = ConfigureRequest{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[8]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -713,7 +637,7 @@ func (x *ConfigureRequest) String() string {
 func (*ConfigureRequest) ProtoMessage() {}
 
 func (x *ConfigureRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[8]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -726,7 +650,7 @@ func (x *ConfigureRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureRequest.ProtoReflect.Descriptor instead.
 func (*ConfigureRequest) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{8}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ConfigureRequest) GetAdapter() string {
@@ -772,17 +696,15 @@ func (x *ConfigureRequest) GetPlatform() string {
 }
 
 type ConfigureResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// git reports whether the adapter delivers a run's git context.
-	Git           bool         `protobuf:"varint,1,opt,name=git,proto3" json:"git,omitempty"`
-	Directories   *Directories `protobuf:"bytes,2,opt,name=directories,proto3" json:"directories,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Directories   *Directories           `protobuf:"bytes,2,opt,name=directories,proto3" json:"directories,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ConfigureResponse) Reset() {
 	*x = ConfigureResponse{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[9]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -794,7 +716,7 @@ func (x *ConfigureResponse) String() string {
 func (*ConfigureResponse) ProtoMessage() {}
 
 func (x *ConfigureResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[9]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -807,14 +729,7 @@ func (x *ConfigureResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureResponse.ProtoReflect.Descriptor instead.
 func (*ConfigureResponse) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *ConfigureResponse) GetGit() bool {
-	if x != nil {
-		return x.Git
-	}
-	return false
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ConfigureResponse) GetDirectories() *Directories {
@@ -836,7 +751,7 @@ type Directories struct {
 
 func (x *Directories) Reset() {
 	*x = Directories{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[10]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -848,7 +763,7 @@ func (x *Directories) String() string {
 func (*Directories) ProtoMessage() {}
 
 func (x *Directories) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[10]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -861,7 +776,7 @@ func (x *Directories) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Directories.ProtoReflect.Descriptor instead.
 func (*Directories) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{10}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Directories) GetInput() string {
@@ -894,7 +809,7 @@ type ReadyRequest struct {
 
 func (x *ReadyRequest) Reset() {
 	*x = ReadyRequest{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[11]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -906,7 +821,7 @@ func (x *ReadyRequest) String() string {
 func (*ReadyRequest) ProtoMessage() {}
 
 func (x *ReadyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[11]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -919,7 +834,7 @@ func (x *ReadyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadyRequest.ProtoReflect.Descriptor instead.
 func (*ReadyRequest) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{11}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ReadyRequest) GetAdapter() string {
@@ -938,7 +853,7 @@ type ReadyResponse struct {
 
 func (x *ReadyResponse) Reset() {
 	*x = ReadyResponse{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[12]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -950,7 +865,7 @@ func (x *ReadyResponse) String() string {
 func (*ReadyResponse) ProtoMessage() {}
 
 func (x *ReadyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[12]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -963,7 +878,7 @@ func (x *ReadyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadyResponse.ProtoReflect.Descriptor instead.
 func (*ReadyResponse) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{12}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ReadyResponse) GetReady() bool {
@@ -983,7 +898,7 @@ type DispatchRequest struct {
 
 func (x *DispatchRequest) Reset() {
 	*x = DispatchRequest{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[13]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -995,7 +910,7 @@ func (x *DispatchRequest) String() string {
 func (*DispatchRequest) ProtoMessage() {}
 
 func (x *DispatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[13]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1008,7 +923,7 @@ func (x *DispatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchRequest.ProtoReflect.Descriptor instead.
 func (*DispatchRequest) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{13}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DispatchRequest) GetAdapter() string {
@@ -1035,7 +950,7 @@ type DispatchResponse struct {
 
 func (x *DispatchResponse) Reset() {
 	*x = DispatchResponse{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[14]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1047,7 +962,7 @@ func (x *DispatchResponse) String() string {
 func (*DispatchResponse) ProtoMessage() {}
 
 func (x *DispatchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[14]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1060,7 +975,7 @@ func (x *DispatchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchResponse.ProtoReflect.Descriptor instead.
 func (*DispatchResponse) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{14}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DispatchResponse) GetOutcome() Outcome {
@@ -1088,7 +1003,7 @@ type LookupRequest struct {
 
 func (x *LookupRequest) Reset() {
 	*x = LookupRequest{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[15]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1100,7 +1015,7 @@ func (x *LookupRequest) String() string {
 func (*LookupRequest) ProtoMessage() {}
 
 func (x *LookupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[15]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1113,7 +1028,7 @@ func (x *LookupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LookupRequest.ProtoReflect.Descriptor instead.
 func (*LookupRequest) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{15}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *LookupRequest) GetAdapter() string {
@@ -1146,7 +1061,7 @@ type LookupResponse struct {
 
 func (x *LookupResponse) Reset() {
 	*x = LookupResponse{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[16]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1158,7 +1073,7 @@ func (x *LookupResponse) String() string {
 func (*LookupResponse) ProtoMessage() {}
 
 func (x *LookupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[16]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1171,7 +1086,7 @@ func (x *LookupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LookupResponse.ProtoReflect.Descriptor instead.
 func (*LookupResponse) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{16}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *LookupResponse) GetJob() *Job {
@@ -1192,7 +1107,7 @@ type FollowRequest struct {
 
 func (x *FollowRequest) Reset() {
 	*x = FollowRequest{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[17]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1204,7 +1119,7 @@ func (x *FollowRequest) String() string {
 func (*FollowRequest) ProtoMessage() {}
 
 func (x *FollowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[17]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1217,7 +1132,7 @@ func (x *FollowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FollowRequest.ProtoReflect.Descriptor instead.
 func (*FollowRequest) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{17}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *FollowRequest) GetAdapter() string {
@@ -1254,7 +1169,7 @@ type FollowResponse struct {
 
 func (x *FollowResponse) Reset() {
 	*x = FollowResponse{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[18]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1266,7 +1181,7 @@ func (x *FollowResponse) String() string {
 func (*FollowResponse) ProtoMessage() {}
 
 func (x *FollowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[18]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1279,7 +1194,7 @@ func (x *FollowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FollowResponse.ProtoReflect.Descriptor instead.
 func (*FollowResponse) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{18}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *FollowResponse) GetEvent() isFollowResponse_Event {
@@ -1333,7 +1248,7 @@ type StopRequest struct {
 
 func (x *StopRequest) Reset() {
 	*x = StopRequest{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[19]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1345,7 +1260,7 @@ func (x *StopRequest) String() string {
 func (*StopRequest) ProtoMessage() {}
 
 func (x *StopRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[19]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1358,7 +1273,7 @@ func (x *StopRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopRequest.ProtoReflect.Descriptor instead.
 func (*StopRequest) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{19}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *StopRequest) GetAdapter() string {
@@ -1383,7 +1298,7 @@ type StopResponse struct {
 
 func (x *StopResponse) Reset() {
 	*x = StopResponse{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[20]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1395,7 +1310,7 @@ func (x *StopResponse) String() string {
 func (*StopResponse) ProtoMessage() {}
 
 func (x *StopResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[20]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1408,7 +1323,7 @@ func (x *StopResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopResponse.ProtoReflect.Descriptor instead.
 func (*StopResponse) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{20}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{19}
 }
 
 type Limits struct {
@@ -1422,7 +1337,7 @@ type Limits struct {
 
 func (x *Limits) Reset() {
 	*x = Limits{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[21]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1434,7 +1349,7 @@ func (x *Limits) String() string {
 func (*Limits) ProtoMessage() {}
 
 func (x *Limits) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[21]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1447,7 +1362,7 @@ func (x *Limits) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Limits.ProtoReflect.Descriptor instead.
 func (*Limits) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{21}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Limits) GetFiles() int64 {
@@ -1482,7 +1397,7 @@ type CollectRequest struct {
 
 func (x *CollectRequest) Reset() {
 	*x = CollectRequest{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[22]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1494,7 +1409,7 @@ func (x *CollectRequest) String() string {
 func (*CollectRequest) ProtoMessage() {}
 
 func (x *CollectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[22]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1507,7 +1422,7 @@ func (x *CollectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CollectRequest.ProtoReflect.Descriptor instead.
 func (*CollectRequest) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{22}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *CollectRequest) GetAdapter() string {
@@ -1547,7 +1462,7 @@ type CollectResponse struct {
 
 func (x *CollectResponse) Reset() {
 	*x = CollectResponse{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[23]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1559,7 +1474,7 @@ func (x *CollectResponse) String() string {
 func (*CollectResponse) ProtoMessage() {}
 
 func (x *CollectResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[23]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1572,7 +1487,7 @@ func (x *CollectResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CollectResponse.ProtoReflect.Descriptor instead.
 func (*CollectResponse) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{23}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *CollectResponse) GetName() string {
@@ -1621,7 +1536,7 @@ type PurgeRequest struct {
 
 func (x *PurgeRequest) Reset() {
 	*x = PurgeRequest{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[24]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1633,7 +1548,7 @@ func (x *PurgeRequest) String() string {
 func (*PurgeRequest) ProtoMessage() {}
 
 func (x *PurgeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[24]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1646,7 +1561,7 @@ func (x *PurgeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PurgeRequest.ProtoReflect.Descriptor instead.
 func (*PurgeRequest) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{24}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *PurgeRequest) GetAdapter() string {
@@ -1678,7 +1593,7 @@ type PurgeResponse struct {
 
 func (x *PurgeResponse) Reset() {
 	*x = PurgeResponse{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[25]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1690,7 +1605,7 @@ func (x *PurgeResponse) String() string {
 func (*PurgeResponse) ProtoMessage() {}
 
 func (x *PurgeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[25]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1703,7 +1618,7 @@ func (x *PurgeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PurgeResponse.ProtoReflect.Descriptor instead.
 func (*PurgeResponse) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{25}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{24}
 }
 
 type ReleaseRequest struct {
@@ -1717,7 +1632,7 @@ type ReleaseRequest struct {
 
 func (x *ReleaseRequest) Reset() {
 	*x = ReleaseRequest{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[26]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1729,7 +1644,7 @@ func (x *ReleaseRequest) String() string {
 func (*ReleaseRequest) ProtoMessage() {}
 
 func (x *ReleaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[26]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1742,7 +1657,7 @@ func (x *ReleaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseRequest.ProtoReflect.Descriptor instead.
 func (*ReleaseRequest) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{26}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ReleaseRequest) GetAdapter() string {
@@ -1774,7 +1689,7 @@ type ReleaseResponse struct {
 
 func (x *ReleaseResponse) Reset() {
 	*x = ReleaseResponse{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[27]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1786,7 +1701,7 @@ func (x *ReleaseResponse) String() string {
 func (*ReleaseResponse) ProtoMessage() {}
 
 func (x *ReleaseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[27]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1799,7 +1714,7 @@ func (x *ReleaseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseResponse.ProtoReflect.Descriptor instead.
 func (*ReleaseResponse) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{27}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{26}
 }
 
 type SweepRequest struct {
@@ -1811,7 +1726,7 @@ type SweepRequest struct {
 
 func (x *SweepRequest) Reset() {
 	*x = SweepRequest{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[28]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1823,7 +1738,7 @@ func (x *SweepRequest) String() string {
 func (*SweepRequest) ProtoMessage() {}
 
 func (x *SweepRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[28]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1836,7 +1751,7 @@ func (x *SweepRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SweepRequest.ProtoReflect.Descriptor instead.
 func (*SweepRequest) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{28}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *SweepRequest) GetAdapter() string {
@@ -1854,7 +1769,7 @@ type SweepResponse struct {
 
 func (x *SweepResponse) Reset() {
 	*x = SweepResponse{}
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[29]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1866,7 +1781,7 @@ func (x *SweepResponse) String() string {
 func (*SweepResponse) ProtoMessage() {}
 
 func (x *SweepResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[29]
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1879,23 +1794,17 @@ func (x *SweepResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SweepResponse.ProtoReflect.Descriptor instead.
 func (*SweepResponse) Descriptor() ([]byte, []int) {
-	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{29}
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{28}
 }
 
 var File_wherry_adapter_v1_adapter_proto protoreflect.FileDescriptor
 
 const file_wherry_adapter_v1_adapter_proto_rawDesc = "" +
 	"\n" +
-	"\x1fwherry/adapter/v1/adapter.proto\x12\x11wherry.adapter.v1\"H\n" +
+	"\x1fwherry/adapter/v1/adapter.proto\x12\x11wherry.adapter.v1\"6\n" +
 	"\x06Handle\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\x12\x16\n" +
-	"\x06commit\x18\x03 \x01(\tR\x06commit\"D\n" +
-	"\n" +
-	"GitContext\x12\x10\n" +
-	"\x03url\x18\x01 \x01(\tR\x03url\x12\x10\n" +
-	"\x03ref\x18\x02 \x01(\tR\x03ref\x12\x12\n" +
-	"\x04path\x18\x03 \x01(\tR\x04path\"\xde\x02\n" +
+	"\x04name\x18\x02 \x01(\tR\x04nameJ\x04\b\x03\x10\x04\"\xb3\x02\n" +
 	"\x03Run\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\aadapter\x18\x02 \x01(\tR\aadapter\x12\x14\n" +
@@ -1906,11 +1815,10 @@ const file_wherry_adapter_v1_adapter_proto_rawDesc = "" +
 	"\n" +
 	"credential\x18\a \x01(\fH\x00R\n" +
 	"credential\x88\x01\x01\x12/\n" +
-	"\x03git\x18\b \x01(\v2\x1d.wherry.adapter.v1.GitContextR\x03git\x12/\n" +
 	"\x06inputs\x18\t \x03(\v2\x17.wherry.adapter.v1.FileR\x06inputs\x12;\n" +
 	"\vcredentials\x18\n" +
 	" \x03(\v2\x19.wherry.adapter.v1.SecretR\vcredentialsB\r\n" +
-	"\v_credential\".\n" +
+	"\v_credentialJ\x04\b\b\x10\t\".\n" +
 	"\x04File\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\"F\n" +
@@ -1942,10 +1850,9 @@ const file_wherry_adapter_v1_adapter_proto_rawDesc = "" +
 	"credential\x18\x04 \x01(\tR\n" +
 	"credential\x12\x16\n" +
 	"\x06config\x18\x05 \x01(\fR\x06config\x12\x1a\n" +
-	"\bplatform\x18\x06 \x01(\tR\bplatform\"g\n" +
-	"\x11ConfigureResponse\x12\x10\n" +
-	"\x03git\x18\x01 \x01(\bR\x03git\x12@\n" +
-	"\vdirectories\x18\x02 \x01(\v2\x1e.wherry.adapter.v1.DirectoriesR\vdirectories\"]\n" +
+	"\bplatform\x18\x06 \x01(\tR\bplatform\"[\n" +
+	"\x11ConfigureResponse\x12@\n" +
+	"\vdirectories\x18\x02 \x01(\v2\x1e.wherry.adapter.v1.DirectoriesR\vdirectoriesJ\x04\b\x01\x10\x02\"]\n" +
 	"\vDirectories\x12\x14\n" +
 	"\x05input\x18\x01 \x01(\tR\x05input\x12\x16\n" +
 	"\x06output\x18\x02 \x01(\tR\x06output\x12 \n" +
@@ -2042,83 +1949,81 @@ func file_wherry_adapter_v1_adapter_proto_rawDescGZIP() []byte {
 }
 
 var file_wherry_adapter_v1_adapter_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_wherry_adapter_v1_adapter_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_wherry_adapter_v1_adapter_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_wherry_adapter_v1_adapter_proto_goTypes = []any{
 	(Outcome)(0),              // 0: wherry.adapter.v1.Outcome
 	(JobState)(0),             // 1: wherry.adapter.v1.JobState
 	(*Handle)(nil),            // 2: wherry.adapter.v1.Handle
-	(*GitContext)(nil),        // 3: wherry.adapter.v1.GitContext
-	(*Run)(nil),               // 4: wherry.adapter.v1.Run
-	(*File)(nil),              // 5: wherry.adapter.v1.File
-	(*Secret)(nil),            // 6: wherry.adapter.v1.Secret
-	(*Job)(nil),               // 7: wherry.adapter.v1.Job
-	(*Terminal)(nil),          // 8: wherry.adapter.v1.Terminal
-	(*Line)(nil),              // 9: wherry.adapter.v1.Line
-	(*ConfigureRequest)(nil),  // 10: wherry.adapter.v1.ConfigureRequest
-	(*ConfigureResponse)(nil), // 11: wherry.adapter.v1.ConfigureResponse
-	(*Directories)(nil),       // 12: wherry.adapter.v1.Directories
-	(*ReadyRequest)(nil),      // 13: wherry.adapter.v1.ReadyRequest
-	(*ReadyResponse)(nil),     // 14: wherry.adapter.v1.ReadyResponse
-	(*DispatchRequest)(nil),   // 15: wherry.adapter.v1.DispatchRequest
-	(*DispatchResponse)(nil),  // 16: wherry.adapter.v1.DispatchResponse
-	(*LookupRequest)(nil),     // 17: wherry.adapter.v1.LookupRequest
-	(*LookupResponse)(nil),    // 18: wherry.adapter.v1.LookupResponse
-	(*FollowRequest)(nil),     // 19: wherry.adapter.v1.FollowRequest
-	(*FollowResponse)(nil),    // 20: wherry.adapter.v1.FollowResponse
-	(*StopRequest)(nil),       // 21: wherry.adapter.v1.StopRequest
-	(*StopResponse)(nil),      // 22: wherry.adapter.v1.StopResponse
-	(*Limits)(nil),            // 23: wherry.adapter.v1.Limits
-	(*CollectRequest)(nil),    // 24: wherry.adapter.v1.CollectRequest
-	(*CollectResponse)(nil),   // 25: wherry.adapter.v1.CollectResponse
-	(*PurgeRequest)(nil),      // 26: wherry.adapter.v1.PurgeRequest
-	(*PurgeResponse)(nil),     // 27: wherry.adapter.v1.PurgeResponse
-	(*ReleaseRequest)(nil),    // 28: wherry.adapter.v1.ReleaseRequest
-	(*ReleaseResponse)(nil),   // 29: wherry.adapter.v1.ReleaseResponse
-	(*SweepRequest)(nil),      // 30: wherry.adapter.v1.SweepRequest
-	(*SweepResponse)(nil),     // 31: wherry.adapter.v1.SweepResponse
+	(*Run)(nil),               // 3: wherry.adapter.v1.Run
+	(*File)(nil),              // 4: wherry.adapter.v1.File
+	(*Secret)(nil),            // 5: wherry.adapter.v1.Secret
+	(*Job)(nil),               // 6: wherry.adapter.v1.Job
+	(*Terminal)(nil),          // 7: wherry.adapter.v1.Terminal
+	(*Line)(nil),              // 8: wherry.adapter.v1.Line
+	(*ConfigureRequest)(nil),  // 9: wherry.adapter.v1.ConfigureRequest
+	(*ConfigureResponse)(nil), // 10: wherry.adapter.v1.ConfigureResponse
+	(*Directories)(nil),       // 11: wherry.adapter.v1.Directories
+	(*ReadyRequest)(nil),      // 12: wherry.adapter.v1.ReadyRequest
+	(*ReadyResponse)(nil),     // 13: wherry.adapter.v1.ReadyResponse
+	(*DispatchRequest)(nil),   // 14: wherry.adapter.v1.DispatchRequest
+	(*DispatchResponse)(nil),  // 15: wherry.adapter.v1.DispatchResponse
+	(*LookupRequest)(nil),     // 16: wherry.adapter.v1.LookupRequest
+	(*LookupResponse)(nil),    // 17: wherry.adapter.v1.LookupResponse
+	(*FollowRequest)(nil),     // 18: wherry.adapter.v1.FollowRequest
+	(*FollowResponse)(nil),    // 19: wherry.adapter.v1.FollowResponse
+	(*StopRequest)(nil),       // 20: wherry.adapter.v1.StopRequest
+	(*StopResponse)(nil),      // 21: wherry.adapter.v1.StopResponse
+	(*Limits)(nil),            // 22: wherry.adapter.v1.Limits
+	(*CollectRequest)(nil),    // 23: wherry.adapter.v1.CollectRequest
+	(*CollectResponse)(nil),   // 24: wherry.adapter.v1.CollectResponse
+	(*PurgeRequest)(nil),      // 25: wherry.adapter.v1.PurgeRequest
+	(*PurgeResponse)(nil),     // 26: wherry.adapter.v1.PurgeResponse
+	(*ReleaseRequest)(nil),    // 27: wherry.adapter.v1.ReleaseRequest
+	(*ReleaseResponse)(nil),   // 28: wherry.adapter.v1.ReleaseResponse
+	(*SweepRequest)(nil),      // 29: wherry.adapter.v1.SweepRequest
+	(*SweepResponse)(nil),     // 30: wherry.adapter.v1.SweepResponse
 }
 var file_wherry_adapter_v1_adapter_proto_depIdxs = []int32{
-	3,  // 0: wherry.adapter.v1.Run.git:type_name -> wherry.adapter.v1.GitContext
-	5,  // 1: wherry.adapter.v1.Run.inputs:type_name -> wherry.adapter.v1.File
-	6,  // 2: wherry.adapter.v1.Run.credentials:type_name -> wherry.adapter.v1.Secret
-	1,  // 3: wherry.adapter.v1.Job.state:type_name -> wherry.adapter.v1.JobState
-	2,  // 4: wherry.adapter.v1.Job.handle:type_name -> wherry.adapter.v1.Handle
-	12, // 5: wherry.adapter.v1.ConfigureResponse.directories:type_name -> wherry.adapter.v1.Directories
-	4,  // 6: wherry.adapter.v1.DispatchRequest.run:type_name -> wherry.adapter.v1.Run
-	0,  // 7: wherry.adapter.v1.DispatchResponse.outcome:type_name -> wherry.adapter.v1.Outcome
-	2,  // 8: wherry.adapter.v1.DispatchResponse.handle:type_name -> wherry.adapter.v1.Handle
-	7,  // 9: wherry.adapter.v1.LookupResponse.job:type_name -> wherry.adapter.v1.Job
-	2,  // 10: wherry.adapter.v1.FollowRequest.handle:type_name -> wherry.adapter.v1.Handle
-	9,  // 11: wherry.adapter.v1.FollowResponse.line:type_name -> wherry.adapter.v1.Line
-	8,  // 12: wherry.adapter.v1.FollowResponse.terminal:type_name -> wherry.adapter.v1.Terminal
-	2,  // 13: wherry.adapter.v1.StopRequest.handle:type_name -> wherry.adapter.v1.Handle
-	2,  // 14: wherry.adapter.v1.CollectRequest.handle:type_name -> wherry.adapter.v1.Handle
-	23, // 15: wherry.adapter.v1.CollectRequest.limits:type_name -> wherry.adapter.v1.Limits
-	10, // 16: wherry.adapter.v1.Adapter.Configure:input_type -> wherry.adapter.v1.ConfigureRequest
-	13, // 17: wherry.adapter.v1.Adapter.Ready:input_type -> wherry.adapter.v1.ReadyRequest
-	15, // 18: wherry.adapter.v1.Adapter.Dispatch:input_type -> wherry.adapter.v1.DispatchRequest
-	17, // 19: wherry.adapter.v1.Adapter.Lookup:input_type -> wherry.adapter.v1.LookupRequest
-	19, // 20: wherry.adapter.v1.Adapter.Follow:input_type -> wherry.adapter.v1.FollowRequest
-	21, // 21: wherry.adapter.v1.Adapter.Stop:input_type -> wherry.adapter.v1.StopRequest
-	24, // 22: wherry.adapter.v1.Adapter.Collect:input_type -> wherry.adapter.v1.CollectRequest
-	26, // 23: wherry.adapter.v1.Adapter.Purge:input_type -> wherry.adapter.v1.PurgeRequest
-	28, // 24: wherry.adapter.v1.Adapter.Release:input_type -> wherry.adapter.v1.ReleaseRequest
-	30, // 25: wherry.adapter.v1.Adapter.Sweep:input_type -> wherry.adapter.v1.SweepRequest
-	11, // 26: wherry.adapter.v1.Adapter.Configure:output_type -> wherry.adapter.v1.ConfigureResponse
-	14, // 27: wherry.adapter.v1.Adapter.Ready:output_type -> wherry.adapter.v1.ReadyResponse
-	16, // 28: wherry.adapter.v1.Adapter.Dispatch:output_type -> wherry.adapter.v1.DispatchResponse
-	18, // 29: wherry.adapter.v1.Adapter.Lookup:output_type -> wherry.adapter.v1.LookupResponse
-	20, // 30: wherry.adapter.v1.Adapter.Follow:output_type -> wherry.adapter.v1.FollowResponse
-	22, // 31: wherry.adapter.v1.Adapter.Stop:output_type -> wherry.adapter.v1.StopResponse
-	25, // 32: wherry.adapter.v1.Adapter.Collect:output_type -> wherry.adapter.v1.CollectResponse
-	27, // 33: wherry.adapter.v1.Adapter.Purge:output_type -> wherry.adapter.v1.PurgeResponse
-	29, // 34: wherry.adapter.v1.Adapter.Release:output_type -> wherry.adapter.v1.ReleaseResponse
-	31, // 35: wherry.adapter.v1.Adapter.Sweep:output_type -> wherry.adapter.v1.SweepResponse
-	26, // [26:36] is the sub-list for method output_type
-	16, // [16:26] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	4,  // 0: wherry.adapter.v1.Run.inputs:type_name -> wherry.adapter.v1.File
+	5,  // 1: wherry.adapter.v1.Run.credentials:type_name -> wherry.adapter.v1.Secret
+	1,  // 2: wherry.adapter.v1.Job.state:type_name -> wherry.adapter.v1.JobState
+	2,  // 3: wherry.adapter.v1.Job.handle:type_name -> wherry.adapter.v1.Handle
+	11, // 4: wherry.adapter.v1.ConfigureResponse.directories:type_name -> wherry.adapter.v1.Directories
+	3,  // 5: wherry.adapter.v1.DispatchRequest.run:type_name -> wherry.adapter.v1.Run
+	0,  // 6: wherry.adapter.v1.DispatchResponse.outcome:type_name -> wherry.adapter.v1.Outcome
+	2,  // 7: wherry.adapter.v1.DispatchResponse.handle:type_name -> wherry.adapter.v1.Handle
+	6,  // 8: wherry.adapter.v1.LookupResponse.job:type_name -> wherry.adapter.v1.Job
+	2,  // 9: wherry.adapter.v1.FollowRequest.handle:type_name -> wherry.adapter.v1.Handle
+	8,  // 10: wherry.adapter.v1.FollowResponse.line:type_name -> wherry.adapter.v1.Line
+	7,  // 11: wherry.adapter.v1.FollowResponse.terminal:type_name -> wherry.adapter.v1.Terminal
+	2,  // 12: wherry.adapter.v1.StopRequest.handle:type_name -> wherry.adapter.v1.Handle
+	2,  // 13: wherry.adapter.v1.CollectRequest.handle:type_name -> wherry.adapter.v1.Handle
+	22, // 14: wherry.adapter.v1.CollectRequest.limits:type_name -> wherry.adapter.v1.Limits
+	9,  // 15: wherry.adapter.v1.Adapter.Configure:input_type -> wherry.adapter.v1.ConfigureRequest
+	12, // 16: wherry.adapter.v1.Adapter.Ready:input_type -> wherry.adapter.v1.ReadyRequest
+	14, // 17: wherry.adapter.v1.Adapter.Dispatch:input_type -> wherry.adapter.v1.DispatchRequest
+	16, // 18: wherry.adapter.v1.Adapter.Lookup:input_type -> wherry.adapter.v1.LookupRequest
+	18, // 19: wherry.adapter.v1.Adapter.Follow:input_type -> wherry.adapter.v1.FollowRequest
+	20, // 20: wherry.adapter.v1.Adapter.Stop:input_type -> wherry.adapter.v1.StopRequest
+	23, // 21: wherry.adapter.v1.Adapter.Collect:input_type -> wherry.adapter.v1.CollectRequest
+	25, // 22: wherry.adapter.v1.Adapter.Purge:input_type -> wherry.adapter.v1.PurgeRequest
+	27, // 23: wherry.adapter.v1.Adapter.Release:input_type -> wherry.adapter.v1.ReleaseRequest
+	29, // 24: wherry.adapter.v1.Adapter.Sweep:input_type -> wherry.adapter.v1.SweepRequest
+	10, // 25: wherry.adapter.v1.Adapter.Configure:output_type -> wherry.adapter.v1.ConfigureResponse
+	13, // 26: wherry.adapter.v1.Adapter.Ready:output_type -> wherry.adapter.v1.ReadyResponse
+	15, // 27: wherry.adapter.v1.Adapter.Dispatch:output_type -> wherry.adapter.v1.DispatchResponse
+	17, // 28: wherry.adapter.v1.Adapter.Lookup:output_type -> wherry.adapter.v1.LookupResponse
+	19, // 29: wherry.adapter.v1.Adapter.Follow:output_type -> wherry.adapter.v1.FollowResponse
+	21, // 30: wherry.adapter.v1.Adapter.Stop:output_type -> wherry.adapter.v1.StopResponse
+	24, // 31: wherry.adapter.v1.Adapter.Collect:output_type -> wherry.adapter.v1.CollectResponse
+	26, // 32: wherry.adapter.v1.Adapter.Purge:output_type -> wherry.adapter.v1.PurgeResponse
+	28, // 33: wherry.adapter.v1.Adapter.Release:output_type -> wherry.adapter.v1.ReleaseResponse
+	30, // 34: wherry.adapter.v1.Adapter.Sweep:output_type -> wherry.adapter.v1.SweepResponse
+	25, // [25:35] is the sub-list for method output_type
+	15, // [15:25] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_wherry_adapter_v1_adapter_proto_init() }
@@ -2126,19 +2031,19 @@ func file_wherry_adapter_v1_adapter_proto_init() {
 	if File_wherry_adapter_v1_adapter_proto != nil {
 		return
 	}
-	file_wherry_adapter_v1_adapter_proto_msgTypes[2].OneofWrappers = []any{}
-	file_wherry_adapter_v1_adapter_proto_msgTypes[18].OneofWrappers = []any{
+	file_wherry_adapter_v1_adapter_proto_msgTypes[1].OneofWrappers = []any{}
+	file_wherry_adapter_v1_adapter_proto_msgTypes[17].OneofWrappers = []any{
 		(*FollowResponse_Line)(nil),
 		(*FollowResponse_Terminal)(nil),
 	}
-	file_wherry_adapter_v1_adapter_proto_msgTypes[23].OneofWrappers = []any{}
+	file_wherry_adapter_v1_adapter_proto_msgTypes[22].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wherry_adapter_v1_adapter_proto_rawDesc), len(file_wherry_adapter_v1_adapter_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   30,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

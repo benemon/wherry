@@ -438,69 +438,105 @@ func TestStatusTimestampIsRFC3339(t *testing.T) {
 	}
 }
 
-func TestGitPartValidation(t *testing.T) {
-	const prompt = `{"text":"hello"},`
-	part := func(url, metadata string) string {
-		return `{"url":"` + url + `","mediaType":"application/vnd.wherry.git","metadata":` + metadata + `}`
+// hostKey is a known_hosts line as ssh-keyscan prints one.
+const hostKey = "git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
+
+func TestGitInputValidation(t *testing.T) {
+	https := GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"}
+	ssh := GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", HostKey: hostKey}
+	with := func(base GitInput, change func(*GitInput)) GitInput {
+		change(&base)
+		return base
 	}
-	valid := part("https://git.example.test/org/repo.git", `{"ref":"main"}`)
+	const (
+		remoteRule  = "git remote must be an https or ssh url of at most 2048 letters, digits and . _ ~ % + @ : / -"
+		hostRule    = "git remote must name a host and a repository path"
+		refRule     = "git ref must be a branch, tag or commit name of at most 255 bytes"
+		pathRule    = "git path must be a relative path of at most 512 bytes without . or .. segments; name one when the repository's name is not a portable file name"
+		keyRule     = "git host_key must be at most 8 KiB of OpenSSH known_hosts lines"
+		hostRuleKey = "git host_key entries must each name the remote's host, as host or [host]:port for a port other than 22, and no wildcard"
+	)
 	for name, test := range map[string]struct {
-		parts string
-		want  string
+		git  GitInput
+		want string
 	}{
-		"https":            {valid, ""},
-		"ssh":              {part("ssh://git.example.test/org/repo.git", `{"ref":"v1.2.0","path":"src/repo"}`), ""},
-		"commit":           {part("https://git.example.test/org/repo", `{"ref":"0123456789abcdef0123456789abcdef01234567"}`), ""},
-		"http":             {part("http://git.example.test/org/repo.git", `{"ref":"main"}`), "git url must be an https or ssh url with a host"},
-		"file":             {part("file:///srv/repo.git", `{"ref":"main"}`), "git url must be an https or ssh url with a host"},
-		"scp form":         {part("git@git.example.test:org/repo.git", `{"ref":"main"}`), "git url must be an https or ssh url with a host"},
-		"no host":          {part("https:///org/repo.git", `{"ref":"main"}`), "git url must be an https or ssh url with a host"},
-		"https userinfo":   {part("https://user:token@git.example.test/org/repo.git", `{"ref":"main"}`), "https git url must not carry user information"},
-		"https user only":  {part("https://git@git.example.test/org/repo.git", `{"ref":"main"}`), "https git url must not carry user information"},
-		"ssh git user":     {part("ssh://git@git.example.test/org/repo.git", `{"ref":"main"}`), ""},
-		"ssh other user":   {part("ssh://deploy@git.example.test/org/repo.git", `{"ref":"main"}`), "ssh git url user must be git"},
-		"ssh empty user":   {part("ssh://@git.example.test/org/repo.git", `{"ref":"main"}`), "ssh git url user must be git"},
-		"ssh password":     {part("ssh://git:hunter2@git.example.test/org/repo.git", `{"ref":"main"}`), "ssh git url must not carry a password"},
-		"ssh empty pass":   {part("ssh://git:@git.example.test/org/repo.git", `{"ref":"main"}`), "ssh git url must not carry a password"},
-		"query":            {part("https://git.example.test/org/repo.git?token=x", `{"ref":"main"}`), "git url must not carry a query or fragment"},
-		"fragment":         {part("https://git.example.test/org/repo.git#x", `{"ref":"main"}`), "git url must not carry a query or fragment"},
-		"no metadata":      {`{"url":"https://git.example.test/org/repo.git","mediaType":"application/vnd.wherry.git"}`, "git part metadata requires a ref"},
-		"no ref":           {part("https://git.example.test/org/repo.git", `{"path":"repo"}`), "git part metadata requires a ref"},
-		"unknown member":   {part("https://git.example.test/org/repo.git", `{"ref":"main","depth":5}`), "git part metadata requires a ref"},
-		"option ref":       {part("https://git.example.test/org/repo.git", `{"ref":"--upload-pack=touch"}`), "git ref must be a branch, tag or commit name"},
-		"spaced ref":       {part("https://git.example.test/org/repo.git", `{"ref":"main branch"}`), "git ref must be a branch, tag or commit name"},
-		"dotted ref":       {part("https://git.example.test/org/repo.git", `{"ref":"main..other"}`), "git ref must be a branch, tag or commit name"},
-		"double slash ref": {part("https://git.example.test/org/repo.git", `{"ref":"release//1"}`), "git ref must be a branch, tag or commit name"},
-		"slash end ref":    {part("https://git.example.test/org/repo.git", `{"ref":"release/"}`), "git ref must be a branch, tag or commit name"},
-		"dot end ref":      {part("https://git.example.test/org/repo.git", `{"ref":"main."}`), "git ref must be a branch, tag or commit name"},
-		"lock end ref":     {part("https://git.example.test/org/repo.git", `{"ref":"main.lock"}`), "git ref must be a branch, tag or commit name"},
-		"traversal":        {part("https://git.example.test/org/repo.git", `{"ref":"main","path":"../outside"}`), "git path must be a relative path without . or .. segments"},
-		"inner traversal":  {part("https://git.example.test/org/repo.git", `{"ref":"main","path":"a/../../b"}`), "git path must be a relative path without . or .. segments"},
-		"absolute path":    {part("https://git.example.test/org/repo.git", `{"ref":"main","path":"/etc"}`), "git path must be a relative path without . or .. segments"},
-		"no default path":  {part("https://git.example.test/", `{"ref":"main"}`), "git path must be a relative path without . or .. segments"},
-		"text with git":    {`{"text":"x","mediaType":"application/vnd.wherry.git"}`, "git part must be a url part"},
-		"two git parts":    {valid + "," + valid, "a submission carries at most one git part"},
-		"other url parts":  {valid + `,{"url":"https://example.test/a"}`, ""},
-		"plain url scheme": {`{"url":"file:///srv/repo.git"}`, ""},
+		"https": {https, ""},
+		"ssh":   {ssh, ""},
+		"ssh port": {with(ssh, func(g *GitInput) {
+			g.Remote, g.HostKey = "ssh://git@git.example.test:2222/org/repo.git", "[git.example.test]:2222"+hostKey[len("git.example.test"):]
+		}), ""},
+		"ssh port 22":     {with(ssh, func(g *GitInput) { g.Remote = "ssh://git@Git.Example.Test:22/org/repo.git" }), ""},
+		"port key bare":   {with(ssh, func(g *GitInput) { g.Remote = "ssh://git@git.example.test:2222/org/repo.git" }), hostRuleKey},
+		"other host key":  {with(ssh, func(g *GitInput) { g.HostKey = "evil.test" + hostKey[len("git.example.test"):] }), hostRuleKey},
+		"one other entry": {with(ssh, func(g *GitInput) { g.HostKey = hostKey + "evil.test" + hostKey[len("git.example.test"):] }), hostRuleKey},
+		"wildcard key":    {with(ssh, func(g *GitInput) { g.HostKey = "*" + hostKey[len("git.example.test"):] }), hostRuleKey},
+		"wildcard beside": {with(ssh, func(g *GitInput) { g.HostKey = "git.example.test,*.evil.test" + hostKey[len("git.example.test"):] }), hostRuleKey},
+		"single wildcard": {with(ssh, func(g *GitInput) {
+			g.HostKey = "git.example.test,git?.example.test" + hostKey[len("git.example.test"):]
+		}), hostRuleKey},
+		"negated beside":   {with(ssh, func(g *GitInput) { g.HostKey = "git.example.test,!other.test" + hostKey[len("git.example.test"):] }), ""},
+		"hashed key":       {with(ssh, func(g *GitInput) { g.HostKey = "|1|c2FsdA==|aGFzaA==" + hostKey[len("git.example.test"):] }), hostRuleKey},
+		"host list":        {with(ssh, func(g *GitInput) { g.HostKey = "GIT.example.test,192.0.2.1" + hostKey[len("git.example.test"):] }), ""},
+		"marker":           {with(ssh, func(g *GitInput) { g.HostKey = "@revoked " + hostKey + hostKey }), ""},
+		"marker only":      {with(ssh, func(g *GitInput) { g.HostKey = "@revoked git.example.test ssh-ed25519\n" }), keyRule},
+		"commit":           {with(https, func(g *GitInput) { g.Ref = "0123456789abcdef0123456789abcdef01234567" }), ""},
+		"credential":       {with(https, func(g *GitInput) { g.Credential = "forge-token" }), ""},
+		"path":             {with(https, func(g *GitInput) { g.Path = "src/repo" }), ""},
+		"http":             {with(https, func(g *GitInput) { g.Remote = "http://git.example.test/org/repo.git" }), remoteRule},
+		"file":             {with(https, func(g *GitInput) { g.Remote = "file:///srv/repo.git" }), remoteRule},
+		"scp form":         {with(https, func(g *GitInput) { g.Remote = "git@git.example.test:org/repo.git" }), remoteRule},
+		"quote":            {with(https, func(g *GitInput) { g.Remote = "https://git.example.test/org/repo'.git" }), remoteRule},
+		"command":          {with(https, func(g *GitInput) { g.Remote = "https://git.example.test/$(id)" }), remoteRule},
+		"space":            {with(https, func(g *GitInput) { g.Remote = "https://git.example.test/org/my repo" }), remoteRule},
+		"query":            {with(https, func(g *GitInput) { g.Remote = "https://git.example.test/org/repo.git?token=x" }), remoteRule},
+		"fragment":         {with(https, func(g *GitInput) { g.Remote = "https://git.example.test/org/repo.git#x" }), remoteRule},
+		"long remote":      {with(https, func(g *GitInput) { g.Remote = "https://git.example.test/" + strings.Repeat("a", MaxGitRemote) }), remoteRule},
+		"no host":          {with(https, func(g *GitInput) { g.Remote = "https:///org/repo.git" }), hostRule},
+		"bad host":         {with(https, func(g *GitInput) { g.Remote = "https://-git.example.test/org/repo.git" }), hostRule},
+		"no path":          {with(https, func(g *GitInput) { g.Remote = "https://git.example.test" }), hostRule},
+		"bad port":         {with(ssh, func(g *GitInput) { g.Remote = "ssh://git@git.example.test:org/repo.git" }), hostRule},
+		"https userinfo":   {with(https, func(g *GitInput) { g.Remote = "https://user:token@git.example.test/org/repo.git" }), "https git remote must not carry user information"},
+		"https user only":  {with(https, func(g *GitInput) { g.Remote = "https://git@git.example.test/org/repo.git" }), "https git remote must not carry user information"},
+		"ssh password":     {with(ssh, func(g *GitInput) { g.Remote = "ssh://git:hunter2@git.example.test/org/repo.git" }), "ssh git remote must not carry a password"},
+		"option ref":       {with(https, func(g *GitInput) { g.Ref = "--upload-pack=touch" }), refRule},
+		"spaced ref":       {with(https, func(g *GitInput) { g.Ref = "main branch" }), refRule},
+		"dotted ref":       {with(https, func(g *GitInput) { g.Ref = "main..other" }), refRule},
+		"double slash ref": {with(https, func(g *GitInput) { g.Ref = "release//1" }), refRule},
+		"slash end ref":    {with(https, func(g *GitInput) { g.Ref = "release/" }), refRule},
+		"dot end ref":      {with(https, func(g *GitInput) { g.Ref = "main." }), refRule},
+		"lock end ref":     {with(https, func(g *GitInput) { g.Ref = "main.lock" }), refRule},
+		"long ref":         {with(https, func(g *GitInput) { g.Ref = strings.Repeat("r", MaxGitRef+1) }), refRule},
+		"no ref":           {with(https, func(g *GitInput) { g.Ref = "" }), refRule},
+		"traversal":        {with(https, func(g *GitInput) { g.Path = "../outside" }), pathRule},
+		"inner traversal":  {with(https, func(g *GitInput) { g.Path = "a/../../b" }), pathRule},
+		"absolute path":    {with(https, func(g *GitInput) { g.Path = "/etc" }), pathRule},
+		"option path":      {with(https, func(g *GitInput) { g.Path = "-c" }), pathRule},
+		"long path":        {with(https, func(g *GitInput) { g.Path = strings.Repeat("a/", 256) + "a" }), pathRule},
+		"no default path":  {with(https, func(g *GitInput) { g.Remote = "https://git.example.test/" }), pathRule},
+		"undeclared":       {with(https, func(g *GitInput) { g.Credential = "other" }), "git credential must be one of the submission's task credentials"},
+		"ssh without key":  {with(ssh, func(g *GitInput) { g.HostKey = "" }), "ssh git remote requires host_key"},
+		"https with key":   {with(https, func(g *GitInput) { g.HostKey = hostKey }), "host_key applies only to an ssh git remote"},
+		"one-field key":    {with(ssh, func(g *GitInput) { g.HostKey = "ssh-ed25519\n" }), keyRule},
+		"blank key":        {with(ssh, func(g *GitInput) { g.HostKey = "\n\n" }), keyRule},
+		"control key":      {with(ssh, func(g *GitInput) { g.HostKey = "git.example.test ssh-ed25519 AAAA\x1b[2J\n" }), keyRule},
+		"long key":         {with(ssh, func(g *GitInput) { g.HostKey = strings.Repeat(hostKey, MaxGitHostKey/len(hostKey)+1) }), keyRule},
+		"keyscan lines":    {with(ssh, func(g *GitInput) { g.HostKey = "# comment\n" + hostKey + "\n" + hostKey }), ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := parseSubmissionParts(t, `"parts":[`+prompt+test.parts+`]`)
-			if test.want == "" && err != nil || test.want != "" && (err == nil || err.Error() != test.want) {
-				t.Fatalf("parse error %v, want %q", err, test.want)
+			submission := validSubmission()
+			submission.Wherry.Credentials = []TaskCredential{{Name: "forge-token", File: "token"}}
+			submission.Wherry.Git = &test.git
+			// The record round-trips through a signature, so a reader applies the same rules.
+			encoded, signErr := SignRecord(submission, wireKey)
+			if signErr == nil {
+				signErr = ParseRecord(encoded, wireKeys, &Submission{})
+			}
+			if test.want == "" && signErr != nil || test.want != "" && (signErr == nil || signErr.Error() != test.want) {
+				t.Fatalf("error %v, want %q", signErr, test.want)
 			}
 		})
 	}
-	git, err := ParseGitPart(Part{URL: "https://git.example.test/org/repo.git", MediaType: GitMediaType, Metadata: jsontext.Value(`{"ref":"main"}`)})
-	if err != nil || git != (GitContext{URL: "https://git.example.test/org/repo.git", Ref: "main", Path: "repo"}) {
-		t.Fatalf("parsed %#v, %v; want the repository name as the default path", git, err)
-	}
-	submission := validSubmission()
-	submission.Message.Parts = append(submission.Message.Parts, Part{URL: "https://token@git.example.test/org/repo.git", MediaType: GitMediaType, Metadata: jsontext.Value(`{"ref":"main"}`)})
-	if err := submission.validate(); err == nil || strings.Contains(err.Error(), "token") {
-		t.Fatalf("validate error %v, want a fixed rejection", err)
-	}
 }
-
 func TestTermsTextIsDeterministic(t *testing.T) {
 	if got, want := TermsText(map[string]string{"region": "eu", "lab/arch": "arm64"}), "lab/arch=arm64,region=eu"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -666,5 +702,60 @@ func TestAdvertisementOfferWithLabelsDoesNotDecode(t *testing.T) {
 	var decoded Advertisement
 	if err := ParseRecord(signedPayload, keys, &decoded); err == nil {
 		t.Fatalf("decoded an offer with labels: %#v", decoded.Offers)
+	}
+}
+
+func TestGitInputPlacement(t *testing.T) {
+	continuation := validSubmission()
+	continuation.Wherry.Turn = 2
+	continuation.Wherry.Git = &GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"}
+	if err := continuation.validate(); err == nil || err.Error() != "only a run's first turn declares credentials, outputs and git" {
+		t.Fatalf("continuation with git: %v", err)
+	}
+	clash := validSubmission()
+	clash.Wherry.Git = &GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", HostKey: hostKey}
+	clash.Message.Parts = append(clash.Message.Parts, Part{Raw: StdBytes("x"), Filename: KnownHostsFile})
+	if err := clash.validate(); err == nil || err.Error() != "an input named known_hosts conflicts with the git host key" {
+		t.Fatalf("input named known_hosts beside a host key: %v", err)
+	}
+	clash.Wherry.Git = &GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"}
+	if err := clash.validate(); err != nil {
+		t.Fatalf("input named known_hosts without a host key: %v", err)
+	}
+}
+
+func TestGitForge(t *testing.T) {
+	for remote, want := range map[string]string{
+		"https://Git.Example.Test/org/repo.git":         "git.example.test",
+		"https://git.example.test:443/org/repo.git":     "git.example.test",
+		"https://git.example.test:8443/org/repo.git":    "git.example.test:8443",
+		"ssh://git@git.example.test/org/repo.git":       "git.example.test",
+		"ssh://git@git.example.test:22/org/repo.git":    "git.example.test",
+		"ssh://git@git.example.test:443/org/repo.git":   "git.example.test:443",
+		"ssh://git@git.example.test:2222/org/repo.git":  "git.example.test:2222",
+		"https://git.example.test.evil.test/org/x.git":  "git.example.test.evil.test",
+		"https://git.example.test@evil.test/org/x.git":  "evil.test",
+		"ssh://git.example.test@evil.test:22/org/x.git": "evil.test",
+	} {
+		if got := (GitInput{Remote: remote}).Forge(); got != want {
+			t.Errorf("forge of %s = %q, want %q", remote, got, want)
+		}
+	}
+	for remote, want := range map[string]string{
+		"https://Git.Example.Test/org/repo.git":        "https://git.example.test",
+		"https://git.example.test:8443/org/repo.git":   "https://git.example.test:8443",
+		"ssh://git@git.example.test:2222/org/repo.git": "ssh://git.example.test:2222",
+	} {
+		if got := (GitInput{Remote: remote}).Origin(); got != want {
+			t.Errorf("origin of %s = %q, want %q", remote, got, want)
+		}
+	}
+	for forge, ok := range map[string]bool{
+		"github.com": true, "git.example.test:2222": true, "a": true, "a:65535": true,
+		"": false, "GitHub.com": false, "a:0": false, "a:65536": false, "a:01": false, "a:": false, "-a": false, "a-": false, "a:b": false, "a/b": false,
+	} {
+		if ValidForge(forge) != ok {
+			t.Errorf("ValidForge(%q) = %v, want %v", forge, !ok, ok)
+		}
 	}
 }

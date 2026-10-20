@@ -738,61 +738,6 @@ func TestAdapterErrorLogsCarryOnlyType(t *testing.T) {
 	}
 }
 
-func TestGitCloneFailureFixedReason(t *testing.T) {
-	const secret = "fatal: could not read from https://user:s3cr3t-git-token@git.example.test/org/repo.git"
-	f := newFixture(t, resultStream)
-	f.receiver.adapters[0].Git = true
-	f.answer(t, credentialName)
-	f.adapter.dispatchErr = fmt.Errorf("%w: %s", adapter.ErrGitContext, secret)
-	if status := f.execute(t, f.submit(t, f.host, withGitPart), 1); status != kgo.AckReject {
-		t.Fatalf("status %v, want reject", status)
-	}
-	task := f.lastTask(t)
-	if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != "git context unavailable" || task.Artifacts[0].Parts[0].Text != "git context unavailable" {
-		t.Fatalf("task status %#v result %q, want FAILED with the fixed reason", task.Status, task.Artifacts[0].Parts[0].Text)
-	}
-	for _, topic := range []string{admin.PoolEventsTopic(testPool), admin.TenantTopic(testTenant)} {
-		for _, record := range f.records(t, topic) {
-			if strings.Contains(string(record.Value), "s3cr3t-git-token") {
-				t.Fatalf("git error text published on %s", topic)
-			}
-		}
-	}
-	if logs := f.logs.String(); strings.Contains(logs, "s3cr3t-git-token") || !strings.Contains(logs, "git context unavailable: *fmt.wrapError") {
-		t.Fatalf("unexpected git failure log: %q", logs)
-	}
-}
-
-func TestStartedStatusRecordsGitCommit(t *testing.T) {
-	const commit = "0123456789abcdef0123456789abcdef01234567"
-	for name, test := range map[string]struct {
-		mutate func(*wire.Submission)
-		want   string
-	}{
-		"git":     {withGitPart, `{"git_commit":"` + commit + `"}`},
-		"without": {nil, ""},
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, resultStream)
-			f.receiver.adapters[0].Git = true
-			f.answer(t, credentialName)
-			f.adapter.commit = commit
-			if status := f.execute(t, f.submit(t, f.host, test.mutate), 1); status != kgo.AckAccept {
-				t.Fatalf("status %v", status)
-			}
-			var started []wire.RunStatus
-			for _, status := range f.feedStatuses(t) {
-				if status.Wherry.Kind == "started" {
-					started = append(started, status)
-				}
-			}
-			if len(started) != 1 || string(started[0].StatusUpdate.Metadata) != test.want {
-				t.Fatalf("started statuses %#v, want one with metadata %q", started, test.want)
-			}
-		})
-	}
-}
-
 func TestResultLine(t *testing.T) {
 	if result, ok := resultLine([]byte(`{"type":"result","result":"ok","is_error":true}`)); !ok || result.Result != "ok" || !result.IsError {
 		t.Fatalf("got %#v %v", result, ok)

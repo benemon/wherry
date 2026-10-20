@@ -3,13 +3,13 @@ package wire
 import (
 	"encoding/hex"
 	"encoding/json/jsontext"
-	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -221,75 +221,167 @@ func InputName(part Part) string {
 	return part.Filename
 }
 
-// CommitMetadata is the metadata of a started status for a run with a git context.
-type CommitMetadata struct {
-	GitCommit string `json:"git_commit"`
+// GitInput is the repository a run's agent clones itself: Remote at Ref into Path, with the task credential
+// Credential and, for an ssh remote, the OpenSSH known_hosts lines HostKey.
+type GitInput struct {
+	Remote     string `json:"remote"`
+	Ref        string `json:"ref"`
+	Path       string `json:"path,omitzero"`
+	Credential string `json:"credential,omitzero"`
+	HostKey    string `json:"host_key,omitzero"`
 }
 
-// GitMediaType is the media type of a url part that names a git repository (ADR-0024).
-const GitMediaType = "application/vnd.wherry.git"
-
-// GitMetadata is the metadata of a git context part.
-type GitMetadata struct {
-	Ref  string `json:"ref"`
-	Path string `json:"path,omitzero"`
-}
-
-// GitContext is a validated git context part; Path has its default applied.
-type GitContext struct {
-	URL  string
-	Ref  string
-	Path string
-}
-
-var (
-	// Refs and paths reach git as arguments, so neither may start with a dash.
-	gitRef     = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._/-]*$`)
-	gitSegment = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+// Bounds of a git input's fields, in bytes; a path is bounded as an output name is.
+const (
+	MaxGitRemote  = 2048
+	MaxGitRef     = 255
+	MaxGitHostKey = 8 << 10
 )
 
-// ParseGitPart validates a git context part.
-func ParseGitPart(part Part) (GitContext, error) {
-	if part.URL == "" {
-		return GitContext{}, errors.New("git part must be a url part")
+// KnownHostsFile is the input file a git input's host key is delivered as.
+const KnownHostsFile = "known_hosts"
+
+// GitPatch and GitBundle are the outputs a run asking for its git changes back expects: a patch series, or a bundle.
+const (
+	GitPatch  = "changes.patch"
+	GitBundle = "changes.bundle"
+)
+
+var (
+	// The agent pastes the remote, ref and path into shell commands and git arguments, so none carries a quote,
+	// a space or a shell metacharacter, and neither a ref nor a path segment starts with a dash.
+	gitRemote  = regexp.MustCompile(`^(https|ssh)://[A-Za-z0-9._~%+@:/-]+$`)
+	gitRef     = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._/-]*$`)
+	gitSegment = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+	forgeHost  = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
+	forgePort  = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
+)
+
+// ValidForge reports whether forge is a lowercase host name, optionally with a port of 1 to 65535.
+func ValidForge(forge string) bool {
+	host, port, hasPort := strings.Cut(forge, ":")
+	if !forgeHost.MatchString(host) {
+		return false
 	}
-	// Error text from url.Parse quotes the URL, so it is never returned.
-	parsed, err := url.Parse(part.URL)
-	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "ssh") || parsed.Host == "" {
-		return GitContext{}, errors.New("git url must be an https or ssh url with a host")
+	if !hasPort {
+		return true
+	}
+	number, err := strconv.Atoi(port)
+	return forgePort.MatchString(port) && err == nil && number <= 65535
+}
+
+// Forge is the lowercase host of the remote, with its port when that is not the scheme's default.
+func (g GitInput) Forge() string {
+	parsed, err := url.Parse(g.Remote)
+	if err != nil {
+		return ""
+	}
+	host, port := strings.ToLower(parsed.Hostname()), parsed.Port()
+	if port == "" || parsed.Scheme == "https" && port == "443" || parsed.Scheme == "ssh" && port == "22" {
+		return host
+	}
+	return host + ":" + port
+}
+
+// Checkout is the path the agent clones into: Path, or the last segment of the remote's path without .git.
+func (g GitInput) Checkout() string {
+	if g.Path != "" {
+		return g.Path
+	}
+	return strings.TrimSuffix(g.Remote[strings.LastIndex(g.Remote, "/")+1:], ".git")
+}
+
+// Validate checks a git input against the task credentials its submission declares. Errors never quote a value.
+func (g *GitInput) Validate(credentials []TaskCredential) error {
+	if len(g.Remote) > MaxGitRemote || !gitRemote.MatchString(g.Remote) {
+		return errors.New("git remote must be an https or ssh url of at most 2048 letters, digits and . _ ~ % + @ : / -")
+	}
+	parsed, err := url.Parse(g.Remote)
+	if err != nil || !ValidForge(g.Forge()) || parsed.Path == "" {
+		return errors.New("git remote must name a host and a repository path")
 	}
 	if parsed.User != nil {
 		if parsed.Scheme != "ssh" {
-			return GitContext{}, errors.New("https git url must not carry user information")
+			return errors.New("https git remote must not carry user information")
 		}
 		if _, ok := parsed.User.Password(); ok {
-			return GitContext{}, errors.New("ssh git url must not carry a password")
-		}
-		if parsed.User.Username() != "git" {
-			return GitContext{}, errors.New("ssh git url user must be git")
+			return errors.New("ssh git remote must not carry a password")
 		}
 	}
-	if parsed.RawQuery != "" || parsed.Fragment != "" || parsed.ForceQuery {
-		return GitContext{}, errors.New("git url must not carry a query or fragment")
+	if len(g.Ref) > MaxGitRef || !gitRef.MatchString(g.Ref) || strings.Contains(g.Ref, "..") || strings.Contains(g.Ref, "//") ||
+		strings.HasSuffix(g.Ref, "/") || strings.HasSuffix(g.Ref, ".") || strings.HasSuffix(g.Ref, ".lock") {
+		return errors.New("git ref must be a branch, tag or commit name of at most 255 bytes")
 	}
-	var metadata GitMetadata
-	if part.Metadata == nil || json.Unmarshal(part.Metadata, &metadata, json.RejectUnknownMembers(true)) != nil || metadata.Ref == "" {
-		return GitContext{}, errors.New("git part metadata requires a ref")
+	checkout := g.Checkout()
+	if len(checkout) > 512 || slices.ContainsFunc(strings.Split(checkout, "/"), func(segment string) bool { return !gitSegment.MatchString(segment) }) {
+		return errors.New("git path must be a relative path of at most 512 bytes without . or .. segments; name one when the repository's name is not a portable file name")
 	}
-	if !gitRef.MatchString(metadata.Ref) || strings.Contains(metadata.Ref, "..") || strings.Contains(metadata.Ref, "//") ||
-		strings.HasSuffix(metadata.Ref, "/") || strings.HasSuffix(metadata.Ref, ".") || strings.HasSuffix(metadata.Ref, ".lock") {
-		return GitContext{}, errors.New("git ref must be a branch, tag or commit name")
+	if g.Credential != "" && !slices.ContainsFunc(credentials, func(credential TaskCredential) bool { return credential.Name == g.Credential }) {
+		return errors.New("git credential must be one of the submission's task credentials")
 	}
-	path := metadata.Path
-	if path == "" {
-		path = strings.TrimSuffix(parsed.Path[strings.LastIndex(parsed.Path, "/")+1:], ".git")
+	switch {
+	case parsed.Scheme == "ssh" && g.HostKey == "":
+		return errors.New("ssh git remote requires host_key")
+	case parsed.Scheme == "https" && g.HostKey != "":
+		return errors.New("host_key applies only to an ssh git remote")
+	case g.HostKey != "":
+		return checkHostKey(g.HostKey, knownHost(parsed))
 	}
-	for _, segment := range strings.Split(path, "/") {
-		if !gitSegment.MatchString(segment) {
-			return GitContext{}, errors.New("git path must be a relative path without . or .. segments")
+	return nil
+}
+
+// Origin is the remote's scheme and lowercase host, with its port when it names one: the URL a credential is scoped to.
+func (g GitInput) Origin() string {
+	parsed, err := url.Parse(g.Remote)
+	if err != nil {
+		return ""
+	}
+	return parsed.Scheme + "://" + strings.ToLower(parsed.Host)
+}
+
+// knownHost is the name known_hosts gives an ssh remote's host: the host, or [host]:port for a port other than 22.
+func knownHost(remote *url.URL) string {
+	host := strings.ToLower(remote.Hostname())
+	if port := remote.Port(); port != "" && port != "22" {
+		return "[" + host + "]:" + port
+	}
+	return host
+}
+
+// checkHostKey accepts at most MaxGitHostKey bytes of printable ASCII lines, each blank, a comment or a known_hosts
+// entry, an optional marker then host patterns, key type and key, with at least one entry and every entry naming host
+// among its patterns and holding no wildcard, so ssh trusts the key for that host alone.
+func checkHostKey(key, host string) error {
+	malformed := errors.New("git host_key must be at most 8 KiB of OpenSSH known_hosts lines")
+	if len(key) > MaxGitHostKey {
+		return malformed
+	}
+	entries := 0
+	for line := range strings.Lines(key) {
+		line = strings.TrimSuffix(line, "\n")
+		if strings.ContainsFunc(line, func(r rune) bool { return r < ' ' || r > '~' }) {
+			return malformed
 		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		if strings.HasPrefix(fields[0], "@") {
+			fields = fields[1:]
+		}
+		if len(fields) < 3 {
+			return malformed
+		}
+		patterns := strings.Split(strings.ToLower(fields[0]), ",")
+		if !slices.Contains(patterns, host) || slices.ContainsFunc(patterns, func(pattern string) bool { return strings.ContainsAny(pattern, "*?") }) {
+			return errors.New("git host_key entries must each name the remote's host, as host or [host]:port for a port other than 22, and no wildcard")
+		}
+		entries++
 	}
-	return GitContext{URL: part.URL, Ref: metadata.Ref, Path: path}, nil
+	if entries == 0 {
+		return malformed
+	}
+	return nil
 }
 
 // AttemptFilter drops records superseded by a later turn or delivery attempt.

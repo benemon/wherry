@@ -14,8 +14,6 @@ type Handle struct {
 	Data []byte
 	// Name is the platform's reference for the job, for diagnosis; the core logs it and never interprets it.
 	Name string
-	// Commit is the git commit checked out for a run with a git context.
-	Commit string
 }
 
 // Line is one output line, the byte offset where it starts and the offset after it.
@@ -25,20 +23,12 @@ type Line struct {
 	Data   []byte
 }
 
-// GitContext is a validated git context part; Path has its default applied.
-type GitContext struct {
-	URL  string
-	Ref  string
-	Path string
-}
-
 // Run is the material needed to start one platform job; the adapter records Attempt, Adapter and Agent
 // in platform metadata.
 type Run struct {
 	ID, Adapter, Agent string
 	Turn, Attempt      int64
 	Prompt, Credential []byte
-	Git                *GitContext
 	// Inputs go in the directory WHERRY_INPUT_DIR names, and Credentials in the one WHERRY_CREDENTIALS_DIR names,
 	// each as a file under its name; the core has validated every name.
 	Inputs      []File
@@ -130,9 +120,6 @@ type Terminal struct {
 	Node  string
 }
 
-// ErrGitContext is the error an adapter returns when a run's git context cannot be checked out.
-var ErrGitContext = errors.New("git context unavailable")
-
 // ErrLinkLost is the error a plugin adapter's call returns when the link to its plugin process is down.
 var ErrLinkLost = errors.New("plugin link lost")
 
@@ -141,8 +128,6 @@ var ErrMessageTooLarge = errors.New("message too large")
 
 // Adapter is the platform seam; implementations hold platform credentials only.
 type Adapter interface {
-	// Git reports whether the adapter delivers a run's git context; the core rejects a task carrying one otherwise.
-	Git() bool
 	// Directories reports where the agent finds its input, output and credentials directories.
 	Directories() Directories
 	// Ready reports whether the adapter can currently start a job.
@@ -165,6 +150,26 @@ type Adapter interface {
 	Release(ctx context.Context, runID string, turn int64) error
 	Sweep(ctx context.Context) error
 }
+
+// AgentEnvironment is the environment every adapter gives its agent, over the environment it configures, so that no
+// system, global or environment git configuration rewrites, redirects, records or traces the clone the prompt gives,
+// and no template seeds a new repository: git reads only the clone's own configuration, never prompts, and traces
+// nothing. Each value switches its variable off. It protects a cooperative agent from ambient configuration; an agent
+// that runs commands can undo all of it.
+var AgentEnvironment = map[string]string{
+	"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_COUNT": "0", "GIT_CONFIG_PARAMETERS": "",
+	"GIT_TEMPLATE_DIR": "", "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": "",
+	"GIT_TRACE": "0", "GIT_TRACE_PACKET": "0", "GIT_TRACE_PACK_ACCESS": "0", "GIT_TRACE_PERFORMANCE": "0", "GIT_TRACE_SETUP": "0",
+	"GIT_TRACE_SHALLOW": "0", "GIT_TRACE_CURL": "0", "GIT_TRACE2": "0", "GIT_TRACE2_EVENT": "0", "GIT_TRACE2_PERF": "0",
+	"GIT_TRACE_REDACT": "1",
+}
+
+// AgentUnset are the variables an adapter removes from the environment it configures, since no value switches them
+// off: the ssh ones override the ssh command the prompt's clone sets, GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
+// GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and GIT_ALTERNATE_OBJECT_DIRECTORIES retarget the repository a command works on, GIT_EXEC_PATH chooses the programs git runs, and any GIT_SSL_NO_VERIFY or
+// GIT_CURL_VERBOSE disables certificate checks or traces requests. An adapter cannot remove what the platform or the
+// image sets, so neither may set them.
+var AgentUnset = []string{"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_EXEC_PATH", "GIT_SSL_NO_VERIFY", "GIT_CURL_VERBOSE"}
 
 // Settings configure one adapter in a plugin.
 type Settings struct {

@@ -184,7 +184,6 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 	p, record, _ := launch(t)
 	a := configured(t, p, "a", "{}")
 	run := Run{ID: "run-a", Adapter: "a", Agent: "claude", Turn: 2, Attempt: 3, Prompt: []byte("hello"), Credential: []byte(runCredential),
-		Git:         &GitContext{URL: "https://git.example.test/org/repo.git", Ref: "main", Path: "repo"},
 		Inputs:      []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty", Data: []byte{}}},
 		Credentials: []Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte(runCredential)}}}
 	if _, _, err := a.Dispatch(context.Background(), run); err != nil {
@@ -203,12 +202,12 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 		}
 	}
 	got := dispatched[0]
-	if len(dispatched) != 2 || got.ID != run.ID || got.Turn != 2 || got.Attempt != 3 || string(got.Prompt) != "hello" || string(got.Credential) != runCredential || *got.Git != *run.Git ||
+	if len(dispatched) != 2 || got.ID != run.ID || got.Turn != 2 || got.Attempt != 3 || string(got.Prompt) != "hello" || string(got.Credential) != runCredential ||
 		!reflect.DeepEqual(got.Inputs, []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty"}}) || !reflect.DeepEqual(got.Credentials, run.Credentials) {
 		t.Fatalf("plugin got %+v; want %+v", got, run)
 	}
-	if dispatched[1].Credential != nil || dispatched[1].Git != nil {
-		t.Fatalf("run without credential or git context arrived as %+v", dispatched[1])
+	if dispatched[1].Credential != nil {
+		t.Fatalf("run without credential arrived as %+v", dispatched[1])
 	}
 }
 
@@ -419,17 +418,11 @@ func TestSecretsStayOutOfLogs(t *testing.T) {
 	}
 }
 
-func TestConfigureReportsGit(t *testing.T) {
+func TestConfigureReportsDirectories(t *testing.T) {
 	p, _, _ := launch(t)
-	a := configured(t, p, "git", `{"git":true}`)
-	if !a.Git() {
-		t.Fatal("adapter delivering git context reported none")
-	}
+	a := configured(t, p, "plain", "{}")
 	if got := a.Directories(); got != (Directories{Input: "/fake/inputs", Output: "/fake/outputs", Credentials: "/fake/credentials"}) {
 		t.Fatalf("directories %+v; want the plugin's", got)
-	}
-	if a := configured(t, p, "plain", "{}"); a.Git() {
-		t.Fatal("adapter without git context reported it")
 	}
 }
 

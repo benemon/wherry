@@ -40,13 +40,7 @@ enum JobState {
 message Handle {
   bytes data = 1;
   string name = 2;
-  string commit = 3;
-}
-
-message GitContext {
-  string url = 1;
-  string ref = 2;
-  string path = 3;
+  reserved 3;
 }
 
 message Run {
@@ -57,7 +51,7 @@ message Run {
   int64 attempt = 5;
   bytes prompt = 6;
   optional bytes credential = 7;
-  GitContext git = 8;
+  reserved 8;
   repeated File inputs = 9;
   repeated Secret credentials = 10;
 }
@@ -105,8 +99,7 @@ message ConfigureRequest {
 }
 
 message ConfigureResponse {
-  // git reports whether the adapter delivers a run's git context.
-  bool git = 1;
+  reserved 1;
   Directories directories = 2;
 }
 

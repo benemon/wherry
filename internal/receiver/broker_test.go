@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -246,7 +247,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
 	terms := testTerms()
-	terms.InlineLimit = 507924
+	terms.InlineLimit = 493221
 	encoded, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
 	if err != nil {
 		t.Fatal(err)
@@ -330,5 +331,119 @@ func TestFilesOnRealBroker(t *testing.T) {
 	}
 	if strings.Contains(logs.String()+hostLogs.String(), deployValue) {
 		t.Fatalf("logs carry the task credential:\n%s\n%s", logs.String(), hostLogs.String())
+	}
+}
+
+// TestGitInputOnRealBroker runs a git task from a host's Submit to its Await on the real broker: the client writes an
+// scp-like remote as an ssh URL, refuses a remote outside the pool's forges before publishing, and declares the patch
+// output; the receiver delivers the host key as known_hosts and the clone commands with the key's path, never its value.
+func TestGitInputOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" {
+		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
+	}
+	shortIntervals(t)
+	sealWait = 30 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	terms := forgeTerms("git.example.test")
+	encoded, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	credential, deployKey := filepath.Join(dir, credentialName), filepath.Join(dir, "deploy-key")
+	if err := os.WriteFile(credential, []byte(testToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deployKey, []byte(deployValue), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hostLogs := &syncBuffer{}
+	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+	hostKafka, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(),
+		map[string]string{credentialName: credential, "deploy-key": deployKey}, log.New(hostLogs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	if _, err := host.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	base, err := kgo.NewClient(b.opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, signing, _ := ed25519.GenerateKey(rand.Reader)
+	logs := &syncBuffer{}
+	patch := []byte("From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n")
+	fake := &fakeAdapter{stream: resultStream, outputs: []adapter.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
+	r := &Receiver{id: b.receiver, kafkaOpt: b.opts, base: base, signing: signing, logger: log.New(logs, "", 0),
+		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
+			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: fake}, nil
+		}}
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- r.Run(runCtx) }()
+	defer func() { stop(); <-done }()
+	b.joined(t, ctx, logs)
+	input := client.SubmitInput{
+		Prompt: "change the README", Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}},
+		Git:        &wire.GitInput{Remote: "git@git.example.test:org/repo.git", Ref: "main", Credential: "deploy-key", HostKey: testHostKey},
+		GitChanges: "patch", Deadline: time.Minute, QueueDeadline: time.Minute,
+	}
+	var submitted client.SubmitResult
+	for ctx.Err() == nil {
+		if submitted, err = host.Submit(ctx, input); err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("submit never placed: %v", err)
+	}
+	tasks, err := admin.ReadTopic(ctx, b.kafka, admin.PoolTasksTopic(b.pool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := input
+	outside.Git = &wire.GitInput{Remote: "https://github.com/org/repo.git", Ref: "main"}
+	if _, err := host.Submit(ctx, outside); !errors.Is(err, client.ErrInvalidInput) || !strings.Contains(err.Error(), "git remote host github.com is not in pool "+b.pool+"'s forges") {
+		t.Fatalf("submit outside the forges = %v; want a refusal naming the host and the pool", err)
+	}
+	if after, err := admin.ReadTopic(ctx, b.kafka, admin.PoolTasksTopic(b.pool)); err != nil || len(after) != len(tasks) {
+		t.Fatalf("task topic holds %d records after the refusal, %v; want %d", len(after), err, len(tasks))
+	}
+	awaited, err := host.Await(ctx, submitted.RunID, 60*time.Second)
+	if err != nil || awaited.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("await %+v, %v; receiver logs:\n%s\nhost logs:\n%s", awaited.Status, err, logs.String(), hostLogs.String())
+	}
+	if len(awaited.Outputs) != 1 || awaited.Outputs[0].Name != wire.GitPatch || !bytes.Equal(awaited.Outputs[0].Data, patch) {
+		t.Fatalf("outputs %+v, want the patch", awaited.Outputs)
+	}
+	run := fake.lastRun
+	if len(run.Inputs) != 1 || run.Inputs[0].Name != wire.KnownHostsFile || string(run.Inputs[0].Data) != testHostKey ||
+		len(run.Credentials) != 1 || string(run.Credentials[0].Value) != deployValue {
+		t.Fatalf("dispatched inputs %+v and credentials %d", run.Inputs, len(run.Credentials))
+	}
+	prompt := string(run.Prompt)
+	for _, want := range []string{
+		"-- 'ssh://git@git.example.test/org/repo.git' 'repo'", `-i "/task/secrets/credentials/id_ed25519"`, `UserKnownHostsFile="/task/inputs/known_hosts"`,
+		`format-patch --output="/task/outputs/changes.patch" refs/wherry/start..HEAD`, "/task/outputs/changes.patch.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt+logs.String()+hostLogs.String(), deployValue) {
+		t.Fatalf("prompt or logs carry the deploy key")
 	}
 }

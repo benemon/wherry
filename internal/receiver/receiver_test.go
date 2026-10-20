@@ -79,7 +79,6 @@ type fakeAdapter struct {
 	jobAdapter, jobAgent string
 	// neverStarted makes Follow report a job whose agent never started.
 	neverStarted bool
-	commit       string
 	purges       int
 	// purgeFailures fail that many Purges; purgeErr fails every one.
 	purgeFailures int
@@ -110,8 +109,6 @@ type fakeAdapter struct {
 	limits       adapter.Limits
 }
 
-func (f *fakeAdapter) Git() bool { return false }
-
 func (f *fakeAdapter) Directories() adapter.Directories {
 	return adapter.Directories{Input: "/task/inputs", Output: "/task/outputs", Credentials: "/task/secrets/credentials"}
 }
@@ -140,11 +137,7 @@ func (f *fakeAdapter) Dispatch(_ context.Context, run adapter.Run) (adapter.Outc
 	if f.outcome == adapter.OutcomeNothingCreated {
 		return f.outcome, adapter.Handle{}, nil
 	}
-	handle := f.handle(run.ID, run.Turn)
-	if run.Git != nil {
-		handle.Commit = f.commit
-	}
-	return cmp.Or(f.outcome, adapter.OutcomeCreated), handle, nil
+	return cmp.Or(f.outcome, adapter.OutcomeCreated), f.handle(run.ID, run.Turn), nil
 }
 
 func (f *fakeAdapter) Lookup(_ context.Context, runID string, turn int64) (adapter.Job, error) {

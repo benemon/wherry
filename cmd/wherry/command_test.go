@@ -103,7 +103,8 @@ func newBus(t *testing.T) *bus {
 	t.Cleanup(cancel)
 	b := &bus{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, stateDir: t.TempDir(), logs: &syncBuffer{}}
 	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, DefaultAgent: "claude",
-		SealLifetimeMS: int64(72 * time.Hour / time.Millisecond), DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+		SealLifetimeMS: int64(72 * time.Hour / time.Millisecond), DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
+		Forges: []string{"git.example.test"}}
 	if err := b.service.PoolCreate(ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
 	}
@@ -673,26 +674,36 @@ func TestKeyAndInit(t *testing.T) {
 	}
 }
 
-func TestSubmitBadGitPartWithoutReceiver(t *testing.T) {
+func TestSubmitBadGitInputWithoutReceiver(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	err := runSubmit(context.Background(), &busclient.Host{}, []string{"--selector", "runtime=exec", "--prompt", "x", "--git", "https://user:s3cr3t@git.example.test/r.git", "--git-ref", "main"}, &stdout, &stderr)
-	if err == nil || !strings.Contains(err.Error(), "https git url must not carry user information") || strings.Contains(err.Error(), "s3cr3t") {
+	err := runSubmit(context.Background(), &busclient.Host{}, []string{"--selector", "runtime=exec", "--prompt", "x", "--git", "https://user:s3cr3t@git.example.test/r.git@main"}, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "https git remote must not carry user information") || strings.Contains(err.Error(), "s3cr3t") {
 		t.Fatalf("submit error %v, want the git rule before receiver matching", err)
 	}
 }
 
 func TestSubmitGitFlags(t *testing.T) {
 	b := newBus(t)
+	hostKey := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(hostKey, []byte("git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	base := []string{"--agent", "claude", "--selector", "runtime=exec,!gpu", "--prompt", "fix the bug"}
 	for name, test := range map[string]struct {
 		flags []string
 		want  string
 	}{
-		"ref without url":  {[]string{"--git-ref", "main"}, "submit requires --git and --git-ref together"},
-		"url without ref":  {[]string{"--git", "https://git.example.test/org/repo.git"}, "submit requires --git and --git-ref together"},
-		"path without url": {[]string{"--git-path", "repo"}, "submit requires --git and --git-ref together"},
-		"userinfo":         {[]string{"--git", "https://user:s3cr3t@git.example.test/org/repo.git", "--git-ref", "main"}, "https git url must not carry user information"},
-		"traversal":        {[]string{"--git", "https://git.example.test/org/repo.git", "--git-ref", "main", "--git-path", "../x"}, "git path must be a relative path without . or .. segments"},
+		"no ref":           {[]string{"--git", "https://git.example.test/org/repo.git"}, "--git takes REMOTE@REF"},
+		"path without git": {[]string{"--git-path", "repo"}, "--git-path, --git-credential, --git-host-key and --git-changes need --git"},
+		"changes alone":    {[]string{"--git-changes", "patch"}, "--git-path, --git-credential, --git-host-key and --git-changes need --git"},
+		"userinfo":         {[]string{"--git", "https://user:s3cr3t@git.example.test/org/repo.git@main"}, "https git remote must not carry user information"},
+		"traversal":        {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-path", "../x"}, "git path must be a relative path"},
+		"outside forges":   {[]string{"--git", "https://github.com/org/repo.git@main"}, "git remote host github.com is not in pool pool-a's forges"},
+		"forge port":       {[]string{"--git", "https://git.example.test:8443/org/repo.git@main"}, "git remote host git.example.test:8443 is not in pool pool-a's forges"},
+		"ssh without key":  {[]string{"--git", "git@git.example.test:org/repo.git@main"}, "ssh git remote requires host_key"},
+		"undeclared":       {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-credential", "model"}, "git credential must be one of the submission's task credentials"},
+		"changes":          {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-changes", "diff"}, "git changes must be patch or bundle"},
+		"missing key file": {[]string{"--git", "git@git.example.test:org/repo.git@main", "--git-host-key", filepath.Join(t.TempDir(), "absent")}, "no such file"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -702,8 +713,12 @@ func TestSubmitGitFlags(t *testing.T) {
 			}
 		})
 	}
+	if records, err := admin.ReadTopic(b.ctx, b.receiver, admin.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
+		t.Fatalf("refused submissions published %d tasks, %v", len(records), err)
+	}
 	var stdout, stderr bytes.Buffer
-	flags := append(slices.Clone(base), "--git", "https://git.example.test/org/repo.git", "--git-ref", "v1.2.0", "--git-path", "src/repo")
+	flags := append(slices.Clone(base), "--git", "git@git.example.test:org/repo.git@v1.2.0", "--git-path", "src/repo", "--git-credential", "model",
+		"--credential-file", "model=id_ed25519", "--git-host-key", hostKey, "--git-changes", "patch")
 	if err := runSubmit(b.ctx, b.client, flags, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
@@ -714,13 +729,12 @@ func TestSubmitGitFlags(t *testing.T) {
 	}) {
 		t.Fatalf("placement %#v, want the --agent and --selector flags", placement)
 	}
-	parts := submission.Message.Parts
-	if len(parts) != 2 || parts[0].Text != "fix the bug" || parts[1].URL != "https://git.example.test/org/repo.git" ||
-		parts[1].MediaType != wire.GitMediaType || string(parts[1].Metadata) != `{"ref":"v1.2.0","path":"src/repo"}` {
-		t.Fatalf("submitted parts %#v", parts)
+	want := wire.GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "v1.2.0", Path: "src/repo", Credential: "model",
+		HostKey: "git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"}
+	if git := submission.Wherry.Git; git == nil || *git != want || len(submission.Message.Parts) != 1 {
+		t.Fatalf("submitted git %+v and parts %+v, want %+v and the prompt alone", git, submission.Message.Parts, want)
 	}
-	git, err := wire.ParseGitPart(parts[1])
-	if err != nil || git != (wire.GitContext{URL: "https://git.example.test/org/repo.git", Ref: "v1.2.0", Path: "src/repo"}) {
-		t.Fatalf("parsed %#v, %v", git, err)
+	if !slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: wire.GitPatch}}) {
+		t.Fatalf("submitted outputs %+v, want the patch", submission.Wherry.Outputs)
 	}
 }

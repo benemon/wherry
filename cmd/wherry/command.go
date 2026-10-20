@@ -164,9 +164,11 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	selectorText := flags.String("selector", "", "labels the adapter must carry: key=v|v, key!=v|v, key, !key, comma-separated")
 	prompt := flags.String("prompt", "", "prompt text")
 	promptFile := flags.String("prompt-file", "", "prompt file")
-	gitURL := flags.String("git", "", "git repository URL to check out for the agent")
-	gitRef := flags.String("git-ref", "", "branch, tag or commit to check out")
-	gitPath := flags.String("git-path", "", "checkout directory (default: the repository name)")
+	gitRemote := flags.String("git", "", "REMOTE@REF: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit")
+	gitPath := flags.String("git-path", "", "checkout directory, relative (default: the repository name)")
+	gitCredential := flags.String("git-credential", "", "name of the --credential-file credential the agent clones with")
+	gitHostKey := flags.String("git-host-key", "", "file of OpenSSH known_hosts lines for an ssh remote's host")
+	gitChanges := flags.String("git-changes", "", "patch or bundle: ask for the agent's commits back as changes.patch or changes.bundle")
 	var inputs []string
 	flags.Func("input", "file to deliver to the agent's input directory (repeatable)", func(value string) error {
 		inputs = append(inputs, value)
@@ -193,18 +195,34 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit [--agent NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git URL --git-ref REF [--git-path PATH]] [--input FILE]... [--credential-file NAME=FILE]... [--output NAME[:required]]... [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit [--agent NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git REMOTE@REF [--git-path PATH] [--git-credential NAME] [--git-host-key FILE] [--git-changes patch|bundle]] [--input FILE]... [--credential-file NAME=FILE]... [--output NAME[:required]]... [--deadline DURATION] [--queue-deadline DURATION]")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {
 		return err
 	}
-	if wasSet(flags, "git") || wasSet(flags, "git-ref") || wasSet(flags, "git-path") {
-		if *gitURL == "" || *gitRef == "" {
-			return errors.New("submit requires --git and --git-ref together")
+	var git *wire.GitInput
+	if *gitRemote != "" {
+		at := strings.LastIndex(*gitRemote, "@")
+		if at < 0 {
+			return errors.New("--git takes REMOTE@REF")
 		}
-		metadata, _ := json.Marshal(wire.GitMetadata{Ref: *gitRef, Path: *gitPath}) // strings always encode
-		parts = append(parts, wire.Part{URL: *gitURL, MediaType: wire.GitMediaType, Metadata: metadata})
+		git = &wire.GitInput{Remote: (*gitRemote)[:at], Ref: (*gitRemote)[at+1:], Path: *gitPath, Credential: *gitCredential}
+		if *gitHostKey != "" {
+			file, err := os.Open(*gitHostKey)
+			if err != nil {
+				return err
+			}
+			// One byte over the bound is read, so validation refuses a longer file without reading all of it.
+			key, err := io.ReadAll(io.LimitReader(file, wire.MaxGitHostKey+1))
+			file.Close()
+			if err != nil {
+				return err
+			}
+			git.HostKey = string(key)
+		}
+	} else if wasSet(flags, "git-path") || wasSet(flags, "git-credential") || wasSet(flags, "git-host-key") || wasSet(flags, "git-changes") {
+		return errors.New("--git-path, --git-credential, --git-host-key and --git-changes need --git")
 	}
 	promptSet := wasSet(flags, "prompt")
 	promptFileSet := wasSet(flags, "prompt-file")
@@ -226,7 +244,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return fmt.Errorf("selector: %w", err)
 	}
 	result, err := client.Submit(ctx, busclient.SubmitInput{
-		Agent: *agent, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Outputs: outputs,
+		Agent: *agent, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Outputs: outputs, Git: git, GitChanges: *gitChanges,
 		Deadline: *deadline, QueueDeadline: *queueDeadline,
 	})
 	if err != nil {
@@ -295,6 +313,12 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	}
 	for i, output := range result.Outputs {
 		fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, paths[i], output.SHA256, output.Size)
+		switch output.Name {
+		case wire.GitPatch:
+			fmt.Fprintf(stderr, "apply with: git am %s\n", paths[i])
+		case wire.GitBundle:
+			fmt.Fprintf(stderr, "fetch with: git fetch %s HEAD\n", paths[i])
+		}
 	}
 	for _, output := range append(result.NotReturned, result.Rejected...) {
 		fmt.Fprintf(stderr, "output %s not returned: %s\n", output.Name, output.Reason)

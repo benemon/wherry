@@ -3,15 +3,19 @@
 `wherry` runs a self-contained task on other compute and returns the result.
 Use it for long tasks, tasks that need a platform or isolation this machine
 lacks, or tasks that can run while you do other work. The remote agent sees
-only the prompt, the files you send and, if given, a checkout of a pushed
-git ref.
+only the prompt, the files you send and, if given, a pushed git ref it
+clones itself.
 
 1. `wherry receivers --json` lists receivers with each adapter's `agent`,
    `labels` and `ready`. Pick an agent and build a selector from the labels.
 2. `wherry submit --prompt TEXT` prints `run_id` and `pool`. Add
    `--agent NAME` to choose the agent, and `--selector` with comma-separated
    terms (`key=v1|v2`, `key!=v`, `key`, `!key`) to require labels. Add
-   `--git URL --git-ref REF` for a repository, `--input FILE` for each file
+   `--git REMOTE@REF` for a repository the agent clones (its host must be
+   one of the pool's forges), with `--git-credential NAME` naming a
+   `--credential-file` credential to clone with, `--git-host-key FILE` (`known_hosts`
+   lines naming the host) for an `ssh` remote, and `--git-changes patch` to get its commits back as
+   `changes.patch` (`git am` it). Add `--input FILE` for each file
    the agent needs (the pool's inline limit in all, 256 KiB by default),
    `--credential-file NAME=FILE` for each configured credential it needs as
    a file, and `--output NAME[:required]` for each file you want back. Keep working.

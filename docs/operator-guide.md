@@ -84,6 +84,8 @@ wherry admin pool create build --terms build-terms.yaml
 - `inline_limit` and `output_limit` bound a task's input files and a
   turn's outputs; they default to 256 KiB and 8 MiB. See
   [Size a pool against the broker](#size-a-pool-against-the-broker).
+- `forges` lists the hosts a task's agent may clone from; without it the
+  pool takes no git input. See [Git repositories](#git-repositories).
 
 Running `pool create` again for an existing pool records the new terms.
 
@@ -110,7 +112,7 @@ record's size when it is.
 Input files grow by about 16/9 on the wire, since they are base64-encoded
 inside a record that is itself base64url-encoded. With brokers and topics
 at their defaults the 1000012-byte producer batch is the limit, and
-`inline_limit` can rise to about 496 KiB. wherry producers batch at most
+`inline_limit` can rise to about 481 KiB. wherry producers batch at most
 1000012 bytes, so raising `message.max.bytes` and `max.message.bytes` does
 not take it further; lowering them brings it down. An output chunk holds
 256 KiB whatever `output_limit` is, so `output_limit` spans as many records
@@ -507,7 +509,7 @@ node_pool "default" {
   has stopped.
 - `alloc-lifecycle`: send `SIGTERM` to the agent task.
 - Variables `write`, `read` and `destroy`: hold each run's prompt,
-  credentials, input files and git context, and sweep them after the job
+  credentials and input files, and sweep them after the job
   ends. The sweep
   lists variables under `nomad/jobs/agent-`; see
   [Nomad variables](https://developer.hashicorp.com/nomad/docs/concepts/variables)
@@ -529,30 +531,125 @@ Outputs are collected once the agent writes its result line and the job is
 stopped, including when that line reports a failure. A turn that ends
 without the agent's result line, by timeout or otherwise, returns none.
 
-## Git context
+## Git repositories
 
-`wherry submit --git URL --git-ref REF [--git-path PATH]` asks the receiver
-to check a repository out before the agent starts. The
-[extension](a2a-extension-v1.md#git-context) defines the URL, ref and path
-rules and the line added to the prompt.
+A task can name a repository for its agent to clone:
 
-The `git` task runs the runtime's own driver and configuration with a
-`/bin/sh` script, so the image or host needs `/bin/sh`, `git`, and `ssh`
-for SSH URLs. It fetches the ref at depth 1 into
-`$NOMAD_ALLOC_DIR/<path>`.
+```sh
+wherry submit --prompt "Fix the failing test" \
+  --git git@github.com:team/app.git@main \
+  --credential-file deploy-key=id_ed25519 --git-credential deploy-key \
+  --git-host-key github-known-hosts --git-changes patch
+```
 
-The platform supplies host trust and repository access:
+The agent runs `git` itself, from its image or host, with the commands the
+prompt gives it; the receiver and the adapter run no git. The
+[extension](a2a-extension-v1.md#git-input) defines the remote, ref and path
+rules and the commands. For the agent to follow them:
 
-- For an HTTPS URL, the system git configuration and CA bundle.
-- For an SSH URL, the host key in `/etc/ssh/ssh_known_hosts`. The task runs
-  ssh with `StrictHostKeyChecking=yes` and `BatchMode=yes`.
-- For a private repository, a deploy key or a git credential helper set up
-  in the image or on the host.
+- The image or host has `git` 2.30 or later, a shell, and `ssh` for `ssh`
+  remotes. The prompt asks the agent to stop and report an older `git`.
+- The agent may run `git` commands. Every command the prompt gives starts
+  with `git`, so for Claude Code `Bash(git:*)` in its allowed tools covers
+  them, along with whatever else the task runs. The rule lets the agent
+  run the commands; it is not a sandbox, since `git` can run any command.
 
-`GIT_TERMINAL_PROMPT=0` stops git from asking for input. A failed checkout
-ends the turn as `TASK_STATE_FAILED` with the message
-`git context unavailable`. The repositories an adapter can reach vary by
-platform; a label such as `git-access` lets tasks select for it.
+Allow the hosts a pool's tasks may clone from with `forges` in its
+[terms](reference.md#pool-terms):
+
+```yaml
+forges:
+  - github.com
+  - git.example.com:2222
+```
+
+`submit` and `continue` refuse a remote outside the forges before they
+publish, and receivers reject one at admission. Set `forges` only once every
+host and receiver runs a release that reads them: a release that predates
+them rejects a pool record that carries them, and with it all of
+`wherry.admin`.
+
+Forges limit what wherry accepts, not where an agent can connect: the agent
+runs commands, and it can reach any host its network allows. Enforce where
+agents connect with the platform's egress policy, and treat `forges` as the
+check that a task names an allowed repository.
+
+The clone's commands keep the credential for the remote's host. No
+template seeds the clone. They reset
+the credential helpers, so no helper of the image or host is asked for the
+token or stores it; the clone's helper answers only for the remote's
+scheme, host and port. They refuse HTTP redirects, so the remote must be
+the repository's current URL, verify certificates, and allow only the
+remote's protocol. `ssh`
+reads no configuration file, uses no agent and no identity but the
+credential, and trusts only the task's host key.
+
+An adapter gives the agent an environment in which `git` reads no system
+or global configuration and no configuration from the environment, uses no
+template, never prompts, and traces nothing, since those could rewrite the
+remote to another host or record the token. The agent has no global `git`
+identity; the clone sets `user.name` and `user.email` to `wherry`.
+
+Some variables no value switches off: `GIT_SSH`, `GIT_SSH_COMMAND` and
+`GIT_SSH_VARIANT` replace the clone's `ssh` command, `GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`
+and `GIT_ALTERNATE_OBJECT_DIRECTORIES` retarget the repository a command
+works on,
+`GIT_EXEC_PATH` chooses the programs `git` runs, `GIT_SSL_NO_VERIFY`
+disables certificate checks, and `GIT_CURL_VERBOSE` traces requests, with
+the Authorization header redacted. An adapter removes them only from the
+environment it configures, such as the Nomad runtime's `env`. It cannot
+remove what the platform or the image sets: a Nomad `raw_exec` task
+inherits the client's environment, and a container keeps its image's
+`ENV`. Add them to the Nomad client's `env.denylist`, and keep them out of
+agent images.
+
+The CA and proxy settings stay yours: `GIT_SSL_CAINFO`, `SSL_CERT_FILE`,
+`HTTPS_PROXY` and the like reach `git` as the image or platform sets them.
+
+The isolation protects a cooperative agent from the configuration around
+it. It is not a boundary against the agent: an agent that runs commands,
+including through an allow rule such as `Bash(git:*)` (`git -c
+alias.x='!cmd'` runs any command), can undo every one of these settings.
+A hostile or prompt-injected agent holds whatever credentials the parent
+sent, and what it can do with them is bounded by their scope and
+lifetime, the platform's egress policy, and the receiver's redaction of
+what it returns.
+
+The parent supplies least privilege; wherry passes the credential as a
+file and checks the host, nothing more:
+
+- For `https`, a short-lived token for one repository, such as a GitHub App
+  installation token. The credential helper answers with the user name
+  `x-access-token`, which installation tokens require.
+- For `ssh`, a deploy key for the repository, ideally created for the run
+  and removed afterwards, and the forge's host key from a source you trust,
+  passed as `--git-host-key`. Every entry must name the remote's host, or
+  `[host]:port` for a port other than 22; hashed entries, and entries with
+  a wildcard pattern even beside the host, are
+  refused. `ssh` checks the host key strictly and ignores every other
+  `known_hosts`.
+- A public repository needs no credential.
+
+With `--git-changes`, the agent returns its commits as `changes.patch` or
+`changes.bundle`, which `await` writes like any output, and the parent
+applies them with its own credentials:
+
+```
+apply with: git am /home/me/.local/state/wherry/runs/run-.../outputs/1/changes.patch
+```
+
+The agent pushes only when the prompt asks it to and the credential allows
+it, and then only to the branch `wherry/<run>`; verify the commit it
+reports at that branch before trusting it, and delete the branch after.
+Forge rules that confine the credential's pushes to `wherry/*` make that
+the only branch it can write.
+
+`ssh` refuses a private key that others can read when the agent's user
+owns the file, so the mode an adapter gives credential files decides
+whether a deploy key works; the
+[Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs)
+says what it gives.
 
 ## Upgrade wherry
 
@@ -572,6 +669,14 @@ state directory.
 
 Agent jobs and variables named before pool-scoped names,
 `agent-<run>-t<turn>`, are not swept; remove them by hand after upgrading.
+
+Before upgrading to the release with the git lane, drain runs that carry a
+git context of the release before it: let them end, or cancel them. The
+new Nomad plugin does not adopt a job with the old prestart `git` task, so
+a redelivered turn of one fails to start until its delivery budget runs
+out. The plugin sweeps the old per-task variables,
+`nomad/jobs/agent-<pool>-<run>-t<turn>/agent/agent` and `.../agent/git`,
+with the rest.
 
 ## Harness integration
 

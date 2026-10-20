@@ -120,19 +120,36 @@ fails with `no matching live receiver`.
 | `--selector` | empty | [selector](#selectors) over adapter labels |
 | `--prompt` | | prompt text |
 | `--prompt-file` | | file holding the prompt |
-| `--git` | | repository URL to check out |
-| `--git-ref` | | branch, tag or commit to check out |
-| `--git-path` | the repository name | checkout directory |
+| `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |
+| `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
+| `--git-credential NAME` | | the `--credential-file` credential the agent clones with: a token for `https`, a private key for `ssh` |
+| `--git-host-key FILE` | | file of OpenSSH `known_hosts` lines naming the remote's host; required for `ssh` |
+| `--git-changes patch\|bundle` | | ask for the agent's commits back as the output `changes.patch` or `changes.bundle` |
 | `--input FILE` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
 | `--credential-file NAME=FILE` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR`; repeatable |
 | `--output NAME[:required]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the turn without it; repeatable |
 | `--deadline` | `30m` | time from now by which the run must end |
 | `--queue-deadline` | `10m` | time from now by which a receiver must claim it |
 
-Exactly one of `--prompt` and `--prompt-file` is required. `--git` and
-`--git-ref` go together; the
-[extension](a2a-extension-v1.md#git-context) gives the rules for the URL,
-ref and path.
+Exactly one of `--prompt` and `--prompt-file` is required. The other
+`--git-` flags need `--git`, which splits at its last `@`. `submit` writes
+a `user@host:path` remote as `ssh://user@host/path`. The
+[extension](a2a-extension-v1.md#git-input) gives the rules for the remote,
+ref, path and host key. `submit` refuses, before it publishes, a remote
+whose host is not one of the pool's [`forges`](#pool-terms):
+
+```
+invalid input: git remote host github.com is not in pool build's forges
+```
+
+`continue` refuses a run whose git input, as this host's record of the run
+holds it, is no longer in the pool's forges. A host without that record,
+another host of the tenant, does not check it, and admission rejects the
+turn instead. `--git-host-key` reads at most one byte over
+the 8 KiB bound.
+
+`--git-changes` adds `changes.patch` or `changes.bundle` to the expected
+outputs, unless `--output` names it already; neither is required.
 
 Input files hold the pool's [`inline_limit`](#pool-terms) together;
 `submit` refuses more before it publishes, naming the size and the limit. Input and credential file names
@@ -186,6 +203,9 @@ prints a line for it:
 ```
 output=<name> path=<path> sha256=<hex> size=<bytes>
 ```
+
+For `changes.patch` it also prints `apply with: git am <path>`, and for
+`changes.bundle` `fetch with: git fetch <path> HEAD`, on standard error.
 
 It prints `output <name> not returned: <reason>` on standard error for each
 output the result lists as not returned and each one that fails
@@ -384,9 +404,7 @@ it, and the receiver exits with `adapter <name>: ...` on an error.
 
 A plugin inherits the receiver's environment. The receiver passes each
 adapter its name, pool, agent, credential name and `config` section, and
-the bundle's `platform` entry for its name when there is one. The plugin
-answers whether the adapter delivers git context; the receiver rejects a
-task with a git context part when its adapter does not.
+the bundle's `platform` entry for its name when there is one.
 
 A plugin also reports, for each adapter, the paths of the input, output and
 credentials directories as its agent sees them, which the receiver writes
@@ -395,6 +413,14 @@ with the prompt. A plugin that cannot deliver an input reports it, and the turn 
 `TASK_STATE_FAILED` naming it. After the agent's result line the receiver
 stops the job and asks the plugin to collect its outputs, which arrive over
 the link in pieces of at most 1 MiB.
+
+A plugin gives each agent the variables of `adapter.AgentEnvironment` over
+the environment it configures, and removes those of `adapter.AgentUnset`
+from that environment, so the platform's `git` configuration does not reach
+a [git input](a2a-extension-v1.md#git-input)'s clone. It cannot remove
+what the platform or the image sets. This protects a cooperative agent,
+not against one that runs commands of its own
+([operator guide](operator-guide.md#git-repositories)).
 
 The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
@@ -447,8 +473,10 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 | `events` | `id` | `id`, `events`, `transcripts`, `skipped` |
 
 - `submit` requires `prompt`. `selector` is an array of
-  `{key, operator, values}`. `git` is `{url, ref, path}`, with `path`
-  optional. `inputs` is an array of file paths, `credentials` an array of
+  `{key, operator, values}`. `git` is `{remote, ref, path, credential,
+  host_key, changes}`, as `--git`, `--git-path`, `--git-credential`,
+  `--git-host-key` and `--git-changes` take them, with `remote` and `ref`
+  required; `host_key` is a file path, read as an input is. `inputs` is an array of file paths, `credentials` an array of
   `{name, file}` and `outputs` an array of `{name, required}`, as
   `--input`, `--credential-file` and `--output` take them. An input must
   resolve, through any symbolic links, to a regular file beneath the
@@ -549,6 +577,14 @@ The YAML file `pool create --terms` reads. Unknown fields are errors.
 | `request_percentage` | host quota, percentage of broker request time |
 | `inline_limit` | optional, default 262144 (256 KiB): bytes of a task's input files together |
 | `output_limit` | optional, default 8388608 (8 MiB): bytes of one output, and of a turn's outputs together |
+| `forges` | optional, default none: the hosts a [git input](a2a-extension-v1.md#git-input) may clone from |
+
+Each entry of `forges` is a lowercase host name, with `:port` for a
+remote that names a port other than its scheme's default, 443 for `https`
+and 22 for `ssh`, and appears once. `git.example.com` matches
+`https://git.example.com/...` and `ssh://git@git.example.com/...`;
+`git.example.com:2222` matches `ssh://git@git.example.com:2222/...`. A pool
+without `forges` accepts no git input.
 
 Every number is positive. Set `lock_duration_ms` above 10000, since a
 receiver renews its lock every 10 seconds; wherry does not check this. The
@@ -571,6 +607,8 @@ delivery_limit: 5
 lock_duration_ms: 15000
 producer_byte_rate: 1048576
 request_percentage: 10
+forges:
+  - github.com
 ```
 
 ### Record limit
@@ -593,19 +631,22 @@ refused before it is measured.
 
 The largest bounded submission has every field that has a bound at its
 maximum: 256 parts, each an input file with a 255-byte name, one of them
-holding `inline_limit` bytes. The prompt's text, part metadata and media
-types, the selector and the lists of task credentials and outputs have no
-bound and are left empty. A task with a large prompt can still exceed the
+holding `inline_limit` bytes, and a git input with a 2048-byte remote, a
+255-byte ref, a 512-byte path and an 8 KiB host key of quotes, which JSON
+escapes, naming the one task credential it declares. Only a first turn
+carries a git input, so the submission is turn 1. The prompt's text, part
+metadata and media types, the selector, the other task credentials and the
+outputs have no bound and are left empty. A task with a large prompt can still exceed the
 record limit; `submit` then fails naming the record's size.
 
 An input file travels base64-encoded inside the signed record, which is
 itself base64url-encoded, so a submission takes about 16/9 of
-`inline_limit` plus about 97 KB. As `pool create` measures them, the
-submission at the default `inline_limit` is 563072 bytes, the output
+`inline_limit` plus about 123 KB. As `pool create` measures them, the
+submission at the default `inline_limit` is 589210 bytes, the output
 chunk 468155 bytes, the result 791053 bytes and the transcript chunk
 933544 bytes, so a feed's
 `max.message.bytes` below 933544 refuses every pool; with brokers and topics at their defaults, the highest
-`inline_limit` that fits is 507924 bytes, about 496 KiB.
+`inline_limit` that fits is 493221 bytes, about 481 KiB.
 
 `pool create` and `tenant add` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.admin`, which they

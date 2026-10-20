@@ -341,8 +341,9 @@ func TestBindTurnsRequireSameBindings(t *testing.T) {
 
 func TestReceiverRejectsURLParts(t *testing.T) {
 	for name, part := range map[string]wire.Part{
-		"url":                         {URL: "https://example.test/a"},
-		"git the adapter cannot take": {URL: "https://git.example.test/org/repo.git", MediaType: wire.GitMediaType, Metadata: jsontext.Value(`{"ref":"main"}`)},
+		"url": {URL: "https://example.test/a"},
+		// The git context part that the git input replaced, as wherry submit built it.
+		"git context": {URL: "https://git.example.test/org/repo.git", MediaType: "application/vnd.wherry.git", Metadata: jsontext.Value(`{"ref":"main"}`)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
@@ -394,45 +395,6 @@ func TestRejectionPublishFailureReleases(t *testing.T) {
 	}
 	if n := len(f.eventStatuses(t)); n != 0 {
 		t.Fatalf("failed rejection publish left %d events", n)
-	}
-}
-
-// gitPart is a git context part as wherry submit builds it.
-var gitPart = wire.Part{URL: "https://git.example.test/org/repo.git", MediaType: wire.GitMediaType, Metadata: jsontext.Value(`{"ref":"main"}`)}
-
-func withGitPart(task *wire.Submission) {
-	task.Message.Parts = append(task.Message.Parts, gitPart)
-}
-
-func TestGitPartAdmittedOnlyWithGitAdapter(t *testing.T) {
-	for name, test := range map[string]struct {
-		git    bool
-		mutate func(*wire.Submission)
-		admit  bool
-	}{
-		"git adapter":         {true, withGitPart, true},
-		"adapter without git": {false, withGitPart, false},
-		"non-git url": {true, func(task *wire.Submission) {
-			task.Message.Parts = append(task.Message.Parts, wire.Part{URL: "https://example.test/a"})
-		}, false},
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, resultStream)
-			f.receiver.adapters[0].Git = test.git
-			f.answer(t, credentialName)
-			record := f.submit(t, f.host, test.mutate)
-			if !test.admit {
-				f.rejected(t, record, "unsupported message part")
-				return
-			}
-			if status := f.execute(t, record, 1); status != kgo.AckAccept {
-				t.Fatalf("status %v", status)
-			}
-			want := adapter.GitContext{URL: gitPart.URL, Ref: "main", Path: "repo"}
-			if run := f.adapter.lastRun; run.Git == nil || *run.Git != want || string(run.Prompt) != "hi" {
-				t.Fatalf("dispatched git %#v prompt %q, want %#v and the text alone", run.Git, run.Prompt, want)
-			}
-		})
 	}
 }
 
