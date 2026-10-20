@@ -3,6 +3,8 @@ package signed
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
@@ -17,6 +19,8 @@ import (
 )
 
 const SealType = "application/vnd.wherry.seal.v2+jwe"
+
+const redactionDomain = "wherry-redaction-v1"
 
 // maxSeal bounds a seal's compact serialisation, and with it the credentials it carries.
 const maxSeal = 64 << 10
@@ -67,9 +71,15 @@ type sealHeader struct {
 }
 
 type sealPlaintext struct {
-	Version int               `json:"v"`
-	Binding SealBinding       `json:"binding"`
-	Values  map[string][]byte `json:"values"`
+	Version int         `json:"v"`
+	Binding SealBinding `json:"binding"`
+	SealValues
+}
+
+// SealValues are the confidential values a seal carries. RedactionKey is the run's 32-byte key.
+type SealValues struct {
+	Values       map[string][]byte `json:"values"`
+	RedactionKey []byte            `json:"redaction_key"`
 }
 
 // SealKeyID is the RFC 7638 SHA-256 thumbprint of a seal key, base64url.
@@ -78,9 +88,20 @@ func SealKeyID(key *ecdsa.PublicKey) string {
 	return base64.RawURLEncoding.EncodeToString(thumbprint)
 }
 
-// Seal encrypts values, one per name of binding.Names, to key as a compact JWE.
-func Seal(binding SealBinding, key *ecdsa.PublicKey, values map[string][]byte) ([]byte, error) {
-	plaintext, err := json.Marshal(sealPlaintext{Version: 1, Binding: binding, Values: values}, json.Deterministic(true))
+// RedactionMarker returns the feed marker for a credential name under a run's key.
+func RedactionMarker(key []byte, name string) string {
+	digest := hmac.New(sha256.New, key)
+	digest.Write([]byte(redactionDomain))
+	digest.Write([]byte(name))
+	return "[redacted:" + base64.RawURLEncoding.EncodeToString(digest.Sum(nil)[:12]) + "]"
+}
+
+// Seal encrypts values, one per name of binding.Names, and the run's redaction key to key as a compact JWE.
+func Seal(binding SealBinding, key *ecdsa.PublicKey, values SealValues) ([]byte, error) {
+	if len(values.RedactionKey) != 32 {
+		return nil, errors.New("seal redaction key is not 32 bytes")
+	}
+	plaintext, err := json.Marshal(sealPlaintext{Version: 1, Binding: binding, SealValues: values}, json.Deterministic(true))
 	if err != nil {
 		return nil, err
 	}
@@ -117,40 +138,43 @@ func Seal(binding SealBinding, key *ecdsa.PublicKey, values map[string][]byte) (
 
 // OpenSeal opens a seal for expected with key, the private half of expected.KeyID, and returns its values by the names
 // of expected.Names.
-func OpenSeal(encoded []byte, expected SealBinding, key *ecdsa.PrivateKey, now time.Time) (map[string][]byte, error) {
+func OpenSeal(encoded []byte, expected SealBinding, key *ecdsa.PrivateKey, now time.Time) (SealValues, error) {
 	if expected.KeyID != SealKeyID(&key.PublicKey) {
-		return nil, errors.New("seal key is not the expected key")
+		return SealValues{}, errors.New("seal key is not the expected key")
 	}
 	if len(encoded) > maxSeal {
-		return nil, errors.New("seal exceeds its size limit")
+		return SealValues{}, errors.New("seal exceeds its size limit")
 	}
 	jwe, err := jose.ParseEncryptedCompact(string(encoded), []jose.KeyAlgorithm{jose.ECDH_ES_A256KW}, []jose.ContentEncryption{jose.A256GCM})
 	if err != nil {
-		return nil, errors.New("seal is not a compact JWE of the allowed algorithms")
+		return SealValues{}, errors.New("seal is not a compact JWE of the allowed algorithms")
 	}
 	protected, _, _ := strings.Cut(string(encoded), ".")
 	decoded, err := base64.RawURLEncoding.DecodeString(protected)
 	var header sealHeader
 	if err != nil || json.Unmarshal(decoded, &header, strict) != nil || header.Type != SealType {
-		return nil, errors.New("seal protected header holds other members than a seal's")
+		return SealValues{}, errors.New("seal protected header holds other members than a seal's")
 	}
 	if !reflect.DeepEqual(header.SealBinding, expected) {
-		return nil, errors.New("seal is bound to another attempt or key")
+		return SealValues{}, errors.New("seal is bound to another attempt or key")
 	}
 	if !now.Before(time.UnixMilli(header.ExpiryMS)) {
-		return nil, errors.New("seal has expired")
+		return SealValues{}, errors.New("seal has expired")
 	}
 	plaintext, err := jwe.Decrypt(key)
 	if err != nil {
-		return nil, errors.New("seal does not decrypt")
+		return SealValues{}, errors.New("seal does not decrypt")
 	}
 	var opened sealPlaintext
 	if json.Unmarshal(plaintext, &opened, strict) != nil || opened.Version != 1 || !reflect.DeepEqual(opened.Binding, header.SealBinding) {
-		return nil, errors.New("seal plaintext is bound otherwise than its header")
+		return SealValues{}, errors.New("seal plaintext is bound otherwise than its header")
 	}
 	names := header.Names()
 	if len(opened.Values) != len(names) || slices.ContainsFunc(names, func(name string) bool { _, ok := opened.Values[name]; return !ok }) {
-		return nil, errors.New("seal values are not the credentials and URLs it names")
+		return SealValues{}, errors.New("seal values are not the credentials and URLs it names")
 	}
-	return opened.Values, nil
+	if len(opened.RedactionKey) != 32 {
+		return SealValues{}, errors.New("seal redaction key is not 32 bytes")
+	}
+	return opened.SealValues, nil
 }

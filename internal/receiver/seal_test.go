@@ -1,9 +1,11 @@
 package receiver
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/base64"
+	"fmt"
 	"runtime"
 	"slices"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"time"
 	"weak"
 
+	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -88,7 +91,7 @@ func TestSealToAnotherRunsKeyDoesNotOpen(t *testing.T) {
 	sealed, err := signed.Seal(signed.SealBinding{
 		Tenant: runB.Tenant, Pool: runB.Pool, Receiver: runB.Receiver, KeyID: runB.KeyID, Run: runB.Run,
 		Turn: runB.Turn, Attempt: runB.Attempt, Credentials: runB.Credentials, ExpiryMS: runB.ExpiryMS,
-	}, runA.Key.Key.(*ecdsa.PublicKey), map[string][]byte{credentialName: []byte(testToken)})
+	}, runA.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: map[string][]byte{credentialName: []byte(testToken)}, RedactionKey: testRedactionKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +186,7 @@ func TestSecretNeverLogged(t *testing.T) {
 	sealed, err := signed.Seal(signed.SealBinding{
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
 		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
-	}, request.Key.Key.(*ecdsa.PublicKey), map[string][]byte{credentialName: []byte(testToken)})
+	}, request.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: map[string][]byte{credentialName: []byte(testToken)}, RedactionKey: testRedactionKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +203,7 @@ func TestSecretNeverLogged(t *testing.T) {
 	}
 }
 
-const redacted = "[redacted]"
+var redacted = signed.RedactionMarker(testRedactionKey, credentialName)
 
 func TestDeliveredCredentialIsRedacted(t *testing.T) {
 	f := newFixture(t, []string{
@@ -299,29 +302,28 @@ func TestRedactedMetadataStaysValid(t *testing.T) {
 	if err := wire.ParseRecord(run.result(taskStatus(wire.TaskStateCompleted, ""), agent.Result, agent.metadata).Value, f.keys(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if metadata := string(result.Task.Artifacts[0].Metadata); !strings.Contains(metadata, `"count":1234567890`) || !strings.Contains(metadata, `"note":"id `+redacted+`"`) {
+	if metadata := string(result.Task.Artifacts[0].Metadata); !strings.Contains(metadata, `"count":1234567890`) || !strings.Contains(metadata, `"note":"id `+signed.RedactionMarker(testRedactionKey, credentialName)+`"`) {
 		t.Fatalf("metadata %s, want the string value redacted and the number kept", metadata)
 	}
 }
 
-// The marker names no credential, so redacting one cannot write out another: under a marker naming its credential,
-// x's value would become "[redacted:x]" and publish y's.
-func TestRedactionCannotReintroduceACredential(t *testing.T) {
+func TestRedactionMarkerDoesNotNameTheCredential(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-n", 1)
-	run.deliver(map[string][]byte{"x": []byte("12345678"), "y": []byte("redacted:x")})
-	if got := run.redactText("a 12345678 b redacted:x c"); got != "a [redacted] b [redacted] c" {
-		t.Fatalf("redacted %q, want both values replaced and neither published", got)
+	run.deliver(map[string][]byte{"credential-name": []byte("12345678")})
+	if got := run.redactText("a 12345678 b"); got != "a "+signed.RedactionMarker(testRedactionKey, "credential-name")+" b" || strings.Contains(got, "credential-name") {
+		t.Fatalf("redacted %q, want the HMAC marker without the credential name", got)
 	}
 }
 
-// A value that occurs within the marker gets the fallback marker, which no value of minRedact bytes fits in.
+// A value that occurs within its own marker gets the fallback marker.
 func TestMarkerFallsBackWhenAValueIsWithinIt(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-m", 1)
-	run.deliver(map[string][]byte{"x": []byte("redacted"), "y": []byte("12345678")})
-	if got := run.redactText("redacted 12345678"); got != "[*] [*]" {
-		t.Fatalf("redacted %q, want the fallback marker for both", got)
+	value := signed.RedactionMarker(testRedactionKey, "x")[10:18]
+	run.deliver(map[string][]byte{"x": []byte(value), "y": []byte("12345678")})
+	if got := run.redactText(value + " 12345678"); got != "[*] "+signed.RedactionMarker(testRedactionKey, "y") {
+		t.Fatalf("redacted %q, want fallback only for x", got)
 	}
 }
 
@@ -331,8 +333,116 @@ func TestLongerValueIsRedactedFirst(t *testing.T) {
 	for range 20 {
 		run := testActiveRun(t, f, "run-l", 1)
 		run.deliver(map[string][]byte{"outer": []byte("prefix-inner-secret"), "inner": []byte("inner-secret")})
-		if got := run.redactText("x prefix-inner-secret"); got != "x [redacted]" {
+		if got := run.redactText("x prefix-inner-secret"); got != "x "+signed.RedactionMarker(testRedactionKey, "outer") {
 			t.Fatalf("redacted %q, want the longer value replaced whole", got)
 		}
+	}
+}
+
+// A marker holding a delivered value would publish it, so that marker falls back: "[redacted:" is within every marker.
+func TestRedactionCannotPublishAValueWithinAMarker(t *testing.T) {
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-v", 1)
+	run.deliver(map[string][]byte{"x": []byte("12345678"), "y": []byte("[redacted:")})
+	if got := run.redactText("a 12345678 b [redacted: c"); got != "a [*] b [*] c" {
+		t.Fatalf("redacted %q, want both values replaced by the fallback", got)
+	}
+}
+
+// adopting returns a fixture whose Lookup finds a running job printing the credential, and the record of its turn.
+func adopting(t *testing.T) (fixture, *kgo.Record) {
+	t.Helper()
+	f := newFixture(t, []string{
+		`{"type":"assistant","message":"token ` + testToken + `"}`,
+		`{"type":"result","result":"used ` + testToken + `","is_error":false}`,
+	})
+	f.adapter.job = adapter.JobRunning
+	return f, f.submit(t, f.host, nil)
+}
+
+// held waits until the adopted job is followed, and a while longer for its lines to be read.
+func (f fixture) held(t *testing.T) {
+	t.Helper()
+	for {
+		if _, _, follows, _ := f.adapter.counts(); follows > 0 {
+			break
+		}
+		if f.ctx.Err() != nil {
+			t.Fatal("the adopted job was never followed")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
+}
+
+// An adopter asks for its own seal and publishes nothing of the job until it opens; the markers it then writes are the
+// run's, the claimant's, and name no credential.
+func TestAnAdopterPublishesNothingBeforeItsSeal(t *testing.T) {
+	f, record := adopting(t)
+	done := f.executing(t, f.ctx, record, 2)
+	request := f.request(t, 1)
+	if request.Attempt != 2 || !slices.Equal(request.Credentials, []string{credentialName}) || len(request.S3Inputs) != 0 {
+		t.Fatalf("adopter's seal request %#v", request)
+	}
+	f.held(t)
+	if chunks, kinds := f.chunks(t), f.kinds(t); len(chunks) != 0 || !slices.Equal(kinds, []string{"claimed"}) {
+		t.Fatalf("before its seal the adopter published %d chunks and statuses %v", len(chunks), kinds)
+	}
+	f.sealFor(t, request, map[string][]byte{credentialName: []byte(testToken)})
+	if status := <-done; status != kgo.AckAccept || f.lastTask(t).Status.State != wire.TaskStateCompleted {
+		t.Fatalf("adopter ended %v; logs:\n%s", status, f.logs.String())
+	}
+	chunks := f.chunks(t)
+	if len(chunks) != 2 || chunks[0].ArtifactUpdate.Artifact.Parts[0].Text != `{"type":"assistant","message":"token `+redacted+`"}` {
+		t.Fatalf("adopter's transcript %+v, want both lines with the run's marker", chunks)
+	}
+	for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
+		var request wire.SealRequest
+		if wire.ParseRecord(record.Value, f.keys(), &request) == nil {
+			continue
+		}
+		if payload := decodedPayload(record.Value); bytes.Contains(payload, []byte(testToken)) || bytes.Contains(payload, []byte(credentialName)) {
+			t.Fatalf("a feed record holds the credential or its name: %s", payload)
+		}
+	}
+	if result := f.lastTask(t).Artifacts[0].Parts[0].Text; result != "used "+redacted {
+		t.Fatalf("result %q, want the credential redacted", result)
+	}
+}
+
+// An adopter whose seal does not come within the request's lifetime stops the job and ends the turn AUTH_REQUIRED,
+// having published none of it.
+func TestAnAdopterWithoutASealEndsAuthRequired(t *testing.T) {
+	f, record := adopting(t)
+	if status := f.execute(t, record, 2); status != kgo.AckAccept || f.lastTask(t).Status.State != wire.TaskStateAuthRequired {
+		t.Fatalf("adopter ended %v; logs:\n%s", status, f.logs.String())
+	}
+	f.adapter.mu.Lock()
+	stops, releases := f.adapter.stops, f.adapter.releases
+	f.adapter.mu.Unlock()
+	if stops != 1 || releases != 1 || len(f.chunks(t)) != 0 {
+		t.Fatalf("stops=%d releases=%d chunks=%d, want the job stopped and released with nothing published", stops, releases, len(f.chunks(t)))
+	}
+	if kinds := f.kinds(t); !slices.Equal(kinds, []string{"claimed", "interrupted"}) {
+		t.Fatalf("statuses %v, want claimed then interrupted", kinds)
+	}
+}
+
+// The held transcript is bounded: the oldest lines go, the log records the gap, and the transcript resumes past it.
+func TestAnAdopterDropsTheOldestHeldLines(t *testing.T) {
+	line := strings.Repeat("x", 1<<20)
+	f := newFixture(t, append(slices.Repeat([]string{line}, 6), `{"type":"result","result":"done","is_error":false}`))
+	f.adapter.job = adapter.JobRunning
+	done := f.executing(t, f.ctx, f.submit(t, f.host, nil), 2)
+	request := f.request(t, 1)
+	f.held(t)
+	f.sealFor(t, request, map[string][]byte{credentialName: []byte(testToken)})
+	if status := <-done; status != kgo.AckAccept {
+		t.Fatalf("adopter ended %v; logs:\n%s", status, f.logs.String())
+	}
+	chunks := f.chunks(t)
+	first := int64(3 * (len(line) + 1))
+	if len(chunks) != 4 || chunks[0].Wherry.Seq != first || !strings.Contains(f.logs.String(), fmt.Sprintf("dropped 3 transcript lines held before the seal; the transcript resumes at offset %d", first)) {
+		t.Fatalf("%d chunks from seq %d; logs:\n%s", len(chunks), chunks[0].Wherry.Seq, f.logs.String())
 	}
 }

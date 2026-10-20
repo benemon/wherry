@@ -427,7 +427,15 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now tim
 		}
 	}
 	if binding.Turn > 1 && previous != nil {
-		record.TaskCredentials, record.VCSHost, record.S3Inputs, record.S3Outputs = previous.TaskCredentials, previous.VCSHost, previous.S3Inputs, previous.S3Outputs
+		record.TaskCredentials, record.VCSHost, record.S3Inputs, record.S3Outputs, record.RedactionKey =
+			previous.TaskCredentials, previous.VCSHost, previous.S3Inputs, previous.S3Outputs, previous.RedactionKey
+	}
+	// Minted here, not at a seal answer, so every answerer of the run reads one key and none writes the record.
+	if len(record.RedactionKey) == 0 {
+		record.RedactionKey = make([]byte, 32)
+		if _, err := rand.Read(record.RedactionKey); err != nil {
+			return err
+		}
 	}
 	if err := h.writeRun(record); err != nil {
 		return err
@@ -520,6 +528,8 @@ type runRecord struct {
 	S3Outputs []string `json:"s3_outputs,omitzero"`
 	// DeadlineMS is the deadline of the turn, when a PUT URL for its S3 outputs expires.
 	DeadlineMS int64 `json:"deadline_ms,omitzero"`
+	// RedactionKey is the run's redaction key, minted when this host first submits a turn of the run.
+	RedactionKey []byte `json:"redaction_key,omitzero"`
 }
 
 func (h *Host) runPath(runID string) (string, bool) {

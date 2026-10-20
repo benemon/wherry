@@ -37,7 +37,7 @@ func testActiveRun(t *testing.T, f fixture, run string, attempt int64) *activeRu
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
 	})
 	task := f.parse(t, record)
-	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: taskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, adapter: f.receiver.adapters[0]}
+	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: taskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, adapter: f.receiver.adapters[0], redactionKey: testRedactionKey}
 }
 
 func TestRunEndingWithoutResultFails(t *testing.T) {
@@ -889,6 +889,7 @@ func TestReceiverRoutesToMatchedAdapter(t *testing.T) {
 
 func TestReceiverRedeliveryAdoptsViaLookup(t *testing.T) {
 	m := newMultiFixture(t)
+	m.answer(t, "cred-cloud")
 	m.cloud.job = adapter.JobRunning
 	if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)

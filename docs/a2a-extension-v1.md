@@ -379,7 +379,7 @@ The `metadata` of a result's `Task` says where the turn ran:
 | `rejected: size changed while read` | the adapter read a length other than the size it listed |
 | `exceeds the S3 object limit` | an S3 output over 5 GiB |
 | `not streamed by the adapter` | the adapter did not stream an S3 output it found |
-| `not uploaded: no upload URL` | the attempt holds no PUT URL for the S3 output: it adopted an earlier attempt's job |
+| `not uploaded: no upload URL` | the attempt holds no PUT URL for the S3 output |
 | `not uploaded: redirected` | the store answered the PUT with a redirect, which the receiver does not follow |
 | `not uploaded: status <code>` | the store answered the PUT with another status than 200 |
 | `not uploaded: request failed`, `not uploaded: invalid request` | the PUT did not complete, or could not be built |
@@ -567,14 +567,23 @@ turn's `claimed` status.
 - `s3_inputs` and `s3_outputs` name the run's S3 inputs and the turn's S3
   outputs, for which the seal is to carry presigned URLs; each is absent
   when empty, and each name appears once in its list. An attempt that
-  adopts an earlier attempt's job asks for nothing.
+  adopts an earlier attempt's job asks for the credentials and the S3
+  outputs, not the S3 inputs, which the job has fetched. A GET presigned
+  again differs from the first attempt's, so an adopter cannot redact the
+  first attempt's S3 input URLs, and an adapter never exposes its fetch URLs
+  to the job.
 - The four lists are not all empty. A turn needs a seal when its adapter
   delivers a credential, or the run has task credentials, S3 inputs or S3
-  outputs.
+  outputs; an adopter, when it has credentials or S3 outputs.
 - `expiry_ms` is 5 minutes after the request. The receiver holds the claim
   until a seal opens, a cancel of the turn arrives, or `expiry_ms` passes.
   At expiry it interrupts the turn `TASK_STATE_AUTH_REQUIRED` (see [Turns
   and continuations](#turns-and-continuations)).
+- An adopter publishes nothing of the job until its seal opens. It holds
+  the job's lines, at most 4 MiB, dropping the oldest, and logs how many it
+  dropped and the offset its transcript resumes at; the first chunk's `seq`
+  shows the gap. At expiry it stops the job before it interrupts the turn,
+  and the held lines are never published.
 - The private key lives only in the receiver's memory and is gone once the
   wait ends. A redelivered or adopted attempt makes a new key and a new
   request; a seal answering an earlier request does not open for it.
@@ -600,6 +609,15 @@ all of these hold:
 7. Every name in `s3_inputs` and `s3_outputs` is an S3 input or S3 output
    the run's first turn declares, the pool's terms have `storage`, and the
    host's configuration has a storage credential.
+
+The host makes the run's redaction key, 32 random bytes, when it records the
+run's first turn, or the first turn it continues of a run another host
+submitted. It writes the key to its record of the run, readable by its owner
+alone, before it publishes the turn, and answers never write it. Every seal for
+the run carries that key: every turn, attempt and adoption. A host never makes
+a second key for a run, since the markers already published would stop mapping
+to names: for a record whose key is not 32 bytes it refuses every request and
+logs the record's path.
 
 For each S3 input the host presigns a GET of
 `wherry/<tenant>/<run>/inputs/<name>` for 15 minutes, and for each S3 output a
@@ -628,7 +646,9 @@ nothing for any other request.
 Check 4 is the only trace a forged claim leaves. The broker's share-group
 claim is invisible to hosts, so a live pool member can sign a `claimed`
 status it never received. A turn that a second receiver claims, by
-adoption or by forgery, gets no seal and ends `TASK_STATE_AUTH_REQUIRED`.
+adoption or by forgery, gets no seal and ends `TASK_STATE_AUTH_REQUIRED`;
+an adopter stops the job first. A receiver adopting its own earlier
+attempt's job is sealed as usual.
 
 ## Seal
 
@@ -648,19 +668,21 @@ request's `key`.
   binding members again, and `values`, mapping each name in `credentials`
   and `task_credentials` to its value, `s3-inputs/<name>` for each S3 input
   to its presigned GET URL, and `s3-outputs/<name>` for each S3 output to
-  its presigned PUT URL, each as padded standard base64. Presigned URLs
-  travel nowhere else on the broker.
+  its presigned PUT URL, each as padded standard base64, and
+  `redaction_key`, the run's 32-byte redaction key as padded standard
+  base64. Presigned URLs travel nowhere else on the broker.
 - A seal is at most 64 KiB in compact form. A host refuses to build a larger
   one and logs the credential names.
 
 The receiver reads the host's topic from its end at the time of the request. It
 opens a seal only when the header's binding equals its request, with `key_id`
 the thumbprint of its own key, `expiry_ms` has not passed, the plaintext's
-`binding` equals the header's, and `values` holds exactly the named credentials
-and URLs. It checks for a cancel, its shutdown, the run deadline and the
-request's expiry before it takes a seal, so a turn stopped while its seal
-arrives is never dispatched. It passes the values to the adapter in Dispatch. It
-logs a seal that does not open by run, turn and attempt, never the reason.
+`binding` equals the header's, `values` holds exactly the named credentials
+and URLs, and `redaction_key` is 32 bytes. It checks for a cancel, its
+shutdown, the run deadline and the request's expiry before it takes a seal,
+so a turn stopped while its seal arrives is never dispatched. It passes the
+values to the adapter in Dispatch. It logs a seal that does not open by run,
+turn and attempt, never the reason.
 
 Before it uses a URL, the receiver checks it against the pool's
 `storage`: its scheme is `https`, its host and port, 443 when absent, are
@@ -672,34 +694,39 @@ task is not returned to the pool.
 
 Before it signs any transcript chunk, output chunk, result text or status
 message of the attempt, the receiver replaces every occurrence of each
-credential value it delivered, task credentials and presigned URLs
-included, and of each URL's `X-Amz-Signature` value alone, with
-`[redacted]`. The marker names no credential, so a replacement cannot
-publish another credential's value; when a form of a delivered value occurs
-within `[redacted]`, the marker for the attempt is `[*]` instead. The data
-passes through the replacement in pieces of 64 KiB. It
-replaces two forms of each value: its bytes without trailing CR and LF,
-since a credential file usually ends in a newline that transcripts and
-outputs drop, and those bytes escaped as a JSON string, as a transcript
-line carries them. The value's own bytes contain the first form, so its
-redaction leaves only the line ending. It redacts an output file whole
-before it splits it into chunks and computes its hash and size. In result
-metadata it replaces within JSON string values only, so the metadata stays
-valid. The marker can be longer than a value, so the limits hold for
-the redacted bytes: an output whose redacted form is over the pool's
-`output_limit`, or would take the turn's outputs over it, is listed as
-`exceeds output limit`; a transcript line whose redacted form is over
-512 KiB becomes an `unstored:oversize` part with that form's hash and size;
-and a result text, metadata string or status text whose redacted form is
-over 64 KiB is replaced by `[redacted text over 65536 bytes]`. A value
-shorter than 8 bytes once trimmed is not redacted; the
-receiver logs `credential <name> too short to redact` once for the attempt.
-A value in any other encoding, such as base64, is not replaced, and an
-adopted attempt delivered nothing to redact. Each form is replaced once,
-longest first, and the marker can join the bytes beside it into a value
-that was not there before: when a value starts with the marker's tail,
-such as `d]` for `[redacted]`, and the rest of it follows a replaced
-value, the published text holds that value whole.
+credential value its seal delivered, task credentials and presigned URLs
+included, and of each URL's `X-Amz-Signature` value alone, with the value's
+marker: `[redacted:`, 16 base64url characters and `]`, 27 bytes. The characters
+are the first 96 bits of the HMAC-SHA256, under the run's redaction key, of
+`wherry-redaction-v1` followed by the value's name: the credential's name, or
+`s3-inputs/<name>` or `s3-outputs/<name>` for a URL and its signature. Every
+form of a value takes the same marker, and every attempt and turn of the run the
+same markers. No marker maps to a credential name without the run's redaction
+key. Seal requests and `interrupted` statuses name credentials, by design. When
+a form of any delivered value occurs within a marker, that marker is `[*]`
+instead, so a replacement cannot publish another value. The data passes through
+the replacement in pieces of 64 KiB. It replaces two forms of each value: its
+bytes without trailing CR and LF, since a credential file usually ends in a
+newline that transcripts and outputs drop, and those bytes escaped as a JSON
+string, as a transcript line carries them. The value's own bytes contain the
+first form, so its redaction leaves only the line ending. It redacts an output
+file whole before it splits it into chunks and computes its hash and size. In
+result metadata it replaces within JSON string values only, so the metadata
+stays valid. The marker can be longer than a value, so the limits hold for the
+redacted bytes: an output whose redacted form is over the pool's `output_limit`,
+or would take the turn's outputs over it, is listed as `exceeds output limit`; a
+transcript line whose redacted form is over 512 KiB becomes an
+`unstored:oversize` part with that form's hash and size; and a result text,
+metadata string or status text whose redacted form is over 64 KiB is replaced by
+`[redacted text over 65536 bytes]`. A result whose agent fields are 16 KiB of
+8-byte values, each replaced by its 27-byte marker, still fits a default
+producer batch. A value shorter than 8 bytes once trimmed is not redacted; the
+receiver logs `credential <name> too short to redact` once for the attempt. A
+value in any other encoding, such as base64, is not replaced. An adopted attempt
+redacts the values its own seal delivers. Each form is replaced once, longest
+first, and a marker can join the bytes beside it into a value that was not there
+before: when a value starts with a marker's tail, such as `]`, and the rest of
+it follows a replaced value, the published text holds that value whole.
 
 ## Admin records
 
@@ -934,14 +961,15 @@ deletes them, and never leaves the host. Receivers and adapters get only
 the presigned URLs in the [seal](#seal), checked against the pool's
 storage before use.
 
-- **In.** The host uploads each S3 input before it publishes the run and
-  lists it in `s3_inputs`. The adapter fetches it into `WHERRY_INPUT_DIR`
-  from its presigned GET before the agent starts, and verifies its size and
-  SHA-256. A fetch that fails or does not verify ends the job before the
-  agent starts, and the receiver ends the turn `TASK_STATE_FAILED` with
-  `an S3 input was not fetched, or did not match its size and SHA-256`,
-  without returning the task to the pool. S3 inputs do not count against
-  `inline_limit`.
+- **In.** The host uploads each S3 input before it publishes the run and lists
+  it in `s3_inputs`. The adapter fetches it into `WHERRY_INPUT_DIR` from its
+  presigned GET before the agent starts, and verifies its size and SHA-256. The
+  adapter never exposes the GET URL to the job: an adopter's seal carries no GET
+  URL, so an adopter cannot redact it. A fetch that fails or does not verify
+  ends the job before the agent starts, and the receiver ends the turn
+  `TASK_STATE_FAILED` with `an S3 input was not fetched, or did not match its
+  size and SHA-256`, without returning the task to the pool. S3 inputs do not
+  count against `inline_limit`.
 - **Out.** After the agent's result line and the job's stop, the adapter
   streams each S3 output it finds as it collects, and the receiver sends it
   to its presigned PUT as it reads it, with the size the adapter listed as
@@ -951,8 +979,8 @@ storage before use.
   expects. Collection waits until the turn's deadline, when the PUT URLs
   expire, if that is later than 2 minutes. The receiver does not redact an
   S3 output, which goes to the host's own bucket and never to the feed. An
-  attempt that adopted an earlier attempt's job holds no PUT URL, and lists
-  its S3 outputs as `not uploaded: no upload URL`.
+  attempt that adopted an earlier attempt's job uploads to the PUT URLs its
+  own seal carries.
 - **Back.** The host downloads each S3 output in the result's
   `s3_outputs` that the run declares, at the key for its name and turn, and
   keeps it only when it matches the listed size and SHA-256. Once the run's

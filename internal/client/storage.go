@@ -162,7 +162,7 @@ func (h *Host) checkSealSize(ctx context.Context, store *minio.Client, bucket, t
 	_, err = signed.Seal(signed.SealBinding{
 		Tenant: tenant, Pool: placeholder, Receiver: placeholder, KeyID: signed.SealKeyID(&key.PublicKey), Run: run, Turn: 1, Attempt: 1 << 31,
 		Credentials: []string{}, TaskCredentials: names, S3Inputs: inputs, S3Outputs: outputs, ExpiryMS: deadline.UnixMilli(),
-	}, &key.PublicKey, values)
+	}, &key.PublicKey, signed.SealValues{Values: values, RedactionKey: make([]byte, 32)})
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}

@@ -258,9 +258,12 @@ func TestS3URLsAreRedacted(t *testing.T) {
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
-	for _, chunk := range f.chunks(t) {
-		if text := chunk.ArtifactUpdate.Artifact.Parts[0].Text; strings.Contains(text, s3Signature) || !strings.Contains(text, "[redacted]") {
-			t.Fatalf("transcript line %q", text)
+	// The URL and its signature alone take a URL's marker; the fixture signs both URLs alike, so the signature is a form
+	// of either.
+	input, output := signed.RedactionMarker(testRedactionKey, signed.S3InputValue("dataset.bin")), signed.RedactionMarker(testRedactionKey, signed.S3OutputValue("report.pdf"))
+	for i, chunk := range f.chunks(t) {
+		if text := chunk.ArtifactUpdate.Artifact.Parts[0].Text; strings.Contains(text, s3Signature) || !strings.Contains(text, input) && (i == 0 || !strings.Contains(text, output)) {
+			t.Fatalf("transcript line %q, want a URL's marker", text)
 		}
 	}
 	if result := f.lastTask(t).Artifacts[0].Parts[0].Text; strings.Contains(result, "X-Amz-Signature") || strings.Contains(result, s3Signature) {
@@ -398,6 +401,30 @@ func TestS3FetchFailureFailsTheTurn(t *testing.T) {
 	}
 	if status := f.lastTask(t).Status; status.State != wire.TaskStateFailed || status.Message.Parts[0].Text != "an S3 input was not fetched, or did not match its size and SHA-256" {
 		t.Fatalf("status %+v", status)
+	}
+}
+
+// An adopter's seal carries fresh PUT URLs for the turn's S3 outputs and none for its inputs, which the job fetched.
+func TestAnAdoptedRunReturnsAnS3Output(t *testing.T) {
+	s := newStore(t)
+	f := s3Fixture(t, s, resultStream, []adapter.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
+	f.adapter.job = adapter.JobRunning
+	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 2)
+	request := f.sealS3(t, func(input, output string) (string, string) {
+		return "", presigned(s.endpoint(), wire.S3OutputKey(testTenant, "run-a", 1, output))
+	})
+	if len(request.S3Inputs) != 0 || !slices.Equal(request.S3Outputs, []string{"report.pdf"}) {
+		t.Fatalf("adopter asks for inputs %v and outputs %v", request.S3Inputs, request.S3Outputs)
+	}
+	if status := <-done; status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	key := wire.S3OutputKey(testTenant, "run-a", 1, "report.pdf")
+	if data, ok := s.put("/" + s3Bucket + "/" + key); !ok || string(data) != "report" {
+		t.Fatalf("store holds %q, %v for the adopted run's output", data, ok)
+	}
+	if listed := manifest(t, f.lastTask(t)); !slices.Equal(listed.S3Outputs, []wire.ReturnedOutput{{Name: "report.pdf", SHA256: sha([]byte("report")), Size: 6, Key: key}}) {
+		t.Fatalf("result lists S3 outputs %+v, not returned %+v", listed.S3Outputs, listed.NotReturned)
 	}
 }
 

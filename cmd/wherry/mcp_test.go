@@ -465,8 +465,8 @@ func TestMCPServerAnswersSealRequests(t *testing.T) {
 		}
 		for _, record := range records {
 			if values, err := signed.OpenSeal(record.Value, binding, key, time.Now()); err == nil {
-				if string(values["model"]) != credentialText {
-					t.Fatalf("sealed %q, want the configured credential", values["model"])
+				if string(values.Values["model"]) != credentialText {
+					t.Fatalf("sealed %q, want the configured credential", values.Values["model"])
 				}
 				return
 			}
