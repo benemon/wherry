@@ -260,8 +260,9 @@ The [Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/mai
 cover the `config` section.
 
 A Codex adapter declares `output: codex`, so the receiver reads the
-`codex exec --json` format. Codex reads its API key from `OPENAI_API_KEY`,
-so the adapter sets `credential_env` to that name. Its platform,
+`codex exec --json` format. `codex exec` reads its API key from
+`CODEX_API_KEY` and ignores `OPENAI_API_KEY`, so the adapter sets
+`credential_env` to `CODEX_API_KEY`. Its platform,
 `nomad-codex` here, is the `nomad` platform without `credential_env`, since
 a key set in both is an error. The task sends the prompt file to
 `codex exec` on standard input, and `--sandbox` takes a mode the platform
@@ -278,7 +279,7 @@ labels:
   isolation: host
 config:
   node_pool: codex
-  credential_env: OPENAI_API_KEY
+  credential_env: CODEX_API_KEY
   runtime:
     driver: exec
     config:
