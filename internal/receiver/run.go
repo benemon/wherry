@@ -8,11 +8,13 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"reflect"
@@ -34,17 +36,12 @@ import (
 )
 
 const (
-	maxLine        = 512 << 10
-	maxAgentResult = 16 << 10
 	maxRunDuration = time.Hour // receiver cap on any task's run deadline (ADR-0013)
 	readTimeout    = 30 * time.Second
 	maxHandle      = 4 << 10
 	budgetReason   = "delivery budget exhausted"
 	minRedact      = 8
-	// outputLimit bounds the bytes of a turn's outputs and maxOutputs the entries beneath its outputs directory,
-	// until the broker's limits set them.
-	outputLimit = 8 << 20
-	maxOutputs  = 256
+	redactPiece    = 64 << 10
 )
 
 // Intervals are variables so tests can shorten them; renew stays below the 30 s default lock.
@@ -226,6 +223,9 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	placement := task.Wherry.Placement
 	if !slices.ContainsFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == placement.Agent }) {
 		return reject("agent is outside the pool terms")
+	}
+	if err := wire.ValidateInputs(task.Message.Parts, terms.InlineLimit); err != nil {
+		return reject(err.Error())
 	}
 	adapter, offered := r.offer(placement)
 	if !offered {
@@ -958,8 +958,10 @@ type activeRun struct {
 	// labels is set when this attempt dispatched the job; an adopted job's adapter labels are unknown.
 	labels map[string]string
 	job    string
-	// redactions are the forms of the credential values this attempt passed to its adapter, longest first.
-	redactions []redaction
+	// redactions are the forms of the credential values this attempt passed to its adapter, longest first, and marker
+	// what replaces each of them.
+	redactions [][]byte
+	marker     []byte
 	// expected are the outputs the run declares; outputs are the chunks of those the turn returns, and returned and
 	// unreturned list them for the result.
 	expected   []wire.ExpectedOutput
@@ -968,16 +970,12 @@ type activeRun struct {
 	unreturned []wire.UnreturnedOutput
 }
 
-// redaction is one form of a delivered credential value and what replaces it.
-type redaction struct {
-	value, replacement []byte
-}
-
 // deliver keeps, for each delivered credential, the forms it is published in: the value without trailing CR and LF,
 // as credential files written by echo or a CLI end in a newline that transcripts and outputs drop, and that form
 // escaped as a JSON string, as a transcript line carries it. Each untrimmed form holds one of these, so its redaction
 // leaves only the line ending. A value shorter than minRedact once trimmed matches ordinary text and JSON literals, so
-// it is logged and left.
+// it is logged and left. The marker names no credential, so it cannot carry or rebuild one, and it changes when a form
+// occurs within it.
 func (run *activeRun) deliver(values map[string][]byte) {
 	for name, value := range values {
 		trimmed := bytes.TrimRight(value, "\r\n")
@@ -985,26 +983,107 @@ func (run *activeRun) deliver(values map[string][]byte) {
 			run.receiver.logger.Printf("run %s: credential %s too short to redact", run.task.Wherry.Run, name)
 			continue
 		}
-		replacement := "[redacted:" + name + "]"
-		// The replacement must not carry the value it replaces.
-		if strings.Contains(name, string(trimmed)) {
-			replacement = "[redacted]"
-		}
 		escaped, _ := jsontext.AppendQuote(nil, trimmed) // invalid UTF-8 is replaced, and that form never appears in a transcript
-		run.redactions = append(run.redactions, redaction{value: trimmed, replacement: []byte(replacement)})
+		run.redactions = append(run.redactions, trimmed)
 		if escaped = escaped[1 : len(escaped)-1]; !bytes.Equal(escaped, trimmed) {
-			run.redactions = append(run.redactions, redaction{value: escaped, replacement: []byte(replacement)})
+			run.redactions = append(run.redactions, escaped)
 		}
 	}
-	slices.SortFunc(run.redactions, func(a, b redaction) int { return len(b.value) - len(a.value) })
+	slices.SortFunc(run.redactions, func(a, b []byte) int { return len(b) - len(a) })
+	run.marker = []byte("[redacted]")
+	// No form of minRedact bytes fits within the fallback.
+	if slices.ContainsFunc(run.redactions, func(form []byte) bool { return bytes.Contains(run.marker, form) }) {
+		run.marker = []byte("[*]")
+	}
 }
 
-// redact replaces each form of each delivered credential value in data with its replacement.
-func (run *activeRun) redact(data []byte) []byte {
-	for _, form := range run.redactions {
-		data = bytes.ReplaceAll(data, form.value, form.replacement)
+// redact replaces each form of each delivered credential value in data with the marker, in order, as bytes.ReplaceAll
+// would; the result is held only while it fits limit.
+func (run *activeRun) redact(data []byte, limit int64) *redactedForm {
+	out := &redactedForm{limit: limit, sum: sha256.New()}
+	run.redactTo(out, data)
+	return out
+}
+
+// redactTo writes data redacted to out. The data passes through in pieces of redactPiece bytes, so no write, and
+// nothing a form's replacer holds, is larger than a piece and the forms.
+func (run *activeRun) redactTo(out io.Writer, data []byte) {
+	w := out
+	for i := len(run.redactions) - 1; i >= 0; i-- {
+		w = &replacer{value: run.redactions[i], marker: run.marker, next: w}
 	}
-	return data
+	for piece := range slices.Chunk(data, redactPiece) {
+		w.Write(piece)
+	}
+	if first, ok := w.(*replacer); ok {
+		first.flush()
+	}
+}
+
+// redactText is redact for receiver and agent text, which becomes a marker when its redacted form passes wire.MaxText.
+func (run *activeRun) redactText(text string) string {
+	form := run.redact([]byte(text), wire.MaxText)
+	if form.over() {
+		return "[redacted text over " + strconv.Itoa(wire.MaxText) + " bytes]"
+	}
+	return string(form.data)
+}
+
+// redactedForm is the redacted form of some bytes: the bytes while they fit limit, and the size and SHA-256 of all of
+// them.
+type redactedForm struct {
+	limit int64
+	data  []byte
+	size  int64
+	sum   hash.Hash
+}
+
+func (r *redactedForm) Write(p []byte) (int, error) {
+	r.size += int64(len(p))
+	r.sum.Write(p)
+	if r.over() {
+		r.data = nil
+	} else {
+		r.data = append(r.data, p...)
+	}
+	return len(p), nil
+}
+
+func (r *redactedForm) over() bool { return r.size > r.limit }
+
+func (r *redactedForm) hash() string { return hex.EncodeToString(r.sum.Sum(nil)) }
+
+// replacer writes on to next what it is written with each occurrence of value replaced by marker, holding back only
+// the bytes a match could still begin in.
+type replacer struct {
+	value, marker []byte
+	next          io.Writer
+	held          []byte
+}
+
+func (w *replacer) Write(p []byte) (int, error) {
+	w.held = append(w.held, p...)
+	for {
+		i := bytes.Index(w.held, w.value)
+		if i < 0 {
+			break
+		}
+		w.next.Write(w.held[:i])
+		w.next.Write(w.marker)
+		w.held = w.held[i+len(w.value):]
+	}
+	cut := max(len(w.held)-len(w.value)+1, 0)
+	w.next.Write(w.held[:cut])
+	w.held = slices.Clone(w.held[cut:])
+	return len(p), nil
+}
+
+func (w *replacer) flush() {
+	w.next.Write(w.held)
+	w.held = nil
+	if next, ok := w.next.(*replacer); ok {
+		next.flush()
+	}
 }
 
 // redactJSON redacts within the string values of an encoded JSON value, leaving names, literals and numbers, so the
@@ -1024,7 +1103,7 @@ func (run *activeRun) redactJSON(value jsontext.Value) jsontext.Value {
 			return nil
 		}
 		if token.Kind() == '"' && !name {
-			token = jsontext.String(string(run.redact([]byte(token.String()))))
+			token = jsontext.String(run.redactText(token.String()))
 		}
 		if err := encoder.WriteToken(token); err != nil {
 			return nil
@@ -1204,7 +1283,9 @@ func (run *activeRun) finish(ctx context.Context, handle adapter.Handle, pending
 // collect reads the outputs of a stopped job, redacts them and keeps their chunks and the result's lists of what the
 // turn returned and did not. Every expected output is listed as one or the other.
 func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stopped bool) {
-	collected, err := run.collected(ctx, handle, stopped)
+	state, _, _ := run.receiver.snapshot()
+	limit := state.Pools[run.receiver.config.Pool].OutputLimit
+	collected, err := run.collected(ctx, handle, stopped, limit)
 	if err != nil {
 		run.receiver.logger.Printf("run %s: outputs not collected: %v", run.task.Wherry.Run, err)
 		for _, output := range run.expected {
@@ -1224,20 +1305,26 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 			name = name[:min(len(name), 256)]
 		case output.Mode.Type() != 0:
 			reason = "rejected: " + fileType(output.Mode)
-		case output.Data == nil || total+output.Size > outputLimit:
+		case output.Data == nil || total+output.Size > limit:
 			reason = "exceeds output limit"
 		case int64(len(output.Data)) != output.Size:
 			reason = "rejected: size changed while read"
+		}
+		var form *redactedForm
+		if reason == "" {
+			// Redaction can lengthen an output, so the limit holds for its redacted form too.
+			if form = run.redact(output.Data, limit-total); form.over() {
+				reason = "exceeds output limit"
+			}
 		}
 		listed[name] = true
 		if reason != "" {
 			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: name, Size: max(output.Size, 0), Reason: reason})
 			continue
 		}
-		total += output.Size
-		data := run.redact(output.Data)
-		run.outputs = append(run.outputs, run.outputChunks(name, data)...)
-		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: taskHash(data), Size: int64(len(data))})
+		total += form.size
+		run.outputs = append(run.outputs, run.outputChunks(name, form.data)...)
+		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: form.hash(), Size: form.size})
 	}
 	for _, output := range run.expected {
 		if !listed[output.Name] {
@@ -1246,9 +1333,10 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 	}
 }
 
-// collected runs the adapter's Collect under collectTimeout. The adapter bounds what it reads by the limits; the
-// count and the total are checked again here, so a plugin that ignores them cannot grow the run's memory.
-func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stopped bool) ([]adapter.Output, error) {
+// collected runs the adapter's Collect under collectTimeout, with limit bounding each output and their total. The
+// adapter bounds what it reads by the limits; the count and the total are checked again here, so a plugin that
+// ignores them cannot grow the run's memory.
+func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stopped bool, limit int64) ([]adapter.Output, error) {
 	if !stopped {
 		return nil, errors.New("the job was not stopped")
 	}
@@ -1258,14 +1346,14 @@ func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stop
 	ended := make(chan error, 1)
 	go func() {
 		defer close(outputs)
-		ended <- run.adapter.Adapter.Collect(ctx, handle, adapter.Limits{Files: maxOutputs, FileBytes: outputLimit, TotalBytes: outputLimit}, outputs)
+		ended <- run.adapter.Adapter.Collect(ctx, handle, adapter.Limits{Files: wire.MaxOutputs, FileBytes: limit, TotalBytes: limit}, outputs)
 	}()
 	var collected []adapter.Output
-	var total int
+	var total int64
 	var over error
 	for output := range outputs {
-		total += len(output.Data)
-		if over == nil && (len(collected) == maxOutputs || total > outputLimit) {
+		total += int64(len(output.Data))
+		if over == nil && (len(collected) == wire.MaxOutputs || total > limit) {
 			over = errors.New("the adapter returned more than the limits")
 			cancel()
 		}
@@ -1334,7 +1422,7 @@ func (run *activeRun) status(kind string, status wire.TaskStatus, offset *int64,
 		message := *status.Message
 		message.Parts = slices.Clone(message.Parts)
 		for i := range message.Parts {
-			message.Parts[i].Text = string(run.redact([]byte(message.Parts[i].Text)))
+			message.Parts[i].Text = run.redactText(message.Parts[i].Text)
 		}
 		status.Message = &message
 	}
@@ -1411,14 +1499,16 @@ func taskStatus(state wire.TaskState, reason string) wire.TaskStatus {
 func (run *activeRun) chunks(lines []adapter.Line, last bool) []*kgo.Record {
 	records := make([]*kgo.Record, 0, len(lines))
 	for i, line := range lines {
-		line.Data = run.redact(line.Data)
+		form := run.redact(line.Data, wire.MaxLine)
+		line.Data = form.data
 		part := wire.Part{Text: string(line.Data), MediaType: "application/x-ndjson"}
 		switch {
-		case len(line.Data) > maxLine:
-			metadata, _ := json.Marshal(wire.PointerMetadata{SHA256: taskHash(line.Data), Size: int64(len(line.Data))}) // a string and an integer always encode
+		case form.over():
+			metadata, _ := json.Marshal(wire.PointerMetadata{SHA256: form.hash(), Size: form.size}) // a string and an integer always encode
 			part = wire.Part{URL: "unstored:oversize", MediaType: part.MediaType, Metadata: metadata}
-		case len(line.Data) == 0 || !utf8.Valid(line.Data):
-			// A text part holds only non-empty UTF-8; other lines travel as exact bytes.
+		case len(line.Data) == 0 || !utf8.Valid(line.Data) || escapedLength(line.Data) > base64.StdEncoding.EncodedLen(len(line.Data)):
+			// A text part holds only non-empty UTF-8, and no more than a raw part would once JSON-escaped, so a chunk
+			// stays within the record a line of wire.MaxLine raw bytes makes; other lines travel as exact bytes.
 			part = wire.Part{Raw: append(wire.StdBytes{}, line.Data...), MediaType: part.MediaType}
 		}
 		chunk := &wire.Chunk{
@@ -1436,20 +1526,15 @@ func (run *activeRun) chunks(lines []adapter.Line, last bool) []*kgo.Record {
 	return records
 }
 
-// placement is the result's metadata: where its last turn ran, and the outputs it returned and did not.
-type placement struct {
-	ReceiverID  string                  `json:"receiver_id"`
-	Pool        string                  `json:"pool"`
-	Adapter     string                  `json:"adapter,omitempty"`
-	Labels      map[string]string       `json:"labels,omitempty"`
-	Job         string                  `json:"job,omitempty"`
-	Outputs     []wire.ReturnedOutput   `json:"outputs,omitempty"`
-	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty"`
+// escapedLength is the length of valid UTF-8 text as a JSON string's contents.
+func escapedLength(text []byte) int {
+	quoted, _ := jsontext.AppendQuote(nil, text)
+	return len(quoted) - 2
 }
 
 // result builds the turn's final task for the feed; a result that is JSON travels as a data part.
 func (run *activeRun) result(status wire.TaskStatus, result string, resultMetadata jsontext.Value) *kgo.Record {
-	result = string(run.redact([]byte(result)))
+	result = run.redactText(result)
 	if resultMetadata != nil {
 		resultMetadata = run.redactJSON(resultMetadata)
 	}
@@ -1459,20 +1544,46 @@ func (run *activeRun) result(status wire.TaskStatus, result string, resultMetada
 		part.Text = string(status.State)
 	case jsontext.Value(result).IsValid():
 		part = wire.Part{Data: jsontext.Value(result), MediaType: "application/json"}
+	case !utf8.ValidString(result) || escapedLength([]byte(result)) > base64.StdEncoding.EncodedLen(len(result)):
+		// As for a transcript line, text travels raw when escaping it would make it longer than base64 does.
+		part = wire.Part{Raw: wire.StdBytes(result), MediaType: "text/plain"}
 	}
-	metadata, _ := json.Marshal(placement{ // strings, numbers and a string map always encode
+	metadata, _ := json.Marshal(wire.ResultMetadata{ // strings, numbers and a string map always encode
 		ReceiverID: run.receiver.id, Pool: run.receiver.config.Pool, Adapter: run.adapter.Name, Labels: run.labels, Job: run.job,
 		Outputs: run.returned, NotReturned: run.unreturned,
 	})
 	return run.feed(&wire.Result{
 		Task: wire.Task{
 			ID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run, Status: status,
-			History:   run.history,
+			// Earlier turns are on the feed in their own results.
+			History:   inputPointers(run.history[len(run.history)-1:]),
 			Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{part}, Metadata: resultMetadata, Extensions: []string{wire.ExtensionURI}}},
 			Metadata:  metadata,
 		},
 		Wherry: wire.ResultBinding{ReceiverBinding: run.receiver.binding(run.task, run.attempt), TaskHash: run.taskHash},
 	})
+}
+
+// inputPointers is history with each raw and data part replaced by an unstored:input part with its filename, media
+// type, size and SHA-256: the inputs already travelled once, and carrying them again could put the result past the
+// record limit.
+func inputPointers(history []wire.Message) []wire.Message {
+	stripped := slices.Clone(history)
+	for i := range stripped {
+		stripped[i].Parts = slices.Clone(stripped[i].Parts)
+		for j, part := range stripped[i].Parts {
+			content := []byte(part.Raw)
+			if part.Data != nil {
+				content = part.Data
+			}
+			if content == nil {
+				continue
+			}
+			metadata, _ := json.Marshal(wire.PointerMetadata{SHA256: taskHash(content), Size: int64(len(content))}) // a string and an integer always encode
+			stripped[i].Parts[j] = wire.Part{URL: "unstored:input", Filename: part.Filename, MediaType: part.MediaType, Metadata: metadata}
+		}
+	}
+	return stripped
 }
 
 // cancelInterrupted ends a cancelled run that waits interrupted. No member holds it, so every member
@@ -1569,7 +1680,7 @@ func resultLine(data []byte) (agentResult, bool) {
 }
 
 // agentResultMetadata passes the agent's result record through, less the result member the
-// artifact already holds; a record that is not an I-JSON object or exceeds maxAgentResult is dropped.
+// artifact already holds; a record that is not an I-JSON object or exceeds wire.MaxAgentResult is dropped.
 func agentResultMetadata(data []byte) jsontext.Value {
 	record := jsontext.Value(data)
 	var members map[string]jsontext.Value
@@ -1578,7 +1689,7 @@ func agentResultMetadata(data []byte) jsontext.Value {
 	}
 	delete(members, "result")
 	rest, err := json.Marshal(members)
-	if err != nil || len(rest) > maxAgentResult {
+	if err != nil || len(rest) > wire.MaxAgentResult {
 		return nil
 	}
 	metadata, _ := json.Marshal(map[string]jsontext.Value{"agent_result": rest}) // a valid object always encodes

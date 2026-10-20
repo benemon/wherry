@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -219,14 +220,22 @@ func TestRecordValidation(t *testing.T) {
 			value.Wherry.Outputs[0].Name = "out/../../x"
 			return value
 		},
+		"submission credential name over 32 characters": func(r map[string]Record) Record {
+			value := r["submission with credentials and outputs"].(*Submission)
+			value.Wherry.Credentials[0].Name = strings.Repeat("c", 33)
+			return value
+		},
+		"submission expecting over 256 outputs": func(r map[string]Record) Record {
+			value := r["submission with credentials and outputs"].(*Submission)
+			value.Wherry.Outputs = nil
+			for i := range MaxOutputs + 1 {
+				value.Wherry.Outputs = append(value.Wherry.Outputs, ExpectedOutput{Name: fmt.Sprintf("o%d", i)})
+			}
+			return value
+		},
 		"submission output absolute": func(r map[string]Record) Record {
 			value := r["submission with credentials and outputs"].(*Submission)
 			value.Wherry.Outputs[0].Name = "/etc/x"
-			return value
-		},
-		"submission inputs over the limit": func(r map[string]Record) Record {
-			value := r["submission"].(*Submission)
-			value.Message.Parts = append(value.Message.Parts, Part{Raw: make(StdBytes, InlineLimit/2+1), Filename: "a"}, Part{Raw: make(StdBytes, InlineLimit/2), Filename: "b"})
 			return value
 		},
 		"output named with a dot segment": func(r map[string]Record) Record {
@@ -276,6 +285,43 @@ func TestRecordValidation(t *testing.T) {
 	}
 }
 
+// The inline limit is the pool's, so a submission of any size signs and admission applies the limit.
+func TestValidateInputsAppliesTheLimit(t *testing.T) {
+	parts := []Part{{Text: "hello"}, {Raw: make(StdBytes, 60), Filename: "a"}, {Data: []byte(`"` + strings.Repeat("x", 38) + `"`), Filename: "b"}}
+	if err := ValidateInputs(parts, 100); err != nil {
+		t.Fatalf("inputs at the limit: %v", err)
+	}
+	if err := ValidateInputs(parts, 99); err == nil || err.Error() != "inline inputs are 100 bytes, over the 99-byte limit" {
+		t.Fatalf("inputs over the limit: %v", err)
+	}
+	value := testRecords()["submission"].(*Submission)
+	value.Message.Parts = append(value.Message.Parts, Part{Raw: make(StdBytes, 1<<20), Filename: "a"})
+	keys, host, _ := testKeys(t)
+	encoded, err := SignRecord(value, host)
+	if err == nil {
+		err = ParseRecord(encoded, keys, &Submission{})
+	}
+	if err != nil {
+		t.Fatalf("submission past the default limit: %v", err)
+	}
+}
+
+func TestMessagePartsAreBounded(t *testing.T) {
+	_, host, _ := testKeys(t)
+	value := testRecords()["submission"].(*Submission)
+	value.Message.Parts = make([]Part, MaxParts)
+	for i := range value.Message.Parts {
+		value.Message.Parts[i] = Part{Text: "p"}
+	}
+	if _, err := SignRecord(value, host); err != nil {
+		t.Fatalf("%d parts: %v", MaxParts, err)
+	}
+	value.Message.Parts = append(value.Message.Parts, Part{Text: "p"})
+	if _, err := SignRecord(value, host); err == nil || err.Error() != "a message has at most 256 parts" {
+		t.Fatalf("%d parts: %v", MaxParts+1, err)
+	}
+}
+
 func TestRecordMustNameItsSigner(t *testing.T) {
 	keys, _, receiver := testKeys(t)
 	submission := testRecords()["submission"].(*Submission)
@@ -322,7 +368,7 @@ func TestFileNames(t *testing.T) {
 	}
 	for name, valid := range map[string]bool{
 		"report.md": true, "a/b/c.txt": true, "": false, "/a": false, "a/": false, "a//b": false, "a/./b": false, "a/../b": false, "a/.git/x": false,
-		strings.Repeat("a/", 2048) + "a": false,
+		strings.Repeat("a/", 255) + "aa": true, strings.Repeat("a/", 256) + "a": false,
 	} {
 		if ValidOutputName(name) != valid {
 			t.Errorf("ValidOutputName(%q) = %v", name, !valid)

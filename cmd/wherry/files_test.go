@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/wire"
 )
@@ -29,7 +30,7 @@ func TestSubmitFileFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	large := filepath.Join(t.TempDir(), "large.bin")
-	if err := os.WriteFile(large, make([]byte, wire.InlineLimit+1), 0o600); err != nil {
+	if err := os.WriteFile(large, make([]byte, admin.DefaultInlineLimit+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	base := []string{"--prompt", "summarise the data"}

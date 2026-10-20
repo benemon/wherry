@@ -207,7 +207,7 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 }
 
 func TestTranscriptArtifactChunks(t *testing.T) {
-	oversized := `{"type":"assistant","message":"` + strings.Repeat("x", maxLine) + `"}`
+	oversized := `{"type":"assistant","message":"` + strings.Repeat("x", wire.MaxLine) + `"}`
 	for name, test := range map[string]struct {
 		stream    []string
 		heartbeat bool
@@ -845,10 +845,10 @@ func TestAgentResultOmittedWhenOversized(t *testing.T) {
 	line := func(pad int, result string) []byte {
 		return []byte(`{"type":"result","result":"` + result + `","pad":"` + strings.Repeat("x", pad) + `"}`)
 	}
-	if result, _ := resultLine(line(maxAgentResult-26, strings.Repeat("r", 2*maxAgentResult))); result.metadata == nil {
+	if result, _ := resultLine(line(wire.MaxAgentResult-26, strings.Repeat("r", 2*wire.MaxAgentResult))); result.metadata == nil {
 		t.Fatal("agent_result at the bound, with a larger result member, was omitted")
 	}
-	result, ok := resultLine(line(maxAgentResult-25, "done"))
+	result, ok := resultLine(line(wire.MaxAgentResult-25, "done"))
 	if !ok || result.metadata != nil {
 		t.Fatalf("agent_result one byte over the bound kept: ok=%t metadata %d bytes", ok, len(result.metadata))
 	}
@@ -1001,7 +1001,8 @@ func TestContinuationResumesInterruptedTask(t *testing.T) {
 		task.Message.MessageID, task.Message.Parts = "msg-2", []wire.Part{{Text: "continue"}}
 	})
 	completed := f.await(t, "run-a", func(task wire.Task) bool { return wire.Terminal(task.Status.State) })
-	if completed.Status.State != wire.TaskStateCompleted || len(completed.History) != 2 || completed.History[0].Parts[0].Text != "hi" || completed.History[1].Parts[0].Text != "continue" {
+	// The result's history is the turn's own; earlier turns are in their own results.
+	if completed.Status.State != wire.TaskStateCompleted || len(completed.History) != 1 || completed.History[0].Parts[0].Text != "continue" {
 		t.Fatalf("completed continuation %#v", completed)
 	}
 	f.adapter.mu.Lock()
@@ -1266,8 +1267,11 @@ func TestContinuationAfterHostKeyRotation(t *testing.T) {
 		task.Message.MessageID, task.Message.Parts = "msg-2", []wire.Part{{Text: "continue"}}
 	})
 	completed := f.await(t, "run-a", func(task wire.Task) bool { return wire.Terminal(task.Status.State) })
-	if completed.Status.State != wire.TaskStateCompleted || len(completed.History) != 2 || completed.History[0].Parts[0].Text != "hi" {
-		t.Fatalf("continuation after rotation %#v; want turn 1, signed before the rotation, in the history", completed)
+	f.adapter.mu.Lock()
+	prompt := string(f.adapter.lastRun.Prompt)
+	f.adapter.mu.Unlock()
+	if completed.Status.State != wire.TaskStateCompleted || prompt != resumedHeader+"\n\nhi\n\ncontinue" {
+		t.Fatalf("continuation after rotation %#v, prompt %q; want turn 1, signed before the rotation, in the prompt", completed, prompt)
 	}
 }
 

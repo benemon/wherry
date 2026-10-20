@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -677,12 +679,62 @@ func TestContinuationKeepsTheTaskCredentials(t *testing.T) {
 	}
 }
 
-func TestSubmitRefusesInlineInputsOverTheLimit(t *testing.T) {
+func TestSubmitRefusesALongCredentialName(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-	parts := []wire.Part{{Raw: make(wire.StdBytes, wire.InlineLimit), Filename: "a.bin"}, {Raw: wire.StdBytes("x"), Filename: "b.bin"}}
+	name := strings.Repeat("c", 33)
+	f.host.credentials[name] = f.secret
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Credentials: []wire.TaskCredential{{Name: name, File: "token"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "credential names are at most 32") {
+		t.Fatalf("submit = %v; want the name refused", err)
+	}
+	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
+		t.Fatal("published a credential name over 32 characters")
+	}
+}
+
+func TestSubmitRefusesOver256ExpectedOutputs(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	var outputs []wire.ExpectedOutput
+	for i := range wire.MaxOutputs + 1 {
+		outputs = append(outputs, wire.ExpectedOutput{Name: "o" + strings.Repeat("x", i%10) + string(rune('a'+i%26)) + strings.Repeat("y", i/26)})
+	}
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Outputs: outputs, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "a submission expects at most 256 outputs") {
+		t.Fatalf("submit = %v; want the outputs refused", err)
+	}
+	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
+		t.Fatal("published over 256 expected outputs")
+	}
+}
+
+func TestSubmitNamesARecordTheBrokerRefuses(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	limit := "2000"
+	if responses, err := kadm.NewClient(f.service.Admin).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &limit}}, admin.PoolTasksTopic("pool-a")); err != nil || responses[0].Err != nil {
+		t.Fatalf("alter topic: %v %v", err, responses)
+	}
+	random := make([]byte, 10000)
+	rand.Read(random)
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: hex.EncodeToString(random), Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "-byte record, over the broker's record limit; shorten the prompt or the input files") {
+		t.Fatalf("submit = %v; want the record size and a remedy", err)
+	}
+}
+
+func TestSubmitRefusesInlineInputsOverThePoolLimit(t *testing.T) {
+	f := newFixture(t)
+	terms := testTerms()
+	terms.InlineLimit = 1000
+	if err := f.service.PoolCreate(f.ctx, "pool-a", terms); err != nil {
+		t.Fatal(err)
+	}
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	parts := []wire.Part{{Raw: make(wire.StdBytes, 1000), Filename: "a.bin"}, {Raw: wire.StdBytes("x"), Filename: "b.bin"}}
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Parts: parts, Deadline: time.Minute, QueueDeadline: time.Minute})
-	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "inline inputs are 262145 bytes, over the 262144-byte limit") {
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "inline inputs are 1001 bytes, over the 1000-byte limit") {
 		t.Fatalf("submit = %v; want the size and the limit named", err)
 	}
 	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {

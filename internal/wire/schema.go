@@ -172,8 +172,31 @@ type UnreturnedOutput struct {
 // OutputChunk bounds the data of one output chunk, below a record's limit.
 const OutputChunk = 256 << 10
 
-// InlineLimit bounds the bytes of a submission's raw and data parts together.
-const InlineLimit = 256 << 10
+// MaxParts bounds the parts of a message.
+const MaxParts = 256
+
+// MaxLine bounds the transcript line a chunk carries; a longer one is not stored.
+const MaxLine = 512 << 10
+
+// MaxOutputs bounds the outputs a submission expects and the entries a receiver collects.
+const MaxOutputs = 256
+
+// MaxText bounds a result's text, and each status text and result metadata string, once redacted.
+const MaxText = 64 << 10
+
+// MaxAgentResult bounds the agent's result record, less its result, that a result's metadata passes through.
+const MaxAgentResult = 16 << 10
+
+// ResultMetadata is a result's task metadata: where its turn ran, and the outputs it returned and did not.
+type ResultMetadata struct {
+	ReceiverID  string             `json:"receiver_id"`
+	Pool        string             `json:"pool"`
+	Adapter     string             `json:"adapter,omitempty"`
+	Labels      map[string]string  `json:"labels,omitempty"`
+	Job         string             `json:"job,omitempty"`
+	Outputs     []ReturnedOutput   `json:"outputs,omitempty"`
+	NotReturned []UnreturnedOutput `json:"not_returned,omitempty"`
+}
 
 // fileName is a portable file name: no separator, no leading dot, nothing a shell or a template interprets.
 var fileName = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`)
@@ -184,10 +207,10 @@ func ValidFileName(name string) bool {
 	return len(name) <= 255 && fileName.MatchString(name)
 }
 
-// ValidOutputName reports whether name is a relative path of at most 4096 bytes whose every slash-separated
+// ValidOutputName reports whether name is a relative path of at most 512 bytes whose every slash-separated
 // segment is a portable file name.
 func ValidOutputName(name string) bool {
-	return len(name) <= 4096 && !slices.ContainsFunc(strings.Split(name, "/"), func(segment string) bool { return !ValidFileName(segment) })
+	return len(name) <= 512 && !slices.ContainsFunc(strings.Split(name, "/"), func(segment string) bool { return !ValidFileName(segment) })
 }
 
 // InputName is the file name a raw or data part is delivered as: its filename, with .json added for a data part.
@@ -344,6 +367,9 @@ func validateMessage(value *Message) error {
 	}
 	if value.Parts == nil {
 		return errors.New("message parts are required")
+	}
+	if len(value.Parts) > MaxParts {
+		return errors.New("a message has at most 256 parts")
 	}
 	if err := validateParts(value.Parts); err != nil {
 		return err

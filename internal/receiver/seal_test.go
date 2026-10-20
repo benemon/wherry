@@ -200,7 +200,7 @@ func TestSecretNeverLogged(t *testing.T) {
 	}
 }
 
-const redacted = "[redacted:" + credentialName + "]"
+const redacted = "[redacted]"
 
 func TestDeliveredCredentialIsRedacted(t *testing.T) {
 	f := newFixture(t, []string{
@@ -304,12 +304,24 @@ func TestRedactedMetadataStaysValid(t *testing.T) {
 	}
 }
 
-func TestReplacementNeverCarriesTheValue(t *testing.T) {
+// The marker names no credential, so redacting one cannot write out another: under a marker naming its credential,
+// x's value would become "[redacted:x]" and publish y's.
+func TestRedactionCannotReintroduceACredential(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-n", 1)
-	run.deliver(map[string][]byte{credentialName: []byte("oauth-token")})
-	if got := string(run.redact([]byte("key oauth-token"))); got != "key [redacted]" {
-		t.Fatalf("redacted %q, want the bare marker since the name holds the value", got)
+	run.deliver(map[string][]byte{"x": []byte("12345678"), "y": []byte("redacted:x")})
+	if got := run.redactText("a 12345678 b redacted:x c"); got != "a [redacted] b [redacted] c" {
+		t.Fatalf("redacted %q, want both values replaced and neither published", got)
+	}
+}
+
+// A value that occurs within the marker gets the fallback marker, which no value of minRedact bytes fits in.
+func TestMarkerFallsBackWhenAValueIsWithinIt(t *testing.T) {
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-m", 1)
+	run.deliver(map[string][]byte{"x": []byte("redacted"), "y": []byte("12345678")})
+	if got := run.redactText("redacted 12345678"); got != "[*] [*]" {
+		t.Fatalf("redacted %q, want the fallback marker for both", got)
 	}
 }
 
@@ -319,7 +331,7 @@ func TestLongerValueIsRedactedFirst(t *testing.T) {
 	for range 20 {
 		run := testActiveRun(t, f, "run-l", 1)
 		run.deliver(map[string][]byte{"outer": []byte("prefix-inner-secret"), "inner": []byte("inner-secret")})
-		if got := string(run.redact([]byte("x prefix-inner-secret"))); got != "x [redacted:outer]" {
+		if got := run.redactText("x prefix-inner-secret"); got != "x [redacted]" {
 			t.Fatalf("redacted %q, want the longer value replaced whole", got)
 		}
 	}

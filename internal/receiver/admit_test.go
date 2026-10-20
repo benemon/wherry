@@ -130,6 +130,24 @@ func TestAdmitRejections(t *testing.T) {
 	}
 }
 
+func TestAdmitAppliesThePoolInlineLimit(t *testing.T) {
+	terms := testTerms()
+	terms.InlineLimit = 100
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	withInput := func(size int) func(*wire.Submission) {
+		return func(task *wire.Submission) {
+			task.Message.Parts = append(task.Message.Parts, wire.Part{Raw: make(wire.StdBytes, size), Filename: "data.bin"})
+		}
+	}
+	f.rejected(t, f.submit(t, f.host, withInput(101)), "inline inputs are 101 bytes, over the 100-byte limit")
+	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
+		withInput(100)(task)
+	})); admitted == nil {
+		t.Fatalf("inputs at the pool's limit: ack %v", ack)
+	}
+}
+
 func TestPlacementOutsideOffersIsStartFailure(t *testing.T) {
 	f := newFixture(t, resultStream)
 	for name, mutate := range map[string]func(*wire.Submission){
@@ -671,8 +689,8 @@ func TestCancelInterruptedTaskEndsIt(t *testing.T) {
 	if status := f.execute(t, f.turn(t, "run-a", 2), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
-	if task := f.lastTask(t); task.Status.State != wire.TaskStateCanceled || len(task.History) != 2 {
-		t.Fatalf("task %#v, want CANCELED with both turns", task)
+	if task := f.lastTask(t); task.Status.State != wire.TaskStateCanceled || len(task.History) != 1 || task.History[0].MessageID != "msg-2" {
+		t.Fatalf("task %#v, want CANCELED with the second turn alone", task)
 	}
 	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
 		t.Fatalf("continuation of a cancelled task dispatched %d jobs", dispatches)

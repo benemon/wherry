@@ -57,8 +57,9 @@ Call `submit` with `prompt`, and `agent`, `selector` and `git` (`url`,
 straight away. Note the id and carry on with other work.
 
 To send files, add `inputs`: paths of regular files beneath the directory
-the wherry MCP server runs in, 256 KiB in all, which the agent finds under
-their base names in its input directory. The server refuses any other path,
+the wherry MCP server runs in, the pool's inline limit in all (256 KiB by
+default), which the agent finds under their base names in its input
+directory. The server refuses any other path,
 and any file of the wherry configuration, its state or its credentials. To give the agent a
 credential as a file, add `credentials`: `{name, file}` with `name` a
 credential in the user's wherry configuration and `file` the name it gets

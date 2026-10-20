@@ -12,9 +12,9 @@ git ref.
    `--agent NAME` to choose the agent, and `--selector` with comma-separated
    terms (`key=v1|v2`, `key!=v`, `key`, `!key`) to require labels. Add
    `--git URL --git-ref REF` for a repository, `--input FILE` for each file
-   the agent needs (256 KiB in all), `--credential-file NAME=FILE` for each
-   configured credential it needs as a file, and `--output NAME[:required]`
-   for each file you want back. Keep working.
+   the agent needs (the pool's inline limit in all, 256 KiB by default),
+   `--credential-file NAME=FILE` for each configured credential it needs as
+   a file, and `--output NAME[:required]` for each file you want back. Keep working.
 3. `wherry await RUN_ID` blocks until the run ends (30 minutes at most by
    default), then prints the state and the result, and writes each returned
    output, printing an `output=<name> path=<path>` line for it. It also answers the

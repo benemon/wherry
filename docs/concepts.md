@@ -205,7 +205,8 @@ from the platform, and files and task credentials from the task.
 ## Files in and out
 
 Everything the task receives lands as files. A submission's `raw` and
-`data` parts are input files, at most 256 KiB together, that the agent
+`data` parts are input files, at most the pool's inline limit together
+(256 KiB by default), that the agent
 finds in the directory `WHERRY_INPUT_DIR` names. Task credentials are
 files in the directory `WHERRY_CREDENTIALS_DIR` names, and never
 environment variables. The receiver opens the prompt with the names of the
@@ -213,7 +214,8 @@ files and of the outputs the task expects.
 
 The agent leaves its outputs in the directory `WHERRY_OUTPUT_DIR` names.
 Once the agent has written its result and the job is stopped, the adapter
-collects the regular files there, up to 256 entries and 8 MiB, without
+collects the regular files there, up to 256 entries and the pool's output
+limit (8 MiB by default), without
 following links. The receiver redacts each file, publishes it in chunks on
 the tenant feed with the result, and lists every output in the result with
 the size and SHA-256 it computed, or with the reason it was not returned.
