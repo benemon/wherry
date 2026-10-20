@@ -93,6 +93,8 @@ type fakeAdapter struct {
 	sweepErr error
 	// endDelay holds a stream without a result line open before it ends.
 	endDelay time.Duration
+	// ended makes Follow end with that terminal after the stream, result line or not.
+	ended *adapter.Terminal
 	// linkLost makes that many Follows end with adapter.ErrLinkLost after at most one line; froms
 	// records the offset of every Follow.
 	linkLost int
@@ -160,7 +162,7 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, 
 	f.follows++
 	f.froms = append(f.froms, from)
 	lost := f.follows <= f.linkLost
-	stream, followErr, endDelay, neverStarted, neverClass := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.neverStarted, f.neverClass
+	stream, followErr, endDelay, neverStarted, neverClass, ended := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.neverStarted, f.neverClass, f.ended
 	f.mu.Unlock()
 	var offset int64
 	for _, data := range stream {
@@ -183,13 +185,16 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, 
 	if followErr != nil {
 		return adapter.Terminal{}, followErr
 	}
-	if !slices.ContainsFunc(stream, func(data string) bool { _, ok := resultLine([]byte(data)); return ok }) {
+	if ended != nil || !slices.ContainsFunc(stream, func(data string) bool { _, ok := resultLine([]byte(data)); return ok }) {
 		select {
 		case <-time.After(endDelay):
 		case <-ctx.Done():
 		}
-		if neverStarted {
+		switch {
+		case neverStarted:
 			return adapter.Terminal{Class: cmp.Or(neverClass, "driver"), Node: "node-1"}, nil
+		case ended != nil:
+			return *ended, nil
 		}
 		return adapter.Terminal{Started: true, ExitCode: 1, Node: "node-1"}, nil
 	}

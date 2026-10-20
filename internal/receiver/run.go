@@ -767,10 +767,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	defer checks.Stop()
 	var pending []adapter.Line
 	position := offset
+	recognise, keep := resultRecognizer(run.adapter.output)
 	take := func(line adapter.Line) (agentResult, bool) {
 		pending = append(pending, line)
 		position = line.Next
-		return resultLine(line.Data)
+		return recognise(line)
 	}
 	// shutdown commits what is pending under its own deadline, since ctx is already done, and returns the task.
 	// It ignores the delivery budget: the receiver is going away and an adopter continues the run.
@@ -841,6 +842,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			case !end.terminal.Started:
 				r.logger.Printf("run %s: job never started (%s)", runID, end.terminal.Class)
 				return run.startFailure(ctx, "platform")
+			case run.adapter.output == "file":
+				return run.conclude(ctx, handle, pending, func() agentResult { return fileResult(end.terminal, run.reply, run.uncollected) })
 			default:
 				r.logger.Printf("run %s: agent ended with exit code %d signal %q on node %s", runID, end.terminal.ExitCode, end.terminal.Signal, end.terminal.Node)
 				return run.stopAndFail(ctx, handle, "agent ended without a result", pending)
@@ -862,10 +865,14 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				return status
 			}
 			// The newest line stays pending so the terminal transaction always holds the last chunk;
-			// the heartbeat offset is where that line starts, so an adopter reads it again.
+			// the heartbeat offset is where that line starts, so an adopter reads it again. A line the
+			// recogniser keeps holds the offset back alone: an adopter publishes again the chunks after it.
 			at, held := position, 0
 			if len(pending) > 0 {
 				at, held = pending[len(pending)-1].Offset, 1
+			}
+			if kept, ok := keep(); ok {
+				at = min(at, kept)
 			}
 			// Heartbeats go to the pool's events alone: adoption needs them, hosts follow the chunks.
 			records := append(run.chunks(pending[:len(pending)-held], false), run.events(run.status("heartbeat", taskStatus(wire.TaskStateWorking, ""), &at, nil)))
@@ -1041,6 +1048,10 @@ type activeRun struct {
 	returned   []wire.ReturnedOutput
 	s3Returned []wire.ReturnedOutput
 	unreturned []wire.UnreturnedOutput
+	// reply is the text of the adapter's reply file, nil when the job wrote none.
+	reply *string
+	// uncollected is true when the job was not stopped, or Collect failed, timed out or overran its limits.
+	uncollected bool
 }
 
 // deliver keeps the forms each credential value is published in: the value without trailing CR and LF, as credential
@@ -1095,10 +1106,12 @@ func (run *activeRun) redactTo(out io.Writer, data []byte) {
 func (run *activeRun) redactText(text string) string {
 	form := run.redact([]byte(text), wire.MaxText)
 	if form.over() {
-		return "[redacted text over " + strconv.Itoa(wire.MaxText) + " bytes]"
+		return overText
 	}
 	return string(form.data)
 }
+
+var overText = "[redacted text over " + strconv.Itoa(wire.MaxText) + " bytes]"
 
 // redactedForm is the redacted form of some bytes: the bytes while they fit limit, and the size and SHA-256 of all of
 // them.
@@ -1334,6 +1347,11 @@ func (run *activeRun) budgetRecords(pending []adapter.Line) []*kgo.Record {
 }
 
 func (run *activeRun) finish(ctx context.Context, handle adapter.Handle, pending []adapter.Line, result agentResult) kgo.AckStatus {
+	return run.conclude(ctx, handle, pending, func() agentResult { return result })
+}
+
+// conclude is finish for a result known only once the outputs are collected.
+func (run *activeRun) conclude(ctx context.Context, handle adapter.Handle, pending []adapter.Line, outcome func() agentResult) kgo.AckStatus {
 	// A result committed after access lapsed is untrusted, so acknowledging it would lose the run.
 	if run.receiver.stopForDenial() {
 		return run.deny(ctx, handle, pending)
@@ -1348,6 +1366,7 @@ func (run *activeRun) finish(ctx context.Context, handle adapter.Handle, pending
 		stopped = false
 	}
 	run.collect(ctx, handle, stopped)
+	result := outcome()
 	state, ack, reason := wire.TaskStateCompleted, kgo.AckAccept, ""
 	if result.IsError {
 		state, ack = wire.TaskStateFailed, kgo.AckReject
@@ -1371,6 +1390,7 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 	collected, err := run.collected(ctx, handle, stopped, limit, stored)
 	if err != nil {
 		run.receiver.logger.Printf("run %s: outputs not collected: %T", run.task.Wherry.Run, err)
+		run.uncollected = true
 		for _, output := range run.expected {
 			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "not collected"})
 		}
@@ -1425,7 +1445,11 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: form.hash(), Size: form.size})
 	}
 	for _, output := range run.expected {
-		if !listed[output.Name] {
+		switch {
+		case listed[output.Name]:
+		case output.Name == run.adapter.replyFile:
+			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "is the adapter's reply file"})
+		default:
 			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "missing"})
 		}
 	}
@@ -1452,16 +1476,30 @@ func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stop
 	defer cancel()
 	outputs := make(chan adapter.Output)
 	ended := make(chan error, 1)
+	stream := s3Outputs(run.expected)
+	if run.adapter.replyFile != "" && !slices.Contains(stream, run.adapter.replyFile) {
+		// Streamed, the reply counts against neither output limit.
+		stream = append(stream, run.adapter.replyFile)
+	}
 	go func() {
 		defer close(outputs)
 		ended <- run.adapter.Adapter.Collect(ctx, handle, adapter.Limits{
-			Files: wire.MaxOutputs, FileBytes: limit, TotalBytes: limit, Stream: s3Outputs(run.expected), StreamBytes: wire.MaxS3Object,
+			Files: wire.MaxOutputs, FileBytes: limit, TotalBytes: limit, Stream: stream, StreamBytes: wire.MaxS3Object,
 		}, outputs)
 	}()
 	var collected []adapter.Output
 	var total int64
 	var over error
 	for output := range outputs {
+		if run.adapter.replyFile != "" && output.Name == run.adapter.replyFile {
+			if run.reply == nil && output.Mode.Type() == 0 {
+				run.reply = readReply(output)
+			}
+			if output.Body != nil {
+				output.Body.Close()
+			}
+			continue
+		}
 		if output.Body != nil {
 			if _, done := stored[output.Name]; !done && over == nil {
 				stored[output.Name] = run.store(ctx, output)
@@ -1533,6 +1571,40 @@ func (run *activeRun) store(ctx context.Context, output adapter.Output) storedOu
 		Name: output.Name, SHA256: hex.EncodeToString(sum.Sum(nil)), Size: output.Size,
 		Key: wire.S3OutputKey(run.task.Wherry.Tenant, run.task.Wherry.Run, run.task.Wherry.Turn, output.Name),
 	}}
+}
+
+// readReply reads at most wire.MaxText bytes of a reply file. A longer one becomes the over-size marker unread, so no
+// cut can split a credential that redaction would otherwise catch; a short read is no reply.
+func readReply(output adapter.Output) *string {
+	if output.Size > wire.MaxText {
+		return &overText
+	}
+	data := output.Data
+	if output.Body != nil {
+		data, _ = io.ReadAll(io.LimitReader(output.Body, wire.MaxText))
+	}
+	if int64(len(data)) != output.Size {
+		return nil
+	}
+	text := string(data)
+	return &text
+}
+
+// fileResult is the outcome of a job whose adapter's output is file, from how it ended, its reply and whether its
+// outputs were collected.
+func fileResult(terminal adapter.Terminal, reply *string, uncollected bool) agentResult {
+	exited := terminal.ExitCode != 0 || terminal.Signal != ""
+	switch {
+	case reply != nil:
+		return agentResult{Result: *reply, IsError: exited}
+	case !exited && uncollected:
+		return agentResult{Result: "outputs not collected", IsError: true}
+	case !exited:
+		return agentResult{Result: "agent wrote no reply file", IsError: true}
+	case terminal.Signal != "":
+		return agentResult{Result: "agent ended by " + terminal.Signal, IsError: true}
+	}
+	return agentResult{Result: "agent exited " + strconv.Itoa(terminal.ExitCode), IsError: true}
 }
 
 // fileType names the type of a collected entry that is not a regular file.
@@ -1843,20 +1915,67 @@ func resultLine(data []byte) (agentResult, bool) {
 	if json.Unmarshal(data, &result) != nil || result.Type != "result" {
 		return agentResult{}, false
 	}
-	result.metadata = agentResultMetadata(data)
+	result.metadata = agentResultMetadata(data, "duration_ms", "duration_api_ms", "num_turns", "total_cost_usd", "usage", "modelUsage")
 	return result, true
 }
 
-// agentResultMetadata keeps only the agent's resource-use fields; a record that is not an I-JSON object or whose
+// resultRecognizer returns the recogniser for output and the log offset of the line it needs read again after
+// adoption, if any: a Codex result is the last agent message, carried on an earlier line than turn.completed. With
+// file, no line ends the turn.
+func resultRecognizer(output string) (func(adapter.Line) (agentResult, bool), func() (int64, bool)) {
+	none := func() (int64, bool) { return 0, false }
+	if output == "file" {
+		return func(adapter.Line) (agentResult, bool) { return agentResult{}, false }, none
+	}
+	if output != "codex" {
+		return func(line adapter.Line) (agentResult, bool) { return resultLine(line.Data) }, none
+	}
+	var last string
+	at := int64(-1)
+	recognise := func(line adapter.Line) (agentResult, bool) {
+		var event struct {
+			Type  string         `json:"type"`
+			Item  jsontext.Value `json:"item"`
+			Error jsontext.Value `json:"error"`
+		}
+		if json.Unmarshal(line.Data, &event) != nil {
+			return agentResult{}, false
+		}
+		switch event.Type {
+		case "item.completed":
+			var item struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(event.Item, &item) == nil && item.Type == "agent_message" {
+				last, at = item.Text, line.Offset
+			}
+		case "turn.completed":
+			return agentResult{Result: last, metadata: agentResultMetadata(line.Data, "usage")}, true
+		case "turn.failed":
+			var failure struct {
+				Message string `json:"message"`
+			}
+			if json.Unmarshal(event.Error, &failure) != nil {
+				_ = json.Unmarshal(event.Error, &failure.Message)
+			}
+			return agentResult{Result: failure.Message, IsError: true}, true
+		}
+		return agentResult{}, false
+	}
+	return recognise, func() (int64, bool) { return at, at >= 0 }
+}
+
+// agentResultMetadata keeps only the named resource-use fields; a record that is not an I-JSON object or whose
 // retained fields exceed wire.MaxAgentResult is dropped.
-func agentResultMetadata(data []byte) jsontext.Value {
+func agentResultMetadata(data []byte, names ...string) jsontext.Value {
 	record := jsontext.Value(data)
 	var members map[string]jsontext.Value
 	if !record.IsValid() || record.Kind() != '{' || json.Unmarshal(record, &members) != nil {
 		return nil
 	}
-	kept := make(map[string]jsontext.Value, 6)
-	for _, name := range []string{"duration_ms", "duration_api_ms", "num_turns", "total_cost_usd", "usage", "modelUsage"} {
+	kept := make(map[string]jsontext.Value, len(names))
+	for _, name := range names {
 		if value, ok := members[name]; ok {
 			kept[name] = value
 		}

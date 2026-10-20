@@ -778,6 +778,8 @@ Each adapter entry:
 | `name` | adapter name, unique in the receiver |
 | `type` | the adapter type; the receiver runs `wherry-plugin-<type>` for it |
 | `agent` | the agent it launches, from the pool's terms |
+| `output` | optional, default `claude`: `claude` for Claude Code stream-json, `codex` for `codex exec --json`, or `file` for a reply file |
+| `reply_file` | optional, only with `output: file`, default `reply.md`: the output name of the reply file |
 | `credential` | optional; a credential the terms allow for the agent, delivered to the job |
 | `labels` | optional; [labels](#labels) for placement |
 | `config` | the adapter type's settings |
@@ -798,7 +800,7 @@ adapters/
 | --- | --- |
 | `receiver.yaml` | `capacity` |
 | `platforms/*.yaml` | one platform: `name`, unique in the directory; `type`; `config`, settings shared by its adapters |
-| `adapters/*.yaml` | one adapter: `name`, `platform`, `agent`, `credential`, `labels` and `config`, as in an adapter entry |
+| `adapters/*.yaml` | one adapter: `name`, `platform`, `agent`, `output`, `reply_file`, `credential`, `labels` and `config`, as in an adapter entry |
 
 The receiver and pool come from the command. Each adapter file becomes one
 adapter entry:
@@ -832,13 +834,38 @@ the paths of its [input, credential and output
 directories](a2a-extension-v1.md#inputs-and-outputs).
 
 The agent writes JSON lines to standard output. The receiver publishes each
-line as a transcript chunk. The line that decodes as a JSON object with
-`"type": "result"` ends the turn: its `result` string becomes the result,
-and `"is_error": true` makes the state `TASK_STATE_FAILED`. The receiver
-stops the job once it reads that line. A job that ends without one fails
-with the message `agent ended without a result`. Claude Code's
+line as a transcript chunk. With the adapter's `output` absent or `claude`,
+the line that decodes as a JSON object with `"type": "result"` ends the
+turn: its `result` string becomes the result, and `"is_error": true` makes
+the state `TASK_STATE_FAILED`. Claude Code's
 [headless](https://docs.claude.com/en/docs/claude-code/headless) stream-json
 output writes this format.
+
+With `output: codex`, the format `codex exec --json` writes, the receiver
+keeps the text of the last `item.completed` line whose `item.type` is
+`agent_message`. A `turn.completed` line ends the turn with that text as the
+result and its `usage` as metadata. A `turn.failed` line ends it as
+`TASK_STATE_FAILED` with its `error.message`, or `error` itself when it is
+a string, as the result. `error` lines and `error` items do not end the
+turn.
+
+With `output: file`, no line ends the turn; it ends when the job does. The
+receiver collects the outputs and takes the output `reply_file` names as
+the result, redacted like any result. The reply is not returned as an output
+and counts against no output limit; a reply over 64 KiB becomes
+`[redacted text over 65536 bytes]`. The `reply_file` name is reserved on
+that adapter: an expected output of that name is listed as not returned with
+the reason `is the adapter's reply file`. A job that exits 0 with a reply
+completes with it, and one that exits 0 without a reply fails with the
+message `agent wrote no reply file`, or `outputs not collected` when the
+receiver could not collect the outputs. An empty reply completes the turn
+with an empty result; `wherry await` then prints the state and an empty
+line. A job that exits non-zero or by a signal fails with its reply as the
+result, or without one with `agent exited <code>` or
+`agent ended by <signal>`. The result carries no `agent_result` metadata.
+
+The receiver stops the job once it reads the line that ends the turn. A job
+that ends without one fails with the message `agent ended without a result`.
 
 A turn's run time is capped at its deadline, and at one hour after its
 queue deadline.

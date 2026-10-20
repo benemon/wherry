@@ -21,6 +21,8 @@ config:
 const labPodman = `name: nomad-podman
 platform: lab-nomad
 agent: claude
+output: file
+reply_file: out/reply.md
 credential: claude-oauth-token
 labels:
   isolation: container
@@ -35,6 +37,7 @@ config:
 const labExec = `name: nomad-exec
 platform: lab-nomad
 agent: claude
+output: codex
 credential: claude-oauth-token
 labels:
   isolation: host
@@ -88,6 +91,8 @@ adapters:
   - name: nomad-podman
     type: nomad
     agent: claude
+    output: file
+    reply_file: out/reply.md
     credential: claude-oauth-token
     labels:
       isolation: container
@@ -104,6 +109,7 @@ adapters:
   - name: nomad-exec
     type: nomad
     agent: claude
+    output: codex
     credential: claude-oauth-token
     labels:
       isolation: host

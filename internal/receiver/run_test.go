@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"slices"
@@ -784,6 +785,289 @@ func TestResultLine(t *testing.T) {
 	}
 }
 
+// testdata/codex holds `codex exec --json` output captured from codex-cli 0.147.0 on 2026-10-20 (codex-fixtures-2026-10-20).
+func codexFixture(t *testing.T, name string) []string {
+	t.Helper()
+	data, err := os.ReadFile("testdata/codex/" + name + ".jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+}
+
+func recogniseFixture(lines []string, output string) (agentResult, bool) {
+	recognise, _ := resultRecognizer(output)
+	for _, line := range lines {
+		if result, ok := recognise(adapter.Line{Data: []byte(line)}); ok {
+			return result, true
+		}
+	}
+	return agentResult{}, false
+}
+
+func TestCodexResultFixtures(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		result  string
+		isError bool
+		ok      bool
+	}{
+		{name: "success", result: "STEADY", ok: true},
+		{name: "tool", result: "fixture input", ok: true},
+		{name: "failure", result: "unexpected status 404 Not Found: The model `no-such-model-wherry` does not exist or you do not have access to it., url: https://api.openai.com/v1/responses, cf-ray: a4d97196785c1ef2-LHR, request id: req_a413a8f759d2447e898432c4ce0596d8", isError: true, ok: true},
+		{name: "interrupted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, ok := recogniseFixture(codexFixture(t, test.name), "codex")
+			if ok != test.ok || result.Result != test.result || result.IsError != test.isError {
+				t.Fatalf("result = %#v, %t", result, ok)
+			}
+			if test.name == "success" {
+				metadata := decodeObject(t, result.metadata)
+				agent := metadata["agent_result"].(map[string]any)
+				if len(agent) != 1 || agent["usage"] == nil {
+					t.Fatalf("metadata = %v, want only usage", metadata)
+				}
+			}
+		})
+	}
+}
+
+func TestResultRecognizersRejectOtherFormat(t *testing.T) {
+	if result, ok := recogniseFixture(codexFixture(t, "success"), "claude"); ok {
+		t.Fatalf("Claude recogniser accepted Codex result %#v", result)
+	}
+	if result, ok := recogniseFixture(resultStream, "codex"); ok {
+		t.Fatalf("Codex recogniser accepted Claude result %#v", result)
+	}
+}
+
+func TestCodexRecognizerIgnoresMismatchedMembers(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		lines   []string
+		result  string
+		isError bool
+	}{
+		{"string error", []string{`{"type":"turn.failed","error":"quota exceeded"}`}, "quota exceeded", true},
+		{"array item", []string{`{"type":"item.completed","item":["x"]}`, `{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`, `{"type":"item.completed","item":"x"}`, `{"type":"turn.completed","item":"x","error":7}`}, "ok", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if result, ok := recogniseFixture(test.lines, "codex"); !ok || result.Result != test.result || result.IsError != test.isError {
+				t.Fatalf("result = %#v, %t", result, ok)
+			}
+		})
+	}
+}
+
+func TestResultRecognizerKeepsTheAgentMessage(t *testing.T) {
+	recognise, keep := resultRecognizer("codex")
+	var offset, message int64 = 0, -1
+	for _, line := range codexFixture(t, "tool") {
+		recognise(adapter.Line{Offset: offset, Data: []byte(line)})
+		if strings.Contains(line, `"agent_message"`) {
+			message = offset
+		}
+		if kept, ok := keep(); ok != (message >= 0) || ok && kept != message {
+			t.Fatalf("at %d keep = %d, %t; want the last agent message at %d", offset, kept, ok, message)
+		}
+		offset += int64(len(line) + 1)
+	}
+	_, keep = resultRecognizer("claude")
+	if _, ok := keep(); ok {
+		t.Fatal("Claude recogniser keeps a line")
+	}
+}
+
+func TestRunUsesCodexResultRecognizer(t *testing.T) {
+	config := testConfig(testReceiver)
+	config.Adapters[0].Output = "codex"
+	stream := codexFixture(t, "success")
+	f := newFixtureWith(t, stream, testTerms(), config, map[string]*fakeAdapter{"nomad": {stream: stream}})
+	task := runToTask(t, f)
+	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "STEADY" {
+		t.Fatalf("unexpected task: %#v", task)
+	}
+}
+
+func TestCodexAdoptionPastTheAgentMessage(t *testing.T) {
+	config := testConfig(testReceiver)
+	config.Adapters[0].Output = "codex"
+	success := codexFixture(t, "success")
+	// A warning item after the final agent message, so a heartbeat can pass that message before turn.completed.
+	before := append(slices.Clone(success[:4]), success[1])
+	f := newFixtureWith(t, before, testTerms(), config, map[string]*fakeAdapter{"nomad": {stream: before, endDelay: 30 * time.Second}})
+	f.answer(t, credentialName)
+	record := f.submit(t, f.host, nil)
+	var message int64
+	for _, line := range success[:3] {
+		message += int64(len(line) + 1)
+	}
+	ctx, stop := context.WithCancel(f.ctx)
+	defer stop()
+	first := f.executing(t, ctx, record, 1)
+	for heartbeat := (*wire.RunStatus)(nil); heartbeat == nil; time.Sleep(20 * time.Millisecond) {
+		for _, status := range f.eventStatuses(t) {
+			if status.Wherry.Kind == "heartbeat" && *status.Wherry.LogOffset > 0 {
+				heartbeat = &status
+			}
+		}
+		if heartbeat != nil && *heartbeat.Wherry.LogOffset != message {
+			t.Fatalf("heartbeat at %d, want the agent message at %d", *heartbeat.Wherry.LogOffset, message)
+		}
+		if f.ctx.Err() != nil {
+			t.Fatalf("no heartbeat past offset 0; logs:\n%s", f.logs.String())
+		}
+	}
+	stop()
+	if status := <-first; status != kgo.AckRelease {
+		t.Fatalf("attempt 1 status %v, want release", status)
+	}
+	f.adapter.mu.Lock()
+	f.adapter.stream, f.adapter.job = append(before, success[4]), adapter.JobRunning
+	f.adapter.mu.Unlock()
+	if status := f.execute(t, record, 2); status != kgo.AckAccept {
+		t.Fatalf("status %v, want the adopted run accepted", status)
+	}
+	if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "STEADY" {
+		t.Fatalf("adopted task %v result %q, want the agent message as the result", task.Status.State, task.Artifacts[0].Parts[0].Text)
+	}
+	f.adapter.mu.Lock()
+	from := f.adapter.froms[len(f.adapter.froms)-1]
+	f.adapter.mu.Unlock()
+	if from != message {
+		t.Fatalf("adopter followed from %d, want the agent message at %d", from, message)
+	}
+}
+
+func TestCodexHeartbeatsPublishPastTheAgentMessage(t *testing.T) {
+	config := testConfig(testReceiver)
+	config.Adapters[0].Output = "codex"
+	success := codexFixture(t, "success")
+	stream := slices.Clone(success[:4])
+	for range 20 {
+		stream = append(stream, success[1])
+	}
+	f := newFixtureWith(t, stream, testTerms(), config, map[string]*fakeAdapter{"nomad": {stream: stream, endDelay: 30 * time.Second}})
+	f.answer(t, credentialName)
+	ctx, stop := context.WithCancel(f.ctx)
+	defer stop()
+	done := f.executing(t, ctx, f.submit(t, f.host, nil), 1)
+	for deadline := time.Now().Add(10 * renewInterval); len(f.chunks(t)) < len(stream)-1; {
+		if time.Now().After(deadline) {
+			t.Fatalf("heartbeats published %d chunks, want all %d but the newest line", len(f.chunks(t)), len(stream)-1)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stop()
+	<-done
+}
+
+func replyOutput(text string) adapter.Output {
+	return adapter.Output{Name: "reply.md", Size: int64(len(text)), Body: io.NopCloser(strings.NewReader(text))}
+}
+
+func TestFileOutputOutcomes(t *testing.T) {
+	over := wire.MaxText + 1
+	for _, test := range []struct {
+		name     string
+		stream   []string
+		terminal adapter.Terminal
+		outputs  []adapter.Output
+		collect  error
+		state    wire.TaskState
+		result   string
+	}{
+		{name: "reply", terminal: adapter.Terminal{Started: true}, outputs: []adapter.Output{replyOutput("done " + testToken)}, state: wire.TaskStateCompleted, result: "done [redacted]"},
+		{name: "reply as data", terminal: adapter.Terminal{Started: true}, outputs: []adapter.Output{{Name: "reply.md", Size: 4, Data: []byte("done")}}, state: wire.TaskStateCompleted, result: "done"},
+		{name: "no reply", terminal: adapter.Terminal{Started: true}, state: wire.TaskStateFailed, result: "agent wrote no reply file"},
+		{name: "not collected", terminal: adapter.Terminal{Started: true}, collect: errors.New("collect failed"), state: wire.TaskStateFailed, result: "outputs not collected"},
+		{name: "exit with reply", terminal: adapter.Terminal{Started: true, ExitCode: 3}, outputs: []adapter.Output{replyOutput("partial")}, state: wire.TaskStateFailed, result: "partial"},
+		{name: "exit", terminal: adapter.Terminal{Started: true, ExitCode: 3}, state: wire.TaskStateFailed, result: "agent exited 3"},
+		{name: "signal", terminal: adapter.Terminal{Started: true, ExitCode: 137, Signal: "SIGKILL"}, state: wire.TaskStateFailed, result: "agent ended by SIGKILL"},
+		{name: "over", terminal: adapter.Terminal{Started: true}, outputs: []adapter.Output{replyOutput(strings.Repeat("x", over))}, state: wire.TaskStateCompleted, result: "[redacted text over 65536 bytes]"},
+		{name: "stdout terminals", stream: append(slices.Clone(resultStream), codexFixture(t, "success")...), terminal: adapter.Terminal{Started: true}, outputs: []adapter.Output{replyOutput("from file")}, state: wire.TaskStateCompleted, result: "from file"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := testConfig(testReceiver)
+			config.Adapters[0].Output = "file"
+			stream := test.stream
+			if stream == nil {
+				stream = noResultStream
+			}
+			f := newFixtureWith(t, stream, testTerms(), config, map[string]*fakeAdapter{"nomad": {stream: stream, ended: &test.terminal, outputs: test.outputs, collectErr: test.collect}})
+			f.answer(t, credentialName)
+			f.execute(t, f.submit(t, f.host, nil), 1)
+			task := f.lastTask(t)
+			if part := task.Artifacts[0].Parts[0]; task.Status.State != test.state || part.Text != test.result {
+				t.Fatalf("task %s with %q, want %s with %q", task.Status.State, part.Text, test.state, test.result)
+			}
+			if task.Artifacts[0].Metadata != nil {
+				t.Fatalf("result metadata %s, want none", task.Artifacts[0].Metadata)
+			}
+		})
+	}
+}
+
+func TestFileReplyIsNotAnOutput(t *testing.T) {
+	config := testConfig(testReceiver)
+	config.Adapters[0].Output = "file"
+	terms := testTerms()
+	terms.OutputLimit = 16
+	f := newFixtureWith(t, noResultStream, terms, config, map[string]*fakeAdapter{"nomad": {stream: noResultStream, ended: &adapter.Terminal{Started: true}, outputs: []adapter.Output{
+		{Name: "report.txt", Size: 16, Data: []byte(strings.Repeat("r", 16))}, replyOutput(strings.Repeat("a", 32)),
+	}}})
+	f.answer(t, credentialName)
+	f.execute(t, f.submit(t, f.host, nil), 1)
+	task := f.lastTask(t)
+	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != strings.Repeat("a", 32) {
+		t.Fatalf("task %s with %q, want the reply as the result", task.Status.State, task.Artifacts[0].Parts[0].Text)
+	}
+	listed := manifest(t, task)
+	if len(listed.Outputs) != 1 || listed.Outputs[0].Name != "report.txt" || len(listed.NotReturned) != 0 {
+		t.Fatalf("outputs %+v not returned %+v, want report.txt alone within the limit", listed.Outputs, listed.NotReturned)
+	}
+	for _, output := range f.outputChunks(t) {
+		if output.ArtifactUpdate.Artifact.ArtifactID != "report.txt" {
+			t.Fatalf("output %s published", output.ArtifactUpdate.Artifact.ArtifactID)
+		}
+	}
+	f.adapter.mu.Lock()
+	defer f.adapter.mu.Unlock()
+	if !slices.Contains(f.adapter.limits.Stream, "reply.md") {
+		t.Fatalf("collect limits %+v, want the reply streamed outside the output limits", f.adapter.limits)
+	}
+}
+
+func TestFileReplyNameIsNotAnExpectedOutput(t *testing.T) {
+	for _, storage := range []string{"", wire.StorageS3} {
+		t.Run(cmp.Or(storage, "local"), func(t *testing.T) {
+			config := testConfig(testReceiver)
+			config.Adapters[0].Output = "file"
+			s := newStore(t)
+			f := newFixtureWith(t, noResultStream, s3Terms(s.endpoint()), config, map[string]*fakeAdapter{"nomad": {stream: noResultStream, ended: &adapter.Terminal{Started: true}, outputs: []adapter.Output{replyOutput("done")}}})
+			done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) {
+				task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "reply.md", Required: true, Storage: storage}}
+			}), 1)
+			f.sealS3(t, validURLs(s.endpoint()))
+			<-done
+			task := f.lastTask(t)
+			if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != "required output reply.md not returned: is the adapter's reply file" {
+				t.Fatalf("task %s with %v, want the required output failed as the reply file", task.Status.State, task.Status.Message)
+			}
+			listed := manifest(t, task)
+			if len(listed.NotReturned) != 1 || listed.NotReturned[0].Name != "reply.md" || listed.NotReturned[0].Reason != "is the adapter's reply file" {
+				t.Fatalf("not returned %+v, want reply.md as the adapter's reply file", listed.NotReturned)
+			}
+			f.adapter.mu.Lock()
+			defer f.adapter.mu.Unlock()
+			if !slices.Equal(f.adapter.limits.Stream, []string{"reply.md"}) {
+				t.Fatalf("collect streams %v, want reply.md once", f.adapter.limits.Stream)
+			}
+		})
+	}
+}
+
 // podmanResultLine is the result record in testdata/podman-cri-stdout.log, a Nomad Podman task log capture,
 // without its CRI framing.
 func podmanResultLine(t *testing.T) string {
@@ -847,7 +1131,7 @@ func TestAgentResultOmittedWhenOversized(t *testing.T) {
 
 func TestAgentResultOmittedWhenNotObject(t *testing.T) {
 	for _, data := range []string{`["result"]`, `"result"`, `null`, `42`, `{"type":"result","a":1,"a":2}`, "{\"type\":\"result\",\"a\":\"\xff\"}"} {
-		if metadata := agentResultMetadata([]byte(data)); metadata != nil {
+		if metadata := agentResultMetadata([]byte(data), "a"); metadata != nil {
 			t.Fatalf("%q produced metadata %s", data, metadata)
 		}
 	}
