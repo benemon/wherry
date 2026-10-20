@@ -104,7 +104,7 @@ func newBus(t *testing.T) *bus {
 	b := &bus{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, stateDir: t.TempDir(), logs: &syncBuffer{}}
 	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, DefaultAgent: "claude",
 		SealLifetimeMS: int64(72 * time.Hour / time.Millisecond), DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
-		Forges: []string{"git.example.test"}}
+		VCS: []string{"git.example.test"}}
 	if err := b.service.PoolCreate(ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
 	}
@@ -707,17 +707,17 @@ func TestSubmitGitFlags(t *testing.T) {
 		flags []string
 		want  string
 	}{
-		"no ref":           {[]string{"--git", "https://git.example.test/org/repo.git"}, "--git takes REMOTE@REF"},
-		"path without git": {[]string{"--git-path", "repo"}, "--git-path, --git-credential, --git-host-key and --git-changes need --git"},
-		"changes alone":    {[]string{"--git-changes", "patch"}, "--git-path, --git-credential, --git-host-key and --git-changes need --git"},
-		"userinfo":         {[]string{"--git", "https://user:s3cr3t@git.example.test/org/repo.git@main"}, "https git remote must not carry user information"},
-		"traversal":        {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-path", "../x"}, "git path must be a relative path"},
-		"outside forges":   {[]string{"--git", "https://github.com/org/repo.git@main"}, "git remote host github.com is not in pool pool-a's forges"},
-		"forge port":       {[]string{"--git", "https://git.example.test:8443/org/repo.git@main"}, "git remote host git.example.test:8443 is not in pool pool-a's forges"},
-		"ssh without key":  {[]string{"--git", "git@git.example.test:org/repo.git@main"}, "ssh git remote requires host_key"},
-		"undeclared":       {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-credential", "model"}, "git credential must be one of the submission's task credentials"},
-		"changes":          {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-changes", "diff"}, "git changes must be patch or bundle"},
-		"missing key file": {[]string{"--git", "git@git.example.test:org/repo.git@main", "--git-host-key", filepath.Join(t.TempDir(), "absent")}, "no such file"},
+		"no ref":            {[]string{"--git", "https://git.example.test/org/repo.git"}, "--git takes REMOTE@REF"},
+		"path without git":  {[]string{"--git-path", "repo"}, "--git-path, --git-credential, --git-host-key and --git-changes need --git"},
+		"changes alone":     {[]string{"--git-changes", "patch"}, "--git-path, --git-credential, --git-host-key and --git-changes need --git"},
+		"userinfo":          {[]string{"--git", "https://user:s3cr3t@git.example.test/org/repo.git@main"}, "https git remote must not carry user information"},
+		"traversal":         {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-path", "../x"}, "git path must be a relative path"},
+		"outside vcs hosts": {[]string{"--git", "https://github.com/org/repo.git@main"}, "git remote host github.com is not in pool pool-a's vcs hosts"},
+		"vcs host port":     {[]string{"--git", "https://git.example.test:8443/org/repo.git@main"}, "git remote host git.example.test:8443 is not in pool pool-a's vcs hosts"},
+		"ssh without key":   {[]string{"--git", "git@git.example.test:org/repo.git@main"}, "ssh git remote requires host_key"},
+		"undeclared":        {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-credential", "model"}, "git credential must be one of the submission's task credentials"},
+		"changes":           {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-changes", "diff"}, "git changes must be patch or bundle"},
+		"missing key file":  {[]string{"--git", "git@git.example.test:org/repo.git@main", "--git-host-key", filepath.Join(t.TempDir(), "absent")}, "no such file"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

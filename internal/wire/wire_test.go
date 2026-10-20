@@ -728,7 +728,7 @@ func TestGitInputPlacement(t *testing.T) {
 	}
 }
 
-func TestGitForge(t *testing.T) {
+func TestGitVCSHost(t *testing.T) {
 	for remote, want := range map[string]string{
 		"https://Git.Example.Test/org/repo.git":         "git.example.test",
 		"https://git.example.test:443/org/repo.git":     "git.example.test",
@@ -741,8 +741,8 @@ func TestGitForge(t *testing.T) {
 		"https://git.example.test@evil.test/org/x.git":  "evil.test",
 		"ssh://git.example.test@evil.test:22/org/x.git": "evil.test",
 	} {
-		if got := (GitInput{Remote: remote}).Forge(); got != want {
-			t.Errorf("forge of %s = %q, want %q", remote, got, want)
+		if got := (GitInput{Remote: remote}).VCSHost(); got != want {
+			t.Errorf("VCS host of %s = %q, want %q", remote, got, want)
 		}
 	}
 	for remote, want := range map[string]string{
@@ -754,12 +754,12 @@ func TestGitForge(t *testing.T) {
 			t.Errorf("origin of %s = %q, want %q", remote, got, want)
 		}
 	}
-	for forge, ok := range map[string]bool{
+	for host, ok := range map[string]bool{
 		"github.com": true, "git.example.test:2222": true, "a": true, "a:65535": true,
 		"": false, "GitHub.com": false, "a:0": false, "a:65536": false, "a:01": false, "a:": false, "-a": false, "a-": false, "a:b": false, "a/b": false,
 	} {
-		if ValidForge(forge) != ok {
-			t.Errorf("ValidForge(%q) = %v, want %v", forge, !ok, ok)
+		if ValidVCSHost(host) != ok {
+			t.Errorf("ValidVCSHost(%q) = %v, want %v", host, !ok, ok)
 		}
 	}
 }

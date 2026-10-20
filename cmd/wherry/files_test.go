@@ -283,8 +283,8 @@ func TestMCPSubmitCarriesTheGitInput(t *testing.T) {
 	}
 	git["host_key"], git["remote"] = "github_known_hosts", "ssh://git@github.com/org/repo.git"
 	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "credentials": []map[string]any{{"name": "model", "file": "id_ed25519"}}, "git": git}); failure.Code != "INVALID_ARGUMENT" ||
-		failure.Message != "invalid input: git remote host github.com is not in pool pool-a's forges" {
-		t.Fatalf("submit outside the forges: %+v", failure)
+		failure.Message != "invalid input: git remote host github.com is not in pool pool-a's vcs hosts" {
+		t.Fatalf("submit outside the vcs hosts: %+v", failure)
 	}
 }
 

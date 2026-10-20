@@ -15,9 +15,9 @@ import (
 // testHostKey is a known_hosts line as ssh-keyscan prints one.
 const testHostKey = "git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
 
-func forgeTerms(forges ...string) admin.Terms {
+func vcsTerms(hosts ...string) admin.Terms {
 	terms := testTerms()
-	terms.Forges = forges
+	terms.VCS = hosts
 	return terms
 }
 
@@ -25,18 +25,18 @@ func withGit(git wire.GitInput) func(*wire.Submission) {
 	return func(task *wire.Submission) { task.Wherry.Git = &git }
 }
 
-func TestGitInputAdmittedOnlyFromThePoolsForges(t *testing.T) {
+func TestGitInputAdmittedOnlyFromThePoolsVCSHosts(t *testing.T) {
 	git := wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"}
 	for name, test := range map[string]struct {
-		forges []string
+		hosts  []string
 		reason string
 	}{
-		"listed":         {[]string{"github.com", "git.example.test"}, ""},
-		"unlisted":       {[]string{"github.com", "git.example.test:8443"}, "git remote host git.example.test is not in pool " + testPool + "'s forges"},
-		"without forges": {nil, "git remote host git.example.test is not in pool " + testPool + "'s forges"},
+		"listed":            {[]string{"github.com", "git.example.test"}, ""},
+		"unlisted":          {[]string{"github.com", "git.example.test:8443"}, "git remote host git.example.test is not in pool " + testPool + "'s vcs hosts"},
+		"without vcs hosts": {nil, "git remote host git.example.test is not in pool " + testPool + "'s vcs hosts"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newFixtureWith(t, resultStream, forgeTerms(test.forges...), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+			f := newFixtureWith(t, resultStream, vcsTerms(test.hosts...), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
 			f.answer(t, credentialName)
 			record := f.submit(t, f.host, withGit(git))
 			if test.reason != "" {
@@ -58,9 +58,9 @@ func TestGitInputAdmittedOnlyFromThePoolsForges(t *testing.T) {
 	}
 }
 
-// A continuation is admitted under the pool's current forges, against the git input its first turn declared.
-func TestGitContinuationRechecksTheForges(t *testing.T) {
-	f := newFixtureWith(t, resultStream, forgeTerms("git.example.test"), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+// A continuation is admitted under the pool's current VCS hosts, against the git input its first turn declared.
+func TestGitContinuationRechecksTheVCSHosts(t *testing.T) {
+	f := newFixtureWith(t, resultStream, vcsTerms("git.example.test"), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
 	// Unanswered, the first turn's seal request leaves it AUTH_REQUIRED.
 	if status := f.execute(t, f.submit(t, f.host, withGit(wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"})), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
@@ -72,7 +72,7 @@ func TestGitContinuationRechecksTheForges(t *testing.T) {
 	if admitted := f.admitted(t, continuation); admitted.git == nil || admitted.git.Remote != "https://git.example.test/org/repo.git" {
 		t.Fatalf("continuation admitted git %+v, want the first turn's", admitted.git)
 	}
-	terms := forgeTerms("github.com")
+	terms := vcsTerms("github.com")
 	encoded := must(t)(admin.EncodeRecord(admin.Record{Kind: "pool", Pool: testPool, Terms: &terms}))
 	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
@@ -80,11 +80,11 @@ func TestGitContinuationRechecksTheForges(t *testing.T) {
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	f.rejected(t, continuation, "git remote host git.example.test is not in pool "+testPool+"'s forges")
+	f.rejected(t, continuation, "git remote host git.example.test is not in pool "+testPool+"'s vcs hosts")
 }
 
 func TestGitInputReachesTheAgentAsFilesAndCommands(t *testing.T) {
-	f := newFixtureWith(t, resultStream, forgeTerms("git.example.test:2222"), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, vcsTerms("git.example.test:2222"), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
 	hostKey := "[git.example.test]:2222" + testHostKey[len("git.example.test"):]
 	git := wire.GitInput{Remote: "ssh://git@git.example.test:2222/org/repo.git", Ref: "v1.2.0", Path: "src/repo", Credential: "deploy-key", HostKey: hostKey}
 	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) {
