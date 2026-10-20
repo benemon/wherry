@@ -521,7 +521,7 @@ func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: strings.Repeat("0", 64), Size: 1 << 62})
 		run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: name, Size: 1 << 62, Reason: "rejected: size changed while read"})
 	}
-	metadata := agentResultMetadata([]byte(`{"type":"result","k":"` + strings.Repeat("x", wire.MaxAgentResult-40) + `"}`))
+	metadata := agentResultMetadata([]byte(`{"type":"result","usage":{"k":"` + strings.Repeat("x", wire.MaxAgentResult-40) + `"}}`))
 	record := run.result(taskStatus(wire.TaskStateFailed, strings.Repeat("x", wire.MaxText)), strings.Repeat("\x01", wire.MaxText), metadata)
 	size := len(record.Key) + len(record.Value) + 97
 	t.Logf("largest result: %d-byte batch", size)
@@ -660,7 +660,7 @@ func TestCredentialFormsAreRedacted(t *testing.T) {
 	const agentValue, taskValue = "sk-token-with-newline\n", `pass"word\back-slash` + "\r\n"
 	stream := []string{
 		`{"type":"assistant","message":"cat gives sk-token-with-newline\n and pass\"word\\back-slash\r\n"}`,
-		`{"type":"result","result":"used sk-token-with-newline\n","is_error":false,"note":"pass\"word\\back-slash"}`,
+		`{"type":"result","result":"used sk-token-with-newline\n","is_error":false,"usage":{"note":"pass\"word\\back-slash"}}`,
 	}
 	f := newFixture(t, stream)
 	f.adapter.outputs = []adapter.Output{file("report.md", `token sk-token-with-newline, password pass"word\back-slash`)}

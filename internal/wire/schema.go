@@ -185,7 +185,7 @@ const MaxOutputs = 256
 // MaxText bounds a result's text, and each status text and result metadata string, once redacted.
 const MaxText = 64 << 10
 
-// MaxAgentResult bounds the agent's result record, less its result, that a result's metadata passes through.
+// MaxAgentResult bounds the resource-use fields of the agent's result record that a result's metadata carries.
 const MaxAgentResult = 16 << 10
 
 // ResultMetadata is a result's task metadata: where its turn ran, and the outputs it returned and did not.

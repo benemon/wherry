@@ -635,6 +635,16 @@ agent images.
 The CA and proxy settings stay yours: `GIT_SSL_CAINFO`, `SSL_CERT_FILE`,
 `HTTPS_PROXY` and the like reach `git` as the image or platform sets them.
 
+Start the agent's harness in a directory above the checkout, never inside
+it. Claude Code in print mode skips the workspace trust prompt and runs the
+hooks and MCP servers of the project it starts in, so a harness started in a
+cloned repository runs that repository's hooks with the agent's credential in
+reach. Started above the checkout, it reads the repository's files without
+loading its project settings, including after the agent changes directory in
+a shell. The start directory is the adapter's to set: on Nomad, a runtime
+command such as `cd /local && exec claude ...` starts the harness in the task
+directory, and the clone lands below it.
+
 The isolation protects a cooperative agent from the configuration around it. It
 is not a boundary against the agent: an agent that runs commands, including
 through an allow rule such as
