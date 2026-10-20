@@ -118,11 +118,11 @@ adapters:
         config:
           command: /bin/sh
 `})
-	want, err := readReceiverConfig(filepath.Join(single, "receiver.yaml"))
+	want, err := readReceiverConfig(filepath.Join(single, "receiver.yaml"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := readReceiverConfig(labTree(t, nil))
+	got, err := readReceiverConfig(labTree(t, nil), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestReceiverConfigDirectoryAdapterTakesPlatformType(t *testing.T) {
 		"platforms/other.yaml":        "name: other\ntype: other-type\n",
 		"adapters/20-nomad-exec.yaml": strings.Replace(labExec, "platform: lab-nomad", "platform: other", 1),
 	})
-	config, err := readReceiverConfig(dir)
+	config, err := readReceiverConfig(dir, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestReceiverConfigDirectoryAdapterTakesPlatformType(t *testing.T) {
 
 func TestReceiverConfigDirectoryRejectsKeySetByPlatformAndAdapter(t *testing.T) {
 	dir := labTree(t, map[string]string{"adapters/20-nomad-exec.yaml": labExec + "  namespace: other\n"})
-	_, err := readReceiverConfig(dir)
+	_, err := readReceiverConfig(dir, true)
 	if err == nil || !strings.Contains(err.Error(), "20-nomad-exec.yaml") || !strings.Contains(err.Error(), `"namespace"`) {
 		t.Fatalf("readReceiverConfig = %v, want an error naming the adapter file and the key", err)
 	}
@@ -172,7 +172,7 @@ func TestReceiverConfigDirectoryRejectsInvalidLayout(t *testing.T) {
 		"missing receiver.yaml": {remove: []string{"receiver.yaml"}, want: "receiver.yaml: no such file"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := readReceiverConfig(labTree(t, test.replace, test.remove...))
+			_, err := readReceiverConfig(labTree(t, test.replace, test.remove...), true)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("readReceiverConfig = %v, want an error containing %q", err, test.want)
 			}
@@ -181,12 +181,12 @@ func TestReceiverConfigDirectoryRejectsInvalidLayout(t *testing.T) {
 }
 
 func TestReceiverConfigDirectoryIgnoresHiddenFiles(t *testing.T) {
-	want, err := readReceiverConfig(labTree(t, nil))
+	want, err := readReceiverConfig(labTree(t, nil), true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, hidden := range []string{".DS_Store", "platforms/.DS_Store", "adapters/.DS_Store"} {
-		got, err := readReceiverConfig(labTree(t, map[string]string{hidden: "x"}))
+		got, err := readReceiverConfig(labTree(t, map[string]string{hidden: "x"}), true)
 		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("with %s: config = %+v, %v; want the config without it", hidden, got, err)
 		}

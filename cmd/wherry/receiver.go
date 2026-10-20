@@ -25,14 +25,14 @@ import (
 func runReceiver(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("receiver", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	bundlePath := flags.String("bundle", "", "receiver bundle file")
+	bundlePath := flags.String("bundle-file", "", "receiver bundle file")
 	stateDir := flags.String("state-dir", "", "directory holding the receiver's keys")
 	pluginDir := flags.String("plugin-dir", "", "directory holding the adapter plugins, wherry-plugin-<type>")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *bundlePath == "" || *stateDir == "" || *pluginDir == "" {
-		return errors.New("usage: wherry receiver --bundle FILE --state-dir DIR --plugin-dir DIR")
+		return errors.New("usage: wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir DIR")
 	}
 	bundle, err := readBundle(*bundlePath)
 	if err != nil {

@@ -51,7 +51,7 @@ request_percentage: 10
 ```
 
 ```sh
-wherry admin pool create build --terms build-terms.yaml
+wherry admin pool create build --config-file build-terms.yaml
 ```
 
 ## 3. Entitle a tenant
@@ -63,7 +63,7 @@ wherry admin tenant add alice --pool build
 ## 4. Add the host
 
 ```sh
-wherry admin host add alice laptop --bundle alice-laptop.bundle
+wherry admin host add alice laptop --bundle-file alice-laptop.bundle
 ```
 
 Copy `alice-laptop.bundle` to `~/.config/wherry/` on the host, keeping mode
@@ -129,7 +129,7 @@ the tenant's sealed `model-api-key` to the job as `MODEL_API_KEY`.
 
 ```sh
 wherry admin receiver add nomad-1 --pool build \
-  --config nomad-1 --bundle nomad-1.bundle
+  --config-dir nomad-1 --bundle-file nomad-1.bundle
 ```
 
 Copy `nomad-1.bundle` to `/etc/wherry/` on the receiver host, keeping mode
@@ -139,7 +139,7 @@ Copy `nomad-1.bundle` to `/etc/wherry/` on the receiver host, keeping mode
 
 ```sh
 NOMAD_TOKEN=<token> wherry receiver \
-  --bundle /etc/wherry/nomad-1.bundle --state-dir /var/lib/wherry \
+  --bundle-file /etc/wherry/nomad-1.bundle --state-dir /var/lib/wherry \
   --plugin-dir /usr/local/libexec/wherry/plugins
 ```
 
