@@ -249,22 +249,21 @@ func TestPanicStaysInItsCall(t *testing.T) {
 		t.Fatalf("panicked adapter's next call: %v %v", ready, err)
 	}
 	streaming := configured(t, p, "c", `{"panic":"Follow"}`)
-	if _, err := streaming.Follow(context.Background(), Handle{}, 0, make(chan Line, 4)); err == nil || errors.Is(err, ErrLinkLost) {
-		t.Fatalf("panicking follow returned %v; want that call's error", err)
+	_, err := streaming.Follow(context.Background(), Handle{}, 0, make(chan Line, 4))
+	if err == nil || errors.Is(err, ErrLinkLost) || !strings.Contains(err.Error(), "adapter c panicked") {
+		t.Fatalf("panicking follow returned %v; want that call's error, naming its adapter", err)
 	}
 	if err := b.Sweep(context.Background()); err != nil {
 		t.Fatalf("other adapter after a follow panic: %v", err)
 	}
-	// go-plugin re-logs a plugin's fields in map order, so the entry is matched field by field.
-	logged := false
-	for _, entry := range strings.Split(logs.String(), "[ERROR]") {
-		if strings.Contains(entry, "method=/wherry.adapter.v1.Adapter/Follow") && strings.Contains(entry, "adapter=c") {
-			logged = true
+	// The plugin's log reaches the receiver asynchronously, and go-plugin re-logs its fields in map order and
+	// interleaves concurrent entries, so the log is awaited for the adapter alone.
+	eventually(t, "follow panic logged with its adapter", func() error {
+		if !strings.Contains(logs.String(), "adapter=c") {
+			return fmt.Errorf("logs:\n%s", logs.String())
 		}
-	}
-	if !logged {
-		t.Fatalf("follow panic logged without its adapter:\n%s", logs.String())
-	}
+		return nil
+	})
 	if after := pid(p); after != before {
 		t.Fatalf("plugin process changed from %d to %d", before, after)
 	}
