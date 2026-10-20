@@ -15,6 +15,10 @@ updates:
     groups:
       go:
         patterns: ["*"]
+    ignore:
+      # kfake publishes no tags, so the module is pinned at a pseudo-version
+      # dependabot cannot resolve; bump it by hand with franz-go.
+      - dependency-name: github.com/twmb/franz-go/pkg/kfake
 
   - package-ecosystem: gomod
     directory: /adapter
