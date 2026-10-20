@@ -526,7 +526,7 @@ func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: strings.Repeat("0", 64), Size: 1 << 62})
 		run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: name, Size: 1 << 62, Reason: "rejected: size changed while read"})
 	}
-	metadata := agentResultMetadata([]byte(`{"type":"result","usage":{"k":"` + strings.Repeat(value, (wire.MaxAgentResult-40)/len(value)) + `"}}`))
+	metadata := agentResultMetadata([]byte(`{"type":"result","usage":{"k":"`+strings.Repeat(value, (wire.MaxAgentResult-40)/len(value))+`"}}`), "usage")
 	record := run.result(taskStatus(wire.TaskStateFailed, strings.Repeat("x", wire.MaxText)), strings.Repeat("\x01", wire.MaxText), metadata)
 	size := len(record.Key) + len(record.Value) + 97
 	t.Logf("largest result: %d-byte batch", size)

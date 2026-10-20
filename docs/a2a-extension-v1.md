@@ -195,8 +195,10 @@ A status reports one attempt of one turn.
 - `task_hash` is the hash of the turn's submission.
 - `event_id` identifies the fact the status reports. Readers keep one
   status per event ID.
-- `log_offset` is the agent output offset the transcript is published up
-  to, on `started` and `heartbeat`.
+- `log_offset` is the agent output offset an adopter follows from, on
+  `started` and `heartbeat`. The transcript is published up to at least
+  that offset. From an adapter with `output: codex`, a heartbeat's
+  `log_offset` is at most the offset of the last `agent_message` line.
 
 | `kind` | State | Written when | Extra |
 | --- | --- | --- | --- |
@@ -274,7 +276,9 @@ A chunk is one line of the agent's standard output, as the A2A artifact
   `unstored:oversize` whose `metadata` holds the line's hex `sha256` and its
   `size` in bytes. The line itself is then not stored.
 - `seq` is the line's byte offset in the agent's output and orders the
-  chunks.
+  chunks. An adopter follows from the last heartbeat's log offset, so a
+  `seq` can repeat across attempts of a turn. A reader keeps the chunks of
+  the attempt that wrote the turn's terminal status.
 - `append` is false for the line at offset 0 and true after it. `lastChunk`
   is true on the turn's final chunk, written with its terminal status.
 
@@ -391,11 +395,12 @@ the agent ended with its result line, and absent when they would be empty.
 The `metadata` of the `result` artifact holds `agent_result` (object): the
 resource-use members `duration_ms`, `duration_api_ms`, `num_turns`,
 `total_cost_usd`, `usage` and `modelUsage` from the agent's final result
-line. The receiver re-encodes them, so member order and string escaping can
-differ from the line in the transcript. `agent_result` is absent when none
-of those members is present, when the line is not an RFC 7493 object, when
-the retained object exceeds 16 KiB as encoded, and when the turn ends
-without a result line.
+line, or, from an adapter with `output: codex`, `usage` from its
+`turn.completed` line. The receiver re-encodes them, so member order and
+string escaping can differ from the line in the transcript. `agent_result`
+is absent when none of those members is present, when the line is not an
+RFC 7493 object, when the retained object exceeds 16 KiB as encoded, and
+when the turn ends without a result line.
 
 ## Echo
 

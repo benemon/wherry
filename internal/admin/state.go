@@ -104,6 +104,8 @@ type AdapterSettings struct {
 	Name       string            `json:"name" yaml:"name"`
 	Type       string            `json:"type" yaml:"type"`
 	Agent      string            `json:"agent" yaml:"agent"`
+	Output     string            `json:"output,omitzero" yaml:"output"`
+	ReplyFile  string            `json:"reply_file,omitzero" yaml:"reply_file"`
 	Credential string            `json:"credential,omitzero" yaml:"credential"`
 	Labels     map[string]string `json:"labels,omitzero" yaml:"labels"`
 	Config     map[string]any    `json:"config" yaml:"config"`
@@ -259,6 +261,12 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	for _, adapter := range config.Adapters {
 		if validateNames(adapter.Name) != nil || names[adapter.Name] || adapter.Type == "" {
 			return errors.New("adapters need unique valid names and a type")
+		}
+		if !slices.Contains([]string{"", "claude", "codex", "file"}, adapter.Output) {
+			return errors.New("adapter output must be claude, codex or file")
+		}
+		if adapter.ReplyFile != "" && (adapter.Output != "file" || !wire.ValidOutputName(adapter.ReplyFile)) {
+			return errors.New("adapter reply_file must be an output name, on an adapter whose output is file")
 		}
 		names[adapter.Name] = true
 		if err := wire.ValidateLabels(adapter.Labels); err != nil {

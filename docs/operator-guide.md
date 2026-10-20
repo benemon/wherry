@@ -259,6 +259,68 @@ matching adapter records a start failure and returns the task.
 The [Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
 cover the `config` section.
 
+A Codex adapter declares `output: codex`, so the receiver reads the
+`codex exec --json` format. Codex reads its API key from `OPENAI_API_KEY`,
+so the adapter sets `credential_env` to that name. Its platform,
+`nomad-codex` here, is the `nomad` platform without `credential_env`, since
+a key set in both is an error. The task sends the prompt file to
+`codex exec` on standard input, and `--sandbox` takes a mode the platform
+allows. Without `--ephemeral`, Codex writes session files under
+`CODEX_HOME` (default `~/.codex`), which the task must be able to write:
+
+```yaml
+name: codex
+platform: nomad-codex
+agent: codex
+output: codex
+credential: openai-api-key
+labels:
+  isolation: host
+config:
+  node_pool: codex
+  credential_env: OPENAI_API_KEY
+  runtime:
+    driver: exec
+    config:
+      command: /bin/sh
+      args:
+        - -c
+        - >-
+          exec codex exec --json --ephemeral --skip-git-repo-check
+          --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
+```
+
+An adapter for any other harness declares `output: file`: the receiver ends
+the turn when the job ends and takes the reply from a file the job writes to
+its output directory, `reply.md` unless `reply_file` names another. The
+command writes the harness's reply there, so the harness itself is
+unchanged, and its exit code decides whether the turn completes:
+
+```yaml
+name: harness
+platform: nomad
+agent: coder
+output: file
+credential: model-api-key
+labels:
+  isolation: host
+config:
+  node_pool: default
+  runtime:
+    driver: exec
+    config:
+      command: /bin/sh
+      args:
+        - -c
+        - >-
+          exec harness run < "$NOMAD_TASK_DIR/prompt.txt"
+          > "$WHERRY_OUTPUT_DIR/reply.md"
+```
+
+A receiver or host of an earlier release cannot decode a configuration record
+that sets `output` or `reply_file`, and stops reading `wherry.admin` while it
+holds one. Upgrade every receiver and host before a configuration sets them.
+
 1. Write the configuration and add the receiver:
 
    ```sh
