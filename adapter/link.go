@@ -10,9 +10,10 @@ import (
 
 const pluginName = "adapter"
 
-// handshake is protocol version 1; the cookie only stops a plugin binary started by hand from serving.
+// handshake is protocol version 2, which added a run's files, the directories and Collect; a version 1 plugin is
+// refused at launch. The cookie only stops a plugin binary started by hand from serving.
 var handshake = plugin.HandshakeConfig{
-	ProtocolVersion:  1,
+	ProtocolVersion:  2,
 	MagicCookieKey:   "WHERRY_ADAPTER_PLUGIN",
 	MagicCookieValue: "b6f1c3e2-9d4a-4e7b-8c5f-2a1d0e9f7b63",
 }

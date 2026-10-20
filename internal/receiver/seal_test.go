@@ -1,11 +1,9 @@
 package receiver
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/base64"
-	"encoding/json"
 	"runtime"
 	"slices"
 	"strings"
@@ -202,39 +200,6 @@ func TestSecretNeverLogged(t *testing.T) {
 	}
 }
 
-// Until task credentials exist, a submission naming credentials does not decode, so no turn runs without them.
-func TestSubmissionNamingCredentialsIsRejected(t *testing.T) {
-	f := newFixture(t, resultStream)
-	submission := testSubmission("run-a")
-	submission.V = 1
-	encoded, err := wire.SignRecord(submission, f.host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(strings.Split(string(encoded), ".")[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	var named map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.UseNumber()
-	if err := decoder.Decode(&named); err != nil {
-		t.Fatal(err)
-	}
-	named["wherry"].(map[string]any)["credentials"] = []map[string]string{{"name": "deploy-key", "file": "id_ed25519"}}
-	value, err := signed.Sign("application/vnd.wherry.submission.v1+jws", signed.HostOwner(testTenant, testHost), named, f.host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	record := f.produce(t, admin.PoolTasksTopic(testPool), "run-a", value)
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
-		t.Fatalf("admitted %v with ack %v, want a rejection", admitted, ack)
-	}
-	if dispatches, _, _ := f.dispatched(t); dispatches != 0 {
-		t.Fatal("dispatched a submission naming credentials")
-	}
-}
-
 const redacted = "[redacted:" + credentialName + "]"
 
 func TestDeliveredCredentialIsRedacted(t *testing.T) {
@@ -276,7 +241,7 @@ func TestDeliveredCredentialIsRedacted(t *testing.T) {
 func TestStatusMessageIsRedacted(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-s", 1)
-	run.delivered = map[string][]byte{credentialName: []byte(testToken), "empty": {}}
+	run.deliver(map[string][]byte{credentialName: []byte(testToken), "empty": {}})
 	var status wire.RunStatus
 	if err := wire.ParseRecord(run.statusRecords("terminal", taskStatus(wire.TaskStateFailed, "failed with "+testToken), nil, nil)[0].Value, f.keys(), &status); err != nil {
 		t.Fatal(err)
@@ -325,7 +290,7 @@ func TestShortCredentialIsLoggedNotRedacted(t *testing.T) {
 func TestRedactedMetadataStaysValid(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-m", 1)
-	run.delivered = map[string][]byte{credentialName: []byte("1234567890")}
+	run.deliver(map[string][]byte{credentialName: []byte("1234567890")})
 	agent, ok := resultLine([]byte(`{"type":"result","result":"done","is_error":false,"count":1234567890,"note":"id 1234567890"}`))
 	if !ok {
 		t.Fatal("fixture is not a result line")
@@ -342,8 +307,20 @@ func TestRedactedMetadataStaysValid(t *testing.T) {
 func TestReplacementNeverCarriesTheValue(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-n", 1)
-	run.delivered = map[string][]byte{credentialName: []byte("oauth-token")}
+	run.deliver(map[string][]byte{credentialName: []byte("oauth-token")})
 	if got := string(run.redact([]byte("key oauth-token"))); got != "key [redacted]" {
 		t.Fatalf("redacted %q, want the bare marker since the name holds the value", got)
+	}
+}
+
+// A value that holds another credential's value is replaced whole, whatever order the values arrive in.
+func TestLongerValueIsRedactedFirst(t *testing.T) {
+	f := newFixture(t, resultStream)
+	for range 20 {
+		run := testActiveRun(t, f, "run-l", 1)
+		run.deliver(map[string][]byte{"outer": []byte("prefix-inner-secret"), "inner": []byte("inner-secret")})
+		if got := string(run.redact([]byte("x prefix-inner-secret"))); got != "x [redacted:outer]" {
+			t.Fatalf("redacted %q, want the longer value replaced whole", got)
+		}
 	}
 }

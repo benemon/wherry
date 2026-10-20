@@ -5,6 +5,7 @@ package adapter
 import (
 	"context"
 	"errors"
+	"io/fs"
 )
 
 // Handle identifies one platform instance of a run.
@@ -38,6 +39,54 @@ type Run struct {
 	Turn, Attempt      int64
 	Prompt, Credential []byte
 	Git                *GitContext
+	// Inputs go in the directory WHERRY_INPUT_DIR names, and Credentials in the one WHERRY_CREDENTIALS_DIR names,
+	// each as a file under its name; the core has validated every name.
+	Inputs      []File
+	Credentials []Secret
+}
+
+// File is one input file.
+type File struct {
+	Name string
+	Data []byte
+}
+
+// Secret is one task credential, delivered as the file File.
+type Secret struct {
+	Name, File string
+	Value      []byte
+}
+
+// Directories are the absolute paths of a job's input, output and credentials directories as the agent sees them. The
+// core writes them into the prompt; an adapter whose paths depend on where the job lands reports tokens of its own
+// and resolves them when it delivers the prompt. Empty means the adapter does not know them.
+type Directories struct {
+	Input, Output, Credentials string
+}
+
+// Limits bound what Collect reads: the number of entries beneath the outputs directory, the bytes of one file and
+// the bytes of all of them.
+type Limits struct {
+	Files      int
+	FileBytes  int64
+	TotalBytes int64
+}
+
+// Output is one entry beneath a job's outputs directory, named by its slash-separated path there. Mode holds its
+// type bits; Data is set only for a regular file read within the limits.
+type Output struct {
+	Name string
+	Size int64
+	Mode fs.FileMode
+	Data []byte
+}
+
+// InputTooLargeError is the error Dispatch returns, with OutcomeNothingCreated, when its platform cannot deliver
+// input Name with the inputs before it.
+type InputTooLargeError struct{ Name string }
+
+func (e *InputTooLargeError) Error() string {
+	return "input " + e.Name + " is too large for the platform"
 }
 
 // Outcome is what a Dispatch left on the platform.
@@ -94,6 +143,8 @@ var ErrMessageTooLarge = errors.New("message too large")
 type Adapter interface {
 	// Git reports whether the adapter delivers a run's git context; the core rejects a task carrying one otherwise.
 	Git() bool
+	// Directories reports where the agent finds its input, output and credentials directories.
+	Directories() Directories
 	// Ready reports whether the adapter can currently start a job.
 	Ready(ctx context.Context) (bool, error)
 	// Dispatch starts a turn's job, converging on an existing one, and returns once it has started or ended.
@@ -105,6 +156,10 @@ type Adapter interface {
 	// a Follow cut short returns an error and a zero Terminal.
 	Follow(ctx context.Context, handle Handle, from int64, lines chan<- Line) (Terminal, error)
 	Stop(ctx context.Context, handle Handle) error
+	// Collect streams every entry beneath a stopped job's outputs directory but the directories it descends, in name
+	// order, reading only regular files within limits and never following a link. It reads nothing when the tree
+	// holds more than limits.Files entries. An error means the outputs were not collected.
+	Collect(ctx context.Context, handle Handle, limits Limits, outputs chan<- Output) error
 	// Purge removes a turn's job and its delivered material, with or without a handle; an absent job is success.
 	Purge(ctx context.Context, runID string, turn int64) error
 	Release(ctx context.Context, runID string, turn int64) error

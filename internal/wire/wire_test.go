@@ -265,10 +265,10 @@ func TestPartRequiresExactlyOneContent(t *testing.T) {
 	}{
 		"text":         {`"parts":[{"text":"hello"}]`, true},
 		"raw":          {`"parts":[{"raw":"aGk=","mediaType":"text/plain","filename":"hi.txt"}]`, true},
-		"empty raw":    {`"parts":[{"raw":""}]`, true},
+		"empty raw":    {`"parts":[{"raw":"","filename":"empty"}]`, true},
 		"url":          {`"parts":[{"url":"https://example.test/a"}]`, true},
-		"data":         {`"parts":[{"data":{"k":[1,2]}}]`, true},
-		"null data":    {`"parts":[{"data":null}]`, true},
+		"data":         {`"parts":[{"data":{"k":[1,2]},"filename":"k"}]`, true},
+		"null data":    {`"parts":[{"data":null,"filename":"null"}]`, true},
 		"none":         {`"parts":[{"mediaType":"text/plain"}]`, false},
 		"empty text":   {`"parts":[{"text":""}]`, false},
 		"empty url":    {`"parts":[{"url":""}]`, false},
@@ -319,7 +319,7 @@ func TestPartRawIsStandardBase64(t *testing.T) {
 		"*":     false,
 	} {
 		t.Run(input, func(t *testing.T) {
-			submission, err := parseSubmissionParts(t, `"parts":[{"raw":"`+input+`"}]`)
+			submission, err := parseSubmissionParts(t, `"parts":[{"raw":"`+input+`","filename":"f"}]`)
 			if (err == nil) != ok {
 				t.Fatalf("parse error %v, want ok=%v", err, ok)
 			}
@@ -336,7 +336,7 @@ func TestOpaqueJSONRelayedByteForByte(t *testing.T) {
 	data := jsontext.Value(`[{"y":"é"},1e-7]`)
 	submission := validSubmission()
 	submission.Message.Metadata = metadata
-	submission.Message.Parts = []Part{{Data: data, Metadata: metadata}}
+	submission.Message.Parts = []Part{{Data: data, Metadata: metadata, Filename: "data"}}
 	encoded, err := SignRecord(submission, wireKey)
 	if err != nil {
 		t.Fatal(err)
@@ -378,7 +378,7 @@ func TestMetadataMustBeObject(t *testing.T) {
 		"number":               {`"parts":[{"text":"hello"}],"metadata":1`, false},
 		"null":                 {`"parts":[{"text":"hello"}],"metadata":null`, false},
 		"part array":           {`"parts":[{"text":"hello","metadata":[1]}]`, false},
-		"part data not object": {`"parts":[{"data":[1]}]`, true},
+		"part data not object": {`"parts":[{"data":[1],"filename":"list"}]`, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseSubmissionParts(t, test.parts); (err == nil) != test.ok {

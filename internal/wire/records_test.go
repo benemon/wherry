@@ -44,6 +44,13 @@ func testRecords() map[string]Record {
 		"start failure":                &StartFailure{Wherry: testBinding(), Adapter: "nomad", Agent: "claude", Class: "launch"},
 		"seal request": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
 			Credentials: []string{"model"}, ExpiryMS: 1},
+		"seal request for task credentials alone": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
+			Credentials: []string{}, TaskCredentials: []string{"deploy-key"}, ExpiryMS: 1},
+		"output": &Output{ArtifactUpdate: TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", Append: true, LastChunk: true, Metadata: []byte(`{"index":1}`),
+			Artifact: Artifact{ArtifactID: "sub/Report.md", Parts: []Part{{Raw: StdBytes("x")}}, Extensions: []string{ExtensionURI}}},
+			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
+		"submission with credentials and outputs": &Submission{Message: testMessage("run-a"), Wherry: SubmissionBinding{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a", Turn: 1, Placement: placement,
+			Credentials: []TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []ExpectedOutput{{Name: "out/report.md", Required: true}}}},
 	}
 }
 
@@ -60,7 +67,7 @@ func TestRecordsRoundTrip(t *testing.T) {
 	keys, host, receiver := testKeys(t)
 	for name, record := range testRecords() {
 		key := receiver
-		if name == "submission" || name == "cancel" {
+		if strings.HasPrefix(name, "submission") || name == "cancel" {
 			key = host
 		}
 		encoded, err := SignRecord(record, key)
@@ -78,7 +85,7 @@ func TestRecordSignedByAnotherOwnerIsRejected(t *testing.T) {
 	keys, host, receiver := testKeys(t)
 	for name, record := range testRecords() {
 		key := host
-		if name == "submission" || name == "cancel" {
+		if strings.HasPrefix(name, "submission") || name == "cancel" {
 			key = receiver
 		}
 		encoded, err := SignRecord(record, key)
@@ -187,6 +194,71 @@ func TestRecordValidation(t *testing.T) {
 			value.Credentials = []string{}
 			return value
 		},
+		"seal request naming a credential twice": func(r map[string]Record) Record {
+			value := r["seal request"].(*SealRequest)
+			value.TaskCredentials = []string{"model"}
+			return value
+		},
+		"submission continuation declaring credentials": func(r map[string]Record) Record {
+			value := r["submission with credentials and outputs"].(*Submission)
+			value.Wherry.Turn = 2
+			return value
+		},
+		"submission credential file escaping": func(r map[string]Record) Record {
+			value := r["submission with credentials and outputs"].(*Submission)
+			value.Wherry.Credentials[0].File = "../id"
+			return value
+		},
+		"submission credential files colliding": func(r map[string]Record) Record {
+			value := r["submission with credentials and outputs"].(*Submission)
+			value.Wherry.Credentials = append(value.Wherry.Credentials, TaskCredential{Name: "other", File: "id_ed25519"})
+			return value
+		},
+		"submission output escaping": func(r map[string]Record) Record {
+			value := r["submission with credentials and outputs"].(*Submission)
+			value.Wherry.Outputs[0].Name = "out/../../x"
+			return value
+		},
+		"submission output absolute": func(r map[string]Record) Record {
+			value := r["submission with credentials and outputs"].(*Submission)
+			value.Wherry.Outputs[0].Name = "/etc/x"
+			return value
+		},
+		"submission inputs over the limit": func(r map[string]Record) Record {
+			value := r["submission"].(*Submission)
+			value.Message.Parts = append(value.Message.Parts, Part{Raw: make(StdBytes, InlineLimit/2+1), Filename: "a"}, Part{Raw: make(StdBytes, InlineLimit/2), Filename: "b"})
+			return value
+		},
+		"output named with a dot segment": func(r map[string]Record) Record {
+			value := r["output"].(*Output)
+			value.ArtifactUpdate.Artifact.ArtifactID = "sub/../x"
+			return value
+		},
+		"output appending at index 0": func(r map[string]Record) Record {
+			value := r["output"].(*Output)
+			value.ArtifactUpdate.Metadata = []byte(`{"index":0}`)
+			return value
+		},
+		"output not appending past index 0": func(r map[string]Record) Record {
+			value := r["output"].(*Output)
+			value.ArtifactUpdate.Append = false
+			return value
+		},
+		"output without an index": func(r map[string]Record) Record {
+			value := r["output"].(*Output)
+			value.ArtifactUpdate.Metadata = []byte(`{"seq":1}`)
+			return value
+		},
+		"output chunk over 256 KiB": func(r map[string]Record) Record {
+			value := r["output"].(*Output)
+			value.ArtifactUpdate.Artifact.Parts = []Part{{Raw: make(StdBytes, OutputChunk+1)}}
+			return value
+		},
+		"output with a text part": func(r map[string]Record) Record {
+			value := r["output"].(*Output)
+			value.ArtifactUpdate.Artifact.Parts = []Part{{Text: "x"}}
+			return value
+		},
 		"start failure without class": func(r map[string]Record) Record {
 			value := r["start failure"].(*StartFailure)
 			value.Class = ""
@@ -236,5 +308,24 @@ func TestParseValidatesWhatItAccepts(t *testing.T) {
 	}
 	if err := ParseRecord(encoded, keys, &RunStatus{}); err == nil {
 		t.Fatal("accepted an invalid status signed outside SignRecord")
+	}
+}
+
+func TestFileNames(t *testing.T) {
+	for name, valid := range map[string]bool{
+		"report.md": true, "Report_1-final.CSV": true, "_x": true, "-x": true, strings.Repeat("a", 255): true,
+		"": false, ".hidden": false, "..": false, "a/b": false, "a b": false, "a\\b": false, "a$b": false, `a"b`: false, "é": false, strings.Repeat("a", 256): false,
+	} {
+		if ValidFileName(name) != valid {
+			t.Errorf("ValidFileName(%q) = %v", name, !valid)
+		}
+	}
+	for name, valid := range map[string]bool{
+		"report.md": true, "a/b/c.txt": true, "": false, "/a": false, "a/": false, "a//b": false, "a/./b": false, "a/../b": false, "a/.git/x": false,
+		strings.Repeat("a/", 2048) + "a": false,
+	} {
+		if ValidOutputName(name) != valid {
+			t.Errorf("ValidOutputName(%q) = %v", name, !valid)
+		}
 	}
 }

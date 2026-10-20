@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -182,7 +184,9 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 	p, record, _ := launch(t)
 	a := configured(t, p, "a", "{}")
 	run := Run{ID: "run-a", Adapter: "a", Agent: "claude", Turn: 2, Attempt: 3, Prompt: []byte("hello"), Credential: []byte(runCredential),
-		Git: &GitContext{URL: "https://git.example.test/org/repo.git", Ref: "main", Path: "repo"}}
+		Git:         &GitContext{URL: "https://git.example.test/org/repo.git", Ref: "main", Path: "repo"},
+		Inputs:      []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty", Data: []byte{}}},
+		Credentials: []Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte(runCredential)}}}
 	if _, _, err := a.Dispatch(context.Background(), run); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +203,8 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 		}
 	}
 	got := dispatched[0]
-	if len(dispatched) != 2 || got.ID != run.ID || got.Turn != 2 || got.Attempt != 3 || string(got.Prompt) != "hello" || string(got.Credential) != runCredential || *got.Git != *run.Git {
+	if len(dispatched) != 2 || got.ID != run.ID || got.Turn != 2 || got.Attempt != 3 || string(got.Prompt) != "hello" || string(got.Credential) != runCredential || *got.Git != *run.Git ||
+		!reflect.DeepEqual(got.Inputs, []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty"}}) || !reflect.DeepEqual(got.Credentials, run.Credentials) {
 		t.Fatalf("plugin got %+v; want %+v", got, run)
 	}
 	if dispatched[1].Credential != nil || dispatched[1].Git != nil {
@@ -416,8 +421,12 @@ func TestSecretsStayOutOfLogs(t *testing.T) {
 
 func TestConfigureReportsGit(t *testing.T) {
 	p, _, _ := launch(t)
-	if a := configured(t, p, "git", `{"git":true}`); !a.Git() {
+	a := configured(t, p, "git", `{"git":true}`)
+	if !a.Git() {
 		t.Fatal("adapter delivering git context reported none")
+	}
+	if got := a.Directories(); got != (Directories{Input: "/fake/inputs", Output: "/fake/outputs", Credentials: "/fake/credentials"}) {
+		t.Fatalf("directories %+v; want the plugin's", got)
 	}
 	if a := configured(t, p, "plain", "{}"); a.Git() {
 		t.Fatal("adapter without git context reported it")
@@ -449,5 +458,75 @@ func TestCloseStopsRestarts(t *testing.T) {
 		if entry.PID != closed {
 			t.Fatalf("plugin started again as %d after Close", entry.PID)
 		}
+	}
+}
+
+func TestInputTooLargeCrossesTheLink(t *testing.T) {
+	p, _, _ := launch(t)
+	a := configured(t, p, "a", `{"too_large":"data.csv"}`)
+	outcome, _, err := a.Dispatch(context.Background(), Run{ID: "run-a", Turn: 1, Inputs: []File{{Name: "data.csv", Data: []byte("x")}}})
+	var tooLarge *InputTooLargeError
+	if outcome != OutcomeNothingCreated || !errors.As(err, &tooLarge) || tooLarge.Name != "data.csv" {
+		t.Fatalf("dispatch = %v, %v; want nothing created and input data.csv too large", outcome, err)
+	}
+}
+
+func collected(t *testing.T, a Adapter, limits Limits) ([]Output, error) {
+	t.Helper()
+	outputs := make(chan Output, 8)
+	err := a.Collect(context.Background(), Handle{Data: []byte("h")}, limits, outputs)
+	close(outputs)
+	var all []Output
+	for output := range outputs {
+		all = append(all, output)
+	}
+	return all, err
+}
+
+func TestCollectJoinsEachOutputsPieces(t *testing.T) {
+	p, _, _ := launch(t)
+	outputs, err := collected(t, configured(t, p, "a", `{"outputs":true}`), Limits{Files: 256, FileBytes: 8 << 20, TotalBytes: 8 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outputs) != 3 || outputs[0].Name != "big.bin" || !bytes.Equal(outputs[0].Data, bytes.Repeat([]byte("b"), 2<<20+1)) || outputs[0].Size != 2<<20+1 {
+		t.Fatalf("collected %d outputs; want big.bin joined from its pieces first", len(outputs))
+	}
+	if empty := outputs[1]; empty.Name != "empty" || empty.Data == nil || len(empty.Data) != 0 {
+		t.Fatalf("empty output %+v; want read with no data", empty)
+	}
+	if link := outputs[2]; link.Name != "link" || link.Data != nil || link.Mode != fs.ModeSymlink || link.Size != 4 {
+		t.Fatalf("link output %+v; want unread with its type", link)
+	}
+}
+
+func TestCollectRefusesAnOutputOverTheFileLimit(t *testing.T) {
+	p, _, _ := launch(t)
+	if _, err := collected(t, configured(t, p, "a", `{"outputs":true}`), Limits{Files: 256, FileBytes: 2 << 20, TotalBytes: 8 << 20}); err == nil {
+		t.Fatal("collect passed an output over the file limit")
+	}
+}
+
+func TestCollectFailureCrossesTheLink(t *testing.T) {
+	p, _, _ := launch(t)
+	if outputs, err := collected(t, configured(t, p, "a", "{}"), Limits{Files: 256, FileBytes: 8 << 20, TotalBytes: 8 << 20}); err == nil || len(outputs) != 0 {
+		t.Fatalf("collect = %d outputs, %v; want the adapter's error", len(outputs), err)
+	}
+}
+
+// A plugin built against protocol version 1 answers go-plugin's handshake with that version; this script answers as
+// one would, before any TLS.
+func TestVersionOnePluginIsRefused(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "wherry-plugin-old")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|1|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Launch(fixed(script), &syncBuffer{})
+	if err == nil {
+		p.Close()
+		t.Fatal("launched a version 1 plugin")
+	}
+	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 1, Client versions: [2]") {
+		t.Fatalf("launch error %v; want the version named", err)
 	}
 }

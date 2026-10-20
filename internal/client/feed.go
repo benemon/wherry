@@ -2,11 +2,16 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,11 +23,25 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// AwaitResult is the accepted outcome of the latest turn; Task is nil when a status record ended it.
+// AwaitResult is the accepted outcome of the latest turn; Task is nil when a status record ended it. Outputs are the
+// turn's outputs that verified against its result, NotReturned those its receiver did not return, and Rejected
+// those this host could not verify.
 type AwaitResult struct {
-	Task    *wire.Task
-	Status  wire.TaskStatus
-	Skipped int
+	Task        *wire.Task
+	Status      wire.TaskStatus
+	Turn        int64
+	Outputs     []Output
+	NotReturned []wire.UnreturnedOutput
+	Rejected    []wire.UnreturnedOutput
+	Skipped     int
+}
+
+// Output is an output of a turn, verified against the size and SHA-256 its result lists.
+type Output struct {
+	Name   string
+	SHA256 string
+	Size   int64
+	Data   []byte
 }
 
 // StatusResult is the latest verified status of a run's latest turn.
@@ -66,6 +85,7 @@ type entry struct {
 	at     time.Time
 	status *wire.RunStatus
 	chunk  *wire.Chunk
+	output *wire.Output
 	result *wire.Result
 }
 
@@ -88,9 +108,12 @@ type runView struct {
 	latest      int64
 	statuses    []*wire.RunStatus
 	chunks      []*wire.Chunk
+	outputs     []*wire.Output
 	skipped     int
 	outcome     *AwaitResult
 	outcomeTurn int64
+	// result is the result that set the outcome, nil when a status did.
+	result *wire.Result
 }
 
 func newRunView(h *Host, v view, runID string, local *runRecord) *runView {
@@ -173,6 +196,12 @@ func (r *runView) add(ctx context.Context, record *kgo.Record) {
 			r.entries = append(r.entries, entry{receiver: chunk.Wherry.Receiver, chunk: &chunk})
 			return
 		}
+		if output, err := authorize(ctx, r, value, func(v view) (wire.Output, error) {
+			return admin.AuthorizeOutput(v.state, v.keys, value, r.pool, r.h.tenant)
+		}); err == nil && output.Wherry.Run == r.run {
+			r.entries = append(r.entries, entry{receiver: output.Wherry.Receiver, output: &output})
+			return
+		}
 		if result, err := authorize(ctx, r, value, func(v view) (wire.Result, error) {
 			return admin.AuthorizeResult(v.state, v.keys, value, r.pool, r.h.tenant)
 		}); err == nil && result.Wherry.Run == r.run {
@@ -213,7 +242,7 @@ func (r *runView) derive() {
 		config, ok := r.v.state.Receivers[receiver]
 		return ok && config.Pool == r.pool && !r.v.state.Ended[admin.ReceiverPrincipal(receiver)] && r.v.state.Entitlements[r.h.tenant][r.pool]
 	}
-	r.turns, r.latest, r.statuses, r.chunks, r.skipped, r.outcome, r.outcomeTurn = map[int64]turn{}, 0, nil, nil, r.unread, nil, 0
+	r.turns, r.latest, r.statuses, r.chunks, r.outputs, r.skipped, r.outcome, r.outcomeTurn, r.result = map[int64]turn{}, 0, nil, nil, nil, r.unread, nil, 0, nil
 	if r.local != nil {
 		r.latest = r.local.Turn
 		r.turns[r.local.Turn] = turn{hash: r.local.TaskHash}
@@ -250,7 +279,7 @@ func (r *runView) derive() {
 			}
 			r.statuses = append(r.statuses, status)
 			if ends(status) && admit(&filter, status) {
-				r.outcome, r.outcomeTurn = &AwaitResult{Status: status.StatusUpdate.Status}, status.Wherry.Turn
+				r.outcome, r.outcomeTurn, r.result = &AwaitResult{Status: status.StatusUpdate.Status}, status.Wherry.Turn, nil
 			}
 		case e.chunk != nil:
 			if r.turns[e.chunk.Wherry.Turn].hash != e.chunk.Wherry.TaskHash {
@@ -258,6 +287,12 @@ func (r *runView) derive() {
 				continue
 			}
 			r.chunks = append(r.chunks, e.chunk)
+		case e.output != nil:
+			if r.turns[e.output.Wherry.Turn].hash != e.output.Wherry.TaskHash {
+				r.skipped++
+				continue
+			}
+			r.outputs = append(r.outputs, e.output)
 		default:
 			result := e.result
 			binding := r.turns[result.Wherry.Turn]
@@ -268,7 +303,7 @@ func (r *runView) derive() {
 			}
 			state := result.Task.Status.State
 			if (wire.Terminal(state) || wire.Interrupted(state)) && filter.Admit(r.run, result.Wherry.Turn, result.Wherry.Attempt) {
-				r.outcome, r.outcomeTurn = &AwaitResult{Task: &result.Task, Status: result.Task.Status}, result.Wherry.Turn
+				r.outcome, r.outcomeTurn, r.result = &AwaitResult{Task: &result.Task, Status: result.Task.Status}, result.Wherry.Turn, result
 			}
 		}
 	}
@@ -509,7 +544,10 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	}
 	for {
 		if r.outcome != nil {
-			r.outcome.Skipped = r.skipped
+			r.outcome.Skipped, r.outcome.Turn = r.skipped, r.outcomeTurn
+			if r.result != nil {
+				r.outcome.Outputs, r.outcome.NotReturned, r.outcome.Rejected = r.verifiedOutputs(r.result)
+			}
 			return *r.outcome, nil
 		}
 		fetches := reader.PollFetches(waitCtx)
@@ -532,4 +570,102 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			return AwaitResult{}, err
 		}
 	}
+}
+
+// verifiedOutputs joins, for each output the result lists, the chunks its own attempt wrote, and verifies them against
+// the listed size and SHA-256. An output whose chunks have a gap, an overlap or a duplicate index, or whose bytes do
+// not match, is rejected. It also returns the outputs the result lists as not returned.
+func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.UnreturnedOutput, []wire.UnreturnedOutput) {
+	var manifest struct {
+		Outputs     []wire.ReturnedOutput   `json:"outputs"`
+		NotReturned []wire.UnreturnedOutput `json:"not_returned"`
+	}
+	// The metadata also holds the placement members; a manifest that does not decode lists nothing.
+	if json.Unmarshal(result.Task.Metadata, &manifest) != nil {
+		return nil, nil, nil
+	}
+	chunks := map[string]map[int64]*wire.Output{}
+	duplicated := map[string]bool{}
+	for _, chunk := range r.outputs {
+		if chunk.Wherry != result.Wherry {
+			continue
+		}
+		var metadata wire.OutputMetadata
+		_ = json.Unmarshal(chunk.ArtifactUpdate.Metadata, &metadata) // validated when the chunk was parsed
+		name := chunk.ArtifactUpdate.Artifact.ArtifactID
+		if chunks[name] == nil {
+			chunks[name] = map[int64]*wire.Output{}
+		}
+		if _, duplicate := chunks[name][metadata.Index]; duplicate {
+			duplicated[name] = true
+		}
+		chunks[name][metadata.Index] = chunk
+	}
+	var verified []Output
+	var rejected []wire.UnreturnedOutput
+	for _, listed := range manifest.Outputs {
+		reason, data := "", []byte{}
+		if duplicated[listed.Name] {
+			reason = "duplicate chunk"
+		}
+		for index := int64(0); reason == ""; index++ {
+			chunk, ok := chunks[listed.Name][index]
+			if !ok {
+				reason = "gap"
+				break
+			}
+			data = append(data, chunk.ArtifactUpdate.Artifact.Parts[0].Raw...)
+			if chunk.ArtifactUpdate.LastChunk {
+				if int64(len(chunks[listed.Name])) != index+1 {
+					reason = "overlap"
+				}
+				break
+			}
+		}
+		sum := sha256.Sum256(data)
+		if reason == "" && (int64(len(data)) != listed.Size || hex.EncodeToString(sum[:]) != listed.SHA256) {
+			reason = "size or hash mismatch"
+		}
+		if reason != "" {
+			rejected = append(rejected, wire.UnreturnedOutput{Name: listed.Name, Size: max(listed.Size, 0), Reason: "rejected by this host: " + reason})
+			continue
+		}
+		verified = append(verified, Output{Name: listed.Name, SHA256: listed.SHA256, Size: listed.Size, Data: data})
+	}
+	return verified, manifest.NotReturned, rejected
+}
+
+// WriteOutputs writes a turn's verified outputs beneath dir, by default <state_dir>/runs/<run>/outputs/<turn>, and
+// returns their paths. Every write stays inside dir, whatever links it holds.
+func (h *Host) WriteOutputs(runID string, turn int64, dir string, outputs []Output) ([]string, error) {
+	if dir == "" {
+		if _, ok := h.runPath(runID); !ok {
+			return nil, errors.New("run ID does not name a local run path")
+		}
+		dir = filepath.Join(h.stateDir, "runs", runID, "outputs", strconv.FormatInt(turn, 10))
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	paths := []string{}
+	for _, output := range outputs {
+		if !wire.ValidOutputName(output.Name) {
+			return nil, errors.New("an output name is not a relative path of portable file names")
+		}
+		if parent := path.Dir(output.Name); parent != "." {
+			if err := root.MkdirAll(parent, 0o700); err != nil {
+				return nil, err
+			}
+		}
+		if err := root.WriteFile(output.Name, output.Data, 0o600); err != nil {
+			return nil, err
+		}
+		paths = append(paths, filepath.Join(dir, filepath.FromSlash(output.Name)))
+	}
+	return paths, nil
 }

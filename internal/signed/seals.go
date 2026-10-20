@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,7 +32,9 @@ type SealBinding struct {
 	Turn        int64    `json:"turn"`
 	Attempt     int64    `json:"attempt"`
 	Credentials []string `json:"credentials"`
-	ExpiryMS    int64    `json:"expiry_ms"`
+	// TaskCredentials are absent from the protected header when empty.
+	TaskCredentials []string `json:"task_credentials,omitzero"`
+	ExpiryMS        int64    `json:"expiry_ms"`
 }
 
 // sealHeader is every member a seal's protected header may hold.
@@ -55,7 +58,7 @@ func SealKeyID(key *ecdsa.PublicKey) string {
 	return base64.RawURLEncoding.EncodeToString(thumbprint)
 }
 
-// Seal encrypts values, one per credential binding names, to key as a compact JWE.
+// Seal encrypts values, one per credential and task credential binding names, to key as a compact JWE.
 func Seal(binding SealBinding, key *ecdsa.PublicKey, values map[string][]byte) ([]byte, error) {
 	plaintext, err := json.Marshal(sealPlaintext{Version: 1, Binding: binding, Values: values}, json.Deterministic(true))
 	if err != nil {
@@ -65,6 +68,9 @@ func Seal(binding SealBinding, key *ecdsa.PublicKey, values map[string][]byte) (
 		WithHeader("tenant", binding.Tenant).WithHeader("pool", binding.Pool).WithHeader("receiver", binding.Receiver).
 		WithHeader("key_id", binding.KeyID).WithHeader("run", binding.Run).WithHeader("turn", binding.Turn).
 		WithHeader("attempt", binding.Attempt).WithHeader("credentials", binding.Credentials).WithHeader("expiry_ms", binding.ExpiryMS)
+	if len(binding.TaskCredentials) > 0 {
+		options = options.WithHeader("task_credentials", binding.TaskCredentials)
+	}
 	encrypter, err := jose.NewEncrypter(jose.A256GCM, jose.Recipient{Algorithm: jose.ECDH_ES_A256KW, Key: key}, options)
 	if err != nil {
 		return nil, err
@@ -78,7 +84,7 @@ func Seal(binding SealBinding, key *ecdsa.PublicKey, values map[string][]byte) (
 		return nil, err
 	}
 	if len(compact) > maxSeal {
-		return nil, fmt.Errorf("a seal of %v is %d bytes, over the 64 KiB limit", binding.Credentials, len(compact))
+		return nil, fmt.Errorf("a seal of %v is %d bytes, over the 64 KiB limit", append(slices.Clone(binding.Credentials), binding.TaskCredentials...), len(compact))
 	}
 	return []byte(compact), nil
 }
@@ -116,8 +122,9 @@ func OpenSeal(encoded []byte, expected SealBinding, key *ecdsa.PrivateKey, now t
 	if json.Unmarshal(plaintext, &opened, strict) != nil || opened.Version != 1 || !reflect.DeepEqual(opened.Binding, header.SealBinding) {
 		return nil, errors.New("seal plaintext is bound otherwise than its header")
 	}
-	for _, name := range header.Credentials {
-		if _, ok := opened.Values[name]; !ok || len(opened.Values) != len(header.Credentials) {
+	names := append(slices.Clone(header.Credentials), header.TaskCredentials...)
+	for _, name := range names {
+		if _, ok := opened.Values[name]; !ok || len(opened.Values) != len(names) {
 			return nil, errors.New("seal values are not the credentials it names")
 		}
 	}

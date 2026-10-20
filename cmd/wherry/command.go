@@ -11,6 +11,7 @@ import (
 	"log"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -166,15 +167,38 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	gitURL := flags.String("git", "", "git repository URL to check out for the agent")
 	gitRef := flags.String("git-ref", "", "branch, tag or commit to check out")
 	gitPath := flags.String("git-path", "", "checkout directory (default: the repository name)")
+	var inputs []string
+	flags.Func("input", "file to deliver to the agent's input directory (repeatable)", func(value string) error {
+		inputs = append(inputs, value)
+		return nil
+	})
+	var credentials []wire.TaskCredential
+	flags.Func("credential-file", "NAME=FILE: deliver configured credential NAME as file FILE in the agent's credentials directory (repeatable)", func(value string) error {
+		name, file, ok := strings.Cut(value, "=")
+		if !ok {
+			return errors.New("want NAME=FILE")
+		}
+		credentials = append(credentials, wire.TaskCredential{Name: name, File: file})
+		return nil
+	})
+	var outputs []wire.ExpectedOutput
+	flags.Func("output", "NAME[:required]: a file the agent is asked to leave in its output directory (repeatable)", func(value string) error {
+		name, required := strings.CutSuffix(value, ":required")
+		outputs = append(outputs, wire.ExpectedOutput{Name: name, Required: required})
+		return nil
+	})
 	deadline := flags.Duration("deadline", 30*time.Minute, "task deadline")
 	queueDeadline := flags.Duration("queue-deadline", 10*time.Minute, "queue deadline")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit [--agent NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git URL --git-ref REF [--git-path PATH]] [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit [--agent NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git URL --git-ref REF [--git-path PATH]] [--input FILE]... [--credential-file NAME=FILE]... [--output NAME[:required]]... [--deadline DURATION] [--queue-deadline DURATION]")
 	}
-	var parts []wire.Part
+	parts, err := inputParts(inputs)
+	if err != nil {
+		return err
+	}
 	if wasSet(flags, "git") || wasSet(flags, "git-ref") || wasSet(flags, "git-path") {
 		if *gitURL == "" || *gitRef == "" {
 			return errors.New("submit requires --git and --git-ref together")
@@ -202,7 +226,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return fmt.Errorf("selector: %w", err)
 	}
 	result, err := client.Submit(ctx, busclient.SubmitInput{
-		Agent: *agent, Selector: selector, Prompt: *prompt, Parts: parts,
+		Agent: *agent, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Outputs: outputs,
 		Deadline: *deadline, QueueDeadline: *queueDeadline,
 	})
 	if err != nil {
@@ -212,8 +236,21 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	return nil
 }
 
+// inputParts reads each input file into a raw part named by its base name.
+func inputParts(paths []string) ([]wire.Part, error) {
+	var parts []wire.Part
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, wire.Part{Raw: append(wire.StdBytes{}, data...), Filename: filepath.Base(path)})
+	}
+	return parts, nil
+}
+
 func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const awaitUsage = "usage: wherry await RUN_ID [--timeout 30m]"
+	const awaitUsage = "usage: wherry await RUN_ID [--timeout 30m] [--outputs-dir DIR]"
 	if len(args) == 0 {
 		return errors.New(awaitUsage)
 	}
@@ -221,6 +258,7 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	flags := flag.NewFlagSet("await", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	timeout := flags.Duration("timeout", 30*time.Minute, "wait timeout")
+	outputsDir := flags.String("outputs-dir", "", "directory for the turn's outputs (default: <state_dir>/runs/RUN_ID/outputs/TURN)")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -249,9 +287,24 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	if result.Status.State == wire.TaskStateAuthRequired {
 		fmt.Fprintf(stderr, "continue with: wherry continue %s\n", runID)
 	}
+	var paths []string
+	if len(result.Outputs) > 0 {
+		if paths, err = client.WriteOutputs(runID, result.Turn, *outputsDir, result.Outputs); err != nil {
+			return fmt.Errorf("write outputs: %w", err)
+		}
+	}
+	for i, output := range result.Outputs {
+		fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, paths[i], output.SHA256, output.Size)
+	}
+	for _, output := range append(result.NotReturned, result.Rejected...) {
+		fmt.Fprintf(stderr, "output %s not returned: %s\n", output.Name, output.Reason)
+	}
 	warnSkipped(stderr, result.Skipped)
 	if result.Status.State != wire.TaskStateCompleted {
 		return fmt.Errorf("run ended in %s", result.Status.State)
+	}
+	if len(result.Rejected) > 0 {
+		return fmt.Errorf("%d outputs failed verification", len(result.Rejected))
 	}
 	return nil
 }

@@ -4,8 +4,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	json "encoding/json/v2"
 	"errors"
+	"fmt"
 	"regexp"
+	"slices"
 
 	"github.com/benemon/wherry/internal/signed"
 	jose "github.com/go-jose/go-jose/v4"
@@ -74,6 +77,23 @@ type SubmissionBinding struct {
 	Placement       Placement `json:"placement"`
 	DeadlineMS      int64     `json:"deadline_ms"`
 	QueueDeadlineMS int64     `json:"queue_deadline_ms"`
+	// Credentials and Outputs are declared by a run's first turn and hold for all of its turns.
+	Credentials []TaskCredential `json:"credentials,omitzero"`
+	Outputs     []ExpectedOutput `json:"outputs,omitzero"`
+}
+
+// TaskCredential is a credential of the host that the run's agent gets as the file File in its credentials
+// directory.
+type TaskCredential struct {
+	Name string `json:"name"`
+	File string `json:"file"`
+}
+
+// ExpectedOutput is a file the agent is asked to leave in its outputs directory; a turn that does not return a
+// required one fails.
+type ExpectedOutput struct {
+	Name     string `json:"name"`
+	Required bool   `json:"required,omitzero"`
 }
 
 // Submission is a host's task or continuation on its pool's task topic.
@@ -134,6 +154,13 @@ type ChunkBinding struct {
 	Seq      int64  `json:"seq"`
 }
 
+// Output is one chunk of an output file, as the A2A artifact the file names, on the tenant feed.
+type Output struct {
+	V              int                     `json:"v"`
+	ArtifactUpdate TaskArtifactUpdateEvent `json:"artifactUpdate"`
+	Wherry         ResultBinding           `json:"wherry"`
+}
+
 // Result is a turn's final A2A task on the tenant feed.
 type Result struct {
 	V      int           `json:"v"`
@@ -141,7 +168,7 @@ type Result struct {
 	Wherry ResultBinding `json:"wherry"`
 }
 
-// ResultBinding is the wherry block of a result.
+// ResultBinding is the wherry block of a result or an output chunk.
 type ResultBinding struct {
 	ReceiverBinding
 	TaskHash string `json:"task_hash"`
@@ -182,7 +209,9 @@ type SealRequest struct {
 	Key         jose.JSONWebKey `json:"key"`
 	KeyID       string          `json:"key_id"`
 	Credentials []string        `json:"credentials"`
-	ExpiryMS    int64           `json:"expiry_ms"`
+	// TaskCredentials are the run's task credentials, outside the pool's terms.
+	TaskCredentials []string `json:"task_credentials,omitzero"`
+	ExpiryMS        int64    `json:"expiry_ms"`
 }
 
 // StartFailure records that a receiver could not start a run's attempt.
@@ -199,6 +228,7 @@ func (*Cancel) jwsType() string        { return "application/vnd.wherry.cancel.v
 func (*RunStatus) jwsType() string     { return "application/vnd.wherry.status.v1+jws" }
 func (*Chunk) jwsType() string         { return "application/vnd.wherry.chunk.v1+jws" }
 func (*Result) jwsType() string        { return "application/vnd.wherry.result.v1+jws" }
+func (*Output) jwsType() string        { return "application/vnd.wherry.output.v1+jws" }
 func (*Echo) jwsType() string          { return "application/vnd.wherry.echo.v1+jws" }
 func (*Advertisement) jwsType() string { return "application/vnd.wherry.advertisement.v1+jws" }
 func (*StartFailure) jwsType() string  { return "application/vnd.wherry.start-failure.v1+jws" }
@@ -211,6 +241,7 @@ func (value *Cancel) owner() string        { return signed.HostOwner(value.Tenan
 func (value *RunStatus) owner() string     { return value.Wherry.Receiver }
 func (value *Chunk) owner() string         { return value.Wherry.Receiver }
 func (value *Result) owner() string        { return value.Wherry.Receiver }
+func (value *Output) owner() string        { return value.Wherry.Receiver }
 func (value *Echo) owner() string          { return value.Receiver }
 func (value *Advertisement) owner() string { return value.Receiver }
 func (value *StartFailure) owner() string  { return value.Wherry.Receiver }
@@ -221,6 +252,7 @@ func (value *Cancel) version() *int        { return &value.V }
 func (value *RunStatus) version() *int     { return &value.V }
 func (value *Chunk) version() *int         { return &value.V }
 func (value *Result) version() *int        { return &value.V }
+func (value *Output) version() *int        { return &value.V }
 func (value *Echo) version() *int          { return &value.V }
 func (value *Advertisement) version() *int { return &value.V }
 func (value *StartFailure) version() *int  { return &value.V }
@@ -267,6 +299,29 @@ func (value *Submission) validate() error {
 	if err := validateMessage(&value.Message); err != nil {
 		return err
 	}
+	if err := ValidateInputs(value.Message.Parts); err != nil {
+		return err
+	}
+	if binding.Turn > 1 && (binding.Credentials != nil || binding.Outputs != nil) {
+		return errors.New("only a run's first turn declares credentials and outputs")
+	}
+	files := map[string]bool{}
+	for _, credential := range binding.Credentials {
+		if err := validateID(credential.Name, "credential"); err != nil {
+			return err
+		}
+		if !ValidFileName(credential.File) || files[credential.File] {
+			return errors.New("credential files must be unique portable file names")
+		}
+		files[credential.File] = true
+	}
+	outputs := map[string]bool{}
+	for _, output := range binding.Outputs {
+		if !ValidOutputName(output.Name) || outputs[output.Name] {
+			return errors.New("expected outputs must be unique relative paths of portable file names")
+		}
+		outputs[output.Name] = true
+	}
 	gitParts := 0
 	for _, part := range value.Message.Parts {
 		if part.MediaType != GitMediaType {
@@ -278,6 +333,31 @@ func (value *Submission) validate() error {
 		if _, err := ParseGitPart(part); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ValidateInputs checks the raw and data parts of a message: each names a unique portable file, and together they
+// fit InlineLimit.
+func ValidateInputs(parts []Part) error {
+	names := map[string]bool{}
+	inline := 0
+	for _, part := range parts {
+		if part.Raw == nil && part.Data == nil {
+			continue
+		}
+		name := InputName(part)
+		if !ValidFileName(part.Filename) || !ValidFileName(name) {
+			return errors.New("a raw or data part needs a filename of letters, digits, '.', '_' and '-', not starting with a dot, at most 255 bytes")
+		}
+		if names[name] {
+			return errors.New("input file names must be unique")
+		}
+		names[name] = true
+		inline += len(part.Raw) + len(part.Data)
+	}
+	if inline > InlineLimit {
+		return fmt.Errorf("inline inputs are %d bytes, over the %d-byte limit", inline, InlineLimit)
 	}
 	return nil
 }
@@ -338,6 +418,32 @@ func (value *Chunk) validate() error {
 	return validateArtifactUpdate(update)
 }
 
+func (value *Output) validate() error {
+	update := &value.ArtifactUpdate
+	if err := value.Wherry.ReceiverBinding.validate(); err != nil {
+		return err
+	}
+	if update.TaskID != value.Wherry.Run || update.ContextID != value.Wherry.Run || !validHash(value.Wherry.TaskHash) {
+		return errors.New("invalid output")
+	}
+	artifact := &update.Artifact
+	if !ValidOutputName(artifact.ArtifactID) || !slices.Contains(artifact.Extensions, ExtensionURI) || len(artifact.Parts) != 1 || artifact.Parts[0].Raw == nil ||
+		len(artifact.Parts[0].Raw) > OutputChunk {
+		return errors.New("an output chunk is one raw part of at most 256 KiB of the artifact its output names")
+	}
+	if err := validateParts(artifact.Parts); err != nil {
+		return err
+	}
+	if err := validateMetadata(artifact.Metadata); err != nil {
+		return err
+	}
+	var metadata OutputMetadata
+	if update.Metadata == nil || json.Unmarshal(update.Metadata, &metadata, json.RejectUnknownMembers(true)) != nil || metadata.Index < 0 || update.Append != (metadata.Index > 0) {
+		return errors.New("output chunk metadata requires its index, and append exactly from index 1")
+	}
+	return nil
+}
+
 func (value *Result) validate() error {
 	if err := value.Wherry.ReceiverBinding.validate(); err != nil {
 		return err
@@ -380,12 +486,16 @@ func (value *SealRequest) validate() error {
 		return err
 	}
 	key, ok := value.Key.Key.(*ecdsa.PublicKey)
-	if !ok || key.Curve != elliptic.P256() || value.KeyID != signed.SealKeyID(key) || value.ExpiryMS <= 0 || len(value.Credentials) == 0 {
+	names := append(slices.Clone(value.Credentials), value.TaskCredentials...)
+	if !ok || key.Curve != elliptic.P256() || value.KeyID != signed.SealKeyID(key) || value.ExpiryMS <= 0 || len(names) == 0 {
 		return errors.New("invalid seal request")
 	}
-	for _, credential := range value.Credentials {
+	for i, credential := range names {
 		if err := validateID(credential, "credential"); err != nil {
 			return err
+		}
+		if slices.Contains(names[:i], credential) {
+			return errors.New("a seal request names each credential once")
 		}
 	}
 	return nil

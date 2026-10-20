@@ -17,9 +17,10 @@ of the same name.
 
 Delegate a task when all of these hold:
 
-- The prompt can stand on its own. The remote agent sees the prompt and,
-  if you pass one, a checkout of a pushed git ref. It does not see this
-  session, your files or uncommitted changes.
+- The prompt can stand on its own. The remote agent sees the prompt, the
+  input files you pass and, if you pass one, a checkout of a pushed git
+  ref. It does not see this session, your other files or uncommitted
+  changes.
 - The task takes minutes or more, or needs something this machine does not
   have (an OS, architecture, isolation level or network).
 - You have other work to do while it runs, or several such tasks to run
@@ -55,14 +56,27 @@ Call `submit` with `prompt`, and `agent`, `selector` and `git` (`url`,
 `ref`, optional `path`) when you need them. It returns `id` and `pool`
 straight away. Note the id and carry on with other work.
 
+To send files, add `inputs`: paths of regular files beneath the directory
+the wherry MCP server runs in, 256 KiB in all, which the agent finds under
+their base names in its input directory. The server refuses any other path,
+and any file of the wherry configuration, its state or its credentials. To give the agent a
+credential as a file, add `credentials`: `{name, file}` with `name` a
+credential in the user's wherry configuration and `file` the name it gets
+in `WHERRY_CREDENTIALS_DIR`; you never see the value. To get files back,
+add `outputs`: `{name, required}` for each file the agent should leave in
+`WHERRY_OUTPUT_DIR`. The prompt the agent receives names all of them.
+
 ## Collect the result
 
 Call `await` with the id. It waits up to 45 seconds and returns one of:
 
-- `TASK_STATE_COMPLETED` with `artifacts`: the result.
+- `TASK_STATE_COMPLETED` with `artifacts`: the result. `outputs` lists
+  each returned file with the local `path` it was written to and its
+  `sha256`; read the files there. `not_returned` lists each expected file
+  that did not come back, with the reason.
 - `TASK_STATE_FAILED` with `artifacts` holding the agent's result when the
   agent reported the failure, or a `message` when the receiver could not
-  run it.
+  run it or a required output did not come back.
 - `TASK_STATE_REJECTED` or `TASK_STATE_CANCELED` with a `message` that
   says why.
 - `TASK_STATE_AUTH_REQUIRED`: see the next section.
