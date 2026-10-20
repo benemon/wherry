@@ -64,7 +64,7 @@ A pool's terms apply to every receiver in it. Write them as a
 [terms file](reference.md#pool-terms) and create the pool:
 
 ```sh
-wherry admin pool create build --terms build-terms.yaml
+wherry admin pool create build --config-file build-terms.yaml
 ```
 
 - `delivery_limit` bounds how often the broker delivers one task. Each
@@ -140,7 +140,7 @@ carries them, and with it all of `wherry.admin`.
 2. Add each host the tenant submits from:
 
    ```sh
-   wherry admin host add alice laptop --bundle alice-laptop.bundle
+   wherry admin host add alice laptop --bundle-file alice-laptop.bundle
    ```
 
 3. Hand the bundle to the host's user over a channel you trust. It holds
@@ -235,11 +235,11 @@ cover the `config` section.
 
    ```sh
    wherry admin receiver add nomad-1 --pool build \
-     --config nomad-1 --bundle nomad-1.bundle
+     --config-dir nomad-1 --bundle-file nomad-1.bundle
    ```
 
    When the platform does not issue the receiver's credential itself, add
-   `--platform-credential ADAPTER=FILE` to put a token in the bundle for
+   `--platform-credential-file ADAPTER=FILE` to put a token in the bundle for
    one adapter.
 
 2. Deliver the bundle to the receiver through the platform's secret
@@ -250,7 +250,7 @@ cover the `config` section.
 ### Change a receiver's configuration
 
 ```sh
-wherry admin receiver configure nomad-1 --config nomad-1
+wherry admin receiver configure nomad-1 --config-dir nomad-1
 ```
 
 The receiver exits when it reads the new record at its next configuration
@@ -261,7 +261,7 @@ dispatched again. The bundle and password do not change.
 
 ## Run a receiver
 
-`wherry receiver --bundle FILE --state-dir DIR --plugin-dir DIR` needs:
+`wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir DIR` needs:
 
 - the bundle, readable by the receiver alone;
 - a state directory that survives restarts. It holds the receiver's
@@ -329,7 +329,7 @@ job "wherry-receiver" {
 
       config {
         command = "/usr/local/bin/wherry"
-        args    = ["receiver", "--bundle", "${NOMAD_SECRETS_DIR}/bundle.yaml",
+        args    = ["receiver", "--bundle-file", "${NOMAD_SECRETS_DIR}/bundle.yaml",
                    "--state-dir", "${NOMAD_ALLOC_DIR}/data",
                    "--plugin-dir", "/usr/local/libexec/wherry/plugins"]
       }
@@ -600,7 +600,8 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    CA file in `SSL_CERT_FILE`); receiver hosts, which upload outputs with
    their system roots; and every platform node that fetches inputs, for the
    Nomad plugin each Nomad client, whose artifact fetcher uses the system
-   roots. Allow the endpoint in the jobs' egress policy.
+   roots. Agent jobs do not reach the endpoint themselves; see
+   [Agent network reach](#agent-network-reach).
 
 On Nomad an input's presigned GET is the source of an `artifact` in the
 agent job, visible to anyone who can read the job for its lifetime, and
@@ -653,7 +654,8 @@ them rejects a pool record that carries them, and with it all of
 
 Forges limit what wherry accepts, not where an agent can connect: the agent
 runs commands, and it can reach any host its network allows. Enforce where
-agents connect with the platform's egress policy, and treat `forges` as the
+agents connect with the platform's egress policy
+([Agent network reach](#agent-network-reach)), and treat `forges` as the
 check that a task names an allowed repository.
 
 The clone's commands keep the credential for the remote's host. No
@@ -733,6 +735,79 @@ whether a deploy key works; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs)
 says what it gives.
 
+## Agent network reach
+
+An agent runs commands, so it can connect to any host its network allows.
+The pool's `forges` and `storage` bound what a task names, not where its
+agent connects. The platform's egress policy bounds that. Give agent jobs a
+policy that:
+
+- denies the control plane: the Nomad servers and clients, Consul, Vault,
+  the Kafka brokers, the Kubernetes API, and cloud metadata addresses such
+  as `169.254.169.254` and `fd00:ec2::254`;
+- allows DNS, the model API the agent's harness calls (for Claude Code,
+  `api.anthropic.com`), and the hosts in the pool's `forges`;
+- denies everything else.
+
+wherry gives the agent no storage URL: none reaches its prompt, its
+environment or its files. On Nomad the client fetches S3 inputs before the
+task starts, and the receiver uploads S3 outputs after the task stops. The
+Nomad clients and the receiver hosts need the storage endpoint; agent jobs
+do not. The presigned GET is the source of an `artifact` in the agent job,
+so an agent that can read its own job can read the URL: keep the Nomad API
+out of the agent's reach, as below.
+
+### On Nomad
+
+The plugin's agent jobs carry no `network` block, so the driver decides
+the task's network. `exec` and `raw_exec` tasks share the client host's
+network namespace. Podman tasks take Podman's default for the client
+(bridge networking when rootful, `slirp4netns` or `pasta` when rootless),
+or the network the runtime's `config` names in `network_mode`.
+
+1. Enable [Nomad ACLs](https://developer.hashicorp.com/nomad/docs/secure/acl).
+   An agent that shares the host's network reaches the client's HTTP API
+   on loopback, and without ACLs that API serves every job, URLs included.
+2. Place agents in their own node pool (the adapter's `node_pool`), on
+   hosts that run nothing else, so a host firewall can carry the policy.
+3. Use `exec` or Podman, not `raw_exec`: a `raw_exec` task has no
+   filesystem isolation and runs as the client's user, often root, so no
+   rule can tell it from the client.
+4. On a host that runs `exec` tasks, the Nomad client must still reach the
+   servers, so a rule for the whole host cannot deny them. Match the agent
+   task's user instead (for example nftables `meta skuid`). The plugin sets
+   no task user, so `exec` tasks run as the driver's default, `nobody`; the
+   rule is as narrow as that user is dedicated to agents.
+5. For Podman, attach agents to a Podman network whose firewall rules carry
+   the policy, named by `network_mode` in the runtime's `config`.
+
+Every Nomad task has the
+[task API](https://developer.hashicorp.com/nomad/docs/runtime/task-api)
+socket in its secrets directory, which no address rule covers. It accepts
+only an authenticated request. The plugin exposes no workload identity
+token to the agent; keep `NOMAD_TOKEN`, `CONSUL_TOKEN`,
+`CONSUL_HTTP_TOKEN` and `VAULT_TOKEN` out of the runtime's `env` and the
+image. A client `env.denylist` replaces Nomad's default list, which holds
+those names, rather than extending it.
+
+The client's artifact fetches run in a subprocess of the client, in the
+client host's network namespace, outside any task network. Restrict the
+client host's egress separately.
+
+### On Kubernetes
+
+Run agent pods under a service account with
+`automountServiceAccountToken: false`, so no API credential is mounted
+beside the agent. Apply a default-deny egress NetworkPolicy to the agent
+pods' namespace, with rules that allow DNS and the allowed hosts. Policies
+take effect only under a CNI that enforces them, and they are additive:
+check that no other policy in the namespace allows the control plane or
+metadata addresses. NetworkPolicy matches addresses, not names. To allow by
+host name, use the cluster's DNS-aware egress rules, such as an OpenShift
+`EgressFirewall` with `dnsName` or a Cilium FQDN policy. These authorise
+the addresses a name resolves to, so a name on a shared or CDN address
+admits its neighbours too; restrict ports and the DNS resolvers as well.
+
 ## Upgrade wherry
 
 Readers reject records with unknown members or versions, so hosts and
@@ -769,6 +844,9 @@ plugins in each receiver's plugin directory with the receiver binary.
 `wherry mcp` serves the host operations as MCP tools over stdio. It reads
 the client configuration and opens a Kafka connection for each tool call.
 [Reference](reference.md#mcp-tools) lists the tools.
+
+The packaged `plugins/wherry/mcp.json` uses the default configuration path.
+Add `--config-file` and its path to the server's `args` for another path.
 
 `plugins/wherry` packages the server with the `wherry` Agent Skill:
 
