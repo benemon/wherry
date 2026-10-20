@@ -139,7 +139,7 @@ func TestMCPSubmitCarriesFilesAndAwaitWritesOutputs(t *testing.T) {
 	b := newBus(t)
 	b.credentials["deploy-key"] = b.credentials["model"]
 	work := t.TempDir()
-	session := mcpSessionReading(t, b.connect(t), nil, inputReader(work, busclient.Config{}))
+	session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{}))
 	input := filepath.Join(work, "data.csv")
 	if err := os.WriteFile(input, []byte("a,b\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -191,9 +191,10 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 		return path
 	}
 	config := busclient.Config{StateDir: filepath.Join(work, "state"), HostKey: write(filepath.Join(work, "host.key")), Bundle: write(filepath.Join(outside, "bundle.yaml")),
-		Credentials: map[string]string{"model": write(filepath.Join(work, "secrets", "model"))}}
+		Credentials: map[string]string{"model": write(filepath.Join(work, "secrets", "model"))},
+		Storage:     &busclient.StorageConfig{AccessKeyFile: write(filepath.Join(work, "s3", "access.key")), SecretKeyFile: write(filepath.Join(work, "s3", "secret.key"))}}
 	write(filepath.Join(config.StateDir, "runs", "run-a.json"))
-	read := inputReader(work, config)
+	read := inputReader(inputOpener(work, config))
 	for name, path := range map[string]string{
 		"outside":                filepath.Join(outside, "bundle.yaml"),
 		"a link out":             link(write(filepath.Join(outside, "elsewhere")), "elsewhere"),
@@ -202,6 +203,8 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 		"a link to the host key": link(config.HostKey, "key"),
 		"the state":              filepath.Join(config.StateDir, "runs", "run-a.json"),
 		"a credential":           config.Credentials["model"],
+		"a storage access key":   config.Storage.AccessKeyFile,
+		"a storage secret key":   config.Storage.SecretKeyFile,
 		"a directory":            filepath.Join(work, "secrets"),
 		"a missing file":         filepath.Join(work, "absent"),
 		"a parent path":          filepath.Join(work, "..", filepath.Base(outside), "bundle.yaml"),
@@ -257,7 +260,7 @@ func TestAwaitSaysHowToApplyGitChanges(t *testing.T) {
 func TestMCPSubmitCarriesTheGitInput(t *testing.T) {
 	b := newBus(t)
 	work := t.TempDir()
-	session := mcpSessionReading(t, b.connect(t), nil, inputReader(work, busclient.Config{Credentials: b.credentials}))
+	session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{Credentials: b.credentials}))
 	const key = "git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
 	if err := os.WriteFile(filepath.Join(work, "known_hosts"), []byte(key), 0o600); err != nil {
 		t.Fatal(err)
@@ -315,10 +318,39 @@ func TestGitHostKeyReadIsBounded(t *testing.T) {
 		limits = append(limits, limit)
 		return wire.Part{Raw: wire.StdBytes("k")}, nil
 	}
-	if _, err := submitFromInput(submitInput{Prompt: "x", Git: &gitInput{Remote: "git@git.example.test:org/repo.git", Ref: "main", HostKey: "known_hosts"}}, read); err != nil {
+	if _, err := submitFromInput(submitInput{Prompt: "x", Git: &gitInput{Remote: "git@git.example.test:org/repo.git", Ref: "main", HostKey: "known_hosts"}}, read, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(limits, []int64{wire.MaxGitHostKey + 1}) {
 		t.Fatalf("host key read with limits %v, want one byte over the bound", limits)
+	}
+}
+
+func TestSubmitTakesS3InputsAndOutputs(t *testing.T) {
+	b := newBus(t)
+	work := t.TempDir()
+	data := filepath.Join(work, "dataset.bin")
+	if err := os.WriteFile(data, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const rule = "this host's configuration has no storage credential for S3 inputs and outputs"
+	for _, args := range [][]string{{"--s3-input", data}, {"--output", "report.pdf:required:s3"}} {
+		var stdout, stderr bytes.Buffer
+		if err := runSubmit(b.ctx, b.client, append([]string{"--prompt", "x"}, args...), &stdout, &stderr); err == nil || !strings.Contains(err.Error(), rule) {
+			t.Fatalf("submit %v = %v; want the S3 lane refused for want of storage", args, err)
+		}
+	}
+	session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{}))
+	for _, arguments := range []map[string]any{
+		{"prompt": "x", "s3_inputs": []string{"dataset.bin"}},
+		{"prompt": "x", "outputs": []map[string]any{{"name": "report.pdf", "storage": "s3"}}},
+	} {
+		if failure := callToolError(t, b.ctx, session, "submit", arguments); failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, rule) {
+			t.Fatalf("MCP submit %v = %+v", arguments, failure)
+		}
+	}
+	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "s3_inputs": []string{"../outside.bin"}}); failure.Code != "INVALID_ARGUMENT" ||
+		!strings.Contains(failure.Message, "beneath the MCP server's working directory") {
+		t.Fatalf("MCP submit of an S3 input outside the working directory = %+v", failure)
 	}
 }

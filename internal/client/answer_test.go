@@ -49,7 +49,8 @@ func (r request) open(t *testing.T, f *fixture, host string) map[string][]byte {
 		t.Fatal(err)
 	}
 	binding := signed.SealBinding{Tenant: r.record.Tenant, Pool: r.record.Pool, Receiver: r.record.Receiver, KeyID: r.record.KeyID, Run: r.record.Run,
-		Turn: r.record.Turn, Attempt: r.record.Attempt, Credentials: r.record.Credentials, TaskCredentials: r.record.TaskCredentials, ExpiryMS: r.record.ExpiryMS}
+		Turn: r.record.Turn, Attempt: r.record.Attempt, Credentials: r.record.Credentials, TaskCredentials: r.record.TaskCredentials,
+		S3Inputs: r.record.S3Inputs, S3Outputs: r.record.S3Outputs, ExpiryMS: r.record.ExpiryMS}
 	var opened []map[string][]byte
 	for _, record := range records {
 		if values, err := signed.OpenSeal(record.Value, binding, r.key, time.Now()); err == nil && string(record.Key) == r.record.Run {

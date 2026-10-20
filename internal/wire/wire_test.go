@@ -2,11 +2,15 @@ package wire
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -709,7 +713,7 @@ func TestGitInputPlacement(t *testing.T) {
 	continuation := validSubmission()
 	continuation.Wherry.Turn = 2
 	continuation.Wherry.Git = &GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"}
-	if err := continuation.validate(); err == nil || err.Error() != "only a run's first turn declares credentials, outputs and git" {
+	if err := continuation.validate(); err == nil || err.Error() != "only a run's first turn declares credentials, outputs, git and S3 inputs" {
 		t.Fatalf("continuation with git: %v", err)
 	}
 	clash := validSubmission()
@@ -757,5 +761,80 @@ func TestGitForge(t *testing.T) {
 		if ValidForge(forge) != ok {
 			t.Errorf("ValidForge(%q) = %v, want %v", forge, !ok, ok)
 		}
+	}
+}
+
+func TestS3InputsAndOutputsValidation(t *testing.T) {
+	sha := strings.Repeat("a", 64)
+	accepted := validSubmission()
+	accepted.Wherry.S3Inputs = []S3Input{{Name: "dataset.bin", Size: MaxS3Object, SHA256: sha}, {Name: "empty", SHA256: sha}}
+	accepted.Wherry.Outputs = []ExpectedOutput{{Name: "report.pdf", Storage: StorageS3}, {Name: "notes.md"}}
+	if err := accepted.validate(); err != nil {
+		t.Fatalf("valid S3 inputs and outputs: %v", err)
+	}
+	for name, edit := range map[string]func(*Submission){
+		"continuation":   func(s *Submission) { s.Wherry.Turn, s.Wherry.Outputs = 2, nil },
+		"invalid name":   func(s *Submission) { s.Wherry.S3Inputs[0].Name = "../x" },
+		"duplicate name": func(s *Submission) { s.Wherry.S3Inputs[1].Name = "dataset.bin" },
+		"inline name": func(s *Submission) {
+			s.Message.Parts = append(s.Message.Parts, Part{Raw: StdBytes("x"), Filename: "dataset.bin"})
+		},
+		"over 5 GiB":       func(s *Submission) { s.Wherry.S3Inputs[0].Size = MaxS3Object + 1 },
+		"negative size":    func(s *Submission) { s.Wherry.S3Inputs[0].Size = -1 },
+		"uppercase hash":   func(s *Submission) { s.Wherry.S3Inputs[0].SHA256 = strings.Repeat("A", 64) },
+		"other storage":    func(s *Submission) { s.Wherry.Outputs[0].Storage = "gcs" },
+		"over 256 entries": func(s *Submission) { s.Wherry.S3Inputs = slices.Repeat(s.Wherry.S3Inputs[:1], MaxParts) },
+	} {
+		submission := validSubmission()
+		submission.Wherry.S3Inputs = slices.Clone(accepted.Wherry.S3Inputs)
+		submission.Wherry.Outputs = slices.Clone(accepted.Wherry.Outputs)
+		edit(submission)
+		if err := submission.validate(); err == nil {
+			t.Errorf("%s: validated", name)
+		}
+	}
+	clash := validSubmission()
+	clash.Wherry.Git = &GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", HostKey: hostKey}
+	clash.Wherry.S3Inputs = []S3Input{{Name: KnownHostsFile, SHA256: sha}}
+	if err := clash.validate(); err == nil || err.Error() != "an input named known_hosts conflicts with the git host key" {
+		t.Fatalf("S3 input named known_hosts beside a host key: %v", err)
+	}
+}
+
+func TestSealRequestNamesS3Objects(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(inputs, outputs []string) *SealRequest {
+		return &SealRequest{ReceiverBinding: receiverBinding(), Key: jose.JSONWebKey{Key: &key.PublicKey}, KeyID: signed.SealKeyID(&key.PublicKey),
+			Credentials: []string{}, S3Inputs: inputs, S3Outputs: outputs, ExpiryMS: 1}
+	}
+	if err := request([]string{"data.bin"}, []string{"out/report.pdf"}).validate(); err != nil {
+		t.Fatalf("a request for S3 URLs alone: %v", err)
+	}
+	for name, invalid := range map[string]*SealRequest{
+		"nothing":           request(nil, nil),
+		"input path":        request([]string{"a/b"}, nil),
+		"duplicate input":   request([]string{"a", "a"}, nil),
+		"output dot dot":    request(nil, []string{"../x"}),
+		"duplicate output":  request(nil, []string{"x", "x"}),
+		"input leading dot": request([]string{".hidden"}, nil),
+	} {
+		if err := invalid.validate(); err == nil {
+			t.Errorf("%s: validated", name)
+		}
+	}
+}
+
+func TestS3Keys(t *testing.T) {
+	if got := S3InputKey("tenant-a", "run-a", "data.bin"); got != "wherry/tenant-a/run-a/inputs/data.bin" {
+		t.Errorf("input key %s", got)
+	}
+	if got := S3OutputKey("tenant-a", "run-a", 2, "out/report.pdf"); got != "wherry/tenant-a/run-a/2/outputs/out/report.pdf" {
+		t.Errorf("output key %s", got)
+	}
+	if prefix := S3Prefix("tenant-a", "run-a"); !strings.HasSuffix(prefix, "/") || strings.HasPrefix(S3Prefix("tenant-a", "run-ab"), prefix) {
+		t.Errorf("prefix %s holds another run's prefix", prefix)
 	}
 }

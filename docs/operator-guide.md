@@ -531,6 +531,88 @@ Outputs are collected once the agent writes its result line and the job is
 stopped, including when that line reports a failure. A turn that ends
 without the agent's result line, by timeout or otherwise, returns none.
 
+## S3 storage
+
+A pool can carry inputs and outputs of up to 5 GiB each through an
+S3-compatible bucket, the [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
+wherry administers no bucket: the operator creates it, sets its lifecycle
+rule, issues each tenant's credential and names the endpoint in the pool's
+terms. Any store that speaks S3 with SigV4 presigned URLs and path-style
+addressing serves, such as Ceph RGW, NooBaa or MinIO.
+
+1. Create one long-lived bucket with the store's default server-side
+   encryption, store-managed or KMS. Every run's objects live under
+   `wherry/<tenant>/<run>/` in it.
+
+2. Name it in the pool's [terms](reference.md#pool-terms). The endpoint is
+   `https://` and the host, with `:port` when it is not 443, and no path;
+   wherry refuses a plain `http` endpoint.
+
+   ```yaml
+   storage:
+     endpoint: https://s3.example.com
+     bucket: wherry
+   ```
+
+3. Give each tenant's hosts a credential that reaches only that tenant's
+   prefix: read, write and delete objects under `wherry/<tenant>/`, and list
+   the bucket under that prefix, which `wherry cleanup` and the end of a run
+   use. A bucket policy for tenant `alice`, whose principal syntax varies by
+   store (Ceph RGW names a user `arn:aws:iam:::user/<uid>`):
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {"Effect": "Allow", "Principal": {"AWS": ["arn:aws:iam:::user/wherry-alice"]},
+        "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+        "Resource": ["arn:aws:s3:::wherry/wherry/alice/*"]},
+       {"Effect": "Allow", "Principal": {"AWS": ["arn:aws:iam:::user/wherry-alice"]},
+        "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::wherry"],
+        "Condition": {"StringLike": {"s3:prefix": ["wherry/alice/*"]}}}
+     ]
+   }
+   ```
+
+   ```sh
+   aws s3api put-bucket-policy --endpoint-url https://s3.example.com --bucket wherry --policy file://alice.json
+   ```
+
+   The host keeps the access key and secret key in two files of mode 0600,
+   named under `storage` in its [configuration](reference.md#client-configuration).
+   Receivers and agents never hold it; they get presigned URLs, a GET per
+   input for 15 minutes and a PUT per output until the turn's deadline.
+
+4. Set a lifecycle rule that expires `wherry/` after a period longer than
+   any run: the host deletes a run's objects when it sees the run end with
+   every output verified, and the rule removes what no host saw finish.
+
+   ```json
+   {"Rules": [{"ID": "wherry-backstop", "Status": "Enabled", "Filter": {"Prefix": "wherry/"}, "Expiration": {"Days": 7}}]}
+   ```
+
+   ```sh
+   aws s3api put-bucket-lifecycle-configuration --endpoint-url https://s3.example.com --bucket wherry --lifecycle-configuration file://lifecycle.json
+   ```
+
+5. Let the parties reach the endpoint and trust its certificate: hosts,
+   which upload, download and delete (they trust the system roots and the
+   CA file in `SSL_CERT_FILE`); receiver hosts, which upload outputs with
+   their system roots; and every platform node that fetches inputs, for the
+   Nomad plugin each Nomad client, whose artifact fetcher uses the system
+   roots. Allow the endpoint in the jobs' egress policy.
+
+On Nomad an input's presigned GET is the source of an `artifact` in the
+agent job, visible to anyone who can read the job for its lifetime, and
+appears in the task event of a fetch that fails. The URL is short-lived and
+names one object; purging the job removes it. Nomad's artifact fetcher
+follows redirects, and Nomad 2.0.7 has no setting that stops it, so the
+fetch's SHA-256 check is what holds the content to the object. The check
+runs once the download ends, so it limits neither where a redirect leads
+nor how much the fetch reads: restrict the Nomad clients' egress to the
+endpoint, and set the client's `artifact.http_max_size`. The receiver's
+upload follows no redirect.
+
 ## Git repositories
 
 A task can name a repository for its agent to clone:
@@ -677,6 +759,10 @@ a redelivered turn of one fails to start until its delivery budget runs
 out. The plugin sweeps the old per-task variables,
 `nomad/jobs/agent-<pool>-<run>-t<turn>/agent/agent` and `.../agent/git`,
 with the rest.
+
+The release with the S3 lane speaks adapter protocol version 3, and a
+receiver refuses a plugin of an earlier version at its start: replace the
+plugins in each receiver's plugin directory with the receiver binary.
 
 ## Harness integration
 

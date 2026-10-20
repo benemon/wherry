@@ -223,6 +223,20 @@ A required output that is not returned fails the turn. `wherry await`
 verifies each output's chunks against the result before it writes the file
 locally.
 
+A pool can also carry files through an S3-compatible bucket its operator
+names, up to 5 GiB each. The host uploads an S3 input with its own
+credential before it publishes the task, and the task carries only the
+input's name, size and SHA-256. When the claiming receiver asks for the
+seal, the host presigns a short-lived GET per input and a PUT per expected
+S3 output, and seals them with the credentials, so the URLs never sit on
+the broker in the clear. The receiver checks each URL against the pool's
+endpoint and bucket; the adapter fetches the inputs into the input
+directory and verifies them; the receiver streams each S3 output to its
+PUT URL, hashing what it sends, and lists it in the result. The host then
+downloads and verifies the outputs and deletes the run's objects. The
+host's storage credential never leaves the host, and S3 outputs, which go
+to the host's own bucket, are not redacted.
+
 A task can also name a git repository: a remote, a ref, the task
 credential to clone with and, for `ssh`, the host key. The agent clones it
 with `git` itself; wherry runs no git. The receiver delivers the host key

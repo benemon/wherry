@@ -6,6 +6,7 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -275,9 +276,36 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 			return true
 		}
 	}
+	if len(request.S3Inputs)+len(request.S3Outputs) > 0 {
+		for _, input := range request.S3Inputs {
+			if !slices.Contains(local.S3Inputs, input) {
+				h.logger.Printf("run %s: skipped a seal request for S3 input %s, which the run does not declare", runID, input)
+				return true
+			}
+		}
+		for _, output := range request.S3Outputs {
+			if !slices.Contains(local.S3Outputs, output) {
+				h.logger.Printf("run %s: skipped a seal request for S3 output %s, which the run does not declare", runID, output)
+				return true
+			}
+		}
+		storage := r.v.state.Pools[r.pool].Storage
+		store, err := h.bucket(r.pool, storage)
+		if err != nil {
+			h.logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)
+			return true
+		}
+		urls, err := presign(ctx, store, storage.Bucket, h.tenant, runID, request.Turn, request.S3Inputs, request.S3Outputs, time.UnixMilli(local.DeadlineMS))
+		if err != nil {
+			h.logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)
+			return true
+		}
+		maps.Copy(values, urls)
+	}
 	sealed, err := seal(signed.SealBinding{
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials, ExpiryMS: request.ExpiryMS,
+		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
+		S3Inputs: request.S3Inputs, S3Outputs: request.S3Outputs, ExpiryMS: request.ExpiryMS,
 	}, request.Key.Key.(*ecdsa.PublicKey), values)
 	if err != nil {
 		// Seal's errors name credentials, never values.
@@ -302,5 +330,8 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 		h.logger.Printf("run %s: record a seal answer: %v", runID, err)
 	}
 	h.logger.Printf("run %s: sealed %v to %s for turn %d attempt %d", runID, append(slices.Clone(request.Credentials), request.TaskCredentials...), request.Receiver, request.Turn, request.Attempt)
+	if len(request.S3Inputs)+len(request.S3Outputs) > 0 {
+		h.logger.Printf("run %s: sealed URLs for S3 inputs %v and outputs %v to %s", runID, request.S3Inputs, request.S3Outputs, request.Receiver)
+	}
 	return true
 }

@@ -1,4 +1,4 @@
-// The adapter protocol, version 2: the receiver core calls a plugin's adapters
+// The adapter protocol, version 3: the receiver core calls a plugin's adapters
 // over this service, and every request names its adapter.
 syntax = "proto3";
 
@@ -54,6 +54,15 @@ message Run {
   reserved 8;
   repeated File inputs = 9;
   repeated Secret credentials = 10;
+  repeated Fetch fetches = 11;
+}
+
+// Fetch is an input the adapter fetches from a presigned URL and verifies before the agent starts.
+message Fetch {
+  string name = 1;
+  string url = 2;
+  int64 size = 3;
+  string sha256 = 4;
 }
 
 message File {
@@ -162,6 +171,8 @@ message Limits {
   int64 files = 1;
   int64 file_bytes = 2;
   int64 total_bytes = 3;
+  repeated string stream = 4;
+  int64 stream_bytes = 5;
 }
 
 message CollectRequest {
@@ -170,7 +181,8 @@ message CollectRequest {
   Limits limits = 3;
 }
 
-// CollectResponse carries one output, or part of its data; more is set on every message of an output but its last.
+// CollectResponse carries one output, or part of its data; more is set on every message of an output but its last. A
+// streamed output's last message carries no data.
 message CollectResponse {
   string name = 1;
   int64 size = 2;

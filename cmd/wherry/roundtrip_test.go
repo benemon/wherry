@@ -6,13 +6,20 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
+	"io"
 	"log"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +33,8 @@ import (
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/receiver"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -130,6 +139,10 @@ func TestRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, DefaultAgent: "claude",
 		SealLifetimeMS: int64(time.Hour / time.Millisecond), DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	bucket := s3Oracle(t)
+	if bucket != nil {
+		terms.Storage = &admin.Storage{Endpoint: bucket.endpoint, Bucket: s3Bucket}
+	}
 	hostBundle, otherBundle, receiverBundle := filepath.Join(dir, "host.yaml"), filepath.Join(dir, "other.yaml"), filepath.Join(dir, "receiver.yaml")
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2,
 		Adapters: []admin.AdapterSettings{{Name: "fake", Type: "fake", Agent: "claude", Credential: "model", Labels: map[string]string{"gpu": "yes"}, Config: map[string]any{"outputs": true}}}}
@@ -192,6 +205,9 @@ func TestRoundTrip(t *testing.T) {
 	}
 	hostConfig := busclient.Config{Bundle: hostBundle, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
 		Credentials: map[string]string{"model": credentialPath, "deploy-key": deployPath}}
+	if bucket != nil {
+		hostConfig.Storage = bucket.config
+	}
 	if _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -290,4 +306,132 @@ func TestRoundTrip(t *testing.T) {
 		Prompt: "nowhere to run", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
 		t.Fatal("placed a task no adapter's labels satisfy")
 	}
+	if bucket != nil {
+		s3RoundTrip(t, ctx, bucket, host, read, logs, hostLogs)
+	}
+}
+
+// s3RoundTrip runs a turn with a 5 MiB S3 input and the plugin's 2 MiB output returned through the bucket: the host
+// uploads the input and seals presigned URLs, the plugin receives a fetch whose URL serves the input, the receiver
+// streams the output to its PUT URL, and the host downloads and verifies it, then deletes the run's prefix.
+func s3RoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host *busclient.Host, read func() []pluginRecord, logs, hostLogs *syncBuffer) {
+	input := bytes.Repeat([]byte("dataset "), 5<<20/8)
+	path := filepath.Join(t.TempDir(), "dataset.bin")
+	if err := os.WriteFile(path, input, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	submitted, err := host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}}, Prompt: "use the dataset",
+		S3Inputs: []busclient.S3File{{Name: "dataset.bin", File: file}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Required: true, Storage: wire.StorageS3}},
+		Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaited, err := host.Await(ctx, submitted.RunID, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if awaited.Status.State != wire.TaskStateCompleted || len(awaited.Stored) != 1 || awaited.Stored[0].Key != wire.S3OutputKey("tenant-a", submitted.RunID, 1, "big.bin") {
+		t.Fatalf("await = %+v; want the S3 output listed; logs:\n%s\n%s", awaited, logs.String(), hostLogs.String())
+	}
+	var fetches []adapter.Fetch
+	for _, record := range read() {
+		if record.Call == "dispatch" && record.Run.ID == submitted.RunID {
+			fetches = record.Run.Fetches
+		}
+	}
+	if len(fetches) != 1 || fetches[0].Name != "dataset.bin" || fetches[0].Size != int64(len(input)) || fetches[0].SHA256 != hexSHA(input) {
+		t.Fatalf("plugin fetches %+v", fetches)
+	}
+	response, err := bucket.client.Get(fetches[0].URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !bytes.Equal(fetched, input) {
+		t.Fatalf("the fetch's URL served %d bytes (%s); want the input", len(fetched), response.Status)
+	}
+	dir := t.TempDir()
+	downloaded, rejected, err := host.DownloadOutputs(ctx, submitted.RunID, awaited, dir)
+	if err != nil || len(rejected) != 0 || len(downloaded) != 1 {
+		t.Fatalf("downloaded %+v, rejected %+v, %v", downloaded, rejected, err)
+	}
+	if written, err := os.ReadFile(filepath.Join(dir, "big.bin")); err != nil || !bytes.Equal(written, bytes.Repeat([]byte("b"), 2<<20+1)) {
+		t.Fatalf("downloaded %d bytes, %v", len(written), err)
+	}
+	for object := range bucket.store.ListObjects(ctx, s3Bucket, minio.ListObjectsOptions{Prefix: wire.S3Prefix("tenant-a", submitted.RunID), Recursive: true}) {
+		t.Fatalf("%s survived the run's cleanup", object.Key)
+	}
+	for _, text := range []string{logs.String(), hostLogs.String()} {
+		if strings.Contains(text, "X-Amz-Signature") {
+			t.Fatalf("logs hold a presigned URL:\n%s", text)
+		}
+	}
+}
+
+const s3Bucket = "wherry-test"
+
+// s3Store is the real S3 store of WHERRY_S3_TEST_ENDPOINT, a local MinIO over http, behind a TLS proxy that keeps the
+// Host header, so the client and receiver speak https as production requires; store reaches it directly.
+type s3Store struct {
+	endpoint string
+	config   *busclient.StorageConfig
+	store    *minio.Client
+	client   *http.Client
+}
+
+// s3Oracle starts the proxy and trusts it for the test: the receiver's uploads take Go's default transport, and the
+// client's minio-go reads SSL_CERT_FILE. Nil without WHERRY_S3_TEST_ENDPOINT.
+func s3Oracle(t *testing.T) *s3Store {
+	t.Helper()
+	target := os.Getenv("WHERRY_S3_TEST_ENDPOINT")
+	if target == "" {
+		t.Log("WHERRY_S3_TEST_ENDPOINT not set: no S3 leg")
+		return nil
+	}
+	config := &busclient.StorageConfig{AccessKeyFile: os.Getenv("WHERRY_S3_TEST_ACCESS_KEY_FILE"), SecretKeyFile: os.Getenv("WHERRY_S3_TEST_SECRET_KEY_FILE")}
+	keys := make([]string, 2)
+	for i, path := range []string{config.AccessKeyFile, config.SecretKeyFile} {
+		key, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys[i] = strings.TrimSpace(string(key))
+	}
+	parsed, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewTLSServer(&httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) { r.SetURL(parsed); r.Out.Host = r.In.Host }})
+	t.Cleanup(proxy.Close)
+	previous := http.DefaultTransport
+	http.DefaultTransport = proxy.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = previous })
+	ca := filepath.Join(t.TempDir(), "proxy.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: proxy.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", ca)
+	store, err := minio.New(parsed.Host, &minio.Options{Creds: credentials.NewStaticV4(keys[0], keys[1], ""), BucketLookup: minio.BucketLookupPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := store.BucketExists(context.Background(), s3Bucket); err != nil {
+		t.Fatal(err)
+	} else if !exists {
+		if err := store.MakeBucket(context.Background(), s3Bucket, minio.MakeBucketOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &s3Store{endpoint: proxy.URL, config: config, store: store, client: proxy.Client()}
+}
+
+func hexSHA(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }

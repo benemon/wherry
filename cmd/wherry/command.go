@@ -25,7 +25,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|receivers|submit|continue|cancel|await|status|events|receiver|admin|mcp>")
+		return errors.New("usage: wherry <init|key|receivers|submit|continue|cancel|await|status|events|cleanup|receiver|admin|mcp>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -68,7 +68,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	command, ok := map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
 		"receivers": runReceivers, "submit": runSubmit, "continue": runContinue, "resume": runContinue,
-		"cancel": runCancel, "await": runAwait, "status": runStatus, "events": runEvents,
+		"cancel": runCancel, "await": runAwait, "status": runStatus, "events": runEvents, "cleanup": runCleanup,
 	}[args[0]]
 	if !ok {
 		return fmt.Errorf("unknown command %q", args[0])
@@ -183,10 +183,20 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		credentials = append(credentials, wire.TaskCredential{Name: name, File: file})
 		return nil
 	})
+	var s3Inputs []string
+	flags.Func("s3-input", "file to upload to the pool's bucket, which the agent finds in its input directory (repeatable)", func(value string) error {
+		s3Inputs = append(s3Inputs, value)
+		return nil
+	})
 	var outputs []wire.ExpectedOutput
-	flags.Func("output", "NAME[:required]: a file the agent is asked to leave in its output directory (repeatable)", func(value string) error {
-		name, required := strings.CutSuffix(value, ":required")
-		outputs = append(outputs, wire.ExpectedOutput{Name: name, Required: required})
+	flags.Func("output", "NAME[:required][:s3]: a file the agent is asked to leave in its output directory, returned through the pool's bucket with :s3 (repeatable)", func(value string) error {
+		name, s3 := strings.CutSuffix(value, ":s3")
+		name, required := strings.CutSuffix(name, ":required")
+		output := wire.ExpectedOutput{Name: name, Required: required}
+		if s3 {
+			output.Storage = wire.StorageS3
+		}
+		outputs = append(outputs, output)
 		return nil
 	})
 	deadline := flags.Duration("deadline", 30*time.Minute, "task deadline")
@@ -195,7 +205,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit [--agent NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git REMOTE@REF [--git-path PATH] [--git-credential NAME] [--git-host-key FILE] [--git-changes patch|bundle]] [--input FILE]... [--credential-file NAME=FILE]... [--output NAME[:required]]... [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit [--agent NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git REMOTE@REF [--git-path PATH] [--git-credential NAME] [--git-host-key FILE] [--git-changes patch|bundle]] [--input FILE]... [--s3-input FILE]... [--credential-file NAME=FILE]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {
@@ -243,9 +253,18 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	if err != nil {
 		return fmt.Errorf("selector: %w", err)
 	}
+	var stored []busclient.S3File
+	for _, path := range s3Inputs {
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		stored = append(stored, busclient.S3File{Name: filepath.Base(path), File: file})
+	}
 	result, err := client.Submit(ctx, busclient.SubmitInput{
 		Agent: *agent, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Outputs: outputs, Git: git, GitChanges: *gitChanges,
-		Deadline: *deadline, QueueDeadline: *queueDeadline,
+		S3Inputs: stored, Deadline: *deadline, QueueDeadline: *queueDeadline,
 	})
 	if err != nil {
 		return err
@@ -311,7 +330,15 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 			return fmt.Errorf("write outputs: %w", err)
 		}
 	}
-	for i, output := range result.Outputs {
+	downloaded, rejected, err := client.DownloadOutputs(ctx, runID, result, *outputsDir)
+	if err != nil {
+		return fmt.Errorf("S3 outputs: %w", err)
+	}
+	result.Rejected = append(result.Rejected, rejected...)
+	for _, output := range downloaded {
+		paths = append(paths, output.Path)
+	}
+	for i, output := range append(result.Outputs, downloaded...) {
 		fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, paths[i], output.SHA256, output.Size)
 		switch output.Name {
 		case wire.GitPatch:
@@ -330,6 +357,17 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	if len(result.Rejected) > 0 {
 		return fmt.Errorf("%d outputs failed verification", len(result.Rejected))
 	}
+	return nil
+}
+
+func runCleanup(ctx context.Context, client *busclient.Host, args []string, stdout, _ io.Writer) error {
+	if len(args) != 1 {
+		return errors.New("usage: wherry cleanup RUN_ID")
+	}
+	if err := client.Cleanup(ctx, args[0]); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "run_id=%s\n", args[0])
 	return nil
 }
 

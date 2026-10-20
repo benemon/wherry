@@ -505,8 +505,8 @@ type feedRecord struct {
 // wire.MaxLine raw bytes. Every field with a bound is at its maximum; the submission's parts are all input files with
 // the longest names, one holding all the inputs. A git input exists only on a first turn and outweighs the longest
 // turn number, so the submission is a first turn with a git input at its bounds and the one task credential it names.
-// A prompt, part metadata and media types, a selector, the other task credentials and the outputs, a receiver's labels
-// and an adapter's job name have no bound and are left empty.
+// A prompt, part metadata and media types, a selector, the other task credentials, the outputs and the S3 inputs, a
+// receiver's labels and an adapter's job name have no bound and are left empty.
 func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	_, key, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -542,12 +542,19 @@ func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	}
 	binding := wire.ReceiverBinding{Receiver: name, Tenant: name, Pool: name, Run: run, Turn: math.MaxInt64, Attempt: math.MaxInt64}
 	outputName := strings.Repeat("a/", 255) + "aa"
-	metadata := wire.ResultMetadata{ReceiverID: name, Pool: name, Adapter: name}
+	// A result lists at most 256 collected entries and the expected outputs missing among them. An S3 output is an
+	// expected one, listed with its key, so a result returning 256 of them misses none.
+	metadata, s3Metadata := wire.ResultMetadata{ReceiverID: name, Pool: name, Adapter: name}, wire.ResultMetadata{ReceiverID: name, Pool: name, Adapter: name}
 	for range wire.MaxOutputs {
 		metadata.Outputs = append(metadata.Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64})
 		metadata.NotReturned = append(metadata.NotReturned, wire.UnreturnedOutput{Name: outputName, Size: math.MaxInt64, Reason: "rejected: size changed while read"})
+		s3Metadata.S3Outputs = append(s3Metadata.S3Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64, Key: wire.S3OutputKey(name, run, math.MaxInt64, outputName)})
 	}
 	encodedMetadata, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, nil, err
+	}
+	encodedS3Metadata, err := json.Marshal(s3Metadata)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -555,6 +562,18 @@ func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	agentResult, _ := json.Marshal(map[string]map[string]string{"agent_result": {"k": strings.Repeat("x", wire.MaxAgentResult*10/8)}}) // strings always encode
 	history := message
 	history.Parts = pointers
+	result := func(metadata []byte) *wire.Result {
+		return &wire.Result{
+			Task: wire.Task{
+				ID: run, ContextID: run, History: []wire.Message{history}, Metadata: metadata,
+				Status: wire.TaskStatus{State: wire.TaskStateFailed, Timestamp: "2006-01-02T15:04:05.000Z", Message: &wire.Message{
+					MessageID: "msg-" + strings.Repeat("0", 32), Role: wire.RoleAgent, Parts: []wire.Part{{Text: strings.Repeat("x", wire.MaxText)}}, Extensions: []string{wire.ExtensionURI},
+				}},
+				Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}}, Metadata: agentResult, Extensions: []string{wire.ExtensionURI}}},
+			},
+			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
+		}
+	}
 	records := []struct {
 		name  string
 		value wire.Record
@@ -567,16 +586,8 @@ func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
 		}},
 		// Receiver texts are names and fixed words, which JSON does not escape; a result text that it would travels raw.
-		{"a result", &wire.Result{
-			Task: wire.Task{
-				ID: run, ContextID: run, History: []wire.Message{history}, Metadata: encodedMetadata,
-				Status: wire.TaskStatus{State: wire.TaskStateFailed, Timestamp: "2006-01-02T15:04:05.000Z", Message: &wire.Message{
-					MessageID: "msg-" + strings.Repeat("0", 32), Role: wire.RoleAgent, Parts: []wire.Part{{Text: strings.Repeat("x", wire.MaxText)}}, Extensions: []string{wire.ExtensionURI},
-				}},
-				Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}}, Metadata: agentResult, Extensions: []string{wire.ExtensionURI}}},
-			},
-			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
-		}},
+		{"a result", result(encodedMetadata)},
+		{"a result returning S3 outputs", result(encodedS3Metadata)},
 		{"a transcript chunk", &wire.Chunk{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
 				TaskID: run, ContextID: run, Append: true, LastChunk: true,

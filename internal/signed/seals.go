@@ -32,10 +32,30 @@ type SealBinding struct {
 	Turn        int64    `json:"turn"`
 	Attempt     int64    `json:"attempt"`
 	Credentials []string `json:"credentials"`
-	// TaskCredentials are absent from the protected header when empty.
+	// TaskCredentials, S3Inputs and S3Outputs are absent from the protected header when empty.
 	TaskCredentials []string `json:"task_credentials,omitzero"`
+	S3Inputs        []string `json:"s3_inputs,omitzero"`
+	S3Outputs       []string `json:"s3_outputs,omitzero"`
 	ExpiryMS        int64    `json:"expiry_ms"`
 }
+
+// Names are the keys of a seal's values: each credential and task credential, then S3InputValue and S3OutputValue of
+// each S3 input and output, whose presigned URL the value is.
+func (binding SealBinding) Names() []string {
+	names := append(slices.Clone(binding.Credentials), binding.TaskCredentials...)
+	for _, input := range binding.S3Inputs {
+		names = append(names, S3InputValue(input))
+	}
+	for _, output := range binding.S3Outputs {
+		names = append(names, S3OutputValue(output))
+	}
+	return names
+}
+
+// S3InputValue and S3OutputValue name the seal values holding the presigned URLs of an S3 input and output; the slash
+// keeps them apart from credential names.
+func S3InputValue(name string) string  { return "s3-inputs/" + name }
+func S3OutputValue(name string) string { return "s3-outputs/" + name }
 
 // sealHeader is every member a seal's protected header may hold.
 type sealHeader struct {
@@ -58,7 +78,7 @@ func SealKeyID(key *ecdsa.PublicKey) string {
 	return base64.RawURLEncoding.EncodeToString(thumbprint)
 }
 
-// Seal encrypts values, one per credential and task credential binding names, to key as a compact JWE.
+// Seal encrypts values, one per name of binding.Names, to key as a compact JWE.
 func Seal(binding SealBinding, key *ecdsa.PublicKey, values map[string][]byte) ([]byte, error) {
 	plaintext, err := json.Marshal(sealPlaintext{Version: 1, Binding: binding, Values: values}, json.Deterministic(true))
 	if err != nil {
@@ -70,6 +90,12 @@ func Seal(binding SealBinding, key *ecdsa.PublicKey, values map[string][]byte) (
 		WithHeader("attempt", binding.Attempt).WithHeader("credentials", binding.Credentials).WithHeader("expiry_ms", binding.ExpiryMS)
 	if len(binding.TaskCredentials) > 0 {
 		options = options.WithHeader("task_credentials", binding.TaskCredentials)
+	}
+	if len(binding.S3Inputs) > 0 {
+		options = options.WithHeader("s3_inputs", binding.S3Inputs)
+	}
+	if len(binding.S3Outputs) > 0 {
+		options = options.WithHeader("s3_outputs", binding.S3Outputs)
 	}
 	encrypter, err := jose.NewEncrypter(jose.A256GCM, jose.Recipient{Algorithm: jose.ECDH_ES_A256KW, Key: key}, options)
 	if err != nil {
@@ -84,13 +110,13 @@ func Seal(binding SealBinding, key *ecdsa.PublicKey, values map[string][]byte) (
 		return nil, err
 	}
 	if len(compact) > maxSeal {
-		return nil, fmt.Errorf("a seal of %v is %d bytes, over the 64 KiB limit", append(slices.Clone(binding.Credentials), binding.TaskCredentials...), len(compact))
+		return nil, fmt.Errorf("a seal of %v is %d bytes, over the 64 KiB limit", binding.Names(), len(compact))
 	}
 	return []byte(compact), nil
 }
 
-// OpenSeal opens a seal for expected with key, the private half of expected.KeyID, and returns its values by
-// credential name.
+// OpenSeal opens a seal for expected with key, the private half of expected.KeyID, and returns its values by the names
+// of expected.Names.
 func OpenSeal(encoded []byte, expected SealBinding, key *ecdsa.PrivateKey, now time.Time) (map[string][]byte, error) {
 	if expected.KeyID != SealKeyID(&key.PublicKey) {
 		return nil, errors.New("seal key is not the expected key")
@@ -122,11 +148,9 @@ func OpenSeal(encoded []byte, expected SealBinding, key *ecdsa.PrivateKey, now t
 	if json.Unmarshal(plaintext, &opened, strict) != nil || opened.Version != 1 || !reflect.DeepEqual(opened.Binding, header.SealBinding) {
 		return nil, errors.New("seal plaintext is bound otherwise than its header")
 	}
-	names := append(slices.Clone(header.Credentials), header.TaskCredentials...)
-	for _, name := range names {
-		if _, ok := opened.Values[name]; !ok || len(opened.Values) != len(names) {
-			return nil, errors.New("seal values are not the credentials it names")
-		}
+	names := header.Names()
+	if len(opened.Values) != len(names) || slices.ContainsFunc(names, func(name string) bool { _, ok := opened.Values[name]; return !ok }) {
+		return nil, errors.New("seal values are not the credentials and URLs it names")
 	}
 	return opened.Values, nil
 }

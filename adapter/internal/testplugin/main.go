@@ -12,8 +12,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/benemon/wherry/adapter"
@@ -21,7 +23,8 @@ import (
 
 var lines = []string{`{"type":"assistant","message":"working"}`, `{"type":"result","result":"done","is_error":false}`}
 
-// outputs are what Collect streams: a file over one message of the link, an empty file and a link it did not read.
+// outputs are what Collect streams: a file over one message of the link, an empty file and a link it did not read. A
+// regular file the limits name for streaming goes as a Body.
 var outputs = []adapter.Output{
 	{Name: "big.bin", Size: 2<<20 + 1, Data: bytes.Repeat([]byte("b"), 2<<20+1)},
 	{Name: "empty", Size: 0, Data: []byte{}},
@@ -121,12 +124,15 @@ func (f *fake) Stop(context.Context, adapter.Handle) error {
 	return nil
 }
 
-func (f *fake) Collect(ctx context.Context, _ adapter.Handle, _ adapter.Limits, out chan<- adapter.Output) error {
+func (f *fake) Collect(ctx context.Context, _ adapter.Handle, limits adapter.Limits, out chan<- adapter.Output) error {
 	f.panics("Collect")
 	if !f.config.Outputs {
 		return errors.New("no outputs configured")
 	}
 	for _, output := range outputs {
+		if output.Data != nil && slices.Contains(limits.Stream, output.Name) {
+			output.Body, output.Data = io.NopCloser(bytes.NewReader(output.Data)), nil
+		}
 		select {
 		case out <- output:
 		case <-ctx.Done():

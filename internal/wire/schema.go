@@ -155,11 +155,12 @@ type OutputMetadata struct {
 }
 
 // ReturnedOutput is an output a turn returned, as a result's task metadata lists it; SHA256 and Size are of the
-// bytes its chunks carry.
+// bytes its chunks carry, or for an S3 output of the bytes the receiver uploaded to Key in its pool's bucket.
 type ReturnedOutput struct {
 	Name   string `json:"name"`
 	SHA256 string `json:"sha256"`
 	Size   int64  `json:"size"`
+	Key    string `json:"key,omitzero"`
 }
 
 // UnreturnedOutput is an output a turn did not return, and why.
@@ -195,6 +196,7 @@ type ResultMetadata struct {
 	Labels      map[string]string  `json:"labels,omitempty"`
 	Job         string             `json:"job,omitempty"`
 	Outputs     []ReturnedOutput   `json:"outputs,omitempty"`
+	S3Outputs   []ReturnedOutput   `json:"s3_outputs,omitempty"`
 	NotReturned []UnreturnedOutput `json:"not_returned,omitempty"`
 }
 
@@ -219,6 +221,30 @@ func InputName(part Part) string {
 		return part.Filename + ".json"
 	}
 	return part.Filename
+}
+
+// S3Input is a file the run's host uploaded to the run's prefix in its pool's bucket, of Size bytes and SHA-256
+// SHA256, which the adapter fetches into the input directory under Name.
+type S3Input struct {
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+// StorageS3 is the storage of an expected output that returns through its pool's bucket.
+const StorageS3 = "s3"
+
+// MaxS3Object bounds an S3 input or output: 5 GiB, the S3 single-PUT maximum.
+const MaxS3Object = 5 << 30
+
+// S3Prefix is the prefix of a run's objects in its pool's bucket; S3InputKey and S3OutputKey are the keys beneath it of
+// an S3 input and of a turn's S3 output.
+func S3Prefix(tenant, run string) string { return "wherry/" + tenant + "/" + run + "/" }
+
+func S3InputKey(tenant, run, name string) string { return S3Prefix(tenant, run) + "inputs/" + name }
+
+func S3OutputKey(tenant, run string, turn int64, name string) string {
+	return S3Prefix(tenant, run) + strconv.FormatInt(turn, 10) + "/outputs/" + name
 }
 
 // GitInput is the repository a run's agent clones itself: Remote at Ref into Path, with the task credential

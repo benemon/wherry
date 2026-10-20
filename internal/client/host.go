@@ -48,6 +48,7 @@ const liveness = 120 * time.Second
 // SubmitInput contains the root-task routing and prompt fields; Parts follow the prompt's text part. Credentials
 // name credentials this host configures, delivered to the agent as files, and Outputs the files it is asked to leave.
 // Git is the repository the agent clones, and GitChanges, patch or bundle, asks for its changes back as that output.
+// S3Inputs are files uploaded to the pool's bucket before the task is published, which the adapter fetches.
 type SubmitInput struct {
 	// Agent names what runs; empty takes the pool's default.
 	Agent         string
@@ -58,6 +59,7 @@ type SubmitInput struct {
 	Outputs       []wire.ExpectedOutput
 	Git           *wire.GitInput
 	GitChanges    string
+	S3Inputs      []S3File
 	Deadline      time.Duration
 	QueueDeadline time.Duration
 }
@@ -118,7 +120,9 @@ type Host struct {
 	host        string
 	stateDir    string
 	credentials map[string]string
-	logger      *log.Logger
+	// storage is the host's S3 credential, nil when its configuration has none.
+	storage *StorageConfig
+	logger  *log.Logger
 }
 
 // NewHost constructs a host over a plain Kafka connection authenticated as principal.
@@ -224,6 +228,16 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
 		}
 	}
+	var s3Inputs, s3Outputs []string
+	for _, file := range input.S3Inputs {
+		s3Inputs = append(s3Inputs, file.Name)
+	}
+	for _, output := range outputs {
+		if output.Storage == wire.StorageS3 {
+			s3Outputs = append(s3Outputs, output.Name)
+		}
+	}
+	stored := len(s3Inputs)+len(s3Outputs) > 0
 	v, err := h.load(ctx)
 	if err != nil {
 		return SubmitResult{}, err
@@ -252,6 +266,28 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		return SubmitResult{}, err
 	}
 	submission.Wherry.Credentials, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, outputs, input.Git
+	if stored {
+		// The S3 inputs are uploaded before publishing, and removed again if the task is not published.
+		storage := v.state.Pools[pool].Storage
+		store, err := h.bucket(pool, storage)
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		deadline := time.UnixMilli(submission.Wherry.DeadlineMS)
+		if err := h.checkSealSize(ctx, store, storage.Bucket, h.tenant, runID, input.Credentials, s3Inputs, s3Outputs, deadline); err != nil {
+			return SubmitResult{}, err
+		}
+		if submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage.Bucket, h.tenant, runID, input.S3Inputs); err == nil {
+			err = h.publish(ctx, submission, now)
+		}
+		if err != nil {
+			if cleanupErr := h.removePrefix(ctx, store, storage.Bucket, runID); cleanupErr != nil {
+				h.logger.Printf("run %s: delete the S3 inputs of a task not published: %v", runID, cleanupErr)
+			}
+			return SubmitResult{}, err
+		}
+		return SubmitResult{RunID: runID, Pool: pool}, nil
+	}
 	if err := h.publish(ctx, submission, now); err != nil {
 		return SubmitResult{}, err
 	}
@@ -305,9 +341,12 @@ func (h *Host) Continue(ctx context.Context, runID string, input ContinueInput) 
 	if echo == nil {
 		return ContinueResult{}, ErrNotAwaitingContinuation
 	}
-	// Another host of the tenant may have submitted the run, and then only admission checks its forge.
+	// Another host of the tenant may have submitted the run, and then only admission checks its forge and storage.
 	if r.local != nil && r.local.Forge != "" && !slices.Contains(r.v.state.Pools[echo.Pool].Forges, r.local.Forge) {
 		return ContinueResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's forges", ErrInvalidInput, r.local.Forge, echo.Pool)
+	}
+	if r.local != nil && len(r.local.S3Inputs)+len(r.local.S3Outputs) > 0 && r.v.state.Pools[echo.Pool].Storage == nil {
+		return ContinueResult{}, fmt.Errorf("%w: pool %s has no storage for S3 inputs and outputs", ErrInvalidInput, echo.Pool)
 	}
 	now := time.Now()
 	submission, err := h.submission(runID, next, echo.Pool, echo.Placement, []wire.Part{{Text: input.Prompt}}, input.Deadline, input.QueueDeadline, now)
@@ -367,15 +406,26 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now tim
 		return err
 	}
 	sum := sha256.Sum256(encoded)
-	record := runRecord{Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: hex.EncodeToString(sum[:]), SubmittedMS: now.UnixMilli()}
+	record := runRecord{
+		Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: hex.EncodeToString(sum[:]), SubmittedMS: now.UnixMilli(),
+		DeadlineMS: binding.DeadlineMS,
+	}
 	for _, credential := range binding.Credentials {
 		record.TaskCredentials = append(record.TaskCredentials, credential.Name)
 	}
 	if binding.Git != nil {
 		record.Forge = binding.Git.Forge()
 	}
+	for _, input := range binding.S3Inputs {
+		record.S3Inputs = append(record.S3Inputs, input.Name)
+	}
+	for _, output := range binding.Outputs {
+		if output.Storage == wire.StorageS3 {
+			record.S3Outputs = append(record.S3Outputs, output.Name)
+		}
+	}
 	if binding.Turn > 1 && previous != nil {
-		record.TaskCredentials, record.Forge = previous.TaskCredentials, previous.Forge
+		record.TaskCredentials, record.Forge, record.S3Inputs, record.S3Outputs = previous.TaskCredentials, previous.Forge, previous.S3Inputs, previous.S3Outputs
 	}
 	if err := h.writeRun(record); err != nil {
 		return err
@@ -463,6 +513,11 @@ type runRecord struct {
 	TaskCredentials []string `json:"task_credentials,omitzero"`
 	// Forge is the forge of the git input the run's first turn declares, which every turn must be in the pool's forges.
 	Forge string `json:"forge,omitzero"`
+	// S3Inputs and S3Outputs name the S3 inputs and outputs the run's first turn declares, which this host may presign.
+	S3Inputs  []string `json:"s3_inputs,omitzero"`
+	S3Outputs []string `json:"s3_outputs,omitzero"`
+	// DeadlineMS is the deadline of the turn, when a PUT URL for its S3 outputs expires.
+	DeadlineMS int64 `json:"deadline_ms,omitzero"`
 }
 
 func (h *Host) runPath(runID string) (string, bool) {

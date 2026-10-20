@@ -24,24 +24,27 @@ import (
 )
 
 // AwaitResult is the accepted outcome of the latest turn; Task is nil when a status record ended it. Outputs are the
-// turn's outputs that verified against its result, NotReturned those its receiver did not return, and Rejected
-// those this host could not verify.
+// turn's outputs that verified against its result, Stored the S3 outputs it lists for DownloadOutputs, NotReturned
+// those its receiver did not return, and Rejected those this host could not verify.
 type AwaitResult struct {
 	Task        *wire.Task
 	Status      wire.TaskStatus
 	Turn        int64
 	Outputs     []Output
+	Stored      []wire.ReturnedOutput
 	NotReturned []wire.UnreturnedOutput
 	Rejected    []wire.UnreturnedOutput
 	Skipped     int
 }
 
-// Output is an output of a turn, verified against the size and SHA-256 its result lists.
+// Output is an output of a turn, verified against the size and SHA-256 its result lists: its bytes, or for an S3
+// output the Path DownloadOutputs wrote it to.
 type Output struct {
 	Name   string
 	SHA256 string
 	Size   int64
 	Data   []byte
+	Path   string
 }
 
 // StatusResult is the latest verified status of a run's latest turn.
@@ -546,7 +549,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		if r.outcome != nil {
 			r.outcome.Skipped, r.outcome.Turn = r.skipped, r.outcomeTurn
 			if r.result != nil {
-				r.outcome.Outputs, r.outcome.NotReturned, r.outcome.Rejected = r.verifiedOutputs(r.result)
+				r.outcome.Outputs, r.outcome.Stored, r.outcome.NotReturned, r.outcome.Rejected = r.verifiedOutputs(r.result)
 			}
 			return *r.outcome, nil
 		}
@@ -574,15 +577,16 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 
 // verifiedOutputs joins, for each output the result lists, the chunks its own attempt wrote, and verifies them against
 // the listed size and SHA-256. An output whose chunks have a gap, an overlap or a duplicate index, or whose bytes do
-// not match, is rejected. It also returns the outputs the result lists as not returned.
-func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.UnreturnedOutput, []wire.UnreturnedOutput) {
+// not match, is rejected. It also returns the S3 outputs the result lists, and the outputs it lists as not returned.
+func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.ReturnedOutput, []wire.UnreturnedOutput, []wire.UnreturnedOutput) {
 	var manifest struct {
 		Outputs     []wire.ReturnedOutput   `json:"outputs"`
+		S3Outputs   []wire.ReturnedOutput   `json:"s3_outputs"`
 		NotReturned []wire.UnreturnedOutput `json:"not_returned"`
 	}
 	// The metadata also holds the placement members; a manifest that does not decode lists nothing.
 	if json.Unmarshal(result.Task.Metadata, &manifest) != nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	chunks := map[string]map[int64]*wire.Output{}
 	duplicated := map[string]bool{}
@@ -632,7 +636,7 @@ func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.Unretur
 		}
 		verified = append(verified, Output{Name: listed.Name, SHA256: listed.SHA256, Size: listed.Size, Data: data})
 	}
-	return verified, manifest.NotReturned, rejected
+	return verified, manifest.S3Outputs, manifest.NotReturned, rejected
 }
 
 // WriteOutputs writes a turn's verified outputs beneath dir, by default <state_dir>/runs/<run>/outputs/<turn>, and

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -262,7 +263,7 @@ func TestTaskCredentialIsRedactedFromTranscriptAndOutputs(t *testing.T) {
 
 func TestPreambleNamesFilesNeverValues(t *testing.T) {
 	directories := adapter.Directories{Input: "/local/inputs", Output: "/local/outputs", Credentials: "/secrets/credentials"}
-	inputs := []adapter.File{{Name: "data.csv", Data: []byte("input-content")}}
+	inputs := []string{"data.csv"}
 	credentials := []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}
 	outputs := []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes/extra.txt"}}
 	got := preamble(directories, inputs, credentials, outputs, nil, "run-a")
@@ -273,7 +274,7 @@ func TestPreambleNamesFilesNeverValues(t *testing.T) {
 			t.Errorf("preamble %q lacks %q", got, want)
 		}
 	}
-	for _, never := range []string{"input-content", "deploy-key"} {
+	for _, never := range []string{"deploy-key"} {
 		if strings.Contains(got, never) {
 			t.Errorf("preamble %q holds %q", got, never)
 		}
@@ -358,7 +359,7 @@ func TestCollectionHonoursThePoolOutputLimit(t *testing.T) {
 	terms := testTerms()
 	terms.OutputLimit = 1000
 	f, task, _ := runWithOutputsUnder(t, terms, nil, []adapter.Output{{Name: "grew.bin", Size: 2000, Data: []byte("x")}, file("report.md", "r")}, nil)
-	if f.adapter.limits != (adapter.Limits{Files: wire.MaxOutputs, FileBytes: 1000, TotalBytes: 1000}) {
+	if !reflect.DeepEqual(f.adapter.limits, adapter.Limits{Files: wire.MaxOutputs, FileBytes: 1000, TotalBytes: 1000, StreamBytes: wire.MaxS3Object}) {
 		t.Fatalf("collected under %+v, want the pool's output limit", f.adapter.limits)
 	}
 	if listed := manifest(t, task); len(listed.Outputs) != 1 || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "grew.bin", Size: 2000, Reason: "exceeds output limit"}}) {
