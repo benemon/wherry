@@ -468,6 +468,10 @@ func TestCleanupDeletesTheRunsPrefixOnDemand(t *testing.T) {
 	f, o, receiver := storageFixture(t)
 	task, _ := submitS3(t, f, receiver, time.Minute)
 	runID := task.submission.Wherry.Run
+	if err := f.host.Cleanup(f.ctx, runID); !errors.Is(err, ErrInvalidInput) || o.object(t, wire.S3InputKey("tenant-a", runID, "dataset.bin")) == nil {
+		t.Fatalf("cleanup of a working run = %v", err)
+	}
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "rejected-1", "rejected", wire.TaskStateRejected, nil))
 	if err := f.host.Cleanup(f.ctx, runID); err != nil {
 		t.Fatal(err)
 	}

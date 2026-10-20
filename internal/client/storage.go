@@ -270,7 +270,8 @@ func verifies(file io.Reader, listed wire.ReturnedOutput) bool {
 	return err == nil && size == listed.Size && hex.EncodeToString(sum.Sum(nil)) == listed.SHA256
 }
 
-// Cleanup deletes every object under a run's prefix in its pool's bucket, and nothing outside it.
+// Cleanup deletes every object under a run's prefix in its pool's bucket, and nothing outside it. It refuses a run whose
+// latest turn has no outcome, since its receiver may still read inputs or write outputs there.
 func (h *Host) Cleanup(ctx context.Context, runID string) error {
 	if _, ok := h.runPath(runID); !ok {
 		return fmt.Errorf("cleanup %s: %w", runID, ErrRunNotFound)
@@ -281,6 +282,10 @@ func (h *Host) Cleanup(ctx context.Context, runID string) error {
 	}
 	if r.pool == "" {
 		return fmt.Errorf("cleanup %s: %w", runID, ErrRunNotFound)
+	}
+	// An interrupted run's continuation still needs its S3 inputs.
+	if r.outcome == nil || wire.Interrupted(r.outcome.Status.State) {
+		return fmt.Errorf("%w: run %s's turn %d has not ended", ErrInvalidInput, runID, r.latest)
 	}
 	storage := r.v.state.Pools[r.pool].Storage
 	store, err := h.bucket(r.pool, storage)

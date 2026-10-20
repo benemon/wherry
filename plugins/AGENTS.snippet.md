@@ -36,9 +36,13 @@ clones itself.
 5. `wherry cancel RUN_ID` when the result is no longer needed.
 6. `wherry status RUN_ID` prints a run's state without waiting.
    `wherry status` alone lists every run this host can see, latest update
-   first.
+   first. `wherry transcript RUN_ID` prints the agent's output lines for the
+   latest turn; `--offset` and `--limit` page through them.
+7. `wherry cleanup RUN_ID` deletes the S3 objects of a run that ended while
+   no `await` ran.
 
 Where the `wherry` MCP server (`wherry mcp`) is configured, its tools do the
-same: `receivers`, `submit`, `status`, `await`, `continue`, `cancel` and
-`events`. Its `await` waits up to 45 seconds; call it again while the
-reply carries `retry_after`.
+same: `receivers`, `submit`, `status`, `await`, `continue`, `cancel`,
+`events`, `transcript` and `cleanup`. Its `await` waits up to 45 seconds;
+call it again while the reply carries `retry_after`. Its `transcript`
+returns a page of lines; call it again with `next_offset` while it is set.

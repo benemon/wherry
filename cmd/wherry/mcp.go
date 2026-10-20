@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"flag"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/wire"
@@ -28,6 +30,12 @@ const awaitBound = 45 * time.Second
 const retryAfter = 5
 
 const progressInterval = 5 * time.Second
+
+// transcriptLimit and transcriptMaxLimit are the default and the largest page of transcript lines.
+const transcriptLimit, transcriptMaxLimit = 100, 500
+
+// transcriptBytes bounds a transcript page's JSON, within the 25,000-token default of Claude Code's MAX_MCP_OUTPUT_TOKENS.
+const transcriptBytes = 24 << 10
 
 // answerRetry separates the server's attempts to answer seal requests after a failure.
 const answerRetry = 5 * time.Second
@@ -127,7 +135,7 @@ type gitInput struct {
 	Ref        string `json:"ref" jsonschema:"branch, tag or commit to check out"`
 	Path       string `json:"path,omitempty" jsonschema:"checkout directory, relative; defaults to the repository name"`
 	Credential string `json:"credential,omitempty" jsonschema:"name of one of the credentials, which the agent clones with: a token for https, a private key for ssh"`
-	HostKey    string `json:"host_key,omitempty" jsonschema:"local file of OpenSSH known_hosts lines for the host of an ssh remote; required for ssh"`
+	HostKey    string `json:"host_key,omitempty" jsonschema:"local file of OpenSSH known_hosts lines for the host of an ssh remote, read as an input is; required for ssh"`
 	Changes    string `json:"changes,omitempty" jsonschema:"patch or bundle: ask for the agent's commits back as the output changes.patch or changes.bundle"`
 }
 
@@ -143,7 +151,8 @@ type outputInput struct {
 }
 
 type submitInput struct {
-	Prompt               string             `json:"prompt" jsonschema:"the task for the remote agent"`
+	Prompt               string             `json:"prompt,omitempty" jsonschema:"the task for the remote agent; exactly one of prompt and prompt_file is required"`
+	PromptFile           string             `json:"prompt_file,omitempty" jsonschema:"local file holding the prompt, read as an input is"`
 	Agent                string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
 	Selector             []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the adapter must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
 	Git                  *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts"`
@@ -218,6 +227,7 @@ type awaitReply struct {
 type continueInput struct {
 	ID                   string `json:"id" jsonschema:"run id of an interrupted run"`
 	Prompt               string `json:"prompt,omitempty" jsonschema:"continuation text; default continue"`
+	PromptFile           string `json:"prompt_file,omitempty" jsonschema:"local file holding the continuation text, read as an input is; not with prompt"`
 	DeadlineSeconds      int64  `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 1800"`
 	QueueDeadlineSeconds int64  `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`
 }
@@ -226,6 +236,10 @@ type continueOutput struct {
 	ID      string `json:"id"`
 	Turn    int64  `json:"turn"`
 	Skipped int    `json:"skipped,omitempty"`
+}
+
+type cleanupOutput struct {
+	ID string `json:"id"`
 }
 
 type cancelOutput struct {
@@ -253,7 +267,36 @@ type eventsOutput struct {
 	ID          string             `json:"id"`
 	Events      []eventOutput      `json:"events"`
 	Transcripts []transcriptOutput `json:"transcripts"`
+	Redacted    map[string]int     `json:"redacted,omitempty" jsonschema:"redaction markers in the events' messages by the credential or S3 object each names"`
 	Skipped     int                `json:"skipped,omitempty"`
+}
+
+type transcriptInput struct {
+	ID     string `json:"id" jsonschema:"run id"`
+	Turn   int64  `json:"turn,omitempty" jsonschema:"turn to read; default the latest"`
+	Offset int    `json:"offset,omitempty" jsonschema:"lines to skip"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"most lines to return, at most 500; default 100"`
+}
+
+type transcriptLine struct {
+	Seq       int64                 `json:"seq" jsonschema:"the line's byte offset in the agent's output"`
+	Attempt   int64                 `json:"attempt" jsonschema:"the delivery attempt that published the line"`
+	Text      string                `json:"text" jsonschema:"the line of the agent's standard output, without its newline; empty for a line with raw_bytes or unstored"`
+	Truncated bool                  `json:"truncated,omitempty" jsonschema:"set when text holds only the start of a line too long for a page"`
+	Bytes     int                   `json:"bytes,omitempty" jsonschema:"size of a truncated line"`
+	RawBytes  int                   `json:"raw_bytes,omitempty" jsonschema:"size of a line that is not UTF-8, which is not included"`
+	Unstored  *wire.PointerMetadata `json:"unstored,omitempty" jsonschema:"sha256 and size of a line over 512 KiB, which the receiver did not store"`
+}
+
+type transcriptReply struct {
+	ID         string           `json:"id"`
+	Turn       int64            `json:"turn"`
+	Attempt    int64            `json:"attempt" jsonschema:"the delivery attempt whose lines these are; 0 while no receiver has reported on the turn"`
+	Total      int              `json:"total" jsonschema:"lines of the attempt on the feed so far"`
+	NextOffset int              `json:"next_offset,omitempty" jsonschema:"set while lines remain past this page: the offset to call with next"`
+	Lines      []transcriptLine `json:"lines"`
+	Redacted   map[string]int   `json:"redacted,omitempty" jsonschema:"redaction markers in every line of the attempt, not only this page, by the credential or S3 object each names"`
+	Skipped    int              `json:"skipped,omitempty"`
 }
 
 // newMCPServer serves the wherry tools. Each call opens its own connection: a Host's consumer serves one operation at a
@@ -287,11 +330,6 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		Name:        "submit",
 		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with await, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which await writes locally. While this server runs, it seals the agent's and the task's configured credentials to the receiver that claims the task when that receiver asks for them.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
-		client, err := connect()
-		if err != nil {
-			return nil, submitOutput{}, toolFailure(err)
-		}
-		defer client.Close()
 		submission, err := submitFromInput(input, readInput, openInput)
 		if err != nil {
 			return nil, submitOutput{}, err
@@ -301,6 +339,11 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 				file.File.Close()
 			}
 		}()
+		client, err := connect()
+		if err != nil {
+			return nil, submitOutput{}, toolFailure(err)
+		}
+		defer client.Close()
 		result, err := client.Submit(ctx, submission)
 		if err != nil {
 			return nil, submitOutput{}, toolFailure(err)
@@ -396,20 +439,32 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "continue",
-		Description: "Sign and publish the next turn of a run interrupted in AUTH_REQUIRED to the pool that admitted it; add a missing credential to the wherry config first.",
+		Description: "Sign and publish the next turn of a run interrupted in AUTH_REQUIRED or INPUT_REQUIRED to the pool that admitted it; add a missing credential to the wherry config first.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input continueInput) (*mcp.CallToolResult, continueOutput, error) {
-		client, err := connect()
-		if err != nil {
-			return nil, continueOutput{}, toolFailure(err)
-		}
-		defer client.Close()
-		if input.Prompt == "" {
+		switch {
+		case input.Prompt != "" && input.PromptFile != "":
+			return nil, continueOutput{}, invalidArgument("prompt and prompt_file are mutually exclusive")
+		case input.PromptFile != "":
+			part, err := readInput(input.PromptFile, math.MaxInt64)
+			if err != nil {
+				return nil, continueOutput{}, err
+			}
+			if len(part.Raw) == 0 {
+				return nil, continueOutput{}, invalidArgument("prompt_file is empty")
+			}
+			input.Prompt = string(part.Raw)
+		case input.Prompt == "":
 			input.Prompt = "continue"
 		}
 		deadline, queueDeadline, err := deadlines(input.DeadlineSeconds, input.QueueDeadlineSeconds)
 		if err != nil {
 			return nil, continueOutput{}, err
 		}
+		client, err := connect()
+		if err != nil {
+			return nil, continueOutput{}, toolFailure(err)
+		}
+		defer client.Close()
 		result, err := client.Continue(ctx, input.ID, busclient.ContinueInput{Prompt: input.Prompt, Deadline: deadline, QueueDeadline: queueDeadline})
 		if err != nil {
 			return nil, continueOutput{}, toolFailure(err)
@@ -436,7 +491,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "events",
-		Description: "Return a run's verified status history and its transcript chunk counts.",
+		Description: "Return a run's verified status history and its transcript chunk counts per turn and attempt. Read the lines with transcript.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, eventsOutput, error) {
 		client, err := connect()
@@ -448,7 +503,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, eventsOutput{}, toolFailure(err)
 		}
-		output := eventsOutput{ID: input.ID, Events: []eventOutput{}, Transcripts: []transcriptOutput{}, Skipped: result.Skipped}
+		output := eventsOutput{ID: input.ID, Events: []eventOutput{}, Transcripts: []transcriptOutput{}, Redacted: result.Redacted, Skipped: result.Skipped}
 		for _, record := range result.Statuses {
 			status := record.StatusUpdate.Status
 			output.Events = append(output.Events, eventOutput{
@@ -467,12 +522,107 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		})
 		return nil, output, nil
 	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "transcript",
+		Description: fmt.Sprintf("Return a page of a turn's transcript: the lines of the agent's standard output, redacted by the "+
+			"receiver, in output order. The lines are the turn's latest delivery attempt's, and before its first line, or while it "+
+			"has none, each earlier attempt's line, so an adopted turn reads from the start; each line names its attempt. A page "+
+			"holds at most limit lines and %d KiB of JSON, which fits a harness's default tool output limit; a line too long for "+
+			"a page alone comes back truncated, with its size in bytes. next_offset is set while more lines are on the feed. The "+
+			"transcript grows while the turn runs.", transcriptBytes>>10),
+		Annotations: readOnly,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input transcriptInput) (*mcp.CallToolResult, transcriptReply, error) {
+		if input.Turn < 0 || input.Offset < 0 || input.Limit < 0 || input.Limit > transcriptMaxLimit {
+			return nil, transcriptReply{}, invalidArgument(fmt.Sprintf("turn and offset must not be negative, and limit must be 0 to %d", transcriptMaxLimit))
+		}
+		if input.Limit == 0 {
+			input.Limit = transcriptLimit
+		}
+		client, err := connect()
+		if err != nil {
+			return nil, transcriptReply{}, toolFailure(err)
+		}
+		defer client.Close()
+		result, err := client.Transcript(ctx, input.ID, input.Turn)
+		if err != nil {
+			return nil, transcriptReply{}, toolFailure(err)
+		}
+		output := transcriptReply{ID: input.ID, Turn: result.Turn, Attempt: result.Attempt, Total: len(result.Lines), Lines: []transcriptLine{},
+			Redacted: result.Redacted, Skipped: result.Skipped}
+		size := func(value any) int {
+			encoded, _ := json.Marshal(value, jsontext.EscapeForHTML(true), jsontext.EscapeForJS(true)) // as the SDK's encoding/json writes it
+			return len(encoded)
+		}
+		output.NextOffset = len(result.Lines)
+		room := transcriptBytes - size(output)
+		output.NextOffset = 0
+		for i := min(input.Offset, len(result.Lines)); i < len(result.Lines); i++ {
+			line := transcriptLine{Seq: result.Lines[i].Seq, Attempt: result.Lines[i].Attempt}
+			switch part := result.Lines[i].Part; {
+			case part.URL != "":
+				line.Unstored = &wire.PointerMetadata{}
+				json.Unmarshal(part.Metadata, line.Unstored) // validation decoded it
+			case part.Raw != nil && !utf8.Valid(part.Raw):
+				line.RawBytes = len(part.Raw)
+			case part.Raw != nil:
+				line.Text = string(part.Raw)
+			default:
+				line.Text = part.Text
+			}
+			// A comma separates each line from the one before it.
+			if len(output.Lines) == input.Limit || len(output.Lines) > 0 && size(line)+1 > room {
+				output.NextOffset = i
+				break
+			}
+			if over := size(line) - room; over > 0 {
+				line.Truncated, line.Bytes = true, len(line.Text)
+				for over = size(line) - room; over > 0; over = size(line) - room {
+					cut := max(len(line.Text)-over, 0)
+					for cut > 0 && !utf8.RuneStart(line.Text[cut]) {
+						cut--
+					}
+					line.Text = line.Text[:cut]
+				}
+			}
+			room -= size(line) + 1
+			output.Lines = append(output.Lines, line)
+		}
+		return nil, output, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "cleanup",
+		Description: "Delete every object under a run's prefix in its pool's bucket: its S3 inputs and outputs. await does this once a " +
+			"turn is terminal and its S3 outputs verify; use cleanup for a run that ended while nothing awaited it.",
+		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, cleanupOutput, error) {
+		client, err := connect()
+		if err != nil {
+			return nil, cleanupOutput{}, toolFailure(err)
+		}
+		defer client.Close()
+		if err := client.Cleanup(ctx, input.ID); err != nil {
+			return nil, cleanupOutput{}, toolFailure(err)
+		}
+		return nil, cleanupOutput{ID: input.ID}, nil
+	})
 	return server
 }
 
 func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error)) (busclient.SubmitInput, error) {
-	if input.Prompt == "" {
-		return busclient.SubmitInput{}, invalidArgument("prompt is required")
+	if (input.Prompt == "") == (input.PromptFile == "") {
+		return busclient.SubmitInput{}, invalidArgument("exactly one of prompt and prompt_file is required")
+	}
+	if input.PromptFile != "" {
+		part, err := readInput(input.PromptFile, math.MaxInt64)
+		if err != nil {
+			return busclient.SubmitInput{}, err
+		}
+		if len(part.Raw) == 0 {
+			return busclient.SubmitInput{}, invalidArgument("prompt_file is empty")
+		}
+		input.Prompt = string(part.Raw)
 	}
 	selector := input.Selector
 	if selector == nil {

@@ -607,6 +607,61 @@ func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 	}
 }
 
+func TestTranscriptPrintsTheLatestAttemptsLines(t *testing.T) {
+	b, runID := transcriptRun(t)
+	var stdout, stderr bytes.Buffer
+	if err := runTranscript(b.ctx, b.client, []string{runID, "--offset", "1", "--limit", "5"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	wantOut := "second [redacted:model]\n\xff\xfe\n\"q\"\n\n"
+	wantErr := "line at offset 40 not stored: sha256=" + hashOf("x") + " size=600000\nmodel redacted 1 times\n"
+	if stdout.String() != wantOut || stderr.String() != wantErr {
+		t.Fatalf("stdout %q stderr %q, want %q and %q", stdout.String(), stderr.String(), wantOut, wantErr)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runEvents(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), `message="using [redacted:model]"`) || stderr.String() != "model redacted 1 times\n" {
+		t.Fatalf("events stdout %q stderr %q", stdout.String(), stderr.String())
+	}
+	if err := runTranscript(b.ctx, b.client, []string{runID, "--turn", "2"}, &stdout, &stderr); !errors.Is(err, busclient.ErrInvalidInput) {
+		t.Fatalf("a turn past the latest: %v", err)
+	}
+}
+
+func TestEmptyPromptFileIsRefused(t *testing.T) {
+	empty := filepath.Join(t.TempDir(), "empty.md")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	if err := runSubmit(context.Background(), nil, []string{"--prompt-file", empty}, &stderr, &stderr); err == nil || err.Error() != "--prompt-file is empty" {
+		t.Fatalf("submit: %v", err)
+	}
+	if err := runContinue(context.Background(), nil, []string{"run-a", "--prompt-file", empty}, &stderr, &stderr); err == nil || err.Error() != "--prompt-file is empty" {
+		t.Fatalf("continue: %v", err)
+	}
+}
+
+func TestCleanupRefusesAnUnfinishedRun(t *testing.T) {
+	b := newBus(t)
+	runID := b.admitted(t).submission.Wherry.Run
+	var stdout, stderr bytes.Buffer
+	if err := runCleanup(b.ctx, b.client, []string{runID}, &stdout, &stderr); !errors.Is(err, busclient.ErrInvalidInput) || !strings.Contains(err.Error(), "has not ended") {
+		t.Fatalf("cleanup of a working run: %v", err)
+	}
+}
+
+func TestCleanupRefusesAnInterruptedRun(t *testing.T) {
+	b, admitted := publishInterruptedRun(t)
+	var stdout, stderr bytes.Buffer
+	if err := runCleanup(b.ctx, b.client, []string{admitted.submission.Wherry.Run}, &stdout, &stderr); !errors.Is(err, busclient.ErrInvalidInput) || !strings.Contains(err.Error(), "has not ended") {
+		t.Fatalf("cleanup of an interrupted run, whose continuation needs its inputs: %v", err)
+	}
+}
+
 func TestUsageErrors(t *testing.T) {
 	for _, test := range []struct {
 		name string

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -80,6 +81,28 @@ type TurnAttempt struct {
 type EventsResult struct {
 	Statuses []wire.RunStatus
 	Chunks   map[TurnAttempt]int
+	// Redacted counts, by name, the redaction markers of the run's values in the statuses' messages, where each reads
+	// [redacted:<name>] instead.
+	Redacted map[string]int
+	Skipped  int
+}
+
+// TranscriptLine is one line of an agent's output, as the single part of its chunk carries it.
+type TranscriptLine struct {
+	// Seq is the line's byte offset in the agent's output.
+	Seq     int64
+	Attempt int64
+	Part    wire.Part
+}
+
+// TranscriptResult is one turn's transcript. Attempt is the turn's highest attempt, which supersedes the others.
+type TranscriptResult struct {
+	Turn    int64
+	Attempt int64
+	Lines   []TranscriptLine
+	// Redacted counts, by name, the redaction markers of the run's values in Lines, where each reads
+	// [redacted:<name>] instead.
+	Redacted map[string]int
 	Skipped  int
 }
 
@@ -526,18 +549,76 @@ func (h *Host) Events(ctx context.Context, runID string) (EventsResult, error) {
 	if r.pool == "" {
 		return EventsResult{}, fmt.Errorf("events %s: %w", runID, ErrRunNotFound)
 	}
-	result := EventsResult{Chunks: map[TurnAttempt]int{}, Skipped: r.skipped}
+	result := EventsResult{Chunks: map[TurnAttempt]int{}, Redacted: map[string]int{}, Skipped: r.skipped}
+	markers := h.markers(r.local)
 	seen := map[string]bool{}
 	for _, status := range r.statuses {
 		if seen[status.Wherry.EventID] {
 			continue
 		}
 		seen[status.Wherry.EventID] = true
-		result.Statuses = append(result.Statuses, *status)
+		record := *status
+		record.StatusUpdate.Status = unredactStatus(record.StatusUpdate.Status, markers, result.Redacted)
+		result.Statuses = append(result.Statuses, record)
 	}
 	for _, chunk := range r.chunks {
 		result.Chunks[TurnAttempt{Turn: chunk.Wherry.Turn, Attempt: chunk.Wherry.Attempt}]++
 	}
+	return result, nil
+}
+
+// Transcript returns the transcript of runID's turn, its latest when turn is 0, in seq order: the lines of the turn's
+// highest attempt, and before the first of them, or in place of them while it has none, each line of the highest
+// earlier attempt that has it. An adopter resumes the job's output past the offset of the last heartbeat, so the lines
+// before it are the earlier attempt's. The CANCELED terminal of an interrupted run, which every pool member writes with
+// its own attempt, does not count.
+func (h *Host) Transcript(ctx context.Context, runID string, turn int64) (TranscriptResult, error) {
+	r, err := h.history(ctx, runID)
+	if err != nil {
+		return TranscriptResult{}, err
+	}
+	if r.pool == "" {
+		return TranscriptResult{}, fmt.Errorf("transcript %s: %w", runID, ErrRunNotFound)
+	}
+	if turn == 0 {
+		turn = r.latest
+	}
+	if turn < 1 || turn > r.latest {
+		return TranscriptResult{}, fmt.Errorf("%w: run %s has turns 1 to %d", ErrInvalidInput, runID, r.latest)
+	}
+	result := TranscriptResult{Turn: turn, Redacted: map[string]int{}, Skipped: r.skipped}
+	for _, status := range r.statuses {
+		if status.Wherry.Turn == turn && !canceled(status) {
+			result.Attempt = max(result.Attempt, status.Wherry.Attempt)
+		}
+	}
+	for _, chunk := range r.chunks {
+		if chunk.Wherry.Turn == turn {
+			result.Attempt = max(result.Attempt, chunk.Wherry.Attempt)
+		}
+	}
+	var chunks []*wire.Chunk
+	first := int64(math.MaxInt64)
+	for _, chunk := range r.chunks {
+		if chunk.Wherry.Turn == turn {
+			chunks = append(chunks, chunk)
+			if chunk.Wherry.Attempt == result.Attempt {
+				first = min(first, chunk.Wherry.Seq)
+			}
+		}
+	}
+	sort.SliceStable(chunks, func(i, j int) bool { return chunks[i].Wherry.Attempt > chunks[j].Wherry.Attempt })
+	markers := h.markers(r.local)
+	seen := map[int64]bool{}
+	for _, chunk := range chunks {
+		if seen[chunk.Wherry.Seq] || chunk.Wherry.Attempt != result.Attempt && chunk.Wherry.Seq >= first {
+			continue
+		}
+		seen[chunk.Wherry.Seq] = true
+		parts := unredactParts(chunk.ArtifactUpdate.Artifact.Parts, markers, result.Redacted)
+		result.Lines = append(result.Lines, TranscriptLine{Seq: chunk.Wherry.Seq, Attempt: chunk.Wherry.Attempt, Part: parts[0]})
+	}
+	sort.Slice(result.Lines, func(i, j int) bool { return result.Lines[i].Seq < result.Lines[j].Seq })
 	return result, nil
 }
 
