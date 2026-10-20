@@ -30,11 +30,13 @@ import (
 
 // Errors the client returns for a run or placement that cannot proceed.
 var (
-	ErrNoMatchingReceiver      = errors.New("no matching live receiver")
-	ErrRunNotFound             = errors.New("run not found")
-	ErrNotAwaitingContinuation = errors.New("task is not awaiting continuation")
-	ErrRunCanceled             = errors.New("task is canceled")
-	ErrTurnSubmitted           = errors.New("continuation turn already submitted")
+	ErrNoMatchingReceiver        = errors.New("no matching live receiver")
+	ErrRunNotFound               = errors.New("run not found")
+	ErrNotAwaitingContinuation   = errors.New("task is not awaiting continuation")
+	ErrRunCanceled               = errors.New("task is canceled")
+	ErrRunExpired                = errors.New("run expired")
+	ErrQueueDeadlinePastLifetime = errors.New("queue deadline exceeds run lifetime")
+	ErrTurnSubmitted             = errors.New("continuation turn already submitted")
 	// ErrInvalidInput wraps a submission the wire format rejects; its message names the rule, never the value.
 	ErrInvalidInput = errors.New("invalid input")
 )
@@ -257,6 +259,9 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateInputs(input.Parts, v.state.Pools[pool].InlineLimit); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
+	if input.QueueDeadline > time.Duration(v.state.Pools[pool].RunLifetimeMS)*time.Millisecond {
+		return SubmitResult{}, ErrQueueDeadlinePastLifetime
+	}
 	if input.Git != nil && !slices.Contains(v.state.Pools[pool].VCS, input.Git.VCSHost()) {
 		return SubmitResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's vcs hosts", ErrInvalidInput, input.Git.VCSHost(), pool)
 	}
@@ -280,7 +285,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, err
 		}
 		if submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage.Bucket, h.tenant, runID, input.S3Inputs); err == nil {
-			err = h.publish(ctx, submission, now)
+			err = h.publish(ctx, submission, now, now)
 		}
 		if err != nil {
 			if cleanupErr := h.removePrefix(ctx, store, storage.Bucket, runID); cleanupErr != nil {
@@ -290,7 +295,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 		return SubmitResult{RunID: runID, Pool: pool}, nil
 	}
-	if err := h.publish(ctx, submission, now); err != nil {
+	if err := h.publish(ctx, submission, now, now); err != nil {
 		return SubmitResult{}, err
 	}
 	return SubmitResult{RunID: runID, Pool: pool}, nil
@@ -343,6 +348,18 @@ func (h *Host) Continue(ctx context.Context, runID string, input ContinueInput) 
 	if echo == nil {
 		return ContinueResult{}, ErrNotAwaitingContinuation
 	}
+	firstSubmitted := r.turns[1].echoedAt
+	if r.local != nil && r.local.FirstSubmittedMS > 0 {
+		firstSubmitted = time.UnixMilli(r.local.FirstSubmittedMS)
+	}
+	now := time.Now()
+	expires := firstSubmitted.Add(time.Duration(r.v.state.Pools[echo.Pool].RunLifetimeMS) * time.Millisecond)
+	if now.After(expires) {
+		return ContinueResult{}, ErrRunExpired
+	}
+	if now.Add(input.QueueDeadline).After(expires) {
+		return ContinueResult{}, ErrQueueDeadlinePastLifetime
+	}
 	// Another host of the tenant may have submitted the run, and then only admission checks its VCS host and storage.
 	if r.local != nil && r.local.VCSHost != "" && !slices.Contains(r.v.state.Pools[echo.Pool].VCS, r.local.VCSHost) {
 		return ContinueResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's vcs hosts", ErrInvalidInput, r.local.VCSHost, echo.Pool)
@@ -350,12 +367,11 @@ func (h *Host) Continue(ctx context.Context, runID string, input ContinueInput) 
 	if r.local != nil && len(r.local.S3Inputs)+len(r.local.S3Outputs) > 0 && r.v.state.Pools[echo.Pool].Storage == nil {
 		return ContinueResult{}, fmt.Errorf("%w: pool %s has no storage for S3 inputs and outputs", ErrInvalidInput, echo.Pool)
 	}
-	now := time.Now()
 	submission, err := h.submission(runID, next, echo.Pool, echo.Placement, []wire.Part{{Text: input.Prompt}}, input.Deadline, input.QueueDeadline, now)
 	if err != nil {
 		return ContinueResult{}, err
 	}
-	if err := h.publish(ctx, submission, now); err != nil {
+	if err := h.publish(ctx, submission, now, firstSubmitted); err != nil {
 		return ContinueResult{}, err
 	}
 	return ContinueResult{RunID: runID, Turn: next, Skipped: r.skipped}, nil
@@ -397,7 +413,7 @@ func (h *Host) submission(runID string, turn int64, pool string, placement wire.
 // publish records the run locally, then writes the submission to its pool's task topic. The record comes first so
 // this host answers the seal request a receiver may send as soon as it claims the task; a failed write restores the
 // record it replaced.
-func (h *Host) publish(ctx context.Context, submission *wire.Submission, now time.Time) error {
+func (h *Host) publish(ctx context.Context, submission *wire.Submission, now, firstSubmitted time.Time) error {
 	encoded, err := wire.SignRecord(submission, h.key)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
@@ -410,7 +426,7 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now tim
 	sum := sha256.Sum256(encoded)
 	record := runRecord{
 		Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: hex.EncodeToString(sum[:]), SubmittedMS: now.UnixMilli(),
-		DeadlineMS: binding.DeadlineMS,
+		FirstSubmittedMS: firstSubmitted.UnixMilli(), DeadlineMS: binding.DeadlineMS,
 	}
 	for _, credential := range binding.Credentials {
 		record.TaskCredentials = append(record.TaskCredentials, credential.Name)
@@ -511,6 +527,8 @@ type runRecord struct {
 	TaskHash  string         `json:"task_hash"`
 	// SubmittedMS is when this host published the turn; records written before it existed hold zero.
 	SubmittedMS int64 `json:"submitted_ms,omitzero"`
+	// FirstSubmittedMS bounds continuations from the run's first local publication.
+	FirstSubmittedMS int64 `json:"first_submitted_ms,omitzero"`
 	// TaskCredentials names the task credentials the run's first turn declares, which this host may seal.
 	TaskCredentials []string `json:"task_credentials,omitzero"`
 	// VCSHost is the host of the git input the run's first turn declares, which every turn must be in the pool's VCS.

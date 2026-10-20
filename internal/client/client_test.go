@@ -868,6 +868,62 @@ func TestContinueRequiresInterruptedTurn(t *testing.T) {
 	}
 }
 
+func TestContinueRefusesRunPastLifetimeBeforePublishing(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
+	local, err := f.host.localRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local.FirstSubmittedMS = time.Now().Add(-15 * 24 * time.Hour).UnixMilli()
+	if err := f.host.writeRun(*local); err != nil {
+		t.Fatal(err)
+	}
+	before := len(receiver.claim(t, f.ctx, runID))
+	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrRunExpired) {
+		t.Fatalf("continue = %v, want run expired", err)
+	}
+	if after := len(receiver.claim(t, f.ctx, runID)); after != before {
+		t.Fatalf("tasks %d -> %d, want no continuation published", before, after)
+	}
+}
+
+func TestSubmitRefusesQueueDeadlinePastLifetimeBeforePublishing(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	input := SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: 15 * 24 * time.Hour}
+	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrQueueDeadlinePastLifetime) {
+		t.Fatalf("submit = %v, want queue deadline past lifetime", err)
+	}
+	if n := f.tasksEnd(t, "pool-a"); n != 0 {
+		t.Fatalf("pool tasks hold %d records", n)
+	}
+}
+
+func TestContinueRefusesQueueDeadlinePastLifetimeBeforePublishing(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
+	local, err := f.host.localRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local.FirstSubmittedMS = time.Now().Add(-14*24*time.Hour + time.Hour).UnixMilli()
+	if err := f.host.writeRun(*local); err != nil {
+		t.Fatal(err)
+	}
+	before := len(receiver.claim(t, f.ctx, runID))
+	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: 2 * time.Hour}); !errors.Is(err, ErrQueueDeadlinePastLifetime) {
+		t.Fatalf("continue = %v, want queue deadline past lifetime", err)
+	}
+	if after := len(receiver.claim(t, f.ctx, runID)); after != before {
+		t.Fatalf("tasks %d -> %d, want no continuation published", before, after)
+	}
+}
+
 func TestContinueIgnoresRejectedStatus(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)

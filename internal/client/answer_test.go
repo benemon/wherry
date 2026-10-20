@@ -532,7 +532,7 @@ func TestAFailedTaskWriteRestoresTheRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.host.publish(cancelled, next, time.Now()); err == nil {
+	if err := f.host.publish(cancelled, next, time.Now(), time.Now()); err == nil {
 		t.Fatal("publish succeeded on a cancelled context")
 	}
 	if local, err := f.host.localRun(runID); err != nil || local == nil || local.Turn != 1 {
@@ -542,7 +542,7 @@ func TestAFailedTaskWriteRestoresTheRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.host.publish(cancelled, fresh, time.Now()); err == nil {
+	if err := f.host.publish(cancelled, fresh, time.Now(), time.Now()); err == nil {
 		t.Fatal("publish succeeded on a cancelled context")
 	}
 	if local, err := f.host.localRun("run-fresh"); err != nil || local != nil {

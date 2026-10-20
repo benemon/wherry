@@ -219,7 +219,8 @@ part. The fixed texts are:
 - rejected: `agent is outside the pool terms`, `duplicate submission`,
   `duplicate continuation`, `stale submission`,
   `task is not awaiting continuation`, `continuation turn out of order`,
-  `continuation history unavailable`, `queue deadline passed`,
+  `continuation history unavailable`, `run expired`,
+  `queue deadline exceeds run lifetime`, `queue deadline passed`,
   `run deadline passed`, `unsupported message part`,
   `input names repeat across turns`, `run ID in use`,
   `inline inputs are <n> bytes, over the <limit>-byte limit`,
@@ -770,20 +771,28 @@ A receiver that claims a submission:
    ready adapter satisfies the placement;
 6. rejects a duplicate, stale or out-of-order turn, unless a cancel covers
    it;
-7. rejects a continuation whose earlier turns it cannot read;
-8. rejects it when its queue deadline or run deadline has passed;
-9. rejects it when the host of the run's [git input](#git-input) is not
-   one of the pool's current VCS hosts, and with `pool <pool> has no
-   storage for S3 inputs and outputs` when the run has S3 inputs or
-   outputs and the pool's terms have no `storage`;
-10. rejects it with `unsupported message part` when a `url` part appears
+7. rejects a turn no pool member has claimed with `run expired` when the
+   run's first turn reached the pool's task topic more than the pool's
+   `run_lifetime_ms` ago, and with `queue deadline exceeds run lifetime`
+   when its queue deadline falls more than `run_lifetime_ms` after that;
+8. rejects a continuation whose earlier turns it cannot read;
+9. rejects a turn no pool member has claimed when its queue deadline or
+   run deadline has passed;
+10. rejects it when the host of the run's [git input](#git-input) is not
+    one of the pool's current VCS hosts, and with `pool <pool> has no
+    storage for S3 inputs and outputs` when the run has S3 inputs or
+    outputs and the pool's terms have no `storage`;
+11. rejects it with `unsupported message part` when a `url` part appears
     in the run's turns, and with `input names repeat across turns` when two
     turns deliver input files of one name, the git input's `known_hosts`
     and the S3 inputs among them;
-11. writes the echo and the `claimed` status.
+12. writes the echo and the `claimed` status.
 
-A turn a cancel covers skips steps 8 to 10, and ends `TASK_STATE_CANCELED`
-after its `claimed` status.
+A turn a cancel covers skips steps 9 to 11, and ends `TASK_STATE_CANCELED`
+after its `claimed` status. A redelivered turn that a member has claimed
+goes on to adoption past its deadlines. When its run deadline has passed,
+the receiver stops the job it finds and ends the turn `TASK_STATE_FAILED`
+with `timeout`.
 
 ## Git input
 

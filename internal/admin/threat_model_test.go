@@ -370,7 +370,7 @@ func hasACL(acls []ACL, principal, resource, operation string) bool {
 
 func kfakeService(t *testing.T) (*kfake.Cluster, *Service, func()) {
 	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("PLAIN", "wherry.operator", "operator-password"))
-	if err := cluster.CreateTopic(AdminTopic, 1, nil); err != nil {
+	if err := cluster.CreateTopic(AdminTopic, 1, map[string]string{"retention.ms": "-1"}); err != nil {
 		t.Fatal(err)
 	}
 	root, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()), kgo.FetchMaxWait(10*time.Millisecond))

@@ -328,6 +328,12 @@ func TestMCPContinueAndCancel(t *testing.T) {
 		if len(status.Runs) != 1 || status.Runs[0].State != string(wire.TaskStateAuthRequired) || status.Runs[0].Turn != 1 || status.Runs[0].Message != "credential token required" {
 			t.Fatalf("status %#v", status)
 		}
+		if failure := callToolError(t, ctx, session, "continue", map[string]any{"id": runID, "queue_deadline_seconds": 15 * 24 * 60 * 60}); failure.Code != "RUN_EXPIRED" {
+			t.Fatalf("continue with a queue deadline past the run lifetime %#v", failure)
+		}
+		if failure := toolFailure(busclient.ErrRunExpired).(*toolError); failure.Code != "RUN_EXPIRED" {
+			t.Fatalf("expired run %#v", failure)
+		}
 		var continued continueOutput
 		callTool(t, ctx, session, "continue", map[string]any{"id": runID}, &continued)
 		if continued.ID != runID || continued.Turn != 2 {

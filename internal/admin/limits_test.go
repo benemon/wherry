@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -39,8 +40,8 @@ func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := state.Pools["pool-a"]; got.InlineLimit != 256<<10 || got.OutputLimit != 8<<20 {
-		t.Fatalf("limits %d and %d, want 256 KiB and 8 MiB", got.InlineLimit, got.OutputLimit)
+	if got := state.Pools["pool-a"]; got.InlineLimit != 256<<10 || got.OutputLimit != 8<<20 || got.RunLifetimeMS != DefaultRunLifetimeMS {
+		t.Fatalf("defaults %#v, want 256 KiB, 8 MiB and a 14-day run lifetime", got)
 	}
 	terms.InlineLimit, terms.OutputLimit = 1000, 2000
 	state, err = Fold([]Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}})
@@ -50,6 +51,151 @@ func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 	terms.OutputLimit = -1
 	if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms}); err == nil {
 		t.Fatal("encoded a negative output limit")
+	}
+}
+
+func topicRetention(t *testing.T, service *Service, topic string) int64 {
+	t.Helper()
+	values, err := service.topicRetentions(context.Background(), topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return values[topic]
+}
+
+func setTopicRetention(t *testing.T, service *Service, topic string, value int64) {
+	t.Helper()
+	setTopicConfig(t, service, topic, "retention.ms", strconv.FormatInt(value, 10))
+}
+
+func setTopicConfig(t *testing.T, service *Service, topic, name, value string) {
+	t.Helper()
+	responses, err := kadm.NewClient(service.Admin).AlterTopicConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.SetConfig, Name: name, Value: &value}}, topic)
+	if err == nil {
+		err = responses[0].Err
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPoolCreateSetsDerivedRetentionOnNewAndExistingTopics(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	want := int64(1299600000)
+	topics := []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")}
+	for _, topic := range topics {
+		if got := topicRetention(t, service, topic); got != want {
+			t.Fatalf("%s retention.ms = %d, want %d", topic, got, want)
+		}
+		setTopicRetention(t, service, topic, 1)
+		setTopicConfig(t, service, topic, "message.timestamp.type", "CreateTime")
+	}
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	types, err := service.topicConfigs(ctx, "message.timestamp.type", topics...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, topic := range topics {
+		if got := topicRetention(t, service, topic); got != want {
+			t.Fatalf("existing %s retention.ms = %d, want %d", topic, got, want)
+		}
+		if types[topic] != "LogAppendTime" {
+			t.Fatalf("existing %s message.timestamp.type = %q, want LogAppendTime", topic, types[topic])
+		}
+	}
+}
+
+func TestPoolCreateRefusesRunLifetimePastFeedRetention(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	terms := modelTerms()
+	terms.RunLifetimeMS = 30 * 24 * 60 * 60 * 1000
+	err := service.PoolCreate(context.Background(), "pool-a", terms)
+	if err == nil || err.Error() != "run lifetime requires tenant feed retention.ms of at least 2595600000" {
+		t.Fatalf("pool create = %v", err)
+	}
+}
+
+func TestPoolCreateRefusesRunLifetimePastAnEntitledFeed(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+		t.Fatal(err)
+	}
+	setTopicRetention(t, service, TenantTopic("tenant-a"), 1213199999)
+	err := service.PoolCreate(ctx, "pool-a", modelTerms())
+	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 1213199999 is below required 1213200000" {
+		t.Fatalf("pool create = %v", err)
+	}
+}
+
+func TestTenantAddRefusesAFeedBelowThePoolsRunLifetime(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.createTopics(ctx, "1213199999", TenantTopic("tenant-a")); err != nil {
+		t.Fatal(err)
+	}
+	err := service.TenantAdd(ctx, "tenant-a", "pool-a")
+	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 1213199999 is below required 1213200000" {
+		t.Fatalf("tenant add = %v", err)
+	}
+	if state, err := service.LoadState(ctx); err != nil || len(state.Entitlements) != 0 {
+		t.Fatalf("entitlements %v, %v; want none written", state.Entitlements, err)
+	}
+}
+
+func TestCheckReportsRetentionDrift(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *Service)
+		want   string
+	}{
+		{"tasks below lifetime plus deadline and margin", func(t *testing.T, service *Service) {
+			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 1299599999)
+		}, "wherry.pool.pool-a.tasks"},
+		{"events below tasks", func(t *testing.T, service *Service) {
+			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 1300000000)
+		}, "wherry.pool.pool-a.events"},
+		{"feed below lifetime plus deadline", func(t *testing.T, service *Service) {
+			setTopicRetention(t, service, TenantTopic("tenant-a"), 1213199999)
+		}, "wherry.tenant.tenant-a"},
+		{"events not stamped by the broker", func(t *testing.T, service *Service) {
+			setTopicConfig(t, service, PoolEventsTopic("pool-a"), "message.timestamp.type", "CreateTime")
+		}, "wherry.pool.pool-a.events message.timestamp.type"},
+		{"identity is not forever", func(t *testing.T, service *Service) {
+			setTopicRetention(t, service, AdminTopic, 1)
+		}, "wherry.admin"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, service, closeFixture := kfakeService(t)
+			defer closeFixture()
+			ctx := context.Background()
+			if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+				t.Fatal(err)
+			}
+			if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(t, service)
+			if err := service.Check(ctx); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("check = %v, want drift on %s", err, test.want)
+			}
+		})
 	}
 }
 
@@ -143,7 +289,7 @@ func TestTenantAddRefusesAFeedThePoolDoesNotFit(t *testing.T) {
 	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.createTopics(ctx, tenantRetentionMS, TenantTopic("tenant-a")); err != nil {
+	if err := service.createTopics(ctx, strconv.Itoa(tenantRetentionMS), TenantTopic("tenant-a")); err != nil {
 		t.Fatal(err)
 	}
 	setTopicLimit(t, service, TenantTopic("tenant-a"), "400000")

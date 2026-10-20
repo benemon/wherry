@@ -344,14 +344,21 @@ and events topics, and sets the configuration of share group `p-<pool>`:
 terms. It refuses a delivery limit above the lowest
 `group.share.max.delivery.count.limit` across the brokers, and terms whose
 [records do not fit the broker](#record-limit). For an existing pool it
-records the new terms and sets the group configuration again.
+records the new terms and sets the group configuration again. On new and
+existing topics it sets the tasks and events `retention.ms` to
+`run_lifetime_ms` plus one hour plus one day, and their
+`message.timestamp.type` to `LogAppendTime`. It refuses a run lifetime above
+29 days and 23 hours, or one that with one hour added exceeds the
+`retention.ms` of the feed of a tenant entitled to the pool. See
+[Topics](#topics).
 
 ### `wherry admin tenant add TENANT --pool POOL`
 
 Entitles the tenant to an existing pool, creates the tenant feed, and
 grants the tenant's hosts and the pool's receivers their ACLs. It refuses
 when the pool's records do not fit the [record limit](#record-limit) with
-the tenant's feed counted, and records nothing. It applies
+the tenant's feed counted, or when the feed's `retention.ms` is below the
+pool's `run_lifetime_ms` plus one hour, and records nothing. It applies
 each host's [quotas](#quotas).
 
 ### `wherry admin host add TENANT HOST --bundle-file FILE`
@@ -419,9 +426,10 @@ record decodes and a hash that does not match.
 
 Loads `wherry.admin`, checks that no two names collide, validates every
 receiver configuration against its pool's terms, checks that every pool's
-[records still fit the broker](#record-limit), and checks that every ACL
-the state calls for is present. It does not report ACLs beyond those, and
-does not check an adapter's `type` or `config` section.
+[records still fit the broker](#record-limit), checks topic retention and
+timestamp type against the [bounds](#topics), and checks that every ACL the
+state calls for is present. It does not report ACLs beyond those, and does not check an
+adapter's `type` or `config` section.
 
 ## Receiver command
 
@@ -587,6 +595,7 @@ error text from the bus, the broker or the host key.
 | `NOT_AWAITING_CONTINUATION` | the run is not interrupted |
 | `RUN_CANCELED` | the run is cancelled |
 | `TURN_ALREADY_SUBMITTED` | the next turn is already published |
+| `RUN_EXPIRED` | the run is past its pool's `run_lifetime_ms`, or the queue deadline falls after it |
 | `OUTPUTS_NOT_WRITTEN` | the turn's verified outputs could not be written to the state directory, or its S3 outputs downloaded, or the run's prefix deleted |
 | `CANCELLED` | the request was cancelled |
 | `UNAVAILABLE` | any other failure; the CLI reports the cause |
@@ -658,6 +667,7 @@ ignored. Any other entry and a directory with no agent files are errors.
 | `agents` | one or more `{name, credentials}`: an agent and the credential names it may take |
 | `default_agent` | an agent from `agents`, used when a task names none |
 | `seal_lifetime_ms` | required and unused: seals expire with their [seal request](a2a-extension-v1.md#seal-request) |
+| `run_lifetime_ms` | optional, default 1209600000 (14 days): time from a run's first submission through its last continuation |
 | `delivery_limit` | the share group's `share.delivery.count.limit` |
 | `lock_duration_ms` | the share group's `share.record.lock.duration.ms` |
 | `producer_byte_rate` | host quota, bytes per second |
@@ -841,7 +851,23 @@ with the message `agent ended without a result`. Claude Code's
 output writes this format.
 
 A turn's run time is capped at its deadline, and at one hour after its
-queue deadline.
+queue deadline. A receiver rejects a turn no pool member has claimed with
+`queue deadline passed` or `run deadline passed` once that deadline has
+passed. A redelivered turn that a member has claimed is not rejected: the
+receiver adopts its job when it finds one, and dispatches the turn again when
+it finds none. Past its run deadline, the receiver stops any job it finds and
+ends the turn `TASK_STATE_FAILED` with `timeout`.
+
+A receiver measures a run's lifetime from the broker's append time of its
+first turn. It rejects a turn no pool member has claimed with `run expired`
+when that time is more than `run_lifetime_ms` ago, and with
+`queue deadline exceeds run lifetime` when the turn's queue deadline falls
+more than `run_lifetime_ms` after it. A redelivered turn that a member has
+claimed skips both checks. `wherry submit`, `wherry continue` and the MCP
+tools make the same checks before publishing. Every turn therefore ends
+within one hour after the run lifetime. A receiver that next reads an
+interrupted run after that time ends it `TASK_STATE_CANCELED` with
+`run expired`.
 
 ## Kafka resources
 
@@ -855,14 +881,24 @@ replication factor, `cleanup.policy=delete` and
 | --- | --- | --- |
 | `wherry.admin` | any recording command | `-1` |
 | `wherry.receivers` | any recording command | `604800000` (7 days) |
-| `wherry.pool.<pool>.tasks` | `pool create` | `-1` |
-| `wherry.pool.<pool>.events` | `pool create` | `-1` |
+| `wherry.pool.<pool>.tasks` | `pool create` | `run_lifetime_ms + 3600000 + 86400000`; default `1299600000` |
+| `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` sets the same value |
 | `wherry.tenant.<tenant>` | `tenant add`, `host add` | `2592000000` (30 days) |
 | `wherry.receiver.<receiver>` | `receiver add` | `-1` |
 | `wherry.host.<tenant>.<host>` | `host add` | `-1` |
 
-`wherry admin` leaves an existing topic's configuration as it is, so a
-tenant feed's retention can be changed with Kafka's own tools.
+The tasks retention keeps the run lifetime, the one-hour maximum turn time,
+and a one-day margin. Events stay at least as long as tasks. A tenant feed
+must stay for at least `run_lifetime_ms + 3600000`; its 30-day default exceeds
+the default requirement of `1213200000`. Identity and configuration topics
+stay at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
+
+`wherry admin` leaves an existing topic's configuration as it is, except
+that `pool create` sets the retention and timestamp type of the pool's tasks
+and events topics. A tenant feed's retention can be changed with Kafka's own
+tools. `pool create` and `tenant add` refuse terms that need more than an
+entitled tenant's feed keeps, and `wherry admin check` reports a topic below
+its bound and a pool topic whose timestamp type is not `LogAppendTime`.
 
 ### ACLs
 
