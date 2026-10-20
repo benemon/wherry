@@ -1847,16 +1847,24 @@ func resultLine(data []byte) (agentResult, bool) {
 	return result, true
 }
 
-// agentResultMetadata passes the agent's result record through, less the result member the
-// artifact already holds; a record that is not an I-JSON object or exceeds wire.MaxAgentResult is dropped.
+// agentResultMetadata keeps only the agent's resource-use fields; a record that is not an I-JSON object or whose
+// retained fields exceed wire.MaxAgentResult is dropped.
 func agentResultMetadata(data []byte) jsontext.Value {
 	record := jsontext.Value(data)
 	var members map[string]jsontext.Value
 	if !record.IsValid() || record.Kind() != '{' || json.Unmarshal(record, &members) != nil {
 		return nil
 	}
-	delete(members, "result")
-	rest, err := json.Marshal(members)
+	kept := make(map[string]jsontext.Value, 6)
+	for _, name := range []string{"duration_ms", "duration_api_ms", "num_turns", "total_cost_usd", "usage", "modelUsage"} {
+		if value, ok := members[name]; ok {
+			kept[name] = value
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	rest, err := json.Marshal(kept)
 	if err != nil || len(rest) > wire.MaxAgentResult {
 		return nil
 	}

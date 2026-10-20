@@ -280,6 +280,41 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 	}
 }
 
+func TestOversizedAgentOutputIsBoundedAndResultMetadataIsAllowListed(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.answer(t, credentialName)
+	huge := strings.Repeat("x", 3<<19)
+	f.adapter.stream = []string{
+		`{"type":"assistant","message":"` + huge + `"}`,
+		`{"type":"result","result":"` + huge + `","is_error":false,"duration_ms":1234,"duration_api_ms":1200,"num_turns":2,"total_cost_usd":0.25,"usage":{"input_tokens":10},"credential":"sk-live-must-not-travel"}`,
+	}
+	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
+		t.Fatalf("status %v, want accept", status)
+	}
+	task := f.lastTask(t)
+	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "[redacted text over 65536 bytes]" {
+		t.Fatalf("task ended %s with result %#v", task.Status.State, task.Artifacts[0].Parts[0])
+	}
+	chunks := f.chunks(t)
+	if len(chunks) != 2 {
+		t.Fatalf("chunks %d, want the transcript and result lines", len(chunks))
+	}
+	for i, chunk := range chunks {
+		part := chunk.ArtifactUpdate.Artifact.Parts[0]
+		if part.URL != "unstored:oversize" || part.Text != "" {
+			t.Fatalf("chunk %d part %#v, want an oversized pointer", i, part)
+		}
+	}
+	metadata := decodeObject(t, task.Artifacts[0].Metadata)
+	want := map[string]any{"agent_result": map[string]any{
+		"duration_ms": 1234.0, "duration_api_ms": 1200.0, "num_turns": 2.0,
+		"total_cost_usd": 0.25, "usage": map[string]any{"input_tokens": 10.0},
+	}}
+	if !reflect.DeepEqual(metadata, want) {
+		t.Fatalf("result metadata %v, want only usage, cost and duration fields", metadata)
+	}
+}
+
 func TestHeartbeatsStayOffTheFeed(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
@@ -774,26 +809,29 @@ func TestResultArtifactCarriesAgentResult(t *testing.T) {
 		t.Fatalf("status %v", status)
 	}
 	artifact := f.lastTask(t).Artifacts[0]
-	want := decodeObject(t, []byte(line))
-	if artifact.Parts[0].Text != want["result"] {
+	decoded := decodeObject(t, []byte(line))
+	if artifact.Parts[0].Text != decoded["result"] {
 		t.Fatalf("result part %#v, want the record's result", artifact.Parts[0])
 	}
-	delete(want, "result")
+	want := map[string]any{}
+	for _, name := range []string{"duration_ms", "duration_api_ms", "num_turns", "total_cost_usd", "usage", "modelUsage"} {
+		want[name] = decoded[name]
+	}
 	got := decodeObject(t, artifact.Metadata)
 	if len(got) != 1 || !reflect.DeepEqual(got["agent_result"], want) {
-		t.Fatalf("artifact metadata %s, want agent_result with every member but result", artifact.Metadata)
+		t.Fatalf("artifact metadata %s, want only the result's resource-use fields", artifact.Metadata)
 	}
 }
 
 func TestAgentResultOmittedWhenOversized(t *testing.T) {
-	// The remaining object is {"pad":"<n bytes>","type":"result"}: n plus 26 bytes.
+	// The retained object is {"usage":{"pad":"<n bytes>"}}: n plus 20 bytes.
 	line := func(pad int, result string) []byte {
-		return []byte(`{"type":"result","result":"` + result + `","pad":"` + strings.Repeat("x", pad) + `"}`)
+		return []byte(`{"type":"result","result":"` + result + `","usage":{"pad":"` + strings.Repeat("x", pad) + `"}}`)
 	}
-	if result, _ := resultLine(line(wire.MaxAgentResult-26, strings.Repeat("r", 2*wire.MaxAgentResult))); result.metadata == nil {
+	if result, _ := resultLine(line(wire.MaxAgentResult-20, strings.Repeat("r", 2*wire.MaxAgentResult))); result.metadata == nil {
 		t.Fatal("agent_result at the bound, with a larger result member, was omitted")
 	}
-	result, ok := resultLine(line(wire.MaxAgentResult-25, "done"))
+	result, ok := resultLine(line(wire.MaxAgentResult-19, "done"))
 	if !ok || result.metadata != nil {
 		t.Fatalf("agent_result one byte over the bound kept: ok=%t metadata %d bytes", ok, len(result.metadata))
 	}

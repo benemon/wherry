@@ -205,7 +205,7 @@ const redacted = "[redacted]"
 func TestDeliveredCredentialIsRedacted(t *testing.T) {
 	f := newFixture(t, []string{
 		`{"type":"assistant","message":"token ` + testToken + `"}`,
-		`{"type":"result","result":"used ` + testToken + `","is_error":false,"note":"` + testToken + `"}`,
+		`{"type":"result","result":"used ` + testToken + `","is_error":false,"usage":{"note":"` + testToken + `"}}`,
 	})
 	f.answer(t, credentialName)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
@@ -291,7 +291,7 @@ func TestRedactedMetadataStaysValid(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-m", 1)
 	run.deliver(map[string][]byte{credentialName: []byte("1234567890")})
-	agent, ok := resultLine([]byte(`{"type":"result","result":"done","is_error":false,"count":1234567890,"note":"id 1234567890"}`))
+	agent, ok := resultLine([]byte(`{"type":"result","result":"done","is_error":false,"usage":{"count":1234567890,"note":"id 1234567890"}}`))
 	if !ok {
 		t.Fatal("fixture is not a result line")
 	}

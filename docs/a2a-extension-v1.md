@@ -388,12 +388,13 @@ The `metadata` of a result's `Task` says where the turn ran:
 the agent ended with its result line, and absent when they would be empty.
 
 The `metadata` of the `result` artifact holds `agent_result` (object): the
-agent's final result line, decoded as a JSON object, with its `result`
-member removed. The receiver passes the other members through without
-interpreting them. It re-encodes them, so member order and string escaping
-can differ from the line in the transcript. `agent_result` is absent when
-the line is not an RFC 7493 object, when the object without `result`
-exceeds 16 KiB as encoded, and when the turn ends without a result line.
+resource-use members `duration_ms`, `duration_api_ms`, `num_turns`,
+`total_cost_usd`, `usage` and `modelUsage` from the agent's final result
+line. The receiver re-encodes them, so member order and string escaping can
+differ from the line in the transcript. `agent_result` is absent when none
+of those members is present, when the line is not an RFC 7493 object, when
+the retained object exceeds 16 KiB as encoded, and when the turn ends
+without a result line.
 
 ## Echo
 
