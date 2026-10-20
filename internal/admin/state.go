@@ -325,6 +325,18 @@ func AuthorizeResult(state State, keys signed.Keys, encoded []byte, placedPool, 
 	return result, nil
 }
 
+// AuthorizeOutput accepts an output chunk from a live member of the run's placed pool.
+func AuthorizeOutput(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.Output, error) {
+	var output wire.Output
+	if err := wire.ParseRecord(encoded, keys, &output); err != nil {
+		return wire.Output{}, err
+	}
+	if err := state.receiverRecord(output.Wherry.ReceiverBinding, placedPool, runTenant); err != nil {
+		return wire.Output{}, err
+	}
+	return output, nil
+}
+
 // AuthorizeStartFailure accepts a start failure from a live member of the run's placed pool.
 func AuthorizeStartFailure(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.StartFailure, error) {
 	var failure wire.StartFailure

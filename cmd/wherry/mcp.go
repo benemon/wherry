@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -34,10 +35,14 @@ func runMCP(ctx context.Context, config busclient.Config, args []string) error {
 	}
 	logger := log.New(os.Stderr, "", 0)
 	connect := func() (*busclient.Host, error) { return busclient.Connect(config, logger) }
+	dir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	go answer(ctx, connect, logger)
-	return newMCPServer(connect).Run(ctx, &mcp.StdioTransport{})
+	return newMCPServer(connect, inputReader(dir, config)).Run(ctx, &mcp.StdioTransport{})
 }
 
 // answer answers seal requests for as long as the server runs, so a credentialed task is sealed while the harness
@@ -108,11 +113,24 @@ type gitInput struct {
 	Path string `json:"path,omitempty" jsonschema:"checkout directory, relative; defaults to the repository name"`
 }
 
+type credentialInput struct {
+	Name string `json:"name" jsonschema:"credential name in this host's wherry config"`
+	File string `json:"file" jsonschema:"file name the agent finds it under in WHERRY_CREDENTIALS_DIR"`
+}
+
+type outputInput struct {
+	Name     string `json:"name" jsonschema:"relative path the agent is asked to write in WHERRY_OUTPUT_DIR"`
+	Required bool   `json:"required,omitempty" jsonschema:"fail the turn when the output is not returned"`
+}
+
 type submitInput struct {
 	Prompt               string             `json:"prompt" jsonschema:"the task for the remote agent"`
 	Agent                string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
 	Selector             []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the adapter must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
 	Git                  *gitInput          `json:"git,omitempty" jsonschema:"repository to check out for the agent"`
+	Inputs               []string           `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names; 256 KiB in all"`
+	Credentials          []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent as files in WHERRY_CREDENTIALS_DIR"`
+	Outputs              []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; await writes the returned ones locally"`
 	DeadlineSeconds      int64              `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 1800"`
 	QueueDeadlineSeconds int64              `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`
 }
@@ -157,13 +175,22 @@ type resultArtifact struct {
 	Parts      []resultPart `json:"parts"`
 }
 
+type outputReply struct {
+	Name   string `json:"name"`
+	Path   string `json:"path" jsonschema:"where this host wrote the output"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
 type awaitReply struct {
-	ID         string           `json:"id"`
-	State      string           `json:"state"`
-	RetryAfter int              `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling await again"`
-	Message    string           `json:"message,omitempty" jsonschema:"status message, such as the credential an AUTH_REQUIRED run needs"`
-	Artifacts  []resultArtifact `json:"artifacts,omitempty"`
-	Skipped    int              `json:"skipped,omitempty"`
+	ID          string                  `json:"id"`
+	State       string                  `json:"state"`
+	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling await again"`
+	Message     string                  `json:"message,omitempty" jsonschema:"status message, such as the credential an AUTH_REQUIRED run needs"`
+	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
+	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the turn's outputs, verified and written locally"`
+	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the turn did not return or this host could not verify, each with its reason"`
+	Skipped     int                     `json:"skipped,omitempty"`
 }
 
 type continueInput struct {
@@ -207,9 +234,9 @@ type eventsOutput struct {
 	Skipped     int                `json:"skipped,omitempty"`
 }
 
-// newMCPServer serves the wherry tools. Each call opens its own connection: a Client's consumer serves one
-// operation at a time, and a harness may call status while an await is in flight.
-func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
+// newMCPServer serves the wherry tools; submit reads its inputs with readInput. Each call opens its own connection:
+// a Client's consumer serves one operation at a time, and a harness may call status while an await is in flight.
+func newMCPServer(connect func() (*busclient.Host, error), readInput func(string) (wire.Part, error)) *mcp.Server {
 	version := "(devel)"
 	if info, ok := debug.ReadBuildInfo(); ok {
 		version = info.Main.Version
@@ -236,14 +263,14 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with await, or check the run without waiting with status. While this server runs, it seals the agent's configured credentials to the receiver that claims the task when that receiver asks for them.",
+		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with await, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which await writes locally. While this server runs, it seals the agent's and the task's configured credentials to the receiver that claims the task when that receiver asks for them.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		client, err := connect()
 		if err != nil {
 			return nil, submitOutput{}, toolFailure(err)
 		}
 		defer client.Close()
-		submission, err := submitFromInput(input)
+		submission, err := submitFromInput(input, readInput)
 		if err != nil {
 			return nil, submitOutput{}, err
 		}
@@ -289,8 +316,8 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 		Name: "await",
 		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish or stop for input. Returns the result, an interrupted, "+
 			"canceled or rejected state with its message, or {id, state, retry_after} while the run is unfinished: call await again. "+
+			"A finished turn's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
 			"Use status to check a run without waiting.", int(awaitBound.Seconds())),
-		Annotations: readOnly,
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, awaitReply, error) {
 		client, err := connect()
 		if err != nil {
@@ -320,6 +347,16 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 				output.Artifacts = append(output.Artifacts, resultArtifact{ArtifactID: artifact.ArtifactID, Parts: resultParts(artifact.Parts)})
 			}
 		}
+		if len(result.Outputs) > 0 {
+			paths, err := client.WriteOutputs(input.ID, result.Turn, "", result.Outputs)
+			if err != nil {
+				return nil, awaitReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: "the turn's outputs could not be written to the state directory"}
+			}
+			for i, written := range result.Outputs {
+				output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: paths[i], SHA256: written.SHA256, Size: written.Size})
+			}
+		}
+		output.NotReturned = append(result.NotReturned, result.Rejected...)
 		return nil, output, nil
 	})
 
@@ -399,7 +436,7 @@ func newMCPServer(connect func() (*busclient.Host, error)) *mcp.Server {
 	return server
 }
 
-func submitFromInput(input submitInput) (busclient.SubmitInput, error) {
+func submitFromInput(input submitInput, readInput func(string) (wire.Part, error)) (busclient.SubmitInput, error) {
 	if input.Prompt == "" {
 		return busclient.SubmitInput{}, invalidArgument("prompt is required")
 	}
@@ -408,6 +445,13 @@ func submitFromInput(input submitInput) (busclient.SubmitInput, error) {
 		selector = []wire.Requirement{}
 	}
 	var parts []wire.Part
+	for _, path := range input.Inputs {
+		part, err := readInput(path)
+		if err != nil {
+			return busclient.SubmitInput{}, err
+		}
+		parts = append(parts, part)
+	}
 	if input.Git != nil {
 		metadata, _ := json.Marshal(wire.GitMetadata{Ref: input.Git.Ref, Path: input.Git.Path}) // strings always encode
 		parts = append(parts, wire.Part{URL: input.Git.URL, MediaType: wire.GitMediaType, Metadata: metadata})
@@ -416,10 +460,17 @@ func submitFromInput(input submitInput) (busclient.SubmitInput, error) {
 	if err != nil {
 		return busclient.SubmitInput{}, err
 	}
-	return busclient.SubmitInput{
+	submission := busclient.SubmitInput{
 		Agent: input.Agent, Selector: selector, Prompt: input.Prompt, Parts: parts,
 		Deadline: deadline, QueueDeadline: queueDeadline,
-	}, nil
+	}
+	for _, credential := range input.Credentials {
+		submission.Credentials = append(submission.Credentials, wire.TaskCredential{Name: credential.Name, File: credential.File})
+	}
+	for _, output := range input.Outputs {
+		submission.Outputs = append(submission.Outputs, wire.ExpectedOutput{Name: output.Name, Required: output.Required})
+	}
+	return submission, nil
 }
 
 // deadlines applies the CLI's defaults to unset deadlines.
@@ -490,4 +541,46 @@ func resultParts(parts []wire.Part) []resultPart {
 		result = append(result, converted)
 	}
 	return result
+}
+
+// inputReader reads an MCP input: a regular file beneath dir once symbolic links are resolved, and none of the host's
+// own files, so a client steered by its prompt cannot send the host key, the bundle, the state or a credential.
+func inputReader(dir string, config busclient.Config) func(string) (wire.Part, error) {
+	resolve := func(path string) string {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			return resolved
+		}
+		return filepath.Clean(path)
+	}
+	root := resolve(dir)
+	protected := []string{resolve(config.StateDir), resolve(config.HostKey), resolve(config.Bundle)}
+	for _, path := range config.Credentials {
+		protected = append(protected, resolve(path))
+	}
+	refused := invalidArgument("inputs must be readable regular files beneath the MCP server's working directory, outside the wherry configuration")
+	return func(path string) (wire.Part, error) {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(dir, path)
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return wire.Part{}, refused
+		}
+		if relative, err := filepath.Rel(root, resolved); err != nil || !filepath.IsLocal(relative) {
+			return wire.Part{}, refused
+		}
+		for _, own := range protected {
+			if relative, err := filepath.Rel(own, resolved); err == nil && filepath.IsLocal(relative) {
+				return wire.Part{}, refused
+			}
+		}
+		if info, err := os.Stat(resolved); err != nil || !info.Mode().IsRegular() {
+			return wire.Part{}, refused
+		}
+		data, err := os.ReadFile(resolved)
+		if err != nil {
+			return wire.Part{}, refused
+		}
+		return wire.Part{Raw: append(wire.StdBytes{}, data...), Filename: filepath.Base(path)}, nil
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func (r request) open(t *testing.T, f *fixture, host string) map[string][]byte {
 		t.Fatal(err)
 	}
 	binding := signed.SealBinding{Tenant: r.record.Tenant, Pool: r.record.Pool, Receiver: r.record.Receiver, KeyID: r.record.KeyID, Run: r.record.Run,
-		Turn: r.record.Turn, Attempt: r.record.Attempt, Credentials: r.record.Credentials, ExpiryMS: r.record.ExpiryMS}
+		Turn: r.record.Turn, Attempt: r.record.Attempt, Credentials: r.record.Credentials, TaskCredentials: r.record.TaskCredentials, ExpiryMS: r.record.ExpiryMS}
 	var opened []map[string][]byte
 	for _, record := range records {
 		if values, err := signed.OpenSeal(record.Value, binding, r.key, time.Now()); err == nil && string(record.Key) == r.record.Run {
@@ -591,5 +592,103 @@ func TestALockWaitEndsWithItsContext(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the lock wait outlived its context")
+	}
+}
+
+// admittedWith submits a task declaring credentials through receiver-a, and writes its echo and claimed status.
+func (f *fixture) admittedWith(t *testing.T, credentials []wire.TaskCredential) (*testReceiver, claimed) {
+	t.Helper()
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Credentials: credentials, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+	receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+	return receiver, task
+}
+
+func TestAnswerSealsTheRunsTaskCredentials(t *testing.T) {
+	f := newFixture(t)
+	deployKey := filepath.Join(t.TempDir(), "deploy-key")
+	if err := os.WriteFile(deployKey, []byte("deploy-key-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.host.credentials["deploy-key"] = deployKey
+	receiver, task := f.admittedWith(t, []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}})
+	runID := task.submission.Wherry.Run
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	asked.record.TaskCredentials = []string{"deploy-key"}
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	answering(t, f, f.host)
+	f.waitSeals(t, "host-a", 1)
+	if values := asked.open(t, f, "host-a"); string(values["model"]) != "model-token" || string(values["deploy-key"]) != "deploy-key-value" || len(values) != 2 {
+		t.Fatalf("sealed %q, want the agent's and the task's credentials", values)
+	}
+}
+
+// A task credential outside the agent's terms is sealed only when the run declares it, so a pool member cannot ask
+// for any credential the host configures.
+func TestAnswerRefusesAnUndeclaredTaskCredential(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admittedWith(t, nil)
+	runID := task.submission.Wherry.Run
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	asked.record.TaskCredentials = []string{"openai"}
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	answering(t, f, f.host)
+	want := "run " + runID + ": skipped a seal request for task credential openai, which the run does not declare"
+	for !strings.Contains(f.logs.String(), want) {
+		if f.ctx.Err() != nil {
+			t.Fatalf("logs:\n%s", f.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if seals := f.seals(t, "host-a"); seals != 0 {
+		t.Fatalf("host topic holds %d seals", seals)
+	}
+}
+
+func TestSubmitRefusesAnUnconfiguredCredential(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Credentials: []wire.TaskCredential{{Name: "absent", File: "token"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "credential absent is not in this host's configuration") {
+		t.Fatalf("submit = %v; want the unconfigured credential named", err)
+	}
+	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
+		t.Fatal("published a task naming an unconfigured credential")
+	}
+}
+
+// A continuation's local record keeps the task credentials the first turn declared, so its seal request is answered.
+func TestContinuationKeepsTheTaskCredentials(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admittedWith(t, []wire.TaskCredential{{Name: "openai", File: "token"}})
+	runID := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
+	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	local, err := f.host.localRun(runID)
+	if err != nil || local.Turn != 2 || !slices.Equal(local.TaskCredentials, []string{"openai"}) {
+		t.Fatalf("local record %+v, %v; want turn 2 keeping the task credentials", local, err)
+	}
+}
+
+func TestSubmitRefusesInlineInputsOverTheLimit(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	parts := []wire.Part{{Raw: make(wire.StdBytes, wire.InlineLimit), Filename: "a.bin"}, {Raw: wire.StdBytes("x"), Filename: "b.bin"}}
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Parts: parts, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "inline inputs are 262145 bytes, over the 262144-byte limit") {
+		t.Fatalf("submit = %v; want the size and the limit named", err)
+	}
+	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
+		t.Fatal("published inputs over the limit")
+	}
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Parts: parts[:1], Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
+		t.Fatalf("inputs at the limit: %v", err)
 	}
 }

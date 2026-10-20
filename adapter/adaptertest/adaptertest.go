@@ -63,6 +63,10 @@ func Run(t *testing.T, factory func(adapter.Settings) (adapter.Adapter, error), 
 		if job, err := running.Lookup(ctx, run.ID, run.Turn); err != nil || job.State != adapter.JobEnded {
 			t.Fatalf("lookup after the job ended = %+v, %v; want ended", job, err)
 		}
+		outputs := make(chan adapter.Output, 1)
+		if err := running.Collect(ctx, handle, adapter.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || len(outputs) != 0 {
+			t.Fatalf("collect from a job that wrote no outputs = %d outputs, %v; want none", len(outputs), err)
+		}
 		idempotent(t, ctx, running, run.ID, run.Turn, handle)
 		if job, err := running.Lookup(ctx, run.ID, run.Turn); err != nil || job.State != adapter.JobAbsent {
 			t.Fatalf("lookup after purge = %+v, %v; want absent", job, err)

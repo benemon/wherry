@@ -1,4 +1,4 @@
-// The adapter protocol, version 1: the receiver core calls a plugin's adapters
+// The adapter protocol, version 2: the receiver core calls a plugin's adapters
 // over this service, and every request names its adapter.
 syntax = "proto3";
 
@@ -15,6 +15,8 @@ service Adapter {
   // Follow streams lines, then one terminal message.
   rpc Follow(FollowRequest) returns (stream FollowResponse);
   rpc Stop(StopRequest) returns (StopResponse);
+  // Collect streams a stopped job's outputs, each output's data split across consecutive messages.
+  rpc Collect(CollectRequest) returns (stream CollectResponse);
   rpc Purge(PurgeRequest) returns (PurgeResponse);
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
   rpc Sweep(SweepRequest) returns (SweepResponse);
@@ -56,6 +58,19 @@ message Run {
   bytes prompt = 6;
   optional bytes credential = 7;
   GitContext git = 8;
+  repeated File inputs = 9;
+  repeated Secret credentials = 10;
+}
+
+message File {
+  string name = 1;
+  bytes data = 2;
+}
+
+message Secret {
+  string name = 1;
+  string file = 2;
+  bytes value = 3;
 }
 
 message Job {
@@ -92,6 +107,14 @@ message ConfigureRequest {
 message ConfigureResponse {
   // git reports whether the adapter delivers a run's git context.
   bool git = 1;
+  Directories directories = 2;
+}
+
+// Directories are the paths of a job's input, output and credentials directories as its agent's prompt shows them.
+message Directories {
+  string input = 1;
+  string output = 2;
+  string credentials = 3;
 }
 
 message ReadyRequest {
@@ -141,6 +164,29 @@ message StopRequest {
 }
 
 message StopResponse {}
+
+message Limits {
+  int64 files = 1;
+  int64 file_bytes = 2;
+  int64 total_bytes = 3;
+}
+
+message CollectRequest {
+  string adapter = 1;
+  Handle handle = 2;
+  Limits limits = 3;
+}
+
+// CollectResponse carries one output, or part of its data; more is set on every message of an output but its last.
+message CollectResponse {
+  string name = 1;
+  int64 size = 2;
+  // mode holds the output's Go fs.FileMode type bits.
+  uint32 mode = 3;
+  // data is absent for an output that was not read.
+  optional bytes data = 4;
+  bool more = 5;
+}
 
 message PurgeRequest {
   string adapter = 1;

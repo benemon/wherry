@@ -421,8 +421,10 @@ message `credential <name> required`, and `wherry continue` followed by
 `wherry await` runs it again.
 
 The host answers only for a credential the pool's terms approve for the
-run's agent and that its configuration maps to a file, and only to the
-receiver that first claimed the turn. It logs each verified request of its
+run's agent, or a task credential the run declares, that its configuration
+maps to a file, and only to the receiver that first claimed the turn.
+`wherry submit` refuses a task credential its configuration does not map
+to a file. It logs each verified request of its
 own runs that it skips or refuses, by run, receiver and credential name, on
 standard error. A turn adopted by a second receiver gets no seal and ends
 `TASK_STATE_AUTH_REQUIRED`; `wherry continue` runs it again.
@@ -433,7 +435,7 @@ The Nomad plugin's calls need this policy, with the namespace adjusted:
 
 ```hcl
 namespace "agents" {
-  capabilities = ["submit-job", "list-jobs", "read-job", "read-logs", "alloc-lifecycle"]
+  capabilities = ["submit-job", "list-jobs", "read-job", "read-logs", "read-fs", "alloc-lifecycle"]
 
   variables {
     path "nomad/jobs/agent-*" {
@@ -457,14 +459,31 @@ node_pool "default" {
 - `list-jobs`: find dead agent jobs to purge.
 - `read-job`: read a job and its allocations.
 - `read-logs`: stream the agent task's standard output.
+- `read-fs`: list and read the agent task's outputs directory once the job
+  has stopped.
 - `alloc-lifecycle`: send `SIGTERM` to the agent task.
 - Variables `write`, `read` and `destroy`: hold each run's prompt,
-  credential and git context, and sweep them after the job ends. The sweep
+  credentials, input files and git context, and sweep them after the job
+  ends. The sweep
   lists variables under `nomad/jobs/agent-`; see
   [Nomad variables](https://developer.hashicorp.com/nomad/docs/concepts/variables)
   for the access rules.
 - `node` read: find a ready node with the runtime's driver healthy.
 - `node_pool` read: register jobs in the node pools the adapters name.
+
+## Inputs and outputs
+
+A task's input files hold 256 KiB together, and a turn's outputs 8 MiB in
+256 entries at most. An adapter can deliver less: the Nomad plugin carries
+a turn's input files in one Nomad variable, which Nomad caps at 64 KiB of
+item names and base64-encoded contents, so about 48 KiB of input. A turn
+whose inputs an adapter cannot deliver ends `TASK_STATE_FAILED` naming the
+input.
+
+The agent creates `WHERRY_OUTPUT_DIR` when it writes its first output.
+Outputs are collected once the agent writes its result line and the job is
+stopped, including when that line reports a failure. A turn that ends
+without the agent's result line, by timeout or otherwise, returns none.
 
 ## Git context
 

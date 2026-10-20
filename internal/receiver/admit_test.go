@@ -321,11 +321,10 @@ func TestBindTurnsRequireSameBindings(t *testing.T) {
 	}
 }
 
-func TestReceiverRejectsNonTextParts(t *testing.T) {
+func TestReceiverRejectsURLParts(t *testing.T) {
 	for name, part := range map[string]wire.Part{
-		"raw":  {Raw: wire.StdBytes("hi"), MediaType: "text/plain"},
-		"url":  {URL: "https://example.test/a"},
-		"data": {Data: jsontext.Value(`{"k":1}`)},
+		"url":                         {URL: "https://example.test/a"},
+		"git the adapter cannot take": {URL: "https://git.example.test/org/repo.git", MediaType: wire.GitMediaType, Metadata: jsontext.Value(`{"ref":"main"}`)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)

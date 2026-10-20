@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/signed"
@@ -225,5 +227,92 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	}
 	if strings.Contains(logs.String()+hostLogs.String(), testToken) {
 		t.Fatalf("logs carry the credential:\n%s\n%s", logs.String(), hostLogs.String())
+	}
+}
+
+// TestFilesOnRealBroker runs a task with an input, a task credential and outputs filling the output limit from a
+// host's Submit to its Await on the real broker: the outputs' chunks commit in the result's transaction, within the
+// broker's record limit, and the host verifies them.
+func TestFilesOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" {
+		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
+	}
+	shortIntervals(t)
+	sealWait = 30 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	dir := t.TempDir()
+	credential, deployKey := filepath.Join(dir, credentialName), filepath.Join(dir, "deploy-key")
+	if err := os.WriteFile(credential, []byte(testToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deployKey, []byte(deployValue), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hostLogs := &syncBuffer{}
+	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+	hostKafka, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(),
+		map[string]string{credentialName: credential, "deploy-key": deployKey}, log.New(hostLogs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	if _, err := host.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	base, err := kgo.NewClient(b.opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, signing, _ := ed25519.GenerateKey(rand.Reader)
+	logs := &syncBuffer{}
+	report := []byte("key " + deployValue + "\n")
+	big := make([]byte, outputLimit-len(report))
+	for i := range big {
+		big[i] = byte(i * 7)
+	}
+	fake := &fakeAdapter{stream: resultStream, outputs: []adapter.Output{
+		{Name: "big.bin", Size: int64(len(big)), Data: big}, {Name: "report.md", Size: int64(len(report)), Data: report},
+	}}
+	r := &Receiver{id: b.receiver, kafkaOpt: b.opts, base: base, signing: signing, logger: log.New(logs, "", 0),
+		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
+			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: fake}, nil
+		}}
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- r.Run(runCtx) }()
+	defer func() { stop(); <-done }()
+	b.joined(t, ctx, logs)
+	var submitted client.SubmitResult
+	for ctx.Err() == nil {
+		if submitted, err = host.Submit(ctx, client.SubmitInput{Prompt: "hello", Parts: []wire.Part{{Raw: wire.StdBytes("a,b\n"), Filename: "data.csv"}},
+			Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "report.md", Required: true}},
+			Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("submit never placed: %v", err)
+	}
+	awaited, err := host.Await(ctx, submitted.RunID, 60*time.Second)
+	if err != nil || awaited.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("await %+v, %v; receiver logs:\n%s\nhost logs:\n%s", awaited.Status, err, logs.String(), hostLogs.String())
+	}
+	if len(awaited.Outputs) != 2 || !bytes.Equal(awaited.Outputs[0].Data, big) || string(awaited.Outputs[1].Data) != "key [redacted:deploy-key]\n" || len(awaited.Rejected) != 0 {
+		t.Fatalf("outputs %d, rejected %+v; want big.bin intact and report.md redacted", len(awaited.Outputs), awaited.Rejected)
+	}
+	run := fake.lastRun
+	if len(run.Inputs) != 1 || string(run.Inputs[0].Data) != "a,b\n" || len(run.Credentials) != 1 || string(run.Credentials[0].Value) != deployValue {
+		t.Fatalf("dispatched inputs %+v and credentials %d", run.Inputs, len(run.Credentials))
+	}
+	if strings.Contains(logs.String()+hostLogs.String(), deployValue) {
+		t.Fatalf("logs carry the task credential:\n%s\n%s", logs.String(), hostLogs.String())
 	}
 }

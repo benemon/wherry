@@ -100,11 +100,14 @@ func (s *server) adapter(name string) (Adapter, error) {
 
 // callStatus carries the errors the core distinguishes across the link.
 func callStatus(err error) error {
+	var tooLarge *InputTooLargeError
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, ErrGitContext):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.As(err, &tooLarge):
+		return status.Error(codes.OutOfRange, tooLarge.Name)
 	case errors.Is(err, context.DeadlineExceeded):
 		return status.Error(codes.DeadlineExceeded, err.Error())
 	case errors.Is(err, context.Canceled):
@@ -121,7 +124,10 @@ func (s *server) Configure(_ context.Context, req *adapterv1.ConfigureRequest) (
 	s.mu.Lock()
 	s.adapters[req.Adapter] = adapter
 	s.mu.Unlock()
-	return &adapterv1.ConfigureResponse{Git: adapter.Git()}, nil
+	directories := adapter.Directories()
+	return &adapterv1.ConfigureResponse{Git: adapter.Git(), Directories: &adapterv1.Directories{
+		Input: directories.Input, Output: directories.Output, Credentials: directories.Credentials,
+	}}, nil
 }
 
 func (s *server) Ready(ctx context.Context, req *adapterv1.ReadyRequest) (*adapterv1.ReadyResponse, error) {
@@ -148,6 +154,12 @@ func (s *server) Dispatch(ctx context.Context, req *adapterv1.DispatchRequest) (
 	}
 	if git := message.GetGit(); git != nil {
 		run.Git = &GitContext{URL: git.Url, Ref: git.Ref, Path: git.Path}
+	}
+	for _, input := range message.GetInputs() {
+		run.Inputs = append(run.Inputs, File{Name: input.GetName(), Data: input.GetData()})
+	}
+	for _, secret := range message.GetCredentials() {
+		run.Credentials = append(run.Credentials, Secret{Name: secret.GetName(), File: secret.GetFile(), Value: secret.GetValue()})
 	}
 	outcome, handle, err := adapter.Dispatch(ctx, run)
 	if err != nil {
@@ -214,6 +226,60 @@ func (s *server) Stop(ctx context.Context, req *adapterv1.StopRequest) (*adapter
 		return nil, err
 	}
 	return &adapterv1.StopResponse{}, callStatus(adapter.Stop(ctx, handleOf(req.Handle)))
+}
+
+// maxPiece bounds the data of one CollectResponse below gRPC's default 4 MiB receive limit.
+const maxPiece = 1 << 20
+
+// Collect runs the adapter's Collect on the handler's goroutine, as Follow does, and sends its outputs in pieces
+// from another.
+func (s *server) Collect(req *adapterv1.CollectRequest, stream grpc.ServerStreamingServer[adapterv1.CollectResponse]) error {
+	adapter, err := s.adapter(req.Adapter)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+	outputs := make(chan Output)
+	sent := make(chan error, 1)
+	go func() {
+		var err error
+		for output := range outputs {
+			if err == nil {
+				if err = sendOutput(stream, output); err != nil {
+					cancel()
+				}
+			}
+		}
+		sent <- err
+	}()
+	limits := req.GetLimits()
+	err = func() error {
+		defer close(outputs)
+		return adapter.Collect(ctx, handleOf(req.Handle), Limits{Files: int(limits.GetFiles()), FileBytes: limits.GetFileBytes(), TotalBytes: limits.GetTotalBytes()}, outputs)
+	}()
+	if sendErr := <-sent; sendErr != nil {
+		return sendErr
+	}
+	return callStatus(err)
+}
+
+func sendOutput(stream grpc.ServerStreamingServer[adapterv1.CollectResponse], output Output) error {
+	data := output.Data
+	for {
+		piece := data[:min(len(data), maxPiece)]
+		data = data[len(piece):]
+		resp := &adapterv1.CollectResponse{Name: output.Name, Size: output.Size, Mode: uint32(output.Mode), More: len(data) > 0}
+		if output.Data != nil {
+			resp.Data = piece
+		}
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+		if len(data) == 0 {
+			return nil
+		}
+	}
 }
 
 func (s *server) Purge(ctx context.Context, req *adapterv1.PurgeRequest) (*adapterv1.PurgeResponse, error) {

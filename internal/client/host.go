@@ -43,13 +43,16 @@ var errUndecodable = errors.New("decode")
 // liveness is how old an advertisement may be for its receiver to count as live.
 const liveness = 120 * time.Second
 
-// SubmitInput contains the root-task routing and prompt fields; Parts follow the prompt's text part.
+// SubmitInput contains the root-task routing and prompt fields; Parts follow the prompt's text part. Credentials
+// name credentials this host configures, delivered to the agent as files, and Outputs the files it is asked to leave.
 type SubmitInput struct {
 	// Agent names what runs; empty takes the pool's default.
 	Agent         string
 	Selector      []wire.Requirement
 	Prompt        string
 	Parts         []wire.Part
+	Credentials   []wire.TaskCredential
+	Outputs       []wire.ExpectedOutput
 	Deadline      time.Duration
 	QueueDeadline time.Duration
 }
@@ -200,6 +203,14 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 		}
 	}
+	if err := wire.ValidateInputs(input.Parts); err != nil {
+		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	for _, credential := range input.Credentials {
+		if _, configured := h.credentials[credential.Name]; !configured {
+			return SubmitResult{}, fmt.Errorf("%w: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
+		}
+	}
 	v, err := h.load(ctx)
 	if err != nil {
 		return SubmitResult{}, err
@@ -221,6 +232,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
+	submission.Wherry.Credentials, submission.Wherry.Outputs = input.Credentials, input.Outputs
 	if err := h.publish(ctx, submission, now); err != nil {
 		return SubmitResult{}, err
 	}
@@ -315,7 +327,14 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now tim
 		return err
 	}
 	sum := sha256.Sum256(encoded)
-	if err := h.writeRun(runRecord{Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: hex.EncodeToString(sum[:]), SubmittedMS: now.UnixMilli()}); err != nil {
+	record := runRecord{Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: hex.EncodeToString(sum[:]), SubmittedMS: now.UnixMilli()}
+	for _, credential := range binding.Credentials {
+		record.TaskCredentials = append(record.TaskCredentials, credential.Name)
+	}
+	if binding.Turn > 1 && previous != nil {
+		record.TaskCredentials = previous.TaskCredentials
+	}
+	if err := h.writeRun(record); err != nil {
 		return err
 	}
 	if err := h.produce(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(binding.Pool), Key: []byte(binding.Run), Value: encoded}); err != nil {
@@ -394,6 +413,8 @@ type runRecord struct {
 	TaskHash  string         `json:"task_hash"`
 	// SubmittedMS is when this host published the turn; records written before it existed hold zero.
 	SubmittedMS int64 `json:"submitted_ms,omitzero"`
+	// TaskCredentials names the task credentials the run's first turn declares, which this host may seal.
+	TaskCredentials []string `json:"task_credentials,omitzero"`
 }
 
 func (h *Host) runPath(runID string) (string, bool) {

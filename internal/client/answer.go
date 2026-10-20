@@ -215,9 +215,9 @@ func removeLock(path string) {
 }
 
 // answer seals the credentials a request asks for when it comes from a live member of the run's pool holding the
-// active attempt of the turn this host last submitted, unanswered and unexpired, and names only credentials of the
-// run's agent that this host holds. It logs a trusted request for its own run that it skips, by run, receiver and
-// credential names only.
+// active attempt of the turn this host last submitted, unanswered and unexpired, and names only credentials this host
+// holds: the run's agent's under the pool's terms, and task credentials the run declares. It logs a trusted request
+// for its own run that it skips, by run, receiver and credential names only.
 func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 	local, err := h.localRun(runID)
 	if err != nil || local == nil {
@@ -257,10 +257,13 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 	terms := r.v.state.Pools[r.pool].Agents
 	agent := slices.IndexFunc(terms, func(terms admin.AgentTerms) bool { return terms.Name == local.Placement.Agent })
 	values := map[string][]byte{}
-	for _, name := range request.Credentials {
+	for i, name := range append(slices.Clone(request.Credentials), request.TaskCredentials...) {
 		path, configured := h.credentials[name]
 		switch {
-		case agent < 0 || !slices.Contains(terms[agent].Credentials, name):
+		case i >= len(request.Credentials) && !slices.Contains(local.TaskCredentials, name):
+			h.logger.Printf("run %s: skipped a seal request for task credential %s, which the run does not declare", runID, name)
+			return true
+		case i < len(request.Credentials) && (agent < 0 || !slices.Contains(terms[agent].Credentials, name)):
 			h.logger.Printf("run %s: skipped a seal request for credential %s, which agent %s's terms do not approve", runID, name, local.Placement.Agent)
 			return true
 		case !configured:
@@ -274,7 +277,7 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 	}
 	sealed, err := seal(signed.SealBinding{
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
+		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials, ExpiryMS: request.ExpiryMS,
 	}, request.Key.Key.(*ecdsa.PublicKey), values)
 	if err != nil {
 		// Seal's errors name credentials, never values.
@@ -298,6 +301,6 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 	if err := writeState(marker, answerMarker{ExpiryMS: request.ExpiryMS}); err != nil {
 		h.logger.Printf("run %s: record a seal answer: %v", runID, err)
 	}
-	h.logger.Printf("run %s: sealed %v to %s for turn %d attempt %d", runID, request.Credentials, request.Receiver, request.Turn, request.Attempt)
+	h.logger.Printf("run %s: sealed %v to %s for turn %d attempt %d", runID, append(slices.Clone(request.Credentials), request.TaskCredentials...), request.Receiver, request.Turn, request.Attempt)
 	return true
 }

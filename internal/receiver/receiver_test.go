@@ -67,7 +67,7 @@ type fakeAdapter struct {
 	follows     int
 	dispatches  int
 	dispatchErr error
-	// outcome is what Dispatch reports, OutcomeCreated when zero.
+	// outcome is what Dispatch reports, OutcomeCreated when zero, or beside dispatchErr OutcomeUnknown when zero.
 	outcome adapter.Outcome
 	// handleSize is the length of the handle data Dispatch and Lookup return.
 	handleSize int
@@ -99,9 +99,21 @@ type fakeAdapter struct {
 	froms    []int64
 	// hang makes Sweep and Ready block until their context ends.
 	hang bool
+	// outputs are what Collect streams, unless collectErr fails it; collects counts the calls and stopsBefore the
+	// Stops each one followed.
+	outputs    []adapter.Output
+	collectErr error
+	// collectHangs makes Collect block until its context ends.
+	collectHangs bool
+	collects     int
+	stopsBefore  []int
 }
 
 func (f *fakeAdapter) Git() bool { return false }
+
+func (f *fakeAdapter) Directories() adapter.Directories {
+	return adapter.Directories{Input: "/task/inputs", Output: "/task/outputs", Credentials: "/task/secrets/credentials"}
+}
 
 func (f *fakeAdapter) Ready(ctx context.Context) (bool, error) {
 	if f.hung(ctx) {
@@ -122,7 +134,7 @@ func (f *fakeAdapter) Dispatch(_ context.Context, run adapter.Run) (adapter.Outc
 	f.dispatches++
 	f.lastRun = run
 	if f.dispatchErr != nil {
-		return adapter.OutcomeUnknown, adapter.Handle{}, f.dispatchErr
+		return f.outcome, adapter.Handle{}, f.dispatchErr
 	}
 	if f.outcome == adapter.OutcomeNothingCreated {
 		return f.outcome, adapter.Handle{}, nil
@@ -199,6 +211,29 @@ func (f *fakeAdapter) Stop(context.Context, adapter.Handle) error {
 		return check()
 	}
 	return err
+}
+
+func (f *fakeAdapter) Collect(ctx context.Context, _ adapter.Handle, _ adapter.Limits, out chan<- adapter.Output) error {
+	f.mu.Lock()
+	f.collects++
+	f.stopsBefore = append(f.stopsBefore, f.stops)
+	outputs, err, hangs := slices.Clone(f.outputs), f.collectErr, f.collectHangs
+	f.mu.Unlock()
+	if hangs {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if err != nil {
+		return err
+	}
+	for _, output := range outputs {
+		select {
+		case out <- output:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 func (f *fakeAdapter) Purge(context.Context, string, int64) error {
@@ -515,7 +550,7 @@ func (f fixture) sealFor(t *testing.T, request wire.SealRequest, values map[stri
 	t.Helper()
 	sealed, err := signed.Seal(signed.SealBinding{
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
+		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials, ExpiryMS: request.ExpiryMS,
 	}, request.Key.Key.(*ecdsa.PublicKey), values)
 	if err != nil {
 		t.Fatal(err)

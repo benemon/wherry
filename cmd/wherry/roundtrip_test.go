@@ -33,8 +33,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// platformText is the receiver bundle's platform credential for the test plugin's adapter.
-const platformText = "s3cr3t-platform-credential"
+// platformText is the receiver bundle's platform credential for the test plugin's adapter, and deployText the host's
+// task credential.
+const (
+	platformText = "s3cr3t-platform-credential"
+	deployText   = "s3cr3t-deploy-key-credential"
+)
 
 type syncBuffer struct {
 	mu  sync.Mutex
@@ -128,7 +132,7 @@ func TestRoundTrip(t *testing.T) {
 		SealLifetimeMS: int64(time.Hour / time.Millisecond), DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	hostBundle, otherBundle, receiverBundle := filepath.Join(dir, "host.yaml"), filepath.Join(dir, "other.yaml"), filepath.Join(dir, "receiver.yaml")
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2,
-		Adapters: []admin.AdapterSettings{{Name: "fake", Type: "fake", Agent: "claude", Credential: "model", Labels: map[string]string{"gpu": "yes"}, Config: map[string]any{}}}}
+		Adapters: []admin.AdapterSettings{{Name: "fake", Type: "fake", Agent: "claude", Credential: "model", Labels: map[string]string{"gpu": "yes"}, Config: map[string]any{"outputs": true}}}}
 	for _, step := range []func() error{
 		func() error { return service.PoolCreate(ctx, "pool-a", terms) },
 		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
@@ -179,12 +183,15 @@ func TestRoundTrip(t *testing.T) {
 	defer stop()
 	go func() { _ = r.Run(runCtx) }()
 
-	credentialPath := filepath.Join(dir, "model")
+	credentialPath, deployPath := filepath.Join(dir, "model"), filepath.Join(dir, "deploy-key")
 	if err := os.WriteFile(credentialPath, []byte(credentialText), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(deployPath, []byte(deployText), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	hostConfig := busclient.Config{Bundle: hostBundle, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
-		Credentials: map[string]string{"model": credentialPath}}
+		Credentials: map[string]string{"model": credentialPath, "deploy-key": deployPath}}
 	if _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +205,9 @@ func TestRoundTrip(t *testing.T) {
 	var submitted busclient.SubmitResult
 	for ctx.Err() == nil {
 		submitted, err = host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}},
-			Prompt: "hello from the host", Deadline: time.Minute, QueueDeadline: time.Minute})
+			Prompt: "hello from the host", Parts: []wire.Part{{Raw: wire.StdBytes("a,b\n"), Filename: "data.csv"}},
+			Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Required: true}},
+			Deadline: time.Minute, QueueDeadline: time.Minute})
 		if err == nil {
 			break
 		}
@@ -217,6 +226,12 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if awaited.Status.State != wire.TaskStateCompleted || awaited.Task == nil || len(awaited.Task.Artifacts) != 1 || awaited.Task.Artifacts[0].Parts[0].Text != "done" {
 		t.Fatalf("await = %+v; want the receiver's completed result", awaited)
+	}
+	// The plugin's outputs cross the link in pieces and the feed in chunks the receiver signs; the host joins and verifies them.
+	if len(awaited.Outputs) != 2 || awaited.Outputs[0].Name != "big.bin" || !bytes.Equal(awaited.Outputs[0].Data, bytes.Repeat([]byte("b"), 2<<20+1)) ||
+		awaited.Outputs[1].Name != "empty" || len(awaited.Rejected) != 0 ||
+		len(awaited.NotReturned) != 1 || awaited.NotReturned[0] != (wire.UnreturnedOutput{Name: "link", Size: 4, Reason: "rejected: symlink"}) {
+		t.Fatalf("outputs %d, not returned %+v, rejected %+v; want big.bin and empty verified and the link refused", len(awaited.Outputs), awaited.NotReturned, awaited.Rejected)
 	}
 	otherConfig := busclient.Config{Bundle: otherBundle, HostKey: filepath.Join(dir, "other.key"), StateDir: filepath.Join(dir, "other-state")}
 	if _, err := busclient.Init(ctx, otherConfig); err != nil {
@@ -240,8 +255,11 @@ func TestRoundTrip(t *testing.T) {
 			configured = record.Settings
 		}
 	}
-	if len(runs) != 1 || runs[0].ID != submitted.RunID || string(runs[0].Credential) != credentialText || string(runs[0].Prompt) == "" {
-		t.Fatalf("plugin runs %+v; want one dispatch with the host's sealed credential", runs)
+	if len(runs) != 1 || runs[0].ID != submitted.RunID || string(runs[0].Credential) != credentialText || string(runs[0].Prompt) == "" ||
+		len(runs[0].Inputs) != 1 || runs[0].Inputs[0].Name != "data.csv" || string(runs[0].Inputs[0].Data) != "a,b\n" ||
+		len(runs[0].Credentials) != 1 || string(runs[0].Credentials[0].Value) != deployText || runs[0].Credentials[0].File != "id_ed25519" ||
+		!strings.Contains(string(runs[0].Prompt), "Input files: /fake/inputs/data.csv.") {
+		t.Fatalf("plugin runs %+v; want one dispatch with the host's sealed credentials and the input", runs)
 	}
 	if configured.Platform != platformText || configured.Pool != "pool-a" || configured.Agent != "claude" || configured.Credential != "model" {
 		t.Fatalf("plugin configured with %+v; want the bundle's platform credential and the adapter's settings", configured)
@@ -256,7 +274,7 @@ func TestRoundTrip(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	for _, secret := range []string{credentialText, platformText} {
+	for _, secret := range []string{credentialText, platformText, deployText} {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("receiver or plugin logs carry a credential:\n%s", logs.String())
 		}
@@ -264,7 +282,7 @@ func TestRoundTrip(t *testing.T) {
 			t.Fatalf("host logs carry a credential:\n%s", hostLogs.String())
 		}
 	}
-	if !strings.Contains(hostLogs.String(), "host: run "+submitted.RunID+": sealed [model] to receiver-a for turn 1 attempt 1") {
+	if !strings.Contains(hostLogs.String(), "host: run "+submitted.RunID+": sealed [model deploy-key] to receiver-a for turn 1 attempt 1") {
 		t.Fatalf("the host did not answer the seal request; logs:\n%s", hostLogs.String())
 	}
 

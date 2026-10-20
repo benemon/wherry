@@ -2,6 +2,7 @@ package receiver
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -13,8 +14,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +41,10 @@ const (
 	maxHandle      = 4 << 10
 	budgetReason   = "delivery budget exhausted"
 	minRedact      = 8
+	// outputLimit bounds the bytes of a turn's outputs and maxOutputs the entries beneath its outputs directory,
+	// until the broker's limits set them.
+	outputLimit = 8 << 20
+	maxOutputs  = 256
 )
 
 // Intervals are variables so tests can shorten them; renew stays below the 30 s default lock.
@@ -57,6 +64,8 @@ var (
 	purgeDeadline = 5 * time.Minute
 	// followRetryInterval separates the Follows of a run whose plugin link is lost.
 	followRetryInterval = time.Second
+	// collectTimeout bounds an adapter's collection of a turn's outputs, during which the claim is renewed.
+	collectTimeout = 2 * time.Minute
 	// sealWait bounds how long a claimed turn waits for its host's seal, which comes only while the parent runs
 	// await or the MCP server; beyond it the turn holds a slot for a parent that is not answering.
 	sealWait = 5 * time.Minute
@@ -146,6 +155,10 @@ type admission struct {
 	adapter  Named
 	history  []wire.Message
 	git      *wire.GitContext
+	inputs   []adapter.File
+	// credentials and outputs are what the run's first turn declares.
+	credentials []wire.TaskCredential
+	outputs     []wire.ExpectedOutput
 	// cancelled is set when a host of the run's tenant cancelled the run; it ends CANCELED without a dispatch.
 	cancelled bool
 }
@@ -248,11 +261,15 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if now.UnixMilli() > task.Wherry.DeadlineMS {
 		return reject("run deadline passed")
 	}
-	git, supported := gitContext(history, adapter.Git)
-	if !supported {
-		return reject("unsupported message part")
+	git, inputs, rejection := deliverables(history, adapter.Git)
+	if rejection != "" {
+		return reject(rejection)
 	}
-	admitted.git = git
+	declared := task.Wherry
+	if task.Wherry.Turn > 1 {
+		declared = submissions[1].record.Wherry
+	}
+	admitted.git, admitted.inputs, admitted.credentials, admitted.outputs = git, inputs, declared.Credentials, declared.Outputs
 	return admitted, 0
 }
 
@@ -268,25 +285,34 @@ func foreignRun(all []runSubmission, statuses []wire.RunStatus, tenant string) b
 	return held >= 0 && statuses[held].Wherry.Tenant != tenant
 }
 
-// gitContext returns the run's git context; false means a non-text part other than one git part the adapter delivers.
-func gitContext(history []wire.Message, delivered bool) (*wire.GitContext, bool) {
+// deliverables returns the run's git context and its input files, from raw and data parts, or the rejection reason for a
+// url part other than one git part the adapter delivers, or for two inputs of one name in different turns.
+func deliverables(history []wire.Message, git bool) (*wire.GitContext, []adapter.File, string) {
 	var found *wire.GitContext
+	var inputs []adapter.File
 	for _, message := range history {
 		for _, part := range message.Parts {
-			if part.Text != "" {
-				continue
+			switch {
+			case part.Text != "":
+			case part.Raw != nil || part.Data != nil:
+				name := wire.InputName(part)
+				if slices.ContainsFunc(inputs, func(input adapter.File) bool { return input.Name == name }) {
+					return nil, nil, "input names repeat across turns"
+				}
+				inputs = append(inputs, adapter.File{Name: name, Data: append(slices.Clone([]byte(part.Raw)), part.Data...)})
+			default:
+				if !git || part.MediaType != wire.GitMediaType || found != nil {
+					return nil, nil, "unsupported message part"
+				}
+				parsed, err := wire.ParseGitPart(part)
+				if err != nil {
+					return nil, nil, "unsupported message part"
+				}
+				found = &parsed
 			}
-			if !delivered || part.MediaType != wire.GitMediaType || found != nil {
-				return nil, false
-			}
-			git, err := wire.ParseGitPart(part)
-			if err != nil {
-				return nil, false
-			}
-			found = &git
 		}
 	}
-	return found, true
+	return found, inputs, ""
 }
 
 // publishRejection writes the echo, so every host of the tenant can find the run's pool, and the rejected
@@ -538,7 +564,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		return kgo.AckRelease
 	}
 	defer producer.Close()
-	run := &activeRun{receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, adapter: admitted.adapter}
+	run := &activeRun{
+		receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, adapter: admitted.adapter,
+		expected: admitted.outputs,
+	}
 
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
 		return run.abandon(err)
@@ -606,27 +635,51 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	if !adopted {
 		named := run.adapter
-		var credential []byte
+		// The agent credential is asked for under the pool's terms; a task credential of the same name rides with it.
+		agentCredentials, taskCredentials := []string{}, []string{}
 		if named.Credential != "" {
-			values, status, sealed := run.awaitSeal(ctx, runCtx, named.Credential)
+			agentCredentials = append(agentCredentials, named.Credential)
+		}
+		for _, credential := range admitted.credentials {
+			if !slices.Contains(agentCredentials, credential.Name) && !slices.Contains(taskCredentials, credential.Name) {
+				taskCredentials = append(taskCredentials, credential.Name)
+			}
+		}
+		var credential []byte
+		var secrets []adapter.Secret
+		if len(agentCredentials)+len(taskCredentials) > 0 {
+			values, status, sealed := run.awaitSeal(ctx, runCtx, agentCredentials, taskCredentials)
 			if !sealed {
 				return status
 			}
-			credential = values[named.Credential]
-			run.delivered = values
-			for name, value := range values {
-				if len(value) < minRedact {
-					r.logger.Printf("run %s: credential %s too short to redact", runID, name)
-				}
+			if named.Credential != "" {
+				credential = values[named.Credential]
 			}
+			for _, declared := range admitted.credentials {
+				secrets = append(secrets, adapter.Secret{Name: declared.Name, File: declared.File, Value: values[declared.Name]})
+			}
+			run.deliver(values)
 		}
 		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, adapter.Run{
 			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Turn: task.Wherry.Turn, Attempt: attempt,
-			Prompt: []byte(prompt(admitted.history)), Credential: credential, Git: (*adapter.GitContext)(admitted.git),
+			Prompt: []byte(preamble(named.Adapter.Directories(), admitted.inputs, admitted.credentials, admitted.outputs) + prompt(admitted.history)), Credential: credential,
+			Git: (*adapter.GitContext)(admitted.git), Inputs: admitted.inputs, Credentials: secrets,
 		})
+		var tooLarge *adapter.InputTooLargeError
 		switch {
 		case err != nil && runCtx.Err() != nil && ctx.Err() == nil:
 			return run.fail(ctx, "timeout", nil)
+		case errors.As(err, &tooLarge) && dispatched == adapter.OutcomeNothingCreated:
+			// The adapter's name for the input reaches the status only when it is one of the run's inputs.
+			name := "an input"
+			if slices.ContainsFunc(admitted.inputs, func(input adapter.File) bool { return input.Name == tooLarge.Name }) {
+				name = "input " + tooLarge.Name
+			}
+			r.logger.Printf("run %s: adapter %s cannot deliver %s", runID, named.Name, name)
+			if err := run.commit(ctx, r.startFailure(task, attempt, named.Name, "input-too-large")); err != nil {
+				return run.abandon(err)
+			}
+			return run.fail(ctx, name+" takes the turn's inputs over what adapter "+named.Name+" delivers", nil)
 		case errors.Is(err, adapter.ErrGitContext):
 			// Git error text can echo URLs, so only the type is logged.
 			r.logger.Printf("run %s: git context unavailable: %T", runID, err)
@@ -809,9 +862,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 }
 
-// awaitSeal asks the run's host for credential under a key made for this attempt, and waits for the seal while the
-// claim is renewed. The key never leaves this call. False carries the acknowledgement.
-func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credential string) (map[string][]byte, kgo.AckStatus, bool) {
+// awaitSeal asks the run's host for the agent's credentials and the task's under a key made for this attempt, and waits
+// for the seal while the claim is renewed. The key never leaves this call. False carries the acknowledgement.
+func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credentials, taskCredentials []string) (map[string][]byte, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
 	runID := task.Wherry.Run
 	key, err := newSealKey()
@@ -821,11 +874,14 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credential string) 
 	}
 	request := &wire.SealRequest{
 		ReceiverBinding: r.binding(task, run.attempt), Key: jose.JSONWebKey{Key: &key.PublicKey}, KeyID: signed.SealKeyID(&key.PublicKey),
-		Credentials: []string{credential}, ExpiryMS: time.Now().Add(sealWait).UnixMilli(),
+		Credentials: credentials, ExpiryMS: time.Now().Add(sealWait).UnixMilli(),
+	}
+	if len(taskCredentials) > 0 {
+		request.TaskCredentials = taskCredentials
 	}
 	expected := signed.SealBinding{
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
+		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials, ExpiryMS: request.ExpiryMS,
 	}
 	// Reading from the host topic's end before the request is committed sees every answer to it.
 	topic := admin.HostTopic(task.Wherry.Tenant, task.Wherry.Host)
@@ -883,7 +939,7 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credential string) 
 		case runCtx.Err() != nil:
 			return nil, run.fail(ctx, "timeout", nil), false
 		case waitCtx.Err() != nil:
-			return nil, run.interrupt(ctx, credential), false
+			return nil, run.interrupt(ctx, append(slices.Clone(credentials), taskCredentials...)), false
 		case values != nil:
 			return values, 0, true
 		}
@@ -902,23 +958,51 @@ type activeRun struct {
 	// labels is set when this attempt dispatched the job; an adopted job's adapter labels are unknown.
 	labels map[string]string
 	job    string
-	// delivered holds the credential values this attempt passed to its adapter, by name.
-	delivered map[string][]byte
+	// redactions are the forms of the credential values this attempt passed to its adapter, longest first.
+	redactions []redaction
+	// expected are the outputs the run declares; outputs are the chunks of those the turn returns, and returned and
+	// unreturned list them for the result.
+	expected   []wire.ExpectedOutput
+	outputs    []*kgo.Record
+	returned   []wire.ReturnedOutput
+	unreturned []wire.UnreturnedOutput
 }
 
-// redact replaces each delivered credential value in data with [redacted:<name>].
-// Values shorter than minRedact are not redacted: they match ordinary text and JSON literals.
-func (run *activeRun) redact(data []byte) []byte {
-	for name, value := range run.delivered {
-		if len(value) < minRedact {
+// redaction is one form of a delivered credential value and what replaces it.
+type redaction struct {
+	value, replacement []byte
+}
+
+// deliver keeps, for each delivered credential, the forms it is published in: the value without trailing CR and LF,
+// as credential files written by echo or a CLI end in a newline that transcripts and outputs drop, and that form
+// escaped as a JSON string, as a transcript line carries it. Each untrimmed form holds one of these, so its redaction
+// leaves only the line ending. A value shorter than minRedact once trimmed matches ordinary text and JSON literals, so
+// it is logged and left.
+func (run *activeRun) deliver(values map[string][]byte) {
+	for name, value := range values {
+		trimmed := bytes.TrimRight(value, "\r\n")
+		if len(trimmed) < minRedact {
+			run.receiver.logger.Printf("run %s: credential %s too short to redact", run.task.Wherry.Run, name)
 			continue
 		}
 		replacement := "[redacted:" + name + "]"
 		// The replacement must not carry the value it replaces.
-		if strings.Contains(name, string(value)) {
+		if strings.Contains(name, string(trimmed)) {
 			replacement = "[redacted]"
 		}
-		data = bytes.ReplaceAll(data, value, []byte(replacement))
+		escaped, _ := jsontext.AppendQuote(nil, trimmed) // invalid UTF-8 is replaced, and that form never appears in a transcript
+		run.redactions = append(run.redactions, redaction{value: trimmed, replacement: []byte(replacement)})
+		if escaped = escaped[1 : len(escaped)-1]; !bytes.Equal(escaped, trimmed) {
+			run.redactions = append(run.redactions, redaction{value: escaped, replacement: []byte(replacement)})
+		}
+	}
+	slices.SortFunc(run.redactions, func(a, b redaction) int { return len(b.value) - len(a.value) })
+}
+
+// redact replaces each form of each delivered credential value in data with its replacement.
+func (run *activeRun) redact(data []byte) []byte {
+	for _, form := range run.redactions {
+		data = bytes.ReplaceAll(data, form.value, form.replacement)
 	}
 	return data
 }
@@ -1004,11 +1088,15 @@ func (run *activeRun) cancel(ctx context.Context, pending []adapter.Line) kgo.Ac
 
 const cancelReason = "canceled by user"
 
-// interrupt waits the run for its tenant's credential: AUTH_REQUIRED with its result, then the task is acknowledged.
-func (run *activeRun) interrupt(ctx context.Context, credential string) kgo.AckStatus {
-	reason := "credential " + credential + " required"
+// interrupt waits the run for its tenant's credentials: AUTH_REQUIRED with its result, then the task is acknowledged.
+// The message names every credential the seal request asked for, and the metadata the first.
+func (run *activeRun) interrupt(ctx context.Context, credentials []string) kgo.AckStatus {
+	reason := "credential " + credentials[0] + " required"
+	if len(credentials) > 1 {
+		reason = "credentials " + strings.Join(credentials, ", ") + " required"
+	}
 	status := taskStatus(wire.TaskStateAuthRequired, reason)
-	metadata, _ := json.Marshal(wire.CredentialMetadata{Credential: credential}) // a string always encodes
+	metadata, _ := json.Marshal(wire.CredentialMetadata{Credential: credentials[0]}) // a string always encodes
 	if err := run.commit(ctx, append([]*kgo.Record{run.result(status, reason, nil)}, run.statusRecords("interrupted", status, nil, metadata)...)...); err != nil {
 		return run.abandon(err)
 	}
@@ -1090,23 +1178,144 @@ func (run *activeRun) finish(ctx context.Context, handle adapter.Handle, pending
 	if run.receiver.stopForDenial() {
 		return run.deny(ctx, handle, pending)
 	}
+	stopped := true
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
 		// At the budget the agent's result stands, and the job is left to the adapter's sweep.
 		if !run.receiver.budgetSpent(run.attempt) {
 			return kgo.AckRelease
 		}
+		stopped = false
 	}
-	state, ack := wire.TaskStateCompleted, kgo.AckAccept
+	run.collect(ctx, handle, stopped)
+	state, ack, reason := wire.TaskStateCompleted, kgo.AckAccept, ""
 	if result.IsError {
 		state, ack = wire.TaskStateFailed, kgo.AckReject
 	}
-	return run.end(ctx, taskStatus(state, ""), result.Result, result.metadata, pending, ack)
+	for _, output := range run.unreturned {
+		if slices.Contains(run.expected, wire.ExpectedOutput{Name: output.Name, Required: true}) {
+			state, ack, reason = wire.TaskStateFailed, kgo.AckReject, "required output "+output.Name+" not returned: "+output.Reason
+			break
+		}
+	}
+	return run.end(ctx, taskStatus(state, reason), result.Result, result.metadata, pending, ack)
 }
 
-// end commits the remaining transcript, the result and the terminal status in one transaction.
+// collect reads the outputs of a stopped job, redacts them and keeps their chunks and the result's lists of what the
+// turn returned and did not. Every expected output is listed as one or the other.
+func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stopped bool) {
+	collected, err := run.collected(ctx, handle, stopped)
+	if err != nil {
+		run.receiver.logger.Printf("run %s: outputs not collected: %v", run.task.Wherry.Run, err)
+		for _, output := range run.expected {
+			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "not collected"})
+		}
+		return
+	}
+	slices.SortFunc(collected, func(a, b adapter.Output) int { return strings.Compare(a.Name, b.Name) })
+	var total int64
+	listed := map[string]bool{}
+	for _, output := range collected {
+		name, reason := output.Name, ""
+		switch {
+		case !wire.ValidOutputName(name) || listed[name]:
+			// The name is the agent's and may be any bytes; it is listed only as quoted ASCII.
+			name, reason = strconv.QuoteToASCII(name), "rejected: invalid name"
+			name = name[:min(len(name), 256)]
+		case output.Mode.Type() != 0:
+			reason = "rejected: " + fileType(output.Mode)
+		case output.Data == nil || total+output.Size > outputLimit:
+			reason = "exceeds output limit"
+		case int64(len(output.Data)) != output.Size:
+			reason = "rejected: size changed while read"
+		}
+		listed[name] = true
+		if reason != "" {
+			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: name, Size: max(output.Size, 0), Reason: reason})
+			continue
+		}
+		total += output.Size
+		data := run.redact(output.Data)
+		run.outputs = append(run.outputs, run.outputChunks(name, data)...)
+		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: taskHash(data), Size: int64(len(data))})
+	}
+	for _, output := range run.expected {
+		if !listed[output.Name] {
+			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "missing"})
+		}
+	}
+}
+
+// collected runs the adapter's Collect under collectTimeout. The adapter bounds what it reads by the limits; the
+// count and the total are checked again here, so a plugin that ignores them cannot grow the run's memory.
+func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stopped bool) ([]adapter.Output, error) {
+	if !stopped {
+		return nil, errors.New("the job was not stopped")
+	}
+	ctx, cancel := context.WithTimeout(ctx, collectTimeout)
+	defer cancel()
+	outputs := make(chan adapter.Output)
+	ended := make(chan error, 1)
+	go func() {
+		defer close(outputs)
+		ended <- run.adapter.Adapter.Collect(ctx, handle, adapter.Limits{Files: maxOutputs, FileBytes: outputLimit, TotalBytes: outputLimit}, outputs)
+	}()
+	var collected []adapter.Output
+	var total int
+	var over error
+	for output := range outputs {
+		total += len(output.Data)
+		if over == nil && (len(collected) == maxOutputs || total > outputLimit) {
+			over = errors.New("the adapter returned more than the limits")
+			cancel()
+		}
+		if over == nil {
+			collected = append(collected, output)
+		}
+	}
+	if err := cmp.Or(over, <-ended); err != nil {
+		return nil, err
+	}
+	return collected, nil
+}
+
+// fileType names the type of a collected entry that is not a regular file.
+func fileType(mode fs.FileMode) string {
+	switch {
+	case mode&fs.ModeSymlink != 0:
+		return "symlink"
+	case mode&fs.ModeNamedPipe != 0:
+		return "fifo"
+	case mode&fs.ModeDevice != 0:
+		return "device"
+	case mode&fs.ModeSocket != 0:
+		return "socket"
+	}
+	return "irregular file"
+}
+
+// outputChunks splits an output into chunks of at most wire.OutputChunk bytes; an empty output is one empty chunk.
+func (run *activeRun) outputChunks(name string, data []byte) []*kgo.Record {
+	var records []*kgo.Record
+	for index := int64(0); index == 0 || len(data) > 0; index++ {
+		piece := data[:min(len(data), wire.OutputChunk)]
+		data = data[len(piece):]
+		metadata, _ := json.Marshal(wire.OutputMetadata{Index: index}) // an integer always encodes
+		records = append(records, run.feed(&wire.Output{
+			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
+				TaskID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run,
+				Artifact: wire.Artifact{ArtifactID: name, Parts: []wire.Part{{Raw: append(wire.StdBytes{}, piece...)}}, Extensions: []string{wire.ExtensionURI}},
+				Append:   index > 0, LastChunk: len(data) == 0, Metadata: metadata,
+			},
+			Wherry: wire.ResultBinding{ReceiverBinding: run.receiver.binding(run.task, run.attempt), TaskHash: run.taskHash},
+		}))
+	}
+	return records
+}
+
+// end commits the remaining transcript, the outputs, the result and the terminal status in one transaction.
 func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, resultMetadata jsontext.Value, pending []adapter.Line, ack kgo.AckStatus) kgo.AckStatus {
-	records := append(append(run.chunks(pending, true), run.result(status, result, resultMetadata)), run.statusRecords("terminal", status, nil, nil)...)
+	records := append(append(append(run.chunks(pending, true), run.outputs...), run.result(status, result, resultMetadata)), run.statusRecords("terminal", status, nil, nil)...)
 	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
 	}
@@ -1227,13 +1436,15 @@ func (run *activeRun) chunks(lines []adapter.Line, last bool) []*kgo.Record {
 	return records
 }
 
-// placement is the result's metadata: where its last turn ran.
+// placement is the result's metadata: where its last turn ran, and the outputs it returned and did not.
 type placement struct {
-	ReceiverID string            `json:"receiver_id"`
-	Pool       string            `json:"pool"`
-	Adapter    string            `json:"adapter,omitempty"`
-	Labels     map[string]string `json:"labels,omitempty"`
-	Job        string            `json:"job,omitempty"`
+	ReceiverID  string                  `json:"receiver_id"`
+	Pool        string                  `json:"pool"`
+	Adapter     string                  `json:"adapter,omitempty"`
+	Labels      map[string]string       `json:"labels,omitempty"`
+	Job         string                  `json:"job,omitempty"`
+	Outputs     []wire.ReturnedOutput   `json:"outputs,omitempty"`
+	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty"`
 }
 
 // result builds the turn's final task for the feed; a result that is JSON travels as a data part.
@@ -1249,8 +1460,9 @@ func (run *activeRun) result(status wire.TaskStatus, result string, resultMetada
 	case jsontext.Value(result).IsValid():
 		part = wire.Part{Data: jsontext.Value(result), MediaType: "application/json"}
 	}
-	metadata, _ := json.Marshal(placement{ // strings and a string map always encode
+	metadata, _ := json.Marshal(placement{ // strings, numbers and a string map always encode
 		ReceiverID: run.receiver.id, Pool: run.receiver.config.Pool, Adapter: run.adapter.Name, Labels: run.labels, Job: run.job,
+		Outputs: run.returned, NotReturned: run.unreturned,
 	})
 	return run.feed(&wire.Result{
 		Task: wire.Task{
@@ -1376,6 +1588,45 @@ func agentResultMetadata(data []byte) jsontext.Value {
 // resumedHeader opens a continuation's prompt. Every interrupt today happens before dispatch, so no
 // earlier turn reached an agent; a per-turn transcript would read as work already done.
 const resumedHeader = "This request was interrupted before any of it was carried out. Carry out all of it now. Its parts follow in the order they were sent."
+
+// preamble tells the agent the full path of each file it has and of each it is asked to leave, so an agent without a
+// shell finds them; it names credential files, never their values. A directory the adapter does not report is named
+// by its environment variable. A run that declares no files has none.
+func preamble(directories adapter.Directories, inputs []adapter.File, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput) string {
+	if len(inputs)+len(credentials)+len(outputs) == 0 {
+		return ""
+	}
+	input, output, credential := cmp.Or(directories.Input, "$WHERRY_INPUT_DIR"), cmp.Or(directories.Output, "$WHERRY_OUTPUT_DIR"),
+		cmp.Or(directories.Credentials, "$WHERRY_CREDENTIALS_DIR")
+	lines := []string{"Your input directory is " + input + ", your credentials directory " + credential + " and your output directory " + output +
+		"; the environment variables WHERRY_INPUT_DIR, WHERRY_CREDENTIALS_DIR and WHERRY_OUTPUT_DIR hold the same paths."}
+	if len(inputs) > 0 {
+		paths := make([]string, 0, len(inputs))
+		for _, file := range inputs {
+			paths = append(paths, input+"/"+file.Name)
+		}
+		lines = append(lines, "Input files: "+strings.Join(paths, ", ")+".")
+	}
+	if len(credentials) > 0 {
+		paths := make([]string, 0, len(credentials))
+		for _, file := range credentials {
+			paths = append(paths, credential+"/"+file.File)
+		}
+		lines = append(lines, "Credential files: "+strings.Join(paths, ", ")+". Never print or copy their contents.")
+	}
+	if len(outputs) > 0 {
+		paths := make([]string, 0, len(outputs))
+		for _, file := range outputs {
+			path := output + "/" + file.Name
+			if file.Required {
+				path += " (required)"
+			}
+			paths = append(paths, path)
+		}
+		lines = append(lines, "Write these output files, creating their directories if they do not exist: "+strings.Join(paths, ", ")+".")
+	}
+	return strings.Join(lines, "\n") + "\n\n"
+}
 
 // prompt is the first turn's text alone, or every turn's text as one request under resumedHeader.
 func prompt(history []wire.Message) string {

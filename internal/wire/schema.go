@@ -149,6 +149,55 @@ type CredentialMetadata struct {
 	Credential string `json:"credential"`
 }
 
+// OutputMetadata is the metadata of an output chunk's artifact update.
+type OutputMetadata struct {
+	Index int64 `json:"index"`
+}
+
+// ReturnedOutput is an output a turn returned, as a result's task metadata lists it; SHA256 and Size are of the
+// bytes its chunks carry.
+type ReturnedOutput struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
+// UnreturnedOutput is an output a turn did not return, and why.
+type UnreturnedOutput struct {
+	Name   string `json:"name"`
+	Size   int64  `json:"size,omitzero"`
+	Reason string `json:"reason"`
+}
+
+// OutputChunk bounds the data of one output chunk, below a record's limit.
+const OutputChunk = 256 << 10
+
+// InlineLimit bounds the bytes of a submission's raw and data parts together.
+const InlineLimit = 256 << 10
+
+// fileName is a portable file name: no separator, no leading dot, nothing a shell or a template interprets.
+var fileName = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`)
+
+// ValidFileName reports whether name is a portable file name of at most 255 bytes: letters, digits, '.', '_' and
+// '-', not starting with a dot.
+func ValidFileName(name string) bool {
+	return len(name) <= 255 && fileName.MatchString(name)
+}
+
+// ValidOutputName reports whether name is a relative path of at most 4096 bytes whose every slash-separated
+// segment is a portable file name.
+func ValidOutputName(name string) bool {
+	return len(name) <= 4096 && !slices.ContainsFunc(strings.Split(name, "/"), func(segment string) bool { return !ValidFileName(segment) })
+}
+
+// InputName is the file name a raw or data part is delivered as: its filename, with .json added for a data part.
+func InputName(part Part) string {
+	if part.Data != nil {
+		return part.Filename + ".json"
+	}
+	return part.Filename
+}
+
 // CommitMetadata is the metadata of a started status for a run with a git context.
 type CommitMetadata struct {
 	GitCommit string `json:"git_commit"`

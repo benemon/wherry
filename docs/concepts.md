@@ -163,6 +163,9 @@ The agent usually needs a model credential, and each tenant's work runs on
 that tenant's own credential. The pool's terms name the credentials each
 agent may take, and the receiver configuration names the one an adapter
 delivers. The host's configuration maps each credential name to a file.
+A task can also declare **task credentials**: credentials of the host,
+such as a deploy key, that the agent gets as files. The task's parent
+chooses them, so the pool's terms do not govern them.
 
 A host seals nothing when it submits. The receiver that claims a turn
 whose adapter delivers a credential makes a P-256 key pair for that
@@ -171,8 +174,9 @@ run, turn and attempt, the public key, the credential names and an expiry
 5 minutes out. The host that submitted the run answers it while `wherry
 await` or `wherry mcp` runs. It checks the request's signature against the
 receiver's registered key, that the receiver is a live member of the run's
-pool and holds the run's current attempt, and that the pool's terms
-approve each credential for the run's agent. It then writes a **seal** to
+pool and holds the run's current attempt, that the pool's terms approve
+the agent's credential for the run's agent, and that the run declares each
+task credential. It then writes a **seal** to
 its own topic: a compact JWE (`ECDH-ES+A256KW` with `A256GCM`, through
 [go-jose](https://github.com/go-jose/go-jose)) encrypted to the request's
 key and bound in its protected header to the tenant, pool, receiver, key
@@ -185,17 +189,37 @@ no restarted receiver. A redelivered turn asks again. Hosts cannot see the
 broker's claim, so a host seals only to the receiver that wrote the turn's
 first `claimed` status, and refuses when a second receiver claims the same
 turn; a turn adopted by another receiver ends `TASK_STATE_AUTH_REQUIRED`.
-The receiver redacts the exact bytes of each credential of 8 bytes or more
-that it delivered from everything it publishes for the attempt.
+The receiver redacts each credential of 8 bytes or more that it delivered,
+with or without its trailing newline and as JSON escapes it, from
+everything it publishes for the attempt.
 
 A turn whose seal does not arrive within 5 minutes ends in
 `TASK_STATE_AUTH_REQUIRED` and waits for the tenant. A parent that submits
 a task needing credentials keeps `wherry await` or `wherry mcp` running
 until the task starts.
 
-Everything else the agent needs comes from the platform: the image or
-host install, network access, CA bundles, SSH known hosts and repository
-credentials. wherry carries no git credential.
+Everything else the agent needs comes from the platform or from the task:
+the image or host install, network access, CA bundles and SSH known hosts
+from the platform, and files and task credentials from the task.
+
+## Files in and out
+
+Everything the task receives lands as files. A submission's `raw` and
+`data` parts are input files, at most 256 KiB together, that the agent
+finds in the directory `WHERRY_INPUT_DIR` names. Task credentials are
+files in the directory `WHERRY_CREDENTIALS_DIR` names, and never
+environment variables. The receiver opens the prompt with the names of the
+files and of the outputs the task expects.
+
+The agent leaves its outputs in the directory `WHERRY_OUTPUT_DIR` names.
+Once the agent has written its result and the job is stopped, the adapter
+collects the regular files there, up to 256 entries and 8 MiB, without
+following links. The receiver redacts each file, publishes it in chunks on
+the tenant feed with the result, and lists every output in the result with
+the size and SHA-256 it computed, or with the reason it was not returned.
+A required output that is not returned fails the turn. `wherry await`
+verifies each output's chunks against the result before it writes the file
+locally.
 
 ## Runs, turns and attempts
 

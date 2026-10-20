@@ -123,6 +123,9 @@ fails with `no matching live receiver`.
 | `--git` | | repository URL to check out |
 | `--git-ref` | | branch, tag or commit to check out |
 | `--git-path` | the repository name | checkout directory |
+| `--input FILE` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
+| `--credential-file NAME=FILE` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR`; repeatable |
+| `--output NAME[:required]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the turn without it; repeatable |
 | `--deadline` | `30m` | time from now by which the run must end |
 | `--queue-deadline` | `10m` | time from now by which a receiver must claim it |
 
@@ -131,8 +134,15 @@ Exactly one of `--prompt` and `--prompt-file` is required. `--git` and
 [extension](a2a-extension-v1.md#git-context) gives the rules for the URL,
 ref and path.
 
+Input files hold 256 KiB together; `submit` refuses more before it
+publishes, naming the size and the limit. Input and credential file names
+are [file names](a2a-extension-v1.md#submission), and output names
+relative paths of them. `submit` refuses a credential its configuration
+does not map to a file.
+
 `submit` seals nothing. The receiver that claims the task asks for the
-credential its adapter delivers, and `wherry await` or `wherry mcp` answers
+credential its adapter delivers and the task's credentials, and `wherry
+await` or `wherry mcp` answers
 ([sealed credentials](concepts.md#sealed-credentials)).
 
 ### `wherry continue RUN_ID`
@@ -159,7 +169,8 @@ and prints `run_id=<id>`.
 ### `wherry await RUN_ID`
 
 Waits for the latest turn of a run to finish or be interrupted. `--timeout`
-sets the wait, `30m` by default.
+sets the wait, `30m` by default. `--outputs-dir DIR` sets where the turn's
+outputs go, by default `<state_dir>/runs/<run>/outputs/<turn>/`.
 
 It prints the state on the first line. For a turn that ended with a result,
 each following line is one part of a result artifact. For a turn that ended
@@ -168,8 +179,22 @@ prints as its text, its JSON data, `[url <url>]`, or
 `[raw <media type> <n> bytes]`. For `TASK_STATE_AUTH_REQUIRED` it prints
 `continue with: wherry continue <id>` on standard error.
 
+`await` writes each output that [verifies](a2a-extension-v1.md#inputs-and-outputs)
+against the result, at its relative path beneath the outputs directory, and
+prints a line for it:
+
+```
+output=<name> path=<path> sha256=<hex> size=<bytes>
+```
+
+It prints `output <name> not returned: <reason>` on standard error for each
+output the result lists as not returned and each one that fails
+verification. A write never leaves the outputs directory, whatever links
+it holds.
+
 `await` exits with status 1, `run ended in <state>`, for any state other
-than `TASK_STATE_COMPLETED`, and with status 1 when the timeout passes.
+than `TASK_STATE_COMPLETED`, with status 1 when an output fails
+verification, and with status 1 when the timeout passes.
 
 While it waits, `await` answers the seal requests on the tenant feed for
 every run this host submitted, once per attempt, and logs on standard error
@@ -359,9 +384,17 @@ the bundle's `platform` entry for its name when there is one. The plugin
 answers whether the adapter delivers git context; the receiver rejects a
 task with a git context part when its adapter does not.
 
+A plugin also reports, for each adapter, the paths of the input, output and
+credentials directories as its agent sees them, which the receiver writes
+into the prompt. Dispatch carries a turn's input files and task credentials
+with the prompt. A plugin that cannot deliver an input reports it, and the turn ends
+`TASK_STATE_FAILED` naming it. After the agent's result line the receiver
+stops the job and asks the plugin to collect its outputs, which arrive over
+the link in pieces of at most 1 MiB.
+
 The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
-certificate pair made for each start, protocol version 1. The receiver
+certificate pair made for each start, protocol version 2. The receiver
 refuses a plugin that offers no TLS certificate. Every call names its
 adapter. A plugin accepts messages up to 64 MiB; the receiver logs a larger
 Dispatch as `dispatch rejected: message too large`.
@@ -402,16 +435,22 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
-| `submit` | `prompt`, `agent`, `selector`, `git`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool` |
+| `submit` | `prompt`, `agent`, `selector`, `git`, `inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool` |
 | `status` | `id`, optional | `runs`, `skipped` |
-| `await` | `id` | `id`, `state`, `retry_after`, `message`, `artifacts`, `skipped` |
+| `await` | `id` | `id`, `state`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `skipped` |
 | `continue` | `id`, `prompt`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `turn`, `skipped` |
 | `cancel` | `id` | `id`, `skipped` |
 | `events` | `id` | `id`, `events`, `transcripts`, `skipped` |
 
 - `submit` requires `prompt`. `selector` is an array of
   `{key, operator, values}`. `git` is `{url, ref, path}`, with `path`
-  optional.
+  optional. `inputs` is an array of file paths, `credentials` an array of
+  `{name, file}` and `outputs` an array of `{name, required}`, as
+  `--input`, `--credential-file` and `--output` take them. An input must
+  resolve, through any symbolic links, to a regular file beneath the
+  server's working directory, and to none of `state_dir`, `host_key`,
+  `bundle` or a credential file; a relative path is taken from that
+  directory.
 - `status` returns the latest verified state of a run's latest turn
   without waiting. `runs` holds one entry for the run `id` names, or,
   without `id`, one per run `wherry status` lists, latest update first.
@@ -426,7 +465,12 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
   `retry_after` set to 5. With a progress token it sends a progress
   notification every 5 seconds. Each artifact is `{artifact_id, parts}`,
   and each part has one of `text`, `data`, `url` or `raw_bytes` (the size
-  of a binary part, which is not included), with `media_type`.
+  of a binary part, which is not included), with `media_type`. `await`
+  writes the turn's verified outputs as `wherry await` does, to the default
+  outputs directory, and returns each in `outputs` as
+  `{name, path, sha256, size}`. `not_returned` holds `{name, size, reason}`
+  for each output the result lists as not returned and each one that
+  fails verification.
 - `continue` requires `id`. `prompt` defaults to `continue`.
 - `events` returns `events`, each
   `{turn, attempt, kind, state, receiver, time, message}`, and
@@ -445,6 +489,7 @@ error text from the bus, the broker or the host key.
 | `NOT_AWAITING_CONTINUATION` | the run is not interrupted |
 | `RUN_CANCELED` | the run is cancelled |
 | `TURN_ALREADY_SUBMITTED` | the next turn is already published |
+| `OUTPUTS_NOT_WRITTEN` | the turn's verified outputs could not be written to the state directory |
 | `CANCELLED` | the request was cancelled |
 | `UNAVAILABLE` | any other failure; the CLI reports the cause |
 
@@ -459,9 +504,10 @@ is expanded in `WHERRY_CONFIG` and in every path.
 | `bundle` | required | the host's bundle |
 | `host_key` | `~/.config/wherry/host.key` | host signing key file |
 | `state_dir` | `~/.config/wherry/state` | run records and answered seal requests |
-| `credentials` | none | credential name to the file holding its value |
+| `credentials` | none | credential name to the file holding its value; a trailing newline is part of the value the agent gets, and the receiver redacts the value with and without it |
 
-`state_dir` holds `runs/<run>.json` for each run this host submitted, and
+`state_dir` holds `runs/<run>.json` for each run this host submitted,
+`runs/<run>/outputs/<turn>/` for the outputs `await` writes by default, and
 `answered/<run>.<turn>.<attempt>` for each attempt it answered, with a
 `.lock` beside it that every process sharing the directory holds while it
 answers that attempt. `submit` and `continue` write the run's record before
@@ -597,6 +643,9 @@ lists its settings and the jobs it runs.
 The agent receives the prompt in a file and the credential, when its
 adapter delivers one, as its plugin documents; for Nomad, in
 [the plugin's agent jobs](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs).
+`WHERRY_INPUT_DIR`, `WHERRY_CREDENTIALS_DIR` and `WHERRY_OUTPUT_DIR` hold
+the paths of its [input, credential and output
+directories](a2a-extension-v1.md#inputs-and-outputs).
 
 The agent writes JSON lines to standard output. The receiver publishes each
 line as a transcript chunk. The line that decodes as a JSON object with

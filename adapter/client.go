@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os/exec"
 	"sync"
 	"time"
@@ -98,17 +99,17 @@ func (p *Plugin) start() (*plugin.Client, adapterv1.AdapterClient, error) {
 	return client, rpc, nil
 }
 
-// configure builds settings' adapter in the plugin and returns whether it delivers git context.
-func configure(rpc adapterv1.AdapterClient, settings Settings) (bool, error) {
+// configure builds settings' adapter in the plugin and returns what the plugin reports of it.
+func configure(rpc adapterv1.AdapterClient, settings Settings) (*adapterv1.ConfigureResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), configureTimeout)
 	defer cancel()
 	resp, err := rpc.Configure(ctx, &adapterv1.ConfigureRequest{
 		Adapter: settings.Name, Pool: settings.Pool, Agent: settings.Agent, Credential: settings.Credential, Config: settings.Config, Platform: settings.Platform,
 	})
 	if err != nil {
-		return false, callError(ctx, err)
+		return nil, callError(ctx, err)
 	}
-	return resp.Git, nil
+	return resp, nil
 }
 
 // supervise restarts the process each time it exits, until Close.
@@ -163,12 +164,15 @@ func (p *Plugin) Configure(settings Settings) (Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	git, err := configure(rpc, settings)
+	resp, err := configure(rpc, settings)
 	if err != nil {
 		return nil, err
 	}
 	p.settings = append(p.settings, settings)
-	return &remote{plugin: p, name: settings.Name, git: git}, nil
+	directories := resp.GetDirectories()
+	return &remote{plugin: p, name: settings.Name, git: resp.Git, directories: Directories{
+		Input: directories.GetInput(), Output: directories.GetOutput(), Credentials: directories.GetCredentials(),
+	}}, nil
 }
 
 // Close stops the process and its restarts.
@@ -207,18 +211,23 @@ func callError(ctx context.Context, err error) error {
 		return context.DeadlineExceeded
 	case codes.ResourceExhausted:
 		return ErrMessageTooLarge
+	case codes.OutOfRange:
+		return &InputTooLargeError{Name: status.Convert(err).Message()}
 	}
 	return errors.New(status.Convert(err).Message())
 }
 
 // remote is one adapter in a plugin process.
 type remote struct {
-	plugin *Plugin
-	name   string
-	git    bool
+	plugin      *Plugin
+	name        string
+	git         bool
+	directories Directories
 }
 
 func (r *remote) Git() bool { return r.git }
+
+func (r *remote) Directories() Directories { return r.directories }
 
 func (r *remote) Ready(ctx context.Context) (bool, error) {
 	rpc, err := r.plugin.link()
@@ -243,9 +252,20 @@ func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
 	if run.Git != nil {
 		message.Git = &adapterv1.GitContext{Url: run.Git.URL, Ref: run.Git.Ref, Path: run.Git.Path}
 	}
+	for _, input := range run.Inputs {
+		message.Inputs = append(message.Inputs, &adapterv1.File{Name: input.Name, Data: input.Data})
+	}
+	for _, secret := range run.Credentials {
+		message.Credentials = append(message.Credentials, &adapterv1.Secret{Name: secret.Name, File: secret.File, Value: secret.Value})
+	}
 	resp, err := rpc.Dispatch(ctx, &adapterv1.DispatchRequest{Adapter: r.name, Run: message})
 	if err != nil {
-		return OutcomeUnknown, Handle{}, callError(ctx, err)
+		err = callError(ctx, err)
+		var tooLarge *InputTooLargeError
+		if errors.As(err, &tooLarge) {
+			return OutcomeNothingCreated, Handle{}, err
+		}
+		return OutcomeUnknown, Handle{}, err
 	}
 	return Outcome(resp.Outcome), handleOf(resp.Handle), nil
 }
@@ -299,6 +319,54 @@ func (r *remote) Stop(ctx context.Context, handle Handle) error {
 	}
 	_, err = rpc.Stop(ctx, &adapterv1.StopRequest{Adapter: r.name, Handle: handleMessage(handle)})
 	return callError(ctx, err)
+}
+
+// Collect bounds each output's data by limits.FileBytes as it joins the pieces, so a plugin cannot grow one without
+// limit.
+func (r *remote) Collect(ctx context.Context, handle Handle, limits Limits, outputs chan<- Output) error {
+	rpc, err := r.plugin.link()
+	if err != nil {
+		return err
+	}
+	stream, err := rpc.Collect(ctx, &adapterv1.CollectRequest{Adapter: r.name, Handle: handleMessage(handle), Limits: &adapterv1.Limits{
+		Files: int64(limits.Files), FileBytes: limits.FileBytes, TotalBytes: limits.TotalBytes,
+	}})
+	if err != nil {
+		return callError(ctx, err)
+	}
+	var output *Output
+	for {
+		resp, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			if output != nil {
+				return errors.New("collect ended inside an output")
+			}
+			return nil
+		}
+		if err != nil {
+			return callError(ctx, err)
+		}
+		if output == nil {
+			output = &Output{Name: resp.Name, Size: resp.Size, Mode: fs.FileMode(resp.Mode)}
+		} else if resp.Name != output.Name {
+			return errors.New("collect interleaved two outputs")
+		}
+		if int64(len(output.Data)+len(resp.Data)) > limits.FileBytes {
+			return errors.New("collect sent an output over the file limit")
+		}
+		if resp.Data != nil {
+			output.Data = append(append([]byte{}, output.Data...), resp.Data...)
+		}
+		if resp.More {
+			continue
+		}
+		select {
+		case outputs <- *output:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		output = nil
+	}
 }
 
 func (r *remote) Purge(ctx context.Context, runID string, turn int64) error {

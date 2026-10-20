@@ -4,9 +4,10 @@ URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
 Hosts and receivers exchange A2A tasks over Kafka with no server between
 them. This extension fixes the record formats and the checks each reader
-applies. Four of the records carry [A2A v1.0](https://a2a-protocol.org/)
-objects: submissions, statuses, transcript chunks and results hold one
-under its A2A field name, beside a `wherry` object of bindings. Every `Message` and `Artifact` wherry writes
+applies. Five of the records carry [A2A v1.0](https://a2a-protocol.org/)
+objects: submissions, statuses, transcript chunks, output chunks and
+results hold one under its A2A field name, beside a `wherry` object of
+bindings. Every `Message` and `Artifact` wherry writes
 lists the URI above in its `extensions`, and readers reject one that does
 not. [Concepts](concepts.md) explains the roles and topics this document
 names.
@@ -47,6 +48,7 @@ algorithm `EdDSA` (Ed25519). The protected header holds:
 | cancel | `application/vnd.wherry.cancel.v1+jws` | host | `wherry.pool.<pool>.events` | run ID |
 | status | `application/vnd.wherry.status.v1+jws` | receiver | `wherry.pool.<pool>.events` and `wherry.tenant.<tenant>` | run ID |
 | chunk | `application/vnd.wherry.chunk.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
+| output chunk | `application/vnd.wherry.output.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
 | result | `application/vnd.wherry.result.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
 | echo | `application/vnd.wherry.echo.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
 | advertisement | `application/vnd.wherry.advertisement.v1+jws` | receiver | `wherry.receivers` | receiver ID |
@@ -68,7 +70,7 @@ A reader accepts a signed record only when all of these hold:
    - A submission or cancel comes from a host on `wherry.admin`, without a
      membership end, of a tenant entitled to the pool. Its `pool` is the
      pool of the topic it arrived on.
-   - A status, chunk, result or start failure comes from a receiver on
+   - A status, chunk, output chunk, result or start failure comes from a receiver on
      `wherry.admin`, without a membership end, in the pool the run was
      placed in. Its `tenant` and `pool` are the run's, and the tenant is
      entitled to the pool.
@@ -99,7 +101,9 @@ A submission is one turn of a run.
       "selector": [{"key": "isolation", "operator": "In", "values": ["container"]}]
     },
     "deadline_ms": 1790000000000,
-    "queue_deadline_ms": 1789998800000
+    "queue_deadline_ms": 1789998800000,
+    "credentials": [{"name": "deploy-key", "file": "id_ed25519"}],
+    "outputs": [{"name": "report.md", "required": true}]
   }
 }
 ```
@@ -118,6 +122,22 @@ A submission is one turn of a run.
   later than one hour after `queue_deadline_ms`.
 - Each part of the message has exactly one of `text`, `raw`, `url` and
   `data`. A submission carries at most one [git part](#git-context).
+- Each `raw` and `data` part is an [input file](#inputs-and-outputs). Its
+  `filename` is required and is a file name: at most 255 bytes of letters,
+  digits, `.`, `_` and `-`, whose first character is not `.`. A `raw` part is delivered
+  as its bytes under `filename`, and a `data` part as its JSON under
+  `filename` with `.json` added. The delivered names are unique, and the
+  `raw` and `data` parts together hold at most 256 KiB.
+- `credentials` lists task credentials, each `{name, file}`: a credential
+  of the host, by the name in its configuration, that the agent gets as the
+  file `file` in its credentials directory. `name` follows the ID rules and
+  `file` the file name rules; each `file` appears once. The pool's terms do
+  not govern task credentials.
+- `outputs` lists the files the agent is asked to leave, each
+  `{name, required}`. `name` is a relative path of file names joined by
+  `/`, at most 4096 bytes, and appears once. `required` defaults to false.
+- Only a run's first turn carries `credentials` and `outputs`, and they
+  hold for every turn of the run.
 
 ## Cancel
 
@@ -181,17 +201,27 @@ part. The fixed texts are:
   `duplicate continuation`, `stale submission`,
   `task is not awaiting continuation`, `continuation turn out of order`,
   `continuation history unavailable`, `queue deadline passed`,
-  `run deadline passed`, `unsupported message part`, `run ID in use`;
-- interrupted: `credential <name> required`;
+  `run deadline passed`, `unsupported message part`,
+  `input names repeat across turns`, `run ID in use`;
+- interrupted: `credential <name> required`, or
+  `credentials <name>, <name> required` when the seal request named more
+  than one;
 - failed: `timeout`, `log stream failed`,
   `agent ended without a result`, `git context unavailable`,
   `receiver denied`, `delivery budget exhausted`,
-  `start failed and the job could not be removed`. A failure the agent
-  reports carries no message; its result holds the agent's text;
+  `start failed and the job could not be removed`,
+  `input <name> takes the turn's inputs over what adapter <adapter>
+  delivers`, naming the input at which they pass the adapter's limit (or
+  `an input takes the turn's inputs over what adapter <adapter> delivers`
+  when the adapter names no input of the run), and
+  `required output <name> not returned: <reason>` with a reason from
+  [Metadata](#metadata). A failure the agent reports carries no message;
+  its result holds the agent's text;
 - canceled: `canceled by user`.
 
-`metadata.credential` names the credential. The `wherry` CLI and MCP
-server pass the message text through and do not read it.
+`metadata.credential` names the credential, the first of them when the
+request named several. The `wherry` CLI and MCP server pass the message
+text through and do not read it.
 
 ## Chunk
 
@@ -223,6 +253,35 @@ A chunk is one line of the agent's standard output, as the A2A artifact
   is true on the turn's final chunk, written with its terminal status.
 
 A turn's transcript starts at offset 0.
+
+## Output chunk
+
+An output chunk is part of one output file, as the A2A artifact the file
+names.
+
+```json
+{
+  "v": 1,
+  "artifactUpdate": { "...": "A2A TaskArtifactUpdateEvent" },
+  "wherry": {
+    "receiver": "nomad-1", "tenant": "alice", "pool": "build",
+    "run": "run-0f3c...", "turn": 1, "attempt": 1,
+    "task_hash": "9d2a..."
+  }
+}
+```
+
+- The artifact's `artifactId` is the output's name, a relative path of
+  file names joined by `/`. It has exactly one `raw` part holding at most
+  256 KiB of the file.
+- `artifactUpdate.metadata` is `{"index": <n>}`. A file's chunks have
+  indexes 0, 1, 2 and so on, in file order. `append` is false at index 0
+  and true after it. `lastChunk` is true on the file's final chunk. An
+  empty file is one chunk with an empty part.
+- A chunk's identity is its turn, attempt, artifact and index.
+
+A receiver writes a turn's output chunks in the transaction that holds its
+result, before the result.
 
 ## Result
 
@@ -269,6 +328,23 @@ The `metadata` of a result's `Task` says where the turn ran:
 - `job` (string): the adapter's reference for the job on its platform, for
   diagnosis only. It is absent when no job was dispatched or adopted, and
   when the adapter gives none.
+- `outputs` (array): each output the turn returned, as `{name, sha256,
+  size}`, where `sha256` is the lowercase hex SHA-256 and `size` the byte
+  count of the bytes its output chunks carry. The receiver computes both.
+- `not_returned` (array): each output the turn did not return, as
+  `{name, size, reason}`. `size` is present when the receiver knows it.
+
+| `reason` | Meaning |
+| --- | --- |
+| `missing` | an expected output the agent did not leave |
+| `not collected` | the adapter did not collect the outputs; every expected output is listed with it |
+| `exceeds output limit` | the file is over 8 MiB, or would take the turn's outputs over 8 MiB |
+| `rejected: symlink`, `rejected: fifo`, `rejected: device`, `rejected: socket`, `rejected: irregular file` | the entry is not a regular file and was not read |
+| `rejected: invalid name` | the path is not a relative path of file names; `name` is the path quoted as ASCII, at most 256 bytes |
+| `rejected: size changed while read` | the adapter read a length other than the size it listed |
+
+`outputs` and `not_returned` are present on a result whose turn the agent
+ended with its result line, and absent when they would be empty.
 
 The `metadata` of the `result` artifact holds `agent_result` (object): the
 agent's final result line, decoded as a JSON object, with its `result`
@@ -350,6 +426,7 @@ then ends the turn `TASK_STATE_FAILED` with the message text
 | `offer-unavailable` | no ready adapter satisfies the task's agent and selector |
 | `dispatch` | the adapter created no job for the turn |
 | `platform` | the platform ended the job before its agent task started, for example when the image cannot be pulled |
+| `input-too-large` | the adapter cannot deliver one of the turn's inputs; the receiver then ends the turn `TASK_STATE_FAILED` naming the input, and releases nothing |
 
 A `platform` start failure can follow the turn's `started` status, when the
 job ended before its agent task started.
@@ -431,6 +508,7 @@ turn's `claimed` status.
   "key": {"kty": "EC", "crv": "P-256", "x": "...", "y": "..."},
   "key_id": "hs9I_DeEnEcQZjRh56OShK8IHP_rXpmv2UZ2DQxMXz0",
   "credentials": ["model-api-key"],
+  "task_credentials": ["deploy-key"],
   "expiry_ms": 1789998300000
 }
 ```
@@ -438,8 +516,11 @@ turn's `claimed` status.
 - `key` is the attempt's public key as a JWK. `key_id` is its
   [RFC 7638](https://datatracker.ietf.org/doc/html/rfc7638) SHA-256
   thumbprint, unpadded base64url.
-- `credentials` names the credentials the attempt needs. Today it is the
-  credential of the adapter the turn was routed to.
+- `credentials` names the credential of the adapter the turn was routed to,
+  and is empty when the adapter delivers none.
+- `task_credentials` names the run's task credentials other than that one,
+  and is absent when there are none. A name appears once across both
+  lists, and the lists are not both empty.
 - `expiry_ms` is 5 minutes after the request. The receiver holds the claim
   until a seal opens, a cancel of the turn arrives, or `expiry_ms` passes.
   At expiry it interrupts the turn `TASK_STATE_AUTH_REQUIRED` (see [Turns
@@ -463,8 +544,9 @@ all of these hold:
 5. The request names the turn this host last submitted or continued, which
    is the run's latest turn, and the receiver and attempt of that turn's
    latest status, which is `claimed`, `started` or `heartbeat`.
-6. Every name in `credentials` is in the pool's terms for the run's agent
-   and in the host's configuration.
+6. Every name in `credentials` is in the pool's terms for the run's agent,
+   every name in `task_credentials` is a task credential the run's first
+   turn declares, and the host's configuration maps every name to a file.
 
 A host records a run locally before it publishes the run's turn, so a
 request can follow the task at once; a request read while the record is
@@ -500,11 +582,12 @@ request's `key`.
   these algorithms and the compact serialization, and reject `zip`.
 - The protected header holds `alg`, `enc`, `epk`, `typ`
   `application/vnd.wherry.seal.v2+jwe` and the binding: `tenant`, `pool`,
-  `receiver`, `key_id`, `run`, `turn`, `attempt`, `credentials` and
-  `expiry_ms`, copied from the request. Readers reject any other member.
+  `receiver`, `key_id`, `run`, `turn`, `attempt`, `credentials`,
+  `task_credentials` when the request has it, and `expiry_ms`, copied from
+  the request. Readers reject any other member.
 - The plaintext is a JSON object: `v`, `binding`, an object holding the
-  binding members again, and `values`, mapping each credential name in
-  `credentials` to its value as padded standard base64.
+  binding members again, and `values`, mapping each name in `credentials`
+  and `task_credentials` to its value as padded standard base64.
 - A seal is at most 64 KiB in compact form. A host refuses to build a larger
   one and logs the credential names.
 
@@ -518,15 +601,21 @@ seal arrives is never dispatched. It passes the values to the adapter in
 Dispatch. It logs a seal that does not open by run, turn and attempt, never
 the reason.
 
-Before it signs any transcript chunk, result text or status message of the
-attempt, the receiver replaces every occurrence of the exact bytes of each
-credential value it delivered with `[redacted:<name>]`, or `[redacted]`
-when the name contains the value. In result metadata it replaces within
-JSON string values only, so the metadata stays valid. A value shorter than
-8 bytes is not redacted; the receiver logs `credential <name> too short to
-redact` once for the attempt. A value that appears in another encoding,
-such as JSON-escaped, is not replaced, and an adopted attempt delivered
-nothing to redact.
+Before it signs any transcript chunk, output chunk, result text or status
+message of the attempt, the receiver replaces every occurrence of each
+credential value it delivered, task credentials included, with
+`[redacted:<name>]`, or `[redacted]` when the name contains the value. It
+replaces two forms of each value: its bytes without trailing CR and LF,
+since a credential file usually ends in a newline that transcripts and
+outputs drop, and those bytes escaped as a JSON string, as a transcript
+line carries them. The value's own bytes contain the first form, so its
+redaction leaves only the line ending. It redacts an output file whole
+before it splits it into chunks and computes its hash and size. In result
+metadata it replaces within JSON string values only, so the metadata stays
+valid. A value shorter than 8 bytes once trimmed is not redacted; the
+receiver logs `credential <name> too short to redact` once for the attempt.
+A value in any other encoding, such as base64, is not replaced, and an
+adopted attempt delivered nothing to redact.
 
 ## Admin records
 
@@ -562,7 +651,7 @@ job. Readers order a run's statuses, chunks and results by
 the outcome of a later one.
 
 A receiver interrupts a turn with `TASK_STATE_AUTH_REQUIRED` when no seal
-for the credential its adapter delivers opens before its
+for the credentials it asked for opens before its
 [seal request](#seal-request) expires. It writes the result and the
 `interrupted` status, and acknowledges the task.
 
@@ -598,8 +687,10 @@ A receiver that claims a submission:
    it;
 7. rejects a continuation whose earlier turns it cannot read;
 8. rejects it when its queue deadline or run deadline has passed;
-9. rejects it when a part other than text, or other than one git part the
-   adapter delivers, appears in the run's turns;
+9. rejects it with `unsupported message part` when a `url` part other than
+   one git part the adapter delivers appears in the run's turns, and with
+   `input names repeat across turns` when two turns deliver input files of
+   one name;
 10. writes the echo and the `claimed` status.
 
 A turn a cancel covers skips steps 8 and 9, and ends `TASK_STATE_CANCELED`
@@ -637,6 +728,52 @@ The turn's `started` status holds `git_commit`, the hex commit SHA checked
 out, in its `metadata`. When the checkout fails, the turn ends
 `TASK_STATE_FAILED` with the message text `git context unavailable`.
 Receivers do not publish git's error output.
+
+## Inputs and outputs
+
+The agent finds three directories through environment variables that hold
+their paths:
+
+- `WHERRY_INPUT_DIR`: the run's input files, from the `raw` and `data`
+  parts of every turn, under their delivered names.
+- `WHERRY_CREDENTIALS_DIR`: the run's task credentials, each as the file
+  its `file` names. The adapter writes credential values only there, as
+  files, and never into the environment or the input directory.
+- `WHERRY_OUTPUT_DIR`: where the agent leaves its outputs. The agent
+  creates the directory when it does not exist.
+
+When the run has inputs, task credentials or expected outputs, the
+receiver opens the prompt with lines giving the absolute path of each
+directory, of each input file, of each credential file and of each expected
+output, with `(required)` after a required one, so an agent without a shell
+finds them. The adapter reports the directories' paths as its agent sees
+them; a directory it does not report appears as its variable. The lines
+hold no credential value.
+
+After the agent's result line, the receiver stops the job, then asks the
+adapter to collect the outputs. The adapter lists every entry beneath the
+outputs directory without following links, and refuses the whole tree,
+reading nothing, when it holds more than 256 entries. It reads only regular
+files: one at most 8 MiB, and together at most 8 MiB, which the receiver
+checks again. Every other entry is listed with its type and left unread.
+The receiver gives up on a collection that takes over 2 minutes. An adapter
+that cannot collect, or a job that could not be stopped, leaves the
+outputs `not collected`.
+
+The receiver checks every name, redacts every file, and publishes each
+returned file as [output chunks](#output-chunk) and in the result's
+[metadata](#metadata). A required output listed in `not_returned` ends
+the turn `TASK_STATE_FAILED` with
+`required output <name> not returned: <reason>`; an optional one leaves
+the state as the agent's result set it.
+
+A host takes a turn's outputs from the attempt and receiver of the result
+that ended it, ignoring every other attempt's chunks. For each output the
+result lists, it joins the chunks by index and rejects the output when an
+index is missing (`gap`), when chunks follow the last one (`overlap`), when
+an index appears twice (`duplicate chunk`), or when the joined bytes differ
+from the listed size or SHA-256 (`size or hash mismatch`). It writes only
+outputs that pass.
 
 ## Cancellation
 

@@ -28,9 +28,15 @@ import (
 // mcpSession connects an MCP client to newMCPServer over in-memory transports; progress counts notifications received.
 func mcpSession(t *testing.T, connect func() (*busclient.Host, error), progress *atomic.Int64) *mcp.ClientSession {
 	t.Helper()
+	return mcpSessionReading(t, connect, progress, inputReader(t.TempDir(), busclient.Config{}))
+}
+
+// mcpSessionReading is mcpSession with submit reading its inputs through readInput.
+func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), progress *atomic.Int64, readInput func(string) (wire.Part, error)) *mcp.ClientSession {
+	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, readInput).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
