@@ -777,7 +777,7 @@ Forge rules that confine the credential's pushes to `wherry/*` make that
 the only branch it can write.
 
 `ssh` refuses a private key that others can read when the agent's user
-owns the file, so the mode an adapter gives credential files decides
+owns the file, so the owner and mode an adapter gives credential files decide
 whether a deploy key works; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs)
 says what it gives.
