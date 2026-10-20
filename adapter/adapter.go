@@ -169,7 +169,40 @@ type Adapter interface {
 	Purge(ctx context.Context, runID string, turn int64) error
 	Release(ctx context.Context, runID string, turn int64) error
 	Sweep(ctx context.Context) error
+	// Metrics reports the adapter's samples of the families the core declares for adapters. The core drops a sample
+	// outside them, and gives every sample's adapter label the adapter's own name.
+	Metrics(ctx context.Context) ([]Sample, error)
 }
+
+// Kind is the kind of a Sample's value.
+type Kind int
+
+const (
+	KindCounter Kind = iota + 1
+	KindGauge
+	KindHistogram
+)
+
+// Sample is one value of a metric family the core declares for adapters, with its labels.
+type Sample struct {
+	Family string
+	Labels map[string]string
+	Kind   Kind
+	// Value is a counter's or a gauge's.
+	Value     float64
+	Histogram Histogram
+}
+
+// Histogram is a snapshot over its family's buckets: Buckets holds the cumulative count of observations at or below
+// each bound.
+type Histogram struct {
+	Buckets []uint64
+	Sum     float64
+	Count   uint64
+}
+
+// PlacementBuckets are the bounds, in seconds, of wherry_adapter_placement_seconds.
+var PlacementBuckets = []float64{1, 2, 5, 10, 30, 60, 120, 300, 600, 1800}
 
 // AgentEnvironment is the environment every adapter gives its agent over the environment it configures: git reads only
 // the clone's own configuration, never prompts and traces nothing. It protects a cooperative agent from ambient

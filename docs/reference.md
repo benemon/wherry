@@ -458,6 +458,10 @@ It logs to standard output with the prefix `receiver: `. It exits on
 `receiver configuration changed` when a new configuration record appears.
 It refuses to start after its membership end.
 
+With `--metrics-addr HOST:PORT` it serves its [metrics](#metrics) at
+`/metrics` on that address, and fails at start when it cannot listen there.
+Without the flag it serves none.
+
 ### Adapter plugins
 
 The receiver ships with no adapters. For each adapter type in its
@@ -502,15 +506,38 @@ not against one that runs commands of its own
 
 The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
-certificate pair made for each start, protocol version 3. The receiver refuses a
-plugin of any other protocol version at its start. The receiver refuses a plugin
-that offers no TLS certificate. Every call names its adapter. A plugin accepts
-messages up to 64 MiB; the receiver logs a larger Dispatch as
-`dispatch rejected: message too large`.
+certificate pair made for each start, protocol version 4. The receiver refuses a
+plugin of any other protocol version at its start, so the receiver and its
+plugins upgrade together. Version 4 adds `Metrics`; the receiver refuses a
+version 3 plugin with
+`incompatible API version with plugin. Plugin version: 3, Client versions: [4]`.
+The receiver refuses a plugin that offers no TLS certificate. Every call names
+its adapter. A plugin accepts messages up to 64 MiB; the receiver logs a larger
+Dispatch as `dispatch rejected: message too large`.
 
 Each advertisement gives every adapter's sweep and readiness call one
 advertise interval, 30 seconds; a call that runs out counts as not ready
 and is logged.
+
+Each scrape of `/metrics` calls every adapter's `Metrics` at once, each within
+2 seconds. A plugin answers with samples of the `wherry_adapter_` families,
+each a family name, labels, and a counter or gauge value or a histogram. A
+histogram gives the cumulative count at each bound of
+`adapter.PlacementBuckets`, its sum and its count. The receiver drops a
+sample, and counts it in `wherry_metrics_dropped_total` by reason, when:
+
+- its family is not one of the four (`unknown_family`);
+- it has a label key the family lacks (`unknown_label`);
+- a label value is outside the family's set (`label_value`);
+- its kind is not the family's (`kind`);
+- its value is not finite, a counter is negative, or a histogram has other
+  buckets (`value`);
+- it repeats a series of the same answer (`duplicate`).
+
+It sets every sample's `adapter` label to the name of the adapter that
+answered, so a plugin cannot report for another adapter. A call that fails
+or runs out is counted as `error` or `timeout`, and the scrape serves that
+adapter's samples from its last answer.
 
 When a plugin exits, the receiver logs `plugin exited; restarting`, starts it
 again after one second, waiting twice as long after each failed start up to 30
@@ -534,6 +561,78 @@ The protocol is the Go module `github.com/benemon/wherry/adapter` in this
 repository. [`adapter.proto`](../adapter/proto/wherry/adapter/v1/adapter.proto)
 defines the service, `adapter.Serve` runs a plugin, and `adaptertest` is
 the conformance suite a plugin runs against its platform.
+
+### Metrics
+
+A receiver started with `--metrics-addr` serves its metrics in the Prometheus
+text format over plain HTTP. `/metrics` is the only path; every other path
+answers 404. The scrape holds the Go runtime (`go_`) and
+process (`process_`) families, `wherry_build_info` with `version` and
+`revision` and value 1, and the families below, each with the label `pool`.
+
+Every label value comes from the receiver's configuration, its pool's terms and
+entitlements, or a fixed list. No label or value carries a run ID, prompt,
+output, error text, URL, image, path, node or credential name. An agent the
+pool's terms do not name is `other`. A turn ended without an adapter has
+`adapter="none"`: one given back at the delivery budget before any adapter
+took it, and an interrupted turn a member ends on its cancel or expiry, even
+after it ran.
+
+| Family | Type | Labels | Counts |
+| --- | --- | --- | --- |
+| `wherry_claims_total` | counter | `tenant` | claimed tasks whose submission verifies |
+| `wherry_admissions_total` | counter | `tenant`, `adapter` | tasks admitted, by the adapter they were routed to |
+| `wherry_rejections_total` | counter | `tenant`, `reason` | rejections, by reason |
+| `wherry_runs_total` | counter | `tenant`, `adapter`, `agent`, `state` | turns ended `completed`, `failed` or `canceled` |
+| `wherry_turn_duration_seconds` | histogram | `tenant`, `adapter`, `agent`, `state` | time from this attempt's claim to the turn's terminal state; an adopted turn counts the adopting attempt only |
+| `wherry_queue_wait_seconds` | histogram | `tenant`, `adapter` | time from submission to first claim |
+| `wherry_adoptions_total` | counter | `tenant`, `adapter` | turns that adopted an earlier attempt's job |
+| `wherry_continuations_total` | counter | `tenant`, `adapter` | continuation turns admitted |
+| `wherry_redeliveries_total` | counter | `tenant`, `adapter` | turns run on a redelivery |
+| `wherry_in_flight` | gauge | `adapter` | tasks held |
+| `wherry_capacity` | gauge | none | the configured capacity |
+| `wherry_start_failures_total` | counter | `adapter`, `class` | start failures: `offer-unavailable`, `input-too-large`, `dispatch`, `platform` |
+| `wherry_dispatch_outcomes_total` | counter | `adapter`, `outcome` | dispatches: `created`, `nothing`, `unknown` |
+| `wherry_stop_failures_total` | counter | `adapter` | failed `Stop` calls |
+| `wherry_purge_failures_total` | counter | `adapter` | failed `Purge` calls |
+| `wherry_sweep_failures_total` | counter | `adapter` | failed `Sweep` calls |
+| `wherry_collection_failures_total` | counter | `adapter`, `reason` | turns whose outputs were not collected: `not_stopped`, `over_limits`, `timeout`, `failed` |
+| `wherry_plugin_restarts_total` | counter | `type` | plugin restarts |
+| `wherry_seal_waits_total` | counter | `tenant`, `outcome` | seal waits: `sealed`, `expired`, `auth_required`, `adopter_refused` |
+| `wherry_seal_wait_seconds` | histogram | `tenant` | time a turn waited for its seal, whatever the outcome |
+| `wherry_redactions_total` | counter | `tenant`, `adapter` | credential values replaced in published output |
+| `wherry_bus_errors_total` | counter | `op` | Kafka errors: `read`, `write`, `transactional ID`, `share group` |
+| `wherry_denials_total` | counter | `op` | Kafka authorisation errors, by the capability denied: `read`, `write`, `transactional ID`, `share group`, `membership` |
+| `wherry_renewal_failures_total` | counter | none | failed claim renewals |
+| `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
+| `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events |
+| `wherry_fenced_total` | counter | none | runs given up to a newer holder |
+| `wherry_agent_reported_tokens_total` | counter | `tenant`, `agent`, `kind` | tokens an agent's result reports: `input`, `output`, `cached`, `reasoning` |
+| `wherry_agent_reported_cost_usd_total` | counter | `tenant`, `agent` | cost in US dollars an agent's result reports |
+| `wherry_metrics_dropped_total` | counter | `adapter`, `reason` | adapter samples dropped and `Metrics` calls that failed |
+| `wherry_adapter_platform_errors_total` | counter | `adapter`, `class` | platform API errors: `unavailable`, `denied`, `conflict`, `timeout`, `other` |
+| `wherry_adapter_cleanup_pending` | gauge | `adapter` | ended jobs awaiting cleanup |
+| `wherry_adapter_sweep_deletions_total` | counter | `adapter`, `kind` | material a sweep deleted: `job`, `variable` |
+| `wherry_adapter_placement_seconds` | histogram | `adapter` | time from dispatch to the agent task starting |
+
+A rejection's `reason` is its fixed text, such as `run expired`. A reason that
+quotes the task counts as `invalid inputs`,
+`git remote host outside the pool's vcs hosts` or `pool has no storage`.
+
+A seal wait is `expired` when the turn's deadline passes,
+`auth_required` when the wait ends and the turn is interrupted, and
+`adopter_refused` when an adopter's wait ends and it stops the job first.
+
+Agent-reported usage comes from a turn's result: Claude Code's `usage` fields
+`input_tokens`, `output_tokens` and `cache_read_input_tokens`, and its
+`total_cost_usd`; Codex's `input_tokens`, `output_tokens`,
+`cached_input_tokens` and `reasoning_output_tokens`. An absent field adds
+nothing. The figures are the agent's own, unchecked.
+
+The core histograms' buckets are 1, 5, 15, 30 and 60 seconds, 2, 5, 10 and 30
+minutes, and 1, 2 and 4 hours. `wherry_adapter_placement_seconds` uses
+`adapter.PlacementBuckets`: 1, 2, 5, 10 and 30 seconds, and 1, 2, 5, 10 and 30
+minutes.
 
 ## MCP tools
 

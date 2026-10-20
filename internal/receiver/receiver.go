@@ -26,6 +26,7 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
@@ -59,6 +60,7 @@ type Receiver struct {
 	signing  ed25519.PrivateKey
 	factory  AdapterFactory
 	logger   *log.Logger
+	metrics  *metrics
 	// config and adapters are set by configure before any claim and never change.
 	config   admin.ReceiverConfig
 	adapters []Named
@@ -84,8 +86,9 @@ type Receiver struct {
 	unfound map[string]time.Time
 }
 
-// New loads or creates the receiver's signing key in stateDir and builds its Kafka client from bundle.
-func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *log.Logger) (*Receiver, error) {
+// New loads or creates the receiver's signing key in stateDir and builds its Kafka client from bundle. Once configured,
+// the receiver registers its metric families on registry.
+func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
 	id, ok := strings.CutPrefix(bundle.Principal, admin.ReceiverPrincipal(""))
 	if !ok || !admin.ValidName(id) {
 		return nil, errors.New("bundle principal is not a receiver principal")
@@ -117,7 +120,7 @@ func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *l
 	if err != nil {
 		return nil, err
 	}
-	return &Receiver{id: id, kafkaOpt: opts, base: base, signing: signing, factory: factory, logger: logger}, nil
+	return &Receiver{id: id, kafkaOpt: opts, base: base, signing: signing, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
 func loadOrCreate[K any](path string, load func(string) (K, error), create func(string) (K, error)) (K, error) {
@@ -260,6 +263,8 @@ func (r *Receiver) configure(ctx context.Context) error {
 				adapters = append(adapters, named)
 			}
 			r.config, r.adapters = config, adapters
+			r.metrics.registerFor(r)
+			r.metrics.capacity.Set(float64(config.Capacity))
 			r.logger.Printf("configured: pool=%s adapters=%d capacity=%d", config.Pool, len(adapters), config.Capacity)
 			return r.refresh(ctx)
 		}
@@ -329,8 +334,11 @@ const (
 	capMembership capability = "membership"
 )
 
-// deny records an authorisation error from an operation that used capability.
+// deny counts an error from an operation that used capability, and records it when it is an authorisation error.
 func (r *Receiver) deny(err error, used capability) {
+	if used != capMembership && !errors.Is(err, context.Canceled) {
+		r.metrics.busErrors.WithLabelValues(string(used)).Inc()
+	}
 	if !authorisationError(err) {
 		return
 	}
@@ -340,6 +348,7 @@ func (r *Receiver) deny(err error, used capability) {
 	case errors.Is(err, kerr.GroupAuthorizationFailed):
 		used = capClaim
 	}
+	r.metrics.denials.WithLabelValues(string(used)).Inc()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.denials[used] {
@@ -483,6 +492,9 @@ func (r *Receiver) advertise(ctx context.Context) error {
 		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)
 		err := named.Adapter.Sweep(callCtx)
 		cancel()
+		if err != nil {
+			r.metrics.sweepFailures.WithLabelValues(named.Name).Inc()
+		}
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
 			r.logger.Printf("adapter %s sweep: timed out", named.Name)

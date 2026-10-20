@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +18,7 @@ import (
 
 	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // pluginDir holds wherry-plugin-fake, the protocol module's test plugin, for the package's tests.
@@ -156,7 +160,7 @@ func TestRelativePluginDirRunsTheCheckedBinary(t *testing.T) {
 	}
 	t.Setenv("PATH", decoys+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Chdir(dir)
-	plugins := &plugins{dir: ".", logs: io.Discard, running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: ".", logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
 	_, err := plugins.adapter("build", admin.AdapterSettings{Name: "exec", Type: "fake", Agent: "claude"}, "")
 	if _, statErr := os.Stat(marker); statErr == nil {
@@ -171,7 +175,7 @@ func TestRestartChecksThePluginAgain(t *testing.T) {
 	read := recordPlugin(t)
 	dir := installPlugin(t)
 	logs := &syncBuffer{}
-	plugins := &plugins{dir: dir, logs: logs, running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: dir, logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
 	if _, err := plugins.adapter("build", admin.AdapterSettings{Name: "exec", Type: "fake", Agent: "claude"}, ""); err != nil {
 		t.Fatal(err)
@@ -195,7 +199,7 @@ func TestRestartChecksThePluginAgain(t *testing.T) {
 }
 
 func TestMissingPluginIsAConfigurationError(t *testing.T) {
-	plugins := &plugins{dir: t.TempDir(), logs: io.Discard, running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: t.TempDir(), logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
 	_, err := plugins.adapter("build", admin.AdapterSettings{Name: "lab", Type: "nomad", Agent: "claude"}, "")
 	if err == nil || err.Error() != "no plugin for type nomad" {
@@ -215,7 +219,7 @@ func TestOneProcessPerAdapterType(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	plugins := &plugins{dir: dir, logs: io.Discard, running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: dir, logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
 	for _, settings := range []admin.AdapterSettings{
 		{Name: "exec", Type: "fake", Agent: "claude"}, {Name: "podman", Type: "fake", Agent: "claude"}, {Name: "edge", Type: "other", Agent: "claude"},
@@ -264,6 +268,29 @@ func TestReadBundleErrorsEchoNoContent(t *testing.T) {
 		}
 		if _, err := readBundle(path); err == nil || strings.Contains(err.Error(), "sk-ant") {
 			t.Fatalf("bundle error %v must name no YAML content", err)
+		}
+	}
+}
+
+func TestMetricsServeOnlyTheMetricsPath(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serveMetrics(listener, newRegistry(), log.New(io.Discard, "", 0)).Close()
+	base := "http://" + listener.Addr().String()
+	for path, want := range map[string]int{"/metrics": http.StatusOK, "/": http.StatusNotFound, "/metrics/x": http.StatusNotFound, "/debug/pprof/": http.StatusNotFound} {
+		response, err := http.Get(base + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if response.StatusCode != want {
+			t.Fatalf("GET %s = %d; want %d", path, response.StatusCode, want)
+		}
+		if path == "/metrics" && (!strings.Contains(string(body), "wherry_build_info{") || !strings.Contains(string(body), "go_goroutines ")) {
+			t.Fatalf("metrics lack the build info and runtime collectors:\n%s", body)
 		}
 	}
 }

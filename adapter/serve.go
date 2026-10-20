@@ -331,3 +331,22 @@ func (s *server) Sweep(ctx context.Context, req *adapterv1.SweepRequest) (*adapt
 	}
 	return &adapterv1.SweepResponse{}, callStatus(adapter.Sweep(ctx))
 }
+
+func (s *server) Metrics(ctx context.Context, req *adapterv1.MetricsRequest) (*adapterv1.MetricsResponse, error) {
+	adapter, err := s.adapter(req.Adapter)
+	if err != nil {
+		return nil, err
+	}
+	samples, err := adapter.Metrics(ctx)
+	if err != nil {
+		return nil, callStatus(err)
+	}
+	resp := &adapterv1.MetricsResponse{}
+	for _, sample := range samples {
+		resp.Samples = append(resp.Samples, &adapterv1.Sample{
+			Family: sample.Family, Labels: sample.Labels, Kind: adapterv1.Kind(sample.Kind), Value: sample.Value,
+			Histogram: &adapterv1.Histogram{Buckets: sample.Histogram.Buckets, Sum: sample.Histogram.Sum, Count: sample.Histogram.Count},
+		})
+	}
+	return resp, nil
+}

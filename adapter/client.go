@@ -41,8 +41,9 @@ type Plugin struct {
 	mu        sync.Mutex
 	client    *plugin.Client
 	// rpc is nil while the process is down.
-	rpc    adapterv1.AdapterClient
-	closed bool
+	rpc      adapterv1.AdapterClient
+	closed   bool
+	restarts int64
 }
 
 // Launch starts the plugin binary resolve returns over mutual TLS, and calls resolve again before every
@@ -149,6 +150,7 @@ func (p *Plugin) supervise(client *plugin.Client) {
 				return
 			}
 			p.client, p.rpc = next, rpc
+			p.restarts++
 			p.mu.Unlock()
 			p.logger.Info("plugin restarted", "path", p.path)
 			client = next
@@ -183,6 +185,13 @@ func (p *Plugin) Close() {
 	client := p.client
 	p.mu.Unlock()
 	client.Kill()
+}
+
+// Restarts is the number of times the process has been started again since Launch.
+func (p *Plugin) Restarts() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.restarts
 }
 
 func (p *Plugin) link() (adapterv1.AdapterClient, error) {
@@ -419,4 +428,24 @@ func (r *remote) Sweep(ctx context.Context) error {
 	}
 	_, err = rpc.Sweep(ctx, &adapterv1.SweepRequest{Adapter: r.name})
 	return callError(ctx, err)
+}
+
+func (r *remote) Metrics(ctx context.Context) ([]Sample, error) {
+	rpc, err := r.plugin.link()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := rpc.Metrics(ctx, &adapterv1.MetricsRequest{Adapter: r.name})
+	if err != nil {
+		return nil, callError(ctx, err)
+	}
+	samples := make([]Sample, 0, len(resp.GetSamples()))
+	for _, sample := range resp.GetSamples() {
+		histogram := sample.GetHistogram()
+		samples = append(samples, Sample{
+			Family: sample.GetFamily(), Labels: sample.GetLabels(), Kind: Kind(sample.GetKind()), Value: sample.GetValue(),
+			Histogram: Histogram{Buckets: histogram.GetBuckets(), Sum: histogram.GetSum(), Count: histogram.GetCount()},
+		})
+	}
+	return samples, nil
 }

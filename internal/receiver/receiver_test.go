@@ -30,6 +30,7 @@ import (
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -112,6 +113,9 @@ type fakeAdapter struct {
 	collects     int
 	stopsBefore  []int
 	limits       adapter.Limits
+	// samples are what Metrics reports, unless metricsHang makes it block until its context ends.
+	samples     []adapter.Sample
+	metricsHang bool
 }
 
 func (f *fakeAdapter) Directories() adapter.Directories {
@@ -281,6 +285,17 @@ func (f *fakeAdapter) Sweep(ctx context.Context) error {
 	defer f.mu.Unlock()
 	f.sweeps++
 	return f.sweepErr
+}
+
+func (f *fakeAdapter) Metrics(ctx context.Context) ([]adapter.Sample, error) {
+	f.mu.Lock()
+	hang, samples := f.metricsHang, f.samples
+	f.mu.Unlock()
+	if hang {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return samples, nil
 }
 
 func (f *fakeAdapter) sweepCount() int {
@@ -462,7 +477,7 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		adapter.mu.Unlock()
 		return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Adapter: adapter}, nil
 	}
-	return &Receiver{id: config.Receiver, kafkaOpt: opts, base: base, signing: signing, factory: factory, logger: log.New(logs, "", 0)}, logs
+	return &Receiver{id: config.Receiver, kafkaOpt: opts, base: base, signing: signing, factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
 }
 
 func (f fixture) produce(t *testing.T, topic, key string, value []byte) *kgo.Record {
@@ -850,7 +865,7 @@ func TestRegisterRefusesAnotherKey(t *testing.T) {
 func TestConfigureWaitsForItsRecord(t *testing.T) {
 	f := newFixture(t, resultStream)
 	// The superuser reads wherry.admin; no record names receiver-z.
-	waiting := &Receiver{id: "receiver-z", base: f.service.Admin, logger: f.receiver.logger, factory: f.receiver.factory}
+	waiting := &Receiver{id: "receiver-z", base: f.service.Admin, logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
 	ctx, cancel := context.WithTimeout(f.ctx, time.Second)
 	defer cancel()
 	if err := waiting.configure(ctx); !errors.Is(err, context.DeadlineExceeded) {
@@ -878,7 +893,7 @@ func TestConfigureRefusesConfigOutsideTerms(t *testing.T) {
 	config := testConfig(testReceiver)
 	config.Adapters[0].Agent = "gemini"
 	f.appendConfig(t, config)
-	restarted := &Receiver{id: testReceiver, base: f.receiver.base, logger: f.receiver.logger, factory: f.receiver.factory}
+	restarted := &Receiver{id: testReceiver, base: f.receiver.base, logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
 	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "outside pool terms") {
 		t.Fatalf("configure: %v, want a refusal naming the terms", err)
 	}
@@ -948,11 +963,11 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 		"host principal": {Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.TenantPrincipal("tenant-a", "host-a"), Password: "p"},
 		"no CA":          {Broker: "127.0.0.1:1", Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"},
 	} {
-		if _, err := New(bundle, filepath.Join(dir, name), nil, log.New(io.Discard, "", 0)); err == nil {
+		if _, err := New(bundle, filepath.Join(dir, name), nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
 			t.Fatalf("%s: New accepted the bundle", name)
 		}
 	}
-	r, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), nil, log.New(io.Discard, "", 0))
+	r, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -960,7 +975,7 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 	if r.id != "receiver-a" {
 		t.Fatalf("receiver ID %q", r.id)
 	}
-	again, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), nil, log.New(io.Discard, "", 0))
+	again, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -976,7 +991,7 @@ func TestNewDeletesTheRetiredSealingKey(t *testing.T) {
 	if err := os.WriteFile(path, []byte("x25519-private-key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(testCA(t)), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, dir, nil, log.New(io.Discard, "", 0))
+	r, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(testCA(t)), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, dir, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

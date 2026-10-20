@@ -32,6 +32,7 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -143,6 +144,16 @@ func (r *Receiver) claimOne(ctx context.Context) error {
 	}
 	r.adjustInFlight(1)
 	defer r.adjustInFlight(-1)
+	tenant, routed := admitted.task.Wherry.Tenant, admitted.adapter.Name
+	r.metrics.admissions.WithLabelValues(tenant, routed).Inc()
+	if admitted.task.Wherry.Turn > 1 {
+		r.metrics.continuations.WithLabelValues(tenant, routed).Inc()
+	}
+	if attemptOf(record) == 1 {
+		r.metrics.queueWait.WithLabelValues(tenant, routed).Observe(time.Since(record.Timestamp).Seconds())
+	}
+	r.metrics.inFlight.WithLabelValues(routed).Inc()
+	defer r.metrics.inFlight.WithLabelValues(routed).Dec()
 	if status := r.execute(ctx, share, record, admitted, attemptOf(record)); status != 0 {
 		record.Ack(status)
 		return flush()
@@ -189,15 +200,19 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	}); err != nil || task.Wherry.Run != string(record.Key) {
 		return nil, kgo.AckReject
 	}
+	r.metrics.claims.WithLabelValues(task.Wherry.Tenant).Inc()
 	run, attempt := task.Wherry.Run, attemptOf(record)
-	reject := func(reason string) (*admission, kgo.AckStatus) {
+	// rejectAs counts the rejection under label, a fixed text for a reason that quotes the task.
+	rejectAs := func(label, reason string) (*admission, kgo.AckStatus) {
 		r.logger.Printf("rejected %s: %s", run, reason)
 		if err := r.publishRejection(ctx, &task, hash, attempt, reason); err != nil {
 			r.logger.Printf("publish rejection for %s: %v", run, err)
 			return nil, kgo.AckRelease
 		}
+		r.metrics.rejections.WithLabelValues(task.Wherry.Tenant, label).Inc()
 		return nil, kgo.AckReject
 	}
+	reject := func(reason string) (*admission, kgo.AckStatus) { return rejectAs(reason, reason) }
 	// giveBack is returnTask for a task no run holds yet: the terminal goes out with the echo under the
 	// admission transactional ID.
 	giveBack := func() (*admission, kgo.AckStatus) {
@@ -210,6 +225,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 			r.logger.Printf("publish terminal for %s: %v", run, err)
 			return nil, kgo.AckRelease
 		}
+		held.ended(wire.TaskStateFailed, nil)
 		return nil, kgo.AckReject
 	}
 	// Nothing is written under the run key before its owner is known; unreadable turns leave it unknown.
@@ -228,13 +244,15 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return reject("agent is outside the pool terms")
 	}
 	if err := wire.ValidateInputs(task.Message.Parts, terms.InlineLimit); err != nil {
-		return reject(err.Error())
+		return rejectAs("invalid inputs", err.Error())
 	}
 	adapter, offered := r.offer(placement)
 	if !offered {
 		r.logger.Printf("run %s: no current offer for agent %s satisfying its selector", run, placement.Agent)
 		if err := r.admissionCommit(ctx, r.startFailure(&task, attempt, "none", "offer-unavailable")); err != nil {
 			r.logger.Printf("publish start failure for %s: %v", run, err)
+		} else {
+			r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
 		}
 		return giveBack()
 	}
@@ -282,10 +300,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		declared = submissions[1].record.Wherry
 	}
 	if declared.Git != nil && !slices.Contains(terms.VCS, declared.Git.VCSHost()) {
-		return reject("git remote host " + declared.Git.VCSHost() + " is not in pool " + r.config.Pool + "'s vcs hosts")
+		return rejectAs("git remote host outside the pool's vcs hosts", "git remote host "+declared.Git.VCSHost()+" is not in pool "+r.config.Pool+"'s vcs hosts")
 	}
 	if (len(declared.S3Inputs) > 0 || len(s3Outputs(declared.Outputs)) > 0) && terms.Storage == nil {
-		return reject("pool " + r.config.Pool + " has no storage for S3 inputs and outputs")
+		return rejectAs("pool has no storage", "pool "+r.config.Pool+" has no storage for S3 inputs and outputs")
 	}
 	inputs, rejection := deliverables(history, declared.Git, declared.S3Inputs)
 	if rejection != "" {
@@ -423,12 +441,14 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 	}
 	if err := producer.ProduceSync(ctx, records...).FirstErr(); err != nil {
 		_ = producer.EndTransaction(ctx, kgo.TryAbort)
+		r.metrics.transactionAborts.Inc()
 		return err
 	}
 	err := commitTransaction(ctx, producer)
 	if err == nil || errors.Is(err, kerr.ProducerFenced) || errors.Is(err, kerr.InvalidProducerEpoch) || authorisationError(err) {
 		return err
 	}
+	r.metrics.ambiguousCommits.Inc()
 	index := slices.IndexFunc(records, func(record *kgo.Record) bool { return record.Topic == admin.PoolEventsTopic(r.config.Pool) })
 	if index < 0 {
 		return err
@@ -545,7 +565,7 @@ func continuationRejection(events poolEvents, task *wire.Submission, hash string
 
 // renewer keeps the share lock alive from claim until the final acknowledgement,
 // including while the platform places the job.
-func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record, logf func(string, ...any)) (stop func()) {
+func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record, failures prometheus.Counter, logf func(string, ...any)) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -560,6 +580,7 @@ func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record, logf fu
 			case <-ticker.C:
 				record.Ack(kgo.AckRenew)
 				if err := share.FlushAcks(ctx); err != nil && ctx.Err() == nil {
+					failures.Inc()
 					logf("renew: %v", err)
 				}
 			}
@@ -577,7 +598,7 @@ func (r *Receiver) newProducer(run string) (*kgo.Client, error) {
 func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.Record, admitted *admission, attempt int64) kgo.AckStatus {
 	task := admitted.task
 	runID := task.Wherry.Run
-	stopRenew := renewer(ctx, share, record, func(format string, args ...any) {
+	stopRenew := renewer(ctx, share, record, r.metrics.renewalFailures, func(format string, args ...any) {
 		r.logger.Printf("run %s: "+format, append([]any{runID}, args...)...)
 	})
 	defer stopRenew()
@@ -598,7 +619,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	defer producer.Close()
 	run := &activeRun{
 		receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, adapter: admitted.adapter,
-		expected: admitted.outputs, deadline: deadline,
+		expected: admitted.outputs, deadline: deadline, claimed: time.Now(),
 	}
 
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
@@ -613,6 +634,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	offset := int64(0)
 	if attempt > 1 {
+		r.metrics.redeliveries.WithLabelValues(task.Wherry.Tenant, admitted.adapter.Name).Inc()
 		offset, err = r.lastOffset(lookupCtx, task, run.taskHash)
 		if err != nil {
 			r.logger.Printf("run %s: read events: %v", runID, err)
@@ -641,10 +663,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 			if job.Adapter != named.Name || job.Agent != task.Wherry.Placement.Agent {
 				if err := named.Adapter.Stop(ctx, job.Handle); err != nil {
+					r.metrics.stopFailures.WithLabelValues(named.Name).Inc()
 					r.logger.Printf("run %s: stop: %T", runID, err)
 					return run.returnTask(ctx, nil)
 				}
 				if err := named.Adapter.Purge(ctx, runID, task.Wherry.Turn); err != nil {
+					r.metrics.purgeFailures.WithLabelValues(named.Name).Inc()
 					r.logger.Printf("run %s: purge: %T", runID, err)
 					return run.returnTask(ctx, nil)
 				}
@@ -654,6 +678,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.logger.Printf("run %s: found attempt %d's job in adapter %s", runID, job.Attempt, named.Name)
 			handle, run.adapter = job.Handle, named
 			adopted, neverStarted = job.State != adapter.JobNeverStarted, job.State == adapter.JobNeverStarted
+			if adopted {
+				r.metrics.adoptions.WithLabelValues(task.Wherry.Tenant, named.Name).Inc()
+			}
 			break
 		}
 	}
@@ -721,8 +748,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		var tooLarge *adapter.InputTooLargeError
 		switch {
 		case err != nil && runCtx.Err() != nil && ctx.Err() == nil:
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
 			return run.fail(ctx, "timeout", nil)
 		case errors.As(err, &tooLarge) && dispatched == adapter.OutcomeNothingCreated:
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
 			// The adapter's name for the input reaches the status only when it is one of the run's inputs.
 			name := "an input"
 			if slices.ContainsFunc(admitted.inputs, func(input adapter.File) bool { return input.Name == tooLarge.Name }) {
@@ -732,6 +761,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			if err := run.commit(ctx, r.startFailure(task, attempt, named.Name, "input-too-large")); err != nil {
 				return run.abandon(err)
 			}
+			r.metrics.startFailures.WithLabelValues(named.Name, "input-too-large").Inc()
 			return run.fail(ctx, name+" takes the turn's inputs over what adapter "+named.Name+" delivers", nil)
 		case errors.Is(err, adapter.ErrMessageTooLarge):
 			r.logger.Printf("run %s: dispatch rejected: message too large", runID)
@@ -742,10 +772,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		switch dispatched {
 		case adapter.OutcomeCreated:
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "created").Inc()
 		case adapter.OutcomeNothingCreated:
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
 			r.logger.Printf("run %s: adapter %s created no job", runID, named.Name)
 			return run.startFailure(ctx, "dispatch")
 		default:
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
 			job, resolved := run.reconcile(runCtx)
 			switch {
 			case !resolved:
@@ -764,6 +797,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if len(handle.Data) > maxHandle {
 		r.logger.Printf("run %s: adapter %s returned a handle over %d bytes", runID, run.adapter.Name, maxHandle)
 		if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
+			r.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
 			r.logger.Printf("run %s: stop: %T", runID, err)
 		}
 		return run.returnTask(ctx, nil)
@@ -993,6 +1027,11 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle
 	}
 	waitCtx, cancel := context.WithDeadline(runCtx, time.UnixMilli(request.ExpiryMS))
 	defer cancel()
+	began := time.Now()
+	waited := func(outcome string) {
+		r.metrics.sealWaits.WithLabelValues(task.Wherry.Tenant, outcome).Inc()
+		r.metrics.sealWait.WithLabelValues(task.Wherry.Tenant).Observe(time.Since(began).Seconds())
+	}
 	for {
 		pollCtx, cancelPoll := context.WithTimeout(waitCtx, stateCheckInterval)
 		fetches := reader.PollFetches(pollCtx)
@@ -1025,18 +1064,24 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle
 		case cancelled && cancelledTurn <= task.Wherry.Turn:
 			return signed.SealValues{}, run.cancel(ctx, nil), false
 		case runCtx.Err() != nil && job != nil:
+			waited("expired")
 			return signed.SealValues{}, run.stopAndFail(ctx, *job, "timeout", nil), false
 		case runCtx.Err() != nil:
+			waited("expired")
 			return signed.SealValues{}, run.fail(ctx, "timeout", nil), false
-		case waitCtx.Err() != nil:
-			if job != nil {
-				if err := run.adapter.Adapter.Stop(ctx, *job); err != nil {
-					r.logger.Printf("run %s: stop: %T", runID, err)
-					return signed.SealValues{}, run.returnTask(ctx, nil), false
-				}
+		case waitCtx.Err() != nil && job != nil:
+			waited("adopter_refused")
+			if err := run.adapter.Adapter.Stop(ctx, *job); err != nil {
+				r.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
+				r.logger.Printf("run %s: stop: %T", runID, err)
+				return signed.SealValues{}, run.returnTask(ctx, nil), false
 			}
 			return signed.SealValues{}, run.interrupt(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
+		case waitCtx.Err() != nil:
+			waited("auth_required")
+			return signed.SealValues{}, run.interrupt(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
 		case values != nil:
+			waited("sealed")
 			return *values, 0, true
 		}
 	}
@@ -1153,6 +1198,8 @@ type activeRun struct {
 	reply *string
 	// uncollected is true when the job was not stopped, or Collect failed, timed out or overran its limits.
 	uncollected bool
+	// claimed is when this attempt began executing the turn, zero for a turn ended without executing it.
+	claimed time.Time
 }
 
 // redaction is a form of a delivered value and the marker that replaces it.
@@ -1199,15 +1246,18 @@ func (run *activeRun) redact(data []byte, limit int64) *redactedForm {
 // redactTo writes data redacted to out. The data passes through in pieces of redactPiece bytes, so no write, and
 // nothing a form's replacer holds, is larger than a piece and the forms.
 func (run *activeRun) redactTo(out io.Writer, data []byte) {
-	w := out
+	w, replaced := out, 0
 	for i := len(run.redactions) - 1; i >= 0; i-- {
-		w = &replacer{value: run.redactions[i].value, marker: run.redactions[i].marker, next: w}
+		w = &replacer{value: run.redactions[i].value, marker: run.redactions[i].marker, next: w, replaced: &replaced}
 	}
 	for piece := range slices.Chunk(data, redactPiece) {
 		w.Write(piece)
 	}
 	if first, ok := w.(*replacer); ok {
 		first.flush()
+	}
+	if replaced > 0 {
+		run.receiver.metrics.redactions.WithLabelValues(run.task.Wherry.Tenant, cmp.Or(run.adapter.Name, "none")).Add(float64(replaced))
 	}
 }
 
@@ -1252,6 +1302,7 @@ type replacer struct {
 	value, marker []byte
 	next          io.Writer
 	held          []byte
+	replaced      *int
 }
 
 func (w *replacer) Write(p []byte) (int, error) {
@@ -1264,6 +1315,7 @@ func (w *replacer) Write(p []byte) (int, error) {
 		w.next.Write(w.held[:i])
 		w.next.Write(w.marker)
 		w.held = w.held[i+len(w.value):]
+		*w.replaced++
 	}
 	cut := max(len(w.held)-len(w.value)+1, 0)
 	w.next.Write(w.held[:cut])
@@ -1311,6 +1363,7 @@ func (run *activeRun) commit(ctx context.Context, records ...*kgo.Record) error 
 // abandon stops all activity for a run whose writes failed; a fenced holder leaves the run to its adopter.
 func (run *activeRun) abandon(err error) kgo.AckStatus {
 	if errors.Is(err, kerr.InvalidProducerEpoch) || errors.Is(err, kerr.ProducerFenced) {
+		run.receiver.metrics.fenced.Inc()
 		run.receiver.logger.Printf("run %s: fenced by a newer holder", run.task.Wherry.Run)
 		return 0
 	}
@@ -1321,6 +1374,7 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 
 func (run *activeRun) stopAndFail(ctx context.Context, handle adapter.Handle, reason string, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
+		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
 		return run.returnTask(ctx, pending)
 	}
@@ -1329,6 +1383,7 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle adapter.Handle, re
 
 func (run *activeRun) stopAndCancel(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
+		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
 		return run.returnTask(ctx, pending)
 	}
@@ -1338,6 +1393,7 @@ func (run *activeRun) stopAndCancel(ctx context.Context, handle adapter.Handle, 
 // deny stops a run on a denied receiver and releases its task to the pool; the terminal status is best effort.
 func (run *activeRun) deny(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
+		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
 		return kgo.AckRelease
 	}
@@ -1345,6 +1401,8 @@ func (run *activeRun) deny(ctx context.Context, handle adapter.Handle, pending [
 	status := taskStatus(wire.TaskStateFailed, reason)
 	if err := run.commit(ctx, append(append(run.chunks(pending, true), run.result(status, reason, nil)), run.statusRecords("terminal", status, nil, nil)...)...); err != nil {
 		run.receiver.logger.Printf("run %s: publish denied status: %v", run.task.Wherry.Run, err)
+	} else {
+		run.ended(status.State, nil)
 	}
 	run.release(ctx)
 	return kgo.AckRelease
@@ -1391,6 +1449,7 @@ func (run *activeRun) startFailure(ctx context.Context, class string) kgo.AckSta
 	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.attempt, run.adapter.Name, class)); err != nil {
 		return run.abandon(err)
 	}
+	run.receiver.metrics.startFailures.WithLabelValues(run.adapter.Name, class).Inc()
 	if err := run.purge(ctx); err != nil {
 		// Shutdown: the next holder's Lookup finds the job again.
 		if ctx.Err() != nil {
@@ -1407,6 +1466,9 @@ func (run *activeRun) purge(ctx context.Context) error {
 	deadline := time.Now().Add(purgeDeadline)
 	for {
 		err := run.adapter.Adapter.Purge(ctx, run.task.Wherry.Run, run.task.Wherry.Turn)
+		if err != nil {
+			run.receiver.metrics.purgeFailures.WithLabelValues(run.adapter.Name).Inc()
+		}
 		if err == nil || ctx.Err() != nil || !time.Now().Before(deadline) {
 			return err
 		}
@@ -1447,6 +1509,7 @@ func (run *activeRun) returnTask(ctx context.Context, pending []adapter.Line) kg
 	if err := run.commit(ctx, run.budgetRecords(pending)...); err != nil {
 		return run.abandon(err)
 	}
+	run.ended(wire.TaskStateFailed, nil)
 	return kgo.AckReject
 }
 
@@ -1467,6 +1530,7 @@ func (run *activeRun) conclude(ctx context.Context, handle adapter.Handle, pendi
 	}
 	stopped := true
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
+		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
 		// At the budget the agent's result stands, and the job is left to the adapter's sweep.
 		if !run.receiver.budgetSpent(run.attempt) {
@@ -1498,6 +1562,16 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 	stored := map[string]storedOutput{}
 	collected, err := run.collected(ctx, handle, stopped, limit, stored)
 	if err != nil {
+		reason := "failed"
+		switch {
+		case !stopped:
+			reason = "not_stopped"
+		case errors.Is(err, errOverLimits):
+			reason = "over_limits"
+		case errors.Is(err, context.DeadlineExceeded):
+			reason = "timeout"
+		}
+		run.receiver.metrics.collectionFailures.WithLabelValues(run.adapter.Name, reason).Inc()
 		run.receiver.logger.Printf("run %s: outputs not collected: %T", run.task.Wherry.Run, err)
 		run.uncollected = true
 		for _, output := range run.expected {
@@ -1618,7 +1692,7 @@ func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stop
 		}
 		total += int64(len(output.Data))
 		if over == nil && (len(collected) == wire.MaxOutputs || total > limit) {
-			over = errors.New("the adapter returned more than the limits")
+			over = errOverLimits
 			cancel()
 		}
 		if over == nil {
@@ -1630,6 +1704,8 @@ func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stop
 	}
 	return collected, nil
 }
+
+var errOverLimits = errors.New("the adapter returned more than the limits")
 
 // errRedirect is what an upload's client returns for a redirect, which it never follows.
 var errRedirect = errors.New("redirected")
@@ -1756,6 +1832,7 @@ func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result st
 	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
 	}
+	run.ended(status.State, resultMetadata)
 	run.release(ctx)
 	return ack
 }
@@ -1973,6 +2050,7 @@ func (r *Receiver) endInterrupted(ctx context.Context, interrupted wire.RunStatu
 	if err := r.admissionCommit(ctx, append([]*kgo.Record{run.result(status, reason, nil)}, run.statusRecords("terminal", status, nil, nil)...)...); err != nil {
 		return time.Time{}, err
 	}
+	run.ended(status.State, nil)
 	r.logger.Printf("run %s: ended interrupted turn %d: %s", runID, turn, reason)
 	return time.Time{}, nil
 }

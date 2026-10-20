@@ -1,4 +1,4 @@
-// The adapter protocol, version 3: the receiver core calls a plugin's adapters
+// The adapter protocol, version 4: the receiver core calls a plugin's adapters
 // over this service, and every request names its adapter.
 syntax = "proto3";
 
@@ -20,6 +20,8 @@ service Adapter {
   rpc Purge(PurgeRequest) returns (PurgeResponse);
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
   rpc Sweep(SweepRequest) returns (SweepResponse);
+  // Metrics reports the adapter's samples of the families the core declares for adapters.
+  rpc Metrics(MetricsRequest) returns (MetricsResponse);
 }
 
 // Outcome numbers match adapter.Outcome.
@@ -214,3 +216,35 @@ message SweepRequest {
 }
 
 message SweepResponse {}
+
+message MetricsRequest {
+  string adapter = 1;
+}
+
+message MetricsResponse {
+  repeated Sample samples = 1;
+}
+
+// Kind numbers match adapter.Kind.
+enum Kind {
+  KIND_UNSPECIFIED = 0;
+  KIND_COUNTER = 1;
+  KIND_GAUGE = 2;
+  KIND_HISTOGRAM = 3;
+}
+
+message Sample {
+  string family = 1;
+  map<string, string> labels = 2;
+  Kind kind = 3;
+  // value is a counter's or a gauge's.
+  double value = 4;
+  Histogram histogram = 5;
+}
+
+// Histogram is a snapshot over the family's buckets: buckets holds the cumulative count at each bound.
+message Histogram {
+  repeated uint64 buckets = 1;
+  double sum = 2;
+  uint64 count = 3;
+}

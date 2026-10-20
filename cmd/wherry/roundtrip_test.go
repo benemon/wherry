@@ -35,6 +35,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -177,18 +178,18 @@ func TestRoundTrip(t *testing.T) {
 		t.Helper()
 		r, err := receiver.New(bundle, stateDir, func(pool string, settings admin.AdapterSettings) (receiver.Named, error) {
 			return plugins.adapter(pool, settings, bundle.Platform[settings.Name])
-		}, logger)
+		}, logger, prometheus.NewRegistry())
 		if err != nil {
 			t.Fatal(err)
 		}
 		return r
 	}
-	missing := &plugins{dir: t.TempDir(), logs: logs, running: map[string]*adapter.Plugin{}}
+	missing := &plugins{dir: t.TempDir(), logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	if err := newReceiver(missing).Run(ctx); err == nil || err.Error() != "adapter fake: no plugin for type fake" {
 		t.Fatalf("receiver without its plugin: %v; want a configuration error", err)
 	}
 	read := recordPlugin(t)
-	plugins := &plugins{dir: pluginDir, logs: logs, running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: pluginDir, logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
 	r := newReceiver(plugins)
 	runCtx, stop := context.WithCancel(ctx)
