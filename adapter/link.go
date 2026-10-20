@@ -10,10 +10,10 @@ import (
 
 const pluginName = "adapter"
 
-// handshake is protocol version 3; a plugin of another version is refused at launch. The cookie only stops a plugin
+// handshake is protocol version 4; a plugin of another version is refused at launch. The cookie only stops a plugin
 // binary started by hand from serving.
 var handshake = plugin.HandshakeConfig{
-	ProtocolVersion:  3,
+	ProtocolVersion:  4,
 	MagicCookieKey:   "WHERRY_ADAPTER_PLUGIN",
 	MagicCookieValue: "b6f1c3e2-9d4a-4e7b-8c5f-2a1d0e9f7b63",
 }

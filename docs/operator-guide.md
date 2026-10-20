@@ -465,6 +465,36 @@ nomad acl policy apply -namespace agents -job wherry-receiver \
 The adapter's `ca_file` is then `/secrets/nomad-ca.pem`, the path inside
 the task.
 
+### Metrics
+
+Start the receiver with `--metrics-addr HOST:PORT` to serve its metrics at
+`/metrics` in the Prometheus text format. The endpoint is plain HTTP with no
+authentication, so bind it to an address only the scraper reaches, such as
+the receiver host's address on a monitoring network, or put an
+authenticating proxy in front of it:
+
+```sh
+wherry receiver --bundle-file bundle.yaml --state-dir /var/lib/wherry \
+  --plugin-dir /usr/local/libexec/wherry/plugins --metrics-addr 10.0.8.21:9464
+```
+
+Scrape it as any Prometheus target:
+
+```yaml
+scrape_configs:
+  - job_name: wherry-receiver
+    static_configs:
+      - targets: ["10.0.8.21:9464"]
+```
+
+The `tenant` label names each entitled tenant whose runs reach the pool.
+Whoever can scrape a receiver sees every tenant's activity on its pool: its
+runs and their outcomes, durations, rejections and seal waits, and the
+tokens and cost its agents report. Give scrape access only to those who may
+see all of the pool's tenants. No label or value carries a prompt, output,
+run ID, error text, URL, image, path, node or credential name.
+[Metrics](reference.md#metrics) lists the families.
+
 ## Revoke a host or receiver
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
@@ -836,7 +866,8 @@ state directory.
 1. Replace the binary on every host and receiver host.
 2. Replace the plugins in each receiver's plugin directory together with the
    receiver binary; a receiver refuses a plugin of another adapter protocol
-   version.
+   version. This release speaks adapter protocol version 4 and refuses a
+   version 3 plugin.
 3. Restart each receiver with the same bundle and state directory. On
    `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its
    tasks to the pool. The next delivery of each task adopts the running

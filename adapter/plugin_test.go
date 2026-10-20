@@ -308,6 +308,9 @@ func TestRestartConfiguresEveryAdapter(t *testing.T) {
 	if !configured["a"] || !configured["b"] {
 		t.Fatalf("restarted process configured %v; want a and b", configured)
 	}
+	if restarts := p.Restarts(); restarts != 1 {
+		t.Fatalf("restarts = %d; want 1", restarts)
+	}
 }
 
 func TestOneProcessPerPlugin(t *testing.T) {
@@ -439,6 +442,24 @@ func TestConfigureReportsDirectories(t *testing.T) {
 	a := configured(t, p, "plain", "{}")
 	if got := a.Directories(); got != (Directories{Input: "/fake/inputs", Output: "/fake/outputs", Credentials: "/fake/credentials"}) {
 		t.Fatalf("directories %+v; want the plugin's", got)
+	}
+}
+
+func TestMetricsCrossTheLink(t *testing.T) {
+	p, _, _ := launch(t)
+	samples, err := configured(t, p, "a", "{}").Metrics(context.Background())
+	want := []Sample{
+		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"adapter": "a"}, Kind: KindGauge, Value: 2},
+		{Family: "wherry_adapter_placement_seconds", Kind: KindHistogram, Histogram: Histogram{Buckets: []uint64{0, 1, 2}, Sum: 3.5, Count: 2}},
+	}
+	if err != nil || len(samples) != len(want) {
+		t.Fatalf("metrics = %+v, %v; want %+v", samples, err, want)
+	}
+	for i := range want {
+		if samples[i].Family != want[i].Family || samples[i].Kind != want[i].Kind || samples[i].Value != want[i].Value ||
+			!reflect.DeepEqual(samples[i].Histogram, want[i].Histogram) || len(samples[i].Labels) != len(want[i].Labels) || samples[i].Labels["adapter"] != want[i].Labels["adapter"] {
+			t.Fatalf("sample %d = %+v; want %+v", i, samples[i], want[i])
+		}
 	}
 }
 
@@ -579,19 +600,19 @@ func TestCollectFailureCrossesTheLink(t *testing.T) {
 	}
 }
 
-// A plugin built against protocol version 1 answers go-plugin's handshake with that version; this script answers as
+// A plugin built against protocol version 3 answers go-plugin's handshake with that version; this script answers as
 // one would, before any TLS.
-func TestVersionOnePluginIsRefused(t *testing.T) {
+func TestVersionThreePluginIsRefused(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "wherry-plugin-old")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|1|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|3|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	p, err := Launch(fixed(script), &syncBuffer{})
 	if err == nil {
 		p.Close()
-		t.Fatal("launched a version 1 plugin")
+		t.Fatal("launched a version 3 plugin")
 	}
-	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 1, Client versions: [3]") {
+	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 3, Client versions: [4]") {
 		t.Fatalf("launch error %v; want the version named", err)
 	}
 }

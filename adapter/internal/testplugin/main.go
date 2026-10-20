@@ -155,6 +155,15 @@ func (f *fake) Sweep(context.Context) error {
 	return nil
 }
 
+// Metrics reports a gauge labelled with the adapter's name and a histogram.
+func (f *fake) Metrics(context.Context) ([]adapter.Sample, error) {
+	f.panics("Metrics")
+	return []adapter.Sample{
+		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"adapter": f.settings.Name}, Kind: adapter.KindGauge, Value: 2},
+		{Family: "wherry_adapter_placement_seconds", Kind: adapter.KindHistogram, Histogram: adapter.Histogram{Buckets: []uint64{0, 1, 2}, Sum: 3.5, Count: 2}},
+	}, nil
+}
+
 func main() {
 	if os.Getenv("WHERRY_TESTPLUGIN_PLAINTEXT") == "1" {
 		os.Unsetenv("PLUGIN_CLIENT_CERT")

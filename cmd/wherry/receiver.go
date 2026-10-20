@@ -9,16 +9,23 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/receiver"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,6 +35,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	bundlePath := flags.String("bundle-file", "", "receiver bundle file")
 	stateDir := flags.String("state-dir", "", "directory holding the receiver's keys")
 	pluginDir := flags.String("plugin-dir", "", "directory holding the adapter plugins, wherry-plugin-<type>")
+	metricsAddr := flags.String("metrics-addr", "", "HOST:PORT to serve /metrics on, off when empty")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -39,11 +47,19 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	logger := log.New(stdout, "receiver: ", log.LstdFlags|log.LUTC)
-	plugins := &plugins{dir: *pluginDir, logs: stdout, running: map[string]*adapter.Plugin{}}
+	registry := newRegistry()
+	if *metricsAddr != "" {
+		listener, err := net.Listen("tcp", *metricsAddr)
+		if err != nil {
+			return fmt.Errorf("metrics address: %w", err)
+		}
+		defer serveMetrics(listener, registry, logger).Close()
+	}
+	plugins := &plugins{dir: *pluginDir, logs: stdout, registry: registry, running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
 	r, err := receiver.New(bundle, *stateDir, func(pool string, settings admin.AdapterSettings) (receiver.Named, error) {
 		return plugins.adapter(pool, settings, bundle.Platform[settings.Name])
-	}, logger)
+	}, logger, registry)
 	if err != nil {
 		return err
 	}
@@ -77,11 +93,41 @@ func readBundle(path string) (admin.Bundle, error) {
 
 var yamlLine = regexp.MustCompile(`line \d+`)
 
+// newRegistry is the receiver process's registry, with the Go runtime and process collectors and wherry_build_info.
+func newRegistry() *prometheus.Registry {
+	version, revision := "(devel)", ""
+	if info, ok := debug.ReadBuildInfo(); ok {
+		version = info.Main.Version
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				revision = setting.Value
+			}
+		}
+	}
+	registry := prometheus.NewRegistry()
+	buildInfo := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "wherry_build_info", Help: "The wherry binary's version and revision.", ConstLabels: prometheus.Labels{"version": version, "revision": revision},
+	})
+	buildInfo.Set(1)
+	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}), buildInfo)
+	return registry
+}
+
+// serveMetrics serves registry at /metrics, and nothing else, on listener over plain HTTP; logger gets gather errors.
+func serveMetrics(listener net.Listener, registry *prometheus.Registry, logger *log.Logger) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{ErrorLog: logger, ErrorHandling: promhttp.ContinueOnError}))
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go server.Serve(listener)
+	return server
+}
+
 // plugins runs one plugin process per adapter type, started for the first adapter of that type.
 type plugins struct {
-	dir     string
-	logs    io.Writer
-	running map[string]*adapter.Plugin
+	dir      string
+	logs     io.Writer
+	registry prometheus.Registerer
+	running  map[string]*adapter.Plugin
 }
 
 // adapter configures one adapter in its type's plugin; platform is the bundle's platform credential for it.
@@ -94,6 +140,9 @@ func (p *plugins) adapter(pool string, settings admin.AdapterSettings, platform 
 			return receiver.Named{}, err
 		}
 		p.running[settings.Type] = running
+		p.registry.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "wherry_plugin_restarts_total", Help: "Times an adapter plugin was started again.", ConstLabels: prometheus.Labels{"pool": pool, "type": settings.Type},
+		}, func() float64 { return float64(running.Restarts()) }))
 	}
 	config, err := json.Marshal(settings.Config)
 	if err != nil {
