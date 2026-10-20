@@ -143,12 +143,15 @@ func (f *fakeAdapter) Dispatch(_ context.Context, run adapter.Run) (adapter.Outc
 	return cmp.Or(f.outcome, adapter.OutcomeCreated), f.handle(run.ID, run.Turn), nil
 }
 
-func (f *fakeAdapter) Lookup(_ context.Context, runID string, turn int64) (adapter.Job, error) {
+func (f *fakeAdapter) Lookup(ctx context.Context, runID string, turn int64) (adapter.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lookups++
 	if f.lookupErr != nil {
 		return adapter.Job{}, f.lookupErr
+	}
+	if err := ctx.Err(); err != nil {
+		return adapter.Job{}, err
 	}
 	if f.job == adapter.JobAbsent {
 		return adapter.Job{}, nil

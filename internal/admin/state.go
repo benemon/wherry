@@ -24,6 +24,7 @@ type Terms struct {
 	Agents            []AgentTerms `json:"agents" yaml:"agents"`
 	DefaultAgent      string       `json:"default_agent" yaml:"default_agent"`
 	SealLifetimeMS    int64        `json:"seal_lifetime_ms" yaml:"seal_lifetime_ms"`
+	RunLifetimeMS     int64        `json:"run_lifetime_ms,omitzero" yaml:"run_lifetime_ms"`
 	DeliveryLimit     int32        `json:"delivery_limit" yaml:"delivery_limit"`
 	LockDurationMS    int64        `json:"lock_duration_ms" yaml:"lock_duration_ms"`
 	ProducerByteRate  int64        `json:"producer_byte_rate" yaml:"producer_byte_rate"`
@@ -68,11 +69,16 @@ func (storage Storage) validate() error {
 
 // DefaultInlineLimit and DefaultOutputLimit are a pool's limits where its terms leave them out.
 const (
-	DefaultInlineLimit = 256 << 10
-	DefaultOutputLimit = 8 << 20
+	DefaultInlineLimit   = 256 << 10
+	DefaultOutputLimit   = 8 << 20
+	DefaultRunLifetimeMS = 14 * 24 * 60 * 60 * 1000
+	MaxRunDurationMS     = 60 * 60 * 1000
 )
 
 func withDefaults(terms Terms) Terms {
+	if terms.RunLifetimeMS == 0 {
+		terms.RunLifetimeMS = DefaultRunLifetimeMS
+	}
 	if terms.InlineLimit == 0 {
 		terms.InlineLimit = DefaultInlineLimit
 	}
@@ -541,7 +547,7 @@ func load(raw []rawRecord) (State, error) {
 
 func validateTerms(terms Terms) error {
 	if len(terms.Agents) == 0 || terms.SealLifetimeMS <= 0 || terms.DeliveryLimit <= 0 || terms.LockDurationMS <= 0 || terms.ProducerByteRate <= 0 || terms.RequestPercentage <= 0 ||
-		terms.InlineLimit < 0 || terms.OutputLimit < 0 {
+		terms.RunLifetimeMS < 0 || terms.InlineLimit < 0 || terms.OutputLimit < 0 {
 		return errors.New("invalid pool terms")
 	}
 	if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == terms.DefaultAgent }) {

@@ -84,6 +84,8 @@ wherry admin pool create build --config-file build-terms.yaml
 - `seal_lifetime_ms` is required and unused: a seal expires with its
   [seal request](a2a-extension-v1.md#seal-request), 5 minutes after the
   receiver asks.
+- `run_lifetime_ms` is the longest time from a run's first submission to
+  its last continuation. It defaults to 14 days. See [Retention](#retention).
 - `inline_limit` and `output_limit` bound a task's input files and a
   turn's outputs; they default to 256 KiB and 8 MiB. See
   [Size a pool against the broker](#size-a-pool-against-the-broker).
@@ -91,6 +93,31 @@ wherry admin pool create build --config-file build-terms.yaml
   pool takes no git input. See [Git repositories](#git-repositories).
 
 Running `pool create` again for an existing pool records the new terms.
+
+### Retention
+
+A run takes continuations for `run_lifetime_ms` after its first submission.
+After that, receivers reject another turn with `run expired`, and an interrupted
+run ends `TASK_STATE_CANCELED` with the same message the next time a receiver
+reads the pool's events. Receivers also reject a turn whose queue deadline falls
+after the lifetime, so every turn ends within one hour after it. Choose the
+lifetime as the longest pause expected before a continuation, such as a wait for
+a person to sign in. A longer lifetime keeps prompts on the broker longer.
+Lowering the lifetime of a pool with runs in progress lowers its topics'
+retention at once: Kafka then deletes the records of runs older than the new
+bound, and their continuations fail with `continuation history unavailable`.
+
+`pool create` sets the retention of the pool's tasks and events topics, new and
+existing, to the run lifetime plus the one-hour maximum turn time plus a one-day
+margin, and their timestamp type to `LogAppendTime`, since the lifetime runs
+from the broker's time. With the 14-day default that is `1299600000` ms, 15 days
+and one hour, after which a run's prompts leave the broker. Tenant feeds keep
+statuses, transcripts and results for 30 days and must keep them for at least
+the run lifetime plus one hour, so `pool create` refuses a lifetime above 29
+days and 23 hours, and `tenant add` refuses a feed that keeps less. Identity and
+configuration topics stay forever. `wherry admin check` reports a topic whose
+retention drops below its bound, and a pool topic whose timestamp type is not
+`LogAppendTime`.
 
 ### Size a pool against the broker
 
@@ -426,11 +453,12 @@ wherry admin check
 
 It loads `wherry.admin`, validates every receiver configuration against its
 pool's current terms, checks that every pool's largest records still fit the
-broker's record limit, and confirms that every ACL the state calls for exists.
-It does not check an adapter's `type` or `config` section; at start the receiver
-finds the type's plugin, the plugin checks the section, and the receiver exits
-with `adapter <name>: ...` on an error. Run it after changing a pool's terms,
-since receivers keep the configuration they started with.
+broker's record limit, reports topic retention below the pool's required
+bounds, and confirms that every ACL the state calls for exists. It does not
+check an adapter's `type` or `config` section; at start the receiver finds the
+type's plugin, the plugin checks the section, and the receiver exits with
+`adapter <name>: ...` on an error. Run it after changing a pool's terms, since
+receivers keep the configuration they started with.
 
 ## Recover from an undecodable `wherry.admin` record
 

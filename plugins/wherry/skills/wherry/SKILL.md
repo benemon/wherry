@@ -136,9 +136,11 @@ ends in `TASK_STATE_CANCELED`.
 
 A failed call returns `{"code": ..., "message": ...}`. `RUN_NOT_FOUND`,
 `NO_MATCHING_RECEIVER`, `INVALID_ARGUMENT`, `NOT_AWAITING_CONTINUATION`,
-`RUN_CANCELED` and `TURN_ALREADY_SUBMITTED` call for a change to your input
-or end the run's handling. `CANCELLED` means the call itself was cancelled.
-`UNAVAILABLE` is any other failure; the user can run the same operation
-with the `wherry` CLI to see the cause. `OUTPUTS_NOT_WRITTEN` means the
-result arrived but its outputs could not be written, downloaded or cleaned
+`RUN_CANCELED` and `TURN_ALREADY_SUBMITTED` call for a change to your input or
+end the run's handling. `RUN_EXPIRED` means the run is past its pool's run
+lifetime, or the queue deadline asked for falls after it: submit a new run, or
+ask for a shorter queue deadline. `CANCELLED` means the call itself was
+cancelled. `UNAVAILABLE` is any other failure; the user can run the same
+operation with the `wherry` CLI to see the cause. `OUTPUTS_NOT_WRITTEN` means
+the result arrived but its outputs could not be written, downloaded or cleaned
 up; the `wherry await` CLI reports the cause.

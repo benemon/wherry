@@ -38,12 +38,11 @@ import (
 )
 
 const (
-	maxRunDuration = time.Hour // receiver cap on any task's run deadline
-	readTimeout    = 30 * time.Second
-	maxHandle      = 4 << 10
-	budgetReason   = "delivery budget exhausted"
-	minRedact      = 8
-	redactPiece    = 64 << 10
+	readTimeout  = 30 * time.Second
+	maxHandle    = 4 << 10
+	budgetReason = "delivery budget exhausted"
+	minRedact    = 8
+	redactPiece  = 64 << 10
 	// heldLimit bounds the transcript an adopter holds while it waits for its seal.
 	heldLimit = 4 << 20
 )
@@ -67,6 +66,7 @@ var (
 	followRetryInterval = time.Second
 	// collectTimeout bounds an adapter's collection of a turn's outputs, during which the claim is renewed.
 	collectTimeout = 2 * time.Minute
+	unfoundRetry   = 10 * time.Minute
 	// sealWait bounds how long a claimed turn waits for its host's seal, which comes only while the parent runs
 	// await or the MCP server; beyond it the turn holds a slot for a parent that is not answering.
 	sealWait = 5 * time.Minute
@@ -246,6 +246,19 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 			return reject(reason)
 		}
 	}
+	// A turn a member already claimed is past the lifetime and deadline checks; its redelivery goes on to adoption.
+	claimed := slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
+		return status.Wherry.TaskHash == hash && status.Wherry.Kind != "rejected"
+	})
+	if first, ok := submissions[1]; ok && !claimed {
+		lifetime := time.Duration(terms.RunLifetimeMS) * time.Millisecond
+		if time.Since(first.submitted) > lifetime {
+			return reject("run expired")
+		}
+		if task.Wherry.QueueDeadlineMS > first.submitted.Add(lifetime).UnixMilli() {
+			return reject("queue deadline exceeds run lifetime")
+		}
+	}
 	history := []wire.Message{task.Message}
 	if task.Wherry.Turn > 1 {
 		if history, err = turns(submissions, &task); err != nil {
@@ -258,10 +271,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return admitted, 0
 	}
 	now := time.Now()
-	if now.UnixMilli() > task.Wherry.QueueDeadlineMS {
+	if !claimed && now.UnixMilli() > task.Wherry.QueueDeadlineMS {
 		return reject("queue deadline passed")
 	}
-	if now.UnixMilli() > task.Wherry.DeadlineMS {
+	if !claimed && now.UnixMilli() > task.Wherry.DeadlineMS {
 		return reject("run deadline passed")
 	}
 	declared := task.Wherry
@@ -443,6 +456,8 @@ func (r *Receiver) startFailure(task *wire.Submission, attempt int64, adapter, c
 type runSubmission struct {
 	record *wire.Submission
 	hash   string
+	// submitted is the broker's LogAppendTime for the task record.
+	submitted time.Time
 	// current is set when the submission verifies against its host's current key, not only a retired one.
 	current bool
 }
@@ -465,7 +480,7 @@ func (r *Receiver) readTurns(ctx context.Context, run string) ([]runSubmission, 
 		submission, err := admin.AuthorizeEarlierTurn(state, hosts, record.Value, r.config.Pool)
 		if err == nil && submission.Wherry.Run == run {
 			_, currentErr := admin.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
-			result = append(result, runSubmission{record: &submission, hash: taskHash(record.Value), current: currentErr == nil})
+			result = append(result, runSubmission{record: &submission, hash: taskHash(record.Value), submitted: record.Timestamp, current: currentErr == nil})
 		}
 	}
 	return result, nil
@@ -569,7 +584,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 
 	// The cap is anchored to the signed queue deadline so redelivery cannot extend it.
 	deadline := time.UnixMilli(task.Wherry.DeadlineMS)
-	if limit := time.UnixMilli(task.Wherry.QueueDeadlineMS).Add(maxRunDuration); deadline.After(limit) {
+	if limit := time.UnixMilli(task.Wherry.QueueDeadlineMS).Add(time.Duration(admin.MaxRunDurationMS) * time.Millisecond); deadline.After(limit) {
 		deadline = limit
 	}
 	runCtx, cancelRun := context.WithDeadline(ctx, deadline)
@@ -589,9 +604,16 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
 		return run.abandon(err)
 	}
+	// A claimed turn is redelivered even past its deadline; its job is looked up all the same, so it is stopped.
+	lookupCtx := runCtx
+	if runCtx.Err() != nil {
+		var cancelLookup context.CancelFunc
+		lookupCtx, cancelLookup = context.WithTimeout(ctx, readTimeout)
+		defer cancelLookup()
+	}
 	offset := int64(0)
 	if attempt > 1 {
-		offset, err = r.lastOffset(runCtx, task, run.taskHash)
+		offset, err = r.lastOffset(lookupCtx, task, run.taskHash)
 		if err != nil {
 			r.logger.Printf("run %s: read events: %v", runID, err)
 			return run.returnTask(ctx, nil)
@@ -602,9 +624,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if attempt > 1 {
 		// Offers can change between attempts, so the run may live in an adapter other than the matched one.
 		for _, named := range r.adapters {
-			job, err := named.Adapter.Lookup(runCtx, runID, task.Wherry.Turn)
+			job, err := named.Adapter.Lookup(lookupCtx, runID, task.Wherry.Turn)
 			if err != nil {
-				if runCtx.Err() != nil && ctx.Err() == nil {
+				if lookupCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, "timeout", nil)
 				}
 				r.logger.Printf("run %s: lookup in adapter %s: %T", runID, named.Name, err)
@@ -644,6 +666,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	if neverStarted {
 		return run.startFailure(ctx, "platform")
+	}
+	if runCtx.Err() != nil && ctx.Err() == nil {
+		if adopted {
+			run.job = handle.Name
+			return run.stopAndFail(ctx, handle, "timeout", nil)
+		}
+		return run.fail(ctx, "timeout", nil)
 	}
 	// The agent credential is asked for under the pool's terms; a task credential of the same name rides with it.
 	agentCredentials, taskCredentials := []string{}, []string{}
@@ -1834,44 +1863,46 @@ func inputPointers(history []wire.Message) []wire.Message {
 	return stripped
 }
 
-// cancelInterrupted ends a cancelled run that waits interrupted. No member holds it, so every member
-// that reads the cancel writes the CANCELED terminal under the turn's fixed event ID; a write already
-// on the pool's events is not repeated.
-func (r *Receiver) cancelInterrupted(ctx context.Context, interrupted wire.RunStatus) error {
+// errInterruptedTurnNotFound is endInterrupted's answer for a turn whose host has ended or whose record has expired.
+var errInterruptedTurnNotFound = errors.New("interrupted turn not found")
+
+// endInterrupted ends an interrupted run whose first turn was submitted more than lifetime ago, or returns that
+// submission time. No member holds the run, so every member uses the turn's fixed CANCELED event ID.
+func (r *Receiver) endInterrupted(ctx context.Context, interrupted wire.RunStatus, reason string, lifetime time.Duration) (time.Time, error) {
 	events, err := r.readEvents(ctx)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	runID, turn := interrupted.Wherry.Run, interrupted.Wherry.Turn
 	if slices.ContainsFunc(events.statuses[runID], func(status wire.RunStatus) bool {
 		return status.Wherry.EventID == fmt.Sprintf("%s/%d/canceled", runID, turn)
 	}) {
-		return nil
+		return time.Time{}, nil
 	}
 	if latest := latestStatus(events.statuses[runID], interrupted.Wherry.Tenant); latest == nil || latest.Wherry.EventID != interrupted.Wherry.EventID {
-		return nil
+		return time.Time{}, nil
 	}
 	all, err := r.readTurns(ctx, runID)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	index := slices.IndexFunc(all, func(submission runSubmission) bool { return submission.hash == interrupted.Wherry.TaskHash })
 	if index < 0 || all[index].record.Wherry.Turn != turn || all[index].record.Wherry.Tenant != interrupted.Wherry.Tenant {
-		return errors.New("interrupted turn not found")
+		return time.Time{}, errInterruptedTurnNotFound
 	}
 	task := all[index].record
-	history, err := turns(bindTurns(all, task, events), task)
-	if err != nil {
-		return err
+	if first, ok := bindTurns(all, task, events)[1]; ok && time.Since(first.submitted) <= lifetime {
+		return first.submitted, nil
 	}
+	// The result carries only the turn's own message, so a first turn gone from the task topic does not matter.
 	// The run's own transactional ID would fence a member that has meanwhile claimed a continuation.
-	run := &activeRun{receiver: r, task: task, taskHash: interrupted.Wherry.TaskHash, history: history, attempt: interrupted.Wherry.Attempt}
-	status := taskStatus(wire.TaskStateCanceled, cancelReason)
-	if err := r.admissionCommit(ctx, append([]*kgo.Record{run.result(status, cancelReason, nil)}, run.statusRecords("terminal", status, nil, nil)...)...); err != nil {
-		return err
+	run := &activeRun{receiver: r, task: task, taskHash: interrupted.Wherry.TaskHash, history: []wire.Message{task.Message}, attempt: interrupted.Wherry.Attempt}
+	status := taskStatus(wire.TaskStateCanceled, reason)
+	if err := r.admissionCommit(ctx, append([]*kgo.Record{run.result(status, reason, nil)}, run.statusRecords("terminal", status, nil, nil)...)...); err != nil {
+		return time.Time{}, err
 	}
-	r.logger.Printf("run %s: canceled interrupted turn %d", runID, turn)
-	return nil
+	r.logger.Printf("run %s: ended interrupted turn %d: %s", runID, turn, reason)
+	return time.Time{}, nil
 }
 
 func turns(submissions map[int64]runSubmission, task *wire.Submission) ([]wire.Message, error) {

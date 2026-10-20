@@ -104,6 +104,8 @@ func toolFailure(err error) error {
 		return &toolError{Code: "NOT_AWAITING_CONTINUATION", Message: "the run is not waiting for a continuation"}
 	case errors.Is(err, busclient.ErrRunCanceled):
 		return &toolError{Code: "RUN_CANCELED", Message: "the run is canceled"}
+	case errors.Is(err, busclient.ErrRunExpired), errors.Is(err, busclient.ErrQueueDeadlinePastLifetime):
+		return &toolError{Code: "RUN_EXPIRED", Message: "the run's lifetime has passed, or the queue deadline is past it"}
 	case errors.Is(err, busclient.ErrTurnSubmitted):
 		return &toolError{Code: "TURN_ALREADY_SUBMITTED", Message: "a continuation for this turn is already submitted"}
 	case errors.Is(err, busclient.ErrInvalidInput):
