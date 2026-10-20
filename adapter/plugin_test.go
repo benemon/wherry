@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -185,7 +186,8 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 	a := configured(t, p, "a", "{}")
 	run := Run{ID: "run-a", Adapter: "a", Agent: "claude", Turn: 2, Attempt: 3, Prompt: []byte("hello"), Credential: []byte(runCredential),
 		Inputs:      []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty", Data: []byte{}}},
-		Credentials: []Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte(runCredential)}}}
+		Credentials: []Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte(runCredential)}},
+		Fetches:     []Fetch{{Name: "dataset.bin", URL: "https://store.example.test/bucket/key?X-Amz-Signature=0", Size: 5 << 20, SHA256: strings.Repeat("a", 64)}}}
 	if _, _, err := a.Dispatch(context.Background(), run); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +205,8 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 	}
 	got := dispatched[0]
 	if len(dispatched) != 2 || got.ID != run.ID || got.Turn != 2 || got.Attempt != 3 || string(got.Prompt) != "hello" || string(got.Credential) != runCredential ||
-		!reflect.DeepEqual(got.Inputs, []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty"}}) || !reflect.DeepEqual(got.Credentials, run.Credentials) {
+		!reflect.DeepEqual(got.Inputs, []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty"}}) || !reflect.DeepEqual(got.Credentials, run.Credentials) ||
+		!reflect.DeepEqual(got.Fetches, run.Fetches) {
 		t.Fatalf("plugin got %+v; want %+v", got, run)
 	}
 	if dispatched[1].Credential != nil {
@@ -493,6 +496,62 @@ func TestCollectJoinsEachOutputsPieces(t *testing.T) {
 	}
 }
 
+// Streamed outputs pass over the link as Bodies, whatever FileBytes says, while the plugin's Collect waits on each.
+func TestCollectStreamsTheOutputsTheLimitsName(t *testing.T) {
+	p, _, _ := launch(t)
+	a := configured(t, p, "a", `{"outputs":true}`)
+	outputs := make(chan Output)
+	ended := make(chan error, 1)
+	go func() {
+		defer close(outputs)
+		ended <- a.Collect(context.Background(), Handle{Data: []byte("h")}, Limits{Files: 256, FileBytes: 1, TotalBytes: 1, Stream: []string{"big.bin", "empty", "link"}, StreamBytes: 4 << 20}, outputs)
+	}()
+	read := map[string][]byte{}
+	var link Output
+	for output := range outputs {
+		if output.Body == nil {
+			link = output
+			continue
+		}
+		data, err := io.ReadAll(output.Body)
+		output.Body.Close()
+		if err != nil {
+			t.Fatalf("read %s: %v", output.Name, err)
+		}
+		read[output.Name] = data
+	}
+	if err := <-ended; err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read["big.bin"], bytes.Repeat([]byte("b"), 2<<20+1)) || read["empty"] == nil || len(read["empty"]) != 0 || len(read) != 2 {
+		t.Fatalf("streamed %d outputs; want big.bin whole and empty", len(read))
+	}
+	if link.Name != "link" || link.Data != nil || link.Mode != fs.ModeSymlink {
+		t.Fatalf("link output %+v; want unread", link)
+	}
+}
+
+func TestCollectRefusesAStreamOverTheStreamLimit(t *testing.T) {
+	p, _, _ := launch(t)
+	a := configured(t, p, "a", `{"outputs":true}`)
+	outputs := make(chan Output)
+	ended := make(chan error, 1)
+	go func() {
+		defer close(outputs)
+		ended <- a.Collect(context.Background(), Handle{Data: []byte("h")}, Limits{Files: 256, FileBytes: 8 << 20, TotalBytes: 8 << 20, Stream: []string{"big.bin"}, StreamBytes: 2 << 20}, outputs)
+	}()
+	var readErr error
+	for output := range outputs {
+		if output.Body != nil {
+			_, readErr = io.ReadAll(output.Body)
+			output.Body.Close()
+		}
+	}
+	if err := <-ended; err == nil || readErr == nil {
+		t.Fatalf("collect = %v and read %v; want a stream over its limit refused on both sides", err, readErr)
+	}
+}
+
 func TestCollectRefusesAnOutputOverTheFileLimit(t *testing.T) {
 	p, _, _ := launch(t)
 	if _, err := collected(t, configured(t, p, "a", `{"outputs":true}`), Limits{Files: 256, FileBytes: 2 << 20, TotalBytes: 8 << 20}); err == nil {
@@ -519,7 +578,7 @@ func TestVersionOnePluginIsRefused(t *testing.T) {
 		p.Close()
 		t.Fatal("launched a version 1 plugin")
 	}
-	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 1, Client versions: [2]") {
+	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 1, Client versions: [3]") {
 		t.Fatalf("launch error %v; want the version named", err)
 	}
 }

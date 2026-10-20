@@ -77,10 +77,11 @@ type SubmissionBinding struct {
 	Placement       Placement `json:"placement"`
 	DeadlineMS      int64     `json:"deadline_ms"`
 	QueueDeadlineMS int64     `json:"queue_deadline_ms"`
-	// Credentials, Outputs and Git are declared by a run's first turn and hold for all of its turns.
+	// Credentials, Outputs, Git and S3Inputs are declared by a run's first turn and hold for all of its turns.
 	Credentials []TaskCredential `json:"credentials,omitzero"`
 	Outputs     []ExpectedOutput `json:"outputs,omitzero"`
 	Git         *GitInput        `json:"git,omitzero"`
+	S3Inputs    []S3Input        `json:"s3_inputs,omitzero"`
 }
 
 // TaskCredential is a credential of the host that the run's agent gets as the file File in its credentials
@@ -91,10 +92,11 @@ type TaskCredential struct {
 }
 
 // ExpectedOutput is a file the agent is asked to leave in its outputs directory; a turn that does not return a
-// required one fails.
+// required one fails. Storage StorageS3 returns it through the pool's bucket instead of the feed.
 type ExpectedOutput struct {
 	Name     string `json:"name"`
 	Required bool   `json:"required,omitzero"`
+	Storage  string `json:"storage,omitzero"`
 }
 
 // Submission is a host's task or continuation on its pool's task topic.
@@ -212,7 +214,10 @@ type SealRequest struct {
 	Credentials []string        `json:"credentials"`
 	// TaskCredentials are the run's task credentials, outside the pool's terms.
 	TaskCredentials []string `json:"task_credentials,omitzero"`
-	ExpiryMS        int64    `json:"expiry_ms"`
+	// S3Inputs and S3Outputs name the run's S3 inputs and outputs the seal is to carry presigned URLs for.
+	S3Inputs  []string `json:"s3_inputs,omitzero"`
+	S3Outputs []string `json:"s3_outputs,omitzero"`
+	ExpiryMS  int64    `json:"expiry_ms"`
 }
 
 // StartFailure records that a receiver could not start a run's attempt.
@@ -306,8 +311,8 @@ func (value *Submission) validate() error {
 	if _, err := inputBytes(value.Message.Parts); err != nil {
 		return err
 	}
-	if binding.Turn > 1 && (binding.Credentials != nil || binding.Outputs != nil || binding.Git != nil) {
-		return errors.New("only a run's first turn declares credentials, outputs and git")
+	if binding.Turn > 1 && (binding.Credentials != nil || binding.Outputs != nil || binding.Git != nil || binding.S3Inputs != nil) {
+		return errors.New("only a run's first turn declares credentials, outputs, git and S3 inputs")
 	}
 	files := map[string]bool{}
 	for _, credential := range binding.Credentials {
@@ -327,7 +332,28 @@ func (value *Submission) validate() error {
 		if !ValidOutputName(output.Name) || outputs[output.Name] {
 			return errors.New("expected outputs must be unique relative paths of portable file names")
 		}
+		if output.Storage != "" && output.Storage != StorageS3 {
+			return errors.New("an expected output's storage is s3 or absent")
+		}
 		outputs[output.Name] = true
+	}
+	if len(binding.S3Inputs)+len(value.Message.Parts) > MaxParts {
+		return errors.New("a first turn's parts and S3 inputs are at most 256")
+	}
+	inputs := map[string]bool{}
+	for _, part := range value.Message.Parts {
+		if part.Raw != nil || part.Data != nil {
+			inputs[InputName(part)] = true
+		}
+	}
+	for _, input := range binding.S3Inputs {
+		if !ValidFileName(input.Name) || inputs[input.Name] {
+			return errors.New("S3 inputs need unique portable file names, distinct from the turn's input files")
+		}
+		if input.Size < 0 || input.Size > MaxS3Object || !validHash(input.SHA256) {
+			return errors.New("an S3 input has a size of at most 5 GiB and a lowercase hex SHA-256")
+		}
+		inputs[input.Name] = true
 	}
 	if binding.Git == nil {
 		return nil
@@ -335,9 +361,7 @@ func (value *Submission) validate() error {
 	if err := binding.Git.Validate(binding.Credentials); err != nil {
 		return err
 	}
-	if binding.Git.HostKey != "" && slices.ContainsFunc(value.Message.Parts, func(part Part) bool {
-		return (part.Raw != nil || part.Data != nil) && InputName(part) == KnownHostsFile
-	}) {
+	if binding.Git.HostKey != "" && inputs[KnownHostsFile] {
 		return errors.New("an input named known_hosts conflicts with the git host key")
 	}
 	return nil
@@ -502,8 +526,18 @@ func (value *SealRequest) validate() error {
 	}
 	key, ok := value.Key.Key.(*ecdsa.PublicKey)
 	names := append(slices.Clone(value.Credentials), value.TaskCredentials...)
-	if !ok || key.Curve != elliptic.P256() || value.KeyID != signed.SealKeyID(key) || value.ExpiryMS <= 0 || len(names) == 0 {
+	if !ok || key.Curve != elliptic.P256() || value.KeyID != signed.SealKeyID(key) || value.ExpiryMS <= 0 || len(names)+len(value.S3Inputs)+len(value.S3Outputs) == 0 {
 		return errors.New("invalid seal request")
+	}
+	for i, input := range value.S3Inputs {
+		if !ValidFileName(input) || slices.Contains(value.S3Inputs[:i], input) {
+			return errors.New("a seal request names unique S3 inputs")
+		}
+	}
+	for i, output := range value.S3Outputs {
+		if !ValidOutputName(output) || slices.Contains(value.S3Outputs[:i], output) {
+			return errors.New("a seal request names unique S3 outputs")
+		}
 	}
 	for i, credential := range names {
 		if err := validateID(credential, "credential"); err != nil {

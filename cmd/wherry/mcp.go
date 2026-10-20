@@ -44,7 +44,8 @@ func runMCP(ctx context.Context, config busclient.Config, args []string) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	go answer(ctx, connect, logger)
-	return newMCPServer(connect, inputReader(dir, config)).Run(ctx, &mcp.StdioTransport{})
+	open := inputOpener(dir, config)
+	return newMCPServer(connect, inputReader(open), open).Run(ctx, &mcp.StdioTransport{})
 }
 
 // answer answers seal requests for as long as the server runs, so a credentialed task is sealed while the harness
@@ -126,6 +127,7 @@ type credentialInput struct {
 type outputInput struct {
 	Name     string `json:"name" jsonschema:"relative path the agent is asked to write in WHERRY_OUTPUT_DIR"`
 	Required bool   `json:"required,omitempty" jsonschema:"fail the turn when the output is not returned"`
+	Storage  string `json:"storage,omitempty" jsonschema:"s3 to return the output through the pool's bucket, up to 5 GiB, instead of the feed"`
 }
 
 type submitInput struct {
@@ -134,6 +136,7 @@ type submitInput struct {
 	Selector             []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the adapter must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
 	Git                  *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's forges"`
 	Inputs               []string           `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names; the pool's inline limit in all, 256 KiB by default"`
+	S3Inputs             []string           `json:"s3_inputs,omitempty" jsonschema:"local files of up to 5 GiB each uploaded to the pool's bucket and fetched into the agent's WHERRY_INPUT_DIR under their base names"`
 	Credentials          []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent as files in WHERRY_CREDENTIALS_DIR"`
 	Outputs              []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; await writes the returned ones locally"`
 	DeadlineSeconds      int64              `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 1800"`
@@ -239,9 +242,9 @@ type eventsOutput struct {
 	Skipped     int                `json:"skipped,omitempty"`
 }
 
-// newMCPServer serves the wherry tools; submit reads its inputs with readInput. Each call opens its own connection:
+// newMCPServer serves the wherry tools; submit reads its inputs with readInput and opens its S3 inputs with openInput. Each call opens its own connection:
 // a Client's consumer serves one operation at a time, and a harness may call status while an await is in flight.
-func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error)) *mcp.Server {
+func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error)) *mcp.Server {
 	version := "(devel)"
 	if info, ok := debug.ReadBuildInfo(); ok {
 		version = info.Main.Version
@@ -275,10 +278,15 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			return nil, submitOutput{}, toolFailure(err)
 		}
 		defer client.Close()
-		submission, err := submitFromInput(input, readInput)
+		submission, err := submitFromInput(input, readInput, openInput)
 		if err != nil {
 			return nil, submitOutput{}, err
 		}
+		defer func() {
+			for _, file := range submission.S3Inputs {
+				file.File.Close()
+			}
+		}()
 		result, err := client.Submit(ctx, submission)
 		if err != nil {
 			return nil, submitOutput{}, toolFailure(err)
@@ -361,7 +369,14 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 				output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: paths[i], SHA256: written.SHA256, Size: written.Size})
 			}
 		}
-		output.NotReturned = append(result.NotReturned, result.Rejected...)
+		downloaded, rejected, err := client.DownloadOutputs(ctx, input.ID, result, "")
+		if err != nil {
+			return nil, awaitReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: "the turn's S3 outputs could not be downloaded, or the run's prefix deleted; the wherry CLI's await reports the cause"}
+		}
+		for _, written := range downloaded {
+			output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: written.Path, SHA256: written.SHA256, Size: written.Size})
+		}
+		output.NotReturned = append(append(result.NotReturned, result.Rejected...), rejected...)
 		return nil, output, nil
 	})
 
@@ -441,7 +456,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	return server
 }
 
-func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part, error)) (busclient.SubmitInput, error) {
+func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error)) (busclient.SubmitInput, error) {
 	if input.Prompt == "" {
 		return busclient.SubmitInput{}, invalidArgument("prompt is required")
 	}
@@ -481,7 +496,17 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 		submission.Credentials = append(submission.Credentials, wire.TaskCredential{Name: credential.Name, File: credential.File})
 	}
 	for _, output := range input.Outputs {
-		submission.Outputs = append(submission.Outputs, wire.ExpectedOutput{Name: output.Name, Required: output.Required})
+		submission.Outputs = append(submission.Outputs, wire.ExpectedOutput{Name: output.Name, Required: output.Required, Storage: output.Storage})
+	}
+	for _, path := range input.S3Inputs {
+		file, err := openInput(path)
+		if err != nil {
+			for _, opened := range submission.S3Inputs {
+				opened.File.Close()
+			}
+			return busclient.SubmitInput{}, err
+		}
+		submission.S3Inputs = append(submission.S3Inputs, busclient.S3File{Name: filepath.Base(path), File: file})
 	}
 	return submission, nil
 }
@@ -556,10 +581,10 @@ func resultParts(parts []wire.Part) []resultPart {
 	return result
 }
 
-// inputReader reads at most limit bytes of an MCP input: a regular file beneath dir once symbolic links are resolved,
-// and none of the host's own files, so a client steered by its prompt cannot send the host key, the bundle, the state
-// or a credential.
-func inputReader(dir string, config busclient.Config) func(string, int64) (wire.Part, error) {
+// inputOpener opens an MCP input: a regular file beneath dir once symbolic links are resolved, and none of the host's
+// own files, so a client steered by its prompt cannot send the host key, the bundle, the state, a credential or a
+// storage key.
+func inputOpener(dir string, config busclient.Config) func(string) (*os.File, error) {
 	resolve := func(path string) string {
 		if resolved, err := filepath.EvalSymlinks(path); err == nil {
 			return resolved
@@ -571,34 +596,48 @@ func inputReader(dir string, config busclient.Config) func(string, int64) (wire.
 	for _, path := range config.Credentials {
 		protected = append(protected, resolve(path))
 	}
+	if config.Storage != nil {
+		protected = append(protected, resolve(config.Storage.AccessKeyFile), resolve(config.Storage.SecretKeyFile))
+	}
 	refused := invalidArgument("inputs must be readable regular files beneath the MCP server's working directory, outside the wherry configuration")
-	return func(path string, limit int64) (wire.Part, error) {
+	return func(path string) (*os.File, error) {
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(dir, path)
 		}
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			return wire.Part{}, refused
+			return nil, refused
 		}
 		if relative, err := filepath.Rel(root, resolved); err != nil || !filepath.IsLocal(relative) {
-			return wire.Part{}, refused
+			return nil, refused
 		}
 		for _, own := range protected {
 			if relative, err := filepath.Rel(own, resolved); err == nil && filepath.IsLocal(relative) {
-				return wire.Part{}, refused
+				return nil, refused
 			}
 		}
 		if info, err := os.Stat(resolved); err != nil || !info.Mode().IsRegular() {
-			return wire.Part{}, refused
+			return nil, refused
 		}
 		file, err := os.Open(resolved)
 		if err != nil {
-			return wire.Part{}, refused
+			return nil, refused
+		}
+		return file, nil
+	}
+}
+
+// inputReader reads at most limit bytes of an MCP input that open opens, named by the base name of its path.
+func inputReader(open func(string) (*os.File, error)) func(string, int64) (wire.Part, error) {
+	return func(path string, limit int64) (wire.Part, error) {
+		file, err := open(path)
+		if err != nil {
+			return wire.Part{}, err
 		}
 		defer file.Close()
 		data, err := io.ReadAll(io.LimitReader(file, limit))
 		if err != nil {
-			return wire.Part{}, refused
+			return wire.Part{}, invalidArgument("inputs must be readable regular files beneath the MCP server's working directory, outside the wherry configuration")
 		}
 		return wire.Part{Raw: append(wire.StdBytes{}, data...), Filename: filepath.Base(path)}, nil
 	}

@@ -251,3 +251,35 @@ func TestSealErrorsDoNotExposeCredential(t *testing.T) {
 		t.Fatalf("tampered seal: %v", err)
 	}
 }
+
+// A seal carries a presigned URL per S3 input and output its binding names, bound in its protected header beside the
+// credentials, and opens only to exactly those values.
+func TestSealCarriesS3URLs(t *testing.T) {
+	key := sealKey(t)
+	binding := testBinding(key)
+	binding.Credentials, binding.S3Inputs, binding.S3Outputs = []string{}, []string{"data.bin"}, []string{"out/report.pdf"}
+	urls := map[string][]byte{S3InputValue("data.bin"): []byte("https://store.test/b/in?X-Amz-Signature=1"), S3OutputValue("out/report.pdf"): []byte("https://store.test/b/out?X-Amz-Signature=2")}
+	sealed := mustSeal(t, binding, &key.PublicKey, urls)
+	opened, err := OpenSeal(sealed, binding, key, time.Now())
+	if err != nil || len(opened) != 2 || string(opened[S3InputValue("data.bin")]) != string(urls[S3InputValue("data.bin")]) {
+		t.Fatalf("opened %v, %v; want the two URLs", opened, err)
+	}
+	header, _, _ := strings.Cut(string(sealed), ".")
+	decoded, err := base64.RawURLEncoding.DecodeString(header)
+	if err != nil || !strings.Contains(string(decoded), `"s3_inputs":["data.bin"]`) || !strings.Contains(string(decoded), `"s3_outputs":["out/report.pdf"]`) {
+		t.Fatalf("protected header %s; want the S3 names bound", decoded)
+	}
+	other := binding
+	other.S3Outputs = nil
+	if _, err := OpenSeal(sealed, other, key, time.Now()); err == nil {
+		t.Fatal("opened a seal bound to other S3 outputs")
+	}
+	// Seal takes any values, as a broken sealer would write them.
+	missing := mustSeal(t, binding, &key.PublicKey, map[string][]byte{S3InputValue("data.bin"): urls[S3InputValue("data.bin")]})
+	extra := mustSeal(t, binding, &key.PublicKey, map[string][]byte{S3InputValue("data.bin"): nil, S3OutputValue("out/report.pdf"): nil, "model": nil})
+	for name, seal := range map[string][]byte{"a missing URL": missing, "an extra value": extra} {
+		if _, err := OpenSeal(seal, binding, key, time.Now()); err == nil {
+			t.Errorf("opened a seal with %s", name)
+		}
+	}
+}

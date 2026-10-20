@@ -5,6 +5,7 @@ package adapter
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 )
 
@@ -29,11 +30,24 @@ type Run struct {
 	ID, Adapter, Agent string
 	Turn, Attempt      int64
 	Prompt, Credential []byte
-	// Inputs go in the directory WHERRY_INPUT_DIR names, and Credentials in the one WHERRY_CREDENTIALS_DIR names,
-	// each as a file under its name; the core has validated every name.
+	// Inputs and Fetches go in the directory WHERRY_INPUT_DIR names, and Credentials in the one WHERRY_CREDENTIALS_DIR
+	// names, each as a file under its name; the core has validated every name.
 	Inputs      []File
 	Credentials []Secret
+	Fetches     []Fetch
 }
+
+// Fetch is an input the adapter fetches from URL, a presigned https GET the core has checked against its pool's storage,
+// and verifies as Size bytes of SHA-256 SHA256 before the agent starts, following no redirect. A fetch that fails or
+// does not verify ends the job before its agent starts, with Terminal.Class ClassFetch.
+type Fetch struct {
+	Name, URL string
+	Size      int64
+	SHA256    string
+}
+
+// ClassFetch is the Terminal.Class of a job that ended before its agent started because a Fetch failed.
+const ClassFetch = "fetch"
 
 // File is one input file.
 type File struct {
@@ -55,20 +69,25 @@ type Directories struct {
 }
 
 // Limits bound what Collect reads: the number of entries beneath the outputs directory, the bytes of one file and
-// the bytes of all of them.
+// the bytes of all of them. The outputs Stream names are streamed instead, each of at most StreamBytes, and count
+// against neither FileBytes nor TotalBytes.
 type Limits struct {
-	Files      int
-	FileBytes  int64
-	TotalBytes int64
+	Files       int
+	FileBytes   int64
+	TotalBytes  int64
+	Stream      []string
+	StreamBytes int64
 }
 
 // Output is one entry beneath a job's outputs directory, named by its slash-separated path there. Mode holds its
-// type bits; Data is set only for a regular file read within the limits.
+// type bits; Data is set only for a regular file read within the limits, and Body only for a regular file Limits.Stream
+// names within StreamBytes, which streams its Size bytes and which whoever receives the Output closes.
 type Output struct {
 	Name string
 	Size int64
 	Mode fs.FileMode
 	Data []byte
+	Body io.ReadCloser
 }
 
 // InputTooLargeError is the error Dispatch returns, with OutcomeNothingCreated, when its platform cannot deliver

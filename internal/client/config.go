@@ -29,6 +29,14 @@ type Config struct {
 	HostKey     string            `json:"host_key,omitzero"`
 	StateDir    string            `json:"state_dir,omitzero"`
 	Credentials map[string]string `json:"credentials,omitzero"`
+	Storage     *StorageConfig    `json:"storage,omitzero"`
+}
+
+// StorageConfig names the files, each readable by this user alone, holding the access key and secret key of the
+// host's S3 credential, which the operator scopes to the tenant's prefix in its pools' buckets.
+type StorageConfig struct {
+	AccessKeyFile string `json:"access_key_file"`
+	SecretKeyFile string `json:"secret_key_file"`
 }
 
 // DefaultConfigPath returns WHERRY_CONFIG or the per-user default path.
@@ -66,7 +74,14 @@ func LoadConfig(path string) (Config, error) {
 	if config.StateDir == "" {
 		config.StateDir = filepath.Join(home, ".config", "wherry", "state")
 	}
-	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir} {
+	paths := []*string{&config.Bundle, &config.HostKey, &config.StateDir}
+	if config.Storage != nil {
+		if config.Storage.AccessKeyFile == "" || config.Storage.SecretKeyFile == "" {
+			return Config{}, errors.New("config storage requires access_key_file and secret_key_file")
+		}
+		paths = append(paths, &config.Storage.AccessKeyFile, &config.Storage.SecretKeyFile)
+	}
+	for _, path := range paths {
 		if *path, err = expandHome(*path); err != nil {
 			return Config{}, err
 		}
@@ -134,6 +149,7 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		kafka.Close()
 		return nil, err
 	}
+	host.storage = config.Storage
 	return host, nil
 }
 

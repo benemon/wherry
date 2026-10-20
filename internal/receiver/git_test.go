@@ -127,7 +127,7 @@ func TestGitInputReachesTheAgentAsFilesAndCommands(t *testing.T) {
 
 func TestKnownHostsInputConflictsAcrossTurns(t *testing.T) {
 	git := &wire.GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", HostKey: testHostKey}
-	_, rejection := deliverables([]wire.Message{{Parts: []wire.Part{{Text: "hi"}}}, {Parts: []wire.Part{{Raw: wire.StdBytes("x"), Filename: wire.KnownHostsFile}}}}, git)
+	_, rejection := deliverables([]wire.Message{{Parts: []wire.Part{{Text: "hi"}}}, {Parts: []wire.Part{{Raw: wire.StdBytes("x"), Filename: wire.KnownHostsFile}}}}, git, nil)
 	if rejection != "input names repeat across turns" {
 		t.Fatalf("rejection %q, want a continuation's known_hosts refused beside the host key", rejection)
 	}

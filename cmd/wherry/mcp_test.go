@@ -9,6 +9,7 @@ import (
 	json "encoding/json/v2"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -28,15 +29,15 @@ import (
 // mcpSession connects an MCP client to newMCPServer over in-memory transports; progress counts notifications received.
 func mcpSession(t *testing.T, connect func() (*busclient.Host, error), progress *atomic.Int64) *mcp.ClientSession {
 	t.Helper()
-	return mcpSessionReading(t, connect, progress, inputReader(t.TempDir(), busclient.Config{}))
+	return mcpSessionReading(t, connect, progress, inputOpener(t.TempDir(), busclient.Config{}))
 }
 
-// mcpSessionReading is mcpSession with submit reading its inputs through readInput.
-func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), progress *atomic.Int64, readInput func(string, int64) (wire.Part, error)) *mcp.ClientSession {
+// mcpSessionReading is mcpSession with submit opening its inputs through openInput.
+func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), progress *atomic.Int64, openInput func(string) (*os.File, error)) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, readInput).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, inputReader(openInput), openInput).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

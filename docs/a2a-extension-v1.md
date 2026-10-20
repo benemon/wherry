@@ -103,7 +103,8 @@ A submission is one turn of a run.
     "deadline_ms": 1790000000000,
     "queue_deadline_ms": 1789998800000,
     "credentials": [{"name": "deploy-key", "file": "id_ed25519"}],
-    "outputs": [{"name": "report.md", "required": true}],
+    "outputs": [{"name": "report.md", "required": true}, {"name": "plot.pdf", "storage": "s3"}],
+    "s3_inputs": [{"name": "dataset.parquet", "size": 5242880, "sha256": "4f1c..."}],
     "git": {
       "remote": "ssh://git@git.example.com/team/app.git",
       "ref": "main",
@@ -143,11 +144,19 @@ A submission is one turn of a run.
   or digit, and `file` follows the file name rules; each `file` appears once. The pool's terms do
   not govern task credentials.
 - `outputs` lists at most 256 files the agent is asked to leave, each
-  `{name, required}`. `name` is a relative path of file names joined by
+  `{name, required, storage}`. `name` is a relative path of file names joined by
   `/`, at most 512 bytes, and appears once. `required` defaults to false.
+  `storage` `s3` returns the output through the pool's bucket
+  ([S3 inputs and outputs](#s3-inputs-and-outputs)); absent, it returns on
+  the feed.
+- `s3_inputs` lists files the host uploaded to the pool's bucket, each
+  `{name, size, sha256}`: a file name distinct from every input file's,
+  appearing once, the object's size in bytes, at most 5 GiB, and its
+  lowercase hex SHA-256. It holds no URL. The message's parts and
+  `s3_inputs` number at most 256 together.
 - `git` is the run's [git input](#git-input), optional.
-- Only a run's first turn carries `credentials`, `outputs` and `git`, and
-  they hold for every turn of the run.
+- Only a run's first turn carries `credentials`, `outputs`, `git` and
+  `s3_inputs`, and they hold for every turn of the run.
 
 ## Cancel
 
@@ -349,6 +358,10 @@ The `metadata` of a result's `Task` says where the turn ran:
 - `outputs` (array): each output the turn returned, as `{name, sha256,
   size}`, where `sha256` is the lowercase hex SHA-256 and `size` the byte
   count of the bytes its output chunks carry. The receiver computes both.
+- `s3_outputs` (array): each S3 output the turn returned, as `{name,
+  sha256, size, key}`, where `sha256` and `size` are of the bytes the
+  receiver uploaded, computed as it sent them, and `key` is the object's
+  key in the pool's bucket.
 - `not_returned` (array): each output the turn did not return, as
   `{name, size, reason}`. `size` is present when the receiver knows it.
 
@@ -360,8 +373,14 @@ The `metadata` of a result's `Task` says where the turn ran:
 | `rejected: symlink`, `rejected: fifo`, `rejected: device`, `rejected: socket`, `rejected: irregular file` | the entry is not a regular file and was not read |
 | `rejected: invalid name` | the path is not a relative path of file names of at most 512 bytes; `name` is the path quoted as ASCII, at most 256 bytes |
 | `rejected: size changed while read` | the adapter read a length other than the size it listed |
+| `exceeds the S3 object limit` | an S3 output over 5 GiB |
+| `not streamed by the adapter` | the adapter did not stream an S3 output it found |
+| `not uploaded: no upload URL` | the attempt holds no PUT URL for the S3 output: it adopted an earlier attempt's job |
+| `not uploaded: redirected` | the store answered the PUT with a redirect, which the receiver does not follow |
+| `not uploaded: status <code>` | the store answered the PUT with another status than 200 |
+| `not uploaded: request failed`, `not uploaded: invalid request` | the PUT did not complete, or could not be built |
 
-`outputs` and `not_returned` are present on a result whose turn the agent
+`outputs`, `s3_outputs` and `not_returned` are present on a result whose turn the agent
 ended with its result line, and absent when they would be empty.
 
 The `metadata` of the `result` artifact holds `agent_result` (object): the
@@ -527,6 +546,8 @@ turn's `claimed` status.
   "key_id": "hs9I_DeEnEcQZjRh56OShK8IHP_rXpmv2UZ2DQxMXz0",
   "credentials": ["model-api-key"],
   "task_credentials": ["deploy-key"],
+  "s3_inputs": ["dataset.parquet"],
+  "s3_outputs": ["plot.pdf"],
   "expiry_ms": 1789998300000
 }
 ```
@@ -538,7 +559,14 @@ turn's `claimed` status.
   and is empty when the adapter delivers none.
 - `task_credentials` names the run's task credentials other than that one,
   and is absent when there are none. A name appears once across both
-  lists, and the lists are not both empty.
+  lists.
+- `s3_inputs` and `s3_outputs` name the run's S3 inputs and the turn's S3
+  outputs, for which the seal is to carry presigned URLs; each is absent
+  when empty, and each name appears once in its list. An attempt that
+  adopts an earlier attempt's job asks for nothing.
+- The four lists are not all empty. A turn needs a seal when its adapter
+  delivers a credential, or the run has task credentials, S3 inputs or S3
+  outputs.
 - `expiry_ms` is 5 minutes after the request. The receiver holds the claim
   until a seal opens, a cancel of the turn arrives, or `expiry_ms` passes.
   At expiry it interrupts the turn `TASK_STATE_AUTH_REQUIRED` (see [Turns
@@ -565,6 +593,14 @@ all of these hold:
 6. Every name in `credentials` is in the pool's terms for the run's agent,
    every name in `task_credentials` is a task credential the run's first
    turn declares, and the host's configuration maps every name to a file.
+7. Every name in `s3_inputs` and `s3_outputs` is an S3 input or S3 output
+   the run's first turn declares, the pool's terms have `storage`, and the
+   host's configuration has a storage credential.
+
+For each S3 input the host presigns a GET of `wherry/<tenant>/<run>/inputs/<name>`
+for 15 minutes, and for each S3 output a PUT of
+`wherry/<tenant>/<run>/<turn>/outputs/<name>` until the turn's
+`deadline_ms`, path-style on the pool's endpoint with its own credential.
 
 A host records a run locally before it publishes the run's turn, so a
 request can follow the task at once; a request read while the record is
@@ -601,11 +637,14 @@ request's `key`.
 - The protected header holds `alg`, `enc`, `epk`, `typ`
   `application/vnd.wherry.seal.v2+jwe` and the binding: `tenant`, `pool`,
   `receiver`, `key_id`, `run`, `turn`, `attempt`, `credentials`,
-  `task_credentials` when the request has it, and `expiry_ms`, copied from
-  the request. Readers reject any other member.
+  `task_credentials`, `s3_inputs` and `s3_outputs` when the request has
+  them, and `expiry_ms`, copied from the request. Readers reject any other member.
 - The plaintext is a JSON object: `v`, `binding`, an object holding the
   binding members again, and `values`, mapping each name in `credentials`
-  and `task_credentials` to its value as padded standard base64.
+  and `task_credentials` to its value, `s3-inputs/<name>` for each S3 input
+  to its presigned GET URL, and `s3-outputs/<name>` for each S3 output to
+  its presigned PUT URL, each as padded standard base64. Presigned URLs
+  travel nowhere else on the broker.
 - A seal is at most 64 KiB in compact form. A host refuses to build a larger
   one and logs the credential names.
 
@@ -613,15 +652,24 @@ The receiver reads the host's topic from its end at the time of the
 request. It opens a seal only when the header's binding equals its request,
 with `key_id` the thumbprint of its own key, `expiry_ms` has not passed, the
 plaintext's `binding` equals the header's, and `values` holds exactly the
-named credentials. It checks for a cancel, its shutdown, the run deadline
+named credentials and URLs. It checks for a cancel, its shutdown, the run deadline
 and the request's expiry before it takes a seal, so a turn stopped while its
 seal arrives is never dispatched. It passes the values to the adapter in
 Dispatch. It logs a seal that does not open by run, turn and attempt, never
 the reason.
 
+Before it uses a URL, the receiver checks it against the pool's
+`storage`: its scheme is `https`, its host and port, 443 when absent, are
+the endpoint's, it carries no user information, and its path is
+`/<bucket>/` and the object's key exactly. A URL that fails ends the turn
+`TASK_STATE_FAILED` with `the URL for S3 input <name> is not one of pool
+<pool>'s storage`, or `S3 output`, before anything is dispatched, and the
+task is not returned to the pool.
+
 Before it signs any transcript chunk, output chunk, result text or status
 message of the attempt, the receiver replaces every occurrence of each
-credential value it delivered, task credentials included, with
+credential value it delivered, task credentials and presigned URLs
+included, and of each URL's `X-Amz-Signature` value alone, with
 `[redacted]`. The marker names no credential, so a replacement cannot
 publish another credential's value; when a form of a delivered value occurs
 within `[redacted]`, the marker for the attempt is `[*]` instead. The data
@@ -722,11 +770,13 @@ A receiver that claims a submission:
 7. rejects a continuation whose earlier turns it cannot read;
 8. rejects it when its queue deadline or run deadline has passed;
 9. rejects it when the host of the run's [git input](#git-input) is not
-   one of the pool's current forges;
+   one of the pool's current forges, and with `pool <pool> has no storage
+   for S3 inputs and outputs` when the run has S3 inputs or outputs and
+   the pool's terms have no `storage`;
 10. rejects it with `unsupported message part` when a `url` part appears
     in the run's turns, and with `input names repeat across turns` when two
     turns deliver input files of one name, the git input's `known_hosts`
-    among them;
+    and the S3 inputs among them;
 11. writes the echo and the `claimed` status.
 
 A turn a cancel covers skips steps 8 to 10, and ends `TASK_STATE_CANCELED`
@@ -833,8 +883,8 @@ The agent finds three directories through environment variables that hold
 their paths:
 
 - `WHERRY_INPUT_DIR`: the run's input files, from the `raw` and `data`
-  parts of every turn, under their delivered names, and `known_hosts` for
-  a git input with a host key.
+  parts of every turn, under their delivered names, its S3 inputs, and
+  `known_hosts` for a git input with a host key.
 - `WHERRY_CREDENTIALS_DIR`: the run's task credentials, each as the file
   its `file` names. The adapter writes credential values only there, as
   files, and never into the environment or the input directory.
@@ -846,7 +896,7 @@ input, the receiver opens the prompt with lines giving the absolute path of
 each directory, of each input file, of each credential file and of each
 expected output, with `(required)` after a required one, so an agent
 without a shell finds them, and the commands of the
-[git input](#git-input). The adapter reports the directories' paths as its agent sees
+[git input](#git-input). The lines name S3 inputs by path, never by URL. The adapter reports the directories' paths as its agent sees
 them; a directory it does not report appears as its variable. The lines
 hold no credential value.
 
@@ -874,6 +924,44 @@ index is missing (`gap`), when chunks follow the last one (`overlap`), when
 an index appears twice (`duplicate chunk`), or when the joined bytes differ
 from the listed size or SHA-256 (`size or hash mismatch`). It writes only
 outputs that pass.
+
+## S3 inputs and outputs
+
+A pool whose terms name `storage`, an S3-compatible endpoint and bucket,
+carries files of up to 5 GiB each beside the broker. Each run's objects
+live under `wherry/<tenant>/<run>/`: an S3 input at `inputs/<name>`, and a
+turn's S3 output at `<turn>/outputs/<name>`. The host's own credential,
+scoped by the operator to `wherry/<tenant>/`, uploads, downloads and
+deletes them, and never leaves the host. Receivers and adapters get only
+the presigned URLs in the [seal](#seal), checked against the pool's
+storage before use.
+
+- **In.** The host uploads each S3 input before it publishes the run and
+  lists it in `s3_inputs`. The adapter fetches it into `WHERRY_INPUT_DIR`
+  from its presigned GET before the agent starts, and verifies its size and
+  SHA-256. A fetch that fails or does not verify ends the job before the
+  agent starts, and the receiver ends the turn `TASK_STATE_FAILED` with
+  `an S3 input was not fetched, or did not match its size and SHA-256`,
+  without returning the task to the pool. S3 inputs do not count against
+  `inline_limit`.
+- **Out.** After the agent's result line and the job's stop, the adapter
+  streams each S3 output it finds as it collects, and the receiver sends it
+  to its presigned PUT as it reads it, with the size the adapter listed as
+  its Content-Length, hashing the bytes it sends. It follows no redirect.
+  An S3 output counts against neither `output_limit` nor the turn's outputs
+  together, but is at most 5 GiB, and among the 256 outputs a submission
+  expects. Collection waits until the turn's deadline, when the PUT URLs
+  expire, if that is later than 2 minutes. The receiver does not redact an
+  S3 output, which goes to the host's own bucket and never to the feed. An
+  attempt that adopted an earlier attempt's job holds no PUT URL, and lists
+  its S3 outputs as `not uploaded: no upload URL`.
+- **Back.** The host downloads each S3 output in the result's
+  `s3_outputs` that the run declares, at the key for its name and turn, and
+  keeps it only when it matches the listed size and SHA-256. Once the run's
+  turn is terminal and every listed S3 output has verified, it deletes every
+  object whose key a listing of `wherry/<tenant>/<run>/` returns and that
+  starts with it. A bucket lifecycle rule expiring `wherry/` removes what no
+  host deletes.
 
 ## Cancellation
 

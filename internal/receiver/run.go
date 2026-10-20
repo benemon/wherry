@@ -17,6 +17,8 @@ import (
 	"hash"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/url"
 	"reflect"
 	"slices"
 	"strconv"
@@ -152,10 +154,11 @@ type admission struct {
 	adapter  Named
 	history  []wire.Message
 	inputs   []adapter.File
-	// credentials, outputs and git are what the run's first turn declares.
+	// credentials, outputs, git and s3Inputs are what the run's first turn declares.
 	credentials []wire.TaskCredential
 	outputs     []wire.ExpectedOutput
 	git         *wire.GitInput
+	s3Inputs    []wire.S3Input
 	// cancelled is set when a host of the run's tenant cancelled the run; it ends CANCELED without a dispatch.
 	cancelled bool
 }
@@ -268,11 +271,14 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if declared.Git != nil && !slices.Contains(terms.Forges, declared.Git.Forge()) {
 		return reject("git remote host " + declared.Git.Forge() + " is not in pool " + r.config.Pool + "'s forges")
 	}
-	inputs, rejection := deliverables(history, declared.Git)
+	if (len(declared.S3Inputs) > 0 || len(s3Outputs(declared.Outputs)) > 0) && terms.Storage == nil {
+		return reject("pool " + r.config.Pool + " has no storage for S3 inputs and outputs")
+	}
+	inputs, rejection := deliverables(history, declared.Git, declared.S3Inputs)
 	if rejection != "" {
 		return reject(rejection)
 	}
-	admitted.inputs, admitted.credentials, admitted.outputs, admitted.git = inputs, declared.Credentials, declared.Outputs, declared.Git
+	admitted.inputs, admitted.credentials, admitted.outputs, admitted.git, admitted.s3Inputs = inputs, declared.Credentials, declared.Outputs, declared.Git, declared.S3Inputs
 	return admitted, 0
 }
 
@@ -288,9 +294,21 @@ func foreignRun(all []runSubmission, statuses []wire.RunStatus, tenant string) b
 	return held >= 0 && statuses[held].Wherry.Tenant != tenant
 }
 
+// s3Outputs names the outputs that return through the pool's bucket.
+func s3Outputs(outputs []wire.ExpectedOutput) []string {
+	var names []string
+	for _, output := range outputs {
+		if output.Storage == wire.StorageS3 {
+			names = append(names, output.Name)
+		}
+	}
+	return names
+}
+
 // deliverables returns the run's input files: the git input's host key as known_hosts, then the raw and data parts.
-// It returns the rejection reason for a url part, or for two inputs of one name in different turns.
-func deliverables(history []wire.Message, git *wire.GitInput) ([]adapter.File, string) {
+// It returns the rejection reason for a url part, or for two inputs of one name in different turns or of an S3 input's
+// name.
+func deliverables(history []wire.Message, git *wire.GitInput, s3Inputs []wire.S3Input) ([]adapter.File, string) {
 	var inputs []adapter.File
 	if git != nil && git.HostKey != "" {
 		inputs = append(inputs, adapter.File{Name: wire.KnownHostsFile, Data: []byte(git.HostKey)})
@@ -301,7 +319,8 @@ func deliverables(history []wire.Message, git *wire.GitInput) ([]adapter.File, s
 			case part.Text != "":
 			case part.Raw != nil || part.Data != nil:
 				name := wire.InputName(part)
-				if slices.ContainsFunc(inputs, func(input adapter.File) bool { return input.Name == name }) {
+				if slices.ContainsFunc(inputs, func(input adapter.File) bool { return input.Name == name }) ||
+					slices.ContainsFunc(s3Inputs, func(input wire.S3Input) bool { return input.Name == name }) {
 					return nil, "input names repeat across turns"
 				}
 				inputs = append(inputs, adapter.File{Name: name, Data: append(slices.Clone([]byte(part.Raw)), part.Data...)})
@@ -564,7 +583,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	defer producer.Close()
 	run := &activeRun{
 		receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, adapter: admitted.adapter,
-		expected: admitted.outputs,
+		expected: admitted.outputs, deadline: deadline,
 	}
 
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
@@ -640,8 +659,14 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		var credential []byte
 		var secrets []adapter.Secret
-		if len(agentCredentials)+len(taskCredentials) > 0 {
-			values, status, sealed := run.awaitSeal(ctx, runCtx, agentCredentials, taskCredentials)
+		var fetches []adapter.Fetch
+		inputNames := make([]string, 0, len(admitted.s3Inputs))
+		for _, input := range admitted.s3Inputs {
+			inputNames = append(inputNames, input.Name)
+		}
+		outputNames := s3Outputs(admitted.outputs)
+		if len(agentCredentials)+len(taskCredentials)+len(inputNames)+len(outputNames) > 0 {
+			values, status, sealed := run.awaitSeal(ctx, runCtx, agentCredentials, taskCredentials, inputNames, outputNames)
 			if !sealed {
 				return status
 			}
@@ -652,11 +677,15 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				secrets = append(secrets, adapter.Secret{Name: declared.Name, File: declared.File, Value: values[declared.Name]})
 			}
 			run.deliver(values)
+			if fetches, run.puts, err = run.presigned(values, admitted.s3Inputs, outputNames); err != nil {
+				r.logger.Printf("run %s: %v", runID, err)
+				return run.fail(ctx, err.Error(), nil)
+			}
 		}
 		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, adapter.Run{
 			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Turn: task.Wherry.Turn, Attempt: attempt,
-			Prompt:     []byte(preamble(named.Adapter.Directories(), admitted.inputs, admitted.credentials, admitted.outputs, admitted.git, runID) + prompt(admitted.history)),
-			Credential: credential, Inputs: admitted.inputs, Credentials: secrets,
+			Prompt:     []byte(preamble(named.Adapter.Directories(), append(fileNames(admitted.inputs), inputNames...), admitted.credentials, admitted.outputs, admitted.git, runID) + prompt(admitted.history)),
+			Credential: credential, Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
 		var tooLarge *adapter.InputTooLargeError
 		switch {
@@ -808,6 +837,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				// A dropped stream does not mean the task ended; stop it rather than leave it running.
 				r.logger.Printf("run %s: follow failed: %T", runID, end.err)
 				return run.stopAndFail(ctx, handle, "log stream failed", pending)
+			case !end.terminal.Started && end.terminal.Class == adapter.ClassFetch:
+				r.logger.Printf("run %s: job never started: an S3 input was not fetched", runID)
+				return run.stopAndFail(ctx, handle, "an S3 input was not fetched, or did not match its size and SHA-256", pending)
 			case !end.terminal.Started:
 				r.logger.Printf("run %s: job never started (%s)", runID, end.terminal.Class)
 				return run.startFailure(ctx, "platform")
@@ -847,9 +879,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 }
 
-// awaitSeal asks the run's host for the agent's credentials and the task's under a key made for this attempt, and waits
-// for the seal while the claim is renewed. The key never leaves this call. False carries the acknowledgement.
-func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credentials, taskCredentials []string) (map[string][]byte, kgo.AckStatus, bool) {
+// awaitSeal asks the run's host for the agent's credentials, the task's, and presigned URLs for its S3 inputs and
+// outputs under a key made for this attempt, and waits for the seal while the claim is renewed. The key never leaves
+// this call. False carries the acknowledgement.
+func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credentials, taskCredentials, s3Inputs, s3Outputs []string) (map[string][]byte, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
 	runID := task.Wherry.Run
 	key, err := newSealKey()
@@ -864,9 +897,16 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credentials, taskCr
 	if len(taskCredentials) > 0 {
 		request.TaskCredentials = taskCredentials
 	}
+	if len(s3Inputs) > 0 {
+		request.S3Inputs = s3Inputs
+	}
+	if len(s3Outputs) > 0 {
+		request.S3Outputs = s3Outputs
+	}
 	expected := signed.SealBinding{
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials, ExpiryMS: request.ExpiryMS,
+		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
+		S3Inputs: request.S3Inputs, S3Outputs: request.S3Outputs, ExpiryMS: request.ExpiryMS,
 	}
 	// Reading from the host topic's end before the request is committed sees every answer to it.
 	topic := admin.HostTopic(task.Wherry.Tenant, task.Wherry.Host)
@@ -924,11 +964,57 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credentials, taskCr
 		case runCtx.Err() != nil:
 			return nil, run.fail(ctx, "timeout", nil), false
 		case waitCtx.Err() != nil:
-			return nil, run.interrupt(ctx, append(slices.Clone(credentials), taskCredentials...)), false
+			return nil, run.interrupt(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
 		case values != nil:
 			return values, 0, true
 		}
 	}
+}
+
+// presigned checks the seal's URLs against the pool's storage and returns the run's fetches and the turn's PUT URLs. A
+// URL that is not https, whose host or port is not the endpoint's, that carries user information or whose path is not
+// its object's key in the bucket fails, naming its input or output and never the URL. The signature of each URL joins
+// the redacted forms, so a transcript quoting a URL in part is redacted too.
+func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input, outputs []string) ([]adapter.Fetch, map[string]string, error) {
+	state, _, _ := run.receiver.snapshot()
+	storage := state.Pools[run.receiver.config.Pool].Storage
+	tenant, runID := run.task.Wherry.Tenant, run.task.Wherry.Run
+	signatures := map[string][]byte{}
+	check := func(value []byte, key string) (string, bool) {
+		parsed, err := url.Parse(string(value))
+		if err != nil || storage == nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" ||
+			parsed.Hostname()+":"+cmp.Or(parsed.Port(), "443") != storage.Host() || parsed.EscapedPath() != "/"+storage.Bucket+"/"+key {
+			return "", false
+		}
+		signatures[key] = []byte(parsed.Query().Get("X-Amz-Signature"))
+		return string(value), true
+	}
+	var fetches []adapter.Fetch
+	for _, input := range inputs {
+		get, ok := check(values[signed.S3InputValue(input.Name)], wire.S3InputKey(tenant, runID, input.Name))
+		if !ok {
+			return nil, nil, errors.New("the URL for S3 input " + input.Name + " is not one of pool " + run.receiver.config.Pool + "'s storage")
+		}
+		fetches = append(fetches, adapter.Fetch{Name: input.Name, URL: get, Size: input.Size, SHA256: input.SHA256})
+	}
+	puts := map[string]string{}
+	for _, output := range outputs {
+		put, ok := check(values[signed.S3OutputValue(output)], wire.S3OutputKey(tenant, runID, run.task.Wherry.Turn, output))
+		if !ok {
+			return nil, nil, errors.New("the URL for S3 output " + output + " is not one of pool " + run.receiver.config.Pool + "'s storage")
+		}
+		puts[output] = put
+	}
+	run.deliver(signatures)
+	return fetches, puts, nil
+}
+
+func fileNames(files []adapter.File) []string {
+	names := make([]string, 0, len(files))
+	for _, file := range files {
+		names = append(names, file.Name)
+	}
+	return names
 }
 
 type activeRun struct {
@@ -943,6 +1029,10 @@ type activeRun struct {
 	// labels is set when this attempt dispatched the job; an adopted job's adapter labels are unknown.
 	labels map[string]string
 	job    string
+	// deadline is the turn's; puts are the presigned PUT URLs of its S3 outputs, by name, which only a dispatching
+	// attempt holds.
+	deadline time.Time
+	puts     map[string]string
 	// redactions are the forms of the credential values this attempt passed to its adapter, longest first, and marker
 	// what replaces each of them.
 	redactions [][]byte
@@ -952,6 +1042,7 @@ type activeRun struct {
 	expected   []wire.ExpectedOutput
 	outputs    []*kgo.Record
 	returned   []wire.ReturnedOutput
+	s3Returned []wire.ReturnedOutput
 	unreturned []wire.UnreturnedOutput
 }
 
@@ -1152,15 +1243,26 @@ func (run *activeRun) cancel(ctx context.Context, pending []adapter.Line) kgo.Ac
 
 const cancelReason = "canceled by user"
 
-// interrupt waits the run for its tenant's credentials: AUTH_REQUIRED with its result, then the task is acknowledged.
-// The message names every credential the seal request asked for, and the metadata the first.
-func (run *activeRun) interrupt(ctx context.Context, credentials []string) kgo.AckStatus {
-	reason := "credential " + credentials[0] + " required"
-	if len(credentials) > 1 {
-		reason = "credentials " + strings.Join(credentials, ", ") + " required"
+// interrupt waits the run for its tenant's credentials and S3 URLs: AUTH_REQUIRED with its result, then the task is
+// acknowledged. The message names every credential the seal request asked for, and the metadata the first.
+func (run *activeRun) interrupt(ctx context.Context, credentials []string, urls bool) kgo.AckStatus {
+	var reasons []string
+	switch len(credentials) {
+	case 0:
+	case 1:
+		reasons = append(reasons, "credential "+credentials[0])
+	default:
+		reasons = append(reasons, "credentials "+strings.Join(credentials, ", "))
 	}
+	if urls {
+		reasons = append(reasons, "presigned URLs for the S3 inputs and outputs")
+	}
+	reason := strings.Join(reasons, " and ") + " required"
 	status := taskStatus(wire.TaskStateAuthRequired, reason)
-	metadata, _ := json.Marshal(wire.CredentialMetadata{Credential: credentials[0]}) // a string always encodes
+	var metadata jsontext.Value
+	if len(credentials) > 0 {
+		metadata, _ = json.Marshal(wire.CredentialMetadata{Credential: credentials[0]}) // a string always encodes
+	}
 	if err := run.commit(ctx, append([]*kgo.Record{run.result(status, reason, nil)}, run.statusRecords("interrupted", status, nil, metadata)...)...); err != nil {
 		return run.abandon(err)
 	}
@@ -1257,7 +1359,7 @@ func (run *activeRun) finish(ctx context.Context, handle adapter.Handle, pending
 		state, ack = wire.TaskStateFailed, kgo.AckReject
 	}
 	for _, output := range run.unreturned {
-		if slices.Contains(run.expected, wire.ExpectedOutput{Name: output.Name, Required: true}) {
+		if slices.ContainsFunc(run.expected, func(expected wire.ExpectedOutput) bool { return expected.Name == output.Name && expected.Required }) {
 			state, ack, reason = wire.TaskStateFailed, kgo.AckReject, "required output "+output.Name+" not returned: "+output.Reason
 			break
 		}
@@ -1266,11 +1368,13 @@ func (run *activeRun) finish(ctx context.Context, handle adapter.Handle, pending
 }
 
 // collect reads the outputs of a stopped job, redacts them and keeps their chunks and the result's lists of what the
-// turn returned and did not. Every expected output is listed as one or the other.
+// turn returned and did not. S3 outputs are uploaded as Collect streams them, unredacted, since they go to the host's own
+// bucket and never to the feed. Every expected output is listed as one or the other.
 func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stopped bool) {
 	state, _, _ := run.receiver.snapshot()
 	limit := state.Pools[run.receiver.config.Pool].OutputLimit
-	collected, err := run.collected(ctx, handle, stopped, limit)
+	stored := map[string]storedOutput{}
+	collected, err := run.collected(ctx, handle, stopped, limit, stored)
 	if err != nil {
 		run.receiver.logger.Printf("run %s: outputs not collected: %v", run.task.Wherry.Run, err)
 		for _, output := range run.expected {
@@ -1279,6 +1383,7 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 		return
 	}
 	slices.SortFunc(collected, func(a, b adapter.Output) int { return strings.Compare(a.Name, b.Name) })
+	s3 := s3Outputs(run.expected)
 	var total int64
 	listed := map[string]bool{}
 	for _, output := range collected {
@@ -1290,6 +1395,20 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 			name = name[:min(len(name), 256)]
 		case output.Mode.Type() != 0:
 			reason = "rejected: " + fileType(output.Mode)
+		case slices.Contains(s3, name):
+			upload, streamed := stored[name]
+			switch {
+			case streamed && upload.reason == "":
+				listed[name] = true
+				run.s3Returned = append(run.s3Returned, upload.output)
+				continue
+			case streamed:
+				reason = upload.reason
+			case output.Size > wire.MaxS3Object:
+				reason = "exceeds the S3 object limit"
+			default:
+				reason = "not streamed by the adapter"
+			}
 		case output.Data == nil || total+output.Size > limit:
 			reason = "exceeds output limit"
 		case int64(len(output.Data)) != output.Size:
@@ -1318,25 +1437,45 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 	}
 }
 
-// collected runs the adapter's Collect under collectTimeout, with limit bounding each output and their total. The
-// adapter bounds what it reads by the limits; the count and the total are checked again here, so a plugin that
-// ignores them cannot grow the run's memory.
-func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stopped bool, limit int64) ([]adapter.Output, error) {
+// storedOutput is an S3 output as the upload of its stream left it: listed for the result, or not returned for reason.
+type storedOutput struct {
+	output wire.ReturnedOutput
+	reason string
+}
+
+// collected runs the adapter's Collect, with limit bounding each output and their total, and uploads each streamed S3
+// output into stored as it arrives. Collect runs under collectTimeout, or until the turn's deadline, when its PUT URLs
+// expire, if that is later. The adapter bounds what it reads by the limits; the count and the total are checked again
+// here, so a plugin that ignores them cannot grow the run's memory.
+func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stopped bool, limit int64, stored map[string]storedOutput) ([]adapter.Output, error) {
 	if !stopped {
 		return nil, errors.New("the job was not stopped")
 	}
-	ctx, cancel := context.WithTimeout(ctx, collectTimeout)
+	until := time.Now().Add(collectTimeout)
+	if len(run.puts) > 0 && run.deadline.After(until) {
+		until = run.deadline
+	}
+	ctx, cancel := context.WithDeadline(ctx, until)
 	defer cancel()
 	outputs := make(chan adapter.Output)
 	ended := make(chan error, 1)
 	go func() {
 		defer close(outputs)
-		ended <- run.adapter.Adapter.Collect(ctx, handle, adapter.Limits{Files: wire.MaxOutputs, FileBytes: limit, TotalBytes: limit}, outputs)
+		ended <- run.adapter.Adapter.Collect(ctx, handle, adapter.Limits{
+			Files: wire.MaxOutputs, FileBytes: limit, TotalBytes: limit, Stream: s3Outputs(run.expected), StreamBytes: wire.MaxS3Object,
+		}, outputs)
 	}()
 	var collected []adapter.Output
 	var total int64
 	var over error
 	for output := range outputs {
+		if output.Body != nil {
+			if _, done := stored[output.Name]; !done && over == nil {
+				stored[output.Name] = run.store(ctx, output)
+			}
+			output.Body.Close()
+			output.Body = nil
+		}
 		total += int64(len(output.Data))
 		if over == nil && (len(collected) == wire.MaxOutputs || total > limit) {
 			over = errors.New("the adapter returned more than the limits")
@@ -1350,6 +1489,57 @@ func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stop
 		return nil, err
 	}
 	return collected, nil
+}
+
+// errRedirect is what an upload's client returns for a redirect, which it never follows.
+var errRedirect = errors.New("redirected")
+
+// storageClient uploads S3 outputs. A variable so tests can trust their TLS servers.
+var storageClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return errRedirect }}
+
+// store uploads a streamed output to its presigned PUT URL with the Content-Length of its listing, as it reads it, and
+// hashes the bytes the request sends. Its reason never quotes the URL or a response body, and is no longer than the
+// longest reason a pool's limits allow for.
+func (run *activeRun) store(ctx context.Context, output adapter.Output) storedOutput {
+	put, ok := run.puts[output.Name]
+	switch {
+	case !ok:
+		return storedOutput{reason: "not uploaded: no upload URL"}
+	case output.Mode.Type() != 0:
+		return storedOutput{reason: "rejected: " + fileType(output.Mode)}
+	case output.Size < 0 || output.Size > wire.MaxS3Object:
+		return storedOutput{reason: "exceeds the S3 object limit"}
+	}
+	sum := sha256.New()
+	body := io.TeeReader(output.Body, sum)
+	if output.Size == 0 {
+		body = http.NoBody
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, put, body)
+	if err != nil {
+		return storedOutput{reason: "not uploaded: invalid request"}
+	}
+	request.ContentLength = output.Size
+	response, err := storageClient.Do(request)
+	if err != nil {
+		reason := "not uploaded: request failed"
+		if errors.Is(err, errRedirect) {
+			reason = "not uploaded: redirected"
+		}
+		run.receiver.logger.Printf("run %s: S3 output %s %s", run.task.Wherry.Run, output.Name, reason)
+		return storedOutput{reason: reason}
+	}
+	io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		reason := "not uploaded: status " + strconv.Itoa(response.StatusCode)
+		run.receiver.logger.Printf("run %s: S3 output %s %s", run.task.Wherry.Run, output.Name, reason)
+		return storedOutput{reason: reason}
+	}
+	return storedOutput{output: wire.ReturnedOutput{
+		Name: output.Name, SHA256: hex.EncodeToString(sum.Sum(nil)), Size: output.Size,
+		Key: wire.S3OutputKey(run.task.Wherry.Tenant, run.task.Wherry.Run, run.task.Wherry.Turn, output.Name),
+	}}
 }
 
 // fileType names the type of a collected entry that is not a regular file.
@@ -1535,7 +1725,7 @@ func (run *activeRun) result(status wire.TaskStatus, result string, resultMetada
 	}
 	metadata, _ := json.Marshal(wire.ResultMetadata{ // strings, numbers and a string map always encode
 		ReceiverID: run.receiver.id, Pool: run.receiver.config.Pool, Adapter: run.adapter.Name, Labels: run.labels, Job: run.job,
-		Outputs: run.returned, NotReturned: run.unreturned,
+		Outputs: run.returned, S3Outputs: run.s3Returned, NotReturned: run.unreturned,
 	})
 	return run.feed(&wire.Result{
 		Task: wire.Task{
@@ -1688,7 +1878,7 @@ const resumedHeader = "This request was interrupted before any of it was carried
 // preamble tells the agent the full path of each file it has and of each it is asked to leave, so an agent without a
 // shell finds them, and how to clone a git input; it names credential files, never their values. A directory the
 // adapter does not report is named by its environment variable. A run that declares no files and no git input has none.
-func preamble(directories adapter.Directories, inputs []adapter.File, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput, git *wire.GitInput, run string) string {
+func preamble(directories adapter.Directories, inputs []string, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput, git *wire.GitInput, run string) string {
 	if len(inputs)+len(credentials)+len(outputs) == 0 && git == nil {
 		return ""
 	}
@@ -1698,8 +1888,8 @@ func preamble(directories adapter.Directories, inputs []adapter.File, credential
 		"; the environment variables WHERRY_INPUT_DIR, WHERRY_CREDENTIALS_DIR and WHERRY_OUTPUT_DIR hold the same paths."}
 	if len(inputs) > 0 {
 		paths := make([]string, 0, len(inputs))
-		for _, file := range inputs {
-			paths = append(paths, input+"/"+file.Name)
+		for _, name := range inputs {
+			paths = append(paths, input+"/"+name)
 		}
 		lines = append(lines, "Input files: "+strings.Join(paths, ", ")+".")
 	}

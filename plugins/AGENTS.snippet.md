@@ -18,10 +18,13 @@ clones itself.
    `changes.patch` (`git am` it). Add `--input FILE` for each file
    the agent needs (the pool's inline limit in all, 256 KiB by default),
    `--credential-file NAME=FILE` for each configured credential it needs as
-   a file, and `--output NAME[:required]` for each file you want back. Keep working.
+   a file, and `--output NAME[:required]` for each file you want back.
+   Where the pool has storage and your configuration a storage credential,
+   `--s3-input FILE` sends a larger file (5 GiB at most) through the pool's
+   bucket, and `--output NAME:s3` returns one that way. Keep working.
 3. `wherry await RUN_ID` blocks until the run ends (30 minutes at most by
    default), then prints the state and the result, and writes each returned
-   output, printing an `output=<name> path=<path>` line for it. It also answers the
+   output, S3 outputs included, printing an `output=<name> path=<path>` line for it. It also answers the
    receiver's request for the agent's credential, so start it within 5
    minutes of submitting. Run it in the background where your harness
    reports background command completion.

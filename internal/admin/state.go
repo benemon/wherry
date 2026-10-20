@@ -32,6 +32,38 @@ type Terms struct {
 	OutputLimit       int64        `json:"output_limit,omitzero" yaml:"output_limit"`
 	// Forges are the hosts, as wire.GitInput.Forge names them, a git input may clone from; none allows no git input.
 	Forges []string `json:"forges,omitzero" yaml:"forges"`
+	// Storage is the pool's S3 lane; nil allows no S3 input or output.
+	Storage *Storage `json:"storage,omitzero" yaml:"storage"`
+}
+
+// Storage is the S3-compatible endpoint, an https origin with no path, and the bucket a pool's S3 inputs and outputs
+// live in.
+type Storage struct {
+	Endpoint string `json:"endpoint" yaml:"endpoint"`
+	Bucket   string `json:"bucket" yaml:"bucket"`
+}
+
+// bucketName is an S3 bucket name as every S3-compatible store accepts one.
+var bucketName = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+
+// Host is the endpoint's host and port, the port defaulting to 443.
+func (storage Storage) Host() string {
+	host := strings.TrimPrefix(storage.Endpoint, "https://")
+	if !strings.Contains(host, ":") {
+		host += ":443"
+	}
+	return host
+}
+
+func (storage Storage) validate() error {
+	host, ok := strings.CutPrefix(storage.Endpoint, "https://")
+	if !ok || !wire.ValidForge(host) {
+		return errors.New("storage endpoint must be https:// and a lowercase host name, optionally with :port, and nothing else")
+	}
+	if !bucketName.MatchString(storage.Bucket) || strings.Contains(storage.Bucket, "..") {
+		return errors.New("storage bucket must be 3 to 63 lowercase letters, digits, dots and hyphens")
+	}
+	return nil
 }
 
 // DefaultInlineLimit and DefaultOutputLimit are a pool's limits where its terms leave them out.
@@ -518,6 +550,11 @@ func validateTerms(terms Terms) error {
 	for i, forge := range terms.Forges {
 		if !wire.ValidForge(forge) || slices.Contains(terms.Forges[:i], forge) {
 			return errors.New("forges must be unique lowercase host names, each optionally with :port")
+		}
+	}
+	if terms.Storage != nil {
+		if err := terms.Storage.validate(); err != nil {
+			return err
 		}
 	}
 	for _, agent := range terms.Agents {

@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"runtime/debug"
 	"sync"
@@ -156,6 +157,9 @@ func (s *server) Dispatch(ctx context.Context, req *adapterv1.DispatchRequest) (
 	for _, secret := range message.GetCredentials() {
 		run.Credentials = append(run.Credentials, Secret{Name: secret.GetName(), File: secret.GetFile(), Value: secret.GetValue()})
 	}
+	for _, fetch := range message.GetFetches() {
+		run.Fetches = append(run.Fetches, Fetch{Name: fetch.GetName(), URL: fetch.GetUrl(), Size: fetch.GetSize(), SHA256: fetch.GetSha256()})
+	}
 	outcome, handle, err := adapter.Dispatch(ctx, run)
 	if err != nil {
 		return nil, callStatus(err)
@@ -245,13 +249,18 @@ func (s *server) Collect(req *adapterv1.CollectRequest, stream grpc.ServerStream
 					cancel()
 				}
 			}
+			if output.Body != nil {
+				output.Body.Close()
+			}
 		}
 		sent <- err
 	}()
 	limits := req.GetLimits()
 	err = func() error {
 		defer close(outputs)
-		return adapter.Collect(ctx, handleOf(req.Handle), Limits{Files: int(limits.GetFiles()), FileBytes: limits.GetFileBytes(), TotalBytes: limits.GetTotalBytes()}, outputs)
+		return adapter.Collect(ctx, handleOf(req.Handle), Limits{
+			Files: int(limits.GetFiles()), FileBytes: limits.GetFileBytes(), TotalBytes: limits.GetTotalBytes(), Stream: limits.GetStream(), StreamBytes: limits.GetStreamBytes(),
+		}, outputs)
 	}()
 	if sendErr := <-sent; sendErr != nil {
 		return sendErr
@@ -260,6 +269,9 @@ func (s *server) Collect(req *adapterv1.CollectRequest, stream grpc.ServerStream
 }
 
 func sendOutput(stream grpc.ServerStreamingServer[adapterv1.CollectResponse], output Output) error {
+	if output.Body != nil {
+		return sendBody(stream, output)
+	}
 	data := output.Data
 	for {
 		piece := data[:min(len(data), maxPiece)]
@@ -273,6 +285,25 @@ func sendOutput(stream grpc.ServerStreamingServer[adapterv1.CollectResponse], ou
 		}
 		if len(data) == 0 {
 			return nil
+		}
+	}
+}
+
+// sendBody sends a streamed output's Body in pieces as it reads them, then a last message with no data.
+func sendBody(stream grpc.ServerStreamingServer[adapterv1.CollectResponse], output Output) error {
+	piece := make([]byte, maxPiece)
+	for {
+		n, err := io.ReadFull(output.Body, piece)
+		if n > 0 || err == nil {
+			if sendErr := stream.Send(&adapterv1.CollectResponse{Name: output.Name, Size: output.Size, Mode: uint32(output.Mode), Data: piece[:n], More: true}); sendErr != nil {
+				return sendErr
+			}
+		}
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return stream.Send(&adapterv1.CollectResponse{Name: output.Name, Size: output.Size, Mode: uint32(output.Mode), Data: []byte{}})
+		}
+		if err != nil {
+			return err
 		}
 	}
 }

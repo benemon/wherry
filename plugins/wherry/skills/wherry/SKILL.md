@@ -78,6 +78,15 @@ in `WHERRY_CREDENTIALS_DIR`; you never see the value. To get files back,
 add `outputs`: `{name, required}` for each file the agent should leave in
 `WHERRY_OUTPUT_DIR`. The prompt the agent receives names all of them.
 
+For a file over the inline limit, up to 5 GiB, add its path to `s3_inputs`
+instead: the server uploads it to the pool's bucket and the agent finds it
+in its input directory like any input. Add `storage: "s3"` to an output to
+return it through the bucket. Both need a pool with storage and a storage
+credential in the user's wherry configuration; without them `submit`
+returns `INVALID_ARGUMENT` saying which is missing. `await` downloads S3
+outputs like any output, and deletes the run's objects from the bucket
+once the run has ended and every one has verified.
+
 ## Collect the result
 
 Call `await` with the id. It waits up to 45 seconds and returns one of:

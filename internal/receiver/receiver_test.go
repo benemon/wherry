@@ -77,8 +77,9 @@ type fakeAdapter struct {
 	// job is the state Lookup reports; jobAdapter and jobAgent override the metadata it reports.
 	job                  adapter.JobState
 	jobAdapter, jobAgent string
-	// neverStarted makes Follow report a job whose agent never started.
+	// neverStarted makes Follow report a job whose agent never started, of class neverClass or else driver.
 	neverStarted bool
+	neverClass   string
 	purges       int
 	// purgeFailures fail that many Purges; purgeErr fails every one.
 	purgeFailures int
@@ -159,7 +160,7 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, 
 	f.follows++
 	f.froms = append(f.froms, from)
 	lost := f.follows <= f.linkLost
-	stream, followErr, endDelay, neverStarted := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.neverStarted
+	stream, followErr, endDelay, neverStarted, neverClass := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.neverStarted, f.neverClass
 	f.mu.Unlock()
 	var offset int64
 	for _, data := range stream {
@@ -188,7 +189,7 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, 
 		case <-ctx.Done():
 		}
 		if neverStarted {
-			return adapter.Terminal{Class: "driver", Node: "node-1"}, nil
+			return adapter.Terminal{Class: cmp.Or(neverClass, "driver"), Node: "node-1"}, nil
 		}
 		return adapter.Terminal{Started: true, ExitCode: 1, Node: "node-1"}, nil
 	}
@@ -545,7 +546,8 @@ func (f fixture) sealFor(t *testing.T, request wire.SealRequest, values map[stri
 	t.Helper()
 	sealed, err := signed.Seal(signed.SealBinding{
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials, ExpiryMS: request.ExpiryMS,
+		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
+		S3Inputs: request.S3Inputs, S3Outputs: request.S3Outputs, ExpiryMS: request.ExpiryMS,
 	}, request.Key.Key.(*ecdsa.PublicKey), values)
 	if err != nil {
 		t.Fatal(err)

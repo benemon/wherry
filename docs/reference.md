@@ -126,8 +126,9 @@ fails with `no matching live receiver`.
 | `--git-host-key FILE` | | file of OpenSSH `known_hosts` lines naming the remote's host; required for `ssh` |
 | `--git-changes patch\|bundle` | | ask for the agent's commits back as the output `changes.patch` or `changes.bundle` |
 | `--input FILE` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
+| `--s3-input FILE` | | file of at most 5 GiB that `submit` uploads to the pool's bucket and the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
 | `--credential-file NAME=FILE` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR`; repeatable |
-| `--output NAME[:required]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the turn without it; repeatable |
+| `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the turn without it, and `:s3` returns it through the pool's bucket; repeatable |
 | `--deadline` | `30m` | time from now by which the run must end |
 | `--queue-deadline` | `10m` | time from now by which a receiver must claim it |
 
@@ -143,7 +144,8 @@ invalid input: git remote host github.com is not in pool build's forges
 ```
 
 `continue` refuses a run whose git input, as this host's record of the run
-holds it, is no longer in the pool's forges. A host without that record,
+holds it, is no longer in the pool's forges, and a run with S3 inputs or
+outputs whose pool no longer has storage. A host without that record,
 another host of the tenant, does not check it, and admission rejects the
 turn instead. `--git-host-key` reads at most one byte over
 the 8 KiB bound.
@@ -157,9 +159,28 @@ are [file names](a2a-extension-v1.md#submission), and output names
 relative paths of them. `submit` refuses a credential its configuration
 does not map to a file.
 
+`--s3-input` and `:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
+`submit` refuses them, before it uploads or publishes anything, when the
+client configuration has no [`storage`](#client-configuration) or the
+pool's terms no [`storage`](#pool-terms):
+
+```
+invalid input: pool build has no storage for S3 inputs and outputs
+```
+
+It uploads each S3 input to `wherry/<tenant>/<run>/inputs/<name>` in the
+pool's bucket with one PUT, then publishes the task with each input's name,
+size and SHA-256 and no URL. S3 input names are file names, distinct from
+the input files' names, and the run's parts and S3 inputs number at most
+256 together. S3 inputs do not count against `inline_limit`. When
+publishing fails, `submit` deletes what it uploaded. It also refuses a run
+whose task credentials and presigned URLs would not fit one 64 KiB seal,
+naming the seal's size. A 422-byte URL, as a lab endpoint and a short object
+name make, takes 838 bytes of the seal, so one seal carries about 75.
+
 `submit` seals nothing. The receiver that claims the task asks for the
-credential its adapter delivers and the task's credentials, and `wherry
-await` or `wherry mcp` answers
+credential its adapter delivers, the task's credentials and presigned URLs
+for its S3 inputs and outputs, and `wherry await` or `wherry mcp` answers
 ([sealed credentials](concepts.md#sealed-credentials)).
 
 ### `wherry continue RUN_ID`
@@ -212,6 +233,17 @@ output the result lists as not returned and each one that fails
 verification. A write never leaves the outputs directory, whatever links
 it holds.
 
+`await` downloads each S3 output the result lists with the host's storage
+credential, to the same place, and prints it as it prints any output. It
+downloads only an S3 output the run declares, at its key for the turn, and
+writes it only when its bytes match the listed size and SHA-256; a file
+already there that matches is kept. Once the run's turn is terminal and
+every listed S3 output has verified, `await` deletes every object under
+`wherry/<tenant>/<run>/` in the pool's bucket, inputs included. An
+interrupted turn keeps them for its continuation. A run that ends while
+no `await` runs keeps them until `wherry cleanup` or the bucket's
+lifecycle rule removes them.
+
 `await` exits with status 1, `run ended in <state>`, for any state other
 than `TASK_STATE_COMPLETED`, with status 1 when an output fails
 verification, and with status 1 when the timeout passes.
@@ -220,6 +252,15 @@ While it waits, `await` answers the seal requests on the tenant feed for
 every run this host submitted, once per attempt, and logs on standard error
 each answer and each verified request of its own runs that it skips or
 refuses, by run, receiver and credential names.
+
+### `wherry cleanup RUN_ID`
+
+Deletes every object under the run's prefix, `wherry/<tenant>/<run>/`, in
+its pool's bucket with the host's storage credential, and prints
+`run_id=<id>`. It deletes only objects whose keys a listing of that prefix
+returns and that start with it, so the prefix of another run or tenant is
+never touched. It finds the run as `status` does, and fails with `run not
+found` otherwise. Use it for a run the client never saw finish.
 
 ### `wherry status [RUN_ID]`
 
@@ -262,7 +303,7 @@ turn=<n> attempt=<n> transcript_chunks=<n>
 `message` appears when the status has one. Heartbeats are not on the feed,
 so they do not appear.
 
-`await`, `status`, `events`, `continue` and `cancel` find a run from this host's
+`await`, `status`, `events`, `cleanup`, `continue` and `cancel` find a run from this host's
 record of it in `state_dir`, or from a receiver's echo on the tenant feed.
 They fail with `run not found` when there is neither.
 
@@ -409,10 +450,14 @@ the bundle's `platform` entry for its name when there is one.
 A plugin also reports, for each adapter, the paths of the input, output and
 credentials directories as its agent sees them, which the receiver writes
 into the prompt. Dispatch carries a turn's input files and task credentials
-with the prompt. A plugin that cannot deliver an input reports it, and the turn ends
+with the prompt, and a fetch for each S3 input: its name, presigned URL,
+size and SHA-256, which the plugin fetches and verifies before the agent
+starts, reporting a job that never started with class `fetch` when it
+cannot. A plugin that cannot deliver an input reports it, and the turn ends
 `TASK_STATE_FAILED` naming it. After the agent's result line the receiver
 stops the job and asks the plugin to collect its outputs, which arrive over
-the link in pieces of at most 1 MiB.
+the link in pieces of at most 1 MiB. The outputs the receiver names for
+streaming, its S3 outputs, the plugin streams as the receiver reads them.
 
 A plugin gives each agent the variables of `adapter.AgentEnvironment` over
 the environment it configures, and removes those of `adapter.AgentUnset`
@@ -424,7 +469,8 @@ not against one that runs commands of its own
 
 The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
-certificate pair made for each start, protocol version 2. The receiver
+certificate pair made for each start, protocol version 3. The receiver
+refuses a plugin of an earlier version at its start. The receiver
 refuses a plugin that offers no TLS certificate. Every call names its
 adapter. A plugin accepts messages up to 64 MiB; the receiver logs a larger
 Dispatch as `dispatch rejected: message too large`.
@@ -465,7 +511,7 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
-| `submit` | `prompt`, `agent`, `selector`, `git`, `inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool` |
+| `submit` | `prompt`, `agent`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `await` | `id` | `id`, `state`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `skipped` |
 | `continue` | `id`, `prompt`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `turn`, `skipped` |
@@ -476,12 +522,13 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
   `{key, operator, values}`. `git` is `{remote, ref, path, credential,
   host_key, changes}`, as `--git`, `--git-path`, `--git-credential`,
   `--git-host-key` and `--git-changes` take them, with `remote` and `ref`
-  required; `host_key` is a file path, read as an input is. `inputs` is an array of file paths, `credentials` an array of
-  `{name, file}` and `outputs` an array of `{name, required}`, as
-  `--input`, `--credential-file` and `--output` take them. An input must
+  required; `host_key` is a file path, read as an input is. `inputs` and `s3_inputs` are arrays of file paths, `credentials` an array of
+  `{name, file}` and `outputs` an array of `{name, required, storage}`, as
+  `--input`, `--s3-input`, `--credential-file` and `--output` take them;
+  `storage` `s3` is `:s3`. An input or S3 input must
   resolve, through any symbolic links, to a regular file beneath the
   server's working directory, and to none of `state_dir`, `host_key`,
-  `bundle` or a credential file; a relative path is taken from that
+  `bundle`, a credential file or a storage key file; a relative path is taken from that
   directory.
 - `status` returns the latest verified state of a run's latest turn
   without waiting. `runs` holds one entry for the run `id` names, or,
@@ -500,7 +547,8 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
   of a binary part, which is not included), with `media_type`. `await`
   writes the turn's verified outputs as `wherry await` does, to the default
   outputs directory, and returns each in `outputs` as
-  `{name, path, sha256, size}`. `not_returned` holds `{name, size, reason}`
+  `{name, path, sha256, size}`, S3 outputs included, which it downloads and
+  verifies, then deletes the run's prefix, as `wherry await` does. `not_returned` holds `{name, size, reason}`
   for each output the result lists as not returned and each one that
   fails verification.
 - `continue` requires `id`. `prompt` defaults to `continue`.
@@ -521,7 +569,7 @@ error text from the bus, the broker or the host key.
 | `NOT_AWAITING_CONTINUATION` | the run is not interrupted |
 | `RUN_CANCELED` | the run is cancelled |
 | `TURN_ALREADY_SUBMITTED` | the next turn is already published |
-| `OUTPUTS_NOT_WRITTEN` | the turn's verified outputs could not be written to the state directory |
+| `OUTPUTS_NOT_WRITTEN` | the turn's verified outputs could not be written to the state directory, or its S3 outputs downloaded, or the run's prefix deleted |
 | `CANCELLED` | the request was cancelled |
 | `UNAVAILABLE` | any other failure; the CLI reports the cause |
 
@@ -537,6 +585,7 @@ is expanded in `WHERRY_CONFIG` and in every path.
 | `host_key` | `~/.config/wherry/host.key` | host signing key file |
 | `state_dir` | `~/.config/wherry/state` | run records and answered seal requests |
 | `credentials` | none | credential name to the file holding its value; a trailing newline is part of the value the agent gets, and the receiver redacts the value with and without it |
+| `storage` | none | `{access_key_file, secret_key_file}`: files holding the access key and secret key of the host's S3 credential, each readable and writable by its owner alone; a host without it uses no S3 lane |
 
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
 `runs/<run>/outputs/<turn>/` for the outputs `await` writes by default, and
@@ -548,6 +597,23 @@ fails. The
 credential file is read at each answer, and its contents are sealed as
 they are. A seal is at most 64 KiB, which bounds the values one seal
 carries.
+
+The storage key files are read whenever the host uploads, presigns,
+downloads or deletes, with surrounding whitespace removed; the client
+refuses a file its group or others can read or write. The credential
+never leaves the host: receivers and agents get only the URLs it presigns.
+Scope it to `wherry/<tenant>/` in each pool's bucket
+([operator guide](operator-guide.md#s3-storage)).
+
+```json
+{
+  "bundle": "~/.config/wherry/host.yaml",
+  "storage": {
+    "access_key_file": "~/.config/wherry/s3-access-key",
+    "secret_key_file": "~/.config/wherry/s3-secret-key"
+  }
+}
+```
 
 ## Bundle
 
@@ -578,6 +644,7 @@ The YAML file `pool create --terms` reads. Unknown fields are errors.
 | `inline_limit` | optional, default 262144 (256 KiB): bytes of a task's input files together |
 | `output_limit` | optional, default 8388608 (8 MiB): bytes of one output, and of a turn's outputs together |
 | `forges` | optional, default none: the hosts a [git input](a2a-extension-v1.md#git-input) may clone from |
+| `storage` | optional, default none: `{endpoint, bucket}`, the S3-compatible store of the pool's [S3 inputs and outputs](a2a-extension-v1.md#s3-inputs-and-outputs) |
 
 Each entry of `forges` is a lowercase host name, with `:port` for a
 remote that names a port other than its scheme's default, 443 for `https`
@@ -585,6 +652,14 @@ and 22 for `ssh`, and appears once. `git.example.com` matches
 `https://git.example.com/...` and `ssh://git@git.example.com/...`;
 `git.example.com:2222` matches `ssh://git@git.example.com:2222/...`. A pool
 without `forges` accepts no git input.
+
+`storage.endpoint` is `https://` and a lowercase host name, with `:port`
+for a port other than 443, and nothing else: no path, user information or
+query. wherry speaks only https to it. `storage.bucket` is 3 to 63
+lowercase letters, digits, dots and hyphens, starting and ending with a
+letter or digit. The run's objects live under `wherry/<tenant>/<run>/` in
+the bucket, addressed path-style, `https://<host>/<bucket>/<key>`. A pool
+without `storage` accepts no S3 input or output.
 
 Every number is positive. Set `lock_duration_ms` above 10000, since a
 receiver renews its lock every 10 seconds; wherry does not check this. The
@@ -609,6 +684,9 @@ producer_byte_rate: 1048576
 request_percentage: 10
 forges:
   - github.com
+storage:
+  endpoint: https://s3.example.com
+  bucket: wherry
 ```
 
 ### Record limit
@@ -798,6 +876,7 @@ A principal whose membership has ended has no grants.
 | Variable | Read by | Effect |
 | --- | --- | --- |
 | `WHERRY_CONFIG` | host commands | client configuration path |
+| `SSL_CERT_FILE` | host commands | PEM CA file trusted beside the system roots for a pool's S3 endpoint |
 | `WHERRY_TRUST_BROKER` | `wherry admin` | Kafka bootstrap address, also written into bundles |
 | `WHERRY_TRUST_CA` | `wherry admin` | PEM CA file for the broker, also written into bundles |
 | `WHERRY_TRUST_ADMIN_USER` | `wherry admin` | super user name |

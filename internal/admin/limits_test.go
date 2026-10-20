@@ -294,3 +294,68 @@ func TestPoolForges(t *testing.T) {
 		}
 	}
 }
+
+func TestPoolStorage(t *testing.T) {
+	terms := modelTerms()
+	terms.Storage = &Storage{Endpoint: "https://s3.example.test:8443", Bucket: "wherry-lab"}
+	encoded, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := DecodeRecord(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := Fold([]Record{record})
+	if err != nil || *state.Pools["pool-a"].Storage != *terms.Storage || state.Pools["pool-a"].Storage.Host() != "s3.example.test:8443" {
+		t.Fatalf("storage %+v, %v; want the terms' own", state.Pools["pool-a"].Storage, err)
+	}
+	if host := (Storage{Endpoint: "https://s3.example.test"}).Host(); host != "s3.example.test:443" {
+		t.Fatalf("host %s; want the https default port", host)
+	}
+	for _, storage := range []Storage{
+		{Endpoint: "http://s3.example.test", Bucket: "wherry-lab"},
+		{Endpoint: "https://s3.example.test/path", Bucket: "wherry-lab"},
+		{Endpoint: "https://S3.example.test", Bucket: "wherry-lab"},
+		{Endpoint: "https://user@s3.example.test", Bucket: "wherry-lab"},
+		{Endpoint: "https://s3.example.test:0", Bucket: "wherry-lab"},
+		{Endpoint: "https://s3.example.test?x=1", Bucket: "wherry-lab"},
+		{Endpoint: "https://s3.example.test", Bucket: "Wherry"},
+		{Endpoint: "https://s3.example.test", Bucket: "ab"},
+		{Endpoint: "https://s3.example.test", Bucket: "a..b"},
+		{Endpoint: "https://s3.example.test", Bucket: "wherry/lab"},
+	} {
+		terms.Storage = &storage
+		if err := validateTerms(terms); err == nil {
+			t.Errorf("storage %+v validated", storage)
+		}
+	}
+}
+
+// A pool's limits must carry a result returning every output through S3, which lists each one's key.
+func TestLargestResultReturnsS3OutputsAtTheirBounds(t *testing.T) {
+	_, feed, err := largestRecords(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := slices.IndexFunc(feed, func(record feedRecord) bool { return record.name == "a result returning S3 outputs" })
+	if index < 0 {
+		t.Fatal("no largest result returning S3 outputs")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(string(bytes.Split(feed[index].value, []byte("."))[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result wire.Result
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatal(err)
+	}
+	var metadata wire.ResultMetadata
+	if err := json.Unmarshal(result.Task.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.S3Outputs) != wire.MaxOutputs || len(metadata.S3Outputs[0].Name) != 512 ||
+		metadata.S3Outputs[0].Key != wire.S3OutputKey(strings.Repeat("n", 32), result.Wherry.Run, math.MaxInt64, metadata.S3Outputs[0].Name) {
+		t.Fatalf("largest result lists %d S3 outputs; want %d at their bounds", len(metadata.S3Outputs), wire.MaxOutputs)
+	}
+}

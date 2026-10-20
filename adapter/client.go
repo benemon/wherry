@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os/exec"
+	"slices"
 	"sync"
 	"time"
 
@@ -250,6 +251,9 @@ func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
 	for _, secret := range run.Credentials {
 		message.Credentials = append(message.Credentials, &adapterv1.Secret{Name: secret.Name, File: secret.File, Value: secret.Value})
 	}
+	for _, fetch := range run.Fetches {
+		message.Fetches = append(message.Fetches, &adapterv1.Fetch{Name: fetch.Name, Url: fetch.URL, Size: fetch.Size, Sha256: fetch.SHA256})
+	}
 	resp, err := rpc.Dispatch(ctx, &adapterv1.DispatchRequest{Adapter: r.name, Run: message})
 	if err != nil {
 		err = callError(ctx, err)
@@ -314,19 +318,27 @@ func (r *remote) Stop(ctx context.Context, handle Handle) error {
 }
 
 // Collect bounds each output's data by limits.FileBytes as it joins the pieces, so a plugin cannot grow one without
-// limit.
-func (r *remote) Collect(ctx context.Context, handle Handle, limits Limits, outputs chan<- Output) error {
+// limit. An output limits.Stream names whose first message carries data is handed on at once, its Body fed the pieces as
+// they arrive and bounded by limits.StreamBytes; pieces arriving after the Body is closed are dropped.
+func (r *remote) Collect(ctx context.Context, handle Handle, limits Limits, outputs chan<- Output) (err error) {
 	rpc, err := r.plugin.link()
 	if err != nil {
 		return err
 	}
 	stream, err := rpc.Collect(ctx, &adapterv1.CollectRequest{Adapter: r.name, Handle: handleMessage(handle), Limits: &adapterv1.Limits{
-		Files: int64(limits.Files), FileBytes: limits.FileBytes, TotalBytes: limits.TotalBytes,
+		Files: int64(limits.Files), FileBytes: limits.FileBytes, TotalBytes: limits.TotalBytes, Stream: limits.Stream, StreamBytes: limits.StreamBytes,
 	}})
 	if err != nil {
 		return callError(ctx, err)
 	}
 	var output *Output
+	var body *io.PipeWriter
+	var streamed int64
+	defer func() {
+		if body != nil {
+			body.CloseWithError(errors.Join(err, errors.New("collect ended inside an output")))
+		}
+	}()
 	for {
 		resp, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
@@ -340,8 +352,29 @@ func (r *remote) Collect(ctx context.Context, handle Handle, limits Limits, outp
 		}
 		if output == nil {
 			output = &Output{Name: resp.Name, Size: resp.Size, Mode: fs.FileMode(resp.Mode)}
+			if resp.Data != nil && slices.Contains(limits.Stream, resp.Name) {
+				var reader *io.PipeReader
+				reader, body = io.Pipe()
+				output.Body = reader
+				select {
+				case outputs <- *output:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
 		} else if resp.Name != output.Name {
 			return errors.New("collect interleaved two outputs")
+		}
+		if body != nil {
+			if streamed += int64(len(resp.Data)); streamed > limits.StreamBytes {
+				return errors.New("collect sent a streamed output over the stream limit")
+			}
+			_, _ = body.Write(resp.Data) // fails only once the receiver of the output has closed it
+			if !resp.More {
+				body.Close()
+				output, body, streamed = nil, nil, 0
+			}
+			continue
 		}
 		if int64(len(output.Data)+len(resp.Data)) > limits.FileBytes {
 			return errors.New("collect sent an output over the file limit")
