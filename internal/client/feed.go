@@ -23,18 +23,20 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// AwaitResult is the accepted outcome of the latest turn; Task is nil when a status record ended it. Outputs are the
-// turn's outputs that verified against its result, Stored the S3 outputs it lists for DownloadOutputs, NotReturned
-// those its receiver did not return, and Rejected those this host could not verify.
+// AwaitResult is the accepted outcome of the latest turn; Task is nil when a status record ended it.
 type AwaitResult struct {
-	Task        *wire.Task
-	Status      wire.TaskStatus
-	Turn        int64
-	Outputs     []Output
-	Stored      []wire.ReturnedOutput
+	Task   *wire.Task
+	Status wire.TaskStatus
+	Turn   int64
+	// Outputs are the turn's outputs that verified against its result.
+	Outputs []Output
+	// Stored are the S3 outputs the result lists for DownloadOutputs.
+	Stored []wire.ReturnedOutput
+	// NotReturned are the outputs the turn's receiver did not return.
 	NotReturned []wire.UnreturnedOutput
-	Rejected    []wire.UnreturnedOutput
-	Skipped     int
+	// Rejected are the outputs this host could not verify.
+	Rejected []wire.UnreturnedOutput
+	Skipped  int
 }
 
 // Output is an output of a turn, verified against the size and SHA-256 its result lists: its bytes, or for an S3
@@ -237,9 +239,8 @@ func (r *runView) read(ctx context.Context, records []*kgo.Record) {
 	r.derive()
 }
 
-// derive binds the kept records to the run against the current view: records from a receiver that is no longer a live
-// member of the run's pool are dropped, echoes bind turns, then statuses, chunks and results in feed order bind to
-// their turn and set the outcome.
+// derive binds the kept records to the run against the current view, dropping those from a receiver that is no longer a
+// live member of the run's pool.
 func (r *runView) derive() {
 	live := func(receiver string) bool {
 		config, ok := r.v.state.Receivers[receiver]
@@ -377,9 +378,8 @@ type RunsResult struct {
 	Skipped int
 }
 
-// Runs returns the status of every run in this host's local records or echoed on the tenant feed. Each run is derived
-// from its own records on one read of wherry.admin and the feed. Feed records are grouped by Kafka key, so a record
-// keyed other than its run counts as unreadable under that key.
+// Runs returns the status of every run in this host's local records or echoed on the tenant feed. Feed records are
+// grouped by Kafka key, so a record keyed other than its run counts as unreadable under that key.
 func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 	v, err := h.load(ctx)
 	if err != nil {
@@ -476,11 +476,9 @@ func (h *Host) Events(ctx context.Context, runID string) (EventsResult, error) {
 	return result, nil
 }
 
-// Await follows the tenant feed until the run's latest turn has an outcome: its result, which the receiver commits
-// with the turn's terminal or interrupted status, an interrupted or rejected status, or a CANCELED terminal. Records
-// already on the feed are read first, so a later outcome supersedes an earlier one. Whenever records of the run
-// arrive, wherry.admin and the receivers' keys are re-read and the run is derived again from every record kept, so
-// nothing from a member ended by then shapes the outcome. While it waits, the host answers seal requests.
+// Await follows the tenant feed until the run's latest turn has an outcome, answering seal requests while it waits.
+// Each arrival re-reads wherry.admin and the receivers' keys and derives the run again, so nothing from a member ended
+// by then shapes the outcome.
 func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (AwaitResult, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

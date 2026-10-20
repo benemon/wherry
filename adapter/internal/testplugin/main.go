@@ -1,10 +1,8 @@
 // Command testplugin is a fake adapter plugin for the protocol's tests and the receiver's round trip.
 //
 // WHERRY_TESTPLUGIN_RECORD names a file that gets one JSON line per Configure and per Dispatch, with the
-// process ID and the value of WHERRY_TESTPLUGIN_ENV. WHERRY_TESTPLUGIN_PLAINTEXT=1 makes the plugin
-// ignore the receiver's AutoMTLS certificate. An adapter's config may name a method that panics
-// ({"panic": "Sweep"}), fail Configure ({"fail": true}), refuse an input
-// as too large ({"too_large": "name"}) or collect the fixed outputs ({"outputs": true}).
+// process ID and the value of WHERRY_TESTPLUGIN_ENV. WHERRY_TESTPLUGIN_PLAINTEXT=1 makes the plugin ignore
+// the receiver's AutoMTLS certificate.
 package main
 
 import (

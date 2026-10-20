@@ -237,12 +237,13 @@ const StorageS3 = "s3"
 // MaxS3Object bounds an S3 input or output: 5 GiB, the S3 single-PUT maximum.
 const MaxS3Object = 5 << 30
 
-// S3Prefix is the prefix of a run's objects in its pool's bucket; S3InputKey and S3OutputKey are the keys beneath it of
-// an S3 input and of a turn's S3 output.
+// S3Prefix is the prefix of a run's objects in its pool's bucket.
 func S3Prefix(tenant, run string) string { return "wherry/" + tenant + "/" + run + "/" }
 
+// S3InputKey is the key of a run's S3 input.
 func S3InputKey(tenant, run, name string) string { return S3Prefix(tenant, run) + "inputs/" + name }
 
+// S3OutputKey is the key of a turn's S3 output.
 func S3OutputKey(tenant, run string, turn int64, name string) string {
 	return S3Prefix(tenant, run) + strconv.FormatInt(turn, 10) + "/outputs/" + name
 }

@@ -1,4 +1,4 @@
-// Package receiver is the platform-independent receiver core (ADR-0018).
+// Package receiver is the platform-independent receiver core.
 package receiver
 
 import (
@@ -38,7 +38,7 @@ type Named struct {
 	Name       string
 	Agent      string
 	Credential string
-	// Labels are the operator's declared labels for the adapter (ADR-0027 Placement).
+	// Labels are the operator's declared labels for the adapter.
 	Labels  map[string]string
 	Adapter adapter.Adapter
 }
@@ -481,8 +481,12 @@ func (r *Receiver) advertise(ctx context.Context) error {
 		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)
 		ready, err := named.Adapter.Ready(callCtx)
 		cancel()
-		if err != nil {
-			r.logger.Printf("adapter %s readiness: %v", named.Name, err)
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			r.logger.Printf("adapter %s readiness: timed out", named.Name)
+			continue
+		case err != nil:
+			r.logger.Printf("adapter %s readiness: %T", named.Name, err)
 			continue
 		}
 		if ready {

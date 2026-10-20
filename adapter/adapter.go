@@ -37,9 +37,10 @@ type Run struct {
 	Fetches     []Fetch
 }
 
-// Fetch is an input the adapter fetches from URL, a presigned https GET the core has checked against its pool's storage,
-// and verifies as Size bytes of SHA-256 SHA256 before the agent starts, following no redirect. A fetch that fails or
-// does not verify ends the job before its agent starts, with Terminal.Class ClassFetch.
+// Fetch is an input the adapter fetches from URL, a presigned https GET the core has checked against its pool's
+// storage, and verifies as Size bytes with SHA256 before the agent starts. URL is a credential: never log it or put it
+// in an error. A fetch that fails or does not verify ends the job before its agent starts, with Terminal.Class
+// ClassFetch.
 type Fetch struct {
 	Name, URL string
 	Size      int64
@@ -170,11 +171,9 @@ type Adapter interface {
 	Sweep(ctx context.Context) error
 }
 
-// AgentEnvironment is the environment every adapter gives its agent, over the environment it configures, so that no
-// system, global or environment git configuration rewrites, redirects, records or traces the clone the prompt gives,
-// and no template seeds a new repository: git reads only the clone's own configuration, never prompts, and traces
-// nothing. Each value switches its variable off. It protects a cooperative agent from ambient configuration; an agent
-// that runs commands can undo all of it.
+// AgentEnvironment is the environment every adapter gives its agent over the environment it configures: git reads only
+// the clone's own configuration, never prompts and traces nothing. It protects a cooperative agent from ambient
+// configuration; an agent that runs commands can undo all of it.
 var AgentEnvironment = map[string]string{
 	"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_COUNT": "0", "GIT_CONFIG_PARAMETERS": "",
 	"GIT_TEMPLATE_DIR": "", "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": "",
@@ -183,12 +182,12 @@ var AgentEnvironment = map[string]string{
 	"GIT_TRACE_REDACT": "1",
 }
 
-// AgentUnset are the variables an adapter removes from the environment it configures, since no value switches them
-// off: the ssh ones override the ssh command the prompt's clone sets, GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
-// GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and GIT_ALTERNATE_OBJECT_DIRECTORIES retarget the repository a command works on, GIT_EXEC_PATH chooses the programs git runs, and any GIT_SSL_NO_VERIFY or
-// GIT_CURL_VERBOSE disables certificate checks or traces requests. An adapter cannot remove what the platform or the
-// image sets, so neither may set them.
-var AgentUnset = []string{"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_EXEC_PATH", "GIT_SSL_NO_VERIFY", "GIT_CURL_VERBOSE"}
+// AgentUnset are the variables an adapter removes from the environment it configures, since no value switches them off.
+// An adapter cannot remove what the platform or the image sets, so neither may set them.
+var AgentUnset = []string{
+	"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_EXEC_PATH", "GIT_SSL_NO_VERIFY", "GIT_CURL_VERBOSE",
+}
 
 // Settings configure one adapter in a plugin.
 type Settings struct {

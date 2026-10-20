@@ -70,9 +70,9 @@ A reader accepts a signed record only when all of these hold:
    - A submission or cancel comes from a host on `wherry.admin`, without a
      membership end, of a tenant entitled to the pool. Its `pool` is the
      pool of the topic it arrived on.
-   - A status, chunk, output chunk, result or start failure comes from a receiver on
-     `wherry.admin`, without a membership end, in the pool the run was
-     placed in. Its `tenant` and `pool` are the run's, and the tenant is
+   - A status, chunk, output chunk, result or start failure comes from a
+     receiver on `wherry.admin`, without a membership end, in the pool the run
+     was placed in. Its `tenant` and `pool` are the run's, and the tenant is
      entitled to the pool.
    - An echo on `wherry.tenant.<tenant>` names that tenant, and comes from a
      live member of the pool it names, to which the tenant is entitled.
@@ -132,17 +132,17 @@ A submission is one turn of a run.
   ([admission](#admission)).
 - Each `raw` and `data` part is an [input file](#inputs-and-outputs). Its
   `filename` is required and is a file name: at most 255 bytes of letters,
-  digits, `.`, `_` and `-`, whose first character is not `.`. A `raw` part is delivered
-  as its bytes under `filename`, and a `data` part as its JSON under
-  `filename` with `.json` added. The delivered names are unique, and the
-  `raw` and `data` parts together hold at most the pool's `inline_limit`
-  bytes, 256 KiB unless its terms set another.
-- `credentials` lists task credentials, each `{name, file}`: a credential
-  of the host, by the name in its configuration, that the agent gets as the
-  file `file` in its credentials directory. `name` is at most 32
-  lowercase letters, digits and hyphens, starting and ending with a letter
-  or digit, and `file` follows the file name rules; each `file` appears once. The pool's terms do
-  not govern task credentials.
+  digits, `.`, `_` and `-`, whose first character is not `.`. A `raw` part is
+  delivered as its bytes under `filename`, and a `data` part as its JSON under
+  `filename` with `.json` added. The delivered names are unique, and the `raw`
+  and `data` parts together hold at most the pool's `inline_limit` bytes, 256
+  KiB unless its terms set another.
+- `credentials` lists task credentials, each `{name, file}`: a credential of the
+  host, by the name in its configuration, that the agent gets as the file `file`
+  in its credentials directory. `name` is at most 32 lowercase letters, digits
+  and hyphens, starting and ending with a letter or digit, and `file` follows
+  the file name rules; each `file` appears once. The pool's terms do not govern
+  task credentials.
 - `outputs` lists at most 256 files the agent is asked to leave, each
   `{name, required, storage}`. `name` is a relative path of file names joined by
   `/`, at most 512 bytes, and appears once. `required` defaults to false.
@@ -222,13 +222,17 @@ part. The fixed texts are:
   `continuation history unavailable`, `queue deadline passed`,
   `run deadline passed`, `unsupported message part`,
   `input names repeat across turns`, `run ID in use`,
-  `inline inputs are <n> bytes, over the <limit>-byte limit`, and
-  `git remote host <host> is not in pool <pool>'s forges`;
+  `inline inputs are <n> bytes, over the <limit>-byte limit`,
+  `git remote host <host> is not in pool <pool>'s forges`, and
+  `pool <pool> has no storage for S3 inputs and outputs`;
 - interrupted: `credential <name> required`, or
   `credentials <name>, <name> required` when the seal request named more
   than one;
 - failed: `timeout`, `log stream failed`,
   `agent ended without a result`,
+  `an S3 input was not fetched, or did not match its size and SHA-256`,
+  `the URL for S3 input <name> is not one of pool <pool>'s storage` (or
+  `S3 output <name>`),
   `receiver denied`, `delivery budget exhausted`,
   `start failed and the job could not be removed`,
   `input <name> takes the turn's inputs over what adapter <adapter>
@@ -262,12 +266,12 @@ A chunk is one line of the agent's standard output, as the A2A artifact
 }
 ```
 
-- The artifact has `artifactId` `transcript` and exactly one part with
-  media type `application/x-ndjson`: a text part holding the line, a `raw`
-  part for an empty line, one that is not UTF-8, or one longer escaped as a
-  JSON string than base64-encoded, or, for a line over 512 KiB, a `url` part with the value `unstored:oversize` whose `metadata`
-  holds the line's hex `sha256` and its `size` in bytes. The line itself
-  is then not stored.
+- The artifact has `artifactId` `transcript` and exactly one part with media
+  type `application/x-ndjson`: a text part holding the line, a `raw` part for an
+  empty line, one that is not UTF-8, or one longer escaped as a JSON string than
+  base64-encoded, or, for a line over 512 KiB, a `url` part with the value
+  `unstored:oversize` whose `metadata` holds the line's hex `sha256` and its
+  `size` in bytes. The line itself is then not stored.
 - `seq` is the line's byte offset in the agent's output and orders the
   chunks.
 - `append` is false for the line at offset 0 and true after it. `lastChunk`
@@ -380,8 +384,8 @@ The `metadata` of a result's `Task` says where the turn ran:
 | `not uploaded: status <code>` | the store answered the PUT with another status than 200 |
 | `not uploaded: request failed`, `not uploaded: invalid request` | the PUT did not complete, or could not be built |
 
-`outputs`, `s3_outputs` and `not_returned` are present on a result whose turn the agent
-ended with its result line, and absent when they would be empty.
+`outputs`, `s3_outputs` and `not_returned` are present on a result whose turn
+the agent ended with its result line, and absent when they would be empty.
 
 The `metadata` of the `result` artifact holds `agent_result` (object): the
 agent's final result line, decoded as a JSON object, with its `result`
@@ -512,10 +516,9 @@ signature's protected header carrying its public key as `jwk`.
 }
 ```
 
-- `owner` is the topic's owner. `key` is the owner's Ed25519 public key as
-  a JWK. Only `rotate` has `previous_key_id`. A receiver record written by an
-  earlier release may carry `sealing_key`, a retired sealing key; readers
-  accept it and ignore it.
+- `owner` is the topic's owner. `key` is the owner's Ed25519 public key as a
+  JWK. Only `rotate` has `previous_key_id`. A receiver record may carry
+  `sealing_key`; readers accept it and ignore it.
 - `register` is the first record on the topic, self-signed by `key`. A
   later `register` is rejected.
 - `rotate` replaces the current key with `key`. It carries two signatures,
@@ -597,10 +600,11 @@ all of these hold:
    the run's first turn declares, the pool's terms have `storage`, and the
    host's configuration has a storage credential.
 
-For each S3 input the host presigns a GET of `wherry/<tenant>/<run>/inputs/<name>`
-for 15 minutes, and for each S3 output a PUT of
-`wherry/<tenant>/<run>/<turn>/outputs/<name>` until the turn's
-`deadline_ms`, path-style on the pool's endpoint with its own credential.
+For each S3 input the host presigns a GET of
+`wherry/<tenant>/<run>/inputs/<name>` for 15 minutes, and for each S3 output a
+PUT of `wherry/<tenant>/<run>/<turn>/outputs/<name>` until the turn's
+`deadline_ms`, at most 7 days, path-style on the pool's endpoint with its own
+credential.
 
 A host records a run locally before it publishes the run's turn, so a
 request can follow the task at once; a request read while the record is
@@ -637,8 +641,8 @@ request's `key`.
 - The protected header holds `alg`, `enc`, `epk`, `typ`
   `application/vnd.wherry.seal.v2+jwe` and the binding: `tenant`, `pool`,
   `receiver`, `key_id`, `run`, `turn`, `attempt`, `credentials`,
-  `task_credentials`, `s3_inputs` and `s3_outputs` when the request has
-  them, and `expiry_ms`, copied from the request. Readers reject any other member.
+  `task_credentials`, `s3_inputs` and `s3_outputs` when the request has them,
+  and `expiry_ms`, copied from the request. Readers reject any other member.
 - The plaintext is a JSON object: `v`, `binding`, an object holding the
   binding members again, and `values`, mapping each name in `credentials`
   and `task_credentials` to its value, `s3-inputs/<name>` for each S3 input
@@ -648,15 +652,14 @@ request's `key`.
 - A seal is at most 64 KiB in compact form. A host refuses to build a larger
   one and logs the credential names.
 
-The receiver reads the host's topic from its end at the time of the
-request. It opens a seal only when the header's binding equals its request,
-with `key_id` the thumbprint of its own key, `expiry_ms` has not passed, the
-plaintext's `binding` equals the header's, and `values` holds exactly the
-named credentials and URLs. It checks for a cancel, its shutdown, the run deadline
-and the request's expiry before it takes a seal, so a turn stopped while its
-seal arrives is never dispatched. It passes the values to the adapter in
-Dispatch. It logs a seal that does not open by run, turn and attempt, never
-the reason.
+The receiver reads the host's topic from its end at the time of the request. It
+opens a seal only when the header's binding equals its request, with `key_id`
+the thumbprint of its own key, `expiry_ms` has not passed, the plaintext's
+`binding` equals the header's, and `values` holds exactly the named credentials
+and URLs. It checks for a cancel, its shutdown, the run deadline and the
+request's expiry before it takes a seal, so a turn stopped while its seal
+arrives is never dispatched. It passes the values to the adapter in Dispatch. It
+logs a seal that does not open by run, turn and attempt, never the reason.
 
 Before it uses a URL, the receiver checks it against the pool's
 `storage`: its scheme is `https`, its host and port, 443 when absent, are
@@ -695,8 +698,7 @@ adopted attempt delivered nothing to redact. Each form is replaced once,
 longest first, and the marker can join the bytes beside it into a value
 that was not there before: when a value starts with the marker's tail,
 such as `d]` for `[redacted]`, and the rest of it follows a replaced
-value, the published text holds that value whole. Redaction does not
-prevent this.
+value, the published text holds that value whole.
 
 ## Admin records
 
@@ -755,16 +757,16 @@ A receiver that claims a submission:
    hash;
 2. drops it when it fails the [signed-record checks](#signed-records), or
    when its Kafka key is not its `run`;
-3. rejects it when its agent is outside the pool's terms, and when its
-   `raw` and `data` parts together exceed the pool's `inline_limit`;
-4. writes an `offer-unavailable` start failure and releases it when no
-   ready adapter satisfies the placement;
-5. rejects it with `run ID in use` when the run ID belongs to another
+3. rejects it with `run ID in use` when the run ID belongs to another
    tenant: the tenant of the run's earliest submission on the pool's task
    topic that a live host's key verifies, or of the run's earliest status
    other than a rejection on the pool's events. Ownership survives the
    owner's host being ended, since the run's statuses still name its
    tenant. This check comes before any record is written under the run ID;
+4. rejects it when its agent is outside the pool's terms, and when its
+   `raw` and `data` parts together exceed the pool's `inline_limit`;
+5. writes an `offer-unavailable` start failure and releases it when no
+   ready adapter satisfies the placement;
 6. rejects a duplicate, stale or out-of-order turn, unless a cancel covers
    it;
 7. rejects a continuation whose earlier turns it cannot read;
@@ -869,13 +871,8 @@ image's are the operator's to keep clear of them. Forges bound what a
 receiver accepts; the platform's egress policy bounds where the agent
 connects.
 
-These settings protect a cooperative agent from ambient configuration. They
-do not constrain a hostile or prompt-injected agent: one that runs
-commands can override every one of them, and a harness rule allowing only
-`git` commands does not prevent that, since `git` aliases run shell
-commands. Such an agent holds whatever credentials the parent sent,
-bounded by their scope and lifetime, the egress policy, and the receiver's
-redaction of what it returns.
+The [operator guide](operator-guide.md#git-repositories) states the limits
+of these settings against an agent that runs commands.
 
 ## Inputs and outputs
 
@@ -891,24 +888,24 @@ their paths:
 - `WHERRY_OUTPUT_DIR`: where the agent leaves its outputs. The agent
   creates the directory when it does not exist.
 
-When the run has inputs, task credentials, expected outputs or a git
-input, the receiver opens the prompt with lines giving the absolute path of
-each directory, of each input file, of each credential file and of each
-expected output, with `(required)` after a required one, so an agent
-without a shell finds them, and the commands of the
-[git input](#git-input). The lines name S3 inputs by path, never by URL. The adapter reports the directories' paths as its agent sees
-them; a directory it does not report appears as its variable. The lines
-hold no credential value.
+When the run has inputs, task credentials, expected outputs or a git input, the
+receiver opens the prompt with lines giving the absolute path of each directory,
+of each input file, of each credential file and of each expected output, with
+`(required)` after a required one, so an agent without a shell finds them, and
+the commands of the [git input](#git-input). The lines name S3 inputs by path,
+never by URL. The adapter reports the directories' paths as its agent sees them;
+a directory it does not report appears as its variable. The lines hold no
+credential value.
 
-After the agent's result line, the receiver stops the job, then asks the
-adapter to collect the outputs. The adapter lists every entry beneath the
-outputs directory without following links, and refuses the whole tree,
-reading nothing, when it holds more than 256 entries. It reads only regular
-files: one at most the pool's `output_limit`, 8 MiB unless its terms set
-another, and together at most that, which the receiver checks again. Every other entry is listed with its type and left unread.
-The receiver gives up on a collection that takes over 2 minutes. An adapter
-that cannot collect, or a job that could not be stopped, leaves the
-outputs `not collected`.
+After the agent's result line, the receiver stops the job, then asks the adapter
+to collect the outputs. The adapter lists every entry beneath the outputs
+directory without following links, and refuses the whole tree, reading nothing,
+when it holds more than 256 entries. It reads only regular files: one at most
+the pool's `output_limit`, 8 MiB unless its terms set another, and together at
+most that, which the receiver checks again. Every other entry is listed with its
+type and left unread. The receiver gives up on a collection that takes over 2
+minutes. An adapter that cannot collect, or a job that could not be stopped,
+leaves the outputs `not collected`.
 
 The receiver checks every name, redacts every file, and publishes each
 returned file as [output chunks](#output-chunk) and in the result's

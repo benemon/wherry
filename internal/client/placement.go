@@ -11,7 +11,7 @@ import (
 // resolvePlacement chooses, among live advertisements in the tenant's entitled pools, the member with the most spare
 // capacity, then the lowest receiver ID, that has a ready adapter launching the agent with labels satisfying selector.
 // An empty agent takes the pool's default agent, then its declared order. Labels come from the operator's config
-// record, never the advertisement (ADR-0027 Placement).
+// record, never the advertisement.
 func resolvePlacement(state admin.State, tenant, agent string, selector []wire.Requirement, ads map[string]wire.Advertisement) (string, wire.Placement, bool) {
 	var chosen *wire.Advertisement
 	var placement wire.Placement

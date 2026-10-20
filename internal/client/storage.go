@@ -169,10 +169,8 @@ func (h *Host) checkSealSize(ctx context.Context, store *minio.Client, bucket, t
 	return nil
 }
 
-// DownloadOutputs downloads a turn's S3 outputs beneath dir as WriteOutputs writes, verifying each against the size and
-// SHA-256 its result lists, and returns the verified ones with their paths and the ones it rejected. Only an S3 output
-// the run declares, at its own key, is downloaded; one already in dir that verifies is not downloaded again. Once the
-// run is terminal and every S3 output verified, it deletes the run's prefix.
+// DownloadOutputs downloads a turn's S3 outputs beneath dir and verifies each against its result's size and SHA-256;
+// once the run is terminal and every output verified, it deletes the run's prefix.
 func (h *Host) DownloadOutputs(ctx context.Context, runID string, result AwaitResult, dir string) ([]Output, []wire.UnreturnedOutput, error) {
 	local, err := h.localRun(runID)
 	if err != nil || local == nil || len(local.S3Inputs)+len(local.S3Outputs) == 0 {

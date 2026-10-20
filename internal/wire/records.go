@@ -60,8 +60,8 @@ func parse(verify func([]byte, string, signed.Keys, any) (string, error), encode
 	return nil
 }
 
-// Placement is what a run asks of its pool: an agent and the labels an
-// adapter must carry (ADR-0027 Placement).
+// Placement is what a run asks of its pool: an agent and the labels an adapter
+// must carry.
 type Placement struct {
 	Agent    string        `json:"agent"`
 	Selector []Requirement `json:"selector"`

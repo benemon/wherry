@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,6 +40,7 @@ type oracle struct {
 	config   *StorageConfig
 	store    *minio.Client
 	client   *http.Client
+	secret   string
 }
 
 func newOracle(t *testing.T) *oracle {
@@ -60,8 +62,25 @@ func newOracle(t *testing.T) *oracle {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxy := httptest.NewTLSServer(&httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) { r.SetURL(parsed); r.Out.Host = r.In.Host }})
+	var mu sync.Mutex
+	var requested []string
+	proxy := httptest.NewTLSServer(&httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) {
+		mu.Lock()
+		requested = append(requested, r.In.URL.String())
+		mu.Unlock()
+		r.SetURL(parsed)
+		r.Out.Host = r.In.Host
+	}})
 	t.Cleanup(proxy.Close)
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, requested := range requested {
+			if strings.Contains(requested, secret) || strings.Contains(requested, url.QueryEscape(secret)) {
+				t.Errorf("a request URL holds the secret key: %s", requested)
+			}
+		}
+	})
 	previous := storageTransport
 	storageTransport = proxy.Client().Transport
 	t.Cleanup(func() { storageTransport = previous })
@@ -78,7 +97,7 @@ func newOracle(t *testing.T) *oracle {
 	}
 	client := proxy.Client()
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &oracle{endpoint: proxy.URL, config: config, store: store, client: client}
+	return &oracle{endpoint: proxy.URL, config: config, store: store, client: client, secret: secret}
 }
 
 // object is the content of key in the test bucket, or nil when it does not exist.
@@ -217,6 +236,11 @@ func TestAnswerSealsPresignedURLsForTheRunsObjects(t *testing.T) {
 	get, put := string(values[signed.S3InputValue("dataset.bin")]), string(values[signed.S3OutputValue("out/report.pdf")])
 	if len(values) != 3 || get == "" || put == "" {
 		t.Fatalf("sealed %d values; want the credential and two URLs", len(values))
+	}
+	for _, sealed := range []string{get, put} {
+		if strings.Contains(sealed, o.secret) || strings.Contains(sealed, url.QueryEscape(o.secret)) {
+			t.Fatalf("a sealed URL holds the secret key: %s", sealed)
+		}
 	}
 	expires := func(raw string) time.Duration {
 		parsed, _ := url.Parse(raw)

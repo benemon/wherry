@@ -32,8 +32,7 @@ type Config struct {
 	Storage     *StorageConfig    `json:"storage,omitzero"`
 }
 
-// StorageConfig names the files, each readable by this user alone, holding the access key and secret key of the
-// host's S3 credential, which the operator scopes to the tenant's prefix in its pools' buckets.
+// StorageConfig names the owner-only files holding the host's S3 access key and secret key.
 type StorageConfig struct {
 	AccessKeyFile string `json:"access_key_file"`
 	SecretKeyFile string `json:"secret_key_file"`
@@ -139,7 +138,7 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		kgo.SeedBrokers(bundle.Broker),
 		kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
 		kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
-		// Aborted transactions are a fenced holder's writes (ADR-0010) and must never be read.
+		// Aborted transactions are a fenced holder's writes and must never be read.
 		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
 	)
 	if err != nil {

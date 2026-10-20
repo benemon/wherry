@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Requirement is one selector condition on a label (ADR-0027 Placement).
+// Requirement is one selector condition on a label.
 type Requirement struct {
 	Key      string   `json:"key"`
 	Operator string   `json:"operator"`

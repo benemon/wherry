@@ -1049,7 +1049,7 @@ func TestReadinessErrorLogsAndLeavesAdapterOut(t *testing.T) {
 	if want := []string{"cloud", "edge"}; !slices.Equal(got, want) {
 		t.Fatalf("advertised adapters %v, want %v", got, want)
 	}
-	if !strings.Contains(m.logs.String(), "adapter lab readiness: nomad unreachable") {
+	if logs := m.logs.String(); !strings.Contains(logs, "adapter lab readiness: *errors.errorString") || strings.Contains(logs, "nomad unreachable") {
 		t.Fatalf("readiness error not logged: %q", m.logs.String())
 	}
 }
@@ -1077,7 +1077,7 @@ func TestHungAdapterDoesNotStopAdvertising(t *testing.T) {
 		t.Fatalf("advertised adapters %v, want %v", got, want)
 	}
 	logs := m.logs.String()
-	if !strings.Contains(logs, "adapter lab sweep: timed out") || !strings.Contains(logs, "adapter lab readiness: context deadline exceeded") {
+	if !strings.Contains(logs, "adapter lab sweep: timed out") || !strings.Contains(logs, "adapter lab readiness: timed out") {
 		t.Fatalf("hung adapter's calls not logged: %q", logs)
 	}
 }

@@ -24,8 +24,8 @@ import (
 
 // fixture is provisioned on a real broker through Service: two pools, two
 // tenants (a entitled to pool a, b to pool b), two hosts for tenant a, one
-// receiver per pool. Names carry a
-// per-run suffix; ACLs and SCRAM users are removed afterwards, topics stay.
+// receiver per pool. Names carry a per-run suffix; ACLs and SCRAM users are
+// removed afterwards, topics stay.
 type fixture struct {
 	service                        *Service
 	poolA, poolB, tenantA, tenantB string
@@ -41,7 +41,7 @@ func TestRealBrokerFixture(t *testing.T) {
 	f := provision(t)
 	ctx := context.Background()
 
-	t.Run("P13 a task submitted before the first fetch is delivered", func(t *testing.T) {
+	t.Run("a task submitted before the first fetch is delivered", func(t *testing.T) {
 		submitter := f.connect(t, TenantPrincipal(f.tenantA, f.hostA1))
 		if err := submitter.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic(f.poolA), Value: []byte("before-first-fetch")}).FirstErr(); err != nil {
 			t.Fatal(err)
@@ -67,17 +67,17 @@ func TestRealBrokerFixture(t *testing.T) {
 		t.Fatal("task submitted before the first fetch was not delivered")
 	})
 
-	t.Run("P01 a tenant cannot write a pool it is not entitled to", func(t *testing.T) {
+	t.Run("a tenant cannot write a pool it is not entitled to", func(t *testing.T) {
 		host := f.connect(t, TenantPrincipal(f.tenantB, f.hostB1))
 		expectDenied(t, host.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic(f.poolA), Value: []byte("x")}).FirstErr())
 	})
 
-	t.Run("P03 a tenant reads only its own feed", func(t *testing.T) {
+	t.Run("a tenant reads only its own feed", func(t *testing.T) {
 		expectReadable(t, f.connect(t, TenantPrincipal(f.tenantA, f.hostA2)), TenantTopic(f.tenantA))
 		expectReadDenied(t, f.connect(t, TenantPrincipal(f.tenantB, f.hostB1)), TenantTopic(f.tenantA))
 	})
 
-	t.Run("P04 key topics have one writer", func(t *testing.T) {
+	t.Run("key topics have one writer", func(t *testing.T) {
 		sibling := f.connect(t, TenantPrincipal(f.tenantA, f.hostA2))
 		expectDenied(t, sibling.ProduceSync(ctx, &kgo.Record{Topic: HostTopic(f.tenantA, f.hostA1), Value: []byte("x")}).FirstErr())
 		peer := f.connect(t, ReceiverPrincipal(f.receiverA))
@@ -93,7 +93,7 @@ func TestRealBrokerFixture(t *testing.T) {
 		}
 	})
 
-	t.Run("P08 a receiver writes only its own pool", func(t *testing.T) {
+	t.Run("a receiver writes only its own pool", func(t *testing.T) {
 		receiver := f.connect(t, ReceiverPrincipal(f.receiverA))
 		if err := receiver.ProduceSync(ctx, &kgo.Record{Topic: PoolEventsTopic(f.poolA), Value: []byte("x")}).FirstErr(); err != nil {
 			t.Fatalf("own pool events: %v", err)
@@ -111,7 +111,7 @@ func TestRealBrokerFixture(t *testing.T) {
 		}
 	})
 
-	t.Run("P14 a status is on both topics or on neither", func(t *testing.T) {
+	t.Run("a status is on both topics or on neither", func(t *testing.T) {
 		writer := f.connect(t, ReceiverPrincipal(f.receiverA), kgo.TransactionalID(TransactionalPrefix(f.poolA)+"run-p14"))
 		committed, aborted := "committed-"+f.poolA, "aborted-"+f.poolA
 		if err := writer.BeginTransaction(); err != nil {
@@ -145,7 +145,7 @@ func TestRealBrokerFixture(t *testing.T) {
 		}
 	})
 
-	t.Run("P15 only the operator writes wherry.admin", func(t *testing.T) {
+	t.Run("only the operator writes wherry.admin", func(t *testing.T) {
 		receiver := f.connect(t, ReceiverPrincipal(f.receiverA), kgo.ProducerBatchMaxBytes(4<<20), kgo.ProducerBatchCompression(kgo.NoCompression()))
 		expectReadable(t, receiver, AdminTopic)
 		// wherry.admin is never deleted, so the write probe must be unable to
@@ -163,7 +163,7 @@ func TestRealBrokerFixture(t *testing.T) {
 		expectDenied(t, receiver.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: probe}).FirstErr())
 	})
 
-	t.Run("P12 provisioning survives Strimzi reconciliation", func(t *testing.T) {
+	t.Run("provisioning survives Strimzi reconciliation", func(t *testing.T) {
 		waitText := os.Getenv("WHERRY_TRUST_RECONCILE_WAIT")
 		if waitText == "" {
 			t.Skip("WHERRY_TRUST_RECONCILE_WAIT is not set")
@@ -183,7 +183,7 @@ func TestRealBrokerFixture(t *testing.T) {
 		expectReadable(t, f.connect(t, ReceiverPrincipal(f.receiverB)), PoolEventsTopic(f.poolB))
 	})
 
-	t.Run("P09 a revoked principal is denied and recorded as ended", func(t *testing.T) {
+	t.Run("a revoked principal is denied and recorded as ended", func(t *testing.T) {
 		principal := TenantPrincipal(f.tenantB, f.hostB1)
 		old := f.connect(t, principal)
 		expectReadable(t, old, TenantTopic(f.tenantB))

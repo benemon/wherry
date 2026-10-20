@@ -66,8 +66,7 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// tlsCluster is kfake behind TLS with a throwaway CA, so bundles carry a real CA and principals log in as they
-// would on the lab.
+// tlsCluster is kfake behind TLS with a throwaway CA, so bundles carry a real CA and principals log in over TLS.
 func tlsCluster(t *testing.T) (*kfake.Cluster, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

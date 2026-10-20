@@ -23,11 +23,11 @@ writes.
   machines that run the `wherry` CLI or its MCP server. Each host is its
   own Kafka principal with its own Ed25519 signing key. A compromised host
   is a compromise of its tenant.
-- **A pool** is a set of receivers that share terms and trust each other
-  fully. Its terms name the agents it runs, the credentials each agent
-  takes, the share-group delivery limit and lock duration, and the quotas
-  its tenants' hosts get. A tenant is entitled to one or more pools. A host entitled through several pools gets the lowest
-  of their quotas.
+- **A pool** is a set of receivers that share terms and trust each other fully.
+  Its terms name the agents it runs, the credentials each agent takes, the
+  share-group delivery limit and lock duration, and the quotas its tenants'
+  hosts get. A tenant is entitled to one or more pools. A host entitled through
+  several pools gets the lowest of their quotas.
 - **A receiver** is a long-running `wherry receiver` process in one pool.
   It claims tasks, runs each as a platform job, and publishes the job's
   statuses, transcript and result. Each receiver is its own principal with
@@ -61,14 +61,14 @@ host or receiver. It never travels over Kafka.
 | receiver | `wherry.rcv.<receiver>` |
 | operator | `wherry.operator` |
 
-Authorisation is [Kafka ACLs](https://kafka.apache.org/documentation/#security_authz),
-enforced by the broker. `wherry admin` generates every ACL from the state
-on `wherry.admin`. Each names one resource literally, except one prefixed
-grant per receiver on its pool's transactional IDs. The `wherry admin`
-command that records a host or receiver on `wherry.admin` also issues its
-principal and ACLs, and `tenant add` records an entitlement with its ACLs.
-Those commands are the approval.
-[Reference](reference.md#acls) lists the matrix.
+Authorisation is
+[Kafka ACLs](https://kafka.apache.org/documentation/#security_authz), enforced
+by the broker. `wherry admin` generates every ACL from the state on
+`wherry.admin`. Each names one resource literally, except one prefixed grant per
+receiver on its pool's transactional IDs. The `wherry admin` command that
+records a host or receiver on `wherry.admin` also issues its principal and ACLs,
+and `tenant add` records an entitlement with its ACLs; no other approval step
+exists. [Reference](reference.md#acls) lists the matrix.
 
 ## Topics
 
@@ -85,13 +85,13 @@ differently live on different topics.
 | `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, transcript chunks, results, echoes, seal requests |
 | `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key, seals |
 
-`wherry.admin` records and seals carry no signature: each
-sits on a topic only one principal can write, so Kafka authenticates it.
-Every other record, key records included, is a versioned EdDSA
-[JWS](https://datatracker.ietf.org/doc/html/rfc7515). A record on a shared
-topic names its owner and key in its `kid`, and a reader verifies it against that
-owner's current key, read from the owner's own key topic, before it
-decodes the payload. No host or receiver can vouch for another's key.
+`wherry.admin` records and seals carry no signature: each sits on a topic only
+one principal can write, so Kafka authenticates it. Every other record, key
+records included, is a versioned EdDSA
+[JWS](https://datatracker.ietf.org/doc/html/rfc7515). A record on a shared topic
+names its owner and key in its `kid`, and a reader verifies it against that
+owner's current key, read from the owner's own key topic, before it decodes the
+payload. No host or receiver can vouch for another's key.
 
 A reader then checks the record against `wherry.admin`. A submission or
 cancel must come from a live host of a tenant entitled to the pool whose
@@ -124,17 +124,16 @@ The platform, runtime, node pool and datacenter an adapter uses are part
 of its configuration, and are neither labels nor selectable.
 
 **The client resolves placement before it signs.** It reads the receiver
-configurations on `wherry.admin` for their labels, and the advertisements
-on `wherry.receivers` for liveness, capacity and which adapters are ready.
-A receiver whose latest advertisement is at most 120 seconds old is live.
-For each live receiver in a pool the tenant is entitled to, the client
-looks for a ready adapter that launches the agent with labels the selector
-accepts. With no agent named, each receiver takes the pool's default agent
-if a ready adapter launches it, otherwise the first other agent in the
-terms' order that one does. Among the receivers that can take the task,
-the one with the most spare capacity wins, whichever agent it would run,
-and ties go to the lowest receiver ID. The client signs the agent, the selector and the
-chosen pool into the task.
+configurations on `wherry.admin` for their labels, and the advertisements on
+`wherry.receivers` for liveness, capacity and which adapters are ready. A
+receiver whose latest advertisement is at most 120 seconds old is live. For each
+live receiver in a pool the tenant is entitled to, the client looks for a ready
+adapter that launches the agent with labels the selector accepts. With no agent
+named, each receiver takes the pool's default agent if a ready adapter launches
+it, otherwise the first other agent in the terms' order that one does. Among the
+receivers that can take the task, the one with the most spare capacity wins,
+whichever agent it would run, and ties go to the lowest receiver ID. The client
+signs the agent, the selector and the chosen pool into the task.
 
 **The receiver routes** a task it claims to its first ready adapter, in
 declared order, whose agent and labels satisfy the task. An agent outside
@@ -150,12 +149,12 @@ type, an agent, an optional credential, labels and the adapter's own
 settings. It holds no secrets. `wherry admin` refuses a configuration that
 names an agent or credential outside the pool's terms.
 
-A receiver starts with its bundle and a state directory. It registers its
-keys, waits for its configuration record, validates it against the terms
-and builds its adapters. It then advertises every 30 seconds. When a new
-configuration record appears, the receiver stops and exits, so its
-platform restarts it with the new configuration. Runs in flight are
-adopted on redelivery.
+A receiver starts with its bundle, a state directory and a plugin directory. It
+registers its signing key, waits for its configuration record, validates it
+against the terms and builds its adapters. It then advertises every 30 seconds.
+When a new configuration record appears, the receiver stops and exits, so its
+platform restarts it with the new configuration. Runs in flight are adopted on
+redelivery.
 
 ## Sealed credentials
 

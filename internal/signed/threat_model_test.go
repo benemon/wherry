@@ -9,7 +9,7 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 )
 
-func TestP04KeysOnlyFollowRegistrationRules(t *testing.T) {
+func TestKeysOnlyFollowRegistrationRules(t *testing.T) {
 	_, first, _ := ed25519.GenerateKey(rand.Reader)
 	_, second, _ := ed25519.GenerateKey(rand.Reader)
 	owner := HostOwner("tenant-a", "host-a")
@@ -83,7 +83,7 @@ type testRecord struct {
 
 const testType = "application/vnd.wherry.test.v1+jws"
 
-func TestP07RecordTypeIsExact(t *testing.T) {
+func TestRecordTypeIsExact(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	owner := HostOwner("tenant-a", "host-a")
 	keys := Keys{owner: {Current: key.Public().(ed25519.PublicKey)}}
@@ -109,7 +109,7 @@ func TestP07RecordTypeIsExact(t *testing.T) {
 	}
 }
 
-func TestP01SignatureMustVerifyAgainstNamedKey(t *testing.T) {
+func TestSignatureMustVerifyAgainstNamedKey(t *testing.T) {
 	_, victim, _ := ed25519.GenerateKey(rand.Reader)
 	_, attacker, _ := ed25519.GenerateKey(rand.Reader)
 	owner := HostOwner("tenant-a", "host-a")
@@ -140,7 +140,7 @@ func TestP01SignatureMustVerifyAgainstNamedKey(t *testing.T) {
 	}
 }
 
-func TestP07PayloadDecodeIsStrict(t *testing.T) {
+func TestPayloadDecodeIsStrict(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	owner := HostOwner("tenant-a", "host-a")
 	keys := Keys{owner: {Current: key.Public().(ed25519.PublicKey)}}

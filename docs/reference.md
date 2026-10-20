@@ -113,8 +113,8 @@ adapter lists each adapter with `ready=false`.
 
 ### `wherry submit`
 
-Resolves a placement, signs the task and publishes it to the chosen pool. It prints `run_id=<id> pool=<pool>`, or
-fails with `no matching live receiver`.
+Resolves a placement, signs the task and publishes it to the chosen pool. It
+prints `run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -155,11 +155,11 @@ the 8 KiB bound.
 `--git-changes` adds `changes.patch` or `changes.bundle` to the expected
 outputs, unless `--output` names it already; neither is required.
 
-Input files hold the pool's [`inline_limit`](#pool-terms) together;
-`submit` refuses more before it publishes, naming the size and the limit. Input and credential file names
-are [file names](a2a-extension-v1.md#submission), and output names
-relative paths of them. `submit` refuses a credential its configuration
-does not map to a file.
+Input files hold the pool's [`inline_limit`](#pool-terms) together; `submit`
+refuses more before it publishes, naming the size and the limit. Input and
+credential file names are [file names](a2a-extension-v1.md#submission), and
+output names relative paths of them. `submit` refuses a credential its
+configuration does not map to a file.
 
 `--s3-input` and `:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
 `submit` refuses them, before it uploads or publishes anything, when the
@@ -170,15 +170,15 @@ pool's terms no [`storage`](#pool-terms):
 invalid input: pool build has no storage for S3 inputs and outputs
 ```
 
-It uploads each S3 input to `wherry/<tenant>/<run>/inputs/<name>` in the
-pool's bucket with one PUT, then publishes the task with each input's name,
-size and SHA-256 and no URL. S3 input names are file names, distinct from
-the input files' names, and the run's parts and S3 inputs number at most
-256 together. S3 inputs do not count against `inline_limit`. When
-publishing fails, `submit` deletes what it uploaded. It also refuses a run
-whose task credentials and presigned URLs would not fit one 64 KiB seal,
-naming the seal's size. A 422-byte URL, as a lab endpoint and a short object
-name make, takes 838 bytes of the seal, so one seal carries about 75.
+It uploads each S3 input to `wherry/<tenant>/<run>/inputs/<name>` in the pool's
+bucket with one PUT, then publishes the task with each input's name, size and
+SHA-256 and no URL. S3 input names are file names, distinct from the input
+files' names, and the run's parts and S3 inputs number at most 256 together. S3
+inputs do not count against `inline_limit`. When publishing fails, `submit`
+deletes what it uploaded. It also refuses a run whose task credentials and
+presigned URLs would not fit one 64 KiB seal, naming the seal's size. A
+presigned URL of about 420 bytes takes about 840 bytes of the seal, so one seal
+carries about 75.
 
 `submit` seals nothing. The receiver that claims the task asks for the
 credential its adapter delivers, the task's credentials and presigned URLs
@@ -309,9 +309,9 @@ turn=<n> attempt=<n> transcript_chunks=<n>
 `message` appears when the status has one. Heartbeats are not on the feed,
 so they do not appear.
 
-`await`, `status`, `events`, `cleanup`, `continue` and `cancel` find a run from this host's
-record of it in `state_dir`, or from a receiver's echo on the tenant feed.
-They fail with `run not found` when there is neither.
+`await`, `status`, `events`, `cleanup`, `continue` and `cancel` find a run from
+this host's record of it in `state_dir`, or from a receiver's echo on the tenant
+feed. They fail with `run not found` when there is neither.
 
 ### `wherry mcp`
 
@@ -359,7 +359,12 @@ each host's [quotas](#quotas).
 Records the host, creates its principal, its key topic and the tenant
 feed, grants its ACLs, applies its quotas, and writes its bundle.
 
-### `wherry admin receiver add RECEIVER --pool POOL <--config-file FILE|--config-dir DIR> --bundle-file FILE`
+### `wherry admin receiver add RECEIVER`
+
+```sh
+wherry admin receiver add RECEIVER --pool POOL \
+  <--config-file FILE|--config-dir DIR> --bundle-file FILE
+```
 
 Reads the [receiver configuration](#receiver-configuration) from a
 directory or a single file, validates it against the pool's terms, records
@@ -370,7 +375,11 @@ grants its ACLs, and writes its bundle. It refuses an existing receiver.
 trailing CR and LF, in the bundle as the platform credential of the named
 adapter.
 
-### `wherry admin receiver configure RECEIVER <--config-file FILE|--config-dir DIR>`
+### `wherry admin receiver configure RECEIVER`
+
+```sh
+wherry admin receiver configure RECEIVER <--config-file FILE|--config-dir DIR>
+```
 
 Records a new configuration for a live receiver in its pool. The
 principal, password and bundle stay as they are. The receiver exits when it
@@ -421,9 +430,9 @@ does not check an adapter's `type` or `config` section.
 Runs a receiver as the bundle's principal. It creates the state directory
 with mode 0700 and keeps `signing.key` in it. On start it:
 
-1. deletes `sealing.key`, a retired sealing key, when the directory holds
-   one, registers its public key on its key topic when the topic is empty,
-   and fails when the topic holds another key;
+1. deletes `sealing.key` when the directory holds one, registers its public key
+   on its key topic when the topic is empty, and fails when the topic holds
+   another key;
 2. waits for its configuration record on `wherry.admin` and validates it
    against the pool's terms;
 3. starts the [adapter plugins](#adapter-plugins) its adapters' types name
@@ -443,14 +452,15 @@ process per type, and configures every adapter of that type in it.
 [wherry-plugins](https://github.com/benemon/wherry-plugins) holds the
 plugins, `nomad` among them.
 
-The plugin directory is made absolute, so the binary checked is the one
-run and `PATH` is never searched. The receiver refuses a plugin directory
-or binary owned by a user other than root or the receiver's, or that group
-or others can write, and a binary that is not a regular file; a symbolic
-link is refused. It checks again before every restart. A type with no binary in the directory is a configuration error,
-and the receiver exits with `adapter <name>: no plugin for type <type>`. A
-plugin checks its adapter's `config` section when the receiver configures
-it, and the receiver exits with `adapter <name>: ...` on an error.
+The plugin directory is made absolute, so the binary checked is the one run and
+`PATH` is never searched. The receiver refuses a plugin directory or binary
+owned by a user other than root or the receiver's, or that group or others can
+write, and a binary that is not a regular file; a symbolic link is refused. It
+checks again before every restart. A type with no binary in the directory is a
+configuration error, and the receiver exits with
+`adapter <name>: no plugin for type <type>`. A plugin checks its adapter's
+`config` section when the receiver configures it, and the receiver exits with
+`adapter <name>: ...` on an error.
 
 A plugin inherits the receiver's environment. The receiver passes each
 adapter its name, pool, agent, credential name and `config` section, and
@@ -478,23 +488,23 @@ not against one that runs commands of its own
 
 The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
-certificate pair made for each start, protocol version 3. The receiver
-refuses a plugin of an earlier version at its start. The receiver
-refuses a plugin that offers no TLS certificate. Every call names its
-adapter. A plugin accepts messages up to 64 MiB; the receiver logs a larger
-Dispatch as `dispatch rejected: message too large`.
+certificate pair made for each start, protocol version 3. The receiver refuses a
+plugin of any other protocol version at its start. The receiver refuses a plugin
+that offers no TLS certificate. Every call names its adapter. A plugin accepts
+messages up to 64 MiB; the receiver logs a larger Dispatch as
+`dispatch rejected: message too large`.
 
 Each advertisement gives every adapter's sweep and readiness call one
 advertise interval, 30 seconds; a call that runs out counts as not ready
 and is logged.
 
-When a plugin exits, the receiver logs `plugin exited; restarting`, starts
-it again after one second, waiting twice as long after each failed start
-up to 30 seconds, and configures every adapter of its type again. Until then those
-adapters are not ready and the next advertisement withdraws their offers.
-A run whose job the receiver is following reads again from its last
-offset once the plugin is back; when the plugin stays down for one lock
-duration, the run fails with `log stream failed`.
+When a plugin exits, the receiver logs `plugin exited; restarting`, starts it
+again after one second, waiting twice as long after each failed start up to 30
+seconds, and configures every adapter of its type again. Until then those
+adapters are not ready and the next advertisement withdraws their offers. A run
+whose job the receiver is following reads again from its last offset once the
+plugin is back; when the plugin stays down for one lock duration, the run fails
+with `log stream failed`.
 
 A receiver with no ready adapter advertises with no offers, so it stays
 `live` with every adapter `ready=false`, and placement passes over it. A
@@ -528,17 +538,17 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 | `events` | `id` | `id`, `events`, `transcripts`, `skipped` |
 
 - `submit` requires `prompt`. `selector` is an array of
-  `{key, operator, values}`. `git` is `{remote, ref, path, credential,
-  host_key, changes}`, as `--git`, `--git-path`, `--git-credential`,
-  `--git-host-key` and `--git-changes` take them, with `remote` and `ref`
-  required; `host_key` is a file path, read as an input is. `inputs` and `s3_inputs` are arrays of file paths, `credentials` an array of
-  `{name, file}` and `outputs` an array of `{name, required, storage}`, as
-  `--input`, `--s3-input`, `--credential-file` and `--output` take them;
-  `storage` `s3` is `:s3`. An input or S3 input must
-  resolve, through any symbolic links, to a regular file beneath the
-  server's working directory, and to none of `state_dir`, `host_key`,
-  `bundle`, a credential file or a storage key file; a relative path is taken from that
-  directory.
+  `{key, operator, values}`. `git` is
+  `{remote, ref, path, credential, host_key, changes}`, as `--git`,
+  `--git-path`, `--git-credential`, `--git-host-key` and `--git-changes` take
+  them, with `remote` and `ref` required; `host_key` is a file path, read as an
+  input is. `inputs` and `s3_inputs` are arrays of file paths, `credentials` an
+  array of `{name, file}` and `outputs` an array of `{name, required, storage}`,
+  as `--input`, `--s3-input`, `--credential-file` and `--output` take them;
+  `storage` `s3` is `:s3`. An input or S3 input must resolve, through any
+  symbolic links, to a regular file beneath the server's working directory, and
+  to none of `state_dir`, `host_key`, `bundle`, a credential file or a storage
+  key file; a relative path is taken from that directory.
 - `status` returns the latest verified state of a run's latest turn
   without waiting. `runs` holds one entry for the run `id` names, or,
   without `id`, one per run `wherry status` lists, latest update first.
@@ -550,16 +560,15 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
   Kafka timestamp of the turn's echo.
 - `await` waits up to 45 seconds. It returns the outcome with `message` and
   `artifacts`, or, while the run is unfinished, its current `state` with
-  `retry_after` set to 5. With a progress token it sends a progress
-  notification every 5 seconds. Each artifact is `{artifact_id, parts}`,
-  and each part has one of `text`, `data`, `url` or `raw_bytes` (the size
-  of a binary part, which is not included), with `media_type`. `await`
-  writes the turn's verified outputs as `wherry await` does, to the default
-  outputs directory, and returns each in `outputs` as
-  `{name, path, sha256, size}`, S3 outputs included, which it downloads and
-  verifies, then deletes the run's prefix, as `wherry await` does. `not_returned` holds `{name, size, reason}`
-  for each output the result lists as not returned and each one that
-  fails verification.
+  `retry_after` set to 5. With a progress token it sends a progress notification
+  every 5 seconds. Each artifact is `{artifact_id, parts}`, and each part has
+  one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which
+  is not included), with `media_type`. `await` writes the turn's verified
+  outputs as `wherry await` does, to the default outputs directory, and returns
+  each in `outputs` as `{name, path, sha256, size}`, S3 outputs included, which
+  it downloads and verifies, then deletes the run's prefix, as `wherry await`
+  does. `not_returned` holds `{name, size, reason}` for each output the result
+  lists as not returned and each one that fails verification.
 - `continue` requires `id`. `prompt` defaults to `continue`.
 - `events` returns `events`, each
   `{turn, attempt, kind, state, receiver, time, message}`, and
@@ -719,24 +728,23 @@ Any one over its record limit refuses the terms, naming its size and the
 limit, and an `inline_limit` above the tasks topic's record limit is
 refused before it is measured.
 
-The largest bounded submission has every field that has a bound at its
-maximum: 256 parts, each an input file with a 255-byte name, one of them
-holding `inline_limit` bytes, and a git input with a 2048-byte remote, a
-255-byte ref, a 512-byte path and an 8 KiB host key of quotes, which JSON
-escapes, naming the one task credential it declares. Only a first turn
-carries a git input, so the submission is turn 1. The prompt's text, part
-metadata and media types, the selector, the other task credentials and the
-outputs have no bound and are left empty. A task with a large prompt can still exceed the
-record limit; `submit` then fails naming the record's size.
+The largest bounded submission has every field that has a bound at its maximum:
+256 parts, each an input file with a 255-byte name, one of them holding
+`inline_limit` bytes, and a git input with a 2048-byte remote, a 255-byte ref, a
+512-byte path and an 8 KiB host key of quotes, which JSON escapes, naming the
+one task credential it declares. Only a first turn carries a git input, so the
+submission is turn 1. The prompt's text, part metadata and media types, the
+selector, the other task credentials and the outputs have no bound and are left
+empty. A task with a large prompt can still exceed the record limit; `submit`
+then fails naming the record's size.
 
-An input file travels base64-encoded inside the signed record, which is
-itself base64url-encoded, so a submission takes about 16/9 of
-`inline_limit` plus about 123 KB. As `pool create` measures them, the
-submission at the default `inline_limit` is 589210 bytes, the output
-chunk 468155 bytes, the result 791053 bytes and the transcript chunk
-933544 bytes, so a feed's
-`max.message.bytes` below 933544 refuses every pool; with brokers and topics at their defaults, the highest
-`inline_limit` that fits is 493221 bytes, about 481 KiB.
+An input file travels base64-encoded inside the signed record, which is itself
+base64url-encoded, so a submission takes about 16/9 of `inline_limit` plus about
+123 KB. As `pool create` measures them, the submission at the default
+`inline_limit` is 589210 bytes, the output chunk 468155 bytes, the result 791053
+bytes and the transcript chunk 933544 bytes, so a feed's `max.message.bytes`
+below 933544 refuses every pool; with brokers and topics at their defaults, the
+highest `inline_limit` that fits is 493221 bytes, about 481 KiB.
 
 `pool create` and `tenant add` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.admin`, which they
@@ -751,10 +759,10 @@ entitled to.
 
 ## Receiver configuration
 
-What `receiver add` and `receiver configure` read from `--config`,
-recorded on `wherry.admin`. `--config` names a
-[directory](#receiver-configuration-directory), or a single YAML file with
-these fields. Unknown fields are errors.
+What `receiver add` and `receiver configure` read, recorded on
+`wherry.admin`: a [directory](#receiver-configuration-directory) named by
+`--config-dir`, or a single YAML file with these fields named by
+`--config-file`. Exactly one is required. Unknown fields are errors.
 
 | Field | Content |
 | --- | --- |

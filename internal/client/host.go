@@ -45,20 +45,23 @@ var errUndecodable = errors.New("decode")
 // liveness is how old an advertisement may be for its receiver to count as live.
 const liveness = 120 * time.Second
 
-// SubmitInput contains the root-task routing and prompt fields; Parts follow the prompt's text part. Credentials
-// name credentials this host configures, delivered to the agent as files, and Outputs the files it is asked to leave.
-// Git is the repository the agent clones, and GitChanges, patch or bundle, asks for its changes back as that output.
-// S3Inputs are files uploaded to the pool's bucket before the task is published, which the adapter fetches.
+// SubmitInput is a root task's routing, prompt, inputs and requested outputs.
 type SubmitInput struct {
 	// Agent names what runs; empty takes the pool's default.
-	Agent         string
-	Selector      []wire.Requirement
-	Prompt        string
-	Parts         []wire.Part
-	Credentials   []wire.TaskCredential
-	Outputs       []wire.ExpectedOutput
-	Git           *wire.GitInput
-	GitChanges    string
+	Agent    string
+	Selector []wire.Requirement
+	Prompt   string
+	// Parts follow the prompt's text part.
+	Parts []wire.Part
+	// Credentials name credentials this host configures, delivered to the agent as files.
+	Credentials []wire.TaskCredential
+	// Outputs are the files the agent is asked to leave.
+	Outputs []wire.ExpectedOutput
+	// Git is the repository the agent clones.
+	Git *wire.GitInput
+	// GitChanges, patch or bundle, asks for the clone's changes back as that output.
+	GitChanges string
+	// S3Inputs are files uploaded to the pool's bucket before the task is published, which the adapter fetches.
 	S3Inputs      []S3File
 	Deadline      time.Duration
 	QueueDeadline time.Duration
@@ -267,7 +270,6 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	submission.Wherry.Credentials, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, outputs, input.Git
 	if stored {
-		// The S3 inputs are uploaded before publishing, and removed again if the task is not published.
 		storage := v.state.Pools[pool].Storage
 		store, err := h.bucket(pool, storage)
 		if err != nil {

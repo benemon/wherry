@@ -38,7 +38,7 @@ import (
 )
 
 const (
-	maxRunDuration = time.Hour // receiver cap on any task's run deadline (ADR-0013)
+	maxRunDuration = time.Hour // receiver cap on any task's run deadline
 	readTimeout    = 30 * time.Second
 	maxHandle      = 4 << 10
 	budgetReason   = "delivery budget exhausted"
@@ -168,9 +168,7 @@ func taskHash(encoded []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// admit applies the committed-terminal check, host authorisation, the placement against the pool's
-// terms and this receiver's offers, cancels, the run's turn order, deadlines and part checks, and
-// builds the prompt from the run's history. A nil admission carries the acknowledgement.
+// admit decides whether record's task runs here; a nil admission carries the acknowledgement.
 func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, kgo.AckStatus) {
 	hash := taskHash(record.Value)
 	// Released even at the delivery budget: without the events, a terminal could repeat a committed one.
@@ -553,7 +551,7 @@ func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record, logf fu
 	return func() { cancel(); wg.Wait() }
 }
 
-// newProducer is the run's transactional producer: an adopter initialising the same ID fences this holder (ADR-0010).
+// newProducer is the run's transactional producer: an adopter initialising the same ID fences this holder.
 func (r *Receiver) newProducer(run string) (*kgo.Client, error) {
 	return kgo.NewClient(append(append([]kgo.Opt(nil), r.kafkaOpt...), kgo.TransactionalID(admin.TransactionalPrefix(r.config.Pool)+run))...)
 }
@@ -971,10 +969,9 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, credentials, taskCr
 	}
 }
 
-// presigned checks the seal's URLs against the pool's storage and returns the run's fetches and the turn's PUT URLs. A
-// URL that is not https, whose host or port is not the endpoint's, that carries user information or whose path is not
-// its object's key in the bucket fails, naming its input or output and never the URL. The signature of each URL joins
-// the redacted forms, so a transcript quoting a URL in part is redacted too.
+// presigned checks the seal's URLs against the pool's storage and returns the run's fetches and the turn's PUT URLs. An
+// error names its input or output, never the URL. Each URL's signature joins the redacted forms, so a transcript
+// quoting a URL in part is redacted too.
 func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input, outputs []string) ([]adapter.Fetch, map[string]string, error) {
 	state, _, _ := run.receiver.snapshot()
 	storage := state.Pools[run.receiver.config.Pool].Storage
@@ -1046,12 +1043,10 @@ type activeRun struct {
 	unreturned []wire.UnreturnedOutput
 }
 
-// deliver keeps, for each delivered credential, the forms it is published in: the value without trailing CR and LF,
-// as credential files written by echo or a CLI end in a newline that transcripts and outputs drop, and that form
-// escaped as a JSON string, as a transcript line carries it. Each untrimmed form holds one of these, so its redaction
-// leaves only the line ending. A value shorter than minRedact once trimmed matches ordinary text and JSON literals, so
-// it is logged and left. The marker names no credential, so it cannot carry or rebuild one, and it changes when a form
-// occurs within it.
+// deliver keeps the forms each credential value is published in: the value without trailing CR and LF, as credential
+// files written by echo or a CLI end in a newline that transcripts and outputs drop, and that form escaped as a JSON
+// string, as a transcript line carries it. A value shorter than minRedact once trimmed matches ordinary text and JSON
+// literals, so it is logged and left. The marker names no credential, so it cannot carry or rebuild one.
 func (run *activeRun) deliver(values map[string][]byte) {
 	for name, value := range values {
 		trimmed := bytes.TrimRight(value, "\r\n")
@@ -1243,8 +1238,7 @@ func (run *activeRun) cancel(ctx context.Context, pending []adapter.Line) kgo.Ac
 
 const cancelReason = "canceled by user"
 
-// interrupt waits the run for its tenant's credentials and S3 URLs: AUTH_REQUIRED with its result, then the task is
-// acknowledged. The message names every credential the seal request asked for, and the metadata the first.
+// interrupt leaves the run AUTH_REQUIRED for its tenant's credentials and S3 URLs, then acknowledges the task.
 func (run *activeRun) interrupt(ctx context.Context, credentials []string, urls bool) kgo.AckStatus {
 	var reasons []string
 	switch len(credentials) {
@@ -1376,7 +1370,7 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 	stored := map[string]storedOutput{}
 	collected, err := run.collected(ctx, handle, stopped, limit, stored)
 	if err != nil {
-		run.receiver.logger.Printf("run %s: outputs not collected: %v", run.task.Wherry.Run, err)
+		run.receiver.logger.Printf("run %s: outputs not collected: %T", run.task.Wherry.Run, err)
 		for _, output := range run.expected {
 			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "not collected"})
 		}
@@ -1443,10 +1437,9 @@ type storedOutput struct {
 	reason string
 }
 
-// collected runs the adapter's Collect, with limit bounding each output and their total, and uploads each streamed S3
-// output into stored as it arrives. Collect runs under collectTimeout, or until the turn's deadline, when its PUT URLs
-// expire, if that is later. The adapter bounds what it reads by the limits; the count and the total are checked again
-// here, so a plugin that ignores them cannot grow the run's memory.
+// collected runs the adapter's Collect under limit and uploads each streamed S3 output into stored as it arrives.
+// Collect may run until the turn's deadline, when its PUT URLs expire. The count and total are checked again here, so a
+// plugin that ignores the limits cannot grow the run's memory.
 func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stopped bool, limit int64, stored map[string]storedOutput) ([]adapter.Output, error) {
 	if !stopped {
 		return nil, errors.New("the job was not stopped")
@@ -1917,18 +1910,15 @@ func preamble(directories adapter.Directories, inputs []string, credentials []wi
 	return strings.Join(lines, "\n") + "\n\n"
 }
 
-// gitPreamble gives the commands that clone a git input and return its changes, each on its own line indented by four
-// spaces. Each starts with git and carries no environment assignment or redirect, so a harness rule allowing git
-// commands allows every one. The remote, ref and checkout path are single-quoted, which their grammar allows; file
-// paths are double-quoted, so a directory named by its environment variable expands. A credential is read from its
-// file inside a credential helper or by ssh, so its value reaches no command line.
+// gitPreamble gives the commands that clone a git input and return its changes. Each starts with git and carries no
+// environment assignment or redirect, so a harness rule allowing git commands allows every one. The remote, ref and
+// checkout path are single-quoted, which their grammar allows; file paths are double-quoted, so a directory named by
+// its environment variable expands. A credential is read from its file by a credential helper or ssh, so its value
+// reaches no command line.
 //
-// The clone's --config settings apply to the clone and stay in its configuration for later fetches and pushes. They
-// complement adapter.AgentEnvironment, which stops system, global and environment configuration being read: no
-// template seeds the clone; the helper list is reset, so no inherited helper is asked or stores the token, and the
-// clone's helper answers only for the remote's origin and only get; redirects are refused, certificates verified and
-// only the remote's protocol allowed; ssh reads no configuration file, no agent and no known_hosts but the remote's
-// host key. They guard a cooperative agent against ambient configuration, not a hostile one, which can override them.
+// The clone's --config settings persist for later fetches and pushes and complement adapter.AgentEnvironment, which
+// stops system, global and environment configuration being read. They guard a cooperative agent against ambient
+// configuration, not a hostile one, which can override them.
 func gitPreamble(git *wire.GitInput, run, knownHosts, credentialDir, outputDir string, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput) []string {
 	remote, ref, checkout := "'"+git.Remote+"'", "'"+git.Ref+"'", "'"+git.Checkout()+"'"
 	keyFile := ""

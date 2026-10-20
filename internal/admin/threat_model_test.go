@@ -51,7 +51,7 @@ func sign(t *testing.T, record wire.Record, key ed25519.PrivateKey) []byte {
 	return encoded
 }
 
-func TestP01TaskKeyMustBelongToSubmittingTenant(t *testing.T) {
+func TestTaskKeyMustBelongToSubmittingTenant(t *testing.T) {
 	state := modelState(t)
 	_, own, _ := ed25519.GenerateKey(rand.Reader)
 	_, foreign, _ := ed25519.GenerateKey(rand.Reader)
@@ -82,7 +82,7 @@ func TestP01TaskKeyMustBelongToSubmittingTenant(t *testing.T) {
 	}
 }
 
-func TestP02CancelMustMatchRunTenant(t *testing.T) {
+func TestCancelMustMatchRunTenant(t *testing.T) {
 	state := modelState(t)
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := signed.Keys{signed.HostOwner("tenant-b", "host-b"): {Current: key.Public().(ed25519.PublicKey)}}
@@ -95,7 +95,7 @@ func TestP02CancelMustMatchRunTenant(t *testing.T) {
 	}
 }
 
-func TestP03TenantFeedACLIsIsolated(t *testing.T) {
+func TestTenantFeedACLIsIsolated(t *testing.T) {
 	state := modelState(t)
 	if hasACL(ACLs(state), TenantPrincipal("tenant-b", "host-b"), TenantTopic("tenant-a"), "READ") {
 		t.Fatal("second tenant can read the first tenant's feed")
@@ -105,7 +105,7 @@ func TestP03TenantFeedACLIsIsolated(t *testing.T) {
 	}
 }
 
-func TestP05ConstructedNamesDoNotAlias(t *testing.T) {
+func TestConstructedNamesDoNotAlias(t *testing.T) {
 	if HostTopic("a", "b-c") == HostTopic("a-b", "c") {
 		t.Fatal("host tuples alias")
 	}
@@ -117,7 +117,7 @@ func TestP05ConstructedNamesDoNotAlias(t *testing.T) {
 	}
 }
 
-func TestP06StatusBindsPlacedPool(t *testing.T) {
+func TestStatusBindsPlacedPool(t *testing.T) {
 	state := modelState(t)
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}}
@@ -147,7 +147,7 @@ func TestP06StatusBindsPlacedPool(t *testing.T) {
 	}
 }
 
-func TestP08ReceiverACLIsLimitedToItsPool(t *testing.T) {
+func TestReceiverACLIsLimitedToItsPool(t *testing.T) {
 	acls := ACLs(modelState(t))
 	if hasACL(acls, ReceiverPrincipal("receiver-a"), PoolEventsTopic("pool-b"), "WRITE") {
 		t.Fatal("receiver can write another pool's events")
@@ -157,7 +157,7 @@ func TestP08ReceiverACLIsLimitedToItsPool(t *testing.T) {
 	}
 }
 
-func TestP09RevocationRunsAllSixStepsInOrder(t *testing.T) {
+func TestRevocationRunsAllSixStepsInOrder(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	_ = cluster
@@ -230,7 +230,7 @@ func TestRealBrokerTLSListener(t *testing.T) {
 	}
 }
 
-func TestP12ProvisioningSurvivesReconciliation(t *testing.T) {
+func TestProvisioningSurvivesReconciliation(t *testing.T) {
 	waitText := os.Getenv("WHERRY_TRUST_RECONCILE_WAIT")
 	if waitText == "" || os.Getenv("WHERRY_TRUST_BROKER") == "" {
 		t.Skip("real-broker reconciliation environment is not set")
@@ -271,7 +271,7 @@ func TestP12ProvisioningSurvivesReconciliation(t *testing.T) {
 	}
 }
 
-func TestP13ShareGroupStartsAtEarliest(t *testing.T) {
+func TestShareGroupStartsAtEarliest(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
@@ -294,7 +294,7 @@ func TestP13ShareGroupStartsAtEarliest(t *testing.T) {
 	}
 }
 
-func TestP15ReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
+func TestReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 	terms := modelTerms()
 	config := modelConfig("receiver-b", "pool-a")
 	record := Record{Version: 1, Kind: "receiver", Pool: "pool-a", Receiver: "receiver-b", Config: &config, AtMS: 1}

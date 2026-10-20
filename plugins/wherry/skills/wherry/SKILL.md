@@ -56,27 +56,26 @@ Call `submit` with `prompt`, and `agent`, `selector` and `git` when you
 need them. It returns `id` and `pool` straight away. Note the id and carry
 on with other work.
 
-`git` names a repository the agent clones itself: `remote` (an `https` or
-`ssh` URL, or `user@host:path`) and `ref` are required. Add `credential`,
-the name of one of your `credentials`, for a private repository;
-`host_key`, a file of `known_hosts` lines naming the host (or
-`[host]:port`), for an `ssh` remote; and `changes`, `patch` or `bundle`, to get its commits back as the
-output `changes.patch` or `changes.bundle`, which you apply with `git am`
-or `git fetch`. The remote's host must be one of the pool's forges, or
-`submit` returns `INVALID_ARGUMENT` naming the host and the pool. The
-agent pushes only when your prompt asks it to, and only to the branch
-`wherry/<run>`.
+`git` names a repository the agent clones itself: `remote` (an `https` or `ssh`
+URL, or `user@host:path`) and `ref` are required. Add `credential`, the name of
+one of your `credentials`, for a private repository; `host_key`, a file of
+`known_hosts` lines naming the host (or `[host]:port`), for an `ssh` remote; and
+`changes`, `patch` or `bundle`, to get its commits back as the output
+`changes.patch` or `changes.bundle`, which you apply with `git am` or
+`git fetch`. The remote's host must be one of the pool's forges, or `submit`
+returns `INVALID_ARGUMENT` naming the host and the pool. The agent pushes only
+when your prompt asks it to, and only to the branch `wherry/<run>`.
 
-To send files, add `inputs`: paths of regular files beneath the directory
-the wherry MCP server runs in, the pool's inline limit in all (256 KiB by
-default), which the agent finds under their base names in its input
-directory. The server refuses any other path,
-and any file of the wherry configuration, its state or its credentials. To give the agent a
-credential as a file, add `credentials`: `{name, file}` with `name` a
-credential in the user's wherry configuration and `file` the name it gets
-in `WHERRY_CREDENTIALS_DIR`; you never see the value. To get files back,
-add `outputs`: `{name, required}` for each file the agent should leave in
-`WHERRY_OUTPUT_DIR`. The prompt the agent receives names all of them.
+To send files, add `inputs`: paths of regular files beneath the directory the
+wherry MCP server runs in, the pool's inline limit in all (256 KiB by default),
+which the agent finds under their base names in its input directory. The server
+refuses any other path, and the host's state directory, host key, bundle,
+credential files and storage key files. To give the agent a credential as a
+file, add `credentials`: `{name, file}` with `name` a credential in the user's
+wherry configuration and `file` the name it gets in `WHERRY_CREDENTIALS_DIR`;
+you never see the value. To get files back, add `outputs`: `{name, required}`
+for each file the agent should leave in `WHERRY_OUTPUT_DIR`. The prompt the
+agent receives names all of them.
 
 For a file over the inline limit, up to 5 GiB, add its path to `s3_inputs`
 instead: the server uploads it to the pool's bucket and the agent finds it
@@ -139,4 +138,6 @@ A failed call returns `{"code": ..., "message": ...}`. `RUN_NOT_FOUND`,
 `RUN_CANCELED` and `TURN_ALREADY_SUBMITTED` call for a change to your input
 or end the run's handling. `CANCELLED` means the call itself was cancelled.
 `UNAVAILABLE` is any other failure; the user can run the same operation
-with the `wherry` CLI to see the cause.
+with the `wherry` CLI to see the cause. `OUTPUTS_NOT_WRITTEN` means the
+result arrived but its outputs could not be written, downloaded or cleaned
+up; the `wherry await` CLI reports the cause.

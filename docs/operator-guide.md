@@ -60,6 +60,9 @@ export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=/etc/wherry/operator-password
 
 ## Create a pool
 
+Prerequisites: the `wherry admin` environment
+([Set up `wherry admin`](#set-up-wherry-admin)).
+
 A pool's terms apply to every receiver in it. Write them as a
 [terms file](reference.md#pool-terms) and create the pool:
 
@@ -124,12 +127,10 @@ Lowering a broker or topic limit later can leave a pool's terms too large;
 their pool's terms from `wherry.admin` every 15 seconds, so admission and
 output collection use a changed limit within that window.
 
-Set `inline_limit` or `output_limit` only once every host and receiver
-runs a release that reads them. Terms that leave them out are recorded
-without them, but a release that predates them rejects a pool record that
-carries them, and with it all of `wherry.admin`.
-
 ## Add tenants and hosts
+
+Prerequisites: the `wherry admin` environment
+([Set up `wherry admin`](#set-up-wherry-admin)) and the pool.
 
 1. Entitle the tenant to a pool:
 
@@ -253,11 +254,12 @@ cover the `config` section.
 wherry admin receiver configure nomad-1 --config-dir nomad-1
 ```
 
-The receiver exits when it reads the new record at its next configuration
-check, which runs every 15 seconds, and its platform restarts it with the new configuration. Runs in flight are
-adopted on redelivery. When the new configuration renames the adapter or
-changes its agent, the run's job is stopped and purged, and the run is
-dispatched again. The bundle and password do not change.
+The receiver exits when it reads the new record at its next configuration check,
+which runs every 15 seconds, and its platform restarts it with the new
+configuration. Runs in flight are adopted on redelivery. When the new
+configuration renames the adapter or changes its agent, the run's job is stopped
+and purged, and the run is dispatched again. The bundle and password do not
+change.
 
 ## Run a receiver
 
@@ -272,10 +274,10 @@ dispatched again. The bundle and password do not change.
 - a supervisor that restarts the process when it exits, since a
   configuration change ends it;
 - for the Nomad plugin, a Nomad token with the
-  [receiver policy](#nomad-acl-policy), from the bundle or `NOMAD_TOKEN`
+  [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy), from the bundle or `NOMAD_TOKEN`
   in the receiver's environment.
 
-On first start the receiver logs `registered keys`, then
+On first start the receiver logs `registered key: signing=<key id>`, then
 `configured: pool=<pool> adapters=<n> capacity=<n>`. It logs
 `waiting for configuration` while its record is missing. After its first
 advertisement, `wherry receivers` on a host of an entitled tenant shows it
@@ -353,17 +355,17 @@ job "wherry-receiver" {
 ```
 
 The plugin directory is the one installed on the node, as in
-[Install adapter plugins](#install-adapter-plugins). As the task sees them,
-root or the receiver's user must own the directory and the binary, neither
-group nor others may write them, and the binary must be a regular file. The plugin runs in the
-receiver's task with its environment, so the workload identity's
+[Install adapter plugins](#install-adapter-plugins). As the task sees them, root
+or the receiver's user must own the directory and the binary, neither group nor
+others may write them, and the binary must be a regular file. The plugin runs in
+the receiver's task with its environment, so the workload identity's
 `NOMAD_TOKEN` reaches it.
 
 Nomad treats a sticky, migrating ephemeral disk as best effort. If the node
 is lost, the keys go with it and the receiver is re-provisioned under a new
 name; a host volume avoids that.
 
-Attach the [receiver policy](#nomad-acl-policy) to the job:
+Attach the [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy) to the job:
 
 ```sh
 nomad acl policy apply -namespace agents -job wherry-receiver \
@@ -423,12 +425,12 @@ wherry admin check
 ```
 
 It loads `wherry.admin`, validates every receiver configuration against its
-pool's current terms, checks that every pool's largest records still fit
-the broker's record limit, and confirms that every ACL the state calls for
-exists. It does not check an adapter's `type` or `config` section; at
-start the receiver finds the type's plugin, the plugin checks the section,
-and the receiver exits with `adapter <name>: ...` on an error. Run it after changing a pool's terms, since receivers keep the
-configuration they started with.
+pool's current terms, checks that every pool's largest records still fit the
+broker's record limit, and confirms that every ACL the state calls for exists.
+It does not check an adapter's `type` or `config` section; at start the receiver
+finds the type's plugin, the plugin checks the section, and the receiver exits
+with `adapter <name>: ...` on an error. Run it after changing a pool's terms,
+since receivers keep the configuration they started with.
 
 ## Recover from an undecodable `wherry.admin` record
 
@@ -446,15 +448,6 @@ each such record as `offset=<n> size=<n> sha256=<hex>`.
 
 The command refuses a record that decodes, so a skip cannot hide state such
 as a membership end.
-
-## Upgrade to per-run seals
-
-Upgrade every receiver and every host together. Hosts reject the
-advertisements of earlier receivers, which carry `sealing_key`, and earlier
-hosts reject the advertisements of upgraded ones, so neither places work on
-the other. On first start an upgraded receiver deletes `sealing.key` from
-its state directory; its key topic needs no change. Hosts may delete
-`pins.json` and `pins.lock` from their state directory.
 
 ## Run credentialed tasks
 
@@ -475,56 +468,13 @@ own runs that it skips or refuses, by run, receiver and credential name, on
 standard error. A turn adopted by a second receiver gets no seal and ends
 `TASK_STATE_AUTH_REQUIRED`; `wherry continue` runs it again.
 
-## Nomad ACL policy
-
-The Nomad plugin's calls need this policy, with the namespace adjusted:
-
-```hcl
-namespace "agents" {
-  capabilities = ["submit-job", "list-jobs", "read-job", "read-logs", "read-fs", "alloc-lifecycle"]
-
-  variables {
-    path "nomad/jobs/agent-*" {
-      capabilities = ["write", "read", "destroy"]
-    }
-  }
-}
-
-node {
-  policy = "read"
-}
-
-node_pool "default" {
-  policy = "read"
-}
-```
-
-- `submit-job`: register a run's job, deregister one that outlives its
-  stop signal or its dispatch wait, and purge one that never started or
-  has been dead for 10 minutes.
-- `list-jobs`: find dead agent jobs to purge.
-- `read-job`: read a job and its allocations.
-- `read-logs`: stream the agent task's standard output.
-- `read-fs`: list and read the agent task's outputs directory once the job
-  has stopped.
-- `alloc-lifecycle`: send `SIGTERM` to the agent task.
-- Variables `write`, `read` and `destroy`: hold each run's prompt,
-  credentials and input files, and sweep them after the job
-  ends. The sweep
-  lists variables under `nomad/jobs/agent-`; see
-  [Nomad variables](https://developer.hashicorp.com/nomad/docs/concepts/variables)
-  for the access rules.
-- `node` read: find a ready node with the runtime's driver healthy.
-- `node_pool` read: register jobs in the node pools the adapters name.
-
 ## Inputs and outputs
 
 A task's input files hold the pool's `inline_limit` together, and a turn's
-outputs its `output_limit` in 256 entries at most. An adapter can deliver less: the Nomad plugin carries
-a turn's input files in one Nomad variable, which Nomad caps at 64 KiB of
-item names and base64-encoded contents, so about 48 KiB of input. A turn
-whose inputs an adapter cannot deliver ends `TASK_STATE_FAILED` naming the
-input.
+outputs its `output_limit` in 256 entries at most. An adapter can deliver
+less; the [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs)
+states its limit. A turn whose inputs an adapter cannot deliver ends
+`TASK_STATE_FAILED` naming the input.
 
 The agent creates `WHERRY_OUTPUT_DIR` when it writes its first output.
 Outputs are collected once the agent writes its result line and the job is
@@ -578,10 +528,11 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    aws s3api put-bucket-policy --endpoint-url https://s3.example.com --bucket wherry --policy file://alice.json
    ```
 
-   The host keeps the access key and secret key in two files of mode 0600,
-   named under `storage` in its [configuration](reference.md#client-configuration).
-   Receivers and agents never hold it; they get presigned URLs, a GET per
-   input for 15 minutes and a PUT per output until the turn's deadline.
+   The host keeps the access key and secret key in two files of mode 0600, named
+   under `storage` in its [configuration](reference.md#client-configuration).
+   Receivers and agents never hold it; they get presigned URLs, a GET per input
+   for 15 minutes and a PUT per output until the turn's deadline, 7 days at
+   most.
 
 4. Set a lifecycle rule that expires `wherry/` after a period longer than
    any run: the host deletes a run's objects when it sees the run end with
@@ -603,16 +554,10 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    roots. Agent jobs do not reach the endpoint themselves; see
    [Agent network reach](#agent-network-reach).
 
-On Nomad an input's presigned GET is the source of an `artifact` in the
-agent job, visible to anyone who can read the job for its lifetime, and
-appears in the task event of a fetch that fails. The URL is short-lived and
-names one object; purging the job removes it. Nomad's artifact fetcher
-follows redirects, and Nomad 2.0.7 has no setting that stops it, so the
-fetch's SHA-256 check is what holds the content to the object. The check
-runs once the download ends, so it limits neither where a redirect leads
-nor how much the fetch reads: restrict the Nomad clients' egress to the
-endpoint, and set the client's `artifact.http_max_size`. The receiver's
-upload follows no redirect.
+The [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#s3-inputs)
+states how Nomad fetches an input, where its presigned GET is visible, and
+the limits to set on the Nomad clients. The receiver's upload follows no
+redirect.
 
 ## Git repositories
 
@@ -632,10 +577,12 @@ rules and the commands. For the agent to follow them:
 
 - The image or host has `git` 2.30 or later, a shell, and `ssh` for `ssh`
   remotes. The prompt asks the agent to stop and report an older `git`.
-- The agent may run `git` commands. Every command the prompt gives starts
-  with `git`, so for Claude Code `Bash(git:*)` in its allowed tools covers
-  them, along with whatever else the task runs. The rule lets the agent
-  run the commands; it is not a sandbox, since `git` can run any command.
+- The agent may run `git` commands. Every command the prompt gives starts with
+  `git`, so for Claude Code
+  [`Bash(git:*)`](https://docs.anthropic.com/en/docs/claude-code/iam) in its
+  allowed tools covers them, along with whatever else the task runs. The rule
+  lets the agent run the commands; it is not a sandbox, since `git` can run any
+  command.
 
 Allow the hosts a pool's tasks may clone from with `forges` in its
 [terms](reference.md#pool-terms):
@@ -647,15 +594,11 @@ forges:
 ```
 
 `submit` and `continue` refuse a remote outside the forges before they
-publish, and receivers reject one at admission. Set `forges` only once every
-host and receiver runs a release that reads them: a release that predates
-them rejects a pool record that carries them, and with it all of
-`wherry.admin`.
+publish, and receivers reject one at admission.
 
-Forges limit what wherry accepts, not where an agent can connect: the agent
-runs commands, and it can reach any host its network allows. Enforce where
-agents connect with the platform's egress policy
-([Agent network reach](#agent-network-reach)), and treat `forges` as the
+Forges limit what wherry accepts. The agent runs commands, and it can reach any
+host its network allows. Enforce where agents connect with the platform's egress
+policy ([Agent network reach](#agent-network-reach)), and treat `forges` as the
 check that a task names an allowed repository.
 
 The clone's commands keep the credential for the remote's host. No
@@ -668,11 +611,12 @@ remote's protocol. `ssh`
 reads no configuration file, uses no agent and no identity but the
 credential, and trusts only the task's host key.
 
-An adapter gives the agent an environment in which `git` reads no system
-or global configuration and no configuration from the environment, uses no
+An adapter gives the agent an environment in which `git` reads no system or
+global configuration and no configuration from the environment, uses no
 template, never prompts, and traces nothing, since those could rewrite the
 remote to another host or record the token. The agent has no global `git`
-identity; the clone sets `user.name` and `user.email` to `wherry`.
+identity; the clone sets `user.name` to `wherry` and `user.email` to
+`wherry@invalid`.
 
 Some variables no value switches off: `GIT_SSH`, `GIT_SSH_COMMAND` and
 `GIT_SSH_VARIANT` replace the clone's `ssh` command, `GIT_DIR`,
@@ -691,14 +635,15 @@ agent images.
 The CA and proxy settings stay yours: `GIT_SSL_CAINFO`, `SSL_CERT_FILE`,
 `HTTPS_PROXY` and the like reach `git` as the image or platform sets them.
 
-The isolation protects a cooperative agent from the configuration around
-it. It is not a boundary against the agent: an agent that runs commands,
-including through an allow rule such as `Bash(git:*)` (`git -c
-alias.x='!cmd'` runs any command), can undo every one of these settings.
-A hostile or prompt-injected agent holds whatever credentials the parent
-sent, and what it can do with them is bounded by their scope and
-lifetime, the platform's egress policy, and the receiver's redaction of
-what it returns.
+The isolation protects a cooperative agent from the configuration around it. It
+is not a boundary against the agent: an agent that runs commands, including
+through an allow rule such as
+[`Bash(git:*)`](https://docs.anthropic.com/en/docs/claude-code/iam)
+(`git -c alias.x='!cmd'` runs any command), can undo every one of these
+settings. A hostile or prompt-injected agent holds whatever credentials the
+parent sent, and what it can do with them is bounded by their scope and
+lifetime, the platform's egress policy, and the receiver's redaction of what it
+returns.
 
 The parent supplies least privilege; wherry passes the credential as a
 file and checks the host, nothing more:
@@ -706,13 +651,12 @@ file and checks the host, nothing more:
 - For `https`, a short-lived token for one repository, such as a GitHub App
   installation token. The credential helper answers with the user name
   `x-access-token`, which installation tokens require.
-- For `ssh`, a deploy key for the repository, ideally created for the run
-  and removed afterwards, and the forge's host key from a source you trust,
-  passed as `--git-host-key`. Every entry must name the remote's host, or
-  `[host]:port` for a port other than 22; hashed entries, and entries with
-  a wildcard pattern even beside the host, are
-  refused. `ssh` checks the host key strictly and ignores every other
-  `known_hosts`.
+- For `ssh`, a deploy key for the repository, created for the run and removed
+  afterwards where the forge allows it, and the forge's host key from a source
+  you trust, passed as `--git-host-key`. Every entry must name the remote's
+  host, or `[host]:port` for a port other than 22; hashed entries, and entries
+  with a wildcard pattern even beside the host, are refused. `ssh` checks the
+  host key strictly and ignores every other `known_hosts`.
 - A public repository needs no credential.
 
 With `--git-changes`, the agent returns its commits as `changes.patch` or
@@ -720,7 +664,7 @@ With `--git-changes`, the agent returns its commits as `changes.patch` or
 applies them with its own credentials:
 
 ```
-apply with: git am /home/me/.local/state/wherry/runs/run-.../outputs/1/changes.patch
+apply with: git am /home/me/.config/wherry/state/runs/run-.../outputs/1/changes.patch
 ```
 
 The agent pushes only when the prompt asks it to and the credential allows
@@ -737,10 +681,9 @@ says what it gives.
 
 ## Agent network reach
 
-An agent runs commands, so it can connect to any host its network allows.
-The pool's `forges` and `storage` bound what a task names, not where its
-agent connects. The platform's egress policy bounds that. Give agent jobs a
-policy that:
+An agent runs commands, so it can connect to any host its network allows. The
+pool's `forges` and `storage` bound what a task names; the platform's egress
+policy bounds where its agent connects. Give agent jobs a policy that:
 
 - denies the control plane: the Nomad servers and clients, Consul, Vault,
   the Kafka brokers, the Kubernetes API, and cloud metadata addresses such
@@ -759,54 +702,22 @@ out of the agent's reach, as below.
 
 ### On Nomad
 
-The plugin's agent jobs carry no `network` block, so the driver decides
-the task's network. `exec` and `raw_exec` tasks share the client host's
-network namespace. Podman tasks take Podman's default for the client
-(bridge networking when rootful, `slirp4netns` or `pasta` when rootless),
-or the network the runtime's `config` names in `network_mode`.
-
-1. Enable [Nomad ACLs](https://developer.hashicorp.com/nomad/docs/secure/acl).
-   An agent that shares the host's network reaches the client's HTTP API
-   on loopback, and without ACLs that API serves every job, URLs included.
-2. Place agents in their own node pool (the adapter's `node_pool`), on
-   hosts that run nothing else, so a host firewall can carry the policy.
-3. Use `exec` or Podman, not `raw_exec`: a `raw_exec` task has no
-   filesystem isolation and runs as the client's user, often root, so no
-   rule can tell it from the client.
-4. On a host that runs `exec` tasks, the Nomad client must still reach the
-   servers, so a rule for the whole host cannot deny them. Match the agent
-   task's user instead (for example nftables `meta skuid`). The plugin sets
-   no task user, so `exec` tasks run as the driver's default, `nobody`; the
-   rule is as narrow as that user is dedicated to agents.
-5. For Podman, attach agents to a Podman network whose firewall rules carry
-   the policy, named by `network_mode` in the runtime's `config`.
-
-Every Nomad task has the
-[task API](https://developer.hashicorp.com/nomad/docs/runtime/task-api)
-socket in its secrets directory, which no address rule covers. It accepts
-only an authenticated request. The plugin exposes no workload identity
-token to the agent; keep `NOMAD_TOKEN`, `CONSUL_TOKEN`,
-`CONSUL_HTTP_TOKEN` and `VAULT_TOKEN` out of the runtime's `env` and the
-image. A client `env.denylist` replaces Nomad's default list, which holds
-those names, rather than extending it.
-
-The client's artifact fetches run in a subprocess of the client, in the
-client host's network namespace, outside any task network. Restrict the
-client host's egress separately.
+The [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-network-reach)
+says how its agent jobs reach the network and how to confine them.
 
 ### On Kubernetes
 
 Run agent pods under a service account with
-`automountServiceAccountToken: false`, so no API credential is mounted
-beside the agent. Apply a default-deny egress NetworkPolicy to the agent
-pods' namespace, with rules that allow DNS and the allowed hosts. Policies
-take effect only under a CNI that enforces them, and they are additive:
-check that no other policy in the namespace allows the control plane or
-metadata addresses. NetworkPolicy matches addresses, not names. To allow by
-host name, use the cluster's DNS-aware egress rules, such as an OpenShift
-`EgressFirewall` with `dnsName` or a Cilium FQDN policy. These authorise
-the addresses a name resolves to, so a name on a shared or CDN address
-admits its neighbours too; restrict ports and the DNS resolvers as well.
+`automountServiceAccountToken: false`, so no API credential is mounted beside
+the agent. Apply a default-deny egress NetworkPolicy to the agent pods'
+namespace, with rules that allow DNS and the allowed hosts. Policies take effect
+only under a CNI that enforces them, and they are additive: check that no other
+policy in the namespace allows the control plane or metadata addresses.
+NetworkPolicy matches addresses only. To allow by host name, use the cluster's
+DNS-aware egress rules, such as an OpenShift `EgressFirewall` with `dnsName` or
+a Cilium FQDN policy. These authorise the addresses a name resolves to, so a
+name on a shared or CDN address admits its neighbours too; restrict ports and
+the DNS resolvers as well.
 
 ## Upgrade wherry
 
@@ -817,27 +728,15 @@ Prerequisites: the new `wherry` binary, and each receiver's bundle and
 state directory.
 
 1. Replace the binary on every host and receiver host.
-2. Restart each receiver with the same bundle and state directory. On
+2. Replace the plugins in each receiver's plugin directory together with the
+   receiver binary; a receiver refuses a plugin of another adapter protocol
+   version.
+3. Restart each receiver with the same bundle and state directory. On
    `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its
    tasks to the pool. The next delivery of each task adopts the running
    job, on the restarted receiver or another member, and resumes the
    transcript from the last heartbeat offset.
-3. Restart the harness sessions that run `wherry mcp`.
-
-Agent jobs and variables named before pool-scoped names,
-`agent-<run>-t<turn>`, are not swept; remove them by hand after upgrading.
-
-Before upgrading to the release with the git lane, drain runs that carry a
-git context of the release before it: let them end, or cancel them. The
-new Nomad plugin does not adopt a job with the old prestart `git` task, so
-a redelivered turn of one fails to start until its delivery budget runs
-out. The plugin sweeps the old per-task variables,
-`nomad/jobs/agent-<pool>-<run>-t<turn>/agent/agent` and `.../agent/git`,
-with the rest.
-
-The release with the S3 lane speaks adapter protocol version 3, and a
-receiver refuses a plugin of an earlier version at its start: replace the
-plugins in each receiver's plugin directory with the receiver binary.
+4. Restart the harness sessions that run `wherry mcp`.
 
 ## Harness integration
 
@@ -845,13 +744,24 @@ plugins in each receiver's plugin directory with the receiver binary.
 the client configuration and opens a Kafka connection for each tool call.
 [Reference](reference.md#mcp-tools) lists the tools.
 
+Prerequisites: `wherry` on the harness's `PATH`, and the client
+configuration, bundle, host key and credential files readable by the
+harness user.
+
+1. Install `plugins/wherry` through the harness's plugin mechanism; for
+   Claude Code, see
+   [plugins](https://docs.anthropic.com/en/docs/claude-code/plugins).
+2. Restart the harness session.
+3. Check the connection with the `receivers` tool, which lists the
+   receivers the tenant may use.
+
 The packaged `plugins/wherry/mcp.json` starts `wherry mcp` with the default
-configuration path. For a configuration elsewhere, keep it at the default
-path or link the default path to it, or register a server of your own that
-runs `wherry mcp --config-file PATH` and disable the packaged one, for
-example with `claude mcp add wherry -- wherry mcp --config-file PATH` in
-Claude Code. A plugin update replaces the packaged `mcp.json`, so edits to
-it do not last.
+configuration path. For a configuration elsewhere, keep it at the default path
+or link the default path to it, or register a server of your own that runs
+`wherry mcp --config-file PATH` and disable the packaged one, for example with
+[`claude mcp add wherry -- wherry mcp --config-file PATH`](https://docs.anthropic.com/en/docs/claude-code/mcp)
+in Claude Code. A plugin update replaces the packaged `mcp.json`, so edits to it
+do not last.
 
 `plugins/wherry` packages the server with the `wherry` Agent Skill:
 
@@ -861,7 +771,3 @@ it do not last.
 - Other harnesses take `mcp.json` and `skills/wherry` directly.
 
 `plugins/AGENTS.snippet.md` covers harnesses without skills, using the CLI.
-
-The harness starts `wherry mcp` by name, so `wherry` must be on its `PATH`,
-and the user running the harness needs the client configuration, the
-bundle, the host key and the credential files.

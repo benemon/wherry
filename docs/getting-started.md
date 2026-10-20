@@ -11,7 +11,7 @@ parts involved.
   `wherry.operator` credentials on the operator's machine.
 - A Nomad cluster with a namespace for agent jobs (`agents` below) and a
   token or workload identity carrying the
-  [receiver policy](operator-guide.md#nomad-acl-policy).
+  [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy).
 - The `wherry` binary on the operator's machine, the host and the receiver
   host. Build it with Go 1.27 or later from a checkout of this repository:
 
@@ -143,10 +143,11 @@ NOMAD_TOKEN=<token> wherry receiver \
   --plugin-dir /usr/local/libexec/wherry/plugins
 ```
 
-The receiver creates its keys in `/var/lib/wherry`, registers them, and
-logs:
+The receiver creates its signing key, `signing.key`, in `/var/lib/wherry`,
+registers it, and logs:
 
 ```
+receiver: <time> registered key: signing=<key id>
 receiver: <time> configured: pool=build adapters=1 capacity=2
 ```
 

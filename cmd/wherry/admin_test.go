@@ -19,7 +19,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kfake"
 )
 
-func TestP11KafkaClientRejectsPlaintextListener(t *testing.T) {
+func TestKafkaClientRejectsPlaintextListener(t *testing.T) {
 	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"))
 	defer cluster.Close()
 	dir := t.TempDir()

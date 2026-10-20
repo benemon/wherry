@@ -252,8 +252,8 @@ type eventsOutput struct {
 	Skipped     int                `json:"skipped,omitempty"`
 }
 
-// newMCPServer serves the wherry tools; submit reads its inputs with readInput and opens its S3 inputs with openInput. Each call opens its own connection:
-// a Client's consumer serves one operation at a time, and a harness may call status while an await is in flight.
+// newMCPServer serves the wherry tools. Each call opens its own connection: a Host's consumer serves one operation at a
+// time, and a harness may call status while an await is in flight.
 func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error)) *mcp.Server {
 	version := "(devel)"
 	if info, ok := debug.ReadBuildInfo(); ok {

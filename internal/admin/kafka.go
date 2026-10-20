@@ -256,8 +256,8 @@ func (service *Service) Skip(ctx context.Context, offset int64, hash string) err
 	return fmt.Errorf("wherry.admin has no record at offset %d", offset)
 }
 
-// tenantRetentionMS is the tenant feed's default: it carries transcripts,
-// which hold anything the agent printed (Ben, 2026-10-19).
+// tenantRetentionMS is the tenant feed's default: it carries transcripts, which
+// hold anything the agent printed.
 const tenantRetentionMS = "2592000000"
 
 // receiversRetentionMS bounds wherry.receivers: readers want only each
@@ -500,13 +500,9 @@ type feedRecord struct {
 	value []byte
 }
 
-// largestRecords signs, with a throwaway key, the largest bounded submission whose inputs fit inlineLimit, and the
-// largest bounded records a receiver writes to a feed: an output chunk, a result, and a transcript chunk of a line of
-// wire.MaxLine raw bytes. Every field with a bound is at its maximum; the submission's parts are all input files with
-// the longest names, one holding all the inputs. A git input exists only on a first turn and outweighs the longest
-// turn number, so the submission is a first turn with a git input at its bounds and the one task credential it names.
-// A prompt, part metadata and media types, a selector, the other task credentials, the outputs and the S3 inputs, a
-// receiver's labels and an adapter's job name have no bound and are left empty.
+// largestRecords signs, with a throwaway key, the largest bounded submission whose inputs fit inlineLimit and the
+// largest bounded records a receiver writes to a feed. A git input exists only on a first turn and outweighs the
+// longest turn number; fields with no bound are left empty.
 func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	_, key, err := ed25519.GenerateKey(nil)
 	if err != nil {

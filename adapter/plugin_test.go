@@ -398,7 +398,14 @@ func TestSecretsStayOutOfLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-a", Turn: 1, Prompt: []byte("hello"), Credential: []byte(runCredential)}); err != nil {
+	const (
+		taskCredential = "ghp-task-credential-never-logged"
+		fetchURL       = "https://s3.example/bucket/wherry/tenant-a/run-a/inputs/data.bin?X-Amz-Signature=fetch-signature-never-logged"
+	)
+	run := Run{ID: "run-a", Turn: 1, Prompt: []byte("hello"), Credential: []byte(runCredential),
+		Credentials: []Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte(taskCredential)}},
+		Fetches:     []Fetch{{Name: "data.bin", URL: fetchURL, Size: 4, SHA256: strings.Repeat("0", 64)}}}
+	if _, _, err := a.Dispatch(context.Background(), run); err != nil {
 		t.Fatal(err)
 	}
 	killed := kill(t, p)
@@ -414,7 +421,7 @@ func TestSecretsStayOutOfLogs(t *testing.T) {
 	if !reconfigured || !strings.Contains(output, "plugin restarted") || !strings.Contains(output, "starting plugin") {
 		t.Fatalf("restart did not carry the platform credential, or the logs miss the link's own lines:\n%s", output)
 	}
-	for _, secret := range []string{runCredential, platformCredential} {
+	for _, secret := range []string{runCredential, platformCredential, taskCredential, fetchURL, "fetch-signature-never-logged"} {
 		if strings.Contains(output, secret) {
 			t.Fatalf("logs carry a credential:\n%s", output)
 		}
