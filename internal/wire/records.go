@@ -263,6 +263,9 @@ func (value *SealRequest) version() *int   { return &value.V }
 // p.<pool>.admission.<receiver>, and a run ID is safe in logs and job names.
 var runID = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
+// credentialName is the grammar of an admin name, which a pool's credentials already follow.
+var credentialName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
+
 func validateIDs(values map[string]string) error {
 	for name, value := range values {
 		if err := validateID(value, name); err != nil {
@@ -299,7 +302,7 @@ func (value *Submission) validate() error {
 	if err := validateMessage(&value.Message); err != nil {
 		return err
 	}
-	if err := ValidateInputs(value.Message.Parts); err != nil {
+	if _, err := inputBytes(value.Message.Parts); err != nil {
 		return err
 	}
 	if binding.Turn > 1 && (binding.Credentials != nil || binding.Outputs != nil) {
@@ -307,13 +310,16 @@ func (value *Submission) validate() error {
 	}
 	files := map[string]bool{}
 	for _, credential := range binding.Credentials {
-		if err := validateID(credential.Name, "credential"); err != nil {
-			return err
+		if !credentialName.MatchString(credential.Name) {
+			return errors.New("credential names are at most 32 lowercase letters, digits and hyphens")
 		}
 		if !ValidFileName(credential.File) || files[credential.File] {
 			return errors.New("credential files must be unique portable file names")
 		}
 		files[credential.File] = true
+	}
+	if len(binding.Outputs) > MaxOutputs {
+		return errors.New("a submission expects at most 256 outputs")
 	}
 	outputs := map[string]bool{}
 	for _, output := range binding.Outputs {
@@ -338,28 +344,37 @@ func (value *Submission) validate() error {
 }
 
 // ValidateInputs checks the raw and data parts of a message: each names a unique portable file, and together they
-// fit InlineLimit.
-func ValidateInputs(parts []Part) error {
+// fit limit.
+func ValidateInputs(parts []Part, limit int64) error {
+	inline, err := inputBytes(parts)
+	if err != nil {
+		return err
+	}
+	if inline > limit {
+		return fmt.Errorf("inline inputs are %d bytes, over the %d-byte limit", inline, limit)
+	}
+	return nil
+}
+
+// inputBytes checks that each raw and data part names a unique portable file, and returns their bytes together.
+func inputBytes(parts []Part) (int64, error) {
 	names := map[string]bool{}
-	inline := 0
+	var inline int64
 	for _, part := range parts {
 		if part.Raw == nil && part.Data == nil {
 			continue
 		}
 		name := InputName(part)
 		if !ValidFileName(part.Filename) || !ValidFileName(name) {
-			return errors.New("a raw or data part needs a filename of letters, digits, '.', '_' and '-', not starting with a dot, at most 255 bytes")
+			return 0, errors.New("a raw or data part needs a filename of letters, digits, '.', '_' and '-', not starting with a dot, at most 255 bytes")
 		}
 		if names[name] {
-			return errors.New("input file names must be unique")
+			return 0, errors.New("input file names must be unique")
 		}
 		names[name] = true
-		inline += len(part.Raw) + len(part.Data)
+		inline += int64(len(part.Raw) + len(part.Data))
 	}
-	if inline > InlineLimit {
-		return fmt.Errorf("inline inputs are %d bytes, over the %d-byte limit", inline, InlineLimit)
-	}
-	return nil
+	return inline, nil
 }
 
 func (value *Cancel) validate() error {

@@ -134,8 +134,8 @@ Exactly one of `--prompt` and `--prompt-file` is required. `--git` and
 [extension](a2a-extension-v1.md#git-context) gives the rules for the URL,
 ref and path.
 
-Input files hold 256 KiB together; `submit` refuses more before it
-publishes, naming the size and the limit. Input and credential file names
+Input files hold the pool's [`inline_limit`](#pool-terms) together;
+`submit` refuses more before it publishes, naming the size and the limit. Input and credential file names
 are [file names](a2a-extension-v1.md#submission), and output names
 relative paths of them. `submit` refuses a credential its configuration
 does not map to a file.
@@ -272,13 +272,16 @@ and events topics, and sets the configuration of share group `p-<pool>`:
 `share.auto.offset.reset=earliest`, `share.isolation.level=read_committed`,
 `share.delivery.count.limit` and `share.record.lock.duration.ms` from the
 terms. It refuses a delivery limit above the lowest
-`group.share.max.delivery.count.limit` across the brokers. For an existing
-pool it records the new terms and sets the group configuration again.
+`group.share.max.delivery.count.limit` across the brokers, and terms whose
+[records do not fit the broker](#record-limit). For an existing pool it
+records the new terms and sets the group configuration again.
 
 ### `wherry admin tenant add TENANT --pool POOL`
 
 Entitles the tenant to an existing pool, creates the tenant feed, and
-grants the tenant's hosts and the pool's receivers their ACLs. It applies
+grants the tenant's hosts and the pool's receivers their ACLs. It refuses
+when the pool's records do not fit the [record limit](#record-limit) with
+the tenant's feed counted, and records nothing. It applies
 each host's [quotas](#quotas).
 
 ### `wherry admin host add TENANT HOST --bundle FILE`
@@ -336,7 +339,8 @@ record decodes and a hash that does not match.
 ### `wherry admin check`
 
 Loads `wherry.admin`, checks that no two names collide, validates every
-receiver configuration against its pool's terms, and checks that every ACL
+receiver configuration against its pool's terms, checks that every pool's
+[records still fit the broker](#record-limit), and checks that every ACL
 the state calls for is present. It does not report ACLs beyond those, and
 does not check an adapter's `type` or `config` section.
 
@@ -543,6 +547,8 @@ The YAML file `pool create --terms` reads. Unknown fields are errors.
 | `lock_duration_ms` | the share group's `share.record.lock.duration.ms` |
 | `producer_byte_rate` | host quota, bytes per second |
 | `request_percentage` | host quota, percentage of broker request time |
+| `inline_limit` | optional, default 262144 (256 KiB): bytes of a task's input files together |
+| `output_limit` | optional, default 8388608 (8 MiB): bytes of one output, and of a turn's outputs together |
 
 Every number is positive. Set `lock_duration_ms` above 10000, since a
 receiver renews its lock every 10 seconds; wherry does not check this. The
@@ -566,6 +572,45 @@ lock_duration_ms: 15000
 producer_byte_rate: 1048576
 request_percentage: 10
 ```
+
+### Record limit
+
+A record limit is the lowest of `message.max.bytes` across the brokers,
+1000012 bytes, the most a wherry producer batches, and `max.message.bytes`
+on the topic the record goes to: the pool's tasks topic for submissions,
+and the feeds of the tenants entitled to the pool for chunks.
+`pool create`, `tenant add` and `check` sign four records and measure
+them as record batches: the largest bounded submission, the largest output
+chunk, of 256 KiB, the largest result, and the largest transcript chunk, a
+line of 512 KiB. The largest result has the turn's message with its 256
+input files named but not carried, 256 returned and 256 unreturned outputs
+with 512-byte names, a status text and a result text of 64 KiB each, and
+the agent's result record at its 16 KiB bound; a receiver's labels and an
+adapter's job name have no bound and are left empty.
+Any one over its record limit refuses the terms, naming its size and the
+limit, and an `inline_limit` above the tasks topic's record limit is
+refused before it is measured.
+
+The largest bounded submission has every field that has a bound at its
+maximum: 256 parts, each an input file with a 255-byte name, one of them
+holding `inline_limit` bytes. The prompt's text, part metadata and media
+types, the selector and the lists of task credentials and outputs have no
+bound and are left empty. A task with a large prompt can still exceed the
+record limit; `submit` then fails naming the record's size.
+
+An input file travels base64-encoded inside the signed record, which is
+itself base64url-encoded, so a submission takes about 16/9 of
+`inline_limit` plus about 97 KB. As `pool create` measures them, the
+submission at the default `inline_limit` is 563072 bytes, the output
+chunk 468155 bytes, the result 791053 bytes and the transcript chunk
+933544 bytes, so a feed's
+`max.message.bytes` below 933544 refuses every pool; with brokers and topics at their defaults, the highest
+`inline_limit` that fits is 507924 bytes, about 496 KiB.
+
+`pool create` and `tenant add` check against the broker at the time.
+Receivers apply the limits from their view of `wherry.admin`, which they
+read every 15 seconds, so a changed limit takes effect within that
+window.
 
 ### Quotas
 

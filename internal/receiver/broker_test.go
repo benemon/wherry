@@ -232,7 +232,9 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 
 // TestFilesOnRealBroker runs a task with an input, a task credential and outputs filling the output limit from a
 // host's Submit to its Await on the real broker: the outputs' chunks commit in the result's transaction, within the
-// broker's record limit, and the host verifies them.
+// broker's record limit, and the host verifies them. The pool's inline limit is the highest a default broker carries
+// and the input fills it, and 250 long-named outputs over the limit lengthen the result, so the result commits only
+// because its history does not carry the input.
 func TestFilesOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
@@ -243,6 +245,17 @@ func TestFilesOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
+	terms := testTerms()
+	terms.InlineLimit = 507924
+	encoded, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	input := make([]byte, terms.InlineLimit)
+	rand.Read(input)
 	dir := t.TempDir()
 	credential, deployKey := filepath.Join(dir, credentialName), filepath.Join(dir, "deploy-key")
 	if err := os.WriteFile(credential, []byte(testToken), 0o600); err != nil {
@@ -273,13 +286,16 @@ func TestFilesOnRealBroker(t *testing.T) {
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	logs := &syncBuffer{}
 	report := []byte("key " + deployValue + "\n")
-	big := make([]byte, outputLimit-len(report))
+	big := make([]byte, admin.DefaultOutputLimit-len(report))
 	for i := range big {
 		big[i] = byte(i * 7)
 	}
-	fake := &fakeAdapter{stream: resultStream, outputs: []adapter.Output{
-		{Name: "big.bin", Size: int64(len(big)), Data: big}, {Name: "report.md", Size: int64(len(report)), Data: report},
-	}}
+	outputs := []adapter.Output{{Name: "big.bin", Size: int64(len(big)), Data: big}, {Name: "report.md", Size: int64(len(report)), Data: report}}
+	// Outputs past the limit, listed in the result by their long names, leave no room for the input in its history.
+	for i := range 250 {
+		outputs = append(outputs, adapter.Output{Name: strings.Repeat(fmt.Sprintf("x%0249d/", i), 2) + "over", Size: 1})
+	}
+	fake := &fakeAdapter{stream: resultStream, outputs: outputs}
 	r := &Receiver{id: b.receiver, kafkaOpt: b.opts, base: base, signing: signing, logger: log.New(logs, "", 0),
 		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: fake}, nil
@@ -291,7 +307,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	b.joined(t, ctx, logs)
 	var submitted client.SubmitResult
 	for ctx.Err() == nil {
-		if submitted, err = host.Submit(ctx, client.SubmitInput{Prompt: "hello", Parts: []wire.Part{{Raw: wire.StdBytes("a,b\n"), Filename: "data.csv"}},
+		if submitted, err = host.Submit(ctx, client.SubmitInput{Prompt: "hello", Parts: []wire.Part{{Raw: input, Filename: "data.bin"}},
 			Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "report.md", Required: true}},
 			Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
 			break
@@ -305,11 +321,11 @@ func TestFilesOnRealBroker(t *testing.T) {
 	if err != nil || awaited.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("await %+v, %v; receiver logs:\n%s\nhost logs:\n%s", awaited.Status, err, logs.String(), hostLogs.String())
 	}
-	if len(awaited.Outputs) != 2 || !bytes.Equal(awaited.Outputs[0].Data, big) || string(awaited.Outputs[1].Data) != "key [redacted:deploy-key]\n" || len(awaited.Rejected) != 0 {
-		t.Fatalf("outputs %d, rejected %+v; want big.bin intact and report.md redacted", len(awaited.Outputs), awaited.Rejected)
+	if len(awaited.Outputs) != 2 || !bytes.Equal(awaited.Outputs[0].Data, big) || string(awaited.Outputs[1].Data) != "key [redacted]\n" || len(awaited.Rejected) != 0 || len(awaited.NotReturned) != 250 {
+		t.Fatalf("outputs %d, rejected %+v, not returned %d; want big.bin intact, report.md redacted and 250 over the limit", len(awaited.Outputs), awaited.Rejected, len(awaited.NotReturned))
 	}
 	run := fake.lastRun
-	if len(run.Inputs) != 1 || string(run.Inputs[0].Data) != "a,b\n" || len(run.Credentials) != 1 || string(run.Credentials[0].Value) != deployValue {
+	if len(run.Inputs) != 1 || !bytes.Equal(run.Inputs[0].Data, input) || len(run.Credentials) != 1 || string(run.Credentials[0].Value) != deployValue {
 		t.Fatalf("dispatched inputs %+v and credentials %d", run.Inputs, len(run.Credentials))
 	}
 	if strings.Contains(logs.String()+hostLogs.String(), deployValue) {

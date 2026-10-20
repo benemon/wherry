@@ -23,6 +23,7 @@ import (
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -203,9 +204,6 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 		}
 	}
-	if err := wire.ValidateInputs(input.Parts); err != nil {
-		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
-	}
 	for _, credential := range input.Credentials {
 		if _, configured := h.credentials[credential.Name]; !configured {
 			return SubmitResult{}, fmt.Errorf("%w: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
@@ -223,6 +221,9 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	pool, placement, ok := resolvePlacement(v.state, h.tenant, input.Agent, input.Selector, ads)
 	if !ok {
 		return SubmitResult{}, ErrNoMatchingReceiver
+	}
+	if err := wire.ValidateInputs(input.Parts, v.state.Pools[pool].InlineLimit); err != nil {
+		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	runID, err := randomID("run-")
 	if err != nil {
@@ -342,6 +343,9 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now tim
 			h.writeRun(*previous)
 		} else if path, ok := h.runPath(binding.Run); ok {
 			os.Remove(path)
+		}
+		if errors.Is(err, kerr.MessageTooLarge) {
+			return fmt.Errorf("%w: the submission is a %d-byte record, over the broker's record limit; shorten the prompt or the input files", ErrInvalidInput, len(encoded))
 		}
 		return err
 	}

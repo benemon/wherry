@@ -81,8 +81,51 @@ wherry admin pool create build --terms build-terms.yaml
 - `seal_lifetime_ms` is required and unused: a seal expires with its
   [seal request](a2a-extension-v1.md#seal-request), 5 minutes after the
   receiver asks.
+- `inline_limit` and `output_limit` bound a task's input files and a
+  turn's outputs; they default to 256 KiB and 8 MiB. See
+  [Size a pool against the broker](#size-a-pool-against-the-broker).
 
 Running `pool create` again for an existing pool records the new terms.
+
+### Size a pool against the broker
+
+Every task and every output or transcript chunk is one Kafka record, so
+the broker's record limit bounds what a pool can carry. `pool create` reads
+`message.max.bytes` from every broker and `max.message.bytes` from the
+pool's tasks topic and its tenants' feeds, signs the largest bounded
+submission `inline_limit` allows and the largest output and transcript
+chunks, and refuses the terms when one is over the limit of the topics it
+goes to. A transcript chunk can be 933544 bytes, so keep each tenant feed's
+`max.message.bytes` at or above that:
+
+```
+inline limit 524288 bytes makes a 1029104-byte submission record, over the 1000012-byte record limit
+```
+
+The bounded submission fills every field that has a bound, including 256
+input files with the longest names. A prompt has no bound, so a task with
+a large prompt can still be refused by the broker; `submit` names the
+record's size when it is.
+
+Input files grow by about 16/9 on the wire, since they are base64-encoded
+inside a record that is itself base64url-encoded. With brokers and topics
+at their defaults the 1000012-byte producer batch is the limit, and
+`inline_limit` can rise to about 496 KiB. wherry producers batch at most
+1000012 bytes, so raising `message.max.bytes` and `max.message.bytes` does
+not take it further; lowering them brings it down. An output chunk holds
+256 KiB whatever `output_limit` is, so `output_limit` spans as many records
+as it needs and the record limit does not bound it.
+
+`tenant add` makes the same check with the new tenant's feed counted.
+Lowering a broker or topic limit later can leave a pool's terms too large;
+[`wherry admin check`](#check-a-deployment) reports it. Receivers read
+their pool's terms from `wherry.admin` every 15 seconds, so admission and
+output collection use a changed limit within that window.
+
+Set `inline_limit` or `output_limit` only once every host and receiver
+runs a release that reads them. Terms that leave them out are recorded
+without them, but a release that predates them rejects a pool record that
+carries them, and with it all of `wherry.admin`.
 
 ## Add tenants and hosts
 
@@ -378,7 +421,8 @@ wherry admin check
 ```
 
 It loads `wherry.admin`, validates every receiver configuration against its
-pool's current terms, and confirms that every ACL the state calls for
+pool's current terms, checks that every pool's largest records still fit
+the broker's record limit, and confirms that every ACL the state calls for
 exists. It does not check an adapter's `type` or `config` section; at
 start the receiver finds the type's plugin, the plugin checks the section,
 and the receiver exits with `adapter <name>: ...` on an error. Run it after changing a pool's terms, since receivers keep the
@@ -473,8 +517,8 @@ node_pool "default" {
 
 ## Inputs and outputs
 
-A task's input files hold 256 KiB together, and a turn's outputs 8 MiB in
-256 entries at most. An adapter can deliver less: the Nomad plugin carries
+A task's input files hold the pool's `inline_limit` together, and a turn's
+outputs its `output_limit` in 256 entries at most. An adapter can deliver less: the Nomad plugin carries
 a turn's input files in one Nomad variable, which Nomad caps at 64 KiB of
 item names and base64-encoded contents, so about 48 KiB of input. A turn
 whose inputs an adapter cannot deliver ends `TASK_STATE_FAILED` naming the

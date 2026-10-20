@@ -99,14 +99,15 @@ type fakeAdapter struct {
 	froms    []int64
 	// hang makes Sweep and Ready block until their context ends.
 	hang bool
-	// outputs are what Collect streams, unless collectErr fails it; collects counts the calls and stopsBefore the
-	// Stops each one followed.
+	// outputs are what Collect streams, unless collectErr fails it; collects counts the calls, stopsBefore the
+	// Stops each one followed and limits the last one's limits.
 	outputs    []adapter.Output
 	collectErr error
 	// collectHangs makes Collect block until its context ends.
 	collectHangs bool
 	collects     int
 	stopsBefore  []int
+	limits       adapter.Limits
 }
 
 func (f *fakeAdapter) Git() bool { return false }
@@ -213,9 +214,10 @@ func (f *fakeAdapter) Stop(context.Context, adapter.Handle) error {
 	return err
 }
 
-func (f *fakeAdapter) Collect(ctx context.Context, _ adapter.Handle, _ adapter.Limits, out chan<- adapter.Output) error {
+func (f *fakeAdapter) Collect(ctx context.Context, _ adapter.Handle, limits adapter.Limits, out chan<- adapter.Output) error {
 	f.mu.Lock()
 	f.collects++
+	f.limits = limits
 	f.stopsBefore = append(f.stopsBefore, f.stops)
 	outputs, err, hangs := slices.Clone(f.outputs), f.collectErr, f.collectHangs
 	f.mu.Unlock()

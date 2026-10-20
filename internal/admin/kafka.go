@@ -2,15 +2,20 @@ package admin
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
+	"strings"
 
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -46,6 +51,16 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 	}
 	if terms.DeliveryLimit > service.DeliveryCeiling {
 		return fmt.Errorf("delivery limit exceeds broker ceiling %d", service.DeliveryCeiling)
+	}
+	if err := service.createTopics(ctx, "-1", AdminTopic); err != nil {
+		return err
+	}
+	current, err := service.LoadState(ctx)
+	if err != nil {
+		return err
+	}
+	if err := service.checkLimits(ctx, current, pool, withDefaults(terms)); err != nil {
+		return err
 	}
 	record := Record{Kind: "pool", Pool: pool, Terms: &terms}
 	state, err := service.appendChecked(ctx, []byte("pool."+pool), record)
@@ -151,12 +166,28 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 }
 
 func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) error {
-	record := Record{Kind: "entitlement", Tenant: tenant, Pool: pool}
-	state, err := service.appendChecked(ctx, []byte("entitlement."+tenant+"."+pool), record)
+	current, err := service.LoadState(ctx)
 	if err != nil {
 		return err
 	}
+	terms, ok := current.Pools[pool]
+	if !ok {
+		return errors.New("entitlement names unknown pool")
+	}
+	// The pool's records must fit the tenant's feed, so it exists before the entitlement does.
 	if err := service.createTopics(ctx, tenantRetentionMS, TenantTopic(tenant)); err != nil {
+		return err
+	}
+	if current.Entitlements[tenant] == nil {
+		current.Entitlements[tenant] = map[string]bool{}
+	}
+	current.Entitlements[tenant][pool] = true
+	if err := service.checkLimits(ctx, current, pool, terms); err != nil {
+		return err
+	}
+	record := Record{Kind: "entitlement", Tenant: tenant, Pool: pool}
+	state, err := service.appendChecked(ctx, []byte("entitlement."+tenant+"."+pool), record)
+	if err != nil {
 		return err
 	}
 	if err := service.reconcileACLs(ctx, state); err != nil {
@@ -183,6 +214,11 @@ func (service *Service) Check(ctx context.Context) error {
 	for receiver, config := range state.Receivers {
 		if err := ValidateConfig(config, state.Pools[config.Pool]); err != nil {
 			return fmt.Errorf("receiver %s: %w", receiver, err)
+		}
+	}
+	for pool, terms := range state.Pools {
+		if err := service.checkLimits(ctx, state, pool, terms); err != nil {
+			return fmt.Errorf("pool %s: %w", pool, err)
 		}
 	}
 	return service.verifyACLs(ctx, state)
@@ -375,6 +411,181 @@ func (service *Service) brokerSetting(ctx context.Context, name string, pick fun
 		return 0, fmt.Errorf("broker setting %s is not readable on every broker", name)
 	}
 	return value, nil
+}
+
+// checkLimits refuses terms whose largest submission or output chunk is a record the broker or a producer would
+// refuse.
+func (service *Service) checkLimits(ctx context.Context, state State, pool string, terms Terms) error {
+	tasks, feeds, err := service.recordLimits(ctx, state, pool)
+	if err != nil {
+		return err
+	}
+	// Inputs only grow on the wire, so this refuses an inline limit no record carries before allocating it.
+	if terms.InlineLimit > tasks {
+		return fmt.Errorf("inline limit %d bytes is over the %d-byte record limit", terms.InlineLimit, tasks)
+	}
+	submission, feed, err := largestRecords(terms.InlineLimit)
+	if err != nil {
+		return err
+	}
+	if size := batchSize(submission); size > tasks {
+		return fmt.Errorf("inline limit %d bytes makes a %d-byte submission record, over the %d-byte record limit", terms.InlineLimit, size, tasks)
+	}
+	for _, record := range feed {
+		if size := batchSize(record.value); size > feeds {
+			return fmt.Errorf("%s record is %d bytes, over the %d-byte record limit", record.name, size, feeds)
+		}
+	}
+	return nil
+}
+
+// recordLimits are the largest record batches that every broker and franz-go's producers accept, and with them the
+// pool's task topic, for submissions, and the feeds of its tenants, for receiver records.
+func (service *Service) recordLimits(ctx context.Context, state State, pool string) (int64, int64, error) {
+	limit, err := service.brokerSetting(ctx, "message.max.bytes", func(a, b int64) int64 { return min(a, b) })
+	if err != nil {
+		return 0, 0, err
+	}
+	// Hosts and receivers, like the admin client, produce with franz-go's default batch maximum.
+	limit = min(limit, int64(service.Admin.OptValue(kgo.ProducerBatchMaxBytes).(int32)))
+	topics := []string{PoolTasksTopic(pool)}
+	for tenant, pools := range state.Entitlements {
+		if pools[pool] {
+			topics = append(topics, TenantTopic(tenant))
+		}
+	}
+	resources, err := kadm.NewClient(service.Admin).DescribeTopicConfigs(ctx, topics...)
+	if err != nil {
+		return 0, 0, err
+	}
+	tasks, feeds := limit, limit
+	for _, resource := range resources {
+		// A pool's task topic does not exist before its first create.
+		if errors.Is(resource.Err, kerr.UnknownTopicOrPartition) && resource.Name == PoolTasksTopic(pool) {
+			continue
+		}
+		if resource.Err != nil {
+			return 0, 0, fmt.Errorf("describe topic %s: %w", resource.Name, resource.Err)
+		}
+		for _, config := range resource.Configs {
+			if config.Key != "max.message.bytes" || config.Value == nil {
+				continue
+			}
+			parsed, err := strconv.ParseInt(*config.Value, 10, 64)
+			if err != nil {
+				return 0, 0, err
+			}
+			if resource.Name == PoolTasksTopic(pool) {
+				tasks = min(tasks, parsed)
+			} else {
+				feeds = min(feeds, parsed)
+			}
+		}
+	}
+	return tasks, feeds, nil
+}
+
+// largestKey is the longest run ID, which keys submissions and output chunks.
+var largestKey = strings.Repeat("r", 63)
+
+// batchSize is the size of a record batch holding value alone under largestKey: a v2 batch's 61-byte header and at
+// most 36 bytes of one record's varint framing.
+func batchSize(value []byte) int64 {
+	return int64(61 + 36 + len(largestKey) + len(value))
+}
+
+// feedRecord is a receiver record at its largest, as a refusal names it.
+type feedRecord struct {
+	name  string
+	value []byte
+}
+
+// largestRecords signs, with a throwaway key, the largest bounded submission whose inputs fit inlineLimit, and the
+// largest bounded records a receiver writes to a feed: an output chunk, a result, and a transcript chunk of a line of
+// wire.MaxLine raw bytes. Every field with a bound is at its maximum; the submission's parts are all input files with
+// the longest names, one holding all the inputs. A prompt, part metadata and media types, a selector, the task
+// credentials, a receiver's labels and an adapter's job name have no bound and are left empty.
+func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
+	_, key, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	name, run, hash := strings.Repeat("n", 32), largestKey, strings.Repeat("0", 64)
+	parts := make([]wire.Part, wire.MaxParts)
+	pointers := make([]wire.Part, wire.MaxParts)
+	pointer, _ := json.Marshal(wire.PointerMetadata{SHA256: hash, Size: math.MaxInt64}) // a string and an integer always encode
+	for i := range parts {
+		parts[i] = wire.Part{Raw: wire.StdBytes{}, Filename: fmt.Sprintf("%0255d", i)}
+		pointers[i] = wire.Part{URL: "unstored:input", Filename: parts[i].Filename, Metadata: pointer}
+	}
+	parts[0].Raw = make(wire.StdBytes, inlineLimit)
+	message := wire.Message{MessageID: "msg-" + strings.Repeat("0", 32), ContextID: run, TaskID: run, Role: wire.RoleUser, Extensions: []string{wire.ExtensionURI}}
+	submitted := message
+	submitted.Parts = parts
+	submission, err := wire.SignRecord(&wire.Submission{
+		Message: submitted,
+		Wherry: wire.SubmissionBinding{
+			Tenant: name, Host: name, Pool: name, Run: run, Turn: math.MaxInt64, Placement: wire.Placement{Agent: name},
+			DeadlineMS: math.MaxInt64, QueueDeadlineMS: math.MaxInt64,
+		},
+	}, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	binding := wire.ReceiverBinding{Receiver: name, Tenant: name, Pool: name, Run: run, Turn: math.MaxInt64, Attempt: math.MaxInt64}
+	outputName := strings.Repeat("a/", 255) + "aa"
+	metadata := wire.ResultMetadata{ReceiverID: name, Pool: name, Adapter: name}
+	for range wire.MaxOutputs {
+		metadata.Outputs = append(metadata.Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64})
+		metadata.NotReturned = append(metadata.NotReturned, wire.UnreturnedOutput{Name: outputName, Size: math.MaxInt64, Reason: "rejected: size changed while read"})
+	}
+	encodedMetadata, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Redaction lengthens the agent's result record by at most 10 bytes in 8.
+	agentResult, _ := json.Marshal(map[string]map[string]string{"agent_result": {"k": strings.Repeat("x", wire.MaxAgentResult*10/8)}}) // strings always encode
+	history := message
+	history.Parts = pointers
+	records := []struct {
+		name  string
+		value wire.Record
+	}{
+		{"an output chunk", &wire.Output{
+			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
+				TaskID: run, ContextID: run, Append: true, LastChunk: true, Metadata: []byte(`{"index":9223372036854775807}`),
+				Artifact: wire.Artifact{ArtifactID: outputName, Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.OutputChunk)}}, Extensions: []string{wire.ExtensionURI}},
+			},
+			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
+		}},
+		// Receiver texts are names and fixed words, which JSON does not escape; a result text that it would travels raw.
+		{"a result", &wire.Result{
+			Task: wire.Task{
+				ID: run, ContextID: run, History: []wire.Message{history}, Metadata: encodedMetadata,
+				Status: wire.TaskStatus{State: wire.TaskStateFailed, Timestamp: "2006-01-02T15:04:05.000Z", Message: &wire.Message{
+					MessageID: "msg-" + strings.Repeat("0", 32), Role: wire.RoleAgent, Parts: []wire.Part{{Text: strings.Repeat("x", wire.MaxText)}}, Extensions: []string{wire.ExtensionURI},
+				}},
+				Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}}, Metadata: agentResult, Extensions: []string{wire.ExtensionURI}}},
+			},
+			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
+		}},
+		{"a transcript chunk", &wire.Chunk{
+			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
+				TaskID: run, ContextID: run, Append: true, LastChunk: true,
+				Artifact: wire.Artifact{ArtifactID: "transcript", Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.MaxLine), MediaType: "application/x-ndjson"}}, Extensions: []string{wire.ExtensionURI}},
+			},
+			Wherry: wire.ChunkBinding{ReceiverBinding: binding, TaskHash: hash, Seq: math.MaxInt64},
+		}},
+	}
+	feed := make([]feedRecord, len(records))
+	for i, record := range records {
+		value, err := wire.SignRecord(record.value, key)
+		if err != nil {
+			return nil, nil, fmt.Errorf("sign %s: %w", record.name, err)
+		}
+		feed[i] = feedRecord{record.name, value}
+	}
+	return submission, feed, nil
 }
 
 func createBundle(path string) (*os.File, error) {

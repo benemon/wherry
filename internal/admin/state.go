@@ -28,6 +28,24 @@ type Terms struct {
 	LockDurationMS    int64        `json:"lock_duration_ms" yaml:"lock_duration_ms"`
 	ProducerByteRate  int64        `json:"producer_byte_rate" yaml:"producer_byte_rate"`
 	RequestPercentage float64      `json:"request_percentage" yaml:"request_percentage"`
+	InlineLimit       int64        `json:"inline_limit,omitzero" yaml:"inline_limit"`
+	OutputLimit       int64        `json:"output_limit,omitzero" yaml:"output_limit"`
+}
+
+// DefaultInlineLimit and DefaultOutputLimit are a pool's limits where its terms leave them out.
+const (
+	DefaultInlineLimit = 256 << 10
+	DefaultOutputLimit = 8 << 20
+)
+
+func withDefaults(terms Terms) Terms {
+	if terms.InlineLimit == 0 {
+		terms.InlineLimit = DefaultInlineLimit
+	}
+	if terms.OutputLimit == 0 {
+		terms.OutputLimit = DefaultOutputLimit
+	}
+	return terms
 }
 
 // ReceiverConfig is a receiver's whole configuration, recorded on
@@ -117,7 +135,7 @@ func Fold(records []Record) (State, error) {
 func apply(state *State, record Record) error {
 	switch record.Kind {
 	case "pool":
-		state.Pools[record.Pool] = *record.Terms
+		state.Pools[record.Pool] = withDefaults(*record.Terms)
 	case "receiver":
 		if _, ok := state.Pools[record.Pool]; !ok {
 			return errors.New("receiver names unknown pool")
@@ -488,7 +506,8 @@ func load(raw []rawRecord) (State, error) {
 }
 
 func validateTerms(terms Terms) error {
-	if len(terms.Agents) == 0 || terms.SealLifetimeMS <= 0 || terms.DeliveryLimit <= 0 || terms.LockDurationMS <= 0 || terms.ProducerByteRate <= 0 || terms.RequestPercentage <= 0 {
+	if len(terms.Agents) == 0 || terms.SealLifetimeMS <= 0 || terms.DeliveryLimit <= 0 || terms.LockDurationMS <= 0 || terms.ProducerByteRate <= 0 || terms.RequestPercentage <= 0 ||
+		terms.InlineLimit < 0 || terms.OutputLimit < 0 {
 		return errors.New("invalid pool terms")
 	}
 	if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == terms.DefaultAgent }) {

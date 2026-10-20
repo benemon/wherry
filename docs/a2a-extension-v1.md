@@ -120,22 +120,25 @@ A submission is one turn of a run.
 - `deadline_ms` and `queue_deadline_ms` are Unix milliseconds by which the
   run must end and a receiver must claim it. A receiver ends the run no
   later than one hour after `queue_deadline_ms`.
-- Each part of the message has exactly one of `text`, `raw`, `url` and
-  `data`. A submission carries at most one [git part](#git-context).
+- The message has at most 256 parts, each with exactly one of `text`,
+  `raw`, `url` and `data`. A submission carries at most one
+  [git part](#git-context).
 - Each `raw` and `data` part is an [input file](#inputs-and-outputs). Its
   `filename` is required and is a file name: at most 255 bytes of letters,
   digits, `.`, `_` and `-`, whose first character is not `.`. A `raw` part is delivered
   as its bytes under `filename`, and a `data` part as its JSON under
   `filename` with `.json` added. The delivered names are unique, and the
-  `raw` and `data` parts together hold at most 256 KiB.
+  `raw` and `data` parts together hold at most the pool's `inline_limit`
+  bytes, 256 KiB unless its terms set another.
 - `credentials` lists task credentials, each `{name, file}`: a credential
   of the host, by the name in its configuration, that the agent gets as the
-  file `file` in its credentials directory. `name` follows the ID rules and
-  `file` the file name rules; each `file` appears once. The pool's terms do
+  file `file` in its credentials directory. `name` is at most 32
+  lowercase letters, digits and hyphens, starting and ending with a letter
+  or digit, and `file` follows the file name rules; each `file` appears once. The pool's terms do
   not govern task credentials.
-- `outputs` lists the files the agent is asked to leave, each
+- `outputs` lists at most 256 files the agent is asked to leave, each
   `{name, required}`. `name` is a relative path of file names joined by
-  `/`, at most 4096 bytes, and appears once. `required` defaults to false.
+  `/`, at most 512 bytes, and appears once. `required` defaults to false.
 - Only a run's first turn carries `credentials` and `outputs`, and they
   hold for every turn of the run.
 
@@ -202,7 +205,8 @@ part. The fixed texts are:
   `task is not awaiting continuation`, `continuation turn out of order`,
   `continuation history unavailable`, `queue deadline passed`,
   `run deadline passed`, `unsupported message part`,
-  `input names repeat across turns`, `run ID in use`;
+  `input names repeat across turns`, `run ID in use`, and
+  `inline inputs are <n> bytes, over the <limit>-byte limit`;
 - interrupted: `credential <name> required`, or
   `credentials <name>, <name> required` when the seal request named more
   than one;
@@ -243,8 +247,8 @@ A chunk is one line of the agent's standard output, as the A2A artifact
 
 - The artifact has `artifactId` `transcript` and exactly one part with
   media type `application/x-ndjson`: a text part holding the line, a `raw`
-  part for an empty line or one that is not UTF-8, or, for a line over
-  512 KiB, a `url` part with the value `unstored:oversize` whose `metadata`
+  part for an empty line, one that is not UTF-8, or one longer escaped as a
+  JSON string than base64-encoded, or, for a line over 512 KiB, a `url` part with the value `unstored:oversize` whose `metadata`
   holds the line's hex `sha256` and its `size` in bytes. The line itself
   is then not stored.
 - `seq` is the line's byte offset in the agent's output and orders the
@@ -301,13 +305,19 @@ A result is the A2A `Task` a turn ends with.
 
 - `task.id` and `task.contextId` are the run ID. `task.status` is the
   turn's final status.
-- `task.history` holds every turn's submitted message in turn order. A
-  reader requires `history[turn - 1].messageId` to equal the `message_id`
-  of the turn's echo.
+- `task.history` holds the turn's own submitted message alone; earlier
+  turns are in their own results on the feed. Each `raw` and `data` part
+  is replaced by a `url` part with the value `unstored:input`, the input's
+  `filename` and `mediaType`, and `metadata` holding the hex `sha256` and
+  `size` in bytes of its `raw` bytes or its `data` JSON. A reader requires
+  `history[0].messageId` to equal the `message_id` of the turn's echo.
 - `task.artifacts` holds the artifact `result`, with one part: the agent's
   result as a `data` part with media type `application/json` when it is
-  JSON, otherwise a text part. With no result text, the part's text is the
-  state's name.
+  JSON, a `raw` part with media type `text/plain` when escaping it as a
+  JSON string would make it longer than base64 does, and otherwise a text
+  part. With no result text, the part's text is the state's name. Result
+  text over 64 KiB once redacted is replaced by
+  `[redacted text over 65536 bytes]`.
 - [Metadata](#metadata) says where the turn ran.
 
 A receiver writes the result in the same transaction as the turn's
@@ -338,9 +348,9 @@ The `metadata` of a result's `Task` says where the turn ran:
 | --- | --- |
 | `missing` | an expected output the agent did not leave |
 | `not collected` | the adapter did not collect the outputs; every expected output is listed with it |
-| `exceeds output limit` | the file is over 8 MiB, or would take the turn's outputs over 8 MiB |
+| `exceeds output limit` | the file is over the pool's `output_limit`, or would take the turn's outputs over it |
 | `rejected: symlink`, `rejected: fifo`, `rejected: device`, `rejected: socket`, `rejected: irregular file` | the entry is not a regular file and was not read |
-| `rejected: invalid name` | the path is not a relative path of file names; `name` is the path quoted as ASCII, at most 256 bytes |
+| `rejected: invalid name` | the path is not a relative path of file names of at most 512 bytes; `name` is the path quoted as ASCII, at most 256 bytes |
 | `rejected: size changed while read` | the adapter read a length other than the size it listed |
 
 `outputs` and `not_returned` are present on a result whose turn the agent
@@ -604,7 +614,10 @@ the reason.
 Before it signs any transcript chunk, output chunk, result text or status
 message of the attempt, the receiver replaces every occurrence of each
 credential value it delivered, task credentials included, with
-`[redacted:<name>]`, or `[redacted]` when the name contains the value. It
+`[redacted]`. The marker names no credential, so a replacement cannot
+publish another credential's value; when a form of a delivered value occurs
+within `[redacted]`, the marker for the attempt is `[*]` instead. The data
+passes through the replacement in pieces of 64 KiB. It
 replaces two forms of each value: its bytes without trailing CR and LF,
 since a credential file usually ends in a newline that transcripts and
 outputs drop, and those bytes escaped as a JSON string, as a transcript
@@ -612,10 +625,22 @@ line carries them. The value's own bytes contain the first form, so its
 redaction leaves only the line ending. It redacts an output file whole
 before it splits it into chunks and computes its hash and size. In result
 metadata it replaces within JSON string values only, so the metadata stays
-valid. A value shorter than 8 bytes once trimmed is not redacted; the
+valid. The marker can be longer than a value, so the limits hold for
+the redacted bytes: an output whose redacted form is over the pool's
+`output_limit`, or would take the turn's outputs over it, is listed as
+`exceeds output limit`; a transcript line whose redacted form is over
+512 KiB becomes an `unstored:oversize` part with that form's hash and size;
+and a result text, metadata string or status text whose redacted form is
+over 64 KiB is replaced by `[redacted text over 65536 bytes]`. A value
+shorter than 8 bytes once trimmed is not redacted; the
 receiver logs `credential <name> too short to redact` once for the attempt.
 A value in any other encoding, such as base64, is not replaced, and an
-adopted attempt delivered nothing to redact.
+adopted attempt delivered nothing to redact. Each form is replaced once,
+longest first, and the marker can join the bytes beside it into a value
+that was not there before: when a value starts with the marker's tail,
+such as `d]` for `[redacted]`, and the rest of it follows a replaced
+value, the published text holds that value whole. Redaction does not
+prevent this.
 
 ## Admin records
 
@@ -674,7 +699,8 @@ A receiver that claims a submission:
    hash;
 2. drops it when it fails the [signed-record checks](#signed-records), or
    when its Kafka key is not its `run`;
-3. rejects it when its agent is outside the pool's terms;
+3. rejects it when its agent is outside the pool's terms, and when its
+   `raw` and `data` parts together exceed the pool's `inline_limit`;
 4. writes an `offer-unavailable` start failure and releases it when no
    ready adapter satisfies the placement;
 5. rejects it with `run ID in use` when the run ID belongs to another
@@ -754,8 +780,8 @@ After the agent's result line, the receiver stops the job, then asks the
 adapter to collect the outputs. The adapter lists every entry beneath the
 outputs directory without following links, and refuses the whole tree,
 reading nothing, when it holds more than 256 entries. It reads only regular
-files: one at most 8 MiB, and together at most 8 MiB, which the receiver
-checks again. Every other entry is listed with its type and left unread.
+files: one at most the pool's `output_limit`, 8 MiB unless its terms set
+another, and together at most that, which the receiver checks again. Every other entry is listed with its type and left unread.
 The receiver gives up on a collection that takes over 2 minutes. An adapter
 that cannot collect, or a job that could not be stopped, leaves the
 outputs `not collected`.

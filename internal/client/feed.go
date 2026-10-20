@@ -296,8 +296,8 @@ func (r *runView) derive() {
 		default:
 			result := e.result
 			binding := r.turns[result.Wherry.Turn]
-			if binding.echo == nil || binding.hash != result.Wherry.TaskHash || int64(len(result.Task.History)) < result.Wherry.Turn ||
-				result.Task.History[result.Wherry.Turn-1].MessageID != binding.echo.MessageID {
+			if binding.echo == nil || binding.hash != result.Wherry.TaskHash || len(result.Task.History) != 1 ||
+				result.Task.History[0].MessageID != binding.echo.MessageID {
 				r.skipped++
 				continue
 			}
