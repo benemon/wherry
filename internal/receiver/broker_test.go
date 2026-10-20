@@ -335,7 +335,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 }
 
 // TestGitInputOnRealBroker runs a git task from a host's Submit to its Await on the real broker: the client writes an
-// scp-like remote as an ssh URL, refuses a remote outside the pool's forges before publishing, and declares the patch
+// scp-like remote as an ssh URL, refuses a remote outside the pool's VCS hosts before publishing, and declares the patch
 // output; the receiver delivers the host key as known_hosts and the clone commands with the key's path, never its value.
 func TestGitInputOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
@@ -347,7 +347,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
-	terms := forgeTerms("git.example.test")
+	terms := vcsTerms("git.example.test")
 	encoded, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
 	if err != nil {
 		t.Fatal(err)
@@ -416,8 +416,8 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	}
 	outside := input
 	outside.Git = &wire.GitInput{Remote: "https://github.com/org/repo.git", Ref: "main"}
-	if _, err := host.Submit(ctx, outside); !errors.Is(err, client.ErrInvalidInput) || !strings.Contains(err.Error(), "git remote host github.com is not in pool "+b.pool+"'s forges") {
-		t.Fatalf("submit outside the forges = %v; want a refusal naming the host and the pool", err)
+	if _, err := host.Submit(ctx, outside); !errors.Is(err, client.ErrInvalidInput) || !strings.Contains(err.Error(), "git remote host github.com is not in pool "+b.pool+"'s vcs hosts") {
+		t.Fatalf("submit outside the vcs hosts = %v; want a refusal naming the host and the pool", err)
 	}
 	if after, err := admin.ReadTopic(ctx, b.kafka, admin.PoolTasksTopic(b.pool)); err != nil || len(after) != len(tasks) {
 		t.Fatalf("task topic holds %d records after the refusal, %v; want %d", len(after), err, len(tasks))

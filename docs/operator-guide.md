@@ -87,7 +87,7 @@ wherry admin pool create build --config-file build-terms.yaml
 - `inline_limit` and `output_limit` bound a task's input files and a
   turn's outputs; they default to 256 KiB and 8 MiB. See
   [Size a pool against the broker](#size-a-pool-against-the-broker).
-- `forges` lists the hosts a task's agent may clone from; without it the
+- `vcs` lists the hosts a task's agent may clone from; without it the
   pool takes no git input. See [Git repositories](#git-repositories).
 
 Running `pool create` again for an existing pool records the new terms.
@@ -584,22 +584,22 @@ rules and the commands. For the agent to follow them:
   lets the agent run the commands; it is not a sandbox, since `git` can run any
   command.
 
-Allow the hosts a pool's tasks may clone from with `forges` in its
+Allow the hosts a pool's tasks may clone from with `vcs` in its
 [terms](reference.md#pool-terms):
 
 ```yaml
-forges:
+vcs:
   - github.com
   - git.example.com:2222
 ```
 
-`submit` and `continue` refuse a remote outside the forges before they
+`submit` and `continue` refuse a remote outside the VCS hosts before they
 publish, and receivers reject one at admission.
 
-Forges limit what wherry accepts. The agent runs commands, and it can reach any
-host its network allows. Enforce where agents connect with the platform's egress
-policy ([Agent network reach](#agent-network-reach)), and treat `forges` as the
-check that a task names an allowed repository.
+VCS hosts limit what wherry accepts. The agent runs commands, and it can
+reach any host its network allows. Enforce where agents connect with the
+platform's egress policy ([Agent network reach](#agent-network-reach)),
+and treat `vcs` as the check that a task names an allowed repository.
 
 The clone's commands keep the credential for the remote's host. No
 template seeds the clone. They reset
@@ -692,14 +692,14 @@ says what it gives.
 ## Agent network reach
 
 An agent runs commands, so it can connect to any host its network allows. The
-pool's `forges` and `storage` bound what a task names; the platform's egress
+pool's `vcs` and `storage` bound what a task names; the platform's egress
 policy bounds where its agent connects. Give agent jobs a policy that:
 
 - denies the control plane: the Nomad servers and clients, Consul, Vault,
   the Kafka brokers, the Kubernetes API, and cloud metadata addresses such
   as `169.254.169.254` and `fd00:ec2::254`;
 - allows DNS, the model API the agent's harness calls (for Claude Code,
-  `api.anthropic.com`), and the hosts in the pool's `forges`;
+  `api.anthropic.com`), and the hosts in the pool's `vcs`;
 - denies everything else.
 
 wherry gives the agent no storage URL: none reaches its prompt, its

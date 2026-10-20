@@ -66,6 +66,9 @@ func TestPoolConfigDirectoryMatchesSingleFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !reflect.DeepEqual(want.VCS, []string{"github.com"}) {
+		t.Fatalf("single-file VCS hosts = %v, want github.com", want.VCS)
+	}
 	got, err := readPoolConfig(filepath.Join("testdata", "pool-nomad"), true)
 	if err != nil {
 		t.Fatal(err)

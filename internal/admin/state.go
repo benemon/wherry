@@ -30,8 +30,8 @@ type Terms struct {
 	RequestPercentage float64      `json:"request_percentage" yaml:"request_percentage"`
 	InlineLimit       int64        `json:"inline_limit,omitzero" yaml:"inline_limit"`
 	OutputLimit       int64        `json:"output_limit,omitzero" yaml:"output_limit"`
-	// Forges are the hosts, as wire.GitInput.Forge names them, a git input may clone from; none allows no git input.
-	Forges []string `json:"forges,omitzero" yaml:"forges"`
+	// VCS holds the hosts, as wire.GitInput.VCSHost names them, a git input may clone from; none allows no git input.
+	VCS []string `json:"vcs,omitzero" yaml:"vcs"`
 	// Storage is the pool's S3 lane; nil allows no S3 input or output.
 	Storage *Storage `json:"storage,omitzero" yaml:"storage"`
 }
@@ -57,7 +57,7 @@ func (storage Storage) Host() string {
 
 func (storage Storage) validate() error {
 	host, ok := strings.CutPrefix(storage.Endpoint, "https://")
-	if !ok || !wire.ValidForge(host) {
+	if !ok || !wire.ValidVCSHost(host) {
 		return errors.New("storage endpoint must be https:// and a lowercase host name, optionally with :port, and nothing else")
 	}
 	if !bucketName.MatchString(storage.Bucket) || strings.Contains(storage.Bucket, "..") {
@@ -547,9 +547,9 @@ func validateTerms(terms Terms) error {
 	if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == terms.DefaultAgent }) {
 		return errors.New("default agent is outside pool terms")
 	}
-	for i, forge := range terms.Forges {
-		if !wire.ValidForge(forge) || slices.Contains(terms.Forges[:i], forge) {
-			return errors.New("forges must be unique lowercase host names, each optionally with :port")
+	for i, host := range terms.VCS {
+		if !wire.ValidVCSHost(host) || slices.Contains(terms.VCS[:i], host) {
+			return errors.New("vcs hosts must be unique lowercase host names, each optionally with :port")
 		}
 	}
 	if terms.Storage != nil {

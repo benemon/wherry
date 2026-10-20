@@ -266,8 +266,8 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if task.Wherry.Turn > 1 {
 		declared = submissions[1].record.Wherry
 	}
-	if declared.Git != nil && !slices.Contains(terms.Forges, declared.Git.Forge()) {
-		return reject("git remote host " + declared.Git.Forge() + " is not in pool " + r.config.Pool + "'s forges")
+	if declared.Git != nil && !slices.Contains(terms.VCS, declared.Git.VCSHost()) {
+		return reject("git remote host " + declared.Git.VCSHost() + " is not in pool " + r.config.Pool + "'s vcs hosts")
 	}
 	if (len(declared.S3Inputs) > 0 || len(s3Outputs(declared.Outputs)) > 0) && terms.Storage == nil {
 		return reject("pool " + r.config.Pool + " has no storage for S3 inputs and outputs")

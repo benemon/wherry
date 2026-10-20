@@ -12,7 +12,8 @@ clones itself.
    to choose the agent, and `--selector` with comma-separated terms
    (`key=v1|v2`, `key!=v`, `key`, `!key`) to require labels. Add
    `--git REMOTE@REF` for a repository the agent clones (its host must be one of
-   the pool's forges), with `--git-credential NAME` naming a `--credential-file`
+   the pool's VCS hosts), with `--git-credential NAME` naming a
+   `--credential-file`
    credential to clone with, `--git-host-key FILE` (`known_hosts` lines naming
    the host) for an `ssh` remote, and `--git-changes patch` to get its commits
    back as `changes.patch` (`git am` it). Add `--input FILE` for each file the

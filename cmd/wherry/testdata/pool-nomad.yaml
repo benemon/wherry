@@ -8,7 +8,7 @@ delivery_limit: 5
 lock_duration_ms: 15000
 producer_byte_rate: 1048576
 request_percentage: 10
-forges:
+vcs:
   - github.com
 storage:
   endpoint: https://s3.example.com

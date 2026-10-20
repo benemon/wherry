@@ -139,14 +139,14 @@ Exactly one of `--prompt` and `--prompt-file` is required. The other
 a `user@host:path` remote as `ssh://user@host/path`. The
 [extension](a2a-extension-v1.md#git-input) gives the rules for the remote,
 ref, path and host key. `submit` refuses, before it publishes, a remote
-whose host is not one of the pool's [`forges`](#pool-terms):
+whose host is not one of the pool's [`vcs`](#pool-terms) hosts:
 
 ```
-invalid input: git remote host github.com is not in pool build's forges
+invalid input: git remote host github.com is not in pool build's vcs hosts
 ```
 
 `continue` refuses a run whose git input, as this host's record of the run
-holds it, is no longer in the pool's forges, and a run with S3 inputs or
+holds it, is no longer in the pool's VCS hosts, and a run with S3 inputs or
 outputs whose pool no longer has storage. A host without that record,
 another host of the tenant, does not check it, and admission rejects the
 turn instead. `--git-host-key` reads at most one byte over
@@ -664,15 +664,15 @@ ignored. Any other entry and a directory with no agent files are errors.
 | `request_percentage` | host quota, percentage of broker request time |
 | `inline_limit` | optional, default 262144 (256 KiB): bytes of a task's input files together |
 | `output_limit` | optional, default 8388608 (8 MiB): bytes of one output, and of a turn's outputs together |
-| `forges` | optional, default none: the hosts a [git input](a2a-extension-v1.md#git-input) may clone from |
+| `vcs` | optional, default none: the hosts a [git input](a2a-extension-v1.md#git-input) may clone from |
 | `storage` | optional, default none: `{endpoint, bucket}`, the S3-compatible store of the pool's [S3 inputs and outputs](a2a-extension-v1.md#s3-inputs-and-outputs) |
 
-Each entry of `forges` is a lowercase host name, with `:port` for a
+Each entry of `vcs` is a lowercase host name, with `:port` for a
 remote that names a port other than its scheme's default, 443 for `https`
 and 22 for `ssh`, and appears once. `git.example.com` matches
 `https://git.example.com/...` and `ssh://git@git.example.com/...`;
 `git.example.com:2222` matches `ssh://git@git.example.com:2222/...`. A pool
-without `forges` accepts no git input.
+without `vcs` accepts no git input.
 
 `storage.endpoint` is `https://` and a lowercase host name, with `:port`
 for a port other than 443, and nothing else: no path, user information or
@@ -703,7 +703,7 @@ delivery_limit: 5
 lock_duration_ms: 15000
 producer_byte_rate: 1048576
 request_percentage: 10
-forges:
+vcs:
   - github.com
 storage:
   endpoint: https://s3.example.com

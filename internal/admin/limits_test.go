@@ -269,28 +269,31 @@ func TestLargestSubmissionHoldsTheLargestGitInput(t *testing.T) {
 	}
 }
 
-func TestPoolForges(t *testing.T) {
+func TestPoolVCS(t *testing.T) {
 	terms := modelTerms()
-	terms.Forges = []string{"github.com", "git.example.test:2222"}
+	terms.VCS = []string{"github.com", "git.example.test:2222"}
 	encoded, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"vcs":["github.com","git.example.test:2222"]`)) {
+		t.Fatalf("encoded terms %s do not use the vcs member", encoded)
 	}
 	record, err := DecodeRecord(encoded)
 	if err != nil {
 		t.Fatal(err)
 	}
 	state, err := Fold([]Record{record})
-	if err != nil || !slices.Equal(state.Pools["pool-a"].Forges, terms.Forges) {
-		t.Fatalf("forges %v, %v; want the terms' own", state.Pools["pool-a"].Forges, err)
+	if err != nil || !slices.Equal(state.Pools["pool-a"].VCS, terms.VCS) {
+		t.Fatalf("vcs hosts %v, %v; want the terms' own", state.Pools["pool-a"].VCS, err)
 	}
-	for _, forges := range [][]string{{"GitHub.com"}, {"github.com", "github.com"}, {"github.com:0"}, {"https://github.com"}, {""}} {
-		terms.Forges = forges
-		if err := validateTerms(terms); err == nil || err.Error() != "forges must be unique lowercase host names, each optionally with :port" {
-			t.Errorf("forges %q: %v", forges, err)
+	for _, hosts := range [][]string{{"GitHub.com"}, {"github.com", "github.com"}, {"github.com:0"}, {"https://github.com"}, {""}} {
+		terms.VCS = hosts
+		if err := validateTerms(terms); err == nil || err.Error() != "vcs hosts must be unique lowercase host names, each optionally with :port" {
+			t.Errorf("vcs hosts %q: %v", hosts, err)
 		}
 		if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}); err == nil {
-			t.Errorf("forges %q encoded", forges)
+			t.Errorf("vcs hosts %q encoded", hosts)
 		}
 	}
 }

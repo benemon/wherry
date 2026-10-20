@@ -62,9 +62,10 @@ one of your `credentials`, for a private repository; `host_key`, a file of
 `known_hosts` lines naming the host (or `[host]:port`), for an `ssh` remote; and
 `changes`, `patch` or `bundle`, to get its commits back as the output
 `changes.patch` or `changes.bundle`, which you apply with `git am` or
-`git fetch`. The remote's host must be one of the pool's forges, or `submit`
-returns `INVALID_ARGUMENT` naming the host and the pool. The agent pushes only
-when your prompt asks it to, and only to the branch `wherry/<run>`.
+`git fetch`. The remote's host must be one of the pool's VCS hosts, or
+`submit` returns `INVALID_ARGUMENT` naming the host and the pool. The agent
+pushes only when your prompt asks it to, and only to the branch
+`wherry/<run>`.
 
 To send files, add `inputs`: paths of regular files beneath the directory the
 wherry MCP server runs in, the pool's inline limit in all (256 KiB by default),

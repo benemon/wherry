@@ -280,25 +280,25 @@ var (
 	gitRemote  = regexp.MustCompile(`^(https|ssh)://[A-Za-z0-9._~%+@:/-]+$`)
 	gitRef     = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._/-]*$`)
 	gitSegment = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
-	forgeHost  = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
-	forgePort  = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
+	vcsHost    = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
+	vcsPort    = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
 )
 
-// ValidForge reports whether forge is a lowercase host name, optionally with a port of 1 to 65535.
-func ValidForge(forge string) bool {
-	host, port, hasPort := strings.Cut(forge, ":")
-	if !forgeHost.MatchString(host) {
+// ValidVCSHost reports whether host is a lowercase host name, optionally with a port of 1 to 65535.
+func ValidVCSHost(host string) bool {
+	host, port, hasPort := strings.Cut(host, ":")
+	if !vcsHost.MatchString(host) {
 		return false
 	}
 	if !hasPort {
 		return true
 	}
 	number, err := strconv.Atoi(port)
-	return forgePort.MatchString(port) && err == nil && number <= 65535
+	return vcsPort.MatchString(port) && err == nil && number <= 65535
 }
 
-// Forge is the lowercase host of the remote, with its port when that is not the scheme's default.
-func (g GitInput) Forge() string {
+// VCSHost is the lowercase host of the remote, with its port when that is not the scheme's default.
+func (g GitInput) VCSHost() string {
 	parsed, err := url.Parse(g.Remote)
 	if err != nil {
 		return ""
@@ -324,7 +324,7 @@ func (g *GitInput) Validate(credentials []TaskCredential) error {
 		return errors.New("git remote must be an https or ssh url of at most 2048 letters, digits and . _ ~ % + @ : / -")
 	}
 	parsed, err := url.Parse(g.Remote)
-	if err != nil || !ValidForge(g.Forge()) || parsed.Path == "" {
+	if err != nil || !ValidVCSHost(g.VCSHost()) || parsed.Path == "" {
 		return errors.New("git remote must name a host and a repository path")
 	}
 	if parsed.User != nil {

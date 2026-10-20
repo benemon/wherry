@@ -257,8 +257,8 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateInputs(input.Parts, v.state.Pools[pool].InlineLimit); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	if input.Git != nil && !slices.Contains(v.state.Pools[pool].Forges, input.Git.Forge()) {
-		return SubmitResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's forges", ErrInvalidInput, input.Git.Forge(), pool)
+	if input.Git != nil && !slices.Contains(v.state.Pools[pool].VCS, input.Git.VCSHost()) {
+		return SubmitResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's vcs hosts", ErrInvalidInput, input.Git.VCSHost(), pool)
 	}
 	runID, err := randomID("run-")
 	if err != nil {
@@ -299,7 +299,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 // scpRemote is git's scp-like remote syntax, [user@]host:path, which has no slash before its colon.
 var scpRemote = regexp.MustCompile(`^(?:([A-Za-z0-9._-]+)@)?([A-Za-z0-9.-]+):(.+)$`)
 
-// sshRemote writes an scp-like remote as the ssh URL of the same path from the root, which forges such as GitHub serve
+// sshRemote writes an scp-like remote as the ssh URL of the same path from the root, which VCS hosts such as GitHub serve
 // as the same repository; any other remote is returned as it is.
 func sshRemote(remote string) string {
 	match := scpRemote.FindStringSubmatch(remote)
@@ -343,9 +343,9 @@ func (h *Host) Continue(ctx context.Context, runID string, input ContinueInput) 
 	if echo == nil {
 		return ContinueResult{}, ErrNotAwaitingContinuation
 	}
-	// Another host of the tenant may have submitted the run, and then only admission checks its forge and storage.
-	if r.local != nil && r.local.Forge != "" && !slices.Contains(r.v.state.Pools[echo.Pool].Forges, r.local.Forge) {
-		return ContinueResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's forges", ErrInvalidInput, r.local.Forge, echo.Pool)
+	// Another host of the tenant may have submitted the run, and then only admission checks its VCS host and storage.
+	if r.local != nil && r.local.VCSHost != "" && !slices.Contains(r.v.state.Pools[echo.Pool].VCS, r.local.VCSHost) {
+		return ContinueResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's vcs hosts", ErrInvalidInput, r.local.VCSHost, echo.Pool)
 	}
 	if r.local != nil && len(r.local.S3Inputs)+len(r.local.S3Outputs) > 0 && r.v.state.Pools[echo.Pool].Storage == nil {
 		return ContinueResult{}, fmt.Errorf("%w: pool %s has no storage for S3 inputs and outputs", ErrInvalidInput, echo.Pool)
@@ -416,7 +416,7 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now tim
 		record.TaskCredentials = append(record.TaskCredentials, credential.Name)
 	}
 	if binding.Git != nil {
-		record.Forge = binding.Git.Forge()
+		record.VCSHost = binding.Git.VCSHost()
 	}
 	for _, input := range binding.S3Inputs {
 		record.S3Inputs = append(record.S3Inputs, input.Name)
@@ -427,7 +427,7 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now tim
 		}
 	}
 	if binding.Turn > 1 && previous != nil {
-		record.TaskCredentials, record.Forge, record.S3Inputs, record.S3Outputs = previous.TaskCredentials, previous.Forge, previous.S3Inputs, previous.S3Outputs
+		record.TaskCredentials, record.VCSHost, record.S3Inputs, record.S3Outputs = previous.TaskCredentials, previous.VCSHost, previous.S3Inputs, previous.S3Outputs
 	}
 	if err := h.writeRun(record); err != nil {
 		return err
@@ -513,8 +513,8 @@ type runRecord struct {
 	SubmittedMS int64 `json:"submitted_ms,omitzero"`
 	// TaskCredentials names the task credentials the run's first turn declares, which this host may seal.
 	TaskCredentials []string `json:"task_credentials,omitzero"`
-	// Forge is the forge of the git input the run's first turn declares, which every turn must be in the pool's forges.
-	Forge string `json:"forge,omitzero"`
+	// VCSHost is the host of the git input the run's first turn declares, which every turn must be in the pool's VCS.
+	VCSHost string `json:"vcs_host,omitzero"`
 	// S3Inputs and S3Outputs name the S3 inputs and outputs the run's first turn declares, which this host may presign.
 	S3Inputs  []string `json:"s3_inputs,omitzero"`
 	S3Outputs []string `json:"s3_outputs,omitzero"`

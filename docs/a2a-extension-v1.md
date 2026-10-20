@@ -223,7 +223,7 @@ part. The fixed texts are:
   `run deadline passed`, `unsupported message part`,
   `input names repeat across turns`, `run ID in use`,
   `inline inputs are <n> bytes, over the <limit>-byte limit`,
-  `git remote host <host> is not in pool <pool>'s forges`, and
+  `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
 - interrupted: `credential <name> required`, or
   `credentials <name>, <name> required` when the seal request named more
@@ -773,9 +773,9 @@ A receiver that claims a submission:
 7. rejects a continuation whose earlier turns it cannot read;
 8. rejects it when its queue deadline or run deadline has passed;
 9. rejects it when the host of the run's [git input](#git-input) is not
-   one of the pool's current forges, and with `pool <pool> has no storage
-   for S3 inputs and outputs` when the run has S3 inputs or outputs and
-   the pool's terms have no `storage`;
+   one of the pool's current VCS hosts, and with `pool <pool> has no
+   storage for S3 inputs and outputs` when the run has S3 inputs or
+   outputs and the pool's terms have no `storage`;
 10. rejects it with `unsupported message part` when a `url` part appears
     in the run's turns, and with `input names repeat across turns` when two
     turns deliver input files of one name, the git input's `known_hosts`
@@ -814,13 +814,13 @@ Readers reject a submission that breaks these rules, and a continuation
 that carries `git`.
 
 The remote's host must be one of the pool's
-[forges](reference.md#pool-terms): its host name in lowercase, with
+[`vcs`](reference.md#pool-terms) hosts: its host name in lowercase, with
 `:port` when the remote names a port other than its scheme's default, 443
-for `https` and 22 for `ssh`. A pool without forges accepts no git input.
-Clients refuse a git input outside the forges before they publish, and
+for `https` and 22 for `ssh`. A pool without `vcs` accepts no git input.
+Clients refuse a git input outside the VCS hosts before they publish, and
 receivers reject a turn of a run whose git input is outside the pool's
-current forges, with `git remote host <host> is not in pool <pool>'s
-forges`.
+current VCS hosts, with `git remote host <host> is not in pool <pool>'s
+vcs hosts`.
 
 An `ssh` remote's `host_key` entries must each name its host, as known_hosts
 does: the host, or `[host]:port` for a port other than 22, among an
@@ -868,9 +868,9 @@ traces nothing (`adapter.AgentEnvironment`), and removes from the
 environment it configures the variables no value switches off
 (`adapter.AgentUnset`), so the platform's configuration does not rewrite,
 redirect, record or trace the clone. The platform's own environment and an
-image's are the operator's to keep clear of them. Forges bound what a
-receiver accepts; the platform's egress policy bounds where the agent
-connects.
+image's are the operator's to keep clear of them. The pool's VCS hosts
+bound what a receiver accepts; the platform's egress policy bounds where
+the agent connects.
 
 The [operator guide](operator-guide.md#git-repositories) states the limits
 of these settings against an agent that runs commands.

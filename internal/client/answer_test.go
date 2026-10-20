@@ -746,10 +746,10 @@ func TestSubmitRefusesInlineInputsOverThePoolLimit(t *testing.T) {
 	}
 }
 
-func TestContinueChecksTheGitInputAgainstCurrentForges(t *testing.T) {
+func TestContinueChecksTheGitInputAgainstCurrentVCSHosts(t *testing.T) {
 	f := newFixture(t)
 	terms := testTerms()
-	terms.Forges = []string{"git.example.test"}
+	terms.VCS = []string{"git.example.test"}
 	if err := f.service.PoolCreate(f.ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
 	}
@@ -762,22 +762,22 @@ func TestContinueChecksTheGitInputAgainstCurrentForges(t *testing.T) {
 	}
 	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
 	receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
-	terms.Forges = []string{"github.com"}
+	terms.VCS = []string{"github.com"}
 	if err := f.service.PoolCreate(f.ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
 	}
 	_, err = f.host.Continue(f.ctx, submitted.RunID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute})
-	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "git remote host git.example.test is not in pool pool-a's forges") {
-		t.Fatalf("continue = %v; want the forge refused", err)
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "git remote host git.example.test is not in pool pool-a's vcs hosts") {
+		t.Fatalf("continue = %v; want the VCS host refused", err)
 	}
 	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 1 {
 		t.Fatalf("task topic holds %d records, want the first turn alone", len(records))
 	}
-	terms.Forges = append(terms.Forges, "git.example.test")
+	terms.VCS = append(terms.VCS, "git.example.test")
 	if err := f.service.PoolCreate(f.ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.host.Continue(f.ctx, submitted.RunID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
-		t.Fatalf("continue under a forge the pool allows: %v", err)
+		t.Fatalf("continue under a VCS host the pool allows: %v", err)
 	}
 }
