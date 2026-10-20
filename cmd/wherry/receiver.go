@@ -103,7 +103,7 @@ func (p *plugins) adapter(pool string, settings admin.AdapterSettings, platform 
 	if err != nil {
 		return receiver.Named{}, err
 	}
-	return receiver.Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Git: configured.Git(), Adapter: configured}, nil
+	return receiver.Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Adapter: configured}, nil
 }
 
 func (p *plugins) close() {

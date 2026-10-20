@@ -503,8 +503,10 @@ type feedRecord struct {
 // largestRecords signs, with a throwaway key, the largest bounded submission whose inputs fit inlineLimit, and the
 // largest bounded records a receiver writes to a feed: an output chunk, a result, and a transcript chunk of a line of
 // wire.MaxLine raw bytes. Every field with a bound is at its maximum; the submission's parts are all input files with
-// the longest names, one holding all the inputs. A prompt, part metadata and media types, a selector, the task
-// credentials, a receiver's labels and an adapter's job name have no bound and are left empty.
+// the longest names, one holding all the inputs. A git input exists only on a first turn and outweighs the longest
+// turn number, so the submission is a first turn with a git input at its bounds and the one task credential it names.
+// A prompt, part metadata and media types, a selector, the other task credentials and the outputs, a receiver's labels
+// and an adapter's job name have no bound and are left empty.
 func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	_, key, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -525,8 +527,14 @@ func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	submission, err := wire.SignRecord(&wire.Submission{
 		Message: submitted,
 		Wherry: wire.SubmissionBinding{
-			Tenant: name, Host: name, Pool: name, Run: run, Turn: math.MaxInt64, Placement: wire.Placement{Agent: name},
+			Tenant: name, Host: name, Pool: name, Run: run, Turn: 1, Placement: wire.Placement{Agent: name},
 			DeadlineMS: math.MaxInt64, QueueDeadlineMS: math.MaxInt64,
+			Credentials: []wire.TaskCredential{{Name: name, File: strings.Repeat("f", 255)}},
+			// A quote is the printable character JSON lengthens most.
+			Git: &wire.GitInput{
+				Remote: "ssh://h/" + strings.Repeat("a", wire.MaxGitRemote-len("ssh://h/")), Ref: strings.Repeat("r", wire.MaxGitRef),
+				Path: strings.Repeat("a/", 255) + "aa", Credential: name, HostKey: "h k " + strings.Repeat(`"`, wire.MaxGitHostKey-len("h k ")),
+			},
 		},
 	}, key)
 	if err != nil {

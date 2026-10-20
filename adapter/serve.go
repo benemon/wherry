@@ -104,8 +104,6 @@ func callStatus(err error) error {
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, ErrGitContext):
-		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.As(err, &tooLarge):
 		return status.Error(codes.OutOfRange, tooLarge.Name)
 	case errors.Is(err, context.DeadlineExceeded):
@@ -125,7 +123,7 @@ func (s *server) Configure(_ context.Context, req *adapterv1.ConfigureRequest) (
 	s.adapters[req.Adapter] = adapter
 	s.mu.Unlock()
 	directories := adapter.Directories()
-	return &adapterv1.ConfigureResponse{Git: adapter.Git(), Directories: &adapterv1.Directories{
+	return &adapterv1.ConfigureResponse{Directories: &adapterv1.Directories{
 		Input: directories.Input, Output: directories.Output, Credentials: directories.Credentials,
 	}}, nil
 }
@@ -151,9 +149,6 @@ func (s *server) Dispatch(ctx context.Context, req *adapterv1.DispatchRequest) (
 	run := Run{
 		ID: message.GetId(), Adapter: message.GetAdapter(), Agent: message.GetAgent(), Turn: message.GetTurn(), Attempt: message.GetAttempt(),
 		Prompt: message.GetPrompt(), Credential: message.Credential,
-	}
-	if git := message.GetGit(); git != nil {
-		run.Git = &GitContext{URL: git.Url, Ref: git.Ref, Path: git.Path}
 	}
 	for _, input := range message.GetInputs() {
 		run.Inputs = append(run.Inputs, File{Name: input.GetName(), Data: input.GetData()})

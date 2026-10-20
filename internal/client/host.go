@@ -15,6 +15,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -46,6 +47,7 @@ const liveness = 120 * time.Second
 
 // SubmitInput contains the root-task routing and prompt fields; Parts follow the prompt's text part. Credentials
 // name credentials this host configures, delivered to the agent as files, and Outputs the files it is asked to leave.
+// Git is the repository the agent clones, and GitChanges, patch or bundle, asks for its changes back as that output.
 type SubmitInput struct {
 	// Agent names what runs; empty takes the pool's default.
 	Agent         string
@@ -54,6 +56,8 @@ type SubmitInput struct {
 	Parts         []wire.Part
 	Credentials   []wire.TaskCredential
 	Outputs       []wire.ExpectedOutput
+	Git           *wire.GitInput
+	GitChanges    string
 	Deadline      time.Duration
 	QueueDeadline time.Duration
 }
@@ -195,14 +199,25 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateRequirements(input.Selector); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	for _, part := range input.Parts {
-		if part.MediaType != wire.GitMediaType {
-			continue
-		}
-		// ParseGitPart never quotes the URL in its errors, so its text is safe to return.
-		if _, err := wire.ParseGitPart(part); err != nil {
+	outputs := input.Outputs
+	if input.Git != nil {
+		git := *input.Git
+		git.Remote = sshRemote(git.Remote)
+		// Validate never quotes a value in its errors, so its text is safe to return.
+		if err := git.Validate(input.Credentials); err != nil {
 			return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 		}
+		input.Git = &git
+		changes := map[string]string{"": "", "patch": wire.GitPatch, "bundle": wire.GitBundle}
+		name, ok := changes[input.GitChanges]
+		if !ok {
+			return SubmitResult{}, fmt.Errorf("%w: git changes must be patch or bundle", ErrInvalidInput)
+		}
+		if name != "" && !slices.ContainsFunc(outputs, func(output wire.ExpectedOutput) bool { return output.Name == name }) {
+			outputs = append(slices.Clone(outputs), wire.ExpectedOutput{Name: name})
+		}
+	} else if input.GitChanges != "" {
+		return SubmitResult{}, fmt.Errorf("%w: git changes need a git input", ErrInvalidInput)
 	}
 	for _, credential := range input.Credentials {
 		if _, configured := h.credentials[credential.Name]; !configured {
@@ -225,6 +240,9 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateInputs(input.Parts, v.state.Pools[pool].InlineLimit); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
+	if input.Git != nil && !slices.Contains(v.state.Pools[pool].Forges, input.Git.Forge()) {
+		return SubmitResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's forges", ErrInvalidInput, input.Git.Forge(), pool)
+	}
 	runID, err := randomID("run-")
 	if err != nil {
 		return SubmitResult{}, err
@@ -233,11 +251,28 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	submission.Wherry.Credentials, submission.Wherry.Outputs = input.Credentials, input.Outputs
+	submission.Wherry.Credentials, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, outputs, input.Git
 	if err := h.publish(ctx, submission, now); err != nil {
 		return SubmitResult{}, err
 	}
 	return SubmitResult{RunID: runID, Pool: pool}, nil
+}
+
+// scpRemote is git's scp-like remote syntax, [user@]host:path, which has no slash before its colon.
+var scpRemote = regexp.MustCompile(`^(?:([A-Za-z0-9._-]+)@)?([A-Za-z0-9.-]+):(.+)$`)
+
+// sshRemote writes an scp-like remote as the ssh URL of the same path from the root, which forges such as GitHub serve
+// as the same repository; any other remote is returned as it is.
+func sshRemote(remote string) string {
+	match := scpRemote.FindStringSubmatch(remote)
+	if match == nil || strings.Contains(remote, "://") {
+		return remote
+	}
+	user := ""
+	if match[1] != "" {
+		user = match[1] + "@"
+	}
+	return "ssh://" + user + match[2] + "/" + strings.TrimPrefix(match[3], "/")
 }
 
 // Continue publishes the next turn of an interrupted run to the pool and placement its echo names.
@@ -269,6 +304,10 @@ func (h *Host) Continue(ctx context.Context, runID string, input ContinueInput) 
 	echo := r.turns[status.Wherry.Turn].echo
 	if echo == nil {
 		return ContinueResult{}, ErrNotAwaitingContinuation
+	}
+	// Another host of the tenant may have submitted the run, and then only admission checks its forge.
+	if r.local != nil && r.local.Forge != "" && !slices.Contains(r.v.state.Pools[echo.Pool].Forges, r.local.Forge) {
+		return ContinueResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's forges", ErrInvalidInput, r.local.Forge, echo.Pool)
 	}
 	now := time.Now()
 	submission, err := h.submission(runID, next, echo.Pool, echo.Placement, []wire.Part{{Text: input.Prompt}}, input.Deadline, input.QueueDeadline, now)
@@ -332,8 +371,11 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now tim
 	for _, credential := range binding.Credentials {
 		record.TaskCredentials = append(record.TaskCredentials, credential.Name)
 	}
+	if binding.Git != nil {
+		record.Forge = binding.Git.Forge()
+	}
 	if binding.Turn > 1 && previous != nil {
-		record.TaskCredentials = previous.TaskCredentials
+		record.TaskCredentials, record.Forge = previous.TaskCredentials, previous.Forge
 	}
 	if err := h.writeRun(record); err != nil {
 		return err
@@ -419,6 +461,8 @@ type runRecord struct {
 	SubmittedMS int64 `json:"submitted_ms,omitzero"`
 	// TaskCredentials names the task credentials the run's first turn declares, which this host may seal.
 	TaskCredentials []string `json:"task_credentials,omitzero"`
+	// Forge is the forge of the git input the run's first turn declares, which every turn must be in the pool's forges.
+	Forge string `json:"forge,omitzero"`
 }
 
 func (h *Host) runPath(runID string) (string, bool) {

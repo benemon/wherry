@@ -32,7 +32,7 @@ func mcpSession(t *testing.T, connect func() (*busclient.Host, error), progress 
 }
 
 // mcpSessionReading is mcpSession with submit reading its inputs through readInput.
-func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), progress *atomic.Int64, readInput func(string) (wire.Part, error)) *mcp.ClientSession {
+func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), progress *atomic.Int64, readInput func(string, int64) (wire.Part, error)) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -408,7 +408,7 @@ func TestMCPErrorsCarryNoSecrets(t *testing.T) {
 		"connect failure": {func() (*busclient.Host, error) { return busclient.Connect(broken, log.New(io.Discard, "", 0)) }, "status", map[string]any{"id": "run-a"}, "UNAVAILABLE"},
 		"git userinfo": {working, "submit", map[string]any{
 			"prompt": "x", "selector": []any{},
-			"git": map[string]any{"url": "https://user:s3cr3t-password@git.example.test/org/repo.git", "ref": "main"},
+			"git": map[string]any{"remote": "https://user:s3cr3t-password@git.example.test/org/repo.git", "ref": "main"},
 		}, "INVALID_ARGUMENT"},
 		"unknown run": {working, "status", map[string]any{"id": "run-missing"}, "RUN_NOT_FOUND"},
 		"invalid selector key": {working, "submit", map[string]any{

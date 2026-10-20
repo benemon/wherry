@@ -1,14 +1,19 @@
 package admin
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	json "encoding/json/v2"
 	"errors"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -236,4 +241,56 @@ func TestLargestRecordsFitTheBrokerOnRealBroker(t *testing.T) {
 		t.Logf("%s: %d-byte batch", record.name, batchSize(record.value))
 	}
 	t.Logf("topic limit %s: highest inline limit %d", limit, accepted)
+}
+
+// The largest submission must hold a git input at every bound, or a pool could accept terms whose git submissions the
+// broker refuses.
+func TestLargestSubmissionHoldsTheLargestGitInput(t *testing.T) {
+	submission, _, err := largestRecords(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments := bytes.Split(submission, []byte("."))
+	if len(segments) != 3 {
+		t.Fatalf("submission is not a compact JWS")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(string(segments[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded wire.Submission
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	git := decoded.Wherry.Git
+	if git == nil || decoded.Wherry.Turn != 1 || len(git.Remote) != wire.MaxGitRemote || len(git.Ref) != wire.MaxGitRef || len(git.Path) != 512 ||
+		len(git.HostKey) != wire.MaxGitHostKey || strings.Count(git.HostKey, `"`) != wire.MaxGitHostKey-len("h k ") || len(git.Credential) != 32 {
+		t.Fatalf("largest submission's git input %+v at turn %d; want every field at its bound on a first turn", git, decoded.Wherry.Turn)
+	}
+}
+
+func TestPoolForges(t *testing.T) {
+	terms := modelTerms()
+	terms.Forges = []string{"github.com", "git.example.test:2222"}
+	encoded, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := DecodeRecord(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := Fold([]Record{record})
+	if err != nil || !slices.Equal(state.Pools["pool-a"].Forges, terms.Forges) {
+		t.Fatalf("forges %v, %v; want the terms' own", state.Pools["pool-a"].Forges, err)
+	}
+	for _, forges := range [][]string{{"GitHub.com"}, {"github.com", "github.com"}, {"github.com:0"}, {"https://github.com"}, {""}} {
+		terms.Forges = forges
+		if err := validateTerms(terms); err == nil || err.Error() != "forges must be unique lowercase host names, each optionally with :port" {
+			t.Errorf("forges %q: %v", forges, err)
+		}
+		if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}); err == nil {
+			t.Errorf("forges %q encoded", forges)
+		}
+	}
 }

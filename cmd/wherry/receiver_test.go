@@ -194,17 +194,6 @@ func TestRestartChecksThePluginAgain(t *testing.T) {
 	}
 }
 
-func TestGitFollowsThePlugin(t *testing.T) {
-	plugins := &plugins{dir: pluginDir, logs: io.Discard, running: map[string]*adapter.Plugin{}}
-	defer plugins.close()
-	for _, git := range []bool{true, false} {
-		named, err := plugins.adapter("build", admin.AdapterSettings{Name: fmt.Sprintf("git-%t", git), Type: "fake", Agent: "claude", Config: map[string]any{"git": git}}, "")
-		if err != nil || named.Git != git {
-			t.Fatalf("adapter reporting git=%t: Named.Git %t, %v", git, named.Git, err)
-		}
-	}
-}
-
 func TestMissingPluginIsAConfigurationError(t *testing.T) {
 	plugins := &plugins{dir: t.TempDir(), logs: io.Discard, running: map[string]*adapter.Plugin{}}
 	defer plugins.close()

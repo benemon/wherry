@@ -170,7 +170,7 @@ func (p *Plugin) Configure(settings Settings) (Adapter, error) {
 	}
 	p.settings = append(p.settings, settings)
 	directories := resp.GetDirectories()
-	return &remote{plugin: p, name: settings.Name, git: resp.Git, directories: Directories{
+	return &remote{plugin: p, name: settings.Name, directories: Directories{
 		Input: directories.GetInput(), Output: directories.GetOutput(), Credentials: directories.GetCredentials(),
 	}}, nil
 }
@@ -205,8 +205,6 @@ func callError(ctx context.Context, err error) error {
 	switch status.Code(err) {
 	case codes.Unavailable, codes.Canceled:
 		return ErrLinkLost
-	case codes.FailedPrecondition:
-		return ErrGitContext
 	case codes.DeadlineExceeded:
 		return context.DeadlineExceeded
 	case codes.ResourceExhausted:
@@ -221,11 +219,8 @@ func callError(ctx context.Context, err error) error {
 type remote struct {
 	plugin      *Plugin
 	name        string
-	git         bool
 	directories Directories
 }
-
-func (r *remote) Git() bool { return r.git }
 
 func (r *remote) Directories() Directories { return r.directories }
 
@@ -248,9 +243,6 @@ func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
 	}
 	message := &adapterv1.Run{
 		Id: run.ID, Adapter: run.Adapter, Agent: run.Agent, Turn: run.Turn, Attempt: run.Attempt, Prompt: run.Prompt, Credential: run.Credential,
-	}
-	if run.Git != nil {
-		message.Git = &adapterv1.GitContext{Url: run.Git.URL, Ref: run.Git.Ref, Path: run.Git.Path}
 	}
 	for _, input := range run.Inputs {
 		message.Inputs = append(message.Inputs, &adapterv1.File{Name: input.Name, Data: input.Data})

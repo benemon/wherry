@@ -39,9 +39,7 @@ type Named struct {
 	Agent      string
 	Credential string
 	// Labels are the operator's declared labels for the adapter (ADR-0027 Placement).
-	Labels map[string]string
-	// Git is set when the adapter delivers git context parts (ADR-0024).
-	Git     bool
+	Labels  map[string]string
 	Adapter adapter.Adapter
 }
 

@@ -34,9 +34,9 @@ func (p *grpcPlugin) GRPCClient(_ context.Context, _ *plugin.GRPCBroker, conn *g
 }
 
 func handleMessage(handle Handle) *adapterv1.Handle {
-	return &adapterv1.Handle{Data: handle.Data, Name: handle.Name, Commit: handle.Commit}
+	return &adapterv1.Handle{Data: handle.Data, Name: handle.Name}
 }
 
 func handleOf(message *adapterv1.Handle) Handle {
-	return Handle{Data: message.GetData(), Name: message.GetName(), Commit: message.GetCommit()}
+	return Handle{Data: message.GetData(), Name: message.GetName()}
 }

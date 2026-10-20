@@ -223,6 +223,16 @@ A required output that is not returned fails the turn. `wherry await`
 verifies each output's chunks against the result before it writes the file
 locally.
 
+A task can also name a git repository: a remote, a ref, the task
+credential to clone with and, for `ssh`, the host key. The agent clones it
+with `git` itself; wherry runs no git. The receiver delivers the host key
+as the input file `known_hosts` and opens the prompt with the clone
+commands, which read the credential from its file. The remote's host must
+be one of the pool's forges. The agent returns its commits as a patch or a
+bundle output, which the parent applies with its own credentials, or
+pushes them to the branch `wherry/<run>` when the parent asks and its
+credential allows.
+
 ## Runs, turns and attempts
 
 A run is one task from submission to its final state. It has one or more

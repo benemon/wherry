@@ -1428,3 +1428,19 @@ func TestRunsUpdatedFallsBackToFileTimeAndEcho(t *testing.T) {
 		t.Fatalf("local run without submitted_ms updated %v, want its file time %v", run.Updated, modified)
 	}
 }
+
+func TestSSHRemote(t *testing.T) {
+	for remote, want := range map[string]string{
+		"git@github.com:org/repo.git":             "ssh://git@github.com/org/repo.git",
+		"github.com:org/repo.git":                 "ssh://github.com/org/repo.git",
+		"git@git.example.test:/srv/repo.git":      "ssh://git@git.example.test/srv/repo.git",
+		"https://github.com/org/repo.git":         "https://github.com/org/repo.git",
+		"ssh://git@github.com:22/org/repo.git":    "ssh://git@github.com:22/org/repo.git",
+		"https://user:s3cr3t@github.com/repo.git": "https://user:s3cr3t@github.com/repo.git",
+		"./repo": "./repo",
+	} {
+		if got := sshRemote(remote); got != want {
+			t.Errorf("sshRemote(%q) = %q, want %q", remote, got, want)
+		}
+	}
+}

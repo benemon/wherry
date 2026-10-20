@@ -103,7 +103,13 @@ A submission is one turn of a run.
     "deadline_ms": 1790000000000,
     "queue_deadline_ms": 1789998800000,
     "credentials": [{"name": "deploy-key", "file": "id_ed25519"}],
-    "outputs": [{"name": "report.md", "required": true}]
+    "outputs": [{"name": "report.md", "required": true}],
+    "git": {
+      "remote": "ssh://git@git.example.com/team/app.git",
+      "ref": "main",
+      "credential": "deploy-key",
+      "host_key": "git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...\n"
+    }
   }
 }
 ```
@@ -121,8 +127,8 @@ A submission is one turn of a run.
   run must end and a receiver must claim it. A receiver ends the run no
   later than one hour after `queue_deadline_ms`.
 - The message has at most 256 parts, each with exactly one of `text`,
-  `raw`, `url` and `data`. A submission carries at most one
-  [git part](#git-context).
+  `raw`, `url` and `data`. Receivers reject a `url` part
+  ([admission](#admission)).
 - Each `raw` and `data` part is an [input file](#inputs-and-outputs). Its
   `filename` is required and is a file name: at most 255 bytes of letters,
   digits, `.`, `_` and `-`, whose first character is not `.`. A `raw` part is delivered
@@ -139,8 +145,9 @@ A submission is one turn of a run.
 - `outputs` lists at most 256 files the agent is asked to leave, each
   `{name, required}`. `name` is a relative path of file names joined by
   `/`, at most 512 bytes, and appears once. `required` defaults to false.
-- Only a run's first turn carries `credentials` and `outputs`, and they
-  hold for every turn of the run.
+- `git` is the run's [git input](#git-input), optional.
+- Only a run's first turn carries `credentials`, `outputs` and `git`, and
+  they hold for every turn of the run.
 
 ## Cancel
 
@@ -185,7 +192,7 @@ A status reports one attempt of one turn.
 | `kind` | State | Written when | Extra |
 | --- | --- | --- | --- |
 | `claimed` | `TASK_STATE_WORKING` | the receiver admits the turn | |
-| `started` | `TASK_STATE_WORKING` | the job has started | `metadata.git_commit` with a git context |
+| `started` | `TASK_STATE_WORKING` | the job has started | |
 | `heartbeat` | `TASK_STATE_WORKING` | every 10 seconds while the job runs | pool events only |
 | `interrupted` | `TASK_STATE_AUTH_REQUIRED` | the turn waits for the tenant | `metadata.credential` for a missing credential |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the turn | the reason as message text |
@@ -205,13 +212,14 @@ part. The fixed texts are:
   `task is not awaiting continuation`, `continuation turn out of order`,
   `continuation history unavailable`, `queue deadline passed`,
   `run deadline passed`, `unsupported message part`,
-  `input names repeat across turns`, `run ID in use`, and
-  `inline inputs are <n> bytes, over the <limit>-byte limit`;
+  `input names repeat across turns`, `run ID in use`,
+  `inline inputs are <n> bytes, over the <limit>-byte limit`, and
+  `git remote host <host> is not in pool <pool>'s forges`;
 - interrupted: `credential <name> required`, or
   `credentials <name>, <name> required` when the seal request named more
   than one;
 - failed: `timeout`, `log stream failed`,
-  `agent ended without a result`, `git context unavailable`,
+  `agent ended without a result`,
   `receiver denied`, `delivery budget exhausted`,
   `start failed and the job could not be removed`,
   `input <name> takes the turn's inputs over what adapter <adapter>
@@ -713,47 +721,111 @@ A receiver that claims a submission:
    it;
 7. rejects a continuation whose earlier turns it cannot read;
 8. rejects it when its queue deadline or run deadline has passed;
-9. rejects it with `unsupported message part` when a `url` part other than
-   one git part the adapter delivers appears in the run's turns, and with
-   `input names repeat across turns` when two turns deliver input files of
-   one name;
-10. writes the echo and the `claimed` status.
+9. rejects it when the host of the run's [git input](#git-input) is not
+   one of the pool's current forges;
+10. rejects it with `unsupported message part` when a `url` part appears
+    in the run's turns, and with `input names repeat across turns` when two
+    turns deliver input files of one name, the git input's `known_hosts`
+    among them;
+11. writes the echo and the `claimed` status.
 
-A turn a cancel covers skips steps 8 and 9, and ends `TASK_STATE_CANCELED`
+A turn a cancel covers skips steps 8 to 10, and ends `TASK_STATE_CANCELED`
 after its `claimed` status.
 
-## Git context
+## Git input
 
-A submission can name a git repository for the agent to work on. The
-repository is a `url` part with media type `application/vnd.wherry.git`:
+A first turn's `git` names a repository the agent clones itself. wherry
+runs no git: it carries the repository's description, delivers the host
+key and the credential as files, and gives the agent the commands.
 
-- `url` (string): the clone URL. Its scheme is `https` or `ssh` and it has
-  a host. An `ssh` URL may carry the user name `git` as its only user
-  information; an `https` URL carries none. Neither has a query or
-  fragment.
-- `metadata.ref` (string, required): a branch, tag or commit.
-- `metadata.path` (string, optional): the checkout directory, a relative
-  path. It defaults to the last segment of the URL path without a `.git`
-  suffix.
-- `metadata` has no other members.
+- `remote` (string, required): the repository's `https` or `ssh` URL, at
+  most 2048 bytes of letters, digits, `.`, `_`, `~`, `%`, `+`, `@`, `:`,
+  `/` and `-`, naming a host and a path. An `https` remote carries no user
+  information; an `ssh` remote may name a user, without a password.
+- `ref` (string, required): a branch, tag or commit, at most 255 bytes.
+- `path` (string, optional): the checkout directory, a relative path of at
+  most 512 bytes, taken from the agent's working directory. It defaults to
+  the last segment of the remote's path without a `.git` suffix.
+- `credential` (string, optional): the `name` of one of the submission's
+  `credentials`, which the agent clones with: a token for an `https`
+  remote, a private key for an `ssh` one.
+- `host_key` (string): OpenSSH `known_hosts` lines for the remote's host,
+  at most 8 KiB of printable ASCII, each blank, a comment or an entry of at
+  least three space-separated fields, with at least one entry. An `ssh`
+  remote requires it and an `https` remote refuses it.
 
 A ref, and each segment of a path, starts with a letter, digit or
 underscore and holds only letters, digits, `.`, `_` and `-`. A ref can also
 hold `/`. It cannot hold `..` or `//`, or end in `/`, `.` or `.lock`.
-Readers reject a submission that breaks these rules. A git part applies to
-its own turn and to every later turn of the run.
+Readers reject a submission that breaks these rules, and a continuation
+that carries `git`.
 
-Before the agent starts, the adapter fetches the ref at depth 1, checks it
-out, and adds one line to the end of the prompt:
+The remote's host must be one of the pool's
+[forges](reference.md#pool-terms): its host name in lowercase, with
+`:port` when the remote names a port other than its scheme's default, 443
+for `https` and 22 for `ssh`. A pool without forges accepts no git input.
+Clients refuse a git input outside the forges before they publish, and
+receivers reject a turn of a run whose git input is outside the pool's
+current forges, with `git remote host <host> is not in pool <pool>'s
+forges`.
 
-```
-The git repository <url> at <ref> is checked out in <dir> at commit <sha>.
-```
+An `ssh` remote's `host_key` entries must each name its host, as known_hosts
+does: the host, or `[host]:port` for a port other than 22, among an
+entry's comma-separated patterns. Hashed entries, and entries with any
+`*` or `?` pattern, are refused.
 
-The turn's `started` status holds `git_commit`, the hex commit SHA checked
-out, in its `metadata`. When the checkout fails, the turn ends
-`TASK_STATE_FAILED` with the message text `git context unavailable`.
-Receivers do not publish git's error output.
+The receiver delivers `host_key` as the input file `known_hosts`, which no
+`raw` or `data` part of the run may also name, and opens the prompt with
+the commands that clone the remote at the ref, each on its own line
+indented by four spaces. They need `git` 2.30 or later, and the prompt asks
+the agent to check. The clone takes no template (`--template=`) and sets,
+for itself and every later command in it:
+
+- `credential.helper` empty, which resets the helpers, then for an `https`
+  remote with a credential, `credential.<scheme>://<host>[:<port>].helper`:
+  a helper that answers only `get`, with the user name `x-access-token` and
+  a password it reads from the credential file;
+- for an `ssh` remote, `core.sshCommand`: `ssh` with `-F /dev/null`, `-i`
+  naming the credential file (or `IdentityFile=/dev/null` without one),
+  `IdentitiesOnly=yes`, `IdentityAgent=none`, `UserKnownHostsFile` naming
+  `known_hosts`, `GlobalKnownHostsFile=/dev/null`,
+  `StrictHostKeyChecking=yes`, `BatchMode=yes` and `ProxyCommand=none`;
+- `http.followRedirects=false`, `http.sslVerify=true`,
+  `protocol.allow=never` and `protocol.<scheme>.allow=always`;
+- `user.name` and `user.email`.
+
+Then `git checkout <ref>`, and `refs/wherry/start` set to the commit
+checked out.
+
+Every command starts with `git`, with no environment assignment or
+redirect, so a harness rule that allows `git` commands allows them all.
+Such a rule grants the commands; it confines nothing, since `git` can run
+any command.
+The commands read the credential from its file, so its value is on no
+command line and in no environment variable or prompt. When the run
+expects the output `changes.patch`, the lines give the
+`git format-patch --output=<file> refs/wherry/start..HEAD` command that
+writes it; for `changes.bundle`, the `git bundle create` command for the
+same range. They ask the agent to push only when the request says so, and
+then only to the branch `wherry/<run>`.
+
+An adapter gives its agent an environment in which `git` reads no system,
+global or environment configuration, uses no template, never prompts and
+traces nothing (`adapter.AgentEnvironment`), and removes from the
+environment it configures the variables no value switches off
+(`adapter.AgentUnset`), so the platform's configuration does not rewrite,
+redirect, record or trace the clone. The platform's own environment and an
+image's are the operator's to keep clear of them. Forges bound what a
+receiver accepts; the platform's egress policy bounds where the agent
+connects.
+
+These settings protect a cooperative agent from ambient configuration. They
+do not constrain a hostile or prompt-injected agent: one that runs
+commands can override every one of them, and a harness rule allowing only
+`git` commands does not prevent that, since `git` aliases run shell
+commands. Such an agent holds whatever credentials the parent sent,
+bounded by their scope and lifetime, the egress policy, and the receiver's
+redaction of what it returns.
 
 ## Inputs and outputs
 
@@ -761,18 +833,20 @@ The agent finds three directories through environment variables that hold
 their paths:
 
 - `WHERRY_INPUT_DIR`: the run's input files, from the `raw` and `data`
-  parts of every turn, under their delivered names.
+  parts of every turn, under their delivered names, and `known_hosts` for
+  a git input with a host key.
 - `WHERRY_CREDENTIALS_DIR`: the run's task credentials, each as the file
   its `file` names. The adapter writes credential values only there, as
   files, and never into the environment or the input directory.
 - `WHERRY_OUTPUT_DIR`: where the agent leaves its outputs. The agent
   creates the directory when it does not exist.
 
-When the run has inputs, task credentials or expected outputs, the
-receiver opens the prompt with lines giving the absolute path of each
-directory, of each input file, of each credential file and of each expected
-output, with `(required)` after a required one, so an agent without a shell
-finds them. The adapter reports the directories' paths as its agent sees
+When the run has inputs, task credentials, expected outputs or a git
+input, the receiver opens the prompt with lines giving the absolute path of
+each directory, of each input file, of each credential file and of each
+expected output, with `(required)` after a required one, so an agent
+without a shell finds them, and the commands of the
+[git input](#git-input). The adapter reports the directories' paths as its agent sees
 them; a directory it does not report appears as its variable. The lines
 hold no credential value.
 

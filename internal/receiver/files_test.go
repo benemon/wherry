@@ -265,7 +265,7 @@ func TestPreambleNamesFilesNeverValues(t *testing.T) {
 	inputs := []adapter.File{{Name: "data.csv", Data: []byte("input-content")}}
 	credentials := []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}
 	outputs := []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes/extra.txt"}}
-	got := preamble(directories, inputs, credentials, outputs)
+	got := preamble(directories, inputs, credentials, outputs, nil, "run-a")
 	for _, want := range []string{"input directory is /local/inputs", "credentials directory /secrets/credentials", "output directory /local/outputs",
 		"WHERRY_INPUT_DIR", "Input files: /local/inputs/data.csv.", "Credential files: /secrets/credentials/id_ed25519.",
 		"/local/outputs/report.md (required), /local/outputs/notes/extra.txt."} {
@@ -278,10 +278,10 @@ func TestPreambleNamesFilesNeverValues(t *testing.T) {
 			t.Errorf("preamble %q holds %q", got, never)
 		}
 	}
-	if unreported := preamble(adapter.Directories{}, inputs, nil, nil); !strings.Contains(unreported, "Input files: $WHERRY_INPUT_DIR/data.csv.") {
+	if unreported := preamble(adapter.Directories{}, inputs, nil, nil, nil, "run-a"); !strings.Contains(unreported, "Input files: $WHERRY_INPUT_DIR/data.csv.") {
 		t.Errorf("preamble %q, want the variable for a directory the adapter does not report", unreported)
 	}
-	if preamble(directories, nil, nil, nil) != "" {
+	if preamble(directories, nil, nil, nil, nil, "run-a") != "" {
 		t.Error("a run that declares no files has a preamble")
 	}
 }

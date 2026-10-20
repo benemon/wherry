@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	json "encoding/json/v2"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -204,7 +206,7 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 		"a missing file":         filepath.Join(work, "absent"),
 		"a parent path":          filepath.Join(work, "..", filepath.Base(outside), "bundle.yaml"),
 	} {
-		if _, err := read(path); err == nil {
+		if _, err := read(path, math.MaxInt64); err == nil {
 			t.Errorf("read %s (%s)", name, path)
 		}
 	}
@@ -213,7 +215,7 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	refused := make(chan error, 1)
-	go func() { _, err := read(fifo); refused <- err }()
+	go func() { _, err := read(fifo, math.MaxInt64); refused <- err }()
 	select {
 	case err := <-refused:
 		if err == nil {
@@ -222,11 +224,101 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("reading a FIFO blocked")
 	}
-	part, err := read(link(write(filepath.Join(work, "sub", "data.csv")), "data.csv"))
+	part, err := read(link(write(filepath.Join(work, "sub", "data.csv")), "data.csv"), math.MaxInt64)
 	if err != nil || part.Filename != "data.csv" || string(part.Raw) != "content" {
 		t.Fatalf("read a file beneath the working directory: %+v, %v", part, err)
 	}
-	if part, err := read("sub/data.csv"); err != nil || string(part.Raw) != "content" {
+	if part, err := read("sub/data.csv", math.MaxInt64); err != nil || string(part.Raw) != "content" {
 		t.Fatalf("read a relative path: %+v, %v", part, err)
+	}
+	if part, err := read("sub/data.csv", 3); err != nil || string(part.Raw) != "con" {
+		t.Fatalf("read with a limit: %+v, %v", part, err)
+	}
+}
+
+func TestAwaitSaysHowToApplyGitChanges(t *testing.T) {
+	for name, command := range map[string]string{wire.GitPatch: "apply with: git am %s\n", wire.GitBundle: "fetch with: git fetch %s HEAD\n"} {
+		t.Run(name, func(t *testing.T) {
+			b := newBus(t)
+			admitted := b.admitted(t)
+			b.outputResult(t, admitted, name, "changes\n", hashOf("changes\n"))
+			dir := t.TempDir()
+			var stdout, stderr bytes.Buffer
+			if err := runAwait(b.ctx, b.client, []string{admitted.submission.Wherry.Run, "--outputs-dir", dir}, &stdout, &stderr); err != nil {
+				t.Fatalf("await: %v; stderr %s", err, stderr.String())
+			}
+			if want := fmt.Sprintf(command, filepath.Join(dir, name)); !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr %q, want %q", stderr.String(), want)
+			}
+		})
+	}
+}
+
+func TestMCPSubmitCarriesTheGitInput(t *testing.T) {
+	b := newBus(t)
+	work := t.TempDir()
+	session := mcpSessionReading(t, b.connect(t), nil, inputReader(work, busclient.Config{Credentials: b.credentials}))
+	const key = "git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
+	if err := os.WriteFile(filepath.Join(work, "known_hosts"), []byte(key), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git := map[string]any{"remote": "git@git.example.test:org/repo.git", "ref": "main", "path": "src/repo", "credential": "model", "host_key": "known_hosts", "changes": "bundle"}
+	var submitted submitOutput
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "fix it", "credentials": []map[string]any{{"name": "model", "file": "id_ed25519"}}, "git": git}, &submitted)
+	submission := b.tasks(t, submitted.ID)[0].submission
+	want := wire.GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", Path: "src/repo", Credential: "model", HostKey: key}
+	if submission.Wherry.Git == nil || *submission.Wherry.Git != want || !slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: wire.GitBundle}}) {
+		t.Fatalf("submitted git %+v and outputs %+v", submission.Wherry.Git, submission.Wherry.Outputs)
+	}
+	// The host key is read as an input is, so it cannot name a credential of this host's configuration.
+	git["host_key"] = b.credentials["model"]
+	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "git": git}); failure.Code != "INVALID_ARGUMENT" || strings.Contains(failure.Message, credentialText) {
+		t.Fatalf("submit with a credential as the host key: %+v", failure)
+	}
+	if err := os.WriteFile(filepath.Join(work, "github_known_hosts"), []byte("github.com"+key[len("git.example.test"):]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git["host_key"], git["remote"] = "github_known_hosts", "ssh://git@github.com/org/repo.git"
+	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "credentials": []map[string]any{{"name": "model", "file": "id_ed25519"}}, "git": git}); failure.Code != "INVALID_ARGUMENT" ||
+		failure.Message != "invalid input: git remote host github.com is not in pool pool-a's forges" {
+		t.Fatalf("submit outside the forges: %+v", failure)
+	}
+}
+
+// A host key file is read only to one byte over its bound: the CLI stops reading a pipe there, and the MCP server asks
+// its reader for no more.
+func TestGitHostKeyReadIsBounded(t *testing.T) {
+	b := newBus(t)
+	fifo := filepath.Join(t.TempDir(), "known_hosts")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	written := make(chan error, 1)
+	go func() {
+		writer, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+		if err == nil {
+			_, err = writer.Write(bytes.Repeat([]byte("x"), 1<<20))
+			writer.Close()
+		}
+		written <- err
+	}()
+	const rule = "git host_key must be at most 8 KiB of OpenSSH known_hosts lines"
+	var stdout, stderr bytes.Buffer
+	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "x", "--git", "git@git.example.test:org/repo.git@main", "--git-host-key", fifo}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), rule) {
+		t.Fatalf("submit = %v, want %q", err, rule)
+	}
+	if err := <-written; err == nil {
+		t.Fatal("the CLI read the whole host key file")
+	}
+	var limits []int64
+	read := func(path string, limit int64) (wire.Part, error) {
+		limits = append(limits, limit)
+		return wire.Part{Raw: wire.StdBytes("k")}, nil
+	}
+	if _, err := submitFromInput(submitInput{Prompt: "x", Git: &gitInput{Remote: "git@git.example.test:org/repo.git", Ref: "main", HostKey: "known_hosts"}}, read); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(limits, []int64{wire.MaxGitHostKey + 1}) {
+		t.Fatalf("host key read with limits %v, want one byte over the bound", limits)
 	}
 }

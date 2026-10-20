@@ -77,9 +77,10 @@ type SubmissionBinding struct {
 	Placement       Placement `json:"placement"`
 	DeadlineMS      int64     `json:"deadline_ms"`
 	QueueDeadlineMS int64     `json:"queue_deadline_ms"`
-	// Credentials and Outputs are declared by a run's first turn and hold for all of its turns.
+	// Credentials, Outputs and Git are declared by a run's first turn and hold for all of its turns.
 	Credentials []TaskCredential `json:"credentials,omitzero"`
 	Outputs     []ExpectedOutput `json:"outputs,omitzero"`
+	Git         *GitInput        `json:"git,omitzero"`
 }
 
 // TaskCredential is a credential of the host that the run's agent gets as the file File in its credentials
@@ -305,8 +306,8 @@ func (value *Submission) validate() error {
 	if _, err := inputBytes(value.Message.Parts); err != nil {
 		return err
 	}
-	if binding.Turn > 1 && (binding.Credentials != nil || binding.Outputs != nil) {
-		return errors.New("only a run's first turn declares credentials and outputs")
+	if binding.Turn > 1 && (binding.Credentials != nil || binding.Outputs != nil || binding.Git != nil) {
+		return errors.New("only a run's first turn declares credentials, outputs and git")
 	}
 	files := map[string]bool{}
 	for _, credential := range binding.Credentials {
@@ -328,17 +329,16 @@ func (value *Submission) validate() error {
 		}
 		outputs[output.Name] = true
 	}
-	gitParts := 0
-	for _, part := range value.Message.Parts {
-		if part.MediaType != GitMediaType {
-			continue
-		}
-		if gitParts++; gitParts > 1 {
-			return errors.New("a submission carries at most one git part")
-		}
-		if _, err := ParseGitPart(part); err != nil {
-			return err
-		}
+	if binding.Git == nil {
+		return nil
+	}
+	if err := binding.Git.Validate(binding.Credentials); err != nil {
+		return err
+	}
+	if binding.Git.HostKey != "" && slices.ContainsFunc(value.Message.Parts, func(part Part) bool {
+		return (part.Raw != nil || part.Data != nil) && InputName(part) == KnownHostsFile
+	}) {
+		return errors.New("an input named known_hosts conflicts with the git host key")
 	}
 	return nil
 }

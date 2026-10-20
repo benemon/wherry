@@ -151,11 +151,11 @@ type admission struct {
 	taskHash string
 	adapter  Named
 	history  []wire.Message
-	git      *wire.GitContext
 	inputs   []adapter.File
-	// credentials and outputs are what the run's first turn declares.
+	// credentials, outputs and git are what the run's first turn declares.
 	credentials []wire.TaskCredential
 	outputs     []wire.ExpectedOutput
+	git         *wire.GitInput
 	// cancelled is set when a host of the run's tenant cancelled the run; it ends CANCELED without a dispatch.
 	cancelled bool
 }
@@ -261,15 +261,18 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if now.UnixMilli() > task.Wherry.DeadlineMS {
 		return reject("run deadline passed")
 	}
-	git, inputs, rejection := deliverables(history, adapter.Git)
-	if rejection != "" {
-		return reject(rejection)
-	}
 	declared := task.Wherry
 	if task.Wherry.Turn > 1 {
 		declared = submissions[1].record.Wherry
 	}
-	admitted.git, admitted.inputs, admitted.credentials, admitted.outputs = git, inputs, declared.Credentials, declared.Outputs
+	if declared.Git != nil && !slices.Contains(terms.Forges, declared.Git.Forge()) {
+		return reject("git remote host " + declared.Git.Forge() + " is not in pool " + r.config.Pool + "'s forges")
+	}
+	inputs, rejection := deliverables(history, declared.Git)
+	if rejection != "" {
+		return reject(rejection)
+	}
+	admitted.inputs, admitted.credentials, admitted.outputs, admitted.git = inputs, declared.Credentials, declared.Outputs, declared.Git
 	return admitted, 0
 }
 
@@ -285,11 +288,13 @@ func foreignRun(all []runSubmission, statuses []wire.RunStatus, tenant string) b
 	return held >= 0 && statuses[held].Wherry.Tenant != tenant
 }
 
-// deliverables returns the run's git context and its input files, from raw and data parts, or the rejection reason for a
-// url part other than one git part the adapter delivers, or for two inputs of one name in different turns.
-func deliverables(history []wire.Message, git bool) (*wire.GitContext, []adapter.File, string) {
-	var found *wire.GitContext
+// deliverables returns the run's input files: the git input's host key as known_hosts, then the raw and data parts.
+// It returns the rejection reason for a url part, or for two inputs of one name in different turns.
+func deliverables(history []wire.Message, git *wire.GitInput) ([]adapter.File, string) {
 	var inputs []adapter.File
+	if git != nil && git.HostKey != "" {
+		inputs = append(inputs, adapter.File{Name: wire.KnownHostsFile, Data: []byte(git.HostKey)})
+	}
 	for _, message := range history {
 		for _, part := range message.Parts {
 			switch {
@@ -297,22 +302,15 @@ func deliverables(history []wire.Message, git bool) (*wire.GitContext, []adapter
 			case part.Raw != nil || part.Data != nil:
 				name := wire.InputName(part)
 				if slices.ContainsFunc(inputs, func(input adapter.File) bool { return input.Name == name }) {
-					return nil, nil, "input names repeat across turns"
+					return nil, "input names repeat across turns"
 				}
 				inputs = append(inputs, adapter.File{Name: name, Data: append(slices.Clone([]byte(part.Raw)), part.Data...)})
 			default:
-				if !git || part.MediaType != wire.GitMediaType || found != nil {
-					return nil, nil, "unsupported message part"
-				}
-				parsed, err := wire.ParseGitPart(part)
-				if err != nil {
-					return nil, nil, "unsupported message part"
-				}
-				found = &parsed
+				return nil, "unsupported message part"
 			}
 		}
 	}
-	return found, inputs, ""
+	return inputs, ""
 }
 
 // publishRejection writes the echo, so every host of the tenant can find the run's pool, and the rejected
@@ -590,11 +588,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				if runCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, "timeout", nil)
 				}
-				if errors.Is(err, adapter.ErrGitContext) {
-					r.logger.Printf("run %s: git context unavailable: %T", runID, err)
-					run.adapter = named
-					return run.fail(ctx, adapter.ErrGitContext.Error(), nil)
-				}
 				r.logger.Printf("run %s: lookup in adapter %s: %T", runID, named.Name, err)
 				return run.returnTask(ctx, nil)
 			}
@@ -662,8 +655,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, adapter.Run{
 			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Turn: task.Wherry.Turn, Attempt: attempt,
-			Prompt: []byte(preamble(named.Adapter.Directories(), admitted.inputs, admitted.credentials, admitted.outputs) + prompt(admitted.history)), Credential: credential,
-			Git: (*adapter.GitContext)(admitted.git), Inputs: admitted.inputs, Credentials: secrets,
+			Prompt:     []byte(preamble(named.Adapter.Directories(), admitted.inputs, admitted.credentials, admitted.outputs, admitted.git, runID) + prompt(admitted.history)),
+			Credential: credential, Inputs: admitted.inputs, Credentials: secrets,
 		})
 		var tooLarge *adapter.InputTooLargeError
 		switch {
@@ -680,10 +673,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				return run.abandon(err)
 			}
 			return run.fail(ctx, name+" takes the turn's inputs over what adapter "+named.Name+" delivers", nil)
-		case errors.Is(err, adapter.ErrGitContext):
-			// Git error text can echo URLs, so only the type is logged.
-			r.logger.Printf("run %s: git context unavailable: %T", runID, err)
-			return run.fail(ctx, adapter.ErrGitContext.Error(), nil)
 		case errors.Is(err, adapter.ErrMessageTooLarge):
 			r.logger.Printf("run %s: dispatch rejected: message too large", runID)
 			dispatched = adapter.OutcomeUnknown
@@ -721,11 +710,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	run.job = handle.Name
 	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.adapter.Labels), handle.Name)
-	var startedMetadata jsontext.Value
-	if handle.Commit != "" {
-		startedMetadata, _ = json.Marshal(wire.CommitMetadata{GitCommit: handle.Commit}) // a string always encodes
-	}
-	if err := run.commit(ctx, run.statusRecords("started", taskStatus(wire.TaskStateWorking, ""), &offset, startedMetadata)...); err != nil {
+	if err := run.commit(ctx, run.statusRecords("started", taskStatus(wire.TaskStateWorking, ""), &offset, nil)...); err != nil {
 		return run.abandon(err)
 	}
 
@@ -1701,10 +1686,10 @@ func agentResultMetadata(data []byte) jsontext.Value {
 const resumedHeader = "This request was interrupted before any of it was carried out. Carry out all of it now. Its parts follow in the order they were sent."
 
 // preamble tells the agent the full path of each file it has and of each it is asked to leave, so an agent without a
-// shell finds them; it names credential files, never their values. A directory the adapter does not report is named
-// by its environment variable. A run that declares no files has none.
-func preamble(directories adapter.Directories, inputs []adapter.File, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput) string {
-	if len(inputs)+len(credentials)+len(outputs) == 0 {
+// shell finds them, and how to clone a git input; it names credential files, never their values. A directory the
+// adapter does not report is named by its environment variable. A run that declares no files and no git input has none.
+func preamble(directories adapter.Directories, inputs []adapter.File, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput, git *wire.GitInput, run string) string {
+	if len(inputs)+len(credentials)+len(outputs) == 0 && git == nil {
 		return ""
 	}
 	input, output, credential := cmp.Or(directories.Input, "$WHERRY_INPUT_DIR"), cmp.Or(directories.Output, "$WHERRY_OUTPUT_DIR"),
@@ -1736,7 +1721,68 @@ func preamble(directories adapter.Directories, inputs []adapter.File, credential
 		}
 		lines = append(lines, "Write these output files, creating their directories if they do not exist: "+strings.Join(paths, ", ")+".")
 	}
+	if git != nil {
+		lines = append(lines, gitPreamble(git, run, input+"/"+wire.KnownHostsFile, credential, output, credentials, outputs)...)
+	}
 	return strings.Join(lines, "\n") + "\n\n"
+}
+
+// gitPreamble gives the commands that clone a git input and return its changes, each on its own line indented by four
+// spaces. Each starts with git and carries no environment assignment or redirect, so a harness rule allowing git
+// commands allows every one. The remote, ref and checkout path are single-quoted, which their grammar allows; file
+// paths are double-quoted, so a directory named by its environment variable expands. A credential is read from its
+// file inside a credential helper or by ssh, so its value reaches no command line.
+//
+// The clone's --config settings apply to the clone and stay in its configuration for later fetches and pushes. They
+// complement adapter.AgentEnvironment, which stops system, global and environment configuration being read: no
+// template seeds the clone; the helper list is reset, so no inherited helper is asked or stores the token, and the
+// clone's helper answers only for the remote's origin and only get; redirects are refused, certificates verified and
+// only the remote's protocol allowed; ssh reads no configuration file, no agent and no known_hosts but the remote's
+// host key. They guard a cooperative agent against ambient configuration, not a hostile one, which can override them.
+func gitPreamble(git *wire.GitInput, run, knownHosts, credentialDir, outputDir string, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput) []string {
+	remote, ref, checkout := "'"+git.Remote+"'", "'"+git.Ref+"'", "'"+git.Checkout()+"'"
+	keyFile := ""
+	if index := slices.IndexFunc(credentials, func(credential wire.TaskCredential) bool { return credential.Name == git.Credential }); index >= 0 {
+		keyFile = credentialDir + "/" + credentials[index].File
+	}
+	scheme, _, _ := strings.Cut(git.Remote, "://")
+	config := []string{"credential.helper="}
+	switch {
+	case scheme == "ssh":
+		identity := `-o IdentityFile=/dev/null`
+		if keyFile != "" {
+			identity = `-i "` + keyFile + `"`
+		}
+		config = append(config, `core.sshCommand='ssh -F /dev/null `+identity+` -o IdentitiesOnly=yes -o IdentityAgent=none -o UserKnownHostsFile="`+knownHosts+
+			`" -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o BatchMode=yes -o ProxyCommand=none'`)
+	case keyFile != "":
+		config = append(config, `credential.`+git.Origin()+`.helper='!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$(cat "`+keyFile+`")"; }; f'`)
+	}
+	config = append(config, "http.followRedirects=false", "http.sslVerify=true", "protocol.allow=never", "protocol."+scheme+".allow=always", "user.name=wherry", "user.email=wherry@invalid")
+	clone := "    git clone --template="
+	for _, setting := range config {
+		clone += " --config " + setting
+	}
+	lines := []string{
+		"Clone the git repository " + git.Remote + " at " + git.Ref + " into " + git.Checkout() + ", relative to your working directory, with these commands. " +
+			"They need git 2.30 or later: run git version first, and if it is older, stop and report that.",
+		clone + " -- " + remote + " " + checkout,
+		"    git -C " + checkout + " checkout " + ref + " --",
+		"    git -C " + checkout + " update-ref refs/wherry/start HEAD",
+		"The clone keeps its settings for later fetches and pushes; do not change them.",
+	}
+	if keyFile != "" {
+		lines = append(lines, "Never print the credential or put it on a command line.")
+	}
+	for _, expected := range outputs {
+		switch expected.Name {
+		case wire.GitPatch:
+			lines = append(lines, "Commit your changes, then write them as a patch series with:", "    git -C "+checkout+` format-patch --output="`+outputDir+"/"+wire.GitPatch+`" refs/wherry/start..HEAD`)
+		case wire.GitBundle:
+			lines = append(lines, "Commit your changes, then write them as a bundle with:", "    git -C "+checkout+` bundle create "`+outputDir+"/"+wire.GitBundle+`" refs/wherry/start..HEAD`)
+		}
+	}
+	return append(lines, "Push only if the request asks you to, and then only to the branch wherry/"+run+":", "    git -C "+checkout+" push origin HEAD:refs/heads/wherry/"+run)
 }
 
 // prompt is the first turn's text alone, or every turn's text as one request under resumedHeader.
