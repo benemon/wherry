@@ -184,7 +184,7 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 	t.Setenv("WHERRY_TESTPLUGIN_ENV", "from-the-receiver")
 	p, record, _ := launch(t)
 	a := configured(t, p, "a", "{}")
-	run := Run{ID: "run-a", Adapter: "a", Agent: "claude", Turn: 2, Attempt: 3, Prompt: []byte("hello"), Credential: []byte(runCredential),
+	run := Run{ID: "run-a", Adapter: "a", Agent: "claude", Model: "sonnet", Turn: 2, Attempt: 3, Prompt: []byte("hello"), Credential: []byte(runCredential),
 		Inputs:      []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty", Data: []byte{}}},
 		Credentials: []Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte(runCredential)}},
 		Fetches:     []Fetch{{Name: "dataset.bin", URL: "https://store.example.test/bucket/key?X-Amz-Signature=0", Size: 5 << 20, SHA256: strings.Repeat("a", 64)}}}
@@ -204,13 +204,13 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 		}
 	}
 	got := dispatched[0]
-	if len(dispatched) != 2 || got.ID != run.ID || got.Turn != 2 || got.Attempt != 3 || string(got.Prompt) != "hello" || string(got.Credential) != runCredential ||
+	if len(dispatched) != 2 || got.ID != run.ID || got.Model != "sonnet" || got.Turn != 2 || got.Attempt != 3 || string(got.Prompt) != "hello" || string(got.Credential) != runCredential ||
 		!reflect.DeepEqual(got.Inputs, []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty"}}) || !reflect.DeepEqual(got.Credentials, run.Credentials) ||
 		!reflect.DeepEqual(got.Fetches, run.Fetches) {
 		t.Fatalf("plugin got %+v; want %+v", got, run)
 	}
-	if dispatched[1].Credential != nil {
-		t.Fatalf("run without credential arrived as %+v", dispatched[1])
+	if dispatched[1].Credential != nil || dispatched[1].Model != "" {
+		t.Fatalf("run without credential or model arrived as %+v", dispatched[1])
 	}
 }
 
@@ -600,19 +600,19 @@ func TestCollectFailureCrossesTheLink(t *testing.T) {
 	}
 }
 
-// A plugin built against protocol version 3 answers go-plugin's handshake with that version; this script answers as
-// one would, before any TLS.
-func TestVersionThreePluginIsRefused(t *testing.T) {
+// A plugin built against protocol version 4, which would drop Run.Model and run its own model, answers go-plugin's
+// handshake with that version; this script answers as one would, before any TLS.
+func TestVersionFourPluginIsRefused(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "wherry-plugin-old")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|3|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|4|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	p, err := Launch(fixed(script), &syncBuffer{})
 	if err == nil {
 		p.Close()
-		t.Fatal("launched a version 3 plugin")
+		t.Fatal("launched a version 4 plugin")
 	}
-	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 3, Client versions: [4]") {
+	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 4, Client versions: [5]") {
 		t.Fatalf("launch error %v; want the version named", err)
 	}
 }

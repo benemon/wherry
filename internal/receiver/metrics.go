@@ -65,11 +65,11 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.claims = counters("claims_total", "Tasks claimed and authorised.", "tenant")
 	m.admissions = counters("admissions_total", "Tasks admitted to run.", "tenant", "adapter")
 	m.rejections = counters("rejections_total", "Tasks rejected, by reason.", "tenant", "reason")
-	m.runs = counters("runs_total", "Turns ended, by terminal state.", "tenant", "adapter", "agent", "state")
+	m.runs = counters("runs_total", "Turns ended, by terminal state.", "tenant", "adapter", "agent", "model", "state")
 	m.adoptions = counters("adoptions_total", "Turns that adopted an earlier attempt's job.", "tenant", "adapter")
 	m.continuations = counters("continuations_total", "Continuation turns admitted.", "tenant", "adapter")
 	m.redeliveries = counters("redeliveries_total", "Turns executed on a redelivery.", "tenant", "adapter")
-	m.turnDuration = histograms("turn_duration_seconds", "Time from claim to a turn's terminal state.", "tenant", "adapter", "agent", "state")
+	m.turnDuration = histograms("turn_duration_seconds", "Time from claim to a turn's terminal state.", "tenant", "adapter", "agent", "model", "state")
 	m.queueWait = histograms("queue_wait_seconds", "Time from submission to first claim.", "tenant", "adapter")
 	m.inFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_in_flight", Help: "Tasks held, by the adapter they were routed to."}, []string{"adapter"})
 	m.capacity = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_capacity", Help: "Tasks the receiver holds at once."})
@@ -89,7 +89,7 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.transactionAborts = counter("transaction_aborts_total", "Transactions aborted after a failed produce.")
 	m.ambiguousCommits = counter("ambiguous_commits_total", "Transaction commits with an unknown outcome.")
 	m.fenced = counter("fenced_total", "Runs given up to a newer holder.")
-	m.tokens = counters("agent_reported_tokens_total", "Tokens as agents report them, by kind.", "tenant", "agent", "kind")
+	m.tokens = counters("agent_reported_tokens_total", "Tokens as agents report them, by kind.", "tenant", "agent", "model", "kind")
 	m.cost = counters("agent_reported_cost_usd_total", "Cost in US dollars as agents report it.", "tenant", "agent")
 	m.dropped = counters("metrics_dropped_total", "Adapter samples refused, and adapter Metrics calls that failed, by reason.", "adapter", "reason")
 	for _, family := range adapterFamilies {
@@ -241,24 +241,37 @@ func (m *metrics) adapterMetric(sample adapter.Sample, labels []string) (prometh
 	return prometheus.MustNewConstMetric(desc, kind, sample.Value, labels...), ""
 }
 
-// agentLabel is agent when the pool's terms name it, and other otherwise, so a host's placement cannot add a label value.
-func (r *Receiver) agentLabel(agent string) string {
+// placementLabels are placement's agent and model as the pool's terms bound them, so a host's placement cannot add a
+// label value: the agent, or other when the terms do not name it; the model, other when the agent's models do not
+// hold it, or empty when the agent has none.
+func (r *Receiver) placementLabels(placement wire.Placement) (string, string) {
 	state, _, _ := r.snapshot()
-	if slices.ContainsFunc(state.Pools[r.config.Pool].Agents, func(terms admin.AgentTerms) bool { return terms.Name == agent }) {
-		return agent
+	agents := state.Pools[r.config.Pool].Agents
+	index := slices.IndexFunc(agents, func(terms admin.AgentTerms) bool { return terms.Name == placement.Agent })
+	switch {
+	case index < 0:
+		return "other", ""
+	case len(agents[index].Models) == 0:
+		return placement.Agent, ""
+	case slices.Contains(agents[index].Models, placement.Model):
+		return placement.Agent, placement.Model
 	}
-	return "other"
+	return placement.Agent, "other"
 }
 
 // ended counts a turn that reached a terminal state, with the time since its claim when this attempt claimed it, and
-// the tokens and cost its agent's result reports.
+// the tokens and cost its agent's result reports. A state outside wire's is labelled other.
 func (run *activeRun) ended(state wire.TaskState, resultMetadata []byte) {
 	m, tenant := run.receiver.metrics, run.task.Wherry.Tenant
-	adapter, agent := cmp.Or(run.adapter.Name, "none"), run.receiver.agentLabel(run.task.Wherry.Placement.Agent)
-	label := strings.ToLower(strings.TrimPrefix(string(state), "TASK_STATE_"))
-	m.runs.WithLabelValues(tenant, adapter, agent, label).Inc()
+	adapter := cmp.Or(run.adapter.Name, "none")
+	agent, model := run.receiver.placementLabels(run.task.Wherry.Placement)
+	label := "other"
+	if wire.ValidTaskState(state) {
+		label = strings.ToLower(strings.TrimPrefix(string(state), "TASK_STATE_"))
+	}
+	m.runs.WithLabelValues(tenant, adapter, agent, model, label).Inc()
 	if !run.claimed.IsZero() {
-		m.turnDuration.WithLabelValues(tenant, adapter, agent, label).Observe(time.Since(run.claimed).Seconds())
+		m.turnDuration.WithLabelValues(tenant, adapter, agent, model, label).Observe(time.Since(run.claimed).Seconds())
 	}
 	var reported struct {
 		AgentResult struct {
@@ -279,7 +292,7 @@ func (run *activeRun) ended(state wire.TaskState, resultMetadata []byte) {
 	usage := reported.AgentResult.Usage
 	for kind, value := range map[string]*float64{"input": usage.Input, "output": usage.Output, "cached": cmp.Or(usage.CacheRead, usage.Cached), "reasoning": usage.Reasoning} {
 		if value != nil && *value >= 0 {
-			m.tokens.WithLabelValues(tenant, agent, kind).Add(*value)
+			m.tokens.WithLabelValues(tenant, agent, model, kind).Add(*value)
 		}
 	}
 	if cost := reported.AgentResult.Cost; cost != nil && *cost >= 0 {

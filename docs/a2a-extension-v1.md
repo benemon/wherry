@@ -98,7 +98,8 @@ A submission is one turn of a run.
     "turn": 1,
     "placement": {
       "agent": "coder",
-      "selector": [{"key": "isolation", "operator": "In", "values": ["container"]}]
+      "selector": [{"key": "isolation", "operator": "In", "values": ["container"]}],
+      "model": "sonnet"
     },
     "deadline_ms": 1790000000000,
     "queue_deadline_ms": 1789998800000,
@@ -123,6 +124,9 @@ A submission is one turn of a run.
   is a list of `{key, operator, values}` requirements: `operator` is `In`,
   `NotIn`, `Exists` or `DoesNotExist`; `In` and `NotIn` take one or more
   unique values, `Exists` and `DoesNotExist` none; each key appears once.
+  `placement.model` is one of the agent's `models` in the pool's terms, and
+  absent for an agent with none. Every turn of a run carries the first
+  turn's placement.
   [Reference](reference.md#labels) gives the key and value grammar.
 - `deadline_ms` and `queue_deadline_ms` are Unix milliseconds by which the
   run must end and a receiver must claim it. A receiver ends the run no
@@ -218,7 +222,8 @@ read committed records only.
 A status message is an A2A `Message` with `role` `ROLE_AGENT` and one text
 part. The fixed texts are:
 
-- rejected: `agent is outside the pool terms`, `duplicate submission`,
+- rejected: `agent is outside the pool terms`,
+  `model not in the pool's terms`, `duplicate submission`,
   `duplicate continuation`, `stale submission`,
   `task is not awaiting continuation`, `continuation turn out of order`,
   `continuation history unavailable`, `run expired`,
@@ -403,6 +408,13 @@ string escaping can differ from the line in the transcript. `agent_result`
 is absent when none of those members is present, when the line is not an
 RFC 7493 object, when the retained object exceeds 16 KiB as encoded, and
 when the turn ends without a result line.
+
+Beside `agent_result`, `served_models` (array of strings) holds the keys of
+the result line's `modelUsage`, sorted: the models that served the turn as
+Claude Code reports them. It is absent when `agent_result` is, when
+`modelUsage` is absent, empty or not an object, and when the metadata with
+it would exceed 16 KiB as encoded. A Codex `turn.completed` line names no
+model, so a Codex result has none.
 
 ## Echo
 
@@ -799,8 +811,11 @@ A receiver that claims a submission:
    other than a rejection on the pool's events. Ownership survives the
    owner's host being ended, since the run's statuses still name its
    tenant. This check comes before any record is written under the run ID;
-4. rejects it when its agent is outside the pool's terms, and when its
-   `raw` and `data` parts together exceed the pool's `inline_limit`;
+4. rejects it when its agent is outside the pool's terms; with
+   `model not in the pool's terms` when the agent has `models` and the
+   placement names no model or one outside the current `models`, or the
+   agent has no `models` and the placement names one; and when its `raw` and
+   `data` parts together exceed the pool's `inline_limit`;
 5. writes an `offer-unavailable` start failure and releases it when no
    ready adapter satisfies the placement;
 6. rejects a duplicate, stale or out-of-order turn, unless a cancel covers
@@ -931,6 +946,9 @@ their paths:
   files, and never into the environment or the input directory.
 - `WHERRY_OUTPUT_DIR`: where the agent leaves its outputs. The agent
   creates the directory when it does not exist.
+
+`WHERRY_MODEL` holds the placement's model when the placement names one,
+and is not set otherwise.
 
 When the run has inputs, task credentials, expected outputs or a git input, the
 receiver opens the prompt with lines giving the absolute path of each directory,

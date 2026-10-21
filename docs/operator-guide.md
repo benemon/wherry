@@ -91,8 +91,17 @@ wherry admin pool create build --config-file build-terms.yaml
   [Size a pool against the broker](#size-a-pool-against-the-broker).
 - `vcs` lists the hosts a task's agent may clone from; without it the
   pool takes no git input. See [Git repositories](#git-repositories).
+- An agent's `models` lists the models a task may name for it, and its
+  optional `default_model`, one of them, the one a task naming none runs.
+  With `models` and no `default_model`, every task for the agent names a
+  model. wherry does not interpret the names. The agent's adapters read the task's
+  model from `WHERRY_MODEL`, as in
+  [Add a receiver](#add-a-receiver). Without `models` a task names no model
+  and the adapter's command sets it.
 
 Running `pool create` again for an existing pool records the new terms.
+Adding or removing an agent's `models` rejects that agent's queued and
+continuing runs at their next claim, so drain the agent first.
 
 ### Retention
 
@@ -290,6 +299,14 @@ config:
           exec codex exec --json --ephemeral --skip-git-repo-check
           --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
 ```
+
+An adapter whose agent has `models` in the pool's terms reads the task's
+model from `WHERRY_MODEL`, which the plugin sets only when the task has a
+model, and falls back to a model of its own:
+`--model "${WHERRY_MODEL:-haiku}"` for Claude Code, or
+`-m "${WHERRY_MODEL:-gpt-5-mini}"` in the Codex command above. The value
+reaches the command through the environment, never pasted into its
+arguments.
 
 An adapter for any other harness declares `output: file`: the receiver ends
 the turn when the job ends and takes the reply from a file the job writes to
@@ -858,7 +875,10 @@ Readers reject records with unknown members or versions, so hosts and
 receivers run the same release. A host's run records carry `redaction_key`,
 so an older `wherry` cannot read a run this release submitted. A run an older
 release submitted holds no redaction key, so this release answers no seal
-request for it until `wherry continue` records its next turn.
+request for it until `wherry continue` records its next turn. A host or
+receiver of an earlier release cannot decode pool terms that set `models` or
+`default_model`, and stops reading `wherry.admin` while they hold them, so
+upgrade every receiver and host before the terms set them.
 
 Prerequisites: the new `wherry` binary, and each receiver's bundle and
 state directory.
@@ -866,8 +886,8 @@ state directory.
 1. Replace the binary on every host and receiver host.
 2. Replace the plugins in each receiver's plugin directory together with the
    receiver binary; a receiver refuses a plugin of another adapter protocol
-   version. This release speaks adapter protocol version 4 and refuses a
-   version 3 plugin.
+   version. This release speaks adapter protocol version 5 and refuses a
+   version 4 plugin, which would drop a task's model and run its own.
 3. Restart each receiver with the same bundle and state directory. On
    `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its
    tasks to the pool. The next delivery of each task adopts the running
@@ -885,11 +905,18 @@ Prerequisites: `wherry` on the harness's `PATH`, and the client
 configuration, bundle, host key and credential files readable by the
 harness user.
 
-1. Install `plugins/wherry` through the harness's plugin mechanism; for
-   Claude Code, see
-   [plugins](https://docs.anthropic.com/en/docs/claude-code/plugins).
-2. Restart the harness session.
-3. Check the connection with the `receivers` tool, which lists the
+1. Install the plugin. In Claude Code, add this repository as a
+   marketplace, install the plugin from it, then run `/reload-plugins` in
+   the session:
+
+   ```sh
+   claude plugin marketplace add benemon/wherry
+   claude plugin install wherry@wherry
+   ```
+
+   Another harness installs `plugins/wherry` through its own plugin
+   mechanism, then restarts its session.
+2. Check the connection with the `receivers` tool, which lists the
    receivers the tenant may use.
 
 The packaged `plugins/wherry/mcp.json` starts `wherry mcp` with the default
@@ -904,7 +931,8 @@ do not last.
 
 - `plugin.json`, `mcp.json` and `skills/` form an Agent Plugins 1.0 bundle.
 - `.claude-plugin/plugin.json` is the Claude Code manifest for the same
-  skill and server.
+  skill and server, and the repository's `.claude-plugin/marketplace.json`
+  lists it as the `wherry` marketplace.
 - Other harnesses take `mcp.json` and `skills/wherry` directly.
 
 `plugins/AGENTS.snippet.md` covers harnesses without skills, using the CLI.

@@ -1,0 +1,14 @@
+{
+  "name": "wherry",
+  "description": "wherry: delegate subagent tasks to agents on other compute",
+  "owner": {
+    "name": "Benjamin Holmes"
+  },
+  "plugins": [
+    {
+      "name": "wherry",
+      "source": "./plugins/wherry",
+      "description": "Run subagent tasks on other compute through wherry and collect their results."
+    }
+  ]
+}

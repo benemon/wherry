@@ -32,6 +32,9 @@ type AwaitResult struct {
 	Task   *wire.Task
 	Status wire.TaskStatus
 	Turn   int64
+	// Model is the model the run's placement names, and ServedModels the models the agent's result reports serving it.
+	Model        string
+	ServedModels []string
 	// Outputs are the turn's outputs that verified against its result.
 	Outputs []Output
 	// Stored are the S3 outputs the result lists for DownloadOutputs.
@@ -62,6 +65,8 @@ type StatusResult struct {
 	Pool   string
 	Turn   int64
 	Status wire.TaskStatus
+	// Model is the model the run's placement names.
+	Model string
 	// Updated is the time of Status; while no receiver has reported one, this host's submission of the turn, else the
 	// Kafka timestamp of the turn's echo.
 	Updated time.Time
@@ -468,7 +473,7 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 
 // status is the latest verified status of the run's latest turn, SUBMITTED until a receiver reports one.
 func (r *runView) status() StatusResult {
-	result := StatusResult{RunID: r.run, Pool: r.pool, Turn: r.latest, Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Skipped: r.skipped}
+	result := StatusResult{RunID: r.run, Pool: r.pool, Turn: r.latest, Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Model: r.model(), Skipped: r.skipped}
 	if r.local != nil && r.local.SubmittedMS > 0 {
 		result.Updated = time.UnixMilli(r.local.SubmittedMS)
 	} else {
@@ -484,6 +489,18 @@ func (r *runView) status() StatusResult {
 	result.Redacted = map[string]int{}
 	result.Status = unredactStatus(result.Status, r.h.markers(r.local), result.Redacted)
 	return result
+}
+
+// model is the model of the run's placement, which every turn shares: this host's record of it, else its latest
+// echo's.
+func (r *runView) model() string {
+	if r.local != nil {
+		return r.local.Placement.Model
+	}
+	if echo := r.turns[r.latest].echo; echo != nil {
+		return echo.Placement.Model
+	}
+	return ""
 }
 
 // markers maps each redaction marker the run's key gives to its name: the credentials this host configures, the
@@ -692,7 +709,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	for {
 		if r.outcome != nil {
 			outcome := *r.outcome
-			outcome.Skipped, outcome.Turn = r.skipped, r.outcomeTurn
+			outcome.Skipped, outcome.Turn, outcome.Model = r.skipped, r.outcomeTurn, r.model()
 			if r.result != nil {
 				outcome.Outputs, outcome.Stored, outcome.NotReturned, outcome.Rejected = r.verifiedOutputs(r.result)
 			}
@@ -700,6 +717,14 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			outcome.Redacted = map[string]int{}
 			outcome.Status = unredactStatus(outcome.Status, markers, outcome.Redacted)
 			if outcome.Task != nil {
+				for _, artifact := range outcome.Task.Artifacts {
+					var metadata struct {
+						ServedModels []string `json:"served_models"`
+					}
+					if artifact.ArtifactID == "result" && json.Unmarshal(artifact.Metadata, &metadata) == nil {
+						outcome.ServedModels = metadata.ServedModels
+					}
+				}
 				task := *outcome.Task
 				task.Status, task.Artifacts = outcome.Status, slices.Clone(task.Artifacts)
 				for i := range task.Artifacts {

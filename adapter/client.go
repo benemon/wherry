@@ -252,7 +252,7 @@ func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
 		return OutcomeUnknown, Handle{}, err
 	}
 	message := &adapterv1.Run{
-		Id: run.ID, Adapter: run.Adapter, Agent: run.Agent, Turn: run.Turn, Attempt: run.Attempt, Prompt: run.Prompt, Credential: run.Credential,
+		Id: run.ID, Adapter: run.Adapter, Agent: run.Agent, Model: run.Model, Turn: run.Turn, Attempt: run.Attempt, Prompt: run.Prompt, Credential: run.Credential,
 	}
 	for _, input := range run.Inputs {
 		message.Inputs = append(message.Inputs, &adapterv1.File{Name: input.Name, Data: input.Data})

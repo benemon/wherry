@@ -825,8 +825,8 @@ func TestCodexResultFixtures(t *testing.T) {
 			if test.name == "success" {
 				metadata := decodeObject(t, result.metadata)
 				agent := metadata["agent_result"].(map[string]any)
-				if len(agent) != 1 || agent["usage"] == nil {
-					t.Fatalf("metadata = %v, want only usage", metadata)
+				if len(agent) != 1 || agent["usage"] == nil || metadata["served_models"] != nil {
+					t.Fatalf("metadata = %v, want only usage and no served models", metadata)
 				}
 			}
 		})
@@ -1102,8 +1102,11 @@ func TestResultArtifactCarriesAgentResult(t *testing.T) {
 		want[name] = decoded[name]
 	}
 	got := decodeObject(t, artifact.Metadata)
-	if len(got) != 1 || !reflect.DeepEqual(got["agent_result"], want) {
-		t.Fatalf("artifact metadata %s, want only the result's resource-use fields", artifact.Metadata)
+	if len(got) != 2 || !reflect.DeepEqual(got["agent_result"], want) {
+		t.Fatalf("artifact metadata %s, want only the result's resource-use fields and its served models", artifact.Metadata)
+	}
+	if served := got["served_models"]; !reflect.DeepEqual(served, []any{"claude-haiku-5-5"}) {
+		t.Fatalf("served models %v, want the capture's modelUsage key", served)
 	}
 }
 

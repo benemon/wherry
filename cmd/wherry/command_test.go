@@ -365,6 +365,15 @@ func TestSubmitNeverPrintsCredential(t *testing.T) {
 	}
 }
 
+func TestSubmitModelOutsideTheTerms(t *testing.T) {
+	b := newBus(t)
+	var stdout, stderr bytes.Buffer
+	err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--agent", "claude", "--model", "sonnet"}, &stdout, &stderr)
+	if !errors.Is(err, busclient.ErrInvalidInput) || !strings.Contains(err.Error(), "model sonnet is not in agent claude's models in pool pool-a") || stdout.Len() != 0 {
+		t.Fatalf("submit = %v, stdout %q; want the model, agent and pool named", err, stdout.String())
+	}
+}
+
 // awaitOutput publishes a completed result with parts for an admitted run and returns what await prints.
 func awaitOutput(t *testing.T, parts []wire.Part) string {
 	t.Helper()

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
@@ -395,6 +397,10 @@ func TestMCPSubmitNamesTheInvalidRule(t *testing.T) {
 			t.Fatalf("error %#v, want INVALID_ARGUMENT naming %q", failure, rule)
 		}
 	}
+	failure := callToolError(t, ctx, session, "submit", map[string]any{"prompt": "x", "agent": "claude", "model": "sonnet"})
+	if failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "model sonnet is not in agent claude's models in pool pool-a") {
+		t.Fatalf("error %#v, want INVALID_ARGUMENT naming the model, agent and pool", failure)
+	}
 }
 
 func TestMCPErrorsCarryNoSecrets(t *testing.T) {
@@ -645,6 +651,51 @@ func TestMCPTranscriptFillsFromEarlierAttempts(t *testing.T) {
 	callTool(t, b.ctx, session, "transcript", map[string]any{"id": runID}, &later)
 	if later.Attempt != 3 || !reflect.DeepEqual(later.Lines, adopted) {
 		t.Fatalf("a turn whose last attempt has no lines: attempt %d, lines %+v", later.Attempt, later.Lines)
+	}
+}
+
+// A Claude stream-json turn as a dogfood run's transcript shows it: each assistant event carries a thinking block
+// whose signature is about 10 KiB of base64, between system thinking_tokens progress events.
+func TestMCPTranscriptDropsThinkingSignatures(t *testing.T) {
+	b := newBus(t)
+	admitted := b.admitted(t)
+	runID := admitted.submission.Wherry.Run
+	signature := base64.StdEncoding.EncodeToString(make([]byte, 7680))
+	var records [][]byte
+	for i := range int64(6) {
+		progress := fmt.Sprintf(`{"type":"system","subtype":"thinking_tokens","tokens":%d,"session_id":"s"}`, 100*i)
+		assistant := fmt.Sprintf(`{"type":"assistant","message":{"id":"msg-%d","role":"assistant","content":[{"type":"thinking","thinking":"step %d","signature":%q},{"type":"text","text":"answer %d"}]},"session_id":"s"}`, i, i, signature, i)
+		records = append(records, b.chunk(t, admitted, 1, 2*i, wire.Part{Text: progress}), b.chunk(t, admitted, 1, 2*i+1, wire.Part{Text: assistant}))
+	}
+	b.feed(t, runID, records...)
+	session := mcpSession(t, b.connect(t), nil)
+	var reply transcriptReply
+	callTool(t, b.ctx, session, "transcript", map[string]any{"id": runID}, &reply)
+	if reply.Total != 6 || len(reply.Lines) < 3 {
+		t.Fatalf("a page holds %d of %d lines, want several assistant lines", len(reply.Lines), reply.Total)
+	}
+	for i, line := range reply.Lines {
+		var event struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content []map[string]any `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(line.Text), &event); err != nil || event.Type != "assistant" || len(event.Message.Content) != 2 ||
+			event.Message.Content[0]["thinking"] != fmt.Sprintf("step %d", i) || event.Message.Content[0]["signature"] != nil || event.Message.Content[1]["text"] != fmt.Sprintf("answer %d", i) {
+			t.Fatalf("line %d %.200s, want the assistant event without its signature", i, line.Text)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runTranscript(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if text := stdout.String(); strings.Count(text, "\n") != 6 || strings.Contains(text, signature) || strings.Contains(text, "thinking_tokens") {
+		t.Fatalf("wherry transcript printed %d lines with a signature or thinking_tokens line", strings.Count(text, "\n"))
+	}
+	feed, err := b.client.Transcript(b.ctx, runID, 0)
+	if err != nil || len(feed.Lines) != 12 || !strings.Contains(feed.Lines[1].Part.Text, signature) {
+		t.Fatalf("the feed's transcript lost lines or signatures: %d lines, %v", len(feed.Lines), err)
 	}
 }
 

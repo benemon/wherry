@@ -444,6 +444,41 @@ func TestPoolVCS(t *testing.T) {
 	}
 }
 
+func TestPoolModels(t *testing.T) {
+	terms := modelTerms()
+	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, "haiku"
+	encoded, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := DecodeRecord(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent := record.Terms.Agents[0]; !slices.Equal(agent.Models, []string{"haiku", "sonnet"}) || agent.DefaultModel != "haiku" {
+		t.Fatalf("agent terms %+v, want the models and default model encoded", agent)
+	}
+	required := modelTerms()
+	required.Agents[0].Models = []string{"haiku", "sonnet"}
+	if err := validateTerms(required); err != nil {
+		t.Fatalf("models without a default refused: %v", err)
+	}
+	for name, edit := range map[string]func(*AgentTerms){
+		"default outside the models": func(agent *AgentTerms) { agent.DefaultModel = "opus" },
+		"default without models":     func(agent *AgentTerms) { agent.Models = nil },
+	} {
+		terms := modelTerms()
+		terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, "haiku"
+		edit(&terms.Agents[0])
+		if err := validateTerms(terms); err == nil || err.Error() != "an agent's default_model must be one of its models" {
+			t.Errorf("%s: %v", name, err)
+		}
+		if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}); err == nil {
+			t.Errorf("%s encoded", name)
+		}
+	}
+}
+
 func TestPoolStorage(t *testing.T) {
 	terms := modelTerms()
 	terms.Storage = &Storage{Endpoint: "https://s3.example.test:8443", Bucket: "wherry-lab"}

@@ -28,6 +28,9 @@ type Line struct {
 // in platform metadata.
 type Run struct {
 	ID, Adapter, Agent string
+	// Model is the model the agent runs, as the pool's terms name it; empty leaves the agent's own. The adapter passes
+	// it to the agent as WHERRY_MODEL and never interprets it.
+	Model              string
 	Turn, Attempt      int64
 	Prompt, Credential []byte
 	// Inputs and Fetches go in the directory WHERRY_INPUT_DIR names, and Credentials in the one WHERRY_CREDENTIALS_DIR
