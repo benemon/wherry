@@ -612,6 +612,17 @@ A receiver with no ready adapter advertises with no offers, so it stays
 job its adapter reports never started is a `platform` start failure: the
 receiver purges the job and returns the task to the pool.
 
+A plugin may report, with a job that never started, the platform's reason
+in `Terminal.Reason`, which can quote the run's material. The receiver logs
+`run <id>: job never started (<class>): <reason>`, or the line without the
+reason when there is none. It replaces each delivered credential value in
+the reason with its redaction marker, as it does in published output, and
+each `http://` or `https://` URL with `[redacted-url]`, turns line breaks
+into spaces and cuts the result to 512 bytes. For class `fetch` the line is
+`run <id>: job never started: an S3 input was not fetched`, and a reason,
+which can quote a presigned URL, is logged as `[omitted]`. The reason goes
+to the receiver's log only.
+
 A receiver adopts a turn's existing job only when the adapter and agent
 recorded with it match the adapter that finds it. It leaves a job whose
 adapter is another of its adapters to that adapter, and stops and purges
@@ -671,7 +682,7 @@ after it ran.
 | `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
 | `wherry_agent_reported_tokens_total` | counter | `tenant`, `agent`, `model`, `kind` | tokens an agent's result reports: `input`, `output`, `cached`, `reasoning` |
-| `wherry_agent_reported_cost_usd_total` | counter | `tenant`, `agent` | cost in US dollars an agent's result reports |
+| `wherry_agent_reported_cost_usd_total` | counter | `tenant`, `agent`, `model` | cost in US dollars an agent's result reports |
 | `wherry_metrics_dropped_total` | counter | `adapter`, `reason` | adapter samples dropped and `Metrics` calls that failed |
 | `wherry_adapter_platform_errors_total` | counter | `adapter`, `class` | platform API errors: `unavailable`, `denied`, `conflict`, `timeout`, `other` |
 | `wherry_adapter_cleanup_pending` | gauge | `adapter` | the adapter's ended jobs awaiting cleanup |

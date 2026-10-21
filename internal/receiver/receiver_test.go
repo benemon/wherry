@@ -80,9 +80,11 @@ type fakeAdapter struct {
 	// job is the state Lookup reports; jobAdapter and jobAgent override the metadata it reports.
 	job                  adapter.JobState
 	jobAdapter, jobAgent string
-	// neverStarted makes Follow report a job whose agent never started, of class neverClass or else driver.
+	// neverStarted makes Follow report a job whose agent never started, of class neverClass or else driver, for
+	// neverReason.
 	neverStarted bool
 	neverClass   string
+	neverReason  string
 	purges       int
 	// purgeFailures fail that many Purges; purgeErr fails every one.
 	purgeFailures int
@@ -171,7 +173,7 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, 
 	f.follows++
 	f.froms = append(f.froms, from)
 	lost := f.follows <= f.linkLost
-	stream, followErr, endDelay, neverStarted, neverClass, ended := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.neverStarted, f.neverClass, f.ended
+	stream, followErr, endDelay, neverStarted, neverClass, neverReason, ended := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.neverStarted, f.neverClass, f.neverReason, f.ended
 	f.mu.Unlock()
 	var offset int64
 	for _, data := range stream {
@@ -201,7 +203,7 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, 
 		}
 		switch {
 		case neverStarted:
-			return adapter.Terminal{Class: cmp.Or(neverClass, "driver"), Node: "node-1"}, nil
+			return adapter.Terminal{Class: cmp.Or(neverClass, "driver"), Node: "node-1", Reason: neverReason}, nil
 		case ended != nil:
 			return *ended, nil
 		}

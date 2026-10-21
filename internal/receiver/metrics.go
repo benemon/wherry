@@ -90,7 +90,7 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.ambiguousCommits = counter("ambiguous_commits_total", "Transaction commits with an unknown outcome.")
 	m.fenced = counter("fenced_total", "Runs given up to a newer holder.")
 	m.tokens = counters("agent_reported_tokens_total", "Tokens as agents report them, by kind.", "tenant", "agent", "model", "kind")
-	m.cost = counters("agent_reported_cost_usd_total", "Cost in US dollars as agents report it.", "tenant", "agent")
+	m.cost = counters("agent_reported_cost_usd_total", "Cost in US dollars as agents report it.", "tenant", "agent", "model")
 	m.dropped = counters("metrics_dropped_total", "Adapter samples refused, and adapter Metrics calls that failed, by reason.", "adapter", "reason")
 	for _, family := range adapterFamilies {
 		labels := []string{"adapter"}
@@ -296,6 +296,6 @@ func (run *activeRun) ended(state wire.TaskState, resultMetadata []byte) {
 		}
 	}
 	if cost := reported.AgentResult.Cost; cost != nil && *cost >= 0 {
-		m.cost.WithLabelValues(tenant, agent).Add(*cost)
+		m.cost.WithLabelValues(tenant, agent, model).Add(*cost)
 	}
 }

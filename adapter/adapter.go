@@ -141,6 +141,8 @@ type Terminal struct {
 	// Class is the platform's failure class for a job that never started.
 	Class string
 	Node  string
+	// Reason is the platform's account of why a job never started, which can quote the run's material; it may be empty.
+	Reason string
 }
 
 // ErrLinkLost is the error a plugin adapter's call returns when the link to its plugin process is down.

@@ -215,7 +215,7 @@ func (s *server) Follow(req *adapterv1.FollowRequest, stream grpc.ServerStreamin
 		return callStatus(err)
 	}
 	return stream.Send(&adapterv1.FollowResponse{Event: &adapterv1.FollowResponse_Terminal{Terminal: &adapterv1.Terminal{
-		Started: terminal.Started, ExitCode: int64(terminal.ExitCode), Signal: terminal.Signal, Class: terminal.Class, Node: terminal.Node,
+		Started: terminal.Started, ExitCode: int64(terminal.ExitCode), Signal: terminal.Signal, Class: terminal.Class, Node: terminal.Node, Reason: terminal.Reason,
 	}}})
 }
 

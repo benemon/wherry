@@ -491,7 +491,8 @@ then ends the turn `TASK_STATE_FAILED` with the message text
 | `input-too-large` | the adapter cannot deliver one of the turn's inputs; the receiver then ends the turn `TASK_STATE_FAILED` naming the input, and releases nothing |
 
 A `platform` start failure can follow the turn's `started` status, when the
-job ended before its agent task started.
+job ended before its agent task started. The platform's reason for it goes to
+the receiver's log, not to the start failure.
 
 `adapter` is the adapter the receiver routed the task to. For
 `offer-unavailable` it is `none`, since no adapter was chosen.

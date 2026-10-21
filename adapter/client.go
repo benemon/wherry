@@ -306,7 +306,7 @@ func (r *remote) Follow(ctx context.Context, handle Handle, from int64, lines ch
 			return Terminal{}, callError(ctx, err)
 		}
 		if terminal := resp.GetTerminal(); terminal != nil {
-			return Terminal{Started: terminal.Started, ExitCode: int(terminal.ExitCode), Signal: terminal.Signal, Class: terminal.Class, Node: terminal.Node}, nil
+			return Terminal{Started: terminal.Started, ExitCode: int(terminal.ExitCode), Signal: terminal.Signal, Class: terminal.Class, Node: terminal.Node, Reason: terminal.Reason}, nil
 		}
 		line := resp.GetLine()
 		select {

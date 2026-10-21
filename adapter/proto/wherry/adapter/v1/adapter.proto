@@ -93,6 +93,8 @@ message Terminal {
   string signal = 3;
   string class = 4;
   string node = 5;
+  // reason is the platform's account of why the task never started; it may be empty.
+  string reason = 6;
 }
 
 message Line {

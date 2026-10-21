@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Role is an A2A Message role name.
@@ -189,6 +190,17 @@ const MaxOutputs = 256
 
 // MaxText bounds a result's text, and each status text and result metadata string, once redacted.
 const MaxText = 64 << 10
+
+// CutUTF8 is s cut to at most n bytes, at a rune boundary.
+func CutUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
 
 // MaxAgentResult bounds the resource-use fields of the agent's result record that a result's metadata carries.
 const MaxAgentResult = 16 << 10

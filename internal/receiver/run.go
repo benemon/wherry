@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -937,10 +938,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				r.logger.Printf("run %s: follow failed: %T", runID, end.err)
 				return run.stopAndFail(ctx, handle, "log stream failed", pending)
 			case !end.terminal.Started && end.terminal.Class == adapter.ClassFetch:
-				r.logger.Printf("run %s: job never started: an S3 input was not fetched", runID)
+				r.logger.Printf("run %s: job never started: an S3 input was not fetched%s", runID, run.startReason(end.terminal))
 				return run.stopAndFail(ctx, handle, "an S3 input was not fetched, or did not match its size and SHA-256", pending)
 			case !end.terminal.Started:
-				r.logger.Printf("run %s: job never started (%s)", runID, end.terminal.Class)
+				r.logger.Printf("run %s: job never started (%s)%s", runID, end.terminal.Class, run.startReason(end.terminal))
 				return run.startFailure(ctx, "platform")
 			case run.adapter.output == "file":
 				return run.conclude(ctx, handle, pending, func() agentResult { return fileResult(end.terminal, run.reply, run.uncollected) })
@@ -1281,6 +1282,26 @@ func (run *activeRun) redactText(text string) string {
 }
 
 var overText = "[redacted text over " + strconv.Itoa(wire.MaxText) + " bytes]"
+
+var reasonURL = regexp.MustCompile(`(?i)https?://\S+`)
+
+// maxReason bounds the reason a start failure's log line carries, in bytes.
+const maxReason = 512
+
+// startReason is ": " and terminal's reason for the log, redacted, without URLs, on one line of at most maxReason bytes,
+// or empty when the adapter gave none. A fetch failure's reason quotes its presigned URL, so it is omitted. The cap
+// follows redaction, which could otherwise miss a value it cut.
+func (run *activeRun) startReason(terminal adapter.Terminal) string {
+	switch {
+	case terminal.Reason == "":
+		return ""
+	case terminal.Class == adapter.ClassFetch:
+		return ": [omitted]"
+	}
+	reason := reasonURL.ReplaceAllString(run.redactText(terminal.Reason), "[redacted-url]")
+	reason = strings.NewReplacer("\r", " ", "\n", " ").Replace(reason)
+	return ": " + wire.CutUTF8(reason, maxReason)
+}
 
 // redactedForm is the redacted form of some bytes: the bytes while they fit limit, and the size and SHA-256 of all of
 // them.
