@@ -19,6 +19,10 @@ import (
 type AgentTerms struct {
 	Name        string   `json:"name" yaml:"name"`
 	Credentials []string `json:"credentials" yaml:"credentials"`
+	// Models are the models a task may name for the agent, and DefaultModel the one a task naming none runs. Models
+	// without a DefaultModel make every task name one; neither leaves the model to the agent's adapters.
+	Models       []string `json:"models,omitzero" yaml:"models"`
+	DefaultModel string   `json:"default_model,omitzero" yaml:"default_model"`
 }
 type Terms struct {
 	Agents            []AgentTerms `json:"agents" yaml:"agents"`
@@ -574,6 +578,9 @@ func validateTerms(terms Terms) error {
 	for _, agent := range terms.Agents {
 		if validateNames(agent.Name) != nil {
 			return errors.New("invalid agent name")
+		}
+		if agent.DefaultModel != "" && !slices.Contains(agent.Models, agent.DefaultModel) {
+			return errors.New("an agent's default_model must be one of its models")
 		}
 		for _, credential := range agent.Credentials {
 			if validateNames(credential) != nil {

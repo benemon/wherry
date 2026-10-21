@@ -144,7 +144,11 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 			fmt.Fprintf(stdout, "receiver=%s pool=%s capacity=%d in_flight=%d heartbeat_age=%s status=%s\n",
 				receiver.ReceiverID, receiver.Pool, receiver.Capacity, receiver.InFlight, receiver.HeartbeatAge, receiver.Status)
 			for _, adapter := range receiver.Adapters {
-				fmt.Fprintf(stdout, "  adapter=%s agent=%s ready=%t labels=%s\n", adapter.Name, adapter.Agent, adapter.Ready, wire.TermsText(adapter.Labels))
+				fmt.Fprintf(stdout, "  adapter=%s agent=%s ready=%t labels=%s", adapter.Name, adapter.Agent, adapter.Ready, wire.TermsText(adapter.Labels))
+				if len(adapter.Models) > 0 {
+					fmt.Fprintf(stdout, " models=%s default_model=%s", strings.Join(adapter.Models, ","), adapter.DefaultModel)
+				}
+				fmt.Fprintln(stdout)
 			}
 		}
 	}
@@ -231,6 +235,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
 	agent := flags.String("agent", "", "agent to run (default: the pool's default agent)")
+	model := flags.String("model", "", "model the agent runs, one of its models as receivers lists them (default: the agent's default model)")
 	selectorText := flags.String("selector", "", "labels the adapter must carry: key=v|v, key!=v|v, key, !key, comma-separated")
 	prompt := flags.String("prompt", "", "prompt text")
 	promptFile := flags.String("prompt-file", "", "prompt file")
@@ -275,7 +280,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit [--agent NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git REMOTE@REF [--git-path PATH] [--git-credential NAME] [--git-host-key FILE] [--git-changes patch|bundle]] [--input FILE]... [--s3-input FILE]... [--credential-file NAME=FILE]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git REMOTE@REF [--git-path PATH] [--git-credential NAME] [--git-host-key FILE] [--git-changes patch|bundle]] [--input FILE]... [--s3-input FILE]... [--credential-file NAME=FILE]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {
@@ -341,7 +346,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	}
 	defer closeClient()
 	result, err := client.Submit(ctx, busclient.SubmitInput{
-		Agent: *agent, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Outputs: outputs, Git: git, GitChanges: *gitChanges,
+		Agent: *agent, Model: *model, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Outputs: outputs, Git: git, GitChanges: *gitChanges,
 		S3Inputs: stored, Deadline: *deadline, QueueDeadline: *queueDeadline,
 	})
 	if err != nil {
@@ -394,6 +399,9 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 		return err
 	}
 	fmt.Fprintln(stdout, result.Status.State)
+	if result.Model != "" || len(result.ServedModels) > 0 {
+		fmt.Fprintf(stderr, "model=%s served_models=%s\n", result.Model, strings.Join(result.ServedModels, ","))
+	}
 	if result.Task != nil {
 		for _, artifact := range result.Task.Artifacts {
 			for _, part := range artifact.Parts {
@@ -490,7 +498,11 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 			return err
 		}
 		for _, run := range result.Runs {
-			fmt.Fprintf(stdout, "%s pool=%s turn=%d %s\n", run.RunID, run.Pool, run.Turn, run.Status.State)
+			model := ""
+			if run.Model != "" {
+				model = " model=" + run.Model
+			}
+			fmt.Fprintf(stdout, "%s pool=%s turn=%d%s %s\n", run.RunID, run.Pool, run.Turn, model, run.Status.State)
 		}
 		warnSkipped(stderr, result.Skipped)
 		return nil
@@ -501,6 +513,9 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		}
 		fmt.Fprintln(stdout, result.Status.State)
 		fmt.Fprintf(stdout, "turn=%d\n", result.Turn)
+		if result.Model != "" {
+			fmt.Fprintf(stdout, "model=%s\n", result.Model)
+		}
 		if result.Status.Message != nil {
 			for _, part := range result.Status.Message.Parts {
 				fmt.Fprintln(stdout, partText(part))
@@ -605,6 +620,7 @@ func runTranscript(ctx context.Context, client *busclient.Host, args []string, s
 	if err != nil {
 		return err
 	}
+	result.Lines = viewLines(result.Lines)
 	lines := result.Lines[min(*offset, len(result.Lines)):]
 	if *limit > 0 {
 		lines = lines[:min(*limit, len(lines))]

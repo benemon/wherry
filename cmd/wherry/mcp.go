@@ -154,6 +154,7 @@ type submitInput struct {
 	Prompt               string             `json:"prompt,omitempty" jsonschema:"the task for the remote agent; exactly one of prompt and prompt_file is required"`
 	PromptFile           string             `json:"prompt_file,omitempty" jsonschema:"local file holding the prompt, read as an input is"`
 	Agent                string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
+	Model                string             `json:"model,omitempty" jsonschema:"model the agent runs, one of its models as receivers lists them; default: the agent's default model"`
 	Selector             []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the adapter must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
 	Git                  *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts"`
 	Inputs               []string           `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names; the pool's inline limit in all, 256 KiB by default"`
@@ -182,6 +183,7 @@ type runOutput struct {
 	Pool     string         `json:"pool"`
 	Turn     int64          `json:"turn"`
 	State    string         `json:"state"`
+	Model    string         `json:"model,omitempty" jsonschema:"model the run's placement names"`
 	Message  string         `json:"message,omitempty"`
 	Updated  string         `json:"updated" jsonschema:"RFC 3339 time of the latest status; while the run has none, of this host's submission, else of the receiver's echo"`
 	Redacted map[string]int `json:"redacted,omitempty" jsonschema:"redaction markers in the message by the credential or S3 object each names"`
@@ -213,15 +215,17 @@ type outputReply struct {
 }
 
 type awaitReply struct {
-	ID          string                  `json:"id"`
-	State       string                  `json:"state"`
-	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling await again"`
-	Message     string                  `json:"message,omitempty" jsonschema:"status message, such as the credential an AUTH_REQUIRED run needs"`
-	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
-	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the turn's outputs, verified and written locally"`
-	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the turn did not return or this host could not verify, each with its reason"`
-	Redacted    map[string]int          `json:"redacted,omitempty" jsonschema:"redaction markers in the message and artifacts by the credential or S3 object each names"`
-	Skipped     int                     `json:"skipped,omitempty"`
+	ID           string                  `json:"id"`
+	State        string                  `json:"state"`
+	Model        string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
+	ServedModels []string                `json:"served_models,omitempty" jsonschema:"models the agent's result reports serving the turn, where its harness reports them"`
+	RetryAfter   int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling await again"`
+	Message      string                  `json:"message,omitempty" jsonschema:"status message, such as the credential an AUTH_REQUIRED run needs"`
+	Artifacts    []resultArtifact        `json:"artifacts,omitempty"`
+	Outputs      []outputReply           `json:"outputs,omitempty" jsonschema:"the turn's outputs, verified and written locally"`
+	NotReturned  []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the turn did not return or this host could not verify, each with its reason"`
+	Redacted     map[string]int          `json:"redacted,omitempty" jsonschema:"redaction markers in the message and artifacts by the credential or S3 object each names"`
+	Skipped      int                     `json:"skipped,omitempty"`
 }
 
 type continueInput struct {
@@ -292,7 +296,7 @@ type transcriptReply struct {
 	ID         string           `json:"id"`
 	Turn       int64            `json:"turn"`
 	Attempt    int64            `json:"attempt" jsonschema:"the delivery attempt whose lines these are; 0 while no receiver has reported on the turn"`
-	Total      int              `json:"total" jsonschema:"lines of the attempt on the feed so far"`
+	Total      int              `json:"total" jsonschema:"lines of the attempt on the feed so far, less those the view drops"`
 	NextOffset int              `json:"next_offset,omitempty" jsonschema:"set while lines remain past this page: the offset to call with next"`
 	Lines      []transcriptLine `json:"lines"`
 	Redacted   map[string]int   `json:"redacted,omitempty" jsonschema:"redaction markers in every line of the attempt, not only this page, by the credential or S3 object each names"`
@@ -311,7 +315,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receivers",
-		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each adapter's agent and labels as wherry.admin records them, with ready set when the receiver's live advertisement offers the adapter. A live receiver with no ready adapter lists every adapter with ready false. Read it to choose an agent and selector before submit.",
+		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each adapter's agent and labels as wherry.admin records them, and its agent's models and default_model from the pool's terms, with ready set when the receiver's live advertisement offers the adapter. A live receiver with no ready adapter lists every adapter with ready false. Read it to choose an agent and selector before submit.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()
@@ -375,7 +379,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		output := statusOutput{Runs: []runOutput{}, Skipped: runs.Skipped}
 		for _, result := range runs.Runs {
 			output.Runs = append(output.Runs, runOutput{
-				ID: result.RunID, Pool: result.Pool, Turn: result.Turn, State: string(result.Status.State), Message: statusText(result.Status),
+				ID: result.RunID, Pool: result.Pool, Turn: result.Turn, State: string(result.Status.State), Model: result.Model, Message: statusText(result.Status),
 				Updated: result.Updated.UTC().Format(time.RFC3339Nano), Redacted: result.Redacted,
 			})
 		}
@@ -404,13 +408,14 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			if err != nil {
 				return nil, awaitReply{}, toolFailure(err)
 			}
-			return nil, awaitReply{ID: input.ID, State: string(status.Status.State), RetryAfter: retryAfter, Skipped: status.Skipped}, nil
+			return nil, awaitReply{ID: input.ID, State: string(status.Status.State), Model: status.Model, RetryAfter: retryAfter, Skipped: status.Skipped}, nil
 		}
 		if err != nil {
 			return nil, awaitReply{}, toolFailure(err)
 		}
 		output := awaitReply{
-			ID: input.ID, State: string(result.Status.State), Message: statusText(result.Status), Redacted: result.Redacted, Skipped: result.Skipped,
+			ID: input.ID, State: string(result.Status.State), Model: result.Model, ServedModels: result.ServedModels, Message: statusText(result.Status),
+			Redacted: result.Redacted, Skipped: result.Skipped,
 		}
 		if result.Task != nil {
 			for _, artifact := range result.Task.Artifacts {
@@ -548,6 +553,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, transcriptReply{}, toolFailure(err)
 		}
+		result.Lines = viewLines(result.Lines)
 		output := transcriptReply{ID: input.ID, Turn: result.Turn, Attempt: result.Attempt, Total: len(result.Lines), Lines: []transcriptLine{},
 			Redacted: result.Redacted, Skipped: result.Skipped}
 		size := func(value any) int {
@@ -610,6 +616,57 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	return server
 }
 
+// viewLines drops what a reader of a Claude stream-json transcript gets nothing from: each thinking block's signature,
+// and system thinking_tokens lines. The feed keeps both.
+func viewLines(lines []busclient.TranscriptLine) []busclient.TranscriptLine {
+	kept := make([]busclient.TranscriptLine, 0, len(lines))
+	for _, line := range lines {
+		data := line.Part.Raw
+		if data == nil {
+			data = []byte(line.Part.Text)
+		}
+		var event struct {
+			Type    string `json:"type"`
+			Subtype string `json:"subtype"`
+		}
+		if line.Part.URL == "" && json.Unmarshal(data, &event) == nil {
+			if event.Type == "system" && event.Subtype == "thinking_tokens" {
+				continue
+			}
+			if unsigned, ok := withoutSignatures(data); ok {
+				line.Part.Raw, line.Part.Text = unsigned, ""
+			}
+		}
+		kept = append(kept, line)
+	}
+	return kept
+}
+
+// withoutSignatures returns an assistant event with the signature of each thinking block in its message's content
+// removed, and false when it has none.
+func withoutSignatures(data []byte) ([]byte, bool) {
+	var event, message map[string]jsontext.Value
+	var content []map[string]jsontext.Value
+	var kind string
+	if json.Unmarshal(data, &event) != nil || json.Unmarshal(event["type"], &kind) != nil || kind != "assistant" || json.Unmarshal(event["message"], &message) != nil || json.Unmarshal(message["content"], &content) != nil {
+		return nil, false
+	}
+	removed := false
+	for _, block := range content {
+		if _, signed := block["signature"]; signed && json.Unmarshal(block["type"], &kind) == nil && kind == "thinking" {
+			delete(block, "signature")
+			removed = true
+		}
+	}
+	if !removed {
+		return nil, false
+	}
+	message["content"], _ = json.Marshal(content, json.Deterministic(true)) // values decoded from valid JSON always encode
+	event["message"], _ = json.Marshal(message, json.Deterministic(true))
+	unsigned, _ := json.Marshal(event, json.Deterministic(true))
+	return unsigned, true
+}
+
 func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error)) (busclient.SubmitInput, error) {
 	if (input.Prompt == "") == (input.PromptFile == "") {
 		return busclient.SubmitInput{}, invalidArgument("exactly one of prompt and prompt_file is required")
@@ -641,7 +698,7 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 		return busclient.SubmitInput{}, err
 	}
 	submission := busclient.SubmitInput{
-		Agent: input.Agent, Selector: selector, Prompt: input.Prompt, Parts: parts,
+		Agent: input.Agent, Model: input.Model, Selector: selector, Prompt: input.Prompt, Parts: parts,
 		Deadline: deadline, QueueDeadline: queueDeadline,
 	}
 	if input.Git != nil {

@@ -50,7 +50,9 @@ const liveness = 120 * time.Second
 // SubmitInput is a root task's routing, prompt, inputs and requested outputs.
 type SubmitInput struct {
 	// Agent names what runs; empty takes the pool's default.
-	Agent    string
+	Agent string
+	// Model names the model the agent runs; empty takes the agent's default model.
+	Model    string
 	Selector []wire.Requirement
 	Prompt   string
 	// Parts follow the prompt's text part.
@@ -108,13 +110,15 @@ type Receiver struct {
 	Ended        bool      `json:"ended"`
 }
 
-// Adapter is one adapter of a receiver: the agent and labels from its config record, and whether the receiver's live
-// advertisement offers it.
+// Adapter is one adapter of a receiver: the agent and labels from its config record, the agent's models and default
+// model from its pool's terms, and whether the receiver's live advertisement offers it.
 type Adapter struct {
-	Name   string            `json:"name"`
-	Agent  string            `json:"agent"`
-	Labels map[string]string `json:"labels"`
-	Ready  bool              `json:"ready"`
+	Name         string            `json:"name"`
+	Agent        string            `json:"agent"`
+	Models       []string          `json:"models,omitzero"`
+	DefaultModel string            `json:"default_model,omitzero"`
+	Labels       map[string]string `json:"labels"`
+	Ready        bool              `json:"ready"`
 }
 
 // Host implements the operations of a tenant's host principal.
@@ -252,9 +256,9 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	pool, placement, ok := resolvePlacement(v.state, h.tenant, input.Agent, input.Selector, ads)
-	if !ok {
-		return SubmitResult{}, ErrNoMatchingReceiver
+	pool, placement, err := resolvePlacement(v.state, h.tenant, input.Agent, input.Model, input.Selector, ads)
+	if err != nil {
+		return SubmitResult{}, err
 	}
 	if err := wire.ValidateInputs(input.Parts, v.state.Pools[pool].InlineLimit); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
@@ -512,7 +516,12 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 				labels = map[string]string{}
 			}
 			ready := receiver.Status == "live" && slices.ContainsFunc(ad.Offers, func(offer wire.Offer) bool { return offer.Adapter == adapter.Name })
-			receiver.Adapters = append(receiver.Adapters, Adapter{Name: adapter.Name, Agent: adapter.Agent, Labels: labels, Ready: ready})
+			listed := Adapter{Name: adapter.Name, Agent: adapter.Agent, Labels: labels, Ready: ready}
+			agents := v.state.Pools[config.Pool].Agents
+			if index := slices.IndexFunc(agents, func(agent admin.AgentTerms) bool { return agent.Name == adapter.Agent }); index >= 0 {
+				listed.Models, listed.DefaultModel = agents[index].Models, agents[index].DefaultModel
+			}
+			receiver.Adapters = append(receiver.Adapters, listed)
 		}
 		result = append(result, receiver)
 	}

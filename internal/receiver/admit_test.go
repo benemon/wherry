@@ -130,6 +130,47 @@ func TestAdmitRejections(t *testing.T) {
 	}
 }
 
+// A task is admitted under the pool's current terms, so one whose model has left its agent's models since submit is
+// rejected.
+func TestAdmitRejectsModelOutsideTheTerms(t *testing.T) {
+	models := func(names ...string) admin.Terms {
+		terms := testTerms()
+		terms.Agents[0].Models, terms.Agents[0].DefaultModel = names, names[0]
+		return terms
+	}
+	f := newFixtureWith(t, resultStream, models("haiku", "sonnet"), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Placement.Model = "sonnet" })
+	f.admitted(t, record)
+	terms := models("haiku")
+	encoded := must(t)(admin.EncodeRecord(admin.Record{Kind: "pool", Pool: testPool, Terms: &terms}))
+	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.rejected(t, record, "model not in the pool's terms")
+	if !strings.Contains(scrape(t, f.receiver), `wherry_rejections_total{pool="pool-a",reason="model not in the pool's terms",tenant="tenant-a"} 1`) {
+		t.Fatal("the rejection is not counted under its fixed reason")
+	}
+	f.rejected(t, f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
+	}), "model not in the pool's terms")
+}
+
+func TestDispatchCarriesThePlacementModel(t *testing.T) {
+	terms := testTerms()
+	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, "haiku"
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f.answer(t, credentialName)
+	if status := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Placement.Model = "sonnet" }), 1); status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	if run := f.lastRun(); run.Model != "sonnet" {
+		t.Fatalf("dispatched model %q, want the placement's", run.Model)
+	}
+}
+
 func TestAdmitRejectsTurnPastRunLifetime(t *testing.T) {
 	terms := testTerms()
 	terms.RunLifetimeMS = 1
@@ -439,6 +480,7 @@ func TestBindTurnsRequireSameBindings(t *testing.T) {
 		"tenant":   func(task *wire.Submission) { task.Wherry.Tenant = "tenant-b" },
 		"agent":    func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" },
 		"selector": func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("zone", "dc1")} },
+		"model":    func(task *wire.Submission) { task.Wherry.Placement.Model = "sonnet" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)

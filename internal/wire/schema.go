@@ -56,6 +56,11 @@ var terminalStates = map[TaskState]bool{
 	TaskStateRejected:  true,
 }
 
+// ValidTaskState reports whether state is an A2A task state.
+func ValidTaskState(state TaskState) bool {
+	return taskStates[state]
+}
+
 // Terminal reports whether an A2A task state ends a task.
 func Terminal(state TaskState) bool {
 	return terminalStates[state]

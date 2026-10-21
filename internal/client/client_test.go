@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -498,6 +499,109 @@ func TestSubmitMatchesAcrossAdapters(t *testing.T) {
 	}
 }
 
+// modelPool creates pool-b, whose claude runs haiku or sonnet and defaultModel by default, with an advertising member.
+func (f *fixture) modelPool(t *testing.T, defaultModel string) *testReceiver {
+	t.Helper()
+	terms := testTerms()
+	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, defaultModel
+	if err := f.service.PoolCreate(f.ctx, "pool-b", terms); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-b"); err != nil {
+		t.Fatal(err)
+	}
+	receiver := f.addReceiver(t, "receiver-b", "pool-b")
+	receiver.advertise(t, f.ctx, nil)
+	return receiver
+}
+
+func TestSubmitModel(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.modelPool(t, "haiku")
+	receivers, err := f.host.Receivers(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lab := receivers[len(receivers)-1].Adapters[0]; lab.Agent != "claude" || !slices.Equal(lab.Models, []string{"haiku", "sonnet"}) || lab.DefaultModel != "haiku" {
+		t.Fatalf("receivers list %+v, want claude's models and default model from the pool terms", lab)
+	}
+	for model, want := range map[string]string{"": "haiku", "sonnet": "sonnet"} {
+		result, err := f.host.Submit(f.ctx, SubmitInput{Model: model, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+		if err != nil {
+			t.Fatalf("model %q: %v", model, err)
+		}
+		if placed := receiver.claim(t, f.ctx, result.RunID)[0].submission.Wherry.Placement; placed.Agent != "claude" || placed.Model != want {
+			t.Fatalf("model %q placed %#v, want claude running %s", model, placed, want)
+		}
+		if status, err := f.host.Status(f.ctx, result.RunID); err != nil || status.Model != want {
+			t.Fatalf("model %q status %+v, %v; want model %s", model, status, err, want)
+		}
+	}
+	published := f.tasksEnd(t, "pool-b")
+	_, err = f.host.Submit(f.ctx, SubmitInput{Model: "opus", Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "model opus") || !strings.Contains(err.Error(), "pool-b") {
+		t.Fatalf("submit of a model outside the terms = %v, want invalid input naming the model and pool", err)
+	}
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Agent: "claude", Model: "opus", Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrInvalidInput) ||
+		!strings.Contains(err.Error(), "model opus is not in agent claude's models in pool pool-b") {
+		t.Fatalf("submit of a model outside the agent's models = %v, want invalid input naming the model, agent and pool", err)
+	}
+	if n := f.tasksEnd(t, "pool-b"); n != published {
+		t.Fatalf("pool tasks hold %d records after refused models, want %d", n, published)
+	}
+}
+
+func TestSubmitWithoutAModelForAnAgentRequiringOne(t *testing.T) {
+	f := newFixture(t)
+	f.modelPool(t, "")
+	_, err := f.host.Submit(f.ctx, SubmitInput{Agent: "claude", Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "agent claude in pool pool-b requires a model") {
+		t.Fatalf("submit without a model = %v, want invalid input saying the agent requires one", err)
+	}
+	if n := f.tasksEnd(t, "pool-b"); n != 0 {
+		t.Fatalf("pool tasks hold %d records after a refused submit", n)
+	}
+}
+
+func TestResolvePlacementModel(t *testing.T) {
+	terms := testTerms()
+	terms.DefaultAgent = "codex"
+	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, "haiku"
+	terms.Agents[1].Models, terms.Agents[1].DefaultModel = []string{"gpt-5-mini"}, "gpt-5-mini"
+	state := admin.NewState()
+	state.Pools["pool-a"] = terms
+	state.Receivers["receiver-a"] = admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Adapters: []admin.AdapterSettings{
+		{Name: "lab", Type: "nomad", Agent: "claude"}, {Name: "cloud", Type: "aws", Agent: "codex"},
+	}}
+	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
+	ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Offers: []wire.Offer{{Adapter: "lab"}, {Adapter: "cloud"}}}}
+	for name, test := range map[string]struct{ agent, model, wantAgent, wantModel string }{
+		"default agent's default model":            {"", "", "codex", "gpt-5-mini"},
+		"fallback skips the default lacking model": {"", "sonnet", "claude", "sonnet"},
+		"explicit agent's default model":           {"claude", "", "claude", "haiku"},
+	} {
+		_, placement, err := resolvePlacement(state, "tenant-a", test.agent, test.model, nil, ads)
+		if err != nil || placement.Agent != test.wantAgent || placement.Model != test.wantModel {
+			t.Fatalf("%s: placed %#v, %v; want %s running %s", name, placement, err, test.wantAgent, test.wantModel)
+		}
+	}
+	if _, _, err := resolvePlacement(state, "tenant-a", "", "opus", nil, ads); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("a model no agent holds placed: %v", err)
+	}
+	// claude, now the default agent, has models and no default model, so a task naming none falls to codex.
+	terms.DefaultAgent, terms.Agents[0].DefaultModel = "claude", ""
+	state.Pools["pool-a"] = terms
+	if _, placement, err := resolvePlacement(state, "tenant-a", "", "", nil, ads); err != nil || placement.Agent != "codex" || placement.Model != "gpt-5-mini" {
+		t.Fatalf("fallback placed %#v, %v; want codex past the agent requiring a model", placement, err)
+	}
+	if _, _, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "agent claude in pool pool-a requires a model") {
+		t.Fatalf("explicit agent requiring a model without one: %v", err)
+	}
+	if _, placement, err := resolvePlacement(state, "tenant-a", "claude", "sonnet", nil, ads); err != nil || placement.Model != "sonnet" {
+		t.Fatalf("explicit agent requiring a model, given one: %#v, %v", placement, err)
+	}
+}
+
 func TestSubmitIgnoresStaleOrUnauthorisedAdvertisements(t *testing.T) {
 	for name, setup := range map[string]func(*testing.T, *fixture){
 		"stale": func(t *testing.T, f *fixture) {
@@ -597,8 +701,8 @@ func TestResolvePlacement(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: test.offers, Capacity: 1}}
-			pool, placement, ok := resolvePlacement(state, "tenant-a", test.agent, test.selector, ads)
-			if ok && (pool != "pool-a" || !reflect.DeepEqual(placement.Selector, test.selector)) {
+			pool, placement, err := resolvePlacement(state, "tenant-a", test.agent, "", test.selector, ads)
+			if err == nil && (pool != "pool-a" || !reflect.DeepEqual(placement.Selector, test.selector)) {
 				t.Fatalf("pool %q placement %#v, want pool-a under the submitted selector", pool, placement)
 			}
 			if placement.Agent != test.want {
@@ -606,7 +710,7 @@ func TestResolvePlacement(t *testing.T) {
 			}
 		})
 	}
-	if _, _, ok := resolvePlacement(state, "tenant-b", "", nil, map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: ready}}); ok {
+	if _, _, err := resolvePlacement(state, "tenant-b", "", "", nil, map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: ready}}); err == nil {
 		t.Fatal("placed a task for a tenant not entitled to the pool")
 	}
 }
@@ -627,12 +731,12 @@ func TestResolvePlacementChoosesMostSpareThenLowestID(t *testing.T) {
 	member("receiver-b", "pool-a", 9, 0, "cloud") // most spare, but its ready adapter launches codex
 	member("receiver-a", "pool-c", 9, 0, "lab")   // most spare, pool not entitled
 	member("receiver-e", "pool-a", 4, 2, "lab")   // spare 2
-	pool, placement, ok := resolvePlacement(state, "tenant-a", "claude", nil, ads)
-	if !ok || pool != "pool-a" || placement.Agent != "claude" {
-		t.Fatalf("placed %q %#v %v, want pool-a through receiver-c", pool, placement, ok)
+	pool, placement, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads)
+	if err != nil || pool != "pool-a" || placement.Agent != "claude" {
+		t.Fatalf("placed %q %#v %v, want pool-a through receiver-c", pool, placement, err)
 	}
 	ads["receiver-d"] = wire.Advertisement{Receiver: "receiver-d", Pool: "pool-b", Capacity: 5, InFlight: 1, Offers: ads["receiver-d"].Offers}
-	if pool, _, _ := resolvePlacement(state, "tenant-a", "claude", nil, ads); pool != "pool-b" {
+	if pool, _, _ := resolvePlacement(state, "tenant-a", "claude", "", nil, ads); pool != "pool-b" {
 		t.Fatalf("pool %q, want pool-b through receiver-d's larger spare capacity", pool)
 	}
 }

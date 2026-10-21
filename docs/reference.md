@@ -96,13 +96,15 @@ and receiver ID:
 
 ```
 receiver=<id> pool=<pool> capacity=<n> in_flight=<n> heartbeat_age=<age> status=<status>
-  adapter=<name> agent=<agent> ready=<bool> labels=<k=v,...>
+  adapter=<name> agent=<agent> ready=<bool> labels=<k=v,...> [models=<m,...> default_model=<m>]
 ```
 
 `status` is `live` when the latest advertisement is at most 120 seconds
 old, `stale` when it is older, `silent` when there is none, and `ended`
 after the receiver's membership end. Adapters and their labels come from the
-receiver's configuration record. `ready` is true when the receiver is live
+receiver's configuration record, and an agent's `models` and
+`default_model` from the pool's [terms](#pool-terms) when it has them.
+`ready` is true when the receiver is live
 and its advertisement offers the adapter. A live receiver with no ready
 adapter lists each adapter with `ready=false`.
 
@@ -111,7 +113,7 @@ adapter lists each adapter with `ready=false`.
 | Member | Content |
 | --- | --- |
 | `receiver_id`, `pool` | strings |
-| `adapters` | `{name, agent, labels, ready}` |
+| `adapters` | `{name, agent, models, default_model, labels, ready}`; `models` and `default_model` only for an agent that has them |
 | `capacity`, `in_flight` | integers from the latest advertisement |
 | `heartbeat_age` | Go duration string, or `-` |
 | `status` | `live`, `stale`, `silent` or `ended` |
@@ -125,6 +127,7 @@ prints `run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--agent` | the pool's default, then the terms' order | agent to run |
+| `--model` | the agent's `default_model` | model the agent runs, one of its `models` in the pool's terms |
 | `--selector` | empty | [selector](#selectors) over adapter labels |
 | `--prompt` | | prompt text |
 | `--prompt-file` | | file holding the prompt |
@@ -139,6 +142,18 @@ prints `run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
 | `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the turn without it, and `:s3` returns it through the pool's bucket; repeatable |
 | `--deadline` | `30m` | time from now by which the run must end |
 | `--queue-deadline` | `10m` | time from now by which a receiver must claim it |
+
+`submit` refuses, before it publishes, a model outside the agent's
+`models`, including any model for an agent with none:
+
+```
+invalid input: model opus is not in agent claude's models in pool build
+```
+
+Without `--agent`, `submit` considers only the agents whose `models` hold
+the model, and refuses a model no agent of the pool holds. wherry does not
+interpret a model name; the adapter passes it to the agent as
+`WHERRY_MODEL`.
 
 Exactly one of `--prompt` and `--prompt-file` is required, and an empty
 prompt file fails with `--prompt-file is empty`. The other `--git-` flags
@@ -231,6 +246,12 @@ prints as its text, its JSON data, `[url <url>]`, or
 `[raw <media type> <n> bytes]`. For `TASK_STATE_AUTH_REQUIRED` it prints
 `continue with: wherry continue <id>` on standard error.
 
+For a run whose placement names a model, or whose agent's result names the
+models that served it, `await` prints
+`model=<model> served_models=<model,...>` on standard error. The receiver
+takes `served_models` from the `modelUsage` keys of a Claude result; a
+Codex result names no model, so it is empty there.
+
 `await` writes each output that [verifies](a2a-extension-v1.md#inputs-and-outputs)
 against the result, at its relative path beneath the outputs directory, and
 prints a line for it:
@@ -282,7 +303,8 @@ run the client never saw finish.
 
 Reads the latest verified state of a run's latest turn without waiting.
 With `RUN_ID` it prints the state on the first line, `turn=<n>` on the
-second, then one line per part of the status message. The state is
+second, `model=<model>` next when the run's placement names one, then one
+line per part of the status message. The state is
 `TASK_STATE_SUBMITTED` until a receiver reports one. For
 `TASK_STATE_AUTH_REQUIRED` it prints `continue with: wherry continue <id>`
 on standard error.
@@ -290,7 +312,7 @@ on standard error.
 Without `RUN_ID` it prints one line per run, latest update first:
 
 ```
-<run> pool=<pool> turn=<n> <state>
+<run> pool=<pool> turn=<n> [model=<model>] <state>
 ```
 
 The list holds the runs in this host's records in `state_dir` and the runs
@@ -336,6 +358,13 @@ attempt, does not count as an attempt.
 | `--turn` | the latest | turn to read |
 | `--offset` | `0` | lines to skip |
 | `--limit` | `0`, every line | most lines to print |
+
+`transcript` shows a Claude stream-json transcript without each thinking
+block's `signature` and without `system` lines of subtype `thinking_tokens`,
+and counts `--offset` and `--limit` over the lines it shows. The feed keeps
+both. A line it drops a signature from is re-encoded compact with its
+members sorted and escapes resolved; a line that does not decode is shown as
+published.
 
 A line that is not UTF-8 prints as its bytes. For a line over 512 KiB, which
 the receiver did not store, it prints `line at offset <seq> not stored:
@@ -535,11 +564,13 @@ not against one that runs commands of its own
 
 The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
-certificate pair made for each start, protocol version 4. The receiver refuses a
+certificate pair made for each start, protocol version 5. The receiver refuses a
 plugin of any other protocol version at its start, so the receiver and its
-plugins upgrade together. Version 4 adds `Metrics`; the receiver refuses a
-version 3 plugin with
-`incompatible API version with plugin. Plugin version: 3, Client versions: [4]`.
+plugins upgrade together. Version 5 adds `Run.Model`, the model a task's
+placement names, which a plugin passes to the agent as `WHERRY_MODEL` when
+it is set and never otherwise. A version 4 plugin would drop it and run its
+own model, so the receiver refuses it with
+`incompatible API version with plugin. Plugin version: 4, Client versions: [5]`.
 The receiver refuses a plugin that offers no TLS certificate. Every call names
 its adapter. A plugin accepts messages up to 64 MiB; the receiver logs a larger
 Dispatch as `dispatch rejected: message too large`.
@@ -602,7 +633,10 @@ process (`process_`) families, `wherry_build_info` with `version` and
 Every label value comes from the receiver's configuration, its pool's terms and
 entitlements, or a fixed list. No label or value carries a run ID, prompt,
 output, error text, URL, image, path, node or credential name. An agent the
-pool's terms do not name is `other`. A turn ended without an adapter has
+pool's terms do not name is `other`. `model` is the placement's model when the
+agent's `models` in the terms hold it, `other` when they do not, and empty for
+an agent with no `models`. A `state` outside the A2A task states is `other`.
+A turn ended without an adapter has
 `adapter="none"`: one given back at the delivery budget before any adapter
 took it, and an interrupted turn a member ends on its cancel or expiry, even
 after it ran.
@@ -612,8 +646,8 @@ after it ran.
 | `wherry_claims_total` | counter | `tenant` | claimed tasks whose submission verifies |
 | `wherry_admissions_total` | counter | `tenant`, `adapter` | tasks admitted, by the adapter they were routed to |
 | `wherry_rejections_total` | counter | `tenant`, `reason` | rejections, by reason |
-| `wherry_runs_total` | counter | `tenant`, `adapter`, `agent`, `state` | turns ended `completed`, `failed` or `canceled` |
-| `wherry_turn_duration_seconds` | histogram | `tenant`, `adapter`, `agent`, `state` | time from this attempt's claim to the turn's terminal state; an adopted turn counts the adopting attempt only |
+| `wherry_runs_total` | counter | `tenant`, `adapter`, `agent`, `model`, `state` | turns ended `completed`, `failed` or `canceled` |
+| `wherry_turn_duration_seconds` | histogram | `tenant`, `adapter`, `agent`, `model`, `state` | time from this attempt's claim to the turn's terminal state; an adopted turn counts the adopting attempt only |
 | `wherry_queue_wait_seconds` | histogram | `tenant`, `adapter` | time from submission to first claim |
 | `wherry_adoptions_total` | counter | `tenant`, `adapter` | turns that adopted an earlier attempt's job |
 | `wherry_continuations_total` | counter | `tenant`, `adapter` | continuation turns admitted |
@@ -636,11 +670,11 @@ after it ran.
 | `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
 | `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
-| `wherry_agent_reported_tokens_total` | counter | `tenant`, `agent`, `kind` | tokens an agent's result reports: `input`, `output`, `cached`, `reasoning` |
+| `wherry_agent_reported_tokens_total` | counter | `tenant`, `agent`, `model`, `kind` | tokens an agent's result reports: `input`, `output`, `cached`, `reasoning` |
 | `wherry_agent_reported_cost_usd_total` | counter | `tenant`, `agent` | cost in US dollars an agent's result reports |
 | `wherry_metrics_dropped_total` | counter | `adapter`, `reason` | adapter samples dropped and `Metrics` calls that failed |
 | `wherry_adapter_platform_errors_total` | counter | `adapter`, `class` | platform API errors: `unavailable`, `denied`, `conflict`, `timeout`, `other` |
-| `wherry_adapter_cleanup_pending` | gauge | `adapter` | ended jobs awaiting cleanup |
+| `wherry_adapter_cleanup_pending` | gauge | `adapter` | the adapter's ended jobs awaiting cleanup |
 | `wherry_adapter_sweep_deletions_total` | counter | `adapter`, `kind` | material a sweep deleted: `job`, `variable` |
 | `wherry_adapter_placement_seconds` | histogram | `adapter` | time from dispatch to the agent task starting |
 
@@ -672,9 +706,9 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool` |
 | `status` | `id`, optional | `runs`, `skipped` |
-| `await` | `id` | `id`, `state`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped` |
+| `await` | `id` | `id`, `state`, `model`, `served_models`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped` |
 | `continue` | `id`, `prompt`, `prompt_file`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `turn`, `skipped` |
 | `cancel` | `id` | `id`, `skipped` |
 | `events` | `id` | `id`, `events`, `transcripts`, `redacted`, `skipped` |
@@ -683,6 +717,8 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 
 - `submit` requires exactly one of `prompt` and `prompt_file`, a file path read
   as an input is; an empty file fails with `prompt_file is empty`.
+  `model` is as `--model` takes it, and a model outside the agent's `models`
+  fails with `INVALID_ARGUMENT` naming the model, agent and pool.
   `selector` is an array of `{key, operator, values}`. `git` is
   `{remote, ref, path, credential, host_key, changes}`, as `--git`,
   `--git-path`, `--git-credential`, `--git-host-key` and `--git-changes` take
@@ -697,7 +733,8 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 - `status` returns the latest verified state of a run's latest turn
   without waiting. `runs` holds one entry for the run `id` names, or,
   without `id`, one per run `wherry status` lists, latest update first.
-  Each entry is `{id, pool, turn, state, message, updated, redacted}`. The
+  Each entry is `{id, pool, turn, state, model, message, updated, redacted}`,
+  with `model` the run's placement's model, when it has one. The
   state is `TASK_STATE_SUBMITTED` until a receiver reports one. `updated` is
   the RFC 3339 time of the latest status. While the run has none, it is this
   host's submission of the turn, else the modification time of this host's
@@ -713,7 +750,9 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
   each in `outputs` as `{name, path, sha256, size}`, S3 outputs included, which
   it downloads and verifies, then deletes the run's prefix, as `wherry await`
   does. `not_returned` holds `{name, size, reason}` for each output the result
-  lists as not returned and each one that fails verification.
+  lists as not returned and each one that fails verification. `model` is the
+  run's placement's model, and `served_models` the models the agent's result
+  names, as `wherry await` prints them.
 - `status`, `await`, `events` and `transcript` show each redaction marker as
   `wherry status` and `wherry await` print it, and `redacted` maps each name
   to the number of its markers in the messages, the artifacts, or every line
@@ -728,8 +767,8 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
 - `transcript` returns the lines `wherry transcript` prints, of `turn`, by
   default the latest, from `offset` lines in. `attempt` is the turn's highest
   attempt, 0 while no receiver has reported on the turn. `total` counts the
-  transcript's lines on the feed so far, and `next_offset` is set while lines
-  remain past the page.
+  transcript's lines on the feed so far, less those `wherry transcript`
+  drops, and `next_offset` is set while lines remain past the page.
 - Each line is `{seq, attempt, text}`, with `seq` its byte offset in the
   agent's output and `attempt` the attempt that published it. `text` is empty
   for an empty line, and for a line that is not UTF-8, which has `raw_bytes`,
@@ -828,7 +867,7 @@ ignored. Any other entry and a directory with no agent files are errors.
 
 | Field | Content |
 | --- | --- |
-| `agents` | one or more `{name, credentials}`: an agent and the credential names it may take |
+| `agents` | one or more `{name, credentials, models, default_model}`: an agent, the credential names it may take, and optionally the models a task may name for it and the one a task naming none runs |
 | `default_agent` | an agent from `agents`, used when a task names none |
 | `seal_lifetime_ms` | required and unused: seals expire with their [seal request](a2a-extension-v1.md#seal-request) |
 | `run_lifetime_ms` | optional, default 1209600000 (14 days): time from a run's first submission through its last continuation |
@@ -840,6 +879,15 @@ ignored. Any other entry and a directory with no agent files are errors.
 | `output_limit` | optional, default 8388608 (8 MiB): bytes of one output, and of a turn's outputs together |
 | `vcs` | optional, default none: the hosts a [git input](a2a-extension-v1.md#git-input) may clone from |
 | `storage` | optional, default none: `{endpoint, bucket}`, the S3-compatible store of the pool's [S3 inputs and outputs](a2a-extension-v1.md#s3-inputs-and-outputs) |
+
+An agent's `default_model`, when set, is one of its `models`, and an agent
+without `models` has none. A task for an agent with `models` runs the model
+it names, or `default_model`; with no `default_model` it must name one, and
+`submit` refuses it otherwise. One naming a model outside `models` fails `submit`, and a
+receiver rejects one whose model has left the terms since with
+`model not in the pool's terms`. A task for an agent without `models` names
+no model, and its adapters run the model their command sets. wherry does not
+interpret a model name.
 
 Each entry of `vcs` is a lowercase host name, with `:port` for a
 remote that names a port other than its scheme's default, 443 for `https`
@@ -871,6 +919,10 @@ agents:
   - name: coder
     credentials:
       - model-api-key
+    models:
+      - haiku
+      - sonnet
+    default_model: haiku
 default_agent: coder
 seal_lifetime_ms: 86400000
 delivery_limit: 5
@@ -1005,7 +1057,10 @@ adapter delivers one, as its plugin documents; for Nomad, in
 [the plugin's agent jobs](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs).
 `WHERRY_INPUT_DIR`, `WHERRY_CREDENTIALS_DIR` and `WHERRY_OUTPUT_DIR` hold
 the paths of its [input, credential and output
-directories](a2a-extension-v1.md#inputs-and-outputs).
+directories](a2a-extension-v1.md#inputs-and-outputs). `WHERRY_MODEL` holds
+the task's model when its agent has [`models`](#pool-terms), and is not set
+otherwise, so the adapter's command reads it with its own fallback, such as
+`--model "${WHERRY_MODEL:-haiku}"`.
 
 The agent writes JSON lines to standard output. The receiver publishes each
 line as a transcript chunk. With the adapter's `output` absent or `claude`,
@@ -1013,7 +1068,9 @@ the line that decodes as a JSON object with `"type": "result"` ends the
 turn: its `result` string becomes the result, and `"is_error": true` makes
 the state `TASK_STATE_FAILED`. Claude Code's
 [headless](https://docs.claude.com/en/docs/claude-code/headless) stream-json
-output writes this format.
+output writes this format. The result's
+[metadata](a2a-extension-v1.md#metadata) keeps its resource-use fields and
+the models that served it.
 
 With `output: codex`, the format `codex exec --json` writes, the receiver
 keeps the text of the last `item.completed` line whose `item.type` is

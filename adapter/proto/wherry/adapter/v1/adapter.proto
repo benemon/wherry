@@ -1,4 +1,4 @@
-// The adapter protocol, version 4: the receiver core calls a plugin's adapters
+// The adapter protocol, version 5: the receiver core calls a plugin's adapters
 // over this service, and every request names its adapter.
 syntax = "proto3";
 
@@ -57,6 +57,7 @@ message Run {
   repeated File inputs = 9;
   repeated Secret credentials = 10;
   repeated Fetch fetches = 11;
+  string model = 12;
 }
 
 // Fetch is an input the adapter fetches from a presigned URL and verifies before the agent starts.

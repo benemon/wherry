@@ -148,7 +148,7 @@ func (s *server) Dispatch(ctx context.Context, req *adapterv1.DispatchRequest) (
 	}
 	message := req.GetRun()
 	run := Run{
-		ID: message.GetId(), Adapter: message.GetAdapter(), Agent: message.GetAgent(), Turn: message.GetTurn(), Attempt: message.GetAttempt(),
+		ID: message.GetId(), Adapter: message.GetAdapter(), Agent: message.GetAgent(), Model: message.GetModel(), Turn: message.GetTurn(), Attempt: message.GetAttempt(),
 		Prompt: message.GetPrompt(), Credential: message.Credential,
 	}
 	for _, input := range message.GetInputs() {

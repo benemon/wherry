@@ -17,6 +17,7 @@ import (
 	"hash"
 	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -240,8 +241,12 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	state, _, _ := r.snapshot()
 	terms := state.Pools[r.config.Pool]
 	placement := task.Wherry.Placement
-	if !slices.ContainsFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == placement.Agent }) {
+	agent := slices.IndexFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == placement.Agent })
+	if agent < 0 {
 		return reject("agent is outside the pool terms")
+	}
+	if !modelInTerms(terms.Agents[agent], placement.Model) {
+		return reject("model not in the pool's terms")
 	}
 	if err := wire.ValidateInputs(task.Message.Parts, terms.InlineLimit); err != nil {
 		return rejectAs("invalid inputs", err.Error())
@@ -311,6 +316,11 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	}
 	admitted.inputs, admitted.credentials, admitted.outputs, admitted.git, admitted.s3Inputs = inputs, declared.Credentials, declared.Outputs, declared.Git, declared.S3Inputs
 	return admitted, 0
+}
+
+// modelInTerms reports whether agent's terms allow model: one of its models, or none when it has none.
+func modelInTerms(agent admin.AgentTerms, model string) bool {
+	return slices.Contains(agent.Models, model) || len(agent.Models) == 0 && model == ""
 }
 
 // foreignRun reports that a run ID belongs to a tenant other than tenant: the tenant of its earliest
@@ -741,7 +751,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 		}
 		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, adapter.Run{
-			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Turn: task.Wherry.Turn, Attempt: attempt,
+			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Turn: task.Wherry.Turn, Attempt: attempt,
 			Prompt:     []byte(preamble(named.Adapter.Directories(), append(fileNames(admitted.inputs), inputNames...), admitted.credentials, admitted.outputs, admitted.git, runID) + prompt(admitted.history)),
 			Credential: credential, Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
@@ -2098,13 +2108,26 @@ type agentResult struct {
 	metadata jsontext.Value
 }
 
-// resultLine recognises the final stream-json record; stdout is data, never control.
+// resultLine recognises the final stream-json record; stdout is data, never control. The metadata's served_models are
+// the record's modelUsage keys, kept while the metadata stays within wire.MaxAgentResult.
 func resultLine(data []byte) (agentResult, bool) {
 	var result agentResult
 	if json.Unmarshal(data, &result) != nil || result.Type != "result" {
 		return agentResult{}, false
 	}
 	result.metadata = agentResultMetadata(data, "duration_ms", "duration_api_ms", "num_turns", "total_cost_usd", "usage", "modelUsage")
+	var usage struct {
+		ModelUsage map[string]jsontext.Value `json:"modelUsage"`
+	}
+	if result.metadata == nil || json.Unmarshal(data, &usage) != nil || len(usage.ModelUsage) == 0 {
+		return result, true
+	}
+	var metadata map[string]jsontext.Value
+	_ = json.Unmarshal(result.metadata, &metadata)                                          // agentResultMetadata encoded it
+	metadata["served_models"], _ = json.Marshal(slices.Sorted(maps.Keys(usage.ModelUsage))) // strings always encode
+	if served, _ := json.Marshal(metadata); len(served) <= wire.MaxAgentResult {            // a valid object always encodes
+		result.metadata = served
+	}
 	return result, true
 }
 
