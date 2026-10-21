@@ -103,7 +103,7 @@ func newBus(t *testing.T) *bus {
 	t.Cleanup(cancel)
 	b := &bus{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, stateDir: t.TempDir(), logs: &syncBuffer{}}
 	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, DefaultAgent: "claude",
-		SealLifetimeMS: int64(72 * time.Hour / time.Millisecond), DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
+		DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
 		VCS: []string{"git.example.test"}}
 	if err := b.service.PoolCreate(ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
@@ -249,7 +249,7 @@ func (b *bus) binding(task task) wire.ReceiverBinding {
 func (b *bus) echo(t *testing.T, task task) []byte {
 	binding := task.submission.Wherry
 	return b.sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: binding.Run, Turn: binding.Turn, Placement: binding.Placement,
-		TaskHash: task.hash, MessageID: task.submission.Message.MessageID, DeadlineMS: binding.DeadlineMS, QueueDeadlineMS: binding.QueueDeadlineMS})
+		TaskHash: task.hash, MessageID: task.submission.Message.MessageID})
 }
 
 func (b *bus) status(t *testing.T, task task, eventID, kind string, status wire.TaskStatus) []byte {
@@ -713,6 +713,9 @@ func TestUsageErrors(t *testing.T) {
 		{"removed secret", func(stderr *bytes.Buffer) error {
 			return run([]string{"secret", "put", "token"}, stderr, stderr)
 		}, "unknown command \"secret\""},
+		{"removed resume", func(stderr *bytes.Buffer) error {
+			return run([]string{"resume", "run-a"}, stderr, stderr)
+		}, "unknown command \"resume\""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var output bytes.Buffer

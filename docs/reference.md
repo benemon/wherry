@@ -210,9 +210,8 @@ for its S3 inputs and outputs, and `wherry await` or `wherry mcp` answers
 ### `wherry continue RUN_ID`
 
 Publishes the next turn of a run interrupted in `TASK_STATE_AUTH_REQUIRED`
-or `TASK_STATE_INPUT_REQUIRED`, to the pool and placement its echo names.
-Like `submit`, it seals nothing. It prints `run_id=<id> turn=<n>`. `resume`
-is an alias.
+to the pool and placement its echo names. Like `submit`, it seals nothing.
+It prints `run_id=<id> turn=<n>`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -502,9 +501,8 @@ adapter's `type` or `config` section.
 Runs a receiver as the bundle's principal. It creates the state directory
 with mode 0700 and keeps `signing.key` in it. On start it:
 
-1. deletes `sealing.key` when the directory holds one, registers its public key
-   on its key topic when the topic is empty, and fails when the topic holds
-   another key;
+1. registers its public key on its key topic when the topic is empty, and
+   fails when the topic holds another key;
 2. waits for its configuration record on `wherry.admin` and validates it
    against the pool's terms;
 3. starts the [adapter plugins](#adapter-plugins) its adapters' types name
@@ -680,7 +678,7 @@ after it ran.
 | `wherry_redeliveries_total` | counter | `tenant`, `adapter` | turns run on a redelivery |
 | `wherry_in_flight` | gauge | `adapter` | tasks held |
 | `wherry_capacity` | gauge | none | the configured capacity |
-| `wherry_start_failures_total` | counter | `adapter`, `class` | start failures: `offer-unavailable`, `input-too-large`, `dispatch`, `platform` |
+| `wherry_start_failures_total` | counter | `adapter`, `class` | start failures: `input-too-large`, `dispatch`, `platform`, and `offer-unavailable`, which counts a release by a member with no matching adapter and has no start-failure record |
 | `wherry_dispatch_outcomes_total` | counter | `adapter`, `outcome` | dispatches: `created`, `nothing`, `unknown` |
 | `wherry_stop_failures_total` | counter | `adapter` | failed `Stop` calls |
 | `wherry_purge_failures_total` | counter | `adapter` | failed `Purge` calls |
@@ -897,7 +895,6 @@ ignored. Any other entry and a directory with no agent files are errors.
 | --- | --- |
 | `agents` | one or more `{name, credentials, models, default_model}`: an agent, the credential names it may take, and optionally the models a task may name for it and the one a task naming none runs |
 | `default_agent` | an agent from `agents`, used when a task names none |
-| `seal_lifetime_ms` | required and unused: seals expire with their [seal request](a2a-extension-v1.md#seal-request) |
 | `run_lifetime_ms` | optional, default 1209600000 (14 days): time from a run's first submission through its last continuation |
 | `delivery_limit` | the share group's `share.delivery.count.limit` |
 | `lock_duration_ms` | the share group's `share.record.lock.duration.ms` |
@@ -937,7 +934,8 @@ receiver renews its lock every 10 seconds; wherry does not check this. The
 broker bounds it between
 `group.share.min.record.lock.duration.ms` and
 `group.share.max.record.lock.duration.ms`. Every delivery counts against
-`delivery_limit`, including a release after a start failure. From attempt
+`delivery_limit`, including a release after a start failure and a release
+by a member with no matching adapter. From attempt
 `delivery_limit` minus 1, a receiver ends a turn `TASK_STATE_FAILED` with
 `delivery budget exhausted` where it would release it, except in the cases
 the [extension](a2a-extension-v1.md#delivery-budget) lists.
@@ -952,7 +950,6 @@ agents:
       - sonnet
     default_model: haiku
 default_agent: coder
-seal_lifetime_ms: 86400000
 delivery_limit: 5
 lock_duration_ms: 15000
 producer_byte_rate: 1048576

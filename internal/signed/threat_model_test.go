@@ -3,7 +3,6 @@ package signed
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"strings"
 	"testing"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -170,36 +169,6 @@ func signRaw(typ, kid string, payload []byte, key ed25519.PrivateKey) ([]byte, e
 	}
 	compact, err := jws.CompactSerialize()
 	return []byte(compact), err
-}
-
-func TestKeyRecordWithARetiredSealingKeyStillFolds(t *testing.T) {
-	_, signing, _ := ed25519.GenerateKey(rand.Reader)
-	registration, err := RegisterKey("receiver-a", signing)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(registration), "sealing_key") {
-		t.Fatal("a new key record carries a sealing key")
-	}
-	// The payload receivers registered before seals moved to per-run keys, signed as signKeys signs.
-	jwk, err := publicJWK(signing).MarshalJSON()
-	if err != nil {
-		t.Fatal(err)
-	}
-	options := &jose.SignerOptions{EmbedJWK: true}
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: jose.JSONWebKey{Key: signing, KeyID: KeyID(signing.Public().(ed25519.PublicKey)), Algorithm: string(jose.EdDSA)}},
-		options.WithType(jose.ContentType(KeyType)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	jws, err := signer.Sign([]byte(`{"v":1,"owner":"receiver-a","action":"register","key":` + string(jwk) + `,"sealing_key":"gTpG8sVq3XzF4qFQ1zH4Bz0mFj1lN6p9cE2rK7tY3wA"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := []byte(jws.FullSerialize())
-	if state, err := ApplyKeyRecord(KeyState{}, "receiver-a", old); err != nil || !state.Current.Equal(signing.Public()) {
-		t.Fatalf("a registration carrying a sealing key does not fold: %v", err)
-	}
 }
 
 func TestRetiredKeysVerifyHistoryOnly(t *testing.T) {

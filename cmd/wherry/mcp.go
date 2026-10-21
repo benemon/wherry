@@ -444,7 +444,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "continue",
-		Description: "Sign and publish the next turn of a run interrupted in AUTH_REQUIRED or INPUT_REQUIRED to the pool that admitted it; add a missing credential to the wherry config first.",
+		Description: "Sign and publish the next turn of a run interrupted in AUTH_REQUIRED to the pool that admitted it; add a missing credential to the wherry config first.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input continueInput) (*mcp.CallToolResult, continueOutput, error) {
 		switch {
 		case input.Prompt != "" && input.PromptFile != "":

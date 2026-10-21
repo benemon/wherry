@@ -21,7 +21,7 @@ import (
 )
 
 // A pool record written before the limits existed, as EncodeRecord writes modelTerms.
-const poolRecordWithoutLimits = `{"v":1,"kind":"pool","pool":"pool-a","terms":{"agents":[{"name":"agent-a","credentials":["model"]}],"default_agent":"agent-a","seal_lifetime_ms":60000,"delivery_limit":3,"lock_duration_ms":15000,"producer_byte_rate":1000000,"request_percentage":50},"at_ms":1}`
+const poolRecordWithoutLimits = `{"v":1,"kind":"pool","pool":"pool-a","terms":{"agents":[{"name":"agent-a","credentials":["model"]}],"default_agent":"agent-a","delivery_limit":3,"lock_duration_ms":15000,"producer_byte_rate":1000000,"request_percentage":50},"at_ms":1}`
 
 func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 	terms := modelTerms()

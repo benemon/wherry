@@ -356,7 +356,7 @@ func TestAdminRecordDecodeIsStrict(t *testing.T) {
 }
 
 func modelTerms() Terms {
-	return Terms{Agents: []AgentTerms{{Name: "agent-a", Credentials: []string{"model"}}}, DefaultAgent: "agent-a", SealLifetimeMS: 60000, DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1000000, RequestPercentage: 50}
+	return Terms{Agents: []AgentTerms{{Name: "agent-a", Credentials: []string{"model"}}}, DefaultAgent: "agent-a", DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1000000, RequestPercentage: 50}
 }
 
 func modelConfig(receiver, pool string) ReceiverConfig {

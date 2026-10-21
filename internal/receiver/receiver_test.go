@@ -346,7 +346,7 @@ type fixture struct {
 func testTerms() admin.Terms {
 	return admin.Terms{
 		Agents:       []admin.AgentTerms{{Name: "claude", Credentials: []string{credentialName, "cred-lab", "cred-cloud"}}, {Name: "codex", Credentials: []string{}}},
-		DefaultAgent: "claude", SealLifetimeMS: time.Hour.Milliseconds(), DeliveryLimit: 10, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
+		DefaultAgent: "claude", DeliveryLimit: 10, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
 	}
 }
 
@@ -984,22 +984,6 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 	defer again.base.Close()
 	if !again.signing.Equal(r.signing) {
 		t.Fatal("the signing key was not kept in the state directory")
-	}
-}
-
-func TestNewDeletesTheRetiredSealingKey(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sealing.key")
-	if err := os.WriteFile(path, []byte("x25519-private-key"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(testCA(t)), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, dir, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.base.Close()
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("sealing key left in the state directory: %v", err)
 	}
 }
 

@@ -79,7 +79,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runMCP(context.Background(), args[1:])
 	}
 	command, ok := map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
-		"receivers": runReceivers, "submit": runSubmit, "continue": runContinue, "resume": runContinue,
+		"receivers": runReceivers, "submit": runSubmit, "continue": runContinue,
 		"cancel": runCancel, "await": runAwait, "status": runStatus, "events": runEvents, "transcript": runTranscript, "cleanup": runCleanup,
 	}[args[0]]
 	if !ok {

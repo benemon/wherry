@@ -250,11 +250,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	adapter, offered := r.offer(placement)
 	if !offered {
 		r.logger.Printf("run %s: no current offer for agent %s satisfying its selector", run, placement.Agent)
-		if err := r.admissionCommit(ctx, r.startFailure(&task, attempt, "none", "offer-unavailable")); err != nil {
-			r.logger.Printf("publish start failure for %s: %v", run, err)
-		} else {
-			r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
-		}
+		r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
 		return giveBack()
 	}
 	submissions := bindTurns(all, &task, events)
@@ -382,7 +378,7 @@ func (r *Receiver) publishRejection(ctx context.Context, task *wire.Submission, 
 func (r *Receiver) echo(task *wire.Submission, hash string) *wire.Echo {
 	return &wire.Echo{
 		Receiver: r.id, Tenant: task.Wherry.Tenant, Pool: r.config.Pool, Run: task.Wherry.Run, Turn: task.Wherry.Turn, Placement: task.Wherry.Placement,
-		TaskHash: hash, MessageID: task.Message.MessageID, DeadlineMS: task.Wherry.DeadlineMS, QueueDeadlineMS: task.Wherry.QueueDeadlineMS,
+		TaskHash: hash, MessageID: task.Message.MessageID,
 	}
 }
 
@@ -475,7 +471,7 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 	return err
 }
 
-// startFailure names the adapter the task was routed to, "none" when it was routed to none.
+// startFailure names the adapter the task was routed to.
 func (r *Receiver) startFailure(task *wire.Submission, attempt int64, adapter, class string) *kgo.Record {
 	failure := &wire.StartFailure{Wherry: r.binding(task, attempt), Adapter: adapter, Agent: task.Wherry.Placement.Agent, Class: class}
 	return &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: r.sign(failure)}

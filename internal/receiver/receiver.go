@@ -107,10 +107,6 @@ func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *l
 	if err != nil {
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	// Seals to the retired long-lived sealing key must never open again.
-	if err := os.Remove(filepath.Join(stateDir, "sealing.key")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("remove sealing key: %w", err)
-	}
 	base, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, err

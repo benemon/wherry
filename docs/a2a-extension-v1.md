@@ -213,8 +213,6 @@ A status reports one attempt of one turn.
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the turn | the reason as message text |
 | `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the turn has ended | the reason as message text, except for completion and a failure the agent reports |
 
-Readers also accept an `interrupted` status in `TASK_STATE_INPUT_REQUIRED`.
-
 A receiver writes each status other than a heartbeat to the pool's events
 and the tenant feed, with identical bytes, in one Kafka transaction. Readers
 read committed records only.
@@ -427,9 +425,7 @@ An echo tells every host of a tenant where a turn was admitted.
   "run": "run-0f3c...", "turn": 1,
   "placement": {"agent": "coder", "selector": []},
   "task_hash": "9d2a...",
-  "message_id": "msg-77c0...",
-  "deadline_ms": 1790000000000,
-  "queue_deadline_ms": 1789998800000
+  "message_id": "msg-77c0..."
 }
 ```
 
@@ -467,11 +463,12 @@ An advertisement reports a receiver's liveness and capacity.
 ## Start failure
 
 A start failure records that a receiver could not start a turn's attempt.
-The receiver writes it to the pool's events and releases the task to the
-pool. For every class but `offer-unavailable`, the receiver first removes
-the turn's job from the platform. When it cannot, it retries for 5 minutes,
-then ends the turn `TASK_STATE_FAILED` with the message text
-`start failed and the job could not be removed`.
+The receiver writes it to the pool's events. For every class but
+`input-too-large`, it then removes the turn's job from the platform and
+releases the task to the pool. When it cannot remove the job, it retries
+for 5 minutes, then ends the turn `TASK_STATE_FAILED` with the message text
+`start failed and the job could not be removed`. An `input-too-large`
+start failure ends the turn as its class describes.
 
 ```json
 {
@@ -485,7 +482,6 @@ then ends the turn `TASK_STATE_FAILED` with the message text
 
 | `class` | Meaning |
 | --- | --- |
-| `offer-unavailable` | no ready adapter satisfies the task's agent and selector |
 | `dispatch` | the adapter created no job for the turn |
 | `platform` | the platform ended the job before its agent task started, for example when the image cannot be pulled |
 | `input-too-large` | the adapter cannot deliver one of the turn's inputs; the receiver then ends the turn `TASK_STATE_FAILED` naming the input, and releases nothing |
@@ -494,8 +490,7 @@ A `platform` start failure can follow the turn's `started` status, when the
 job ended before its agent task started. The platform's reason for it goes to
 the receiver's log, not to the start failure.
 
-`adapter` is the adapter the receiver routed the task to. For
-`offer-unavailable` it is `none`, since no adapter was chosen.
+`adapter` is the adapter the receiver routed the task to.
 
 ### Delivery budget
 
@@ -539,8 +534,7 @@ signature's protected header carrying its public key as `jwk`.
 ```
 
 - `owner` is the topic's owner. `key` is the owner's Ed25519 public key as a
-  JWK. Only `rotate` has `previous_key_id`. A receiver record may carry
-  `sealing_key`; readers accept it and ignore it.
+  JWK. Only `rotate` has `previous_key_id`.
 - `register` is the first record on the topic, self-signed by `key`. A
   later `register` is rejected.
 - `rotate` replaces the current key with `key`. It carries two signatures,
@@ -817,8 +811,7 @@ A receiver that claims a submission:
    placement names no model or one outside the current `models`, or the
    agent has no `models` and the placement names one; and when its `raw` and
    `data` parts together exceed the pool's `inline_limit`;
-5. writes an `offer-unavailable` start failure and releases it when no
-   ready adapter satisfies the placement;
+5. releases it when no ready adapter satisfies the placement;
 6. rejects a duplicate, stale or out-of-order turn, unless a cancel covers
    it;
 7. rejects a turn no pool member has claimed with `run expired` when the

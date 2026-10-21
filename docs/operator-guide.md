@@ -71,8 +71,9 @@ wherry admin pool create build --config-file build-terms.yaml
 ```
 
 - `delivery_limit` bounds how often the broker delivers one task. Each
-  start failure returns a task to the pool, so set it to at least the
-  number of receivers in the pool, plus a margin. From attempt
+  start failure, and each member with no matching adapter, returns a task
+  to the pool and uses a delivery, so set it to at least the number of
+  receivers in the pool, plus a margin. From attempt
   `delivery_limit` minus 1, a receiver ends a turn it would return to the
   pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
   cases the [extension](a2a-extension-v1.md#delivery-budget) lists. The
@@ -81,9 +82,6 @@ wherry admin pool create build --config-file build-terms.yaml
 - `lock_duration_ms` is how long a claim survives without renewal, and how
   long a denied receiver keeps running its jobs. Receivers renew every 10
   seconds.
-- `seal_lifetime_ms` is required and unused: a seal expires with its
-  [seal request](a2a-extension-v1.md#seal-request), 5 minutes after the
-  receiver asks.
 - `run_lifetime_ms` is the longest time from a run's first submission to
   its last continuation. It defaults to 14 days. See [Retention](#retention).
 - `inline_limit` and `output_limit` bound a task's input files and a
@@ -263,7 +261,7 @@ A task with no selector runs on the first ready adapter, `container` here,
 and `--selector isolation=host` runs on the second. Every member of a pool
 must honour the labels its adapters declare. The client places a task by
 one member's labels, but any member can claim it. A member with no
-matching adapter records a start failure and returns the task.
+matching adapter returns the task.
 
 The [Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
 cover the `config` section.

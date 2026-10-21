@@ -306,7 +306,7 @@ func TestAdmitAppliesThePoolInlineLimit(t *testing.T) {
 	}
 }
 
-func TestPlacementOutsideOffersIsStartFailure(t *testing.T) {
+func TestPlacementOutsideOffersReleasesWithoutARecord(t *testing.T) {
 	f := newFixture(t, resultStream)
 	for name, mutate := range map[string]func(*wire.Submission){
 		// codex is inside the terms, but no adapter here launches it.
@@ -319,22 +319,13 @@ func TestPlacementOutsideOffersIsStartFailure(t *testing.T) {
 			if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
 				t.Fatalf("admitted=%v ack=%v, want release", admitted != nil, ack)
 			}
-			records := f.records(t, admin.PoolEventsTopic(testPool))
-			if len(records) != before+1 {
-				t.Fatalf("pool events %d -> %d, want one start failure", before, len(records))
-			}
-			var failure wire.StartFailure
-			if err := wire.ParseRecord(records[len(records)-1].Value, f.keys(), &failure); err != nil {
-				t.Fatal(err)
-			}
-			placement := f.parse(t, record).Wherry.Placement
-			if failure.Class != "offer-unavailable" || failure.Adapter != "none" || failure.Agent != placement.Agent || failure.Wherry.Run != "run-a" {
-				t.Fatalf("start failure %#v", failure)
+			if after := len(f.records(t, admin.PoolEventsTopic(testPool))); after != before {
+				t.Fatalf("pool events %d -> %d, want none written", before, after)
 			}
 		})
 	}
 	if len(f.feedStatuses(t)) != 0 {
-		t.Fatal("a start failure wrote a status to the feed")
+		t.Fatal("an unoffered placement wrote a status to the feed")
 	}
 }
 
@@ -1025,18 +1016,6 @@ func TestRejectionIsAllOrNothing(t *testing.T) {
 	}
 	if !f.receiver.denied() {
 		t.Fatal("an authorisation error writing the rejection did not enter denial")
-	}
-}
-
-func TestStartFailureWriteDenialEntersDenial(t *testing.T) {
-	f := newFixture(t, resultStream)
-	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.PoolEventsTopic(testPool)).Operations(kadm.OpWrite))
-	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" })
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
-		t.Fatalf("admitted=%v ack=%v, want release", admitted != nil, ack)
-	}
-	if !f.receiver.holds(capWrite) || !strings.Contains(f.logs.String(), "publish start failure for run-a") {
-		t.Fatalf("a start failure that could not be written was not denied and logged; logs:\n%s", f.logs.String())
 	}
 }
 

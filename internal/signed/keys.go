@@ -21,9 +21,6 @@ type KeyRecord struct {
 	Action        string          `json:"action"`
 	Key           jose.JSONWebKey `json:"key"`
 	PreviousKeyID string          `json:"previous_key_id,omitzero"`
-	// SealingKey is a retired receiver sealing key, decoded from records
-	// written before seals moved to per-run keys and otherwise ignored.
-	SealingKey string `json:"sealing_key,omitzero"`
 }
 
 func KeyID(key ed25519.PublicKey) string {

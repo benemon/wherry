@@ -16,12 +16,12 @@ One `wherry` binary with three sides:
 - **Host:** `wherry init` and `wherry key` register and show the host's signing
   key. `receivers` lists the receivers the tenant may use with their adapters
   and labels. `submit` places a task by agent and label selector and publishes
-  it. `await`, `status`, `events`, `continue` (alias `resume`) and `cancel`
-  follow, extend and stop a run, and `await` answers the claiming receiver's
-  request for the agent's credential. `status` without a run ID lists every run
-  the host can see, `transcript` prints a turn's agent output, and `cleanup`
-  deletes a run's S3 objects. `mcp` serves every one of these commands but
-  `init` and `key` as an MCP tool of the same name; see
+  it. `await`, `status`, `events`, `continue` and `cancel` follow, extend and
+  stop a run, and `await` answers the claiming receiver's request for the
+  agent's credential. `status` without a run ID lists every run the host
+  can see, `transcript` prints a turn's agent output, and `cleanup` deletes
+  a run's S3 objects. `mcp` serves every one of these commands but `init`
+  and `key` as an MCP tool of the same name; see
   [Harness integration](#harness-integration).
 - **Receiver:** `wherry receiver` claims its pool's tasks and runs each one
   as a job through an adapter plugin, such as the Nomad plugin from
