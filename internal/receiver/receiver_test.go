@@ -75,8 +75,10 @@ type fakeAdapter struct {
 	// handleSize is the length of the handle data Dispatch and Lookup return.
 	handleSize int
 	lastRun    adapter.Run
-	lookups    int
-	lookupErr  error
+	// lastDeadline is the deadline of the context Dispatch last ran under.
+	lastDeadline time.Time
+	lookups      int
+	lookupErr    error
 	// job is the state Lookup reports; jobAdapter and jobAgent override the metadata it reports.
 	job                  adapter.JobState
 	jobAdapter, jobAgent string
@@ -137,11 +139,12 @@ func (f *fakeAdapter) handle(runID string, turn int64) adapter.Handle {
 	return adapter.Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: fmt.Sprintf("agent-%s-t%d", runID, turn)}
 }
 
-func (f *fakeAdapter) Dispatch(_ context.Context, run adapter.Run) (adapter.Outcome, adapter.Handle, error) {
+func (f *fakeAdapter) Dispatch(ctx context.Context, run adapter.Run) (adapter.Outcome, adapter.Handle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dispatches++
 	f.lastRun = run
+	f.lastDeadline, _ = ctx.Deadline()
 	if f.dispatchErr != nil {
 		return f.outcome, adapter.Handle{}, f.dispatchErr
 	}

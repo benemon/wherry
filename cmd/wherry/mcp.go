@@ -13,8 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -161,7 +163,7 @@ type submitInput struct {
 	S3Inputs             []string           `json:"s3_inputs,omitempty" jsonschema:"local files of up to 5 GiB each uploaded to the pool's bucket and fetched into the agent's WHERRY_INPUT_DIR under their base names"`
 	Credentials          []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent as files in WHERRY_CREDENTIALS_DIR"`
 	Outputs              []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; await writes the returned ones locally"`
-	DeadlineSeconds      int64              `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 1800"`
+	DeadlineSeconds      int64              `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 7200"`
 	QueueDeadlineSeconds int64              `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`
 }
 
@@ -232,7 +234,7 @@ type continueInput struct {
 	ID                   string `json:"id" jsonschema:"run id of an interrupted run"`
 	Prompt               string `json:"prompt,omitempty" jsonschema:"continuation text; default continue"`
 	PromptFile           string `json:"prompt_file,omitempty" jsonschema:"local file holding the continuation text, read as an input is; not with prompt"`
-	DeadlineSeconds      int64  `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 1800"`
+	DeadlineSeconds      int64  `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 7200"`
 	QueueDeadlineSeconds int64  `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`
 }
 
@@ -733,7 +735,7 @@ func deadlines(deadlineSeconds, queueDeadlineSeconds int64) (time.Duration, time
 	if deadlineSeconds < 0 || queueDeadlineSeconds < 0 {
 		return 0, 0, invalidArgument("deadlines must be positive")
 	}
-	deadline, queueDeadline := 30*time.Minute, 10*time.Minute
+	deadline, queueDeadline := busclient.DefaultDeadline, busclient.DefaultQueueDeadline
 	if deadlineSeconds > 0 {
 		deadline = time.Duration(deadlineSeconds) * time.Second
 	}
@@ -798,25 +800,55 @@ func resultParts(parts []wire.Part) []resultPart {
 	return result
 }
 
-// inputOpener opens an MCP input: a regular file beneath dir once symbolic links are resolved, and none of the host's
-// own files, so a client steered by its prompt cannot send the host key, the bundle, the state, a credential or a
-// storage key.
+// inputOpener opens an MCP input: a regular file beneath one of the configured input roots, or dir when there are
+// none, and none of the host's own files, so a client steered by its prompt cannot send the host key, the bundle, the
+// state, a credential or a storage key. Files are compared by identity, since path strings miss case-insensitive
+// spellings and hard links. Relative paths resolve against dir.
 func inputOpener(dir string, config busclient.Config) func(string) (*os.File, error) {
-	resolve := func(path string) string {
-		if resolved, err := filepath.EvalSymlinks(path); err == nil {
-			return resolved
-		}
-		return filepath.Clean(path)
+	configured := config.InputRoots
+	if len(configured) == 0 {
+		configured = []string{dir}
 	}
-	root := resolve(dir)
-	protected := []string{resolve(config.StateDir), resolve(config.HostKey), resolve(config.Bundle)}
+	var roots []os.FileInfo
+	for _, root := range configured {
+		if info, err := os.Stat(root); err == nil {
+			roots = append(roots, info)
+		}
+	}
+	protected := []string{config.StateDir, config.HostKey, config.Bundle}
 	for _, path := range config.Credentials {
-		protected = append(protected, resolve(path))
+		protected = append(protected, path)
 	}
 	if config.Storage != nil {
-		protected = append(protected, resolve(config.Storage.AccessKeyFile), resolve(config.Storage.SecretKeyFile))
+		protected = append(protected, config.Storage.AccessKeyFile, config.Storage.SecretKeyFile)
 	}
-	refused := invalidArgument("inputs must be readable regular files beneath the MCP server's working directory, outside the wherry configuration")
+	refused := invalidArgument("inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration")
+	// The host's files are looked up on each call, since the state directory and host key can appear after startup.
+	allowed := func(resolved string, info os.FileInfo) bool {
+		var own []os.FileInfo
+		for _, path := range protected {
+			if info, err := os.Stat(path); err == nil {
+				own = append(own, info)
+			}
+		}
+		is := func(set []os.FileInfo, info os.FileInfo) bool {
+			return slices.ContainsFunc(set, func(other os.FileInfo) bool { return os.SameFile(other, info) })
+		}
+		if !info.Mode().IsRegular() || is(own, info) {
+			return false
+		}
+		contained := false
+		for ancestor := filepath.Dir(resolved); ; ancestor = filepath.Dir(ancestor) {
+			info, err := os.Stat(ancestor)
+			if err != nil || is(own, info) {
+				return false
+			}
+			contained = contained || is(roots, info)
+			if ancestor == filepath.Dir(ancestor) {
+				return contained
+			}
+		}
+	}
 	return func(path string) (*os.File, error) {
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(dir, path)
@@ -825,19 +857,14 @@ func inputOpener(dir string, config busclient.Config) func(string) (*os.File, er
 		if err != nil {
 			return nil, refused
 		}
-		if relative, err := filepath.Rel(root, resolved); err != nil || !filepath.IsLocal(relative) {
-			return nil, refused
-		}
-		for _, own := range protected {
-			if relative, err := filepath.Rel(own, resolved); err == nil && filepath.IsLocal(relative) {
-				return nil, refused
-			}
-		}
-		if info, err := os.Stat(resolved); err != nil || !info.Mode().IsRegular() {
-			return nil, refused
-		}
-		file, err := os.Open(resolved)
+		// O_NONBLOCK keeps opening a FIFO from blocking until a writer appears; the regular-file check refuses it.
+		file, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
+			return nil, refused
+		}
+		info, err := file.Stat()
+		if err != nil || !allowed(resolved, info) {
+			file.Close()
 			return nil, refused
 		}
 		return file, nil
@@ -854,7 +881,7 @@ func inputReader(open func(string) (*os.File, error)) func(string, int64) (wire.
 		defer file.Close()
 		data, err := io.ReadAll(io.LimitReader(file, limit))
 		if err != nil {
-			return wire.Part{}, invalidArgument("inputs must be readable regular files beneath the MCP server's working directory, outside the wherry configuration")
+			return wire.Part{}, invalidArgument("inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration")
 		}
 		return wire.Part{Raw: append(wire.StdBytes{}, data...), Filename: filepath.Base(path)}, nil
 	}

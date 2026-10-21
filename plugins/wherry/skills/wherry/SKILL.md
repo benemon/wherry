@@ -76,16 +76,17 @@ one of your `credentials`, for a private repository; `host_key`, a file of
 pushes only when your prompt asks it to, and only to the branch
 `wherry/<run>`.
 
-To send files, add `inputs`: paths of regular files beneath the directory the
-wherry MCP server runs in, the pool's inline limit in all (256 KiB by default),
-which the agent finds under their base names in its input directory. The server
-refuses any other path, and the host's state directory, host key, bundle,
-credential files and storage key files. To give the agent a credential as a
-file, add `credentials`: `{name, file}` with `name` a credential in the user's
-wherry configuration and `file` the name it gets in `WHERRY_CREDENTIALS_DIR`;
-you never see the value. To get files back, add `outputs`: `{name, required}`
-for each file the agent should leave in `WHERRY_OUTPUT_DIR`. The prompt the
-agent receives names all of them.
+To send files, add `inputs`: paths of regular files beneath one of the wherry
+MCP server's input roots (the directory it runs in, unless the user's wherry
+configuration lists `input_roots`), the pool's inline limit in all (256 KiB by
+default), which the agent finds under their base names in its input directory.
+The server refuses any other path, and the host's state directory, host key,
+bundle, credential files and storage key files. To give the agent a credential
+as a file, add `credentials`: `{name, file}` with `name` a credential in the
+user's wherry configuration and `file` the name it gets in
+`WHERRY_CREDENTIALS_DIR`; you never see the value. To get files back, add
+`outputs`: `{name, required}` for each file the agent should leave in
+`WHERRY_OUTPUT_DIR`. The prompt the agent receives names all of them.
 
 For a file over the inline limit, up to 5 GiB, add its path to `s3_inputs`
 instead: the server uploads it to the pool's bucket and the agent finds it
@@ -132,7 +133,7 @@ with `truncated` set and its full size in `bytes`.
 
 Where your harness runs shell commands in the background and tells you when
 they finish, run `wherry await <id>` as a background command. It blocks
-until the run ends (or for 30 minutes; `--timeout` changes that), prints the
+until the run ends (or for 2 hours; `--timeout` changes that), prints the
 state and the result, and exits non-zero for any state other than
 `TASK_STATE_COMPLETED`. You then skip the await loop.
 

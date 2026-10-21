@@ -86,7 +86,7 @@ func TestPoolCreateSetsDerivedRetentionOnNewAndExistingTopics(t *testing.T) {
 	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
 		t.Fatal(err)
 	}
-	want := int64(1299600000)
+	want := int64(1317600000)
 	topics := []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")}
 	for _, topic := range topics {
 		if got := topicRetention(t, service, topic); got != want {
@@ -118,7 +118,7 @@ func TestPoolCreateRefusesRunLifetimePastFeedRetention(t *testing.T) {
 	terms := modelTerms()
 	terms.RunLifetimeMS = 30 * 24 * 60 * 60 * 1000
 	err := service.PoolCreate(context.Background(), "pool-a", terms)
-	if err == nil || err.Error() != "run lifetime requires tenant feed retention.ms of at least 2595600000" {
+	if err == nil || err.Error() != "run lifetime requires tenant feed retention.ms of at least 2613600000" {
 		t.Fatalf("pool create = %v", err)
 	}
 }
@@ -133,9 +133,9 @@ func TestPoolCreateRefusesRunLifetimePastAnEntitledFeed(t *testing.T) {
 	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
-	setTopicRetention(t, service, TenantTopic("tenant-a"), 1213199999)
+	setTopicRetention(t, service, TenantTopic("tenant-a"), 1231199999)
 	err := service.PoolCreate(ctx, "pool-a", modelTerms())
-	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 1213199999 is below required 1213200000" {
+	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 1231199999 is below required 1231200000" {
 		t.Fatalf("pool create = %v", err)
 	}
 }
@@ -147,11 +147,11 @@ func TestTenantAddRefusesAFeedBelowThePoolsRunLifetime(t *testing.T) {
 	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.createTopics(ctx, "1213199999", TenantTopic("tenant-a")); err != nil {
+	if err := service.createTopics(ctx, "1231199999", TenantTopic("tenant-a")); err != nil {
 		t.Fatal(err)
 	}
 	err := service.TenantAdd(ctx, "tenant-a", "pool-a")
-	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 1213199999 is below required 1213200000" {
+	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 1231199999 is below required 1231200000" {
 		t.Fatalf("tenant add = %v", err)
 	}
 	if state, err := service.LoadState(ctx); err != nil || len(state.Entitlements) != 0 {
@@ -166,13 +166,13 @@ func TestCheckReportsRetentionDrift(t *testing.T) {
 		want   string
 	}{
 		{"tasks below lifetime plus deadline and margin", func(t *testing.T, service *Service) {
-			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 1299599999)
+			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 1317599999)
 		}, "wherry.pool.pool-a.tasks"},
 		{"events below tasks", func(t *testing.T, service *Service) {
-			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 1300000000)
+			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 1320000000)
 		}, "wherry.pool.pool-a.events"},
 		{"feed below lifetime plus deadline", func(t *testing.T, service *Service) {
-			setTopicRetention(t, service, TenantTopic("tenant-a"), 1213199999)
+			setTopicRetention(t, service, TenantTopic("tenant-a"), 1231199999)
 		}, "wherry.tenant.tenant-a"},
 		{"events not stamped by the broker", func(t *testing.T, service *Service) {
 			setTopicConfig(t, service, PoolEventsTopic("pool-a"), "message.timestamp.type", "CreateTime")

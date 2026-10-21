@@ -140,7 +140,7 @@ prints `run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
 | `--s3-input FILE` | | file of at most 5 GiB that `submit` uploads to the pool's bucket and the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
 | `--credential-file NAME=FILE` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR`; repeatable |
 | `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the turn without it, and `:s3` returns it through the pool's bucket; repeatable |
-| `--deadline` | `30m` | time from now by which the run must end |
+| `--deadline` | `2h` | time from now by which the run must end |
 | `--queue-deadline` | `10m` | time from now by which a receiver must claim it |
 
 `submit` refuses, before it publishes, a model outside the agent's
@@ -217,7 +217,7 @@ It prints `run_id=<id> turn=<n>`.
 | --- | --- | --- |
 | `--prompt` | `continue` | text of the new turn |
 | `--prompt-file` | | file holding the new turn's prompt |
-| `--deadline` | `30m` | run deadline for the turn |
+| `--deadline` | `2h` | run deadline for the turn |
 | `--queue-deadline` | `10m` | queue deadline for the turn |
 
 `--prompt` and `--prompt-file` are mutually exclusive, and an empty prompt
@@ -235,7 +235,7 @@ and prints `run_id=<id>`.
 ### `wherry await RUN_ID`
 
 Waits for the latest turn of a run to finish or be interrupted. `--timeout`
-sets the wait, `30m` by default. `--outputs-dir DIR` sets where the turn's
+sets the wait, `2h` by default. `--outputs-dir DIR` sets where the turn's
 outputs go, by default `<state_dir>/runs/<run>/outputs/<turn>/`.
 
 It prints the state on the first line. For a turn that ended with a result,
@@ -409,9 +409,9 @@ terms. It refuses a delivery limit above the lowest
 [records do not fit the broker](#record-limit). For an existing pool it
 records the new terms and sets the group configuration again. On new and
 existing topics it sets the tasks and events `retention.ms` to
-`run_lifetime_ms` plus one hour plus one day, and their
+`run_lifetime_ms` plus six hours plus one day, and their
 `message.timestamp.type` to `LogAppendTime`. It refuses a run lifetime above
-29 days and 23 hours, or one that with one hour added exceeds the
+29 days and 18 hours, or one that with six hours added exceeds the
 `retention.ms` of the feed of a tenant entitled to the pool. See
 [Topics](#topics).
 
@@ -421,7 +421,7 @@ Entitles the tenant to an existing pool, creates the tenant feed, and
 grants the tenant's hosts and the pool's receivers their ACLs. It refuses
 when the pool's records do not fit the [record limit](#record-limit) with
 the tenant's feed counted, or when the feed's `retention.ms` is below the
-pool's `run_lifetime_ms` plus one hour, and records nothing. It applies
+pool's `run_lifetime_ms` plus six hours, and records nothing. It applies
 each host's [quotas](#quotas).
 
 ### `wherry admin host add TENANT HOST --bundle-file FILE`
@@ -717,7 +717,7 @@ Agent-reported usage comes from a turn's result: Claude Code's `usage` fields
 nothing. The figures are the agent's own, unchecked.
 
 The core histograms' buckets are 1, 5, 15, 30 and 60 seconds, 2, 5, 10 and 30
-minutes, and 1, 2 and 4 hours. `wherry_adapter_placement_seconds` uses
+minutes, and 1, 2, 4 and 6 hours. `wherry_adapter_placement_seconds` uses
 `adapter.PlacementBuckets`: 1, 2, 5, 10 and 30 seconds, and 1, 2, 5, 10 and 30
 minutes.
 
@@ -725,7 +725,7 @@ minutes.
 
 `wherry mcp` serves nine tools over stdio. Each takes and returns JSON with
 a declared schema and opens its own Kafka connection. Deadlines given as `0`
-or omitted take the CLI defaults, 1800 and 600 seconds.
+or omitted take the CLI defaults, 7200 and 600 seconds.
 
 | Tool | Input | Output |
 | --- | --- | --- |
@@ -751,9 +751,10 @@ or omitted take the CLI defaults, 1800 and 600 seconds.
   array of `{name, file}` and `outputs` an array of `{name, required, storage}`,
   as `--input`, `--s3-input`, `--credential-file` and `--output` take them;
   `storage` `s3` is `:s3`. An input or S3 input must resolve, through any
-  symbolic links, to a regular file beneath the server's working directory, and
-  to none of `state_dir`, `host_key`, `bundle`, a credential file or a storage
-  key file; a relative path is taken from that directory.
+  symbolic links, to a regular file beneath one of the
+  [`input_roots`](#client-configuration), and to none of `state_dir`,
+  `host_key`, `bundle`, a credential file or a storage key file; a relative
+  path is taken from the server's working directory.
 - `status` returns the latest verified state of a run's latest turn
   without waiting. `runs` holds one entry for the run `id` names, or,
   without `id`, one per run `wherry status` lists, latest update first.
@@ -838,6 +839,7 @@ A JSON object at `~/.config/wherry/config.json`, or at the host command's
 | `state_dir` | `~/.config/wherry/state` | run records and answered seal requests |
 | `credentials` | none | credential name to the file holding its value; a trailing newline is part of the value the agent gets, and the receiver redacts the value with and without it |
 | `storage` | none | `{access_key_file, secret_key_file}`: files holding the access key and secret key of the host's S3 credential, each readable and writable by its owner alone; a host without it uses no S3 lane |
+| `input_roots` | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
 
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
 readable by its owner alone, with `redaction_key`, the run's redaction key,
@@ -1124,7 +1126,7 @@ result, or without one with `agent exited <code>` or
 The receiver stops the job once it reads the line that ends the turn. A job
 that ends without one fails with the message `agent ended without a result`.
 
-A turn's run time is capped at its deadline, and at one hour after its
+A turn's run time is capped at its deadline, and at six hours after its
 queue deadline. A receiver rejects a turn no pool member has claimed with
 `queue deadline passed` or `run deadline passed` once that deadline has
 passed. A redelivered turn that a member has claimed is not rejected: the
@@ -1139,7 +1141,7 @@ when that time is more than `run_lifetime_ms` ago, and with
 more than `run_lifetime_ms` after it. A redelivered turn that a member has
 claimed skips both checks. `wherry submit`, `wherry continue` and the MCP
 tools make the same checks before publishing. Every turn therefore ends
-within one hour after the run lifetime. A receiver that next reads an
+within six hours after the run lifetime. A receiver that next reads an
 interrupted run after that time ends it `TASK_STATE_CANCELED` with
 `run expired`.
 
@@ -1155,16 +1157,16 @@ replication factor, `cleanup.policy=delete` and
 | --- | --- | --- |
 | `wherry.admin` | any recording command | `-1` |
 | `wherry.receivers` | any recording command | `604800000` (7 days) |
-| `wherry.pool.<pool>.tasks` | `pool create` | `run_lifetime_ms + 3600000 + 86400000`; default `1299600000` |
+| `wherry.pool.<pool>.tasks` | `pool create` | `run_lifetime_ms + 21600000 + 86400000`; default `1317600000` |
 | `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` sets the same value |
 | `wherry.tenant.<tenant>` | `tenant add`, `host add` | `2592000000` (30 days) |
 | `wherry.receiver.<receiver>` | `receiver add` | `-1` |
 | `wherry.host.<tenant>.<host>` | `host add` | `-1` |
 
-The tasks retention keeps the run lifetime, the one-hour maximum turn time,
+The tasks retention keeps the run lifetime, the six-hour maximum turn time,
 and a one-day margin. Events stay at least as long as tasks. A tenant feed
-must stay for at least `run_lifetime_ms + 3600000`; its 30-day default exceeds
-the default requirement of `1213200000`. Identity and configuration topics
+must stay for at least `run_lifetime_ms + 21600000`; its 30-day default exceeds
+the default requirement of `1231200000`. Identity and configuration topics
 stay at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 
 `wherry admin` leaves an existing topic's configuration as it is, except

@@ -171,6 +171,31 @@ func TestDispatchCarriesThePlacementModel(t *testing.T) {
 	}
 }
 
+func TestRunTimeIsCappedSixHoursAfterTheQueueDeadline(t *testing.T) {
+	queueDeadline, twoHours := time.Now().Add(10*time.Minute).UnixMilli(), time.Now().Add(2*time.Hour).UnixMilli()
+	for name, test := range map[string]struct{ deadline, want int64 }{
+		"two hours":   {twoHours, twoHours},
+		"seven hours": {time.Now().Add(7 * time.Hour).UnixMilli(), time.UnixMilli(queueDeadline).Add(6 * time.Hour).UnixMilli()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.answer(t, credentialName)
+			record := f.submit(t, f.host, func(task *wire.Submission) {
+				task.Wherry.DeadlineMS, task.Wherry.QueueDeadlineMS = test.deadline, queueDeadline
+			})
+			// The fixture's context ends within a minute, sooner than either deadline.
+			if status := f.receiver.execute(context.WithoutCancel(f.ctx), f.service.Admin, record, f.admitted(t, record), 1); status != kgo.AckAccept {
+				t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+			}
+			f.adapter.mu.Lock()
+			defer f.adapter.mu.Unlock()
+			if got := f.adapter.lastDeadline.UnixMilli(); got != test.want {
+				t.Fatalf("run deadline %v, want %v", f.adapter.lastDeadline, time.UnixMilli(test.want))
+			}
+		})
+	}
+}
+
 func TestAdmitRejectsTurnPastRunLifetime(t *testing.T) {
 	terms := testTerms()
 	terms.RunLifetimeMS = 1
@@ -903,7 +928,7 @@ func TestRunsUnderRetention(t *testing.T) {
 			task.Message.TaskID, task.Message.ContextID = run, run
 		})
 	}
-	turn("run-ancient", 27*time.Hour, "interrupted", wire.TaskStateAuthRequired)
+	turn("run-ancient", 32*time.Hour, "interrupted", wire.TaskStateAuthRequired)
 	completed, _ := turn("run-completed", 14*time.Hour, "terminal", wire.TaskStateCompleted)
 	turn("run-continued", 50*time.Minute, "interrupted", wire.TaskStateAuthRequired)
 	adopted, adoptedTask := turn("run-adopted", 50*time.Minute, "started", wire.TaskStateWorking)

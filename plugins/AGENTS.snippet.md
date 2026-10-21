@@ -23,7 +23,7 @@ clones itself.
    pool has storage and your configuration a storage credential,
    `--s3-input FILE` sends a larger file (5 GiB at most) through the pool's
    bucket, and `--output NAME:s3` returns one that way. Keep working.
-3. `wherry await RUN_ID` blocks until the run ends (30 minutes at most by
+3. `wherry await RUN_ID` blocks until the run ends (2 hours at most by
    default), then prints the state and the result, and writes each returned
    output, S3 outputs included, printing an `output=<name> path=<path>` line for
    it. It also answers the receiver's request for the agent's credential, so

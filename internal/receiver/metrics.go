@@ -17,8 +17,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// durationBuckets bound the core's histograms, in seconds, from one second to four hours.
-var durationBuckets = []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400}
+// durationBuckets bound the core's histograms, in seconds, from one second to six hours.
+var durationBuckets = []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400, 21600}
 
 // metricsDeadline bounds each adapter's Metrics call at scrape time; a variable so tests can shorten it.
 var metricsDeadline = 2 * time.Second
