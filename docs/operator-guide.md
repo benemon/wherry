@@ -107,7 +107,7 @@ A run takes continuations for `run_lifetime_ms` after its first submission.
 After that, receivers reject another turn with `run expired`, and an interrupted
 run ends `TASK_STATE_CANCELED` with the same message the next time a receiver
 reads the pool's events. Receivers also reject a turn whose queue deadline falls
-after the lifetime, so every turn ends within one hour after it. Choose the
+after the lifetime, so every turn ends within six hours after it. Choose the
 lifetime as the longest pause expected before a continuation, such as a wait for
 a person to sign in. A longer lifetime keeps prompts on the broker longer.
 Lowering the lifetime of a pool with runs in progress lowers its topics'
@@ -115,13 +115,13 @@ retention at once: Kafka then deletes the records of runs older than the new
 bound, and their continuations fail with `continuation history unavailable`.
 
 `pool create` sets the retention of the pool's tasks and events topics, new and
-existing, to the run lifetime plus the one-hour maximum turn time plus a one-day
+existing, to the run lifetime plus the six-hour maximum turn time plus a one-day
 margin, and their timestamp type to `LogAppendTime`, since the lifetime runs
-from the broker's time. With the 14-day default that is `1299600000` ms, 15 days
-and one hour, after which a run's prompts leave the broker. Tenant feeds keep
+from the broker's time. With the 14-day default that is `1317600000` ms, 15 days
+and six hours, after which a run's prompts leave the broker. Tenant feeds keep
 statuses, transcripts and results for 30 days and must keep them for at least
-the run lifetime plus one hour, so `pool create` refuses a lifetime above 29
-days and 23 hours, and `tenant add` refuses a feed that keeps less. Identity and
+the run lifetime plus six hours, so `pool create` refuses a lifetime above 29
+days and 18 hours, and `tenant add` refuses a feed that keeps less. Identity and
 configuration topics stay forever. `wherry admin check` reports a topic whose
 retention drops below its bound, and a pool topic whose timestamp type is not
 `LogAppendTime`.
@@ -926,6 +926,11 @@ or link the default path to it, or register a server of your own that runs
 [`claude mcp add wherry -- wherry mcp --config-file PATH`](https://docs.anthropic.com/en/docs/claude-code/mcp)
 in Claude Code. A plugin update replaces the packaged `mcp.json`, so edits to it
 do not last.
+
+The server sends an input or `prompt_file` only from beneath its input
+roots: the client configuration's `input_roots`, or its working directory
+when that is unset. Every input root is a directory whose files the harness
+can send to remote agents; list only directories meant for that.
 
 `plugins/wherry` packages the server with the `wherry` Agent Skill:
 

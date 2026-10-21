@@ -479,6 +479,20 @@ func TestContinuePrintsRunAndTurn(t *testing.T) {
 	}
 }
 
+func TestContinueDefaultsToATwoHourDeadline(t *testing.T) {
+	b, admitted := publishInterruptedRun(t)
+	runID := admitted.submission.Wherry.Run
+	var stdout, stderr bytes.Buffer
+	before := time.Now()
+	if err := runContinue(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now()
+	if deadline := b.tasks(t, runID)[1].submission.Wherry.DeadlineMS; deadline < before.Add(2*time.Hour).UnixMilli() || deadline > after.Add(2*time.Hour).UnixMilli() {
+		t.Fatalf("continue deadline %v, want two hours out", time.UnixMilli(deadline))
+	}
+}
+
 func TestContinuePromptFile(t *testing.T) {
 	b, admitted := publishInterruptedRun(t)
 	runID := admitted.submission.Wherry.Run

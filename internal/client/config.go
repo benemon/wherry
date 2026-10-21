@@ -18,13 +18,15 @@ import (
 )
 
 // Config is the on-disk wherry host configuration. Credentials maps a
-// credential name to the file holding its value.
+// credential name to the file holding its value. InputRoots are the
+// directories the MCP server sends inputs from.
 type Config struct {
 	Bundle      string            `json:"bundle"`
 	HostKey     string            `json:"host_key,omitzero"`
 	StateDir    string            `json:"state_dir,omitzero"`
 	Credentials map[string]string `json:"credentials,omitzero"`
 	Storage     *StorageConfig    `json:"storage,omitzero"`
+	InputRoots  []string          `json:"input_roots,omitzero"`
 }
 
 // StorageConfig names the owner-only files holding the host's S3 access key and secret key.
@@ -84,6 +86,17 @@ func LoadConfig(path string) (Config, error) {
 	for name, path := range config.Credentials {
 		if config.Credentials[name], err = expandHome(path); err != nil {
 			return Config{}, err
+		}
+	}
+	for i, root := range config.InputRoots {
+		if config.InputRoots[i], err = expandHome(root); err != nil {
+			return Config{}, err
+		}
+		if !filepath.IsAbs(config.InputRoots[i]) {
+			return Config{}, fmt.Errorf("config input root %s must be absolute", root)
+		}
+		if info, err := os.Stat(config.InputRoots[i]); err != nil || !info.IsDir() {
+			return Config{}, fmt.Errorf("config input root %s does not exist or is not a directory", root)
 		}
 	}
 	return config, nil

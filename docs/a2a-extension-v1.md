@@ -130,7 +130,7 @@ A submission is one turn of a run.
   [Reference](reference.md#labels) gives the key and value grammar.
 - `deadline_ms` and `queue_deadline_ms` are Unix milliseconds by which the
   run must end and a receiver must claim it. A receiver ends the run no
-  later than one hour after `queue_deadline_ms`.
+  later than six hours after `queue_deadline_ms`.
 - The message has at most 256 parts, each with exactly one of `text`,
   `raw`, `url` and `data`. Receivers reject a `url` part
   ([admission](#admission)).

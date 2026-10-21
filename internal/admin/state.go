@@ -84,7 +84,7 @@ const (
 	DefaultInlineLimit   = 256 << 10
 	DefaultOutputLimit   = 8 << 20
 	DefaultRunLifetimeMS = 14 * 24 * 60 * 60 * 1000
-	MaxRunDurationMS     = 60 * 60 * 1000
+	MaxRunDurationMS     = 6 * 60 * 60 * 1000
 )
 
 func withDefaults(terms Terms) Terms {

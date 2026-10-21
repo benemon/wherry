@@ -69,6 +69,12 @@ type SubmitInput struct {
 	QueueDeadline time.Duration
 }
 
+// DefaultDeadline and DefaultQueueDeadline are a turn's deadlines where the caller gives none.
+const (
+	DefaultDeadline      = 2 * time.Hour
+	DefaultQueueDeadline = 10 * time.Minute
+)
+
 // SubmitResult describes a produced root task.
 type SubmitResult struct {
 	RunID string

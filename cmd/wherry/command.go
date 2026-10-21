@@ -15,7 +15,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/signed"
@@ -166,8 +165,8 @@ func runContinue(ctx context.Context, client *busclient.Host, args []string, std
 	configFile := flags.String("config-file", "", "host configuration file")
 	prompt := flags.String("prompt", "continue", "continuation prompt")
 	promptFile := flags.String("prompt-file", "", "continuation prompt file")
-	deadline := flags.Duration("deadline", 30*time.Minute, "task deadline")
-	queueDeadline := flags.Duration("queue-deadline", 10*time.Minute, "queue deadline")
+	deadline := flags.Duration("deadline", busclient.DefaultDeadline, "task deadline")
+	queueDeadline := flags.Duration("queue-deadline", busclient.DefaultQueueDeadline, "queue deadline")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -274,8 +273,8 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		outputs = append(outputs, output)
 		return nil
 	})
-	deadline := flags.Duration("deadline", 30*time.Minute, "task deadline")
-	queueDeadline := flags.Duration("queue-deadline", 10*time.Minute, "queue deadline")
+	deadline := flags.Duration("deadline", busclient.DefaultDeadline, "task deadline")
+	queueDeadline := flags.Duration("queue-deadline", busclient.DefaultQueueDeadline, "queue deadline")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -378,7 +377,7 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	flags := flag.NewFlagSet("await", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
-	timeout := flags.Duration("timeout", 30*time.Minute, "wait timeout")
+	timeout := flags.Duration("timeout", busclient.DefaultDeadline, "wait timeout")
 	outputsDir := flags.String("outputs-dir", "", "directory for the turn's outputs (default: <state_dir>/runs/RUN_ID/outputs/TURN)")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err

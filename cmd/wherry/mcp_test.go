@@ -190,6 +190,44 @@ func TestMCPToolsList(t *testing.T) {
 	}
 }
 
+func TestDeadlineDefaultsAreTwoHours(t *testing.T) {
+	b := newBus(t)
+	session := mcpSession(t, b.connect(t), nil)
+	tools, err := session.ListTools(b.ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools.Tools {
+		if tool.Name != "submit" && tool.Name != "continue" {
+			continue
+		}
+		encoded, _ := json.Marshal(tool.InputSchema)
+		for _, want := range []string{
+			fmt.Sprintf("task deadline in seconds; default %d", int64(busclient.DefaultDeadline/time.Second)),
+			fmt.Sprintf("queue deadline in seconds; default %d", int64(busclient.DefaultQueueDeadline/time.Second)),
+		} {
+			if !strings.Contains(string(encoded), want) {
+				t.Errorf("%s input schema lacks %q: %s", tool.Name, want, encoded)
+			}
+		}
+	}
+	before := time.Now()
+	var submitted submitOutput
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work"}, &submitted)
+	var stdout, stderr bytes.Buffer
+	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "work"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now()
+	cli, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
+	for lane, runID := range map[string]string{"MCP": submitted.ID, "CLI": cli} {
+		task := b.tasks(t, runID)[0].submission.Wherry
+		if task.DeadlineMS < before.Add(2*time.Hour).UnixMilli() || task.DeadlineMS > after.Add(2*time.Hour).UnixMilli() {
+			t.Errorf("%s submit deadline %v, want two hours out", lane, time.UnixMilli(task.DeadlineMS))
+		}
+	}
+}
+
 func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 	b := newBus(t)
 	ctx := b.ctx

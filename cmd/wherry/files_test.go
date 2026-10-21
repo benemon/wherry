@@ -239,6 +239,75 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestMCPInputsStayInTheInputRoots(t *testing.T) {
+	dirs := make([]string, 4)
+	for i := range dirs {
+		dir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		dirs[i] = dir
+	}
+	work, first, second, outside := dirs[0], dirs[1], dirs[2], dirs[3]
+	write := func(path string) string {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	config := busclient.Config{InputRoots: []string{first, second}, StateDir: filepath.Join(second, "state"),
+		HostKey: write(filepath.Join(first, "wherry", "host.key")), Bundle: write(filepath.Join(outside, "bundle.yaml")),
+		Credentials: map[string]string{"model": write(filepath.Join(first, "wherry", "model"))}}
+	write(filepath.Join(config.StateDir, "runs", "run-a.json"))
+	link := filepath.Join(first, "out")
+	if err := os.Symlink(write(filepath.Join(outside, "elsewhere")), link); err != nil {
+		t.Fatal(err)
+	}
+	hardLink := func(target, name string) string {
+		t.Helper()
+		path := filepath.Join(first, name)
+		if err := os.Link(target, path); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	read := inputReader(inputOpener(work, config))
+	if part, err := read(write(filepath.Join(second, "sub", "data.csv")), math.MaxInt64); err != nil || string(part.Raw) != "content" {
+		t.Fatalf("read a file beneath the second root: %+v, %v", part, err)
+	}
+	refused := map[string]string{
+		"outside every root":          filepath.Join(outside, "elsewhere"),
+		"the working directory":       write(filepath.Join(work, "local")),
+		"the state in a root":         filepath.Join(config.StateDir, "runs", "run-a.json"),
+		"a link out of a root":        link,
+		"a hard link to the host key": hardLink(config.HostKey, "key"),
+		"a hard link to the bundle":   hardLink(config.Bundle, "bundle"),
+	}
+	if _, err := os.Stat(strings.ToUpper(config.HostKey)); err == nil {
+		upper := func(root, path string) string {
+			relative, err := filepath.Rel(root, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(root, strings.ToUpper(relative))
+		}
+		refused["the host key, upper-cased"] = upper(first, config.HostKey)
+		refused["a credential, upper-cased"] = upper(first, config.Credentials["model"])
+		refused["the state, upper-cased"] = upper(second, filepath.Join(config.StateDir, "runs", "run-a.json"))
+	} else {
+		t.Log("the temporary directory is case-sensitive; case-varied paths are not exercised")
+	}
+	for name, path := range refused {
+		if _, err := read(path, math.MaxInt64); err == nil {
+			t.Errorf("read %s (%s)", name, path)
+		}
+	}
+}
+
 func TestAwaitSaysHowToApplyGitChanges(t *testing.T) {
 	for name, command := range map[string]string{wire.GitPatch: "apply with: git am %s\n", wire.GitBundle: "fetch with: git fetch %s HEAD\n"} {
 		t.Run(name, func(t *testing.T) {
@@ -350,7 +419,7 @@ func TestSubmitTakesS3InputsAndOutputs(t *testing.T) {
 		}
 	}
 	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "s3_inputs": []string{"../outside.bin"}}); failure.Code != "INVALID_ARGUMENT" ||
-		!strings.Contains(failure.Message, "beneath the MCP server's working directory") {
+		!strings.Contains(failure.Message, "beneath one of the MCP server's input roots") {
 		t.Fatalf("MCP submit of an S3 input outside the working directory = %+v", failure)
 	}
 }

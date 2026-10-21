@@ -1159,6 +1159,33 @@ func TestConfigRejectsUnknownField(t *testing.T) {
 	}
 }
 
+func TestConfigInputRoots(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	for name, test := range map[string]struct{ root, want string }{
+		"missing":  {filepath.Join(dir, "absent"), "does not exist or is not a directory"},
+		"a file":   {path, "does not exist or is not a directory"},
+		"relative": {".", "must be absolute"},
+	} {
+		if err := os.WriteFile(path, []byte(`{"bundle":"bundle.yaml","input_roots":["`+test.root+`"]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("config with an input root that is %s: %v, want %q", name, err, test.want)
+		}
+	}
+	if err := os.WriteFile(path, []byte(`{"bundle":"bundle.yaml","input_roots":["~"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config, err := LoadConfig(path); err != nil || !slices.Equal(config.InputRoots, []string{home}) {
+		t.Fatalf("input roots %v, %v", config.InputRoots, err)
+	}
+}
+
 func TestConnectErrorsOmitPassword(t *testing.T) {
 	const password = "kafka-password-secret"
 	dir := t.TempDir()
