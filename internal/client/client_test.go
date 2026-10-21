@@ -69,9 +69,9 @@ func (b *syncBuffer) String() string {
 
 func testTerms() admin.Terms {
 	return admin.Terms{
-		Agents:         []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}, {Name: "codex", Credentials: []string{"openai"}}},
-		DefaultAgent:   "claude",
-		SealLifetimeMS: int64(time.Hour / time.Millisecond), DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
+		Agents:        []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}, {Name: "codex", Credentials: []string{"openai"}}},
+		DefaultAgent:  "claude",
+		DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
 	}
 }
 
@@ -285,7 +285,7 @@ func (r *testReceiver) binding(task claimed, attempt int64) wire.ReceiverBinding
 func (r *testReceiver) echo(t *testing.T, task claimed) []byte {
 	binding := task.submission.Wherry
 	return r.sign(t, &wire.Echo{Receiver: r.id, Tenant: binding.Tenant, Pool: r.pool, Run: binding.Run, Turn: binding.Turn, Placement: binding.Placement,
-		TaskHash: task.hash, MessageID: task.submission.Message.MessageID, DeadlineMS: binding.DeadlineMS, QueueDeadlineMS: binding.QueueDeadlineMS})
+		TaskHash: task.hash, MessageID: task.submission.Message.MessageID})
 }
 
 func (r *testReceiver) status(t *testing.T, task claimed, attempt int64, eventID, kind string, state wire.TaskState, mutate func(*wire.RunStatus)) []byte {

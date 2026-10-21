@@ -43,7 +43,6 @@ agents:
     credentials:
       - model-api-key
 default_agent: coder
-seal_lifetime_ms: 86400000
 delivery_limit: 5
 lock_duration_ms: 15000
 producer_byte_rate: 1048576

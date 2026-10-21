@@ -184,17 +184,15 @@ type ResultBinding struct {
 
 // Echo tells every host of a tenant where a turn was admitted.
 type Echo struct {
-	V               int       `json:"v"`
-	Receiver        string    `json:"receiver"`
-	Tenant          string    `json:"tenant"`
-	Pool            string    `json:"pool"`
-	Run             string    `json:"run"`
-	Turn            int64     `json:"turn"`
-	Placement       Placement `json:"placement"`
-	TaskHash        string    `json:"task_hash"`
-	MessageID       string    `json:"message_id"`
-	DeadlineMS      int64     `json:"deadline_ms"`
-	QueueDeadlineMS int64     `json:"queue_deadline_ms"`
+	V         int       `json:"v"`
+	Receiver  string    `json:"receiver"`
+	Tenant    string    `json:"tenant"`
+	Pool      string    `json:"pool"`
+	Run       string    `json:"run"`
+	Turn      int64     `json:"turn"`
+	Placement Placement `json:"placement"`
+	TaskHash  string    `json:"task_hash"`
+	MessageID string    `json:"message_id"`
 }
 
 // Advertisement is a receiver's live offers on wherry.receivers.
@@ -518,7 +516,7 @@ func (value *Echo) validate() error {
 	if err := validateIDs(map[string]string{"receiver": value.Receiver, "tenant": value.Tenant, "pool": value.Pool, "run": value.Run, "message_id": value.MessageID}); err != nil {
 		return err
 	}
-	if value.Turn < 1 || !ValidHash(value.TaskHash) || value.DeadlineMS < 0 || value.QueueDeadlineMS < 0 {
+	if value.Turn < 1 || !ValidHash(value.TaskHash) {
 		return errors.New("invalid echo")
 	}
 	return value.Placement.validate()

@@ -175,7 +175,7 @@ func TestRoundTrip(t *testing.T) {
 		Broker: address, CA: ca, DeliveryCeiling: 10}
 	dir := t.TempDir()
 	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, DefaultAgent: "claude",
-		SealLifetimeMS: int64(time.Hour / time.Millisecond), DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	bucket := s3Oracle(t)
 	if bucket != nil {
 		terms.Storage = &admin.Storage{Endpoint: bucket.endpoint, Bucket: s3Bucket}

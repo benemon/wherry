@@ -625,6 +625,44 @@ func TestFencedProducerStopsRunWrites(t *testing.T) {
 	}
 }
 
+// A fenced holder's start failure must not purge the job its adopter now runs.
+func TestFencedStartFailureLeavesTheJob(t *testing.T) {
+	f := newFixture(t, resultStream)
+	zombie := testActiveRun(t, f, "run-fence", 1)
+	if err := zombie.commit(f.ctx, zombie.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
+		t.Fatal(err)
+	}
+	adopter := testActiveRun(t, f, "run-fence", 2)
+	if err := adopter.commit(f.ctx, adopter.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
+		t.Fatal(err)
+	}
+	if status := zombie.startFailure(f.ctx, "dispatch"); status != 0 {
+		t.Fatalf("fenced start failure returned ack %v, want 0 (no acknowledgement)", status)
+	}
+	f.adapter.mu.Lock()
+	defer f.adapter.mu.Unlock()
+	if f.adapter.purges != 0 {
+		t.Fatalf("fenced holder purged %d times, want 0", f.adapter.purges)
+	}
+}
+
+func TestStartFailureWriteDenialEntersDenial(t *testing.T) {
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-a", 1)
+	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.PoolEventsTopic(testPool)).Operations(kadm.OpWrite))
+	if status := run.startFailure(f.ctx, "dispatch"); status != kgo.AckRelease {
+		t.Fatalf("status %v, want release", status)
+	}
+	if !f.receiver.holds(capWrite) || !strings.Contains(f.logs.String(), "run run-a: write failed") {
+		t.Fatalf("a start failure that could not be written was not denied and logged; logs:\n%s", f.logs.String())
+	}
+	f.adapter.mu.Lock()
+	defer f.adapter.mu.Unlock()
+	if f.adapter.purges != 0 {
+		t.Fatalf("purged %d times without a committed start failure, want 0", f.adapter.purges)
+	}
+}
+
 func TestFollowErrorReasonIsFixed(t *testing.T) {
 	f := newFixture(t, nil)
 	f.adapter.followErr = errors.New("upstream detail")

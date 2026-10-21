@@ -69,7 +69,7 @@ func Terminal(state TaskState) bool {
 
 // Interrupted reports whether an A2A task state waits for a continuation.
 func Interrupted(state TaskState) bool {
-	return state == TaskStateAuthRequired || state == TaskStateInputRequired
+	return state == TaskStateAuthRequired
 }
 
 // Part is an A2A Part with exactly one of Text, Raw, URL or Data.

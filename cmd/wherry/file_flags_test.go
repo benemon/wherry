@@ -78,6 +78,20 @@ func TestPoolConfigDirectoryMatchesSingleFile(t *testing.T) {
 	}
 }
 
+func TestPoolConfigRejectsSealLifetime(t *testing.T) {
+	pool, err := os.ReadFile(filepath.Join("testdata", "pool-nomad.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "pool.yaml")
+	if err := os.WriteFile(file, append(pool, "seal_lifetime_ms: 86400000\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPoolConfig(file, false); err == nil || !strings.Contains(err.Error(), "seal_lifetime_ms") {
+		t.Fatalf("pool config = %v, want seal_lifetime_ms refused as an unknown field", err)
+	}
+}
+
 func TestPoolConfigDirectoryRejectsAgentsInPoolYAML(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"pool.yaml":          "agents:\n  - name: claude\n",
