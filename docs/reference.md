@@ -1060,7 +1060,8 @@ the paths of its [input, credential and output
 directories](a2a-extension-v1.md#inputs-and-outputs). `WHERRY_MODEL` holds
 the task's model when its agent has [`models`](#pool-terms), and is not set
 otherwise, so the adapter's command reads it with its own fallback, such as
-`--model "${WHERRY_MODEL:-haiku}"`.
+`test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;` before
+`--model "$WHERRY_MODEL"`.
 
 The agent writes JSON lines to standard output. The receiver publishes each
 line as a transcript chunk. With the adapter's `output` absent or `claude`,
