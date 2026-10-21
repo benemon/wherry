@@ -1720,6 +1720,52 @@ func TestNeverStartedJobIsAPlatformStartFailure(t *testing.T) {
 	}
 }
 
+// The platform's reason for a job that never started reaches the receiver's log with the run's delivered credential
+// redacted; without a reason the line is as it was.
+func TestNeverStartedReasonIsLoggedRedacted(t *testing.T) {
+	for _, test := range []struct{ name, reason, want string }{
+		{"reason", "template rendered " + testToken, "run run-a: job never started (driver): template rendered " + signed.RedactionMarker(testRedactionKey, credentialName) + "\n"},
+		{"no reason", "", "run run-a: job never started (driver)\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.adapter.stream, f.adapter.neverStarted, f.adapter.neverReason = nil, true, test.reason
+			f.answer(t, credentialName)
+			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
+				t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
+			}
+			logs := f.logs.String()
+			if !strings.Contains(logs, test.want) || strings.Contains(logs, testToken) {
+				t.Fatalf("logs lack %q or hold the credential:\n%s", test.want, logs)
+			}
+		})
+	}
+}
+
+func TestStartReasonIsRedactedOnOneBoundedLine(t *testing.T) {
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-a", 1)
+	run.deliver(map[string][]byte{credentialName: []byte(testToken)})
+	marker := signed.RedactionMarker(testRedactionKey, credentialName)
+	for _, test := range []struct {
+		name     string
+		terminal adapter.Terminal
+		want     string
+	}{
+		{"credential", adapter.Terminal{Class: "validation", Reason: "rendered " + testToken}, ": rendered " + marker},
+		{"url", adapter.Terminal{Class: "driver", Reason: `Head "https://registry.example/v2/x?token=abc": no such host`}, `: Head "[redacted-url] no such host`},
+		{"newlines", adapter.Terminal{Class: "validation", Reason: "1 error occurred:\r\n* bad"}, ": 1 error occurred:  * bad"},
+		{"fetch", adapter.Terminal{Class: adapter.ClassFetch, Reason: `error downloading "s3::bucket/object?X-Amz-Signature=abc"`}, ": [omitted]"},
+		{"cap", adapter.Terminal{Class: "driver", Reason: strings.Repeat("x", 2048)}, ": " + strings.Repeat("x", maxReason)},
+		{"cap after redaction", adapter.Terminal{Class: "driver", Reason: strings.Repeat("x", maxReason-10) + testToken}, ": " + (strings.Repeat("x", maxReason-10) + marker)[:maxReason]},
+		{"empty", adapter.Terminal{Class: "driver"}, ""},
+	} {
+		if got := run.startReason(test.terminal); got != test.want {
+			t.Errorf("%s: reason %q, want %q", test.name, got, test.want)
+		}
+	}
+}
+
 func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 	for _, test := range []struct {
 		name    string

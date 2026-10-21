@@ -65,7 +65,7 @@ func TestScrapeAfterARun(t *testing.T) {
 		`wherry_agent_reported_tokens_total{agent="claude",kind="input",model="",pool="pool-a",tenant="tenant-a"} 10`,
 		`wherry_agent_reported_tokens_total{agent="claude",kind="output",model="",pool="pool-a",tenant="tenant-a"} 5`,
 		`wherry_agent_reported_tokens_total{agent="claude",kind="cached",model="",pool="pool-a",tenant="tenant-a"} 3`,
-		`wherry_agent_reported_cost_usd_total{agent="claude",pool="pool-a",tenant="tenant-a"} 0.25`,
+		`wherry_agent_reported_cost_usd_total{agent="claude",model="",pool="pool-a",tenant="tenant-a"} 0.25`,
 		`wherry_in_flight{adapter="nomad",pool="pool-a"} 0`,
 		`wherry_capacity{pool="pool-a"} 1`,
 	)
@@ -217,6 +217,31 @@ func TestModelOutsideTheTermsIsLabelledOther(t *testing.T) {
 	)
 	if strings.Contains(text, "opus") {
 		t.Fatalf("scrape holds the model outside the terms:\n%s", text)
+	}
+}
+
+// Reported cost counts under the placement's model as the agent's terms bound it, and a result without a cost adds
+// none.
+func TestCostIsLabelledByModel(t *testing.T) {
+	terms := testTerms()
+	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, "haiku"
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	for model, result := range map[string]string{
+		"sonnet": `{"agent_result":{"total_cost_usd":0.5}}`,
+		"opus":   `{"agent_result":{"total_cost_usd":0.25}}`,
+		"haiku":  `{"agent_result":{"usage":{"input_tokens":4}}}`,
+	} {
+		run := testActiveRun(t, f, "run-"+model, 1)
+		run.task.Wherry.Placement.Model = model
+		run.ended(wire.TaskStateCompleted, []byte(result))
+	}
+	text := scraped(t, f.receiver,
+		`wherry_agent_reported_cost_usd_total{agent="claude",model="sonnet",pool="pool-a",tenant="tenant-a"} 0.5`,
+		`wherry_agent_reported_cost_usd_total{agent="claude",model="other",pool="pool-a",tenant="tenant-a"} 0.25`,
+		`wherry_agent_reported_tokens_total{agent="claude",kind="input",model="haiku",pool="pool-a",tenant="tenant-a"} 4`,
+	)
+	if strings.Contains(text, "opus") || strings.Contains(text, `wherry_agent_reported_cost_usd_total{agent="claude",model="haiku"`) {
+		t.Fatalf("scrape holds the model outside the terms or a cost the result did not report:\n%s", text)
 	}
 }
 

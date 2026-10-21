@@ -614,12 +614,14 @@ func (x *Job) GetAgent() string {
 }
 
 type Terminal struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Started       bool                   `protobuf:"varint,1,opt,name=started,proto3" json:"started,omitempty"`
-	ExitCode      int64                  `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
-	Signal        string                 `protobuf:"bytes,3,opt,name=signal,proto3" json:"signal,omitempty"`
-	Class         string                 `protobuf:"bytes,4,opt,name=class,proto3" json:"class,omitempty"`
-	Node          string                 `protobuf:"bytes,5,opt,name=node,proto3" json:"node,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Started  bool                   `protobuf:"varint,1,opt,name=started,proto3" json:"started,omitempty"`
+	ExitCode int64                  `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	Signal   string                 `protobuf:"bytes,3,opt,name=signal,proto3" json:"signal,omitempty"`
+	Class    string                 `protobuf:"bytes,4,opt,name=class,proto3" json:"class,omitempty"`
+	Node     string                 `protobuf:"bytes,5,opt,name=node,proto3" json:"node,omitempty"`
+	// reason is the platform's account of why the task never started; it may be empty.
+	Reason        string `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -685,6 +687,13 @@ func (x *Terminal) GetClass() string {
 func (x *Terminal) GetNode() string {
 	if x != nil {
 		return x.Node
+	}
+	return ""
+}
+
+func (x *Terminal) GetReason() string {
+	if x != nil {
+		return x.Reason
 	}
 	return ""
 }
@@ -2219,13 +2228,14 @@ const file_wherry_adapter_v1_adapter_proto_rawDesc = "" +
 	"\x06handle\x18\x02 \x01(\v2\x19.wherry.adapter.v1.HandleR\x06handle\x12\x18\n" +
 	"\aattempt\x18\x03 \x01(\x03R\aattempt\x12\x18\n" +
 	"\aadapter\x18\x04 \x01(\tR\aadapter\x12\x14\n" +
-	"\x05agent\x18\x05 \x01(\tR\x05agent\"\x83\x01\n" +
+	"\x05agent\x18\x05 \x01(\tR\x05agent\"\x9b\x01\n" +
 	"\bTerminal\x12\x18\n" +
 	"\astarted\x18\x01 \x01(\bR\astarted\x12\x1b\n" +
 	"\texit_code\x18\x02 \x01(\x03R\bexitCode\x12\x16\n" +
 	"\x06signal\x18\x03 \x01(\tR\x06signal\x12\x14\n" +
 	"\x05class\x18\x04 \x01(\tR\x05class\x12\x12\n" +
-	"\x04node\x18\x05 \x01(\tR\x04node\"F\n" +
+	"\x04node\x18\x05 \x01(\tR\x04node\x12\x16\n" +
+	"\x06reason\x18\x06 \x01(\tR\x06reason\"F\n" +
 	"\x04Line\x12\x16\n" +
 	"\x06offset\x18\x01 \x01(\x03R\x06offset\x12\x12\n" +
 	"\x04next\x18\x02 \x01(\x03R\x04next\x12\x12\n" +

@@ -584,11 +584,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			if over := size(line) - room; over > 0 {
 				line.Truncated, line.Bytes = true, len(line.Text)
 				for over = size(line) - room; over > 0; over = size(line) - room {
-					cut := max(len(line.Text)-over, 0)
-					for cut > 0 && !utf8.RuneStart(line.Text[cut]) {
-						cut--
-					}
-					line.Text = line.Text[:cut]
+					line.Text = wire.CutUTF8(line.Text, max(len(line.Text)-over, 0))
 				}
 			}
 			room -= size(line) + 1

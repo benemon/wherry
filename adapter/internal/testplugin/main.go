@@ -35,6 +35,8 @@ type config struct {
 	Outputs bool   `json:"outputs"`
 	// TooLarge names the input Dispatch refuses.
 	TooLarge string `json:"too_large"`
+	// NeverStarted is the reason Follow ends the job with, as one that never started.
+	NeverStarted string `json:"never_started"`
 }
 
 type record struct {
@@ -101,6 +103,9 @@ func (f *fake) Lookup(context.Context, string, int64) (adapter.Job, error) {
 // Follow emits the lines from offset from, then holds the stream open like a running job.
 func (f *fake) Follow(ctx context.Context, _ adapter.Handle, from int64, out chan<- adapter.Line) (adapter.Terminal, error) {
 	f.panics("Follow")
+	if f.config.NeverStarted != "" {
+		return adapter.Terminal{Class: "validation", Node: "fake-node", Reason: f.config.NeverStarted}, nil
+	}
 	var offset int64
 	for _, data := range lines {
 		next := offset + int64(len(data)+1)

@@ -235,6 +235,15 @@ func TestFollowResumesFromOffset(t *testing.T) {
 	}
 }
 
+func TestTerminalReasonCrossesTheLink(t *testing.T) {
+	p, _, _ := launch(t)
+	a := configured(t, p, "a", `{"never_started":"failed to interpolate ${BAD:-x}"}`)
+	terminal, err := a.Follow(context.Background(), Handle{Data: []byte("h")}, 0, make(chan Line, 4))
+	if want := (Terminal{Class: "validation", Node: "fake-node", Reason: "failed to interpolate ${BAD:-x}"}); err != nil || terminal != want {
+		t.Fatalf("follow = %+v, %v; want %+v", terminal, err, want)
+	}
+}
+
 func TestPanicStaysInItsCall(t *testing.T) {
 	p, _, logs := launch(t)
 	a, b := configured(t, p, "a", `{"panic":"Sweep"}`), configured(t, p, "b", "{}")

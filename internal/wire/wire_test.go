@@ -838,3 +838,22 @@ func TestS3Keys(t *testing.T) {
 		t.Errorf("prefix %s holds another run's prefix", prefix)
 	}
 }
+
+func TestCutUTF8KeepsWholeRunes(t *testing.T) {
+	for _, c := range []struct {
+		s    string
+		n    int
+		want string
+	}{
+		{"abc", 5, "abc"},
+		{"abc", 3, "abc"},
+		{"abc", 2, "ab"},
+		{"a€b", 3, "a"},
+		{"a€b", 4, "a€"},
+		{"€", 0, ""},
+	} {
+		if got := CutUTF8(c.s, c.n); got != c.want {
+			t.Errorf("CutUTF8(%q, %d) = %q, want %q", c.s, c.n, got, c.want)
+		}
+	}
+}
