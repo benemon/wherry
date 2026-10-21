@@ -1,4 +1,9 @@
-# wherry
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/svg/wherry-horizontal-cream.svg">
+    <img alt="wherry" src="brand/svg/wherry-horizontal.svg" width="320">
+  </picture>
+</h1>
 
 A coding agent runs its subagents on the machine the agent itself runs on.
 wherry sends a task to other compute, starts an unmodified agent there, and
