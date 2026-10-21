@@ -5,8 +5,6 @@ import (
 	"cmp"
 	"context"
 	"crypto/ed25519"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	json "encoding/json/v2"
 	"errors"
@@ -29,7 +27,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
 // ErrConfigChanged is returned by Run when wherry.admin holds a configuration other than the one it started with.
@@ -54,13 +51,12 @@ type AdapterFactory func(pool string, settings admin.AdapterSettings) (Named, er
 
 // Receiver claims tasks for one pool and runs them through its adapters.
 type Receiver struct {
-	id       string
-	kafkaOpt []kgo.Opt
-	base     *kgo.Client
-	signing  ed25519.PrivateKey
-	factory  AdapterFactory
-	logger   *log.Logger
-	metrics  *metrics
+	id      string
+	base    *kgo.Client
+	signing ed25519.PrivateKey
+	factory AdapterFactory
+	logger  *log.Logger
+	metrics *metrics
 	// config and adapters are set by configure before any claim and never change.
 	config   admin.ReceiverConfig
 	adapters []Named
@@ -90,12 +86,12 @@ type Receiver struct {
 // the receiver registers its metric families on registry.
 func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
 	id, ok := strings.CutPrefix(bundle.Principal, admin.ReceiverPrincipal(""))
-	if !ok || !admin.ValidName(id) {
+	if !ok || !wire.ValidName(id) {
 		return nil, errors.New("bundle principal is not a receiver principal")
 	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM([]byte(bundle.CA)) {
-		return nil, errors.New("bundle CA contains no certificates")
+	opts, err := admin.KafkaOpts(bundle.Broker, []byte(bundle.CA), bundle.Principal, bundle.Password)
+	if err != nil {
+		return nil, fmt.Errorf("bundle: %w", err)
 	}
 	if stateDir == "" {
 		return nil, errors.New("receiver requires a state directory")
@@ -103,7 +99,11 @@ func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *l
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, err
 	}
-	signing, err := loadOrCreate(filepath.Join(stateDir, "signing.key"), trust.LoadSigningKeyFile, trust.GenerateSigningKeyFile)
+	signingPath := filepath.Join(stateDir, "signing.key")
+	signing, err := trust.LoadSigningKeyFile(signingPath)
+	if errors.Is(err, os.ErrNotExist) {
+		signing, err = trust.GenerateSigningKeyFile(signingPath)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
@@ -111,24 +111,16 @@ func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *l
 	if err := os.Remove(filepath.Join(stateDir, "sealing.key")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("remove sealing key: %w", err)
 	}
-	opts := []kgo.Opt{
-		kgo.SeedBrokers(bundle.Broker),
-		kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
-		kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
-	}
 	base, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, err
 	}
-	return &Receiver{id: id, kafkaOpt: opts, base: base, signing: signing, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+	return &Receiver{id: id, base: base, signing: signing, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
-func loadOrCreate[K any](path string, load func(string) (K, error), create func(string) (K, error)) (K, error) {
-	key, err := load(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return create(path)
-	}
-	return key, err
+// newClient is a client of the receiver's connection with extra options.
+func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
+	return kgo.NewClient(append(slices.Clone(r.base.Opts()), extra...)...)
 }
 
 // Run registers the receiver's keys, waits for its configuration, then advertises and claims
@@ -254,7 +246,7 @@ func (r *Receiver) configure(ctx context.Context) error {
 			for _, settings := range config.Adapters {
 				named, err := r.factory(config.Pool, settings)
 				if err != nil {
-					return fmt.Errorf("adapter %s: %w", settings.Name, err)
+					return fmt.Errorf("adapter %s: %s", settings.Name, logText(nil, err))
 				}
 				named.output = settings.Output
 				if named.output == "file" {
@@ -411,7 +403,7 @@ func (r *Receiver) blocked() bool {
 func (r *Receiver) stopForDenial() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	lock := time.Duration(r.state.Pools[r.config.Pool].LockDurationMS) * time.Millisecond
+	lock := r.state.Pools[r.config.Pool].LockDuration()
 	return !r.deniedSince.IsZero() && time.Since(r.deniedSince) >= lock
 }
 
@@ -499,7 +491,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 		case errors.Is(err, context.DeadlineExceeded):
 			r.logger.Printf("adapter %s sweep: timed out", named.Name)
 		case err != nil:
-			r.logger.Printf("adapter %s sweep: %T", named.Name, err)
+			r.logger.Printf("adapter %s sweep: %s", named.Name, logText(nil, err))
 		}
 	}
 	offers := []wire.Offer{}
@@ -512,7 +504,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 			r.logger.Printf("adapter %s readiness: timed out", named.Name)
 			continue
 		case err != nil:
-			r.logger.Printf("adapter %s readiness: %T", named.Name, err)
+			r.logger.Printf("adapter %s readiness: %s", named.Name, logText(nil, err))
 			continue
 		}
 		if ready {
@@ -636,7 +628,7 @@ func (r *Receiver) readCancels(ctx context.Context) error {
 		return err
 	}
 	state, _, _ := r.snapshot()
-	lifetime := time.Duration(state.Pools[r.config.Pool].RunLifetimeMS) * time.Millisecond
+	lifetime := state.Pools[r.config.Pool].RunLifetime()
 	r.mu.Lock()
 	known, knownUnfound := r.runStarts, r.unfound
 	r.mu.Unlock()

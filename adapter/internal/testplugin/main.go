@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/benemon/wherry/adapter"
+	"github.com/hashicorp/go-hclog"
 )
 
 var lines = []string{`{"type":"assistant","message":"working"}`, `{"type":"result","result":"done","is_error":false}`}
@@ -37,6 +38,8 @@ type config struct {
 	TooLarge string `json:"too_large"`
 	// NeverStarted is the reason Follow ends the job with, as one that never started.
 	NeverStarted string `json:"never_started"`
+	// SweepError is the text of the adapter.Error Sweep returns.
+	SweepError string `json:"sweep_error"`
 }
 
 type record struct {
@@ -157,6 +160,9 @@ func (f *fake) Release(context.Context, string, int64) error {
 
 func (f *fake) Sweep(context.Context) error {
 	f.panics("Sweep")
+	if f.config.SweepError != "" {
+		return &adapter.Error{Op: "list jobs", Class: "denied", Err: errors.New(f.config.SweepError)}
+	}
 	return nil
 }
 
@@ -173,8 +179,9 @@ func main() {
 	if os.Getenv("WHERRY_TESTPLUGIN_PLAINTEXT") == "1" {
 		os.Unsetenv("PLUGIN_CLIENT_CERT")
 	}
-	adapter.Serve(func(settings adapter.Settings) (adapter.Adapter, error) {
+	adapter.Serve(func(settings adapter.Settings, logger hclog.Logger) (adapter.Adapter, error) {
 		write(record{Call: "configure", Settings: settings})
+		logger.Info("configuring adapter", "adapter", settings.Name)
 		var decoded config
 		if len(settings.Config) > 0 {
 			if err := json.Unmarshal(settings.Config, &decoded); err != nil {

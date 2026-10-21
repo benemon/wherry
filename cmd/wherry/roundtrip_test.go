@@ -12,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log"
 	"math/big"
@@ -106,6 +107,42 @@ func connectTLS(t *testing.T, address, ca, user, password string) *kgo.Client {
 	}
 	t.Cleanup(client.Close)
 	return client
+}
+
+// A password file's last line break is not part of the password, for every client KafkaOpts builds; the admin
+// command's client and a revocation probe stand for them.
+func TestPasswordLineBreakIsNotThePassword(t *testing.T) {
+	ctx := context.Background()
+	cluster, ca := tlsCluster(t)
+	address := cluster.ListenAddrs()[0]
+	dir := t.TempDir()
+	caPath, passwordPath := filepath.Join(dir, "ca.pem"), filepath.Join(dir, "password")
+	if err := os.WriteFile(caPath, []byte(ca), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(passwordPath, []byte("password\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WHERRY_TRUST_BROKER", address)
+	t.Setenv("WHERRY_TRUST_CA", caPath)
+	t.Setenv("WHERRY_TEST_USER", "admin")
+	t.Setenv("WHERRY_TEST_PASSWORD_FILE", passwordPath)
+	client, err := adminKafka("WHERRY_TEST_USER", "WHERRY_TEST_PASSWORD_FILE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.Ping(ctx); err != nil {
+		t.Fatalf("admin client with a password file ending in a line break: %v", err)
+	}
+	service := &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Broker: address, CA: ca}
+	// The superuser is authorised, so a probe that logs in finds it still authorised.
+	if err := service.Probe("wherry.admin")(ctx, "admin", "password\n"); !errors.Is(err, admin.ErrStillAuthorised) {
+		t.Fatalf("probe with a password ending in a line break = %v; want a login", err)
+	}
+	if err := service.Probe("wherry.admin")(ctx, "admin", "other"); errors.Is(err, admin.ErrStillAuthorised) {
+		t.Fatal("probe with a wrong password logged in")
+	}
 }
 
 // resalt works around kfake's SCRAM handshake, which always names 4096 iterations.

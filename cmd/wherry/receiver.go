@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	json "encoding/json/v2"
 	"errors"
@@ -14,19 +13,17 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"runtime/debug"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/receiver"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"gopkg.in/yaml.v3"
 )
 
 func runReceiver(args []string, stdout, stderr io.Writer) error {
@@ -42,7 +39,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	if *bundlePath == "" || *stateDir == "" || *pluginDir == "" {
 		return errors.New("usage: wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir DIR")
 	}
-	bundle, err := readBundle(*bundlePath)
+	bundle, err := admin.ReadBundle(*bundlePath)
 	if err != nil {
 		return err
 	}
@@ -70,28 +67,6 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	return nil
 }
-
-func readBundle(path string) (admin.Bundle, error) {
-	encoded, err := os.ReadFile(path)
-	if err != nil {
-		return admin.Bundle{}, err
-	}
-	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
-	decoder.KnownFields(true)
-	var bundle admin.Bundle
-	if err := decoder.Decode(&bundle); err != nil {
-		// The decoder quotes keys and values, and a credential pasted in the wrong place is still a
-		// credential: only the line numbers it names are kept.
-		lines := strings.Join(yamlLine.FindAllString(err.Error(), -1), ", ")
-		if lines == "" {
-			return admin.Bundle{}, errors.New("decode bundle: not a valid bundle")
-		}
-		return admin.Bundle{}, fmt.Errorf("decode bundle: invalid or unknown field at %s", lines)
-	}
-	return bundle, nil
-}
-
-var yamlLine = regexp.MustCompile(`line \d+`)
 
 // newRegistry is the receiver process's registry, with the Go runtime and process collectors and wherry_build_info.
 func newRegistry() *prometheus.Registry {
@@ -170,7 +145,7 @@ var receiverUID = os.Getuid()
 // write it or a user other than root or the receiver's owns it, and a binary that is not a regular
 // file. An absolute path is never looked up on PATH, so the binary checked is the one run.
 func pluginPath(dir, kind string) (string, error) {
-	if !admin.ValidName(kind) {
+	if !wire.ValidName(kind) {
 		return "", fmt.Errorf("adapter type %q is not a valid name", kind)
 	}
 	dir, err := filepath.Abs(dir)

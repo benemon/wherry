@@ -901,7 +901,7 @@ func TestRunsUnderRetention(t *testing.T) {
 		t.Helper()
 		task := testSubmission(run)
 		record := aged(admin.PoolTasksTopic(testPool), run, must(t)(wire.SignRecord(task, f.host)), age)
-		status := f.receiver.status(task, taskHash(record.Value), 1, kind, taskStatus(state, ""), nil)
+		status := f.receiver.status(task, wire.TaskHash(record.Value), 1, kind, taskStatus(state, ""), nil)
 		aged(admin.PoolEventsTopic(testPool), run, must(t)(wire.SignRecord(status, f.receiver.signing)), age)
 		return record, task
 	}
@@ -916,7 +916,7 @@ func TestRunsUnderRetention(t *testing.T) {
 	completed, _ := turn("run-completed", 14*time.Hour, "terminal", wire.TaskStateCompleted)
 	turn("run-continued", 50*time.Minute, "interrupted", wire.TaskStateAuthRequired)
 	adopted, adoptedTask := turn("run-adopted", 50*time.Minute, "started", wire.TaskStateWorking)
-	aged(admin.PoolEventsTopic(testPool), "run-adopted", f.heartbeat(t, adoptedTask, taskHash(adopted.Value), testReceiver, f.receiver.signing, 41, nil), 50*time.Minute)
+	aged(admin.PoolEventsTopic(testPool), "run-adopted", f.heartbeat(t, adoptedTask, wire.TaskHash(adopted.Value), testReceiver, f.receiver.signing, 41, nil), 50*time.Minute)
 	turn("run-stale", 2*time.Hour, "interrupted", wire.TaskStateAuthRequired)
 	f.cluster.ApplyRetention()
 
@@ -935,7 +935,7 @@ func TestRunsUnderRetention(t *testing.T) {
 	if got := prompt(f.admitted(t, continuation("run-continued")).history); got != resumedHeader+"\n\nhi\n\nhi" {
 		t.Fatalf("continued prompt %q", got)
 	}
-	if offset, err := f.receiver.lastOffset(f.ctx, adoptedTask, taskHash(adopted.Value)); err != nil || offset != 41 {
+	if offset, err := f.receiver.lastOffset(f.ctx, adoptedTask, wire.TaskHash(adopted.Value)); err != nil || offset != 41 {
 		t.Fatalf("adoption offset %d, %v; want 41", offset, err)
 	}
 	if status := f.receiver.execute(f.ctx, f.service.Admin, adopted, f.admitted(t, adopted), 2); status != kgo.AckAccept {
@@ -1004,7 +1004,7 @@ func TestRejectionCarriesItsEcho(t *testing.T) {
 	if len(feed) != 2 || wire.ParseRecord(feed[0].Value, f.keys(), &echo) != nil || wire.ParseRecord(feed[1].Value, f.keys(), &rejected) != nil {
 		t.Fatalf("feed records %d, want the echo then the rejected status", len(feed))
 	}
-	if echo.Pool != testPool || echo.Run != "run-a" || echo.TaskHash != taskHash(record.Value) || rejected.Wherry.Kind != "rejected" {
+	if echo.Pool != testPool || echo.Run != "run-a" || echo.TaskHash != wire.TaskHash(record.Value) || rejected.Wherry.Kind != "rejected" {
 		t.Fatalf("echo %#v status %#v", echo, rejected.Wherry)
 	}
 	if feed[1].Offset != feed[0].Offset+1 || feed[1].ProducerID != feed[0].ProducerID {

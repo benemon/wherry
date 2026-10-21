@@ -113,7 +113,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 	}
 	logs := &syncBuffer{}
 	adapter := &fakeAdapter{stream: noResultStream, endDelay: time.Minute}
-	r := &Receiver{id: receiverID, kafkaOpt: opts, base: base, signing: signing, logger: log.New(logs, "", 0),
+	r := &Receiver{id: receiverID, base: base, signing: signing, logger: log.New(logs, "", 0),
 		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: adapter}, nil
 		}}
@@ -201,7 +201,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	logs := &syncBuffer{}
 	adapter := &fakeAdapter{stream: resultStream}
-	r := &Receiver{id: b.receiver, kafkaOpt: b.opts, base: base, signing: signing, logger: log.New(logs, "", 0),
+	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0),
 		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: adapter}, nil
 		}}
@@ -298,7 +298,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 		outputs = append(outputs, adapter.Output{Name: strings.Repeat(fmt.Sprintf("x%0249d/", i), 2) + "over", Size: 1})
 	}
 	fake := &fakeAdapter{stream: resultStream, outputs: outputs}
-	r := &Receiver{id: b.receiver, kafkaOpt: b.opts, base: base, signing: signing, logger: log.New(logs, "", 0),
+	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0),
 		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: fake}, nil
 		}}
@@ -387,7 +387,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	logs := &syncBuffer{}
 	patch := []byte("From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n")
 	fake := &fakeAdapter{stream: resultStream, outputs: []adapter.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
-	r := &Receiver{id: b.receiver, kafkaOpt: b.opts, base: base, signing: signing, logger: log.New(logs, "", 0),
+	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0),
 		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: fake}, nil
 		}}

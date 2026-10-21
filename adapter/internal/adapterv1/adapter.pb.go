@@ -2187,6 +2187,67 @@ func (x *Histogram) GetCount() uint64 {
 	return 0
 }
 
+// ErrorDetail is the status detail of an error the adapter returns as an adapter.Error.
+type ErrorDetail struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Op            string                 `protobuf:"bytes,1,opt,name=op,proto3" json:"op,omitempty"`
+	Class         string                 `protobuf:"bytes,2,opt,name=class,proto3" json:"class,omitempty"`
+	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ErrorDetail) Reset() {
+	*x = ErrorDetail{}
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ErrorDetail) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ErrorDetail) ProtoMessage() {}
+
+func (x *ErrorDetail) ProtoReflect() protoreflect.Message {
+	mi := &file_wherry_adapter_v1_adapter_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ErrorDetail.ProtoReflect.Descriptor instead.
+func (*ErrorDetail) Descriptor() ([]byte, []int) {
+	return file_wherry_adapter_v1_adapter_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *ErrorDetail) GetOp() string {
+	if x != nil {
+		return x.Op
+	}
+	return ""
+}
+
+func (x *ErrorDetail) GetClass() string {
+	if x != nil {
+		return x.Class
+	}
+	return ""
+}
+
+func (x *ErrorDetail) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 var File_wherry_adapter_v1_adapter_proto protoreflect.FileDescriptor
 
 const file_wherry_adapter_v1_adapter_proto_rawDesc = "" +
@@ -2331,7 +2392,11 @@ const file_wherry_adapter_v1_adapter_proto_rawDesc = "" +
 	"\tHistogram\x12\x18\n" +
 	"\abuckets\x18\x01 \x03(\x04R\abuckets\x12\x10\n" +
 	"\x03sum\x18\x02 \x01(\x01R\x03sum\x12\x14\n" +
-	"\x05count\x18\x03 \x01(\x04R\x05count*P\n" +
+	"\x05count\x18\x03 \x01(\x04R\x05count\"M\n" +
+	"\vErrorDetail\x12\x0e\n" +
+	"\x02op\x18\x01 \x01(\tR\x02op\x12\x14\n" +
+	"\x05class\x18\x02 \x01(\tR\x05class\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage*P\n" +
 	"\aOutcome\x12\x13\n" +
 	"\x0fOUTCOME_UNKNOWN\x10\x00\x12\x1b\n" +
 	"\x17OUTCOME_NOTHING_CREATED\x10\x01\x12\x13\n" +
@@ -2373,7 +2438,7 @@ func file_wherry_adapter_v1_adapter_proto_rawDescGZIP() []byte {
 }
 
 var file_wherry_adapter_v1_adapter_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_wherry_adapter_v1_adapter_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
+var file_wherry_adapter_v1_adapter_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
 var file_wherry_adapter_v1_adapter_proto_goTypes = []any{
 	(Outcome)(0),              // 0: wherry.adapter.v1.Outcome
 	(JobState)(0),             // 1: wherry.adapter.v1.JobState
@@ -2412,7 +2477,8 @@ var file_wherry_adapter_v1_adapter_proto_goTypes = []any{
 	(*MetricsResponse)(nil),   // 34: wherry.adapter.v1.MetricsResponse
 	(*Sample)(nil),            // 35: wherry.adapter.v1.Sample
 	(*Histogram)(nil),         // 36: wherry.adapter.v1.Histogram
-	nil,                       // 37: wherry.adapter.v1.Sample.LabelsEntry
+	(*ErrorDetail)(nil),       // 37: wherry.adapter.v1.ErrorDetail
+	nil,                       // 38: wherry.adapter.v1.Sample.LabelsEntry
 }
 var file_wherry_adapter_v1_adapter_proto_depIdxs = []int32{
 	6,  // 0: wherry.adapter.v1.Run.inputs:type_name -> wherry.adapter.v1.File
@@ -2432,7 +2498,7 @@ var file_wherry_adapter_v1_adapter_proto_depIdxs = []int32{
 	3,  // 14: wherry.adapter.v1.CollectRequest.handle:type_name -> wherry.adapter.v1.Handle
 	24, // 15: wherry.adapter.v1.CollectRequest.limits:type_name -> wherry.adapter.v1.Limits
 	35, // 16: wherry.adapter.v1.MetricsResponse.samples:type_name -> wherry.adapter.v1.Sample
-	37, // 17: wherry.adapter.v1.Sample.labels:type_name -> wherry.adapter.v1.Sample.LabelsEntry
+	38, // 17: wherry.adapter.v1.Sample.labels:type_name -> wherry.adapter.v1.Sample.LabelsEntry
 	2,  // 18: wherry.adapter.v1.Sample.kind:type_name -> wherry.adapter.v1.Kind
 	36, // 19: wherry.adapter.v1.Sample.histogram:type_name -> wherry.adapter.v1.Histogram
 	11, // 20: wherry.adapter.v1.Adapter.Configure:input_type -> wherry.adapter.v1.ConfigureRequest
@@ -2481,7 +2547,7 @@ func file_wherry_adapter_v1_adapter_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wherry_adapter_v1_adapter_proto_rawDesc), len(file_wherry_adapter_v1_adapter_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   35,
+			NumMessages:   36,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

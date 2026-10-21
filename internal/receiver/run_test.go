@@ -38,7 +38,7 @@ func testActiveRun(t *testing.T, f fixture, run string, attempt int64) *activeRu
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
 	})
 	task := f.parse(t, record)
-	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: taskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, adapter: f.receiver.adapters[0], redactionKey: testRedactionKey}
+	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, adapter: f.receiver.adapters[0], redactionKey: testRedactionKey}
 }
 
 func TestRunEndingWithoutResultFails(t *testing.T) {
@@ -90,7 +90,7 @@ func TestEchoSharesTheClaimedTransaction(t *testing.T) {
 	if wire.ParseRecord(records[1].Value, f.keys(), &claimed) != nil || claimed.Wherry.Kind != "claimed" {
 		t.Fatal("the claimed status does not follow the echo")
 	}
-	if echo.TaskHash != taskHash(record.Value) || echo.Pool != testPool || echo.Tenant != testTenant || !reflect.DeepEqual(echo.Placement, f.parse(t, record).Wherry.Placement) {
+	if echo.TaskHash != wire.TaskHash(record.Value) || echo.Pool != testPool || echo.Tenant != testTenant || !reflect.DeepEqual(echo.Placement, f.parse(t, record).Wherry.Placement) {
 		t.Fatalf("echo %#v", echo)
 	}
 	// Both records come from one committed transaction: a reader stopping at the claimed status sees the echo.
@@ -249,7 +249,7 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 					if err := json.Unmarshal(part.Metadata, &pointer); err != nil {
 						t.Fatal(err)
 					}
-					if part.URL != "unstored:oversize" || part.Text != "" || pointer.SHA256 != taskHash([]byte(line)) || pointer.Size != int64(len(line)) {
+					if part.URL != "unstored:oversize" || part.Text != "" || pointer.SHA256 != wire.TaskHash([]byte(line)) || pointer.Size != int64(len(line)) {
 						t.Fatalf("oversized line became %#v with %#v", part, pointer)
 					}
 				} else if slices.Contains(test.raw, i) {
@@ -627,14 +627,13 @@ func TestFencedProducerStopsRunWrites(t *testing.T) {
 
 func TestFollowErrorReasonIsFixed(t *testing.T) {
 	f := newFixture(t, nil)
-	f.adapter.followErr = errors.New("secret upstream detail")
+	f.adapter.followErr = errors.New("upstream detail")
 	task := runToTask(t, f)
 	if got := task.Artifacts[0].Parts[0].Text; got != "log stream failed" {
 		t.Fatalf("result reason %q, want fixed reason", got)
 	}
-	logs := f.logs.String()
-	if strings.Contains(logs, "secret upstream detail") || !strings.Contains(logs, "*errors.errorString") {
-		t.Fatalf("unexpected follow error log: %q", logs)
+	if logs := f.logs.String(); !strings.Contains(logs, "follow failed: upstream detail\n") {
+		t.Fatalf("follow error not logged: %q", logs)
 	}
 }
 
@@ -732,45 +731,70 @@ func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 			}
 		}
 	}
-	if logs := f.logs.String(); strings.Contains(logs, secret) || !strings.Contains(logs, "*errors.errorString") {
-		t.Fatalf("unexpected dispatch error log: %q", logs)
+}
+
+func TestDispatchErrorIsLoggedRedacted(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.answer(t, credentialName)
+	f.adapter.dispatchErr = &adapter.Error{Op: "write variable nomad/jobs/agent-run-a-t1", Class: "denied", Err: errors.New("status 403: echoed " + testToken)}
+	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
+		t.Fatalf("status %v", status)
+	}
+	want := "dispatch failed: op=write variable nomad/jobs/agent-run-a-t1 class=denied: status 403: echoed " + signed.RedactionMarker(testRedactionKey, credentialName) + "\n"
+	if logs := f.logs.String(); !strings.Contains(logs, want) || strings.Contains(logs, testToken) {
+		t.Fatalf("dispatch error log lacks %q or holds the credential: %q", want, logs)
 	}
 }
 
-func TestAdapterErrorLogsCarryOnlyType(t *testing.T) {
-	const secret = "token=s3cr3t-adapter-detail"
+func TestAdapterErrorLogsAreRedacted(t *testing.T) {
+	failure := &adapter.Error{Op: "deregister job", Class: "conflict", Err: errors.New("echoed " + testToken)}
 	for _, test := range []struct {
 		name string
-		call func(*testing.T, fixture)
+		call func(*testing.T, fixture, *activeRun)
 	}{
-		{"lookup", func(t *testing.T, f fixture) {
-			f.adapter.lookupErr = errors.New(secret)
-			f.execute(t, f.submit(t, f.host, nil), 2)
+		{"stop on result", func(t *testing.T, f fixture, run *activeRun) {
+			f.adapter.stopErr = failure
+			run.finish(f.ctx, adapter.Handle{}, nil, agentResult{Result: "done"})
 		}},
-		{"stop on result", func(t *testing.T, f fixture) {
-			f.adapter.stopErr = errors.New(secret)
-			testActiveRun(t, f, "run-log-result", 1).finish(f.ctx, adapter.Handle{}, nil, agentResult{Result: "done"})
+		{"stop on failure", func(t *testing.T, f fixture, run *activeRun) {
+			f.adapter.stopErr = failure
+			run.stopAndFail(f.ctx, adapter.Handle{}, "timeout", nil)
 		}},
-		{"stop on failure", func(t *testing.T, f fixture) {
-			f.adapter.stopErr = errors.New(secret)
-			testActiveRun(t, f, "run-log-failure", 1).stopAndFail(f.ctx, adapter.Handle{}, "timeout", nil)
+		{"stop on denial", func(t *testing.T, f fixture, run *activeRun) {
+			f.adapter.stopErr = failure
+			run.deny(f.ctx, adapter.Handle{}, nil)
 		}},
-		{"stop on denial", func(t *testing.T, f fixture) {
-			f.adapter.stopErr = errors.New(secret)
-			testActiveRun(t, f, "run-log-denial", 1).deny(f.ctx, adapter.Handle{}, nil)
-		}},
-		{"release", func(t *testing.T, f fixture) {
-			f.adapter.releaseErr = errors.New(secret)
-			testActiveRun(t, f, "run-log-release", 1).release(f.ctx)
+		{"release", func(t *testing.T, f fixture, run *activeRun) {
+			f.adapter.releaseErr = failure
+			run.release(f.ctx)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			test.call(t, f)
-			if logs := f.logs.String(); strings.Contains(logs, secret) || !strings.Contains(logs, "*errors.errorString") {
-				t.Fatalf("unexpected adapter error log: %q", logs)
+			run := testActiveRun(t, f, "run-log", 1)
+			run.deliver(map[string][]byte{credentialName: []byte(testToken)})
+			test.call(t, f, run)
+			want := "op=deregister job class=conflict: echoed " + signed.RedactionMarker(testRedactionKey, credentialName) + "\n"
+			if logs := f.logs.String(); !strings.Contains(logs, want) || strings.Contains(logs, testToken) {
+				t.Fatalf("adapter error log lacks %q or holds the credential: %q", want, logs)
 			}
 		})
+	}
+}
+
+func TestAdapterErrorWithoutClassLogsNoClass(t *testing.T) {
+	if got := logText(nil, &adapter.Error{Op: "read allocation", Err: errors.New("not found")}); got != "op=read allocation: not found" {
+		t.Fatalf("logText = %q", got)
+	}
+}
+
+// An adopter looks the job up before any seal gives it values to redact.
+func TestLookupErrorIsLogged(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.adapter.lookupErr = &adapter.Error{Op: "read job", Class: "unavailable", Err: errors.New("connection refused")}
+	f.execute(t, f.submit(t, f.host, nil), 2)
+	if logs := f.logs.String(); !strings.Contains(logs, "lookup in adapter "+f.receiver.adapters[0].Name+": op=read job class=unavailable: connection refused\n") {
+		t.Fatalf("lookup error not logged: %q", logs)
 	}
 }
 
@@ -1756,8 +1780,8 @@ func TestStartReasonIsRedactedOnOneBoundedLine(t *testing.T) {
 		{"url", adapter.Terminal{Class: "driver", Reason: `Head "https://registry.example/v2/x?token=abc": no such host`}, `: Head "[redacted-url] no such host`},
 		{"newlines", adapter.Terminal{Class: "validation", Reason: "1 error occurred:\r\n* bad"}, ": 1 error occurred:  * bad"},
 		{"fetch", adapter.Terminal{Class: adapter.ClassFetch, Reason: `error downloading "s3::bucket/object?X-Amz-Signature=abc"`}, ": [omitted]"},
-		{"cap", adapter.Terminal{Class: "driver", Reason: strings.Repeat("x", 2048)}, ": " + strings.Repeat("x", maxReason)},
-		{"cap after redaction", adapter.Terminal{Class: "driver", Reason: strings.Repeat("x", maxReason-10) + testToken}, ": " + (strings.Repeat("x", maxReason-10) + marker)[:maxReason]},
+		{"cap", adapter.Terminal{Class: "driver", Reason: strings.Repeat("x", 2048)}, ": " + strings.Repeat("x", maxLogText)},
+		{"cap after redaction", adapter.Terminal{Class: "driver", Reason: strings.Repeat("x", maxLogText-10) + testToken}, ": " + (strings.Repeat("x", maxLogText-10) + marker)[:maxLogText]},
 		{"empty", adapter.Terminal{Class: "driver"}, ""},
 	} {
 		if got := run.startReason(test.terminal); got != test.want {

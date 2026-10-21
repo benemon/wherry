@@ -86,8 +86,8 @@ when the key topic holds another key or has been revoked.
 
 ### `wherry key`
 
-Prints the host key's key ID. The key file must grant no group or other
-access.
+Prints the host key's key ID. The key file must be a regular file that
+grants no group or other access.
 
 ### `wherry receivers`
 
@@ -623,6 +623,20 @@ into spaces and cuts the result to 512 bytes. For class `fetch` the line is
 which can quote a presigned URL, is logged as `[omitted]`. The reason goes
 to the receiver's log only.
 
+A plugin returns a failed platform call as an `adapter.Error`, which names
+the operation (`Op`) and the platform's failure class (`Class`) beside the
+error, and crosses the link as a gRPC status detail. The receiver logs an
+adapter call's error as `op=<op> class=<class>: <text>`, without
+`class=` when the adapter gives none, or as its text alone when the error
+has no operation, under the rules for a
+reason above. A run's calls (dispatch, lookup, follow, stop, collect, purge
+and release) replace each credential value delivered to the run with its
+redaction marker; an adopter's lookup comes before its seal and has no values
+yet. The pool's calls (sweep, readiness and configure) belong to no run and
+replace no values. Every call's text has its URLs replaced, its line breaks
+turned into spaces and is cut to 512 bytes. An adapter's configure error ends
+the receiver with `adapter <name>: <text>`.
+
 A receiver adopts a turn's existing job only when the adapter and agent
 recorded with it match the adapter that finds it. It leaves a job whose
 adapter is another of its adapters to that adapter, and stops and purges
@@ -630,8 +644,9 @@ any other job under the turn's ID and dispatches the turn again.
 
 The protocol is the Go module `github.com/benemon/wherry/adapter` in this
 repository. [`adapter.proto`](../adapter/proto/wherry/adapter/v1/adapter.proto)
-defines the service, `adapter.Serve` runs a plugin, and `adaptertest` is
-the conformance suite a plugin runs against its platform.
+defines the service, `adapter.Serve` runs a plugin and gives its factory
+the logger whose JSON lines the receiver relays at their level, and
+`adaptertest` is the conformance suite a plugin runs against its platform.
 
 ### Metrics
 
@@ -859,7 +874,9 @@ Scope it to `wherry/<tenant>/` in each pool's bucket
 ## Bundle
 
 A YAML file that `wherry admin` writes with mode 0600. Unknown fields are
-errors.
+errors, and `broker`, `principal` and `password` are required; a decode
+error names only its line numbers. A trailing line break ends the password
+and is not part of it, and a password of nothing else is refused.
 
 | Field | Content |
 | --- | --- |

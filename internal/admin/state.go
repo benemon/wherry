@@ -3,7 +3,6 @@ package admin
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -39,6 +38,16 @@ type Terms struct {
 	VCS []string `json:"vcs,omitzero" yaml:"vcs"`
 	// Storage is the pool's S3 lane; nil allows no S3 input or output.
 	Storage *Storage `json:"storage,omitzero" yaml:"storage"`
+}
+
+// RunLifetime is RunLifetimeMS as a duration.
+func (terms Terms) RunLifetime() time.Duration {
+	return time.Duration(terms.RunLifetimeMS) * time.Millisecond
+}
+
+// LockDuration is LockDurationMS as a duration.
+func (terms Terms) LockDuration() time.Duration {
+	return time.Duration(terms.LockDurationMS) * time.Millisecond
 }
 
 // Storage is the S3-compatible endpoint, an https origin with no path, and the bucket a pool's S3 inputs and outputs
@@ -156,7 +165,7 @@ func EncodeRecord(record Record) ([]byte, error) {
 
 func DecodeRecord(encoded []byte) (Record, error) {
 	var record Record
-	if err := json.Unmarshal(encoded, &record, json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)); err != nil {
+	if err := json.Unmarshal(encoded, &record, signed.Strict); err != nil {
 		return Record{}, fmt.Errorf("decode admin record: %w", err)
 	}
 	if err := validateRecord(record); err != nil {
@@ -499,7 +508,7 @@ func validateRecord(record Record) error {
 			return errors.New("invalid entitlement record")
 		}
 	case "skip":
-		if record.Offset < 0 || !sha256Pattern.MatchString(record.SHA256) {
+		if record.Offset < 0 || !wire.ValidHash(record.SHA256) {
 			return errors.New("invalid skip record")
 		}
 	case "end":
@@ -511,8 +520,6 @@ func validateRecord(record Record) error {
 	}
 	return nil
 }
-
-var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type rawRecord struct {
 	Offset int64

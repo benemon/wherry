@@ -152,7 +152,7 @@ func OpenSeal(encoded []byte, expected SealBinding, key *ecdsa.PrivateKey, now t
 	protected, _, _ := strings.Cut(string(encoded), ".")
 	decoded, err := base64.RawURLEncoding.DecodeString(protected)
 	var header sealHeader
-	if err != nil || json.Unmarshal(decoded, &header, strict) != nil || header.Type != SealType {
+	if err != nil || json.Unmarshal(decoded, &header, Strict) != nil || header.Type != SealType {
 		return SealValues{}, errors.New("seal protected header holds other members than a seal's")
 	}
 	if !reflect.DeepEqual(header.SealBinding, expected) {
@@ -166,7 +166,7 @@ func OpenSeal(encoded []byte, expected SealBinding, key *ecdsa.PrivateKey, now t
 		return SealValues{}, errors.New("seal does not decrypt")
 	}
 	var opened sealPlaintext
-	if json.Unmarshal(plaintext, &opened, strict) != nil || opened.Version != 1 || !reflect.DeepEqual(opened.Binding, header.SealBinding) {
+	if json.Unmarshal(plaintext, &opened, Strict) != nil || opened.Version != 1 || !reflect.DeepEqual(opened.Binding, header.SealBinding) {
 		return SealValues{}, errors.New("seal plaintext is bound otherwise than its header")
 	}
 	names := header.Names()

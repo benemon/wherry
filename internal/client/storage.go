@@ -15,12 +15,12 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -60,29 +60,15 @@ func (h *Host) bucket(pool string, storage *admin.Storage) (*minio.Client, error
 	if err != nil {
 		return nil, err
 	}
-	return minio.New(strings.TrimPrefix(storage.Endpoint, "https://"), &minio.Options{
+	// minio drops the default port Host adds, as presigned URLs are signed without it.
+	return minio.New(storage.Host(), &minio.Options{
 		Creds: credentials.NewStaticV4(access, secret, ""), Secure: true, BucketLookup: minio.BucketLookupPath, Transport: storageTransport,
 	})
 }
 
 // readKey reads a storage key file that only its owner can read or write.
 func readKey(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("storage key file: %w", err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return "", fmt.Errorf("storage key file: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("storage key file %s is not a regular file", path)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("storage key file %s is open to its group or others; chmod 600 it", path)
-	}
-	key, err := io.ReadAll(file)
+	key, err := trust.ReadOwnerOnly(path)
 	if err != nil {
 		return "", fmt.Errorf("storage key file: %w", err)
 	}
@@ -177,7 +163,7 @@ func (h *Host) DownloadOutputs(ctx context.Context, runID string, result AwaitRe
 		return nil, nil, err
 	}
 	if dir == "" {
-		dir = filepath.Join(h.stateDir, "runs", runID, "outputs", strconv.FormatInt(result.Turn, 10))
+		dir = h.outputDir(runID, result.Turn)
 	}
 	var verified []Output
 	var rejected []wire.UnreturnedOutput
@@ -228,9 +214,10 @@ func (h *Host) DownloadOutputs(ctx context.Context, runID string, result AwaitRe
 // there that verifies is kept.
 func download(ctx context.Context, store *minio.Client, bucket string, root *os.Root, listed wire.ReturnedOutput) string {
 	if existing, err := root.Open(listed.Name); err == nil {
-		matched := verifies(existing, listed)
+		sum := sha256.New()
+		size, err := io.Copy(sum, io.LimitReader(existing, listed.Size+1))
 		existing.Close()
-		if matched {
+		if err == nil && size == listed.Size && hex.EncodeToString(sum.Sum(nil)) == listed.SHA256 {
 			return ""
 		}
 	}
@@ -261,13 +248,6 @@ func download(ctx context.Context, store *minio.Client, bucket string, root *os.
 		return "not downloaded"
 	}
 	return "size or hash mismatch"
-}
-
-// verifies reports whether file holds exactly listed's bytes.
-func verifies(file io.Reader, listed wire.ReturnedOutput) bool {
-	sum := sha256.New()
-	size, err := io.Copy(sum, io.LimitReader(file, listed.Size+1))
-	return err == nil && size == listed.Size && hex.EncodeToString(sum.Sum(nil)) == listed.SHA256
 }
 
 // Cleanup deletes every object under a run's prefix in its pool's bucket, and nothing outside it. It refuses a run whose

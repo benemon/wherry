@@ -672,3 +672,30 @@ func TestRevocationProbeRetriesOnlyWhileABrokerAuthorises(t *testing.T) {
 		t.Fatalf("broker never denies: step %+v; want failure after the probe window", step)
 	}
 }
+
+// One grammar holds for every name: one admin issues and the wire records carry must not be valid to one side alone.
+func TestNameGrammarIsOneOnBothSides(t *testing.T) {
+	for name, want := range map[string]bool{
+		"a": true, "pool-a": true, "0": true, strings.Repeat("a", 32): true,
+		"": false, "-a": false, "a-": false, "A": false, "a.b": false, "a_b": false, strings.Repeat("a", 33): false,
+	} {
+		if got := wire.ValidName(name); got != want {
+			t.Errorf("wire.ValidName(%q) = %v, want %v", name, got, want)
+		}
+		if got := validateNames(name) == nil; got != want {
+			t.Errorf("admin accepts %q = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestKafkaOptsRefuseACAWithoutCertificates(t *testing.T) {
+	if _, err := KafkaOpts("127.0.0.1:1", []byte("not a certificate"), "user", "password"); err == nil {
+		t.Fatal("built options trusting no certificate")
+	}
+}
+
+func TestKafkaOptsRefuseAPasswordOfALineBreak(t *testing.T) {
+	if _, err := KafkaOpts("127.0.0.1:1", nil, "user", "\r\n"); err == nil || err.Error() != "password is empty" {
+		t.Fatalf("options for a password of a line break: %v; want it refused as empty", err)
+	}
+}

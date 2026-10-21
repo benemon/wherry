@@ -4,6 +4,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -271,8 +274,24 @@ func (value *SealRequest) version() *int   { return &value.V }
 // p.<pool>.admission.<receiver>, and a run ID is safe in logs and job names.
 var runID = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// credentialName is the grammar of an admin name, which a pool's credentials already follow.
-var credentialName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
+var namePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
+
+// ValidName reports whether name follows the grammar of the names wherry admin issues, which a pool's credentials
+// follow too.
+func ValidName(name string) bool { return namePattern.MatchString(name) }
+
+// TaskHash is the SHA-256, in lowercase hex, of a task record's encoded value.
+func TaskHash(encoded []byte) string {
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
+}
+
+// RandomID is prefix and 128 random bits in hex.
+func RandomID(prefix string) string {
+	id := make([]byte, 16)
+	rand.Read(id) // never fails
+	return prefix + hex.EncodeToString(id)
+}
 
 func validateIDs(values map[string]string) error {
 	for name, value := range values {
@@ -318,7 +337,7 @@ func (value *Submission) validate() error {
 	}
 	files := map[string]bool{}
 	for _, credential := range binding.Credentials {
-		if !credentialName.MatchString(credential.Name) {
+		if !ValidName(credential.Name) {
 			return errors.New("credential names are at most 32 lowercase letters, digits and hyphens")
 		}
 		if !ValidFileName(credential.File) || files[credential.File] {
@@ -352,7 +371,7 @@ func (value *Submission) validate() error {
 		if !ValidFileName(input.Name) || inputs[input.Name] {
 			return errors.New("S3 inputs need unique portable file names, distinct from the turn's input files")
 		}
-		if input.Size < 0 || input.Size > MaxS3Object || !validHash(input.SHA256) {
+		if input.Size < 0 || input.Size > MaxS3Object || !ValidHash(input.SHA256) {
 			return errors.New("an S3 input has a size of at most 5 GiB and a lowercase hex SHA-256")
 		}
 		inputs[input.Name] = true
@@ -431,7 +450,7 @@ func (value *RunStatus) validate() error {
 	if err := validateID(binding.EventID, "event_id"); err != nil {
 		return err
 	}
-	if update.TaskID != binding.Run || update.ContextID != binding.Run || !validHash(binding.TaskHash) {
+	if update.TaskID != binding.Run || update.ContextID != binding.Run || !ValidHash(binding.TaskHash) {
 		return errors.New("invalid status")
 	}
 	if err := validateTaskStatus(&update.Status); err != nil {
@@ -453,7 +472,7 @@ func (value *Chunk) validate() error {
 	if err := value.Wherry.ReceiverBinding.validate(); err != nil {
 		return err
 	}
-	if update.TaskID != value.Wherry.Run || update.ContextID != value.Wherry.Run || value.Wherry.Seq < 0 || !validHash(value.Wherry.TaskHash) {
+	if update.TaskID != value.Wherry.Run || update.ContextID != value.Wherry.Run || value.Wherry.Seq < 0 || !ValidHash(value.Wherry.TaskHash) {
 		return errors.New("invalid chunk")
 	}
 	return validateArtifactUpdate(update)
@@ -464,7 +483,7 @@ func (value *Output) validate() error {
 	if err := value.Wherry.ReceiverBinding.validate(); err != nil {
 		return err
 	}
-	if update.TaskID != value.Wherry.Run || update.ContextID != value.Wherry.Run || !validHash(value.Wherry.TaskHash) {
+	if update.TaskID != value.Wherry.Run || update.ContextID != value.Wherry.Run || !ValidHash(value.Wherry.TaskHash) {
 		return errors.New("invalid output")
 	}
 	artifact := &update.Artifact
@@ -479,7 +498,7 @@ func (value *Output) validate() error {
 		return err
 	}
 	var metadata OutputMetadata
-	if update.Metadata == nil || json.Unmarshal(update.Metadata, &metadata, json.RejectUnknownMembers(true)) != nil || metadata.Index < 0 || update.Append != (metadata.Index > 0) {
+	if update.Metadata == nil || json.Unmarshal(update.Metadata, &metadata, signed.Strict) != nil || metadata.Index < 0 || update.Append != (metadata.Index > 0) {
 		return errors.New("output chunk metadata requires its index, and append exactly from index 1")
 	}
 	return nil
@@ -489,7 +508,7 @@ func (value *Result) validate() error {
 	if err := value.Wherry.ReceiverBinding.validate(); err != nil {
 		return err
 	}
-	if value.Task.ID != value.Wherry.Run || value.Task.ContextID != value.Wherry.Run || !validHash(value.Wherry.TaskHash) {
+	if value.Task.ID != value.Wherry.Run || value.Task.ContextID != value.Wherry.Run || !ValidHash(value.Wherry.TaskHash) {
 		return errors.New("invalid result")
 	}
 	return validateTask(&value.Task)
@@ -499,7 +518,7 @@ func (value *Echo) validate() error {
 	if err := validateIDs(map[string]string{"receiver": value.Receiver, "tenant": value.Tenant, "pool": value.Pool, "run": value.Run, "message_id": value.MessageID}); err != nil {
 		return err
 	}
-	if value.Turn < 1 || !validHash(value.TaskHash) || value.DeadlineMS < 0 || value.QueueDeadlineMS < 0 {
+	if value.Turn < 1 || !ValidHash(value.TaskHash) || value.DeadlineMS < 0 || value.QueueDeadlineMS < 0 {
 		return errors.New("invalid echo")
 	}
 	return value.Placement.validate()

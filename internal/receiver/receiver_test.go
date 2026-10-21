@@ -479,7 +479,7 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		adapter.mu.Unlock()
 		return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Adapter: adapter}, nil
 	}
-	return &Receiver{id: config.Receiver, kafkaOpt: opts, base: base, signing: signing, factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
+	return &Receiver{id: config.Receiver, base: base, signing: signing, factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
 }
 
 func (f fixture) produce(t *testing.T, topic, key string, value []byte) *kgo.Record {
@@ -533,7 +533,7 @@ func (f fixture) parse(t *testing.T, record *kgo.Record) *wire.Submission {
 // publishStatus signs a status for the submission in record with key, as the receiver builds it.
 func (f fixture) publishStatus(t *testing.T, record *kgo.Record, receiver string, key ed25519.PrivateKey, kind string, state wire.TaskState, mutate func(*wire.RunStatus)) {
 	t.Helper()
-	status := f.receiver.status(f.parse(t, record), taskHash(record.Value), 1, kind, taskStatus(state, ""), nil)
+	status := f.receiver.status(f.parse(t, record), wire.TaskHash(record.Value), 1, kind, taskStatus(state, ""), nil)
 	status.Wherry.Receiver = receiver
 	if mutate != nil {
 		mutate(status)
@@ -1076,7 +1076,8 @@ func TestReadinessErrorLogsAndLeavesAdapterOut(t *testing.T) {
 	if want := []string{"cloud", "edge"}; !slices.Equal(got, want) {
 		t.Fatalf("advertised adapters %v, want %v", got, want)
 	}
-	if logs := m.logs.String(); !strings.Contains(logs, "adapter lab readiness: *errors.errorString") || strings.Contains(logs, "nomad unreachable") {
+	// A plain error, as a plugin built before adapter.Error returns, logs its text alone.
+	if logs := m.logs.String(); !strings.Contains(logs, "adapter lab readiness: nomad unreachable\n") {
 		t.Fatalf("readiness error not logged: %q", m.logs.String())
 	}
 }
@@ -1111,9 +1112,8 @@ func TestHungAdapterDoesNotStopAdvertising(t *testing.T) {
 
 func TestSweepErrorIsolated(t *testing.T) {
 	m := newMultiFixture(t)
-	const detail = "variable item test-credential"
 	m.lab.mu.Lock()
-	m.lab.sweepErr = errors.New(detail)
+	m.lab.sweepErr = &adapter.Error{Op: "list jobs", Class: "unavailable", Err: errors.New(`Get "https://nomad.example:4646/v1/jobs?prefix=agent-&token=abc": connection refused`)}
 	m.lab.mu.Unlock()
 	before := []int{m.lab.sweepCount(), m.cloud.sweepCount(), m.edge.sweepCount()}
 	if err := m.receiver.advertise(m.ctx); err != nil {
@@ -1132,8 +1132,8 @@ func TestSweepErrorIsolated(t *testing.T) {
 		t.Fatalf("published %d offers after a sweep error, want 3", offers)
 	}
 	logs := m.logs.String()
-	if !strings.Contains(logs, "adapter lab sweep: *errors.errorString") || strings.Contains(logs, detail) {
-		t.Fatalf("unexpected sweep error log: %q", logs)
+	if want := `adapter lab sweep: op=list jobs class=unavailable: Get "[redacted-url] connection refused` + "\n"; !strings.Contains(logs, want) || strings.Contains(logs, "token=abc") {
+		t.Fatalf("sweep error log lacks %q or holds the URL: %q", want, logs)
 	}
 }
 

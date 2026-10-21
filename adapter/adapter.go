@@ -102,6 +102,22 @@ func (e *InputTooLargeError) Error() string {
 	return "input " + e.Name + " is too large for the platform"
 }
 
+// Error is an adapter's error from the platform operation Op, with the platform's failure class. The core logs Op,
+// Class and Err's text, redacted.
+type Error struct {
+	Op, Class string
+	Err       error
+}
+
+func (e *Error) Error() string {
+	if e.Err == nil {
+		return e.Op
+	}
+	return e.Op + ": " + e.Err.Error()
+}
+
+func (e *Error) Unwrap() error { return e.Err }
+
 // Outcome is what a Dispatch left on the platform.
 type Outcome int
 

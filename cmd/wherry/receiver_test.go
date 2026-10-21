@@ -243,15 +243,21 @@ func TestReadBundleIsStrict(t *testing.T) {
 	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\nextra: 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readBundle(path); err == nil {
+	if _, err := admin.ReadBundle(path); err == nil {
 		t.Fatal("accepted a bundle with an unknown field")
 	}
 	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\nplatform:\n  lab: token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	bundle, err := readBundle(path)
+	bundle, err := admin.ReadBundle(path)
 	if err != nil || bundle.Platform["lab"] != "token" || bundle.Principal != "wherry.rcv.r" {
 		t.Fatalf("bundle %#v err %v", bundle, err)
+	}
+	if err := os.WriteFile(path, []byte("broker: b\nca: c\npassword: p\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ReadBundle(path); err == nil {
+		t.Fatal("accepted a bundle without a principal")
 	}
 }
 
@@ -266,7 +272,7 @@ func TestReadBundleErrorsEchoNoContent(t *testing.T) {
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := readBundle(path); err == nil || strings.Contains(err.Error(), "sk-ant") {
+		if _, err := admin.ReadBundle(path); err == nil || strings.Contains(err.Error(), "sk-ant") {
 			t.Fatalf("bundle error %v must name no YAML content", err)
 		}
 	}
