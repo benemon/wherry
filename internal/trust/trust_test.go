@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -60,6 +61,15 @@ func TestLoadKeyFileRejectsGroupReadable(t *testing.T) {
 		}
 		if _, err := LoadSigningKeyFile(path); err == nil {
 			t.Fatal("other-readable signing key was loaded")
+		}
+	})
+	t.Run("not regular", func(t *testing.T) {
+		path := filepath.Join(directory, "dir.key")
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadSigningKeyFile(path); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("loaded a directory as a signing key: %v", err)
 		}
 	})
 }

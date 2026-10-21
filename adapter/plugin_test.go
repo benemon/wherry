@@ -602,11 +602,40 @@ func TestCollectRefusesAnOutputOverTheFileLimit(t *testing.T) {
 	}
 }
 
+// The fake's Collect fails with a plain error, as a plugin built before Error does: the core gets its text alone.
 func TestCollectFailureCrossesTheLink(t *testing.T) {
 	p, _, _ := launch(t)
-	if outputs, err := collected(t, configured(t, p, "a", "{}"), Limits{Files: 256, FileBytes: 8 << 20, TotalBytes: 8 << 20}); err == nil || len(outputs) != 0 {
-		t.Fatalf("collect = %d outputs, %v; want the adapter's error", len(outputs), err)
+	outputs, err := collected(t, configured(t, p, "a", "{}"), Limits{Files: 256, FileBytes: 8 << 20, TotalBytes: 8 << 20})
+	var failure *Error
+	if err == nil || len(outputs) != 0 || errors.As(err, &failure) || err.Error() != "no outputs configured" {
+		t.Fatalf("collect = %d outputs, %v; want the adapter's error text alone", len(outputs), err)
 	}
+}
+
+func TestErrorCrossesTheLinkWithItsOpAndClass(t *testing.T) {
+	p, _, _ := launch(t)
+	err := configured(t, p, "a", `{"sweep_error":"status 403: permission denied"}`).Sweep(context.Background())
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Op != "list jobs" || failure.Class != "denied" || failure.Err.Error() != "status 403: permission denied" {
+		t.Fatalf("sweep = %#v; want an Error with the adapter's op, class and text", err)
+	}
+}
+
+func TestErrorWithoutCauseIsItsOp(t *testing.T) {
+	if got := (&Error{Op: "list jobs", Class: "denied"}).Error(); got != "list jobs" {
+		t.Fatalf("Error() = %q, want the op alone", got)
+	}
+}
+
+func TestServeHandsTheAdapterItsLogger(t *testing.T) {
+	p, _, logs := launch(t)
+	configured(t, p, "logged", "{}")
+	eventually(t, "the plugin's own log line relayed", func() error {
+		if output := logs.String(); !strings.Contains(output, "configuring adapter") || !strings.Contains(output, "adapter=logged") {
+			return fmt.Errorf("logs:\n%s", output)
+		}
+		return nil
+	})
 }
 
 // A plugin built against protocol version 4, which would drop Run.Model and run its own model, answers go-plugin's

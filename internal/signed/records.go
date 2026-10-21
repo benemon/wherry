@@ -11,7 +11,8 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 )
 
-var strict = json.JoinOptions(json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false))
+// Strict decodes wherry's records and files, refusing unknown members and duplicate names.
+var Strict = json.JoinOptions(json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false))
 
 // Sign signs payload as a compact JWS of type typ; kid names the owner and
 // its key so a verifier resolves the key before reading the payload.
@@ -67,7 +68,7 @@ func verify(encoded []byte, typ string, key func(owner, keyID string) (ed25519.P
 	if err != nil {
 		return "", errors.New("invalid JWS signature")
 	}
-	if err := json.Unmarshal(payload, dst, strict); err != nil {
+	if err := json.Unmarshal(payload, dst, Strict); err != nil {
 		return "", fmt.Errorf("decode payload: %w", err)
 	}
 	return owner, nil

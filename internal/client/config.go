@@ -1,11 +1,7 @@
 package client
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -16,10 +12,9 @@ import (
 	"strings"
 
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/sasl/scram"
-	"gopkg.in/yaml.v3"
 )
 
 // Config is the on-disk wherry host configuration. Credentials maps a
@@ -58,7 +53,7 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, err
 	}
 	var config Config
-	if err := json.Unmarshal(encoded, &config, json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)); err != nil {
+	if err := json.Unmarshal(encoded, &config, signed.Strict); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if config.Bundle == "" {
@@ -115,32 +110,20 @@ func Init(ctx context.Context, config Config) (string, error) {
 
 // Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal; the host logs to logger.
 func Connect(config Config, logger *log.Logger) (*Host, error) {
-	encoded, err := os.ReadFile(config.Bundle)
+	bundle, err := admin.ReadBundle(config.Bundle)
 	if err != nil {
-		return nil, fmt.Errorf("read bundle: %w", err)
+		return nil, err
 	}
-	var bundle admin.Bundle
-	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
-	decoder.KnownFields(true)
-	// YAML errors can quote the bundle's text, which holds the password.
-	if decoder.Decode(&bundle) != nil || bundle.Broker == "" || bundle.Principal == "" || bundle.Password == "" {
-		return nil, errors.New("bundle is not a valid wherry bundle")
-	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM([]byte(bundle.CA)) {
-		return nil, errors.New("bundle CA contains no certificates")
+	opts, err := admin.KafkaOpts(bundle.Broker, []byte(bundle.CA), bundle.Principal, bundle.Password)
+	if err != nil {
+		return nil, fmt.Errorf("bundle: %w", err)
 	}
 	key, err := trust.LoadSigningKeyFile(config.HostKey)
 	if err != nil {
 		return nil, fmt.Errorf("load host key: %w", err)
 	}
-	kafka, err := kgo.NewClient(
-		kgo.SeedBrokers(bundle.Broker),
-		kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
-		kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
-		// Aborted transactions are a fenced holder's writes and must never be read.
-		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
-	)
+	// Aborted transactions are a fenced holder's writes and must never be read.
+	kafka, err := kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 	if err != nil {
 		return nil, err
 	}

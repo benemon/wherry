@@ -4,9 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -18,6 +15,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -136,9 +134,10 @@ type Host struct {
 
 // NewHost constructs a host over a plain Kafka connection authenticated as principal.
 func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir string, credentials map[string]string, logger *log.Logger) (*Host, error) {
-	names, prefixed := strings.CutPrefix(principal, "wherry.tnt.")
+	// TenantPrincipal("", "") is the prefix and the separator between tenant and host.
+	names, prefixed := strings.CutPrefix(principal, strings.TrimSuffix(admin.TenantPrincipal("", ""), "."))
 	tenant, host, split := strings.Cut(names, ".")
-	if !prefixed || !split || !admin.ValidName(tenant) || !admin.ValidName(host) {
+	if !prefixed || !split || !wire.ValidName(tenant) || !wire.ValidName(host) {
 		return nil, errors.New("principal is not a host principal wherry.tnt.<tenant>.<host>")
 	}
 	return &Host{kafka: kafka, key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, logger: logger}, nil
@@ -263,16 +262,15 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err := wire.ValidateInputs(input.Parts, v.state.Pools[pool].InlineLimit); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	if input.QueueDeadline > time.Duration(v.state.Pools[pool].RunLifetimeMS)*time.Millisecond {
+	if input.QueueDeadline > v.state.Pools[pool].RunLifetime() {
 		return SubmitResult{}, ErrQueueDeadlinePastLifetime
 	}
-	if input.Git != nil && !slices.Contains(v.state.Pools[pool].VCS, input.Git.VCSHost()) {
-		return SubmitResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's vcs hosts", ErrInvalidInput, input.Git.VCSHost(), pool)
+	if input.Git != nil {
+		if host := input.Git.VCSHost(); !slices.Contains(v.state.Pools[pool].VCS, host) {
+			return SubmitResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's vcs hosts", ErrInvalidInput, host, pool)
+		}
 	}
-	runID, err := randomID("run-")
-	if err != nil {
-		return SubmitResult{}, err
-	}
+	runID := wire.RandomID("run-")
 	submission, err := h.submission(runID, 1, pool, placement, append([]wire.Part{{Text: input.Prompt}}, input.Parts...), input.Deadline, input.QueueDeadline, now)
 	if err != nil {
 		return SubmitResult{}, err
@@ -357,7 +355,7 @@ func (h *Host) Continue(ctx context.Context, runID string, input ContinueInput) 
 		firstSubmitted = time.UnixMilli(r.local.FirstSubmittedMS)
 	}
 	now := time.Now()
-	expires := firstSubmitted.Add(time.Duration(r.v.state.Pools[echo.Pool].RunLifetimeMS) * time.Millisecond)
+	expires := firstSubmitted.Add(r.v.state.Pools[echo.Pool].RunLifetime())
 	if now.After(expires) {
 		return ContinueResult{}, ErrRunExpired
 	}
@@ -401,12 +399,8 @@ func (h *Host) Cancel(ctx context.Context, runID string) (CancelResult, error) {
 }
 
 func (h *Host) submission(runID string, turn int64, pool string, placement wire.Placement, parts []wire.Part, deadline, queueDeadline time.Duration, now time.Time) (*wire.Submission, error) {
-	messageID, err := randomID("msg-")
-	if err != nil {
-		return nil, err
-	}
 	return &wire.Submission{
-		Message: wire.Message{MessageID: messageID, ContextID: runID, TaskID: runID, Role: wire.RoleUser, Parts: parts, Extensions: []string{wire.ExtensionURI}},
+		Message: wire.Message{MessageID: wire.RandomID("msg-"), ContextID: runID, TaskID: runID, Role: wire.RoleUser, Parts: parts, Extensions: []string{wire.ExtensionURI}},
 		Wherry: wire.SubmissionBinding{
 			Tenant: h.tenant, Host: h.host, Pool: pool, Run: runID, Turn: turn, Placement: placement,
 			DeadlineMS: now.Add(deadline).UnixMilli(), QueueDeadlineMS: now.Add(queueDeadline).UnixMilli(),
@@ -427,9 +421,8 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now, fi
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(encoded)
 	record := runRecord{
-		Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: hex.EncodeToString(sum[:]), SubmittedMS: now.UnixMilli(),
+		Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(),
 		FirstSubmittedMS: firstSubmitted.UnixMilli(), DeadlineMS: binding.DeadlineMS,
 	}
 	for _, credential := range binding.Credentials {
@@ -566,6 +559,11 @@ func (h *Host) runPath(runID string) (string, bool) {
 	return filepath.Join(h.stateDir, "runs", runID+".json"), true
 }
 
+// outputDir is the default directory of a turn's outputs.
+func (h *Host) outputDir(runID string, turn int64) string {
+	return filepath.Join(h.stateDir, "runs", runID, "outputs", strconv.FormatInt(turn, 10))
+}
+
 // localRun returns the local record of runID, or nil when this host has none.
 func (h *Host) localRun(runID string) (*runRecord, error) {
 	path, ok := h.runPath(runID)
@@ -600,7 +598,7 @@ func readState(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(encoded, value, json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)); err != nil {
+	if err := json.Unmarshal(encoded, value, signed.Strict); err != nil {
 		return fmt.Errorf("%w %s: %w", errUndecodable, path, err)
 	}
 	return nil
@@ -635,12 +633,4 @@ func (h *Host) produce(ctx context.Context, records ...*kgo.Record) error {
 		return fmt.Errorf("produce: %w", err)
 	}
 	return nil
-}
-
-func randomID(prefix string) (string, error) {
-	bytes := make([]byte, 16)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	return prefix + hex.EncodeToString(bytes), nil
 }

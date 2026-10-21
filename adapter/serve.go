@@ -21,14 +21,15 @@ import (
 const maxMessage = 64 << 20
 
 // Serve runs a plugin process for the receiver that started it, building one adapter with factory for
-// each Configure and routing every call to the adapter it names. It returns when the receiver ends the link.
-func Serve(factory func(Settings) (Adapter, error)) {
+// each Configure and routing every call to the adapter it names. factory gets the logger whose lines the
+// receiver relays. It returns when the receiver ends the link.
+func Serve(factory func(Settings, hclog.Logger) (Adapter, error)) {
 	// JSON lines keep their level when the receiver relays them; os.Stderr is read before plugin.Serve
 	// redirects it.
 	logger := hclog.New(&hclog.LoggerOptions{Output: os.Stderr, JSONFormat: true, Level: hclog.Info})
 	plugin.Serve(&plugin.ServeConfig{
 		HandshakeConfig: handshake,
-		Plugins:         plugin.PluginSet{pluginName: &grpcPlugin{server: &server{factory: factory, adapters: map[string]Adapter{}}}},
+		Plugins:         plugin.PluginSet{pluginName: &grpcPlugin{server: &server{factory: factory, logger: logger, adapters: map[string]Adapter{}}}},
 		GRPCServer: func(options []grpc.ServerOption) *grpc.Server {
 			return grpc.NewServer(append(options, grpc.MaxRecvMsgSize(maxMessage),
 				grpc.ChainUnaryInterceptor(recoverUnary(logger)), grpc.ChainStreamInterceptor(recoverStream(logger)))...)
@@ -84,7 +85,8 @@ func (s *namingStream) RecvMsg(m any) error {
 
 type server struct {
 	adapterv1.UnimplementedAdapterServer
-	factory  func(Settings) (Adapter, error)
+	factory  func(Settings, hclog.Logger) (Adapter, error)
+	logger   hclog.Logger
 	mu       sync.RWMutex
 	adapters map[string]Adapter
 }
@@ -99,7 +101,8 @@ func (s *server) adapter(name string) (Adapter, error) {
 	return adapter, nil
 }
 
-// callStatus carries the errors the core distinguishes across the link.
+// callStatus carries the errors the core distinguishes across the link. Only an Error the adapter returns itself
+// carries its op and class as a detail; one wrapped or joined travels as its text, which names each op.
 func callStatus(err error) error {
 	var tooLarge *InputTooLargeError
 	switch {
@@ -112,11 +115,18 @@ func callStatus(err error) error {
 	case errors.Is(err, context.Canceled):
 		return status.Error(codes.Canceled, err.Error())
 	}
+	if failure, ok := err.(*Error); ok {
+		// A detail whose text is not UTF-8 does not marshal; the error then travels as its text alone.
+		detailed, detailErr := status.New(codes.Unknown, err.Error()).WithDetails(&adapterv1.ErrorDetail{Op: failure.Op, Class: failure.Class, Message: failure.Err.Error()})
+		if detailErr == nil {
+			return detailed.Err()
+		}
+	}
 	return status.Error(codes.Unknown, err.Error())
 }
 
 func (s *server) Configure(_ context.Context, req *adapterv1.ConfigureRequest) (*adapterv1.ConfigureResponse, error) {
-	adapter, err := s.factory(Settings{Name: req.Adapter, Pool: req.Pool, Agent: req.Agent, Credential: req.Credential, Config: req.Config, Platform: req.Platform})
+	adapter, err := s.factory(Settings{Name: req.Adapter, Pool: req.Pool, Agent: req.Agent, Credential: req.Credential, Config: req.Config, Platform: req.Platform}, s.logger)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}

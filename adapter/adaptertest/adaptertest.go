@@ -9,21 +9,23 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/adapter"
+	"github.com/hashicorp/go-hclog"
 )
 
 const maxHandle = 4 << 10
 
-// Run checks the adapters factory builds against the adapter contract on their platform. completes
-// configures an adapter whose job runs for at least ten seconds and exits 0; neverStarts one whose job the
-// platform ends before its agent starts. Every job the suite creates is purged.
-func Run(t *testing.T, factory func(adapter.Settings) (adapter.Adapter, error), completes, neverStarts adapter.Settings) {
+// Run checks the adapters factory, the one a plugin hands Serve, builds against the adapter contract on their
+// platform, giving it a logger that discards. completes configures an adapter whose job runs for at least ten seconds
+// and exits 0; neverStarts one whose job the platform ends before its agent starts. Every job the suite creates is
+// purged.
+func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Adapter, error), completes, neverStarts adapter.Settings) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
-	running, err := factory(completes)
+	running, err := factory(completes, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatalf("configure %s: %v", completes.Name, err)
 	}
-	failing, err := factory(neverStarts)
+	failing, err := factory(neverStarts, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatalf("configure %s: %v", neverStarts.Name, err)
 	}

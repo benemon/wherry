@@ -92,12 +92,12 @@ func (r *Receiver) claimLoop(ctx context.Context) {
 }
 
 func (r *Receiver) claimOne(ctx context.Context) error {
-	share, err := kgo.NewClient(append(append([]kgo.Opt(nil), r.kafkaOpt...),
+	share, err := r.newClient(
 		kgo.ConsumeTopics(admin.PoolTasksTopic(r.config.Pool)),
 		kgo.ShareGroup(admin.PoolGroup(r.config.Pool)),
 		kgo.ShareMaxRecords(1),
 		kgo.ShareMaxRecordsStrict(),
-	)...)
+	)
 	if err != nil {
 		return err
 	}
@@ -178,14 +178,9 @@ type admission struct {
 	cancelled bool
 }
 
-func taskHash(encoded []byte) string {
-	sum := sha256.Sum256(encoded)
-	return hex.EncodeToString(sum[:])
-}
-
 // admit decides whether record's task runs here; a nil admission carries the acknowledgement.
 func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, kgo.AckStatus) {
-	hash := taskHash(record.Value)
+	hash := wire.TaskHash(record.Value)
 	// Released even at the delivery budget: without the events, a terminal could repeat a committed one.
 	events, err := r.readEvents(ctx)
 	if err != nil {
@@ -275,7 +270,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return status.Wherry.TaskHash == hash && status.Wherry.Kind != "rejected"
 	})
 	if first, ok := submissions[1]; ok && !claimed {
-		lifetime := time.Duration(terms.RunLifetimeMS) * time.Millisecond
+		lifetime := terms.RunLifetime()
 		if time.Since(first.submitted) > lifetime {
 			return reject("run expired")
 		}
@@ -305,8 +300,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if task.Wherry.Turn > 1 {
 		declared = submissions[1].record.Wherry
 	}
-	if declared.Git != nil && !slices.Contains(terms.VCS, declared.Git.VCSHost()) {
-		return rejectAs("git remote host outside the pool's vcs hosts", "git remote host "+declared.Git.VCSHost()+" is not in pool "+r.config.Pool+"'s vcs hosts")
+	if declared.Git != nil {
+		if host := declared.Git.VCSHost(); !slices.Contains(terms.VCS, host) {
+			return rejectAs("git remote host outside the pool's vcs hosts", "git remote host "+host+" is not in pool "+r.config.Pool+"'s vcs hosts")
+		}
 	}
 	if (len(declared.S3Inputs) > 0 || len(s3Outputs(declared.Outputs)) > 0) && terms.Storage == nil {
 		return rejectAs("pool has no storage", "pool "+r.config.Pool+" has no storage for S3 inputs and outputs")
@@ -400,7 +397,7 @@ func (r *Receiver) admissionTransactionalID() string {
 func (r *Receiver) admissionCommit(ctx context.Context, records ...*kgo.Record) error {
 	r.admissionMu.Lock()
 	defer r.admissionMu.Unlock()
-	producer, err := kgo.NewClient(append(append([]kgo.Opt(nil), r.kafkaOpt...), kgo.TransactionalID(r.admissionTransactionalID()))...)
+	producer, err := r.newClient(kgo.TransactionalID(r.admissionTransactionalID()))
 	if err != nil {
 		return err
 	}
@@ -417,7 +414,7 @@ func (r *Receiver) admissionCommit(ctx context.Context, records ...*kgo.Record) 
 func (r *Receiver) probeWrite(ctx context.Context) error {
 	r.admissionMu.Lock()
 	defer r.admissionMu.Unlock()
-	producer, err := kgo.NewClient(append(append([]kgo.Opt(nil), r.kafkaOpt...), kgo.TransactionalID(r.admissionTransactionalID()))...)
+	producer, err := r.newClient(kgo.TransactionalID(r.admissionTransactionalID()))
 	if err != nil {
 		return err
 	}
@@ -511,7 +508,7 @@ func (r *Receiver) readTurns(ctx context.Context, run string) ([]runSubmission, 
 		submission, err := admin.AuthorizeEarlierTurn(state, hosts, record.Value, r.config.Pool)
 		if err == nil && submission.Wherry.Run == run {
 			_, currentErr := admin.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
-			result = append(result, runSubmission{record: &submission, hash: taskHash(record.Value), submitted: record.Timestamp, current: currentErr == nil})
+			result = append(result, runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp, current: currentErr == nil})
 		}
 	}
 	return result, nil
@@ -602,7 +599,7 @@ func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record, failure
 
 // newProducer is the run's transactional producer: an adopter initialising the same ID fences this holder.
 func (r *Receiver) newProducer(run string) (*kgo.Client, error) {
-	return kgo.NewClient(append(append([]kgo.Opt(nil), r.kafkaOpt...), kgo.TransactionalID(admin.TransactionalPrefix(r.config.Pool)+run))...)
+	return r.newClient(kgo.TransactionalID(admin.TransactionalPrefix(r.config.Pool) + run))
 }
 
 // execute runs one task; it returns the final share acknowledgement, or 0 when fenced.
@@ -662,7 +659,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				if lookupCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, "timeout", nil)
 				}
-				r.logger.Printf("run %s: lookup in adapter %s: %T", runID, named.Name, err)
+				r.logger.Printf("run %s: lookup in adapter %s: %s", runID, named.Name, logText(run, err))
 				return run.returnTask(ctx, nil)
 			}
 			if job.State == adapter.JobAbsent {
@@ -675,12 +672,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			if job.Adapter != named.Name || job.Agent != task.Wherry.Placement.Agent {
 				if err := named.Adapter.Stop(ctx, job.Handle); err != nil {
 					r.metrics.stopFailures.WithLabelValues(named.Name).Inc()
-					r.logger.Printf("run %s: stop: %T", runID, err)
+					r.logger.Printf("run %s: stop: %s", runID, logText(run, err))
 					return run.returnTask(ctx, nil)
 				}
 				if err := named.Adapter.Purge(ctx, runID, task.Wherry.Turn); err != nil {
 					r.metrics.purgeFailures.WithLabelValues(named.Name).Inc()
-					r.logger.Printf("run %s: purge: %T", runID, err)
+					r.logger.Printf("run %s: purge: %s", runID, logText(run, err))
 					return run.returnTask(ctx, nil)
 				}
 				r.logger.Printf("run %s: purged a job from adapter %q agent %q", runID, job.Adapter, job.Agent)
@@ -751,9 +748,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				return run.fail(ctx, err.Error(), nil)
 			}
 		}
+		promptInputs := make([]string, 0, len(admitted.inputs)+len(inputNames))
+		for _, input := range admitted.inputs {
+			promptInputs = append(promptInputs, input.Name)
+		}
 		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, adapter.Run{
 			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Turn: task.Wherry.Turn, Attempt: attempt,
-			Prompt:     []byte(preamble(named.Adapter.Directories(), append(fileNames(admitted.inputs), inputNames...), admitted.credentials, admitted.outputs, admitted.git, runID) + prompt(admitted.history)),
+			Prompt:     []byte(preamble(named.Adapter.Directories(), append(promptInputs, inputNames...), admitted.credentials, admitted.outputs, admitted.git, runID) + prompt(admitted.history)),
 			Credential: credential, Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
 		var tooLarge *adapter.InputTooLargeError
@@ -778,7 +779,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.logger.Printf("run %s: dispatch rejected: message too large", runID)
 			dispatched = adapter.OutcomeUnknown
 		case err != nil:
-			r.logger.Printf("run %s: dispatch failed: %T", runID, err)
+			r.logger.Printf("run %s: dispatch failed: %s", runID, logText(run, err))
 			dispatched = adapter.OutcomeUnknown
 		}
 		switch dispatched {
@@ -809,7 +810,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		r.logger.Printf("run %s: adapter %s returned a handle over %d bytes", runID, run.adapter.Name, maxHandle)
 		if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 			r.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-			r.logger.Printf("run %s: stop: %T", runID, err)
+			r.logger.Printf("run %s: stop: %s", runID, logText(run, err))
 		}
 		return run.returnTask(ctx, nil)
 	}
@@ -929,13 +930,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			case errors.Is(end.err, adapter.ErrLinkLost) && (retryUntil.IsZero() || time.Now().Before(retryUntil)):
 				if retryUntil.IsZero() {
 					state, _, _ := r.snapshot()
-					retryUntil = time.Now().Add(time.Duration(state.Pools[r.config.Pool].LockDurationMS) * time.Millisecond)
+					retryUntil = time.Now().Add(state.Pools[r.config.Pool].LockDuration())
 					r.logger.Printf("run %s: plugin link lost; following again from offset %d", runID, position)
 				}
 				retry = time.After(followRetryInterval)
 			case end.err != nil:
 				// A dropped stream does not mean the task ended; stop it rather than leave it running.
-				r.logger.Printf("run %s: follow failed: %T", runID, end.err)
+				r.logger.Printf("run %s: follow failed: %s", runID, logText(run, end.err))
 				return run.stopAndFail(ctx, handle, "log stream failed", pending)
 			case !end.terminal.Started && end.terminal.Class == adapter.ClassFetch:
 				r.logger.Printf("run %s: job never started: an S3 input was not fetched%s", runID, run.startReason(end.terminal))
@@ -1027,7 +1028,7 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle
 	}
 	partitions := map[int32]kgo.Offset{}
 	ends.Each(func(end kadm.ListedOffset) { partitions[end.Partition] = kgo.NewOffset().At(end.Offset) })
-	reader, err := kgo.NewClient(append(slices.Clone(r.kafkaOpt), kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: partitions}))...)
+	reader, err := r.newClient(kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: partitions}))
 	if err != nil {
 		r.logger.Printf("run %s: host topic reader: %v", runID, err)
 		return signed.SealValues{}, run.returnTask(ctx, nil), false
@@ -1084,7 +1085,7 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle
 			waited("adopter_refused")
 			if err := run.adapter.Adapter.Stop(ctx, *job); err != nil {
 				r.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-				r.logger.Printf("run %s: stop: %T", runID, err)
+				r.logger.Printf("run %s: stop: %s", runID, logText(run, err))
 				return signed.SealValues{}, run.returnTask(ctx, nil), false
 			}
 			return signed.SealValues{}, run.interrupt(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
@@ -1168,14 +1169,6 @@ func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input,
 	}
 	run.deliver(signatures)
 	return fetches, puts, nil
-}
-
-func fileNames(files []adapter.File) []string {
-	names := make([]string, 0, len(files))
-	for _, file := range files {
-		names = append(names, file.Name)
-	}
-	return names
 }
 
 type activeRun struct {
@@ -1285,12 +1278,32 @@ var overText = "[redacted text over " + strconv.Itoa(wire.MaxText) + " bytes]"
 
 var reasonURL = regexp.MustCompile(`(?i)https?://\S+`)
 
-// maxReason bounds the reason a start failure's log line carries, in bytes.
-const maxReason = 512
+// maxLogText bounds the adapter text one log line carries, in bytes.
+const maxLogText = 512
 
-// startReason is ": " and terminal's reason for the log, redacted, without URLs, on one line of at most maxReason bytes,
-// or empty when the adapter gave none. A fetch failure's reason quotes its presigned URL, so it is omitted. The cap
-// follows redaction, which could otherwise miss a value it cut.
+// logText is err's text for the log: an adapter.Error's op and any class, then its text, with run's delivered values
+// redacted when run is set, without URLs, on one line of at most maxLogText bytes. The cap follows redaction, which
+// could otherwise miss a value it cut.
+func logText(run *activeRun, err error) string {
+	text := err.Error()
+	if failure, ok := err.(*adapter.Error); ok {
+		text = "op=" + failure.Op
+		if failure.Class != "" {
+			text += " class=" + failure.Class
+		}
+		if failure.Err != nil {
+			text += ": " + failure.Err.Error()
+		}
+	}
+	if run != nil {
+		text = run.redactText(text)
+	}
+	text = strings.NewReplacer("\r", " ", "\n", " ").Replace(reasonURL.ReplaceAllString(text, "[redacted-url]"))
+	return wire.CutUTF8(text, maxLogText)
+}
+
+// startReason is ": " and terminal's reason as logText gives it, or empty when the adapter gave none. A fetch failure's
+// reason quotes its presigned URL, so it is omitted.
 func (run *activeRun) startReason(terminal adapter.Terminal) string {
 	switch {
 	case terminal.Reason == "":
@@ -1298,9 +1311,7 @@ func (run *activeRun) startReason(terminal adapter.Terminal) string {
 	case terminal.Class == adapter.ClassFetch:
 		return ": [omitted]"
 	}
-	reason := reasonURL.ReplaceAllString(run.redactText(terminal.Reason), "[redacted-url]")
-	reason = strings.NewReplacer("\r", " ", "\n", " ").Replace(reason)
-	return ": " + wire.CutUTF8(reason, maxReason)
+	return ": " + logText(run, errors.New(terminal.Reason))
 }
 
 // redactedForm is the redacted form of some bytes: the bytes while they fit limit, and the size and SHA-256 of all of
@@ -1406,7 +1417,7 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 func (run *activeRun) stopAndFail(ctx context.Context, handle adapter.Handle, reason string, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
+		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run, err))
 		return run.returnTask(ctx, pending)
 	}
 	return run.fail(ctx, reason, pending)
@@ -1415,7 +1426,7 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle adapter.Handle, re
 func (run *activeRun) stopAndCancel(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
+		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run, err))
 		return run.returnTask(ctx, pending)
 	}
 	return run.cancel(ctx, pending)
@@ -1425,7 +1436,7 @@ func (run *activeRun) stopAndCancel(ctx context.Context, handle adapter.Handle, 
 func (run *activeRun) deny(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
+		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run, err))
 		return kgo.AckRelease
 	}
 	const reason = "receiver denied"
@@ -1503,7 +1514,7 @@ func (run *activeRun) purge(ctx context.Context) error {
 		if err == nil || ctx.Err() != nil || !time.Now().Before(deadline) {
 			return err
 		}
-		run.receiver.logger.Printf("run %s: purge: %T", run.task.Wherry.Run, err)
+		run.receiver.logger.Printf("run %s: purge: %s", run.task.Wherry.Run, logText(run, err))
 		sleep(ctx, renewInterval)
 	}
 }
@@ -1525,7 +1536,7 @@ func (run *activeRun) reconcile(ctx context.Context) (adapter.Job, bool) {
 		if err == nil {
 			return job, true
 		}
-		run.receiver.logger.Printf("run %s: lookup in adapter %s: %T", run.task.Wherry.Run, run.adapter.Name, err)
+		run.receiver.logger.Printf("run %s: lookup in adapter %s: %s", run.task.Wherry.Run, run.adapter.Name, logText(run, err))
 	}
 	return adapter.Job{}, false
 }
@@ -1562,7 +1573,7 @@ func (run *activeRun) conclude(ctx context.Context, handle adapter.Handle, pendi
 	stopped := true
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-		run.receiver.logger.Printf("run %s: stop: %T", run.task.Wherry.Run, err)
+		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run, err))
 		// At the budget the agent's result stands, and the job is left to the adapter's sweep.
 		if !run.receiver.budgetSpent(run.attempt) {
 			return kgo.AckRelease
@@ -1603,7 +1614,7 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 			reason = "timeout"
 		}
 		run.receiver.metrics.collectionFailures.WithLabelValues(run.adapter.Name, reason).Inc()
-		run.receiver.logger.Printf("run %s: outputs not collected: %T", run.task.Wherry.Run, err)
+		run.receiver.logger.Printf("run %s: outputs not collected: %s", run.task.Wherry.Run, logText(run, err))
 		run.uncollected = true
 		for _, output := range run.expected {
 			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "not collected"})
@@ -1870,7 +1881,7 @@ func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result st
 
 func (run *activeRun) release(ctx context.Context) {
 	if err := run.adapter.Adapter.Release(ctx, run.task.Wherry.Run, run.task.Wherry.Turn); err != nil {
-		run.receiver.logger.Printf("run %s: release: %T", run.task.Wherry.Run, err)
+		run.receiver.logger.Printf("run %s: release: %s", run.task.Wherry.Run, logText(run, err))
 	}
 }
 
@@ -1916,7 +1927,7 @@ func (r *Receiver) binding(task *wire.Submission, attempt int64) wire.ReceiverBi
 // status builds a run status; a CANCELED terminal has the turn's fixed event ID, since every
 // member that reads the cancel of an interrupted run writes it.
 func (r *Receiver) status(task *wire.Submission, hash string, attempt int64, kind string, status wire.TaskStatus, offset *int64) *wire.RunStatus {
-	eventID := randomID("event-")
+	eventID := wire.RandomID("event-")
 	if kind == "terminal" && status.State == wire.TaskStateCanceled {
 		eventID = fmt.Sprintf("%s/%d/canceled", task.Wherry.Run, task.Wherry.Turn)
 	}
@@ -1934,18 +1945,12 @@ func (r *Receiver) sign(value wire.Record) []byte {
 	return encoded
 }
 
-func randomID(prefix string) string {
-	id := make([]byte, 16)
-	rand.Read(id)
-	return prefix + hex.EncodeToString(id)
-}
-
 // taskStatus stamps state with the current time; a reason becomes the status message.
 func taskStatus(state wire.TaskState, reason string) wire.TaskStatus {
 	status := wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
 	if reason != "" {
 		status.Message = &wire.Message{
-			MessageID: randomID("msg-"), Role: wire.RoleAgent,
+			MessageID: wire.RandomID("msg-"), Role: wire.RoleAgent,
 			Parts: []wire.Part{{Text: reason}}, Extensions: []string{wire.ExtensionURI},
 		}
 	}
@@ -2036,7 +2041,7 @@ func inputPointers(history []wire.Message) []wire.Message {
 			if content == nil {
 				continue
 			}
-			metadata, _ := json.Marshal(wire.PointerMetadata{SHA256: taskHash(content), Size: int64(len(content))}) // a string and an integer always encode
+			metadata, _ := json.Marshal(wire.PointerMetadata{SHA256: wire.TaskHash(content), Size: int64(len(content))}) // a string and an integer always encode
 			stripped[i].Parts[j] = wire.Part{URL: "unstored:input", Filename: part.Filename, MediaType: part.MediaType, Metadata: metadata}
 		}
 	}

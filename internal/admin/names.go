@@ -2,15 +2,12 @@ package admin
 
 import (
 	"errors"
-	"regexp"
+
+	"github.com/benemon/wherry/internal/wire"
 )
 
 const AdminTopic = "wherry.admin"
 const ReceiversTopic = "wherry.receivers"
-
-var namePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
-
-func ValidName(name string) bool { return namePattern.MatchString(name) }
 
 func TenantPrincipal(tenant, host string) string { return "wherry.tnt." + tenant + "." + host }
 func ReceiverPrincipal(receiver string) string   { return "wherry.rcv." + receiver }
@@ -24,7 +21,7 @@ func TransactionalPrefix(pool string) string     { return "p." + pool + "." }
 
 func validateNames(values ...string) error {
 	for _, value := range values {
-		if !ValidName(value) {
+		if !wire.ValidName(value) {
 			return errors.New("invalid name")
 		}
 	}

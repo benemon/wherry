@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"reflect"
@@ -855,5 +856,34 @@ func TestCutUTF8KeepsWholeRunes(t *testing.T) {
 		if got := CutUTF8(c.s, c.n); got != c.want {
 			t.Errorf("CutUTF8(%q, %d) = %q, want %q", c.s, c.n, got, c.want)
 		}
+	}
+}
+
+func TestValidHash(t *testing.T) {
+	for value, want := range map[string]bool{
+		strings.Repeat("a1", 32): true,
+		strings.Repeat("A1", 32): false,
+		strings.Repeat("a", 63):  false,
+		strings.Repeat("g", 64):  false,
+		strings.Repeat("a1", 33): false,
+		"":                       false,
+	} {
+		if got := ValidHash(value); got != want {
+			t.Errorf("ValidHash(%q) = %v, want %v", value, got, want)
+		}
+	}
+}
+
+func TestTaskHashIsHexSHA256(t *testing.T) {
+	if got := TaskHash([]byte("abc")); got != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+		t.Fatalf("TaskHash = %s", got)
+	}
+}
+
+func TestRandomID(t *testing.T) {
+	first, second := RandomID("run-"), RandomID("run-")
+	random, prefixed := strings.CutPrefix(first, "run-")
+	if decoded, err := hex.DecodeString(random); first == second || !prefixed || err != nil || len(decoded) != 16 {
+		t.Fatalf("ids %q and %q; want distinct, prefixed, 128 bits in hex", first, second)
 	}
 }

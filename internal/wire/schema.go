@@ -320,8 +320,12 @@ func (g GitInput) VCSHost() string {
 	if err != nil {
 		return ""
 	}
-	host, port := strings.ToLower(parsed.Hostname()), parsed.Port()
-	if port == "" || parsed.Scheme == "https" && port == "443" || parsed.Scheme == "ssh" && port == "22" {
+	return hostOf(parsed)
+}
+
+func hostOf(remote *url.URL) string {
+	host, port := strings.ToLower(remote.Hostname()), remote.Port()
+	if port == "" || remote.Scheme == "https" && port == "443" || remote.Scheme == "ssh" && port == "22" {
 		return host
 	}
 	return host + ":" + port
@@ -341,7 +345,7 @@ func (g *GitInput) Validate(credentials []TaskCredential) error {
 		return errors.New("git remote must be an https or ssh url of at most 2048 letters, digits and . _ ~ % + @ : / -")
 	}
 	parsed, err := url.Parse(g.Remote)
-	if err != nil || !ValidVCSHost(g.VCSHost()) || parsed.Path == "" {
+	if err != nil || !ValidVCSHost(hostOf(parsed)) || parsed.Path == "" {
 		return errors.New("git remote must name a host and a repository path")
 	}
 	if parsed.User != nil {
@@ -565,7 +569,8 @@ func validateID(value, name string) error {
 	return nil
 }
 
-func validHash(value string) bool {
+// ValidHash reports whether value is a SHA-256 in lowercase hex.
+func ValidHash(value string) bool {
 	if len(value) != 64 || value != strings.ToLower(value) {
 		return false
 	}

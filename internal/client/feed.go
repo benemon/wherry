@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -827,7 +826,7 @@ func (h *Host) WriteOutputs(runID string, turn int64, dir string, outputs []Outp
 		if _, ok := h.runPath(runID); !ok {
 			return nil, errors.New("run ID does not name a local run path")
 		}
-		dir = filepath.Join(h.stateDir, "runs", runID, "outputs", strconv.FormatInt(turn, 10))
+		dir = h.outputDir(runID, turn)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err

@@ -251,3 +251,10 @@ message Histogram {
   double sum = 2;
   uint64 count = 3;
 }
+
+// ErrorDetail is the status detail of an error the adapter returns as an adapter.Error.
+message ErrorDetail {
+  string op = 1;
+  string class = 2;
+  string message = 3;
+}

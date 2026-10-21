@@ -54,7 +54,8 @@ func writeKeyFile(path string, key []byte) (returnErr error) {
 	return nil
 }
 
-func readKeyFile(path string) ([]byte, error) {
+// ReadOwnerOnly reads the regular file at path, refusing one its group or others can access.
+func ReadOwnerOnly(path string) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -64,10 +65,17 @@ func readKeyFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, errors.New("key file grants group or other access")
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	encoded, err := io.ReadAll(file)
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%s is open to its group or others; chmod 600 it", path)
+	}
+	return io.ReadAll(file)
+}
+
+func readKeyFile(path string) ([]byte, error) {
+	encoded, err := ReadOwnerOnly(path)
 	if err != nil {
 		return nil, err
 	}

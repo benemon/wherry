@@ -2,9 +2,8 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"gopkg.in/yaml.v3"
 )
 
@@ -119,7 +117,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		}
 		return service.HostAdd(ctx, pos[2], pos[3], options["bundle-file"])
 	case "revoke host", "revoke receiver":
-		wait, err := time.ParseDuration(defaultValue(options["wait"], "0s"))
+		wait, err := time.ParseDuration(cmp.Or(options["wait"], "0s"))
 		if err != nil {
 			return err
 		}
@@ -400,21 +398,13 @@ func adminKafka(userEnv, passwordEnv string) (*kgo.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(ca) {
-		return nil, errors.New("trust CA contains no certificates")
-	}
 	password, err := os.ReadFile(passwordPath)
 	if err != nil {
 		return nil, err
 	}
-	client, err := kgo.NewClient(kgo.SeedBrokers(broker), kgo.DialTLSConfig(&tls.Config{RootCAs: roots}), kgo.SASL(scram.Auth{User: user, Pass: strings.TrimRight(string(password), "\r\n")}.AsSha512Mechanism()), kgo.FetchIsolationLevel(kgo.ReadCommitted()))
-	return client, err
-}
-
-func defaultValue(value, fallback string) string {
-	if value == "" {
-		return fallback
+	opts, err := admin.KafkaOpts(broker, ca, user, string(password))
+	if err != nil {
+		return nil, fmt.Errorf("trust %w", err)
 	}
-	return value
+	return kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 }

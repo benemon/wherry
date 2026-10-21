@@ -1,10 +1,13 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	json "encoding/json/v2"
@@ -12,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -20,6 +24,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"gopkg.in/yaml.v3"
 )
 
@@ -39,6 +44,50 @@ type Bundle struct {
 	// Platform holds platform credentials by adapter name, for platforms that
 	// do not issue one by their own identity.
 	Platform map[string]string `yaml:"platform,omitempty"`
+}
+
+// ReadBundle reads the bundle at path, refusing unknown fields and a bundle without its broker, principal or password.
+// A decode error names only the lines it found, since the decoder quotes the bundle's text and a credential pasted in
+// the wrong place is still a credential.
+func ReadBundle(path string) (Bundle, error) {
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return Bundle{}, fmt.Errorf("read bundle: %w", err)
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
+	decoder.KnownFields(true)
+	var bundle Bundle
+	if err := decoder.Decode(&bundle); err != nil {
+		lines := strings.Join(yamlLine.FindAllString(err.Error(), -1), ", ")
+		if lines == "" {
+			return Bundle{}, errors.New("decode bundle: not a valid bundle")
+		}
+		return Bundle{}, fmt.Errorf("decode bundle: invalid or unknown field at %s", lines)
+	}
+	if bundle.Broker == "" || bundle.Principal == "" || bundle.Password == "" {
+		return Bundle{}, errors.New("bundle requires broker, principal and password")
+	}
+	return bundle, nil
+}
+
+var yamlLine = regexp.MustCompile(`line \d+`)
+
+// KafkaOpts are the options of a TLS and SCRAM-SHA-512 connection to broker as user, trusting the PEM certificates in
+// ca. A trailing line break, as a password file ends with, is not part of password, and nothing else is no password.
+func KafkaOpts(broker string, ca []byte, user, password string) ([]kgo.Opt, error) {
+	password = strings.TrimRight(password, "\r\n")
+	if password == "" {
+		return nil, errors.New("password is empty")
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(ca) {
+		return nil, errors.New("CA contains no certificates")
+	}
+	return []kgo.Opt{
+		kgo.SeedBrokers(broker),
+		kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
+		kgo.SASL(scram.Auth{User: user, Pass: password}.AsSha512Mechanism()),
+	}, nil
 }
 
 func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms) error {

@@ -222,7 +222,13 @@ func callError(ctx context.Context, err error) error {
 	case codes.OutOfRange:
 		return &InputTooLargeError{Name: status.Convert(err).Message()}
 	}
-	return errors.New(status.Convert(err).Message())
+	call := status.Convert(err)
+	for _, detail := range call.Details() {
+		if detail, ok := detail.(*adapterv1.ErrorDetail); ok {
+			return &Error{Op: detail.Op, Class: detail.Class, Err: errors.New(detail.Message)}
+		}
+	}
+	return errors.New(call.Message())
 }
 
 // remote is one adapter in a plugin process.

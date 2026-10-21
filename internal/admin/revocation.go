@@ -2,8 +2,6 @@ package admin
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"time"
@@ -12,7 +10,6 @@ import (
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
-	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
 var ErrAuthenticationFailure = errors.New("authentication failure")
@@ -127,11 +124,11 @@ func (service *Service) Probe(topic string) func(context.Context, string, string
 		if err != nil {
 			return err
 		}
-		roots := x509.NewCertPool()
-		if !roots.AppendCertsFromPEM([]byte(service.CA)) {
-			return errors.New("service CA holds no certificate")
+		opts, err := KafkaOpts(service.Broker, []byte(service.CA), user, password)
+		if err != nil {
+			return fmt.Errorf("service %w", err)
 		}
-		client, err := kgo.NewClient(kgo.SeedBrokers(service.Broker), kgo.DialTLSConfig(&tls.Config{RootCAs: roots}), kgo.SASL(scram.Auth{User: user, Pass: password}.AsSha512Mechanism()))
+		client, err := kgo.NewClient(opts...)
 		if err != nil {
 			return err
 		}
