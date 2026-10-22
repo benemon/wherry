@@ -827,6 +827,7 @@ error text from the bus, the broker or the host key.
 | `RUN_EXPIRED` | the run is past its pool's `run_lifetime_ms`, or the queue deadline falls after it |
 | `OUTPUTS_NOT_WRITTEN` | the turn's verified outputs could not be written to the state directory, or its S3 outputs downloaded, or the run's prefix deleted |
 | `CANCELLED` | the request was cancelled |
+| `VERSION_SKEW` | `wherry.admin` holds records a later release wrote; upgrade `wherry` and restart the MCP server |
 | `UNAVAILABLE` | any other failure; the CLI reports the cause |
 
 ## Client configuration
