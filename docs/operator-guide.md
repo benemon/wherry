@@ -585,7 +585,8 @@ each such record as `offset=<n> size=<n> sha256=<hex>`.
    ```
 
 The command refuses a record that decodes, so a skip cannot hide state such
-as a membership end.
+as a membership end. It also refuses a record a later release wrote; the
+error says so, and upgrading `wherry` reads it.
 
 ## Run credentialed tasks
 
@@ -878,7 +879,10 @@ release submitted holds no redaction key, so this release answers no seal
 request for it until `wherry continue` records its next turn. A host or
 receiver of an earlier release cannot decode pool terms that set `models` or
 `default_model`, and stops reading `wherry.admin` while they hold them, so
-upgrade every receiver and host before the terms set them.
+upgrade every receiver and host before the terms set them. An older release
+reports such records as written by a later release; do not skip them, upgrade
+it. A harness does not restart a running `wherry mcp` when its binary
+changes, so restart the MCP server after upgrading.
 
 Prerequisites: the new `wherry` binary, and each receiver's bundle and
 state directory.

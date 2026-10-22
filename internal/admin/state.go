@@ -525,17 +525,22 @@ type rawRecord struct {
 	Value  []byte
 }
 
+// ErrNewerRecord is a wherry.admin record with a member this release does not know, written by a later release.
+var ErrNewerRecord = errors.New("wherry.admin holds records a later wherry release wrote")
+
 // load folds wherry.admin. An undecodable record is tolerated only when a
 // skip record names its offset and hash; a skip naming a decodable record is
 // refused, so a skip can never hide state such as a membership end.
 func load(raw []rawRecord) (State, error) {
 	undecodable := map[int64]string{}
+	newer := map[int64]bool{}
 	var records, skips []Record
 	for _, entry := range raw {
 		record, err := DecodeRecord(entry.Value)
 		if err != nil {
 			sum := sha256.Sum256(entry.Value)
 			undecodable[entry.Offset] = hex.EncodeToString(sum[:])
+			newer[entry.Offset] = errors.Is(err, json.ErrUnknownName)
 			continue
 		}
 		if record.Kind == "skip" {
@@ -553,10 +558,16 @@ func load(raw []rawRecord) (State, error) {
 	}
 	if len(undecodable) > 0 {
 		var uncovered []string
+		allNewer := true
 		for _, entry := range raw {
 			if hash, ok := undecodable[entry.Offset]; ok {
 				uncovered = append(uncovered, fmt.Sprintf("offset=%d size=%d sha256=%s", entry.Offset, len(entry.Value), hash))
+				allNewer = allNewer && newer[entry.Offset]
 			}
+		}
+		// Skipping a later release's record would hide state it holds.
+		if allNewer {
+			return State{}, fmt.Errorf("%w; upgrade this wherry: %s", ErrNewerRecord, strings.Join(uncovered, "; "))
 		}
 		return State{}, fmt.Errorf("wherry.admin has undecodable records; review each and run wherry admin skip: %s", strings.Join(uncovered, "; "))
 	}

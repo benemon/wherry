@@ -377,6 +377,9 @@ func TestMCPContinueAndCancel(t *testing.T) {
 		if failure := toolFailure(busclient.ErrRunExpired).(*toolError); failure.Code != "RUN_EXPIRED" {
 			t.Fatalf("expired run %#v", failure)
 		}
+		if failure := toolFailure(fmt.Errorf("load: %w", admin.ErrNewerRecord)).(*toolError); failure.Code != "VERSION_SKEW" {
+			t.Fatalf("a later release's record %#v", failure)
+		}
 		var continued continueOutput
 		callTool(t, ctx, session, "continue", map[string]any{"id": runID}, &continued)
 		if continued.ID != runID || continued.Turn != 2 {

@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -140,6 +141,8 @@ func toolFailure(err error) error {
 		return invalidArgument(err.Error())
 	case errors.Is(err, context.Canceled):
 		return &toolError{Code: "CANCELLED", Message: "the request was cancelled"}
+	case errors.Is(err, admin.ErrNewerRecord):
+		return &toolError{Code: "VERSION_SKEW", Message: "this wherry is older than the release that wrote the pool's records; upgrade wherry and restart this MCP server"}
 	}
 	return &toolError{Code: "UNAVAILABLE", Message: "the wherry bus could not complete the request; the wherry CLI reports the cause"}
 }

@@ -435,6 +435,40 @@ func realService(t *testing.T) (*Service, func()) {
 	return &Service{Admin: root, Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: string(ca)}, func() { operator.Close(); root.Close() }
 }
 
+func TestLoadNamesALaterReleasesRecord(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := readRaw(ctx, service.Operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := append([]byte(`{"later_member":true,`), raw[0].Value[1:]...)
+	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: later}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.LoadState(ctx); !errors.Is(err, ErrNewerRecord) || strings.Contains(err.Error(), "wherry admin skip") {
+		t.Fatalf("load over a later release's record: %v; want ErrNewerRecord and no skip advice", err)
+	}
+	raw, err = readRaw(ctx, service.Operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(later)
+	if err := service.Skip(ctx, raw[len(raw)-1].Offset, hex.EncodeToString(sum[:])); !errors.Is(err, ErrNewerRecord) {
+		t.Fatalf("skip of a later release's record: %v; want ErrNewerRecord", err)
+	}
+	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: []byte("not a record")}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.LoadState(ctx); errors.Is(err, ErrNewerRecord) || err == nil || !strings.Contains(err.Error(), "wherry admin skip") {
+		t.Fatalf("load over a later release's record and a corrupt one: %v; want the skip advice", err)
+	}
+}
+
 func TestAdminSkipRecoversOnlyUndecodableRecords(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
