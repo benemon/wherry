@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"maps"
+	"slices"
 )
 
 // Handle identifies one platform instance of a run.
@@ -243,6 +245,25 @@ var AgentEnvironment = map[string]string{
 var AgentUnset = []string{
 	"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
 	"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_EXEC_PATH", "GIT_SSL_NO_VERIFY", "GIT_CURL_VERBOSE",
+}
+
+// AgentEnv returns configured without AgentUnset and with AgentEnvironment over it.
+func AgentEnv(configured map[string]string) map[string]string {
+	env := maps.Clone(configured)
+	if env == nil {
+		env = map[string]string{}
+	}
+	for _, name := range AgentUnset {
+		delete(env, name)
+	}
+	maps.Copy(env, AgentEnvironment)
+	return env
+}
+
+// ReservedEnv reports whether an adapter sets the variable name for the agent, so a credential under it would be lost.
+func ReservedEnv(name string) bool {
+	_, set := AgentEnvironment[name]
+	return set || slices.Contains([]string{"HOME", "WHERRY_INPUT_DIR", "WHERRY_OUTPUT_DIR", "WHERRY_CREDENTIALS_DIR", "WHERRY_MODEL"}, name)
 }
 
 // Settings configure one adapter in a plugin.
