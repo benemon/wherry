@@ -31,7 +31,7 @@ type Run struct {
 	// Model is the model the agent runs, as the pool's terms name it; empty leaves the agent's own. The adapter passes
 	// it to the agent as WHERRY_MODEL and never interprets it.
 	Model              string
-	Turn, Attempt      int64
+	Attempt            int64
 	Prompt, Credential []byte
 	// Inputs and Fetches go in the directory WHERRY_INPUT_DIR names, and Credentials in the one WHERRY_CREDENTIALS_DIR
 	// names, each as a file under its name; the core has validated every name.
@@ -129,7 +129,7 @@ const (
 	OutcomeCreated
 )
 
-// JobState is the state of a turn's job as Lookup finds it.
+// JobState is the state of a run's job as Lookup finds it.
 type JobState int
 
 const (
@@ -140,7 +140,7 @@ const (
 	JobNeverStarted
 )
 
-// Job is a turn's job as Lookup finds it, with the attempt, adapter and agent its platform metadata records.
+// Job is a run's job as Lookup finds it, with the attempt, adapter and agent its platform metadata records.
 type Job struct {
 	State JobState
 	// Handle is set unless State is JobAbsent.
@@ -175,11 +175,11 @@ type Adapter interface {
 	InlineLimit() int64
 	// Ready reports whether the adapter can currently start a job.
 	Ready(ctx context.Context) (bool, error)
-	// Dispatch starts a turn's job, converging on an existing one, and returns once it has started or ended.
+	// Dispatch starts a run's job, converging on an existing one, and returns once it has started or ended.
 	// The core treats an error as OutcomeUnknown.
 	Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
-	// Lookup finds a turn's job without creating one, and waits for it as Dispatch does.
-	Lookup(ctx context.Context, runID string, turn int64) (Job, error)
+	// Lookup finds a run's job without creating one, and waits for it as Dispatch does.
+	Lookup(ctx context.Context, runID string) (Job, error)
 	// Follow streams stdout lines from a byte offset and returns the Terminal once the job has ended;
 	// a Follow cut short returns an error and a zero Terminal.
 	Follow(ctx context.Context, handle Handle, from int64, lines chan<- Line) (Terminal, error)
@@ -188,9 +188,9 @@ type Adapter interface {
 	// order, reading only regular files within limits and never following a link. It reads nothing when the tree
 	// holds more than limits.Files entries. An error means the outputs were not collected.
 	Collect(ctx context.Context, handle Handle, limits Limits, outputs chan<- Output) error
-	// Purge removes a turn's job and its delivered material, with or without a handle; an absent job is success.
-	Purge(ctx context.Context, runID string, turn int64) error
-	Release(ctx context.Context, runID string, turn int64) error
+	// Purge removes a run's job and its delivered material, with or without a handle; an absent job is success.
+	Purge(ctx context.Context, runID string) error
+	Release(ctx context.Context, runID string) error
 	Sweep(ctx context.Context) error
 	// Metrics reports the adapter's samples of the families the core declares for adapters. The core drops a sample
 	// outside them, and gives every sample's adapter label the adapter's own name.

@@ -32,21 +32,22 @@ clones itself.
    start it within 5 minutes of submitting. Start it in the background right
    after submitting, where your harness reports background command
    completion: its completion is how you learn the run ended.
-4. On `TASK_STATE_AUTH_REQUIRED`, tell the user which credential the
-   message names, and to add a file holding it to `credentials` in their
-   wherry configuration. Never handle the value yourself. Then run
-   `wherry continue RUN_ID` and await again.
+4. A run whose credential request goes unanswered for 5 minutes ends
+   `TASK_STATE_FAILED` with a message naming the credential. Tell the user
+   which credential it names, and to add a file holding it to `credentials`
+   in their wherry configuration. Never handle the value yourself. Then
+   submit the task again and await the new run.
 5. `wherry cancel RUN_ID` when the result is no longer needed.
 6. `wherry status RUN_ID` prints a run's state without waiting.
    `wherry status` alone lists every run this host can see, latest update
-   first. `wherry transcript RUN_ID` prints the agent's output lines for the
-   latest turn; `--offset` and `--limit` page through them.
+   first. `wherry transcript RUN_ID` prints the agent's output lines;
+   `--offset` and `--limit` page through them.
 7. `wherry cleanup RUN_ID` deletes the S3 objects of a run that ended while
    no `await` ran.
 
 Where the `wherry` MCP server (`wherry mcp`) is configured, its tools do the
-same: `receivers`, `submit`, `status`, `await`, `continue`, `cancel`,
-`events`, `transcript` and `cleanup`. Its `submit` and `continue` return `await`,
+same: `receivers`, `submit`, `status`, `await`, `cancel`, `events`,
+`transcript` and `cleanup`. Its `submit` returns `await`,
 the `wherry await` command to start in the background. Its `await` tool
 waits up to 45 seconds; call it again while the reply carries `retry_after`. Its `transcript`
 returns a page of lines; call it again with `next_offset` while it is set.

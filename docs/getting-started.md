@@ -216,16 +216,16 @@ wherry await run-<id>
 and exits non-zero for any state other than `TASK_STATE_COMPLETED`. It waits
 2 hours by default. While it waits it answers `nomad-1`'s request for
 `model-api-key`. Start it within 5 minutes of `nomad-1` claiming the task,
-or the run ends `TASK_STATE_AUTH_REQUIRED`.
+or the run ends `TASK_STATE_FAILED`.
 
 `wherry events run-<id>` prints the run's status history.
 
 ### If the run needs a credential
 
-A run that ends in `TASK_STATE_AUTH_REQUIRED` received no seal for the
-credential the message names: the host was not running `await`, or does
-not configure the credential.
+A run that ends in `TASK_STATE_FAILED` with a message naming a credential
+received no seal for it within 5 minutes: the host was not running `await`,
+or does not configure the credential. The run does not resume.
 
 1. Add the credential's file to `credentials` in the host configuration.
-2. Run `wherry continue run-<id>`, which publishes the next turn.
-3. Run `wherry await run-<id>`, which answers the next turn's request.
+2. Submit the task again with `wherry submit`, which starts a new run.
+3. Run `wherry await` with the new run ID, which answers its request.

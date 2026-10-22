@@ -20,7 +20,6 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
-	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -57,7 +56,7 @@ var (
 	refreshInterval   = 15 * time.Second
 	// cancelReadInterval is how often the receiver reads the pool's events, once for every run it holds.
 	cancelReadInterval = 10 * time.Second
-	// stateCheckInterval is how often a running turn checks the cancels and denial the receiver holds.
+	// stateCheckInterval is how often a running run checks the cancels and denial the receiver holds.
 	stateCheckInterval = time.Second
 	// shutdownTimeout bounds the final transcript commit and ack flush after the receiver is told to stop.
 	shutdownTimeout = 5 * time.Second
@@ -67,11 +66,10 @@ var (
 	purgeDeadline = 5 * time.Minute
 	// followRetryInterval separates the Follows of a run whose plugin link is lost.
 	followRetryInterval = time.Second
-	// collectTimeout bounds an adapter's collection of a turn's outputs, during which the claim is renewed.
+	// collectTimeout bounds an adapter's collection of a run's outputs, during which the claim is renewed.
 	collectTimeout = 2 * time.Minute
-	unfoundRetry   = 10 * time.Minute
-	// sealWait bounds how long a claimed turn waits for its host's seal, which comes only while the parent runs
-	// await or the MCP server; beyond it the turn holds a slot for a parent that is not answering.
+	// sealWait bounds how long a claimed run waits for its host's seal, which comes only while the parent runs
+	// await or the MCP server; beyond it the run ends failed.
 	sealWait = 5 * time.Minute
 )
 
@@ -148,9 +146,6 @@ func (r *Receiver) claimOne(ctx context.Context) error {
 	defer r.adjustInFlight(-1)
 	tenant, routed := admitted.task.Wherry.Tenant, admitted.adapter.Name
 	r.metrics.admissions.WithLabelValues(tenant, routed).Inc()
-	if admitted.task.Wherry.Turn > 1 {
-		r.metrics.continuations.WithLabelValues(tenant, routed).Inc()
-	}
 	if attemptOf(record) == 1 {
 		r.metrics.queueWait.WithLabelValues(tenant, routed).Observe(time.Since(record.Timestamp).Seconds())
 	}
@@ -169,7 +164,7 @@ type admission struct {
 	adapter  Named
 	history  []wire.Message
 	inputs   []adapter.File
-	// credentials, outputs, git and s3Inputs are what the run's first turn declares.
+	// credentials, outputs, git and s3Inputs are what the run declares.
 	credentials []wire.TaskCredential
 	outputs     []wire.ExpectedOutput
 	git         *wire.GitInput
@@ -225,10 +220,10 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		held.ended(wire.TaskStateFailed, nil)
 		return nil, kgo.AckReject
 	}
-	// Nothing is written under the run key before its owner is known; unreadable turns leave it unknown.
-	all, err := r.readTurns(ctx, run)
+	// Nothing is written under the run key before its owner is known; unreadable submissions leave it unknown.
+	all, err := r.readSubmissions(ctx, run)
 	if err != nil {
-		r.logger.Printf("read run %s turns: %v", run, err)
+		r.logger.Printf("read run %s submissions: %v", run, err)
 		return nil, kgo.AckRelease
 	}
 	if foreignRun(all, events.statuses[run], task.Wherry.Tenant) {
@@ -253,34 +248,24 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
 		return giveBack()
 	}
-	submissions := bindTurns(all, &task, events)
-	cancelledTurn, cancelled := r.cancelledTurn(ctx, events, run, task.Wherry.Tenant)
-	cancelled = cancelled && cancelledTurn <= task.Wherry.Turn
-	if !cancelled {
-		if reason := continuationRejection(events, &task, hash, submissions); reason != "" {
-			return reject(reason)
-		}
+	cancelled := r.cancelledRun(ctx, events, run, task.Wherry.Tenant)
+	if len(all) == 0 || all[0].hash != hash {
+		return reject("duplicate submission")
 	}
-	// A turn a member already claimed is past the lifetime and deadline checks; its redelivery goes on to adoption.
+	// A run a member already claimed is past the lifetime and deadline checks; its redelivery goes on to adoption.
 	claimed := slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
 		return status.Wherry.TaskHash == hash && status.Wherry.Kind != "rejected"
 	})
-	if first, ok := submissions[1]; ok && !claimed {
+	if !claimed {
 		lifetime := terms.RunLifetime()
-		if time.Since(first.submitted) > lifetime {
+		if time.Since(all[0].submitted) > lifetime {
 			return reject("run expired")
 		}
-		if task.Wherry.QueueDeadlineMS > first.submitted.Add(lifetime).UnixMilli() {
+		if task.Wherry.QueueDeadlineMS > all[0].submitted.Add(lifetime).UnixMilli() {
 			return reject("queue deadline exceeds run lifetime")
 		}
 	}
 	history := []wire.Message{task.Message}
-	if task.Wherry.Turn > 1 {
-		if history, err = turns(submissions, &task); err != nil {
-			r.logger.Printf("run %s: continuation history: %v", run, err)
-			return reject("continuation history unavailable")
-		}
-	}
 	admitted := &admission{task: &task, taskHash: hash, adapter: adapter, history: history, cancelled: cancelled}
 	if cancelled {
 		return admitted, 0
@@ -293,9 +278,6 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return reject("run deadline passed")
 	}
 	declared := task.Wherry
-	if task.Wherry.Turn > 1 {
-		declared = submissions[1].record.Wherry
-	}
 	if declared.Git != nil {
 		if host := declared.Git.VCSHost(); !slices.Contains(terms.VCS, host) {
 			return rejectAs("git remote host outside the pool's vcs hosts", "git remote host "+host+" is not in pool "+r.config.Pool+"'s vcs hosts")
@@ -341,8 +323,7 @@ func s3Outputs(outputs []wire.ExpectedOutput) []string {
 }
 
 // deliverables returns the run's input files: the git input's host key as known_hosts, then the raw and data parts.
-// It returns the rejection reason for a url part, or for two inputs of one name in different turns or of an S3 input's
-// name.
+// It returns the rejection reason for a url part or a duplicate input name.
 func deliverables(history []wire.Message, git *wire.GitInput, s3Inputs []wire.S3Input) ([]adapter.File, string) {
 	var inputs []adapter.File
 	if git != nil && git.HostKey != "" {
@@ -356,7 +337,7 @@ func deliverables(history []wire.Message, git *wire.GitInput, s3Inputs []wire.S3
 				name := wire.InputName(part)
 				if slices.ContainsFunc(inputs, func(input adapter.File) bool { return input.Name == name }) ||
 					slices.ContainsFunc(s3Inputs, func(input wire.S3Input) bool { return input.Name == name }) {
-					return nil, "input names repeat across turns"
+					return nil, "input names repeat"
 				}
 				inputs = append(inputs, adapter.File{Name: name, Data: append(slices.Clone([]byte(part.Raw)), part.Data...)})
 			default:
@@ -377,7 +358,7 @@ func (r *Receiver) publishRejection(ctx context.Context, task *wire.Submission, 
 
 func (r *Receiver) echo(task *wire.Submission, hash string) *wire.Echo {
 	return &wire.Echo{
-		Receiver: r.id, Tenant: task.Wherry.Tenant, Pool: r.config.Pool, Run: task.Wherry.Run, Turn: task.Wherry.Turn, Placement: task.Wherry.Placement,
+		Receiver: r.id, Tenant: task.Wherry.Tenant, Pool: r.config.Pool, Run: task.Wherry.Run, Placement: task.Wherry.Placement,
 		TaskHash: hash, MessageID: task.Message.MessageID,
 	}
 }
@@ -425,7 +406,7 @@ func (r *Receiver) probeWrite(ctx context.Context) error {
 	return producer.EndTransaction(ctx, kgo.TryAbort)
 }
 
-// newSealKey is a variable so tests can watch the key a turn's seal is opened with.
+// newSealKey is a variable so tests can watch the key a run's seal is opened with.
 var newSealKey = func() (*ecdsa.PrivateKey, error) { return ecdsa.GenerateKey(elliptic.P256(), rand.Reader) }
 
 // commitTransaction is a variable so tests can lose the answer to a commit the broker applied, which
@@ -482,12 +463,10 @@ type runSubmission struct {
 	hash   string
 	// submitted is the broker's LogAppendTime for the task record.
 	submitted time.Time
-	// current is set when the submission verifies against its host's current key, not only a retired one.
-	current bool
 }
 
-// readTurns reads the run's authorised submissions from the pool's task topic in log order.
-func (r *Receiver) readTurns(ctx context.Context, run string) ([]runSubmission, error) {
+// readSubmissions reads the run's current-key submissions from the pool's task topic in log order.
+func (r *Receiver) readSubmissions(ctx context.Context, run string) ([]runSubmission, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	records, err := admin.ReadTopic(ctx, r.base, admin.PoolTasksTopic(r.config.Pool))
@@ -501,70 +480,12 @@ func (r *Receiver) readTurns(ctx context.Context, run string) ([]runSubmission, 
 		if string(record.Key) != run {
 			continue
 		}
-		submission, err := admin.AuthorizeEarlierTurn(state, hosts, record.Value, r.config.Pool)
+		submission, err := admin.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
 		if err == nil && submission.Wherry.Run == run {
-			_, currentErr := admin.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
-			result = append(result, runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp, current: currentErr == nil})
+			result = append(result, runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp})
 		}
 	}
 	return result, nil
-}
-
-// bindTurns keeps, for each turn, the submission carrying the tenant and placement of expected that a pool member's
-// status names by hash, or else the first one; a later submission cannot displace a turn a member already ran. A
-// submission that verifies only against a retired key counts only when a member's status names it: a leaked retired
-// key must not pre-empt a turn no member has run.
-func bindTurns(all []runSubmission, expected *wire.Submission, events poolEvents) map[int64]runSubmission {
-	ran := map[string]bool{}
-	for _, status := range events.statuses[expected.Wherry.Run] {
-		ran[status.Wherry.TaskHash] = true
-	}
-	result := make(map[int64]runSubmission)
-	for _, submission := range all {
-		if submission.record.Wherry.Tenant != expected.Wherry.Tenant || !reflect.DeepEqual(submission.record.Wherry.Placement, expected.Wherry.Placement) {
-			continue
-		}
-		if !submission.current && !ran[submission.hash] {
-			continue
-		}
-		turn := submission.record.Wherry.Turn
-		if previous, duplicate := result[turn]; !duplicate || ran[submission.hash] && !ran[previous.hash] {
-			result[turn] = submission
-		}
-	}
-	return result
-}
-
-// continuationRejection checks the task against the run's turns and its pool members' statuses;
-// it returns the fixed rejection reason, or "".
-func continuationRejection(events poolEvents, task *wire.Submission, hash string, submissions map[int64]runSubmission) string {
-	if submissions[task.Wherry.Turn].hash != hash {
-		if task.Wherry.Turn == 1 {
-			return "duplicate submission"
-		}
-		return "duplicate continuation"
-	}
-	var bound []wire.RunStatus
-	for _, status := range events.statuses[task.Wherry.Run] {
-		if submission, found := submissions[status.Wherry.Turn]; found && status.Wherry.TaskHash == submission.hash {
-			bound = append(bound, status)
-		}
-	}
-	latest := latestStatus(bound, task.Wherry.Tenant)
-	if latest != nil && (latest.Wherry.Turn > task.Wherry.Turn ||
-		latest.Wherry.Turn == task.Wherry.Turn && (latest.Wherry.Kind == "interrupted" || latest.Wherry.Kind == "terminal")) {
-		return "stale submission"
-	}
-	if task.Wherry.Turn == 1 || latest != nil && latest.Wherry.Turn == task.Wherry.Turn {
-		return ""
-	}
-	if latest == nil || latest.Wherry.Kind != "interrupted" || !wire.Interrupted(latest.StatusUpdate.Status.State) {
-		return "task is not awaiting continuation"
-	}
-	if task.Wherry.Turn != latest.Wherry.Turn+1 {
-		return "continuation turn out of order"
-	}
-	return ""
 }
 
 // renewer keeps the share lock alive from claim until the final acknowledgement,
@@ -629,7 +550,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
 		return run.abandon(err)
 	}
-	// A claimed turn is redelivered even past its deadline; its job is looked up all the same, so it is stopped.
+	// A claimed run is redelivered even past its deadline; its job is looked up all the same, so it is stopped.
 	lookupCtx := runCtx
 	if runCtx.Err() != nil {
 		var cancelLookup context.CancelFunc
@@ -650,7 +571,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if attempt > 1 {
 		// Offers can change between attempts, so the run may live in an adapter other than the matched one.
 		for _, named := range r.adapters {
-			job, err := named.Adapter.Lookup(lookupCtx, runID, task.Wherry.Turn)
+			job, err := named.Adapter.Lookup(lookupCtx, runID)
 			if err != nil {
 				if lookupCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, "timeout", nil)
@@ -671,7 +592,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 					r.logger.Printf("run %s: stop: %s", runID, logText(run, err))
 					return run.returnTask(ctx, nil)
 				}
-				if err := named.Adapter.Purge(ctx, runID, task.Wherry.Turn); err != nil {
+				if err := named.Adapter.Purge(ctx, runID); err != nil {
 					r.metrics.purgeFailures.WithLabelValues(named.Name).Inc()
 					r.logger.Printf("run %s: purge: %s", runID, logText(run, err))
 					return run.returnTask(ctx, nil)
@@ -749,7 +670,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			promptInputs = append(promptInputs, input.Name)
 		}
 		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, adapter.Run{
-			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Turn: task.Wherry.Turn, Attempt: attempt,
+			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Attempt: attempt,
 			Prompt:     []byte(preamble(named.Adapter.Directories(), append(promptInputs, inputNames...), admitted.credentials, admitted.outputs, admitted.git, runID) + prompt(admitted.history)),
 			Credential: credential, Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
@@ -770,7 +691,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				return run.abandon(err)
 			}
 			r.metrics.startFailures.WithLabelValues(named.Name, "input-too-large").Inc()
-			return run.fail(ctx, name+" takes the turn's inputs over what adapter "+named.Name+" delivers", nil)
+			return run.fail(ctx, name+" takes the run's inputs over what adapter "+named.Name+" delivers", nil)
 		case errors.Is(err, adapter.ErrMessageTooLarge):
 			r.logger.Printf("run %s: dispatch rejected: message too large", runID)
 			dispatched = adapter.OutcomeUnknown
@@ -884,13 +805,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	// stopHeld ends the run when the receiver holds its cancel or a denial lasting one lock interval.
 	stopHeld := func() (kgo.AckStatus, bool) {
 		r.mu.Lock()
-		cancelledTurn, cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
+		cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
 		r.mu.Unlock()
 		switch {
 		case r.stopForDenial():
 			stopFollow()
 			return run.deny(ctx, handle, pending), true
-		case cancelled && cancelledTurn <= task.Wherry.Turn:
+		case cancelled:
 			stopFollow()
 			return run.stopAndCancel(ctx, handle, pending), true
 		}
@@ -984,7 +905,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 
 // awaitSeal asks the run's host for the agent's credentials, the task's, and presigned URLs for its S3 inputs and
 // outputs under a key made for this attempt, and waits for the seal while the claim is renewed. The key never leaves
-// this call. A turn that ends while it waits stops job, the adopted job, first. False carries the acknowledgement.
+// this call. A run that ends while it waits stops job, the adopted job, first. False carries the acknowledgement.
 func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle, credentials, taskCredentials, s3Inputs, s3Outputs []string) (signed.SealValues, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
 	runID := task.Wherry.Run
@@ -1008,7 +929,7 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle
 	}
 	expected := signed.SealBinding{
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
+		Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
 		S3Inputs: request.S3Inputs, S3Outputs: request.S3Outputs, ExpiryMS: request.ExpiryMS,
 	}
 	// Reading from the host topic's end before the request is committed sees every answer to it.
@@ -1055,21 +976,21 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle
 			opened, err := signed.OpenSeal(record.Value, expected, key, time.Now())
 			if err != nil {
 				// never log err: the cause may describe secret material
-				r.logger.Printf("run %s: a seal for turn %d attempt %d does not open", runID, task.Wherry.Turn, run.attempt)
+				r.logger.Printf("run %s: a seal for attempt %d does not open", runID, run.attempt)
 				return
 			}
 			values = &opened
 		})
 		r.mu.Lock()
-		cancelledTurn, cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
+		cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
 		r.mu.Unlock()
-		// A stop seen in the same iteration as a seal wins, so a cancelled or expired turn never dispatches.
+		// A stop seen in the same iteration as a seal wins, so a cancelled or expired run never dispatches.
 		switch {
 		case ctx.Err() != nil:
 			return signed.SealValues{}, kgo.AckRelease, false
-		case cancelled && cancelledTurn <= task.Wherry.Turn && job != nil:
+		case cancelled && job != nil:
 			return signed.SealValues{}, run.stopAndCancel(ctx, *job, nil), false
-		case cancelled && cancelledTurn <= task.Wherry.Turn:
+		case cancelled:
 			return signed.SealValues{}, run.cancel(ctx, nil), false
 		case runCtx.Err() != nil && job != nil:
 			waited("expired")
@@ -1084,10 +1005,10 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle
 				r.logger.Printf("run %s: stop: %s", runID, logText(run, err))
 				return signed.SealValues{}, run.returnTask(ctx, nil), false
 			}
-			return signed.SealValues{}, run.interrupt(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
+			return signed.SealValues{}, run.fail(ctx, unansweredReason(append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), nil), false
 		case waitCtx.Err() != nil:
-			waited("auth_required")
-			return signed.SealValues{}, run.interrupt(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
+			waited("unanswered")
+			return signed.SealValues{}, run.fail(ctx, unansweredReason(append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), nil), false
 		case values != nil:
 			waited("sealed")
 			return *values, 0, true
@@ -1129,7 +1050,7 @@ func (run *activeRun) hold(lines <-chan adapter.Line) func() []adapter.Line {
 	}
 }
 
-// presigned checks the seal's URLs against the pool's storage and returns the run's fetches and the turn's PUT URLs. An
+// presigned checks the seal's URLs against the pool's storage and returns the run's fetches and PUT URLs. An
 // error names its input or output, never the URL. Each URL's signature joins the redacted forms under the URL's name, so
 // a transcript quoting a URL in part is redacted too, with the URL's marker.
 func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input, outputs []string) ([]adapter.Fetch, map[string]string, error) {
@@ -1157,7 +1078,7 @@ func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input,
 	}
 	puts := map[string]string{}
 	for _, output := range outputs {
-		put, ok := check(signed.S3OutputValue(output), wire.S3OutputKey(tenant, runID, run.task.Wherry.Turn, output))
+		put, ok := check(signed.S3OutputValue(output), wire.S3OutputKey(tenant, runID, output))
 		if !ok {
 			return nil, nil, errors.New("the URL for S3 output " + output + " is not one of pool " + run.receiver.config.Pool + "'s storage")
 		}
@@ -1179,7 +1100,7 @@ type activeRun struct {
 	// labels is set when this attempt dispatched the job; an adopted job's adapter labels are unknown.
 	labels map[string]string
 	job    string
-	// deadline is the turn's; puts are the presigned PUT URLs of its S3 outputs, by name, which an attempt holds once
+	// deadline is the run's; puts are the presigned PUT URLs of its S3 outputs, by name, which an attempt holds once
 	// sealed.
 	deadline time.Time
 	puts     map[string]string
@@ -1187,7 +1108,7 @@ type activeRun struct {
 	// from its seal.
 	redactions   []redaction
 	redactionKey []byte
-	// expected are the outputs the run declares; outputs are the chunks of those the turn returns, and returned and
+	// expected are the outputs the run declares; outputs are the chunks of those the run returns, and returned and
 	// unreturned list them for the result.
 	expected   []wire.ExpectedOutput
 	outputs    []*kgo.Record
@@ -1198,7 +1119,7 @@ type activeRun struct {
 	reply *string
 	// uncollected is true when the job was not stopped, or Collect failed, timed out or overran its limits.
 	uncollected bool
-	// claimed is when this attempt began executing the turn, zero for a turn ended without executing it.
+	// claimed is when this attempt began executing the run, zero for a run ended without executing it.
 	claimed time.Time
 }
 
@@ -1456,8 +1377,8 @@ func (run *activeRun) cancel(ctx context.Context, pending []adapter.Line) kgo.Ac
 
 const cancelReason = "canceled by user"
 
-// interrupt leaves the run AUTH_REQUIRED for its tenant's credentials and S3 URLs, then acknowledges the task.
-func (run *activeRun) interrupt(ctx context.Context, credentials []string, urls bool) kgo.AckStatus {
+// unansweredReason names only the credential names and storage URLs the host did not answer.
+func unansweredReason(credentials []string, urls bool) string {
 	var reasons []string
 	switch len(credentials) {
 	case 0:
@@ -1469,20 +1390,19 @@ func (run *activeRun) interrupt(ctx context.Context, credentials []string, urls 
 	if urls {
 		reasons = append(reasons, "presigned URLs for the S3 inputs and outputs")
 	}
-	reason := strings.Join(reasons, " and ") + " required"
-	status := taskStatus(wire.TaskStateAuthRequired, reason)
-	var metadata jsontext.Value
-	if len(credentials) > 0 {
-		metadata, _ = json.Marshal(wire.CredentialMetadata{Credential: credentials[0]}) // a string always encodes
+	subject := strings.Join(reasons, " and ")
+	verb, configure := "were", "configure them"
+	if len(credentials) == 1 && !urls {
+		verb, configure = "was", "add it to credentials"
+	} else if len(credentials) > 0 && !urls {
+		configure = "add them to credentials"
+	} else if len(credentials) > 0 {
+		configure = "add the credentials and storage"
 	}
-	if err := run.commit(ctx, append([]*kgo.Record{run.result(status, reason, nil)}, run.statusRecords("interrupted", status, nil, metadata)...)...); err != nil {
-		return run.abandon(err)
-	}
-	run.release(ctx)
-	return kgo.AckAccept
+	return subject + " " + verb + " not answered within 5m; " + configure + " in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
 }
 
-// startFailure purges the turn's job and returns the task to the pool for a member that can start it.
+// startFailure purges the run's job and returns the task to the pool for a member that can start it.
 func (run *activeRun) startFailure(ctx context.Context, class string) kgo.AckStatus {
 	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.attempt, run.adapter.Name, class)); err != nil {
 		return run.abandon(err)
@@ -1503,7 +1423,7 @@ func (run *activeRun) startFailure(ctx context.Context, class string) kgo.AckSta
 func (run *activeRun) purge(ctx context.Context) error {
 	deadline := time.Now().Add(purgeDeadline)
 	for {
-		err := run.adapter.Adapter.Purge(ctx, run.task.Wherry.Run, run.task.Wherry.Turn)
+		err := run.adapter.Adapter.Purge(ctx, run.task.Wherry.Run)
 		if err != nil {
 			run.receiver.metrics.purgeFailures.WithLabelValues(run.adapter.Name).Inc()
 		}
@@ -1528,7 +1448,7 @@ func (run *activeRun) reconcile(ctx context.Context) (adapter.Job, bool) {
 		if i > 0 {
 			sleep(ctx, reconcileInterval)
 		}
-		job, err := run.adapter.Adapter.Lookup(ctx, run.task.Wherry.Run, run.task.Wherry.Turn)
+		job, err := run.adapter.Adapter.Lookup(ctx, run.task.Wherry.Run)
 		if err == nil {
 			return job, true
 		}
@@ -1592,7 +1512,7 @@ func (run *activeRun) conclude(ctx context.Context, handle adapter.Handle, pendi
 }
 
 // collect reads the outputs of a stopped job, redacts them and keeps their chunks and the result's lists of what the
-// turn returned and did not. S3 outputs are uploaded as Collect streams them, unredacted, since they go to the host's own
+// run returned and did not. S3 outputs are uploaded as Collect streams them, unredacted, since they go to the host's own
 // bucket and never to the feed. Every expected output is listed as one or the other.
 func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stopped bool) {
 	state, _, _ := run.receiver.snapshot()
@@ -1683,7 +1603,7 @@ type storedOutput struct {
 }
 
 // collected runs the adapter's Collect under limit and uploads each streamed S3 output into stored as it arrives.
-// Collect may run until the turn's deadline, when its PUT URLs expire. The count and total are checked again here, so a
+// Collect may run until the run's deadline, when its PUT URLs expire. The count and total are checked again here, so a
 // plugin that ignores the limits cannot grow the run's memory.
 func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stopped bool, limit int64, stored map[string]storedOutput) ([]adapter.Output, error) {
 	if !stopped {
@@ -1792,7 +1712,7 @@ func (run *activeRun) store(ctx context.Context, output adapter.Output) storedOu
 	}
 	return storedOutput{output: wire.ReturnedOutput{
 		Name: output.Name, SHA256: hex.EncodeToString(sum.Sum(nil)), Size: output.Size,
-		Key: wire.S3OutputKey(run.task.Wherry.Tenant, run.task.Wherry.Run, run.task.Wherry.Turn, output.Name),
+		Key: wire.S3OutputKey(run.task.Wherry.Tenant, run.task.Wherry.Run, output.Name),
 	}}
 }
 
@@ -1876,7 +1796,7 @@ func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result st
 }
 
 func (run *activeRun) release(ctx context.Context) {
-	if err := run.adapter.Adapter.Release(ctx, run.task.Wherry.Run, run.task.Wherry.Turn); err != nil {
+	if err := run.adapter.Adapter.Release(ctx, run.task.Wherry.Run); err != nil {
 		run.receiver.logger.Printf("run %s: release: %s", run.task.Wherry.Run, logText(run, err))
 	}
 }
@@ -1917,16 +1837,12 @@ func (run *activeRun) feed(value wire.Record) *kgo.Record {
 }
 
 func (r *Receiver) binding(task *wire.Submission, attempt int64) wire.ReceiverBinding {
-	return wire.ReceiverBinding{Receiver: r.id, Tenant: task.Wherry.Tenant, Pool: r.config.Pool, Run: task.Wherry.Run, Turn: task.Wherry.Turn, Attempt: attempt}
+	return wire.ReceiverBinding{Receiver: r.id, Tenant: task.Wherry.Tenant, Pool: r.config.Pool, Run: task.Wherry.Run, Attempt: attempt}
 }
 
-// status builds a run status; a CANCELED terminal has the turn's fixed event ID, since every
-// member that reads the cancel of an interrupted run writes it.
+// status builds a run status.
 func (r *Receiver) status(task *wire.Submission, hash string, attempt int64, kind string, status wire.TaskStatus, offset *int64) *wire.RunStatus {
 	eventID := wire.RandomID("event-")
-	if kind == "terminal" && status.State == wire.TaskStateCanceled {
-		eventID = fmt.Sprintf("%s/%d/canceled", task.Wherry.Run, task.Wherry.Turn)
-	}
 	return &wire.RunStatus{
 		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: task.Wherry.Run, ContextID: task.Wherry.Run, Status: status},
 		Wherry:       wire.StatusBinding{ReceiverBinding: r.binding(task, attempt), EventID: eventID, Kind: kind, TaskHash: hash, LogOffset: offset},
@@ -1990,7 +1906,7 @@ func escapedLength(text []byte) int {
 	return len(quoted) - 2
 }
 
-// result builds the turn's final task for the feed; a result that is JSON travels as a data part.
+// result builds the run's final task for the feed; a result that is JSON travels as a data part.
 func (run *activeRun) result(status wire.TaskStatus, result string, resultMetadata jsontext.Value) *kgo.Record {
 	result = run.redactText(result)
 	if resultMetadata != nil {
@@ -2013,8 +1929,7 @@ func (run *activeRun) result(status wire.TaskStatus, result string, resultMetada
 	return run.feed(&wire.Result{
 		Task: wire.Task{
 			ID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run, Status: status,
-			// Earlier turns are on the feed in their own results.
-			History:   inputPointers(run.history[len(run.history)-1:]),
+			History:   inputPointers(run.history),
 			Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{part}, Metadata: resultMetadata, Extensions: []string{wire.ExtensionURI}}},
 			Metadata:  metadata,
 		},
@@ -2044,62 +1959,7 @@ func inputPointers(history []wire.Message) []wire.Message {
 	return stripped
 }
 
-// errInterruptedTurnNotFound is endInterrupted's answer for a turn whose host has ended or whose record has expired.
-var errInterruptedTurnNotFound = errors.New("interrupted turn not found")
-
-// endInterrupted ends an interrupted run whose first turn was submitted more than lifetime ago, or returns that
-// submission time. No member holds the run, so every member uses the turn's fixed CANCELED event ID.
-func (r *Receiver) endInterrupted(ctx context.Context, interrupted wire.RunStatus, reason string, lifetime time.Duration) (time.Time, error) {
-	events, err := r.readEvents(ctx)
-	if err != nil {
-		return time.Time{}, err
-	}
-	runID, turn := interrupted.Wherry.Run, interrupted.Wherry.Turn
-	if slices.ContainsFunc(events.statuses[runID], func(status wire.RunStatus) bool {
-		return status.Wherry.EventID == fmt.Sprintf("%s/%d/canceled", runID, turn)
-	}) {
-		return time.Time{}, nil
-	}
-	if latest := latestStatus(events.statuses[runID], interrupted.Wherry.Tenant); latest == nil || latest.Wherry.EventID != interrupted.Wherry.EventID {
-		return time.Time{}, nil
-	}
-	all, err := r.readTurns(ctx, runID)
-	if err != nil {
-		return time.Time{}, err
-	}
-	index := slices.IndexFunc(all, func(submission runSubmission) bool { return submission.hash == interrupted.Wherry.TaskHash })
-	if index < 0 || all[index].record.Wherry.Turn != turn || all[index].record.Wherry.Tenant != interrupted.Wherry.Tenant {
-		return time.Time{}, errInterruptedTurnNotFound
-	}
-	task := all[index].record
-	if first, ok := bindTurns(all, task, events)[1]; ok && time.Since(first.submitted) <= lifetime {
-		return first.submitted, nil
-	}
-	// The result carries only the turn's own message, so a first turn gone from the task topic does not matter.
-	// The run's own transactional ID would fence a member that has meanwhile claimed a continuation.
-	run := &activeRun{receiver: r, task: task, taskHash: interrupted.Wherry.TaskHash, history: []wire.Message{task.Message}, attempt: interrupted.Wherry.Attempt}
-	status := taskStatus(wire.TaskStateCanceled, reason)
-	if err := r.admissionCommit(ctx, append([]*kgo.Record{run.result(status, reason, nil)}, run.statusRecords("terminal", status, nil, nil)...)...); err != nil {
-		return time.Time{}, err
-	}
-	run.ended(status.State, nil)
-	r.logger.Printf("run %s: ended interrupted turn %d: %s", runID, turn, reason)
-	return time.Time{}, nil
-}
-
-func turns(submissions map[int64]runSubmission, task *wire.Submission) ([]wire.Message, error) {
-	history := make([]wire.Message, 0, task.Wherry.Turn)
-	for turn := int64(1); turn <= task.Wherry.Turn; turn++ {
-		submission, ok := submissions[turn]
-		if !ok {
-			return nil, fmt.Errorf("submission turn %d not found", turn)
-		}
-		history = append(history, submission.record.Message)
-	}
-	return history, nil
-}
-
-// lastOffset returns the highest started or heartbeat log offset this turn reached under an earlier attempt.
+// lastOffset returns the highest started or heartbeat log offset this run reached under an earlier attempt.
 func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash string) (int64, error) {
 	events, err := r.readEvents(ctx)
 	if err != nil {
@@ -2107,7 +1967,7 @@ func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash s
 	}
 	var highest int64
 	for _, status := range events.statuses[task.Wherry.Run] {
-		if status.Wherry.Tenant != task.Wherry.Tenant || status.Wherry.Turn != task.Wherry.Turn || status.Wherry.TaskHash != hash ||
+		if status.Wherry.Tenant != task.Wherry.Tenant || status.Wherry.TaskHash != hash ||
 			(status.Wherry.Kind != "started" && status.Wherry.Kind != "heartbeat") || status.Wherry.LogOffset == nil {
 			continue
 		}
@@ -2155,7 +2015,7 @@ func resultLine(data []byte) (agentResult, bool) {
 
 // resultRecognizer returns the recogniser for output and the log offset of the line it needs read again after
 // adoption, if any: a Codex result is the last agent message, carried on an earlier line than turn.completed. With
-// file, no line ends the turn.
+// file, no line ends the run.
 func resultRecognizer(output string) (func(adapter.Line) (agentResult, bool), func() (int64, bool)) {
 	none := func() (int64, bool) { return 0, false }
 	if output == "file" {
@@ -2224,10 +2084,6 @@ func agentResultMetadata(data []byte, names ...string) jsontext.Value {
 	metadata, _ := json.Marshal(map[string]jsontext.Value{"agent_result": rest}) // a valid object always encodes
 	return metadata
 }
-
-// resumedHeader opens a continuation's prompt. Every interrupt today happens before dispatch, so no
-// earlier turn reached an agent; a per-turn transcript would read as work already done.
-const resumedHeader = "This request was interrupted before any of it was carried out. Carry out all of it now. Its parts follow in the order they were sent."
 
 // preamble tells the agent the full path of each file it has and of each it is asked to leave, so an agent without a
 // shell finds them, and how to clone a git input; it names credential files, never their values. A directory the
@@ -2326,16 +2182,9 @@ func gitPreamble(git *wire.GitInput, run, knownHosts, credentialDir, outputDir s
 	return append(lines, "Push only if the request asks you to, and then only to the branch wherry/"+run+":", "    git -C "+checkout+" push origin HEAD:refs/heads/wherry/"+run)
 }
 
-// prompt is the first turn's text alone, or every turn's text as one request under resumedHeader.
+// prompt is the run's text.
 func prompt(history []wire.Message) string {
-	if len(history) == 1 {
-		return text(history[0])
-	}
-	sections := []string{resumedHeader}
-	for _, message := range history {
-		sections = append(sections, text(message))
-	}
-	return strings.Join(sections, "\n\n")
+	return text(history[0])
 }
 
 func text(message wire.Message) string {

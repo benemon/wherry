@@ -26,15 +26,14 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// AwaitResult is the accepted outcome of the latest turn; Task is nil when a status record ended it.
+// AwaitResult is the accepted outcome of a run; Task is nil when a status record ended it.
 type AwaitResult struct {
 	Task   *wire.Task
 	Status wire.TaskStatus
-	Turn   int64
 	// Model is the model the run's placement names, and ServedModels the models the agent's result reports serving it.
 	Model        string
 	ServedModels []string
-	// Outputs are the turn's outputs that verified against its result.
+	// Outputs are the run's outputs that verified against its result.
 	Outputs []Output
 	// Stored are the S3 outputs the result lists for DownloadOutputs.
 	Stored []wire.ReturnedOutput
@@ -48,7 +47,7 @@ type AwaitResult struct {
 	Skipped  int
 }
 
-// Output is an output of a turn, verified against the size and SHA-256 its result lists: its bytes, or for an S3
+// Output is an output of a run, verified against the size and SHA-256 its result lists: its bytes, or for an S3
 // output the Path DownloadOutputs wrote it to.
 type Output struct {
 	Name   string
@@ -58,16 +57,14 @@ type Output struct {
 	Path   string
 }
 
-// StatusResult is the latest verified status of a run's latest turn.
+// StatusResult is the latest verified status of a run.
 type StatusResult struct {
 	RunID  string
 	Pool   string
-	Turn   int64
 	Status wire.TaskStatus
 	// Model is the model the run's placement names.
 	Model string
-	// Updated is the time of Status; while no receiver has reported one, this host's submission of the turn, else the
-	// Kafka timestamp of the turn's echo.
+	// Updated is the time of Status; while no receiver has reported one, this host's submission, else the echo's time.
 	Updated time.Time
 	// Redacted counts, by name, the redaction markers of the run's values in Status, where each reads
 	// [redacted:<name>] instead.
@@ -75,16 +72,10 @@ type StatusResult struct {
 	Skipped  int
 }
 
-// TurnAttempt identifies one delivery attempt within one submission turn.
-type TurnAttempt struct {
-	Turn    int64
-	Attempt int64
-}
-
-// EventsResult contains a run's verified statuses and its transcript chunk count per turn and attempt.
+// EventsResult contains a run's verified statuses and its transcript chunk count per attempt.
 type EventsResult struct {
 	Statuses []wire.RunStatus
-	Chunks   map[TurnAttempt]int
+	Chunks   map[int64]int
 	// Redacted counts, by name, the redaction markers of the run's values in the statuses' messages, where each reads
 	// [redacted:<name>] instead.
 	Redacted map[string]int
@@ -99,9 +90,8 @@ type TranscriptLine struct {
 	Part    wire.Part
 }
 
-// TranscriptResult is one turn's transcript. Attempt is the turn's highest attempt, which supersedes the others.
+// TranscriptResult is a run's transcript. Attempt is its highest attempt, which supersedes the others.
 type TranscriptResult struct {
-	Turn    int64
 	Attempt int64
 	Lines   []TranscriptLine
 	// Redacted counts, by name, the redaction markers of the run's values in Lines, where each reads
@@ -110,9 +100,9 @@ type TranscriptResult struct {
 	Skipped  int
 }
 
-// turn binds a turn's records: its task hash, and the echo of its admission and the echo's Kafka timestamp once a
+// binding binds a run's records: its task hash, and the echo of its admission and the echo's Kafka timestamp once a
 // receiver has written one.
-type turn struct {
+type binding struct {
 	hash     string
 	echo     *wire.Echo
 	echoedAt time.Time
@@ -145,14 +135,12 @@ type runView struct {
 	// reread holds the kids whose owner's key topic has been re-read, which bounds re-reads to one per key.
 	reread map[string]bool
 
-	turns       map[int64]turn
-	latest      int64
-	statuses    []*wire.RunStatus
-	chunks      []*wire.Chunk
-	outputs     []*wire.Output
-	skipped     int
-	outcome     *AwaitResult
-	outcomeTurn int64
+	binding  binding
+	statuses []*wire.RunStatus
+	chunks   []*wire.Chunk
+	outputs  []*wire.Output
+	skipped  int
+	outcome  *AwaitResult
 	// result is the result that set the outcome, nil when a status did.
 	result *wire.Result
 }
@@ -261,7 +249,7 @@ func (r *runView) add(ctx context.Context, record *kgo.Record) {
 	}
 }
 
-// read takes a bounded read of the feed: echoes first, so a status committed before its turn's echo still binds.
+// read takes a bounded read of the feed: echoes first, so a status committed before its run's echo still binds.
 func (r *runView) read(ctx context.Context, records []*kgo.Record) {
 	echoes := make([]bool, len(records))
 	for i, record := range records {
@@ -282,24 +270,21 @@ func (r *runView) derive() {
 		config, ok := r.v.state.Receivers[receiver]
 		return ok && config.Pool == r.pool && !r.v.state.Ended[admin.ReceiverPrincipal(receiver)] && r.v.state.Entitlements[r.h.tenant][r.pool]
 	}
-	r.turns, r.latest, r.statuses, r.chunks, r.outputs, r.skipped, r.outcome, r.outcomeTurn, r.result = map[int64]turn{}, 0, nil, nil, nil, r.unread, nil, 0, nil
+	r.binding, r.statuses, r.chunks, r.outputs, r.skipped, r.outcome, r.result = binding{}, nil, nil, nil, r.unread, nil, nil
 	if r.local != nil {
-		r.latest = r.local.Turn
-		r.turns[r.local.Turn] = turn{hash: r.local.TaskHash}
+		r.binding.hash = r.local.TaskHash
 	}
 	for _, e := range r.entries {
 		if e.echo == nil || !live(e.receiver) {
 			continue
 		}
-		known, ok := r.turns[e.echo.Turn]
-		if ok && known.hash != e.echo.TaskHash {
+		if r.binding.hash != "" && r.binding.hash != e.echo.TaskHash {
 			r.skipped++
 			continue
 		}
-		if known.echo == nil {
-			r.turns[e.echo.Turn] = turn{hash: e.echo.TaskHash, echo: e.echo, echoedAt: e.at}
+		if r.binding.echo == nil {
+			r.binding = binding{hash: e.echo.TaskHash, echo: e.echo, echoedAt: e.at}
 		}
-		r.latest = max(r.latest, e.echo.Turn)
 	}
 	var filter wire.AttemptFilter
 	for _, e := range r.entries {
@@ -313,42 +298,38 @@ func (r *runView) derive() {
 		switch {
 		case e.status != nil:
 			status := e.status
-			if r.turns[status.Wherry.Turn].hash != status.Wherry.TaskHash {
+			if r.binding.hash != status.Wherry.TaskHash {
 				r.skipped++
 				continue
 			}
 			r.statuses = append(r.statuses, status)
 			if ends(status) && admit(&filter, status) {
-				r.outcome, r.outcomeTurn, r.result = &AwaitResult{Status: status.StatusUpdate.Status}, status.Wherry.Turn, nil
+				r.outcome, r.result = &AwaitResult{Status: status.StatusUpdate.Status}, nil
 			}
 		case e.chunk != nil:
-			if r.turns[e.chunk.Wherry.Turn].hash != e.chunk.Wherry.TaskHash {
+			if r.binding.hash != e.chunk.Wherry.TaskHash {
 				r.skipped++
 				continue
 			}
 			r.chunks = append(r.chunks, e.chunk)
 		case e.output != nil:
-			if r.turns[e.output.Wherry.Turn].hash != e.output.Wherry.TaskHash {
+			if r.binding.hash != e.output.Wherry.TaskHash {
 				r.skipped++
 				continue
 			}
 			r.outputs = append(r.outputs, e.output)
 		default:
 			result := e.result
-			binding := r.turns[result.Wherry.Turn]
-			if binding.echo == nil || binding.hash != result.Wherry.TaskHash || len(result.Task.History) != 1 ||
-				result.Task.History[0].MessageID != binding.echo.MessageID {
+			if r.binding.echo == nil || r.binding.hash != result.Wherry.TaskHash || len(result.Task.History) != 1 ||
+				result.Task.History[0].MessageID != r.binding.echo.MessageID {
 				r.skipped++
 				continue
 			}
 			state := result.Task.Status.State
-			if (wire.Terminal(state) || wire.Interrupted(state)) && filter.Admit(r.run, result.Wherry.Turn, result.Wherry.Attempt) {
-				r.outcome, r.outcomeTurn, r.result = &AwaitResult{Task: &result.Task, Status: result.Task.Status}, result.Wherry.Turn, result
+			if wire.Terminal(state) && filter.Admit(r.run, result.Wherry.Attempt) {
+				r.outcome, r.result = &AwaitResult{Task: &result.Task, Status: result.Task.Status}, result
 			}
 		}
-	}
-	if r.outcome != nil && r.outcomeTurn != r.latest {
-		r.outcome = nil
 	}
 }
 
@@ -370,24 +351,15 @@ func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
 	return r, nil
 }
 
-// admit applies filter to a status. Every pool member writes the CANCELED terminal of an interrupted run under one
-// event ID and with its own attempt, so that terminal is always current.
+// admit applies filter to a status.
 func admit(filter *wire.AttemptFilter, status *wire.RunStatus) bool {
-	return canceled(status) || filter.Admit(status.Wherry.Run, status.Wherry.Turn, status.Wherry.Attempt)
+	return filter.Admit(status.Wherry.Run, status.Wherry.Attempt)
 }
 
-// canceled reports whether status is the CANCELED terminal of an interrupted run.
-func canceled(status *wire.RunStatus) bool {
-	binding := status.Wherry
-	return binding.Kind == "terminal" && status.StatusUpdate.Status.State == wire.TaskStateCanceled && binding.EventID == fmt.Sprintf("%s/%d/canceled", binding.Run, binding.Turn)
-}
-
-// ends reports whether a status ends a turn without a result to wait for.
+// ends reports whether a status ends a run without a result to wait for.
 func ends(status *wire.RunStatus) bool {
 	state := status.StatusUpdate.Status.State
 	switch status.Wherry.Kind {
-	case "interrupted":
-		return wire.Interrupted(state)
 	case "rejected":
 		return state == wire.TaskStateRejected
 	case "terminal":
@@ -396,7 +368,7 @@ func ends(status *wire.RunStatus) bool {
 	return false
 }
 
-// Status returns the latest verified status of runID's latest turn, SUBMITTED until a receiver reports one.
+// Status returns the latest verified status of runID, SUBMITTED until a receiver reports one.
 func (h *Host) Status(ctx context.Context, runID string) (StatusResult, error) {
 	r, err := h.history(ctx, runID)
 	if err != nil {
@@ -470,17 +442,17 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 	return result, nil
 }
 
-// status is the latest verified status of the run's latest turn, SUBMITTED until a receiver reports one.
+// status is the latest verified status of the run, SUBMITTED until a receiver reports one.
 func (r *runView) status() StatusResult {
-	result := StatusResult{RunID: r.run, Pool: r.pool, Turn: r.latest, Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Model: r.model(), Skipped: r.skipped}
+	result := StatusResult{RunID: r.run, Pool: r.pool, Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Model: r.model(), Skipped: r.skipped}
 	if r.local != nil && r.local.SubmittedMS > 0 {
 		result.Updated = time.UnixMilli(r.local.SubmittedMS)
 	} else {
-		result.Updated = r.turns[r.latest].echoedAt
+		result.Updated = r.binding.echoedAt
 	}
 	var filter wire.AttemptFilter
 	for _, status := range r.statuses {
-		if status.Wherry.Turn == r.latest && admit(&filter, status) {
+		if admit(&filter, status) {
 			result.Status = status.StatusUpdate.Status
 			result.Updated, _ = time.Parse(time.RFC3339, result.Status.Timestamp) // decoding validated it
 		}
@@ -490,13 +462,12 @@ func (r *runView) status() StatusResult {
 	return result
 }
 
-// model is the model of the run's placement, which every turn shares: this host's record of it, else its latest
-// echo's.
+// model is the model of the run's placement: this host's record of it, else its echo's.
 func (r *runView) model() string {
 	if r.local != nil {
 		return r.local.Placement.Model
 	}
-	if echo := r.turns[r.latest].echo; echo != nil {
+	if echo := r.binding.echo; echo != nil {
 		return echo.Placement.Model
 	}
 	return ""
@@ -565,7 +536,7 @@ func (h *Host) Events(ctx context.Context, runID string) (EventsResult, error) {
 	if r.pool == "" {
 		return EventsResult{}, fmt.Errorf("events %s: %w", runID, ErrRunNotFound)
 	}
-	result := EventsResult{Chunks: map[TurnAttempt]int{}, Redacted: map[string]int{}, Skipped: r.skipped}
+	result := EventsResult{Chunks: map[int64]int{}, Redacted: map[string]int{}, Skipped: r.skipped}
 	markers := h.markers(r.local)
 	seen := map[string]bool{}
 	for _, status := range r.statuses {
@@ -578,17 +549,15 @@ func (h *Host) Events(ctx context.Context, runID string) (EventsResult, error) {
 		result.Statuses = append(result.Statuses, record)
 	}
 	for _, chunk := range r.chunks {
-		result.Chunks[TurnAttempt{Turn: chunk.Wherry.Turn, Attempt: chunk.Wherry.Attempt}]++
+		result.Chunks[chunk.Wherry.Attempt]++
 	}
 	return result, nil
 }
 
-// Transcript returns the transcript of runID's turn, its latest when turn is 0, in seq order: the lines of the turn's
+// Transcript returns the transcript of runID in seq order: the lines of the
 // highest attempt, and before the first of them, or in place of them while it has none, each line of the highest
-// earlier attempt that has it. An adopter resumes the job's output past the offset of the last heartbeat, so the lines
-// before it are the earlier attempt's. The CANCELED terminal of an interrupted run, which every pool member writes with
-// its own attempt, does not count.
-func (h *Host) Transcript(ctx context.Context, runID string, turn int64) (TranscriptResult, error) {
+// earlier attempt that has it. An adopter resumes the job's output past the offset of the last heartbeat.
+func (h *Host) Transcript(ctx context.Context, runID string) (TranscriptResult, error) {
 	r, err := h.history(ctx, runID)
 	if err != nil {
 		return TranscriptResult{}, err
@@ -596,31 +565,19 @@ func (h *Host) Transcript(ctx context.Context, runID string, turn int64) (Transc
 	if r.pool == "" {
 		return TranscriptResult{}, fmt.Errorf("transcript %s: %w", runID, ErrRunNotFound)
 	}
-	if turn == 0 {
-		turn = r.latest
-	}
-	if turn < 1 || turn > r.latest {
-		return TranscriptResult{}, fmt.Errorf("%w: run %s has turns 1 to %d", ErrInvalidInput, runID, r.latest)
-	}
-	result := TranscriptResult{Turn: turn, Redacted: map[string]int{}, Skipped: r.skipped}
+	result := TranscriptResult{Redacted: map[string]int{}, Skipped: r.skipped}
 	for _, status := range r.statuses {
-		if status.Wherry.Turn == turn && !canceled(status) {
-			result.Attempt = max(result.Attempt, status.Wherry.Attempt)
-		}
+		result.Attempt = max(result.Attempt, status.Wherry.Attempt)
 	}
 	for _, chunk := range r.chunks {
-		if chunk.Wherry.Turn == turn {
-			result.Attempt = max(result.Attempt, chunk.Wherry.Attempt)
-		}
+		result.Attempt = max(result.Attempt, chunk.Wherry.Attempt)
 	}
 	var chunks []*wire.Chunk
 	first := int64(math.MaxInt64)
 	for _, chunk := range r.chunks {
-		if chunk.Wherry.Turn == turn {
-			chunks = append(chunks, chunk)
-			if chunk.Wherry.Attempt == result.Attempt {
-				first = min(first, chunk.Wherry.Seq)
-			}
+		chunks = append(chunks, chunk)
+		if chunk.Wherry.Attempt == result.Attempt {
+			first = min(first, chunk.Wherry.Seq)
 		}
 	}
 	sort.SliceStable(chunks, func(i, j int) bool { return chunks[i].Wherry.Attempt > chunks[j].Wherry.Attempt })
@@ -638,7 +595,7 @@ func (h *Host) Transcript(ctx context.Context, runID string, turn int64) (Transc
 	return result, nil
 }
 
-// Await follows the tenant feed until the run's latest turn has an outcome, answering seal requests while it waits.
+// Await follows the tenant feed until the run has an outcome, answering seal requests while it waits.
 // Each arrival re-reads wherry.admin and the receivers' keys and derives the run again, so nothing from a member ended
 // by then shapes the outcome.
 func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (AwaitResult, error) {
@@ -708,7 +665,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	for {
 		if r.outcome != nil {
 			outcome := *r.outcome
-			outcome.Skipped, outcome.Turn, outcome.Model = r.skipped, r.outcomeTurn, r.model()
+			outcome.Skipped, outcome.Model = r.skipped, r.model()
 			if r.result != nil {
 				outcome.Outputs, outcome.Stored, outcome.NotReturned, outcome.Rejected = r.verifiedOutputs(r.result)
 			}
@@ -819,14 +776,14 @@ func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.Returne
 	return verified, manifest.S3Outputs, manifest.NotReturned, rejected
 }
 
-// WriteOutputs writes a turn's verified outputs beneath dir, by default <state_dir>/runs/<run>/outputs/<turn>, and
+// WriteOutputs writes a run's verified outputs beneath dir, by default <state_dir>/runs/<run>/outputs, and
 // returns their paths. Every write stays inside dir, whatever links it holds.
-func (h *Host) WriteOutputs(runID string, turn int64, dir string, outputs []Output) ([]string, error) {
+func (h *Host) WriteOutputs(runID, dir string, outputs []Output) ([]string, error) {
 	if dir == "" {
 		if _, ok := h.runPath(runID); !ok {
 			return nil, errors.New("run ID does not name a local run path")
 		}
-		dir = h.outputDir(runID, turn)
+		dir = h.outputDir(runID)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err

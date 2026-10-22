@@ -233,6 +233,80 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	}
 }
 
+// TestUnansweredCredentialFailsOnRealBroker verifies that an expired seal wait is terminal and acknowledged.
+func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" {
+		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
+	}
+	shortIntervals(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+	hostKafka, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), map[string]string{}, log.New(&syncBuffer{}, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	if _, err := host.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	base, err := kgo.NewClient(b.opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, signing, _ := ed25519.GenerateKey(rand.Reader)
+	logs := &syncBuffer{}
+	fake := &fakeAdapter{stream: resultStream}
+	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
+			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: fake}, nil
+		}}
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- r.Run(runCtx) }()
+	defer func() { stop(); <-done }()
+	b.joined(t, ctx, logs)
+	submitted, err := host.Submit(ctx, client.SubmitInput{Prompt: "hello", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "credential " + credentialName + " was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
+	for {
+		status, statusErr := host.Status(ctx, submitted.RunID)
+		if statusErr == nil && status.Status.State == wire.TaskStateFailed {
+			if status.Status.Message == nil || len(status.Status.Message.Parts) != 1 || status.Status.Message.Parts[0].Text != want || strings.Contains(status.Status.Message.Parts[0].Text, testToken) {
+				t.Fatalf("failed status %+v, want the credential name and no value", status.Status)
+			}
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("run did not fail after its seal wait; status error %v; logs:\n%s", statusErr, logs.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	member, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ConsumeTopics(admin.PoolTasksTopic(b.pool)), kgo.ShareGroup(admin.PoolGroup(b.pool)), kgo.ShareMaxRecords(1))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer member.Close()
+	pollCtx, cancelPoll := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelPoll()
+	for _, record := range member.PollRecords(pollCtx, 1).Records() {
+		if string(record.Key) == submitted.RunID {
+			t.Fatal("failed task was redelivered")
+		}
+	}
+	if dispatches, _, _, _ := fake.counts(); dispatches != 0 {
+		t.Fatalf("unsealed run dispatched %d jobs", dispatches)
+	}
+}
+
 // TestFilesOnRealBroker runs a task with an input, a task credential and outputs filling the output limit from a
 // host's Submit to its Await on the real broker: the outputs' chunks commit in the result's transaction, within the
 // broker's record limit, and the host verifies them. The pool's inline limit is the highest a default broker carries
@@ -249,7 +323,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
 	terms := testTerms()
-	terms.InlineLimit = 493221
+	terms.InlineLimit = 493227
 	encoded, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
 	if err != nil {
 		t.Fatal(err)

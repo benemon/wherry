@@ -41,21 +41,21 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 	})
 
 	t.Run("Absent", func(t *testing.T) {
-		job, err := running.Lookup(ctx, id+"-absent", 1)
+		job, err := running.Lookup(ctx, id+"-absent")
 		if err != nil || job.State != adapter.JobAbsent {
 			t.Fatalf("lookup of an unknown run = %+v, %v; want absent", job, err)
 		}
-		idempotent(t, ctx, running, id+"-absent", 1, adapter.Handle{})
+		idempotent(t, ctx, running, id+"-absent", adapter.Handle{})
 	})
 
 	t.Run("Completes", func(t *testing.T) {
-		run := adapter.Run{ID: id, Adapter: completes.Name, Agent: completes.Agent, Turn: 1, Attempt: 3, Prompt: []byte("conformance prompt")}
+		run := adapter.Run{ID: id, Adapter: completes.Name, Agent: completes.Agent, Attempt: 3, Prompt: []byte("conformance prompt")}
 		purgeAfter(t, running, run)
 		handle := dispatch(t, ctx, running, run)
 		if _, again := dispatchOutcome(t, ctx, running, run); again.Name != handle.Name {
-			t.Fatalf("second dispatch of the same turn returned job %q, first %q", again.Name, handle.Name)
+			t.Fatalf("second dispatch of the same run returned job %q, first %q", again.Name, handle.Name)
 		}
-		job, err := running.Lookup(ctx, run.ID, run.Turn)
+		job, err := running.Lookup(ctx, run.ID)
 		if err != nil || job.State != adapter.JobRunning {
 			t.Fatalf("lookup while running = %+v, %v; want running", job, err)
 		}
@@ -65,21 +65,21 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 		if terminal := follow(t, ctx, running, handle); !terminal.Started || terminal.ExitCode != 0 {
 			t.Fatalf("terminal %+v; want started with exit code 0", terminal)
 		}
-		if job, err := running.Lookup(ctx, run.ID, run.Turn); err != nil || job.State != adapter.JobEnded {
+		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State != adapter.JobEnded {
 			t.Fatalf("lookup after the job ended = %+v, %v; want ended", job, err)
 		}
 		outputs := make(chan adapter.Output, 1)
 		if err := running.Collect(ctx, handle, adapter.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || len(outputs) != 0 {
 			t.Fatalf("collect from a job that wrote no outputs = %d outputs, %v; want none", len(outputs), err)
 		}
-		idempotent(t, ctx, running, run.ID, run.Turn, handle)
-		if job, err := running.Lookup(ctx, run.ID, run.Turn); err != nil || job.State != adapter.JobAbsent {
+		idempotent(t, ctx, running, run.ID, handle)
+		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State != adapter.JobAbsent {
 			t.Fatalf("lookup after purge = %+v, %v; want absent", job, err)
 		}
 	})
 
 	t.Run("Stop", func(t *testing.T) {
-		run := adapter.Run{ID: id, Adapter: completes.Name, Agent: completes.Agent, Turn: 2, Attempt: 1, Prompt: []byte("conformance prompt")}
+		run := adapter.Run{ID: id, Adapter: completes.Name, Agent: completes.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
 		purgeAfter(t, running, run)
 		handle := dispatch(t, ctx, running, run)
 		for range 2 {
@@ -87,22 +87,22 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 				t.Fatalf("stop: %v", err)
 			}
 		}
-		if job, err := running.Lookup(ctx, run.ID, run.Turn); err != nil || job.State == adapter.JobRunning {
+		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State == adapter.JobRunning {
 			t.Fatalf("lookup after stop = %+v, %v; want the job not running", job, err)
 		}
 	})
 
 	t.Run("NeverStarts", func(t *testing.T) {
-		run := adapter.Run{ID: id + "-never", Adapter: neverStarts.Name, Agent: neverStarts.Agent, Turn: 1, Attempt: 1, Prompt: []byte("conformance prompt")}
+		run := adapter.Run{ID: id + "-never", Adapter: neverStarts.Name, Agent: neverStarts.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
 		purgeAfter(t, failing, run)
 		handle := dispatch(t, ctx, failing, run)
-		if job, err := failing.Lookup(ctx, run.ID, run.Turn); err != nil || job.State != adapter.JobNeverStarted {
+		if job, err := failing.Lookup(ctx, run.ID); err != nil || job.State != adapter.JobNeverStarted {
 			t.Fatalf("lookup = %+v, %v; want never started", job, err)
 		}
 		if terminal := follow(t, ctx, failing, handle); terminal.Started {
 			t.Fatalf("terminal %+v; want not started", terminal)
 		}
-		idempotent(t, ctx, failing, run.ID, run.Turn, handle)
+		idempotent(t, ctx, failing, run.ID, handle)
 	})
 }
 
@@ -119,8 +119,8 @@ func purgeAfter(t *testing.T, a adapter.Adapter, run adapter.Run) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := a.Purge(ctx, run.ID, run.Turn); err != nil {
-			t.Errorf("purge %s turn %d: %v", run.ID, run.Turn, err)
+		if err := a.Purge(ctx, run.ID); err != nil {
+			t.Errorf("purge %s: %v", run.ID, err)
 		}
 	})
 }
@@ -129,7 +129,7 @@ func dispatchOutcome(t *testing.T, ctx context.Context, a adapter.Adapter, run a
 	t.Helper()
 	outcome, handle, err := a.Dispatch(ctx, run)
 	if err != nil {
-		t.Fatalf("dispatch %s turn %d: %v", run.ID, run.Turn, err)
+		t.Fatalf("dispatch %s: %v", run.ID, err)
 	}
 	if len(handle.Data) > maxHandle || handle.Name == "" {
 		t.Fatalf("handle of %d bytes named %q; want at most %d bytes and a name", len(handle.Data), handle.Name, maxHandle)
@@ -141,7 +141,7 @@ func dispatch(t *testing.T, ctx context.Context, a adapter.Adapter, run adapter.
 	t.Helper()
 	outcome, handle := dispatchOutcome(t, ctx, a, run)
 	if outcome != adapter.OutcomeCreated {
-		t.Fatalf("dispatch %s turn %d: outcome %d; want created", run.ID, run.Turn, outcome)
+		t.Fatalf("dispatch %s: outcome %d; want created", run.ID, outcome)
 	}
 	return handle
 }
@@ -170,8 +170,8 @@ func follow(t *testing.T, ctx context.Context, a adapter.Adapter, handle adapter
 	}
 }
 
-// idempotent stops a turn's job twice, then releases it twice, then purges it twice; every call succeeds.
-func idempotent(t *testing.T, ctx context.Context, a adapter.Adapter, runID string, turn int64, handle adapter.Handle) {
+// idempotent stops a run's job twice, then releases it twice, then purges it twice; every call succeeds.
+func idempotent(t *testing.T, ctx context.Context, a adapter.Adapter, runID string, handle adapter.Handle) {
 	t.Helper()
 	for range 2 {
 		if handle.Data != nil {
@@ -181,12 +181,12 @@ func idempotent(t *testing.T, ctx context.Context, a adapter.Adapter, runID stri
 		}
 	}
 	for range 2 {
-		if err := a.Release(ctx, runID, turn); err != nil {
+		if err := a.Release(ctx, runID); err != nil {
 			t.Fatalf("release: %v", err)
 		}
 	}
 	for range 2 {
-		if err := a.Purge(ctx, runID, turn); err != nil {
+		if err := a.Purge(ctx, runID); err != nil {
 			t.Fatalf("purge: %v", err)
 		}
 	}

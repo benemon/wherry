@@ -168,7 +168,7 @@ func TestCallsReachTheAdapterTheyName(t *testing.T) {
 	p, record, _ := launch(t)
 	a, b := configured(t, p, "a", "{}"), configured(t, p, "b", "{}")
 	for name, adapter := range map[string]Adapter{"a": a, "b": b} {
-		outcome, handle, err := adapter.Dispatch(context.Background(), Run{ID: "run-" + name, Adapter: name, Agent: "claude", Turn: 1})
+		outcome, handle, err := adapter.Dispatch(context.Background(), Run{ID: "run-" + name, Adapter: name, Agent: "claude"})
 		if err != nil || outcome != OutcomeCreated || handle.Name != name+"/run-"+name {
 			t.Fatalf("adapter %s dispatch: %v %+v %v; want its own instance's handle", name, outcome, handle, err)
 		}
@@ -192,14 +192,14 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 	t.Setenv("WHERRY_TESTPLUGIN_ENV", "from-the-receiver")
 	p, record, _ := launch(t)
 	a := configured(t, p, "a", "{}")
-	run := Run{ID: "run-a", Adapter: "a", Agent: "claude", Model: "sonnet", Turn: 2, Attempt: 3, Prompt: []byte("hello"), Credential: []byte(runCredential),
+	run := Run{ID: "run-a", Adapter: "a", Agent: "claude", Model: "sonnet", Attempt: 3, Prompt: []byte("hello"), Credential: []byte(runCredential),
 		Inputs:      []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty", Data: []byte{}}},
 		Credentials: []Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte(runCredential)}},
 		Fetches:     []Fetch{{Name: "dataset.bin", URL: "https://store.example.test/bucket/key?X-Amz-Signature=0", Size: 5 << 20, SHA256: strings.Repeat("a", 64)}}}
 	if _, _, err := a.Dispatch(context.Background(), run); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-b", Adapter: "a", Agent: "claude", Turn: 1}); err != nil {
+	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-b", Adapter: "a", Agent: "claude"}); err != nil {
 		t.Fatal(err)
 	}
 	var dispatched []*Run
@@ -212,7 +212,7 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 		}
 	}
 	got := dispatched[0]
-	if len(dispatched) != 2 || got.ID != run.ID || got.Model != "sonnet" || got.Turn != 2 || got.Attempt != 3 || string(got.Prompt) != "hello" || string(got.Credential) != runCredential ||
+	if len(dispatched) != 2 || got.ID != run.ID || got.Model != "sonnet" || got.Attempt != 3 || string(got.Prompt) != "hello" || string(got.Credential) != runCredential ||
 		!reflect.DeepEqual(got.Inputs, []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty"}}) || !reflect.DeepEqual(got.Credentials, run.Credentials) ||
 		!reflect.DeepEqual(got.Fetches, run.Fetches) {
 		t.Fatalf("plugin got %+v; want %+v", got, run)
@@ -310,7 +310,7 @@ func TestRestartConfiguresEveryAdapter(t *testing.T) {
 	})
 	eventually(t, "both adapters back after the restart", func() error {
 		for _, adapter := range []Adapter{a, b} {
-			if _, _, err := adapter.Dispatch(context.Background(), Run{ID: "after", Turn: 1}); err != nil {
+			if _, _, err := adapter.Dispatch(context.Background(), Run{ID: "after"}); err != nil {
 				return err
 			}
 		}
@@ -428,7 +428,7 @@ func TestSecretsStayOutOfLogs(t *testing.T) {
 		taskCredential = "ghp-task-credential-never-logged"
 		fetchURL       = "https://s3.example/bucket/wherry/tenant-a/run-a/inputs/data.bin?X-Amz-Signature=fetch-signature-never-logged"
 	)
-	run := Run{ID: "run-a", Turn: 1, Prompt: []byte("hello"), Credential: []byte(runCredential),
+	run := Run{ID: "run-a", Prompt: []byte("hello"), Credential: []byte(runCredential),
 		Credentials: []Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte(taskCredential)}},
 		Fetches:     []Fetch{{Name: "data.bin", URL: fetchURL, Size: 4, SHA256: strings.Repeat("0", 64)}}}
 	if _, _, err := a.Dispatch(context.Background(), run); err != nil {
@@ -483,10 +483,10 @@ func TestMetricsCrossTheLink(t *testing.T) {
 func TestLargeDispatch(t *testing.T) {
 	p, _, _ := launch(t)
 	a := configured(t, p, "a", "{}")
-	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-large", Turn: 1, Prompt: bytes.Repeat([]byte("p"), 5<<20)}); err != nil {
+	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-large", Prompt: bytes.Repeat([]byte("p"), 5<<20)}); err != nil {
 		t.Fatalf("5 MiB prompt: %v", err)
 	}
-	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-huge", Turn: 1, Prompt: bytes.Repeat([]byte("p"), maxMessage+1)}); !errors.Is(err, ErrMessageTooLarge) {
+	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-huge", Prompt: bytes.Repeat([]byte("p"), maxMessage+1)}); !errors.Is(err, ErrMessageTooLarge) {
 		t.Fatalf("prompt over the limit returned %v; want ErrMessageTooLarge", err)
 	}
 	if ready, err := a.Ready(context.Background()); !ready || err != nil {
@@ -511,7 +511,7 @@ func TestCloseStopsRestarts(t *testing.T) {
 func TestInputTooLargeCrossesTheLink(t *testing.T) {
 	p, _, _ := launch(t)
 	a := configured(t, p, "a", `{"too_large":"data.csv"}`)
-	outcome, _, err := a.Dispatch(context.Background(), Run{ID: "run-a", Turn: 1, Inputs: []File{{Name: "data.csv", Data: []byte("x")}}})
+	outcome, _, err := a.Dispatch(context.Background(), Run{ID: "run-a", Inputs: []File{{Name: "data.csv", Data: []byte("x")}}})
 	var tooLarge *InputTooLargeError
 	if outcome != OutcomeNothingCreated || !errors.As(err, &tooLarge) || tooLarge.Name != "data.csv" {
 		t.Fatalf("dispatch = %v, %v; want nothing created and input data.csv too large", outcome, err)
@@ -646,19 +646,18 @@ func TestServeHandsTheAdapterItsLogger(t *testing.T) {
 	})
 }
 
-// A plugin built against protocol version 5, which would omit its inline limit, answers go-plugin's
-// handshake with that version; this script answers as one would, before any TLS.
-func TestVersionFivePluginIsRefused(t *testing.T) {
+// A plugin built against protocol version 6 still carries turn fields and is incompatible.
+func TestVersionSixPluginIsRefused(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "wherry-plugin-old")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|5|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|6|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	p, err := Launch(fixed(script), &syncBuffer{})
 	if err == nil {
 		p.Close()
-		t.Fatal("launched a version 5 plugin")
+		t.Fatal("launched a version 6 plugin")
 	}
-	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 5, Client versions: [6]") {
+	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 6, Client versions: [7]") {
 		t.Fatalf("launch error %v; want the version named", err)
 	}
 }

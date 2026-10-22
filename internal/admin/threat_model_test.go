@@ -31,14 +31,14 @@ import (
 func testSubmission(tenant, host, pool, run string) *wire.Submission {
 	return &wire.Submission{
 		Message: wire.Message{MessageID: "message-" + run, ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "hello"}}, Extensions: []string{wire.ExtensionURI}},
-		Wherry:  wire.SubmissionBinding{Tenant: tenant, Host: host, Pool: pool, Run: run, Turn: 1, Placement: wire.Placement{Agent: "agent-a"}},
+		Wherry:  wire.SubmissionBinding{Tenant: tenant, Host: host, Pool: pool, Run: run, Placement: wire.Placement{Agent: "agent-a"}},
 	}
 }
 
 func testStatus(receiver, tenant, pool, run string) *wire.RunStatus {
 	return &wire.RunStatus{
 		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: run, ContextID: run, Status: wire.TaskStatus{State: wire.TaskStateWorking, Timestamp: "2026-10-19T10:00:00Z"}},
-		Wherry:       wire.StatusBinding{ReceiverBinding: wire.ReceiverBinding{Receiver: receiver, Tenant: tenant, Pool: pool, Run: run, Turn: 1, Attempt: 1}, EventID: "event-" + run, Kind: "started", TaskHash: strings.Repeat("a", 64)},
+		Wherry:       wire.StatusBinding{ReceiverBinding: wire.ReceiverBinding{Receiver: receiver, Tenant: tenant, Pool: pool, Run: run, Attempt: 1}, EventID: "event-" + run, Kind: "started", TaskHash: strings.Repeat("a", 64)},
 	}
 }
 
@@ -86,7 +86,7 @@ func TestCancelMustMatchRunTenant(t *testing.T) {
 	state := modelState(t)
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := signed.Keys{signed.HostOwner("tenant-b", "host-b"): {Current: key.Public().(ed25519.PublicKey)}}
-	cancel := sign(t, &wire.Cancel{Tenant: "tenant-b", Host: "host-b", Pool: "pool-a", Run: "run-a", Turn: 1}, key)
+	cancel := sign(t, &wire.Cancel{Tenant: "tenant-b", Host: "host-b", Pool: "pool-a", Run: "run-a"}, key)
 	if _, err := AuthorizeCancel(state, keys, cancel, "pool-a", "tenant-b"); err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +556,7 @@ func TestEchoAdvertisementAndSealRequestBindTheirPool(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}}
 	echo := func(tenant, pool string) []byte {
-		return sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: tenant, Pool: pool, Run: "run-a", Turn: 1, Placement: wire.Placement{Agent: "agent-a"}, TaskHash: strings.Repeat("a", 64), MessageID: "message-a"}, key)
+		return sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: tenant, Pool: pool, Run: "run-a", Placement: wire.Placement{Agent: "agent-a"}, TaskHash: strings.Repeat("a", 64), MessageID: "message-a"}, key)
 	}
 	if _, err := AuthorizeEcho(state, keys, echo("tenant-a", "pool-a"), "tenant-a"); err != nil {
 		t.Fatal(err)
@@ -575,7 +575,7 @@ func TestEchoAdvertisementAndSealRequestBindTheirPool(t *testing.T) {
 	}
 	sealKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	request := func(tenant, pool string) []byte {
-		return sign(t, &wire.SealRequest{ReceiverBinding: wire.ReceiverBinding{Receiver: "receiver-a", Tenant: tenant, Pool: pool, Run: "run-a", Turn: 1, Attempt: 1},
+		return sign(t, &wire.SealRequest{ReceiverBinding: wire.ReceiverBinding{Receiver: "receiver-a", Tenant: tenant, Pool: pool, Run: "run-a", Attempt: 1},
 			Key: jose.JSONWebKey{Key: &sealKey.PublicKey}, KeyID: signed.SealKeyID(&sealKey.PublicKey), Credentials: []string{"model"}, ExpiryMS: 1}, key)
 	}
 	if _, err := AuthorizeSealRequest(state, keys, request("tenant-a", "pool-a"), "pool-a", "tenant-a"); err != nil {

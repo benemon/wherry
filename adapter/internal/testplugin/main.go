@@ -101,7 +101,7 @@ func (f *fake) Dispatch(_ context.Context, run adapter.Run) (adapter.Outcome, ad
 	return adapter.OutcomeCreated, adapter.Handle{Data: []byte(run.ID), Name: f.settings.Name + "/" + run.ID}, nil
 }
 
-func (f *fake) Lookup(context.Context, string, int64) (adapter.Job, error) {
+func (f *fake) Lookup(context.Context, string) (adapter.Job, error) {
 	f.panics("Lookup")
 	return adapter.Job{}, nil
 }
@@ -151,12 +151,12 @@ func (f *fake) Collect(ctx context.Context, _ adapter.Handle, limits adapter.Lim
 	return nil
 }
 
-func (f *fake) Purge(context.Context, string, int64) error {
+func (f *fake) Purge(context.Context, string) error {
 	f.panics("Purge")
 	return nil
 }
 
-func (f *fake) Release(context.Context, string, int64) error {
+func (f *fake) Release(context.Context, string) error {
 	f.panics("Release")
 	return nil
 }

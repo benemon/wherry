@@ -201,14 +201,15 @@ func TestTaskCredentialOfTheAgentsNameIsAskedOnce(t *testing.T) {
 	}
 }
 
-func TestMissingTaskCredentialInterruptsNamingIt(t *testing.T) {
+func TestMissingTaskCredentialFailsNamingIt(t *testing.T) {
 	f := newFixture(t, resultStream)
-	if status := f.execute(t, f.submit(t, f.host, withDeployKey), 1); status != kgo.AckAccept {
+	if status := f.execute(t, f.submit(t, f.host, withDeployKey), 1); status != kgo.AckReject {
 		t.Fatalf("status %v", status)
 	}
 	task := f.lastTask(t)
-	if task.Status.State != wire.TaskStateAuthRequired || task.Status.Message.Parts[0].Text != "credentials "+credentialName+", deploy-key required" {
-		t.Fatalf("ended %s with %q, want AUTH_REQUIRED naming both credentials", task.Status.State, task.Status.Message.Parts[0].Text)
+	want := "credentials " + credentialName + ", deploy-key were not answered within 5m; add them to credentials in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
+	if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != want {
+		t.Fatalf("ended %s with %q, want FAILED naming both credentials", task.Status.State, task.Status.Message.Parts[0].Text)
 	}
 }
 
@@ -615,8 +616,8 @@ func TestOutputChunksAreBoundedAndCommittedWithTheResult(t *testing.T) {
 
 func TestInputTooLargeFailsTheTurnNamingIt(t *testing.T) {
 	for name, test := range map[string]struct{ reported, message string }{
-		"one of the run's inputs": {"data.csv", "input data.csv takes the turn's inputs over what adapter nomad delivers"},
-		"a name the run lacks":    {"other\nname", "an input takes the turn's inputs over what adapter nomad delivers"},
+		"one of the run's inputs": {"data.csv", "input data.csv takes the run's inputs over what adapter nomad delivers"},
+		"a name the run lacks":    {"other\nname", "an input takes the run's inputs over what adapter nomad delivers"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
@@ -699,30 +700,11 @@ func TestOutputsOfAJobThatWouldNotStopAreNotCollected(t *testing.T) {
 	run := testActiveRun(t, f, "run-unstopped", int64(testTerms().DeliveryLimit)-1)
 	run.expected = []wire.ExpectedOutput{{Name: "report.md"}, {Name: "notes.md"}}
 	result, _ := resultLine([]byte(resultStream[1]))
-	if status := run.finish(f.ctx, f.adapter.handle("run-unstopped", 1), nil, result); status != kgo.AckAccept {
+	if status := run.finish(f.ctx, f.adapter.handle("run-unstopped"), nil, result); status != kgo.AckAccept {
 		t.Fatalf("status %v, want the result accepted", status)
 	}
 	want := []wire.UnreturnedOutput{{Name: "report.md", Reason: "not collected"}, {Name: "notes.md", Reason: "not collected"}}
 	if listed := manifest(t, f.lastTask(t)); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, want) || f.adapter.collects != 0 {
 		t.Fatalf("returned %+v, not returned %+v after %d collects; want every output not collected and none", listed.Outputs, listed.NotReturned, f.adapter.collects)
-	}
-}
-
-func TestAContinuationRepeatingAnInputNameIsRejected(t *testing.T) {
-	f := newFixture(t, resultStream)
-	withInput := func(task *wire.Submission) {
-		task.Message.Parts = append(task.Message.Parts, wire.Part{Raw: wire.StdBytes("x"), Filename: "data.csv"})
-	}
-	first := f.submit(t, f.host, withInput)
-	f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
-	second := f.submit(t, f.host, func(task *wire.Submission) {
-		withInput(task)
-		task.Wherry.Turn, task.Message.MessageID = 2, "msg-2"
-	})
-	if admitted, ack := f.receiver.admit(f.ctx, second); admitted != nil || ack != kgo.AckReject {
-		t.Fatalf("admitted %v with ack %v, want a rejection", admitted, ack)
-	}
-	if statuses := f.feedStatuses(t); statuses[len(statuses)-1].StatusUpdate.Status.Message.Parts[0].Text != "input names repeat across turns" {
-		t.Fatalf("status %+v", statuses[len(statuses)-1].StatusUpdate.Status)
 	}
 }

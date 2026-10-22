@@ -34,7 +34,7 @@ func validSubmission() *Submission {
 		V:       1,
 		Message: Message{MessageID: "message-1", ContextID: "run-1", TaskID: "run-1", Role: RoleUser, Parts: []Part{{Text: "hello"}}, Extensions: []string{ExtensionURI}},
 		Wherry: SubmissionBinding{
-			Tenant: "tenant-1", Host: "host-1", Pool: "linux", Run: "run-1", Turn: 1,
+			Tenant: "tenant-1", Host: "host-1", Pool: "linux", Run: "run-1",
 			Placement:  Placement{Agent: "claude", Selector: []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}}},
 			DeadlineMS: 2_000, QueueDeadlineMS: 1_000,
 		},
@@ -42,7 +42,7 @@ func validSubmission() *Submission {
 }
 
 func receiverBinding() ReceiverBinding {
-	return ReceiverBinding{Receiver: "receiver-1", Tenant: "tenant-1", Pool: "linux", Run: "run-1", Turn: 1, Attempt: 1}
+	return ReceiverBinding{Receiver: "receiver-1", Tenant: "tenant-1", Pool: "linux", Run: "run-1", Attempt: 1}
 }
 
 func validStatus() *RunStatus {
@@ -82,7 +82,7 @@ func validResult() *Result {
 
 func validEcho() *Echo {
 	submission := validSubmission()
-	return &Echo{V: 1, Receiver: "receiver-1", Tenant: "tenant-1", Pool: "linux", Run: "run-1", Turn: 1, Placement: submission.Wherry.Placement, TaskHash: wireHash, MessageID: "message-1"}
+	return &Echo{V: 1, Receiver: "receiver-1", Tenant: "tenant-1", Pool: "linux", Run: "run-1", Placement: submission.Wherry.Placement, TaskHash: wireHash, MessageID: "message-1"}
 }
 
 // recordJSON marshals value as signed.Sign does.
@@ -161,7 +161,6 @@ func TestParseRecordIsStrict(t *testing.T) {
 		"duplicate member": replaceOnce(t, encoded, `"run":"run-1"`, `"run":"run-1","run":"run-1"`),
 		"unknown member":   replaceOnce(t, encoded, `"run":"run-1"`, `"run":"run-1","unexpected":true`),
 		"trailing value":   append(bytes.Clone(encoded), " {}"...),
-		"float integer":    replaceOnce(t, encoded, `"turn":1`, `"turn":1.5`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := parseJSON(t, "tenant-1.host-1", payload, &Submission{}); err == nil {
@@ -171,18 +170,22 @@ func TestParseRecordIsStrict(t *testing.T) {
 	}
 }
 
-func TestTurnAndAttemptRequired(t *testing.T) {
+func TestRecordWithTurnIsRefused(t *testing.T) {
+	payload := replaceOnce(t, recordJSON(t, validSubmission()), `"run":"run-1"`, `"run":"run-1","turn":1`)
+	if err := parseJSON(t, "tenant-1.host-1", payload, &Submission{}); err == nil {
+		t.Fatal("record carrying turn decoded")
+	}
+}
+
+func TestAttemptRequired(t *testing.T) {
 	for name, test := range map[string]struct {
 		value   Record
 		members []string
 	}{
-		"submission":    {validSubmission(), []string{`"turn":1`}},
-		"cancel":        {&Cancel{V: 1, Tenant: "tenant-1", Host: "host-1", Pool: "linux", Run: "run-1", Turn: 1}, []string{`"turn":1`}},
-		"echo":          {validEcho(), []string{`"turn":1`}},
-		"status":        {validStatus(), []string{`"turn":1`, `"attempt":1`}},
-		"chunk":         {validChunk(), []string{`"turn":1`, `"attempt":1`}},
-		"result":        {validResult(), []string{`"turn":1`, `"attempt":1`}},
-		"start failure": {&StartFailure{V: 1, Wherry: receiverBinding(), Adapter: "nomad", Agent: "claude", Class: "launch"}, []string{`"turn":1`, `"attempt":1`}},
+		"status":        {validStatus(), []string{`"attempt":1`}},
+		"chunk":         {validChunk(), []string{`"attempt":1`}},
+		"result":        {validResult(), []string{`"attempt":1`}},
+		"start failure": {&StartFailure{V: 1, Wherry: receiverBinding(), Adapter: "nomad", Agent: "claude", Class: "launch"}, []string{`"attempt":1`}},
 	} {
 		empty := func() Record { return reflect.New(reflect.TypeOf(test.value).Elem()).Interface().(Record) }
 		encoded := recordJSON(t, test.value)
@@ -202,27 +205,21 @@ func TestTurnAndAttemptRequired(t *testing.T) {
 	}
 }
 
-func TestAttemptFilterOrdersByTurn(t *testing.T) {
+func TestAttemptFilterOrdersByAttempt(t *testing.T) {
 	var filter AttemptFilter
-	if !filter.Admit("r", 1, 2) {
+	if !filter.Admit("r", 2) {
 		t.Fatal("first attempt rejected")
 	}
-	if filter.Admit("r", 1, 1) {
+	if filter.Admit("r", 1) {
 		t.Fatal("lower attempt admitted")
 	}
-	if !filter.Admit("r", 1, 2) {
+	if !filter.Admit("r", 2) {
 		t.Fatal("equal attempt rejected")
 	}
-	if !filter.Admit("r", 1, 3) {
+	if !filter.Admit("r", 3) {
 		t.Fatal("higher attempt rejected")
 	}
-	if !filter.Admit("r", 2, 1) {
-		t.Fatal("higher turn with restarted attempt rejected")
-	}
-	if filter.Admit("r", 1, 99) {
-		t.Fatal("lower turn with higher attempt admitted")
-	}
-	if !filter.Admit("other", 1, 1) {
+	if !filter.Admit("other", 1) {
 		t.Fatal("other run rejected")
 	}
 }
@@ -712,12 +709,6 @@ func TestAdvertisementOfferWithLabelsDoesNotDecode(t *testing.T) {
 }
 
 func TestGitInputPlacement(t *testing.T) {
-	continuation := validSubmission()
-	continuation.Wherry.Turn = 2
-	continuation.Wherry.Git = &GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"}
-	if err := continuation.validate(); err == nil || err.Error() != "only a run's first turn declares credentials, outputs, git and S3 inputs" {
-		t.Fatalf("continuation with git: %v", err)
-	}
 	clash := validSubmission()
 	clash.Wherry.Git = &GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", HostKey: hostKey}
 	clash.Message.Parts = append(clash.Message.Parts, Part{Raw: StdBytes("x"), Filename: KnownHostsFile})
@@ -775,7 +766,6 @@ func TestS3InputsAndOutputsValidation(t *testing.T) {
 		t.Fatalf("valid S3 inputs and outputs: %v", err)
 	}
 	for name, edit := range map[string]func(*Submission){
-		"continuation":   func(s *Submission) { s.Wherry.Turn, s.Wherry.Outputs = 2, nil },
 		"invalid name":   func(s *Submission) { s.Wherry.S3Inputs[0].Name = "../x" },
 		"duplicate name": func(s *Submission) { s.Wherry.S3Inputs[1].Name = "dataset.bin" },
 		"inline name": func(s *Submission) {
@@ -833,7 +823,7 @@ func TestS3Keys(t *testing.T) {
 	if got := S3InputKey("tenant-a", "run-a", "data.bin"); got != "wherry/tenant-a/run-a/inputs/data.bin" {
 		t.Errorf("input key %s", got)
 	}
-	if got := S3OutputKey("tenant-a", "run-a", 2, "out/report.pdf"); got != "wherry/tenant-a/run-a/2/outputs/out/report.pdf" {
+	if got := S3OutputKey("tenant-a", "run-a", "out/report.pdf"); got != "wherry/tenant-a/run-a/outputs/out/report.pdf" {
 		t.Errorf("output key %s", got)
 	}
 	if prefix := S3Prefix("tenant-a", "run-a"); !strings.HasSuffix(prefix, "/") || strings.HasPrefix(S3Prefix("tenant-a", "run-ab"), prefix) {

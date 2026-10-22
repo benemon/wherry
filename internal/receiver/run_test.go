@@ -110,30 +110,30 @@ func oneTransaction(records []*kgo.Record) bool {
 	return true
 }
 
-func TestInterruptedStatusSharesItsResultsTransaction(t *testing.T) {
+func TestFailedStatusSharesItsResultsTransaction(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.execute(t, f.submit(t, f.host, nil), 1)
 	records := f.records(t, admin.TenantTopic(testTenant))
-	// echo and claimed, the seal request, then the AUTH_REQUIRED result and the interrupted status.
+	// Echo and claimed, the seal request, then the FAILED result and terminal status.
 	if len(records) != 5 {
 		t.Fatalf("feed records %d, want 5", len(records))
 	}
 	var result wire.Result
-	var interrupted wire.RunStatus
-	if wire.ParseRecord(records[3].Value, f.keys(), &result) != nil || wire.ParseRecord(records[4].Value, f.keys(), &interrupted) != nil || interrupted.Wherry.Kind != "interrupted" {
-		t.Fatal("the result is not followed by the interrupted status")
+	var terminal wire.RunStatus
+	if wire.ParseRecord(records[3].Value, f.keys(), &result) != nil || wire.ParseRecord(records[4].Value, f.keys(), &terminal) != nil || terminal.Wherry.Kind != "terminal" {
+		t.Fatal("the result is not followed by the terminal status")
 	}
 	if !oneTransaction(records[3:]) || oneTransaction(records[2:4]) {
-		t.Fatal("the AUTH_REQUIRED result and its interrupted status are not one transaction of their own")
+		t.Fatal("the FAILED result and terminal status are not one transaction of their own")
 	}
 }
 
-func TestNoSealWithinTheWaitInterrupts(t *testing.T) {
+func TestSealWaitExpiryFailsWithoutCredentialValue(t *testing.T) {
 	f := newFixture(t, resultStream)
 	record := f.submit(t, f.host, nil)
 	before := time.Now().Add(-time.Second)
-	if status := f.execute(t, record, 1); status != kgo.AckAccept {
-		t.Fatalf("status %v, want accept", status)
+	if status := f.execute(t, record, 1); status != kgo.AckReject {
+		t.Fatalf("status %v, want reject", status)
 	}
 	f.adapter.mu.Lock()
 	dispatches, releases := f.adapter.dispatches, f.adapter.releases
@@ -143,24 +143,22 @@ func TestNoSealWithinTheWaitInterrupts(t *testing.T) {
 	}
 	statuses := f.feedStatuses(t)
 	if len(statuses) != 2 || len(f.eventStatuses(t)) != 2 {
-		t.Fatalf("feed statuses=%d, want claimed and interrupted on the feed and the pool's events", len(statuses))
+		t.Fatalf("feed statuses=%d, want claimed and terminal on the feed and the pool's events", len(statuses))
 	}
-	interrupted := statuses[1]
-	got := interrupted.StatusUpdate.Status
-	if interrupted.Wherry.Kind != "interrupted" || got.State != wire.TaskStateAuthRequired {
-		t.Fatalf("interrupted status %#v, want AUTH_REQUIRED", interrupted)
+	terminal := statuses[1]
+	got := terminal.StatusUpdate.Status
+	if terminal.Wherry.Kind != "terminal" || got.State != wire.TaskStateFailed {
+		t.Fatalf("terminal status %#v, want FAILED", terminal)
 	}
-	if got.Message == nil || got.Message.Role != wire.RoleAgent || len(got.Message.Parts) != 1 || got.Message.Parts[0].Text != "credential "+credentialName+" required" {
-		t.Fatalf("status message %#v, want one agent text part with the reason", got.Message)
+	want := "credential " + credentialName + " was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
+	if got.Message == nil || got.Message.Role != wire.RoleAgent || len(got.Message.Parts) != 1 || got.Message.Parts[0].Text != want || strings.Contains(got.Message.Parts[0].Text, testToken) {
+		t.Fatalf("status message %#v, want credential name and no value", got.Message)
 	}
 	if at, err := time.Parse(time.RFC3339, got.Timestamp); err != nil || at.Before(before) || at.After(time.Now()) {
 		t.Fatalf("status timestamp %q is not the time of the status: %v", got.Timestamp, err)
 	}
-	if got, want := string(interrupted.StatusUpdate.Metadata), `{"credential":"`+credentialName+`"}`; got != want {
-		t.Fatalf("status metadata %s, want %s", got, want)
-	}
-	if task := f.lastTask(t); task.Status.State != wire.TaskStateAuthRequired {
-		t.Fatalf("result %#v, want AUTH_REQUIRED beside the interrupted status", task)
+	if task := f.lastTask(t); task.Status.State != wire.TaskStateFailed || task.Status.Message == nil || task.Status.Message.Parts[0].Text != want {
+		t.Fatalf("result %#v, want FAILED beside the terminal status", task)
 	}
 }
 
@@ -187,7 +185,7 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 		want := map[string]any{
 			"receiver_id": testReceiver, "pool": testPool, "adapter": "nomad",
 			"labels": map[string]any{"zone": "dc1", "example.com/gpu": "none"},
-			"job":    "agent-run-a-t1",
+			"job":    "agent-run-a",
 		}
 		if got := decodeObject(t, f.lastTask(t).Metadata); !reflect.DeepEqual(got, want) {
 			t.Fatalf("task metadata %v, want %v", got, want)
@@ -197,10 +195,11 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 	t.Run("adopted", func(t *testing.T) {
 		m := newMultiFixture(t)
 		m.cloud.job = adapter.JobRunning
+		m.answer(t, "cred-cloud")
 		if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
-		want := map[string]any{"receiver_id": testReceiver, "pool": testPool, "adapter": "cloud", "job": "agent-run-moved-t1"}
+		want := map[string]any{"receiver_id": testReceiver, "pool": testPool, "adapter": "cloud", "job": "agent-run-moved"}
 		if got := decodeObject(t, m.lastTask(t).Metadata); !reflect.DeepEqual(got, want) {
 			t.Fatalf("task metadata %v, want %v", got, want)
 		}
@@ -546,7 +545,6 @@ func TestLastOffsetIgnoresMismatchedStatus(t *testing.T) {
 	for _, value := range [][]byte{
 		f.heartbeat(t, task, hash, testReceiver, f.receiver.signing, 42, nil),
 		f.heartbeat(t, task, strings.Repeat("c", 64), testReceiver, f.receiver.signing, 99, nil),
-		f.heartbeat(t, task, hash, testReceiver, f.receiver.signing, 99, func(status *wire.RunStatus) { status.Wherry.Turn++ }),
 		f.heartbeat(t, task, hash, testReceiver, f.receiver.signing, 99, func(status *wire.RunStatus) { status.Wherry.Tenant = "tenant-b" }),
 	} {
 		f.produce(t, admin.PoolEventsTopic(testPool), "run-offset-binding", value)
@@ -1286,14 +1284,15 @@ func TestReceiverCredentialPerAdapter(t *testing.T) {
 	if m.edge.lastRun.Credential != nil {
 		t.Fatal("adapter without a configured credential received one")
 	}
-	if status := m.execute(t, "run-cloud", accelerated, 1); status != kgo.AckAccept {
-		t.Fatalf("cloud status %v, want accept", status)
+	if status := m.execute(t, "run-cloud", accelerated, 1); status != kgo.AckReject {
+		t.Fatalf("cloud status %v, want reject", status)
 	}
 	if dispatches, _, _, releases := m.cloud.counts(); dispatches != 0 || releases != 1 {
 		t.Fatalf("cloud dispatches=%d releases=%d, want 0 and 1", dispatches, releases)
 	}
 	statuses := m.feedStatuses(t)
-	if got := statuses[len(statuses)-1].StatusUpdate.Status.Message.Parts[0].Text; got != "credential cred-cloud required" {
+	want := "credential cred-cloud was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
+	if got := statuses[len(statuses)-1].StatusUpdate.Status.Message.Parts[0].Text; got != want {
 		t.Fatalf("reason %q", got)
 	}
 	if strings.Contains(m.logs.String(), testToken) {
@@ -1318,35 +1317,6 @@ func TestShutdownCommitsHeldTranscriptLine(t *testing.T) {
 	t.Fatalf("the transcript line held for the next commit was lost at shutdown; logs:\n%s", f.logs.String())
 }
 
-func TestContinuationResumesInterruptedTask(t *testing.T) {
-	f := newFixture(t, resultStream)
-	ctx, stop := context.WithCancel(f.ctx)
-	defer stop()
-	f.run(t, ctx)
-	f.turn(t, "run-a", 1)
-	interrupted := f.await(t, "run-a", anyTask)
-	if interrupted.Status.State != wire.TaskStateAuthRequired {
-		t.Fatalf("first turn %#v, want AUTH_REQUIRED", interrupted)
-	}
-	f.answer(t, credentialName)
-	f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Turn = 2
-		task.Message.MessageID, task.Message.Parts = "msg-2", []wire.Part{{Text: "continue"}}
-	})
-	completed := f.await(t, "run-a", func(task wire.Task) bool { return wire.Terminal(task.Status.State) })
-	// The result's history is the turn's own; earlier turns are in their own results.
-	if completed.Status.State != wire.TaskStateCompleted || len(completed.History) != 1 || completed.History[0].Parts[0].Text != "continue" {
-		t.Fatalf("completed continuation %#v", completed)
-	}
-	f.adapter.mu.Lock()
-	run := f.adapter.lastRun
-	f.adapter.mu.Unlock()
-	if want := resumedHeader + "\n\nhi\n\ncontinue"; string(run.Prompt) != want || run.Turn != 2 {
-		t.Fatalf("turn %d prompt %q, want turn 2 prompt %q", run.Turn, run.Prompt, want)
-	}
-}
-
-// deleteACLs removes every ACL of the receiver's principal, as revocation's second step does.
 func (f fixture) deleteACLs(t *testing.T) {
 	t.Helper()
 	f.deleteReceiverACLs(t, kadm.NewACLs().AnyResource().Operations(kadm.OpAny))
@@ -1579,78 +1549,6 @@ func TestAdoptionTrustsRotatedPeerKey(t *testing.T) {
 	f.produce(t, admin.PoolEventsTopic(testPool), "run-peer", f.heartbeat(t, task, hash, "receiver-peer", next, 42, nil))
 	if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("heartbeat under the peer's rotated key: offset %d err %v, want 42", got, err)
-	}
-}
-
-func TestContinuationAfterHostKeyRotation(t *testing.T) {
-	f := newFixture(t, resultStream)
-	ctx, stop := context.WithCancel(f.ctx)
-	defer stop()
-	f.run(t, ctx)
-	f.turn(t, "run-a", 1)
-	if interrupted := f.await(t, "run-a", anyTask); interrupted.Status.State != wire.TaskStateAuthRequired {
-		t.Fatalf("first turn %#v, want AUTH_REQUIRED", interrupted)
-	}
-	_, rotated, _ := ed25519.GenerateKey(rand.Reader)
-	owner := signed.HostOwner(testTenant, testHost)
-	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(owner, f.host, rotated)))
-	f.answer(t, credentialName)
-	f.submit(t, rotated, func(task *wire.Submission) {
-		task.Wherry.Turn = 2
-		task.Message.MessageID, task.Message.Parts = "msg-2", []wire.Part{{Text: "continue"}}
-	})
-	completed := f.await(t, "run-a", func(task wire.Task) bool { return wire.Terminal(task.Status.State) })
-	f.adapter.mu.Lock()
-	prompt := string(f.adapter.lastRun.Prompt)
-	f.adapter.mu.Unlock()
-	if completed.Status.State != wire.TaskStateCompleted || prompt != resumedHeader+"\n\nhi\n\ncontinue" {
-		t.Fatalf("continuation after rotation %#v, prompt %q; want turn 1, signed before the rotation, in the prompt", completed, prompt)
-	}
-}
-
-func TestBindTurnsPrefersTheTurnAMemberRan(t *testing.T) {
-	ran, forged := testSubmission("run-a"), testSubmission("run-a")
-	forged.Message.Parts = []wire.Part{{Text: "forged"}}
-	all := []runSubmission{{record: forged, hash: strings.Repeat("b", 64), current: true}, {record: ran, hash: strings.Repeat("a", 64), current: true}}
-	events := poolEvents{statuses: map[string][]wire.RunStatus{"run-a": {{Wherry: wire.StatusBinding{ReceiverBinding: wire.ReceiverBinding{Run: "run-a", Turn: 1}, TaskHash: strings.Repeat("a", 64)}}}}}
-	if bound := bindTurns(all, ran, events); bound[1].hash != strings.Repeat("a", 64) {
-		t.Fatalf("turn 1 bound to %s; want the submission a pool member's status names", bound[1].hash)
-	}
-	if bound := bindTurns(all, ran, poolEvents{}); bound[1].hash != strings.Repeat("b", 64) {
-		t.Fatal("without statuses the first submission of a turn should stand")
-	}
-	// Signed only by a retired key and run by no member: it does not count, even first.
-	all[0].current = false
-	if bound := bindTurns(all, ran, poolEvents{}); bound[1].hash != strings.Repeat("a", 64) {
-		t.Fatalf("turn 1 bound to %s; want the current-key submission over a retired-key one no member ran", bound[1].hash)
-	}
-}
-
-func TestRetiredKeyForgeryDoesNotBlockTheRealTurn(t *testing.T) {
-	f := newFixture(t, resultStream)
-	first := f.turn(t, "run-a", 1)
-	f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
-	retired := f.host
-	_, current, _ := ed25519.GenerateKey(rand.Reader)
-	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(signed.HostOwner(testTenant, testHost), retired, current)))
-	if err := f.receiver.refresh(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	// A leaked retired key forges turn 2 before the host writes it.
-	forged := f.submit(t, retired, func(task *wire.Submission) {
-		task.Wherry.Turn = 2
-		task.Message.MessageID, task.Message.Parts = "msg-forged", []wire.Part{{Text: "forged"}}
-	})
-	genuine := f.submit(t, current, func(task *wire.Submission) {
-		task.Wherry.Turn = 2
-		task.Message.MessageID, task.Message.Parts = "msg-2", []wire.Part{{Text: "continue"}}
-	})
-	admitted := f.admitted(t, genuine)
-	if len(admitted.history) != 2 || admitted.history[1].Parts[0].Text != "continue" {
-		t.Fatalf("history %#v, want the real turn 2", admitted.history)
-	}
-	if admitted, ack := f.receiver.admit(f.ctx, forged); admitted != nil || ack != kgo.AckReject {
-		t.Fatalf("the retired-key forgery admitted=%v ack=%v, want a silent rejection", admitted != nil, ack)
 	}
 }
 
@@ -2046,6 +1944,7 @@ func TestJobOfAnotherAdapterIsLeftToIt(t *testing.T) {
 	// lab and cloud share one backend: both find the job, labelled with cloud.
 	m.lab.job, m.lab.jobAdapter = adapter.JobRunning, "cloud"
 	m.cloud.job = adapter.JobRunning
+	m.answer(t, "cred-cloud")
 	if status := m.execute(t, "run-shared", cpu, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}

@@ -7,8 +7,6 @@ import (
 	"encoding/json/jsontext"
 	"slices"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,14 +194,13 @@ func TestRunTimeIsCappedSixHoursAfterTheQueueDeadline(t *testing.T) {
 	}
 }
 
-func TestAdmitRejectsTurnPastRunLifetime(t *testing.T) {
+func TestAdmitRejectsRunPastLifetime(t *testing.T) {
 	terms := testTerms()
 	terms.RunLifetimeMS = 1
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
-	first := f.turn(t, "run-expired", 1)
-	f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
+	record := f.turn(t, "run-expired", 1)
 	time.Sleep(10 * time.Millisecond)
-	f.rejected(t, f.turn(t, "run-expired", 2), "run expired")
+	f.rejected(t, record, "run expired")
 }
 
 func TestAdmitRejectsQueueDeadlinePastRunLifetime(t *testing.T) {
@@ -215,14 +212,6 @@ func TestAdmitRejectsQueueDeadlinePastRunLifetime(t *testing.T) {
 		task.Wherry.QueueDeadlineMS = time.Now().Add(2 * time.Hour).UnixMilli()
 	})
 	f.rejected(t, first, "queue deadline exceeds run lifetime")
-	interrupted := f.turn(t, "run-continued", 1)
-	f.publishStatus(t, interrupted, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
-	next := f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Wherry.Turn, task.Message.MessageID = "run-continued", 2, "msg-2"
-		task.Message.TaskID, task.Message.ContextID = "run-continued", "run-continued"
-		task.Wherry.QueueDeadlineMS = time.Now().Add(2 * time.Hour).UnixMilli()
-	})
-	f.rejected(t, next, "queue deadline exceeds run lifetime")
 }
 
 func TestRedeliveredClaimedTurnPastRunLifetimeIsAdopted(t *testing.T) {
@@ -232,6 +221,7 @@ func TestRedeliveredClaimedTurnPastRunLifetimeIsAdopted(t *testing.T) {
 	record := startedTurn(t, f, "run-held", func(task *wire.Submission) {
 		task.Wherry.QueueDeadlineMS = time.Now().Add(20 * time.Millisecond).UnixMilli()
 	})
+	f.answer(t, credentialName)
 	time.Sleep(60 * time.Millisecond)
 	if status := f.receiver.execute(f.ctx, f.service.Admin, record, f.admitted(t, record), 2); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
@@ -301,18 +291,6 @@ func TestRedeliveredClaimedTurnPastRunDeadlineStopsItsJob(t *testing.T) {
 	}
 }
 
-func TestUnclaimedContinuationPastQueueDeadlineIsRejected(t *testing.T) {
-	f := newFixture(t, resultStream)
-	first := f.turn(t, "run-continued", 1)
-	f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
-	next := f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Wherry.Turn, task.Message.MessageID = "run-continued", 2, "msg-2"
-		task.Message.TaskID, task.Message.ContextID = "run-continued", "run-continued"
-		task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli()
-	})
-	f.rejected(t, next, "queue deadline passed")
-}
-
 func TestAdmitAppliesThePoolInlineLimit(t *testing.T) {
 	terms := testTerms()
 	terms.InlineLimit = 100
@@ -364,57 +342,6 @@ func TestPlacementSelectorSelectsAnOffer(t *testing.T) {
 	}
 }
 
-func TestContinuationRejectedWhenNotInterrupted(t *testing.T) {
-	for name, state := range map[string]wire.TaskState{"running": wire.TaskStateWorking, "completed": wire.TaskStateCompleted} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, resultStream)
-			first := f.turn(t, "run-not-interrupted", 1)
-			kind := "claimed"
-			if wire.Terminal(state) {
-				kind = "terminal"
-			}
-			f.publishStatus(t, first, testReceiver, f.receiver.signing, kind, state, nil)
-			f.rejected(t, f.turn(t, "run-not-interrupted", 2), "task is not awaiting continuation")
-		})
-	}
-}
-
-func TestStaleSubmissionRejected(t *testing.T) {
-	t.Run("earlier turn after later turn started", func(t *testing.T) {
-		f := newFixture(t, resultStream)
-		first := f.turn(t, "run-earlier-turn", 1)
-		f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
-		second := f.turn(t, "run-earlier-turn", 2)
-		f.publishStatus(t, second, testReceiver, f.receiver.signing, "started", wire.TaskStateWorking, nil)
-		f.rejected(t, first, "stale submission")
-	})
-	t.Run("turn after its interruption", func(t *testing.T) {
-		f := newFixture(t, resultStream)
-		first := f.turn(t, "run-interrupted-replay", 1)
-		f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
-		f.rejected(t, first, "stale submission")
-	})
-	t.Run("active turn redelivery adopts", func(t *testing.T) {
-		f := newFixture(t, resultStream)
-		first := f.turn(t, "run-active-redelivery", 1)
-		f.publishStatus(t, first, testReceiver, f.receiver.signing, "heartbeat", wire.TaskStateWorking, nil)
-		f.admitted(t, first)
-	})
-}
-
-func TestDuplicateContinuationRejected(t *testing.T) {
-	f := newFixture(t, resultStream)
-	first := f.turn(t, "run-duplicate", 1)
-	f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
-	accepted := f.turn(t, "run-duplicate", 2)
-	duplicate := f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Wherry.Turn = "run-duplicate", 2
-		task.Message.MessageID, task.Message.TaskID, task.Message.ContextID = "msg-duplicate", "run-duplicate", "run-duplicate"
-	})
-	f.admitted(t, accepted)
-	f.rejected(t, duplicate, "duplicate continuation")
-}
-
 func TestDuplicateSubmissionRejected(t *testing.T) {
 	f := newFixture(t, resultStream)
 	accepted := f.turn(t, "run-duplicate-root", 1)
@@ -424,94 +351,6 @@ func TestDuplicateSubmissionRejected(t *testing.T) {
 	})
 	f.admitted(t, accepted)
 	f.rejected(t, duplicate, "duplicate submission")
-}
-
-func TestRejectedContinuationKeepsTaskResumable(t *testing.T) {
-	f := newFixture(t, resultStream)
-	first := f.turn(t, "run-rejected-continuation", 1)
-	f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
-	f.rejected(t, f.turn(t, "run-rejected-continuation", 3), "continuation turn out of order")
-	f.admitted(t, f.turn(t, "run-rejected-continuation", 2))
-	statuses := f.feedStatuses(t)
-	if got := statuses[len(statuses)-1]; got.Wherry.Kind != "rejected" || got.StatusUpdate.Status.State != wire.TaskStateRejected {
-		t.Fatalf("rejection status %#v", got)
-	}
-}
-
-func TestContinuationRejectedFromOtherPoolStatus(t *testing.T) {
-	f := newFixture(t, resultStream)
-	if err := f.service.PoolCreate(f.ctx, "pool-b", testTerms()); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.service.TenantAdd(f.ctx, testTenant, "pool-b"); err != nil {
-		t.Fatal(err)
-	}
-	otherKey := f.addPeer(t, "receiver-other-pool", "pool-b")
-	first := f.turn(t, "run-other-pool-status", 1)
-	f.publishStatus(t, first, "receiver-other-pool", otherKey, "interrupted", wire.TaskStateAuthRequired, nil)
-	f.rejected(t, f.turn(t, "run-other-pool-status", 2), "task is not awaiting continuation")
-}
-
-func TestContinuationAcceptsPeerInterruption(t *testing.T) {
-	f := newFixture(t, resultStream)
-	peerKey := f.addPeer(t, "receiver-b", testPool)
-	first := f.turn(t, "run-peer-interrupted", 1)
-	f.publishStatus(t, first, "receiver-b", peerKey, "interrupted", wire.TaskStateAuthRequired, nil)
-	f.admitted(t, f.turn(t, "run-peer-interrupted", 2))
-}
-
-func TestContinuationStatusBindings(t *testing.T) {
-	for name, mutate := range map[string]func(*wire.RunStatus){
-		"task hash": func(status *wire.RunStatus) { status.Wherry.TaskHash = strings.Repeat("d", 64) },
-		"kind":      func(status *wire.RunStatus) { status.Wherry.Kind = "claimed" },
-		"tenant":    func(status *wire.RunStatus) { status.Wherry.Tenant = "tenant-b" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, resultStream)
-			if err := f.service.TenantAdd(f.ctx, "tenant-b", testPool); err != nil {
-				t.Fatal(err)
-			}
-			if err := f.receiver.refresh(f.ctx); err != nil {
-				t.Fatal(err)
-			}
-			first := f.turn(t, "run-status-binding", 1)
-			f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, mutate)
-			if admitted, ack := f.receiver.admit(f.ctx, f.turn(t, "run-status-binding", 2)); admitted != nil || ack != kgo.AckReject {
-				t.Fatalf("admitted=%v ack=%v, want rejection", admitted != nil, ack)
-			}
-		})
-	}
-}
-
-func TestContinuationStatusOrdering(t *testing.T) {
-	f := newFixture(t, resultStream)
-	first := f.turn(t, "run-status-order", 1)
-	f.publishStatus(t, first, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, func(status *wire.RunStatus) { status.Wherry.Attempt = 2 })
-	f.publishStatus(t, first, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
-	f.admitted(t, f.turn(t, "run-status-order", 2))
-}
-
-func TestBindTurnsRequireSameBindings(t *testing.T) {
-	for name, mutate := range map[string]func(*wire.Submission){
-		"tenant":   func(task *wire.Submission) { task.Wherry.Tenant = "tenant-b" },
-		"agent":    func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" },
-		"selector": func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("zone", "dc1")} },
-		"model":    func(task *wire.Submission) { task.Wherry.Placement.Model = "sonnet" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, resultStream)
-			f.turn(t, "run-submission-binding", 1)
-			all, err := f.receiver.readTurns(f.ctx, "run-submission-binding")
-			if err != nil || len(all) != 1 {
-				t.Fatalf("turns %d err %v", len(all), err)
-			}
-			expected := testSubmission("run-submission-binding")
-			mutate(expected)
-			if bound := bindTurns(all, expected, poolEvents{}); len(bound) != 0 {
-				t.Fatalf("mismatched %s was accepted", name)
-			}
-		})
-	}
 }
 
 func TestReceiverRejectsURLParts(t *testing.T) {
@@ -611,7 +450,7 @@ func TestCancelledSubmissionNotDispatched(t *testing.T) {
 func TestCancelSinceLastReadStopsDispatch(t *testing.T) {
 	f := newFixture(t, resultStream)
 	record := f.submit(t, f.host, nil)
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: "run-a", Turn: 1}, f.host)))
+	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: "run-a"}, f.host)))
 	if admitted := f.admitted(t, record); !admitted.cancelled {
 		t.Fatalf("admission %#v, want the run admitted for cancellation", admitted)
 	}
@@ -773,134 +612,6 @@ func TestHeartbeatHonoursHeldCancel(t *testing.T) {
 	}
 }
 
-// interrupt runs the first turn of run without a seal, so it waits AUTH_REQUIRED.
-func (f fixture) interrupt(t *testing.T, run, text string) *kgo.Record {
-	t.Helper()
-	record := f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
-		task.Message.Parts = []wire.Part{{Text: text}}
-	})
-	if status := f.execute(t, record, 1); status != kgo.AckAccept {
-		t.Fatalf("status %v, want the interrupted task acknowledged", status)
-	}
-	if task := f.lastTask(t); task.Status.State != wire.TaskStateAuthRequired {
-		t.Fatalf("task %#v, want AUTH_REQUIRED", task)
-	}
-	return record
-}
-
-func TestCancelInterruptedTaskEndsIt(t *testing.T) {
-	f := newFixture(t, resultStream)
-	peer := f.startPeer(t, "receiver-b")
-	f.interrupt(t, "run-a", "first")
-	// The peer, which never held the run, reads the cancel first and ends the interrupted turn.
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: "run-a", Turn: 1}, f.host)))
-	if err := peer.readCancels(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.receiver.readCancels(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	keys := signed.Keys{"receiver-b": {Current: peer.signing.Public().(ed25519.PublicKey)}, testReceiver: f.keys()[testReceiver]}
-	var canceled []wire.RunStatus
-	var result *wire.Result
-	for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
-		var status wire.RunStatus
-		if wire.ParseRecord(record.Value, keys, &status) == nil && status.Wherry.Kind == "terminal" {
-			canceled = append(canceled, status)
-		}
-		var candidate wire.Result
-		if wire.ParseRecord(record.Value, keys, &candidate) == nil {
-			result = &candidate
-		}
-	}
-	if len(canceled) != 1 || canceled[0].Wherry.EventID != "run-a/1/canceled" || canceled[0].Wherry.Receiver != "receiver-b" || canceled[0].StatusUpdate.Status.State != wire.TaskStateCanceled {
-		t.Fatalf("CANCELED terminals on the feed %#v, want the peer's alone, with the turn's event ID", canceled)
-	}
-	if result == nil || result.Task.Status.State != wire.TaskStateCanceled || len(result.Task.History) != 1 || result.Task.History[0].Parts[0].Text != "first" {
-		t.Fatalf("result %#v, want CANCELED with the first turn", result)
-	}
-
-	// A continuation published without the host's own check is cancelled too, and never dispatched.
-	f.answer(t, credentialName)
-	if status := f.execute(t, f.turn(t, "run-a", 2), 1); status != kgo.AckAccept {
-		t.Fatalf("status %v", status)
-	}
-	if task := f.lastTask(t); task.Status.State != wire.TaskStateCanceled || len(task.History) != 1 || task.History[0].MessageID != "msg-2" {
-		t.Fatalf("task %#v, want CANCELED with the second turn alone", task)
-	}
-	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
-		t.Fatalf("continuation of a cancelled task dispatched %d jobs", dispatches)
-	}
-}
-
-func TestExpiredInterruptedTaskEndsCanceled(t *testing.T) {
-	f := newFixture(t, resultStream)
-	f.interrupt(t, "run-expired", "first")
-	terms := testTerms()
-	terms.RunLifetimeMS = 1
-	if err := f.service.PoolCreate(f.ctx, testPool, terms); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.receiver.refresh(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(10 * time.Millisecond)
-	if err := f.receiver.readCancels(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	if state, reason := terminalReason(t, f, "run-expired"); state != wire.TaskStateCanceled || reason != "run expired" {
-		t.Fatalf("terminal %s %q, want CANCELED run expired", state, reason)
-	}
-}
-
-func TestExpiredInterruptedTaskEndsWithoutItsFirstTurn(t *testing.T) {
-	f := newFixture(t, resultStream)
-	record := f.turn(t, "run-expired", 2)
-	f.publishStatus(t, record, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
-	if err := f.receiver.readCancels(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	if state, reason := terminalReason(t, f, "run-expired"); state != wire.TaskStateCanceled || reason != "run expired" {
-		t.Fatalf("terminal %s %q, want CANCELED run expired; logs:\n%s", state, reason, f.logs.String())
-	}
-}
-
-func TestInterruptedTurnOfAnEndedHostIsReadOnce(t *testing.T) {
-	f := newFixture(t, resultStream)
-	record := f.turn(t, "run-ended-host", 1)
-	f.publishStatus(t, record, testReceiver, f.receiver.signing, "interrupted", wire.TaskStateAuthRequired, nil)
-	denied := func(context.Context, string, string) error { return admin.ErrAuthorizationDenied }
-	if result := f.service.RevokeHost(f.ctx, testTenant, testHost, time.Millisecond, denied); !result.Complete {
-		t.Fatalf("revoke host: %#v", result.Steps)
-	}
-	if err := f.receiver.refresh(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	for range 2 {
-		if err := f.receiver.readCancels(f.ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if n := strings.Count(f.logs.String(), "interrupted turn not found"); n != 1 {
-		t.Fatalf("interrupted turn looked up %d times, want once; logs:\n%s", n, f.logs.String())
-	}
-	// A miss can come from a host key not yet refreshed, so it is looked up again once unfoundRetry has passed.
-	f.receiver.mu.Lock()
-	for id := range f.receiver.unfound {
-		f.receiver.unfound[id] = time.Now().Add(-unfoundRetry)
-	}
-	f.receiver.mu.Unlock()
-	if err := f.receiver.readCancels(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	if n := strings.Count(f.logs.String(), "interrupted turn not found"); n != 2 {
-		t.Fatalf("interrupted turn looked up %d times after its retry interval, want twice", n)
-	}
-}
-
-// TestRunsUnderRetention backdates records against the derived retention, since its turn deadline and margin keep it
-// above a day.
 func TestRunsUnderRetention(t *testing.T) {
 	terms := testTerms()
 	terms.RunLifetimeMS = time.Hour.Milliseconds()
@@ -913,7 +624,7 @@ func TestRunsUnderRetention(t *testing.T) {
 		}
 		return record
 	}
-	turn := func(run string, age time.Duration, kind string, state wire.TaskState) (*kgo.Record, *wire.Submission) {
+	run := func(run string, age time.Duration, kind string, state wire.TaskState) (*kgo.Record, *wire.Submission) {
 		t.Helper()
 		task := testSubmission(run)
 		record := aged(admin.PoolTasksTopic(testPool), run, must(t)(wire.SignRecord(task, f.host)), age)
@@ -921,19 +632,11 @@ func TestRunsUnderRetention(t *testing.T) {
 		aged(admin.PoolEventsTopic(testPool), run, must(t)(wire.SignRecord(status, f.receiver.signing)), age)
 		return record, task
 	}
-	continuation := func(run string) *kgo.Record {
-		t.Helper()
-		return f.submit(t, f.host, func(task *wire.Submission) {
-			task.Wherry.Run, task.Wherry.Turn, task.Message.MessageID = run, 2, "msg-2"
-			task.Message.TaskID, task.Message.ContextID = run, run
-		})
-	}
-	turn("run-ancient", 32*time.Hour, "interrupted", wire.TaskStateAuthRequired)
-	completed, _ := turn("run-completed", 14*time.Hour, "terminal", wire.TaskStateCompleted)
-	turn("run-continued", 50*time.Minute, "interrupted", wire.TaskStateAuthRequired)
-	adopted, adoptedTask := turn("run-adopted", 50*time.Minute, "started", wire.TaskStateWorking)
+	run("run-ancient", 32*time.Hour, "terminal", wire.TaskStateCompleted)
+	completed, _ := run("run-completed", 14*time.Hour, "terminal", wire.TaskStateCompleted)
+	adopted, adoptedTask := run("run-adopted", 50*time.Minute, "started", wire.TaskStateWorking)
 	aged(admin.PoolEventsTopic(testPool), "run-adopted", f.heartbeat(t, adoptedTask, wire.TaskHash(adopted.Value), testReceiver, f.receiver.signing, 41, nil), 50*time.Minute)
-	turn("run-stale", 2*time.Hour, "interrupted", wire.TaskStateAuthRequired)
+	f.answer(t, credentialName)
 	f.cluster.ApplyRetention()
 
 	for _, topic := range []string{admin.PoolTasksTopic(testPool), admin.PoolEventsTopic(testPool)} {
@@ -943,13 +646,10 @@ func TestRunsUnderRetention(t *testing.T) {
 	}
 	before := len(f.records(t, admin.PoolEventsTopic(testPool)))
 	if admitted, ack := f.receiver.admit(f.ctx, completed); admitted != nil || ack != kgo.AckAccept {
-		t.Fatalf("redelivered completed turn admitted=%v ack=%v, want accept; logs:\n%s", admitted != nil, ack, f.logs.String())
+		t.Fatalf("redelivered completed run admitted=%v ack=%v, want accept; logs:\n%s", admitted != nil, ack, f.logs.String())
 	}
 	if after := len(f.records(t, admin.PoolEventsTopic(testPool))); after != before {
-		t.Fatalf("a redelivered completed turn wrote events %d -> %d", before, after)
-	}
-	if got := prompt(f.admitted(t, continuation("run-continued")).history); got != resumedHeader+"\n\nhi\n\nhi" {
-		t.Fatalf("continued prompt %q", got)
+		t.Fatalf("a redelivered completed run wrote events %d -> %d", before, after)
 	}
 	if offset, err := f.receiver.lastOffset(f.ctx, adoptedTask, wire.TaskHash(adopted.Value)); err != nil || offset != 41 {
 		t.Fatalf("adoption offset %d, %v; want 41", offset, err)
@@ -959,13 +659,6 @@ func TestRunsUnderRetention(t *testing.T) {
 	}
 	if dispatches, _, follows, _ := f.adapter.counts(); dispatches != 0 || follows != 1 {
 		t.Fatalf("dispatches=%d follows=%d, want the running job adopted", dispatches, follows)
-	}
-	f.rejected(t, continuation("run-stale"), "run expired")
-	if err := f.receiver.readCancels(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	if state, reason := terminalReason(t, f, "run-stale"); state != wire.TaskStateCanceled || reason != "run expired" {
-		t.Fatalf("stale run terminal %s %q, want CANCELED run expired", state, reason)
 	}
 }
 
@@ -1041,70 +734,6 @@ func TestRejectionIsAllOrNothing(t *testing.T) {
 	}
 	if !f.receiver.denied() {
 		t.Fatal("an authorisation error writing the rejection did not enter denial")
-	}
-}
-
-func TestConcurrentInterruptedCancelIsOneFact(t *testing.T) {
-	f := newFixture(t, resultStream)
-	peer := f.startPeer(t, "receiver-b")
-	f.interrupt(t, "run-a", "first")
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: "run-a", Turn: 1}, f.host)))
-	// The first commit waits until the second member's commit arrives, so both members write.
-	second := make(chan struct{})
-	var commits atomic.Int32
-	f.cluster.ControlKey(kmsg.EndTxn.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
-		if !strings.Contains(request.(*kmsg.EndTxnRequest).TransactionalID, ".admission.") {
-			return nil, nil, false
-		}
-		switch commits.Add(1) {
-		case 1:
-			f.cluster.SleepControl(func() {
-				select {
-				case <-second:
-				case <-time.After(10 * time.Second):
-				}
-			})
-		case 2:
-			close(second)
-			f.cluster.DropControl()
-		}
-		return nil, nil, false
-	})
-	var wg sync.WaitGroup
-	for _, member := range []*Receiver{f.receiver, peer} {
-		wg.Go(func() {
-			if err := member.readCancels(f.ctx); err != nil {
-				t.Error(err)
-			}
-		})
-	}
-	wg.Wait()
-	if commits.Load() != 2 {
-		t.Fatalf("admission commits %d, want both members to write", commits.Load())
-	}
-	keys := signed.Keys{"receiver-b": {Current: peer.signing.Public().(ed25519.PublicKey)}, testReceiver: f.keys()[testReceiver]}
-	feedIDs := map[string]bool{}
-	for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
-		var status wire.RunStatus
-		if wire.ParseRecord(record.Value, keys, &status) == nil && status.Wherry.Kind == "terminal" {
-			feedIDs[status.Wherry.EventID] = true
-		}
-	}
-	if len(feedIDs) != 1 || !feedIDs["run-a/1/canceled"] {
-		t.Fatalf("CANCELED event IDs on the feed %v, want run-a/1/canceled alone", feedIDs)
-	}
-	events, err := f.receiver.readEvents(f.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	terminals := 0
-	for _, status := range events.statuses["run-a"] {
-		if status.Wherry.Kind == "terminal" {
-			terminals++
-		}
-	}
-	if terminals != 1 {
-		t.Fatalf("a pool events reader sees %d CANCELED terminals, want one", terminals)
 	}
 }
 

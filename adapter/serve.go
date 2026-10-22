@@ -16,8 +16,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// maxMessage bounds a message the plugin receives. A Dispatch carries a prompt built from a run's
-// turns, each at most one Kafka record, which brokers cap at a few MiB; 64 MiB leaves room for long runs.
+// maxMessage bounds a message the plugin receives. A Dispatch carries a prompt from a run's submission, one Kafka
+// record, which brokers cap at a few MiB; 64 MiB leaves room.
 const maxMessage = 64 << 20
 
 // Serve runs a plugin process for the receiver that started it, building one adapter with factory for
@@ -158,7 +158,7 @@ func (s *server) Dispatch(ctx context.Context, req *adapterv1.DispatchRequest) (
 	}
 	message := req.GetRun()
 	run := Run{
-		ID: message.GetId(), Adapter: message.GetAdapter(), Agent: message.GetAgent(), Model: message.GetModel(), Turn: message.GetTurn(), Attempt: message.GetAttempt(),
+		ID: message.GetId(), Adapter: message.GetAdapter(), Agent: message.GetAgent(), Model: message.GetModel(), Attempt: message.GetAttempt(),
 		Prompt: message.GetPrompt(), Credential: message.Credential,
 	}
 	for _, input := range message.GetInputs() {
@@ -182,7 +182,7 @@ func (s *server) Lookup(ctx context.Context, req *adapterv1.LookupRequest) (*ada
 	if err != nil {
 		return nil, err
 	}
-	job, err := adapter.Lookup(ctx, req.RunId, req.Turn)
+	job, err := adapter.Lookup(ctx, req.RunId)
 	if err != nil {
 		return nil, callStatus(err)
 	}
@@ -323,7 +323,7 @@ func (s *server) Purge(ctx context.Context, req *adapterv1.PurgeRequest) (*adapt
 	if err != nil {
 		return nil, err
 	}
-	return &adapterv1.PurgeResponse{}, callStatus(adapter.Purge(ctx, req.RunId, req.Turn))
+	return &adapterv1.PurgeResponse{}, callStatus(adapter.Purge(ctx, req.RunId))
 }
 
 func (s *server) Release(ctx context.Context, req *adapterv1.ReleaseRequest) (*adapterv1.ReleaseResponse, error) {
@@ -331,7 +331,7 @@ func (s *server) Release(ctx context.Context, req *adapterv1.ReleaseRequest) (*a
 	if err != nil {
 		return nil, err
 	}
-	return &adapterv1.ReleaseResponse{}, callStatus(adapter.Release(ctx, req.RunId, req.Turn))
+	return &adapterv1.ReleaseResponse{}, callStatus(adapter.Release(ctx, req.RunId))
 }
 
 func (s *server) Sweep(ctx context.Context, req *adapterv1.SweepRequest) (*adapterv1.SweepResponse, error) {

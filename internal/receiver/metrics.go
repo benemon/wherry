@@ -30,14 +30,14 @@ type metrics struct {
 	collectors []prometheus.Collector
 	register   sync.Once
 
-	claims, admissions, rejections, runs, adoptions, continuations, redeliveries *prometheus.CounterVec
-	turnDuration, queueWait, sealWait                                            *prometheus.HistogramVec
-	inFlight                                                                     *prometheus.GaugeVec
-	capacity                                                                     prometheus.Gauge
-	startFailures, dispatchOutcomes, stopFailures, purgeFailures                 *prometheus.CounterVec
-	sweepFailures, collectionFailures, sealWaits, redactions                     *prometheus.CounterVec
-	busErrors, denials, tokens, cost, dropped                                    *prometheus.CounterVec
-	renewalFailures, transactionAborts, ambiguousCommits, fenced                 prometheus.Counter
+	claims, admissions, rejections, runs, adoptions, redeliveries *prometheus.CounterVec
+	turnDuration, queueWait, sealWait                             *prometheus.HistogramVec
+	inFlight                                                      *prometheus.GaugeVec
+	capacity                                                      prometheus.Gauge
+	startFailures, dispatchOutcomes, stopFailures, purgeFailures  *prometheus.CounterVec
+	sweepFailures, collectionFailures, sealWaits, redactions      *prometheus.CounterVec
+	busErrors, denials, tokens, cost, dropped                     *prometheus.CounterVec
+	renewalFailures, transactionAborts, ambiguousCommits, fenced  prometheus.Counter
 
 	adapterDescs map[string]*prometheus.Desc
 	// lastGood holds, by adapter, the samples of its latest Metrics call that answered.
@@ -65,11 +65,10 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.claims = counters("claims_total", "Tasks claimed and authorised.", "tenant")
 	m.admissions = counters("admissions_total", "Tasks admitted to run.", "tenant", "adapter")
 	m.rejections = counters("rejections_total", "Tasks rejected, by reason.", "tenant", "reason")
-	m.runs = counters("runs_total", "Turns ended, by terminal state.", "tenant", "adapter", "agent", "model", "state")
-	m.adoptions = counters("adoptions_total", "Turns that adopted an earlier attempt's job.", "tenant", "adapter")
-	m.continuations = counters("continuations_total", "Continuation turns admitted.", "tenant", "adapter")
-	m.redeliveries = counters("redeliveries_total", "Turns executed on a redelivery.", "tenant", "adapter")
-	m.turnDuration = histograms("turn_duration_seconds", "Time from claim to a turn's terminal state.", "tenant", "adapter", "agent", "model", "state")
+	m.runs = counters("runs_total", "Runs ended, by terminal state.", "tenant", "adapter", "agent", "model", "state")
+	m.adoptions = counters("adoptions_total", "Runs that adopted an earlier attempt's job.", "tenant", "adapter")
+	m.redeliveries = counters("redeliveries_total", "Runs executed on a redelivery.", "tenant", "adapter")
+	m.turnDuration = histograms("turn_duration_seconds", "Time from claim to a run's terminal state.", "tenant", "adapter", "agent", "model", "state")
 	m.queueWait = histograms("queue_wait_seconds", "Time from submission to first claim.", "tenant", "adapter")
 	m.inFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_in_flight", Help: "Tasks held, by the adapter they were routed to."}, []string{"adapter"})
 	m.capacity = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_capacity", Help: "Tasks the receiver holds at once."})
@@ -79,9 +78,9 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.stopFailures = counters("stop_failures_total", "Failed adapter Stop calls.", "adapter")
 	m.purgeFailures = counters("purge_failures_total", "Failed adapter Purge calls.", "adapter")
 	m.sweepFailures = counters("sweep_failures_total", "Failed adapter Sweep calls.", "adapter")
-	m.collectionFailures = counters("collection_failures_total", "Turns whose outputs were not collected, by reason.", "adapter", "reason")
+	m.collectionFailures = counters("collection_failures_total", "Runs whose outputs were not collected, by reason.", "adapter", "reason")
 	m.sealWaits = counters("seal_waits_total", "Seal waits, by outcome.", "tenant", "outcome")
-	m.sealWait = histograms("seal_wait_seconds", "Time a turn waited for its seal.", "tenant")
+	m.sealWait = histograms("seal_wait_seconds", "Time a run waited for its seal.", "tenant")
 	m.redactions = counters("redactions_total", "Credential values replaced in published output.", "tenant", "adapter")
 	m.busErrors = counters("bus_errors_total", "Kafka operation errors, by operation.", "op")
 	m.denials = counters("denials_total", "Kafka authorisation errors, by the capability denied.", "op")
@@ -259,7 +258,7 @@ func (r *Receiver) placementLabels(placement wire.Placement) (string, string) {
 	return placement.Agent, "other"
 }
 
-// ended counts a turn that reached a terminal state, with the time since its claim when this attempt claimed it, and
+// ended counts a run that reached a terminal state, with the time since its claim when this attempt claimed it, and
 // the tokens and cost its agent's result reports. A state outside wire's is labelled other.
 func (run *activeRun) ended(state wire.TaskState, resultMetadata []byte) {
 	m, tenant := run.receiver.metrics, run.task.Wherry.Tenant

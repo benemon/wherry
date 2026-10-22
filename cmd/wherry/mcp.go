@@ -129,14 +129,8 @@ func toolFailure(err error) error {
 		return &toolError{Code: "RUN_NOT_FOUND", Message: "this host has not submitted the run and no receiver has admitted it"}
 	case errors.Is(err, busclient.ErrNoMatchingReceiver):
 		return &toolError{Code: "NO_MATCHING_RECEIVER", Message: "no live receiver of an entitled pool offers a placement matching the selector"}
-	case errors.Is(err, busclient.ErrNotAwaitingContinuation):
-		return &toolError{Code: "NOT_AWAITING_CONTINUATION", Message: "the run is not waiting for a continuation"}
-	case errors.Is(err, busclient.ErrRunCanceled):
-		return &toolError{Code: "RUN_CANCELED", Message: "the run is canceled"}
-	case errors.Is(err, busclient.ErrRunExpired), errors.Is(err, busclient.ErrQueueDeadlinePastLifetime):
-		return &toolError{Code: "RUN_EXPIRED", Message: "the run's lifetime has passed, or the queue deadline is past it"}
-	case errors.Is(err, busclient.ErrTurnSubmitted):
-		return &toolError{Code: "TURN_ALREADY_SUBMITTED", Message: "a continuation for this turn is already submitted"}
+	case errors.Is(err, busclient.ErrQueueDeadlinePastLifetime):
+		return &toolError{Code: "RUN_EXPIRED", Message: "the queue deadline falls after the pool's run lifetime"}
 	case errors.Is(err, busclient.ErrInvalidInput):
 		return invalidArgument(err.Error())
 	case errors.Is(err, context.Canceled):
@@ -169,7 +163,7 @@ type credentialInput struct {
 
 type outputInput struct {
 	Name     string `json:"name" jsonschema:"relative path the agent is asked to write in WHERRY_OUTPUT_DIR"`
-	Required bool   `json:"required,omitempty" jsonschema:"fail the turn when the output is not returned"`
+	Required bool   `json:"required,omitempty" jsonschema:"fail the run when the output is not returned"`
 	Storage  string `json:"storage,omitempty" jsonschema:"s3 to return the output through the pool's bucket, up to 5 GiB, instead of the feed"`
 }
 
@@ -205,7 +199,6 @@ type statusInput struct {
 type runOutput struct {
 	ID       string         `json:"id"`
 	Pool     string         `json:"pool"`
-	Turn     int64          `json:"turn"`
 	State    string         `json:"state"`
 	Model    string         `json:"model,omitempty" jsonschema:"model the run's placement names"`
 	Message  string         `json:"message,omitempty"`
@@ -242,29 +235,14 @@ type awaitReply struct {
 	ID           string                  `json:"id"`
 	State        string                  `json:"state"`
 	Model        string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
-	ServedModels []string                `json:"served_models,omitempty" jsonschema:"models the agent's result reports serving the turn, where its harness reports them"`
+	ServedModels []string                `json:"served_models,omitempty" jsonschema:"models the agent's result reports serving the run, where its harness reports them"`
 	RetryAfter   int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling await again"`
-	Message      string                  `json:"message,omitempty" jsonschema:"status message, such as the credential an AUTH_REQUIRED run needs"`
+	Message      string                  `json:"message,omitempty" jsonschema:"status message, such as a credential the run could not obtain"`
 	Artifacts    []resultArtifact        `json:"artifacts,omitempty"`
-	Outputs      []outputReply           `json:"outputs,omitempty" jsonschema:"the turn's outputs, verified and written locally"`
-	NotReturned  []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the turn did not return or this host could not verify, each with its reason"`
+	Outputs      []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
+	NotReturned  []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the run did not return or this host could not verify, each with its reason"`
 	Redacted     map[string]int          `json:"redacted,omitempty" jsonschema:"redaction markers in the message and artifacts by the credential or S3 object each names"`
 	Skipped      int                     `json:"skipped,omitempty"`
-}
-
-type continueInput struct {
-	ID                   string `json:"id" jsonschema:"run id of an interrupted run"`
-	Prompt               string `json:"prompt,omitempty" jsonschema:"continuation text; default continue"`
-	PromptFile           string `json:"prompt_file,omitempty" jsonschema:"local file holding the continuation text, read as an input is; not with prompt"`
-	DeadlineSeconds      int64  `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 7200"`
-	QueueDeadlineSeconds int64  `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`
-}
-
-type continueOutput struct {
-	ID      string `json:"id"`
-	Turn    int64  `json:"turn"`
-	Skipped int    `json:"skipped,omitempty"`
-	Await   string `json:"await" jsonschema:"shell command that waits for the turn to end; run it in the background"`
 }
 
 type cleanupOutput struct {
@@ -277,7 +255,6 @@ type cancelOutput struct {
 }
 
 type eventOutput struct {
-	Turn     int64  `json:"turn"`
 	Attempt  int64  `json:"attempt"`
 	Kind     string `json:"kind"`
 	State    string `json:"state"`
@@ -287,7 +264,6 @@ type eventOutput struct {
 }
 
 type transcriptOutput struct {
-	Turn    int64 `json:"turn"`
 	Attempt int64 `json:"attempt"`
 	Chunks  int   `json:"chunks"`
 }
@@ -302,7 +278,6 @@ type eventsOutput struct {
 
 type transcriptInput struct {
 	ID     string `json:"id" jsonschema:"run id"`
-	Turn   int64  `json:"turn,omitempty" jsonschema:"turn to read; default the latest"`
 	Offset int    `json:"offset,omitempty" jsonschema:"lines to skip"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"most lines to return, at most 500; default 100"`
 }
@@ -319,8 +294,7 @@ type transcriptLine struct {
 
 type transcriptReply struct {
 	ID         string           `json:"id"`
-	Turn       int64            `json:"turn"`
-	Attempt    int64            `json:"attempt" jsonschema:"the delivery attempt whose lines these are; 0 while no receiver has reported on the turn"`
+	Attempt    int64            `json:"attempt" jsonschema:"the delivery attempt whose lines these are; 0 while no receiver has reported on the run"`
 	Total      int              `json:"total" jsonschema:"lines of the attempt on the feed so far, less those the view drops"`
 	NextOffset int              `json:"next_offset,omitempty" jsonschema:"set while lines remain past this page: the offset to call with next"`
 	Lines      []transcriptLine `json:"lines"`
@@ -384,7 +358,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "status",
-		Description: "Return the latest verified state of a run's latest turn without waiting. With id, runs holds that run; " +
+		Description: "Return the latest verified state of a run without waiting. With id, runs holds that run; " +
 			"without it, runs holds every run this host submitted or the tenant's receivers admitted, latest update first.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input statusInput) (*mcp.CallToolResult, statusOutput, error) {
@@ -406,7 +380,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		output := statusOutput{Runs: []runOutput{}, Skipped: runs.Skipped}
 		for _, result := range runs.Runs {
 			output.Runs = append(output.Runs, runOutput{
-				ID: result.RunID, Pool: result.Pool, Turn: result.Turn, State: string(result.Status.State), Model: result.Model, Message: statusText(result.Status),
+				ID: result.RunID, Pool: result.Pool, State: string(result.Status.State), Model: result.Model, Message: statusText(result.Status),
 				Updated: result.Updated.UTC().Format(time.RFC3339Nano), Redacted: result.Redacted,
 			})
 		}
@@ -415,9 +389,9 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "await",
-		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish or stop for input. Returns the result, an interrupted, "+
-			"canceled or rejected state with its message, or {id, state, retry_after} while the run is unfinished: call await again. "+
-			"A finished turn's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
+		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish. Returns the result, a failed, canceled or rejected state "+
+			"with its message, or {id, state, retry_after} while the run is unfinished: call await again. "+
+			"A finished run's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
 			"Use status to check a run without waiting.", int(awaitBound.Seconds())),
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, awaitReply, error) {
 		client, err := connect()
@@ -450,9 +424,9 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			}
 		}
 		if len(result.Outputs) > 0 {
-			paths, err := client.WriteOutputs(input.ID, result.Turn, "", result.Outputs)
+			paths, err := client.WriteOutputs(input.ID, "", result.Outputs)
 			if err != nil {
-				return nil, awaitReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: "the turn's outputs could not be written to the state directory"}
+				return nil, awaitReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: "the run's outputs could not be written to the state directory"}
 			}
 			for i, written := range result.Outputs {
 				output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: paths[i], SHA256: written.SHA256, Size: written.Size})
@@ -460,48 +434,13 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		}
 		downloaded, rejected, err := client.DownloadOutputs(ctx, input.ID, result, "")
 		if err != nil {
-			return nil, awaitReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: "the turn's S3 outputs could not be downloaded, or the run's prefix deleted; the wherry CLI's await reports the cause"}
+			return nil, awaitReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: "the run's S3 outputs could not be downloaded, or the run's prefix deleted; the wherry CLI's await reports the cause"}
 		}
 		for _, written := range downloaded {
 			output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: written.Path, SHA256: written.SHA256, Size: written.Size})
 		}
 		output.NotReturned = append(append(result.NotReturned, result.Rejected...), rejected...)
 		return nil, output, nil
-	})
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "continue",
-		Description: "Sign and publish the next turn of a run interrupted in AUTH_REQUIRED to the pool that admitted it; add a missing credential to the wherry config first.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, input continueInput) (*mcp.CallToolResult, continueOutput, error) {
-		switch {
-		case input.Prompt != "" && input.PromptFile != "":
-			return nil, continueOutput{}, invalidArgument("prompt and prompt_file are mutually exclusive")
-		case input.PromptFile != "":
-			part, err := readInput(input.PromptFile, math.MaxInt64)
-			if err != nil {
-				return nil, continueOutput{}, err
-			}
-			if len(part.Raw) == 0 {
-				return nil, continueOutput{}, invalidArgument("prompt_file is empty")
-			}
-			input.Prompt = string(part.Raw)
-		case input.Prompt == "":
-			input.Prompt = "continue"
-		}
-		deadline, queueDeadline, err := deadlines(input.DeadlineSeconds, input.QueueDeadlineSeconds)
-		if err != nil {
-			return nil, continueOutput{}, err
-		}
-		client, err := connect()
-		if err != nil {
-			return nil, continueOutput{}, toolFailure(err)
-		}
-		defer client.Close()
-		result, err := client.Continue(ctx, input.ID, busclient.ContinueInput{Prompt: input.Prompt, Deadline: deadline, QueueDeadline: queueDeadline})
-		if err != nil {
-			return nil, continueOutput{}, toolFailure(err)
-		}
-		return nil, continueOutput{ID: result.RunID, Turn: result.Turn, Skipped: result.Skipped, Await: awaitCommand(result.RunID)}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -523,7 +462,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "events",
-		Description: "Return a run's verified status history and its transcript chunk counts per turn and attempt. Read the lines with transcript.",
+		Description: "Return a run's verified status history and its transcript chunk counts per attempt. Read the lines with transcript.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, eventsOutput, error) {
 		client, err := connect()
@@ -539,17 +478,14 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		for _, record := range result.Statuses {
 			status := record.StatusUpdate.Status
 			output.Events = append(output.Events, eventOutput{
-				Turn: record.Wherry.Turn, Attempt: record.Wherry.Attempt, Kind: record.Wherry.Kind, State: string(status.State),
+				Attempt: record.Wherry.Attempt, Kind: record.Wherry.Kind, State: string(status.State),
 				Receiver: record.Wherry.Receiver, Time: status.Timestamp, Message: statusText(status),
 			})
 		}
-		for position, chunks := range result.Chunks {
-			output.Transcripts = append(output.Transcripts, transcriptOutput{Turn: position.Turn, Attempt: position.Attempt, Chunks: chunks})
+		for attempt, chunks := range result.Chunks {
+			output.Transcripts = append(output.Transcripts, transcriptOutput{Attempt: attempt, Chunks: chunks})
 		}
 		sort.Slice(output.Transcripts, func(i, j int) bool {
-			if output.Transcripts[i].Turn != output.Transcripts[j].Turn {
-				return output.Transcripts[i].Turn < output.Transcripts[j].Turn
-			}
 			return output.Transcripts[i].Attempt < output.Transcripts[j].Attempt
 		})
 		return nil, output, nil
@@ -557,16 +493,16 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "transcript",
-		Description: fmt.Sprintf("Return a page of a turn's transcript: the lines of the agent's standard output, redacted by the "+
-			"receiver, in output order. The lines are the turn's latest delivery attempt's, and before its first line, or while it "+
-			"has none, each earlier attempt's line, so an adopted turn reads from the start; each line names its attempt. A page "+
+		Description: fmt.Sprintf("Return a page of a run's transcript: the lines of the agent's standard output, redacted by the "+
+			"receiver, in output order. The lines are the run's latest delivery attempt's, and before its first line, or while it "+
+			"has none, each earlier attempt's line, so an adopted run reads from the start; each line names its attempt. A page "+
 			"holds at most limit lines and %d KiB of JSON, which fits a harness's default tool output limit; a line too long for "+
 			"a page alone comes back truncated, with its size in bytes. next_offset is set while more lines are on the feed. The "+
-			"transcript grows while the turn runs.", transcriptBytes>>10),
+			"transcript grows while the run runs.", transcriptBytes>>10),
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input transcriptInput) (*mcp.CallToolResult, transcriptReply, error) {
-		if input.Turn < 0 || input.Offset < 0 || input.Limit < 0 || input.Limit > transcriptMaxLimit {
-			return nil, transcriptReply{}, invalidArgument(fmt.Sprintf("turn and offset must not be negative, and limit must be 0 to %d", transcriptMaxLimit))
+		if input.Offset < 0 || input.Limit < 0 || input.Limit > transcriptMaxLimit {
+			return nil, transcriptReply{}, invalidArgument(fmt.Sprintf("offset must not be negative, and limit must be 0 to %d", transcriptMaxLimit))
 		}
 		if input.Limit == 0 {
 			input.Limit = transcriptLimit
@@ -576,12 +512,12 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			return nil, transcriptReply{}, toolFailure(err)
 		}
 		defer client.Close()
-		result, err := client.Transcript(ctx, input.ID, input.Turn)
+		result, err := client.Transcript(ctx, input.ID)
 		if err != nil {
 			return nil, transcriptReply{}, toolFailure(err)
 		}
 		result.Lines = viewLines(result.Lines)
-		output := transcriptReply{ID: input.ID, Turn: result.Turn, Attempt: result.Attempt, Total: len(result.Lines), Lines: []transcriptLine{},
+		output := transcriptReply{ID: input.ID, Attempt: result.Attempt, Total: len(result.Lines), Lines: []transcriptLine{},
 			Redacted: result.Redacted, Skipped: result.Skipped}
 		size := func(value any) int {
 			encoded, _ := json.Marshal(value, jsontext.EscapeForHTML(true), jsontext.EscapeForJS(true)) // as the SDK's encoding/json writes it
@@ -623,7 +559,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "cleanup",
 		Description: "Delete every object under a run's prefix in its pool's bucket: its S3 inputs and outputs. await does this once a " +
-			"turn is terminal and its S3 outputs verify; use cleanup for a run that ended while nothing awaited it.",
+			"run is terminal and its S3 outputs verify; use cleanup for a run that ended while nothing awaited it.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, cleanupOutput, error) {
 		client, err := connect()

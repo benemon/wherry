@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 
 	busclient "github.com/benemon/wherry/internal/client"
@@ -24,7 +23,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|receivers|submit|continue|cancel|await|status|events|transcript|cleanup|receiver|admin|mcp>")
+		return errors.New("usage: wherry <init|key|receivers|submit|cancel|await|status|events|transcript|cleanup|receiver|admin|mcp>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -78,7 +77,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runMCP(context.Background(), args[1:])
 	}
 	command, ok := map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
-		"receivers": runReceivers, "submit": runSubmit, "continue": runContinue,
+		"receivers": runReceivers, "submit": runSubmit,
 		"cancel": runCancel, "await": runAwait, "status": runStatus, "events": runEvents, "transcript": runTranscript, "cleanup": runCleanup,
 	}[args[0]]
 	if !ok {
@@ -154,57 +153,6 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 			}
 		}
 	}
-	return nil
-}
-
-func runContinue(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const continueUsage = "usage: wherry continue RUN_ID [--prompt TEXT|--prompt-file FILE] [--deadline DURATION] [--queue-deadline DURATION]"
-	if len(args) == 0 {
-		return errors.New(continueUsage)
-	}
-	runID := args[0]
-	flags := flag.NewFlagSet("continue", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	configFile := flags.String("config-file", "", "host configuration file")
-	prompt := flags.String("prompt", "continue", "continuation prompt")
-	promptFile := flags.String("prompt-file", "", "continuation prompt file")
-	deadline := flags.Duration("deadline", busclient.DefaultDeadline, "task deadline")
-	queueDeadline := flags.Duration("queue-deadline", busclient.DefaultQueueDeadline, "queue deadline")
-	if err := flags.Parse(args[1:]); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New(continueUsage)
-	}
-	if *deadline <= 0 || *queueDeadline <= 0 {
-		return errors.New("deadlines must be positive")
-	}
-	if wasSet(flags, "prompt") && wasSet(flags, "prompt-file") {
-		return errors.New("--prompt and --prompt-file are mutually exclusive")
-	}
-	if wasSet(flags, "prompt-file") {
-		contents, err := os.ReadFile(*promptFile)
-		if err != nil {
-			return err
-		}
-		if len(contents) == 0 {
-			return errors.New("--prompt-file is empty")
-		}
-		*prompt = string(contents)
-	}
-	client, closeClient, err := commandClient(client, *configFile, stderr)
-	if err != nil {
-		return err
-	}
-	defer closeClient()
-	result, err := client.Continue(ctx, runID, busclient.ContinueInput{
-		Prompt: *prompt, Deadline: *deadline, QueueDeadline: *queueDeadline,
-	})
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "run_id=%s turn=%d\n", result.RunID, result.Turn)
-	warnSkipped(stderr, result.Skipped)
 	return nil
 }
 
@@ -381,7 +329,7 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
 	timeout := flags.Duration("timeout", busclient.DefaultDeadline, "wait timeout")
-	outputsDir := flags.String("outputs-dir", "", "directory for the turn's outputs (default: <state_dir>/runs/RUN_ID/outputs/TURN)")
+	outputsDir := flags.String("outputs-dir", "", "directory for the run's outputs (default: <state_dir>/runs/RUN_ID/outputs)")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -415,12 +363,9 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 			fmt.Fprintln(stdout, partText(part))
 		}
 	}
-	if result.Status.State == wire.TaskStateAuthRequired {
-		fmt.Fprintf(stderr, "continue with: wherry continue %s\n", runID)
-	}
 	var paths []string
 	if len(result.Outputs) > 0 {
-		if paths, err = client.WriteOutputs(runID, result.Turn, *outputsDir, result.Outputs); err != nil {
+		if paths, err = client.WriteOutputs(runID, *outputsDir, result.Outputs); err != nil {
 			return fmt.Errorf("write outputs: %w", err)
 		}
 	}
@@ -504,7 +449,7 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 			if run.Model != "" {
 				model = " model=" + run.Model
 			}
-			fmt.Fprintf(stdout, "%s pool=%s turn=%d%s %s\n", run.RunID, run.Pool, run.Turn, model, run.Status.State)
+			fmt.Fprintf(stdout, "%s pool=%s%s %s\n", run.RunID, run.Pool, model, run.Status.State)
 		}
 		warnSkipped(stderr, result.Skipped)
 		return nil
@@ -514,7 +459,6 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 			return err
 		}
 		fmt.Fprintln(stdout, result.Status.State)
-		fmt.Fprintf(stdout, "turn=%d\n", result.Turn)
 		if result.Model != "" {
 			fmt.Fprintf(stdout, "model=%s\n", result.Model)
 		}
@@ -522,9 +466,6 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 			for _, part := range result.Status.Message.Parts {
 				fmt.Fprintln(stdout, partText(part))
 			}
-		}
-		if result.Status.State == wire.TaskStateAuthRequired {
-			fmt.Fprintf(stderr, "continue with: wherry continue %s\n", flags.Arg(0))
 		}
 		warnRedacted(stderr, result.Redacted)
 		warnSkipped(stderr, result.Skipped)
@@ -566,8 +507,8 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 	}
 	for _, record := range result.Statuses {
 		status := record.StatusUpdate.Status
-		fmt.Fprintf(stdout, "turn=%d attempt=%d kind=%s state=%s receiver=%s time=%s",
-			record.Wherry.Turn, record.Wherry.Attempt, record.Wherry.Kind, status.State, record.Wherry.Receiver, status.Timestamp)
+		fmt.Fprintf(stdout, "attempt=%d kind=%s state=%s receiver=%s time=%s",
+			record.Wherry.Attempt, record.Wherry.Kind, status.State, record.Wherry.Receiver, status.Timestamp)
 		if status.Message != nil {
 			texts := make([]string, 0, len(status.Message.Parts))
 			for _, part := range status.Message.Parts {
@@ -577,15 +518,10 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 		}
 		fmt.Fprintln(stdout)
 	}
-	positions := slices.Collect(maps.Keys(result.Chunks))
-	sort.Slice(positions, func(i, j int) bool {
-		if positions[i].Turn != positions[j].Turn {
-			return positions[i].Turn < positions[j].Turn
-		}
-		return positions[i].Attempt < positions[j].Attempt
-	})
-	for _, position := range positions {
-		fmt.Fprintf(stdout, "turn=%d attempt=%d transcript_chunks=%d\n", position.Turn, position.Attempt, result.Chunks[position])
+	attempts := slices.Collect(maps.Keys(result.Chunks))
+	slices.Sort(attempts)
+	for _, attempt := range attempts {
+		fmt.Fprintf(stdout, "attempt=%d transcript_chunks=%d\n", attempt, result.Chunks[attempt])
 	}
 	warnRedacted(stderr, result.Redacted)
 	warnSkipped(stderr, result.Skipped)
@@ -593,7 +529,7 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 }
 
 func runTranscript(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const transcriptUsage = "usage: wherry transcript RUN_ID [--turn N] [--offset N] [--limit N]"
+	const transcriptUsage = "usage: wherry transcript RUN_ID [--offset N] [--limit N]"
 	if len(args) == 0 {
 		return errors.New(transcriptUsage)
 	}
@@ -601,7 +537,6 @@ func runTranscript(ctx context.Context, client *busclient.Host, args []string, s
 	flags := flag.NewFlagSet("transcript", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
-	turn := flags.Int64("turn", 0, "turn to read (default: the latest)")
 	offset := flags.Int("offset", 0, "lines to skip")
 	limit := flags.Int("limit", 0, "most lines to print (default: all)")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -610,15 +545,15 @@ func runTranscript(ctx context.Context, client *busclient.Host, args []string, s
 	if flags.NArg() != 0 {
 		return errors.New(transcriptUsage)
 	}
-	if *turn < 0 || *offset < 0 || *limit < 0 {
-		return errors.New("--turn, --offset and --limit must not be negative")
+	if *offset < 0 || *limit < 0 {
+		return errors.New("--offset and --limit must not be negative")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {
 		return err
 	}
 	defer closeClient()
-	result, err := client.Transcript(ctx, runID, *turn)
+	result, err := client.Transcript(ctx, runID)
 	if err != nil {
 		return err
 	}

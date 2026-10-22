@@ -335,7 +335,7 @@ func TestRoundTrip(t *testing.T) {
 			t.Fatalf("host logs carry a credential:\n%s", hostLogs.String())
 		}
 	}
-	if !strings.Contains(hostLogs.String(), "host: run "+submitted.RunID+": sealed [model deploy-key] to receiver-a for turn 1 attempt 1") {
+	if !strings.Contains(hostLogs.String(), "host: run "+submitted.RunID+": sealed [model deploy-key] to receiver-a for attempt 1") {
 		t.Fatalf("the host did not answer the seal request; logs:\n%s", hostLogs.String())
 	}
 
@@ -406,7 +406,7 @@ func s3RoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host *buscl
 	if err != nil {
 		t.Fatal(err)
 	}
-	if awaited.Status.State != wire.TaskStateCompleted || len(awaited.Stored) != 1 || awaited.Stored[0].Key != wire.S3OutputKey("tenant-a", submitted.RunID, 1, "big.bin") {
+	if awaited.Status.State != wire.TaskStateCompleted || len(awaited.Stored) != 1 || awaited.Stored[0].Key != wire.S3OutputKey("tenant-a", submitted.RunID, "big.bin") {
 		t.Fatalf("await = %+v; want the S3 output listed; logs:\n%s\n%s", awaited, logs.String(), hostLogs.String())
 	}
 	dir := t.TempDir()

@@ -67,18 +67,6 @@ func (keys Keys) current(owner, keyID string) (ed25519.PublicKey, error) {
 	return state.Current, nil
 }
 
-// signedBy returns the owner's current or retired key with keyID.
-func (keys Keys) signedBy(owner, keyID string) (ed25519.PublicKey, error) {
-	if current, err := keys.current(owner, keyID); err == nil {
-		return current, nil
-	}
-	state := keys[owner]
-	if index := slices.IndexFunc(state.Retired, func(key ed25519.PublicKey) bool { return KeyID(key) == keyID }); index >= 0 {
-		return state.Retired[index], nil
-	}
-	return nil, errors.New("signing key is not one of the owner's keys")
-}
-
 func ApplyKeyRecord(state KeyState, topicOwner string, encoded []byte) (KeyState, error) {
 	if state.Revoked {
 		return state, errors.New("key topic is closed by revocation")

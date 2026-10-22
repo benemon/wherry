@@ -90,15 +90,15 @@ func TestSealToAnotherRunsKeyDoesNotOpen(t *testing.T) {
 	runB := f.request(t, 2)
 	sealed, err := signed.Seal(signed.SealBinding{
 		Tenant: runB.Tenant, Pool: runB.Pool, Receiver: runB.Receiver, KeyID: runB.KeyID, Run: runB.Run,
-		Turn: runB.Turn, Attempt: runB.Attempt, Credentials: runB.Credentials, ExpiryMS: runB.ExpiryMS,
+		Attempt: runB.Attempt, Credentials: runB.Credentials, ExpiryMS: runB.ExpiryMS,
 	}, runA.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: map[string][]byte{credentialName: []byte(testToken)}, RedactionKey: testRedactionKey})
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.produce(t, admin.HostTopic(testTenant, testHost), "run-b", sealed)
 	<-first
-	if status := <-second; status != kgo.AckAccept || f.lastTask(t).Status.State != wire.TaskStateAuthRequired {
-		t.Fatalf("run-b ended %v with %s, want AUTH_REQUIRED", status, f.lastTask(t).Status.State)
+	if status := <-second; status != kgo.AckReject || f.lastTask(t).Status.State != wire.TaskStateFailed {
+		t.Fatalf("run-b ended %v with %s, want FAILED", status, f.lastTask(t).Status.State)
 	}
 	if dispatches, _, _ := f.dispatched(t); dispatches != 0 {
 		t.Fatalf("dispatched %d jobs with a seal to another run's key", dispatches)
@@ -129,7 +129,7 @@ func TestALaterAttemptRequestsAgain(t *testing.T) {
 	if dispatches, credential, attempt := f.dispatched(t); dispatches != 1 || string(credential) != testToken || attempt != 2 {
 		t.Fatalf("dispatches %d with %q at attempt %d, want attempt 2's seal alone", dispatches, credential, attempt)
 	}
-	if !strings.Contains(f.logs.String(), "run run-a: a seal for turn 1 attempt 2 does not open") {
+	if !strings.Contains(f.logs.String(), "run run-a: a seal for attempt 2 does not open") {
 		t.Fatalf("the first attempt's seal was not refused; logs:\n%s", f.logs.String())
 	}
 }
@@ -185,7 +185,7 @@ func TestSecretNeverLogged(t *testing.T) {
 	request := f.request(t, 2)
 	sealed, err := signed.Seal(signed.SealBinding{
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
+		Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
 	}, request.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: map[string][]byte{credentialName: []byte(testToken)}, RedactionKey: testRedactionKey})
 	if err != nil {
 		t.Fatal(err)
@@ -195,10 +195,10 @@ func TestSecretNeverLogged(t *testing.T) {
 	tag[0] ^= 1
 	parts[4] = base64.RawURLEncoding.EncodeToString(tag)
 	f.produce(t, admin.HostTopic(testTenant, testHost), "run-b", []byte(strings.Join(parts, ".")))
-	if status := <-done; status != kgo.AckAccept || f.lastTask(t).Status.State != wire.TaskStateAuthRequired {
-		t.Fatalf("a tampered seal: ended %v, want AUTH_REQUIRED", status)
+	if status := <-done; status != kgo.AckReject || f.lastTask(t).Status.State != wire.TaskStateFailed {
+		t.Fatalf("a tampered seal: ended %v, want FAILED", status)
 	}
-	if logs := f.logs.String(); strings.Contains(logs, testToken) || !strings.Contains(logs, "run run-b: a seal for turn 1 attempt 1 does not open") {
+	if logs := f.logs.String(); strings.Contains(logs, testToken) || !strings.Contains(logs, "run run-b: a seal for attempt 1 does not open") {
 		t.Fatalf("unexpected logs:\n%s", logs)
 	}
 }
@@ -410,11 +410,10 @@ func TestAnAdopterPublishesNothingBeforeItsSeal(t *testing.T) {
 	}
 }
 
-// An adopter whose seal does not come within the request's lifetime stops the job and ends the turn AUTH_REQUIRED,
-// having published none of it.
-func TestAnAdopterWithoutASealEndsAuthRequired(t *testing.T) {
+// An adopter whose seal does not come within the request's lifetime stops the job and fails the run.
+func TestAnAdopterWithoutASealFails(t *testing.T) {
 	f, record := adopting(t)
-	if status := f.execute(t, record, 2); status != kgo.AckAccept || f.lastTask(t).Status.State != wire.TaskStateAuthRequired {
+	if status := f.execute(t, record, 2); status != kgo.AckReject || f.lastTask(t).Status.State != wire.TaskStateFailed {
 		t.Fatalf("adopter ended %v; logs:\n%s", status, f.logs.String())
 	}
 	f.adapter.mu.Lock()
@@ -423,8 +422,8 @@ func TestAnAdopterWithoutASealEndsAuthRequired(t *testing.T) {
 	if stops != 1 || releases != 1 || len(f.chunks(t)) != 0 {
 		t.Fatalf("stops=%d releases=%d chunks=%d, want the job stopped and released with nothing published", stops, releases, len(f.chunks(t)))
 	}
-	if kinds := f.kinds(t); !slices.Equal(kinds, []string{"claimed", "interrupted"}) {
-		t.Fatalf("statuses %v, want claimed then interrupted", kinds)
+	if kinds := f.kinds(t); !slices.Equal(kinds, []string{"claimed", "terminal"}) {
+		t.Fatalf("statuses %v, want claimed then terminal", kinds)
 	}
 }
 

@@ -24,22 +24,22 @@ func testMessage(run string) Message {
 }
 
 func testBinding() ReceiverBinding {
-	return ReceiverBinding{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Turn: 1, Attempt: 1}
+	return ReceiverBinding{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Attempt: 1}
 }
 
 func testRecords() map[string]Record {
 	placement := Placement{Agent: "claude"}
 	status := TaskStatus{State: "TASK_STATE_WORKING", Timestamp: testTime}
 	return map[string]Record{
-		"submission": &Submission{Message: testMessage("run-a"), Wherry: SubmissionBinding{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a", Turn: 1, Placement: placement}},
-		"cancel":     &Cancel{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a", Turn: 1},
+		"submission": &Submission{Message: testMessage("run-a"), Wherry: SubmissionBinding{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a", Placement: placement}},
+		"cancel":     &Cancel{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a"},
 		"status": &RunStatus{StatusUpdate: TaskStatusUpdateEvent{TaskID: "run-a", ContextID: "run-a", Status: status},
 			Wherry: StatusBinding{ReceiverBinding: testBinding(), EventID: "event-a", Kind: "started", TaskHash: testHash}},
 		"chunk": &Chunk{ArtifactUpdate: TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", Artifact: Artifact{ArtifactID: "transcript", Parts: []Part{{Text: "line"}}, Extensions: []string{ExtensionURI}}},
 			Wherry: ChunkBinding{ReceiverBinding: testBinding(), TaskHash: testHash, Seq: 0}},
 		"result": &Result{Task: Task{ID: "run-a", ContextID: "run-a", Status: TaskStatus{State: "TASK_STATE_COMPLETED", Timestamp: testTime}, Artifacts: []Artifact{}, History: []Message{testMessage("run-a")}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
-		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Turn: 1, Placement: placement, TaskHash: testHash, MessageID: "message-a"},
+		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Placement: placement, TaskHash: testHash, MessageID: "message-a"},
 		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Adapter: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
 		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 1},
 		"start failure":                &StartFailure{Wherry: testBinding(), Adapter: "nomad", Agent: "claude", Class: "launch"},
@@ -50,7 +50,7 @@ func testRecords() map[string]Record {
 		"output": &Output{ArtifactUpdate: TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", Append: true, LastChunk: true, Metadata: []byte(`{"index":1}`),
 			Artifact: Artifact{ArtifactID: "sub/Report.md", Parts: []Part{{Raw: StdBytes("x")}}, Extensions: []string{ExtensionURI}}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
-		"submission with credentials and outputs": &Submission{Message: testMessage("run-a"), Wherry: SubmissionBinding{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a", Turn: 1, Placement: placement,
+		"submission with credentials and outputs": &Submission{Message: testMessage("run-a"), Wherry: SubmissionBinding{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a", Placement: placement,
 			Credentials: []TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []ExpectedOutput{{Name: "out/report.md", Required: true}}}},
 	}
 }
@@ -113,11 +113,6 @@ func TestRecordTypesAreNotInterchangeable(t *testing.T) {
 func TestRecordValidation(t *testing.T) {
 	_, host, receiver := testKeys(t)
 	cases := map[string]func(map[string]Record) Record{
-		"submission turn 0": func(r map[string]Record) Record {
-			value := r["submission"].(*Submission)
-			value.Wherry.Turn = 0
-			return value
-		},
 		"submission message for another run": func(r map[string]Record) Record {
 			value := r["submission"].(*Submission)
 			value.Message.TaskID = "run-b"
@@ -198,11 +193,6 @@ func TestRecordValidation(t *testing.T) {
 		"seal request naming a credential twice": func(r map[string]Record) Record {
 			value := r["seal request"].(*SealRequest)
 			value.TaskCredentials = []string{"model"}
-			return value
-		},
-		"submission continuation declaring credentials": func(r map[string]Record) Record {
-			value := r["submission with credentials and outputs"].(*Submission)
-			value.Wherry.Turn = 2
 			return value
 		},
 		"submission credential file escaping": func(r map[string]Record) Record {

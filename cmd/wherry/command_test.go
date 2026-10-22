@@ -243,12 +243,12 @@ func (b *bus) tasks(t *testing.T, runID string) []task {
 }
 
 func (b *bus) binding(task task) wire.ReceiverBinding {
-	return wire.ReceiverBinding{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: task.submission.Wherry.Run, Turn: task.submission.Wherry.Turn, Attempt: 1}
+	return wire.ReceiverBinding{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: task.submission.Wherry.Run, Attempt: 1}
 }
 
 func (b *bus) echo(t *testing.T, task task) []byte {
 	binding := task.submission.Wherry
-	return b.sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: binding.Run, Turn: binding.Turn, Placement: binding.Placement,
+	return b.sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: binding.Run, Placement: binding.Placement,
 		TaskHash: task.hash, MessageID: task.submission.Message.MessageID})
 }
 
@@ -413,20 +413,22 @@ func TestAwaitPrintsDataPart(t *testing.T) {
 	}
 }
 
-// publishInterruptedRun admits a run and interrupts it in AUTH_REQUIRED, as a receiver without a seal does.
-func publishInterruptedRun(t *testing.T) (*bus, task) {
+// publishFailedRun admits a run and fails it after its credential is not answered.
+func publishFailedRun(t *testing.T) (*bus, task) {
 	t.Helper()
 	b := newBus(t)
 	admitted := b.admitted(t)
-	status := now(wire.TaskStateAuthRequired)
-	status.Message = &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "credential token required"}}, Extensions: []string{wire.ExtensionURI}}
-	b.feed(t, admitted.submission.Wherry.Run, b.status(t, admitted, "interrupted-1", "interrupted", status))
+	status := now(wire.TaskStateFailed)
+	status.Message = &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "credential token was not answered within 5m"}}, Extensions: []string{wire.ExtensionURI}}
+	runID := admitted.submission.Wherry.Run
+	result := &wire.Result{Task: wire.Task{ID: runID, ContextID: runID, History: []wire.Message{admitted.submission.Message}, Status: status, Artifacts: []wire.Artifact{}},
+		Wherry: wire.ResultBinding{ReceiverBinding: b.binding(admitted), TaskHash: admitted.hash}}
+	b.feed(t, runID, b.sign(t, result), b.status(t, admitted, "failed", "terminal", status))
 	return b, admitted
 }
 
-// cancelInterrupted reads the host's cancel from pool-a's events as receiver-a and writes the CANCELED terminal an
-// interrupted run gets.
-func (b *bus) cancelInterrupted(t *testing.T, admitted task) {
+// cancelRun reads the host's cancel from pool-a's events and writes its CANCELED terminal.
+func (b *bus) cancelRun(t *testing.T, admitted task) {
 	t.Helper()
 	state, err := admin.Load(b.ctx, b.receiver)
 	if err != nil {
@@ -447,82 +449,23 @@ func (b *bus) cancelInterrupted(t *testing.T, admitted task) {
 	b.feed(t, runID, b.status(t, admitted, runID+"/1/canceled", "terminal", now(wire.TaskStateCanceled)))
 }
 
-func TestAwaitPrintsAuthRequiredAndContinuation(t *testing.T) {
-	b, admitted := publishInterruptedRun(t)
+func TestAwaitPrintsFailed(t *testing.T) {
+	b, admitted := publishFailedRun(t)
 	runID := admitted.submission.Wherry.Run
 	var stdout, stderr bytes.Buffer
 	err := runAwait(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr)
-	if err == nil || err.Error() != "run ended in TASK_STATE_AUTH_REQUIRED" {
+	if err == nil || err.Error() != "run ended in TASK_STATE_FAILED" {
 		t.Fatalf("error %v", err)
 	}
-	want := "TASK_STATE_AUTH_REQUIRED\ncredential token required\n"
-	if stdout.String() != want || stderr.String() != "continue with: wherry continue "+runID+"\n" {
-		t.Fatalf("stdout %q stderr %q, want %q and the continue hint", stdout.String(), stderr.String(), want)
-	}
-}
-
-func TestContinuePrintsRunAndTurn(t *testing.T) {
-	b, admitted := publishInterruptedRun(t)
-	runID := admitted.submission.Wherry.Run
-	var stdout, stderr bytes.Buffer
-	before := time.Now()
-	if err := runContinue(b.ctx, b.client, []string{runID, "--deadline", "45s", "--queue-deadline", "15s"}, &stdout, &stderr); err != nil {
-		t.Fatal(err)
-	}
-	after := time.Now()
-	if got, want := stdout.String(), "run_id="+runID+" turn=2\n"; got != want {
-		t.Fatalf("stdout %q, want %q", got, want)
-	}
-	tasks := b.tasks(t, runID)
-	if len(tasks) != 2 {
-		t.Fatalf("pool tasks hold %d turns, want submission and continuation", len(tasks))
-	}
-	continuation := tasks[1].submission.Wherry
-	inRange := func(ms int64, d time.Duration) bool {
-		return ms >= before.Add(d).UnixMilli() && ms <= after.Add(d).UnixMilli()
-	}
-	if continuation.Turn != 2 || !inRange(continuation.DeadlineMS, 45*time.Second) || !inRange(continuation.QueueDeadlineMS, 15*time.Second) {
-		t.Fatalf("continuation %#v does not follow the flags", continuation)
-	}
-}
-
-func TestContinueDefaultsToATwoHourDeadline(t *testing.T) {
-	b, admitted := publishInterruptedRun(t)
-	runID := admitted.submission.Wherry.Run
-	var stdout, stderr bytes.Buffer
-	before := time.Now()
-	if err := runContinue(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
-		t.Fatal(err)
-	}
-	after := time.Now()
-	if deadline := b.tasks(t, runID)[1].submission.Wherry.DeadlineMS; deadline < before.Add(2*time.Hour).UnixMilli() || deadline > after.Add(2*time.Hour).UnixMilli() {
-		t.Fatalf("continue deadline %v, want two hours out", time.UnixMilli(deadline))
-	}
-}
-
-func TestContinuePromptFile(t *testing.T) {
-	b, admitted := publishInterruptedRun(t)
-	runID := admitted.submission.Wherry.Run
-	promptFile := filepath.Join(t.TempDir(), "prompt.txt")
-	if err := os.WriteFile(promptFile, []byte("use the refreshed credential\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var stdout, stderr bytes.Buffer
-	if err := runContinue(b.ctx, b.client, []string{runID, "--prompt-file", promptFile}, &stdout, &stderr); err != nil {
-		t.Fatal(err)
-	}
-	tasks := b.tasks(t, runID)
-	if got := tasks[1].submission.Message.Parts[0].Text; got != "use the refreshed credential\n" {
-		t.Fatalf("continuation prompt %q, want the prompt file's contents", got)
-	}
-	err := runContinue(b.ctx, b.client, []string{runID, "--prompt", "text", "--prompt-file", promptFile}, &stdout, &stderr)
-	if err == nil || !strings.Contains(err.Error(), "--prompt") || !strings.Contains(err.Error(), "--prompt-file") {
-		t.Fatalf("both prompt flags = %v, want an error naming both", err)
+	want := "TASK_STATE_FAILED\n"
+	if stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
 	}
 }
 
 func TestCancelCLI(t *testing.T) {
-	b, admitted := publishInterruptedRun(t)
+	b := newBus(t)
+	admitted := b.admitted(t)
 	runID := admitted.submission.Wherry.Run
 	var stdout, stderr bytes.Buffer
 	if err := runCancel(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
@@ -531,7 +474,7 @@ func TestCancelCLI(t *testing.T) {
 	if stdout.String() != "run_id="+runID+"\n" || stderr.Len() != 0 {
 		t.Fatalf("cancel stdout %q stderr %q", stdout.String(), stderr.String())
 	}
-	b.cancelInterrupted(t, admitted)
+	b.cancelRun(t, admitted)
 	stdout.Reset()
 	err := runAwait(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr)
 	if err == nil || err.Error() != "run ended in TASK_STATE_CANCELED" {
@@ -544,8 +487,8 @@ func TestCancelCLI(t *testing.T) {
 	if err := runEvents(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	if lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n"); len(lines) != 3 ||
-		!strings.Contains(lines[1], "kind=interrupted") || !strings.Contains(lines[2], "kind=terminal state=TASK_STATE_CANCELED receiver=receiver-a") {
+	if lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n"); len(lines) != 2 ||
+		!strings.Contains(lines[1], "kind=terminal state=TASK_STATE_CANCELED receiver=receiver-a") {
 		t.Fatalf("events stdout %q", stdout.String())
 	}
 	if err := runCancel(b.ctx, b.client, []string{"run-missing"}, &stdout, &stderr); err == nil || err.Error() != "cancel run-missing: run not found" {
@@ -560,21 +503,21 @@ func TestStatusOfAWorkingRunExitsZero(t *testing.T) {
 	if err := runStatus(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
 		t.Fatalf("status of a WORKING run: %v", err)
 	}
-	if want := "TASK_STATE_WORKING\nturn=1\n"; stdout.String() != want || stderr.Len() != 0 {
+	if want := "TASK_STATE_WORKING\n"; stdout.String() != want || stderr.Len() != 0 {
 		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
 	}
 }
 
-func TestStatusPrintsAuthRequiredAndContinuation(t *testing.T) {
-	b, admitted := publishInterruptedRun(t)
+func TestStatusPrintsFailed(t *testing.T) {
+	b, admitted := publishFailedRun(t)
 	runID := admitted.submission.Wherry.Run
 	var stdout, stderr bytes.Buffer
 	if err := runStatus(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	want := "TASK_STATE_AUTH_REQUIRED\nturn=1\ncredential token required\n"
-	if stdout.String() != want || stderr.String() != "continue with: wherry continue "+runID+"\n" {
-		t.Fatalf("stdout %q stderr %q, want %q and the continue hint", stdout.String(), stderr.String(), want)
+	want := "TASK_STATE_FAILED\ncredential token was not answered within 5m\n"
+	if stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
 	}
 }
 
@@ -600,7 +543,7 @@ func TestStatusListsRuns(t *testing.T) {
 	if err := runStatus(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	want := submitted.RunID + " pool=pool-a turn=1 TASK_STATE_SUBMITTED\n" + working + " pool=pool-a turn=1 TASK_STATE_WORKING\n"
+	want := submitted.RunID + " pool=pool-a TASK_STATE_SUBMITTED\n" + working + " pool=pool-a TASK_STATE_WORKING\n"
 	if stdout.String() != want || stderr.Len() != 0 {
 		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
 	}
@@ -630,8 +573,8 @@ func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 	if err := runEvents(b.ctx, b.client, []string{submitted.RunID}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	want := "turn=1 attempt=1 kind=terminal state=TASK_STATE_REJECTED receiver=receiver-a time=2026-10-17T10:00:00.000Z message=\"queue deadline passed\"\n" +
-		"turn=1 attempt=1 transcript_chunks=2\n"
+	want := "attempt=1 kind=terminal state=TASK_STATE_REJECTED receiver=receiver-a time=2026-10-17T10:00:00.000Z message=\"queue deadline passed\"\n" +
+		"attempt=1 transcript_chunks=2\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout %q, want %q", stdout.String(), want)
 	}
@@ -656,9 +599,6 @@ func TestTranscriptPrintsTheLatestAttemptsLines(t *testing.T) {
 	if !strings.Contains(stdout.String(), `message="using [redacted:model]"`) || stderr.String() != "model redacted 1 times\n" {
 		t.Fatalf("events stdout %q stderr %q", stdout.String(), stderr.String())
 	}
-	if err := runTranscript(b.ctx, b.client, []string{runID, "--turn", "2"}, &stdout, &stderr); !errors.Is(err, busclient.ErrInvalidInput) {
-		t.Fatalf("a turn past the latest: %v", err)
-	}
 }
 
 func TestEmptyPromptFileIsRefused(t *testing.T) {
@@ -669,9 +609,6 @@ func TestEmptyPromptFileIsRefused(t *testing.T) {
 	var stderr bytes.Buffer
 	if err := runSubmit(context.Background(), nil, []string{"--prompt-file", empty}, &stderr, &stderr); err == nil || err.Error() != "--prompt-file is empty" {
 		t.Fatalf("submit: %v", err)
-	}
-	if err := runContinue(context.Background(), nil, []string{"run-a", "--prompt-file", empty}, &stderr, &stderr); err == nil || err.Error() != "--prompt-file is empty" {
-		t.Fatalf("continue: %v", err)
 	}
 }
 
@@ -684,11 +621,11 @@ func TestCleanupRefusesAnUnfinishedRun(t *testing.T) {
 	}
 }
 
-func TestCleanupRefusesAnInterruptedRun(t *testing.T) {
-	b, admitted := publishInterruptedRun(t)
+func TestCleanupRecognizesAFailedRunAsEnded(t *testing.T) {
+	b, admitted := publishFailedRun(t)
 	var stdout, stderr bytes.Buffer
-	if err := runCleanup(b.ctx, b.client, []string{admitted.submission.Wherry.Run}, &stdout, &stderr); !errors.Is(err, busclient.ErrInvalidInput) || !strings.Contains(err.Error(), "has not ended") {
-		t.Fatalf("cleanup of an interrupted run, whose continuation needs its inputs: %v", err)
+	if err := runCleanup(b.ctx, b.client, []string{admitted.submission.Wherry.Run}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "no storage credential") || strings.Contains(err.Error(), "has not ended") {
+		t.Fatalf("cleanup of a failed run: %v", err)
 	}
 }
 
@@ -704,9 +641,6 @@ func TestUsageErrors(t *testing.T) {
 		{"submit labels", func(stderr *bytes.Buffer) error {
 			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--labels", "region=eu", "--prompt", "p"}, stderr, stderr)
 		}, "flag provided but not defined: -labels"},
-		{"continue argument", func(stderr *bytes.Buffer) error {
-			return runContinue(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
-		}, "usage: wherry continue"},
 		{"cancel argument", func(stderr *bytes.Buffer) error {
 			return runCancel(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
 		}, "usage: wherry cancel"},
@@ -721,9 +655,6 @@ func TestUsageErrors(t *testing.T) {
 		}, "selector: requirement values must be valid and unique"},
 		{"submit deadline", func(stderr *bytes.Buffer) error {
 			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--prompt", "p", "--deadline", "0s"}, stderr, stderr)
-		}, "deadlines must be positive"},
-		{"continue deadline", func(stderr *bytes.Buffer) error {
-			return runContinue(context.Background(), nil, []string{"run-a", "--deadline", "0s"}, stderr, stderr)
 		}, "deadlines must be positive"},
 		{"await timeout", func(stderr *bytes.Buffer) error {
 			return runAwait(context.Background(), nil, []string{"run-a", "--timeout", "0s"}, stderr, stderr)

@@ -113,7 +113,7 @@ func (f fixture) sealS3(t *testing.T, urls func(input, output string) (string, s
 
 func validURLs(origin string) func(string, string) (string, string) {
 	return func(input, output string) (string, string) {
-		return presigned(origin, wire.S3InputKey(testTenant, "run-a", input)), presigned(origin, wire.S3OutputKey(testTenant, "run-a", 1, output))
+		return presigned(origin, wire.S3InputKey(testTenant, "run-a", input)), presigned(origin, wire.S3OutputKey(testTenant, "run-a", output))
 	}
 }
 
@@ -147,7 +147,7 @@ func TestS3ObjectsTravelOnlyInTheSeal(t *testing.T) {
 			}
 		}
 	}
-	key := wire.S3OutputKey(testTenant, "run-a", 1, "report.pdf")
+	key := wire.S3OutputKey(testTenant, "run-a", "report.pdf")
 	if data, ok := s.put("/" + s3Bucket + "/" + key); !ok || string(data) != "report" {
 		t.Fatalf("store holds %q, %v for the output", data, ok)
 	}
@@ -216,7 +216,7 @@ func TestS3URLsAreCheckedAgainstPoolStorage(t *testing.T) {
 		done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
 		f.sealS3(t, func(input, output string) (string, string) {
 			get, _ := validURLs(origin)(input, output)
-			return get, presigned("https://127.0.0.1:1", wire.S3OutputKey(testTenant, "run-a", 1, output))
+			return get, presigned("https://127.0.0.1:1", wire.S3OutputKey(testTenant, "run-a", output))
 		})
 		if status := <-done; status != kgo.AckReject || f.lastTask(t).Status.Message.Parts[0].Text != "the URL for S3 output report.pdf is not one of pool pool-a's storage" {
 			t.Fatalf("status %v, %+v", status, f.lastTask(t).Status)
@@ -411,7 +411,7 @@ func TestAnAdoptedRunReturnsAnS3Output(t *testing.T) {
 	f.adapter.job = adapter.JobRunning
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 2)
 	request := f.sealS3(t, func(input, output string) (string, string) {
-		return "", presigned(s.endpoint(), wire.S3OutputKey(testTenant, "run-a", 1, output))
+		return "", presigned(s.endpoint(), wire.S3OutputKey(testTenant, "run-a", output))
 	})
 	if len(request.S3Inputs) != 0 || !slices.Equal(request.S3Outputs, []string{"report.pdf"}) {
 		t.Fatalf("adopter asks for inputs %v and outputs %v", request.S3Inputs, request.S3Outputs)
@@ -419,7 +419,7 @@ func TestAnAdoptedRunReturnsAnS3Output(t *testing.T) {
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
-	key := wire.S3OutputKey(testTenant, "run-a", 1, "report.pdf")
+	key := wire.S3OutputKey(testTenant, "run-a", "report.pdf")
 	if data, ok := s.put("/" + s3Bucket + "/" + key); !ok || string(data) != "report" {
 		t.Fatalf("store holds %q, %v for the adopted run's output", data, ok)
 	}
@@ -437,7 +437,7 @@ func TestAnAttemptWithoutAnUploadURLStoresNothing(t *testing.T) {
 
 func TestAnInputFileCannotTakeAnS3InputsName(t *testing.T) {
 	history := []wire.Message{{Parts: []wire.Part{{Text: "hi"}}}, {Parts: []wire.Part{{Raw: wire.StdBytes("x"), Filename: "dataset.bin"}}}}
-	if _, rejection := deliverables(history, nil, []wire.S3Input{{Name: "dataset.bin"}}); rejection != "input names repeat across turns" {
+	if _, rejection := deliverables(history, nil, []wire.S3Input{{Name: "dataset.bin"}}); rejection != "input names repeat" {
 		t.Fatalf("rejection %q", rejection)
 	}
 }

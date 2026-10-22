@@ -356,7 +356,7 @@ func TestAnswerSealsPresignedURLsForTheRunsObjects(t *testing.T) {
 	if response, err := o.client.Do(request); err != nil || response.StatusCode != http.StatusOK {
 		t.Fatalf("PUT answered %v, %v", response.Status, err)
 	}
-	if got := o.object(t, wire.S3OutputKey("tenant-a", runID, 1, "out/report.pdf")); string(got) != "report" {
+	if got := o.object(t, wire.S3OutputKey("tenant-a", runID, "out/report.pdf")); string(got) != "report" {
 		t.Fatalf("output key holds %q", got)
 	}
 	if strings.Contains(f.logs.String(), "X-Amz") {
@@ -466,7 +466,7 @@ func TestDownloadVerifiesThenDeletesOnlyTheRunsPrefix(t *testing.T) {
 	task, _ := submitS3(t, f, receiver, time.Minute)
 	runID := task.submission.Wherry.Run
 	report := bytes.Repeat([]byte("r"), 3<<20)
-	key := wire.S3OutputKey("tenant-a", runID, 1, "out/report.pdf")
+	key := wire.S3OutputKey("tenant-a", runID, "out/report.pdf")
 	o.put(t, key, report)
 	// Neighbours a prefix match too loose would reach: a run whose ID extends this one's, and this run under another tenant.
 	neighbours := []string{wire.S3InputKey("tenant-a", runID+"x", "dataset.bin"), wire.S3InputKey("tenant-b", runID, "dataset.bin")}
@@ -522,7 +522,7 @@ func TestADownloadThatDoesNotVerifyKeepsThePrefix(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			task, _ := submitS3(t, f, receiver, time.Minute)
 			runID := task.submission.Wherry.Run
-			key := wire.S3OutputKey("tenant-a", runID, 1, "out/report.pdf")
+			key := wire.S3OutputKey("tenant-a", runID, "out/report.pdf")
 			o.put(t, key, []byte("report"))
 			o.put(t, strings.Replace(key, "/1/outputs/", "/2/outputs/", 1), []byte("report"))
 			o.put(t, strings.Replace(key, "report.pdf", "other.pdf", 1), []byte("report"))
@@ -580,24 +580,5 @@ func TestASealOverItsLimitIsRefusedBeforeUploading(t *testing.T) {
 	}
 	if end := f.tasksEnd(t, "pool-s3"); end != 0 {
 		t.Fatalf("%d tasks published", end)
-	}
-}
-
-// An interrupted turn's continuation fetches the same S3 inputs, so the run's prefix outlives it.
-func TestAnInterruptedRunKeepsItsPrefix(t *testing.T) {
-	f, o, receiver := storageFixture(t)
-	task, _ := submitS3(t, f, receiver, time.Minute)
-	runID := task.submission.Wherry.Run
-	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateAuthRequired, nil),
-		receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
-	awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
-	if err != nil || awaited.Status.State != wire.TaskStateAuthRequired {
-		t.Fatalf("await = %+v, %v", awaited.Status, err)
-	}
-	if _, _, err := f.host.DownloadOutputs(f.ctx, runID, awaited, t.TempDir()); err != nil {
-		t.Fatal(err)
-	}
-	if o.object(t, wire.S3InputKey("tenant-a", runID, "dataset.bin")) == nil {
-		t.Fatal("an interrupted run's input was deleted")
 	}
 }

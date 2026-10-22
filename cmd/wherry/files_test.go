@@ -160,7 +160,7 @@ func TestMCPSubmitCarriesFilesAndAwaitWritesOutputs(t *testing.T) {
 	b.outputResult(t, admitted, "report.md", "# Report\n", hashOf("# Report\n"))
 	var reply awaitReply
 	callTool(t, b.ctx, session, "await", map[string]any{"id": submitted.ID}, &reply)
-	path := filepath.Join(b.stateDir, "runs", submitted.ID, "outputs", "1", "report.md")
+	path := filepath.Join(b.stateDir, "runs", submitted.ID, "outputs", "report.md")
 	if !slices.Equal(reply.Outputs, []outputReply{{Name: "report.md", Path: path, SHA256: hashOf("# Report\n"), Size: 9}}) ||
 		!slices.Equal(reply.NotReturned, []wire.UnreturnedOutput{{Name: "notes.md", Reason: "missing"}}) {
 		t.Fatalf("await outputs %+v, not returned %+v", reply.Outputs, reply.NotReturned)
