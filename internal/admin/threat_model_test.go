@@ -692,7 +692,7 @@ func TestRevocationProbeRetriesOnlyWhileABrokerAuthorises(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), nil, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	login, calls, password := probe(ErrAuthenticationFailure)
+	login, calls, password := probe(errors.New("authentication failure"))
 	step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, login))
 	if step.Complete || *calls != 1 {
 		t.Fatalf("failed login: step %+v after %d probes; want one failed probe", step, *calls)

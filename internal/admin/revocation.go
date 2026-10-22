@@ -12,7 +12,6 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
-var ErrAuthenticationFailure = errors.New("authentication failure")
 var ErrAuthorizationDenied = errors.New("authorisation denied")
 var ErrStillAuthorised = errors.New("broker still authorises the principal")
 
@@ -140,7 +139,7 @@ func (service *Service) Probe(topic string) func(context.Context, string, string
 			request.Topics = append(request.Topics, requestTopic)
 			response, err := client.Broker(int(id)).Request(ctx, request)
 			if errors.Is(err, kerr.SaslAuthenticationFailed) {
-				return ErrAuthenticationFailure
+				return errors.New("authentication failure")
 			}
 			if err != nil {
 				return err

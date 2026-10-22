@@ -76,7 +76,7 @@ func TestRealBrokerFixture(t *testing.T) {
 
 	t.Run("a tenant reads only its own feed", func(t *testing.T) {
 		expectReadable(t, f.connect(t, TenantPrincipal(f.tenantA, f.hostA2)), TenantTopic(f.tenantA))
-		expectReadDenied(t, f.connect(t, TenantPrincipal(f.tenantB, f.hostB1)), TenantTopic(f.tenantA))
+		expectDenied(t, listEnd(f.connect(t, TenantPrincipal(f.tenantB, f.hostB1)), TenantTopic(f.tenantA)))
 	})
 
 	t.Run("key topics have one writer", func(t *testing.T) {
@@ -314,11 +314,6 @@ func expectReadable(t *testing.T, client *kgo.Client, topic string) {
 	if err := listEnd(client, topic); err != nil {
 		t.Fatalf("read %s: %v", topic, err)
 	}
-}
-
-func expectReadDenied(t *testing.T, client *kgo.Client, topic string) {
-	t.Helper()
-	expectDenied(t, listEnd(client, topic))
 }
 
 func listEnd(client *kgo.Client, topic string) error {

@@ -1,6 +1,9 @@
 package admin
 
-import "slices"
+import (
+	"slices"
+	"strings"
+)
 
 type ACL struct {
 	Principal, ResourceType, Resource string
@@ -58,22 +61,12 @@ func ACLs(state State) []ACL {
 	}
 	slices.SortFunc(acls, func(a, b ACL) int {
 		if a.Principal != b.Principal {
-			return cmp(a.Principal, b.Principal)
+			return strings.Compare(a.Principal, b.Principal)
 		}
 		if a.Resource != b.Resource {
-			return cmp(a.Resource, b.Resource)
+			return strings.Compare(a.Resource, b.Resource)
 		}
-		return cmp(a.ResourceType, b.ResourceType)
+		return strings.Compare(a.ResourceType, b.ResourceType)
 	})
 	return acls
-}
-
-func cmp(a, b string) int {
-	if a < b {
-		return -1
-	}
-	if a > b {
-		return 1
-	}
-	return 0
 }
