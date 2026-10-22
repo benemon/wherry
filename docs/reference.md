@@ -392,7 +392,7 @@ terms. It refuses a delivery limit above the lowest
 [records do not fit the broker](#record-limit). For an existing pool it
 records the new terms and sets the group configuration again. On new and
 existing topics it sets the tasks and events `retention.ms` to
-`run_lifetime_ms` plus six hours plus one day, and their
+`run_lifetime` plus six hours plus one day, and their
 `message.timestamp.type` to `LogAppendTime`. It refuses a run lifetime above
 29 days and 18 hours, or one that with six hours added exceeds the
 `retention.ms` of the feed of a tenant entitled to the pool. See
@@ -404,7 +404,7 @@ Entitles the tenant to an existing pool, creates the tenant feed, and
 grants the tenant's hosts and the pool's receivers their ACLs. It refuses
 when the pool's records do not fit the [record limit](#record-limit) with
 the tenant's feed counted, or when the feed's `retention.ms` is below the
-pool's `run_lifetime_ms` plus six hours, and records nothing. It applies
+pool's `run_lifetime` plus six hours, and records nothing. It applies
 each host's [quotas](#quotas).
 
 ### `wherry admin host add TENANT HOST --bundle-file FILE`
@@ -706,13 +706,14 @@ minutes.
 ## MCP tools
 
 `wherry mcp` serves eight tools over stdio. Each takes and returns JSON with
-a declared schema and opens its own Kafka connection. Deadlines given as `0`
-or omitted take the CLI defaults, 7200 and 600 seconds.
+a declared schema and opens its own Kafka connection. `deadline` and
+`queue_deadline` are Go durations, such as `90m`; omitted, they take the CLI
+defaults, `2h` and `10m`.
 
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool`, `await` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline`, `queue_deadline` | `id`, `pool`, `await` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `await` | `id` | `id`, `state`, `model`, `served_models`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped` |
 | `cancel` | `id` | `id`, `skipped` |
@@ -799,7 +800,7 @@ error text from the bus, the broker or the host key.
 | `INVALID_ARGUMENT` | an input is missing or malformed; the message names the rule it breaks |
 | `RUN_NOT_FOUND` | this host has not submitted the run and no receiver has admitted it |
 | `NO_MATCHING_RECEIVER` | no live receiver of an entitled pool can take the agent and selector |
-| `RUN_EXPIRED` | the queue deadline falls more than the pool's `run_lifetime_ms` after submission |
+| `RUN_EXPIRED` | the queue deadline falls more than the pool's `run_lifetime` after submission |
 | `OUTPUTS_NOT_WRITTEN` | the run's verified outputs could not be written to the state directory, or its S3 outputs downloaded, or the run's prefix deleted |
 | `CANCELLED` | the request was cancelled |
 | `VERSION_SKEW` | `wherry.admin` holds records a later release wrote; upgrade `wherry` and restart the MCP server |
@@ -875,9 +876,9 @@ ignored. Any other entry and a directory with no agent files are errors.
 | --- | --- |
 | `agents` | one or more `{name, credentials, models, default_model}`: an agent, the credential names it may take, and optionally the models a task may name for it and the one a task naming none runs |
 | `default_agent` | an agent from `agents`, used when a task names none |
-| `run_lifetime_ms` | optional, default 1209600000 (14 days): time from a run's submission past which a receiver rejects it unclaimed; it also bounds the run's queue deadline and the pool topics' retention |
+| `run_lifetime` | optional duration, default `336h` (14 days): time from a run's submission past which a receiver rejects it unclaimed; it also bounds the run's queue deadline and the pool topics' retention |
 | `delivery_limit` | the share group's `share.delivery.count.limit` |
-| `lock_duration_ms` | the share group's `share.record.lock.duration.ms` |
+| `lock_duration` | duration, the share group's `share.record.lock.duration.ms` |
 | `producer_byte_rate` | host quota, bytes per second |
 | `request_percentage` | host quota, percentage of broker request time |
 | `inline_limit` | optional, default 262144 (256 KiB): bytes of a task's input files together |
@@ -909,7 +910,8 @@ letter or digit. The run's objects live under `wherry/<tenant>/<run>/` in
 the bucket, addressed path-style, `https://<host>/<bucket>/<key>`. A pool
 without `storage` accepts no S3 input or output.
 
-Every number is positive. Set `lock_duration_ms` above 10000, since a
+Every number and duration is positive. Durations use Go syntax and are
+stored in milliseconds. Set `lock_duration` above `10s`, since a
 receiver renews its lock every 10 seconds; wherry does not check this. The
 broker bounds it between
 `group.share.min.record.lock.duration.ms` and
@@ -931,7 +933,7 @@ agents:
     default_model: haiku
 default_agent: coder
 delivery_limit: 5
-lock_duration_ms: 15000
+lock_duration: 15s
 producer_byte_rate: 1048576
 request_percentage: 10
 vcs:
@@ -1114,11 +1116,11 @@ ends the run `TASK_STATE_FAILED` with `timeout`.
 
 A receiver measures a run's lifetime from the broker's append time of its
 submission. It rejects a run no pool member has claimed with `run expired`
-when that time is more than `run_lifetime_ms` ago, and with
+when that time is more than `run_lifetime` ago, and with
 `queue deadline exceeds run lifetime` when the run's queue deadline falls
-more than `run_lifetime_ms` after it. A redelivered run that a member has
+more than `run_lifetime` after it. A redelivered run that a member has
 claimed skips both checks. `wherry submit` and the MCP `submit` tool refuse,
-before publishing, a queue deadline more than `run_lifetime_ms` from now.
+before publishing, a queue deadline more than `run_lifetime` from now.
 Every run therefore ends within six hours after the run lifetime.
 
 ## Kafka resources
@@ -1133,7 +1135,7 @@ replication factor, `cleanup.policy=delete` and
 | --- | --- | --- |
 | `wherry.admin` | any recording command | `-1` |
 | `wherry.receivers` | any recording command | `604800000` (7 days) |
-| `wherry.pool.<pool>.tasks` | `pool create` | `run_lifetime_ms + 21600000 + 86400000`; default `1317600000` |
+| `wherry.pool.<pool>.tasks` | `pool create` | `run_lifetime` plus 30 hours, in milliseconds; default `1317600000` |
 | `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` sets the same value |
 | `wherry.tenant.<tenant>` | `tenant add`, `host add` | `2592000000` (30 days) |
 | `wherry.receiver.<receiver>` | `receiver add` | `-1` |
@@ -1141,7 +1143,7 @@ replication factor, `cleanup.policy=delete` and
 
 The tasks retention keeps the run lifetime, the six-hour maximum run time,
 and a one-day margin. Events stay at least as long as tasks. A tenant feed
-must stay for at least `run_lifetime_ms + 21600000`; its 30-day default exceeds
+must stay for at least `run_lifetime` plus six hours; its 30-day default exceeds
 the default requirement of `1231200000`. Identity and configuration topics
 stay at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 

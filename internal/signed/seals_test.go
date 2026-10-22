@@ -52,7 +52,7 @@ func mustSeal(t *testing.T, binding SealBinding, key *ecdsa.PublicKey, values ma
 func headers(binding SealBinding) map[jose.HeaderKey]any {
 	return map[jose.HeaderKey]any{
 		jose.HeaderType: SealType, "tenant": binding.Tenant, "pool": binding.Pool, "receiver": binding.Receiver, "key_id": binding.KeyID,
-		"run": binding.Run, "attempt": binding.Attempt, "credentials": binding.Credentials, "expiry_ms": binding.ExpiryMS,
+		"run": binding.Run, "attempt": binding.Attempt, "credentials": binding.Credentials, "expiry_at_ms": binding.ExpiryMS,
 	}
 }
 

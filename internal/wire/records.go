@@ -73,8 +73,8 @@ type SubmissionBinding struct {
 	Pool            string           `json:"pool"`
 	Run             string           `json:"run"`
 	Placement       Placement        `json:"placement"`
-	DeadlineMS      int64            `json:"deadline_ms"`
-	QueueDeadlineMS int64            `json:"queue_deadline_ms"`
+	DeadlineMS      int64            `json:"deadline_at_ms"`
+	QueueDeadlineMS int64            `json:"queue_deadline_at_ms"`
 	Credentials     []TaskCredential `json:"credentials,omitzero"`
 	Outputs         []ExpectedOutput `json:"outputs,omitzero"`
 	Git             *GitInput        `json:"git,omitzero"`
@@ -209,7 +209,7 @@ type SealRequest struct {
 	// S3Inputs and S3Outputs name the run's S3 inputs and outputs the seal is to carry presigned URLs for.
 	S3Inputs  []string `json:"s3_inputs,omitzero"`
 	S3Outputs []string `json:"s3_outputs,omitzero"`
-	ExpiryMS  int64    `json:"expiry_ms"`
+	ExpiryMS  int64    `json:"expiry_at_ms"`
 }
 
 // StartFailure records that a receiver could not start a run's attempt.

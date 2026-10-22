@@ -678,7 +678,7 @@ func shortLock(f fixture, lock time.Duration) {
 	f.receiver.mu.Lock()
 	defer f.receiver.mu.Unlock()
 	terms := f.receiver.state.Pools[testPool]
-	terms.LockDurationMS = lock.Milliseconds()
+	terms.LockDurationMS = admin.Millis(lock.Milliseconds())
 	f.receiver.state.Pools[testPool] = terms
 }
 

@@ -1486,7 +1486,7 @@ func TestRunsDropsUnauthorisedRuns(t *testing.T) {
 	}
 }
 
-func TestRunsUpdatedFallsBackToFileTimeAndEcho(t *testing.T) {
+func TestRunsUpdatedUsesSubmissionAndEchoTimes(t *testing.T) {
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
@@ -1496,12 +1496,9 @@ func TestRunsUpdatedFallsBackToFileTimeAndEcho(t *testing.T) {
 	if err := readState(path, &record); err != nil {
 		t.Fatal(err)
 	}
-	delete(record, "submitted_ms")
-	if err := writeState(path, record); err != nil {
-		t.Fatal(err)
-	}
 	modified := time.Now().Add(-3 * time.Hour).Truncate(time.Millisecond)
-	if err := os.Chtimes(path, modified, modified); err != nil {
+	record["submitted_at_ms"] = modified.UnixMilli()
+	if err := writeState(path, record); err != nil {
 		t.Fatal(err)
 	}
 	other := f.newHost(t, "host-b", t.TempDir())
@@ -1522,7 +1519,7 @@ func TestRunsUpdatedFallsBackToFileTimeAndEcho(t *testing.T) {
 		t.Fatalf("echo-only run updated %v, want its echo's timestamp", run.Updated)
 	}
 	if run := runs.Runs[1]; !run.Updated.Equal(modified) {
-		t.Fatalf("local run without submitted_ms updated %v, want its file time %v", run.Updated, modified)
+		t.Fatalf("local run updated %v, want its submission time %v", run.Updated, modified)
 	}
 }
 

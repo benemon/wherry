@@ -44,7 +44,7 @@ agents:
       - model-api-key
 default_agent: coder
 delivery_limit: 5
-lock_duration_ms: 15000
+lock_duration: 15s
 producer_byte_rate: 1048576
 request_percentage: 10
 ```
