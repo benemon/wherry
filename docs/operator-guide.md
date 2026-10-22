@@ -345,8 +345,9 @@ holds one. Upgrade every receiver and host before a configuration sets them.
    ```
 
    When the platform does not issue the receiver's credential itself, add
-   `--platform-credential-file ADAPTER=FILE` to put a token in the bundle for
-   one adapter.
+   `--platform-credential-file PLATFORM=FILE` to put a token in the bundle
+   for the adapters of one platform. Give it once for each platform that
+   needs one.
 
 2. Deliver the bundle to the receiver through the platform's secret
    mechanism.
@@ -710,7 +711,7 @@ A task can name a repository for its agent to clone:
 ```sh
 wherry submit --prompt "Fix the failing test" \
   --git git@github.com:team/app.git@main \
-  --credential-file deploy-key=id_ed25519 --git-credential deploy-key \
+  --credential deploy-key=id_ed25519 --git-credential deploy-key \
   --git-host-key github-known-hosts --git-changes patch
 ```
 

@@ -750,9 +750,12 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `end` | `receiver`, or `tenant` and `host` | records a membership end |
 | `skip` | `offset`, `sha256` | passes over the undecodable record at that offset with that SHA-256 |
 
-`terms` and `config` have the members of the
-[pool terms](reference.md#pool-terms) and
-[receiver configuration](reference.md#receiver-configuration) files.
+`terms` has the members of the [pool terms](reference.md#pool-terms) file,
+with `run_lifetime_ms` and `lock_duration_ms` in milliseconds for its
+`run_lifetime` and `lock_duration`. `config` holds the receiver's `capacity`
+and its `adapters` in routing order, each the
+[adapter entry](reference.md#receiver-configuration) with its platform's
+`type` and merged `config`, and `platform` naming the platform.
 Readers fold the records in order. A reader loads no state when:
 
 - a `receiver` record moves a receiver to another pool or names an unknown

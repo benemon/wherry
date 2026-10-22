@@ -35,7 +35,7 @@ func TestConfigInputRequiresExactlyOne(t *testing.T) {
 				"both":    {"--config-file", file, "--config-dir", dir},
 			} {
 				t.Run(label, func(t *testing.T) {
-					_, parsed, err := adminArgs(append(command, options...))
+					_, parsed, _, err := adminArgs(append(command, options...))
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -130,7 +130,7 @@ func TestAdminArgsRejectsUnknownOptions(t *testing.T) {
 		{"receiver", "configure", "receiver-a", "--config", "receiver.yaml"},
 		{"host", "add", "tenant-a", "host-a", "--bundle", "host.yaml"},
 	} {
-		_, _, err := adminArgs(args)
+		_, _, _, err := adminArgs(args)
 		option := args[len(args)-2]
 		if err == nil || !strings.Contains(err.Error(), option) {
 			t.Fatalf("adminArgs(%q) = %v, want an error naming %s", args, err, option)

@@ -40,11 +40,11 @@ func TestSubmitFileFlags(t *testing.T) {
 		flags []string
 		want  string
 	}{
-		"credential without a file": {[]string{"--credential-file", "deploy-key"}, "want NAME=FILE"},
-		"unconfigured credential":   {[]string{"--credential-file", "absent=token"}, "credential absent is not in this host's configuration"},
+		"credential without a file": {[]string{"--credential", "deploy-key"}, "want NAME=FILE"},
+		"unconfigured credential":   {[]string{"--credential", "absent=token"}, "credential absent is not in this host's configuration"},
 		"inputs over the limit":     {[]string{"--input", large}, "inline inputs are 262145 bytes, over the 262144-byte limit"},
 		"output escaping":           {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
-		"credential file escaping":  {[]string{"--credential-file", "deploy-key=../id"}, "credential files must be unique portable file names"},
+		"credential file escaping":  {[]string{"--credential", "deploy-key=../id"}, "credential files must be unique portable file names"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -55,7 +55,7 @@ func TestSubmitFileFlags(t *testing.T) {
 		})
 	}
 	var stdout, stderr bytes.Buffer
-	flags := append(slices.Clone(base), "--input", input, "--credential-file", "deploy-key=id_ed25519", "--output", "report.md:required", "--output", "notes/extra.txt")
+	flags := append(slices.Clone(base), "--input", input, "--credential", "deploy-key=id_ed25519", "--output", "report.md:required", "--output", "notes/extra.txt")
 	if err := runSubmit(b.ctx, b.client, flags, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}

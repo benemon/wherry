@@ -135,12 +135,12 @@ prints `run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
 | `--prompt-file` | | file holding the prompt |
 | `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
-| `--git-credential NAME` | | the `--credential-file` credential the agent clones with: a token for `https`, a private key for `ssh` |
+| `--git-credential NAME` | | the `--credential` credential the agent clones with: a token for `https`, a private key for `ssh` |
 | `--git-host-key FILE` | | file of OpenSSH `known_hosts` lines naming the remote's host; required for `ssh` |
 | `--git-changes patch\|bundle` | | ask for the agent's commits back as the output `changes.patch` or `changes.bundle` |
 | `--input FILE` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
 | `--s3-input FILE` | | file of at most 5 GiB that `submit` uploads to the pool's bucket and the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
-| `--credential-file NAME=FILE` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR`; repeatable |
+| `--credential NAME=FILE` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR`; repeatable |
 | `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket; repeatable |
 | `--deadline` | `2h` | time from now by which the run must end |
 | `--queue-deadline` | `10m` | time from now by which a receiver must claim it |
@@ -424,9 +424,10 @@ directory or a single file, validates it against the pool's terms, records
 it, creates the receiver's principal and key topic,
 grants its ACLs, and writes its bundle. It refuses an existing receiver.
 
-`--platform-credential-file ADAPTER=FILE` puts the contents of `FILE`, less
-trailing CR and LF, in the bundle as the platform credential of the named
-adapter.
+`--platform-credential-file PLATFORM=FILE` puts the contents of `FILE`, less
+trailing CR and LF, in the bundle as the credential of the named platform,
+which every adapter of that platform receives. It may be given once per
+platform, and refuses a platform no adapter uses.
 
 ### `wherry admin receiver configure RECEIVER`
 
@@ -734,7 +735,7 @@ defaults, `2h` and `10m`.
   them, with `remote` and `ref` required; `host_key` is a file path, read as an
   input is. `inputs` and `s3_inputs` are arrays of file paths, `credentials` an
   array of `{name, file}` and `outputs` an array of `{name, required, storage}`,
-  as `--input`, `--s3-input`, `--credential-file` and `--output` take them;
+  as `--input`, `--s3-input`, `--credential` and `--output` take them;
   `storage` `s3` is `:s3`. An input or S3 input must resolve, through any
   symbolic links, to a regular file beneath one of the
   [`input_roots`](#client-configuration), and to none of `state_dir`,
@@ -993,28 +994,40 @@ entitled to.
 
 What `receiver add` and `receiver configure` read, recorded on
 `wherry.admin`: a [directory](#receiver-configuration-directory) named by
-`--config-dir`, or a single YAML file with these fields named by
-`--config-file`. Exactly one is required. Unknown fields are errors.
+`--config-dir`, or a single YAML file named by `--config-file` with the same
+entries in lists. Exactly one is required. The receiver and pool come from
+the command. Unknown fields are errors.
+
+| Field of the single file | Content |
+| --- | --- |
+| `capacity` | runs the receiver holds at once, positive |
+| `platforms` | one or more platform entries |
+| `adapters` | one or more adapter entries, in routing order |
+
+Each platform entry:
 
 | Field | Content |
 | --- | --- |
-| `receiver` | optional; must equal the command's receiver |
-| `pool` | optional; on `receiver add` must equal `--pool`; `receiver configure` keeps the receiver's pool |
-| `capacity` | runs the receiver holds at once, positive |
-| `adapters` | one or more adapter entries, in routing order |
+| `name` | platform name, unique in the receiver |
+| `type` | the adapter type of its adapters; the receiver runs `wherry-plugin-<type>` for it |
+| `config` | settings shared by its adapters |
 
 Each adapter entry:
 
 | Field | Content |
 | --- | --- |
 | `name` | adapter name, unique in the receiver |
-| `type` | the adapter type; the receiver runs `wherry-plugin-<type>` for it |
+| `platform` | the platform entry it takes its type, shared `config` and bundle credential from |
 | `agent` | the agent it launches, from the pool's terms |
 | `output` | optional, default `claude`: `claude` for Claude Code stream-json, `codex` for `codex exec --json`, or `file` for a reply file |
 | `reply_file` | optional, only with `output: file`, default `reply.md`: the output name of the reply file |
 | `credential` | optional; a credential the terms allow for the agent, delivered to the job |
 | `labels` | optional; [labels](#labels) for placement |
 | `config` | the adapter type's settings |
+
+An adapter's `config` is its platform's `config` merged with its own at the
+top level. A top-level key set in both is an error that names the adapter
+and the key. Nested values do not merge.
 
 ### Receiver configuration directory
 
@@ -1031,18 +1044,8 @@ adapters/
 | File | Fields |
 | --- | --- |
 | `receiver.yaml` | `capacity` |
-| `platforms/*.yaml` | one platform: `name`, unique in the directory; `type`; `config`, settings shared by its adapters |
-| `adapters/*.yaml` | one adapter: `name`, `platform`, `agent`, `output`, `reply_file`, `credential`, `labels` and `config`, as in an adapter entry |
-
-The receiver and pool come from the command. Each adapter file becomes one
-adapter entry:
-
-- Routing order is the lexical order of the file names in `adapters/`.
-- `platform` names a platform in `platforms/`, and the entry takes that
-  platform's `type`.
-- The entry's `config` is the platform's `config` merged with the
-  adapter's at the top level. A top-level key set in both is an error that
-  names the adapter file and the key. Nested values do not merge.
+| `platforms/*.yaml` | one platform entry |
+| `adapters/*.yaml` | one adapter entry; routing order is the lexical order of the file names |
 
 Unknown fields, an unknown platform, a repeated adapter or platform name,
 an empty `adapters/`, a nested directory, and any file other than
