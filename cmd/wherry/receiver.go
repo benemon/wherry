@@ -30,17 +30,21 @@ import (
 const defaultPluginDir = "/usr/local/libexec/wherry/plugins"
 
 func runReceiver(args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("receiver", flag.ContinueOnError)
+	const usage = "usage: wherry receiver run --bundle-file FILE [--state-dir DIR] [--plugin-dir DIR] [--metrics-addr HOST:PORT]"
+	if len(args) == 0 || args[0] != "run" {
+		return errors.New(usage)
+	}
+	flags := flag.NewFlagSet("receiver run", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	bundlePath := flags.String("bundle-file", "", "receiver bundle file")
 	stateDir := flags.String("state-dir", "", "directory holding the receiver's keys (default: state beside the bundle file)")
 	pluginDir := flags.String("plugin-dir", defaultPluginDir, "directory holding the adapter plugins, wherry-plugin-<type>")
 	metricsAddr := flags.String("metrics-addr", "", "HOST:PORT to serve /metrics on, off when empty")
-	if err := flags.Parse(args); err != nil {
+	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
 	if *bundlePath == "" || flags.NArg() != 0 {
-		return errors.New("usage: wherry receiver --bundle-file FILE [--state-dir DIR] [--plugin-dir DIR] [--metrics-addr HOST:PORT]")
+		return errors.New(usage)
 	}
 	if *stateDir == "" {
 		*stateDir = filepath.Join(filepath.Dir(*bundlePath), "state")

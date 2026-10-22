@@ -23,7 +23,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(pos) == 0 {
-		return errors.New("usage: wherry admin <pool create|receiver add|receiver configure|tenant add|host add|revoke host|revoke receiver|skip|check>")
+		return errors.New("usage: wherry admin <pool create|pool entitle|receiver add|receiver configure|receiver revoke|host add|host revoke|skip|check>")
 	}
 	broker, caPath := os.Getenv("WHERRY_TRUST_BROKER"), os.Getenv("WHERRY_TRUST_CA")
 	if broker == "" || caPath == "" {
@@ -95,32 +95,35 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		}
 		config.Receiver = pos[2]
 		return service.ReceiverConfigure(ctx, config)
-	case "tenant add":
-		if len(pos) != 3 || options["pool"] == "" {
-			return errors.New("usage: wherry admin tenant add TENANT --pool POOL")
+	case "pool entitle":
+		if len(pos) != 3 || options["tenant"] == "" {
+			return errors.New("usage: wherry admin pool entitle POOL --tenant TENANT")
 		}
-		return service.TenantAdd(ctx, pos[2], options["pool"])
+		return service.TenantAdd(ctx, options["tenant"], pos[2])
 	case "host add":
-		if len(pos) != 4 || options["bundle-file"] == "" {
-			return errors.New("usage: wherry admin host add TENANT HOST --bundle-file FILE")
+		if len(pos) != 3 || options["tenant"] == "" || options["bundle-file"] == "" {
+			return errors.New("usage: wherry admin host add HOST --tenant TENANT --bundle-file FILE")
 		}
-		return service.HostAdd(ctx, pos[2], pos[3], options["bundle-file"])
-	case "revoke host", "revoke receiver":
-		if pos[1] == "host" && len(pos) != 4 || pos[1] == "receiver" && len(pos) != 3 {
-			return errors.New("invalid revoke command")
+		return service.HostAdd(ctx, options["tenant"], pos[2], options["bundle-file"])
+	case "host revoke", "receiver revoke":
+		if pos[0] == "host" && (len(pos) != 3 || options["tenant"] == "") {
+			return errors.New("usage: wherry admin host revoke HOST --tenant TENANT [--wait DURATION]")
+		}
+		if len(pos) != 3 {
+			return errors.New("usage: wherry admin receiver revoke RECEIVER [--wait DURATION]")
 		}
 		wait, err := time.ParseDuration(cmp.Or(options["wait"], "0s"))
 		if err != nil {
 			return err
 		}
-		topic := admin.ReceiverTopic(pos[len(pos)-1])
-		if pos[1] == "host" {
-			topic = admin.HostTopic(pos[2], pos[3])
+		topic := admin.ReceiverTopic(pos[2])
+		if pos[0] == "host" {
+			topic = admin.HostTopic(options["tenant"], pos[2])
 		}
 		probe := service.Probe(topic)
 		var result admin.RevocationResult
-		if pos[1] == "host" {
-			result = service.RevokeHost(ctx, pos[2], pos[3], wait, probe)
+		if pos[0] == "host" {
+			result = service.RevokeHost(ctx, options["tenant"], pos[2], wait, probe)
 		} else {
 			result = service.RevokeReceiver(ctx, pos[2], wait, probe)
 		}
@@ -186,10 +189,10 @@ func adminArgs(args []string) ([]string, map[string]string, []string, error) {
 		"pool create":        {"config-file": true, "config-dir": true},
 		"receiver add":       {"pool": true, "config-file": true, "config-dir": true, "bundle-file": true, "platform-credential-file": true},
 		"receiver configure": {"config-file": true, "config-dir": true},
-		"tenant add":         {"pool": true},
-		"host add":           {"bundle-file": true},
-		"revoke host":        {"wait": true},
-		"revoke receiver":    {"wait": true},
+		"pool entitle":       {"tenant": true},
+		"host add":           {"tenant": true, "bundle-file": true},
+		"host revoke":        {"tenant": true, "wait": true},
+		"receiver revoke":    {"wait": true},
 		"skip":               {"sha256": true},
 		"check":              {},
 	}[command]

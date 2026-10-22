@@ -28,7 +28,7 @@ One `wherry` binary with three sides:
   a run's S3 objects. `mcp` serves every one of these commands but `init`
   and `key` as an MCP tool of the same name; see
   [Harness integration](#harness-integration).
-- **Receiver:** `wherry receiver` claims its pool's tasks and runs each one
+- **Receiver:** `wherry receiver run` claims its pool's tasks and runs each one
   as a job through an adapter plugin, such as the Nomad plugin from
   [wherry-plugins](https://github.com/benemon/wherry-plugins). The adapter
   protocol is the Go module in [`adapter`](adapter).

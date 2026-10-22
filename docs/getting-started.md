@@ -56,13 +56,13 @@ wherry admin pool create build --config-file build-terms.yaml
 ## 3. Entitle a tenant
 
 ```sh
-wherry admin tenant add alice --pool build
+wherry admin pool entitle build --tenant alice
 ```
 
 ## 4. Add the host
 
 ```sh
-wherry admin host add alice laptop --bundle-file alice-laptop.bundle
+wherry admin host add laptop --tenant alice --bundle-file alice-laptop.bundle
 ```
 
 Copy `alice-laptop.bundle` to `~/.config/wherry/` on the host, keeping mode
@@ -137,7 +137,7 @@ Copy `nomad-1.bundle` to `/etc/wherry/` on the receiver host, keeping mode
 ## 6. Start the receiver
 
 ```sh
-NOMAD_TOKEN=<token> wherry receiver \
+NOMAD_TOKEN=<token> wherry receiver run \
   --bundle-file /etc/wherry/nomad-1.bundle --state-dir /var/lib/wherry \
   --plugin-dir /usr/local/libexec/wherry/plugins
 ```

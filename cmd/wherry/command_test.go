@@ -661,6 +661,12 @@ func TestUsageErrors(t *testing.T) {
 		{"await timeout", func(stderr *bytes.Buffer) error {
 			return runAwait(context.Background(), nil, []string{"run-a", "--timeout", "0s"}, stderr, stderr)
 		}, "timeout must be positive"},
+		{"receiver without run", func(stderr *bytes.Buffer) error {
+			return run([]string{"receiver", "--bundle-file", "x"}, stderr, stderr)
+		}, "usage: wherry receiver run"},
+		{"receiver with another verb", func(stderr *bytes.Buffer) error {
+			return run([]string{"receiver", "start", "--bundle-file", "x"}, stderr, stderr)
+		}, "usage: wherry receiver run"},
 		{"removed enrol", func(stderr *bytes.Buffer) error {
 			return run([]string{"enrol", "list"}, stderr, stderr)
 		}, "unknown command \"enrol\""},

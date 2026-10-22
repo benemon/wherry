@@ -233,8 +233,8 @@ func TestReceiverDefaults(t *testing.T) {
 		t.Fatalf("capacity %d, %v; want 1 when receiver.yaml leaves it out", config.Capacity, err)
 	}
 	var stderr bytes.Buffer
-	err = runReceiver([]string{"--bundle-file", filepath.Join(t.TempDir(), "missing.yaml")}, io.Discard, &stderr)
+	err = run([]string{"receiver", "run", "--bundle-file", filepath.Join(t.TempDir(), "missing.yaml")}, io.Discard, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "read bundle") {
-		t.Fatalf("receiver with only --bundle-file = %v; want it to read the bundle, not ask for more flags", err)
+		t.Fatalf("receiver run with only --bundle-file = %v; want it to read the bundle, not ask for more flags", err)
 	}
 }

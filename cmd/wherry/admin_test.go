@@ -56,7 +56,8 @@ func TestKafkaClientRejectsPlaintextListener(t *testing.T) {
 	}
 }
 
-func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
+// adminEnv points runAdmin at a TLS fake broker.
+func adminEnv(t *testing.T) {
 	cluster, ca := tlsCluster(t)
 	dir := t.TempDir()
 	files := map[string]string{"ca.pem": ca, "admin": "password", "operator": "operator-password"}
@@ -71,18 +72,40 @@ func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
 	t.Setenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE", filepath.Join(dir, "admin"))
 	t.Setenv("WHERRY_TRUST_OPERATOR_USER", "wherry.operator")
 	t.Setenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE", filepath.Join(dir, "operator"))
+}
+
+func TestAdminCommandUsage(t *testing.T) {
+	adminEnv(t)
+	bundle := filepath.Join(t.TempDir(), "host.bundle")
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"host", "add", "host-a", "--bundle-file", bundle}, "usage: wherry admin host add HOST --tenant TENANT"},
+		{[]string{"host", "add", "tenant-a", "host-a", "--bundle-file", bundle}, "usage: wherry admin host add HOST --tenant TENANT"},
+		{[]string{"host", "add", "tenant-a", "host-a", "--tenant", "tenant-a", "--bundle-file", bundle}, "usage: wherry admin host add HOST --tenant TENANT"},
+		{[]string{"host", "add", "host-a", "--tenant", "tenant-a"}, "usage: wherry admin host add HOST --tenant TENANT"},
+		{[]string{"host", "revoke", "host-a"}, "usage: wherry admin host revoke HOST --tenant TENANT"},
+		{[]string{"host", "revoke", "--tenant", "tenant-a"}, "usage: wherry admin host revoke HOST --tenant TENANT"},
+		{[]string{"receiver", "revoke"}, "usage: wherry admin receiver revoke RECEIVER"},
+		{[]string{"receiver", "revoke", "receiver-a", "receiver-b"}, "usage: wherry admin receiver revoke RECEIVER"},
+		{[]string{"pool", "entitle", "build"}, "usage: wherry admin pool entitle POOL --tenant TENANT"},
+		{[]string{"pool", "entitle", "--tenant", "tenant-a"}, "usage: wherry admin pool entitle POOL --tenant TENANT"},
+		{[]string{"tenant", "add", "tenant-a", "--pool", "build"}, "unknown admin command"},
+		{[]string{"revoke", "host", "tenant-a", "host-a"}, "unknown admin command"},
+		{[]string{"revoke", "receiver", "receiver-a"}, "unknown admin command"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if err := runAdmin(test.args, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), test.want) {
+			t.Errorf("%q = %v, want %q", test.args, err, test.want)
+		}
+	}
+}
+
+func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
+	adminEnv(t)
 	var stdout, stderr bytes.Buffer
-	for _, args := range [][]string{{"tenant", "add", "tenant-a"}, {"host", "add", "tenant-a", "host-a"}} {
-		if err := runAdmin(args, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
-			t.Fatalf("%v without its required option = %v, want its usage", args, err)
-		}
-	}
-	for _, args := range [][]string{{"revoke", "host", "tenant-a"}, {"revoke", "receiver"}, {"revoke", "receiver", "a", "b"}} {
-		if err := runAdmin(args, &stdout, &stderr); err == nil || err.Error() != "invalid revoke command" {
-			t.Fatalf("%v = %v, want invalid revoke command", args, err)
-		}
-	}
-	err := runAdmin([]string{"revoke", "receiver", "receiver-a", "--wait", "1ms"}, &stdout, &stderr)
+	err := runAdmin([]string{"receiver", "revoke", "receiver-a", "--wait", "1ms"}, &stdout, &stderr)
 	if err == nil || err.Error() != "revocation incomplete" {
 		t.Fatalf("revoke = %v, want revocation incomplete", err)
 	}

@@ -120,7 +120,7 @@ runs from the broker's time. With the 14-day default that is `1317600000` ms, 15
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
 statuses, transcripts and results for 30 days and must keep them for at least
 `max_queue_deadline` plus six hours, so `pool create` refuses a maximum above 29
-days and 18 hours, and `tenant add` refuses a feed that keeps less. Identity and
+days and 18 hours, and `pool entitle` refuses a feed that keeps less. Identity and
 configuration topics stay forever. `wherry admin check` reports a topic whose
 retention drops below its bound, and a pool topic whose timestamp type is not
 `LogAppendTime`.
@@ -154,7 +154,7 @@ not take it further; lowering them brings it down. An output chunk holds
 256 KiB whatever `output_limit` is, so `output_limit` spans as many records
 as it needs and the record limit does not bound it.
 
-`tenant add` makes the same check with the new tenant's feed counted.
+`pool entitle` makes the same check with the new tenant's feed counted.
 Lowering a broker or topic limit later can leave a pool's terms too large;
 [`wherry admin check`](#check-a-deployment) reports it. Receivers read
 their pool's terms from `wherry.admin` every 15 seconds, so admission and
@@ -168,13 +168,13 @@ Prerequisites: the `wherry admin` environment
 1. Entitle the tenant to a pool:
 
    ```sh
-   wherry admin tenant add alice --pool build
+   wherry admin pool entitle build --tenant alice
    ```
 
 2. Add each host the tenant submits from:
 
    ```sh
-   wherry admin host add alice laptop --bundle-file alice-laptop.bundle
+   wherry admin host add laptop --tenant alice --bundle-file alice-laptop.bundle
    ```
 
 3. Hand the bundle to the host's user over a channel you trust. It holds
@@ -184,7 +184,7 @@ The tenant then writes its
 [client configuration](reference.md#client-configuration) and runs
 `wherry init`, as in [Getting started](getting-started.md#7-configure-the-host).
 
-A tenant can be entitled to several pools; run `tenant add` once per pool.
+A tenant can be entitled to several pools; run `pool entitle` once per pool.
 
 ## Add a receiver
 
@@ -370,7 +370,7 @@ change.
 
 ## Run a receiver
 
-`wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir DIR` needs:
+`wherry receiver run --bundle-file FILE --state-dir DIR --plugin-dir DIR` needs:
 
 - the bundle, readable by the receiver alone;
 - a state directory that survives restarts. It holds the receiver's
@@ -491,7 +491,7 @@ the receiver host's address on a monitoring network, or put an
 authenticating proxy in front of it:
 
 ```sh
-wherry receiver --bundle-file bundle.yaml --state-dir /var/lib/wherry \
+wherry receiver run --bundle-file bundle.yaml --state-dir /var/lib/wherry \
   --plugin-dir /usr/local/libexec/wherry/plugins --metrics-addr 10.0.8.21:9464
 ```
 
@@ -520,8 +520,8 @@ the `wherry admin` environment.
 1. Run the revocation:
 
    ```sh
-   wherry admin revoke host alice laptop
-   wherry admin revoke receiver nomad-1
+   wherry admin host revoke laptop --tenant alice
+   wherry admin receiver revoke nomad-1
    ```
 
    When it ends, the command prints one line per

@@ -5,7 +5,7 @@
 
 ## Conventions
 
-- `wherry admin` and `wherry receiver` read no client configuration. Every
+- `wherry admin` and `wherry receiver run` read no client configuration. Every
   other command reads it first, and every command except `key` and `mcp`
   then connects to Kafka.
 - Every host command takes `--config-file FILE`. It defaults to
@@ -14,8 +14,8 @@
 - A failed command prints `wherry: <error>` on standard error and exits
   with status 1.
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
-  positive; a `revoke --wait` of zero or less takes the broker-derived
-  wait.
+  positive; the `--wait` of `host revoke` and `receiver revoke` takes the
+  broker-derived wait when zero or less.
 - `cancel`, `await`, `status`, `events` and `transcript` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
@@ -381,7 +381,7 @@ take a value and can appear anywhere after `admin`. An option without a
 value fails with `admin option requires a value`, one the command does not
 take with `unknown option --<name>`, and a repeated one other than
 `--platform-credential-file` with `option --<name> is given twice`. `pool create`,
-`tenant add`, `host add` and `receiver add` then create every ACL the new
+`pool entitle`, `host add` and `receiver add` then create every ACL the new
 state calls for, re-read them, and fail with `ACL plan incomplete` when one
 is missing.
 
@@ -406,7 +406,7 @@ existing topics it sets the tasks and events `retention.ms` to
 `retention.ms` of the feed of a tenant entitled to the pool. See
 [Topics](#topics).
 
-### `wherry admin tenant add TENANT --pool POOL`
+### `wherry admin pool entitle POOL --tenant TENANT`
 
 Entitles the tenant to an existing pool, creates the tenant feed, and
 grants the tenant's hosts and the pool's receivers their ACLs. It refuses
@@ -415,7 +415,7 @@ the tenant's feed counted, or when the feed's `retention.ms` is below the
 pool's `max_queue_deadline` plus six hours, and records nothing. It applies
 each host's [quotas](#quotas).
 
-### `wherry admin host add TENANT HOST --bundle-file FILE`
+### `wherry admin host add HOST --tenant TENANT --bundle-file FILE`
 
 Records the host, creates its principal, its key topic and the tenant
 feed, grants its ACLs, applies its quotas, and writes its bundle.
@@ -448,9 +448,9 @@ principal, password and bundle stay as they are. The receiver exits when it
 reads a record that differs from the configuration it runs, and its platform
 restarts it.
 
-### `wherry admin revoke host TENANT HOST`
+### `wherry admin host revoke HOST --tenant TENANT`
 
-### `wherry admin revoke receiver RECEIVER`
+### `wherry admin receiver revoke RECEIVER`
 
 Runs the [revocation](concepts.md#revocation) steps. When it ends, it
 prints one line per step it ran:
@@ -491,7 +491,7 @@ adapter's `type` or `config` section.
 
 ## Receiver command
 
-### `wherry receiver --bundle-file FILE`
+### `wherry receiver run --bundle-file FILE`
 
 Runs a receiver as the bundle's principal. `--state-dir DIR` defaults to
 `state` beside the bundle file, and `--plugin-dir DIR` to
@@ -977,7 +977,7 @@ A record limit is the lowest of `message.max.bytes` across the brokers,
 1000012 bytes, the most a wherry producer batches, and `max.message.bytes`
 on the topic the record goes to: the pool's tasks topic for submissions,
 and the feeds of the tenants entitled to the pool for chunks.
-`pool create`, `tenant add` and `check` sign five records and measure
+`pool create`, `pool entitle` and `check` sign five records and measure
 them as record batches: the largest bounded submission, the largest output
 chunk, of 256 KiB, two largest results, and the largest transcript chunk, a
 line of 512 KiB. Each result has the run's message with its 256 input files
@@ -1007,7 +1007,7 @@ the submission at the default `inline_limit` is 589198 bytes, the output chunk
 below 933508 refuses every pool; with brokers and topics at their defaults, the
 highest `inline_limit` that fits is 493227 bytes, about 481 KiB.
 
-`pool create` and `tenant add` check against the broker at the time.
+`pool create` and `pool entitle` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.admin`, which they
 read every 15 seconds, so a changed limit takes effect within that
 window.
@@ -1170,7 +1170,7 @@ replication factor, `cleanup.policy=delete` and
 | `wherry.receivers` | any recording command | `604800000` (7 days) |
 | `wherry.pool.<pool>.tasks` | `pool create` | `max_queue_deadline` plus 30 hours, in milliseconds; default `1317600000` |
 | `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` sets the same value |
-| `wherry.tenant.<tenant>` | `tenant add`, `host add` | `2592000000` (30 days) |
+| `wherry.tenant.<tenant>` | `pool entitle`, `host add` | `2592000000` (30 days) |
 | `wherry.receiver.<receiver>` | `receiver add` | `-1` |
 | `wherry.host.<tenant>.<host>` | `host add` | `-1` |
 
@@ -1183,7 +1183,7 @@ stay at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 `wherry admin` leaves an existing topic's configuration as it is, except
 that `pool create` sets the retention and timestamp type of the pool's tasks
 and events topics. A tenant feed's retention can be changed with Kafka's own
-tools. `pool create` and `tenant add` refuse terms that need more than an
+tools. `pool create` and `pool entitle` refuse terms that need more than an
 entitled tenant's feed keeps, and `wherry admin check` reports a topic below
 its bound and a pool topic whose timestamp type is not `LogAppendTime`.
 

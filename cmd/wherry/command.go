@@ -23,7 +23,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|receivers|submit|cancel|await|status|events|transcript|cleanup|receiver|admin|mcp>")
+		return errors.New("usage: wherry <init|key|receivers|submit|cancel|await|status|events|transcript|cleanup|receiver run|admin|mcp>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)

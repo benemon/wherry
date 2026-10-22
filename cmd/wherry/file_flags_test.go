@@ -128,7 +128,8 @@ func TestAdminArgsRejectsUnknownOptions(t *testing.T) {
 	for _, args := range [][]string{
 		{"pool", "create", "pool-a", "--terms", "pool.yaml"},
 		{"receiver", "configure", "receiver-a", "--config", "receiver.yaml"},
-		{"host", "add", "tenant-a", "host-a", "--bundle", "host.yaml"},
+		{"host", "add", "host-a", "--tenant", "tenant-a", "--bundle", "host.yaml"},
+		{"pool", "create", "pool-a", "--tenant", "tenant-a"},
 	} {
 		_, _, _, err := adminArgs(args)
 		option := args[len(args)-2]

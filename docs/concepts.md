@@ -28,7 +28,7 @@ writes.
   share-group delivery limit and lock duration, and the quotas its tenants'
   hosts get. A tenant is entitled to one or more pools. A host entitled through
   several pools gets the lowest of their quotas.
-- **A receiver** is a long-running `wherry receiver` process in one pool.
+- **A receiver** is a long-running `wherry receiver run` process in one pool.
   It claims tasks, runs each as a platform job, and publishes the job's
   statuses, transcript and result. Each receiver is its own principal with
   an Ed25519 signing key, which it creates on first start and keeps in its
@@ -67,7 +67,7 @@ by the broker. `wherry admin` generates every ACL from the state on
 `wherry.admin`. Each names one resource literally, except one prefixed grant per
 receiver on its pool's transactional IDs. The `wherry admin` command that
 records a host or receiver on `wherry.admin` also issues its principal and ACLs,
-and `tenant add` records an entitlement with its ACLs; no other approval step
+and `pool entitle` records an entitlement with its ACLs; no other approval step
 exists. [Reference](reference.md#acls) lists the matrix.
 
 ## Topics
