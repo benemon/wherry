@@ -115,6 +115,9 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		}
 		return service.HostAdd(ctx, pos[2], pos[3], options["bundle-file"])
 	case "revoke host", "revoke receiver":
+		if pos[1] == "host" && len(pos) != 4 || pos[1] == "receiver" && len(pos) != 3 {
+			return errors.New("invalid revoke command")
+		}
 		wait, err := time.ParseDuration(cmp.Or(options["wait"], "0s"))
 		if err != nil {
 			return err
@@ -125,12 +128,10 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		}
 		probe := service.Probe(topic)
 		var result admin.RevocationResult
-		if pos[1] == "host" && len(pos) == 4 {
+		if pos[1] == "host" {
 			result = service.RevokeHost(ctx, pos[2], pos[3], wait, probe)
-		} else if pos[1] == "receiver" && len(pos) == 3 {
-			result = service.RevokeReceiver(ctx, pos[2], wait, probe)
 		} else {
-			return errors.New("invalid revoke command")
+			result = service.RevokeReceiver(ctx, pos[2], wait, probe)
 		}
 		for _, step := range result.Steps {
 			fmt.Fprintf(stdout, "step=%d complete=%t name=%s", step.Number, step.Complete, step.Name)

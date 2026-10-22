@@ -72,6 +72,11 @@ func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
 	t.Setenv("WHERRY_TRUST_OPERATOR_USER", "wherry.operator")
 	t.Setenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE", filepath.Join(dir, "operator"))
 	var stdout, stderr bytes.Buffer
+	for _, args := range [][]string{{"revoke", "host", "tenant-a"}, {"revoke", "receiver"}, {"revoke", "receiver", "a", "b"}} {
+		if err := runAdmin(args, &stdout, &stderr); err == nil || err.Error() != "invalid revoke command" {
+			t.Fatalf("%v = %v, want invalid revoke command", args, err)
+		}
+	}
 	err := runAdmin([]string{"revoke", "receiver", "receiver-a", "--wait", "1ms"}, &stdout, &stderr)
 	if err == nil || err.Error() != "revocation incomplete" {
 		t.Fatalf("revoke = %v, want revocation incomplete", err)
