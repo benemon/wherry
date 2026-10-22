@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"gopkg.in/yaml.v3"
 )
 
 func runAdmin(args []string, stdout, stderr io.Writer) error {
@@ -237,9 +235,7 @@ func readYAML(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
-	decoder.KnownFields(true)
-	return decoder.Decode(value)
+	return admin.DecodeYAML(encoded, value)
 }
 
 // readReceiverConfig reads a receiver config from a single file or from a
