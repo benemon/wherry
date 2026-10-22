@@ -165,9 +165,9 @@ func TestReceiverConfigDirectoryRejectsInvalidLayout(t *testing.T) {
 		remove  []string
 		want    string
 	}{
-		"unknown receiver key":  {replace: map[string]string{"receiver.yaml": "capacity: 2\nadapters: []\n"}, want: "field adapters not found"},
-		"unknown platform key":  {replace: map[string]string{"platforms/lab-nomad.yaml": labPlatform + "region: global\n"}, want: "field region not found"},
-		"unknown adapter key":   {replace: map[string]string{"adapters/20-nomad-exec.yaml": labExec + "type: nomad\n"}, want: "field type not found"},
+		"unknown receiver key":  {replace: map[string]string{"receiver.yaml": "capacity: 2\nadapters: []\n"}, want: "invalid or unknown field at line"},
+		"unknown platform key":  {replace: map[string]string{"platforms/lab-nomad.yaml": labPlatform + "region: global\n"}, want: "invalid or unknown field at line"},
+		"unknown adapter key":   {replace: map[string]string{"adapters/20-nomad-exec.yaml": labExec + "type: nomad\n"}, want: "invalid or unknown field at line"},
 		"unknown platform":      {replace: map[string]string{"adapters/20-nomad-exec.yaml": strings.Replace(labExec, "platform: lab-nomad", "platform: missing", 1)}, want: `unknown platform "missing"`},
 		"duplicate adapter":     {replace: map[string]string{"adapters/30-again.yaml": labExec}, want: `30-again.yaml: adapter name "nomad-exec" is repeated`},
 		"duplicate platform":    {replace: map[string]string{"platforms/again.yaml": labPlatform}, want: `platform name "lab-nomad" is empty or repeated`},
@@ -183,6 +183,20 @@ func TestReceiverConfigDirectoryRejectsInvalidLayout(t *testing.T) {
 				t.Fatalf("readReceiverConfig = %v, want an error containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestReceiverConfigErrorsQuoteNoValue(t *testing.T) {
+	const token = "nomad-token-value-secret"
+	for name, replace := range map[string]map[string]string{
+		"mistyped value":  {"receiver.yaml": "capacity: " + token + "\n"},
+		"misplaced value": {"platforms/lab-nomad.yaml": labPlatform + token + "\n"},
+	} {
+		_, err := readReceiverConfig(labTree(t, replace), true)
+		// The decoder quotes a value's first 7 bytes when it is longer than 10.
+		if err == nil || strings.Contains(err.Error(), token[:7]) {
+			t.Fatalf("%s: readReceiverConfig = %v; want an error without the value", name, err)
+		}
 	}
 }
 

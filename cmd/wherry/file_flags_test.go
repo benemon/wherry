@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -87,7 +88,8 @@ func TestPoolConfigRejectsSealLifetime(t *testing.T) {
 	if err := os.WriteFile(file, append(pool, "seal_lifetime_ms: 86400000\n"...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readPoolConfig(file, false); err == nil || !strings.Contains(err.Error(), "seal_lifetime_ms") {
+	line := fmt.Sprintf("unknown field at line %d", bytes.Count(pool, []byte("\n"))+1)
+	if _, err := readPoolConfig(file, false); err == nil || !strings.Contains(err.Error(), line) {
 		t.Fatalf("pool config = %v, want seal_lifetime_ms refused as an unknown field", err)
 	}
 }

@@ -46,23 +46,30 @@ type Bundle struct {
 	Platform map[string]string `yaml:"platform,omitempty"`
 }
 
+// DecodeYAML decodes encoded into value, refusing unknown fields. An error names only the lines it found, since the
+// decoder quotes the text and a credential pasted in the wrong place is still a credential.
+func DecodeYAML(encoded []byte, value any) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(value); err != nil {
+		lines := strings.Join(yamlLine.FindAllString(err.Error(), -1), ", ")
+		if lines == "" {
+			return errors.New("not valid YAML")
+		}
+		return fmt.Errorf("invalid or unknown field at %s", lines)
+	}
+	return nil
+}
+
 // ReadBundle reads the bundle at path, refusing unknown fields and a bundle without its broker, principal or password.
-// A decode error names only the lines it found, since the decoder quotes the bundle's text and a credential pasted in
-// the wrong place is still a credential.
 func ReadBundle(path string) (Bundle, error) {
 	encoded, err := os.ReadFile(path)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("read bundle: %w", err)
 	}
-	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
-	decoder.KnownFields(true)
 	var bundle Bundle
-	if err := decoder.Decode(&bundle); err != nil {
-		lines := strings.Join(yamlLine.FindAllString(err.Error(), -1), ", ")
-		if lines == "" {
-			return Bundle{}, errors.New("decode bundle: not a valid bundle")
-		}
-		return Bundle{}, fmt.Errorf("decode bundle: invalid or unknown field at %s", lines)
+	if err := DecodeYAML(encoded, &bundle); err != nil {
+		return Bundle{}, fmt.Errorf("decode bundle: %w", err)
 	}
 	if bundle.Broker == "" || bundle.Principal == "" || bundle.Password == "" {
 		return Bundle{}, errors.New("bundle requires broker, principal and password")
