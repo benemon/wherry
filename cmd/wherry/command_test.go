@@ -10,6 +10,8 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
+	"flag"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -769,5 +771,26 @@ func TestSubmitGitFlags(t *testing.T) {
 	}
 	if !slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: wire.GitPatch}}) {
 		t.Fatalf("submitted outputs %+v, want the patch", submission.Wherry.Outputs)
+	}
+}
+
+func TestParseAnywhere(t *testing.T) {
+	for _, args := range [][]string{
+		{"run-1", "--config-file", "f", "--timeout", "5m"},
+		{"--config-file", "f", "run-1", "--timeout", "5m"},
+		{"--config-file", "f", "--timeout", "5m", "run-1"},
+	} {
+		flags := flag.NewFlagSet("test", flag.ContinueOnError)
+		config := flags.String("config-file", "", "")
+		timeout := flags.Duration("timeout", 0, "")
+		positional, err := parseAnywhere(flags, args)
+		if err != nil || !reflect.DeepEqual(positional, []string{"run-1"}) || *config != "f" || *timeout != 5*time.Minute {
+			t.Fatalf("%q: positional %q, config %q, timeout %v, %v", args, positional, *config, *timeout, err)
+		}
+	}
+	flags := flag.NewFlagSet("test", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	if _, err := parseAnywhere(flags, []string{"run-1", "--unknown"}); err == nil {
+		t.Fatal("an unknown flag after the argument parsed")
 	}
 }

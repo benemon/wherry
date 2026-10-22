@@ -10,6 +10,7 @@
   then connects to Kafka.
 - Every host command takes `--config-file FILE`. It defaults to
   `~/.config/wherry/config.json`. A leading `~/` is expanded.
+- A command's flags may come before or after its `RUN_ID`.
 - A failed command prints `wherry: <error>` on standard error and exits
   with status 1.
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
@@ -224,7 +225,8 @@ Publishes a signed cancel of the run to its pool's events and prints
 
 ### `wherry await RUN_ID`
 
-Waits for a run to finish. `--timeout` sets the wait, `2h` by default.
+Waits for a run to finish. `--timeout` sets the wait, `2h10m` by default:
+the default queue deadline and run deadline together.
 `--outputs-dir DIR` sets where the run's outputs go, by default
 `<state_dir>/runs/<run>/outputs/`.
 
