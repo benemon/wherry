@@ -26,18 +26,24 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// defaultPluginDir is where the docs and the receiver image install plugins.
+const defaultPluginDir = "/usr/local/libexec/wherry/plugins"
+
 func runReceiver(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("receiver", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	bundlePath := flags.String("bundle-file", "", "receiver bundle file")
-	stateDir := flags.String("state-dir", "", "directory holding the receiver's keys")
-	pluginDir := flags.String("plugin-dir", "", "directory holding the adapter plugins, wherry-plugin-<type>")
+	stateDir := flags.String("state-dir", "", "directory holding the receiver's keys (default: state beside the bundle file)")
+	pluginDir := flags.String("plugin-dir", defaultPluginDir, "directory holding the adapter plugins, wherry-plugin-<type>")
 	metricsAddr := flags.String("metrics-addr", "", "HOST:PORT to serve /metrics on, off when empty")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *bundlePath == "" || *stateDir == "" || *pluginDir == "" {
-		return errors.New("usage: wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir DIR")
+	if *bundlePath == "" || flags.NArg() != 0 {
+		return errors.New("usage: wherry receiver --bundle-file FILE [--state-dir DIR] [--plugin-dir DIR] [--metrics-addr HOST:PORT]")
+	}
+	if *stateDir == "" {
+		*stateDir = filepath.Join(filepath.Dir(*bundlePath), "state")
 	}
 	bundle, err := admin.ReadBundle(*bundlePath)
 	if err != nil {

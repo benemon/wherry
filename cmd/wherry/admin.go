@@ -25,12 +25,12 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	if len(pos) == 0 {
 		return errors.New("usage: wherry admin <pool create|receiver add|receiver configure|tenant add|host add|revoke host|revoke receiver|skip|check>")
 	}
-	root, err := adminKafka("WHERRY_TRUST_ADMIN_USER", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
+	root, err := adminKafka("WHERRY_TRUST_ADMIN_USER", "", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	operator, err := adminKafka("WHERRY_TRUST_OPERATOR_USER", "WHERRY_TRUST_OPERATOR_PASSWORD_FILE")
+	operator, err := adminKafka("WHERRY_TRUST_OPERATOR_USER", admin.OperatorPrincipal, "WHERRY_TRUST_OPERATOR_PASSWORD_FILE")
 	if err != nil {
 		return err
 	}
@@ -354,7 +354,7 @@ func readEntries[T any](dir string) ([]entry[T], error) {
 }
 
 func receiverConfig(capacity int64, platforms []entry[receiverPlatform], adapters []entry[receiverAdapter]) (admin.ReceiverConfig, error) {
-	config := admin.ReceiverConfig{Capacity: capacity}
+	config := admin.ReceiverConfig{Capacity: cmp.Or(capacity, 1)}
 	byName := map[string]receiverPlatform{}
 	for _, p := range platforms {
 		if _, ok := byName[p.value.Name]; ok || p.value.Name == "" {
@@ -445,8 +445,9 @@ func yamlFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
-func adminKafka(userEnv, passwordEnv string) (*kgo.Client, error) {
-	broker, caPath, user, passwordPath := os.Getenv("WHERRY_TRUST_BROKER"), os.Getenv("WHERRY_TRUST_CA"), os.Getenv(userEnv), os.Getenv(passwordEnv)
+// adminKafka connects as the user userEnv names, or defaultUser when it is unset.
+func adminKafka(userEnv, defaultUser, passwordEnv string) (*kgo.Client, error) {
+	broker, caPath, user, passwordPath := os.Getenv("WHERRY_TRUST_BROKER"), os.Getenv("WHERRY_TRUST_CA"), cmp.Or(os.Getenv(userEnv), defaultUser), os.Getenv(passwordEnv)
 	if broker == "" || caPath == "" || user == "" || passwordPath == "" {
 		return nil, errors.New("trust broker credentials are not configured")
 	}

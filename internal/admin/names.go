@@ -7,6 +7,7 @@ import (
 )
 
 const AdminTopic = "wherry.admin"
+const OperatorPrincipal = "wherry.operator"
 const ReceiversTopic = "wherry.receivers"
 
 func TenantPrincipal(tenant, host string) string { return "wherry.tnt." + tenant + "." + host }
