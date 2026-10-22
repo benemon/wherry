@@ -54,9 +54,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	plugins := &plugins{dir: *pluginDir, logs: stdout, registry: registry, running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
-	r, err := receiver.New(bundle, *stateDir, func(pool string, settings admin.AdapterSettings) (receiver.Named, error) {
-		return plugins.adapter(pool, settings, bundle.Platform[settings.Name])
-	}, logger, registry)
+	r, err := receiver.New(bundle, *stateDir, plugins.factory(bundle), logger, registry)
 	if err != nil {
 		return err
 	}
@@ -106,6 +104,13 @@ type plugins struct {
 }
 
 // adapter configures one adapter in its type's plugin; platform is the bundle's platform credential for it.
+// factory configures each adapter through its type's plugin with the bundle's credential for its platform.
+func (p *plugins) factory(bundle admin.Bundle) receiver.AdapterFactory {
+	return func(pool string, settings admin.AdapterSettings) (receiver.Named, error) {
+		return p.adapter(pool, settings, bundle.Platform[settings.Platform])
+	}
+}
+
 func (p *plugins) adapter(pool string, settings admin.AdapterSettings, platform string) (receiver.Named, error) {
 	running, ok := p.running[settings.Type]
 	if !ok {

@@ -120,24 +120,26 @@ func withDefaults(terms Terms) Terms {
 // ReceiverConfig is a receiver's whole configuration, recorded on
 // wherry.admin and read by the receiver after it authenticates.
 type ReceiverConfig struct {
-	Receiver string            `json:"receiver" yaml:"receiver"`
-	Pool     string            `json:"pool" yaml:"pool"`
-	Capacity int64             `json:"capacity" yaml:"capacity"`
-	Adapters []AdapterSettings `json:"adapters" yaml:"adapters"`
+	Receiver string            `json:"receiver"`
+	Pool     string            `json:"pool"`
+	Capacity int64             `json:"capacity"`
+	Adapters []AdapterSettings `json:"adapters"`
 }
 
 // AdapterSettings configures one adapter: the agent it launches, the
 // credential that agent takes, the labels its operator declares for it, and
 // settings its type decodes (runtime, node pool and the like stay there).
 type AdapterSettings struct {
-	Name       string            `json:"name" yaml:"name"`
-	Type       string            `json:"type" yaml:"type"`
-	Agent      string            `json:"agent" yaml:"agent"`
-	Output     string            `json:"output,omitzero" yaml:"output"`
-	ReplyFile  string            `json:"reply_file,omitzero" yaml:"reply_file"`
-	Credential string            `json:"credential,omitzero" yaml:"credential"`
-	Labels     map[string]string `json:"labels,omitzero" yaml:"labels"`
-	Config     map[string]any    `json:"config" yaml:"config"`
+	Name string `json:"name"`
+	// Platform names the platform entry the adapter takes its type, shared config and bundle credential from.
+	Platform   string            `json:"platform"`
+	Type       string            `json:"type"`
+	Agent      string            `json:"agent"`
+	Output     string            `json:"output,omitzero"`
+	ReplyFile  string            `json:"reply_file,omitzero"`
+	Credential string            `json:"credential,omitzero"`
+	Labels     map[string]string `json:"labels,omitzero"`
+	Config     map[string]any    `json:"config"`
 }
 
 type Record struct {

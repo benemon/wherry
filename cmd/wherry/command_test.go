@@ -753,7 +753,7 @@ func TestSubmitGitFlags(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	flags := append(slices.Clone(base), "--git", "git@git.example.test:org/repo.git@v1.2.0", "--git-path", "src/repo", "--git-credential", "model",
-		"--credential-file", "model=id_ed25519", "--git-host-key", hostKey, "--git-changes", "patch")
+		"--credential", "model=id_ed25519", "--git-host-key", hostKey, "--git-changes", "patch")
 	if err := runSubmit(b.ctx, b.client, flags, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}

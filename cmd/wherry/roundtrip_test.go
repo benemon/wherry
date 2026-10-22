@@ -184,14 +184,14 @@ func TestRoundTrip(t *testing.T) {
 	terms.Storage = &admin.Storage{Endpoint: bucket.endpoint, Bucket: s3Bucket}
 	hostBundle, otherBundle, receiverBundle := filepath.Join(dir, "host.yaml"), filepath.Join(dir, "other.yaml"), filepath.Join(dir, "receiver.yaml")
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2,
-		Adapters: []admin.AdapterSettings{{Name: "fake", Type: "fake", Agent: "claude", Credential: "model", Labels: map[string]string{"gpu": "yes"}, Config: map[string]any{"outputs": true, "inline_limit": 1000}}}}
+		Adapters: []admin.AdapterSettings{{Name: "fake", Platform: "fake-platform", Type: "fake", Agent: "claude", Credential: "model", Labels: map[string]string{"gpu": "yes"}, Config: map[string]any{"outputs": true, "inline_limit": 1000}}}}
 	for _, step := range []func() error{
 		func() error { return service.PoolCreate(ctx, "pool-a", terms) },
 		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle) },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle) },
 		func() error {
-			return service.ReceiverAdd(ctx, config, map[string]string{"fake": platformText}, receiverBundle)
+			return service.ReceiverAdd(ctx, config, map[string]string{"fake-platform": platformText}, receiverBundle)
 		},
 	} {
 		if err := step(); err != nil {
@@ -215,9 +215,7 @@ func TestRoundTrip(t *testing.T) {
 	logger := log.New(logs, "receiver: ", 0)
 	newReceiver := func(plugins *plugins) *receiver.Receiver {
 		t.Helper()
-		r, err := receiver.New(bundle, stateDir, func(pool string, settings admin.AdapterSettings) (receiver.Named, error) {
-			return plugins.adapter(pool, settings, bundle.Platform[settings.Name])
-		}, logger, prometheus.NewRegistry())
+		r, err := receiver.New(bundle, stateDir, plugins.factory(bundle), logger, prometheus.NewRegistry())
 		if err != nil {
 			t.Fatal(err)
 		}

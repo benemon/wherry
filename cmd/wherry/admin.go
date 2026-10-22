@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +18,7 @@ import (
 )
 
 func runAdmin(args []string, stdout, stderr io.Writer) error {
-	pos, options, err := adminArgs(args)
+	pos, options, platformFiles, err := adminArgs(args)
 	if err != nil {
 		return err
 	}
@@ -60,7 +61,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return service.PoolCreate(ctx, pos[2], terms)
 	case "receiver add":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> --bundle-file FILE [--platform-credential-file ADAPTER=FILE]")
+			return errors.New("usage: wherry admin receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> --bundle-file FILE [--platform-credential-file PLATFORM=FILE ...]")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -70,21 +71,10 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if (config.Receiver != "" && config.Receiver != pos[2]) || (config.Pool != "" && config.Pool != options["pool"]) {
-			return errors.New("receiver config identity does not match command")
-		}
 		config.Receiver, config.Pool = pos[2], options["pool"]
-		var platform map[string]string
-		if value := options["platform-credential-file"]; value != "" {
-			adapter, path, ok := strings.Cut(value, "=")
-			if !ok {
-				return errors.New("--platform-credential-file takes ADAPTER=FILE")
-			}
-			credential, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			platform = map[string]string{adapter: strings.TrimRight(string(credential), "\r\n")}
+		platform, err := platformCredentials(config, platformFiles)
+		if err != nil {
+			return err
 		}
 		return service.ReceiverAdd(ctx, config, platform, options["bundle-file"])
 	case "receiver configure":
@@ -98,9 +88,6 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		config, err := readReceiverConfig(path, directory)
 		if err != nil {
 			return err
-		}
-		if config.Receiver != "" && config.Receiver != pos[2] {
-			return errors.New("receiver config identity does not match command")
 		}
 		config.Receiver = pos[2]
 		return service.ReceiverConfigure(ctx, config)
@@ -163,8 +150,8 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	}
 }
 
-func adminArgs(args []string) ([]string, map[string]string, error) {
-	var positional []string
+func adminArgs(args []string) ([]string, map[string]string, []string, error) {
+	var positional, platformFiles []string
 	var optionNames []string
 	options := map[string]string{}
 	for i := 0; i < len(args); i++ {
@@ -173,10 +160,17 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 			continue
 		}
 		if i+1 == len(args) {
-			return nil, nil, errors.New("admin option requires a value")
+			return nil, nil, nil, errors.New("admin option requires a value")
 		}
 		name := strings.TrimPrefix(args[i], "--")
-		options[name] = args[i+1]
+		switch _, repeated := options[name]; {
+		case name == "platform-credential-file":
+			platformFiles = append(platformFiles, args[i+1])
+		case repeated:
+			return nil, nil, nil, fmt.Errorf("option --%s is given twice", name)
+		default:
+			options[name] = args[i+1]
+		}
 		optionNames = append(optionNames, name)
 		i++
 	}
@@ -198,11 +192,11 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 	if allowed != nil {
 		for _, name := range optionNames {
 			if !allowed[name] {
-				return nil, nil, fmt.Errorf("unknown option --%s", name)
+				return nil, nil, nil, fmt.Errorf("unknown option --%s", name)
 			}
 		}
 	}
-	return positional, options, nil
+	return positional, options, platformFiles, nil
 }
 
 func configInput(options map[string]string) (string, bool, error) {
@@ -239,91 +233,156 @@ func readYAML(path string, value any) error {
 	return admin.DecodeYAML(encoded, value)
 }
 
-// readReceiverConfig reads a receiver config from a single file or from a
-// directory holding receiver.yaml, platforms/*.yaml and adapters/*.yaml, where
-// adapter file order is routing order and an adapter's config takes its
-// platform's top-level keys, which it must not repeat.
+// platformCredentials reads each PLATFORM=FILE of --platform-credential-file, refusing a platform no adapter of config
+// uses or one named twice.
+func platformCredentials(config admin.ReceiverConfig, files []string) (map[string]string, error) {
+	var platform map[string]string
+	for _, value := range files {
+		name, path, ok := strings.Cut(value, "=")
+		if !ok {
+			return nil, errors.New("--platform-credential-file takes PLATFORM=FILE")
+		}
+		if !slices.ContainsFunc(config.Adapters, func(adapter admin.AdapterSettings) bool { return adapter.Platform == name }) {
+			return nil, fmt.Errorf("--platform-credential-file names platform %q, which no adapter in the configuration uses", name)
+		}
+		if _, repeated := platform[name]; repeated {
+			return nil, fmt.Errorf("--platform-credential-file names platform %q twice", name)
+		}
+		credential, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if platform == nil {
+			platform = map[string]string{}
+		}
+		platform[name] = strings.TrimRight(string(credential), "\r\n")
+	}
+	return platform, nil
+}
+
+// receiverPlatform and receiverAdapter are the platform and adapter entries of a receiver config, in either form.
+type receiverPlatform struct {
+	Name   string         `yaml:"name"`
+	Type   string         `yaml:"type"`
+	Config map[string]any `yaml:"config"`
+}
+
+type receiverAdapter struct {
+	Name       string            `yaml:"name"`
+	Platform   string            `yaml:"platform"`
+	Agent      string            `yaml:"agent"`
+	Output     string            `yaml:"output"`
+	ReplyFile  string            `yaml:"reply_file"`
+	Credential string            `yaml:"credential"`
+	Labels     map[string]string `yaml:"labels"`
+	Config     map[string]any    `yaml:"config"`
+}
+
+// readReceiverConfig reads a receiver config from a single file holding capacity, platforms and adapters, or from a
+// directory holding receiver.yaml, platforms/*.yaml and adapters/*.yaml, where adapter file order is routing order.
+// An adapter's config takes its platform's top-level keys, which it must not repeat.
 func readReceiverConfig(path string, directory bool) (admin.ReceiverConfig, error) {
-	var config admin.ReceiverConfig
 	if !directory {
-		return config, readYAML(path, &config)
+		var file struct {
+			Capacity  int64              `yaml:"capacity"`
+			Platforms []receiverPlatform `yaml:"platforms"`
+			Adapters  []receiverAdapter  `yaml:"adapters"`
+		}
+		if err := readYAML(path, &file); err != nil {
+			return admin.ReceiverConfig{}, err
+		}
+		return receiverConfig(file.Capacity, labelled(path, "platforms", file.Platforms), labelled(path, "adapters", file.Adapters))
 	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		return config, err
+		return admin.ReceiverConfig{}, err
 	}
 	for _, entry := range entries {
 		if name := entry.Name(); !strings.HasPrefix(name, ".") && name != "receiver.yaml" && name != "platforms" && name != "adapters" {
-			return config, fmt.Errorf("%s does not belong in a receiver config directory", filepath.Join(path, name))
+			return admin.ReceiverConfig{}, fmt.Errorf("%s does not belong in a receiver config directory", filepath.Join(path, name))
 		}
 	}
 	var receiver struct {
 		Capacity int64 `yaml:"capacity"`
 	}
 	if err := readYAML(filepath.Join(path, "receiver.yaml"), &receiver); err != nil {
-		return config, err
+		return admin.ReceiverConfig{}, err
 	}
-	config.Capacity = receiver.Capacity
-	type platform struct {
-		Name   string         `yaml:"name"`
-		Type   string         `yaml:"type"`
-		Config map[string]any `yaml:"config"`
-	}
-	platforms := map[string]platform{}
-	files, err := yamlFiles(filepath.Join(path, "platforms"))
+	platforms, err := readEntries[receiverPlatform](filepath.Join(path, "platforms"))
 	if err != nil {
-		return config, err
+		return admin.ReceiverConfig{}, err
 	}
+	adapters, err := readEntries[receiverAdapter](filepath.Join(path, "adapters"))
+	if err != nil {
+		return admin.ReceiverConfig{}, err
+	}
+	if len(adapters) == 0 {
+		return admin.ReceiverConfig{}, fmt.Errorf("%s holds no adapters", filepath.Join(path, "adapters"))
+	}
+	return receiverConfig(receiver.Capacity, platforms, adapters)
+}
+
+// entry is a decoded platform or adapter with the place it was read from, which errors name.
+type entry[T any] struct {
+	where string
+	value T
+}
+
+func labelled[T any](path, list string, values []T) []entry[T] {
+	entries := make([]entry[T], len(values))
+	for i, value := range values {
+		entries[i] = entry[T]{fmt.Sprintf("%s: %s[%d]", path, list, i), value}
+	}
+	return entries
+}
+
+// readEntries decodes each .yaml file in dir, in name order.
+func readEntries[T any](dir string) ([]entry[T], error) {
+	files, err := yamlFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	var entries []entry[T]
 	for _, file := range files {
-		var p platform
-		if err := readYAML(file, &p); err != nil {
-			return config, fmt.Errorf("%s: %w", file, err)
+		var value T
+		if err := readYAML(file, &value); err != nil {
+			return nil, fmt.Errorf("%s: %w", file, err)
 		}
-		if _, ok := platforms[p.Name]; ok || p.Name == "" {
-			return config, fmt.Errorf("%s: platform name %q is empty or repeated", file, p.Name)
+		entries = append(entries, entry[T]{file, value})
+	}
+	return entries, nil
+}
+
+func receiverConfig(capacity int64, platforms []entry[receiverPlatform], adapters []entry[receiverAdapter]) (admin.ReceiverConfig, error) {
+	config := admin.ReceiverConfig{Capacity: capacity}
+	byName := map[string]receiverPlatform{}
+	for _, p := range platforms {
+		if _, ok := byName[p.value.Name]; ok || p.value.Name == "" {
+			return config, fmt.Errorf("%s: platform name %q is empty or repeated", p.where, p.value.Name)
 		}
-		platforms[p.Name] = p
-	}
-	files, err = yamlFiles(filepath.Join(path, "adapters"))
-	if err != nil {
-		return config, err
-	}
-	if len(files) == 0 {
-		return config, fmt.Errorf("%s holds no adapters", filepath.Join(path, "adapters"))
+		byName[p.value.Name] = p.value
 	}
 	names := map[string]bool{}
-	for _, file := range files {
-		var adapter struct {
-			Name       string            `yaml:"name"`
-			Platform   string            `yaml:"platform"`
-			Agent      string            `yaml:"agent"`
-			Output     string            `yaml:"output"`
-			ReplyFile  string            `yaml:"reply_file"`
-			Credential string            `yaml:"credential"`
-			Labels     map[string]string `yaml:"labels"`
-			Config     map[string]any    `yaml:"config"`
-		}
-		if err := readYAML(file, &adapter); err != nil {
-			return config, fmt.Errorf("%s: %w", file, err)
-		}
+	for _, a := range adapters {
+		adapter := a.value
 		if names[adapter.Name] {
-			return config, fmt.Errorf("%s: adapter name %q is repeated", file, adapter.Name)
+			return config, fmt.Errorf("%s: adapter name %q is repeated", a.where, adapter.Name)
 		}
 		names[adapter.Name] = true
-		p, ok := platforms[adapter.Platform]
+		p, ok := byName[adapter.Platform]
 		if !ok {
-			return config, fmt.Errorf("%s: unknown platform %q", file, adapter.Platform)
+			return config, fmt.Errorf("%s: unknown platform %q", a.where, adapter.Platform)
 		}
 		if adapter.Config == nil {
 			adapter.Config = map[string]any{}
 		}
 		for key, value := range p.Config {
 			if _, ok := adapter.Config[key]; ok {
-				return config, fmt.Errorf("%s: config key %q is also set by platform %q", file, key, p.Name)
+				return config, fmt.Errorf("%s: config key %q is also set by platform %q", a.where, key, p.Name)
 			}
 			adapter.Config[key] = value
 		}
-		config.Adapters = append(config.Adapters, admin.AdapterSettings{Name: adapter.Name, Type: p.Type, Agent: adapter.Agent, Output: adapter.Output, ReplyFile: adapter.ReplyFile, Credential: adapter.Credential, Labels: adapter.Labels, Config: adapter.Config})
+		config.Adapters = append(config.Adapters, admin.AdapterSettings{Name: adapter.Name, Platform: p.Name, Type: p.Type, Agent: adapter.Agent, Output: adapter.Output, ReplyFile: adapter.ReplyFile, Credential: adapter.Credential, Labels: adapter.Labels, Config: adapter.Config})
 	}
 	return config, nil
 }

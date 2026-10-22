@@ -86,44 +86,15 @@ func labTree(t *testing.T, replace map[string]string, remove ...string) string {
 }
 
 func TestReceiverConfigDirectoryMatchesSingleFile(t *testing.T) {
-	single := writeTree(t, map[string]string{"receiver.yaml": `capacity: 2
-adapters:
-  - name: nomad-podman
-    type: nomad
-    agent: claude
-    output: file
-    reply_file: out/reply.md
-    credential: claude-oauth-token
-    labels:
-      isolation: container
-    config:
-      address: https://nomad.example:4646
-      ca_file: /secrets/nomad-ca.crt
-      namespace: wherry
-      credential_env: CLAUDE_CODE_OAUTH_TOKEN
-      node_pool: default
-      runtime:
-        driver: podman
-        config:
-          image: localhost/wherry-agent:test
-  - name: nomad-exec
-    type: nomad
-    agent: claude
-    output: codex
-    credential: claude-oauth-token
-    labels:
-      isolation: host
-    config:
-      address: https://nomad.example:4646
-      ca_file: /secrets/nomad-ca.crt
-      namespace: wherry
-      credential_env: CLAUDE_CODE_OAUTH_TOKEN
-      node_pool: OCPv
-      runtime:
-        driver: exec
-        config:
-          command: /bin/sh
-`})
+	// item turns a document into an entry of a YAML list.
+	item := func(document string) string {
+		lines := strings.Split(strings.TrimSuffix(document, "\n"), "\n")
+		for i := range lines {
+			lines[i] = "    " + lines[i]
+		}
+		return "  - " + strings.TrimPrefix(strings.Join(lines, "\n"), "    ") + "\n"
+	}
+	single := writeTree(t, map[string]string{"receiver.yaml": "capacity: 2\nplatforms:\n" + item(labPlatform) + "adapters:\n" + item(labPodman) + item(labExec)})
 	want, err := readReceiverConfig(filepath.Join(single, "receiver.yaml"), false)
 	if err != nil {
 		t.Fatal(err)
@@ -210,5 +181,46 @@ func TestReceiverConfigDirectoryIgnoresHiddenFiles(t *testing.T) {
 		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("with %s: config = %+v, %v; want the config without it", hidden, got, err)
 		}
+	}
+}
+
+func TestReceiverConfigFileRefusesIdentity(t *testing.T) {
+	file := writeTree(t, map[string]string{"receiver.yaml": "receiver: receiver-a\ncapacity: 2\n"})
+	if _, err := readReceiverConfig(filepath.Join(file, "receiver.yaml"), false); err == nil {
+		t.Fatal("a receiver config file naming its receiver was accepted")
+	}
+}
+
+func TestPlatformCredentialsByPlatform(t *testing.T) {
+	config, err := readReceiverConfig(labTree(t, nil), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Adapters[0].Platform != "lab-nomad" || config.Adapters[1].Platform != "lab-nomad" {
+		t.Fatalf("adapter platforms %q, %q, want lab-nomad", config.Adapters[0].Platform, config.Adapters[1].Platform)
+	}
+	token := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(token, []byte("nomad-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	platform, err := platformCredentials(config, []string{"lab-nomad=" + token})
+	if err != nil || !reflect.DeepEqual(platform, map[string]string{"lab-nomad": "nomad-token"}) {
+		t.Fatalf("platform credentials %v, %v; want lab-nomad's token", platform, err)
+	}
+	for name, files := range map[string][]string{
+		"adapter name":  {"nomad-exec=" + token},
+		"no platform":   {"missing=" + token},
+		"named twice":   {"lab-nomad=" + token, "lab-nomad=" + token},
+		"not NAME=FILE": {token},
+	} {
+		if _, err := platformCredentials(config, files); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, _, files, err := adminArgs([]string{"receiver", "add", "r", "--platform-credential-file", "a=x", "--platform-credential-file", "b=y"}); err != nil || len(files) != 2 {
+		t.Errorf("repeated --platform-credential-file = %v, %v; want both", files, err)
+	}
+	if _, _, _, err := adminArgs([]string{"receiver", "add", "r", "--pool", "a", "--pool", "b"}); err == nil {
+		t.Error("a repeated --pool was accepted")
 	}
 }

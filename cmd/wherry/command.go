@@ -206,7 +206,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	promptFile := flags.String("prompt-file", "", "prompt file")
 	gitRemote := flags.String("git", "", "REMOTE@REF: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit")
 	gitPath := flags.String("git-path", "", "checkout directory, relative (default: the repository name)")
-	gitCredential := flags.String("git-credential", "", "name of the --credential-file credential the agent clones with")
+	gitCredential := flags.String("git-credential", "", "name of the --credential credential the agent clones with")
 	gitHostKey := flags.String("git-host-key", "", "file of OpenSSH known_hosts lines for an ssh remote's host")
 	gitChanges := flags.String("git-changes", "", "patch or bundle: ask for the agent's commits back as changes.patch or changes.bundle")
 	var inputs []string
@@ -215,7 +215,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return nil
 	})
 	var credentials []wire.TaskCredential
-	flags.Func("credential-file", "NAME=FILE: deliver configured credential NAME as file FILE in the agent's credentials directory (repeatable)", func(value string) error {
+	flags.Func("credential", "NAME=FILE: deliver configured credential NAME as file FILE in the agent's credentials directory (repeatable)", func(value string) error {
 		name, file, ok := strings.Cut(value, "=")
 		if !ok {
 			return errors.New("want NAME=FILE")
@@ -245,7 +245,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git REMOTE@REF [--git-path PATH] [--git-credential NAME] [--git-host-key FILE] [--git-changes patch|bundle]] [--input FILE]... [--s3-input FILE]... [--credential-file NAME=FILE]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git REMOTE@REF [--git-path PATH] [--git-credential NAME] [--git-host-key FILE] [--git-changes patch|bundle]] [--input FILE]... [--s3-input FILE]... [--credential NAME=FILE]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {
