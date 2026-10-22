@@ -543,3 +543,31 @@ func TestLargestResultReturnsS3OutputsAtTheirBounds(t *testing.T) {
 		t.Fatalf("largest result lists %d S3 outputs; want %d at their bounds", len(metadata.S3Outputs), wire.MaxOutputs)
 	}
 }
+
+func TestSingleAnswerTermsDefault(t *testing.T) {
+	terms := Terms{Agents: []AgentTerms{{Name: "agent-a", Models: []string{"m1"}}}, ProducerByteRate: 1000000, RequestPercentage: 50}
+	encoded, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := DecodeRecord(encoded)
+	if err != nil {
+		t.Fatalf("a pool record leaving out single-answer terms: %v", err)
+	}
+	state, err := Fold([]Record{record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := state.Pools["pool-a"]
+	if got.DefaultAgent != "agent-a" || got.Agents[0].DefaultModel != "m1" || got.DeliveryLimit != DefaultDeliveryLimit || got.LockDurationMS != DefaultLockDurationMS {
+		t.Fatalf("terms %#v, want the one agent and model, delivery limit 5 and a 15s lock", got)
+	}
+	if terms.Agents[0].DefaultModel != "" {
+		t.Fatal("folding wrote the default into the record's terms")
+	}
+	two := terms
+	two.Agents = []AgentTerms{{Name: "agent-a"}, {Name: "agent-b"}}
+	if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &two, AtMS: 1}); err == nil {
+		t.Fatal("two agents without a default agent encoded")
+	}
+}

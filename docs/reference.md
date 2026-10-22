@@ -480,10 +480,12 @@ adapter's `type` or `config` section.
 
 ## Receiver command
 
-### `wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir DIR`
+### `wherry receiver --bundle-file FILE`
 
-Runs a receiver as the bundle's principal. It creates the state directory
-with mode 0700 and keeps `signing.key` in it. On start it:
+Runs a receiver as the bundle's principal. `--state-dir DIR` defaults to
+`state` beside the bundle file, and `--plugin-dir DIR` to
+`/usr/local/libexec/wherry/plugins`. It creates the state directory with
+mode 0700 and keeps `signing.key` in it. On start it:
 
 1. registers its public key on its key topic when the topic is empty, and
    fails when the topic holds another key;
@@ -876,10 +878,10 @@ ignored. Any other entry and a directory with no agent files are errors.
 | Field | Content |
 | --- | --- |
 | `agents` | one or more `{name, credentials, models, default_model}`: an agent, the credential names it may take, and optionally the models a task may name for it and the one a task naming none runs |
-| `default_agent` | an agent from `agents`, used when a task names none |
+| `default_agent` | an agent from `agents`, used when a task names none; optional when `agents` holds one, which it then defaults to |
 | `run_lifetime` | optional duration, default `336h` (14 days): time from a run's submission past which a receiver rejects it unclaimed; it also bounds the run's queue deadline and the pool topics' retention |
-| `delivery_limit` | the share group's `share.delivery.count.limit` |
-| `lock_duration` | duration, the share group's `share.record.lock.duration.ms` |
+| `delivery_limit` | optional, default 5: the share group's `share.delivery.count.limit` |
+| `lock_duration` | optional duration, default `15s`: the share group's `share.record.lock.duration.ms` |
 | `producer_byte_rate` | host quota, bytes per second |
 | `request_percentage` | host quota, percentage of broker request time |
 | `inline_limit` | optional, default 262144 (256 KiB): bytes of a task's input files together |
@@ -887,8 +889,8 @@ ignored. Any other entry and a directory with no agent files are errors.
 | `vcs` | optional, default none: the hosts a [git input](a2a-extension-v1.md#git-input) may clone from |
 | `storage` | optional, default none: `{endpoint, bucket}`, the S3-compatible store of the pool's [S3 inputs and outputs](a2a-extension-v1.md#s3-inputs-and-outputs) |
 
-An agent's `default_model`, when set, is one of its `models`, and an agent
-without `models` has none. A task for an agent with `models` runs the model
+An agent's `default_model`, when set, is one of its `models`; it defaults to
+the model of an agent listing one, and an agent without `models` has none. A task for an agent with `models` runs the model
 it names, or `default_model`; with no `default_model` it must name one, and
 `submit` refuses it otherwise. One naming a model outside `models` fails `submit`, and a
 receiver rejects one whose model has left the terms since with
@@ -1000,7 +1002,7 @@ the command. Unknown fields are errors.
 
 | Field of the single file | Content |
 | --- | --- |
-| `capacity` | runs the receiver holds at once, positive |
+| `capacity` | optional, default 1: runs the receiver holds at once, positive |
 | `platforms` | one or more platform entries |
 | `adapters` | one or more adapter entries, in routing order |
 
@@ -1193,7 +1195,7 @@ A principal whose membership has ended has no grants.
 | `WHERRY_TRUST_CA` | `wherry admin` | PEM CA file for the broker, also written into bundles |
 | `WHERRY_TRUST_ADMIN_USER` | `wherry admin` | super user name |
 | `WHERRY_TRUST_ADMIN_PASSWORD_FILE` | `wherry admin` | file holding the super user's SCRAM password |
-| `WHERRY_TRUST_OPERATOR_USER` | `wherry admin` | operator principal name; must be `wherry.operator` |
+| `WHERRY_TRUST_OPERATOR_USER` | `wherry admin` | operator principal name, `wherry.operator`, which is the default |
 | `WHERRY_TRUST_OPERATOR_PASSWORD_FILE` | `wherry admin` | file holding the operator's SCRAM password |
 
 A plugin reads its own variables from the receiver's environment; the

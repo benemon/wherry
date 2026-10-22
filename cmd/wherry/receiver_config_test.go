@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -222,5 +224,17 @@ func TestPlatformCredentialsByPlatform(t *testing.T) {
 	}
 	if _, _, _, err := adminArgs([]string{"receiver", "add", "r", "--pool", "a", "--pool", "b"}); err == nil {
 		t.Error("a repeated --pool was accepted")
+	}
+}
+
+func TestReceiverDefaults(t *testing.T) {
+	config, err := readReceiverConfig(labTree(t, map[string]string{"receiver.yaml": "{}\n"}), true)
+	if err != nil || config.Capacity != 1 {
+		t.Fatalf("capacity %d, %v; want 1 when receiver.yaml leaves it out", config.Capacity, err)
+	}
+	var stderr bytes.Buffer
+	err = runReceiver([]string{"--bundle-file", filepath.Join(t.TempDir(), "missing.yaml")}, io.Discard, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "read bundle") {
+		t.Fatalf("receiver with only --bundle-file = %v; want it to read the bundle, not ask for more flags", err)
 	}
 }

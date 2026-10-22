@@ -11,7 +11,7 @@ type ACL struct {
 func ACLs(state State) []ACL {
 	readDescribe := []string{"READ", "DESCRIBE"}
 	writeDescribe := []string{"WRITE", "DESCRIBE"}
-	acls := []ACL{{"wherry.operator", "topic", AdminTopic, false, []string{"READ", "WRITE", "DESCRIBE"}}}
+	acls := []ACL{{OperatorPrincipal, "topic", AdminTopic, false, []string{"READ", "WRITE", "DESCRIBE"}}}
 	for principal, host := range state.Hosts {
 		if !state.Ended[principal] {
 			acls = append(acls, ACL{principal, "topic", AdminTopic, false, readDescribe}, ACL{principal, "topic", ReceiversTopic, false, readDescribe}, ACL{principal, "topic", TenantTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, []string{"READ", "WRITE", "DESCRIBE"}})

@@ -44,7 +44,7 @@ func TestKafkaClientRejectsPlaintextListener(t *testing.T) {
 	t.Setenv("WHERRY_TRUST_CA", caPath)
 	t.Setenv("WHERRY_TRUST_ADMIN_USER", "admin")
 	t.Setenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE", passwordPath)
-	client, err := adminKafka("WHERRY_TRUST_ADMIN_USER", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
+	client, err := adminKafka("WHERRY_TRUST_ADMIN_USER", "", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
 	if err != nil {
 		t.Fatal(err)
 	}

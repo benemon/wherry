@@ -26,10 +26,10 @@ type AgentTerms struct {
 }
 type Terms struct {
 	Agents            []AgentTerms `json:"agents" yaml:"agents"`
-	DefaultAgent      string       `json:"default_agent" yaml:"default_agent"`
+	DefaultAgent      string       `json:"default_agent,omitzero" yaml:"default_agent"`
 	RunLifetimeMS     Millis       `json:"run_lifetime_ms,omitzero" yaml:"run_lifetime"`
-	DeliveryLimit     int32        `json:"delivery_limit" yaml:"delivery_limit"`
-	LockDurationMS    Millis       `json:"lock_duration_ms" yaml:"lock_duration"`
+	DeliveryLimit     int32        `json:"delivery_limit,omitzero" yaml:"delivery_limit"`
+	LockDurationMS    Millis       `json:"lock_duration_ms,omitzero" yaml:"lock_duration"`
 	ProducerByteRate  int64        `json:"producer_byte_rate" yaml:"producer_byte_rate"`
 	RequestPercentage float64      `json:"request_percentage" yaml:"request_percentage"`
 	InlineLimit       int64        `json:"inline_limit,omitzero" yaml:"inline_limit"`
@@ -96,15 +96,33 @@ func (storage Storage) validate() error {
 	return nil
 }
 
-// DefaultInlineLimit and DefaultOutputLimit are a pool's limits where its terms leave them out.
+// The Default values are a pool's terms where its terms leave them out; MaxRunDurationMS caps a run after its queue
+// deadline.
 const (
-	DefaultInlineLimit   = 256 << 10
-	DefaultOutputLimit   = 8 << 20
-	DefaultRunLifetimeMS = 14 * 24 * 60 * 60 * 1000
-	MaxRunDurationMS     = 6 * 60 * 60 * 1000
+	DefaultDeliveryLimit  = 5
+	DefaultLockDurationMS = 15000
+	DefaultInlineLimit    = 256 << 10
+	DefaultOutputLimit    = 8 << 20
+	DefaultRunLifetimeMS  = 14 * 24 * 60 * 60 * 1000
+	MaxRunDurationMS      = 6 * 60 * 60 * 1000
 )
 
 func withDefaults(terms Terms) Terms {
+	if terms.DefaultAgent == "" && len(terms.Agents) == 1 {
+		terms.DefaultAgent = terms.Agents[0].Name
+	}
+	terms.Agents = slices.Clone(terms.Agents)
+	for i, agent := range terms.Agents {
+		if agent.DefaultModel == "" && len(agent.Models) == 1 {
+			terms.Agents[i].DefaultModel = agent.Models[0]
+		}
+	}
+	if terms.DeliveryLimit == 0 {
+		terms.DeliveryLimit = DefaultDeliveryLimit
+	}
+	if terms.LockDurationMS == 0 {
+		terms.LockDurationMS = DefaultLockDurationMS
+	}
 	if terms.RunLifetimeMS == 0 {
 		terms.RunLifetimeMS = DefaultRunLifetimeMS
 	}
@@ -504,7 +522,7 @@ func validateRecord(record Record) error {
 	}
 	switch record.Kind {
 	case "pool":
-		if validateNames(record.Pool) != nil || record.Terms == nil || validateTerms(*record.Terms) != nil {
+		if validateNames(record.Pool) != nil || record.Terms == nil || validateTerms(withDefaults(*record.Terms)) != nil {
 			return errors.New("invalid pool record")
 		}
 	case "receiver":
