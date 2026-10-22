@@ -39,7 +39,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		if flags.NArg() != 0 {
-			return errors.New("usage: wherry init")
+			return errors.New("usage: wherry init [--config-file FILE]")
 		}
 		config, err := loadConfig(*configFile)
 		if err != nil {
@@ -60,7 +60,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		if flags.NArg() != 0 {
-			return errors.New("usage: wherry key")
+			return errors.New("usage: wherry key [--config-file FILE]")
 		}
 		config, err := loadConfig(*configFile)
 		if err != nil {
@@ -229,16 +229,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return nil
 	})
 	var outputs []wire.ExpectedOutput
-	flags.Func("output", "NAME[:required][:s3]: a file the agent is asked to leave in its output directory, returned through the pool's bucket with :s3 (repeatable)", func(value string) error {
-		name, s3 := strings.CutSuffix(value, ":s3")
-		name, required := strings.CutSuffix(name, ":required")
-		output := wire.ExpectedOutput{Name: name, Required: required}
-		if s3 {
-			output.Storage = wire.StorageS3
-		}
-		outputs = append(outputs, output)
-		return nil
-	})
+	flags.Func("output", "NAME[:required][:s3]: a file the agent is asked to leave in its output directory, returned through the pool's bucket with :s3 (repeatable)", outputFlag(&outputs))
 	deadline := flags.Duration("deadline", busclient.DefaultDeadline, "task deadline")
 	queueDeadline := flags.Duration("queue-deadline", busclient.DefaultQueueDeadline, "queue deadline")
 	if err := flags.Parse(args); err != nil {
@@ -332,6 +323,26 @@ func inputParts(paths []string) ([]wire.Part, error) {
 		parts = append(parts, wire.Part{Raw: append(wire.StdBytes{}, data...), Filename: filepath.Base(path)})
 	}
 	return parts, nil
+}
+
+// outputFlag parses NAME[:required][:s3], its suffixes in either order, into outputs.
+func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
+	return func(value string) error {
+		fields := strings.Split(value, ":")
+		output := wire.ExpectedOutput{Name: fields[0]}
+		for _, suffix := range fields[1:] {
+			switch {
+			case suffix == "required" && !output.Required:
+				output.Required = true
+			case suffix == "s3" && output.Storage == "":
+				output.Storage = wire.StorageS3
+			default:
+				return fmt.Errorf("want NAME[:required][:s3], not %q", value)
+			}
+		}
+		*outputs = append(*outputs, output)
+		return nil
+	}
 }
 
 // defaultAwaitTimeout covers a run at the default queue deadline and run deadline.

@@ -45,6 +45,8 @@ func TestSubmitFileFlags(t *testing.T) {
 		"inputs over the limit":     {[]string{"--input", large}, "inline inputs are 262145 bytes, over the 262144-byte limit"},
 		"output escaping":           {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
 		"credential file escaping":  {[]string{"--credential", "deploy-key=../id"}, "credential files must be unique portable file names"},
+		"unknown output suffix":     {[]string{"--output", "report.md:needed"}, "want NAME[:required][:s3]"},
+		"repeated output suffix":    {[]string{"--output", "report.md:required:required"}, "want NAME[:required][:s3]"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

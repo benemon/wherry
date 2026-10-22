@@ -44,7 +44,7 @@ func TestKafkaClientRejectsPlaintextListener(t *testing.T) {
 	t.Setenv("WHERRY_TRUST_CA", caPath)
 	t.Setenv("WHERRY_TRUST_ADMIN_USER", "admin")
 	t.Setenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE", passwordPath)
-	client, err := adminKafka("WHERRY_TRUST_ADMIN_USER", "", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
+	client, err := adminKafka(cluster.ListenAddrs()[0], pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), "WHERRY_TRUST_ADMIN_USER", "", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +72,11 @@ func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
 	t.Setenv("WHERRY_TRUST_OPERATOR_USER", "wherry.operator")
 	t.Setenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE", filepath.Join(dir, "operator"))
 	var stdout, stderr bytes.Buffer
+	for _, args := range [][]string{{"tenant", "add", "tenant-a"}, {"host", "add", "tenant-a", "host-a"}} {
+		if err := runAdmin(args, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+			t.Fatalf("%v without its required option = %v, want its usage", args, err)
+		}
+	}
 	for _, args := range [][]string{{"revoke", "host", "tenant-a"}, {"revoke", "receiver"}, {"revoke", "receiver", "a", "b"}} {
 		if err := runAdmin(args, &stdout, &stderr); err == nil || err.Error() != "invalid revoke command" {
 			t.Fatalf("%v = %v, want invalid revoke command", args, err)

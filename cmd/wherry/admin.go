@@ -25,21 +25,25 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	if len(pos) == 0 {
 		return errors.New("usage: wherry admin <pool create|receiver add|receiver configure|tenant add|host add|revoke host|revoke receiver|skip|check>")
 	}
-	root, err := adminKafka("WHERRY_TRUST_ADMIN_USER", "", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
+	broker, caPath := os.Getenv("WHERRY_TRUST_BROKER"), os.Getenv("WHERRY_TRUST_CA")
+	if broker == "" || caPath == "" {
+		return errors.New("trust broker credentials are not configured")
+	}
+	ca, err := os.ReadFile(caPath)
+	if err != nil {
+		return err
+	}
+	root, err := adminKafka(broker, ca, "WHERRY_TRUST_ADMIN_USER", "", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	operator, err := adminKafka("WHERRY_TRUST_OPERATOR_USER", admin.OperatorPrincipal, "WHERRY_TRUST_OPERATOR_PASSWORD_FILE")
+	operator, err := adminKafka(broker, ca, "WHERRY_TRUST_OPERATOR_USER", admin.OperatorPrincipal, "WHERRY_TRUST_OPERATOR_PASSWORD_FILE")
 	if err != nil {
 		return err
 	}
 	defer operator.Close()
-	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
-	if err != nil {
-		return err
-	}
-	service := admin.Service{Admin: root, Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: string(ca)}
+	service := admin.Service{Admin: root, Operator: operator, Broker: broker, CA: string(ca)}
 	ctx := context.Background()
 	command := strings.Join(pos[:min(len(pos), 2)], " ")
 	if pos[0] == "skip" {
@@ -60,7 +64,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		}
 		return service.PoolCreate(ctx, pos[2], terms)
 	case "receiver add":
-		if len(pos) != 3 {
+		if len(pos) != 3 || options["pool"] == "" || options["bundle-file"] == "" {
 			return errors.New("usage: wherry admin receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> --bundle-file FILE [--platform-credential-file PLATFORM=FILE ...]")
 		}
 		path, directory, err := configInput(options)
@@ -92,12 +96,12 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		config.Receiver = pos[2]
 		return service.ReceiverConfigure(ctx, config)
 	case "tenant add":
-		if len(pos) != 3 {
+		if len(pos) != 3 || options["pool"] == "" {
 			return errors.New("usage: wherry admin tenant add TENANT --pool POOL")
 		}
 		return service.TenantAdd(ctx, pos[2], options["pool"])
 	case "host add":
-		if len(pos) != 4 {
+		if len(pos) != 4 || options["bundle-file"] == "" {
 			return errors.New("usage: wherry admin host add TENANT HOST --bundle-file FILE")
 		}
 		return service.HostAdd(ctx, pos[2], pos[3], options["bundle-file"])
@@ -445,15 +449,11 @@ func yamlFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
-// adminKafka connects as the user userEnv names, or defaultUser when it is unset.
-func adminKafka(userEnv, defaultUser, passwordEnv string) (*kgo.Client, error) {
-	broker, caPath, user, passwordPath := os.Getenv("WHERRY_TRUST_BROKER"), os.Getenv("WHERRY_TRUST_CA"), cmp.Or(os.Getenv(userEnv), defaultUser), os.Getenv(passwordEnv)
-	if broker == "" || caPath == "" || user == "" || passwordPath == "" {
+// adminKafka connects to broker, trusting ca, as the user userEnv names, or defaultUser when it is unset.
+func adminKafka(broker string, ca []byte, userEnv, defaultUser, passwordEnv string) (*kgo.Client, error) {
+	user, passwordPath := cmp.Or(os.Getenv(userEnv), defaultUser), os.Getenv(passwordEnv)
+	if user == "" || passwordPath == "" {
 		return nil, errors.New("trust broker credentials are not configured")
-	}
-	ca, err := os.ReadFile(caPath)
-	if err != nil {
-		return nil, err
 	}
 	password, err := os.ReadFile(passwordPath)
 	if err != nil {

@@ -692,8 +692,8 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    ```
 
 5. Let the parties reach the endpoint and trust its certificate: hosts,
-   which upload, download and delete (they trust the system roots and the
-   CA file in `SSL_CERT_FILE`); receiver hosts, which upload outputs with
+   which upload, download and delete (they trust the system roots, or only
+   the CA file in `SSL_CERT_FILE` when it is set); receiver hosts, which upload outputs with
    their system roots; and every platform node that fetches inputs, for the
    Nomad plugin each Nomad client, whose artifact fetcher uses the system
    roots. Agent jobs do not reach the endpoint themselves; see
