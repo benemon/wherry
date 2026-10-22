@@ -27,8 +27,9 @@ const (
 // Offer is an adapter a receiver can currently dispatch to and the agent it
 // launches. Its labels live in the receiver's configuration record.
 type Offer struct {
-	Adapter string `json:"adapter"`
-	Agent   string `json:"agent"`
+	Adapter     string `json:"adapter"`
+	Agent       string `json:"agent"`
+	InlineLimit int64  `json:"inline_limit,omitzero"`
 }
 
 // reservedPrefix is held back for labels wherry itself may define.
@@ -123,6 +124,9 @@ func validateOffers(offers []Offer) error {
 	for i, offer := range offers {
 		if err := validateIDs(map[string]string{"offer adapter": offer.Adapter, "offer agent": offer.Agent}); err != nil {
 			return err
+		}
+		if offer.InlineLimit < 0 {
+			return errors.New("offer inline limit must not be negative")
 		}
 		if slices.ContainsFunc(offers[:i], func(other Offer) bool { return other.Adapter == offer.Adapter }) {
 			return errors.New("duplicate offer adapter")

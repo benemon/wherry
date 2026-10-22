@@ -146,7 +146,7 @@ func newBus(t *testing.T) *bus {
 	}
 	b.produce(t, admin.ReceiverTopic("receiver-a"), "receiver-a", registration)
 	b.produce(t, admin.ReceiversTopic, "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
-		Offers: []wire.Offer{{Adapter: "lab", Agent: "claude"}}, Capacity: 1, AtMS: time.Now().UnixMilli()}))
+		Offers: []wire.Offer{{Adapter: "lab", Agent: "claude", InlineLimit: 49152}}, Capacity: 1, AtMS: time.Now().UnixMilli()}))
 	return b
 }
 
@@ -329,6 +329,13 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	}
 	if rows[0]["receiver_id"] != "receiver-a" || rows[0]["status"] != "live" || rows[0]["pool"] != "pool-a" {
 		t.Fatalf("unexpected JSON row: %#v", rows[0])
+	}
+	stdout.Reset()
+	if err := runReceivers(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "inline_limit=49152") {
+		t.Fatalf("receivers output %q does not carry the adapter's inline limit", stdout.String())
 	}
 }
 

@@ -87,6 +87,10 @@ To send files, add `inputs`: paths of regular files beneath one of the wherry
 MCP server's input roots (the directory it runs in, unless the user's wherry
 configuration lists `input_roots`), the pool's inline limit in all (256 KiB by
 default), which the agent finds under their base names in its input directory.
+An adapter can declare a lower limit. When the chosen pool has storage and the
+host has its storage credential, wherry automatically carries all inline inputs
+through S3 when they exceed the smallest matching adapter limit; otherwise
+submit refuses before publishing and names that limit.
 The server refuses any other path, and the host's state directory, host key,
 bundle, credential files and storage key files. To give the agent a credential
 as a file, add `credentials`: `{name, file}` with `name` a credential in the
@@ -95,7 +99,7 @@ user's wherry configuration and `file` the name it gets in
 `outputs`: `{name, required}` for each file the agent should leave in
 `WHERRY_OUTPUT_DIR`. The prompt the agent receives names all of them.
 
-For a file over the inline limit, up to 5 GiB, add its path to `s3_inputs`
+For a file over the pool inline limit, up to 5 GiB, add its path to `s3_inputs`
 instead: the server uploads it to the pool's bucket and the agent finds it
 in its input directory like any input. Add `storage: "s3"` to an output to
 return it through the bucket. Both need a pool with storage and a storage

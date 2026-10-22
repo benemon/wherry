@@ -26,10 +26,10 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// S3File is a local file a run's first turn delivers through its pool's bucket, as the input Name.
+// S3File is bytes a run's first turn delivers through its pool's bucket, as the input Name.
 type S3File struct {
 	Name string
-	File *os.File
+	Body io.ReadSeeker
 }
 
 // getLifetime is how long a presigned GET for an S3 input lives; a PUT for an S3 output lives until its turn's
@@ -80,19 +80,31 @@ func readKey(path string) (string, error) {
 func uploadInputs(ctx context.Context, store *minio.Client, bucket, tenant, run string, files []S3File) ([]wire.S3Input, error) {
 	var inputs []wire.S3Input
 	for _, file := range files {
-		info, err := file.File.Stat()
+		if local, ok := file.Body.(*os.File); ok {
+			info, err := local.Stat()
+			if err != nil {
+				return nil, err
+			}
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("%w: S3 input %s must be a regular file of at most 5 GiB", ErrInvalidInput, file.Name)
+			}
+		}
+		size, err := file.Body.Seek(0, io.SeekEnd)
 		if err != nil {
 			return nil, err
 		}
-		if !info.Mode().IsRegular() || info.Size() > wire.MaxS3Object {
+		if _, err := file.Body.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		if size > wire.MaxS3Object {
 			return nil, fmt.Errorf("%w: S3 input %s must be a regular file of at most 5 GiB", ErrInvalidInput, file.Name)
 		}
 		sum := sha256.New()
-		if _, err := store.PutObject(ctx, bucket, wire.S3InputKey(tenant, run, file.Name), io.TeeReader(file.File, sum), info.Size(),
+		if _, err := store.PutObject(ctx, bucket, wire.S3InputKey(tenant, run, file.Name), io.TeeReader(file.Body, sum), size,
 			minio.PutObjectOptions{DisableMultipart: true, ContentType: "application/octet-stream"}); err != nil {
 			return nil, fmt.Errorf("upload S3 input %s: %w", file.Name, err)
 		}
-		inputs = append(inputs, wire.S3Input{Name: file.Name, Size: info.Size(), SHA256: hex.EncodeToString(sum.Sum(nil))})
+		inputs = append(inputs, wire.S3Input{Name: file.Name, Size: size, SHA256: hex.EncodeToString(sum.Sum(nil))})
 	}
 	return inputs, nil
 }

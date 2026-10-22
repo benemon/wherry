@@ -1,4 +1,4 @@
-// The adapter protocol, version 5: the receiver core calls a plugin's adapters
+// The adapter protocol, version 6: the receiver core calls a plugin's adapters
 // over this service, and every request names its adapter.
 syntax = "proto3";
 
@@ -115,6 +115,7 @@ message ConfigureRequest {
 message ConfigureResponse {
   reserved 1;
   Directories directories = 2;
+  int64 inline_limit = 3;
 }
 
 // Directories are the paths of a job's input, output and credentials directories as its agent's prompt shows them.

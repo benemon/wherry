@@ -175,6 +175,11 @@ func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 		{Name: "lab", Type: "nomad", Agent: "claude", Credential: "model", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
 		{Name: "cloud", Type: "aws", Agent: "codex", Credential: "openai", Labels: map[string]string{"runtime": "exec"}},
 	}}
+	return f.addReceiverConfig(t, config)
+}
+
+func (f *fixture) addReceiverConfig(t *testing.T, config admin.ReceiverConfig) *testReceiver {
+	t.Helper()
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
 	if err := f.service.ReceiverAdd(f.ctx, config, nil, bundle); err != nil {
 		t.Fatal(err)
@@ -184,13 +189,13 @@ func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiver := &testReceiver{id: id, pool: pool, key: key, kafka: kafka}
-	registration, err := signed.RegisterKey(id, key)
+	receiver := &testReceiver{id: config.Receiver, pool: config.Pool, key: key, kafka: kafka}
+	registration, err := signed.RegisterKey(config.Receiver, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiver.produce(t, f.ctx, admin.ReceiverTopic(id), id, registration)
-	f.receivers[id] = receiver
+	receiver.produce(t, f.ctx, admin.ReceiverTopic(config.Receiver), config.Receiver, registration)
+	f.receivers[config.Receiver] = receiver
 	return receiver
 }
 
@@ -496,6 +501,54 @@ func TestSubmitMatchesAcrossAdapters(t *testing.T) {
 		if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrNoMatchingReceiver) {
 			t.Fatalf("%s: %v", name, err)
 		}
+	}
+}
+
+func TestSubmitRefusesInputsOverSmallestAdapterInlineLimit(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 1000 })
+	f.addReceiver(t, "receiver-b", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 5000 })
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 2000), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "adapter lab's 1000-byte limit") || !strings.Contains(err.Error(), "pool with storage") {
+		t.Fatalf("submit = %v, want invalid input naming adapter lab's 1000-byte limit and storage", err)
+	}
+	if n := f.tasksEnd(t, "pool-a"); n != 0 {
+		t.Fatalf("pool tasks hold %d records after the refused input", n)
+	}
+}
+
+func TestSubmitKeepsInputsWithinAdapterInlineLimit(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 1000 })
+	f.addReceiver(t, "receiver-b", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 5000 })
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 900), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := receiver.claim(t, f.ctx, result.RunID)[0].submission
+	if len(task.Message.Parts) != 2 || len(task.Message.Parts[1].Raw) != 900 || len(task.Wherry.S3Inputs) != 0 {
+		t.Fatalf("submission parts %+v and S3 inputs %+v; want the 900-byte input inline", task.Message.Parts, task.Wherry.S3Inputs)
+	}
+}
+
+func TestSubmitIgnoresInlineLimitOfOfferOutsideSelector(t *testing.T) {
+	f := newFixture(t)
+	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2, Adapters: []admin.AdapterSettings{
+		{Name: "lab", Type: "nomad", Agent: "claude", Credential: "model", Labels: map[string]string{"runtime": "podman"}},
+		{Name: "other", Type: "nomad", Agent: "claude", Credential: "model", Labels: map[string]string{"runtime": "exec"}},
+	}}
+	receiver := f.addReceiverConfig(t, config)
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Offers = []wire.Offer{{Adapter: "lab", Agent: "claude", InlineLimit: 5000}, {Adapter: "other", Agent: "claude", InlineLimit: 100}}
+	})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 900), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := receiver.claim(t, f.ctx, result.RunID)[0].submission
+	if len(task.Message.Parts) != 2 || len(task.Message.Parts[1].Raw) != 900 {
+		t.Fatalf("submission parts %+v; want the 900-byte input inline", task.Message.Parts)
 	}
 }
 
@@ -1071,7 +1124,10 @@ func TestCancelWritesToTheEchosPool(t *testing.T) {
 func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	f := newFixture(t)
 	f.pool(t, "pool-b")
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity, ad.InFlight = 3, 1 })
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Capacity, ad.InFlight = 3, 1
+		ad.Offers[0].InlineLimit = 49152
+	})
 	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Capacity, ad.InFlight, ad.AtMS = 4, 2, time.Now().Add(-121*time.Second).UnixMilli()
 	})
@@ -1098,7 +1154,7 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	}
 	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 ||
 		!reflect.DeepEqual(a.Adapters, []Adapter{
-			{Name: "lab", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
+			{Name: "lab", Agent: "claude", InlineLimit: 49152, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
 			{Name: "cloud", Agent: "codex", Labels: map[string]string{"runtime": "exec"}, Ready: false},
 		}) {
 		t.Fatalf("live receiver %#v", a)

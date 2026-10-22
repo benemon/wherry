@@ -31,9 +31,10 @@ var outputs = []adapter.Output{
 }
 
 type config struct {
-	Panic   string `json:"panic"`
-	Fail    bool   `json:"fail"`
-	Outputs bool   `json:"outputs"`
+	Panic       string `json:"panic"`
+	Fail        bool   `json:"fail"`
+	Outputs     bool   `json:"outputs"`
+	InlineLimit int64  `json:"inline_limit"`
 	// TooLarge names the input Dispatch refuses.
 	TooLarge string `json:"too_large"`
 	// NeverStarted is the reason Follow ends the job with, as one that never started.
@@ -83,6 +84,8 @@ func (f *fake) panics(method string) {
 func (f *fake) Directories() adapter.Directories {
 	return adapter.Directories{Input: "/fake/inputs", Output: "/fake/outputs", Credentials: "/fake/credentials"}
 }
+
+func (f *fake) InlineLimit() int64 { return f.config.InlineLimit }
 
 func (f *fake) Ready(context.Context) (bool, error) {
 	f.panics("Ready")

@@ -171,6 +171,8 @@ var ErrMessageTooLarge = errors.New("message too large")
 type Adapter interface {
 	// Directories reports where the agent finds its input, output and credentials directories.
 	Directories() Directories
+	// InlineLimit reports the most inline input bytes the adapter delivers, or zero when it declares none.
+	InlineLimit() int64
 	// Ready reports whether the adapter can currently start a job.
 	Ready(ctx context.Context) (bool, error)
 	// Dispatch starts a turn's job, converging on an existing one, and returns once it has started or ended.

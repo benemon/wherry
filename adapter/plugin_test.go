@@ -180,6 +180,14 @@ func TestCallsReachTheAdapterTheyName(t *testing.T) {
 	}
 }
 
+func TestConfigureCarriesInlineLimit(t *testing.T) {
+	p, _, _ := launch(t)
+	a := configured(t, p, "a", `{"inline_limit":49152}`)
+	if got := a.InlineLimit(); got != 49152 {
+		t.Fatalf("inline limit = %d, want 49152", got)
+	}
+}
+
 func TestDispatchCarriesTheRun(t *testing.T) {
 	t.Setenv("WHERRY_TESTPLUGIN_ENV", "from-the-receiver")
 	p, record, _ := launch(t)
@@ -638,19 +646,19 @@ func TestServeHandsTheAdapterItsLogger(t *testing.T) {
 	})
 }
 
-// A plugin built against protocol version 4, which would drop Run.Model and run its own model, answers go-plugin's
+// A plugin built against protocol version 5, which would omit its inline limit, answers go-plugin's
 // handshake with that version; this script answers as one would, before any TLS.
-func TestVersionFourPluginIsRefused(t *testing.T) {
+func TestVersionFivePluginIsRefused(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "wherry-plugin-old")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|4|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|5|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	p, err := Launch(fixed(script), &syncBuffer{})
 	if err == nil {
 		p.Close()
-		t.Fatal("launched a version 4 plugin")
+		t.Fatal("launched a version 5 plugin")
 	}
-	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 4, Client versions: [5]") {
+	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 5, Client versions: [6]") {
 		t.Fatalf("launch error %v; want the version named", err)
 	}
 }

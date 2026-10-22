@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -41,6 +42,58 @@ type oracle struct {
 	store    *minio.Client
 	client   *http.Client
 	secret   string
+}
+
+type uploadOracle struct {
+	endpoint string
+	config   *StorageConfig
+	mu       sync.Mutex
+	objects  map[string][]byte
+}
+
+func newUploadOracle(t *testing.T) *uploadOracle {
+	t.Helper()
+	o := &uploadOracle{objects: map[string][]byte{}}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Query().Has("location") {
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, "<LocationConstraint></LocationConstraint>")
+			return
+		}
+		if r.Method != http.MethodPut {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "body", http.StatusBadRequest)
+			return
+		}
+		o.mu.Lock()
+		o.objects[r.URL.Path] = data
+		o.mu.Unlock()
+		w.Header().Set("ETag", `"test"`)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	previous := storageTransport
+	storageTransport = server.Client().Transport
+	t.Cleanup(func() { storageTransport = previous })
+	access, secret := filepath.Join(t.TempDir(), "access"), filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(access, []byte("access"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o.endpoint, o.config = server.URL, &StorageConfig{AccessKeyFile: access, SecretKeyFile: secret}
+	return o
+}
+
+func (o *uploadOracle) object(path string) []byte {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return slices.Clone(o.objects[path])
 }
 
 func newOracle(t *testing.T) *oracle {
@@ -174,7 +227,7 @@ func hexSum(data []byte) string {
 func submitS3(t *testing.T, f *fixture, receiver *testReceiver, deadline time.Duration) (claimed, []byte) {
 	t.Helper()
 	file, data := randomFile(t, "dataset.bin", 5<<20)
-	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", File: file}},
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
 		Outputs: []wire.ExpectedOutput{{Name: "out/report.pdf", Required: true, Storage: wire.StorageS3}}, Deadline: deadline, QueueDeadline: time.Minute})
 	if err != nil {
 		t.Fatal(err)
@@ -207,6 +260,36 @@ func TestSubmitUploadsS3InputsBeforePublishing(t *testing.T) {
 		if bytes.Contains(payload, []byte("X-Amz")) || bytes.Contains(payload, []byte(o.endpoint)) {
 			t.Fatalf("the task record holds a URL: %s", payload)
 		}
+	}
+}
+
+func TestSubmitMovesInputsOverSmallestAdapterLimitToS3(t *testing.T) {
+	o := newUploadOracle(t)
+	f := newFixture(t)
+	terms := testTerms()
+	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	if err := f.service.PoolCreate(f.ctx, "pool-inline", terms); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-inline"); err != nil {
+		t.Fatal(err)
+	}
+	f.host.storage = o.config
+	receiver := f.addReceiver(t, "receiver-a", "pool-inline")
+	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 1000 })
+	f.addReceiver(t, "receiver-b", "pool-inline").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 5000 })
+	data := bytes.Repeat([]byte("x"), 2000)
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: data, Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := receiver.claim(t, f.ctx, result.RunID)[0].submission
+	if len(task.Message.Parts) != 1 || !slices.Equal(task.Wherry.S3Inputs, []wire.S3Input{{Name: "data.bin", Size: 2000, SHA256: hexSum(data)}}) {
+		t.Fatalf("submission has %d parts and S3 inputs %+v; want only an S3 input", len(task.Message.Parts), task.Wherry.S3Inputs)
+	}
+	path := "/" + testBucket + "/" + wire.S3InputKey("tenant-a", result.RunID, "data.bin")
+	if got := o.object(path); !bytes.Equal(got, data) {
+		t.Fatalf("uploaded input is %d bytes, want %d", len(got), len(data))
 	}
 }
 
@@ -325,7 +408,7 @@ func TestS3UseIsRefusedBeforePublishing(t *testing.T) {
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
 	file, _ := randomFile(t, "dataset.bin", 16)
-	input := SubmitInput{Selector: defaultSelector(), Prompt: "x", S3Inputs: []S3File{{Name: "dataset.bin", File: file}}, Deadline: time.Minute, QueueDeadline: time.Minute}
+	input := SubmitInput{Selector: defaultSelector(), Prompt: "x", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}}, Deadline: time.Minute, QueueDeadline: time.Minute}
 	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "this host's configuration has no storage credential") {
 		t.Fatalf("submit without a storage credential = %v", err)
 	}
@@ -490,7 +573,7 @@ func TestASealOverItsLimitIsRefusedBeforeUploading(t *testing.T) {
 		outputs = append(outputs, wire.ExpectedOutput{Name: strings.Repeat("o", 300) + strconv.Itoa(i), Storage: wire.StorageS3})
 	}
 	file, _ := randomFile(t, "dataset.bin", 16)
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "x", S3Inputs: []S3File{{Name: "dataset.bin", File: file}}, Outputs: outputs,
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "x", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}}, Outputs: outputs,
 		Deadline: time.Minute, QueueDeadline: time.Minute})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "over the 64 KiB limit") {
 		t.Fatalf("submit = %v; want the seal's size refused", err)

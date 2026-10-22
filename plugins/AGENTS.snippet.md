@@ -17,7 +17,9 @@ clones itself.
    credential to clone with, `--git-host-key FILE` (`known_hosts` lines naming
    the host) for an `ssh` remote, and `--git-changes patch` to get its commits
    back as `changes.patch` (`git am` it). Add `--input FILE` for each file the
-   agent needs (the pool's inline limit in all, 256 KiB by default),
+   agent needs (the pool's inline limit in all, 256 KiB by default; a lower
+   matching adapter limit moves all inline inputs through S3 when the pool and
+   host have storage, or refuses before publishing),
    `--credential-file NAME=FILE` for each configured credential it needs as a
    file, and `--output NAME[:required]` for each file you want back. Where the
    pool has storage and your configuration a storage credential,

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -119,6 +120,7 @@ type Receiver struct {
 type Adapter struct {
 	Name         string            `json:"name"`
 	Agent        string            `json:"agent"`
+	InlineLimit  int64             `json:"inline_limit,omitzero"`
 	Models       []string          `json:"models,omitzero"`
 	DefaultModel string            `json:"default_model,omitzero"`
 	Labels       map[string]string `json:"labels"`
@@ -267,6 +269,30 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	if err := wire.ValidateInputs(input.Parts, v.state.Pools[pool].InlineLimit); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	if limit, limiting := adapterInlineLimit(v.state, pool, placement, ads); limit > 0 && limit < v.state.Pools[pool].InlineLimit {
+		if err := wire.ValidateInputs(input.Parts, limit); err != nil {
+			if v.state.Pools[pool].Storage == nil || h.storage == nil {
+				return SubmitResult{}, fmt.Errorf("%w: inline inputs are over adapter %s's %d-byte limit; a pool with storage and a host storage credential would carry the inputs through S3", ErrInvalidInput, limiting, limit)
+			}
+			parts := make([]wire.Part, 0, len(input.Parts))
+			for _, part := range input.Parts {
+				switch {
+				case part.Raw != nil:
+					input.S3Inputs = append(input.S3Inputs, S3File{Name: wire.InputName(part), Body: bytes.NewReader(part.Raw)})
+				case part.Data != nil:
+					input.S3Inputs = append(input.S3Inputs, S3File{Name: wire.InputName(part), Body: bytes.NewReader(part.Data)})
+				default:
+					parts = append(parts, part)
+				}
+			}
+			input.Parts = parts
+			s3Inputs = s3Inputs[:0]
+			for _, file := range input.S3Inputs {
+				s3Inputs = append(s3Inputs, file.Name)
+			}
+			stored = true
+		}
 	}
 	if input.QueueDeadline > v.state.Pools[pool].RunLifetime() {
 		return SubmitResult{}, ErrQueueDeadlinePastLifetime
@@ -514,8 +540,12 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			if labels == nil {
 				labels = map[string]string{}
 			}
-			ready := receiver.Status == "live" && slices.ContainsFunc(ad.Offers, func(offer wire.Offer) bool { return offer.Adapter == adapter.Name })
+			offerIndex := slices.IndexFunc(ad.Offers, func(offer wire.Offer) bool { return offer.Adapter == adapter.Name })
+			ready := receiver.Status == "live" && offerIndex >= 0
 			listed := Adapter{Name: adapter.Name, Agent: adapter.Agent, Labels: labels, Ready: ready}
+			if offerIndex >= 0 {
+				listed.InlineLimit = ad.Offers[offerIndex].InlineLimit
+			}
 			agents := v.state.Pools[config.Pool].Agents
 			if index := slices.IndexFunc(agents, func(agent admin.AgentTerms) bool { return agent.Name == adapter.Agent }); index >= 0 {
 				listed.Models, listed.DefaultModel = agents[index].Models, agents[index].DefaultModel
