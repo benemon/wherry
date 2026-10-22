@@ -62,8 +62,15 @@ Call `submit` with `prompt`, and `agent`, `selector` and `git` when you
 need them. For a long brief, write it to a file and pass its path as
 `prompt_file` instead of `prompt`; the server reads it as it reads `inputs`,
 and refuses an empty one.
-It returns `id` and `pool` straight away. Note the id and carry on with other
-work.
+It returns `id`, `pool` and `await` straight away. `await` is a shell
+command, `wherry await <id>`. Where your harness runs shell commands in the
+background and tells you when they finish, start that command in the
+background now, before anything else: it blocks until the run ends (or for 2
+hours; `--timeout` changes that), prints the state and the result, writes
+returned outputs, answers the receiver's credential request, and exits
+non-zero for any state other than `TASK_STATE_COMPLETED`. Its completion is
+how you learn the run ended, so you skip the await loop below. Then carry on
+with other work. `continue` returns `await` too; start it the same way.
 
 `git` names a repository the agent clones itself: `remote` (an `https` or `ssh`
 URL, or `user@host:path`) and `ref` are required. Add `credential`, the name of
@@ -101,7 +108,9 @@ nothing awaited it keeps them until you call `cleanup` with its id;
 
 ## Collect the result
 
-Call `await` with the id. It waits up to 45 seconds and returns one of:
+Without a background command, call the `await` tool with the id, and call it
+again until the run ends; nothing tells you when it does. It waits up to 45
+seconds and returns one of:
 
 - `TASK_STATE_COMPLETED` with `artifacts`: the result. `outputs` lists
   each returned file with the local `path` it was written to and its
@@ -130,12 +139,6 @@ from the start, the earlier attempt's lines first. A page stays within 24 KiB,
 which fits a harness's default limit on tool output, such as Claude Code's
 `MAX_MCP_OUTPUT_TOKENS`. A line too long for a page comes back as its start,
 with `truncated` set and its full size in `bytes`.
-
-Where your harness runs shell commands in the background and tells you when
-they finish, run `wherry await <id>` as a background command. It blocks
-until the run ends (or for 2 hours; `--timeout` changes that), prints the
-state and the result, and exits non-zero for any state other than
-`TASK_STATE_COMPLETED`. You then skip the await loop.
 
 ## A run that needs a credential
 

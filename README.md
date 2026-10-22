@@ -53,7 +53,9 @@ It reads the host's configuration and offers nine tools: `receivers`,
 `cleanup`. Each takes
 and returns JSON with a declared schema. `await` waits up to 45 seconds,
 then returns the final or interrupted state with its result or message,
-or `retry_after` while the run is unfinished.
+or `retry_after` while the run is unfinished. `submit` and `continue` also
+return `await`, the `wherry await` command a harness runs in the background
+to learn when the run ends.
 
 [`plugins/wherry`](plugins/wherry) packages the server with a `wherry`
 Agent Skill that teaches the submit and await protocol. The

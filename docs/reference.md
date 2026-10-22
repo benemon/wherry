@@ -730,15 +730,18 @@ or omitted take the CLI defaults, 7200 and 600 seconds.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool`, `await` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `await` | `id` | `id`, `state`, `model`, `served_models`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped` |
-| `continue` | `id`, `prompt`, `prompt_file`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `turn`, `skipped` |
+| `continue` | `id`, `prompt`, `prompt_file`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `turn`, `skipped`, `await` |
 | `cancel` | `id` | `id`, `skipped` |
 | `events` | `id` | `id`, `events`, `transcripts`, `redacted`, `skipped` |
 | `transcript` | `id`, `turn`, `offset`, `limit` | `id`, `turn`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
 | `cleanup` | `id` | `id` |
 
+- `submit` and `continue` return `await`, the shell command that waits for
+  the run, `wherry await ID`, with `--config-file` and the server's absolute
+  configuration path when the server was started with one.
 - `submit` requires exactly one of `prompt` and `prompt_file`, a file path read
   as an input is; an empty file fails with `prompt_file is empty`.
   `model` is as `--model` takes it, and a model outside the agent's `models`

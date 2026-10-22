@@ -27,8 +27,9 @@ clones itself.
    default), then prints the state and the result, and writes each returned
    output, S3 outputs included, printing an `output=<name> path=<path>` line for
    it. It also answers the receiver's request for the agent's credential, so
-   start it within 5 minutes of submitting. Run it in the background where your
-   harness reports background command completion.
+   start it within 5 minutes of submitting. Start it in the background right
+   after submitting, where your harness reports background command
+   completion: its completion is how you learn the run ended.
 4. On `TASK_STATE_AUTH_REQUIRED`, tell the user which credential the
    message names, and to add a file holding it to `credentials` in their
    wherry configuration. Never handle the value yourself. Then run
@@ -43,6 +44,7 @@ clones itself.
 
 Where the `wherry` MCP server (`wherry mcp`) is configured, its tools do the
 same: `receivers`, `submit`, `status`, `await`, `continue`, `cancel`,
-`events`, `transcript` and `cleanup`. Its `await` waits up to 45 seconds;
-call it again while the reply carries `retry_after`. Its `transcript`
+`events`, `transcript` and `cleanup`. Its `submit` and `continue` return `await`,
+the `wherry await` command to start in the background. Its `await` tool
+waits up to 45 seconds; call it again while the reply carries `retry_after`. Its `transcript`
 returns a page of lines; call it again with `next_offset` while it is set.
