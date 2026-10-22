@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"gopkg.in/yaml.v3"
 )
@@ -347,5 +349,38 @@ func readAll(t *testing.T, client *kgo.Client, topic string) map[string]bool {
 			return seen
 		}
 		fetches.EachRecord(func(record *kgo.Record) { seen[string(record.Value)] = true })
+	}
+}
+
+// The pool's share group takes the terms' defaults when the pool file leaves delivery_limit and lock_duration out.
+func TestPoolGroupTakesTermDefaultsOnRealBroker(t *testing.T) {
+	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
+		t.Skip("WHERRY_TRUST_BROKER is not set")
+	}
+	service, closeService := realService(t)
+	defer closeService()
+	ctx := context.Background()
+	terms := modelTerms()
+	terms.DeliveryLimit, terms.LockDurationMS = 0, 0
+	pool := fmt.Sprintf("defaults-%d", time.Now().UnixNano())
+	if err := service.PoolCreate(ctx, pool, terms); err != nil {
+		t.Fatal(err)
+	}
+	request := kmsg.NewPtrDescribeConfigsRequest()
+	resource := kmsg.NewDescribeConfigsRequestResource()
+	resource.ResourceType, resource.ResourceName = kmsg.ConfigResourceTypeGroupConfig, PoolGroup(pool)
+	request.Resources = append(request.Resources, resource)
+	response, err := service.Admin.Request(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, config := range response.(*kmsg.DescribeConfigsResponse).Resources[0].Configs {
+		if config.Value != nil {
+			got[config.Name] = *config.Value
+		}
+	}
+	if got["share.delivery.count.limit"] != "5" || got["share.record.lock.duration.ms"] != "15000" {
+		t.Fatalf("share group delivery limit %q, lock %q; want the defaults 5 and 15000", got["share.delivery.count.limit"], got["share.record.lock.duration.ms"])
 	}
 }
