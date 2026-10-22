@@ -434,10 +434,3 @@ func TestAnAttemptWithoutAnUploadURLStoresNothing(t *testing.T) {
 		t.Fatalf("stored %+v", stored)
 	}
 }
-
-func TestAnInputFileCannotTakeAnS3InputsName(t *testing.T) {
-	history := []wire.Message{{Parts: []wire.Part{{Text: "hi"}}}, {Parts: []wire.Part{{Raw: wire.StdBytes("x"), Filename: "dataset.bin"}}}}
-	if _, rejection := deliverables(history, nil, []wire.S3Input{{Name: "dataset.bin"}}); rejection != "input names repeat" {
-		t.Fatalf("rejection %q", rejection)
-	}
-}

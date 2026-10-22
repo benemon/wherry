@@ -21,6 +21,12 @@ names.
 - A2A objects use the
   [proto3 JSON mapping](https://protobuf.dev/programming-guides/json/) of
   the A2A v1.0 schema. wherry writes `bytes` as padded standard base64.
+  Readers accept standard or URL-safe base64, padded or not.
+- Every `TaskStatus` has `timestamp`, an RFC 3339 time. Receivers write it
+  in UTC with milliseconds.
+- A `Task` has `artifacts` and `history`, and a `Message` and an `Artifact`
+  have `parts`, each present even when empty. A `data` part holds valid
+  JSON.
 - A2A identifiers (`messageId`, `taskId`, `contextId`, `artifactId`) and
   wherry's tenant, host, receiver, pool, adapter, agent and event IDs are
   non-empty and lowercase. `metadata`, wherever it appears, is a JSON object.
@@ -70,10 +76,10 @@ A reader accepts a signed record only when all of these hold:
    - A submission or cancel comes from a host on `wherry.admin`, without a
      membership end, of a tenant entitled to the pool. Its `pool` is the
      pool of the topic it arrived on.
-   - A status, chunk, output chunk, result or start failure comes from a
-     receiver on `wherry.admin`, without a membership end, in the pool the run
-     was placed in. Its `tenant` and `pool` are the run's, and the tenant is
-     entitled to the pool.
+   - A status, chunk, output chunk, result, start failure or seal request
+     comes from a receiver on `wherry.admin`, without a membership end, in
+     the pool the run was placed in. Its `tenant` and `pool` are the run's,
+     and the tenant is entitled to the pool.
    - An echo on `wherry.tenant.<tenant>` names that tenant, and comes from a
      live member of the pool it names, to which the tenant is entitled.
    - An advertisement comes from a live member of the pool it names.
@@ -121,8 +127,8 @@ A submission is the task of one run.
   absent for an agent with none.
   [Reference](reference.md#labels) gives the key and value grammar.
 - `deadline_at_ms` and `queue_deadline_at_ms` are Unix milliseconds by which the
-  run must end and a receiver must claim it. A receiver ends the run no
-  later than six hours after `queue_deadline_at_ms`.
+  run must end and a receiver must claim it, each 0 or more. A receiver ends
+  the run no later than six hours after `queue_deadline_at_ms`.
 - The message has at most 256 parts, each with exactly one of `text`,
   `raw`, `url` and `data`. Receivers reject a `url` part
   ([admission](#admission)).
@@ -137,8 +143,8 @@ A submission is the task of one run.
   host, by the name in its configuration, that the agent gets as the file `file`
   in its credentials directory. `name` is at most 32 lowercase letters, digits
   and hyphens, starting and ending with a letter or digit, and `file` follows
-  the file name rules; each `file` appears once. The pool's terms do not govern
-  task credentials.
+  the file name rules; each `file` appears once, while a `name` can repeat.
+  The pool's terms do not govern task credentials.
 - `outputs` lists at most 256 files the agent is asked to leave, each
   `{name, required, storage}`. `name` is a relative path of file names joined by
   `/`, at most 512 bytes, and appears once. `required` defaults to false.
@@ -150,7 +156,12 @@ A submission is the task of one run.
   appearing once, the object's size in bytes, at most 5 GiB, and its
   lowercase hex SHA-256. It holds no URL. The message's parts and
   `s3_inputs` number at most 256 together.
-- `git` is the run's [git input](#git-input), optional.
+- `git` is the run's [git input](#git-input), optional. With a `host_key`,
+  no input file or S3 input is named `known_hosts`.
+
+A submission whose input names repeat, among its input files, its S3 inputs
+and `known_hosts`, fails to decode, so a receiver drops it at
+[admission](#admission) step 2.
 
 ## Cancel
 
@@ -214,7 +225,7 @@ part. The fixed texts are:
   `model not in the pool's terms`, `duplicate submission`,
   `run expired`, `queue deadline exceeds run lifetime`,
   `queue deadline passed`, `run deadline passed`,
-  `unsupported message part`, `input names repeat`, `run ID in use`,
+  `unsupported message part`, `run ID in use`,
   `inline inputs are <n> bytes, over the <limit>-byte limit`,
   `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
@@ -270,7 +281,8 @@ A chunk is one line of the agent's standard output, as the A2A artifact
   empty line, one that is not UTF-8, or one longer escaped as a JSON string than
   base64-encoded, or, for a line over 512 KiB, a `url` part with the value
   `unstored:oversize` whose `metadata` holds the line's hex `sha256` and its
-  `size` in bytes. The line itself is then not stored.
+  `size` in bytes. The line itself is then not stored. Readers require a
+  `url` part's `sha256` to be lowercase hex SHA-256 and its `size` over 0.
 - `seq` is the line's byte offset in the agent's output and orders the
   chunks. An adopter follows from the last heartbeat's log offset, so a
   `seq` can repeat across attempts of a run. A reader takes the latest
@@ -300,9 +312,10 @@ names.
 ```
 
 - The artifact's `artifactId` is the output's name, a relative path of
-  file names joined by `/`. It has exactly one `raw` part holding at most
-  256 KiB of the file.
-- `artifactUpdate.metadata` is `{"index": <n>}`. A file's chunks have
+  file names joined by `/` that follows the `outputs` name rules. It has
+  exactly one `raw` part holding at most 256 KiB of the file.
+- `artifactUpdate.metadata` is exactly `{"index": <n>}`, with `n` 0 or
+  more. A file's chunks have
   indexes 0, 1, 2 and so on, in file order. `append` is false at index 0
   and true after it. `lastChunk` is true on the file's final chunk. An
   empty file is one chunk with an empty part.
@@ -337,8 +350,9 @@ A result is the A2A `Task` a run ends with.
   run's echo.
 - `task.artifacts` holds the artifact `result`, with one part: the agent's
   result as a `data` part with media type `application/json` when it is
-  JSON, a `raw` part with media type `text/plain` when escaping it as a
-  JSON string would make it longer than base64 does, and otherwise a text
+  JSON, a `raw` part with media type `text/plain` when it is not valid
+  UTF-8 or escaping it as a JSON string would make it longer than base64
+  does, and otherwise a text
   part. With no result text, the part's text is the state's name. Result
   text over 64 KiB once redacted is replaced by
   `[redacted text over 65536 bytes]`.
@@ -375,6 +389,7 @@ The `metadata` of a result's `Task` says where the run executed:
 | `reason` | Meaning |
 | --- | --- |
 | `missing` | an expected output the agent did not leave |
+| `is the adapter's reply file` | an expected output the agent did not leave, whose name is the adapter's `reply_file` |
 | `not collected` | the adapter did not collect the outputs; every expected output is listed with it |
 | `exceeds output limit` | the file is over the pool's `output_limit`, or would take the run's outputs over it |
 | `rejected: symlink`, `rejected: fifo`, `rejected: device`, `rejected: socket`, `rejected: irregular file` | the entry is not a regular file and was not read |
@@ -388,7 +403,9 @@ The `metadata` of a result's `Task` says where the run executed:
 | `not uploaded: request failed`, `not uploaded: invalid request` | the PUT did not complete, or could not be built |
 
 `outputs`, `s3_outputs` and `not_returned` are present on a result of a run
-the agent ended with its result line, and absent when they would be empty.
+the agent ended with its result line, or of a run whose adapter has
+`output: file` and whose job ended after its agent task started, and
+absent when they would be empty.
 
 The `metadata` of the `result` artifact holds `agent_result` (object): the
 resource-use members `duration_ms`, `duration_api_ms`, `num_turns`,
@@ -423,7 +440,9 @@ An echo tells every host of a tenant where a run was admitted.
 ```
 
 A receiver writes the echo in the transaction that holds the run's
-`claimed` or `rejected` status. The echo's fields copy the submission's. A
+`claimed` or `rejected` status, or its `terminal` status when the receiver
+ends at the [delivery budget](#delivery-budget) a run no ready adapter
+satisfies. The echo's fields copy the submission's. A
 host that has no record of the run takes the run's pool from its first
 valid echo, and ignores records of the run from any other pool. A status or
 chunk binds to the run when its `task_hash` equals the hash of the run's
@@ -444,10 +463,15 @@ An advertisement reports a receiver's liveness and capacity.
 ```
 
 - `offers` lists the receiver's ready adapters in declared order, each as
-  `adapter` and `agent`. An offer carries no other member. It is empty when
-  no adapter is ready. Readers take an adapter's agent and labels from the
-  receiver's configuration record on `wherry.admin`, and use `offers` only
-  to learn which adapters are ready. Each `adapter` appears at most once.
+  `adapter`, `agent` and, optionally, `inline_limit`, the bytes of `raw`
+  and `data` parts the adapter delivers, absent when it declares no limit
+  and never negative. It is empty when no adapter is ready. Readers take an
+  adapter's agent and labels from the receiver's configuration record on
+  `wherry.admin`. Each `adapter` appears at most once. When the smallest
+  `inline_limit` among the live offers that satisfy a placement is below
+  the pool's, a host submitting inputs over it carries them as S3 inputs,
+  or refuses the run when the pool or the host has no storage.
+- `capacity` and `in_flight` are 0 or more, and `at_ms` is over 0.
 - A receiver advertises every 30 seconds, with or without a ready adapter.
   Placement passes over a receiver whose `offers` is empty. Readers take
   each receiver's
@@ -527,13 +551,15 @@ signature's protected header carrying its public key as `jwk`.
 }
 ```
 
-- `owner` is the topic's owner. `key` is the owner's Ed25519 public key as a
-  JWK. Only `rotate` has `previous_key_id`.
+- `v` is 1. `owner` is the topic's owner. `key` is the owner's Ed25519
+  public key as a public JWK. Writers set `previous_key_id` only on
+  `rotate`; readers ignore it on other actions.
 - `register` is the first record on the topic, self-signed by `key`. A
   later `register` is rejected.
 - `rotate` replaces the current key with `key`. It carries two signatures,
   by the current key and by `key`, and `previous_key_id` names the current
-  key. The replaced key verifies nothing afterwards.
+  key. A `rotate` whose `key` is the current key is rejected. The replaced
+  key verifies nothing afterwards.
 - `revoke` names the current key as `key`, is signed by it, and closes the
   topic. Nothing on it
   verifies afterwards.
@@ -564,9 +590,11 @@ run's `claimed` status.
 }
 ```
 
-- `key` is the attempt's public key as a JWK. `key_id` is its
+- `key` is the attempt's P-256 EC public key as a JWK. `key_id` is its
   [RFC 7638](https://datatracker.ietf.org/doc/html/rfc7638) SHA-256
-  thumbprint, unpadded base64url.
+  thumbprint, unpadded base64url. `expiry_at_ms` is over 0. Credential
+  names are non-empty and lowercase, `s3_inputs` are file names and
+  `s3_outputs` follow the `outputs` name rules.
 - `credentials` names the credential of the adapter the run was routed to,
   and is empty when the adapter delivers none.
 - `task_credentials` names the run's task credentials other than that one,
@@ -637,9 +665,10 @@ absent is checked again on each later pass until it expires. The host holds
 an exclusive lock on the attempt, shared by every process using its state
 directory, from these checks to the record of its answer, and gives up
 waiting for the lock when its own work ends.
-Just before it writes the seal it reads the run again and repeats checks 3
-to 5, so a status that ends the attempt, or another claim, while the seal
-is built stops the write. It records the attempt as answered once the write
+Just before it writes the seal it checks again that `expiry_at_ms` has not
+passed, then reads the run again and repeats checks 4 and 5, so a status
+that ends the attempt, or another claim, while the seal is built stops the
+write. It records the attempt as answered once the write
 is acknowledged. A host that
 stops between the two answers again on its next start; the receiver opens
 the first seal that opens. Each start removes the records of attempts whose
@@ -647,7 +676,8 @@ request has expired or whose run has ended.
 
 A host logs a skipped request that verifies and belongs to a run it
 submitted, by run, receiver and credential names, never a value. It logs
-nothing for any other request.
+nothing for a request for a run it did not submit, nor, apart from a failure
+to read its own run, for a request it cannot verify.
 
 Check 4 is the only trace a forged claim leaves. The broker's share-group
 claim is invisible to hosts, so a live pool member can sign a `claimed`
@@ -667,10 +697,11 @@ request's `key`.
   these algorithms and the compact serialization, and reject `zip`.
 - The protected header holds `alg`, `enc`, `epk`, `typ`
   `application/vnd.wherry.seal.v2+jwe` and the binding: `tenant`, `pool`,
-  `receiver`, `key_id`, `run`, `attempt`, `credentials`,
-  `task_credentials`, `s3_inputs` and `s3_outputs` when the request has them,
-  and `expiry_at_ms`, copied from the request. Readers reject any other member.
-- The plaintext is a JSON object: `v`, `binding`, an object holding the
+  `receiver`, `key_id`, `run`, `attempt`, `credentials`, always present and
+  possibly empty, `task_credentials`, `s3_inputs` and `s3_outputs` when
+  non-empty, and `expiry_at_ms`, copied from the request. Readers reject any
+  other member.
+- The plaintext is a JSON object: `v` 1, `binding`, an object holding the
   binding members again, and `values`, mapping each name in `credentials`
   and `task_credentials` to its value, `s3-inputs/<name>` for each S3 input
   to its presigned GET URL, and `s3-outputs/<name>` for each S3 output to
@@ -678,23 +709,26 @@ request's `key`.
   `redaction_key`, the run's 32-byte redaction key as padded standard
   base64. Presigned URLs travel nowhere else on the broker.
 - A seal is at most 64 KiB in compact form. A host refuses to build a larger
-  one and logs the credential names.
+  one and logs the credential names. At submit, a host refuses a run with S3
+  inputs or outputs whose seal of its task credentials and presigned URLs
+  would exceed 64 KiB.
 
 The receiver reads the host's topic from its end at the time of the request. It
-opens a seal only when the header's binding equals its request, with `key_id`
-the thumbprint of its own key, `expiry_at_ms` has not passed, the plaintext's
-`binding` equals the header's, `values` holds exactly the named credentials
-and URLs, and `redaction_key` is 32 bytes. It checks for a cancel, its
-shutdown, the run deadline and the request's expiry before it takes a seal,
-so a run stopped while its seal arrives is never dispatched. It passes the
-values to the adapter in Dispatch. It logs a seal that does not open by run
-and attempt, never the reason.
+refuses a seal over 64 KiB, and opens a seal only when the header's `typ`
+is the seal type and its binding equals the request, with `key_id` the
+thumbprint of the receiver's own key, `expiry_at_ms` has not passed, the
+plaintext has `v` 1 and its `binding` equals the header's, `values` holds
+exactly the named credentials and URLs, and `redaction_key` is 32 bytes.
+It checks for a cancel, its shutdown, the run deadline and the request's
+expiry before it takes a seal, so a run stopped while its seal arrives is
+never dispatched. It passes the values to the adapter in Dispatch. It logs
+a seal that does not open by run and attempt, never the reason.
 
 Before it uses a URL, the receiver checks it against the pool's
 `storage`: its scheme is `https`, its host and port, 443 when absent, are
-the endpoint's, it carries no user information, and its path is
-`/<bucket>/` and the object's key exactly. A URL that fails ends the run
-`TASK_STATE_FAILED` with
+the endpoint's, it carries no user information, fragment or opaque part,
+and its escaped path is `/<bucket>/` and the object's key exactly. A URL
+that fails ends the run `TASK_STATE_FAILED` with
 `the URL for S3 input <name> is not one of pool <pool>'s storage`, or
 `S3 output`, before anything is dispatched, and the task is not returned to
 the pool.
@@ -752,10 +786,13 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 
 `terms` has the members of the [pool terms](reference.md#pool-terms) file,
 with `run_lifetime_ms` and `lock_duration_ms` in milliseconds for its
-`run_lifetime` and `lock_duration`. `config` holds the receiver's `capacity`
-and its `adapters` in routing order, each the
-[adapter entry](reference.md#receiver-configuration) with its platform's
-`type` and merged `config`, and `platform` naming the platform.
+`run_lifetime` and `lock_duration`. `config` holds `receiver` and `pool`,
+which equal the record's, the receiver's `capacity`, and its `adapters` in
+routing order. Each adapter is the
+[adapter entry](reference.md#receiver-configuration) as `name`, `platform`
+naming the platform, the platform's `type`, `agent`, `output`, `reply_file`,
+`credential` and `labels` when set, and the merged `config`. An `end` names
+exactly one of `receiver`, or `tenant` and `host`.
 Readers fold the records in order. A reader loads no state when:
 
 - a `receiver` record moves a receiver to another pool or names an unknown
@@ -763,7 +800,13 @@ Readers fold the records in order. A reader loads no state when:
 - a `receiver` or `host` record follows that member's `end`;
 - an `entitlement` names an unknown pool;
 - a record fails to decode and no `skip` matches it;
-- a `skip` names no undecodable record with that hash.
+- a `skip` names no undecodable record with that hash;
+- two of the Kafka names that pools, receivers and hosts derive (topics,
+  share groups, principals and transactional prefixes) collide.
+
+When every undecodable record no `skip` matches fails only on unknown
+members, the reader reports that a later wherry release wrote them and that
+this one needs an upgrade.
 
 ## Admission
 
@@ -800,9 +843,7 @@ A receiver that claims a submission:
    storage for S3 inputs and outputs` when the run has S3 inputs or
    outputs and the pool's terms have no `storage`;
 10. rejects it with `unsupported message part` when a `url` part appears
-    in the message, and with `input names repeat` when two input files
-    share a name, the git input's `known_hosts` and the S3 inputs among
-    them;
+    in the message;
 11. writes the echo and the `claimed` status.
 
 A run a cancel covers skips steps 8 to 10, and ends `TASK_STATE_CANCELED`
@@ -829,8 +870,10 @@ key and the credential as files, and gives the agent the commands.
   `credentials`, which the agent clones with: a token for an `https`
   remote, a private key for an `ssh` one.
 - `host_key` (string): OpenSSH `known_hosts` lines for the remote's host,
-  at most 8 KiB of printable ASCII, each blank, a comment or an entry of at
-  least three space-separated fields, with at least one entry. An `ssh`
+  at most 8 KiB of printable ASCII with no tab or other control character,
+  each blank, a comment or an entry of at least three space-separated
+  fields after an optional marker such as `@cert-authority`, with at least
+  one entry. An `ssh`
   remote requires it and an `https` remote refuses it.
 
 A ref, and each segment of a path, starts with a letter, digit or
@@ -853,8 +896,8 @@ entry's comma-separated patterns. Hashed entries, and entries with any
 `*` or `?` pattern, are refused.
 
 The receiver delivers `host_key` as the input file `known_hosts`, which no
-`raw` or `data` part of the run may also name, and opens the prompt with
-the commands that clone the remote at the ref, each on its own line
+`raw` or `data` part or S3 input of the run may also name, and opens the
+prompt with the commands that clone the remote at the ref, each on its own line
 indented by four spaces. They need `git` 2.30 or later, and the prompt asks
 the agent to check. The clone takes no template (`--template=`) and sets,
 for itself and every later command in it:
@@ -949,7 +992,8 @@ result lists, it joins the chunks by index and rejects the output when an
 index is missing (`gap`), when chunks follow the last one (`overlap`), when
 an index appears twice (`duplicate chunk`), or when the joined bytes differ
 from the listed size or SHA-256 (`size or hash mismatch`). It writes only
-outputs that pass.
+outputs that pass, and reports each rejected output with the reason after
+`rejected by this host: `.
 
 ## S3 inputs and outputs
 
@@ -984,7 +1028,11 @@ storage before use.
   own seal carries.
 - **Back.** The host downloads each S3 output in the result's
   `s3_outputs` that the run declares, at the key for its name, and keeps it
-  only when it matches the listed size and SHA-256. Once the run is terminal
+  only when it matches the listed size and SHA-256. It reports each other
+  S3 output with `rejected by this host: ` and one of
+  `not an S3 output the run declares`,
+  `listed at a key outside the run's prefix`, `not downloaded`,
+  `not written` or `size or hash mismatch`. Once the run is terminal
   and every listed S3 output has verified, it deletes every
   object whose key a listing of `wherry/<tenant>/<run>/` returns and that
   starts with it. A bucket lifecycle rule expiring `wherry/` removes what no

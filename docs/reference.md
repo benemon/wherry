@@ -100,9 +100,9 @@ receiver=<id> pool=<pool> capacity=<n> in_flight=<n> heartbeat_age=<age> status=
   adapter=<name> agent=<agent> ready=<bool> labels=<k=v,...> [inline_limit=<n>] [models=<m,...> default_model=<m>]
 ```
 
-`status` is `live` when the latest advertisement is at most 120 seconds
-old, `stale` when it is older, `silent` when there is none, and `ended`
-after the receiver's membership end. Adapters and their labels come from the
+`status` is `live` when the latest advertisement is dated within 120
+seconds of now, either side, `stale` otherwise, `silent` when there is none,
+and `ended` after the receiver's membership end. Adapters and their labels come from the
 receiver's configuration record, and an agent's `models` and
 `default_model` from the pool's [terms](#pool-terms) when it has them.
 `ready` is true when the receiver is live
@@ -169,7 +169,8 @@ whose host is not one of the pool's [`vcs`](#pool-terms) hosts:
 invalid input: git remote host github.com is not in pool build's vcs hosts
 ```
 
-`--git-host-key` reads at most one byte over the 8 KiB bound.
+`--git-host-key` reads at most one byte over the 8 KiB bound. With a host
+key, no input may be named `known_hosts`.
 
 `--git-changes` adds `changes.patch` or `changes.bundle` to the expected
 outputs, unless `--output` names it already; neither is required.
@@ -201,8 +202,9 @@ bucket with one PUT, then publishes the task with each input's name, size and
 SHA-256 and no URL. S3 input names are file names, distinct from the input
 files' names, and the run's parts and S3 inputs number at most 256 together. S3
 inputs do not count against `inline_limit`. When publishing fails, `submit`
-deletes what it uploaded. It also refuses a run whose task credentials and
-presigned URLs would not fit one 64 KiB seal, naming the seal's size. A
+deletes what it uploaded. It also refuses a run with S3 inputs or outputs whose
+task credentials and presigned URLs would not fit one 64 KiB seal, naming the
+seal's size. A
 presigned URL of about 420 bytes takes about 840 bytes of the seal, so one seal
 carries about 75.
 
@@ -304,9 +306,8 @@ Without `RUN_ID` it prints one line per run, latest update first:
 The list holds the runs in this host's records in `state_dir` and the runs
 a receiver echoed on the tenant feed, which include runs from the tenant's
 other hosts. A run's update time is that of its latest status. While it has
-none, the time is this host's submission of the run, else the modification
-time of this host's record of the run when the record predates submission
-times, else the Kafka timestamp of the run's echo. A record in `state_dir`
+none, the time is this host's submission of the run when its record holds
+one, else the Kafka timestamp of the run's echo. A record in `state_dir`
 that does not decode counts as skipped, and its run is listed only through
 its echo. With no runs it prints nothing.
 
@@ -341,6 +342,9 @@ heartbeat's offset, so an adopted run reads from offset 0.
 | `--offset` | `0` | lines to skip |
 | `--limit` | `0`, every line | most lines to print |
 
+A negative `--offset` or `--limit` fails with
+`--offset and --limit must not be negative`.
+
 `transcript` shows a Claude stream-json transcript without each thinking
 block's `signature` and without `system` lines of subtype `thinking_tokens`,
 and counts `--offset` and `--limit` over the lines it shows. The feed keeps
@@ -373,7 +377,10 @@ A server that runs `wherry mcp --config-file PATH` uses another; see the
 `wherry.operator`, with the [environment](#environment-variables) set.
 It writes every `wherry.admin` record as `wherry.operator`, creating
 `wherry.admin` and `wherry.receivers` first if they are missing. Options
-take a value and can appear anywhere after `admin`. `pool create`,
+take a value and can appear anywhere after `admin`. An option without a
+value fails with `admin option requires a value`, one the command does not
+take with `unknown option --<name>`, and a repeated one other than
+`--platform-credential-file` with `option --<name> is given twice`. `pool create`,
 `tenant add`, `host add` and `receiver add` then create every ACL the new
 state calls for, re-read them, and fail with `ACL plan incomplete` when one
 is missing.
@@ -387,7 +394,8 @@ Records the [pool terms](#pool-terms), creates the pool's tasks
 and events topics, and sets the configuration of share group `p-<pool>`:
 `share.auto.offset.reset=earliest`, `share.isolation.level=read_committed`,
 `share.delivery.count.limit` and `share.record.lock.duration.ms` from the
-terms. It refuses a delivery limit above the lowest
+terms' `delivery_limit` and `lock_duration`, 5 and `15s` when the terms omit
+them. It refuses a delivery limit above the lowest
 `group.share.max.delivery.count.limit` across the brokers, and terms whose
 [records do not fit the broker](#record-limit). For an existing pool it
 records the new terms and sets the group configuration again. On new and
@@ -437,7 +445,8 @@ wherry admin receiver configure RECEIVER <--config-file FILE|--config-dir DIR>
 
 Records a new configuration for a live receiver in its pool. The
 principal, password and bundle stay as they are. The receiver exits when it
-reads the new record, and its platform restarts it.
+reads a record that differs from the configuration it runs, and its platform
+restarts it.
 
 ### `wherry admin revoke host TENANT HOST`
 
@@ -466,8 +475,10 @@ is unbounded. `--wait DURATION` replaces that wait.
 Records the decision to pass over the undecodable record at `OFFSET` on
 `wherry.admin`, whose SHA-256 is `HASH`. Loading `wherry.admin` fails while
 any record on it does not decode, and the error lists each one as
-`offset=<n> size=<n> sha256=<hex>`. The command refuses an offset whose
-record decodes and a hash that does not match.
+`offset=<n> size=<n> sha256=<hex>`. When every such record is one a later
+release wrote, the error says to upgrade this wherry instead. The command
+refuses an offset whose record decodes, a record a later release wrote, and
+a hash that does not match.
 
 ### `wherry admin check`
 
@@ -495,9 +506,12 @@ mode 0700 and keeps `signing.key` in it. On start it:
    from the plugin directory and configures each adapter, reads its pool's
    events once, and starts advertising and claiming.
 
-It logs to standard output with the prefix `receiver: `. It exits on
+It logs its own lines to standard output with the prefix `receiver: `;
+plugin and link lines are hclog lines named `plugin`. It exits on
 `SIGINT` or `SIGTERM` without stopping its jobs, and fails with
-`receiver configuration changed` when a new configuration record appears.
+`receiver configuration changed` when a configuration record that differs
+from its own appears. An adapter type that is not a valid name ends it with
+`adapter type "<type>" is not a valid name`.
 It refuses to start after its membership end.
 
 With `--metrics-addr HOST:PORT` it serves its [metrics](#metrics) at
@@ -524,7 +538,7 @@ configuration error, and the receiver exits with
 
 A plugin inherits the receiver's environment. The receiver passes each
 adapter its name, pool, agent, credential name and `config` section, and
-the bundle's `platform` entry for its name when there is one.
+the bundle's `platform` entry for the adapter's platform when there is one.
 
 A plugin also reports, for each adapter, the paths of the input, output and
 credentials directories as its agent sees them, which the receiver writes
@@ -585,8 +599,8 @@ answered, so a plugin cannot report for another adapter. A call that fails
 or runs out is counted as `error` or `timeout`, and the scrape serves that
 adapter's samples from its last answer.
 
-When a plugin exits, the receiver logs `plugin exited; restarting`, starts it
-again after one second, waiting twice as long after each failed start up to 30
+When a plugin exits, the receiver logs `plugin exited; restarting` as a
+`plugin` line, starts it again after one second, waiting twice as long after each failed start up to 30
 seconds, and configures every adapter of its type again. Until then those
 adapters are not ready and the next advertisement withdraws their offers. A run
 whose job the receiver is following reads again from its last offset once the
@@ -596,7 +610,9 @@ with `log stream failed`.
 A receiver with no ready adapter advertises with no offers, so it stays
 `live` with every adapter `ready=false`, and placement passes over it. A
 job its adapter reports never started is a `platform` start failure: the
-receiver purges the job and returns the task to the pool.
+receiver purges the job and returns the task to the pool. A job that never
+started with class `fetch` instead ends the run `TASK_STATE_FAILED` with
+`an S3 input was not fetched, or did not match its size and SHA-256`.
 
 A plugin may report, with a job that never started, the platform's reason
 in `Terminal.Reason`, which can quote the run's material. The receiver logs
@@ -637,8 +653,9 @@ the logger whose JSON lines the receiver relays at their level, and
 ### Metrics
 
 A receiver started with `--metrics-addr` serves its metrics in the Prometheus
-text format over plain HTTP. `/metrics` is the only path; every other path
-answers 404. The scrape holds the Go runtime (`go_`) and
+text format over plain HTTP. `GET /metrics` is the only route; every other
+path answers 404, and a method other than GET or HEAD on `/metrics`
+answers 405. The scrape holds the Go runtime (`go_`) and
 process (`process_`) families, `wherry_build_info` with `version` and
 `revision` and value 1, and the families below, each with the label `pool`.
 
@@ -663,7 +680,7 @@ before any adapter took it, has `adapter="none"`.
 | `wherry_redeliveries_total` | counter | `tenant`, `adapter` | runs executed on a redelivery |
 | `wherry_in_flight` | gauge | `adapter` | tasks held |
 | `wherry_capacity` | gauge | none | the configured capacity |
-| `wherry_start_failures_total` | counter | `adapter`, `class` | start failures: `input-too-large`, `dispatch`, `platform`, and `offer-unavailable`, which counts a release by a member with no matching adapter and has no start-failure record |
+| `wherry_start_failures_total` | counter | `adapter`, `class` | start failures: `input-too-large`, `dispatch`, `platform`, and `offer-unavailable`, which counts a release by a member with no matching adapter, has no start-failure record and carries `adapter="none"` |
 | `wherry_dispatch_outcomes_total` | counter | `adapter`, `outcome` | dispatches: `created`, `nothing`, `unknown` |
 | `wherry_stop_failures_total` | counter | `adapter` | failed `Stop` calls |
 | `wherry_purge_failures_total` | counter | `adapter` | failed `Purge` calls |
@@ -750,9 +767,8 @@ defaults, `2h` and `10m`.
   with `model` the run's placement's model, when it has one. The
   state is `TASK_STATE_SUBMITTED` until a receiver reports one. `updated` is
   the RFC 3339 time of the latest status. While the run has none, it is this
-  host's submission of the run, else the modification time of this host's
-  record of the run when the record predates submission times, else the
-  Kafka timestamp of the run's echo.
+  host's submission of the run when its record holds one, else the Kafka
+  timestamp of the run's echo.
 - `await` waits up to 45 seconds. It returns the outcome with `message` and
   `artifacts`, or, while the run is unfinished, its current `state` with
   `retry_after` set to 5. With a progress token it sends a progress notification
@@ -787,7 +803,8 @@ defaults, `2h` and `10m`.
 - A harness caps a tool's output; Claude Code's `MAX_MCP_OUTPUT_TOKENS`
   defaults to about 25,000 tokens. A `transcript` page fits it: it holds at
   most `limit` lines, 100 by default and 500 at most (the CLI's `--limit`
-  of 0 prints every line), and at most 24 KiB of
+  of 0 prints every line); a `limit` over 500 or a negative `offset` is
+  refused with `INVALID_ARGUMENT`. A page holds at most 24 KiB of
   JSON. It ends before the line that would take it past that. A line too long
   for a page alone comes back as the start of its text that fits, with
   `truncated` true and `bytes` its full size, and `next_offset` passes it.
@@ -822,7 +839,7 @@ A JSON object at `~/.config/wherry/config.json`, or at the host command's
 | `host_key` | `~/.config/wherry/host.key` | host signing key file |
 | `state_dir` | `~/.config/wherry/state` | run records and answered seal requests |
 | `credentials` | none | credential name to the file holding its value; a trailing newline is part of the value the agent gets, and the receiver redacts the value with and without it |
-| `storage` | none | `{access_key_file, secret_key_file}`: files holding the access key and secret key of the host's S3 credential, each readable and writable by its owner alone; a host without it uses no S3 lane |
+| `storage` | none | `{access_key_file, secret_key_file}`: regular files holding the access key and secret key of the host's S3 credential, each granting its group and others no access; a host without it uses no S3 lane |
 | `input_roots` | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
 
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
@@ -835,11 +852,14 @@ record before it publishes the task, and removes it when publishing
 fails. The
 credential file is read at each answer, and its contents are sealed as
 they are. A seal is at most 64 KiB, which bounds the values one seal
-carries.
+carries. The receiver redacts no credential value shorter than 8 bytes
+once its trailing CR and LF are removed, and logs
+`run <id>: credential <name> too short to redact`.
 
 The storage key files are read whenever the host uploads, presigns,
 downloads or deletes, with surrounding whitespace removed; the client
-refuses a file its group or others can read or write. The credential
+refuses a file that is not regular or that grants its group or others any
+access. The credential
 never leaves the host: receivers and agents get only the URLs it presigns.
 Scope it to `wherry/<tenant>/` in each pool's bucket
 ([operator guide](operator-guide.md#s3-storage)).
@@ -857,7 +877,8 @@ Scope it to `wherry/<tenant>/` in each pool's bucket
 ## Bundle
 
 A YAML file that `wherry admin` writes with mode 0600. Unknown fields are
-errors, and `broker`, `principal` and `password` are required; a decode
+errors, and `broker`, `ca`, `principal` and `password` are required, a `ca`
+with no certificate failing with `CA contains no certificates`; a decode
 error names only its line numbers. A trailing line break ends the password
 and is not part of it, and a password of nothing else is refused.
 
@@ -867,7 +888,7 @@ and is not part of it, and a password of nothing else is refused.
 | `ca` | PEM CA certificate for the broker's TLS certificate |
 | `principal` | SCRAM-SHA-512 user name |
 | `password` | SCRAM password |
-| `platform` | receivers only: adapter name to platform credential |
+| `platform` | receivers only: platform name to platform credential |
 
 ## Pool terms
 
@@ -899,22 +920,26 @@ receiver rejects one whose model has left the terms since with
 no model, and its adapters run the model their command sets. wherry does not
 interpret a model name.
 
-Each entry of `vcs` is a lowercase host name, with `:port` for a
-remote that names a port other than its scheme's default, 443 for `https`
-and 22 for `ssh`, and appears once. `git.example.com` matches
+Each entry of `vcs` is a lowercase host name, optionally with a `:port` of
+1 to 65535, and appears once. A remote's host drops its scheme's default
+port, 443 for `https` and 22 for `ssh`, before it is matched, so an entry
+names a port only when it is not that default; an entry with the default
+port matches no remote. `git.example.com` matches
 `https://git.example.com/...` and `ssh://git@git.example.com/...`;
 `git.example.com:2222` matches `ssh://git@git.example.com:2222/...`. A pool
 without `vcs` accepts no git input.
 
-`storage.endpoint` is `https://` and a lowercase host name, with `:port`
-for a port other than 443, and nothing else: no path, user information or
+`storage.endpoint` is `https://` and a lowercase host name, optionally with
+a `:port` of 1 to 65535, 443 when absent, and nothing else: no path, user information or
 query. wherry speaks only https to it. `storage.bucket` is 3 to 63
 lowercase letters, digits, dots and hyphens, starting and ending with a
-letter or digit. The run's objects live under `wherry/<tenant>/<run>/` in
+letter or digit, with no `..`. The run's objects live under `wherry/<tenant>/<run>/` in
 the bucket, addressed path-style, `https://<host>/<bucket>/<key>`. A pool
 without `storage` accepts no S3 input or output.
 
-Every number and duration is positive. Durations use Go syntax and are
+No number or duration is negative, and a zero takes the field's default
+where it has one; `producer_byte_rate` and `request_percentage` are
+positive. Durations use Go syntax and are
 stored in milliseconds. Set `lock_duration` above `10s`, since a
 receiver renews its lock every 10 seconds; wherry does not check this. The
 broker bounds it between
@@ -953,14 +978,15 @@ A record limit is the lowest of `message.max.bytes` across the brokers,
 1000012 bytes, the most a wherry producer batches, and `max.message.bytes`
 on the topic the record goes to: the pool's tasks topic for submissions,
 and the feeds of the tenants entitled to the pool for chunks.
-`pool create`, `tenant add` and `check` sign four records and measure
+`pool create`, `tenant add` and `check` sign five records and measure
 them as record batches: the largest bounded submission, the largest output
-chunk, of 256 KiB, the largest result, and the largest transcript chunk, a
-line of 512 KiB. The largest result has the run's message with its 256
-input files named but not carried, 256 returned and 256 unreturned outputs
-with 512-byte names, a status text and a result text of 64 KiB each, and
-the agent's result record at its 16 KiB bound; a receiver's labels and an
-adapter's job name have no bound and are left empty.
+chunk, of 256 KiB, two largest results, and the largest transcript chunk, a
+line of 512 KiB. Each result has the run's message with its 256 input files
+named but not carried, a status text and a result text of 64 KiB each, and
+the agent's result record at 20 KiB, its 16 KiB bound plus the growth
+redaction adds. One result lists 256 returned and 256 unreturned outputs
+with 512-byte names, the other 256 S3 outputs with their keys. A receiver's
+labels and an adapter's job name have no bound and are left empty.
 Any one over its record limit refuses the terms, naming its size and the
 limit, and an `inline_limit` above the tasks topic's record limit is
 refused before it is measured.
@@ -976,9 +1002,9 @@ then fails naming the record's size.
 
 An input file travels base64-encoded inside the signed record, which is itself
 base64url-encoded, so a submission takes about 16/9 of `inline_limit` plus about
-123 KB. As `pool create` measures them, the submission at the default
-`inline_limit` is 589198 bytes, the output chunk 468119 bytes, the result 791017
-bytes and the transcript chunk 933508 bytes, so a feed's `max.message.bytes`
+123 KB. As `pool create`'s check measures them on a broker at its defaults,
+the submission at the default `inline_limit` is 589198 bytes, the output chunk
+468119 bytes, the results 791017 and 803627 bytes (with S3 outputs) and the transcript chunk 933508 bytes, so a feed's `max.message.bytes`
 below 933508 refuses every pool; with brokers and topics at their defaults, the
 highest `inline_limit` that fits is 493227 bytes, about 481 KiB.
 
@@ -1030,7 +1056,8 @@ Each adapter entry:
 
 An adapter's `config` is its platform's `config` merged with its own at the
 top level. A top-level key set in both is an error that names the adapter
-and the key. Nested values do not merge.
+entry's file or list index, the key and the platform:
+`<where>: config key "<key>" is also set by platform "<platform>"`. Nested values do not merge.
 
 ### Receiver configuration directory
 

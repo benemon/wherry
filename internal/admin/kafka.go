@@ -41,7 +41,7 @@ type Bundle struct {
 	CA        string `yaml:"ca"`
 	Principal string `yaml:"principal"`
 	Password  string `yaml:"password"`
-	// Platform holds platform credentials by adapter name, for platforms that
+	// Platform holds platform credentials by platform name, for platforms that
 	// do not issue one by their own identity.
 	Platform map[string]string `yaml:"platform,omitempty"`
 }
@@ -110,7 +110,7 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 		}
 		service.DeliveryCeiling = int32(ceiling)
 	}
-	if terms.DeliveryLimit > service.DeliveryCeiling {
+	if effective.DeliveryLimit > service.DeliveryCeiling {
 		return fmt.Errorf("delivery limit exceeds broker ceiling %d", service.DeliveryCeiling)
 	}
 	if err := service.createTopics(ctx, "-1", AdminTopic); err != nil {
@@ -138,7 +138,7 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 	if err := service.configureTopicRetention(ctx, value, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
 		return err
 	}
-	if err := service.configureGroup(ctx, pool, terms); err != nil {
+	if err := service.configureGroup(ctx, pool, effective); err != nil {
 		return err
 	}
 	return service.reconcileACLs(ctx, state)

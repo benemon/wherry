@@ -51,8 +51,8 @@ Labels are the operator's description of each adapter. wherry matches them
 literally and interprets only the agent name.
 
 An adapter whose agent lists `models` runs `default_model` unless you pass
-`model`, one of those `models`, to `submit`; without a `default_model` you
-must pass one. A model outside them, or none where one is required, returns
+`model`, one of those `models`, to `submit`; an agent with one model runs
+it, and with two or more and no `default_model` you must pass one. A model outside them, or none where one is required, returns
 `INVALID_ARGUMENT`. `await` returns the `model` asked for and, where the
 agent reports them, the `served_models` that ran it.
 
