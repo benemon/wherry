@@ -214,7 +214,7 @@ wherry await run-<id>
 
 `await` prints the final state on its first line and the result after it,
 and exits non-zero for any state other than `TASK_STATE_COMPLETED`. It waits
-2 hours by default. While it waits it answers `nomad-1`'s request for
+2 hours 10 minutes by default (`--timeout` changes that). While it waits it answers `nomad-1`'s request for
 `model-api-key`. Start it within 5 minutes of `nomad-1` claiming the task,
 or the run ends `TASK_STATE_FAILED`.
 

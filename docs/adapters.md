@@ -13,3 +13,5 @@ own README covering installation, settings and the platform's
 permissions:
 
 - [Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad)
+- [Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes),
+  OpenShift included

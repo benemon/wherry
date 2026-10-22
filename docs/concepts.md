@@ -36,7 +36,7 @@ writes.
 - **An adapter** is the part of a receiver that runs jobs on one platform.
   Adapters are plugins: the receiver ships with none, and runs one plugin
   process per adapter type from its plugin directory, linked to it by
-  mutual TLS. Nomad's plugin is the only one. A receiver holds one or more
+  mutual TLS. Plugins exist for Nomad and Kubernetes. A receiver holds one or more
   adapters, and each adapter launches one agent.
 - **The agent** is the program a job runs, such as a coding agent's
   headless command. wherry does not modify it. The receiver passes it a
@@ -100,9 +100,11 @@ pool the run was placed in, on behalf of a tenant entitled to it.
 [The wherry A2A extension](a2a-extension-v1.md) specifies every record.
 
 Every topic has one partition, `LogAppendTime` timestamps and
-`cleanup.policy=delete`. Nothing is compacted and no topic is deleted. The
-tenant feed keeps records for 30 days and `wherry.receivers` for 7; every
-other topic keeps them forever.
+`cleanup.policy=delete`. Nothing is compacted and no topic is deleted. A
+pool's task and event topics keep records for its run lifetime plus six hours
+plus a day, 15 days 6 hours by default, the tenant feed for 30 days and
+`wherry.receivers` for 7; the identity and configuration topics keep them
+forever.
 
 Every principal reads all of `wherry.admin`, so tenants see each other's
 names, hosts, entitlements and pools.

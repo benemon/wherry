@@ -76,8 +76,8 @@ wherry admin pool create build --config-file build-terms.yaml
   receivers in the pool, plus a margin. From attempt
   `delivery_limit` minus 1, a receiver ends a run it would return to the
   pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
-  cases the [extension](a2a-extension-v1.md#delivery-budget) lists. The
-  broker caps it at
+  cases the [extension](a2a-extension-v1.md#delivery-budget) lists. `pool
+  create` refuses a `delivery_limit` above the broker's
   `group.share.max.delivery.count.limit`.
 - `lock_duration` is how long a claim survives without renewal, and how
   long a denied receiver keeps running its jobs. Receivers renew every 10
@@ -91,8 +91,8 @@ wherry admin pool create build --config-file build-terms.yaml
   pool takes no git input. See [Git repositories](#git-repositories).
 - An agent's `models` lists the models a task may name for it, and its
   optional `default_model`, one of them, the one a task naming none runs.
-  With `models` and no `default_model`, every task for the agent names a
-  model. wherry does not interpret the names. The agent's adapters read the task's
+  An agent with one model defaults to it; with two or more `models` and no
+  `default_model`, every task for the agent names a model. wherry does not interpret the names. The agent's adapters read the task's
   model from `WHERRY_MODEL`, as in
   [Add a receiver](#add-a-receiver). Without `models` a task names no model
   and the adapter's command sets it.
@@ -819,7 +819,7 @@ With `--git-changes`, the agent returns its commits as `changes.patch` or
 applies them with its own credentials:
 
 ```
-apply with: git am /home/me/.config/wherry/state/runs/run-.../outputs/1/changes.patch
+apply with: git am /home/me/.config/wherry/state/runs/run-.../outputs/changes.patch
 ```
 
 The agent pushes only when the prompt asks it to and the credential allows
