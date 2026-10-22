@@ -1,0 +1,76 @@
+/* wherry brand: clip green #00290B and cream #F4F1E8, one at a time; Outfit for text, IBM Plex Mono for code. */
+:root {
+  --wherry-green: #00290b;
+  --wherry-cream: #f4f1e8;
+  --wherry-surface: #fffdf7;
+  --wherry-ink-2: #2e4a35;
+  --wherry-accent: #3f6b4a;
+
+  --vp-c-brand-1: var(--wherry-accent);
+  --vp-c-brand-2: var(--wherry-green);
+  --vp-c-brand-3: var(--wherry-green);
+  --vp-c-brand-soft: rgba(0, 41, 11, 0.08);
+
+  --vp-c-bg: var(--wherry-cream);
+  --vp-c-bg-alt: var(--wherry-surface);
+  --vp-c-bg-soft: var(--wherry-surface);
+  --vp-c-text-1: var(--wherry-green);
+  --vp-c-text-2: var(--wherry-ink-2);
+
+  --vp-c-tip-1: var(--wherry-accent);
+  --vp-c-tip-soft: var(--vp-c-brand-soft);
+
+  --vp-font-family-base: 'Outfit', ui-sans-serif, system-ui, sans-serif;
+  --vp-font-family-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  --vp-button-brand-bg: var(--wherry-green);
+  --vp-button-brand-hover-bg: var(--wherry-accent);
+  --vp-button-brand-active-bg: var(--wherry-green);
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-text: var(--wherry-cream);
+  --vp-button-alt-bg: transparent;
+  --vp-button-alt-border: var(--wherry-green);
+  --vp-button-alt-text: var(--wherry-green);
+  --vp-button-alt-hover-bg: var(--vp-c-brand-soft);
+  --vp-button-alt-hover-border: var(--wherry-green);
+  --vp-button-alt-hover-text: var(--wherry-green);
+
+  --vp-code-bg: rgba(0, 41, 11, 0.06);
+  --vp-code-color: var(--wherry-green);
+
+  --vp-home-hero-name-color: var(--wherry-green);
+}
+
+.dark {
+  --vp-c-brand-1: #9bbfa2;
+  --vp-c-brand-2: var(--wherry-cream);
+  --vp-c-brand-3: #9bbfa2;
+  --vp-c-brand-soft: rgba(244, 241, 232, 0.1);
+
+  --vp-c-bg: var(--wherry-green);
+  --vp-c-bg-alt: #003a10;
+  --vp-c-bg-soft: #003a10;
+  --vp-c-text-1: var(--wherry-cream);
+  --vp-c-text-2: #c9d6cb;
+
+  --vp-button-brand-bg: var(--wherry-cream);
+  --vp-button-brand-hover-bg: #9bbfa2;
+  --vp-button-brand-active-bg: var(--wherry-cream);
+  --vp-button-brand-text: var(--wherry-green);
+  --vp-button-alt-bg: transparent;
+  --vp-button-alt-border: var(--wherry-cream);
+  --vp-button-alt-text: var(--wherry-cream);
+  --vp-button-alt-hover-bg: var(--vp-c-brand-soft);
+  --vp-button-alt-hover-border: var(--wherry-cream);
+  --vp-button-alt-hover-text: var(--wherry-cream);
+
+  --vp-code-bg: rgba(244, 241, 232, 0.1);
+  --vp-code-color: var(--wherry-cream);
+
+  --vp-home-hero-name-color: var(--wherry-cream);
+}
+
+.VPNavBarTitle .logo {
+  height: 28px;
+  width: auto;
+}

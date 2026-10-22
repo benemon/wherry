@@ -703,9 +703,10 @@ Before it uses a URL, the receiver checks it against the pool's
 `storage`: its scheme is `https`, its host and port, 443 when absent, are
 the endpoint's, it carries no user information, and its path is
 `/<bucket>/` and the object's key exactly. A URL that fails ends the turn
-`TASK_STATE_FAILED` with `the URL for S3 input <name> is not one of pool
-<pool>'s storage`, or `S3 output`, before anything is dispatched, and the
-task is not returned to the pool.
+`TASK_STATE_FAILED` with
+`the URL for S3 input <name> is not one of pool <pool>'s storage`, or
+`S3 output`, before anything is dispatched, and the task is not returned to
+the pool.
 
 Before it signs any transcript chunk, output chunk, result text or status
 message of the attempt, the receiver replaces every occurrence of each

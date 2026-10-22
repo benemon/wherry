@@ -60,6 +60,10 @@ check-markers: ## Fail on tool-attribution markers in tracked files
 .PHONY: check
 check: check-fmt vet test check-licenses check-markers ## Run every CI gate
 
+.PHONY: docs
+docs: ## Build the documentation site into docs-site/.vitepress/dist (npm ci in docs-site first)
+	cd docs-site && npm run build
+
 .PHONY: sbom
 # app mode describes what the wherry binary links, not the module graph with
 # its test-only dependencies. The tool reads tags through go-git, so run it
