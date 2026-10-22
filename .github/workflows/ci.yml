@@ -29,3 +29,25 @@ jobs:
             adapter/go.sum
       - name: Run every gate
         run: make check
+
+  broker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            adapter/go.sum
+      - name: Start Kafka
+        run: test/kafka/up.sh "$RUNNER_TEMP/kafka"
+      # One package at a time: the packages share the broker's wherry.admin.
+      - name: Run the real-broker tests
+        run: |
+          . "$RUNNER_TEMP/kafka/env"
+          go test -p 1 -count=1 ./internal/admin/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/

@@ -80,3 +80,13 @@ run when their variables are set and skip otherwise:
   `WHERRY_S3_TEST_SECRET_KEY_FILE`: an S3-compatible store, such as Ceph RGW,
   and the files holding its access key and secret key, for the host's storage
   tests and the S3 leg of the round-trip test.
+
+`test/kafka/up.sh DIR` starts one Kafka 4.3 container serving both brokers
+and writes their variables to `DIR/env`; CI runs these tests against it:
+
+```sh
+test/kafka/up.sh /tmp/wherry-kafka && . /tmp/wherry-kafka/env
+go test -p 1 -count=1 ./internal/admin/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
+```
+
+The packages share the broker's `wherry.admin`, so they run one at a time.
