@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -41,7 +42,7 @@ func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), pr
 	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(openInput), openInput).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, inputReader(openInput), openInput, func(id string) string { return "wherry await " + id }).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -753,6 +754,9 @@ func TestMCPPromptFile(t *testing.T) {
 		if text := b.tasks(t, submitted.ID)[0].submission.Message.Parts[0].Text; !strings.Contains(text, "the brief") {
 			t.Fatalf("prompt %q, want the file's", text)
 		}
+		if submitted.Await != "wherry await "+submitted.ID {
+			t.Errorf("submit await %q, want the command that waits for %s", submitted.Await, submitted.ID)
+		}
 		for name, arguments := range map[string]map[string]any{
 			"both":    {"prompt": "x", "prompt_file": "brief.md"},
 			"neither": {},
@@ -786,6 +790,9 @@ func TestMCPPromptFile(t *testing.T) {
 		if text := b.tasks(t, runID)[1].submission.Message.Parts[0].Text; !strings.Contains(text, "the brief") {
 			t.Fatalf("continuation %q, want the file's", text)
 		}
+		if continued.Await != "wherry await "+runID {
+			t.Errorf("continue await %q, want the command that waits for %s", continued.Await, runID)
+		}
 	})
 }
 
@@ -804,5 +811,23 @@ func TestMCPCleanup(t *testing.T) {
 	}
 	if failure := callToolError(t, b.ctx, session, "cleanup", map[string]any{"id": "run-missing"}); failure.Code != "RUN_NOT_FOUND" {
 		t.Fatalf("cleanup of an unknown run: %+v", failure)
+	}
+}
+
+func TestAwaitCommand(t *testing.T) {
+	plain, err := awaitCommand("")
+	if err != nil || plain("run-1") != "wherry await run-1" {
+		t.Fatalf("no config file: %v", err)
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	named, err := awaitCommand("it's.yaml")
+	want := "wherry await run-1 --config-file '" + strings.ReplaceAll(filepath.Join(dir, "it's.yaml"), "'", `'\''`) + "'"
+	if err != nil || named("run-1") != want {
+		t.Fatalf("config file: %q, %v; want %q", named("run-1"), err, want)
+	}
+	out, err := exec.Command("sh", "-c", "printf %s "+strings.TrimPrefix(named("run-1"), "wherry await run-1 --config-file ")).Output()
+	if err != nil || string(out) != filepath.Join(dir, "it's.yaml") {
+		t.Fatalf("the shell reads the path as %q, %v", out, err)
 	}
 }

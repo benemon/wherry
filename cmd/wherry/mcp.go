@@ -65,7 +65,25 @@ func runMCP(ctx context.Context, args []string) error {
 	defer stop()
 	go answer(ctx, connect, logger)
 	open := inputOpener(dir, config)
-	return newMCPServer(connect, inputReader(open), open).Run(ctx, &mcp.StdioTransport{})
+	await, err := awaitCommand(*configFile)
+	if err != nil {
+		return err
+	}
+	return newMCPServer(connect, inputReader(open), open, await).Run(ctx, &mcp.StdioTransport{})
+}
+
+// awaitCommand returns the shell command that waits for a run, naming configFile, made absolute and quoted, when
+// it is set.
+func awaitCommand(configFile string) (func(id string) string, error) {
+	if configFile == "" {
+		return func(id string) string { return "wherry await " + id }, nil
+	}
+	path, err := filepath.Abs(configFile)
+	if err != nil {
+		return nil, err
+	}
+	quoted := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+	return func(id string) string { return "wherry await " + id + " --config-file " + quoted }, nil
 }
 
 // answer answers seal requests for as long as the server runs, so a credentialed task is sealed while the harness
@@ -168,8 +186,9 @@ type submitInput struct {
 }
 
 type submitOutput struct {
-	ID   string `json:"id" jsonschema:"run id"`
-	Pool string `json:"pool" jsonschema:"pool the task was placed in"`
+	ID    string `json:"id" jsonschema:"run id"`
+	Pool  string `json:"pool" jsonschema:"pool the task was placed in"`
+	Await string `json:"await" jsonschema:"shell command that waits for the run to end; run it in the background"`
 }
 
 type runInput struct {
@@ -242,6 +261,7 @@ type continueOutput struct {
 	ID      string `json:"id"`
 	Turn    int64  `json:"turn"`
 	Skipped int    `json:"skipped,omitempty"`
+	Await   string `json:"await" jsonschema:"shell command that waits for the turn to end; run it in the background"`
 }
 
 type cleanupOutput struct {
@@ -307,7 +327,7 @@ type transcriptReply struct {
 
 // newMCPServer serves the wherry tools. Each call opens its own connection: a Host's consumer serves one operation at a
 // time, and a harness may call status while an await is in flight.
-func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error)) *mcp.Server {
+func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), awaitCommand func(id string) string) *mcp.Server {
 	version := "(devel)"
 	if info, ok := debug.ReadBuildInfo(); ok {
 		version = info.Main.Version
@@ -354,7 +374,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, submitOutput{}, toolFailure(err)
 		}
-		return nil, submitOutput{ID: result.RunID, Pool: result.Pool}, nil
+		return nil, submitOutput{ID: result.RunID, Pool: result.Pool, Await: awaitCommand(result.RunID)}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -476,7 +496,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, continueOutput{}, toolFailure(err)
 		}
-		return nil, continueOutput{ID: result.RunID, Turn: result.Turn, Skipped: result.Skipped}, nil
+		return nil, continueOutput{ID: result.RunID, Turn: result.Turn, Skipped: result.Skipped, Await: awaitCommand(result.RunID)}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
