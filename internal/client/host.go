@@ -225,6 +225,10 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
 		}
 	}
+	// A receiver cuts a run at the queue deadline plus the run cap, so a later deadline would be cut silently.
+	if limit := input.QueueDeadline + time.Duration(admin.MaxRunDurationMS)*time.Millisecond; input.Deadline > limit {
+		return SubmitResult{}, fmt.Errorf("%w: the deadline is %s, past the queue deadline plus the 6h run cap (%s)", ErrInvalidInput, input.Deadline, limit)
+	}
 	var s3Inputs, s3Outputs []string
 	for _, file := range input.S3Inputs {
 		s3Inputs = append(s3Inputs, file.Name)
@@ -479,8 +483,8 @@ type runRecord struct {
 	Pool      string         `json:"pool"`
 	Placement wire.Placement `json:"placement"`
 	TaskHash  string         `json:"task_hash"`
-	// SubmittedMS is when this host published the run; records written before it existed hold zero.
-	SubmittedMS int64 `json:"submitted_ms,omitzero"`
+	// SubmittedMS is when this host published the run.
+	SubmittedMS int64 `json:"submitted_at_ms,omitzero"`
 	// TaskCredentials names the task credentials the run declares, which this host may seal.
 	TaskCredentials []string `json:"task_credentials,omitzero"`
 	// VCSHost is the host of the git input the run declares.
@@ -489,7 +493,7 @@ type runRecord struct {
 	S3Inputs  []string `json:"s3_inputs,omitzero"`
 	S3Outputs []string `json:"s3_outputs,omitzero"`
 	// DeadlineMS is the run deadline, when a PUT URL for its S3 outputs expires.
-	DeadlineMS int64 `json:"deadline_ms,omitzero"`
+	DeadlineMS int64 `json:"deadline_at_ms,omitzero"`
 	// RedactionKey is the run's redaction key, minted when this host submits the run.
 	RedactionKey []byte `json:"redaction_key,omitzero"`
 }
@@ -517,12 +521,6 @@ func (h *Host) localRun(runID string) (*runRecord, error) {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
-	}
-	// A record written before submitted_ms existed takes its file's modification time.
-	if record.SubmittedMS == 0 {
-		if info, err := os.Stat(path); err == nil {
-			record.SubmittedMS = info.ModTime().UnixMilli()
-		}
 	}
 	return &record, nil
 }

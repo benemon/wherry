@@ -9,7 +9,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 )
@@ -191,5 +193,27 @@ func TestHostCommandsReadConfigFile(t *testing.T) {
 				t.Fatalf("run(%q) = %v, want the configured path read", args, err)
 			}
 		})
+	}
+}
+
+func TestPoolConfigReadsDurations(t *testing.T) {
+	pool, err := os.ReadFile(filepath.Join("testdata", "pool-nomad.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "pool.yaml")
+	if err := os.WriteFile(file, append(pool, "run_lifetime: 36h\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	terms, err := readPoolConfig(file, false)
+	if err != nil || terms.LockDurationMS != 15000 || terms.RunLifetimeMS != admin.Millis(36*time.Hour/time.Millisecond) {
+		t.Fatalf("terms lock %d run lifetime %d, %v; want 15s and 36h in milliseconds", terms.LockDurationMS, terms.RunLifetimeMS, err)
+	}
+	old := bytes.Replace(pool, []byte("lock_duration: 15s"), []byte("lock_duration_ms: 15000"), 1)
+	if err := os.WriteFile(file, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPoolConfig(file, false); err == nil {
+		t.Fatal("pool config accepted lock_duration_ms")
 	}
 }

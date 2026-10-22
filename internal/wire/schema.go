@@ -79,6 +79,9 @@ type Part struct {
 }
 
 // ExtensionURI identifies the wherry A2A extension.
+// SealWait is how long a receiver waits for the host's seal after it asks for one.
+const SealWait = 5 * time.Minute
+
 const ExtensionURI = "https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md"
 
 // Message is an A2A Message.

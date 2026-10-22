@@ -96,8 +96,8 @@ A submission is the task of one run.
       "selector": [{"key": "isolation", "operator": "In", "values": ["container"]}],
       "model": "sonnet"
     },
-    "deadline_ms": 1790000000000,
-    "queue_deadline_ms": 1789998800000,
+    "deadline_at_ms": 1790000000000,
+    "queue_deadline_at_ms": 1789998800000,
     "credentials": [{"name": "deploy-key", "file": "id_ed25519"}],
     "outputs": [{"name": "report.md", "required": true}, {"name": "plot.pdf", "storage": "s3"}],
     "s3_inputs": [{"name": "dataset.parquet", "size": 5242880, "sha256": "4f1c..."}],
@@ -120,9 +120,9 @@ A submission is the task of one run.
   `placement.model` is one of the agent's `models` in the pool's terms, and
   absent for an agent with none.
   [Reference](reference.md#labels) gives the key and value grammar.
-- `deadline_ms` and `queue_deadline_ms` are Unix milliseconds by which the
+- `deadline_at_ms` and `queue_deadline_at_ms` are Unix milliseconds by which the
   run must end and a receiver must claim it. A receiver ends the run no
-  later than six hours after `queue_deadline_ms`.
+  later than six hours after `queue_deadline_at_ms`.
 - The message has at most 256 parts, each with exactly one of `text`,
   `raw`, `url` and `data`. Receivers reject a `url` part
   ([admission](#admission)).
@@ -560,7 +560,7 @@ run's `claimed` status.
   "task_credentials": ["deploy-key"],
   "s3_inputs": ["dataset.parquet"],
   "s3_outputs": ["plot.pdf"],
-  "expiry_ms": 1789998300000
+  "expiry_at_ms": 1789998300000
 }
 ```
 
@@ -582,8 +582,8 @@ run's `claimed` status.
 - The four lists are not all empty. A run needs a seal when its adapter
   delivers a credential, or the run has task credentials, S3 inputs or S3
   outputs; an adopter, when it has credentials or S3 outputs.
-- `expiry_ms` is 5 minutes after the request. The receiver holds the claim
-  until a seal opens, a cancel of the run arrives, or `expiry_ms` passes.
+- `expiry_at_ms` is 5 minutes after the request. The receiver holds the claim
+  until a seal opens, a cancel of the run arrives, or `expiry_at_ms` passes.
   At expiry it ends the run `TASK_STATE_FAILED` with a message naming the
   credentials it asked for, never their values ([Status](#status)), and
   the task is not returned to the pool.
@@ -604,7 +604,7 @@ these hold:
    member of the run's pool, for the run's tenant.
 2. The host holds a local record of the run, written when it submitted the
    run.
-3. `expiry_ms` has not passed and is at most 6 minutes away: the receiver's
+3. `expiry_at_ms` has not passed and is at most 6 minutes away: the receiver's
    5-minute wait and a minute of clock skew.
 4. Every `claimed` status of the run comes from one receiver, and the
    request comes from it.
@@ -628,7 +628,7 @@ logs the record's path.
 For each S3 input the host presigns a GET of
 `wherry/<tenant>/<run>/inputs/<name>` for 15 minutes, and for each S3 output a
 PUT of `wherry/<tenant>/<run>/outputs/<name>` until the run's
-`deadline_ms`, at most 7 days, path-style on the pool's endpoint with its own
+`deadline_at_ms`, at most 7 days, path-style on the pool's endpoint with its own
 credential.
 
 A host records a run locally before it publishes the run's submission, so a
@@ -669,7 +669,7 @@ request's `key`.
   `application/vnd.wherry.seal.v2+jwe` and the binding: `tenant`, `pool`,
   `receiver`, `key_id`, `run`, `attempt`, `credentials`,
   `task_credentials`, `s3_inputs` and `s3_outputs` when the request has them,
-  and `expiry_ms`, copied from the request. Readers reject any other member.
+  and `expiry_at_ms`, copied from the request. Readers reject any other member.
 - The plaintext is a JSON object: `v`, `binding`, an object holding the
   binding members again, and `values`, mapping each name in `credentials`
   and `task_credentials` to its value, `s3-inputs/<name>` for each S3 input
@@ -682,7 +682,7 @@ request's `key`.
 
 The receiver reads the host's topic from its end at the time of the request. It
 opens a seal only when the header's binding equals its request, with `key_id`
-the thumbprint of its own key, `expiry_ms` has not passed, the plaintext's
+the thumbprint of its own key, `expiry_at_ms` has not passed, the plaintext's
 `binding` equals the header's, `values` holds exactly the named credentials
 and URLs, and `redaction_key` is 32 bytes. It checks for a cancel, its
 shutdown, the run deadline and the request's expiry before it takes a seal,

@@ -56,7 +56,7 @@ func (h *Host) Answer(ctx context.Context) error {
 			// Read before verifying, since every earlier request on the feed has expired; an unverified expiry can only
 			// skip a request.
 			var unverified struct {
-				ExpiryMS int64 `json:"expiry_ms"`
+				ExpiryMS int64 `json:"expiry_at_ms"`
 			}
 			if json.Unmarshal(jws.UnsafePayloadWithoutVerification(), &unverified) == nil {
 				pending[fmt.Sprintf("%d/%d", record.Partition, record.Offset)] = request{string(record.Key), record.Value, unverified.ExpiryMS}
@@ -77,8 +77,8 @@ const (
 	lockRetry     = 50 * time.Millisecond
 )
 
-// requestLifetime bounds a seal request's expiry: the receiver's 5-minute seal wait and a minute of clock skew.
-const requestLifetime = 6 * time.Minute
+// requestLifetime bounds a seal request's expiry: the receiver's seal wait and a minute of clock skew.
+const requestLifetime = wire.SealWait + time.Minute
 
 // seal and produceSeal are variables so tests can delay building a seal and fail its write.
 var (
@@ -88,7 +88,7 @@ var (
 
 // answerMarker records that a run's attempt was answered; ExpiryMS is when its request expires.
 type answerMarker struct {
-	ExpiryMS int64 `json:"expiry_ms"`
+	ExpiryMS int64 `json:"expiry_at_ms"`
 }
 
 func (h *Host) markerPath(run string, attempt int64) string {

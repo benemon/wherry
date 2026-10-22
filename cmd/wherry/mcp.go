@@ -168,18 +168,18 @@ type outputInput struct {
 }
 
 type submitInput struct {
-	Prompt               string             `json:"prompt,omitempty" jsonschema:"the task for the remote agent; exactly one of prompt and prompt_file is required"`
-	PromptFile           string             `json:"prompt_file,omitempty" jsonschema:"local file holding the prompt, read as an input is"`
-	Agent                string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
-	Model                string             `json:"model,omitempty" jsonschema:"model the agent runs, one of its models as receivers lists them; default: the agent's default model"`
-	Selector             []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the adapter must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
-	Git                  *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts"`
-	Inputs               []string           `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names; the pool's inline limit in all, 256 KiB by default"`
-	S3Inputs             []string           `json:"s3_inputs,omitempty" jsonschema:"local files of up to 5 GiB each uploaded to the pool's bucket and fetched into the agent's WHERRY_INPUT_DIR under their base names"`
-	Credentials          []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent as files in WHERRY_CREDENTIALS_DIR"`
-	Outputs              []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; await writes the returned ones locally"`
-	DeadlineSeconds      int64              `json:"deadline_seconds,omitempty" jsonschema:"task deadline in seconds; default 7200"`
-	QueueDeadlineSeconds int64              `json:"queue_deadline_seconds,omitempty" jsonschema:"queue deadline in seconds; default 600"`
+	Prompt        string             `json:"prompt,omitempty" jsonschema:"the task for the remote agent; exactly one of prompt and prompt_file is required"`
+	PromptFile    string             `json:"prompt_file,omitempty" jsonschema:"local file holding the prompt, read as an input is"`
+	Agent         string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
+	Model         string             `json:"model,omitempty" jsonschema:"model the agent runs, one of its models as receivers lists them; default: the agent's default model"`
+	Selector      []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the adapter must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
+	Git           *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts"`
+	Inputs        []string           `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names; the pool's inline limit in all, 256 KiB by default"`
+	S3Inputs      []string           `json:"s3_inputs,omitempty" jsonschema:"local files of up to 5 GiB each uploaded to the pool's bucket and fetched into the agent's WHERRY_INPUT_DIR under their base names"`
+	Credentials   []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent as files in WHERRY_CREDENTIALS_DIR"`
+	Outputs       []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; await writes the returned ones locally"`
+	Deadline      string             `json:"deadline,omitempty" jsonschema:"task deadline, a Go duration such as 90m; default 2h"`
+	QueueDeadline string             `json:"queue_deadline,omitempty" jsonschema:"queue deadline, a Go duration such as 30m; default 10m"`
 }
 
 type submitOutput struct {
@@ -652,7 +652,7 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 		}
 		parts = append(parts, part)
 	}
-	deadline, queueDeadline, err := deadlines(input.DeadlineSeconds, input.QueueDeadlineSeconds)
+	deadline, queueDeadline, err := deadlines(input.Deadline, input.QueueDeadline)
 	if err != nil {
 		return busclient.SubmitInput{}, err
 	}
@@ -693,19 +693,20 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 	return submission, nil
 }
 
-// deadlines applies the CLI's defaults to unset deadlines.
-func deadlines(deadlineSeconds, queueDeadlineSeconds int64) (time.Duration, time.Duration, error) {
-	if deadlineSeconds < 0 || queueDeadlineSeconds < 0 {
-		return 0, 0, invalidArgument("deadlines must be positive")
+// deadlines parses the deadlines and applies the CLI's defaults to unset ones.
+func deadlines(deadline, queueDeadline string) (time.Duration, time.Duration, error) {
+	parsed := []time.Duration{busclient.DefaultDeadline, busclient.DefaultQueueDeadline}
+	for i, text := range []string{deadline, queueDeadline} {
+		if text == "" {
+			continue
+		}
+		value, err := time.ParseDuration(text)
+		if err != nil || value <= 0 {
+			return 0, 0, invalidArgument("deadlines must be positive Go durations, such as 90m")
+		}
+		parsed[i] = value
 	}
-	deadline, queueDeadline := busclient.DefaultDeadline, busclient.DefaultQueueDeadline
-	if deadlineSeconds > 0 {
-		deadline = time.Duration(deadlineSeconds) * time.Second
-	}
-	if queueDeadlineSeconds > 0 {
-		queueDeadline = time.Duration(queueDeadlineSeconds) * time.Second
-	}
-	return deadline, queueDeadline, nil
+	return parsed[0], parsed[1], nil
 }
 
 // notifyProgress reports the elapsed wait every progressInterval until the returned stop is called.

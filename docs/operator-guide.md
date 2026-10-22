@@ -79,10 +79,10 @@ wherry admin pool create build --config-file build-terms.yaml
   cases the [extension](a2a-extension-v1.md#delivery-budget) lists. The
   broker caps it at
   `group.share.max.delivery.count.limit`.
-- `lock_duration_ms` is how long a claim survives without renewal, and how
+- `lock_duration` is how long a claim survives without renewal, and how
   long a denied receiver keeps running its jobs. Receivers renew every 10
   seconds.
-- `run_lifetime_ms` bounds how long after its submission a run's task is
+- `run_lifetime` bounds how long after its submission a run's task is
   admitted. It defaults to 14 days. See [Retention](#retention).
 - `inline_limit` and `output_limit` bound a task's input files and a
   run's outputs; they default to 256 KiB and 8 MiB. See
@@ -103,7 +103,7 @@ redelivered runs at their next claim, so drain the agent first.
 
 ### Retention
 
-Receivers reject a task still unclaimed `run_lifetime_ms` after its submission
+Receivers reject a task still unclaimed `run_lifetime` after its submission
 with `run expired`, and a task whose queue deadline falls after the lifetime
 with `queue deadline exceeds run lifetime`; `wherry submit` refuses such a
 queue deadline before it publishes. Every run therefore ends within six hours

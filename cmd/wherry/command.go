@@ -86,6 +86,20 @@ func run(args []string, stdout, stderr io.Writer) error {
 	return command(context.Background(), nil, args[1:], stdout, stderr)
 }
 
+// parseAnywhere parses flags given before, between or after the positional arguments, which it returns in order.
+func parseAnywhere(flags *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := flags.Parse(args); err != nil {
+			return nil, err
+		}
+		if flags.NArg() == 0 {
+			return positional, nil
+		}
+		positional, args = append(positional, flags.Arg(0)), flags.Args()[1:]
+	}
+}
+
 func loadConfig(path string) (busclient.Config, error) {
 	if path == "" {
 		var err error
@@ -160,10 +174,11 @@ func runCancel(ctx context.Context, client *busclient.Host, args []string, stdou
 	flags := flag.NewFlagSet("cancel", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
-	if err := flags.Parse(args); err != nil {
+	positional, err := parseAnywhere(flags, args)
+	if err != nil {
 		return err
 	}
-	if flags.NArg() != 1 {
+	if len(positional) != 1 {
 		return errors.New("usage: wherry cancel RUN_ID")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
@@ -171,7 +186,7 @@ func runCancel(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	defer closeClient()
-	result, err := client.Cancel(ctx, flags.Arg(0))
+	result, err := client.Cancel(ctx, positional[0])
 	if err != nil {
 		return err
 	}
@@ -319,23 +334,24 @@ func inputParts(paths []string) ([]wire.Part, error) {
 	return parts, nil
 }
 
+// defaultAwaitTimeout covers a run at the default queue deadline and run deadline.
+const defaultAwaitTimeout = busclient.DefaultQueueDeadline + busclient.DefaultDeadline
+
 func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const awaitUsage = "usage: wherry await RUN_ID [--timeout 30m] [--outputs-dir DIR]"
-	if len(args) == 0 {
-		return errors.New(awaitUsage)
-	}
-	runID := args[0]
+	const awaitUsage = "usage: wherry await RUN_ID [--timeout 2h10m] [--outputs-dir DIR]"
 	flags := flag.NewFlagSet("await", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
-	timeout := flags.Duration("timeout", busclient.DefaultDeadline, "wait timeout")
+	timeout := flags.Duration("timeout", defaultAwaitTimeout, "wait timeout")
 	outputsDir := flags.String("outputs-dir", "", "directory for the run's outputs (default: <state_dir>/runs/RUN_ID/outputs)")
-	if err := flags.Parse(args[1:]); err != nil {
+	positional, err := parseAnywhere(flags, args)
+	if err != nil {
 		return err
 	}
-	if flags.NArg() != 0 {
+	if len(positional) != 1 {
 		return errors.New(awaitUsage)
 	}
+	runID := positional[0]
 	if *timeout <= 0 {
 		return errors.New("timeout must be positive")
 	}
@@ -404,10 +420,11 @@ func runCleanup(ctx context.Context, client *busclient.Host, args []string, stdo
 	flags := flag.NewFlagSet("cleanup", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
-	if err := flags.Parse(args); err != nil {
+	positional, err := parseAnywhere(flags, args)
+	if err != nil {
 		return err
 	}
-	if flags.NArg() != 1 {
+	if len(positional) != 1 {
 		return errors.New("usage: wherry cleanup RUN_ID")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
@@ -415,7 +432,7 @@ func runCleanup(ctx context.Context, client *busclient.Host, args []string, stdo
 		return err
 	}
 	defer closeClient()
-	runID := flags.Arg(0)
+	runID := positional[0]
 	if err := client.Cleanup(ctx, runID); err != nil {
 		return err
 	}
@@ -427,10 +444,11 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
-	if err := flags.Parse(args); err != nil {
+	positional, err := parseAnywhere(flags, args)
+	if err != nil {
 		return err
 	}
-	if flags.NArg() > 1 {
+	if len(positional) > 1 {
 		return errors.New("usage: wherry status [RUN_ID]")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
@@ -438,7 +456,7 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	defer closeClient()
-	switch flags.NArg() {
+	switch len(positional) {
 	case 0:
 		result, err := client.Runs(ctx)
 		if err != nil {
@@ -454,7 +472,7 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		warnSkipped(stderr, result.Skipped)
 		return nil
 	case 1:
-		result, err := client.Status(ctx, flags.Arg(0))
+		result, err := client.Status(ctx, positional[0])
 		if err != nil {
 			return err
 		}
@@ -490,10 +508,11 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 	flags := flag.NewFlagSet("events", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
-	if err := flags.Parse(args); err != nil {
+	positional, err := parseAnywhere(flags, args)
+	if err != nil {
 		return err
 	}
-	if flags.NArg() != 1 {
+	if len(positional) != 1 {
 		return errors.New("usage: wherry events RUN_ID")
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
@@ -501,7 +520,7 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	defer closeClient()
-	result, err := client.Events(ctx, flags.Arg(0))
+	result, err := client.Events(ctx, positional[0])
 	if err != nil {
 		return err
 	}
@@ -530,21 +549,19 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 
 func runTranscript(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	const transcriptUsage = "usage: wherry transcript RUN_ID [--offset N] [--limit N]"
-	if len(args) == 0 {
-		return errors.New(transcriptUsage)
-	}
-	runID := args[0]
 	flags := flag.NewFlagSet("transcript", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
 	offset := flags.Int("offset", 0, "lines to skip")
 	limit := flags.Int("limit", 0, "most lines to print (default: all)")
-	if err := flags.Parse(args[1:]); err != nil {
+	positional, err := parseAnywhere(flags, args)
+	if err != nil {
 		return err
 	}
-	if flags.NArg() != 0 {
+	if len(positional) != 1 {
 		return errors.New(transcriptUsage)
 	}
+	runID := positional[0]
 	if *offset < 0 || *limit < 0 {
 		return errors.New("--offset and --limit must not be negative")
 	}

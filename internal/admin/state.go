@@ -13,6 +13,7 @@ import (
 
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"gopkg.in/yaml.v3"
 )
 
 type AgentTerms struct {
@@ -26,9 +27,9 @@ type AgentTerms struct {
 type Terms struct {
 	Agents            []AgentTerms `json:"agents" yaml:"agents"`
 	DefaultAgent      string       `json:"default_agent" yaml:"default_agent"`
-	RunLifetimeMS     int64        `json:"run_lifetime_ms,omitzero" yaml:"run_lifetime_ms"`
+	RunLifetimeMS     Millis       `json:"run_lifetime_ms,omitzero" yaml:"run_lifetime"`
 	DeliveryLimit     int32        `json:"delivery_limit" yaml:"delivery_limit"`
-	LockDurationMS    int64        `json:"lock_duration_ms" yaml:"lock_duration_ms"`
+	LockDurationMS    Millis       `json:"lock_duration_ms" yaml:"lock_duration"`
 	ProducerByteRate  int64        `json:"producer_byte_rate" yaml:"producer_byte_rate"`
 	RequestPercentage float64      `json:"request_percentage" yaml:"request_percentage"`
 	InlineLimit       int64        `json:"inline_limit,omitzero" yaml:"inline_limit"`
@@ -37,6 +38,22 @@ type Terms struct {
 	VCS []string `json:"vcs,omitzero" yaml:"vcs"`
 	// Storage is the pool's S3 lane; nil allows no S3 input or output.
 	Storage *Storage `json:"storage,omitzero" yaml:"storage"`
+}
+
+// Millis is a duration in milliseconds, which pool YAML writes as a Go duration such as 15s or 336h.
+type Millis int64
+
+func (m *Millis) UnmarshalYAML(node *yaml.Node) error {
+	var text string
+	if err := node.Decode(&text); err != nil {
+		return err
+	}
+	duration, err := time.ParseDuration(text)
+	if err != nil {
+		return err
+	}
+	*m = Millis(duration.Milliseconds())
+	return nil
 }
 
 // RunLifetime is RunLifetimeMS as a duration.

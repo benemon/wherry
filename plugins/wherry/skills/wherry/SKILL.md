@@ -66,7 +66,7 @@ It returns `id`, `pool` and `await` straight away. `await` is a shell
 command, `wherry await <id>`. Where your harness runs shell commands in the
 background and tells you when they finish, start that command in the
 background now, before anything else: it blocks until the run ends (or for 2
-hours; `--timeout` changes that), prints the state and the result, writes
+hours 10 minutes; `--timeout` changes that), prints the state and the result, writes
 returned outputs, answers the receiver's credential request, and exits
 non-zero for any state other than `TASK_STATE_COMPLETED`. Its completion is
 how you learn the run ended, so you skip the await loop below. Then carry on

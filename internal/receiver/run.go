@@ -70,7 +70,7 @@ var (
 	collectTimeout = 2 * time.Minute
 	// sealWait bounds how long a claimed run waits for its host's seal, which comes only while the parent runs
 	// await or the MCP server; beyond it the run ends failed.
-	sealWait = 5 * time.Minute
+	sealWait = wire.SealWait
 )
 
 // claimLoop holds one slot: a dedicated share client per claimed record,
@@ -1399,7 +1399,7 @@ func unansweredReason(credentials []string, urls bool) string {
 	} else if len(credentials) > 0 {
 		configure = "add the credentials and storage"
 	}
-	return subject + " " + verb + " not answered within 5m; " + configure + " in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
+	return subject + " " + verb + " not answered within " + strings.TrimSuffix(wire.SealWait.String(), "0s") + "; " + configure + " in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
 }
 
 // startFailure purges the run's job and returns the task to the pool for a member that can start it.

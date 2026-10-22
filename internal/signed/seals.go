@@ -39,7 +39,7 @@ type SealBinding struct {
 	TaskCredentials []string `json:"task_credentials,omitzero"`
 	S3Inputs        []string `json:"s3_inputs,omitzero"`
 	S3Outputs       []string `json:"s3_outputs,omitzero"`
-	ExpiryMS        int64    `json:"expiry_ms"`
+	ExpiryMS        int64    `json:"expiry_at_ms"`
 }
 
 // Names are the keys of a seal's values: each credential and task credential, then S3InputValue and S3OutputValue of
@@ -107,7 +107,7 @@ func Seal(binding SealBinding, key *ecdsa.PublicKey, values SealValues) ([]byte,
 	options := new(jose.EncrypterOptions).WithType(SealType).
 		WithHeader("tenant", binding.Tenant).WithHeader("pool", binding.Pool).WithHeader("receiver", binding.Receiver).
 		WithHeader("key_id", binding.KeyID).WithHeader("run", binding.Run).
-		WithHeader("attempt", binding.Attempt).WithHeader("credentials", binding.Credentials).WithHeader("expiry_ms", binding.ExpiryMS)
+		WithHeader("attempt", binding.Attempt).WithHeader("credentials", binding.Credentials).WithHeader("expiry_at_ms", binding.ExpiryMS)
 	if len(binding.TaskCredentials) > 0 {
 		options = options.WithHeader("task_credentials", binding.TaskCredentials)
 	}

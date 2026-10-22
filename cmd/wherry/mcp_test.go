@@ -202,14 +202,24 @@ func TestDeadlineDefaultsAreTwoHours(t *testing.T) {
 			continue
 		}
 		encoded, _ := json.Marshal(tool.InputSchema)
-		for _, want := range []string{
-			fmt.Sprintf("task deadline in seconds; default %d", int64(busclient.DefaultDeadline/time.Second)),
-			fmt.Sprintf("queue deadline in seconds; default %d", int64(busclient.DefaultQueueDeadline/time.Second)),
-		} {
-			if !strings.Contains(string(encoded), want) {
-				t.Errorf("%s input schema lacks %q: %s", tool.Name, want, encoded)
+		for field, want := range map[string]time.Duration{"task deadline": busclient.DefaultDeadline, "queue deadline": busclient.DefaultQueueDeadline} {
+			_, rest, _ := strings.Cut(string(encoded), field+", a Go duration such as ")
+			_, rest, _ = strings.Cut(rest, "; default ")
+			stated, _, _ := strings.Cut(rest, `"`)
+			if got, err := time.ParseDuration(stated); err != nil || got != want {
+				t.Errorf("%s input schema states %s default %q, want %s: %s", tool.Name, field, stated, want, encoded)
 			}
 		}
+	}
+	for _, bad := range []string{"7200", "-1h", "soon"} {
+		if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "deadline": bad}); failure.Code != "INVALID_ARGUMENT" {
+			t.Errorf("deadline %q: %+v, want INVALID_ARGUMENT", bad, failure)
+		}
+	}
+	var custom submitOutput
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "deadline": "90m", "queue_deadline": "5m"}, &custom)
+	if task := b.tasks(t, custom.ID)[0].submission.Wherry; time.Duration(task.DeadlineMS-task.QueueDeadlineMS)*time.Millisecond != 85*time.Minute {
+		t.Errorf("deadlines 90m and 5m gave %d and %d", task.DeadlineMS, task.QueueDeadlineMS)
 	}
 	before := time.Now()
 	var submitted submitOutput

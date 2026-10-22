@@ -205,7 +205,7 @@ func TestAdmitRejectsRunPastLifetime(t *testing.T) {
 
 func TestAdmitRejectsQueueDeadlinePastRunLifetime(t *testing.T) {
 	terms := testTerms()
-	terms.RunLifetimeMS = time.Hour.Milliseconds()
+	terms.RunLifetimeMS = admin.Millis(time.Hour.Milliseconds())
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
 	first := f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-queued", "run-queued", "run-queued"
@@ -614,7 +614,7 @@ func TestHeartbeatHonoursHeldCancel(t *testing.T) {
 
 func TestRunsUnderRetention(t *testing.T) {
 	terms := testTerms()
-	terms.RunLifetimeMS = time.Hour.Milliseconds()
+	terms.RunLifetimeMS = admin.Millis(time.Hour.Milliseconds())
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream, job: adapter.JobRunning}})
 	aged := func(topic, key string, value []byte, age time.Duration) *kgo.Record {
 		t.Helper()
