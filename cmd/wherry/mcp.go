@@ -50,7 +50,7 @@ func runMCP(ctx context.Context, args []string) error {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry mcp")
+		return errors.New("usage: wherry mcp [--config-file FILE]")
 	}
 	config, err := loadConfig(*configFile)
 	if err != nil {

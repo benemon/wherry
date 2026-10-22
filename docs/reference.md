@@ -141,7 +141,7 @@ prints `run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
 | `--input FILE` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
 | `--s3-input FILE` | | file of at most 5 GiB that `submit` uploads to the pool's bucket and the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
 | `--credential NAME=FILE` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR`; repeatable |
-| `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket; repeatable |
+| `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket, in either order; repeatable |
 | `--deadline` | `2h` | time from now by which the run must end |
 | `--queue-deadline` | `10m` | time from now by which a receiver must claim it |
 
@@ -786,7 +786,8 @@ defaults, `2h` and `10m`.
   `{sha256, size}`.
 - A harness caps a tool's output; Claude Code's `MAX_MCP_OUTPUT_TOKENS`
   defaults to about 25,000 tokens. A `transcript` page fits it: it holds at
-  most `limit` lines, 100 by default and 500 at most, and at most 24 KiB of
+  most `limit` lines, 100 by default and 500 at most (the CLI's `--limit`
+  of 0 prints every line), and at most 24 KiB of
   JSON. It ends before the line that would take it past that. A line too long
   for a page alone comes back as the start of its text that fits, with
   `truncated` true and `bytes` its full size, and `next_offset` passes it.
@@ -1190,7 +1191,7 @@ A principal whose membership has ended has no grants.
 
 | Variable | Read by | Effect |
 | --- | --- | --- |
-| `SSL_CERT_FILE` | host commands | PEM CA file trusted beside the system roots for a pool's S3 endpoint |
+| `SSL_CERT_FILE` | host commands | PEM CA file that replaces the system roots, for a pool's S3 endpoint under a private CA; include the public roots in it when the host also reaches public endpoints |
 | `WHERRY_TRUST_BROKER` | `wherry admin` | Kafka bootstrap address, also written into bundles |
 | `WHERRY_TRUST_CA` | `wherry admin` | PEM CA file for the broker, also written into bundles |
 | `WHERRY_TRUST_ADMIN_USER` | `wherry admin` | super user name |
