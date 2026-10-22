@@ -286,7 +286,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if (len(declared.S3Inputs) > 0 || len(s3Outputs(declared.Outputs)) > 0) && terms.Storage == nil {
 		return rejectAs("pool has no storage", "pool "+r.config.Pool+" has no storage for S3 inputs and outputs")
 	}
-	inputs, rejection := deliverables(history, declared.Git, declared.S3Inputs)
+	inputs, rejection := deliverables(history, declared.Git)
 	if rejection != "" {
 		return reject(rejection)
 	}
@@ -323,8 +323,8 @@ func s3Outputs(outputs []wire.ExpectedOutput) []string {
 }
 
 // deliverables returns the run's input files: the git input's host key as known_hosts, then the raw and data parts.
-// It returns the rejection reason for a url part or a duplicate input name.
-func deliverables(history []wire.Message, git *wire.GitInput, s3Inputs []wire.S3Input) ([]adapter.File, string) {
+// It returns the rejection reason for a url part.
+func deliverables(history []wire.Message, git *wire.GitInput) ([]adapter.File, string) {
 	var inputs []adapter.File
 	if git != nil && git.HostKey != "" {
 		inputs = append(inputs, adapter.File{Name: wire.KnownHostsFile, Data: []byte(git.HostKey)})
@@ -334,12 +334,8 @@ func deliverables(history []wire.Message, git *wire.GitInput, s3Inputs []wire.S3
 			switch {
 			case part.Text != "":
 			case part.Raw != nil || part.Data != nil:
-				name := wire.InputName(part)
-				if slices.ContainsFunc(inputs, func(input adapter.File) bool { return input.Name == name }) ||
-					slices.ContainsFunc(s3Inputs, func(input wire.S3Input) bool { return input.Name == name }) {
-					return nil, "input names repeat"
-				}
-				inputs = append(inputs, adapter.File{Name: name, Data: append(slices.Clone([]byte(part.Raw)), part.Data...)})
+				// Decoding refused repeated input names, so each is unique.
+				inputs = append(inputs, adapter.File{Name: wire.InputName(part), Data: append(slices.Clone([]byte(part.Raw)), part.Data...)})
 			default:
 				return nil, "unsupported message part"
 			}

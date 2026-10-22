@@ -878,3 +878,18 @@ func TestRandomID(t *testing.T) {
 		t.Fatalf("ids %q and %q; want distinct, prefixed, 128 bits in hex", first, second)
 	}
 }
+
+// The receiver hands an adapter the inputs without checking names again, so decoding is where they are unique.
+func TestInputNamesAreUniqueAtDecode(t *testing.T) {
+	repeated := validSubmission()
+	repeated.Message.Parts = append(repeated.Message.Parts, Part{Raw: StdBytes("a"), Filename: "data.csv"}, Part{Raw: StdBytes("b"), Filename: "data.csv"})
+	if err := repeated.validate(); err == nil || err.Error() != "input file names must be unique" {
+		t.Fatalf("two inputs named data.csv: %v", err)
+	}
+	shadowed := validSubmission()
+	shadowed.Message.Parts = append(shadowed.Message.Parts, Part{Raw: StdBytes("a"), Filename: "dataset.bin"})
+	shadowed.Wherry.S3Inputs = []S3Input{{Name: "dataset.bin", Size: 1, SHA256: strings.Repeat("0", 64)}}
+	if err := shadowed.validate(); err == nil || !strings.Contains(err.Error(), "distinct from the run's input files") {
+		t.Fatalf("an input and an S3 input named dataset.bin: %v", err)
+	}
+}
