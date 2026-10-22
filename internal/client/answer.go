@@ -77,8 +77,8 @@ const (
 	lockRetry     = 50 * time.Millisecond
 )
 
-// requestLifetime bounds a seal request's expiry: the receiver's 5-minute seal wait and a minute of clock skew.
-const requestLifetime = 6 * time.Minute
+// requestLifetime bounds a seal request's expiry: the receiver's seal wait and a minute of clock skew.
+const requestLifetime = wire.SealWait + time.Minute
 
 // seal and produceSeal are variables so tests can delay building a seal and fail its write.
 var (
