@@ -59,6 +59,7 @@ type fakeAdapter struct {
 	mu sync.Mutex
 	// pool, name and agent are the ones the fixture's factory builds the adapter with.
 	pool, name, agent string
+	inlineLimit       int64
 	// unready and readyErr make Ready report the adapter unable to start a job.
 	unready     bool
 	readyErr    error
@@ -125,6 +126,8 @@ type fakeAdapter struct {
 func (f *fakeAdapter) Directories() adapter.Directories {
 	return adapter.Directories{Input: "/task/inputs", Output: "/task/outputs", Credentials: "/task/secrets/credentials"}
 }
+
+func (f *fakeAdapter) InlineLimit() int64 { return f.inlineLimit }
 
 func (f *fakeAdapter) Ready(ctx context.Context) (bool, error) {
 	if f.hung(ctx) {
@@ -1010,8 +1013,12 @@ func (f fixture) advertisedOffers(t *testing.T) wire.Advertisement {
 
 func TestAdvertisement(t *testing.T) {
 	f := newFixture(t, resultStream)
+	f.adapter.inlineLimit = 49152
+	if err := f.receiver.advertise(f.ctx); err != nil {
+		t.Fatal(err)
+	}
 	advertisement := f.advertisedOffers(t)
-	want := []wire.Offer{{Adapter: "nomad", Agent: "claude"}}
+	want := []wire.Offer{{Adapter: "nomad", Agent: "claude", InlineLimit: 49152}}
 	if !reflect.DeepEqual(advertisement.Offers, want) || advertisement.Pool != testPool || advertisement.Capacity != 1 {
 		t.Fatalf("advertisement %#v, want offers %#v", advertisement, want)
 	}

@@ -175,7 +175,7 @@ func (p *Plugin) Configure(settings Settings) (Adapter, error) {
 	directories := resp.GetDirectories()
 	return &remote{plugin: p, name: settings.Name, directories: Directories{
 		Input: directories.GetInput(), Output: directories.GetOutput(), Credentials: directories.GetCredentials(),
-	}}, nil
+	}, inlineLimit: resp.GetInlineLimit()}, nil
 }
 
 // Close stops the process and its restarts.
@@ -236,9 +236,11 @@ type remote struct {
 	plugin      *Plugin
 	name        string
 	directories Directories
+	inlineLimit int64
 }
 
 func (r *remote) Directories() Directories { return r.directories }
+func (r *remote) InlineLimit() int64       { return r.inlineLimit }
 
 func (r *remote) Ready(ctx context.Context) (bool, error) {
 	rpc, err := r.plugin.link()

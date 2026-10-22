@@ -96,7 +96,7 @@ and receiver ID:
 
 ```
 receiver=<id> pool=<pool> capacity=<n> in_flight=<n> heartbeat_age=<age> status=<status>
-  adapter=<name> agent=<agent> ready=<bool> labels=<k=v,...> [models=<m,...> default_model=<m>]
+  adapter=<name> agent=<agent> ready=<bool> labels=<k=v,...> [inline_limit=<n>] [models=<m,...> default_model=<m>]
 ```
 
 `status` is `live` when the latest advertisement is at most 120 seconds
@@ -106,14 +106,15 @@ receiver's configuration record, and an agent's `models` and
 `default_model` from the pool's [terms](#pool-terms) when it has them.
 `ready` is true when the receiver is live
 and its advertisement offers the adapter. A live receiver with no ready
-adapter lists each adapter with `ready=false`.
+adapter lists each adapter with `ready=false`. `inline_limit`, when set, is
+the most inline input bytes the offered adapter delivers.
 
 `--json` prints a JSON array, one object per receiver:
 
 | Member | Content |
 | --- | --- |
 | `receiver_id`, `pool` | strings |
-| `adapters` | `{name, agent, models, default_model, labels, ready}`; `models` and `default_model` only for an agent that has them |
+| `adapters` | `{name, agent, inline_limit, models, default_model, labels, ready}`; optional values are omitted when unset |
 | `capacity`, `in_flight` | integers from the latest advertisement |
 | `heartbeat_age` | Go duration string, or `-` |
 | `status` | `live`, `stale`, `silent` or `ended` |
@@ -178,10 +179,17 @@ the 8 KiB bound.
 outputs, unless `--output` names it already; neither is required.
 
 Input files hold the pool's [`inline_limit`](#pool-terms) together; `submit`
-refuses more before it publishes, naming the size and the limit. Input and
-credential file names are [file names](a2a-extension-v1.md#submission), and
-output names relative paths of them. `submit` refuses a credential its
-configuration does not map to a file.
+refuses more before it publishes, naming the size and the limit. Among the
+live offers in the chosen pool whose adapter launches the placed agent and
+satisfies the selector, the smallest declared adapter `inline_limit` also
+applies. When the inputs are over that adapter limit, a pool with storage and
+a configured host storage credential uploads every inline input through S3
+instead. Otherwise `submit` refuses before publishing, names the adapter and
+its effective cap, and says that a pool with storage would carry the inputs
+through S3. An undeclared adapter limit is zero and does not lower the pool
+limit. Input and credential file names are [file
+names](a2a-extension-v1.md#submission), and output names relative paths of
+them. `submit` refuses a credential its configuration does not map to a file.
 
 `--s3-input` and `:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
 `submit` refuses them, before it uploads or publishes anything, when the
@@ -542,7 +550,8 @@ the bundle's `platform` entry for its name when there is one.
 
 A plugin also reports, for each adapter, the paths of the input, output and
 credentials directories as its agent sees them, which the receiver writes
-into the prompt. Dispatch carries a turn's input files and task credentials
+into the prompt, and implements `InlineLimit` to report the most inline input
+bytes it delivers. Zero declares no adapter limit. Dispatch carries a turn's input files and task credentials
 with the prompt, and a fetch for each S3 input: its name, presigned URL,
 size and SHA-256, which the plugin fetches and verifies before the agent
 starts, reporting a job that never started with class `fetch` when it
@@ -562,20 +571,19 @@ not against one that runs commands of its own
 
 The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
-certificate pair made for each start, protocol version 5. The receiver refuses a
+certificate pair made for each start, protocol version 6. The receiver refuses a
 plugin of any other protocol version at its start, so the receiver and its
-plugins upgrade together. Version 5 adds `Run.Model`, the model a task's
-placement names, which a plugin passes to the agent as `WHERRY_MODEL` when
-it is set and never otherwise. A version 4 plugin would drop it and run its
-own model, so the receiver refuses it with
-`incompatible API version with plugin. Plugin version: 4, Client versions: [5]`.
+plugins upgrade together. Version 6 adds the adapter's inline input limit to
+Configure. A version 5 plugin would omit it, so the receiver refuses it with
+`incompatible API version with plugin. Plugin version: 5, Client versions: [6]`.
 The receiver refuses a plugin that offers no TLS certificate. Every call names
 its adapter. A plugin accepts messages up to 64 MiB; the receiver logs a larger
 Dispatch as `dispatch rejected: message too large`.
 
 Each advertisement gives every adapter's sweep and readiness call one
 advertise interval, 30 seconds; a call that runs out counts as not ready
-and is logged.
+and is logged. Each offer carries the adapter's declared inline input limit;
+negative limits are invalid.
 
 Each scrape of `/metrics` calls every adapter's `Metrics` at once, each within
 2 seconds. A plugin answers with samples of the `wherry_adapter_` families,

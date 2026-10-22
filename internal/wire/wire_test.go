@@ -673,6 +673,7 @@ func TestValidateOffers(t *testing.T) {
 		"none":              {nil, true},
 		"empty":             {[]Offer{}, true},
 		"duplicate adapter": {[]Offer{offer, {Adapter: "nomad", Agent: "codex"}}, false},
+		"negative limit":    {[]Offer{{Adapter: "nomad", Agent: "claude", InlineLimit: -1}}, false},
 		"missing agent":     {[]Offer{{Adapter: "nomad"}}, false},
 		"uppercase agent":   {[]Offer{{Adapter: "nomad", Agent: "Claude"}}, false},
 		"missing adapter":   {[]Offer{{Agent: "claude"}}, false},

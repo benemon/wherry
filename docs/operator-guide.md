@@ -612,10 +612,14 @@ receiver gets no seal, so that receiver stops the job and the turn ends
 ## Inputs and outputs
 
 A task's input files hold the pool's `inline_limit` together, and a turn's
-outputs its `output_limit` in 256 entries at most. An adapter can deliver
-less; the [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs)
-states its limit. A turn whose inputs an adapter cannot deliver ends
-`TASK_STATE_FAILED` naming the input.
+outputs its `output_limit` in 256 entries at most. An adapter implements
+`InlineLimit` with the most inline input bytes it delivers, or zero when it
+declares none. Receivers advertise that cap. A host applies the smallest
+nonzero cap among the live adapters in the chosen pool that satisfy the task.
+When the task exceeds it, a pool with storage and a configured host storage
+credential carries every inline input through S3; otherwise submit refuses
+before publishing. The receiver keeps the adapter's dispatch check as a
+backstop.
 
 The agent creates `WHERRY_OUTPUT_DIR` when it writes its first output.
 Outputs are collected once the agent writes its result line and the job is
@@ -890,8 +894,8 @@ state directory.
 1. Replace the binary on every host and receiver host.
 2. Replace the plugins in each receiver's plugin directory together with the
    receiver binary; a receiver refuses a plugin of another adapter protocol
-   version. This release speaks adapter protocol version 5 and refuses a
-   version 4 plugin, which would drop a task's model and run its own.
+   version. This release speaks adapter protocol version 6 and refuses a
+   version 5 plugin, which would omit its inline input limit.
 3. Restart each receiver with the same bundle and state directory. On
    `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its
    tasks to the pool. The next delivery of each task adopts the running

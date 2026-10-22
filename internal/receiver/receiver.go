@@ -504,7 +504,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 			continue
 		}
 		if ready {
-			offers = append(offers, wire.Offer{Adapter: named.Name, Agent: named.Agent})
+			offers = append(offers, wire.Offer{Adapter: named.Name, Agent: named.Agent, InlineLimit: named.Adapter.InlineLimit()})
 		}
 	}
 	r.mu.Lock()

@@ -144,6 +144,9 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 				receiver.ReceiverID, receiver.Pool, receiver.Capacity, receiver.InFlight, receiver.HeartbeatAge, receiver.Status)
 			for _, adapter := range receiver.Adapters {
 				fmt.Fprintf(stdout, "  adapter=%s agent=%s ready=%t labels=%s", adapter.Name, adapter.Agent, adapter.Ready, wire.TermsText(adapter.Labels))
+				if adapter.InlineLimit > 0 {
+					fmt.Fprintf(stdout, " inline_limit=%d", adapter.InlineLimit)
+				}
 				if len(adapter.Models) > 0 {
 					fmt.Fprintf(stdout, " models=%s default_model=%s", strings.Join(adapter.Models, ","), adapter.DefaultModel)
 				}
@@ -337,7 +340,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 			return err
 		}
 		defer file.Close()
-		stored = append(stored, busclient.S3File{Name: filepath.Base(path), File: file})
+		stored = append(stored, busclient.S3File{Name: filepath.Base(path), Body: file})
 	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {

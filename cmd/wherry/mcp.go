@@ -340,7 +340,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receivers",
-		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each adapter's agent and labels as wherry.admin records them, and its agent's models and default_model from the pool's terms, with ready set when the receiver's live advertisement offers the adapter. A live receiver with no ready adapter lists every adapter with ready false. Read it to choose an agent and selector before submit.",
+		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each adapter's agent and labels as wherry.admin records them, its inline_limit from the offer, and its agent's models and default_model from the pool's terms, with ready set when the receiver's live advertisement offers the adapter. A live receiver with no ready adapter lists every adapter with ready false. Read it to choose an agent and selector before submit.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()
@@ -365,7 +365,9 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		}
 		defer func() {
 			for _, file := range submission.S3Inputs {
-				file.File.Close()
+				if closer, ok := file.Body.(io.Closer); ok {
+					closer.Close()
+				}
 			}
 		}()
 		client, err := connect()
@@ -744,11 +746,13 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 		file, err := openInput(path)
 		if err != nil {
 			for _, opened := range submission.S3Inputs {
-				opened.File.Close()
+				if closer, ok := opened.Body.(io.Closer); ok {
+					closer.Close()
+				}
 			}
 			return busclient.SubmitInput{}, err
 		}
-		submission.S3Inputs = append(submission.S3Inputs, busclient.S3File{Name: filepath.Base(path), File: file})
+		submission.S3Inputs = append(submission.S3Inputs, busclient.S3File{Name: filepath.Base(path), Body: file})
 	}
 	return submission, nil
 }

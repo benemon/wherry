@@ -94,3 +94,26 @@ func requiresModel(agent admin.AgentTerms) bool {
 func spare(ad wire.Advertisement) int64 {
 	return ad.Capacity - ad.InFlight
 }
+
+// adapterInlineLimit returns the smallest declared limit of the live adapters in pool that satisfy placement.
+func adapterInlineLimit(state admin.State, pool string, placement wire.Placement, ads map[string]wire.Advertisement) (int64, string) {
+	var limit int64
+	var limiting string
+	for _, receiver := range slices.Sorted(maps.Keys(ads)) {
+		ad := ads[receiver]
+		if ad.Pool != pool {
+			continue
+		}
+		config := state.Receivers[receiver]
+		for _, offer := range ad.Offers {
+			index := slices.IndexFunc(config.Adapters, func(adapter admin.AdapterSettings) bool { return adapter.Name == offer.Adapter })
+			if index < 0 || config.Adapters[index].Agent != placement.Agent || !wire.Satisfies(placement.Selector, config.Adapters[index].Labels) {
+				continue
+			}
+			if offer.InlineLimit > 0 && (limit == 0 || offer.InlineLimit < limit) {
+				limit, limiting = offer.InlineLimit, offer.Adapter
+			}
+		}
+	}
+	return limit, limiting
+}

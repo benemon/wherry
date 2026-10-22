@@ -17,8 +17,8 @@ const maxHandle = 4 << 10
 // Run checks the adapters factory, the one a plugin hands Serve, builds against the adapter contract on their
 // platform, giving it a logger that discards. completes configures an adapter whose job runs for at least ten seconds
 // and exits 0; neverStarts one whose job the platform ends before its agent starts. Every job the suite creates is
-// purged.
-func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Adapter, error), completes, neverStarts adapter.Settings) {
+// purged. inlineLimit is the cap both configured adapters report.
+func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Adapter, error), completes, neverStarts adapter.Settings, inlineLimit int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 	running, err := factory(completes, hclog.NewNullLogger())
@@ -28,6 +28,9 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 	failing, err := factory(neverStarts, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatalf("configure %s: %v", neverStarts.Name, err)
+	}
+	if running.InlineLimit() != inlineLimit || failing.InlineLimit() != inlineLimit {
+		t.Fatalf("inline limits = %d and %d, want %d", running.InlineLimit(), failing.InlineLimit(), inlineLimit)
 	}
 	id := runID(t)
 

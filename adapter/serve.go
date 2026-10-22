@@ -136,7 +136,7 @@ func (s *server) Configure(_ context.Context, req *adapterv1.ConfigureRequest) (
 	directories := adapter.Directories()
 	return &adapterv1.ConfigureResponse{Directories: &adapterv1.Directories{
 		Input: directories.Input, Output: directories.Output, Credentials: directories.Credentials,
-	}}, nil
+	}, InlineLimit: adapter.InlineLimit()}, nil
 }
 
 func (s *server) Ready(ctx context.Context, req *adapterv1.ReadyRequest) (*adapterv1.ReadyResponse, error) {
