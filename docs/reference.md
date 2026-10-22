@@ -15,7 +15,7 @@
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
   positive; a `revoke --wait` of zero or less takes the broker-derived
   wait.
-- `continue`, `cancel`, `await`, `status` and `events` print
+- `cancel`, `await`, `status`, `events` and `transcript` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
 - `await` and `status` print each redaction marker of a run this host
@@ -140,7 +140,7 @@ prints `run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
 | `--input FILE` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
 | `--s3-input FILE` | | file of at most 5 GiB that `submit` uploads to the pool's bucket and the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
 | `--credential-file NAME=FILE` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR`; repeatable |
-| `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the turn without it, and `:s3` returns it through the pool's bucket; repeatable |
+| `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket; repeatable |
 | `--deadline` | `2h` | time from now by which the run must end |
 | `--queue-deadline` | `10m` | time from now by which a receiver must claim it |
 
@@ -168,12 +168,7 @@ whose host is not one of the pool's [`vcs`](#pool-terms) hosts:
 invalid input: git remote host github.com is not in pool build's vcs hosts
 ```
 
-`continue` refuses a run whose git input, as this host's record of the run
-holds it, is no longer in the pool's VCS hosts, and a run with S3 inputs or
-outputs whose pool no longer has storage. A host without that record,
-another host of the tenant, does not check it, and admission rejects the
-turn instead. `--git-host-key` reads at most one byte over
-the 8 KiB bound.
+`--git-host-key` reads at most one byte over the 8 KiB bound.
 
 `--git-changes` adds `changes.patch` or `changes.bundle` to the expected
 outputs, unless `--output` names it already; neither is required.
@@ -213,45 +208,31 @@ carries about 75.
 `submit` seals nothing. The receiver that claims the task asks for the
 credential its adapter delivers, the task's credentials and presigned URLs
 for its S3 inputs and outputs, and `wherry await` or `wherry mcp` answers
-([sealed credentials](concepts.md#sealed-credentials)).
+([sealed credentials](concepts.md#sealed-credentials)). When no seal
+answers the request within 5 minutes, the run ends `TASK_STATE_FAILED` with a message
+that names the credentials, and the presigned URLs when the run has S3
+inputs or outputs, but never a value:
 
-### `wherry continue RUN_ID`
-
-Publishes the next turn of a run interrupted in `TASK_STATE_AUTH_REQUIRED`
-to the pool and placement its echo names. Like `submit`, it seals nothing.
-It prints `run_id=<id> turn=<n>`.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--prompt` | `continue` | text of the new turn |
-| `--prompt-file` | | file holding the new turn's prompt |
-| `--deadline` | `2h` | run deadline for the turn |
-| `--queue-deadline` | `10m` | queue deadline for the turn |
-
-`--prompt` and `--prompt-file` are mutually exclusive, and an empty prompt
-file fails with `--prompt-file is empty`. With neither, the prompt is
-`continue`.
-
-It fails when the run is not interrupted, is cancelled, or already has a
-next turn.
+```
+credential <name> was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again
+```
 
 ### `wherry cancel RUN_ID`
 
-Publishes a signed cancel of the run's latest turn to its pool's events
-and prints `run_id=<id>`.
+Publishes a signed cancel of the run to its pool's events and prints
+`run_id=<id>`.
 
 ### `wherry await RUN_ID`
 
-Waits for the latest turn of a run to finish or be interrupted. `--timeout`
-sets the wait, `2h` by default. `--outputs-dir DIR` sets where the turn's
-outputs go, by default `<state_dir>/runs/<run>/outputs/<turn>/`.
+Waits for a run to finish. `--timeout` sets the wait, `2h` by default.
+`--outputs-dir DIR` sets where the run's outputs go, by default
+`<state_dir>/runs/<run>/outputs/`.
 
-It prints the state on the first line. For a turn that ended with a result,
-each following line is one part of a result artifact. For a turn that ended
+It prints the state on the first line. For a run that ended with a result,
+each following line is one part of a result artifact. For a run that ended
 with a status alone, each line is one part of the status message. A part
 prints as its text, its JSON data, `[url <url>]`, or
-`[raw <media type> <n> bytes]`. For `TASK_STATE_AUTH_REQUIRED` it prints
-`continue with: wherry continue <id>` on standard error.
+`[raw <media type> <n> bytes]`.
 
 For a run whose placement names a model, or whose agent's result names the
 models that served it, `await` prints
@@ -277,14 +258,13 @@ it holds.
 
 `await` downloads each S3 output the result lists with the host's storage
 credential, to the same place, and prints it as it prints any output. It
-downloads only an S3 output the run declares, at its key for the turn, and
-writes it only when its bytes match the listed size and SHA-256; a file
-already there that matches is kept. Once the run's turn is terminal and
-every listed S3 output has verified, `await` deletes every object under
-`wherry/<tenant>/<run>/` in the pool's bucket, inputs included. An
-interrupted turn keeps them for its continuation. A run that ends while
-no `await` runs keeps them until `wherry cleanup` or the bucket's
-lifecycle rule removes them.
+downloads only an S3 output the run declares, at its key
+`wherry/<tenant>/<run>/outputs/<name>`, and writes it only when its bytes
+match the listed size and SHA-256; a file already there that matches is
+kept. Once the run is terminal and every listed S3 output has verified,
+`await` deletes every object under `wherry/<tenant>/<run>/` in the pool's
+bucket, inputs included. A run that ends while no `await` runs keeps them
+until `wherry cleanup` or the bucket's lifecycle rule removes them.
 
 `await` exits with status 1, `run ended in <state>`, for any state other
 than `TASK_STATE_COMPLETED`, with status 1 when an output fails
@@ -302,32 +282,29 @@ its pool's bucket with the host's storage credential, and prints
 `run_id=<id>`. It deletes only objects whose keys a listing of that prefix
 returns and that start with it, so the prefix of another run or tenant is
 never touched. It finds the run as `status` does, and fails with `run not
-found` otherwise. It refuses a run whose latest turn has not ended, since its
+found` otherwise. It refuses a run that has not ended, since its
 receiver may still read the inputs or write the outputs there. Use it for a
 run the client never saw finish.
 
 ### `wherry status [RUN_ID]`
 
-Reads the latest verified state of a run's latest turn without waiting.
-With `RUN_ID` it prints the state on the first line, `turn=<n>` on the
-second, `model=<model>` next when the run's placement names one, then one
-line per part of the status message. The state is
-`TASK_STATE_SUBMITTED` until a receiver reports one. For
-`TASK_STATE_AUTH_REQUIRED` it prints `continue with: wherry continue <id>`
-on standard error.
+Reads the latest verified state of a run without waiting. With `RUN_ID` it
+prints the state on the first line, `model=<model>` next when the run's
+placement names one, then one line per part of the status message. The
+state is `TASK_STATE_SUBMITTED` until a receiver reports one.
 
 Without `RUN_ID` it prints one line per run, latest update first:
 
 ```
-<run> pool=<pool> turn=<n> [model=<model>] <state>
+<run> pool=<pool> [model=<model>] <state>
 ```
 
 The list holds the runs in this host's records in `state_dir` and the runs
 a receiver echoed on the tenant feed, which include runs from the tenant's
 other hosts. A run's update time is that of its latest status. While it has
-none, the time is this host's submission of the turn, else the modification
+none, the time is this host's submission of the run, else the modification
 time of this host's record of the run when the record predates submission
-times, else the Kafka timestamp of the turn's echo. A record in `state_dir`
+times, else the Kafka timestamp of the run's echo. A record in `state_dir`
 that does not decode counts as skipped, and its run is listed only through
 its echo. With no runs it prints nothing.
 
@@ -337,12 +314,11 @@ state. It fails when the run is not found or the read fails.
 ### `wherry events RUN_ID`
 
 Prints a run's verified history: one line per status, one per event ID, in
-feed order, then one line per turn and attempt with its transcript chunk
-count.
+feed order, then one line per attempt with its transcript chunk count.
 
 ```
-turn=<n> attempt=<n> kind=<kind> state=<state> receiver=<id> time=<time> message="<text>"
-turn=<n> attempt=<n> transcript_chunks=<n>
+attempt=<n> kind=<kind> state=<state> receiver=<id> time=<time> message="<text>"
+attempt=<n> transcript_chunks=<n>
 ```
 
 `message` appears when the status has one, with each redaction marker shown
@@ -351,18 +327,15 @@ appear.
 
 ### `wherry transcript RUN_ID`
 
-Prints a turn's transcript: each line of the agent's standard output, in
-output order, as the receiver redacted it. The lines are those the turn's
+Prints a run's transcript: each line of the agent's standard output, in
+output order, as the receiver redacted it. The lines are those the run's
 highest delivery attempt published. Before that attempt's first line, or in
 place of its lines while it has none, each line comes from the highest earlier
 attempt that has it. An adopter resumes the job's output past the last
-heartbeat's offset, so an adopted turn reads from offset 0. The CANCELED
-terminal of an interrupted run, which every pool member writes with its own
-attempt, does not count as an attempt.
+heartbeat's offset, so an adopted run reads from offset 0.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--turn` | the latest | turn to read |
 | `--offset` | `0` | lines to skip |
 | `--limit` | `0`, every line | most lines to print |
 
@@ -377,10 +350,10 @@ A line that is not UTF-8 prints as its bytes. For a line over 512 KiB, which
 the receiver did not store, it prints `line at offset <seq> not stored:
 sha256=<hex> size=<bytes>` on standard error. Each redaction marker reads
 `[redacted:<name>]`, and `<name> redacted <n> times` on standard error counts
-the markers in every line of the transcript. The transcript grows while the turn
-runs. `transcript` fails with `invalid input` for a turn the run does not have.
+the markers in every line of the transcript. The transcript grows while the agent
+runs.
 
-`await`, `status`, `events`, `transcript`, `cleanup`, `continue` and `cancel`
+`await`, `status`, `events`, `transcript`, `cleanup` and `cancel`
 find a run from this host's record of it in `state_dir`, or from a receiver's
 echo on the tenant feed. They fail with `run not found` when there is neither.
 
@@ -551,12 +524,12 @@ the bundle's `platform` entry for its name when there is one.
 A plugin also reports, for each adapter, the paths of the input, output and
 credentials directories as its agent sees them, which the receiver writes
 into the prompt, and implements `InlineLimit` to report the most inline input
-bytes it delivers. Zero declares no adapter limit. Dispatch carries a turn's
+bytes it delivers. Zero declares no adapter limit. Dispatch carries a run's
 input files and task credentials with the prompt, and a fetch for each S3
 input: its name, presigned URL,
 size and SHA-256, which the plugin fetches and verifies before the agent
 starts, reporting a job that never started with class `fetch` when it
-cannot. A plugin that cannot deliver an input reports it, and the turn ends
+cannot. A plugin that cannot deliver an input reports it, and the run ends
 `TASK_STATE_FAILED` naming it. After the agent's result line the receiver
 stops the job and asks the plugin to collect its outputs, which arrive over
 the link in pieces of at most 1 MiB. The outputs the receiver names for
@@ -572,11 +545,12 @@ not against one that runs commands of its own
 
 The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
-certificate pair made for each start, protocol version 6. The receiver refuses a
+certificate pair made for each start, protocol version 7. The receiver refuses a
 plugin of any other protocol version at its start, so the receiver and its
-plugins upgrade together. Version 6 adds the adapter's inline input limit to
-Configure. A version 5 plugin would omit it, so the receiver refuses it with
-`incompatible API version with plugin. Plugin version: 5, Client versions: [6]`.
+plugins upgrade together. Version 7 removes the turn from the run Dispatch
+carries and from Lookup, Purge and Release, which name a job by run ID alone.
+The receiver refuses a version 6 plugin with
+`incompatible API version with plugin. Plugin version: 6, Client versions: [7]`.
 The receiver refuses a plugin that offers no TLS certificate. Every call names
 its adapter. A plugin accepts messages up to 64 MiB; the receiver logs a larger
 Dispatch as `dispatch rejected: message too large`.
@@ -644,10 +618,10 @@ replace no values. Every call's text has its URLs replaced, its line breaks
 turned into spaces and is cut to 512 bytes. An adapter's configure error ends
 the receiver with `adapter <name>: <text>`.
 
-A receiver adopts a turn's existing job only when the adapter and agent
+A receiver adopts a run's existing job only when the adapter and agent
 recorded with it match the adapter that finds it. It leaves a job whose
 adapter is another of its adapters to that adapter, and stops and purges
-any other job under the turn's ID and dispatches the turn again.
+any other job under the run's ID and dispatches the run again.
 
 The protocol is the Go module `github.com/benemon/wherry/adapter` in this
 repository. [`adapter.proto`](https://github.com/benemon/wherry/blob/main/adapter/proto/wherry/adapter/v1/adapter.proto)
@@ -669,22 +643,19 @@ output, error text, URL, image, path, node or credential name. An agent the
 pool's terms do not name is `other`. `model` is the placement's model when the
 agent's `models` in the terms hold it, `other` when they do not, and empty for
 an agent with no `models`. A `state` outside the A2A task states is `other`.
-A turn ended without an adapter has
-`adapter="none"`: one given back at the delivery budget before any adapter
-took it, and an interrupted turn a member ends on its cancel or expiry, even
-after it ran.
+A run ended without an adapter, one given back at the delivery budget
+before any adapter took it, has `adapter="none"`.
 
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
 | `wherry_claims_total` | counter | `tenant` | claimed tasks whose submission verifies |
 | `wherry_admissions_total` | counter | `tenant`, `adapter` | tasks admitted, by the adapter they were routed to |
 | `wherry_rejections_total` | counter | `tenant`, `reason` | rejections, by reason |
-| `wherry_runs_total` | counter | `tenant`, `adapter`, `agent`, `model`, `state` | turns ended `completed`, `failed` or `canceled` |
-| `wherry_turn_duration_seconds` | histogram | `tenant`, `adapter`, `agent`, `model`, `state` | time from this attempt's claim to the turn's terminal state; an adopted turn counts the adopting attempt only |
+| `wherry_runs_total` | counter | `tenant`, `adapter`, `agent`, `model`, `state` | runs ended `completed`, `failed` or `canceled` |
+| `wherry_turn_duration_seconds` | histogram | `tenant`, `adapter`, `agent`, `model`, `state` | time from this attempt's claim to the run's terminal state; an adopted run counts the adopting attempt only |
 | `wherry_queue_wait_seconds` | histogram | `tenant`, `adapter` | time from submission to first claim |
-| `wherry_adoptions_total` | counter | `tenant`, `adapter` | turns that adopted an earlier attempt's job |
-| `wherry_continuations_total` | counter | `tenant`, `adapter` | continuation turns admitted |
-| `wherry_redeliveries_total` | counter | `tenant`, `adapter` | turns run on a redelivery |
+| `wherry_adoptions_total` | counter | `tenant`, `adapter` | runs that adopted an earlier attempt's job |
+| `wherry_redeliveries_total` | counter | `tenant`, `adapter` | runs executed on a redelivery |
 | `wherry_in_flight` | gauge | `adapter` | tasks held |
 | `wherry_capacity` | gauge | none | the configured capacity |
 | `wherry_start_failures_total` | counter | `adapter`, `class` | start failures: `input-too-large`, `dispatch`, `platform`, and `offer-unavailable`, which counts a release by a member with no matching adapter and has no start-failure record |
@@ -692,10 +663,10 @@ after it ran.
 | `wherry_stop_failures_total` | counter | `adapter` | failed `Stop` calls |
 | `wherry_purge_failures_total` | counter | `adapter` | failed `Purge` calls |
 | `wherry_sweep_failures_total` | counter | `adapter` | failed `Sweep` calls |
-| `wherry_collection_failures_total` | counter | `adapter`, `reason` | turns whose outputs were not collected: `not_stopped`, `over_limits`, `timeout`, `failed` |
+| `wherry_collection_failures_total` | counter | `adapter`, `reason` | runs whose outputs were not collected: `not_stopped`, `over_limits`, `timeout`, `failed` |
 | `wherry_plugin_restarts_total` | counter | `type` | plugin restarts |
-| `wherry_seal_waits_total` | counter | `tenant`, `outcome` | seal waits: `sealed`, `expired`, `auth_required`, `adopter_refused` |
-| `wherry_seal_wait_seconds` | histogram | `tenant` | time a turn waited for its seal, whatever the outcome |
+| `wherry_seal_waits_total` | counter | `tenant`, `outcome` | seal waits: `sealed`, `expired`, `unanswered`, `adopter_refused` |
+| `wherry_seal_wait_seconds` | histogram | `tenant` | time a run waited for its seal, whatever the outcome |
 | `wherry_redactions_total` | counter | `tenant`, `adapter` | credential values replaced in published output |
 | `wherry_bus_errors_total` | counter | `op` | Kafka errors: `read`, `write`, `transactional ID`, `share group` |
 | `wherry_denials_total` | counter | `op` | Kafka authorisation errors, by the capability denied: `read`, `write`, `transactional ID`, `share group`, `membership` |
@@ -715,11 +686,11 @@ A rejection's `reason` is its fixed text, such as `run expired`. A reason that
 quotes the task counts as `invalid inputs`,
 `git remote host outside the pool's vcs hosts` or `pool has no storage`.
 
-A seal wait is `expired` when the turn's deadline passes,
-`auth_required` when the wait ends and the turn is interrupted, and
-`adopter_refused` when an adopter's wait ends and it stops the job first.
+A seal wait is `expired` when the run's deadline passes, `unanswered` when
+the 5-minute wait ends and the run fails, and `adopter_refused` when an
+adopter's wait ends and it stops the job before the run fails.
 
-Agent-reported usage comes from a turn's result: Claude Code's `usage` fields
+Agent-reported usage comes from a run's result: Claude Code's `usage` fields
 `input_tokens`, `output_tokens` and `cache_read_input_tokens`, and its
 `total_cost_usd`; Codex's `input_tokens`, `output_tokens`,
 `cached_input_tokens` and `reasoning_output_tokens`. An absent field adds
@@ -732,7 +703,7 @@ minutes.
 
 ## MCP tools
 
-`wherry mcp` serves nine tools over stdio. Each takes and returns JSON with
+`wherry mcp` serves eight tools over stdio. Each takes and returns JSON with
 a declared schema and opens its own Kafka connection. Deadlines given as `0`
 or omitted take the CLI defaults, 7200 and 600 seconds.
 
@@ -742,13 +713,12 @@ or omitted take the CLI defaults, 7200 and 600 seconds.
 | `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `pool`, `await` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `await` | `id` | `id`, `state`, `model`, `served_models`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped` |
-| `continue` | `id`, `prompt`, `prompt_file`, `deadline_seconds`, `queue_deadline_seconds` | `id`, `turn`, `skipped`, `await` |
 | `cancel` | `id` | `id`, `skipped` |
 | `events` | `id` | `id`, `events`, `transcripts`, `redacted`, `skipped` |
-| `transcript` | `id`, `turn`, `offset`, `limit` | `id`, `turn`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
+| `transcript` | `id`, `offset`, `limit` | `id`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
 | `cleanup` | `id` | `id` |
 
-- `submit` and `continue` return `await`, the shell command that waits for
+- `submit` returns `await`, the shell command that waits for
   the run, `wherry await ID`, with `--config-file` and the server's absolute
   configuration path when the server was started with one.
 - `submit` requires exactly one of `prompt` and `prompt_file`, a file path read
@@ -767,22 +737,22 @@ or omitted take the CLI defaults, 7200 and 600 seconds.
   [`input_roots`](#client-configuration), and to none of `state_dir`,
   `host_key`, `bundle`, a credential file or a storage key file; a relative
   path is taken from the server's working directory.
-- `status` returns the latest verified state of a run's latest turn
-  without waiting. `runs` holds one entry for the run `id` names, or,
+- `status` returns the latest verified state of a run without
+  waiting. `runs` holds one entry for the run `id` names, or,
   without `id`, one per run `wherry status` lists, latest update first.
-  Each entry is `{id, pool, turn, state, model, message, updated, redacted}`,
+  Each entry is `{id, pool, state, model, message, updated, redacted}`,
   with `model` the run's placement's model, when it has one. The
   state is `TASK_STATE_SUBMITTED` until a receiver reports one. `updated` is
   the RFC 3339 time of the latest status. While the run has none, it is this
-  host's submission of the turn, else the modification time of this host's
+  host's submission of the run, else the modification time of this host's
   record of the run when the record predates submission times, else the
-  Kafka timestamp of the turn's echo.
+  Kafka timestamp of the run's echo.
 - `await` waits up to 45 seconds. It returns the outcome with `message` and
   `artifacts`, or, while the run is unfinished, its current `state` with
   `retry_after` set to 5. With a progress token it sends a progress notification
   every 5 seconds. Each artifact is `{artifact_id, parts}`, and each part has
   one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which
-  is not included), with `media_type`. `await` writes the turn's verified
+  is not included), with `media_type`. `await` writes the run's verified
   outputs as `wherry await` does, to the default outputs directory, and returns
   each in `outputs` as `{name, path, sha256, size}`, S3 outputs included, which
   it downloads and verifies, then deletes the run's prefix, as `wherry await`
@@ -794,16 +764,13 @@ or omitted take the CLI defaults, 7200 and 600 seconds.
   `wherry status` and `wherry await` print it, and `redacted` maps each name
   to the number of its markers in the messages, the artifacts, or every line
   of the transcript's attempt.
-- `continue` requires `id`. `prompt` defaults to `continue`; `prompt_file`, a
-  file path read as an input is, replaces it, and the two are exclusive. An
-  empty file fails with `prompt_file is empty`. `submit` and `continue` check
-  their arguments before they connect to the bus.
+- `submit` checks its arguments before it connects to the bus.
 - `events` returns `events`, each
-  `{turn, attempt, kind, state, receiver, time, message}`, and
-  `transcripts`, each `{turn, attempt, chunks}`.
-- `transcript` returns the lines `wherry transcript` prints, of `turn`, by
-  default the latest, from `offset` lines in. `attempt` is the turn's highest
-  attempt, 0 while no receiver has reported on the turn. `total` counts the
+  `{attempt, kind, state, receiver, time, message}`, and
+  `transcripts`, each `{attempt, chunks}`.
+- `transcript` returns the lines `wherry transcript` prints, from `offset`
+  lines in. `attempt` is the run's highest attempt, 0 while no receiver has
+  reported on the run. `total` counts the
   transcript's lines on the feed so far, less those `wherry transcript`
   drops, and `next_offset` is set while lines remain past the page.
 - Each line is `{seq, attempt, text}`, with `seq` its byte offset in the
@@ -818,7 +785,7 @@ or omitted take the CLI defaults, 7200 and 600 seconds.
   for a page alone comes back as the start of its text that fits, with
   `truncated` true and `bytes` its full size, and `next_offset` passes it.
 - `cleanup` deletes the run's S3 objects as `wherry cleanup` does, and refuses
-  with `INVALID_ARGUMENT` while the run's latest turn has not ended.
+  with `INVALID_ARGUMENT` while the run has not ended.
 - `skipped` counts the run's records that failed verification; for a
   `status` list, the records of every listed run.
 
@@ -830,11 +797,8 @@ error text from the bus, the broker or the host key.
 | `INVALID_ARGUMENT` | an input is missing or malformed; the message names the rule it breaks |
 | `RUN_NOT_FOUND` | this host has not submitted the run and no receiver has admitted it |
 | `NO_MATCHING_RECEIVER` | no live receiver of an entitled pool can take the agent and selector |
-| `NOT_AWAITING_CONTINUATION` | the run is not interrupted |
-| `RUN_CANCELED` | the run is cancelled |
-| `TURN_ALREADY_SUBMITTED` | the next turn is already published |
-| `RUN_EXPIRED` | the run is past its pool's `run_lifetime_ms`, or the queue deadline falls after it |
-| `OUTPUTS_NOT_WRITTEN` | the turn's verified outputs could not be written to the state directory, or its S3 outputs downloaded, or the run's prefix deleted |
+| `RUN_EXPIRED` | the queue deadline falls more than the pool's `run_lifetime_ms` after submission |
+| `OUTPUTS_NOT_WRITTEN` | the run's verified outputs could not be written to the state directory, or its S3 outputs downloaded, or the run's prefix deleted |
 | `CANCELLED` | the request was cancelled |
 | `VERSION_SKEW` | `wherry.admin` holds records a later release wrote; upgrade `wherry` and restart the MCP server |
 | `UNAVAILABLE` | any other failure; the CLI reports the cause |
@@ -856,12 +820,11 @@ A JSON object at `~/.config/wherry/config.json`, or at the host command's
 
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
 readable by its owner alone, with `redaction_key`, the run's redaction key,
-made when this host first records a turn of the run,
-`runs/<run>/outputs/<turn>/` for the outputs `await` writes by default, and
-`answered/<run>.<turn>.<attempt>` for each attempt it answered, with a
-`.lock` beside it that every process sharing the directory holds while it
-answers that attempt. `submit` and `continue` write the run's record before
-they publish the turn, and put the previous record back when publishing
+made when this host submits the run, `runs/<run>/outputs/` for the outputs
+`await` writes by default, and `answered/<run>.<attempt>` for each attempt
+it answered, with a `.lock` beside it that every process sharing the
+directory holds while it answers that attempt. `submit` writes the run's
+record before it publishes the task, and removes it when publishing
 fails. The
 credential file is read at each answer, and its contents are sealed as
 they are. A seal is at most 64 KiB, which bounds the values one seal
@@ -910,13 +873,13 @@ ignored. Any other entry and a directory with no agent files are errors.
 | --- | --- |
 | `agents` | one or more `{name, credentials, models, default_model}`: an agent, the credential names it may take, and optionally the models a task may name for it and the one a task naming none runs |
 | `default_agent` | an agent from `agents`, used when a task names none |
-| `run_lifetime_ms` | optional, default 1209600000 (14 days): time from a run's first submission through its last continuation |
+| `run_lifetime_ms` | optional, default 1209600000 (14 days): time from a run's submission past which a receiver rejects it unclaimed; it also bounds the run's queue deadline and the pool topics' retention |
 | `delivery_limit` | the share group's `share.delivery.count.limit` |
 | `lock_duration_ms` | the share group's `share.record.lock.duration.ms` |
 | `producer_byte_rate` | host quota, bytes per second |
 | `request_percentage` | host quota, percentage of broker request time |
 | `inline_limit` | optional, default 262144 (256 KiB): bytes of a task's input files together |
-| `output_limit` | optional, default 8388608 (8 MiB): bytes of one output, and of a turn's outputs together |
+| `output_limit` | optional, default 8388608 (8 MiB): bytes of one output, and of a run's outputs together |
 | `vcs` | optional, default none: the hosts a [git input](a2a-extension-v1.md#git-input) may clone from |
 | `storage` | optional, default none: `{endpoint, bucket}`, the S3-compatible store of the pool's [S3 inputs and outputs](a2a-extension-v1.md#s3-inputs-and-outputs) |
 
@@ -951,7 +914,7 @@ broker bounds it between
 `group.share.max.record.lock.duration.ms`. Every delivery counts against
 `delivery_limit`, including a release after a start failure and a release
 by a member with no matching adapter. From attempt
-`delivery_limit` minus 1, a receiver ends a turn `TASK_STATE_FAILED` with
+`delivery_limit` minus 1, a receiver ends a run `TASK_STATE_FAILED` with
 `delivery budget exhausted` where it would release it, except in the cases
 the [extension](a2a-extension-v1.md#delivery-budget) lists.
 
@@ -985,7 +948,7 @@ and the feeds of the tenants entitled to the pool for chunks.
 `pool create`, `tenant add` and `check` sign four records and measure
 them as record batches: the largest bounded submission, the largest output
 chunk, of 256 KiB, the largest result, and the largest transcript chunk, a
-line of 512 KiB. The largest result has the turn's message with its 256
+line of 512 KiB. The largest result has the run's message with its 256
 input files named but not carried, 256 returned and 256 unreturned outputs
 with 512-byte names, a status text and a result text of 64 KiB each, and
 the agent's result record at its 16 KiB bound; a receiver's labels and an
@@ -998,8 +961,7 @@ The largest bounded submission has every field that has a bound at its maximum:
 256 parts, each an input file with a 255-byte name, one of them holding
 `inline_limit` bytes, and a git input with a 2048-byte remote, a 255-byte ref, a
 512-byte path and an 8 KiB host key of quotes, which JSON escapes, naming the
-one task credential it declares. Only a first turn carries a git input, so the
-submission is turn 1. The prompt's text, part metadata and media types, the
+one task credential it declares. The prompt's text, part metadata and media types, the
 selector, the other task credentials and the outputs have no bound and are left
 empty. A task with a large prompt can still exceed the record limit; `submit`
 then fails naming the record's size.
@@ -1007,10 +969,10 @@ then fails naming the record's size.
 An input file travels base64-encoded inside the signed record, which is itself
 base64url-encoded, so a submission takes about 16/9 of `inline_limit` plus about
 123 KB. As `pool create` measures them, the submission at the default
-`inline_limit` is 589210 bytes, the output chunk 468155 bytes, the result 791053
-bytes and the transcript chunk 933544 bytes, so a feed's `max.message.bytes`
-below 933544 refuses every pool; with brokers and topics at their defaults, the
-highest `inline_limit` that fits is 493221 bytes, about 481 KiB.
+`inline_limit` is 589198 bytes, the output chunk 468119 bytes, the result 791017
+bytes and the transcript chunk 933508 bytes, so a feed's `max.message.bytes`
+below 933508 refuses every pool; with brokers and topics at their defaults, the
+highest `inline_limit` that fits is 493227 bytes, about 481 KiB.
 
 `pool create` and `tenant add` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.admin`, which they
@@ -1106,7 +1068,7 @@ otherwise, so the adapter's command reads it with its own fallback, such as
 The agent writes JSON lines to standard output. The receiver publishes each
 line as a transcript chunk. With the adapter's `output` absent or `claude`,
 the line that decodes as a JSON object with `"type": "result"` ends the
-turn: its `result` string becomes the result, and `"is_error": true` makes
+run: its `result` string becomes the result, and `"is_error": true` makes
 the state `TASK_STATE_FAILED`. Claude Code's
 [headless](https://docs.claude.com/en/docs/claude-code/headless) stream-json
 output writes this format. The result's
@@ -1115,13 +1077,13 @@ the models that served it.
 
 With `output: codex`, the format `codex exec --json` writes, the receiver
 keeps the text of the last `item.completed` line whose `item.type` is
-`agent_message`. A `turn.completed` line ends the turn with that text as the
+`agent_message`. A `turn.completed` line ends the run with that text as the
 result and its `usage` as metadata. A `turn.failed` line ends it as
 `TASK_STATE_FAILED` with its `error.message`, or `error` itself when it is
 a string, as the result. `error` lines and `error` items do not end the
-turn.
+run.
 
-With `output: file`, no line ends the turn; it ends when the job does. The
+With `output: file`, no line ends the run; it ends when the job does. The
 receiver collects the outputs and takes the output `reply_file` names as
 the result, redacted like any result. The reply is not returned as an output
 and counts against no output limit; a reply over 64 KiB becomes
@@ -1130,33 +1092,31 @@ that adapter: an expected output of that name is listed as not returned with
 the reason `is the adapter's reply file`. A job that exits 0 with a reply
 completes with it, and one that exits 0 without a reply fails with the
 message `agent wrote no reply file`, or `outputs not collected` when the
-receiver could not collect the outputs. An empty reply completes the turn
+receiver could not collect the outputs. An empty reply completes the run
 with an empty result; `wherry await` then prints the state and an empty
 line. A job that exits non-zero or by a signal fails with its reply as the
 result, or without one with `agent exited <code>` or
 `agent ended by <signal>`. The result carries no `agent_result` metadata.
 
-The receiver stops the job once it reads the line that ends the turn. A job
+The receiver stops the job once it reads the line that ends the run. A job
 that ends without one fails with the message `agent ended without a result`.
 
-A turn's run time is capped at its deadline, and at six hours after its
-queue deadline. A receiver rejects a turn no pool member has claimed with
+A run's time is capped at its deadline, and at six hours after its queue
+deadline. A receiver rejects a run no pool member has claimed with
 `queue deadline passed` or `run deadline passed` once that deadline has
-passed. A redelivered turn that a member has claimed is not rejected: the
-receiver adopts its job when it finds one, and dispatches the turn again when
+passed. A redelivered run that a member has claimed is not rejected: the
+receiver adopts its job when it finds one, and dispatches the run again when
 it finds none. Past its run deadline, the receiver stops any job it finds and
-ends the turn `TASK_STATE_FAILED` with `timeout`.
+ends the run `TASK_STATE_FAILED` with `timeout`.
 
 A receiver measures a run's lifetime from the broker's append time of its
-first turn. It rejects a turn no pool member has claimed with `run expired`
+submission. It rejects a run no pool member has claimed with `run expired`
 when that time is more than `run_lifetime_ms` ago, and with
-`queue deadline exceeds run lifetime` when the turn's queue deadline falls
-more than `run_lifetime_ms` after it. A redelivered turn that a member has
-claimed skips both checks. `wherry submit`, `wherry continue` and the MCP
-tools make the same checks before publishing. Every turn therefore ends
-within six hours after the run lifetime. A receiver that next reads an
-interrupted run after that time ends it `TASK_STATE_CANCELED` with
-`run expired`.
+`queue deadline exceeds run lifetime` when the run's queue deadline falls
+more than `run_lifetime_ms` after it. A redelivered run that a member has
+claimed skips both checks. `wherry submit` and the MCP `submit` tool refuse,
+before publishing, a queue deadline more than `run_lifetime_ms` from now.
+Every run therefore ends within six hours after the run lifetime.
 
 ## Kafka resources
 
@@ -1176,7 +1136,7 @@ replication factor, `cleanup.policy=delete` and
 | `wherry.receiver.<receiver>` | `receiver add` | `-1` |
 | `wherry.host.<tenant>.<host>` | `host add` | `-1` |
 
-The tasks retention keeps the run lifetime, the six-hour maximum turn time,
+The tasks retention keeps the run lifetime, the six-hour maximum run time,
 and a one-day margin. Events stay at least as long as tasks. A tenant feed
 must stay for at least `run_lifetime_ms + 21600000`; its 30-day default exceeds
 the default requirement of `1231200000`. Identity and configuration topics

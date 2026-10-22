@@ -73,13 +73,8 @@ type Receiver struct {
 	deniedSince time.Time
 	// admissionMu serialises the admission transactional ID, which one producer at a time may hold.
 	admissionMu sync.Mutex
-	// cancelled holds, per tenant and run, the lowest turn a host of that tenant has cancelled.
-	cancelled map[runKey]int64
-	// runStarts holds, per tenant and run, when a waiting interrupted run's first turn was submitted.
-	runStarts map[runKey]time.Time
-	// unfound holds, by event ID, when an interrupted status's turn was last found missing; a host key not yet
-	// refreshed can cause a miss, so a missing turn is looked up again after unfoundRetry.
-	unfound map[string]time.Time
+	// cancelled holds the runs cancelled by a host of their tenant.
+	cancelled map[runKey]bool
 }
 
 // New loads or creates the receiver's signing key in stateDir and builds its Kafka client from bundle. Once configured,
@@ -596,9 +591,8 @@ func (events poolEvents) committedTerminal(run, taskHash string) bool {
 
 type runKey struct{ tenant, run string }
 
-// cancelledTurn returns the lowest turn of run that a live host of tenant has cancelled.
-func (r *Receiver) cancelledTurn(ctx context.Context, events poolEvents, run, tenant string) (int64, bool) {
-	var lowest int64
+// cancelledRun reports whether a live host of tenant has cancelled run.
+func (r *Receiver) cancelledRun(ctx context.Context, events poolEvents, run, tenant string) bool {
 	found := false
 	for _, encoded := range events.others[run] {
 		err := r.authorizeHost(ctx, encoded, func(state admin.State, hosts signed.Keys) error {
@@ -606,31 +600,23 @@ func (r *Receiver) cancelledTurn(ctx context.Context, events poolEvents, run, te
 			if err == nil && cancel.Run != run {
 				return errors.New("cancel names another run than its key")
 			}
-			if err == nil && (!found || cancel.Turn < lowest) {
-				lowest, found = cancel.Turn, true
+			if err == nil {
+				found = true
 			}
 			return err
 		})
 		_ = err // a record that is not an authorised cancel changes nothing
 	}
-	return lowest, found
+	return found
 }
 
-// readCancels rebuilds the cancelled runs from the pool's events, and ends each cancelled or expired run
-// that waits interrupted, held by no member.
+// readCancels rebuilds the cancelled runs from the pool's events.
 func (r *Receiver) readCancels(ctx context.Context) error {
 	events, err := r.readEvents(ctx)
 	if err != nil {
 		return err
 	}
-	state, _, _ := r.snapshot()
-	lifetime := state.Pools[r.config.Pool].RunLifetime()
-	r.mu.Lock()
-	known, knownUnfound := r.runStarts, r.unfound
-	r.mu.Unlock()
-	cancelled := map[runKey]int64{}
-	starts := map[runKey]time.Time{}
-	unfound := map[string]time.Time{}
+	cancelled := map[runKey]bool{}
 	for run, statuses := range events.statuses {
 		// A cancel counts for its own tenant only, so a status of another tenant under the run ID, such as a
 		// rejection, cannot lend that tenant's host the run.
@@ -639,43 +625,13 @@ func (r *Receiver) readCancels(ctx context.Context) error {
 			tenants[status.Wherry.Tenant] = true
 		}
 		for tenant := range tenants {
-			latest := latestStatus(statuses, tenant)
-			turn, canceled := r.cancelledTurn(ctx, events, run, tenant)
-			if canceled {
-				cancelled[runKey{tenant, run}] = turn
-			}
-			if latest == nil || latest.Wherry.Kind != "interrupted" {
-				continue
-			}
-			if canceled && latest.Wherry.Turn >= turn {
-				if _, err := r.endInterrupted(ctx, *latest, cancelReason, 0); err != nil {
-					r.logger.Printf("run %s: cancel interrupted turn: %v", run, err)
-				}
-				continue
-			}
-			key := runKey{tenant, run}
-			if start, ok := known[key]; ok && time.Since(start) <= lifetime {
-				starts[key] = start
-				continue
-			}
-			if at, ok := knownUnfound[latest.Wherry.EventID]; ok && time.Since(at) < unfoundRetry {
-				unfound[latest.Wherry.EventID] = at
-				continue
-			}
-			start, err := r.endInterrupted(ctx, *latest, "run expired", lifetime)
-			if errors.Is(err, errInterruptedTurnNotFound) {
-				unfound[latest.Wherry.EventID] = time.Now()
-			}
-			if err != nil {
-				r.logger.Printf("run %s: expire interrupted turn: %v", run, err)
-			} else if !start.IsZero() {
-				starts[key] = start
+			if r.cancelledRun(ctx, events, run, tenant) {
+				cancelled[runKey{tenant, run}] = true
 			}
 		}
 	}
 	r.mu.Lock()
 	r.cancelled = cancelled
-	r.runStarts, r.unfound = starts, unfound
 	r.mu.Unlock()
 	return nil
 }
@@ -686,7 +642,7 @@ func latestStatus(statuses []wire.RunStatus, tenant string) *wire.RunStatus {
 	var order wire.AttemptFilter
 	for i := range statuses {
 		status := &statuses[i]
-		if status.Wherry.Tenant != tenant || status.Wherry.Kind == "rejected" || !order.Admit(status.Wherry.Run, status.Wherry.Turn, status.Wherry.Attempt) {
+		if status.Wherry.Tenant != tenant || status.Wherry.Kind == "rejected" || !order.Admit(status.Wherry.Run, status.Wherry.Attempt) {
 			continue
 		}
 		latest = status

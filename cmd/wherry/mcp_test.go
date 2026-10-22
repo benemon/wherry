@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -132,11 +131,11 @@ func TestMCPToolsList(t *testing.T) {
 			}
 		}
 	})
-	if want := []string{"await", "cancel", "cleanup", "continue", "events", "receivers", "status", "submit", "transcript"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"await", "cancel", "cleanup", "events", "receivers", "status", "submit", "transcript"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools %v, want %v", names, want)
 	}
 	required := map[string][]string{
-		"await": {"id"}, "cancel": {"id"}, "cleanup": {"id"}, "continue": {"id"}, "events": {"id"}, "receivers": nil, "status": nil,
+		"await": {"id"}, "cancel": {"id"}, "cleanup": {"id"}, "events": {"id"}, "receivers": nil, "status": nil,
 		"submit": nil, "transcript": {"id"},
 	}
 	for name, tool := range schemas {
@@ -199,7 +198,7 @@ func TestDeadlineDefaultsAreTwoHours(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tool := range tools.Tools {
-		if tool.Name != "submit" && tool.Name != "continue" {
+		if tool.Name != "submit" {
 			continue
 		}
 		encoded, _ := json.Marshal(tool.InputSchema)
@@ -247,7 +246,7 @@ func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 	}
 	var status statusOutput
 	callTool(t, ctx, session, "status", map[string]any{"id": submitted.ID}, &status)
-	if len(status.Runs) != 1 || status.Runs[0].ID != submitted.ID || status.Runs[0].Pool != "pool-a" || status.Runs[0].State != string(wire.TaskStateSubmitted) || status.Runs[0].Turn != 1 {
+	if len(status.Runs) != 1 || status.Runs[0].ID != submitted.ID || status.Runs[0].Pool != "pool-a" || status.Runs[0].State != string(wire.TaskStateSubmitted) {
 		t.Fatalf("status before a receiver reports %#v", status)
 	}
 	if _, err := time.Parse(time.RFC3339, status.Runs[0].Updated); err != nil {
@@ -356,41 +355,10 @@ func TestMCPAwaitBoundedRetry(t *testing.T) {
 	}
 }
 
-func TestMCPContinueAndCancel(t *testing.T) {
-	t.Run("continue", func(t *testing.T) {
-		b, admitted := publishInterruptedRun(t)
-		ctx, runID := b.ctx, admitted.submission.Wherry.Run
-		session := mcpSession(t, b.connect(t), nil)
-		var reply awaitReply
-		callTool(t, ctx, session, "await", map[string]any{"id": runID}, &reply)
-		if reply.State != string(wire.TaskStateAuthRequired) || reply.Message != "credential token required" || reply.RetryAfter != 0 {
-			t.Fatalf("await %#v", reply)
-		}
-		var status statusOutput
-		callTool(t, ctx, session, "status", map[string]any{"id": runID}, &status)
-		if len(status.Runs) != 1 || status.Runs[0].State != string(wire.TaskStateAuthRequired) || status.Runs[0].Turn != 1 || status.Runs[0].Message != "credential token required" {
-			t.Fatalf("status %#v", status)
-		}
-		if failure := callToolError(t, ctx, session, "continue", map[string]any{"id": runID, "queue_deadline_seconds": 15 * 24 * 60 * 60}); failure.Code != "RUN_EXPIRED" {
-			t.Fatalf("continue with a queue deadline past the run lifetime %#v", failure)
-		}
-		if failure := toolFailure(busclient.ErrRunExpired).(*toolError); failure.Code != "RUN_EXPIRED" {
-			t.Fatalf("expired run %#v", failure)
-		}
-		if failure := toolFailure(fmt.Errorf("load: %w", admin.ErrNewerRecord)).(*toolError); failure.Code != "VERSION_SKEW" {
-			t.Fatalf("a later release's record %#v", failure)
-		}
-		var continued continueOutput
-		callTool(t, ctx, session, "continue", map[string]any{"id": runID}, &continued)
-		if continued.ID != runID || continued.Turn != 2 {
-			t.Fatalf("continue %#v", continued)
-		}
-		if failure := callToolError(t, ctx, session, "continue", map[string]any{"id": runID}); failure.Code != "TURN_ALREADY_SUBMITTED" {
-			t.Fatalf("second continue %#v", failure)
-		}
-	})
+func TestMCPCancel(t *testing.T) {
 	t.Run("cancel", func(t *testing.T) {
-		b, admitted := publishInterruptedRun(t)
+		b := newBus(t)
+		admitted := b.admitted(t)
 		ctx, runID := b.ctx, admitted.submission.Wherry.Run
 		session := mcpSession(t, b.connect(t), nil)
 		var cancelled cancelOutput
@@ -398,7 +366,7 @@ func TestMCPContinueAndCancel(t *testing.T) {
 		if cancelled.ID != runID {
 			t.Fatalf("cancel %#v", cancelled)
 		}
-		b.cancelInterrupted(t, admitted)
+		b.cancelRun(t, admitted)
 		var reply awaitReply
 		callTool(t, ctx, session, "await", map[string]any{"id": runID}, &reply)
 		if reply.State != string(wire.TaskStateCanceled) {
@@ -411,11 +379,8 @@ func TestMCPContinueAndCancel(t *testing.T) {
 		}
 		var events eventsOutput
 		callTool(t, ctx, session, "events", map[string]any{"id": runID}, &events)
-		if len(events.Events) != 3 || events.Events[1].Kind != "interrupted" || events.Events[2].State != string(wire.TaskStateCanceled) {
+		if len(events.Events) != 2 || events.Events[1].State != string(wire.TaskStateCanceled) {
 			t.Fatalf("events %#v", events)
-		}
-		if failure := callToolError(t, ctx, session, "continue", map[string]any{"id": runID}); failure.Code != "RUN_CANCELED" {
-			t.Fatalf("continue after cancel %#v", failure)
 		}
 		if failure := callToolError(t, ctx, session, "cancel", map[string]any{"id": "run-missing"}); failure.Code != "RUN_NOT_FOUND" {
 			t.Fatalf("cancel of an unknown run %#v", failure)
@@ -513,7 +478,7 @@ func TestMCPServerAnswersSealRequests(t *testing.T) {
 	go func() { defer close(done); answer(ctx, b.connect(t), log.New(io.Discard, "", 0)) }()
 	defer func() { stop(); <-done }()
 	binding := signed.SealBinding{Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS}
+		Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS}
 	for {
 		records, err := admin.ReadTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a"))
 		if err != nil {
@@ -550,7 +515,7 @@ func (b *bus) redactionMarker(t *testing.T, runID, name string) string {
 	return signed.RedactionMarker(record.RedactionKey, name)
 }
 
-// attemptBinding is receiver-a's binding for attempt of the admitted task's turn.
+// attemptBinding is receiver-a's binding for an admitted run attempt.
 func (b *bus) attemptBinding(admitted task, attempt int64) wire.ReceiverBinding {
 	binding := b.binding(admitted)
 	binding.Attempt = attempt
@@ -573,7 +538,7 @@ func (b *bus) chunk(t *testing.T, admitted task, attempt, seq int64, part wire.P
 // transcriptBig is a line over the transcript page bound.
 var transcriptBig = strings.Repeat("b", 300<<10)
 
-// transcriptRun admits a run whose first turn has a stale first attempt's line and a second attempt's lines, fed out
+// transcriptRun admits a run with a stale first attempt's line and a second attempt's lines, fed out
 // of order and one twice, a CANCELED terminal under a third attempt, and a working status whose message carries a
 // redaction marker.
 func transcriptRun(t *testing.T) (*bus, string) {
@@ -610,7 +575,7 @@ func TestMCPTranscript(t *testing.T) {
 	session := mcpSession(t, b.connect(t), nil)
 	var reply transcriptReply
 	callTool(t, ctx, session, "transcript", map[string]any{"id": runID}, &reply)
-	want := transcriptReply{ID: runID, Turn: 1, Attempt: 2, Total: 8, NextOffset: 6, Redacted: map[string]int{"model": 1}, Lines: []transcriptLine{
+	want := transcriptReply{ID: runID, Attempt: 3, Total: 9, NextOffset: 6, Redacted: map[string]int{"model": 1}, Lines: []transcriptLine{
 		{Seq: 0, Attempt: 2, Text: `{"type":"start"}`}, {Seq: 10, Attempt: 2, Text: "second [redacted:model]"}, {Seq: 20, Attempt: 2, RawBytes: 2},
 		{Seq: 30, Attempt: 2, Text: `"q"`}, {Seq: 35, Attempt: 2}, {Seq: 40, Attempt: 2, Unstored: &wire.PointerMetadata{SHA256: hashOf("x"), Size: 600000}},
 	}}
@@ -639,11 +604,11 @@ func TestMCPTranscript(t *testing.T) {
 	}
 	var last transcriptReply
 	callTool(t, ctx, session, "transcript", map[string]any{"id": runID, "offset": 7}, &last)
-	if last.NextOffset != 0 || !reflect.DeepEqual(last.Lines, []transcriptLine{{Seq: 60, Attempt: 2, Text: "tail"}}) {
+	if last.NextOffset != 0 || !reflect.DeepEqual(last.Lines, []transcriptLine{{Seq: 60, Attempt: 2, Text: "tail"}, {Seq: 70, Attempt: 1, Text: "stale past the second attempt's first line"}}) {
 		t.Fatalf("the last page: %+v", last)
 	}
 	var page transcriptReply
-	callTool(t, ctx, session, "transcript", map[string]any{"id": runID, "turn": 1, "offset": 1, "limit": 2}, &page)
+	callTool(t, ctx, session, "transcript", map[string]any{"id": runID, "offset": 1, "limit": 2}, &page)
 	if page.NextOffset != 3 || !reflect.DeepEqual(page.Lines, want.Lines[1:3]) {
 		t.Fatalf("offset 1 limit 2: %+v", page)
 	}
@@ -651,9 +616,8 @@ func TestMCPTranscript(t *testing.T) {
 		arguments map[string]any
 		code      string
 	}{
-		"a turn past the latest": {map[string]any{"id": runID, "turn": 2}, "INVALID_ARGUMENT"},
-		"a limit over the most":  {map[string]any{"id": runID, "limit": transcriptMaxLimit + 1}, "INVALID_ARGUMENT"},
-		"an unknown run":         {map[string]any{"id": "run-missing"}, "RUN_NOT_FOUND"},
+		"a limit over the most": {map[string]any{"id": runID, "limit": transcriptMaxLimit + 1}, "INVALID_ARGUMENT"},
+		"an unknown run":        {map[string]any{"id": "run-missing"}, "RUN_NOT_FOUND"},
 	} {
 		if failure := callToolError(t, ctx, session, "transcript", call.arguments); failure.Code != call.code {
 			t.Errorf("%s: %+v, want %s", name, failure, call.code)
@@ -735,7 +699,7 @@ func TestMCPTranscriptDropsThinkingSignatures(t *testing.T) {
 	if text := stdout.String(); strings.Count(text, "\n") != 6 || strings.Contains(text, signature) || strings.Contains(text, "thinking_tokens") {
 		t.Fatalf("wherry transcript printed %d lines with a signature or thinking_tokens line", strings.Count(text, "\n"))
 	}
-	feed, err := b.client.Transcript(b.ctx, runID, 0)
+	feed, err := b.client.Transcript(b.ctx, runID)
 	if err != nil || len(feed.Lines) != 12 || !strings.Contains(feed.Lines[1].Part.Text, signature) {
 		t.Fatalf("the feed's transcript lost lines or signatures: %d lines, %v", len(feed.Lines), err)
 	}
@@ -772,29 +736,6 @@ func TestMCPPromptFile(t *testing.T) {
 		}
 		if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt_file": "empty.md"}); failure.Message != "prompt_file is empty" {
 			t.Errorf("empty prompt file: %+v", failure)
-		}
-	})
-	t.Run("continue", func(t *testing.T) {
-		b, admitted := publishInterruptedRun(t)
-		runID := admitted.submission.Wherry.Run
-		session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{}))
-		// The arguments are checked before the server connects, so a bus that is down does not hide a bad call.
-		down := mcpSessionReading(t, func() (*busclient.Host, error) { return nil, errors.New("down") }, nil, inputOpener(work, busclient.Config{}))
-		for name, arguments := range map[string]map[string]any{
-			"both":  {"id": runID, "prompt": "x", "prompt_file": "brief.md"},
-			"empty": {"id": runID, "prompt_file": "empty.md"},
-		} {
-			if failure := callToolError(t, b.ctx, down, "continue", arguments); failure.Code != "INVALID_ARGUMENT" {
-				t.Errorf("%s: %+v", name, failure)
-			}
-		}
-		var continued continueOutput
-		callTool(t, b.ctx, session, "continue", map[string]any{"id": runID, "prompt_file": "brief.md"}, &continued)
-		if text := b.tasks(t, runID)[1].submission.Message.Parts[0].Text; !strings.Contains(text, "the brief") {
-			t.Fatalf("continuation %q, want the file's", text)
-		}
-		if continued.Await != "wherry await "+runID {
-			t.Errorf("continue await %q, want the command that waits for %s", continued.Await, runID)
 		}
 	})
 }

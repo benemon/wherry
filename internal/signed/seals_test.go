@@ -33,7 +33,7 @@ func sealKey(t *testing.T) *ecdsa.PrivateKey {
 func testBinding(key *ecdsa.PrivateKey) SealBinding {
 	return SealBinding{
 		Tenant: "tenant-a", Pool: "pool-a", Receiver: "receiver-a", KeyID: SealKeyID(&key.PublicKey), Run: "run-a",
-		Turn: 2, Attempt: 3, Credentials: []string{"model"}, ExpiryMS: time.Now().Add(time.Minute).UnixMilli(),
+		Attempt: 3, Credentials: []string{"model"}, ExpiryMS: time.Now().Add(time.Minute).UnixMilli(),
 	}
 }
 
@@ -52,7 +52,7 @@ func mustSeal(t *testing.T, binding SealBinding, key *ecdsa.PublicKey, values ma
 func headers(binding SealBinding) map[jose.HeaderKey]any {
 	return map[jose.HeaderKey]any{
 		jose.HeaderType: SealType, "tenant": binding.Tenant, "pool": binding.Pool, "receiver": binding.Receiver, "key_id": binding.KeyID,
-		"run": binding.Run, "turn": binding.Turn, "attempt": binding.Attempt, "credentials": binding.Credentials, "expiry_ms": binding.ExpiryMS,
+		"run": binding.Run, "attempt": binding.Attempt, "credentials": binding.Credentials, "expiry_ms": binding.ExpiryMS,
 	}
 }
 
@@ -106,7 +106,6 @@ func TestSealBoundToEveryHeaderField(t *testing.T) {
 		"receiver":    func(b *SealBinding) { b.Receiver = "receiver-b" },
 		"key_id":      func(b *SealBinding) { b.KeyID = SealKeyID(&sealKey(t).PublicKey) },
 		"run":         func(b *SealBinding) { b.Run = "run-b" },
-		"turn":        func(b *SealBinding) { b.Turn = 1 },
 		"attempt":     func(b *SealBinding) { b.Attempt = 2 },
 		"credentials": func(b *SealBinding) { b.Credentials = []string{"other"} },
 		"expiry":      func(b *SealBinding) { b.ExpiryMS += time.Hour.Milliseconds() },

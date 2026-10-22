@@ -67,11 +67,6 @@ func Terminal(state TaskState) bool {
 	return terminalStates[state]
 }
 
-// Interrupted reports whether an A2A task state waits for a continuation.
-func Interrupted(state TaskState) bool {
-	return state == TaskStateAuthRequired
-}
-
 // Part is an A2A Part with exactly one of Text, Raw, URL or Data.
 type Part struct {
 	Text      string         `json:"text,omitzero"`
@@ -150,11 +145,6 @@ type PointerMetadata struct {
 	Size   int64  `json:"size"`
 }
 
-// CredentialMetadata is the metadata of an interrupted status that waits on a credential.
-type CredentialMetadata struct {
-	Credential string `json:"credential"`
-}
-
 // OutputMetadata is the metadata of an output chunk's artifact update.
 type OutputMetadata struct {
 	Index int64 `json:"index"`
@@ -169,7 +159,7 @@ type ReturnedOutput struct {
 	Key    string `json:"key,omitzero"`
 }
 
-// UnreturnedOutput is an output a turn did not return, and why.
+// UnreturnedOutput is an output a run did not return, and why.
 type UnreturnedOutput struct {
 	Name   string `json:"name"`
 	Size   int64  `json:"size,omitzero"`
@@ -205,7 +195,7 @@ func CutUTF8(s string, n int) string {
 // MaxAgentResult bounds the resource-use fields of the agent's result record that a result's metadata carries.
 const MaxAgentResult = 16 << 10
 
-// ResultMetadata is a result's task metadata: where its turn ran, and the outputs it returned and did not.
+// ResultMetadata is a result's task metadata: where its run ran, and the outputs it returned and did not.
 type ResultMetadata struct {
 	ReceiverID  string             `json:"receiver_id"`
 	Pool        string             `json:"pool"`
@@ -260,9 +250,9 @@ func S3Prefix(tenant, run string) string { return "wherry/" + tenant + "/" + run
 // S3InputKey is the key of a run's S3 input.
 func S3InputKey(tenant, run, name string) string { return S3Prefix(tenant, run) + "inputs/" + name }
 
-// S3OutputKey is the key of a turn's S3 output.
-func S3OutputKey(tenant, run string, turn int64, name string) string {
-	return S3Prefix(tenant, run) + strconv.FormatInt(turn, 10) + "/outputs/" + name
+// S3OutputKey is the key of a run's S3 output.
+func S3OutputKey(tenant, run, name string) string {
+	return S3Prefix(tenant, run) + "outputs/" + name
 }
 
 // GitInput is the repository a run's agent clones itself: Remote at Ref into Path, with the task credential
@@ -432,26 +422,21 @@ func checkHostKey(key, host string) error {
 	return nil
 }
 
-// AttemptFilter drops records superseded by a later turn or delivery attempt.
+// AttemptFilter drops records superseded by a later delivery attempt.
 type AttemptFilter struct {
-	highest map[string]turnAttempt
-}
-
-type turnAttempt struct {
-	turn    int64
-	attempt int64
+	highest map[string]int64
 }
 
 // Admit reports whether a record is current for its run.
-func (filter *AttemptFilter) Admit(runID string, turn, attempt int64) bool {
+func (filter *AttemptFilter) Admit(runID string, attempt int64) bool {
 	highest := filter.highest[runID]
-	if turn < highest.turn || turn == highest.turn && attempt < highest.attempt {
+	if attempt < highest {
 		return false
 	}
 	if filter.highest == nil {
-		filter.highest = make(map[string]turnAttempt)
+		filter.highest = make(map[string]int64)
 	}
-	filter.highest[runID] = turnAttempt{turn: turn, attempt: attempt}
+	filter.highest[runID] = attempt
 	return true
 }
 

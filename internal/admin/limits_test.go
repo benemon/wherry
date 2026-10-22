@@ -409,9 +409,9 @@ func TestLargestSubmissionHoldsTheLargestGitInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	git := decoded.Wherry.Git
-	if git == nil || decoded.Wherry.Turn != 1 || len(git.Remote) != wire.MaxGitRemote || len(git.Ref) != wire.MaxGitRef || len(git.Path) != 512 ||
+	if git == nil || len(git.Remote) != wire.MaxGitRemote || len(git.Ref) != wire.MaxGitRef || len(git.Path) != 512 ||
 		len(git.HostKey) != wire.MaxGitHostKey || strings.Count(git.HostKey, `"`) != wire.MaxGitHostKey-len("h k ") || len(git.Credential) != 32 {
-		t.Fatalf("largest submission's git input %+v at turn %d; want every field at its bound on a first turn", git, decoded.Wherry.Turn)
+		t.Fatalf("largest submission's git input %+v; want every field at its bound", git)
 	}
 }
 
@@ -539,7 +539,7 @@ func TestLargestResultReturnsS3OutputsAtTheirBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(metadata.S3Outputs) != wire.MaxOutputs || len(metadata.S3Outputs[0].Name) != 512 ||
-		metadata.S3Outputs[0].Key != wire.S3OutputKey(strings.Repeat("n", 32), result.Wherry.Run, math.MaxInt64, metadata.S3Outputs[0].Name) {
+		metadata.S3Outputs[0].Key != wire.S3OutputKey(strings.Repeat("n", 32), result.Wherry.Run, metadata.S3Outputs[0].Name) {
 		t.Fatalf("largest result lists %d S3 outputs; want %d at their bounds", len(metadata.S3Outputs), wire.MaxOutputs)
 	}
 }

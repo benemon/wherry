@@ -16,7 +16,6 @@ import (
 	"regexp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -31,11 +30,7 @@ import (
 var (
 	ErrNoMatchingReceiver        = errors.New("no matching live receiver")
 	ErrRunNotFound               = errors.New("run not found")
-	ErrNotAwaitingContinuation   = errors.New("task is not awaiting continuation")
-	ErrRunCanceled               = errors.New("task is canceled")
-	ErrRunExpired                = errors.New("run expired")
 	ErrQueueDeadlinePastLifetime = errors.New("queue deadline exceeds run lifetime")
-	ErrTurnSubmitted             = errors.New("continuation turn already submitted")
 	// ErrInvalidInput wraps a submission the wire format rejects; its message names the rule, never the value.
 	ErrInvalidInput = errors.New("invalid input")
 )
@@ -70,7 +65,7 @@ type SubmitInput struct {
 	QueueDeadline time.Duration
 }
 
-// DefaultDeadline and DefaultQueueDeadline are a turn's deadlines where the caller gives none.
+// DefaultDeadline and DefaultQueueDeadline are a run's deadlines where the caller gives none.
 const (
 	DefaultDeadline      = 2 * time.Hour
 	DefaultQueueDeadline = 10 * time.Minute
@@ -80,20 +75,6 @@ const (
 type SubmitResult struct {
 	RunID string
 	Pool  string
-}
-
-// ContinueInput contains the new prompt and deadlines for a continuation.
-type ContinueInput struct {
-	Prompt        string
-	Deadline      time.Duration
-	QueueDeadline time.Duration
-}
-
-// ContinueResult describes a produced continuation.
-type ContinueResult struct {
-	RunID   string
-	Turn    int64
-	Skipped int
 }
 
 // CancelResult describes a produced cancel.
@@ -303,7 +284,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 	}
 	runID := wire.RandomID("run-")
-	submission, err := h.submission(runID, 1, pool, placement, append([]wire.Part{{Text: input.Prompt}}, input.Parts...), input.Deadline, input.QueueDeadline, now)
+	submission, err := h.submission(runID, pool, placement, append([]wire.Part{{Text: input.Prompt}}, input.Parts...), input.Deadline, input.QueueDeadline, now)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -319,7 +300,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, err
 		}
 		if submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage.Bucket, h.tenant, runID, input.S3Inputs); err == nil {
-			err = h.publish(ctx, submission, now, now)
+			err = h.publish(ctx, submission, now)
 		}
 		if err != nil {
 			if cleanupErr := h.removePrefix(ctx, store, storage.Bucket, runID); cleanupErr != nil {
@@ -329,7 +310,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 		return SubmitResult{RunID: runID, Pool: pool}, nil
 	}
-	if err := h.publish(ctx, submission, now, now); err != nil {
+	if err := h.publish(ctx, submission, now); err != nil {
 		return SubmitResult{}, err
 	}
 	return SubmitResult{RunID: runID, Pool: pool}, nil
@@ -352,66 +333,7 @@ func sshRemote(remote string) string {
 	return "ssh://" + user + match[2] + "/" + strings.TrimPrefix(match[3], "/")
 }
 
-// Continue publishes the next turn of an interrupted run to the pool and placement its echo names.
-func (h *Host) Continue(ctx context.Context, runID string, input ContinueInput) (ContinueResult, error) {
-	r, err := h.history(ctx, runID)
-	if err != nil {
-		return ContinueResult{}, err
-	}
-	if r.pool == "" {
-		return ContinueResult{}, fmt.Errorf("continue %s: %w", runID, ErrRunNotFound)
-	}
-	var filter wire.AttemptFilter
-	var status *wire.RunStatus
-	for _, candidate := range r.statuses {
-		if candidate.Wherry.Kind != "rejected" && admit(&filter, candidate) {
-			status = candidate
-		}
-	}
-	if status == nil || status.Wherry.Kind != "interrupted" || !wire.Interrupted(status.StatusUpdate.Status.State) {
-		if status != nil && status.StatusUpdate.Status.State == wire.TaskStateCanceled {
-			return ContinueResult{}, ErrRunCanceled
-		}
-		return ContinueResult{}, ErrNotAwaitingContinuation
-	}
-	next := status.Wherry.Turn + 1
-	if _, submitted := r.turns[next]; submitted {
-		return ContinueResult{}, ErrTurnSubmitted
-	}
-	echo := r.turns[status.Wherry.Turn].echo
-	if echo == nil {
-		return ContinueResult{}, ErrNotAwaitingContinuation
-	}
-	firstSubmitted := r.turns[1].echoedAt
-	if r.local != nil && r.local.FirstSubmittedMS > 0 {
-		firstSubmitted = time.UnixMilli(r.local.FirstSubmittedMS)
-	}
-	now := time.Now()
-	expires := firstSubmitted.Add(r.v.state.Pools[echo.Pool].RunLifetime())
-	if now.After(expires) {
-		return ContinueResult{}, ErrRunExpired
-	}
-	if now.Add(input.QueueDeadline).After(expires) {
-		return ContinueResult{}, ErrQueueDeadlinePastLifetime
-	}
-	// Another host of the tenant may have submitted the run, and then only admission checks its VCS host and storage.
-	if r.local != nil && r.local.VCSHost != "" && !slices.Contains(r.v.state.Pools[echo.Pool].VCS, r.local.VCSHost) {
-		return ContinueResult{}, fmt.Errorf("%w: git remote host %s is not in pool %s's vcs hosts", ErrInvalidInput, r.local.VCSHost, echo.Pool)
-	}
-	if r.local != nil && len(r.local.S3Inputs)+len(r.local.S3Outputs) > 0 && r.v.state.Pools[echo.Pool].Storage == nil {
-		return ContinueResult{}, fmt.Errorf("%w: pool %s has no storage for S3 inputs and outputs", ErrInvalidInput, echo.Pool)
-	}
-	submission, err := h.submission(runID, next, echo.Pool, echo.Placement, []wire.Part{{Text: input.Prompt}}, input.Deadline, input.QueueDeadline, now)
-	if err != nil {
-		return ContinueResult{}, err
-	}
-	if err := h.publish(ctx, submission, now, firstSubmitted); err != nil {
-		return ContinueResult{}, err
-	}
-	return ContinueResult{RunID: runID, Turn: next, Skipped: r.skipped}, nil
-}
-
-// Cancel publishes a cancel of a run's latest turn to the events topic of its pool.
+// Cancel publishes a cancel of a run to the events topic of its pool.
 func (h *Host) Cancel(ctx context.Context, runID string) (CancelResult, error) {
 	r, err := h.history(ctx, runID)
 	if err != nil {
@@ -420,7 +342,7 @@ func (h *Host) Cancel(ctx context.Context, runID string) (CancelResult, error) {
 	if r.pool == "" {
 		return CancelResult{}, fmt.Errorf("cancel %s: %w", runID, ErrRunNotFound)
 	}
-	encoded, err := wire.SignRecord(&wire.Cancel{Tenant: h.tenant, Host: h.host, Pool: r.pool, Run: runID, Turn: r.latest}, h.key)
+	encoded, err := wire.SignRecord(&wire.Cancel{Tenant: h.tenant, Host: h.host, Pool: r.pool, Run: runID}, h.key)
 	if err != nil {
 		return CancelResult{}, err
 	}
@@ -430,32 +352,27 @@ func (h *Host) Cancel(ctx context.Context, runID string) (CancelResult, error) {
 	return CancelResult{RunID: runID, Skipped: r.skipped}, nil
 }
 
-func (h *Host) submission(runID string, turn int64, pool string, placement wire.Placement, parts []wire.Part, deadline, queueDeadline time.Duration, now time.Time) (*wire.Submission, error) {
+func (h *Host) submission(runID, pool string, placement wire.Placement, parts []wire.Part, deadline, queueDeadline time.Duration, now time.Time) (*wire.Submission, error) {
 	return &wire.Submission{
 		Message: wire.Message{MessageID: wire.RandomID("msg-"), ContextID: runID, TaskID: runID, Role: wire.RoleUser, Parts: parts, Extensions: []string{wire.ExtensionURI}},
 		Wherry: wire.SubmissionBinding{
-			Tenant: h.tenant, Host: h.host, Pool: pool, Run: runID, Turn: turn, Placement: placement,
+			Tenant: h.tenant, Host: h.host, Pool: pool, Run: runID, Placement: placement,
 			DeadlineMS: now.Add(deadline).UnixMilli(), QueueDeadlineMS: now.Add(queueDeadline).UnixMilli(),
 		},
 	}, nil
 }
 
 // publish records the run locally, then writes the submission to its pool's task topic. The record comes first so
-// this host answers the seal request a receiver may send as soon as it claims the task; a failed write restores the
-// record it replaced.
-func (h *Host) publish(ctx context.Context, submission *wire.Submission, now, firstSubmitted time.Time) error {
+// this host answers the seal request a receiver may send as soon as it claims the task; a failed write removes the
+// record.
+func (h *Host) publish(ctx context.Context, submission *wire.Submission, now time.Time) error {
 	encoded, err := wire.SignRecord(submission, h.key)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	binding := submission.Wherry
-	previous, err := h.localRun(binding.Run)
-	if err != nil {
-		return err
-	}
 	record := runRecord{
-		Run: binding.Run, Pool: binding.Pool, Turn: binding.Turn, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(),
-		FirstSubmittedMS: firstSubmitted.UnixMilli(), DeadlineMS: binding.DeadlineMS,
+		Run: binding.Run, Pool: binding.Pool, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(), DeadlineMS: binding.DeadlineMS,
 	}
 	for _, credential := range binding.Credentials {
 		record.TaskCredentials = append(record.TaskCredentials, credential.Name)
@@ -471,24 +388,16 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now, fi
 			record.S3Outputs = append(record.S3Outputs, output.Name)
 		}
 	}
-	if binding.Turn > 1 && previous != nil {
-		record.TaskCredentials, record.VCSHost, record.S3Inputs, record.S3Outputs, record.RedactionKey =
-			previous.TaskCredentials, previous.VCSHost, previous.S3Inputs, previous.S3Outputs, previous.RedactionKey
-	}
 	// Minted here, not at a seal answer, so every answerer of the run reads one key and none writes the record.
-	if len(record.RedactionKey) == 0 {
-		record.RedactionKey = make([]byte, 32)
-		if _, err := rand.Read(record.RedactionKey); err != nil {
-			return err
-		}
+	record.RedactionKey = make([]byte, 32)
+	if _, err := rand.Read(record.RedactionKey); err != nil {
+		return err
 	}
 	if err := h.writeRun(record); err != nil {
 		return err
 	}
 	if err := h.produce(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(binding.Pool), Key: []byte(binding.Run), Value: encoded}); err != nil {
-		if previous != nil {
-			h.writeRun(*previous)
-		} else if path, ok := h.runPath(binding.Run); ok {
+		if path, ok := h.runPath(binding.Run); ok {
 			os.Remove(path)
 		}
 		if errors.Is(err, kerr.MessageTooLarge) {
@@ -563,28 +472,25 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 	return result, nil
 }
 
-// runRecord is the submitting host's own record of a run's latest turn, which lets it report the run before a
+// runRecord is the submitting host's own record of a run, which lets it report the run before a
 // receiver echoes it.
 type runRecord struct {
 	Run       string         `json:"run"`
 	Pool      string         `json:"pool"`
-	Turn      int64          `json:"turn"`
 	Placement wire.Placement `json:"placement"`
 	TaskHash  string         `json:"task_hash"`
-	// SubmittedMS is when this host published the turn; records written before it existed hold zero.
+	// SubmittedMS is when this host published the run; records written before it existed hold zero.
 	SubmittedMS int64 `json:"submitted_ms,omitzero"`
-	// FirstSubmittedMS bounds continuations from the run's first local publication.
-	FirstSubmittedMS int64 `json:"first_submitted_ms,omitzero"`
-	// TaskCredentials names the task credentials the run's first turn declares, which this host may seal.
+	// TaskCredentials names the task credentials the run declares, which this host may seal.
 	TaskCredentials []string `json:"task_credentials,omitzero"`
-	// VCSHost is the host of the git input the run's first turn declares, which every turn must be in the pool's VCS.
+	// VCSHost is the host of the git input the run declares.
 	VCSHost string `json:"vcs_host,omitzero"`
-	// S3Inputs and S3Outputs name the S3 inputs and outputs the run's first turn declares, which this host may presign.
+	// S3Inputs and S3Outputs name the S3 inputs and outputs the run declares, which this host may presign.
 	S3Inputs  []string `json:"s3_inputs,omitzero"`
 	S3Outputs []string `json:"s3_outputs,omitzero"`
-	// DeadlineMS is the deadline of the turn, when a PUT URL for its S3 outputs expires.
+	// DeadlineMS is the run deadline, when a PUT URL for its S3 outputs expires.
 	DeadlineMS int64 `json:"deadline_ms,omitzero"`
-	// RedactionKey is the run's redaction key, minted when this host first submits a turn of the run.
+	// RedactionKey is the run's redaction key, minted when this host submits the run.
 	RedactionKey []byte `json:"redaction_key,omitzero"`
 }
 
@@ -595,9 +501,9 @@ func (h *Host) runPath(runID string) (string, bool) {
 	return filepath.Join(h.stateDir, "runs", runID+".json"), true
 }
 
-// outputDir is the default directory of a turn's outputs.
-func (h *Host) outputDir(runID string, turn int64) string {
-	return filepath.Join(h.stateDir, "runs", runID, "outputs", strconv.FormatInt(turn, 10))
+// outputDir is the default directory of a run's outputs.
+func (h *Host) outputDir(runID string) string {
+	return filepath.Join(h.stateDir, "runs", runID, "outputs")
 }
 
 // localRun returns the local record of runID, or nil when this host has none.

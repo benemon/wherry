@@ -91,11 +91,11 @@ type answerMarker struct {
 	ExpiryMS int64 `json:"expiry_ms"`
 }
 
-func (h *Host) markerPath(run string, turn, attempt int64) string {
-	return filepath.Join(h.stateDir, "answered", fmt.Sprintf("%s.%d.%d", run, turn, attempt))
+func (h *Host) markerPath(run string, attempt int64) string {
+	return filepath.Join(h.stateDir, "answered", fmt.Sprintf("%s.%d", run, attempt))
 }
 
-// sweep removes the markers of attempts whose request has expired or whose run's latest turn has an outcome, and
+// sweep removes the markers of attempts whose request has expired or whose run has an outcome, and
 // lock files without a marker that no answerer holds.
 func (h *Host) sweep(ctx context.Context) {
 	entries, err := os.ReadDir(filepath.Join(h.stateDir, "answered"))
@@ -125,9 +125,7 @@ func (h *Host) sweep(ctx context.Context) {
 	}
 }
 
-// active reports why request is not for the active attempt of the turn this host last submitted, reading the run
-// afresh, or "" when it is. A pool member can sign a claimed status it does not hold; claims by two receivers for one
-// turn are the trace.
+// active reports why request is not for the active attempt of the run, reading the run afresh, or "" when it is.
 func (h *Host) active(ctx context.Context, request wire.SealRequest) string {
 	local, err := h.localRun(request.Run)
 	if err != nil || local == nil {
@@ -137,41 +135,38 @@ func (h *Host) active(ctx context.Context, request wire.SealRequest) string {
 	if err != nil {
 		return "the run is unreadable"
 	}
-	if request.Turn != local.Turn || request.Turn != r.latest {
-		return fmt.Sprintf("turn %d is not the turn this host last submitted", request.Turn)
-	}
 	var claimant string
 	for _, status := range r.statuses {
-		if status.Wherry.Turn != request.Turn || status.Wherry.Kind != "claimed" {
+		if status.Wherry.Kind != "claimed" {
 			continue
 		}
 		if claimant == "" {
 			claimant = status.Wherry.Receiver
 		}
 		if status.Wherry.Receiver != claimant {
-			return fmt.Sprintf("refused to seal: turn %d is claimed by %s and %s", request.Turn, claimant, status.Wherry.Receiver)
+			return fmt.Sprintf("refused to seal: run is claimed by %s and %s", claimant, status.Wherry.Receiver)
 		}
 	}
 	if claimant != "" && request.Receiver != claimant {
-		return fmt.Sprintf("refused to seal: %s asks for turn %d, which %s claimed first", request.Receiver, request.Turn, claimant)
+		return fmt.Sprintf("refused to seal: %s asks for the run, which %s claimed first", request.Receiver, claimant)
 	}
 	var current *wire.RunStatus
 	for _, status := range r.statuses {
-		if status.Wherry.Turn == request.Turn && (current == nil || status.Wherry.Attempt >= current.Wherry.Attempt) {
+		if current == nil || status.Wherry.Attempt >= current.Wherry.Attempt {
 			current = status
 		}
 	}
 	if current == nil || current.Wherry.ReceiverBinding != request.ReceiverBinding ||
 		current.Wherry.Kind != "claimed" && current.Wherry.Kind != "started" && current.Wherry.Kind != "heartbeat" {
-		return fmt.Sprintf("attempt %d of turn %d from %s is not the run's active attempt", request.Attempt, request.Turn, request.Receiver)
+		return fmt.Sprintf("attempt %d from %s is not the run's active attempt", request.Attempt, request.Receiver)
 	}
 	return ""
 }
 
 // lockAttempt takes an exclusive lock on a run's attempt, shared by every process using the state directory, and
 // returns its release. It gives up when ctx ends.
-func (h *Host) lockAttempt(ctx context.Context, run string, turn, attempt int64) (func(), error) {
-	path := h.markerPath(run, turn, attempt) + ".lock"
+func (h *Host) lockAttempt(ctx context.Context, run string, attempt int64) (func(), error) {
+	path := h.markerPath(run, attempt) + ".lock"
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -216,7 +211,7 @@ func removeLock(path string) {
 }
 
 // answer seals the credentials a request asks for when it comes from a live member of the run's pool holding the
-// active attempt of the turn this host last submitted, unanswered and unexpired, and names only credentials this host
+// active attempt of the run this host submitted, unanswered and unexpired, and names only credentials this host
 // holds: the run's agent's under the pool's terms, and task credentials the run declares. It logs a trusted request
 // for its own run that it skips, by run, receiver and credential names only.
 func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
@@ -241,13 +236,13 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 		return true
 	}
 	// The check, the write and the marker run under the attempt's lock, so concurrent answerers write one seal.
-	unlock, err := h.lockAttempt(ctx, runID, request.Turn, request.Attempt)
+	unlock, err := h.lockAttempt(ctx, runID, request.Attempt)
 	if err != nil {
 		h.logger.Printf("run %s: lock the attempt: %v", runID, err)
 		return true
 	}
 	defer unlock()
-	marker := h.markerPath(runID, request.Turn, request.Attempt)
+	marker := h.markerPath(runID, request.Attempt)
 	if _, err := os.Stat(marker); err == nil {
 		return true
 	}
@@ -306,7 +301,7 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 			h.logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)
 			return true
 		}
-		urls, err := presign(ctx, store, storage.Bucket, h.tenant, runID, request.Turn, request.S3Inputs, request.S3Outputs, time.UnixMilli(local.DeadlineMS))
+		urls, err := presign(ctx, store, storage.Bucket, h.tenant, runID, request.S3Inputs, request.S3Outputs, time.UnixMilli(local.DeadlineMS))
 		if err != nil {
 			h.logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)
 			return true
@@ -315,7 +310,7 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 	}
 	sealed, err := seal(signed.SealBinding{
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
+		Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
 		S3Inputs: request.S3Inputs, S3Outputs: request.S3Outputs, ExpiryMS: request.ExpiryMS,
 	}, request.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: values, RedactionKey: local.RedactionKey})
 	if err != nil {
@@ -340,7 +335,7 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 	if err := writeState(marker, answerMarker{ExpiryMS: request.ExpiryMS}); err != nil {
 		h.logger.Printf("run %s: record a seal answer: %v", runID, err)
 	}
-	h.logger.Printf("run %s: sealed %v to %s for turn %d attempt %d", runID, append(slices.Clone(request.Credentials), request.TaskCredentials...), request.Receiver, request.Turn, request.Attempt)
+	h.logger.Printf("run %s: sealed %v to %s for attempt %d", runID, append(slices.Clone(request.Credentials), request.TaskCredentials...), request.Receiver, request.Attempt)
 	if len(request.S3Inputs)+len(request.S3Outputs) > 0 {
 		h.logger.Printf("run %s: sealed URLs for S3 inputs %v and outputs %v to %s", runID, request.S3Inputs, request.S3Outputs, request.Receiver)
 	}

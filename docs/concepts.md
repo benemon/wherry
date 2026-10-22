@@ -166,10 +166,10 @@ A task can also declare **task credentials**: credentials of the host,
 such as a deploy key, that the agent gets as files. The task's parent
 chooses them, so the pool's terms do not govern them.
 
-A host seals nothing when it submits. The receiver that claims a turn
+A host seals nothing when it submits. The receiver that claims a run
 whose adapter delivers a credential makes a P-256 key pair for that
 attempt and publishes a signed **seal request** on the tenant feed: the
-run, turn and attempt, the public key, the credential names and an expiry
+run and attempt, the public key, the credential names and an expiry
 5 minutes out. The host that submitted the run answers it while `wherry
 await` or `wherry mcp` runs. It checks the request's signature against the
 receiver's registered key, that the receiver is a live member of the run's
@@ -179,26 +179,30 @@ task credential. It then writes a **seal** to
 its own topic: a compact JWE (`ECDH-ES+A256KW` with `A256GCM`, through
 [go-jose](https://github.com/go-jose/go-jose)) encrypted to the request's
 key and bound in its protected header to the tenant, pool, receiver, key
-thumbprint, run, turn, attempt, credential names and expiry.
+thumbprint, run, attempt, credential names and expiry.
 
 Only the requesting receiver can open a seal, and only for that attempt.
 The private key lives in the receiver's memory until the seal opens or the
 wait ends, so a seal on the host's topic opens for no later attempt and for
-no restarted receiver. A redelivered turn asks again. Hosts cannot see the
-broker's claim, so a host seals only to the receiver that wrote the turn's
+no restarted receiver. A redelivered run asks again. Hosts cannot see the
+broker's claim, so a host seals only to the receiver that wrote the run's
 first `claimed` status, and refuses when a second receiver claims the same
-turn; a turn adopted by another receiver ends `TASK_STATE_AUTH_REQUIRED`.
+run; a run adopted by another receiver ends `TASK_STATE_FAILED` when its
+seal wait ends.
 The receiver redacts each credential of 8 bytes or more that it delivered,
 with or without its trailing newline and as JSON escapes it, from
 everything it publishes for the attempt. Each marker is an HMAC of the
 credential's name under a key the host makes for the run and sends in every
 seal, so no marker maps to a name without that key. Seal requests and
-`interrupted` statuses name credentials, by design.
+the failed status of an unanswered seal request name credentials, never
+their values, by design.
 
-A turn whose seal does not arrive within 5 minutes ends in
-`TASK_STATE_AUTH_REQUIRED` and waits for the tenant. A parent that submits
-a task needing credentials keeps `wherry await` or `wherry mcp` running
-until the task starts.
+A run whose seal does not arrive within 5 minutes ends in
+`TASK_STATE_FAILED` with a message naming each credential the host did not
+answer. The tenant adds the credential to `credentials` in its wherry
+configuration and submits a new run. A parent that submits a task needing
+credentials keeps `wherry await` or `wherry mcp` running until the task
+starts.
 
 Everything else the agent needs comes from the platform or from the task:
 the image or host install, network access, CA bundles and SSH known hosts
@@ -221,7 +225,7 @@ limit (8 MiB by default), without
 following links. The receiver redacts each file, publishes it in chunks on
 the tenant feed with the result, and lists every output in the result with
 the size and SHA-256 it computed, or with the reason it was not returned.
-A required output that is not returned fails the turn. `wherry await`
+A required output that is not returned fails the run. `wherry await`
 verifies each output's chunks against the result before it writes the file
 locally.
 
@@ -249,31 +253,23 @@ or a bundle output, which the parent applies with its own credentials, or
 pushes them to the branch `wherry/<run>` when the parent asks and its
 credential allows.
 
-## Runs, turns and attempts
+## Runs and attempts
 
-A run is one task from submission to its final state. It has one or more
-turns. Each turn is a separate signed submission and runs as a new job. A
-turn ends in a terminal state, or is interrupted.
-
-A turn interrupted in `TASK_STATE_AUTH_REQUIRED` (see [Sealed
-credentials](#sealed-credentials)) resumes when the tenant adds the
-credential to its configuration and runs `wherry continue`, then `wherry
-await`, which answers the continuation's seal request. The continuation's
-job receives the text of every turn so far as one request, opening with a
-line saying none of it was carried out, since an interrupted turn never
-reaches an agent.
+A run is one task from submission to its final state. It is one signed
+submission and one execution, which ends in a terminal state. A receiver
+may attempt that execution more than once.
 
 Each pool reads its tasks through the Kafka
 [share group](https://cwiki.apache.org/confluence/display/KAFKA/KIP-932%3A+Queues+for+Kafka)
 `p-<pool>`. A receiver holds a claimed task through the share group's
-acquisition lock for the whole turn and renews it every 10 seconds. When a
+acquisition lock for the whole run and renews it every 10 seconds. When a
 receiver stops renewing, the broker delivers the task again, and that
 delivery is the next attempt. The receiver that takes it looks for the
-turn's job in each of its adapters. If the job exists and came from the
+run's job in each of its adapters. If the job exists and came from the
 same adapter and agent, the receiver adopts it, asks for a seal of its own,
 and once it opens resumes the transcript from the last log offset recorded
 in a heartbeat. Any other job under the
-turn's ID is stopped and purged, and the turn is dispatched again. Each
+run's ID is stopped and purged, and the run is dispatched again. Each
 run writes through its own
 [transactional producer](https://kafka.apache.org/documentation/#semantics),
 `p.<pool>.<run>`, so an adopter fences the earlier holder's writes.
@@ -281,23 +277,19 @@ run writes through its own
 A status goes to the pool's events and the tenant feed in one transaction,
 and every reader reads committed records only. Heartbeats go to the pool's
 events alone. Transcript chunks, the result and the **echo** go to the
-tenant feed. The echo, written when a receiver claims or rejects a turn,
-names the pool and placement the turn was admitted to, so any host of the
-tenant can follow, continue or cancel the run. The submitting host also
+tenant feed. The echo, written when a receiver claims or rejects a run,
+names the pool and placement the run was admitted to, so any host of the
+tenant can follow or cancel the run. The submitting host also
 keeps a record of each run in its state directory, so it can report the
 run before a receiver claims it.
 
 ## Cancellation
 
-A cancel is a host-signed record on the pool's events. It names the run's
-latest turn and applies to that turn and every later one. A receiver reads
-cancels every 10 seconds, and a running turn checks them every second. The
-receiver stops a running job, and a receiver that claims a cancelled turn
-starts no job. Either way the turn ends in `TASK_STATE_CANCELED`.
-
-An interrupted run has no receiver holding it. Every pool member that
-reads a cancel for one writes its `TASK_STATE_CANCELED` terminal under one
-event ID, and readers treat those records as one.
+A cancel is a host-signed record on the pool's events that names a run.
+A receiver reads cancels every 10 seconds, and checks them every second
+for each run it holds. The receiver stops a running job, and a receiver
+that claims a cancelled run starts no job. Either way the run ends in
+`TASK_STATE_CANCELED`.
 
 ## Revocation
 

@@ -1,4 +1,4 @@
-// The adapter protocol, version 6: the receiver core calls a plugin's adapters
+// The adapter protocol, version 7: the receiver core calls a plugin's adapters
 // over this service, and every request names its adapter.
 syntax = "proto3";
 
@@ -49,7 +49,7 @@ message Run {
   string id = 1;
   string adapter = 2;
   string agent = 3;
-  int64 turn = 4;
+  reserved 4;
   int64 attempt = 5;
   bytes prompt = 6;
   optional bytes credential = 7;
@@ -146,7 +146,7 @@ message DispatchResponse {
 message LookupRequest {
   string adapter = 1;
   string run_id = 2;
-  int64 turn = 3;
+  reserved 3;
 }
 
 message LookupResponse {
@@ -202,7 +202,7 @@ message CollectResponse {
 message PurgeRequest {
   string adapter = 1;
   string run_id = 2;
-  int64 turn = 3;
+  reserved 3;
 }
 
 message PurgeResponse {}
@@ -210,7 +210,7 @@ message PurgeResponse {}
 message ReleaseRequest {
   string adapter = 1;
   string run_id = 2;
-  int64 turn = 3;
+  reserved 3;
 }
 
 message ReleaseResponse {}

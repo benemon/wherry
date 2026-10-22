@@ -40,12 +40,6 @@ func ParseRecord(encoded []byte, keys signed.Keys, value Record) error {
 	return parse(signed.Verify, encoded, keys, value)
 }
 
-// ParseHistoryRecord is ParseRecord for a run's earlier records: it also
-// accepts keys the owner has since rotated away.
-func ParseHistoryRecord(encoded []byte, keys signed.Keys, value Record) error {
-	return parse(signed.VerifyHistory, encoded, keys, value)
-}
-
 func parse(verify func([]byte, string, signed.Keys, any) (string, error), encoded []byte, keys signed.Keys, value Record) error {
 	owner, err := verify(encoded, value.jwsType(), keys, value)
 	if err != nil {
@@ -74,19 +68,17 @@ type Placement struct {
 
 // SubmissionBinding is the wherry block of a submission.
 type SubmissionBinding struct {
-	Tenant          string    `json:"tenant"`
-	Host            string    `json:"host"`
-	Pool            string    `json:"pool"`
-	Run             string    `json:"run"`
-	Turn            int64     `json:"turn"`
-	Placement       Placement `json:"placement"`
-	DeadlineMS      int64     `json:"deadline_ms"`
-	QueueDeadlineMS int64     `json:"queue_deadline_ms"`
-	// Credentials, Outputs, Git and S3Inputs are declared by a run's first turn and hold for all of its turns.
-	Credentials []TaskCredential `json:"credentials,omitzero"`
-	Outputs     []ExpectedOutput `json:"outputs,omitzero"`
-	Git         *GitInput        `json:"git,omitzero"`
-	S3Inputs    []S3Input        `json:"s3_inputs,omitzero"`
+	Tenant          string           `json:"tenant"`
+	Host            string           `json:"host"`
+	Pool            string           `json:"pool"`
+	Run             string           `json:"run"`
+	Placement       Placement        `json:"placement"`
+	DeadlineMS      int64            `json:"deadline_ms"`
+	QueueDeadlineMS int64            `json:"queue_deadline_ms"`
+	Credentials     []TaskCredential `json:"credentials,omitzero"`
+	Outputs         []ExpectedOutput `json:"outputs,omitzero"`
+	Git             *GitInput        `json:"git,omitzero"`
+	S3Inputs        []S3Input        `json:"s3_inputs,omitzero"`
 }
 
 // TaskCredential is a credential of the host that the run's agent gets as the file File in its credentials
@@ -96,7 +88,7 @@ type TaskCredential struct {
 	File string `json:"file"`
 }
 
-// ExpectedOutput is a file the agent is asked to leave in its outputs directory; a turn that does not return a
+// ExpectedOutput is a file the agent is asked to leave in its outputs directory; a run that does not return a
 // required one fails. Storage StorageS3 returns it through the pool's bucket instead of the feed.
 type ExpectedOutput struct {
 	Name     string `json:"name"`
@@ -104,7 +96,7 @@ type ExpectedOutput struct {
 	Storage  string `json:"storage,omitzero"`
 }
 
-// Submission is a host's task or continuation on its pool's task topic.
+// Submission is a host's task on its pool's task topic.
 type Submission struct {
 	V       int               `json:"v"`
 	Message Message           `json:"message"`
@@ -118,7 +110,6 @@ type Cancel struct {
 	Host   string `json:"host"`
 	Pool   string `json:"pool"`
 	Run    string `json:"run"`
-	Turn   int64  `json:"turn"`
 }
 
 // ReceiverBinding names the receiver, tenant, pool and attempt of a receiver
@@ -128,11 +119,10 @@ type ReceiverBinding struct {
 	Tenant   string `json:"tenant"`
 	Pool     string `json:"pool"`
 	Run      string `json:"run"`
-	Turn     int64  `json:"turn"`
 	Attempt  int64  `json:"attempt"`
 }
 
-// RunStatus is a receiver's status for one attempt of a turn.
+// RunStatus is a receiver's status for one attempt of a run.
 type RunStatus struct {
 	V            int                   `json:"v"`
 	StatusUpdate TaskStatusUpdateEvent `json:"statusUpdate"`
@@ -169,7 +159,7 @@ type Output struct {
 	Wherry         ResultBinding           `json:"wherry"`
 }
 
-// Result is a turn's final A2A task on the tenant feed.
+// Result is a run's final A2A task on the tenant feed.
 type Result struct {
 	V      int           `json:"v"`
 	Task   Task          `json:"task"`
@@ -182,14 +172,13 @@ type ResultBinding struct {
 	TaskHash string `json:"task_hash"`
 }
 
-// Echo tells every host of a tenant where a turn was admitted.
+// Echo tells every host of a tenant where a run was admitted.
 type Echo struct {
 	V         int       `json:"v"`
 	Receiver  string    `json:"receiver"`
 	Tenant    string    `json:"tenant"`
 	Pool      string    `json:"pool"`
 	Run       string    `json:"run"`
-	Turn      int64     `json:"turn"`
 	Placement Placement `json:"placement"`
 	TaskHash  string    `json:"task_hash"`
 	MessageID string    `json:"message_id"`
@@ -315,7 +304,7 @@ func (value *Submission) validate() error {
 	if err := validateIDs(map[string]string{"tenant": binding.Tenant, "host": binding.Host, "pool": binding.Pool, "run": binding.Run}); err != nil {
 		return err
 	}
-	if binding.Turn < 1 || binding.DeadlineMS < 0 || binding.QueueDeadlineMS < 0 {
+	if binding.DeadlineMS < 0 || binding.QueueDeadlineMS < 0 {
 		return errors.New("invalid submission")
 	}
 	if err := binding.Placement.validate(); err != nil {
@@ -329,9 +318,6 @@ func (value *Submission) validate() error {
 	}
 	if _, err := inputBytes(value.Message.Parts); err != nil {
 		return err
-	}
-	if binding.Turn > 1 && (binding.Credentials != nil || binding.Outputs != nil || binding.Git != nil || binding.S3Inputs != nil) {
-		return errors.New("only a run's first turn declares credentials, outputs, git and S3 inputs")
 	}
 	files := map[string]bool{}
 	for _, credential := range binding.Credentials {
@@ -357,7 +343,7 @@ func (value *Submission) validate() error {
 		outputs[output.Name] = true
 	}
 	if len(binding.S3Inputs)+len(value.Message.Parts) > MaxParts {
-		return errors.New("a first turn's parts and S3 inputs are at most 256")
+		return errors.New("a run's parts and S3 inputs are at most 256")
 	}
 	inputs := map[string]bool{}
 	for _, part := range value.Message.Parts {
@@ -367,7 +353,7 @@ func (value *Submission) validate() error {
 	}
 	for _, input := range binding.S3Inputs {
 		if !ValidFileName(input.Name) || inputs[input.Name] {
-			return errors.New("S3 inputs need unique portable file names, distinct from the turn's input files")
+			return errors.New("S3 inputs need unique portable file names, distinct from the run's input files")
 		}
 		if input.Size < 0 || input.Size > MaxS3Object || !ValidHash(input.SHA256) {
 			return errors.New("an S3 input has a size of at most 5 GiB and a lowercase hex SHA-256")
@@ -424,9 +410,6 @@ func (value *Cancel) validate() error {
 	if err := validateIDs(map[string]string{"tenant": value.Tenant, "host": value.Host, "pool": value.Pool, "run": value.Run}); err != nil {
 		return err
 	}
-	if value.Turn < 1 {
-		return errors.New("invalid cancel turn")
-	}
 	return nil
 }
 
@@ -434,8 +417,8 @@ func (value ReceiverBinding) validate() error {
 	if err := validateIDs(map[string]string{"receiver": value.Receiver, "tenant": value.Tenant, "pool": value.Pool, "run": value.Run}); err != nil {
 		return err
 	}
-	if value.Turn < 1 || value.Attempt < 1 {
-		return errors.New("invalid turn or attempt")
+	if value.Attempt < 1 {
+		return errors.New("invalid attempt")
 	}
 	return nil
 }
@@ -458,7 +441,7 @@ func (value *RunStatus) validate() error {
 		return err
 	}
 	switch binding.Kind {
-	case "claimed", "started", "heartbeat", "interrupted", "rejected", "terminal":
+	case "claimed", "started", "heartbeat", "rejected", "terminal":
 		return nil
 	default:
 		return errors.New("invalid status kind")
@@ -516,7 +499,7 @@ func (value *Echo) validate() error {
 	if err := validateIDs(map[string]string{"receiver": value.Receiver, "tenant": value.Tenant, "pool": value.Pool, "run": value.Run, "message_id": value.MessageID}); err != nil {
 		return err
 	}
-	if value.Turn < 1 || !ValidHash(value.TaskHash) {
+	if !ValidHash(value.TaskHash) {
 		return errors.New("invalid echo")
 	}
 	return value.Placement.validate()

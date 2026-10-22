@@ -70,7 +70,7 @@ hours; `--timeout` changes that), prints the state and the result, writes
 returned outputs, answers the receiver's credential request, and exits
 non-zero for any state other than `TASK_STATE_COMPLETED`. Its completion is
 how you learn the run ended, so you skip the await loop below. Then carry on
-with other work. `continue` returns `await` too; start it the same way.
+with other work.
 
 `git` names a repository the agent clones itself: `remote` (an `https` or `ssh`
 URL, or `user@host:path`) and `ref` are required. Add `credential`, the name of
@@ -122,23 +122,23 @@ seconds and returns one of:
   that did not come back, with the reason.
 - `TASK_STATE_FAILED` with `artifacts` holding the agent's result when the
   agent reported the failure, or a `message` when the receiver could not
-  run it or a required output did not come back.
+  run it, a required output did not come back, or a credential went
+  unanswered (see the next section).
 - `TASK_STATE_REJECTED` or `TASK_STATE_CANCELED` with a `message` that
   says why.
-- `TASK_STATE_AUTH_REQUIRED`: see the next section.
 - `retry_after` with the current `state`: the run has not finished. Wait
   that many seconds, or do other work, then call `await` again.
 
 `status` with the id returns the run's latest state without waiting. Without
 an id it lists every run this host can see, latest update first, each with
-its `pool`, `turn`, `state` and `updated` time; use it to find a run whose
+its `pool`, `state` and `updated` time; use it to find a run whose
 id you no longer hold. `events` returns the run's status history.
 
-`transcript` with the id returns the agent's standard output for the latest
-turn, or `turn`, as the receiver redacted it: up to 100 lines from `offset`,
+`transcript` with the id returns the agent's standard output as the
+receiver redacted it: up to 100 lines from `offset`,
 and `next_offset` while more remain. Call it again with `next_offset` to read
 on. Use it to follow a long run or to see why one failed. Each line names the
-delivery attempt that published it; a turn another receiver took over reads
+delivery attempt that published it; a run another receiver took over reads
 from the start, the earlier attempt's lines first. A page stays within 24 KiB,
 which fits a harness's default limit on tool output, such as Claude Code's
 `MAX_MCP_OUTPUT_TOKENS`. A line too long for a page comes back as its start,
@@ -148,13 +148,13 @@ with `truncated` set and its full size in `bytes`.
 
 The receiver that claims a task asks this host for the credential the
 agent needs, and the wherry MCP server answers while it runs, as `wherry
-await` does. `TASK_STATE_AUTH_REQUIRED` means no answer arrived in time,
-usually because the credential is not configured. The `message` names the
-credential and never holds its value. Tell the user to put the credential
-in a file and add it under that name to `credentials` in their wherry
-configuration. Never ask for the value or handle it yourself. When the
-user says it is in place, call `continue` with the id (and a `prompt` if
-the agent needs more to go on), then `await` again.
+await` does. When no answer arrives within 5 minutes, usually because the
+credential is not configured, the run ends `TASK_STATE_FAILED` with a
+`message` that names the credential and never holds its value. Tell the user
+to put the credential in a file and add it under that name to `credentials`
+in their wherry configuration. Never ask for the value or handle it
+yourself. When the user says it is in place, call `submit` again with the
+same input, and start its `await` as before.
 
 ## Cancel unneeded work
 
@@ -164,11 +164,9 @@ ends in `TASK_STATE_CANCELED`.
 ## Errors
 
 A failed call returns `{"code": ..., "message": ...}`. `RUN_NOT_FOUND`,
-`NO_MATCHING_RECEIVER`, `INVALID_ARGUMENT`, `NOT_AWAITING_CONTINUATION`,
-`RUN_CANCELED` and `TURN_ALREADY_SUBMITTED` call for a change to your input or
-end the run's handling. `RUN_EXPIRED` means the run is past its pool's run
-lifetime, or the queue deadline asked for falls after it: submit a new run, or
-ask for a shorter queue deadline. `CANCELLED` means the call itself was
+`NO_MATCHING_RECEIVER` and `INVALID_ARGUMENT` call for a change to your input or
+end the run's handling. `RUN_EXPIRED` means the queue deadline asked for falls
+after the pool's run lifetime: ask for a shorter queue deadline. `CANCELLED` means the call itself was
 cancelled. `VERSION_SKEW` means the pool's records come from a later wherry
 release than the running MCP server: tell the user to upgrade `wherry` and
 restart the server, since a harness keeps the old process running. `UNAVAILABLE` is any other failure; the user can run the same

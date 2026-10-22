@@ -63,14 +63,14 @@ func TestAwaitJoinsAndVerifiesOutputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(awaited.Outputs) != 2 || string(awaited.Outputs[0].Data) != "# Report\n" || awaited.Outputs[1].Name != "sub/empty" || len(awaited.Rejected) != 0 ||
-		!slices.Equal(awaited.NotReturned, []wire.UnreturnedOutput{missing}) || awaited.Turn != 1 {
+		!slices.Equal(awaited.NotReturned, []wire.UnreturnedOutput{missing}) {
 		t.Fatalf("await = %+v; want both outputs verified and notes.md listed as missing", awaited)
 	}
-	paths, err := f.host.WriteOutputs(runID, awaited.Turn, "", awaited.Outputs)
+	paths, err := f.host.WriteOutputs(runID, "", awaited.Outputs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(f.stateDir, "runs", runID, "outputs", "1", "report.md"); paths[0] != want {
+	if want := filepath.Join(f.stateDir, "runs", runID, "outputs", "report.md"); paths[0] != want {
 		t.Fatalf("wrote %v, want %s first", paths, want)
 	}
 	if written, err := os.ReadFile(paths[0]); err != nil || string(written) != "# Report\n" {
@@ -144,14 +144,14 @@ func TestWriteOutputsStaysInsideItsDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"escape/x", "planted", "../x", "/etc/x", ".hidden"} {
-		if _, err := f.host.WriteOutputs("run-a", 1, dir, []Output{{Name: name, Data: []byte("x")}}); err == nil {
+		if _, err := f.host.WriteOutputs("run-a", dir, []Output{{Name: name, Data: []byte("x")}}); err == nil {
 			t.Fatalf("wrote output %q", name)
 		}
 	}
 	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
 		t.Fatalf("a write left the directory: %v", entries)
 	}
-	paths, err := f.host.WriteOutputs("run-a", 1, dir, []Output{{Name: "a/b/c.txt", Data: []byte("nested")}})
+	paths, err := f.host.WriteOutputs("run-a", dir, []Output{{Name: "a/b/c.txt", Data: []byte("nested")}})
 	if err != nil || !strings.HasSuffix(paths[0], filepath.Join("a", "b", "c.txt")) {
 		t.Fatalf("nested output: %v, %v", paths, err)
 	}

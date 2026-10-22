@@ -171,7 +171,7 @@ func signRaw(typ, kid string, payload []byte, key ed25519.PrivateKey) ([]byte, e
 	return []byte(compact), err
 }
 
-func TestRetiredKeysVerifyHistoryOnly(t *testing.T) {
+func TestRetiredKeysAdmitNothing(t *testing.T) {
 	_, first, _ := ed25519.GenerateKey(rand.Reader)
 	_, second, _ := ed25519.GenerateKey(rand.Reader)
 	owner := HostOwner("tenant-a", "host-a")
@@ -189,15 +189,6 @@ func TestRetiredKeysVerifyHistoryOnly(t *testing.T) {
 	var decoded testRecord
 	if _, err := Verify(old, testType, Keys{owner: state}, &decoded); err == nil {
 		t.Fatal("admitted a record signed with a retired key")
-	}
-	if _, err := VerifyHistory(old, testType, Keys{owner: state}, &decoded); err != nil {
-		t.Fatalf("history refused a record signed before the rotation: %v", err)
-	}
-	if state, err = ApplyKeyRecord(state, owner, must(RevokeKey(owner, second))); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := VerifyHistory(old, testType, Keys{owner: state}, &decoded); err == nil {
-		t.Fatal("history accepted a retired key after the owner's revocation")
 	}
 }
 

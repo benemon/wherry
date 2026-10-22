@@ -13,8 +13,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -59,7 +57,7 @@ func (r request) openSealed(t *testing.T, f *fixture, host string) signed.SealVa
 		t.Fatal(err)
 	}
 	binding := signed.SealBinding{Tenant: r.record.Tenant, Pool: r.record.Pool, Receiver: r.record.Receiver, KeyID: r.record.KeyID, Run: r.record.Run,
-		Turn: r.record.Turn, Attempt: r.record.Attempt, Credentials: r.record.Credentials, TaskCredentials: r.record.TaskCredentials,
+		Attempt: r.record.Attempt, Credentials: r.record.Credentials, TaskCredentials: r.record.TaskCredentials,
 		S3Inputs: r.record.S3Inputs, S3Outputs: r.record.S3Outputs, ExpiryMS: r.record.ExpiryMS}
 	var opened []signed.SealValues
 	for _, record := range records {
@@ -130,7 +128,7 @@ func TestAwaitAnswersTheSealRequest(t *testing.T) {
 	if awaited := <-done; awaited.Status.State != wire.TaskStateCompleted || awaited.Skipped != 0 {
 		t.Fatalf("await %#v; want completed with the seal request unskipped", awaited)
 	}
-	if logs := f.logs.String(); !strings.Contains(logs, "run "+runID+": sealed [model] to receiver-a for turn 1 attempt 1") || strings.Contains(logs, "model-token") {
+	if logs := f.logs.String(); !strings.Contains(logs, "run "+runID+": sealed [model] to receiver-a for attempt 1") || strings.Contains(logs, "model-token") {
 		t.Fatalf("logs:\n%s", logs)
 	}
 }
@@ -222,9 +220,9 @@ func TestSweepRemovesSpentMarkers(t *testing.T) {
 		receiver.status(t, endedTask, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil))
 	live := time.Now().Add(time.Minute).UnixMilli()
 	markers := map[string]int64{
-		f.host.markerPath(runID, 1, 1):       live,
-		f.host.markerPath(runID, 1, 2):       time.Now().Add(-time.Second).UnixMilli(),
-		f.host.markerPath(ended.RunID, 1, 1): live,
+		f.host.markerPath(runID, 1):       live,
+		f.host.markerPath(runID, 2):       time.Now().Add(-time.Second).UnixMilli(),
+		f.host.markerPath(ended.RunID, 1): live,
 	}
 	for path, expiry := range markers {
 		if err := writeState(path, answerMarker{ExpiryMS: expiry}); err != nil {
@@ -232,7 +230,7 @@ func TestSweepRemovesSpentMarkers(t *testing.T) {
 		}
 	}
 	f.host.sweep(f.ctx)
-	for path, kept := range map[string]bool{f.host.markerPath(runID, 1, 1): true, f.host.markerPath(runID, 1, 2): false, f.host.markerPath(ended.RunID, 1, 1): false} {
+	for path, kept := range map[string]bool{f.host.markerPath(runID, 1): true, f.host.markerPath(runID, 2): false, f.host.markerPath(ended.RunID, 1): false} {
 		if _, err := os.Stat(path); (err == nil) != kept {
 			t.Fatalf("marker %s kept %t, want %t", filepath.Base(path), err == nil, kept)
 		}
@@ -316,7 +314,7 @@ func TestAnswerSkipsRequestsItCannotTrust(t *testing.T) {
 		"ended attempt": func(t *testing.T, f *fixture, receiver *testReceiver, task claimed) (request, []byte) {
 			runID := task.submission.Wherry.Run
 			asked := newRequest(t, receiver.binding(task, 1), "model")
-			receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
+			receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateFailed, nil))
 			return asked, receiver.sign(t, &asked.record)
 		},
 		"expiry beyond the seal wait": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) (request, []byte) {
@@ -350,32 +348,6 @@ func TestAnswerSkipsRequestsItCannotTrust(t *testing.T) {
 				t.Fatalf("logs carry the credential:\n%s", f.logs.String())
 			}
 		})
-	}
-}
-
-// A request for a turn the run has moved past is skipped; the continuation's request is answered.
-func TestAnswerSkipsAStaleTurn(t *testing.T) {
-	f := newFixture(t)
-	receiver, task := f.admitted(t)
-	runID := task.submission.Wherry.Run
-	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
-	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
-		t.Fatal(err)
-	}
-	next := receiver.claim(t, f.ctx, runID)[1]
-	receiver.feed(t, f.ctx, runID, receiver.echo(t, next), receiver.status(t, next, 1, "claimed-2", "claimed", wire.TaskStateWorking, nil))
-	// A claim for turn 1 written after the continuation makes turn 1's latest status active again.
-	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "claimed-late", "claimed", wire.TaskStateWorking, nil))
-	stale := newRequest(t, receiver.binding(task, 2), "model")
-	control := newRequest(t, receiver.binding(next, 1), "model")
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &stale.record))
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &control.record))
-	answering(t, f, f.host)
-	f.waitSeals(t, "host-a", 1)
-	time.Sleep(200 * time.Millisecond)
-	control.open(t, f, "host-a")
-	if seals := f.seals(t, "host-a"); seals != 1 {
-		t.Fatalf("host topic holds %d seals; the stale turn's request was answered", seals)
 	}
 }
 
@@ -415,31 +387,6 @@ func TestAnswerLogsACredentialThisHostLacks(t *testing.T) {
 	}
 }
 
-// A pool member can echo and claim a turn the host never submitted; the host answers only for the turn it last
-// submitted.
-func TestAnswerSkipsAForgedFutureTurn(t *testing.T) {
-	f := newFixture(t)
-	receiver, task := f.admitted(t)
-	runID := task.submission.Wherry.Run
-	future := task
-	future.submission.Wherry.Turn = 2
-	future.submission.Message.MessageID = "msg-forged"
-	future.hash = strings.Repeat("b", 64)
-	asked := newRequest(t, receiver.binding(future, 1), "model")
-	receiver.feed(t, f.ctx, runID, receiver.echo(t, future), receiver.status(t, future, 1, "claimed-forged", "claimed", wire.TaskStateWorking, nil))
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	next := f.anotherRun(t, receiver)
-	control := newRequest(t, receiver.binding(next, 1), "model")
-	receiver.feed(t, f.ctx, next.submission.Wherry.Run, receiver.sign(t, &control.record))
-	answering(t, f, f.host)
-	f.waitSeals(t, "host-a", 1)
-	time.Sleep(200 * time.Millisecond)
-	control.open(t, f, "host-a")
-	if seals := f.seals(t, "host-a"); seals != 1 {
-		t.Fatalf("host topic holds %d seals; the forged turn was answered", seals)
-	}
-}
-
 // A status that ends the attempt while its seal is built stops the write.
 func TestAnEndWhileSealingStopsTheWrite(t *testing.T) {
 	f := newFixture(t)
@@ -450,7 +397,7 @@ func TestAnEndWhileSealingStopsTheWrite(t *testing.T) {
 	built := make(chan struct{})
 	seal = func(binding signed.SealBinding, key *ecdsa.PublicKey, values signed.SealValues) ([]byte, error) {
 		defer close(built)
-		receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
+		receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateFailed, nil))
 		return previous(binding, key, values)
 	}
 	asked := newRequest(t, receiver.binding(task, 1), "model")
@@ -532,27 +479,16 @@ func TestSubmitRecordsTheRunBeforeProducing(t *testing.T) {
 }
 
 // A task write that fails puts back the record it replaced, so the turn can be submitted again.
-func TestAFailedTaskWriteRestoresTheRecord(t *testing.T) {
+func TestAFailedTaskWriteLeavesNoRecord(t *testing.T) {
 	f := newFixture(t)
 	_, task := f.admitted(t)
-	runID := task.submission.Wherry.Run
 	cancelled, cancel := context.WithCancel(f.ctx)
 	cancel()
-	next, err := f.host.submission(runID, 2, "pool-a", task.submission.Wherry.Placement, []wire.Part{{Text: "again"}}, time.Minute, time.Minute, time.Now())
+	fresh, err := f.host.submission("run-fresh", "pool-a", task.submission.Wherry.Placement, []wire.Part{{Text: "new"}}, time.Minute, time.Minute, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.host.publish(cancelled, next, time.Now(), time.Now()); err == nil {
-		t.Fatal("publish succeeded on a cancelled context")
-	}
-	if local, err := f.host.localRun(runID); err != nil || local == nil || local.Turn != 1 {
-		t.Fatalf("local record %#v, %v; want turn 1 restored", local, err)
-	}
-	fresh, err := f.host.submission("run-fresh", 1, "pool-a", task.submission.Wherry.Placement, []wire.Part{{Text: "new"}}, time.Minute, time.Minute, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.host.publish(cancelled, fresh, time.Now(), time.Now()); err == nil {
+	if err := f.host.publish(cancelled, fresh, time.Now()); err == nil {
 		t.Fatal("publish succeeded on a cancelled context")
 	}
 	if local, err := f.host.localRun("run-fresh"); err != nil || local != nil {
@@ -562,11 +498,11 @@ func TestAFailedTaskWriteRestoresTheRecord(t *testing.T) {
 
 func TestSweepLeavesAHeldLock(t *testing.T) {
 	f := newFixture(t)
-	marker := f.host.markerPath("run-a", 1, 1)
+	marker := f.host.markerPath("run-a", 1)
 	if err := writeState(marker, answerMarker{ExpiryMS: time.Now().Add(-time.Second).UnixMilli()}); err != nil {
 		t.Fatal(err)
 	}
-	unlock, err := f.host.lockAttempt(f.ctx, "run-a", 1, 1)
+	unlock, err := f.host.lockAttempt(f.ctx, "run-a", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,7 +519,7 @@ func TestSweepLeavesAHeldLock(t *testing.T) {
 
 func TestALockWaitEndsWithItsContext(t *testing.T) {
 	f := newFixture(t)
-	unlock, err := f.host.lockAttempt(f.ctx, "run-a", 1, 1)
+	unlock, err := f.host.lockAttempt(f.ctx, "run-a", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,7 +528,7 @@ func TestALockWaitEndsWithItsContext(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		release, err := f.host.lockAttempt(ctx, "run-a", 1, 1)
+		release, err := f.host.lockAttempt(ctx, "run-a", 1)
 		if err == nil {
 			release()
 		}
@@ -675,32 +611,7 @@ func TestSubmitRefusesAnUnconfiguredCredential(t *testing.T) {
 	}
 }
 
-// A continuation's local record keeps the task credentials the first turn declared, so its seal request is answered,
-// and the run's redaction key, so its markers stay the run's.
-func TestContinuationKeepsTheTaskCredentials(t *testing.T) {
-	f := newFixture(t)
-	receiver, task := f.admittedWith(t, []wire.TaskCredential{{Name: "openai", File: "token"}})
-	runID := task.submission.Wherry.Run
-	local, err := f.host.localRun(runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	redactionKey := bytes.Repeat([]byte{7}, 32)
-	local.RedactionKey = redactionKey
-	if err := f.host.writeRun(*local); err != nil {
-		t.Fatal(err)
-	}
-	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
-	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
-		t.Fatal(err)
-	}
-	local, err = f.host.localRun(runID)
-	if err != nil || local.Turn != 2 || !slices.Equal(local.TaskCredentials, []string{"openai"}) || !bytes.Equal(local.RedactionKey, redactionKey) {
-		t.Fatalf("local record %+v, %v; want turn 2 keeping the task credentials and the redaction key", local, err)
-	}
-}
-
-// Submit mints the run's redaction key into its local record, and every seal of every turn and attempt carries it.
+// Submit mints the run's redaction key into its local record, and every attempt's seal carries it.
 func TestEverySealCarriesTheKeyMintedAtSubmit(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
@@ -716,17 +627,9 @@ func TestEverySealCarriesTheKeyMintedAtSubmit(t *testing.T) {
 	second := newRequest(t, receiver.binding(task, 2), "model")
 	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "claimed-2", "claimed", wire.TaskStateWorking, nil), receiver.sign(t, &second.record))
 	f.waitSeals(t, "host-a", 2)
-	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "interrupted-2", "interrupted", wire.TaskStateAuthRequired, nil))
-	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
-		t.Fatal(err)
-	}
-	next := receiver.claim(t, f.ctx, runID)[1]
-	third := newRequest(t, receiver.binding(next, 1), "model")
-	receiver.feed(t, f.ctx, runID, receiver.echo(t, next), receiver.status(t, next, 1, "claimed-2-1", "claimed", wire.TaskStateWorking, nil), receiver.sign(t, &third.record))
-	f.waitSeals(t, "host-a", 3)
-	for _, asked := range []request{first, second, third} {
+	for _, asked := range []request{first, second} {
 		if opened := asked.openSealed(t, f, "host-a"); !bytes.Equal(opened.RedactionKey, local.RedactionKey) {
-			t.Fatalf("turn %d attempt %d sealed redaction key %x, want the key minted at submit %x", asked.record.Turn, asked.record.Attempt, opened.RedactionKey, local.RedactionKey)
+			t.Fatalf("attempt %d sealed redaction key %x, want the key minted at submit %x", asked.record.Attempt, opened.RedactionKey, local.RedactionKey)
 		}
 	}
 }
@@ -812,39 +715,6 @@ func TestConcurrentAnswerersForTwoAttemptsSealOneKey(t *testing.T) {
 	}
 	if !bytes.Equal(sealed[1], local.RedactionKey) || !bytes.Equal(sealed[2], local.RedactionKey) {
 		t.Fatalf("attempts sealed redaction keys %x, want both the run's %x", sealed, local.RedactionKey)
-	}
-}
-
-// A Continue landing while an answer is in flight is not reverted by that answer.
-func TestAnAnswerKeepsAContinueMadeWhileItSeals(t *testing.T) {
-	f := newFixture(t)
-	receiver, task := f.admitted(t)
-	runID := task.submission.Wherry.Run
-	held := fifo(t)
-	f.host.credentials = map[string]string{"model": held}
-	asked := newRequest(t, receiver.binding(task, 1), "model")
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	answering(t, f, f.host)
-	writer := f.reading(t, held)
-	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
-	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
-		t.Fatal(err)
-	}
-	continued, err := f.host.localRun(runID)
-	if err != nil || continued.Turn != 2 {
-		t.Fatalf("local record %+v, %v; want turn 2", continued, err)
-	}
-	writer.WriteString("model-token")
-	writer.Close()
-	// The continued turn stops the answer before its write, and the answer logs why.
-	for !strings.Contains(f.logs.String(), "run "+runID+": ") {
-		if f.ctx.Err() != nil {
-			t.Fatalf("the answer never finished; logs:\n%s", f.logs.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if local, err := f.host.localRun(runID); err != nil || !reflect.DeepEqual(local, continued) {
-		t.Fatalf("local record %+v, %v; want the continued %+v", local, err, continued)
 	}
 }
 
@@ -1021,41 +891,5 @@ func TestSubmitRefusesInlineInputsOverThePoolLimit(t *testing.T) {
 	}
 	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Parts: parts[:1], Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
 		t.Fatalf("inputs at the limit: %v", err)
-	}
-}
-
-func TestContinueChecksTheGitInputAgainstCurrentVCSHosts(t *testing.T) {
-	f := newFixture(t)
-	terms := testTerms()
-	terms.VCS = []string{"git.example.test"}
-	if err := f.service.PoolCreate(f.ctx, "pool-a", terms); err != nil {
-		t.Fatal(err)
-	}
-	receiver := f.addReceiver(t, "receiver-a", "pool-a")
-	receiver.advertise(t, f.ctx, nil)
-	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Git: &wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"},
-		Deadline: time.Minute, QueueDeadline: time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
-	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
-	receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
-	terms.VCS = []string{"github.com"}
-	if err := f.service.PoolCreate(f.ctx, "pool-a", terms); err != nil {
-		t.Fatal(err)
-	}
-	_, err = f.host.Continue(f.ctx, submitted.RunID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute})
-	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "git remote host git.example.test is not in pool pool-a's vcs hosts") {
-		t.Fatalf("continue = %v; want the VCS host refused", err)
-	}
-	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 1 {
-		t.Fatalf("task topic holds %d records, want the first turn alone", len(records))
-	}
-	terms.VCS = append(terms.VCS, "git.example.test")
-	if err := f.service.PoolCreate(f.ctx, "pool-a", terms); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.host.Continue(f.ctx, submitted.RunID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
-		t.Fatalf("continue under a VCS host the pool allows: %v", err)
 	}
 }

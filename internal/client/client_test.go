@@ -284,12 +284,12 @@ func (r *testReceiver) claim(t *testing.T, ctx context.Context, runID string) []
 }
 
 func (r *testReceiver) binding(task claimed, attempt int64) wire.ReceiverBinding {
-	return wire.ReceiverBinding{Receiver: r.id, Tenant: task.submission.Wherry.Tenant, Pool: r.pool, Run: task.submission.Wherry.Run, Turn: task.submission.Wherry.Turn, Attempt: attempt}
+	return wire.ReceiverBinding{Receiver: r.id, Tenant: task.submission.Wherry.Tenant, Pool: r.pool, Run: task.submission.Wherry.Run, Attempt: attempt}
 }
 
 func (r *testReceiver) echo(t *testing.T, task claimed) []byte {
 	binding := task.submission.Wherry
-	return r.sign(t, &wire.Echo{Receiver: r.id, Tenant: binding.Tenant, Pool: r.pool, Run: binding.Run, Turn: binding.Turn, Placement: binding.Placement,
+	return r.sign(t, &wire.Echo{Receiver: r.id, Tenant: binding.Tenant, Pool: r.pool, Run: binding.Run, Placement: binding.Placement,
 		TaskHash: task.hash, MessageID: task.submission.Message.MessageID})
 }
 
@@ -379,7 +379,7 @@ func TestHostEndToEnd(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
-	if binding := task.submission.Wherry; binding.Tenant != "tenant-a" || binding.Host != "host-a" || binding.Pool != "pool-a" || binding.Turn != 1 ||
+	if binding := task.submission.Wherry; binding.Tenant != "tenant-a" || binding.Host != "host-a" || binding.Pool != "pool-a" ||
 		binding.Placement.Agent != "claude" || !reflect.DeepEqual(binding.Placement.Selector, defaultSelector()) {
 		t.Fatalf("submitted binding %#v", binding)
 	}
@@ -387,7 +387,7 @@ func TestHostEndToEnd(t *testing.T) {
 		t.Fatalf("submitted message %#v", message)
 	}
 	local, err := f.host.localRun(runID)
-	if err != nil || local == nil || local.Run != runID || local.Pool != "pool-a" || local.Turn != 1 || local.TaskHash != task.hash || local.Placement.Agent != "claude" || !reflect.DeepEqual(local.Placement.Selector, defaultSelector()) {
+	if err != nil || local == nil || local.Run != runID || local.Pool != "pool-a" || local.TaskHash != task.hash || local.Placement.Agent != "claude" || !reflect.DeepEqual(local.Placement.Selector, defaultSelector()) {
 		t.Fatalf("local record %#v, %v", local, err)
 	}
 	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, 0), receiver.chunk(t, task, 1, 1))
@@ -405,11 +405,11 @@ func TestHostEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(events.Statuses) != 2 || events.Statuses[1].Wherry.Kind != "terminal" ||
-		events.Chunks[TurnAttempt{1, 1}] != 2 || events.Chunks[TurnAttempt{1, 2}] != 1 || len(events.Chunks) != 2 {
+		events.Chunks[1] != 2 || events.Chunks[2] != 1 || len(events.Chunks) != 2 {
 		t.Fatalf("events %#v", events)
 	}
 	status, err := f.host.Status(f.ctx, runID)
-	if err != nil || status.Status.State != wire.TaskStateCompleted || status.Turn != 1 {
+	if err != nil || status.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("status %#v, %v", status, err)
 	}
 	// Submit seals nothing: the host topic holds the host's key alone.
@@ -800,7 +800,7 @@ func TestStatusBeforeAndAfterEcho(t *testing.T) {
 	receiver.advertise(t, f.ctx, nil)
 	submitted := f.submit(t, defaultSelector())
 	status, err := f.host.Status(f.ctx, submitted.RunID)
-	if err != nil || status.Status.State != wire.TaskStateSubmitted || status.Turn != 1 || status.RunID != submitted.RunID || status.Pool != "pool-a" || status.Updated.IsZero() {
+	if err != nil || status.Status.State != wire.TaskStateSubmitted || status.RunID != submitted.RunID || status.Pool != "pool-a" || status.Updated.IsZero() {
 		t.Fatalf("status before the echo %#v, %v", status, err)
 	}
 	other := f.newHost(t, "host-b", t.TempDir())
@@ -836,13 +836,6 @@ func TestAwaitAcceptsOnlyBoundRecords(t *testing.T) {
 		"message": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) []byte {
 			return receiver.result(t, task, 1, wire.TaskStateCompleted, func(result *wire.Result) { result.Task.History[0].MessageID = "msg-other" })
 		},
-		"turn": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) []byte {
-			task.submission.Wherry.Turn = 2
-			task.submission.Message.MessageID = "msg-turn"
-			return receiver.result(t, task, 1, wire.TaskStateCompleted, func(result *wire.Result) {
-				result.Task.History = append([]wire.Message{task.submission.Message}, task.submission.Message)
-			})
-		},
 		"other pool": func(t *testing.T, f *fixture, _ *testReceiver, task claimed) []byte {
 			f.pool(t, "pool-b")
 			other := f.addReceiver(t, "receiver-b", "pool-b")
@@ -856,12 +849,12 @@ func TestAwaitAcceptsOnlyBoundRecords(t *testing.T) {
 		},
 		"status hash": func(t *testing.T, _ *fixture, receiver *testReceiver, task claimed) []byte {
 			task.hash = hex.EncodeToString(make([]byte, 32))
-			return receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil)
+			return receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateFailed, nil)
 		},
 		"status from other pool": func(t *testing.T, f *fixture, _ *testReceiver, task claimed) []byte {
 			f.pool(t, "pool-b")
 			other := f.addReceiver(t, "receiver-b", "pool-b")
-			return other.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil)
+			return other.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateFailed, nil)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -895,16 +888,15 @@ func TestAwaitFailsClosedWithoutRun(t *testing.T) {
 	}
 }
 
-func TestAwaitReturnsOnInterruptedOrRejected(t *testing.T) {
-	t.Run("interrupted", func(t *testing.T) {
-		f := newFixture(t)
-		receiver, task := f.admitted(t)
-		receiver.feed(t, f.ctx, task.submission.Wherry.Run, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
-		awaited, err := f.host.Await(f.ctx, task.submission.Wherry.Run, 5*time.Second)
-		if err != nil || awaited.Task != nil || awaited.Status.State != wire.TaskStateAuthRequired {
-			t.Fatalf("await %#v, %v; want AUTH_REQUIRED without a task", awaited, err)
-		}
-	})
+func TestAwaitReturnsOnFailed(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	receiver.feed(t, f.ctx, task.submission.Wherry.Run, receiver.result(t, task, 1, wire.TaskStateFailed, nil),
+		receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateFailed, nil))
+	awaited, err := f.host.Await(f.ctx, task.submission.Wherry.Run, 5*time.Second)
+	if err != nil || awaited.Task == nil || awaited.Status.State != wire.TaskStateFailed {
+		t.Fatalf("await %#v, %v; want FAILED", awaited, err)
+	}
 }
 
 func TestAwaitKeepsArtifactsWhenResultFollows(t *testing.T) {
@@ -918,32 +910,6 @@ func TestAwaitKeepsArtifactsWhenResultFollows(t *testing.T) {
 	awaited, err := f.host.Await(f.ctx, runID, 10*time.Second)
 	if err != nil || awaited.Task == nil {
 		t.Fatalf("await %#v, %v; want the result", awaited, err)
-	}
-}
-
-func TestAwaitTakesLaterCancelOfInterruptedRun(t *testing.T) {
-	f := newFixture(t)
-	receiver, task := f.admitted(t)
-	runID := task.submission.Wherry.Run
-	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 3, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
-	peer := f.addReceiver(t, "receiver-b", "pool-a")
-	receiver.feed(t, f.ctx, runID, peer.status(t, task, 1, runID+"/1/canceled", "terminal", wire.TaskStateCanceled, nil))
-	for _, read := range []func() (wire.TaskState, error){
-		func() (wire.TaskState, error) {
-			awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
-			return awaited.Status.State, err
-		},
-		func() (wire.TaskState, error) {
-			status, err := f.host.Status(f.ctx, runID)
-			return status.Status.State, err
-		},
-	} {
-		if state, err := read(); err != nil || state != wire.TaskStateCanceled {
-			t.Fatalf("state %s, %v; want the CANCELED terminal written after the interrupt", state, err)
-		}
-	}
-	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrRunCanceled) {
-		t.Fatalf("continue after cancel: %v", err)
 	}
 }
 
@@ -979,74 +945,6 @@ func TestRecordsAfterMembershipEndAreRejected(t *testing.T) {
 	}
 }
 
-func TestContinueThroughTheEcho(t *testing.T) {
-	f := newFixture(t)
-	receiver := f.addReceiver(t, "receiver-a", "pool-a")
-	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
-	selector := []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}
-	submitted := f.submit(t, selector)
-	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
-	runID := task.submission.Wherry.Run
-	receiver.feed(t, f.ctx, runID, receiver.echo(t, task), receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
-	// A pool with more spare capacity appears: a continuation placed afresh would go there, with the default agent.
-	f.pool(t, "pool-b")
-	f.addReceiver(t, "receiver-b", "pool-b").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Capacity = 9 })
-	// Another host of the tenant has no local record: the pool and placement come from the echo alone.
-	other := f.newHost(t, "host-b", t.TempDir())
-	if _, err := f.host.Continue(f.ctx, "run-missing", ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrRunNotFound) {
-		t.Fatalf("continue of an unknown run: %v", err)
-	}
-	result, err := other.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute})
-	if err != nil || result.Turn != 2 {
-		t.Fatalf("continue %#v, %v", result, err)
-	}
-	tasks := receiver.claim(t, f.ctx, runID)
-	if len(tasks) != 2 {
-		t.Fatalf("pool-a tasks hold %d turns", len(tasks))
-	}
-	next := tasks[1].submission
-	if next.Wherry.Turn != 2 || next.Wherry.Host != "host-b" || next.Wherry.Pool != "pool-a" || next.Wherry.Placement.Agent != "codex" ||
-		!reflect.DeepEqual(next.Wherry.Placement.Selector, selector) || next.Message.Parts[0].Text != "again" || next.Message.ContextID != runID {
-		t.Fatalf("continuation %#v", next)
-	}
-	if records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", "host-b")); err != nil || len(records) != 1 {
-		t.Fatalf("continuing host's topic holds %d records, %v; want its key registration alone", len(records), err)
-	}
-	if _, err := other.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrTurnSubmitted) {
-		t.Fatalf("second continue: %v", err)
-	}
-}
-
-func TestContinueRequiresInterruptedTurn(t *testing.T) {
-	f := newFixture(t)
-	_, task := f.admitted(t)
-	if _, err := f.host.Continue(f.ctx, task.submission.Wherry.Run, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrNotAwaitingContinuation) {
-		t.Fatalf("continued a working run: %v", err)
-	}
-}
-
-func TestContinueRefusesRunPastLifetimeBeforePublishing(t *testing.T) {
-	f := newFixture(t)
-	receiver, task := f.admitted(t)
-	runID := task.submission.Wherry.Run
-	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
-	local, err := f.host.localRun(runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	local.FirstSubmittedMS = time.Now().Add(-15 * 24 * time.Hour).UnixMilli()
-	if err := f.host.writeRun(*local); err != nil {
-		t.Fatal(err)
-	}
-	before := len(receiver.claim(t, f.ctx, runID))
-	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrRunExpired) {
-		t.Fatalf("continue = %v, want run expired", err)
-	}
-	if after := len(receiver.claim(t, f.ctx, runID)); after != before {
-		t.Fatalf("tasks %d -> %d, want no continuation published", before, after)
-	}
-}
-
 func TestSubmitRefusesQueueDeadlinePastLifetimeBeforePublishing(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
@@ -1056,39 +954,6 @@ func TestSubmitRefusesQueueDeadlinePastLifetimeBeforePublishing(t *testing.T) {
 	}
 	if n := f.tasksEnd(t, "pool-a"); n != 0 {
 		t.Fatalf("pool tasks hold %d records", n)
-	}
-}
-
-func TestContinueRefusesQueueDeadlinePastLifetimeBeforePublishing(t *testing.T) {
-	f := newFixture(t)
-	receiver, task := f.admitted(t)
-	runID := task.submission.Wherry.Run
-	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil))
-	local, err := f.host.localRun(runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	local.FirstSubmittedMS = time.Now().Add(-14*24*time.Hour + time.Hour).UnixMilli()
-	if err := f.host.writeRun(*local); err != nil {
-		t.Fatal(err)
-	}
-	before := len(receiver.claim(t, f.ctx, runID))
-	if _, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: 2 * time.Hour}); !errors.Is(err, ErrQueueDeadlinePastLifetime) {
-		t.Fatalf("continue = %v, want queue deadline past lifetime", err)
-	}
-	if after := len(receiver.claim(t, f.ctx, runID)); after != before {
-		t.Fatalf("tasks %d -> %d, want no continuation published", before, after)
-	}
-}
-
-func TestContinueIgnoresRejectedStatus(t *testing.T) {
-	f := newFixture(t)
-	receiver, task := f.admitted(t)
-	runID := task.submission.Wherry.Run
-	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil),
-		receiver.status(t, task, 2, "rejected-1", "rejected", wire.TaskStateRejected, nil))
-	if result, err := f.host.Continue(f.ctx, runID, ContinueInput{Prompt: "again", Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil || result.Turn != 2 {
-		t.Fatalf("continue %#v, %v", result, err)
 	}
 }
 
@@ -1116,7 +981,7 @@ func TestCancelWritesToTheEchosPool(t *testing.T) {
 		t.Fatalf("pool events hold %d records, %v", len(records), err)
 	}
 	cancel, err := admin.AuthorizeCancel(state, keys, records[0].Value, "pool-a", "tenant-a")
-	if err != nil || cancel.Run != runID || cancel.Turn != 1 || cancel.Host != "host-b" {
+	if err != nil || cancel.Run != runID || cancel.Host != "host-b" {
 		t.Fatalf("cancel %#v, %v", cancel, err)
 	}
 }
@@ -1179,15 +1044,11 @@ func TestEventsBindsRecordsToTheRun(t *testing.T) {
 	_, otherTask := f.admitted(t)
 	wrongHash := task
 	wrongHash.hash = hex.EncodeToString(make([]byte, 32))
-	wrongTurn := task
-	wrongTurn.submission.Wherry.Turn = 2
 	receiver.feed(t, f.ctx, runID,
 		receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil),
 		receiver.status(t, wrongHash, 1, "started-1", "started", wire.TaskStateWorking, nil),
-		receiver.status(t, wrongTurn, 1, "started-2", "started", wire.TaskStateWorking, nil),
 		other.status(t, task, 1, "started-3", "started", wire.TaskStateWorking, nil),
 		receiver.chunk(t, task, 1, 0),
-		receiver.chunk(t, wrongTurn, 1, 0),
 		receiver.chunk(t, wrongHash, 1, 2),
 		other.chunk(t, task, 1, 1),
 		[]byte("not a record"),
@@ -1197,8 +1058,8 @@ func TestEventsBindsRecordsToTheRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events.Statuses) != 1 || events.Statuses[0].Wherry.EventID != "claimed-1" || events.Chunks[TurnAttempt{1, 1}] != 1 || len(events.Chunks) != 1 || events.Skipped != 7 {
-		t.Fatalf("statuses %d chunks %v skipped %d, want the one claimed status, one chunk and seven skipped", len(events.Statuses), events.Chunks, events.Skipped)
+	if len(events.Statuses) != 1 || events.Statuses[0].Wherry.EventID != "claimed-1" || events.Chunks[1] != 1 || len(events.Chunks) != 1 || events.Skipped != 5 {
+		t.Fatalf("statuses %d chunks %v skipped %d, want the one claimed status, one chunk and five skipped", len(events.Statuses), events.Chunks, events.Skipped)
 	}
 	if _, err := f.host.Events(f.ctx, "run-missing"); !errors.Is(err, ErrRunNotFound) {
 		t.Fatalf("events of an unknown run: %v", err)
@@ -1280,8 +1141,8 @@ func TestAwaitRejectsRecordsFromMemberEndedDuringAwait(t *testing.T) {
 		"result": func(t *testing.T, receiver *testReceiver, task claimed) []byte {
 			return receiver.result(t, task, 1, wire.TaskStateCompleted, nil)
 		},
-		"interrupted status": func(t *testing.T, receiver *testReceiver, task claimed) []byte {
-			return receiver.status(t, task, 1, "interrupted-1", "interrupted", wire.TaskStateAuthRequired, nil)
+		"failed status": func(t *testing.T, receiver *testReceiver, task claimed) []byte {
+			return receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateFailed, nil)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1359,20 +1220,13 @@ func TestAwaitRereadsRotatedKey(t *testing.T) {
 }
 
 func TestAwaitEndsOnCanceledTerminal(t *testing.T) {
-	for name, eventID := range map[string]string{"holder's own event ID": "terminal-1", "interrupted run's event ID": ""} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t)
-			receiver, task := f.admitted(t)
-			runID := task.submission.Wherry.Run
-			if eventID == "" {
-				eventID = runID + "/1/canceled"
-			}
-			receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, eventID, "terminal", wire.TaskStateCanceled, nil))
-			awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
-			if err != nil || awaited.Status.State != wire.TaskStateCanceled {
-				t.Fatalf("await %#v, %v; want CANCELED", awaited, err)
-			}
-		})
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCanceled, nil))
+	awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
+	if err != nil || awaited.Status.State != wire.TaskStateCanceled {
+		t.Fatalf("await %#v, %v; want CANCELED", awaited, err)
 	}
 }
 
@@ -1442,11 +1296,11 @@ func TestSupersededCancelDoesNotMaskALaterAttempt(t *testing.T) {
 
 func TestAwaitIgnoresWhatAnEndedMemberWritesAfterItsEnd(t *testing.T) {
 	for name, stale := range map[string]func(*testing.T, *testReceiver, claimed) []byte{
-		"interrupted status with a high attempt": func(t *testing.T, ended *testReceiver, task claimed) []byte {
-			return ended.status(t, task, 9, "interrupted-9", "interrupted", wire.TaskStateAuthRequired, nil)
+		"failed status with a high attempt": func(t *testing.T, ended *testReceiver, task claimed) []byte {
+			return ended.status(t, task, 9, "terminal-9", "terminal", wire.TaskStateFailed, nil)
 		},
-		"echo for a later turn": func(t *testing.T, ended *testReceiver, task claimed) []byte {
-			task.submission.Wherry.Turn = 2
+		"echo for another submission": func(t *testing.T, ended *testReceiver, task claimed) []byte {
+			task.hash = strings.Repeat("b", 64)
 			return ended.echo(t, task)
 		},
 	} {
@@ -1540,10 +1394,10 @@ func TestRunsListsLocalAndEchoedRuns(t *testing.T) {
 	if got, want := runIDs(runs.Runs), []string{local.RunID, elsewhere.RunID}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("runs %v, want this host's unadmitted run then the other host's echoed run: %v", got, want)
 	}
-	if run := runs.Runs[0]; run.Status.State != wire.TaskStateSubmitted || run.Pool != "pool-a" || run.Turn != 1 || run.Updated.Before(before.Truncate(time.Millisecond)) {
+	if run := runs.Runs[0]; run.Status.State != wire.TaskStateSubmitted || run.Pool != "pool-a" || run.Updated.Before(before.Truncate(time.Millisecond)) {
 		t.Fatalf("unadmitted run %#v, want SUBMITTED at its local submit time", run)
 	}
-	if run := runs.Runs[1]; run.Status.State != wire.TaskStateWorking || run.Pool != "pool-a" || run.Turn != 1 || !run.Updated.Equal(claimedAt) {
+	if run := runs.Runs[1]; run.Status.State != wire.TaskStateWorking || run.Pool != "pool-a" || !run.Updated.Equal(claimedAt) {
 		t.Fatalf("echoed run %#v, want WORKING at its status time %v", run, claimedAt)
 	}
 }

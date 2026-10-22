@@ -408,7 +408,7 @@ func (service *Service) configureTopicRetention(ctx context.Context, value strin
 		resource := kmsg.NewIncrementalAlterConfigsRequestResource()
 		resource.ResourceType = kmsg.ConfigResourceTypeTopic
 		resource.ResourceName = topic
-		// Admission measures a run's lifetime from the broker's timestamp of its first turn.
+		// Admission measures a run's lifetime from the broker's timestamp of its submission.
 		for name, value := range map[string]string{"retention.ms": value, "message.timestamp.type": "LogAppendTime"} {
 			config := kmsg.NewIncrementalAlterConfigsRequestResourceConfig()
 			config.Name = name
@@ -747,8 +747,7 @@ type feedRecord struct {
 }
 
 // largestRecords signs, with a throwaway key, the largest bounded submission whose inputs fit inlineLimit and the
-// largest bounded records a receiver writes to a feed. A git input exists only on a first turn and outweighs the
-// longest turn number; fields with no bound are left empty.
+// largest bounded records a receiver writes to a feed. Fields with no bound are left empty.
 func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	_, key, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -769,7 +768,7 @@ func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	submission, err := wire.SignRecord(&wire.Submission{
 		Message: submitted,
 		Wherry: wire.SubmissionBinding{
-			Tenant: name, Host: name, Pool: name, Run: run, Turn: 1, Placement: wire.Placement{Agent: name},
+			Tenant: name, Host: name, Pool: name, Run: run, Placement: wire.Placement{Agent: name},
 			DeadlineMS: math.MaxInt64, QueueDeadlineMS: math.MaxInt64,
 			Credentials: []wire.TaskCredential{{Name: name, File: strings.Repeat("f", 255)}},
 			// A quote is the printable character JSON lengthens most.
@@ -782,7 +781,7 @@ func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	binding := wire.ReceiverBinding{Receiver: name, Tenant: name, Pool: name, Run: run, Turn: math.MaxInt64, Attempt: math.MaxInt64}
+	binding := wire.ReceiverBinding{Receiver: name, Tenant: name, Pool: name, Run: run, Attempt: math.MaxInt64}
 	outputName := strings.Repeat("a/", 255) + "aa"
 	// A result lists at most 256 collected entries and the expected outputs missing among them. An S3 output is an
 	// expected one, listed with its key, so a result returning 256 of them misses none.
@@ -790,7 +789,7 @@ func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	for range wire.MaxOutputs {
 		metadata.Outputs = append(metadata.Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64})
 		metadata.NotReturned = append(metadata.NotReturned, wire.UnreturnedOutput{Name: outputName, Size: math.MaxInt64, Reason: "rejected: size changed while read"})
-		s3Metadata.S3Outputs = append(s3Metadata.S3Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64, Key: wire.S3OutputKey(name, run, math.MaxInt64, outputName)})
+		s3Metadata.S3Outputs = append(s3Metadata.S3Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64, Key: wire.S3OutputKey(name, run, outputName)})
 	}
 	encodedMetadata, err := json.Marshal(metadata)
 	if err != nil {

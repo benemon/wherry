@@ -260,7 +260,7 @@ func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
 		return OutcomeUnknown, Handle{}, err
 	}
 	message := &adapterv1.Run{
-		Id: run.ID, Adapter: run.Adapter, Agent: run.Agent, Model: run.Model, Turn: run.Turn, Attempt: run.Attempt, Prompt: run.Prompt, Credential: run.Credential,
+		Id: run.ID, Adapter: run.Adapter, Agent: run.Agent, Model: run.Model, Attempt: run.Attempt, Prompt: run.Prompt, Credential: run.Credential,
 	}
 	for _, input := range run.Inputs {
 		message.Inputs = append(message.Inputs, &adapterv1.File{Name: input.Name, Data: input.Data})
@@ -283,12 +283,12 @@ func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
 	return Outcome(resp.Outcome), handleOf(resp.Handle), nil
 }
 
-func (r *remote) Lookup(ctx context.Context, runID string, turn int64) (Job, error) {
+func (r *remote) Lookup(ctx context.Context, runID string) (Job, error) {
 	rpc, err := r.plugin.link()
 	if err != nil {
 		return Job{}, err
 	}
-	resp, err := rpc.Lookup(ctx, &adapterv1.LookupRequest{Adapter: r.name, RunId: runID, Turn: turn})
+	resp, err := rpc.Lookup(ctx, &adapterv1.LookupRequest{Adapter: r.name, RunId: runID})
 	if err != nil {
 		return Job{}, callError(ctx, err)
 	}
@@ -411,21 +411,21 @@ func (r *remote) Collect(ctx context.Context, handle Handle, limits Limits, outp
 	}
 }
 
-func (r *remote) Purge(ctx context.Context, runID string, turn int64) error {
+func (r *remote) Purge(ctx context.Context, runID string) error {
 	rpc, err := r.plugin.link()
 	if err != nil {
 		return err
 	}
-	_, err = rpc.Purge(ctx, &adapterv1.PurgeRequest{Adapter: r.name, RunId: runID, Turn: turn})
+	_, err = rpc.Purge(ctx, &adapterv1.PurgeRequest{Adapter: r.name, RunId: runID})
 	return callError(ctx, err)
 }
 
-func (r *remote) Release(ctx context.Context, runID string, turn int64) error {
+func (r *remote) Release(ctx context.Context, runID string) error {
 	rpc, err := r.plugin.link()
 	if err != nil {
 		return err
 	}
-	_, err = rpc.Release(ctx, &adapterv1.ReleaseRequest{Adapter: r.name, RunId: runID, Turn: turn})
+	_, err = rpc.Release(ctx, &adapterv1.ReleaseRequest{Adapter: r.name, RunId: runID})
 	return callError(ctx, err)
 }
 

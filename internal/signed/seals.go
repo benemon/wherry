@@ -33,7 +33,6 @@ type SealBinding struct {
 	Receiver    string   `json:"receiver"`
 	KeyID       string   `json:"key_id"`
 	Run         string   `json:"run"`
-	Turn        int64    `json:"turn"`
 	Attempt     int64    `json:"attempt"`
 	Credentials []string `json:"credentials"`
 	// TaskCredentials, S3Inputs and S3Outputs are absent from the protected header when empty.
@@ -107,7 +106,7 @@ func Seal(binding SealBinding, key *ecdsa.PublicKey, values SealValues) ([]byte,
 	}
 	options := new(jose.EncrypterOptions).WithType(SealType).
 		WithHeader("tenant", binding.Tenant).WithHeader("pool", binding.Pool).WithHeader("receiver", binding.Receiver).
-		WithHeader("key_id", binding.KeyID).WithHeader("run", binding.Run).WithHeader("turn", binding.Turn).
+		WithHeader("key_id", binding.KeyID).WithHeader("run", binding.Run).
 		WithHeader("attempt", binding.Attempt).WithHeader("credentials", binding.Credentials).WithHeader("expiry_ms", binding.ExpiryMS)
 	if len(binding.TaskCredentials) > 0 {
 		options = options.WithHeader("task_credentials", binding.TaskCredentials)

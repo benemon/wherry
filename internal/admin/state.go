@@ -332,12 +332,6 @@ func AuthorizeSubmission(state State, keys signed.Keys, encoded []byte, topicPoo
 	return authorizeSubmission(wire.ParseRecord, state, keys, encoded, topicPool)
 }
 
-// AuthorizeEarlierTurn is AuthorizeSubmission for a run's earlier turns, which
-// its host may have signed with a key since rotated away.
-func AuthorizeEarlierTurn(state State, keys signed.Keys, encoded []byte, topicPool string) (wire.Submission, error) {
-	return authorizeSubmission(wire.ParseHistoryRecord, state, keys, encoded, topicPool)
-}
-
 func authorizeSubmission(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, topicPool string) (wire.Submission, error) {
 	var submission wire.Submission
 	if err := parse(encoded, keys, &submission); err != nil {

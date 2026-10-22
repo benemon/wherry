@@ -59,29 +59,6 @@ func TestGitInputAdmittedOnlyFromThePoolsVCSHosts(t *testing.T) {
 }
 
 // A continuation is admitted under the pool's current VCS hosts, against the git input its first turn declared.
-func TestGitContinuationRechecksTheVCSHosts(t *testing.T) {
-	f := newFixtureWith(t, resultStream, vcsTerms("git.example.test"), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
-	// Unanswered, the first turn's seal request leaves it AUTH_REQUIRED.
-	if status := f.execute(t, f.submit(t, f.host, withGit(wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"})), 1); status != kgo.AckAccept {
-		t.Fatalf("status %v", status)
-	}
-	if task := f.lastTask(t); task.Status.State != wire.TaskStateAuthRequired {
-		t.Fatalf("task %#v, want AUTH_REQUIRED", task.Status)
-	}
-	continuation := f.turn(t, "run-a", 2)
-	if admitted := f.admitted(t, continuation); admitted.git == nil || admitted.git.Remote != "https://git.example.test/org/repo.git" {
-		t.Fatalf("continuation admitted git %+v, want the first turn's", admitted.git)
-	}
-	terms := vcsTerms("github.com")
-	encoded := must(t)(admin.EncodeRecord(admin.Record{Kind: "pool", Pool: testPool, Terms: &terms}))
-	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.receiver.refresh(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	f.rejected(t, continuation, "git remote host git.example.test is not in pool "+testPool+"'s vcs hosts")
-}
 
 func TestGitInputReachesTheAgentAsFilesAndCommands(t *testing.T) {
 	f := newFixtureWith(t, resultStream, vcsTerms("git.example.test:2222"), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
@@ -122,13 +99,5 @@ func TestGitInputReachesTheAgentAsFilesAndCommands(t *testing.T) {
 	}
 	if strings.Contains(prompt, deployValue) || strings.Contains(prompt, testToken) || !strings.HasSuffix(prompt, "\n\nhi") {
 		t.Fatalf("prompt %q, want no credential value and the text after the preamble", prompt)
-	}
-}
-
-func TestKnownHostsInputConflictsAcrossTurns(t *testing.T) {
-	git := &wire.GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", HostKey: testHostKey}
-	_, rejection := deliverables([]wire.Message{{Parts: []wire.Part{{Text: "hi"}}}, {Parts: []wire.Part{{Raw: wire.StdBytes("x"), Filename: wire.KnownHostsFile}}}}, git, nil)
-	if rejection != "input names repeat across turns" {
-		t.Fatalf("rejection %q, want a continuation's known_hosts refused beside the host key", rejection)
 	}
 }

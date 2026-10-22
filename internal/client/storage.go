@@ -26,13 +26,13 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// S3File is bytes a run's first turn delivers through its pool's bucket, as the input Name.
+// S3File is bytes a run delivers through its pool's bucket, as the input Name.
 type S3File struct {
 	Name string
 	Body io.ReadSeeker
 }
 
-// getLifetime is how long a presigned GET for an S3 input lives; a PUT for an S3 output lives until its turn's
+// getLifetime is how long a presigned GET for an S3 input lives; a PUT for an S3 output lives until its run's
 // deadline.
 const getLifetime = 15 * time.Minute
 
@@ -109,9 +109,8 @@ func uploadInputs(ctx context.Context, store *minio.Client, bucket, tenant, run 
 	return inputs, nil
 }
 
-// presign returns the seal values of a run's S3 inputs and outputs: a GET per input for getLifetime and a PUT per output
-// of turn until deadline.
-func presign(ctx context.Context, store *minio.Client, bucket, tenant, run string, turn int64, inputs, outputs []string, deadline time.Time) (map[string][]byte, error) {
+// presign returns the seal values of a run's S3 inputs and outputs.
+func presign(ctx context.Context, store *minio.Client, bucket, tenant, run string, inputs, outputs []string, deadline time.Time) (map[string][]byte, error) {
 	values := map[string][]byte{}
 	for _, input := range inputs {
 		get, err := store.PresignedGetObject(ctx, bucket, wire.S3InputKey(tenant, run, input), getLifetime, nil)
@@ -125,10 +124,10 @@ func presign(ctx context.Context, store *minio.Client, bucket, tenant, run strin
 	}
 	lifetime := min(time.Until(deadline).Truncate(time.Second)+time.Second, maxPresign)
 	if lifetime < 2*time.Second {
-		return nil, errors.New("the turn's deadline has passed")
+		return nil, errors.New("the run's deadline has passed")
 	}
 	for _, output := range outputs {
-		put, err := store.PresignedPutObject(ctx, bucket, wire.S3OutputKey(tenant, run, turn, output), lifetime)
+		put, err := store.PresignedPutObject(ctx, bucket, wire.S3OutputKey(tenant, run, output), lifetime)
 		if err != nil {
 			return nil, fmt.Errorf("presign S3 output %s: %w", output, err)
 		}
@@ -140,7 +139,7 @@ func presign(ctx context.Context, store *minio.Client, bucket, tenant, run strin
 // checkSealSize refuses a run whose seal would pass its limit: it seals the run's task credentials and URLs for its S3
 // inputs and outputs, presigned as the answer will, to a throwaway key. The agent's own credential is not counted.
 func (h *Host) checkSealSize(ctx context.Context, store *minio.Client, bucket, tenant, run string, credentials []wire.TaskCredential, inputs, outputs []string, deadline time.Time) error {
-	values, err := presign(ctx, store, bucket, tenant, run, 1, inputs, outputs, deadline)
+	values, err := presign(ctx, store, bucket, tenant, run, inputs, outputs, deadline)
 	if err != nil {
 		return err
 	}
@@ -158,7 +157,7 @@ func (h *Host) checkSealSize(ctx context.Context, store *minio.Client, bucket, t
 	// Fields the answer fills from the receiver's request are at their bounds.
 	placeholder := strings.Repeat("x", 32)
 	_, err = signed.Seal(signed.SealBinding{
-		Tenant: tenant, Pool: placeholder, Receiver: placeholder, KeyID: signed.SealKeyID(&key.PublicKey), Run: run, Turn: 1, Attempt: 1 << 31,
+		Tenant: tenant, Pool: placeholder, Receiver: placeholder, KeyID: signed.SealKeyID(&key.PublicKey), Run: run, Attempt: 1 << 31,
 		Credentials: []string{}, TaskCredentials: names, S3Inputs: inputs, S3Outputs: outputs, ExpiryMS: deadline.UnixMilli(),
 	}, &key.PublicKey, signed.SealValues{Values: values, RedactionKey: make([]byte, 32)})
 	if err != nil {
@@ -167,7 +166,7 @@ func (h *Host) checkSealSize(ctx context.Context, store *minio.Client, bucket, t
 	return nil
 }
 
-// DownloadOutputs downloads a turn's S3 outputs beneath dir and verifies each against its result's size and SHA-256;
+// DownloadOutputs downloads a run's S3 outputs beneath dir and verifies each against its result's size and SHA-256;
 // once the run is terminal and every output verified, it deletes the run's prefix.
 func (h *Host) DownloadOutputs(ctx context.Context, runID string, result AwaitResult, dir string) ([]Output, []wire.UnreturnedOutput, error) {
 	local, err := h.localRun(runID)
@@ -175,7 +174,7 @@ func (h *Host) DownloadOutputs(ctx context.Context, runID string, result AwaitRe
 		return nil, nil, err
 	}
 	if dir == "" {
-		dir = h.outputDir(runID, result.Turn)
+		dir = h.outputDir(runID)
 	}
 	var verified []Output
 	var rejected []wire.UnreturnedOutput
@@ -202,8 +201,8 @@ func (h *Host) DownloadOutputs(ctx context.Context, runID string, result AwaitRe
 			switch {
 			case !slices.Contains(local.S3Outputs, listed.Name):
 				reason = "not an S3 output the run declares"
-			case listed.Key != wire.S3OutputKey(h.tenant, runID, result.Turn, listed.Name):
-				reason = "listed at a key outside the turn's prefix"
+			case listed.Key != wire.S3OutputKey(h.tenant, runID, listed.Name):
+				reason = "listed at a key outside the run's prefix"
 			default:
 				reason = download(ctx, store, storage.Bucket, root, listed)
 			}
@@ -263,7 +262,7 @@ func download(ctx context.Context, store *minio.Client, bucket string, root *os.
 }
 
 // Cleanup deletes every object under a run's prefix in its pool's bucket, and nothing outside it. It refuses a run whose
-// latest turn has no outcome, since its receiver may still read inputs or write outputs there.
+// run has no outcome, since its receiver may still read inputs or write outputs there.
 func (h *Host) Cleanup(ctx context.Context, runID string) error {
 	if _, ok := h.runPath(runID); !ok {
 		return fmt.Errorf("cleanup %s: %w", runID, ErrRunNotFound)
@@ -275,9 +274,8 @@ func (h *Host) Cleanup(ctx context.Context, runID string) error {
 	if r.pool == "" {
 		return fmt.Errorf("cleanup %s: %w", runID, ErrRunNotFound)
 	}
-	// An interrupted run's continuation still needs its S3 inputs.
-	if r.outcome == nil || wire.Interrupted(r.outcome.Status.State) {
-		return fmt.Errorf("%w: run %s's turn %d has not ended", ErrInvalidInput, runID, r.latest)
+	if r.outcome == nil {
+		return fmt.Errorf("%w: run %s has not ended", ErrInvalidInput, runID)
 	}
 	storage := r.v.state.Pools[r.pool].Storage
 	store, err := h.bucket(r.pool, storage)

@@ -74,7 +74,7 @@ wherry admin pool create build --config-file build-terms.yaml
   start failure, and each member with no matching adapter, returns a task
   to the pool and uses a delivery, so set it to at least the number of
   receivers in the pool, plus a margin. From attempt
-  `delivery_limit` minus 1, a receiver ends a turn it would return to the
+  `delivery_limit` minus 1, a receiver ends a run it would return to the
   pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
   cases the [extension](a2a-extension-v1.md#delivery-budget) lists. The
   broker caps it at
@@ -82,10 +82,10 @@ wherry admin pool create build --config-file build-terms.yaml
 - `lock_duration_ms` is how long a claim survives without renewal, and how
   long a denied receiver keeps running its jobs. Receivers renew every 10
   seconds.
-- `run_lifetime_ms` is the longest time from a run's first submission to
-  its last continuation. It defaults to 14 days. See [Retention](#retention).
+- `run_lifetime_ms` bounds how long after its submission a run's task is
+  admitted. It defaults to 14 days. See [Retention](#retention).
 - `inline_limit` and `output_limit` bound a task's input files and a
-  turn's outputs; they default to 256 KiB and 8 MiB. See
+  run's outputs; they default to 256 KiB and 8 MiB. See
   [Size a pool against the broker](#size-a-pool-against-the-broker).
 - `vcs` lists the hosts a task's agent may clone from; without it the
   pool takes no git input. See [Git repositories](#git-repositories).
@@ -99,23 +99,21 @@ wherry admin pool create build --config-file build-terms.yaml
 
 Running `pool create` again for an existing pool records the new terms.
 Adding or removing an agent's `models` rejects that agent's queued and
-continuing runs at their next claim, so drain the agent first.
+redelivered runs at their next claim, so drain the agent first.
 
 ### Retention
 
-A run takes continuations for `run_lifetime_ms` after its first submission.
-After that, receivers reject another turn with `run expired`, and an interrupted
-run ends `TASK_STATE_CANCELED` with the same message the next time a receiver
-reads the pool's events. Receivers also reject a turn whose queue deadline falls
-after the lifetime, so every turn ends within six hours after it. Choose the
-lifetime as the longest pause expected before a continuation, such as a wait for
-a person to sign in. A longer lifetime keeps prompts on the broker longer.
+Receivers reject a task still unclaimed `run_lifetime_ms` after its submission
+with `run expired`, and a task whose queue deadline falls after the lifetime
+with `queue deadline exceeds run lifetime`; `wherry submit` refuses such a
+queue deadline before it publishes. Every run therefore ends within six hours
+after its lifetime. A longer lifetime keeps prompts on the broker longer.
 Lowering the lifetime of a pool with runs in progress lowers its topics'
 retention at once: Kafka then deletes the records of runs older than the new
-bound, and their continuations fail with `continuation history unavailable`.
+bound, and receivers reject a redelivered task whose submission is gone.
 
 `pool create` sets the retention of the pool's tasks and events topics, new and
-existing, to the run lifetime plus the six-hour maximum turn time plus a one-day
+existing, to the run lifetime plus the six-hour maximum run time plus a one-day
 margin, and their timestamp type to `LogAppendTime`, since the lifetime runs
 from the broker's time. With the 14-day default that is `1317600000` ms, 15 days
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
@@ -134,7 +132,7 @@ the broker's record limit bounds what a pool can carry. `pool create` reads
 pool's tasks topic and its tenants' feeds, signs the largest bounded
 submission `inline_limit` allows and the largest output and transcript
 chunks, and refuses the terms when one is over the limit of the topics it
-goes to. A transcript chunk can be 933544 bytes, so keep each tenant feed's
+goes to. A transcript chunk can be 933508 bytes, so keep each tenant feed's
 `max.message.bytes` at or above that:
 
 ```
@@ -309,10 +307,10 @@ The value reaches the command through the environment, never pasted into its
 arguments.
 
 An adapter for any other harness declares `output: file`: the receiver ends
-the turn when the job ends and takes the reply from a file the job writes to
+the run when the job ends and takes the reply from a file the job writes to
 its output directory, `reply.md` unless `reply_file` names another. The
 command writes the harness's reply there, so the harness itself is
-unchanged, and its exit code decides whether the turn completes:
+unchanged, and its exit code decides whether the run completes:
 
 ```yaml
 name: harness
@@ -591,27 +589,28 @@ error says so, and upgrading `wherry` reads it.
 ## Run credentialed tasks
 
 A receiver asks the submitting host for an adapter's credential when it
-claims the turn, and the host answers only while `wherry await` or
+claims the task, and the host answers only while `wherry await` or
 `wherry mcp` runs on it. A parent that submits a task whose adapter takes
 a credential keeps one of them running until the task starts; without an
-answer within 5 minutes, the turn ends `TASK_STATE_AUTH_REQUIRED` with the
-message `credential <name> required`, and `wherry continue` followed by
-`wherry await` runs it again.
+answer within 5 minutes, the run ends `TASK_STATE_FAILED` with a message
+that names each unanswered credential, never its value. Add the credential to
+`credentials` in the host's wherry configuration, then submit a new run with
+`wherry await` or `wherry mcp` running on the host.
 
 The host answers only for a credential the pool's terms approve for the
 run's agent, or a task credential the run declares, that its configuration
-maps to a file, and only to the receiver that first claimed the turn.
+maps to a file, and only to the receiver that first claimed the run.
 `wherry submit` refuses a task credential its configuration does not map
 to a file. It logs each verified request of its
 own runs that it skips or refuses, by run, receiver and credential name, on
 standard error. A receiver that adopts a running job asks for its own seal
-and publishes nothing of the job until it opens. A turn adopted by a second
-receiver gets no seal, so that receiver stops the job and the turn ends
-`TASK_STATE_AUTH_REQUIRED`; `wherry continue` runs it again.
+and publishes nothing of the job until it opens. A run adopted by a second
+receiver gets no seal, so that receiver stops the job and the run ends
+`TASK_STATE_FAILED` naming the credentials; submit a new run.
 
 ## Inputs and outputs
 
-A task's input files hold the pool's `inline_limit` together, and a turn's
+A task's input files hold the pool's `inline_limit` together, and a run's
 outputs its `output_limit` in 256 entries at most. An adapter implements
 `InlineLimit` with the most inline input bytes it delivers, or zero when it
 declares none. Receivers advertise that cap. A host applies the smallest
@@ -623,7 +622,7 @@ backstop.
 
 The agent creates `WHERRY_OUTPUT_DIR` when it writes its first output.
 Outputs are collected once the agent writes its result line and the job is
-stopped, including when that line reports a failure. A turn that ends
+stopped, including when that line reports a failure. A run that ends
 without the agent's result line, by timeout or otherwise, returns none.
 
 ## S3 storage
@@ -676,7 +675,7 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    The host keeps the access key and secret key in two files of mode 0600, named
    under `storage` in its [configuration](reference.md#client-configuration).
    Receivers and agents never hold it; they get presigned URLs, a GET per input
-   for 15 minutes and a PUT per output until the turn's deadline, 7 days at
+   for 15 minutes and a PUT per output until the run's deadline, 7 days at
    most.
 
 4. Set a lifecycle rule that expires `wherry/` after a period longer than
@@ -738,8 +737,8 @@ vcs:
   - git.example.com:2222
 ```
 
-`submit` and `continue` refuse a remote outside the VCS hosts before they
-publish, and receivers reject one at admission.
+`submit` refuses a remote outside the VCS hosts before it
+publishes, and receivers reject one at admission.
 
 VCS hosts limit what wherry accepts. The agent runs commands, and it can
 reach any host its network allows. Enforce where agents connect with the
@@ -878,9 +877,7 @@ the DNS resolvers as well.
 
 Readers reject records with unknown members or versions, so hosts and
 receivers run the same release. A host's run records carry `redaction_key`,
-so an older `wherry` cannot read a run this release submitted. A run an older
-release submitted holds no redaction key, so this release answers no seal
-request for it until `wherry continue` records its next turn. A host or
+so an older `wherry` cannot read a run this release submitted. A host or
 receiver of an earlier release cannot decode pool terms that set `models` or
 `default_model`, and stops reading `wherry.admin` while they hold them, so
 upgrade every receiver and host before the terms set them. An older release
@@ -894,8 +891,8 @@ state directory.
 1. Replace the binary on every host and receiver host.
 2. Replace the plugins in each receiver's plugin directory together with the
    receiver binary; a receiver refuses a plugin of another adapter protocol
-   version. This release speaks adapter protocol version 6 and refuses a
-   version 5 plugin, which would omit its inline input limit.
+   version. This release speaks adapter protocol version 7 and refuses a
+   version 6 plugin.
 3. Restart each receiver with the same bundle and state directory. On
    `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its
    tasks to the pool. The next delivery of each task adopts the running

@@ -21,10 +21,10 @@ One `wherry` binary with three sides:
 - **Host:** `wherry init` and `wherry key` register and show the host's signing
   key. `receivers` lists the receivers the tenant may use with their adapters
   and labels. `submit` places a task by agent and label selector and publishes
-  it. `await`, `status`, `events`, `continue` and `cancel` follow, extend and
-  stop a run, and `await` answers the claiming receiver's request for the
-  agent's credential. `status` without a run ID lists every run the host
-  can see, `transcript` prints a turn's agent output, and `cleanup` deletes
+  it. `await`, `status`, `events` and `cancel` follow and stop a run, and
+  `await` answers the claiming receiver's request for the agent's
+  credential. `status` without a run ID lists every run the host
+  can see, `transcript` prints a run's agent output, and `cleanup` deletes
   a run's S3 objects. `mcp` serves every one of these commands but `init`
   and `key` as an MCP tool of the same name; see
   [Harness integration](#harness-integration).
@@ -48,13 +48,12 @@ record.
 ## Harness integration
 
 `wherry mcp` is an MCP server (protocol 2026-07-28 and earlier) on stdio.
-It reads the host's configuration and offers nine tools: `receivers`,
-`submit`, `status`, `await`, `continue`, `cancel`, `events`, `transcript` and
-`cleanup`. Each takes
-and returns JSON with a declared schema. `await` waits up to 45 seconds,
-then returns the final or interrupted state with its result or message,
-or `retry_after` while the run is unfinished. `submit` and `continue` also
-return `await`, the `wherry await` command a harness runs in the background
+It reads the host's configuration and offers eight tools: `receivers`,
+`submit`, `status`, `await`, `cancel`, `events`, `transcript` and
+`cleanup`. Each takes and returns JSON with a declared schema. `await`
+waits up to 45 seconds, then returns the final state with its result or
+message, or `retry_after` while the run is unfinished. `submit` also
+returns `await`, the `wherry await` command a harness runs in the background
 to learn when the run ends.
 
 [`plugins/wherry`](plugins/wherry) packages the server with a `wherry`

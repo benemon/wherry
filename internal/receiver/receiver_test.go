@@ -138,8 +138,8 @@ func (f *fakeAdapter) Ready(ctx context.Context) (bool, error) {
 	return !f.unready && f.readyErr == nil, f.readyErr
 }
 
-func (f *fakeAdapter) handle(runID string, turn int64) adapter.Handle {
-	return adapter.Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: fmt.Sprintf("agent-%s-t%d", runID, turn)}
+func (f *fakeAdapter) handle(runID string) adapter.Handle {
+	return adapter.Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: "agent-" + runID}
 }
 
 func (f *fakeAdapter) Dispatch(ctx context.Context, run adapter.Run) (adapter.Outcome, adapter.Handle, error) {
@@ -154,10 +154,10 @@ func (f *fakeAdapter) Dispatch(ctx context.Context, run adapter.Run) (adapter.Ou
 	if f.outcome == adapter.OutcomeNothingCreated {
 		return f.outcome, adapter.Handle{}, nil
 	}
-	return cmp.Or(f.outcome, adapter.OutcomeCreated), f.handle(run.ID, run.Turn), nil
+	return cmp.Or(f.outcome, adapter.OutcomeCreated), f.handle(run.ID), nil
 }
 
-func (f *fakeAdapter) Lookup(ctx context.Context, runID string, turn int64) (adapter.Job, error) {
+func (f *fakeAdapter) Lookup(ctx context.Context, runID string) (adapter.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lookups++
@@ -170,7 +170,7 @@ func (f *fakeAdapter) Lookup(ctx context.Context, runID string, turn int64) (ada
 	if f.job == adapter.JobAbsent {
 		return adapter.Job{}, nil
 	}
-	return adapter.Job{State: f.job, Handle: f.handle(runID, turn), Attempt: 1, Adapter: cmp.Or(f.jobAdapter, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
+	return adapter.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Adapter: cmp.Or(f.jobAdapter, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
 }
 
 // Follow emits the stream; a stream with a result keeps running like a live task, one without ends.
@@ -254,7 +254,7 @@ func (f *fakeAdapter) Collect(ctx context.Context, _ adapter.Handle, limits adap
 	return nil
 }
 
-func (f *fakeAdapter) Purge(context.Context, string, int64) error {
+func (f *fakeAdapter) Purge(context.Context, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.purges++
@@ -265,7 +265,7 @@ func (f *fakeAdapter) Purge(context.Context, string, int64) error {
 	return f.purgeErr
 }
 
-func (f *fakeAdapter) Release(_ context.Context, runID string, _ int64) error {
+func (f *fakeAdapter) Release(_ context.Context, runID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releases++
@@ -497,12 +497,12 @@ func (f fixture) produce(t *testing.T, topic, key string, value []byte) *kgo.Rec
 	return record
 }
 
-// testSubmission is a first turn for run as a host builds it.
+// testSubmission is a task for run as a host builds it.
 func testSubmission(run string) *wire.Submission {
 	return &wire.Submission{
 		Message: wire.Message{MessageID: "msg-a", ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "hi"}}, Extensions: []string{wire.ExtensionURI}},
 		Wherry: wire.SubmissionBinding{
-			Tenant: testTenant, Host: testHost, Pool: testPool, Run: run, Turn: 1,
+			Tenant: testTenant, Host: testHost, Pool: testPool, Run: run,
 			Placement:  wire.Placement{Agent: "claude", Selector: []wire.Requirement{}},
 			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
 		},
@@ -522,7 +522,7 @@ func (f fixture) submit(t *testing.T, key ed25519.PrivateKey, mutate func(*wire.
 func (f fixture) turn(t *testing.T, run string, turn int64) *kgo.Record {
 	t.Helper()
 	return f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Wherry.Turn = run, turn
+		task.Wherry.Run = run
 		task.Message.MessageID, task.Message.TaskID, task.Message.ContextID = fmt.Sprintf("msg-%d", turn), run, run
 	})
 }
@@ -550,7 +550,7 @@ func (f fixture) publishStatus(t *testing.T, record *kgo.Record, receiver string
 // publishCancel puts a cancel for run signed by key on the pool's events and refreshes the receiver's cancelled set.
 func (f fixture) publishCancel(t *testing.T, run string, turn int64, key ed25519.PrivateKey, mutate func(*wire.Cancel)) {
 	t.Helper()
-	cancel := &wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: run, Turn: turn}
+	cancel := &wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: run}
 	if mutate != nil {
 		mutate(cancel)
 	}
@@ -579,7 +579,7 @@ func (f fixture) sealFor(t *testing.T, request wire.SealRequest, values map[stri
 	t.Helper()
 	sealed, err := signed.Seal(signed.SealBinding{
 		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
+		Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
 		S3Inputs: request.S3Inputs, S3Outputs: request.S3Outputs, ExpiryMS: request.ExpiryMS,
 	}, request.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: values, RedactionKey: testRedactionKey})
 	if err != nil {
@@ -615,7 +615,7 @@ func answerSeals(t *testing.T, ctx context.Context, kafka *kgo.Client, keys sign
 				answered[request.KeyID] = true
 				sealed, err := signed.Seal(signed.SealBinding{
 					Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-					Turn: request.Turn, Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
+					Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
 				}, request.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: map[string][]byte{credential: []byte(value)}, RedactionKey: testRedactionKey})
 				if err == nil {
 					err = kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.HostTopic(tenant, host), Key: []byte(request.Run), Value: sealed}).FirstErr()
@@ -793,7 +793,7 @@ func TestEndToEndWithFakeAdapter(t *testing.T) {
 		var echo wire.Echo
 		if wire.ParseRecord(record.Value, f.keys(), &echo) == nil {
 			echoes++
-			if echo.Pool != testPool || echo.Run != "run-a" || echo.Turn != 1 || echo.MessageID != "msg-a" || echo.Placement.Agent != "claude" {
+			if echo.Pool != testPool || echo.Run != "run-a" || echo.MessageID != "msg-a" || echo.Placement.Agent != "claude" {
 				t.Fatalf("echo %#v", echo)
 			}
 		}
@@ -1208,7 +1208,6 @@ func (m multiFixture) routed(t *testing.T, selector ...wire.Requirement) string 
 }
 
 func TestEachSelectorOperatorRoutes(t *testing.T) {
-	m := newMultiFixture(t)
 	for _, test := range []struct {
 		name     string
 		selector []wire.Requirement
@@ -1223,6 +1222,7 @@ func TestEachSelectorOperatorRoutes(t *testing.T) {
 		{"DoesNotExist", []wire.Requirement{doesNotExist("example.com/accelerator"), in("class", "cpu")}, "lab"},
 		{"conjunction", []wire.Requirement{in("class", "cpu"), notIn("site", "lab"), exists("example.com/accelerator")}, "cloud"},
 	} {
+		m := newMultiFixture(t)
 		if got := m.routed(t, test.selector...); got != test.want {
 			t.Errorf("%s: routed to %s, want %s", test.name, got, test.want)
 		}
