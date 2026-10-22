@@ -225,6 +225,10 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
 		}
 	}
+	// A receiver cuts a run at the queue deadline plus the run cap, so a later deadline would be cut silently.
+	if limit := input.QueueDeadline + time.Duration(admin.MaxRunDurationMS)*time.Millisecond; input.Deadline > limit {
+		return SubmitResult{}, fmt.Errorf("%w: the deadline is %s, past the queue deadline plus the 6h run cap (%s)", ErrInvalidInput, input.Deadline, limit)
+	}
 	var s3Inputs, s3Outputs []string
 	for _, file := range input.S3Inputs {
 		s3Inputs = append(s3Inputs, file.Name)

@@ -1541,3 +1541,15 @@ func TestSSHRemote(t *testing.T) {
 		}
 	}
 }
+
+func TestSubmitRefusesADeadlinePastTheRunCap(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Deadline: 6*time.Hour + 11*time.Minute, QueueDeadline: 10 * time.Minute})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "6h run cap") {
+		t.Fatalf("submit past the cap: %v; want it refused naming the cap", err)
+	}
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Deadline: 6*time.Hour + 10*time.Minute, QueueDeadline: 10 * time.Minute}); err != nil {
+		t.Fatalf("submit at the cap: %v", err)
+	}
+}

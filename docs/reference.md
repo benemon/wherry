@@ -1104,7 +1104,8 @@ The receiver stops the job once it reads the line that ends the run. A job
 that ends without one fails with the message `agent ended without a result`.
 
 A run's time is capped at its deadline, and at six hours after its queue
-deadline. A receiver rejects a run no pool member has claimed with
+deadline. `submit` refuses a deadline later than the queue deadline plus six
+hours. A receiver rejects a run no pool member has claimed with
 `queue deadline passed` or `run deadline passed` once that deadline has
 passed. A redelivered run that a member has claimed is not rejected: the
 receiver adopts its job when it finds one, and dispatches the run again when
