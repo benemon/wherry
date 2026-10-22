@@ -551,8 +551,9 @@ the bundle's `platform` entry for its name when there is one.
 A plugin also reports, for each adapter, the paths of the input, output and
 credentials directories as its agent sees them, which the receiver writes
 into the prompt, and implements `InlineLimit` to report the most inline input
-bytes it delivers. Zero declares no adapter limit. Dispatch carries a turn's input files and task credentials
-with the prompt, and a fetch for each S3 input: its name, presigned URL,
+bytes it delivers. Zero declares no adapter limit. Dispatch carries a turn's
+input files and task credentials with the prompt, and a fetch for each S3
+input: its name, presigned URL,
 size and SHA-256, which the plugin fetches and verifies before the agent
 starts, reporting a job that never started with class `fetch` when it
 cannot. A plugin that cannot deliver an input reports it, and the turn ends
@@ -649,7 +650,7 @@ adapter is another of its adapters to that adapter, and stops and purges
 any other job under the turn's ID and dispatches the turn again.
 
 The protocol is the Go module `github.com/benemon/wherry/adapter` in this
-repository. [`adapter.proto`](../adapter/proto/wherry/adapter/v1/adapter.proto)
+repository. [`adapter.proto`](https://github.com/benemon/wherry/blob/main/adapter/proto/wherry/adapter/v1/adapter.proto)
 defines the service, `adapter.Serve` runs a plugin and gives its factory
 the logger whose JSON lines the receiver relays at their level, and
 `adaptertest` is the conformance suite a plugin runs against its platform.
