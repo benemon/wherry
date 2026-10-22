@@ -129,8 +129,8 @@ func toolFailure(err error) error {
 		return &toolError{Code: "RUN_NOT_FOUND", Message: "this host has not submitted the run and no receiver has admitted it"}
 	case errors.Is(err, busclient.ErrNoMatchingReceiver):
 		return &toolError{Code: "NO_MATCHING_RECEIVER", Message: "no live receiver of an entitled pool offers a placement matching the selector"}
-	case errors.Is(err, busclient.ErrQueueDeadlinePastLifetime):
-		return &toolError{Code: "RUN_EXPIRED", Message: "the queue deadline falls after the pool's run lifetime"}
+	case errors.Is(err, busclient.ErrQueueDeadlinePastMaximum):
+		return invalidArgument("the queue deadline is longer than the pool's max_queue_deadline")
 	case errors.Is(err, busclient.ErrInvalidInput):
 		return invalidArgument(err.Error())
 	case errors.Is(err, context.Canceled):

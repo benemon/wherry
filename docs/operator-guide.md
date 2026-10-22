@@ -82,8 +82,9 @@ wherry admin pool create build --config-file build-terms.yaml
 - `lock_duration` is how long a claim survives without renewal, and how
   long a denied receiver keeps running its jobs. Receivers renew every 10
   seconds.
-- `run_lifetime` bounds how long after its submission a run's task is
-  admitted. It defaults to 14 days. See [Retention](#retention).
+- `max_queue_deadline` is the longest queue deadline a task may ask for,
+  and bounds how long after its submission a run's task is admitted. It
+  defaults to 14 days. See [Retention](#retention).
 - `inline_limit` and `output_limit` bound a task's input files and a
   run's outputs; they default to 256 KiB and 8 MiB. See
   [Size a pool against the broker](#size-a-pool-against-the-broker).
@@ -103,22 +104,22 @@ redelivered runs at their next claim, so drain the agent first.
 
 ### Retention
 
-Receivers reject a task still unclaimed `run_lifetime` after its submission
-with `run expired`, and a task whose queue deadline falls after the lifetime
-with `queue deadline exceeds run lifetime`; `wherry submit` refuses such a
-queue deadline before it publishes. Every run therefore ends within six hours
-after its lifetime. A longer lifetime keeps prompts on the broker longer.
-Lowering the lifetime of a pool with runs in progress lowers its topics'
+Receivers reject a task still unclaimed `max_queue_deadline` after its
+submission with `run expired`, and a task whose queue deadline is longer with
+`queue deadline exceeds the pool's max queue deadline`; `wherry submit`
+refuses such a queue deadline before it publishes. Every run therefore ends
+within six hours after `max_queue_deadline`. A longer maximum keeps prompts on
+the broker longer. Lowering `max_queue_deadline` of a pool with runs in progress lowers its topics'
 retention at once: Kafka then deletes the records of runs older than the new
 bound, and receivers reject a redelivered task whose submission is gone.
 
 `pool create` sets the retention of the pool's tasks and events topics, new and
-existing, to the run lifetime plus the six-hour maximum run time plus a one-day
-margin, and their timestamp type to `LogAppendTime`, since the lifetime runs
-from the broker's time. With the 14-day default that is `1317600000` ms, 15 days
+existing, to `max_queue_deadline` plus the six-hour maximum run time plus a
+one-day margin, and their timestamp type to `LogAppendTime`, since a run's age
+runs from the broker's time. With the 14-day default that is `1317600000` ms, 15 days
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
 statuses, transcripts and results for 30 days and must keep them for at least
-the run lifetime plus six hours, so `pool create` refuses a lifetime above 29
+`max_queue_deadline` plus six hours, so `pool create` refuses a maximum above 29
 days and 18 hours, and `tenant add` refuses a feed that keeps less. Identity and
 configuration topics stay forever. `wherry admin check` reports a topic whose
 retention drops below its bound, and a pool topic whose timestamp type is not

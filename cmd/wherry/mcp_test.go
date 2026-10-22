@@ -785,3 +785,15 @@ func TestAwaitCommand(t *testing.T) {
 		t.Fatalf("the shell reads the path as %q, %v", out, err)
 	}
 }
+
+func TestToolFailureCodes(t *testing.T) {
+	for err, want := range map[error]string{
+		fmt.Errorf("load: %w", admin.ErrNewerRecord):                    "VERSION_SKEW",
+		fmt.Errorf("submit: %w", busclient.ErrQueueDeadlinePastMaximum): "INVALID_ARGUMENT",
+		busclient.ErrNoMatchingReceiver:                                 "NO_MATCHING_RECEIVER",
+	} {
+		if failure := toolFailure(err).(*toolError); failure.Code != want {
+			t.Errorf("%v: code %s, want %s", err, failure.Code, want)
+		}
+	}
+}

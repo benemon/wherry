@@ -165,8 +165,8 @@ ends in `TASK_STATE_CANCELED`.
 
 A failed call returns `{"code": ..., "message": ...}`. `RUN_NOT_FOUND`,
 `NO_MATCHING_RECEIVER` and `INVALID_ARGUMENT` call for a change to your input or
-end the run's handling. `RUN_EXPIRED` means the queue deadline asked for falls
-after the pool's run lifetime: ask for a shorter queue deadline. `CANCELLED` means the call itself was
+end the run's handling; a queue deadline longer than the pool's
+`max_queue_deadline` is an `INVALID_ARGUMENT`, so ask for a shorter one. `CANCELLED` means the call itself was
 cancelled. `VERSION_SKEW` means the pool's records come from a later wherry
 release than the running MCP server: tell the user to upgrade `wherry` and
 restart the server, since a harness keeps the old process running. `UNAVAILABLE` is any other failure; the user can run the same

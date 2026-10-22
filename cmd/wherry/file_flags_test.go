@@ -202,12 +202,12 @@ func TestPoolConfigReadsDurations(t *testing.T) {
 		t.Fatal(err)
 	}
 	file := filepath.Join(t.TempDir(), "pool.yaml")
-	if err := os.WriteFile(file, append(pool, "run_lifetime: 36h\n"...), 0o600); err != nil {
+	if err := os.WriteFile(file, append(pool, "max_queue_deadline: 36h\n"...), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	terms, err := readPoolConfig(file, false)
-	if err != nil || terms.LockDurationMS != 15000 || terms.RunLifetimeMS != admin.Millis(36*time.Hour/time.Millisecond) {
-		t.Fatalf("terms lock %d run lifetime %d, %v; want 15s and 36h in milliseconds", terms.LockDurationMS, terms.RunLifetimeMS, err)
+	if err != nil || terms.LockDurationMS != 15000 || terms.MaxQueueDeadlineMS != admin.Millis(36*time.Hour/time.Millisecond) {
+		t.Fatalf("terms lock %d max queue deadline %d, %v; want 15s and 36h in milliseconds", terms.LockDurationMS, terms.MaxQueueDeadlineMS, err)
 	}
 	old := bytes.Replace(pool, []byte("lock_duration: 15s"), []byte("lock_duration_ms: 15000"), 1)
 	if err := os.WriteFile(file, old, 0o600); err != nil {

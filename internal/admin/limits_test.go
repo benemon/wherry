@@ -40,8 +40,8 @@ func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := state.Pools["pool-a"]; got.InlineLimit != 256<<10 || got.OutputLimit != 8<<20 || got.RunLifetimeMS != DefaultRunLifetimeMS {
-		t.Fatalf("defaults %#v, want 256 KiB, 8 MiB and a 14-day run lifetime", got)
+	if got := state.Pools["pool-a"]; got.InlineLimit != 256<<10 || got.OutputLimit != 8<<20 || got.MaxQueueDeadlineMS != DefaultMaxQueueDeadlineMS {
+		t.Fatalf("defaults %#v, want 256 KiB, 8 MiB and a 14-day max queue deadline", got)
 	}
 	terms.InlineLimit, terms.OutputLimit = 1000, 2000
 	state, err = Fold([]Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}})
@@ -112,18 +112,18 @@ func TestPoolCreateSetsDerivedRetentionOnNewAndExistingTopics(t *testing.T) {
 	}
 }
 
-func TestPoolCreateRefusesRunLifetimePastFeedRetention(t *testing.T) {
+func TestPoolCreateRefusesMaxQueueDeadlinePastFeedRetention(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	terms := modelTerms()
-	terms.RunLifetimeMS = 30 * 24 * 60 * 60 * 1000
+	terms.MaxQueueDeadlineMS = 30 * 24 * 60 * 60 * 1000
 	err := service.PoolCreate(context.Background(), "pool-a", terms)
-	if err == nil || err.Error() != "run lifetime requires tenant feed retention.ms of at least 2613600000" {
+	if err == nil || err.Error() != "max queue deadline requires tenant feed retention.ms of at least 2613600000" {
 		t.Fatalf("pool create = %v", err)
 	}
 }
 
-func TestPoolCreateRefusesRunLifetimePastAnEntitledFeed(t *testing.T) {
+func TestPoolCreateRefusesMaxQueueDeadlinePastAnEntitledFeed(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
@@ -140,7 +140,7 @@ func TestPoolCreateRefusesRunLifetimePastAnEntitledFeed(t *testing.T) {
 	}
 }
 
-func TestTenantAddRefusesAFeedBelowThePoolsRunLifetime(t *testing.T) {
+func TestTenantAddRefusesAFeedBelowThePoolsMaxQueueDeadline(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
@@ -165,13 +165,13 @@ func TestCheckReportsRetentionDrift(t *testing.T) {
 		mutate func(*testing.T, *Service)
 		want   string
 	}{
-		{"tasks below lifetime plus deadline and margin", func(t *testing.T, service *Service) {
+		{"tasks below max queue deadline plus run time and margin", func(t *testing.T, service *Service) {
 			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 1317599999)
 		}, "wherry.pool.pool-a.tasks"},
 		{"events below tasks", func(t *testing.T, service *Service) {
 			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 1320000000)
 		}, "wherry.pool.pool-a.events"},
-		{"feed below lifetime plus deadline", func(t *testing.T, service *Service) {
+		{"feed below max queue deadline plus run time", func(t *testing.T, service *Service) {
 			setTopicRetention(t, service, TenantTopic("tenant-a"), 1231199999)
 		}, "wherry.tenant.tenant-a"},
 		{"events not stamped by the broker", func(t *testing.T, service *Service) {

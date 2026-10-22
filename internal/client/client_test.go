@@ -945,12 +945,12 @@ func TestRecordsAfterMembershipEndAreRejected(t *testing.T) {
 	}
 }
 
-func TestSubmitRefusesQueueDeadlinePastLifetimeBeforePublishing(t *testing.T) {
+func TestSubmitRefusesQueueDeadlinePastMaximumBeforePublishing(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	input := SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: 15 * 24 * time.Hour}
-	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrQueueDeadlinePastLifetime) {
-		t.Fatalf("submit = %v, want queue deadline past lifetime", err)
+	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrQueueDeadlinePastMaximum) {
+		t.Fatalf("submit = %v, want queue deadline past the maximum", err)
 	}
 	if n := f.tasksEnd(t, "pool-a"); n != 0 {
 		t.Fatalf("pool tasks hold %d records", n)

@@ -101,7 +101,7 @@ pool the run was placed in, on behalf of a tenant entitled to it.
 
 Every topic has one partition, `LogAppendTime` timestamps and
 `cleanup.policy=delete`. Nothing is compacted and no topic is deleted. A
-pool's task and event topics keep records for its run lifetime plus six hours
+pool's task and event topics keep records for its maximum queue deadline plus six hours
 plus a day, 15 days 6 hours by default, the tenant feed for 30 days and
 `wherry.receivers` for 7; the identity and configuration topics keep them
 forever.

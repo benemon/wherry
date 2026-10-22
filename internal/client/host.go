@@ -28,9 +28,9 @@ import (
 
 // Errors the client returns for a run or placement that cannot proceed.
 var (
-	ErrNoMatchingReceiver        = errors.New("no matching live receiver")
-	ErrRunNotFound               = errors.New("run not found")
-	ErrQueueDeadlinePastLifetime = errors.New("queue deadline exceeds run lifetime")
+	ErrNoMatchingReceiver       = errors.New("no matching live receiver")
+	ErrRunNotFound              = errors.New("run not found")
+	ErrQueueDeadlinePastMaximum = errors.New("queue deadline exceeds the pool's max queue deadline")
 	// ErrInvalidInput wraps a submission the wire format rejects; its message names the rule, never the value.
 	ErrInvalidInput = errors.New("invalid input")
 )
@@ -279,8 +279,8 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			stored = true
 		}
 	}
-	if input.QueueDeadline > v.state.Pools[pool].RunLifetime() {
-		return SubmitResult{}, ErrQueueDeadlinePastLifetime
+	if input.QueueDeadline > v.state.Pools[pool].MaxQueueDeadline() {
+		return SubmitResult{}, ErrQueueDeadlinePastMaximum
 	}
 	if input.Git != nil {
 		if host := input.Git.VCSHost(); !slices.Contains(v.state.Pools[pool].VCS, host) {

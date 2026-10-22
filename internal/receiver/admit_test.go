@@ -196,27 +196,27 @@ func TestRunTimeIsCappedSixHoursAfterTheQueueDeadline(t *testing.T) {
 
 func TestAdmitRejectsRunPastLifetime(t *testing.T) {
 	terms := testTerms()
-	terms.RunLifetimeMS = 1
+	terms.MaxQueueDeadlineMS = 1
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
 	record := f.turn(t, "run-expired", 1)
 	time.Sleep(10 * time.Millisecond)
 	f.rejected(t, record, "run expired")
 }
 
-func TestAdmitRejectsQueueDeadlinePastRunLifetime(t *testing.T) {
+func TestAdmitRejectsQueueDeadlinePastMaxQueueDeadline(t *testing.T) {
 	terms := testTerms()
-	terms.RunLifetimeMS = admin.Millis(time.Hour.Milliseconds())
+	terms.MaxQueueDeadlineMS = admin.Millis(time.Hour.Milliseconds())
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
 	first := f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-queued", "run-queued", "run-queued"
 		task.Wherry.QueueDeadlineMS = time.Now().Add(2 * time.Hour).UnixMilli()
 	})
-	f.rejected(t, first, "queue deadline exceeds run lifetime")
+	f.rejected(t, first, "queue deadline exceeds the pool's max queue deadline")
 }
 
-func TestRedeliveredClaimedTurnPastRunLifetimeIsAdopted(t *testing.T) {
+func TestRedeliveredClaimedRunPastMaxQueueDeadlineIsAdopted(t *testing.T) {
 	terms := testTerms()
-	terms.RunLifetimeMS = 50
+	terms.MaxQueueDeadlineMS = 50
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream, job: adapter.JobRunning}})
 	record := startedTurn(t, f, "run-held", func(task *wire.Submission) {
 		task.Wherry.QueueDeadlineMS = time.Now().Add(20 * time.Millisecond).UnixMilli()
@@ -614,7 +614,7 @@ func TestHeartbeatHonoursHeldCancel(t *testing.T) {
 
 func TestRunsUnderRetention(t *testing.T) {
 	terms := testTerms()
-	terms.RunLifetimeMS = admin.Millis(time.Hour.Milliseconds())
+	terms.MaxQueueDeadlineMS = admin.Millis(time.Hour.Milliseconds())
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream, job: adapter.JobRunning}})
 	aged := func(topic, key string, value []byte, age time.Duration) *kgo.Record {
 		t.Helper()

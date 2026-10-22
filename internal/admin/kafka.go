@@ -353,10 +353,10 @@ type retentionBounds struct {
 
 // poolRetention derives the pool topics' and its tenant feeds' minimum retention.ms from terms with defaults applied.
 func poolRetention(terms Terms) (retentionBounds, error) {
-	if terms.RunLifetimeMS > tenantRetentionMS-MaxRunDurationMS {
-		return retentionBounds{}, fmt.Errorf("run lifetime requires tenant feed retention.ms of at least %d", terms.RunLifetimeMS+MaxRunDurationMS)
+	if terms.MaxQueueDeadlineMS > tenantRetentionMS-MaxRunDurationMS {
+		return retentionBounds{}, fmt.Errorf("max queue deadline requires tenant feed retention.ms of at least %d", terms.MaxQueueDeadlineMS+MaxRunDurationMS)
 	}
-	feed := int64(terms.RunLifetimeMS) + MaxRunDurationMS
+	feed := int64(terms.MaxQueueDeadlineMS) + MaxRunDurationMS
 	return retentionBounds{tasks: feed + retentionMarginMS, feed: feed}, nil
 }
 
@@ -408,7 +408,7 @@ func (service *Service) configureTopicRetention(ctx context.Context, value strin
 		resource := kmsg.NewIncrementalAlterConfigsRequestResource()
 		resource.ResourceType = kmsg.ConfigResourceTypeTopic
 		resource.ResourceName = topic
-		// Admission measures a run's lifetime from the broker's timestamp of its submission.
+		// Admission measures a run's age from the broker's timestamp of its submission.
 		for name, value := range map[string]string{"retention.ms": value, "message.timestamp.type": "LogAppendTime"} {
 			config := kmsg.NewIncrementalAlterConfigsRequestResourceConfig()
 			config.Name = name

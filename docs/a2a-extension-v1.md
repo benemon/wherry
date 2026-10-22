@@ -223,7 +223,7 @@ part. The fixed texts are:
 
 - rejected: `agent is outside the pool terms`,
   `model not in the pool's terms`, `duplicate submission`,
-  `run expired`, `queue deadline exceeds run lifetime`,
+  `run expired`, `queue deadline exceeds the pool's max queue deadline`,
   `queue deadline passed`, `run deadline passed`,
   `unsupported message part`, `run ID in use`,
   `inline inputs are <n> bytes, over the <limit>-byte limit`,
@@ -785,8 +785,8 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `skip` | `offset`, `sha256` | passes over the undecodable record at that offset with that SHA-256 |
 
 `terms` has the members of the [pool terms](reference.md#pool-terms) file,
-with `run_lifetime_ms` and `lock_duration_ms` in milliseconds for its
-`run_lifetime` and `lock_duration`. `config` holds `receiver` and `pool`,
+with `max_queue_deadline_ms` and `lock_duration_ms` in milliseconds for its
+`max_queue_deadline` and `lock_duration`. `config` holds `receiver` and `pool`,
 which equal the record's, the receiver's `capacity`, and its `adapters` in
 routing order. Each adapter is the
 [adapter entry](reference.md#receiver-configuration) as `name`, `platform`
@@ -834,8 +834,9 @@ A receiver that claims a submission:
    verifies;
 7. rejects a run no pool member has claimed with `run expired` when its
    submission reached the pool's task topic more than the pool's
-   `run_lifetime_ms` ago, and with `queue deadline exceeds run lifetime`
-   when its queue deadline falls more than `run_lifetime_ms` after that;
+   `max_queue_deadline_ms` ago, and with
+   `queue deadline exceeds the pool's max queue deadline` when its queue
+   deadline falls more than `max_queue_deadline_ms` after that;
 8. rejects a run no pool member has claimed when its queue deadline or run
    deadline has passed;
 9. rejects it when the host of the run's [git input](#git-input) is not

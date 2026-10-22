@@ -252,17 +252,17 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if len(all) == 0 || all[0].hash != hash {
 		return reject("duplicate submission")
 	}
-	// A run a member already claimed is past the lifetime and deadline checks; its redelivery goes on to adoption.
+	// A run a member already claimed is past the age and deadline checks; its redelivery goes on to adoption.
 	claimed := slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
 		return status.Wherry.TaskHash == hash && status.Wherry.Kind != "rejected"
 	})
 	if !claimed {
-		lifetime := terms.RunLifetime()
-		if time.Since(all[0].submitted) > lifetime {
+		maximum := terms.MaxQueueDeadline()
+		if time.Since(all[0].submitted) > maximum {
 			return reject("run expired")
 		}
-		if task.Wherry.QueueDeadlineMS > all[0].submitted.Add(lifetime).UnixMilli() {
-			return reject("queue deadline exceeds run lifetime")
+		if task.Wherry.QueueDeadlineMS > all[0].submitted.Add(maximum).UnixMilli() {
+			return reject("queue deadline exceeds the pool's max queue deadline")
 		}
 	}
 	history := []wire.Message{task.Message}

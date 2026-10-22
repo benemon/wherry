@@ -61,7 +61,7 @@ func TestScrapeAfterARun(t *testing.T) {
 		`wherry_seal_waits_total{outcome="sealed",pool="pool-a",tenant="tenant-a"} 1`,
 		`wherry_seal_wait_seconds_count{pool="pool-a",tenant="tenant-a"} 1`,
 		`wherry_runs_total{adapter="nomad",agent="claude",model="",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
-		`wherry_turn_duration_seconds_count{adapter="nomad",agent="claude",model="",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
+		`wherry_run_duration_seconds_count{adapter="nomad",agent="claude",model="",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
 		`wherry_agent_reported_tokens_total{agent="claude",kind="input",model="",pool="pool-a",tenant="tenant-a"} 10`,
 		`wherry_agent_reported_tokens_total{agent="claude",kind="output",model="",pool="pool-a",tenant="tenant-a"} 5`,
 		`wherry_agent_reported_tokens_total{agent="claude",kind="cached",model="",pool="pool-a",tenant="tenant-a"} 3`,

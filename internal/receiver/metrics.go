@@ -31,7 +31,7 @@ type metrics struct {
 	register   sync.Once
 
 	claims, admissions, rejections, runs, adoptions, redeliveries *prometheus.CounterVec
-	turnDuration, queueWait, sealWait                             *prometheus.HistogramVec
+	runDuration, queueWait, sealWait                              *prometheus.HistogramVec
 	inFlight                                                      *prometheus.GaugeVec
 	capacity                                                      prometheus.Gauge
 	startFailures, dispatchOutcomes, stopFailures, purgeFailures  *prometheus.CounterVec
@@ -68,7 +68,7 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.runs = counters("runs_total", "Runs ended, by terminal state.", "tenant", "adapter", "agent", "model", "state")
 	m.adoptions = counters("adoptions_total", "Runs that adopted an earlier attempt's job.", "tenant", "adapter")
 	m.redeliveries = counters("redeliveries_total", "Runs executed on a redelivery.", "tenant", "adapter")
-	m.turnDuration = histograms("turn_duration_seconds", "Time from claim to a run's terminal state.", "tenant", "adapter", "agent", "model", "state")
+	m.runDuration = histograms("run_duration_seconds", "Time from claim to a run's terminal state.", "tenant", "adapter", "agent", "model", "state")
 	m.queueWait = histograms("queue_wait_seconds", "Time from submission to first claim.", "tenant", "adapter")
 	m.inFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_in_flight", Help: "Tasks held, by the adapter they were routed to."}, []string{"adapter"})
 	m.capacity = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_capacity", Help: "Tasks the receiver holds at once."})
@@ -270,7 +270,7 @@ func (run *activeRun) ended(state wire.TaskState, resultMetadata []byte) {
 	}
 	m.runs.WithLabelValues(tenant, adapter, agent, model, label).Inc()
 	if !run.claimed.IsZero() {
-		m.turnDuration.WithLabelValues(tenant, adapter, agent, model, label).Observe(time.Since(run.claimed).Seconds())
+		m.runDuration.WithLabelValues(tenant, adapter, agent, model, label).Observe(time.Since(run.claimed).Seconds())
 	}
 	var reported struct {
 		AgentResult struct {
