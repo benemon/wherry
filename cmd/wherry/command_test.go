@@ -839,3 +839,15 @@ func TestOutputSuffixesInEitherOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestVersionNeedsNoConfigOrBroker(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"version"}, &stdout, &stderr); err != nil {
+		t.Fatalf("version: %v (stderr %q)", err, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) < 2 || !strings.HasPrefix(lines[0], "version=") || !strings.HasPrefix(lines[1], "revision=") {
+		t.Fatalf("version printed %q, want version= and revision= lines", stdout.String())
+	}
+}

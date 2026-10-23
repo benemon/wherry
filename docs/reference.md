@@ -413,6 +413,15 @@ The packaged MCP launch uses `["mcp"]` and the default configuration path.
 A server that runs `wherry mcp --config-file PATH` uses another; see the
 [operator guide](operator-guide.md#harness-integration).
 
+### `wherry version`
+
+Prints the binary's release as `version=<release>` and its commit as
+`revision=<commit>`, each on its own line. A release build's release is its
+git tag, such as `v0.1.0-rc.9`. A build from an untagged commit prints a Go
+pseudo-version, and a build without git information prints `(devel)` and an
+empty revision. A build from a working tree with uncommitted changes adds
+`modified=true`. It takes no flags and reads no configuration.
+
 ## Admin commands
 
 `wherry admin` connects twice, as the Kafka super user and as

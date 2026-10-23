@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
 
@@ -23,13 +24,35 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|key rotate|receivers|submit|cancel|await|status|events|transcript|cleanup|receiver run|admin|mcp>")
+		return errors.New("usage: wherry <init|key|key rotate|receivers|submit|cancel|await|status|events|transcript|cleanup|receiver run|admin|mcp|version>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
 	}
 	if args[0] == "admin" {
 		return runAdmin(args[1:], stdout, stderr)
+	}
+	if args[0] == "version" {
+		if len(args) != 1 {
+			return errors.New("usage: wherry version")
+		}
+		version, revision, modified := "(devel)", "", false
+		if info, ok := debug.ReadBuildInfo(); ok {
+			version = info.Main.Version
+			for _, setting := range info.Settings {
+				switch setting.Key {
+				case "vcs.revision":
+					revision = setting.Value
+				case "vcs.modified":
+					modified = setting.Value == "true"
+				}
+			}
+		}
+		fmt.Fprintf(stdout, "version=%s\nrevision=%s\n", version, revision)
+		if modified {
+			fmt.Fprintln(stdout, "modified=true")
+		}
+		return nil
 	}
 	if args[0] == "init" {
 		flags := flag.NewFlagSet("init", flag.ContinueOnError)
