@@ -122,27 +122,27 @@ func TestStatusBindsPlacedPool(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}}
 	status := sign(t, testStatus("receiver-a", "tenant-a", "pool-a", "run-a"), key)
-	if _, err := AuthorizeStatus(state, keys, status, "pool-a", "tenant-a"); err != nil {
+	if _, err := AuthorizeStatus(wire.ParseRecord, state, keys, status, "pool-a", "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AuthorizeStatus(state, keys, status, "pool-b", "tenant-a"); err == nil {
+	if _, err := AuthorizeStatus(wire.ParseRecord, state, keys, status, "pool-b", "tenant-a"); err == nil {
 		t.Fatal("accepted pool-a receiver status for a pool-b run")
 	}
-	if _, err := AuthorizeStatus(state, keys, status, "pool-a", "tenant-b"); err == nil {
+	if _, err := AuthorizeStatus(wire.ParseRecord, state, keys, status, "pool-a", "tenant-b"); err == nil {
 		t.Fatal("accepted a status moved to another tenant's run")
 	}
-	if _, err := AuthorizeStatus(state, keys, sign(t, testStatus("receiver-b", "tenant-a", "pool-a", "run-a"), key), "pool-a", "tenant-a"); err == nil {
+	if _, err := AuthorizeStatus(wire.ParseRecord, state, keys, sign(t, testStatus("receiver-b", "tenant-a", "pool-a", "run-a"), key), "pool-a", "tenant-a"); err == nil {
 		t.Fatal("accepted a status naming a receiver whose key did not sign it")
 	}
-	if _, err := AuthorizeStatus(state, keys, sign(t, testStatus("receiver-a", "tenant-a", "pool-b", "run-b"), key), "pool-b", "tenant-a"); err == nil {
+	if _, err := AuthorizeStatus(wire.ParseRecord, state, keys, sign(t, testStatus("receiver-a", "tenant-a", "pool-b", "run-b"), key), "pool-b", "tenant-a"); err == nil {
 		t.Fatal("accepted a pool-b status from a pool-a receiver")
 	}
 	keys["receiver-b"] = signed.KeyState{Current: key.Public().(ed25519.PublicKey)}
-	if _, err := AuthorizeStatus(state, keys, sign(t, testStatus("receiver-b", "tenant-b", "pool-b", "run-b"), key), "pool-b", "tenant-b"); err == nil {
+	if _, err := AuthorizeStatus(wire.ParseRecord, state, keys, sign(t, testStatus("receiver-b", "tenant-b", "pool-b", "run-b"), key), "pool-b", "tenant-b"); err == nil {
 		t.Fatal("accepted a status for a tenant not entitled to the pool")
 	}
 	state.Ended[ReceiverPrincipal("receiver-a")] = true
-	if _, err := AuthorizeStatus(state, keys, status, "pool-a", "tenant-a"); err == nil {
+	if _, err := AuthorizeStatus(wire.ParseRecord, state, keys, status, "pool-a", "tenant-a"); err == nil {
 		t.Fatal("accepted a status from a receiver after its membership end")
 	}
 }
@@ -558,13 +558,13 @@ func TestEchoAdvertisementAndSealRequestBindTheirPool(t *testing.T) {
 	echo := func(tenant, pool string) []byte {
 		return sign(t, &wire.Echo{Receiver: "receiver-a", Tenant: tenant, Pool: pool, Run: "run-a", Placement: wire.Placement{Agent: "agent-a"}, TaskHash: strings.Repeat("a", 64), MessageID: "message-a"}, key)
 	}
-	if _, err := AuthorizeEcho(state, keys, echo("tenant-a", "pool-a"), "tenant-a"); err != nil {
+	if _, err := AuthorizeEcho(wire.ParseRecord, state, keys, echo("tenant-a", "pool-a"), "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AuthorizeEcho(state, keys, echo("tenant-a", "pool-a"), "tenant-b"); err == nil {
+	if _, err := AuthorizeEcho(wire.ParseRecord, state, keys, echo("tenant-a", "pool-a"), "tenant-b"); err == nil {
 		t.Fatal("accepted an echo on another tenant's feed")
 	}
-	if _, err := AuthorizeEcho(state, keys, echo("tenant-a", "pool-b"), "tenant-a"); err == nil {
+	if _, err := AuthorizeEcho(wire.ParseRecord, state, keys, echo("tenant-a", "pool-b"), "tenant-a"); err == nil {
 		t.Fatal("accepted an echo placing a run in a pool the receiver is not in")
 	}
 	advertisement := func(pool string) []byte {

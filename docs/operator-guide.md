@@ -544,6 +544,44 @@ them.
 A revoked name cannot be reused. Provision a returning host or receiver
 under a new name.
 
+## Rotate a key
+
+A rotation replaces a host's or receiver's signing key and keeps its name.
+Readers keep verifying the feed records the old key signed before the
+rotation. For a key that may be compromised, revoke the host or receiver
+instead.
+
+For a host:
+
+1. Wait for the runs the host submitted to end. `wherry status` lists them.
+2. Stop every other wherry process of the host, such as the MCP server and
+   any `wherry await`. They hold the old key.
+3. Run the rotation:
+
+   ```sh
+   wherry key rotate
+   ```
+
+   It prints `old_key_id=<id> new_key_id=<id>`. It refuses while a run the
+   host submitted has not ended, and names the run.
+
+For a receiver, restart it once with `--rotate-key`:
+
+```sh
+wherry receiver run --bundle-file nomad-1.bundle --rotate-key
+```
+
+It rotates `signing.key` before it claims anything and logs
+`rotated key: old=<id> new=<id>`. Start it without the flag afterwards.
+
+A rotation writes the new key beside the old one, as `<host_key>.next` or
+`signing.key.next`, before it publishes anything. When a rotation stops
+part way, the next host command, or the receiver's next start, settles the
+`.next` file from the key topic: it keeps the new key when the topic names
+it current and removes the `.next` file when the topic still names the old
+key. Leave the `.next` file in place; removing it by hand after the
+rotation was published loses the key.
+
 ## Replace a lost key
 
 A host or receiver key cannot be recovered or re-registered.

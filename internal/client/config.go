@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/ed25519"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -9,11 +10,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -131,22 +134,53 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}
-	key, err := trust.LoadSigningKeyFile(config.HostKey)
-	if err != nil {
-		return nil, fmt.Errorf("load host key: %w", err)
-	}
 	// Aborted transactions are a fenced holder's writes and must never be read.
 	kafka, err := kgo.NewClient(append(opts, kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 	if err != nil {
 		return nil, err
 	}
-	host, err := NewHost(kafka, key, bundle.Principal, config.StateDir, config.Credentials, logger)
+	host, err := NewHost(kafka, nil, bundle.Principal, config.StateDir, config.Credentials, logger)
 	if err != nil {
 		kafka.Close()
 		return nil, err
 	}
+	if host.key, err = admin.RecoverKey(context.Background(), kafka, signed.HostOwner(host.tenant, host.host), admin.HostTopic(host.tenant, host.host), config.HostKey); err != nil {
+		kafka.Close()
+		return nil, fmt.Errorf("load host key: %w", err)
+	}
 	host.storage = config.Storage
 	return host, nil
+}
+
+// RotateKey replaces the host key with a new one and returns the old and new key IDs. It refuses while a run this host
+// submitted has not ended, since receivers admit a task only under its host's current key.
+func RotateKey(ctx context.Context, config Config) (string, string, error) {
+	host, err := Connect(config, log.New(io.Discard, "", 0))
+	if err != nil {
+		return "", "", err
+	}
+	defer host.Close()
+	runs, err := host.Runs(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	var unfinished []string
+	for _, run := range runs.Runs {
+		path, _ := host.runPath(run.RunID)
+		if _, err := os.Stat(path); err == nil && !wire.Terminal(run.Status.State) {
+			unfinished = append(unfinished, run.RunID)
+		}
+	}
+	if len(unfinished) > 0 {
+		slices.Sort(unfinished)
+		return "", "", fmt.Errorf("runs %s have not ended; rotate the key once they have, with every other wherry process of this host (the MCP server, any wherry await) stopped", strings.Join(unfinished, ", "))
+	}
+	old := host.key
+	next, err := admin.RotateKey(ctx, host.kafka, signed.HostOwner(host.tenant, host.host), admin.HostTopic(host.tenant, host.host), config.HostKey, old)
+	if err != nil {
+		return "", "", err
+	}
+	return signed.KeyID(old.Public().(ed25519.PublicKey)), signed.KeyID(next.Public().(ed25519.PublicKey)), nil
 }
 
 func expandHome(path string) (string, error) {

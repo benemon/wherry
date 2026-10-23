@@ -971,11 +971,11 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 		"host principal": {Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.TenantPrincipal("tenant-a", "host-a"), Password: "p"},
 		"no CA":          {Broker: "127.0.0.1:1", Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"},
 	} {
-		if _, err := New(bundle, filepath.Join(dir, name), nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
+		if _, err := New(bundle, filepath.Join(dir, name), false, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
 			t.Fatalf("%s: New accepted the bundle", name)
 		}
 	}
-	r, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	r, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), false, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -983,7 +983,7 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 	if r.id != "receiver-a" {
 		t.Fatalf("receiver ID %q", r.id)
 	}
-	again, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	again, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), false, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

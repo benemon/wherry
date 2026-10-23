@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/internal/trust"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -92,6 +93,51 @@ func TestRealBrokerFixture(t *testing.T) {
 		owner := f.connect(t, TenantPrincipal(f.tenantA, f.hostA1))
 		if err := owner.ProduceSync(ctx, &kgo.Record{Topic: HostTopic(f.tenantA, f.hostA1), Value: registration}).FirstErr(); err != nil {
 			t.Fatalf("owner registration: %v", err)
+		}
+	})
+
+	t.Run("a host and a receiver rotate their own keys", func(t *testing.T) {
+		for _, c := range []struct{ owner, principal, topic string }{
+			{signed.HostOwner(f.tenantA, f.hostA2), TenantPrincipal(f.tenantA, f.hostA2), HostTopic(f.tenantA, f.hostA2)},
+			{f.receiverB, ReceiverPrincipal(f.receiverB), ReceiverTopic(f.receiverB)},
+		} {
+			client := f.connect(t, c.principal)
+			path := filepath.Join(t.TempDir(), "signing.key")
+			key, err := trust.GenerateSigningKeyFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			registration, err := signed.RegisterKey(c.owner, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := client.ProduceSync(ctx, &kgo.Record{Topic: c.topic, Key: []byte(c.owner), Value: registration}).FirstErr(); err != nil {
+				t.Fatalf("%s registration: %v", c.owner, err)
+			}
+			next, err := RotateKey(ctx, client, c.owner, c.topic, path, key)
+			if err != nil {
+				t.Fatalf("%s rotation: %v", c.owner, err)
+			}
+			if _, err := os.Stat(path + ".next"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s next key file left: %v", c.owner, err)
+			}
+			if loaded, err := trust.LoadSigningKeyFile(path); err != nil || !loaded.Equal(next) {
+				t.Fatalf("%s key file does not hold the next key: %v", c.owner, err)
+			}
+			records, err := ReadTopic(ctx, client, c.topic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys, err := ReadKeys(ctx, client, map[string]string{c.owner: c.topic})
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := keys[c.owner]
+			// The retirement time is the broker's: key topics use LogAppendTime.
+			if len(records) != 2 || records[1].Attrs.TimestampType() != 1 || !state.Current.Equal(next.Public()) || len(state.Retired) != 1 ||
+				!state.Retired[0].Key.Equal(key.Public()) || !state.Retired[0].At.Equal(records[1].Timestamp) {
+				t.Fatalf("%s key topic of %d records folded to %#v; want the old key retired at the rotation's log append time", c.owner, len(records), state)
+			}
 		}
 	})
 

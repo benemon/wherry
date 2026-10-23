@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"time"
 
 	"github.com/benemon/wherry/internal/signed"
 	jose "github.com/go-jose/go-jose/v4"
@@ -38,6 +39,16 @@ func SignRecord(value Record, key ed25519.PrivateKey) ([]byte, error) {
 // decodes it into value and requires the payload to name that owner.
 func ParseRecord(encoded []byte, keys signed.Keys, value Record) error {
 	return parse(signed.Verify, encoded, keys, value)
+}
+
+// ParseHistory is ParseRecord for a feed record the broker appended at appended,
+// which also verifies against a key its owner retired after that.
+func ParseHistory(appended time.Time) func([]byte, signed.Keys, Record) error {
+	return func(encoded []byte, keys signed.Keys, value Record) error {
+		return parse(func(encoded []byte, typ string, keys signed.Keys, dst any) (string, error) {
+			return signed.VerifyHistory(encoded, typ, keys, appended, dst)
+		}, encoded, keys, value)
+	}
 }
 
 func parse(verify func([]byte, string, signed.Keys, any) (string, error), encoded []byte, keys signed.Keys, value Record) error {

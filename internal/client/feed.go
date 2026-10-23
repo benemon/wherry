@@ -194,7 +194,9 @@ func authorize[T any](ctx context.Context, r *runView, value []byte, check func(
 // addEcho keeps an echo of the run, reporting whether record was one.
 func (r *runView) addEcho(ctx context.Context, record *kgo.Record) bool {
 	value := record.Value
-	echo, err := authorize(ctx, r, value, func(v view) (wire.Echo, error) { return admin.AuthorizeEcho(v.state, v.keys, value, r.h.tenant) })
+	echo, err := authorize(ctx, r, value, func(v view) (wire.Echo, error) {
+		return admin.AuthorizeEcho(wire.ParseHistory(record.Timestamp), v.state, v.keys, value, r.h.tenant)
+	})
 	if err != nil || echo.Run != r.run {
 		return false
 	}
@@ -212,27 +214,28 @@ func (r *runView) addEcho(ctx context.Context, record *kgo.Record) bool {
 // add keeps a status, chunk or result of the run; a record keyed by the run that is none of them counts as unread.
 func (r *runView) add(ctx context.Context, record *kgo.Record) {
 	value := record.Value
+	history := wire.ParseHistory(record.Timestamp)
 	if r.pool != "" {
 		if status, err := authorize(ctx, r, value, func(v view) (wire.RunStatus, error) {
-			return admin.AuthorizeStatus(v.state, v.keys, value, r.pool, r.h.tenant)
+			return admin.AuthorizeStatus(history, v.state, v.keys, value, r.pool, r.h.tenant)
 		}); err == nil && status.Wherry.Run == r.run {
 			r.entries = append(r.entries, entry{receiver: status.Wherry.Receiver, status: &status})
 			return
 		}
 		if chunk, err := authorize(ctx, r, value, func(v view) (wire.Chunk, error) {
-			return admin.AuthorizeChunk(v.state, v.keys, value, r.pool, r.h.tenant)
+			return admin.AuthorizeChunk(history, v.state, v.keys, value, r.pool, r.h.tenant)
 		}); err == nil && chunk.Wherry.Run == r.run {
 			r.entries = append(r.entries, entry{receiver: chunk.Wherry.Receiver, chunk: &chunk})
 			return
 		}
 		if output, err := authorize(ctx, r, value, func(v view) (wire.Output, error) {
-			return admin.AuthorizeOutput(v.state, v.keys, value, r.pool, r.h.tenant)
+			return admin.AuthorizeOutput(history, v.state, v.keys, value, r.pool, r.h.tenant)
 		}); err == nil && output.Wherry.Run == r.run {
 			r.entries = append(r.entries, entry{receiver: output.Wherry.Receiver, output: &output})
 			return
 		}
 		if result, err := authorize(ctx, r, value, func(v view) (wire.Result, error) {
-			return admin.AuthorizeResult(v.state, v.keys, value, r.pool, r.h.tenant)
+			return admin.AuthorizeResult(history, v.state, v.keys, value, r.pool, r.h.tenant)
 		}); err == nil && result.Wherry.Run == r.run {
 			r.entries = append(r.entries, entry{receiver: result.Wherry.Receiver, result: &result})
 			return

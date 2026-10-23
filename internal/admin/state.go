@@ -399,9 +399,11 @@ func AuthorizeCancel(state State, keys signed.Keys, encoded []byte, topicPool, r
 }
 
 // AuthorizeStatus accepts a status from a live member of the run's placed pool.
-func AuthorizeStatus(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.RunStatus, error) {
+// parse is wire.ParseRecord for a reader that admits work, and
+// wire.ParseHistory for a host reading its tenant feed.
+func AuthorizeStatus(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.RunStatus, error) {
 	var status wire.RunStatus
-	if err := wire.ParseRecord(encoded, keys, &status); err != nil {
+	if err := parse(encoded, keys, &status); err != nil {
 		return wire.RunStatus{}, err
 	}
 	if err := state.receiverRecord(status.Wherry.ReceiverBinding, placedPool, runTenant); err != nil {
@@ -411,9 +413,9 @@ func AuthorizeStatus(state State, keys signed.Keys, encoded []byte, placedPool, 
 }
 
 // AuthorizeChunk accepts a transcript chunk from a live member of the run's placed pool.
-func AuthorizeChunk(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.Chunk, error) {
+func AuthorizeChunk(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.Chunk, error) {
 	var chunk wire.Chunk
-	if err := wire.ParseRecord(encoded, keys, &chunk); err != nil {
+	if err := parse(encoded, keys, &chunk); err != nil {
 		return wire.Chunk{}, err
 	}
 	if err := state.receiverRecord(chunk.Wherry.ReceiverBinding, placedPool, runTenant); err != nil {
@@ -423,9 +425,9 @@ func AuthorizeChunk(state State, keys signed.Keys, encoded []byte, placedPool, r
 }
 
 // AuthorizeResult accepts a result from a live member of the run's placed pool.
-func AuthorizeResult(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.Result, error) {
+func AuthorizeResult(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.Result, error) {
 	var result wire.Result
-	if err := wire.ParseRecord(encoded, keys, &result); err != nil {
+	if err := parse(encoded, keys, &result); err != nil {
 		return wire.Result{}, err
 	}
 	if err := state.receiverRecord(result.Wherry.ReceiverBinding, placedPool, runTenant); err != nil {
@@ -435,9 +437,9 @@ func AuthorizeResult(state State, keys signed.Keys, encoded []byte, placedPool, 
 }
 
 // AuthorizeOutput accepts an output chunk from a live member of the run's placed pool.
-func AuthorizeOutput(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.Output, error) {
+func AuthorizeOutput(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.Output, error) {
 	var output wire.Output
-	if err := wire.ParseRecord(encoded, keys, &output); err != nil {
+	if err := parse(encoded, keys, &output); err != nil {
 		return wire.Output{}, err
 	}
 	if err := state.receiverRecord(output.Wherry.ReceiverBinding, placedPool, runTenant); err != nil {
@@ -460,9 +462,9 @@ func AuthorizeStartFailure(state State, keys signed.Keys, encoded []byte, placed
 
 // AuthorizeEcho accepts an echo on feedTenant's feed from a live member of the
 // pool it names. The echo is what places a run, so its pool comes from itself.
-func AuthorizeEcho(state State, keys signed.Keys, encoded []byte, feedTenant string) (wire.Echo, error) {
+func AuthorizeEcho(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, feedTenant string) (wire.Echo, error) {
 	var echo wire.Echo
-	if err := wire.ParseRecord(encoded, keys, &echo); err != nil {
+	if err := parse(encoded, keys, &echo); err != nil {
 		return wire.Echo{}, err
 	}
 	if echo.Tenant != feedTenant {

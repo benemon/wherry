@@ -7,7 +7,8 @@
 
 - `wherry admin` and `wherry receiver run` read no client configuration. Every
   other command reads it first, and every command except `key` and `mcp`
-  then connects to Kafka.
+  then connects to Kafka. `key` connects only to settle a
+  [leftover next key](#wherry-key-rotate).
 - Every host command takes `--config-file FILE`. It defaults to
   `~/.config/wherry/config.json`. A leading `~/` is expanded.
 - A command's flags may come before or after its `RUN_ID`.
@@ -83,12 +84,37 @@ On the command line a selector is comma-separated:
 Creates the host key at `host_key` with mode 0600, unless the file exists,
 creating its directory with mode 0700. It then registers the key on the
 host's key topic when the topic holds none, and prints the key ID. It fails
-when the key topic holds another key or has been revoked.
+when the key topic holds another key.
 
 ### `wherry key`
 
 Prints the host key's key ID. The key file must be a regular file that
 grants no group or other access.
+
+### `wherry key rotate`
+
+Replaces the host key with a new one:
+
+1. It refuses while a run this host submitted has a latest state that is
+   not terminal, as `wherry status` shows it, and names those runs. A
+   receiver admits a task only under its host's current key.
+2. It writes the new key to `<host_key>.next` with mode 0600 and syncs the
+   file and its directory.
+3. It publishes a `rotate` [key record](a2a-extension-v1.md#key-records),
+   signed by the old and new keys, to the host's key topic and waits for the
+   broker's acknowledgement.
+4. It folds the key topic again. When the topic's current key is the new
+   key, it renames `<host_key>.next` over `host_key`, which removes the old
+   private key, and syncs the directory. It then prints
+   `old_key_id=<id> new_key_id=<id>`.
+
+Stop every other wherry process of the host first, such as the MCP server
+and any `wherry await`; they hold the old key.
+
+Every host command that finds `<host_key>.next` folds the host's key topic
+before anything else. When the current key is the next key's, it renames
+`<host_key>.next` over `host_key`; when it is still the old key, it removes
+`<host_key>.next`. It fails when the current key is neither.
 
 ### `wherry receivers`
 
@@ -498,11 +524,16 @@ Runs a receiver as the bundle's principal. `--state-dir DIR` defaults to
 `/usr/local/libexec/wherry/plugins`. It creates the state directory with
 mode 0700 and keeps `signing.key` in it. On start it:
 
-1. registers its public key on its key topic when the topic is empty, and
+1. settles a leftover `signing.key.next` as a host command settles
+   [`<host_key>.next`](#wherry-key-rotate);
+2. registers its public key on its key topic when the topic is empty, and
    fails when the topic holds another key;
-2. waits for its configuration record on `wherry.admin` and validates it
+3. with `--rotate-key`, replaces `signing.key` as
+   [`wherry key rotate`](#wherry-key-rotate) replaces the host key, through
+   `signing.key.next`, and logs `rotated key: old=<id> new=<id>`;
+4. waits for its configuration record on `wherry.admin` and validates it
    against the pool's terms;
-3. starts the [adapter plugins](#adapter-plugins) its adapters' types name
+5. starts the [adapter plugins](#adapter-plugins) its adapters' types name
    from the plugin directory and configures each adapter, reads its pool's
    events once, and starts advertising and claiming.
 
@@ -517,6 +548,9 @@ It refuses to start after its membership end.
 With `--metrics-addr HOST:PORT` it serves its [metrics](#metrics) at
 `/metrics` on that address, and fails at start when it cannot listen there.
 Without the flag it serves none.
+
+`--rotate-key` rotates the key at that start only. A start without it never
+rotates the key.
 
 ### Adapter plugins
 

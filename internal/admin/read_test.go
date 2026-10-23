@@ -85,7 +85,8 @@ func TestReadKeysFoldsEachOwnersTopic(t *testing.T) {
 	produce("keys-host", must(signed.RegisterKey(hostOwner, host)))
 	produce("keys-host", must(signed.RegisterKey(hostOwner, intruder)))
 	produce("keys-receiver", must(signed.RegisterKey("receiver-a", receiver)))
-	produce("keys-receiver", must(signed.RevokeKey("receiver-a", receiver)))
+	_, next, _ := ed25519.GenerateKey(rand.Reader)
+	produce("keys-receiver", must(signed.RotateKey("receiver-a", receiver, next)))
 	keys, err := ReadKeys(ctx, client, map[string]string{hostOwner: "keys-host", "receiver-a": "keys-receiver"})
 	if err != nil {
 		t.Fatal(err)
@@ -93,8 +94,13 @@ func TestReadKeysFoldsEachOwnersTopic(t *testing.T) {
 	if !keys[hostOwner].Current.Equal(host.Public()) {
 		t.Fatal("a second bare registration replaced the host key")
 	}
-	if !keys["receiver-a"].Revoked || keys["receiver-a"].Current != nil {
-		t.Fatal("revocation did not close the receiver's key topic")
+	records, err := ReadTopic(ctx, client, "keys-receiver")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := keys["receiver-a"]
+	if !state.Current.Equal(next.Public()) || len(state.Retired) != 1 || !state.Retired[0].Key.Equal(receiver.Public()) || !state.Retired[0].At.Equal(records[1].Timestamp) {
+		t.Fatalf("rotation folded to %#v; want the old key retired at the rotation's broker time", state)
 	}
 }
 

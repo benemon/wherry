@@ -215,7 +215,7 @@ func TestRoundTrip(t *testing.T) {
 	logger := log.New(logs, "receiver: ", 0)
 	newReceiver := func(plugins *plugins) *receiver.Receiver {
 		t.Helper()
-		r, err := receiver.New(bundle, stateDir, plugins.factory(bundle), logger, prometheus.NewRegistry())
+		r, err := receiver.New(bundle, stateDir, false, plugins.factory(bundle), logger, prometheus.NewRegistry())
 		if err != nil {
 			t.Fatal(err)
 		}

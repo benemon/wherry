@@ -103,6 +103,18 @@ func TestHostKeyReReadOnUnknownKeyID(t *testing.T) {
 	}
 }
 
+func TestTaskSignedWithARetiredHostKeyIsRefused(t *testing.T) {
+	f := newFixture(t, resultStream)
+	_, next, _ := ed25519.GenerateKey(rand.Reader)
+	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RotateKey(signed.HostOwner(testTenant, testHost), f.host, next)))
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, nil)); admitted != nil || ack != kgo.AckReject {
+		t.Fatalf("task signed with the host's retired key: admitted=%v ack=%v", admitted != nil, ack)
+	}
+}
+
 func TestAdmitRejections(t *testing.T) {
 	for _, c := range []struct {
 		name   string

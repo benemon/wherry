@@ -91,7 +91,9 @@ records included, is a versioned EdDSA
 [JWS](https://datatracker.ietf.org/doc/html/rfc7515). A record on a shared topic
 names its owner and key in its `kid`, and a reader verifies it against that
 owner's current key, read from the owner's own key topic, before it decodes the
-payload. No host or receiver can vouch for another's key.
+payload. A host reading its tenant feed also accepts a key the owner has
+rotated away, for records the broker appended before that rotation. No host or
+receiver can vouch for another's key.
 
 A reader then checks the record against `wherry.admin`. A submission or
 cancel must come from a live host of a tenant entitled to the pool whose
@@ -322,3 +324,7 @@ pool.
 
 A revoked principal does not return. A host or receiver that comes back is
 provisioned under a new name, with a new principal and key topic.
+
+A compromised key calls for revocation. A
+[key rotation](operator-guide.md#rotate-a-key) keeps the retired key
+verifying the owner's feed records from before the rotation.

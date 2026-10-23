@@ -57,6 +57,9 @@ type Receiver struct {
 	factory AdapterFactory
 	logger  *log.Logger
 	metrics *metrics
+	// rotateKey, set by New only, has Run replace the signing key in keyFile before it claims anything.
+	keyFile   string
+	rotateKey bool
 	// config and adapters are set by configure before any claim and never change.
 	config   admin.ReceiverConfig
 	adapters []Named
@@ -77,9 +80,10 @@ type Receiver struct {
 	cancelled map[runKey]bool
 }
 
-// New loads or creates the receiver's signing key in stateDir and builds its Kafka client from bundle. Once configured,
-// the receiver registers its metric families on registry.
-func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
+// New builds the receiver's Kafka client from bundle and loads or creates its signing key in stateDir, settling a
+// rotation an earlier start left. With rotateKey, Run rotates the key. Once configured, the receiver registers its
+// metric families on registry.
+func New(bundle admin.Bundle, stateDir string, rotateKey bool, factory AdapterFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
 	id, ok := strings.CutPrefix(bundle.Principal, admin.ReceiverPrincipal(""))
 	if !ok || !wire.ValidName(id) {
 		return nil, errors.New("bundle principal is not a receiver principal")
@@ -94,19 +98,20 @@ func New(bundle admin.Bundle, stateDir string, factory AdapterFactory, logger *l
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, err
 	}
-	signingPath := filepath.Join(stateDir, "signing.key")
-	signing, err := trust.LoadSigningKeyFile(signingPath)
-	if errors.Is(err, os.ErrNotExist) {
-		signing, err = trust.GenerateSigningKeyFile(signingPath)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("signing key: %w", err)
-	}
 	base, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, err
 	}
-	return &Receiver{id: id, base: base, signing: signing, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+	keyFile := filepath.Join(stateDir, "signing.key")
+	signing, err := admin.RecoverKey(context.Background(), base, id, admin.ReceiverTopic(id), keyFile)
+	if errors.Is(err, os.ErrNotExist) {
+		signing, err = trust.GenerateSigningKeyFile(keyFile)
+	}
+	if err != nil {
+		base.Close()
+		return nil, fmt.Errorf("signing key: %w", err)
+	}
+	return &Receiver{id: id, base: base, signing: signing, keyFile: keyFile, rotateKey: rotateKey, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
 // newClient is a client of the receiver's connection with extra options.
@@ -114,12 +119,20 @@ func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
 	return kgo.NewClient(append(slices.Clone(r.base.Opts()), extra...)...)
 }
 
-// Run registers the receiver's keys, waits for its configuration, then advertises and claims
-// until ctx ends or the configuration changes.
+// Run registers the receiver's keys, rotates them when New was asked to, waits for its configuration, then advertises
+// and claims until ctx ends or the configuration changes.
 func (r *Receiver) Run(ctx context.Context) error {
 	defer r.base.Close()
 	if err := r.register(ctx); err != nil {
 		return err
+	}
+	if r.rotateKey {
+		next, err := admin.RotateKey(ctx, r.base, r.id, admin.ReceiverTopic(r.id), r.keyFile, r.signing)
+		if err != nil {
+			return fmt.Errorf("rotate key: %w", err)
+		}
+		r.logger.Printf("rotated key: old=%s new=%s", signed.KeyID(r.signing.Public().(ed25519.PublicKey)), signed.KeyID(next.Public().(ed25519.PublicKey)))
+		r.signing = next
 	}
 	if err := r.configure(ctx); err != nil {
 		return err
@@ -206,7 +219,7 @@ func (r *Receiver) register(ctx context.Context) error {
 	}
 	var state signed.KeyState
 	for _, record := range records {
-		if state, err = signed.ApplyKeyRecord(state, r.id, record.Value); err != nil {
+		if state, err = signed.ApplyKeyRecord(state, r.id, record.Value, record.Timestamp); err != nil {
 			return errors.New("receiver key topic holds a record that does not fold")
 		}
 	}
@@ -571,7 +584,7 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 			continue
 		}
 		// A status binds its run's tenant through the task hash; the pool and membership are checked here.
-		status, err := admin.AuthorizeStatus(state, peers, record.Value, r.config.Pool, named.Wherry.Tenant)
+		status, err := admin.AuthorizeStatus(wire.ParseRecord, state, peers, record.Value, r.config.Pool, named.Wherry.Tenant)
 		if err != nil || status.Wherry.Run != run || seen[status.Wherry.EventID] {
 			continue
 		}

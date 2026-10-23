@@ -1219,6 +1219,26 @@ func TestAwaitRereadsRotatedKey(t *testing.T) {
 	}
 }
 
+func TestStatusReadsWhatAReceiverSignedBeforeItRotated(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	retired := receiver.key
+	time.Sleep(5 * time.Millisecond)
+	_, next, _ := ed25519.GenerateKey(rand.Reader)
+	rotation, err := signed.RotateKey("receiver-a", retired, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver.produce(t, f.ctx, admin.ReceiverTopic("receiver-a"), "receiver-a", rotation)
+	time.Sleep(5 * time.Millisecond)
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCanceled, nil))
+	status, err := f.host.Status(f.ctx, runID)
+	if err != nil || status.Status.State != wire.TaskStateWorking || status.Skipped != 1 {
+		t.Fatalf("status %#v, %v; want the WORKING signed before the rotation, and the CANCELED signed with the retired key after it skipped", status, err)
+	}
+}
+
 func TestAwaitEndsOnCanceledTerminal(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)

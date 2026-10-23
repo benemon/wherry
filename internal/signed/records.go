@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
 )
@@ -40,6 +41,19 @@ func Sign(typ, owner string, payload any, key ed25519.PrivateKey) ([]byte, error
 // the caller must match against the payload's own claims.
 func Verify(encoded []byte, typ string, keys Keys, dst any) (string, error) {
 	return verify(encoded, typ, keys.current, dst)
+}
+
+// VerifyHistory is Verify for an owner's feed records, which also verify
+// against a key the owner retired after the broker appended them.
+func VerifyHistory(encoded []byte, typ string, keys Keys, appended time.Time, dst any) (string, error) {
+	return verify(encoded, typ, func(owner, keyID string) (ed25519.PublicKey, error) {
+		for _, retired := range keys[owner].Retired {
+			if KeyID(retired.Key) == keyID && appended.Before(retired.At) {
+				return retired.Key, nil
+			}
+		}
+		return keys.current(owner, keyID)
+	}, dst)
 }
 
 func verify(encoded []byte, typ string, key func(owner, keyID string) (ed25519.PublicKey, error), dst any) (string, error) {

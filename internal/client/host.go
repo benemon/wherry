@@ -147,8 +147,6 @@ func (h *Host) Register(ctx context.Context) (string, error) {
 	}
 	public := h.key.Public().(ed25519.PublicKey)
 	switch state := keys[owner]; {
-	case state.Revoked:
-		return "", errors.New("host key topic is closed by revocation")
 	case state.Current == nil:
 		record, err := signed.RegisterKey(owner, h.key)
 		if err != nil {

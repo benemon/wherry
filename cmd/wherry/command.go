@@ -23,7 +23,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|receivers|submit|cancel|await|status|events|transcript|cleanup|receiver run|admin|mcp>")
+		return errors.New("usage: wherry <init|key|key rotate|receivers|submit|cancel|await|status|events|transcript|cleanup|receiver run|admin|mcp>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -53,6 +53,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	if args[0] == "key" {
+		rotate := len(args) > 1 && args[1] == "rotate"
+		if rotate {
+			args = args[1:]
+		}
 		flags := flag.NewFlagSet("key", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		configFile := flags.String("config-file", "", "host configuration file")
@@ -60,11 +64,27 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		if flags.NArg() != 0 {
-			return errors.New("usage: wherry key [--config-file FILE]")
+			return errors.New("usage: wherry key [rotate] [--config-file FILE]")
 		}
 		config, err := loadConfig(*configFile)
 		if err != nil {
 			return err
+		}
+		if rotate {
+			old, next, err := busclient.RotateKey(context.Background(), config)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "old_key_id=%s new_key_id=%s\n", old, next)
+			return nil
+		}
+		// Connecting settles a rotation that left the next key behind.
+		if _, err := os.Stat(config.HostKey + ".next"); err == nil {
+			client, err := busclient.Connect(config, log.New(stderr, "", 0))
+			if err != nil {
+				return err
+			}
+			client.Close()
 		}
 		key, err := trust.LoadSigningKeyFile(config.HostKey)
 		if err != nil {

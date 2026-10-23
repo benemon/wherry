@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
 )
@@ -38,18 +39,19 @@ func RotateKey(owner string, current, next ed25519.PrivateKey) ([]byte, error) {
 	return signKeys(KeyRecord{Version: 1, Owner: owner, Action: "rotate", Key: publicJWK(next), PreviousKeyID: KeyID(current.Public().(ed25519.PublicKey))}, current, next)
 }
 
-func RevokeKey(owner string, current ed25519.PrivateKey) ([]byte, error) {
-	return signKeys(KeyRecord{Version: 1, Owner: owner, Action: "revoke", Key: publicJWK(current)}, current)
-}
-
-// KeyState is a key topic folded by ApplyKeyRecord. A revoked topic is closed:
-// its owner is re-provisioned under a new principal.
+// KeyState is a key topic folded by ApplyKeyRecord.
 type KeyState struct {
 	Current ed25519.PublicKey
 	// Retired holds keys rotated away; they verify the owner's history,
-	// never new work. A revocation drops them with the topic.
-	Retired []ed25519.PublicKey
-	Revoked bool
+	// never new work.
+	Retired []RetiredKey
+}
+
+// RetiredKey is a key and the broker time of the rotation that retired it. It
+// verifies only records the broker appended before that time.
+type RetiredKey struct {
+	Key ed25519.PublicKey
+	At  time.Time
 }
 
 // Keys maps an owner (HostOwner, or a receiver ID) to its folded key topic.
@@ -61,16 +63,14 @@ func HostOwner(tenant, host string) string { return tenant + "." + host }
 // signature is); a mismatch tells the reader to re-read the owner's key topic.
 func (keys Keys) current(owner, keyID string) (ed25519.PublicKey, error) {
 	state := keys[owner]
-	if state.Revoked || state.Current == nil || KeyID(state.Current) != keyID {
+	if state.Current == nil || KeyID(state.Current) != keyID {
 		return nil, errors.New("signing key is not the owner's current key")
 	}
 	return state.Current, nil
 }
 
-func ApplyKeyRecord(state KeyState, topicOwner string, encoded []byte) (KeyState, error) {
-	if state.Revoked {
-		return state, errors.New("key topic is closed by revocation")
-	}
+// ApplyKeyRecord folds encoded, which the broker appended at appended, into state.
+func ApplyKeyRecord(state KeyState, topicOwner string, encoded []byte, appended time.Time) (KeyState, error) {
 	jws, err := jose.ParseSigned(string(encoded), []jose.SignatureAlgorithm{jose.EdDSA})
 	if err != nil {
 		return state, fmt.Errorf("parse key JWS: %w", err)
@@ -112,12 +112,7 @@ func ApplyKeyRecord(state KeyState, topicOwner string, encoded []byte) (KeyState
 		if state.Current == nil || len(jws.Signatures) != 2 || record.PreviousKeyID != KeyID(state.Current) || key.Equal(state.Current) || !verifiedBy(jws, state.Current) || !verifiedBy(jws, key) {
 			return state, errors.New("rotation is not signed by current and new keys")
 		}
-		return KeyState{Current: key, Retired: append(slices.Clone(state.Retired), state.Current)}, nil
-	case "revoke":
-		if state.Current == nil || len(jws.Signatures) != 1 || !key.Equal(state.Current) || !verifiedBy(jws, key) {
-			return state, errors.New("revocation is not signed by retiring key")
-		}
-		return KeyState{Revoked: true}, nil
+		return KeyState{Current: key, Retired: append(slices.Clone(state.Retired), RetiredKey{Key: state.Current, At: appended})}, nil
 	default:
 		return state, errors.New("unknown key action")
 	}

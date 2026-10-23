@@ -30,7 +30,7 @@ import (
 const defaultPluginDir = "/usr/local/libexec/wherry/plugins"
 
 func runReceiver(args []string, stdout, stderr io.Writer) error {
-	const usage = "usage: wherry receiver run --bundle-file FILE [--state-dir DIR] [--plugin-dir DIR] [--metrics-addr HOST:PORT]"
+	const usage = "usage: wherry receiver run --bundle-file FILE [--state-dir DIR] [--plugin-dir DIR] [--metrics-addr HOST:PORT] [--rotate-key]"
 	if len(args) == 0 || args[0] != "run" {
 		return errors.New(usage)
 	}
@@ -40,6 +40,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	stateDir := flags.String("state-dir", "", "directory holding the receiver's keys (default: state beside the bundle file)")
 	pluginDir := flags.String("plugin-dir", defaultPluginDir, "directory holding the adapter plugins, wherry-plugin-<type>")
 	metricsAddr := flags.String("metrics-addr", "", "HOST:PORT to serve /metrics on, off when empty")
+	rotateKey := flags.Bool("rotate-key", false, "replace the receiver's signing key at start, before it claims anything")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -64,7 +65,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	plugins := &plugins{dir: *pluginDir, logs: stdout, registry: registry, running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
-	r, err := receiver.New(bundle, *stateDir, plugins.factory(bundle), logger, registry)
+	r, err := receiver.New(bundle, *stateDir, *rotateKey, plugins.factory(bundle), logger, registry)
 	if err != nil {
 		return err
 	}

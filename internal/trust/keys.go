@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
-// GenerateSigningKeyFile creates an Ed25519 private-key file without replacing an existing file.
+// GenerateSigningKeyFile creates an Ed25519 private-key file without replacing an existing file, synced with its
+// directory.
 func GenerateSigningKeyFile(path string) (ed25519.PrivateKey, error) {
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -51,7 +53,27 @@ func writeKeyFile(path string, key []byte) (returnErr error) {
 	if _, err := file.WriteString(encoded); err != nil {
 		return err
 	}
-	return nil
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// ReplaceKeyFile renames the key file from over to and syncs their directory.
+func ReplaceKeyFile(from, to string) error {
+	if err := os.Rename(from, to); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(to))
+}
+
+func syncDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // ReadOwnerOnly reads the regular file at path, refusing one its group or others can access.

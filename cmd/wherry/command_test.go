@@ -707,7 +707,7 @@ func TestKeyAndInit(t *testing.T) {
 	if again, err := trust.LoadSigningKeyFile(keyPath); err != nil || !again.Equal(key) {
 		t.Fatal("second init replaced the host key")
 	}
-	if err := run([]string{"key", "--config-file", config, "extra"}, &stdout, &stderr); err == nil || err.Error() != "usage: wherry key [--config-file FILE]" {
+	if err := run([]string{"key", "--config-file", config, "extra"}, &stdout, &stderr); err == nil || err.Error() != "usage: wherry key [rotate] [--config-file FILE]" {
 		t.Fatalf("got %v, want key usage error", err)
 	}
 	if err := run([]string{"key", "--config-file", config}, &stdout, &stderr); err != nil || stdout.String() != signed.KeyID(key.Public().(ed25519.PublicKey))+"\n" {

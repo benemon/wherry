@@ -112,7 +112,7 @@ func ReadKeys(ctx context.Context, client *kgo.Client, topics map[string]string)
 		state := signed.KeyState{}
 		for _, record := range records {
 			// ApplyKeyRecord returns the prior state with its error.
-			state, _ = signed.ApplyKeyRecord(state, owner, record.Value)
+			state, _ = signed.ApplyKeyRecord(state, owner, record.Value, record.Timestamp)
 		}
 		keys[owner] = state
 	}
