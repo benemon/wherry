@@ -1,0 +1,15 @@
+{
+  "bundle": "~/.config/wherry/laptop.bundle",
+  "host_key": "~/.config/wherry/laptop.key",
+  "state_dir": "~/.local/state/wherry",
+  "credentials": {
+    "claude-oauth-token": "~/.config/wherry/credentials/claude-oauth-token",
+    "model-api-key": "~/.config/wherry/credentials/model-api-key",
+    "openai-api-key": "~/.config/wherry/credentials/openai-api-key"
+  },
+  "input_roots": ["~/src", "~/notes"],
+  "storage": {
+    "access_key_file": "~/.config/wherry/s3-access-key",
+    "secret_key_file": "~/.config/wherry/s3-secret-key"
+  }
+}

@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/benemon/wherry/internal/admin"
 )
 
 const labPlatform = `name: lab-nomad
@@ -108,6 +110,32 @@ func TestReceiverConfigDirectoryMatchesSingleFile(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("directory config = %+v, want %+v", got, want)
 	}
+}
+
+// TestReceiverConfigExampleParses reads the reference's complete receiver configuration in both forms and checks it
+// against the example pool's terms.
+func TestReceiverConfigExampleParses(t *testing.T) {
+	want, err := readReceiverConfig(filepath.Join("testdata", "example-receiver.yaml"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := readReceiverConfig(filepath.Join("testdata", "example-receiver"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("directory config = %+v, want %+v", got, want)
+	}
+	terms, err := readPoolConfig(filepath.Join("testdata", "example-pool.yaml"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want.Receiver, want.Pool = "nomad-1", "build"
+	if err := admin.ValidateConfig(want, terms); err != nil {
+		t.Fatal(err)
+	}
+	documented(t, "example-receiver.yaml", "example-receiver/receiver.yaml", "example-receiver/platforms/nomad.yaml", "example-receiver/platforms/nomad-edge.yaml",
+		"example-receiver/adapters/10-claude-container.yaml", "example-receiver/adapters/20-codex-edge.yaml", "example-receiver/adapters/30-coder-host.yaml")
 }
 
 func TestReceiverConfigDirectoryAdapterTakesPlatformType(t *testing.T) {

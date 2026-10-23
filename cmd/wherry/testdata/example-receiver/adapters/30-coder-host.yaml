@@ -1,0 +1,22 @@
+name: coder-host
+platform: nomad
+agent: coder
+output: file
+# The run ends when the job does, with this output as its result.
+reply_file: answer.md
+credential: model-api-key
+labels:
+  isolation: host
+config:
+  credential_env: MODEL_API_KEY
+  node_pool: hosts
+  runtime:
+    driver: exec
+    config:
+      command: /bin/sh
+      args:
+        - -c
+        - >-
+          mkdir -p "$WHERRY_OUTPUT_DIR" &&
+          exec harness run < "$NOMAD_TASK_DIR/prompt.txt"
+          > "$WHERRY_OUTPUT_DIR/answer.md"

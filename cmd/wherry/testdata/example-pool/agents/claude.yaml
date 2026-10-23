@@ -1,0 +1,7 @@
+name: claude
+credentials:
+  - claude-oauth-token
+models:
+  - haiku
+  - sonnet
+default_model: haiku

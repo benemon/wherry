@@ -81,6 +81,51 @@ func TestPoolConfigDirectoryMatchesSingleFile(t *testing.T) {
 	}
 }
 
+// TestPoolConfigExampleParses reads the reference's complete pool terms in both forms; they set every field, and their
+// first agent every agent field.
+func TestPoolConfigExampleParses(t *testing.T) {
+	want, err := readPoolConfig(filepath.Join("testdata", "example-pool.yaml"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := readPoolConfig(filepath.Join("testdata", "example-pool"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("directory config = %+v, want %+v", got, want)
+	}
+	for _, fields := range []reflect.Value{reflect.ValueOf(want), reflect.ValueOf(want.Agents[0])} {
+		for i := range fields.NumField() {
+			if fields.Field(i).IsZero() {
+				t.Errorf("example pool leaves %s.%s unset", fields.Type().Name(), fields.Type().Field(i).Name)
+			}
+		}
+	}
+	if _, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: "build", Terms: &want}); err != nil {
+		t.Fatal(err)
+	}
+	documented(t, "example-pool.yaml", "example-pool/pool.yaml", "example-pool/agents/claude.yaml", "example-pool/agents/coder.yaml", "example-pool/agents/codex.yaml")
+}
+
+// documented fails unless docs/reference.md holds each testdata file as a whole code block.
+func documented(t *testing.T, files ...string) {
+	t.Helper()
+	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", "reference.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		example, err := os.ReadFile(filepath.Join("testdata", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(reference), "```yaml\n"+string(example)+"```\n") {
+			t.Errorf("docs/reference.md has no code block holding testdata/%s", file)
+		}
+	}
+}
+
 func TestPoolConfigRejectsSealLifetime(t *testing.T) {
 	pool, err := os.ReadFile(filepath.Join("testdata", "pool-nomad.yaml"))
 	if err != nil {

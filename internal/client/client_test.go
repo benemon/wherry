@@ -1185,6 +1185,43 @@ func TestConfigInputRoots(t *testing.T) {
 	}
 }
 
+// TestConfigExampleLoads loads the reference's complete host configuration, which sets every member.
+func TestConfigExampleLoads(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, root := range []string{"src", "notes"} {
+		if err := os.Mkdir(filepath.Join(home, root), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	example, err := os.ReadFile(filepath.Join("testdata", "example-config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := LoadConfig(filepath.Join("testdata", "example-config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	members := reflect.ValueOf(config)
+	for i := range members.NumField() {
+		if members.Field(i).IsZero() {
+			t.Errorf("example config leaves %s unset", members.Type().Field(i).Name)
+		}
+	}
+	// host_key and state_dir differ from their defaults, so a member the example drops shows here.
+	if config.HostKey != filepath.Join(home, ".config", "wherry", "laptop.key") || config.StateDir != filepath.Join(home, ".local", "state", "wherry") ||
+		!slices.Equal(config.InputRoots, []string{filepath.Join(home, "src"), filepath.Join(home, "notes")}) {
+		t.Fatalf("host key %s, state dir %s, input roots %v, want each under %s", config.HostKey, config.StateDir, config.InputRoots, home)
+	}
+	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", "reference.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(reference), "```json\n"+string(example)+"```\n") {
+		t.Fatal("docs/reference.md has no code block holding testdata/example-config.json")
+	}
+}
+
 func TestConnectErrorsOmitPassword(t *testing.T) {
 	const password = "kafka-password-secret"
 	dir := t.TempDir()

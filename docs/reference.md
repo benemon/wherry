@@ -919,15 +919,31 @@ never leaves the host: receivers and agents get only the URLs it presigns.
 Scope it to `wherry/<tenant>/` in each pool's bucket
 ([operator guide](operator-guide.md#s3-storage)).
 
+### Client configuration example
+
+The configuration of host `laptop`, setting every member:
+
 ```json
 {
-  "bundle": "~/.config/wherry/host.yaml",
+  "bundle": "~/.config/wherry/laptop.bundle",
+  "host_key": "~/.config/wherry/laptop.key",
+  "state_dir": "~/.local/state/wherry",
+  "credentials": {
+    "claude-oauth-token": "~/.config/wherry/credentials/claude-oauth-token",
+    "model-api-key": "~/.config/wherry/credentials/model-api-key",
+    "openai-api-key": "~/.config/wherry/credentials/openai-api-key"
+  },
+  "input_roots": ["~/src", "~/notes"],
   "storage": {
     "access_key_file": "~/.config/wherry/s3-access-key",
     "secret_key_file": "~/.config/wherry/s3-secret-key"
   }
 }
 ```
+
+JSON takes no comments. `credentials` holds the value of each credential the
+adapters of the [receiver configuration example](#receiver-configuration-example)
+deliver; the host reads the file each time a receiver asks for it.
 
 ## Bundle
 
@@ -1006,26 +1022,112 @@ by a member with no matching adapter. From attempt
 `delivery budget exhausted` where it would release it, except in the cases
 the [extension](a2a-extension-v1.md#delivery-budget) lists.
 
+### Pool terms example
+
+Terms for pool `build` that set every field, as one file for
+`pool create build --config-file build.yaml`:
+
 ```yaml
 agents:
-  - name: coder
+  - name: claude
     credentials:
-      - model-api-key
+      - claude-oauth-token
     models:
       - haiku
       - sonnet
     default_model: haiku
-default_agent: coder
-delivery_limit: 5
-lock_duration: 15s
+  - name: coder
+    credentials:
+      - model-api-key
+  # Without models, a task names no model and the adapter's command picks one.
+  - name: codex
+    credentials:
+      - openai-api-key
+default_agent: claude
+max_queue_deadline: 72h
+# Each receiver with no matching adapter spends one delivery, so this covers the pool's receivers plus a margin.
+delivery_limit: 6
+# Above the receiver's 10s renewal interval.
+lock_duration: 30s
 producer_byte_rate: 1048576
 request_percentage: 10
+# 480 KiB, under the 493227-byte ceiling of brokers and topics at their defaults.
+inline_limit: 491520
+output_limit: 16777216
 vcs:
   - github.com
+  # A port appears only when it is not the scheme's default.
+  - git.example.com:2222
 storage:
   endpoint: https://s3.example.com
   bucket: wherry
 ```
+
+The same terms as a directory for `pool create build --config-dir build`:
+
+```
+build/
+  pool.yaml
+  agents/
+    claude.yaml
+    coder.yaml
+    codex.yaml
+```
+
+`pool.yaml`:
+
+```yaml
+default_agent: claude
+max_queue_deadline: 72h
+# Each receiver with no matching adapter spends one delivery, so this covers the pool's receivers plus a margin.
+delivery_limit: 6
+# Above the receiver's 10s renewal interval.
+lock_duration: 30s
+producer_byte_rate: 1048576
+request_percentage: 10
+# 480 KiB, under the 493227-byte ceiling of brokers and topics at their defaults.
+inline_limit: 491520
+output_limit: 16777216
+vcs:
+  - github.com
+  # A port appears only when it is not the scheme's default.
+  - git.example.com:2222
+storage:
+  endpoint: https://s3.example.com
+  bucket: wherry
+```
+
+`agents/claude.yaml`:
+
+```yaml
+name: claude
+credentials:
+  - claude-oauth-token
+models:
+  - haiku
+  - sonnet
+default_model: haiku
+```
+
+`agents/coder.yaml`:
+
+```yaml
+name: coder
+credentials:
+  - model-api-key
+```
+
+`agents/codex.yaml`:
+
+```yaml
+# Without models, a task names no model and the adapter's command picks one.
+name: codex
+credentials:
+  - openai-api-key
+```
+
+The agent files are read in file-name order, so `coder` precedes `codex` in
+both forms.
 
 ### Record limit
 
@@ -1137,6 +1239,211 @@ an empty `adapters/`, a nested directory, and any file other than
 `receiver.yaml` and `.yaml` files in `platforms/` and `adapters/` are
 errors. Files and directories whose names start with `.` are ignored. The
 command writes nothing when the directory has an error.
+
+### Receiver configuration example
+
+Receiver `nomad-1` in pool `build`, against the
+[pool terms example](#pool-terms-example): two Nomad clusters and three
+adapters in routing order, one for each `output`. Each adapter's `config`
+holds only what the example needs; the
+[Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
+lists every setting. As one file for
+`receiver add nomad-1 --pool build --config-file nomad-1.yaml`:
+
+```yaml
+capacity: 3
+platforms:
+  - name: nomad
+    type: nomad
+    # Every adapter on this platform takes these keys and must not set them itself.
+    config:
+      address: https://nomad.example.com:4646
+      ca_file: /etc/wherry/nomad-ca.pem
+      namespace: agents
+  # A second cluster; --platform-credential-file nomad-edge=FILE gives its adapters their own token.
+  - name: nomad-edge
+    type: nomad
+    config:
+      address: https://nomad-edge.example.com:4646
+      ca_file: /etc/wherry/nomad-edge-ca.pem
+      namespace: agents
+adapters:
+  - name: claude-container
+    platform: nomad
+    agent: claude
+    output: claude
+    credential: claude-oauth-token
+    labels:
+      isolation: container
+    config:
+      credential_env: CLAUDE_CODE_OAUTH_TOKEN
+      runtime:
+        driver: docker
+        config:
+          image: registry.example.com/claude-agent:1.0
+  - name: codex-edge
+    platform: nomad-edge
+    agent: codex
+    output: codex
+    credential: openai-api-key
+    labels:
+      isolation: host
+      site: edge
+    config:
+      credential_env: CODEX_API_KEY
+      node_pool: codex
+      runtime:
+        driver: exec
+        config:
+          command: /bin/sh
+          args:
+            - -c
+            - >-
+              exec codex exec --json --ephemeral --skip-git-repo-check
+              --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
+  - name: coder-host
+    platform: nomad
+    agent: coder
+    output: file
+    # The run ends when the job does, with this output as its result.
+    reply_file: answer.md
+    credential: model-api-key
+    labels:
+      isolation: host
+    config:
+      credential_env: MODEL_API_KEY
+      node_pool: hosts
+      runtime:
+        driver: exec
+        config:
+          command: /bin/sh
+          args:
+            - -c
+            - >-
+              mkdir -p "$WHERRY_OUTPUT_DIR" &&
+              exec harness run < "$NOMAD_TASK_DIR/prompt.txt"
+              > "$WHERRY_OUTPUT_DIR/answer.md"
+```
+
+The same configuration as a directory for
+`receiver add nomad-1 --pool build --config-dir nomad-1`:
+
+```
+nomad-1/
+  receiver.yaml
+  platforms/
+    nomad-edge.yaml
+    nomad.yaml
+  adapters/
+    10-claude-container.yaml
+    20-codex-edge.yaml
+    30-coder-host.yaml
+```
+
+`receiver.yaml`:
+
+```yaml
+capacity: 3
+```
+
+`platforms/nomad.yaml`:
+
+```yaml
+name: nomad
+type: nomad
+# Every adapter on this platform takes these keys and must not set them itself.
+config:
+  address: https://nomad.example.com:4646
+  ca_file: /etc/wherry/nomad-ca.pem
+  namespace: agents
+```
+
+`platforms/nomad-edge.yaml`:
+
+```yaml
+# A second cluster; --platform-credential-file nomad-edge=FILE gives its adapters their own token.
+name: nomad-edge
+type: nomad
+config:
+  address: https://nomad-edge.example.com:4646
+  ca_file: /etc/wherry/nomad-edge-ca.pem
+  namespace: agents
+```
+
+`adapters/10-claude-container.yaml`:
+
+```yaml
+name: claude-container
+platform: nomad
+agent: claude
+output: claude
+credential: claude-oauth-token
+labels:
+  isolation: container
+config:
+  credential_env: CLAUDE_CODE_OAUTH_TOKEN
+  runtime:
+    driver: docker
+    config:
+      image: registry.example.com/claude-agent:1.0
+```
+
+`adapters/20-codex-edge.yaml`:
+
+```yaml
+name: codex-edge
+platform: nomad-edge
+agent: codex
+output: codex
+credential: openai-api-key
+labels:
+  isolation: host
+  site: edge
+config:
+  credential_env: CODEX_API_KEY
+  node_pool: codex
+  runtime:
+    driver: exec
+    config:
+      command: /bin/sh
+      args:
+        - -c
+        - >-
+          exec codex exec --json --ephemeral --skip-git-repo-check
+          --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
+```
+
+`adapters/30-coder-host.yaml`:
+
+```yaml
+name: coder-host
+platform: nomad
+agent: coder
+output: file
+# The run ends when the job does, with this output as its result.
+reply_file: answer.md
+credential: model-api-key
+labels:
+  isolation: host
+config:
+  credential_env: MODEL_API_KEY
+  node_pool: hosts
+  runtime:
+    driver: exec
+    config:
+      command: /bin/sh
+      args:
+        - -c
+        - >-
+          mkdir -p "$WHERRY_OUTPUT_DIR" &&
+          exec harness run < "$NOMAD_TASK_DIR/prompt.txt"
+          > "$WHERRY_OUTPUT_DIR/answer.md"
+```
+
+A task runs on the first ready adapter of its agent whose labels satisfy its
+selector. Each adapter here launches a different agent, so a task for
+`claude`, the pool's default agent, runs on `claude-container`, and
+`--selector isolation=host` leaves it no adapter.
 
 ### Adapter settings
 

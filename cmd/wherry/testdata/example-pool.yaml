@@ -1,0 +1,33 @@
+agents:
+  - name: claude
+    credentials:
+      - claude-oauth-token
+    models:
+      - haiku
+      - sonnet
+    default_model: haiku
+  - name: coder
+    credentials:
+      - model-api-key
+  # Without models, a task names no model and the adapter's command picks one.
+  - name: codex
+    credentials:
+      - openai-api-key
+default_agent: claude
+max_queue_deadline: 72h
+# Each receiver with no matching adapter spends one delivery, so this covers the pool's receivers plus a margin.
+delivery_limit: 6
+# Above the receiver's 10s renewal interval.
+lock_duration: 30s
+producer_byte_rate: 1048576
+request_percentage: 10
+# 480 KiB, under the 493227-byte ceiling of brokers and topics at their defaults.
+inline_limit: 491520
+output_limit: 16777216
+vcs:
+  - github.com
+  # A port appears only when it is not the scheme's default.
+  - git.example.com:2222
+storage:
+  endpoint: https://s3.example.com
+  bucket: wherry

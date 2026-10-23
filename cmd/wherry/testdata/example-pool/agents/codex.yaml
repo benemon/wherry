@@ -1,0 +1,4 @@
+# Without models, a task names no model and the adapter's command picks one.
+name: codex
+credentials:
+  - openai-api-key

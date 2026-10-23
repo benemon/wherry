@@ -1,0 +1,20 @@
+name: codex-edge
+platform: nomad-edge
+agent: codex
+output: codex
+credential: openai-api-key
+labels:
+  isolation: host
+  site: edge
+config:
+  credential_env: CODEX_API_KEY
+  node_pool: codex
+  runtime:
+    driver: exec
+    config:
+      command: /bin/sh
+      args:
+        - -c
+        - >-
+          exec codex exec --json --ephemeral --skip-git-repo-check
+          --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"

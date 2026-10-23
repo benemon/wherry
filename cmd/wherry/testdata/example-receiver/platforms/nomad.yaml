@@ -1,0 +1,7 @@
+name: nomad
+type: nomad
+# Every adapter on this platform takes these keys and must not set them itself.
+config:
+  address: https://nomad.example.com:4646
+  ca_file: /etc/wherry/nomad-ca.pem
+  namespace: agents

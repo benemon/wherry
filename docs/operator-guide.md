@@ -70,6 +70,9 @@ A pool's terms apply to every receiver in it. Write them as a
 wherry admin pool create build --config-file build-terms.yaml
 ```
 
+The [pool terms example](reference.md#pool-terms-example) sets every field,
+as one file and as a `--config-dir` directory.
+
 - `delivery_limit` bounds how often the broker delivers one task. Each
   start failure, and each member with no matching adapter, returns a task
   to the pool and uses a delivery, so set it to at least the number of
@@ -255,6 +258,9 @@ every rule.
 A single YAML file holding the whole
 [receiver configuration](reference.md#receiver-configuration) also works in
 place of the directory.
+The [receiver configuration example](reference.md#receiver-configuration-example)
+gives one configuration in both forms, with two platforms and an adapter for
+each `output`.
 
 A task with no selector runs on the first ready adapter, `container` here,
 and `--selector isolation=host` runs on the second. Every member of a pool
