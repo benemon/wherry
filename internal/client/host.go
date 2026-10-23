@@ -237,6 +237,16 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 	}
 	stored := len(s3Inputs)+len(s3Outputs) > 0
+	// Connect folds the key topic only when <host_key>.next exists, and receivers refuse a task under any key but the
+	// current one without writing a status.
+	owner := signed.HostOwner(h.tenant, h.host)
+	keys, err := admin.ReadKeys(ctx, h.kafka, map[string]string{owner: admin.HostTopic(h.tenant, h.host)})
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if current := keys[owner].Current; current == nil || !current.Equal(h.key.Public()) {
+		return SubmitResult{}, errors.New("the host key is not the current key of this host's key topic: when <host_key>.next exists, the next wherry command completes the interrupted wherry key rotate; otherwise this host was re-keyed elsewhere and needs wherry init on a re-provisioned host")
+	}
 	v, err := h.load(ctx)
 	if err != nil {
 		return SubmitResult{}, err
@@ -375,6 +385,7 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now tim
 	binding := submission.Wherry
 	record := runRecord{
 		Run: binding.Run, Pool: binding.Pool, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(), DeadlineMS: binding.DeadlineMS,
+		QueueDeadlineMS: binding.QueueDeadlineMS,
 	}
 	for _, credential := range binding.Credentials {
 		record.TaskCredentials = append(record.TaskCredentials, credential.Name)
@@ -492,6 +503,8 @@ type runRecord struct {
 	S3Outputs []string `json:"s3_outputs,omitzero"`
 	// DeadlineMS is the run deadline, when a PUT URL for its S3 outputs expires.
 	DeadlineMS int64 `json:"deadline_at_ms,omitzero"`
+	// QueueDeadlineMS is the submission's queue deadline, past which no receiver claims the run.
+	QueueDeadlineMS int64 `json:"queue_deadline_at_ms,omitzero"`
 	// RedactionKey is the run's redaction key, minted when this host submits the run.
 	RedactionKey []byte `json:"redaction_key,omitzero"`
 }

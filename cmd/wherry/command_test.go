@@ -523,6 +523,34 @@ func TestStatusPrintsFailed(t *testing.T) {
 	}
 }
 
+func TestAwaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
+	b := newBus(t)
+	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", Deadline: time.Minute, QueueDeadline: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	err = runAwait(b.ctx, b.client, []string{submitted.RunID, "--timeout", "20s"}, &stdout, &stderr)
+	if elapsed := time.Since(start); elapsed > 6*time.Second {
+		t.Fatalf("await returned after %s, want soon after the 2s queue deadline", elapsed)
+	}
+	if err == nil || !strings.HasPrefix(err.Error(), "queue deadline passed at ") || !strings.HasSuffix(err.Error(), " and no receiver claimed the run") {
+		t.Fatalf("await error %v", err)
+	}
+	if want := "TASK_STATE_SUBMITTED\n"; stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("await stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+	}
+	unclaimed := err.Error()
+	stdout.Reset()
+	if err := runStatus(b.ctx, b.client, []string{submitted.RunID}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if want := "TASK_STATE_SUBMITTED\n" + unclaimed + "\n"; stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("status stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+	}
+}
+
 func TestStatusOfAnUnknownRunFails(t *testing.T) {
 	b := newBus(t)
 	var stdout, stderr bytes.Buffer

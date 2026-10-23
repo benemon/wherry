@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
@@ -237,7 +238,7 @@ type awaitReply struct {
 	Model        string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
 	ServedModels []string                `json:"served_models,omitempty" jsonschema:"models the agent's result reports serving the run, where its harness reports them"`
 	RetryAfter   int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling await again"`
-	Message      string                  `json:"message,omitempty" jsonschema:"status message, such as a credential the run could not obtain"`
+	Message      string                  `json:"message,omitempty" jsonschema:"status message, such as a credential the run could not obtain, or this host's note that the queue deadline passed and no receiver claimed the run"`
 	Artifacts    []resultArtifact        `json:"artifacts,omitempty"`
 	Outputs      []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
 	NotReturned  []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the run did not return or this host could not verify, each with its reason"`
@@ -380,7 +381,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		output := statusOutput{Runs: []runOutput{}, Skipped: runs.Skipped}
 		for _, result := range runs.Runs {
 			output.Runs = append(output.Runs, runOutput{
-				ID: result.RunID, Pool: result.Pool, State: string(result.Status.State), Model: result.Model, Message: statusText(result.Status),
+				ID: result.RunID, Pool: result.Pool, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
 				Updated: result.Updated.UTC().Format(time.RFC3339Nano), Redacted: result.Redacted,
 			})
 		}
@@ -391,6 +392,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		Name: "await",
 		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish. Returns the result, a failed, canceled or rejected state "+
 			"with its message, or {id, state, retry_after} while the run is unfinished: call await again. "+
+			"A run whose queue deadline passed with no receiver claiming it returns its state and a message saying so, without retry_after. "+
 			"A finished run's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
 			"Use status to check a run without waiting.", int(awaitBound.Seconds())),
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, awaitReply, error) {
@@ -415,7 +417,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			return nil, awaitReply{}, toolFailure(err)
 		}
 		output := awaitReply{
-			ID: input.ID, State: string(result.Status.State), Model: result.Model, ServedModels: result.ServedModels, Message: statusText(result.Status),
+			ID: input.ID, State: string(result.Status.State), Model: result.Model, ServedModels: result.ServedModels, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
 			Redacted: result.Redacted, Skipped: result.Skipped,
 		}
 		if result.Task != nil {

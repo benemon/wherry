@@ -68,7 +68,8 @@ background and tells you when they finish, start that command in the
 background now, before anything else: it blocks until the run ends (or for 2
 hours 10 minutes; `--timeout` changes that), prints the state and the result, writes
 returned outputs, answers the receiver's credential request, and exits
-non-zero for any state other than `TASK_STATE_COMPLETED`. Its completion is
+non-zero for any state other than `TASK_STATE_COMPLETED`, and at once when
+the queue deadline passes with no receiver claiming the run. Its completion is
 how you learn the run ended, so you skip the await loop below. Then carry on
 with other work.
 
@@ -126,6 +127,10 @@ seconds and returns one of:
   unanswered (see the next section).
 - `TASK_STATE_REJECTED` or `TASK_STATE_CANCELED` with a `message` that
   says why.
+- `TASK_STATE_SUBMITTED` with the `message`
+  `queue deadline passed at <time> and no receiver claimed the run` and no
+  `retry_after`: no receiver took the run before its queue deadline and none
+  will. Check `receivers` for a live one that fits, then `submit` again.
 - `retry_after` with the current `state`: the run has not finished. Wait
   that many seconds, or do other work, then call `await` again.
 

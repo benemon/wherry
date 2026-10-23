@@ -152,6 +152,12 @@ the most inline input bytes the offered adapter delivers.
 Resolves a placement, signs the task and publishes it to the chosen pool. It
 prints `run_id=<id> pool=<pool>`, or fails with `no matching live receiver`.
 
+Before it publishes, it folds the host's key topic and refuses when the host
+key is not the topic's current key, since receivers admit a task only under
+that key. When `<host_key>.next` exists, the next host command completes the
+interrupted `wherry key rotate`; otherwise the host was re-keyed elsewhere
+and needs `wherry init` on a re-provisioned host.
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--agent` | the pool's default, then the terms' order | agent to run |
@@ -296,6 +302,13 @@ kept. Once the run is terminal and every listed S3 output has verified,
 bucket, inputs included. A run that ends while no `await` runs keeps them
 until `wherry cleanup` or the bucket's lifecycle rule removes them.
 
+A run this host submitted whose queue deadline passes with no status from
+a receiver can never start. `await` then prints `TASK_STATE_SUBMITTED` and
+exits at once with status 1 and
+`queue deadline passed at <RFC 3339 time> and no receiver claimed the run`.
+The queue deadline comes from this host's record of the submission, so
+`await` on another host of the tenant waits for its timeout.
+
 `await` exits with status 1, `run ended in <state>`, for any state other
 than `TASK_STATE_COMPLETED`, with status 1 when an output fails
 verification, and with status 1 when the timeout passes.
@@ -321,7 +334,10 @@ run the client never saw finish.
 Reads the latest verified state of a run without waiting. With `RUN_ID` it
 prints the state on the first line, `model=<model>` next when the run's
 placement names one, then one line per part of the status message. The
-state is `TASK_STATE_SUBMITTED` until a receiver reports one.
+state is `TASK_STATE_SUBMITTED` until a receiver reports one. For a run this
+host submitted whose queue deadline passed with no status from a receiver,
+the line after the state and model is
+`queue deadline passed at <RFC 3339 time> and no receiver claimed the run`.
 
 Without `RUN_ID` it prints one line per run, latest update first:
 
@@ -799,13 +815,19 @@ defaults, `2h` and `10m`.
   without `id`, one per run `wherry status` lists, latest update first.
   Each entry is `{id, pool, state, model, message, updated, redacted}`,
   with `model` the run's placement's model, when it has one. The
-  state is `TASK_STATE_SUBMITTED` until a receiver reports one. `updated` is
+  state is `TASK_STATE_SUBMITTED` until a receiver reports one. For a run
+  this host submitted whose queue deadline passed with no status from a
+  receiver, `message` is
+  `queue deadline passed at <RFC 3339 time> and no receiver claimed the run`. `updated` is
   the RFC 3339 time of the latest status. While the run has none, it is this
   host's submission of the run when its record holds one, else the Kafka
   timestamp of the run's echo.
 - `await` waits up to 45 seconds. It returns the outcome with `message` and
   `artifacts`, or, while the run is unfinished, its current `state` with
-  `retry_after` set to 5. With a progress token it sends a progress notification
+  `retry_after` set to 5. For a run whose queue deadline passes with no
+  status from a receiver, it returns at once with `state`
+  `TASK_STATE_SUBMITTED`, the `message` `status` gives, and no
+  `retry_after`. With a progress token it sends a progress notification
   every 5 seconds. Each artifact is `{artifact_id, parts}`, and each part has
   one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which
   is not included), with `media_type`. `await` writes the run's verified

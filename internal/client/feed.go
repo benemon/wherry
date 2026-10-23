@@ -44,7 +44,9 @@ type AwaitResult struct {
 	// Redacted counts, by name, the redaction markers of the run's values in Task's artifacts and Status, where each
 	// marker reads [redacted:<name>] instead.
 	Redacted map[string]int
-	Skipped  int
+	// Unclaimed is set, with Status SUBMITTED, when the run's queue deadline passed and no receiver claimed it.
+	Unclaimed string
+	Skipped   int
 }
 
 // Output is an output of a run, verified against the size and SHA-256 its result lists: its bytes, or for an S3
@@ -69,7 +71,9 @@ type StatusResult struct {
 	// Redacted counts, by name, the redaction markers of the run's values in Status, where each reads
 	// [redacted:<name>] instead.
 	Redacted map[string]int
-	Skipped  int
+	// Unclaimed is set when the run's queue deadline passed and no receiver claimed it.
+	Unclaimed string
+	Skipped   int
 }
 
 // EventsResult contains a run's verified statuses and its transcript chunk count per attempt.
@@ -462,7 +466,18 @@ func (r *runView) status() StatusResult {
 	}
 	result.Redacted = map[string]int{}
 	result.Status = unredactStatus(result.Status, r.h.markers(r.local), result.Redacted)
+	result.Unclaimed = r.unclaimed(time.Now())
 	return result
+}
+
+// unclaimed says that the run's queue deadline passed at now with no status from a receiver, and is empty otherwise. Only
+// this host's record holds the queue deadline.
+func (r *runView) unclaimed(now time.Time) string {
+	if r.local == nil || r.local.QueueDeadlineMS == 0 || len(r.statuses) > 0 || now.UnixMilli() <= r.local.QueueDeadlineMS {
+		return ""
+	}
+	deadline := time.UnixMilli(r.local.QueueDeadlineMS).UTC().Format(time.RFC3339)
+	return "queue deadline passed at " + deadline + " and no receiver claimed the run"
 }
 
 // model is the model of the run's placement: this host's record of it, else its echo's.
@@ -693,11 +708,20 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			}
 			return outcome, nil
 		}
-		fetches := reader.PollFetches(waitCtx)
+		if unclaimed := r.unclaimed(time.Now()); unclaimed != "" {
+			return AwaitResult{Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Model: r.model(), Unclaimed: unclaimed, Skipped: r.skipped}, nil
+		}
+		pollCtx, stopPoll := waitCtx, context.CancelFunc(func() {})
+		if r.local != nil && r.local.QueueDeadlineMS > 0 && len(r.statuses) == 0 {
+			pollCtx, stopPoll = context.WithDeadline(waitCtx, time.UnixMilli(r.local.QueueDeadlineMS+1))
+		}
+		fetches := reader.PollFetches(pollCtx)
+		stopPoll()
 		if err := waitCtx.Err(); err != nil {
 			return AwaitResult{}, fmt.Errorf("await %s: %w", runID, err)
 		}
-		if err := fetches.Err(); err != nil {
+		// Only pollCtx can have passed its deadline here: the queue deadline, which the next turn reports.
+		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			return AwaitResult{}, err
 		}
 		kept, unread := len(r.entries), r.unread

@@ -957,6 +957,88 @@ func TestSubmitRefusesQueueDeadlinePastMaximumBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestSubmitRefusesAKeyThatIsNotCurrentBeforePublishing(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	_, next, _ := ed25519.GenerateKey(rand.Reader)
+	rotation, err := signed.RotateKey(signed.HostOwner("tenant-a", "host-a"), f.host.key, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.host.produce(f.ctx, &kgo.Record{Topic: admin.HostTopic("tenant-a", "host-a"), Key: []byte("tenant-a.host-a"), Value: rotation}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err == nil || !strings.Contains(err.Error(), "host key is not the current key") || !strings.Contains(err.Error(), "wherry init") {
+		t.Fatalf("submit = %v, want the host key refused as not current", err)
+	}
+	if n := f.tasksEnd(t, "pool-a"); n != 0 {
+		t.Fatalf("pool tasks hold %d records", n)
+	}
+	if runs, err := os.ReadDir(filepath.Join(f.stateDir, "runs")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state holds runs %v, %v", runs, err)
+	}
+}
+
+// submitQueued submits a run with queueDeadline through receiver-a.
+func (f *fixture) submitQueued(t *testing.T, queueDeadline time.Duration) string {
+	t.Helper()
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: queueDeadline})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result.RunID
+}
+
+func TestAwaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
+	f := newFixture(t)
+	runID := f.submitQueued(t, 2*time.Second)
+	start := time.Now()
+	awaited, err := f.host.Await(f.ctx, runID, 20*time.Second)
+	elapsed := time.Since(start)
+	if err != nil || awaited.Status.State != wire.TaskStateSubmitted || !strings.HasPrefix(awaited.Unclaimed, "queue deadline passed at ") ||
+		!strings.HasSuffix(awaited.Unclaimed, " and no receiver claimed the run") {
+		t.Fatalf("await %#v, %v; want the passed queue deadline", awaited, err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("await returned after %s, want soon after the 2s queue deadline", elapsed)
+	}
+	status, err := f.host.Status(f.ctx, runID)
+	if err != nil || status.Status.State != wire.TaskStateSubmitted || status.Unclaimed != awaited.Unclaimed {
+		t.Fatalf("status %#v, %v; want %q", status, err, awaited.Unclaimed)
+	}
+}
+
+func TestAwaitKeepsWaitingBeforeTheQueueDeadline(t *testing.T) {
+	f := newFixture(t)
+	runID := f.submitQueued(t, 10*time.Minute)
+	if awaited, err := f.host.Await(f.ctx, runID, 2*time.Second); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("await = %#v, %v; want it still waiting", awaited, err)
+	}
+	if status, err := f.host.Status(f.ctx, runID); err != nil || status.Unclaimed != "" {
+		t.Fatalf("status %#v, %v; want no passed queue deadline", status, err)
+	}
+}
+
+func TestClaimedRunNeverReportsItsQueueDeadline(t *testing.T) {
+	f := newFixture(t)
+	runID := f.submitQueued(t, 5*time.Second)
+	receiver := f.receivers["receiver-a"]
+	task := receiver.claim(t, f.ctx, runID)[0]
+	receiver.feed(t, f.ctx, runID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+	if time.Now().UnixMilli() > task.submission.Wherry.QueueDeadlineMS {
+		t.Fatal("the claim landed after the queue deadline")
+	}
+	time.Sleep(time.Until(time.UnixMilli(task.submission.Wherry.QueueDeadlineMS + 1)))
+	if awaited, err := f.host.Await(f.ctx, runID, 2*time.Second); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("await = %#v, %v; want it still waiting on the claimed run", awaited, err)
+	}
+	if status, err := f.host.Status(f.ctx, runID); err != nil || status.Status.State != wire.TaskStateWorking || status.Unclaimed != "" {
+		t.Fatalf("status %#v, %v; want WORKING with no passed queue deadline", status, err)
+	}
+}
+
 func TestCancelWritesToTheEchosPool(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)

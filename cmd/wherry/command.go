@@ -396,6 +396,9 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 		return err
 	}
 	fmt.Fprintln(stdout, result.Status.State)
+	if result.Unclaimed != "" {
+		return errors.New(result.Unclaimed)
+	}
 	if result.Model != "" || len(result.ServedModels) > 0 {
 		fmt.Fprintf(stderr, "model=%s served_models=%s\n", result.Model, strings.Join(result.ServedModels, ","))
 	}
@@ -515,6 +518,9 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 			for _, part := range result.Status.Message.Parts {
 				fmt.Fprintln(stdout, partText(part))
 			}
+		}
+		if result.Unclaimed != "" {
+			fmt.Fprintln(stdout, result.Unclaimed)
 		}
 		warnRedacted(stderr, result.Redacted)
 		warnSkipped(stderr, result.Skipped)

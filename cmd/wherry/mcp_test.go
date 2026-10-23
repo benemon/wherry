@@ -365,6 +365,30 @@ func TestMCPAwaitBoundedRetry(t *testing.T) {
 	}
 }
 
+func TestMCPAwaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
+	b := newBus(t)
+	ctx := b.ctx
+	session := mcpSession(t, b.connect(t), nil)
+	var submitted submitOutput
+	callTool(t, ctx, session, "submit", map[string]any{"prompt": "fix the bug", "queue_deadline": "2s"}, &submitted)
+	start := time.Now()
+	var reply map[string]any
+	callTool(t, ctx, session, "await", map[string]any{"id": submitted.ID}, &reply)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("await returned after %s, want soon after the 2s queue deadline", elapsed)
+	}
+	message, _ := reply["message"].(string)
+	if !strings.HasPrefix(message, "queue deadline passed at ") || !strings.HasSuffix(message, " and no receiver claimed the run") ||
+		!reflect.DeepEqual(reply, map[string]any{"id": submitted.ID, "state": string(wire.TaskStateSubmitted), "message": message}) {
+		t.Fatalf("await %#v, want the passed queue deadline without retry_after", reply)
+	}
+	var status statusOutput
+	callTool(t, ctx, session, "status", map[string]any{"id": submitted.ID}, &status)
+	if len(status.Runs) != 1 || status.Runs[0].State != string(wire.TaskStateSubmitted) || status.Runs[0].Message != message {
+		t.Fatalf("status %#v, want %q", status, message)
+	}
+}
+
 func TestMCPCancel(t *testing.T) {
 	t.Run("cancel", func(t *testing.T) {
 		b := newBus(t)
