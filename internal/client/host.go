@@ -17,6 +17,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
@@ -120,6 +121,9 @@ type Host struct {
 	// storage is the host's S3 credential, nil when its configuration has none.
 	storage *StorageConfig
 	logger  *log.Logger
+	// follower is the host's reader of the tenant feed, kept while its context lasts.
+	followMu sync.Mutex
+	follower *follower
 }
 
 // NewHost constructs a host over a plain Kafka connection authenticated as principal.

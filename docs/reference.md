@@ -314,7 +314,7 @@ than `TASK_STATE_COMPLETED`, with status 1 when an output fails
 verification, and with status 1 when the timeout passes.
 
 While it waits, `await` answers the seal requests on the tenant feed for
-every run this host submitted, once per attempt, and logs on standard error
+every run this host submitted that has not ended, once per attempt, and logs on standard error
 each answer and each verified request of its own runs that it skips or
 refuses, by run, receiver and credential names.
 

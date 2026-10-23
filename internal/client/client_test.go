@@ -429,8 +429,10 @@ func TestRegisterIsIdempotentAndRefusesAnotherKey(t *testing.T) {
 		t.Fatalf("host topic holds %d records, %v; want one registration", len(records), err)
 	}
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
-	impostor := *f.host
-	impostor.key = other
+	impostor, err := NewHost(f.host.kafka, other, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.logger)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := impostor.Register(f.ctx); err == nil {
 		t.Fatal("registered a second key on the host topic")
 	}

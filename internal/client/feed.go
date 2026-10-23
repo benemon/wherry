@@ -16,6 +16,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
@@ -349,13 +350,141 @@ func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
 	if err != nil {
 		return nil, err
 	}
-	records, err := admin.ReadTopicFrom(ctx, h.kafka, admin.TenantTopic(h.tenant), local.feedOffset())
+	h.followMu.Lock()
+	f := h.follower
+	h.followMu.Unlock()
+	records, _, err := h.readFeed(ctx, f, local.feedOffset())
 	if err != nil {
 		return nil, err
 	}
 	r := newRunView(h, v, runID, local)
 	r.read(ctx, records)
 	return r, nil
+}
+
+// follower reads the tenant feed from start until the context it was started with ends. Its records are unverified:
+// each reader verifies them against the state it loads.
+type follower struct {
+	ctx     context.Context
+	start   int64
+	mu      sync.Mutex
+	records []*kgo.Record
+	// read is the offset the follower has read up to, control records included.
+	read int64
+	// woken is closed and replaced each time read advances.
+	woken chan struct{}
+}
+
+// follow returns the host's follower, first starting one under ctx when none runs. It starts at the lowest feed offset
+// of the host's runs that have not ended, or at the feed's committed end when every run has.
+func (h *Host) follow(ctx context.Context) (*follower, error) {
+	h.followMu.Lock()
+	defer h.followMu.Unlock()
+	if h.follower != nil && h.follower.ctx.Err() == nil {
+		return h.follower, nil
+	}
+	topic := admin.TenantTopic(h.tenant)
+	ends, err := kadm.NewClient(h.kafka).ListCommittedOffsets(ctx, topic)
+	if err == nil {
+		err = ends.Error()
+	}
+	if err != nil {
+		return nil, err
+	}
+	var partition int32
+	var start int64
+	ends.Each(func(end kadm.ListedOffset) { partition, start = end.Partition, end.Offset })
+	// Listed after the end: a run recorded later has every record about it after the end.
+	runs, err := h.Runs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, run := range runs.Runs {
+		local, err := h.localRun(run.RunID)
+		if err == nil && local != nil && !wire.Terminal(run.Status.State) {
+			start = min(start, local.FeedOffset)
+		}
+	}
+	reader, err := kgo.NewClient(append(h.kafka.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.KeepControlRecords(),
+		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: {partition: kgo.NewOffset().At(start)}}))...)
+	if err != nil {
+		return nil, err
+	}
+	f := &follower{ctx: ctx, start: start, read: start, woken: make(chan struct{})}
+	go func() {
+		defer reader.Close()
+		var logged string
+		for {
+			fetches := reader.PollFetches(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			if err := fetches.Err(); err != nil && err.Error() != logged {
+				logged = err.Error()
+				h.logger.Printf("follow the tenant feed: %v", err)
+			}
+			f.mu.Lock()
+			read := f.read
+			fetches.EachRecord(func(record *kgo.Record) {
+				if !record.Attrs.IsControl() {
+					f.records = append(f.records, record)
+				}
+				f.read = max(f.read, record.Offset+1)
+			})
+			if f.read > read {
+				close(f.woken)
+				f.woken = make(chan struct{})
+			}
+			f.mu.Unlock()
+		}
+	}()
+	h.follower = f
+	return f, nil
+}
+
+// from returns the records f has read at or after offset, the offset f has read up to, and a channel closed when f reads
+// further.
+func (f *follower) from(offset int64) ([]*kgo.Record, int64, <-chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	i := sort.Search(len(f.records), func(i int) bool { return f.records[i].Offset >= offset })
+	return f.records[i:], f.read, f.woken
+}
+
+// readFeed returns the tenant feed's records from offset up to at least its committed end, listed first, and the offset
+// that follows them. It takes them from f while f runs, if f started at or below offset, and reads them once otherwise.
+func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.Record, int64, error) {
+	topic := admin.TenantTopic(h.tenant)
+	ends, err := kadm.NewClient(h.kafka).ListCommittedOffsets(ctx, topic)
+	if err == nil {
+		err = ends.Error()
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	var end int64
+	ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
+	for f != nil && f.start <= offset && f.ctx.Err() == nil {
+		records, read, woken := f.from(offset)
+		if read >= end {
+			return records, read, nil
+		}
+		select {
+		case <-woken:
+		case <-f.ctx.Done():
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		}
+	}
+	records, err := admin.ReadTopicFrom(ctx, h.kafka, topic, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	// ReadTopicFrom reads to its own, possibly later, bound, so what follows starts after its last record.
+	for _, record := range records {
+		end = max(end, record.Offset+1)
+	}
+	return records, end, nil
 }
 
 // admit applies filter to a status.
@@ -619,6 +748,10 @@ func (h *Host) Transcript(ctx context.Context, runID string) (TranscriptResult, 
 func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (AwaitResult, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	f, err := h.follow(waitCtx)
+	if err != nil {
+		return AwaitResult{}, err
+	}
 	answered := make(chan struct{})
 	defer func() { cancel(); <-answered }()
 	go func() {
@@ -635,15 +768,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	if err != nil {
 		return AwaitResult{}, err
 	}
-	topic := admin.TenantTopic(h.tenant)
-	bounds, err := kadm.NewClient(h.kafka).ListCommittedOffsets(waitCtx, topic)
-	if err == nil {
-		err = bounds.Error()
-	}
-	if err != nil {
-		return AwaitResult{}, err
-	}
-	records, err := admin.ReadTopicFrom(waitCtx, h.kafka, topic, local.feedOffset())
+	records, next, err := h.readFeed(waitCtx, f, local.feedOffset())
 	if err != nil {
 		return AwaitResult{}, err
 	}
@@ -652,22 +777,6 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	if r.pool == "" {
 		return AwaitResult{}, fmt.Errorf("await %s: %w", runID, ErrRunNotFound)
 	}
-	// ReadTopic reads to its own, possibly later, bound, so following resumes after its last record.
-	starts := map[int32]int64{}
-	bounds.Each(func(bound kadm.ListedOffset) { starts[bound.Partition] = bound.Offset })
-	for _, record := range records {
-		starts[record.Partition] = max(starts[record.Partition], record.Offset+1)
-	}
-	partitions := map[int32]kgo.Offset{}
-	for partition, offset := range starts {
-		partitions[partition] = kgo.NewOffset().At(offset)
-	}
-	reader, err := kgo.NewClient(append(h.kafka.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()),
-		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: partitions}))...)
-	if err != nil {
-		return AwaitResult{}, err
-	}
-	defer reader.Close()
 	rederive := func() error {
 		v, err := h.load(waitCtx)
 		if err != nil {
@@ -715,21 +824,32 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		if r.local != nil && r.local.QueueDeadlineMS > 0 && len(r.statuses) == 0 {
 			pollCtx, stopPoll = context.WithDeadline(waitCtx, time.UnixMilli(r.local.QueueDeadlineMS+1))
 		}
-		fetches := reader.PollFetches(pollCtx)
+		records, read, woken := f.from(next)
+		if read <= next {
+			select {
+			case <-woken:
+			case <-pollCtx.Done():
+			case <-f.ctx.Done():
+				// The follower's owner stopped it; another follower, perhaps from a later offset, takes over.
+				if f, err = h.follow(waitCtx); err == nil {
+					records, read, err = h.readFeed(waitCtx, f, next)
+				}
+			}
+		}
 		stopPoll()
 		if err := waitCtx.Err(); err != nil {
 			return AwaitResult{}, fmt.Errorf("await %s: %w", runID, err)
 		}
-		// Only pollCtx can have passed its deadline here: the queue deadline, which the next turn reports.
-		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		if err != nil {
 			return AwaitResult{}, err
 		}
+		next = max(next, read)
 		kept, unread := len(r.entries), r.unread
-		fetches.EachRecord(func(record *kgo.Record) {
+		for _, record := range records {
 			if !r.addEcho(waitCtx, record) {
 				r.add(waitCtx, record)
 			}
-		})
+		}
 		if len(r.entries) == kept && r.unread == unread {
 			continue
 		}

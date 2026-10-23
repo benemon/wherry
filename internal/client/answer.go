@@ -21,39 +21,46 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Answer follows the tenant feed from its start and answers each seal request for a run this host submitted, until
-// ctx ends.
+// Answer follows the tenant feed from the earliest run of this host that has not ended and answers each seal request for
+// a run this host submitted, until ctx ends.
 func (h *Host) Answer(ctx context.Context) error {
-	reader, err := kgo.NewClient(append(h.kafka.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()),
-		kgo.ConsumeTopics(admin.TenantTopic(h.tenant)), kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))...)
+	f, err := h.follow(ctx)
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
 	h.sweep(ctx)
-	// pending holds unexpired requests read before their run's local record existed, retried at each poll.
+	// pending holds unexpired requests not yet settled, as when read before their run's local record existed, retried at
+	// each retry interval.
 	type request struct {
 		run      string
 		value    []byte
 		expiryMS int64
 	}
 	pending := map[string]request{}
-	// logged holds each pending request's last logged reason, so a request retried each poll logs a reason once.
+	// logged holds each pending request's last logged reason, so a request retried each interval logs a reason once.
 	logged := map[string]string{}
+	settle := func(key string) {
+		retry := func(format string, args ...any) {
+			if reason := fmt.Sprintf(format, args...); logged[key] != reason {
+				logged[key] = reason
+				h.logger.Print(reason)
+			}
+		}
+		if waiting := pending[key]; !time.Now().Before(time.UnixMilli(waiting.expiryMS)) || h.answer(ctx, waiting.run, waiting.value, retry) {
+			delete(pending, key)
+			delete(logged, key)
+		}
+	}
+	retries := time.NewTicker(retryInterval)
+	defer retries.Stop()
+	next := f.start
 	for {
-		pollCtx, cancel := context.WithTimeout(ctx, retryInterval)
-		fetches := reader.PollFetches(pollCtx)
-		cancel()
-		if ctx.Err() != nil {
-			return nil
-		}
-		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		fetches.EachRecord(func(record *kgo.Record) {
+		records, read, woken := f.from(next)
+		next = max(next, read)
+		for _, record := range records {
 			jws, err := jose.ParseSignedCompact(string(record.Value), []jose.SignatureAlgorithm{jose.EdDSA})
 			if err != nil || len(jws.Signatures) != 1 || jws.Signatures[0].Protected.ExtraHeaders[jose.HeaderType] != wire.SealRequestType {
-				return
+				continue
 			}
 			// Read before verifying, since every earlier request on the feed has expired; an unverified expiry can only
 			// skip a request.
@@ -61,20 +68,29 @@ func (h *Host) Answer(ctx context.Context) error {
 				ExpiryMS int64 `json:"expiry_at_ms"`
 			}
 			if json.Unmarshal(jws.UnsafePayloadWithoutVerification(), &unverified) == nil {
-				pending[fmt.Sprintf("%d/%d", record.Partition, record.Offset)] = request{string(record.Key), record.Value, unverified.ExpiryMS}
+				key := fmt.Sprintf("%d/%d", record.Partition, record.Offset)
+				pending[key] = request{string(record.Key), record.Value, unverified.ExpiryMS}
+				settle(key)
 			}
-		})
-		for key, waiting := range pending {
-			retry := func(format string, args ...any) {
-				if reason := fmt.Sprintf(format, args...); logged[key] != reason {
-					logged[key] = reason
-					h.logger.Print(reason)
-				}
+		}
+		select {
+		case <-ctx.Done():
+		case <-woken:
+		case <-f.ctx.Done():
+		case <-retries.C:
+			for key := range pending {
+				settle(key)
 			}
-			if !time.Now().Before(time.UnixMilli(waiting.expiryMS)) || h.answer(ctx, waiting.run, waiting.value, retry) {
-				delete(pending, key)
-				delete(logged, key)
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		if f.ctx.Err() != nil {
+			// The follower's owner stopped it; another follower reads every run that has not ended.
+			if f, err = h.follow(ctx); err != nil {
+				return err
 			}
+			next = max(next, f.start)
 		}
 	}
 }
