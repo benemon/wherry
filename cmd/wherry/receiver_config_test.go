@@ -44,7 +44,7 @@ credential: claude-oauth-token
 labels:
   isolation: host
 config:
-  node_pool: OCPv
+  node_pool: hosts
   runtime:
     driver: exec
     config:
