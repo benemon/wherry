@@ -300,10 +300,11 @@ config:
 An adapter whose agent has `models` in the pool's terms reads the task's
 model from `WHERRY_MODEL`, which the plugin sets only when the task has a
 model, and falls back to a model of its own. The shell command sets the
-fallback first, `test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;`, then passes
+fallback first, `test -n "$WHERRY_MODEL" || WHERRY_MODEL=<model>;`, with a model
+the harness accepts, such as `haiku` for Claude Code, then passes
 `--model "$WHERRY_MODEL"` to Claude Code or `-m "$WHERRY_MODEL"` to Codex.
 Nomad reads `${...}` in driver configuration as its own interpolation and
-fails the task on `${WHERRY_MODEL:-haiku}`, so the fallback avoids braces.
+fails the task on `${WHERRY_MODEL:-<model>}`, so the fallback avoids braces.
 The value reaches the command through the environment, never pasted into its
 arguments.
 
