@@ -38,6 +38,8 @@ func (h *Host) Answer(ctx context.Context) error {
 		expiryMS int64
 	}
 	pending := map[string]request{}
+	// logged holds each pending request's last logged reason, so a request retried each poll logs a reason once.
+	logged := map[string]string{}
 	for {
 		pollCtx, cancel := context.WithTimeout(ctx, retryInterval)
 		fetches := reader.PollFetches(pollCtx)
@@ -63,8 +65,15 @@ func (h *Host) Answer(ctx context.Context) error {
 			}
 		})
 		for key, waiting := range pending {
-			if !time.Now().Before(time.UnixMilli(waiting.expiryMS)) || h.answer(ctx, waiting.run, waiting.value) {
+			retry := func(format string, args ...any) {
+				if reason := fmt.Sprintf(format, args...); logged[key] != reason {
+					logged[key] = reason
+					h.logger.Print(reason)
+				}
+			}
+			if !time.Now().Before(time.UnixMilli(waiting.expiryMS)) || h.answer(ctx, waiting.run, waiting.value, retry) {
 				delete(pending, key)
+				delete(logged, key)
 			}
 		}
 	}
@@ -214,15 +223,18 @@ func removeLock(path string) {
 // active attempt of the run this host submitted, unanswered and unexpired, and names only credentials this host
 // holds: the run's agent's under the pool's terms, and task credentials the run declares. It logs a trusted request
 // for its own run that it skips, by run, receiver and credential names only.
-func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
+// answer handles one seal request and reports whether it is settled. A failure that a later pass can clear (the run's
+// history not yet read, an attempt not yet visible as active, a failed write) leaves it unsettled, logged through retry,
+// so Answer tries it again until it expires.
+func (h *Host) answer(ctx context.Context, runID string, encoded []byte, retry func(format string, args ...any)) bool {
 	local, err := h.localRun(runID)
 	if err != nil || local == nil {
 		return false
 	}
 	r, err := h.history(ctx, runID)
 	if err != nil {
-		h.logger.Printf("run %s: read the run for a seal request: %v", runID, err)
-		return true
+		retry("run %s: read the run for a seal request: %v", runID, err)
+		return false
 	}
 	request, err := authorize(ctx, r, encoded, func(v view) (wire.SealRequest, error) {
 		return admin.AuthorizeSealRequest(v.state, v.keys, encoded, r.pool, h.tenant)
@@ -247,8 +259,8 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 		return true
 	}
 	if reason := h.active(ctx, request); reason != "" {
-		h.logger.Printf("run %s: %s", runID, reason)
-		return true
+		retry("run %s: %s", runID, reason)
+		return false
 	}
 	local, err = h.localRun(runID)
 	if err != nil || local == nil {
@@ -329,8 +341,8 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte) bool {
 	// The marker follows the acknowledged write: a crash between them answers again, and the receiver opens the first
 	// seal of the two.
 	if err := produceSeal(ctx, h, &kgo.Record{Topic: admin.HostTopic(h.tenant, h.host), Key: []byte(runID), Value: sealed}); err != nil {
-		h.logger.Printf("run %s: seal for %s not written: %v", runID, request.Receiver, err)
-		return true
+		retry("run %s: seal for %s not written: %v", runID, request.Receiver, err)
+		return false
 	}
 	if err := writeState(marker, answerMarker{ExpiryMS: request.ExpiryMS}); err != nil {
 		h.logger.Printf("run %s: record a seal answer: %v", runID, err)

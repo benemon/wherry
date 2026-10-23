@@ -174,7 +174,11 @@ func TestAnUnrecordedAnswerIsAnsweredAgain(t *testing.T) {
 	previous := produceSeal
 	t.Cleanup(func() { produceSeal = previous })
 	failed := make(chan struct{})
-	produceSeal = func(context.Context, *Host, *kgo.Record) error { close(failed); return errors.New("host stopped") }
+	var once sync.Once
+	produceSeal = func(context.Context, *Host, *kgo.Record) error {
+		once.Do(func() { close(failed) })
+		return errors.New("host stopped")
+	}
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
 	ctx, stop := context.WithCancel(f.ctx)
@@ -437,6 +441,30 @@ func TestConcurrentAnswerersWriteOneSeal(t *testing.T) {
 }
 
 // A request read while its run's local record is absent is reconsidered on a later pass.
+// A request read before its attempt shows as claimed on the feed, as when the feed is slow to read, is answered once
+// the claim lands; refusing it once must not drop it.
+func TestARequestBeforeTheClaimIsAnswered(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	submitted := f.submit(t, defaultSelector())
+	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+	receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task))
+	answering(t, f, f.host)
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, submitted.RunID, receiver.sign(t, &asked.record))
+	time.Sleep(1500 * time.Millisecond)
+	if seals := f.seals(t, "host-a"); seals != 0 {
+		t.Fatalf("sealed %d times before the attempt was claimed", seals)
+	}
+	receiver.feed(t, f.ctx, submitted.RunID, receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+	f.waitSeals(t, "host-a", 1)
+	asked.open(t, f, "host-a")
+	if logs := f.logs.String(); strings.Count(logs, "is not the run's active attempt") != 1 {
+		t.Fatalf("want the refusal logged once while it waited; logs:\n%s", logs)
+	}
+}
+
 func TestARequestBeforeTheLocalRecordIsAnswered(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
