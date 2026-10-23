@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 620" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
+  <title id="title">wherry logical architecture by capability</title>
+  <desc id="desc">A coding agent on the caller's host delegates a task through harness integration. Placement chooses a receiver and an adapter, context delivery carries the prompt, files, credentials and repository to the job as files, and a platform adapter runs the unmodified agent as a job on the user's platform. Results carry statuses, transcript, outputs and the result back, redacted, and the caller verifies outputs before writing them. Authority and trust spans every exchange: operator-issued identities and grants enforced by the broker, signed records checked against the operator's state, and credentials sealed to one receiver for one attempt.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e4a35"/>
+    </marker>
+    <marker id="arrow-back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3f6b4a"/>
+    </marker>
+  </defs>
+
+  <rect width="1180" height="620" fill="#f4f1e8"/>
+
+  <!-- ======================= Caller ======================= -->
+  <text x="40" y="76" font-size="13" font-weight="600" fill="#2e4a35" letter-spacing="1">CALLER</text>
+  <g font-size="13" fill="#00290b">
+    <rect x="40" y="124" width="200" height="84" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="140" y="152" text-anchor="middle" font-weight="600">Coding agent</text>
+    <text x="140" y="172" text-anchor="middle" font-size="10.5" fill="#2e4a35">delegates a subagent task</text>
+    <text x="140" y="187" text-anchor="middle" font-size="10.5" fill="#2e4a35">and awaits its result</text>
+
+    <rect x="40" y="232" width="200" height="176" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="140" y="260" text-anchor="middle" font-weight="600">Caller's host</text>
+    <text x="140" y="280" text-anchor="middle" font-size="10.5" fill="#2e4a35">credential files</text>
+    <text x="140" y="295" text-anchor="middle" font-size="10.5" fill="#2e4a35">input files</text>
+    <text x="140" y="310" text-anchor="middle" font-size="10.5" fill="#2e4a35">verified outputs</text>
+  </g>
+
+  <!-- caller -> wherry -->
+  <path d="M 240 166 H 296" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="268" y="158" text-anchor="middle" font-size="10.5" fill="#2e4a35">task</text>
+  <path d="M 240 270 H 296" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="268" y="262" text-anchor="middle" font-size="10.5" fill="#2e4a35">files</text>
+  <path d="M 302 370 H 246" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-back)"/>
+  <text x="271" y="362" text-anchor="middle" font-size="10.5" fill="#3f6b4a">outputs</text>
+
+  <!-- ======================= wherry ======================= -->
+  <rect x="280" y="56" width="620" height="500" rx="8" fill="#fffdf7" stroke="#3f6b4a" stroke-width="2"/>
+  <text x="302" y="86" font-size="14" font-weight="700" fill="#00290b">wherry</text>
+  <text x="302" y="104" font-size="11" fill="#2e4a35">capabilities between a caller and compute the user runs</text>
+
+  <g font-size="12.5" fill="#00290b">
+    <rect x="302" y="124" width="170" height="84" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="387" y="148" text-anchor="middle" font-weight="600">Harness integration</text>
+    <text x="387" y="167" text-anchor="middle" font-size="10.5" fill="#2e4a35">tools and a skill</text>
+    <text x="387" y="182" text-anchor="middle" font-size="10.5" fill="#2e4a35">in the agent's harness</text>
+    <text x="387" y="197" text-anchor="middle" font-size="10.5" fill="#2e4a35">submit, await, cancel</text>
+
+    <rect x="502" y="124" width="170" height="84" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="587" y="148" text-anchor="middle" font-weight="600">Placement</text>
+    <text x="587" y="167" text-anchor="middle" font-size="10.5" fill="#2e4a35">agent and label selector</text>
+    <text x="587" y="182" text-anchor="middle" font-size="10.5" fill="#2e4a35">client picks a receiver</text>
+    <text x="587" y="197" text-anchor="middle" font-size="10.5" fill="#2e4a35">receiver picks an adapter</text>
+
+    <rect x="702" y="124" width="170" height="84" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="787" y="148" text-anchor="middle" font-weight="600">Platform adapters</text>
+    <text x="787" y="167" text-anchor="middle" font-size="10.5" fill="#2e4a35">a plugin per platform type</text>
+    <text x="787" y="182" text-anchor="middle" font-size="10.5" fill="#2e4a35">run the agent as a job</text>
+    <text x="787" y="197" text-anchor="middle" font-size="10.5" fill="#2e4a35">and follow its output</text>
+
+    <rect x="302" y="232" width="570" height="76" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="587" y="256" text-anchor="middle" font-weight="600">Context delivery</text>
+    <text x="587" y="275" text-anchor="middle" font-size="10.5" fill="#2e4a35">prompt, input files, task credentials and a git repository, delivered to the job as files</text>
+    <text x="587" y="290" text-anchor="middle" font-size="10.5" fill="#2e4a35">large files travel beside the log, which carries their names, sizes and hashes</text>
+
+    <rect x="302" y="332" width="570" height="76" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="587" y="356" text-anchor="middle" font-weight="600">Results</text>
+    <text x="587" y="375" text-anchor="middle" font-size="10.5" fill="#2e4a35">statuses, transcript, output files and result, redacted before they are published</text>
+    <text x="587" y="390" text-anchor="middle" font-size="10.5" fill="#2e4a35">the caller verifies each output against the result before it writes the file</text>
+
+    <rect x="302" y="432" width="570" height="100" rx="6" fill="#e8ebdf" stroke="#3f6b4a" stroke-width="1"/>
+    <text x="587" y="456" text-anchor="middle" font-weight="600">Authority and trust</text>
+    <text x="587" y="475" text-anchor="middle" font-size="10.5" fill="#2e4a35">the operator issues every identity and grant, and the broker enforces them</text>
+    <text x="587" y="490" text-anchor="middle" font-size="10.5" fill="#2e4a35">every record on a shared topic is signed, and checked against the operator's state</text>
+    <text x="587" y="505" text-anchor="middle" font-size="10.5" fill="#2e4a35">credentials are sealed to one receiver's key for one attempt</text>
+    <text x="587" y="520" text-anchor="middle" font-size="10.5" fill="#2e4a35">spans every exchange above</text>
+  </g>
+
+  <!-- within wherry -->
+  <path d="M 472 166 H 496" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 672 166 H 696" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- ======================= User's platform ======================= -->
+  <text x="940" y="76" font-size="13" font-weight="600" fill="#2e4a35" letter-spacing="1">USER'S PLATFORM</text>
+  <g font-size="13" fill="#00290b">
+    <rect x="940" y="124" width="200" height="84" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="1040" y="148" text-anchor="middle" font-weight="600">Platform job</text>
+    <text x="1040" y="167" text-anchor="middle" font-size="10.5" fill="#2e4a35">unmodified agent</text>
+    <text x="1040" y="182" text-anchor="middle" font-size="10.5" fill="#2e4a35">with input, credentials and</text>
+    <text x="1040" y="197" text-anchor="middle" font-size="10.5" fill="#2e4a35">output directories</text>
+  </g>
+
+  <!-- wherry -> platform and back -->
+  <path d="M 872 166 H 934" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="903" y="158" text-anchor="middle" font-size="10.5" fill="#2e4a35">dispatch</text>
+  <path d="M 872 270 H 1010 V 214" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="941" y="262" text-anchor="middle" font-size="10.5" fill="#2e4a35">files</text>
+  <path d="M 1070 208 V 370 H 878" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-back)"/>
+  <text x="1080" y="300" font-size="10.5" fill="#3f6b4a">transcript,</text>
+  <text x="1080" y="315" font-size="10.5" fill="#3f6b4a">outputs, result</text>
+
+  <!-- legend -->
+  <g font-size="10.5" fill="#2e4a35">
+    <line x1="40" y1="590" x2="80" y2="590" stroke="#2e4a35" stroke-width="1.5"/>
+    <text x="88" y="594">toward the job</text>
+    <line x1="200" y1="590" x2="240" y2="590" stroke="#3f6b4a" stroke-width="1.5"/>
+    <text x="248" y="594" fill="#3f6b4a">back to the caller</text>
+  </g>
+</svg>

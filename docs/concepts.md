@@ -13,6 +13,11 @@ exchange is a record on a Kafka cluster the user also runs. Kafka supplies
 identity, authorisation, isolation, history, work distribution and atomic
 writes.
 
+wherry's capabilities sit between the caller and the platform that runs
+the agent.
+
+![wherry's capabilities: harness integration, placement, platform adapters, context delivery, results, and authority and trust](diagrams/architecture.svg)
+
 ## Roles
 
 - **The operator** runs `wherry admin`. It issues every Kafka principal,
@@ -84,6 +89,11 @@ differently live on different topics.
 | `wherry.pool.<pool>.events` | the pool's receivers, entitled tenants' hosts | the pool's receivers | statuses, heartbeats, start failures, cancels |
 | `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, transcript chunks, results, echoes, seal requests |
 | `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key, seals |
+
+A host and a receiver read and write these topics as their grants allow,
+beside the platform, object storage and git remote a run uses.
+
+![wherry's implementation: a host, the Kafka topics, a receiver with adapter plugins, a platform job, object storage and a git remote](diagrams/implementation.svg)
 
 `wherry.admin` records and seals carry no signature: each sits on a topic only
 one principal can write, so Kafka authenticates it. Every other record, key
@@ -184,6 +194,10 @@ its own topic: a compact JWE (`ECDH-ES+A256KW` with `A256GCM`, through
 [go-jose](https://github.com/go-jose/go-jose)) encrypted to the request's
 key and bound in its protected header to the tenant, pool, receiver, key
 thumbprint, run, attempt, credential names and expiry.
+
+A seal passes from the host to one attempt of one receiver in these steps.
+
+![Credential delivery: the receiver's seal request, the host's checks and sealed answer, and delivery to the job](diagrams/credential-delivery.svg)
 
 Only the requesting receiver can open a seal, and only for that attempt.
 The private key lives in the receiver's memory until the seal opens or the
@@ -286,6 +300,10 @@ names the pool and placement the run was admitted to, so any host of the
 tenant can follow or cancel the run. The submitting host also
 keeps a record of each run in its state directory, so it can report the
 run before a receiver claims it.
+
+A run passes through these records from submission to result.
+
+![A run's lifecycle: submission, claim, seal, dispatch, statuses and transcript, result and await, with where a redelivery and an adoption enter](diagrams/run-lifecycle.svg)
 
 ## Cancellation
 
