@@ -122,7 +122,8 @@
     <text x="857" y="273">advertise</text>
     <text x="857" y="345">own key</text>
     <text x="857" y="417">claim</text>
-    <text x="857" y="489">statuses, cancels</text>
+    <text x="857" y="482">statuses,</text>
+    <text x="857" y="494">cancels</text>
     <text x="857" y="561">publish</text>
     <text x="857" y="633" fill="#3f6b4a">seals</text>
   </g>

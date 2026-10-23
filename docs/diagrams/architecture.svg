@@ -29,11 +29,11 @@
 
   <!-- caller -> wherry -->
   <path d="M 240 166 H 296" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-  <text x="268" y="158" text-anchor="middle" font-size="10.5" fill="#2e4a35">task</text>
+  <text x="274" y="158" text-anchor="end" font-size="10.5" fill="#2e4a35">task</text>
   <path d="M 240 270 H 296" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-  <text x="268" y="262" text-anchor="middle" font-size="10.5" fill="#2e4a35">files</text>
-  <path d="M 302 370 H 246" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-back)"/>
-  <text x="271" y="362" text-anchor="middle" font-size="10.5" fill="#3f6b4a">outputs</text>
+  <text x="274" y="262" text-anchor="end" font-size="10.5" fill="#2e4a35">files</text>
+  <path d="M 302 370 H 246" stroke="#3f6b4a" stroke-width="1.5" stroke-dasharray="5 3" fill="none" marker-end="url(#arrow-back)"/>
+  <text x="274" y="362" text-anchor="end" font-size="10.5" fill="#3f6b4a">outputs</text>
 
   <!-- ======================= wherry ======================= -->
   <rect x="280" y="56" width="620" height="500" rx="8" fill="#fffdf7" stroke="#3f6b4a" stroke-width="2"/>
@@ -93,10 +93,10 @@
 
   <!-- wherry -> platform and back -->
   <path d="M 872 166 H 934" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-  <text x="903" y="158" text-anchor="middle" font-size="10.5" fill="#2e4a35">dispatch</text>
+  <text x="906" y="158" text-anchor="start" font-size="10.5" fill="#2e4a35">dispatch</text>
   <path d="M 872 270 H 1010 V 214" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
   <text x="941" y="262" text-anchor="middle" font-size="10.5" fill="#2e4a35">files</text>
-  <path d="M 1070 208 V 370 H 878" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-back)"/>
+  <path d="M 1070 208 V 370 H 878" stroke="#3f6b4a" stroke-width="1.5" stroke-dasharray="5 3" fill="none" marker-end="url(#arrow-back)"/>
   <text x="1080" y="300" font-size="10.5" fill="#3f6b4a">transcript,</text>
   <text x="1080" y="315" font-size="10.5" fill="#3f6b4a">outputs, result</text>
 
@@ -104,7 +104,7 @@
   <g font-size="10.5" fill="#2e4a35">
     <line x1="40" y1="590" x2="80" y2="590" stroke="#2e4a35" stroke-width="1.5"/>
     <text x="88" y="594">toward the job</text>
-    <line x1="200" y1="590" x2="240" y2="590" stroke="#3f6b4a" stroke-width="1.5"/>
+    <line x1="200" y1="590" x2="240" y2="590" stroke="#3f6b4a" stroke-width="1.5" stroke-dasharray="5 3"/>
     <text x="248" y="594" fill="#3f6b4a">back to the caller</text>
   </g>
 </svg>
