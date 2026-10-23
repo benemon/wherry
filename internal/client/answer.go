@@ -55,7 +55,7 @@ func (h *Host) Answer(ctx context.Context) error {
 	defer retries.Stop()
 	next := f.start
 	for {
-		records, read, woken := f.from(next)
+		records, read, woken, _ := f.from(next)
 		next = max(next, read)
 		for _, record := range records {
 			jws, err := jose.ParseSignedCompact(string(record.Value), []jose.SignatureAlgorithm{jose.EdDSA})

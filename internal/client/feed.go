@@ -371,12 +371,15 @@ type follower struct {
 	records []*kgo.Record
 	// read is the offset the follower has read up to, control records included.
 	read int64
-	// woken is closed and replaced each time read advances.
+	// err is the error of the follower's last fetch, nil once a fetch succeeds.
+	err error
+	// woken is closed and replaced each time read advances or a fetch fails after one succeeded.
 	woken chan struct{}
 }
 
 // follow returns the host's follower, first starting one under ctx when none runs. It starts at the lowest feed offset
-// of the host's runs that have not ended, or at the feed's committed end when every run has.
+// of the host's runs whose run deadline has not passed, or at the feed's committed end when no such run exists, and at
+// no lower than the feed's log start.
 func (h *Host) follow(ctx context.Context) (*follower, error) {
 	h.followMu.Lock()
 	defer h.followMu.Unlock()
@@ -395,16 +398,28 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 	var start int64
 	ends.Each(func(end kadm.ListedOffset) { partition, start = end.Partition, end.Offset })
 	// Listed after the end: a run recorded later has every record about it after the end.
-	runs, err := h.Runs(ctx)
+	files, err := os.ReadDir(filepath.Join(h.stateDir, "runs"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	now := time.Now().UnixMilli()
+	for _, file := range files {
+		if runID, ok := strings.CutSuffix(file.Name(), ".json"); ok && !file.IsDir() {
+			// A run cannot still be running past its run deadline.
+			if local, err := h.localRun(runID); err == nil && local != nil && local.DeadlineMS > now {
+				start = min(start, local.FeedOffset)
+			}
+		}
+	}
+	starts, err := kadm.NewClient(h.kafka).ListStartOffsets(ctx, topic)
+	if err == nil {
+		err = starts.Error()
+	}
 	if err != nil {
 		return nil, err
 	}
-	for _, run := range runs.Runs {
-		local, err := h.localRun(run.RunID)
-		if err == nil && local != nil && !wire.Terminal(run.Status.State) {
-			start = min(start, local.FeedOffset)
-		}
-	}
+	// Below the log start the follower's read position never reaches the committed end.
+	starts.Each(func(logStart kadm.ListedOffset) { start = max(start, logStart.Offset) })
 	reader, err := kgo.NewClient(append(h.kafka.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.KeepControlRecords(),
 		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: {partition: kgo.NewOffset().At(start)}}))...)
 	if err != nil {
@@ -419,7 +434,8 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 			if ctx.Err() != nil {
 				return
 			}
-			if err := fetches.Err(); err != nil && err.Error() != logged {
+			err := fetches.Err()
+			if err != nil && err.Error() != logged {
 				logged = err.Error()
 				h.logger.Printf("follow the tenant feed: %v", err)
 			}
@@ -431,10 +447,11 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 				}
 				f.read = max(f.read, record.Offset+1)
 			})
-			if f.read > read {
+			if f.read > read || (err != nil && f.err == nil) {
 				close(f.woken)
 				f.woken = make(chan struct{})
 			}
+			f.err = err
 			f.mu.Unlock()
 		}
 	}()
@@ -442,17 +459,18 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 	return f, nil
 }
 
-// from returns the records f has read at or after offset, the offset f has read up to, and a channel closed when f reads
-// further.
-func (f *follower) from(offset int64) ([]*kgo.Record, int64, <-chan struct{}) {
+// from returns the records f has read at or after offset, the offset f has read up to, a channel closed when f reads
+// further or its fetches start failing, and the error of f's last fetch.
+func (f *follower) from(offset int64) ([]*kgo.Record, int64, <-chan struct{}, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	i := sort.Search(len(f.records), func(i int) bool { return f.records[i].Offset >= offset })
-	return f.records[i:], f.read, f.woken
+	return f.records[i:], f.read, f.woken, f.err
 }
 
 // readFeed returns the tenant feed's records from offset up to at least its committed end, listed first, and the offset
-// that follows them. It takes them from f while f runs, if f started at or below offset, and reads them once otherwise.
+// that follows them. It takes them from f while f runs, if f started at or below offset, and reads them once otherwise
+// or when f's fetches fail.
 func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.Record, int64, error) {
 	topic := admin.TenantTopic(h.tenant)
 	ends, err := kadm.NewClient(h.kafka).ListCommittedOffsets(ctx, topic)
@@ -465,9 +483,12 @@ func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.
 	var end int64
 	ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
 	for f != nil && f.start <= offset && f.ctx.Err() == nil {
-		records, read, woken := f.from(offset)
+		records, read, woken, err := f.from(offset)
 		if read >= end {
 			return records, read, nil
+		}
+		if err != nil {
+			break
 		}
 		select {
 		case <-woken:
@@ -824,7 +845,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		if r.local != nil && r.local.QueueDeadlineMS > 0 && len(r.statuses) == 0 {
 			pollCtx, stopPoll = context.WithDeadline(waitCtx, time.UnixMilli(r.local.QueueDeadlineMS+1))
 		}
-		records, read, woken := f.from(next)
+		records, read, woken, _ := f.from(next)
 		if read <= next {
 			select {
 			case <-woken:
