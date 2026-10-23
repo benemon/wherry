@@ -22,6 +22,7 @@ import (
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -406,6 +407,15 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, now tim
 	if _, err := rand.Read(record.RedactionKey); err != nil {
 		return err
 	}
+	// Listed before the write: a receiver that claims at once writes the run's first records after the submission.
+	ends, err := kadm.NewClient(h.kafka).ListCommittedOffsets(ctx, admin.TenantTopic(h.tenant))
+	if err == nil {
+		err = ends.Error()
+	}
+	if err != nil {
+		return err
+	}
+	ends.Each(func(end kadm.ListedOffset) { record.FeedOffset = end.Offset })
 	if err := h.writeRun(record); err != nil {
 		return err
 	}
@@ -505,8 +515,19 @@ type runRecord struct {
 	DeadlineMS int64 `json:"deadline_at_ms,omitzero"`
 	// QueueDeadlineMS is the submission's queue deadline, past which no receiver claims the run.
 	QueueDeadlineMS int64 `json:"queue_deadline_at_ms,omitzero"`
+	// FeedOffset is the tenant feed's committed end before the submission was published. Every record about the run
+	// is written after a receiver reads the submission, so it lies at or after this offset; zero reads the whole feed.
+	FeedOffset int64 `json:"feed_offset,omitzero"`
 	// RedactionKey is the run's redaction key, minted when this host submits the run.
 	RedactionKey []byte `json:"redaction_key,omitzero"`
+}
+
+// feedOffset is where the tenant feed's records about the run begin, zero without a local record of it.
+func (r *runRecord) feedOffset() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.FeedOffset
 }
 
 func (h *Host) runPath(runID string) (string, bool) {

@@ -14,6 +14,11 @@ import (
 // dedicated read_committed reader built from client's options. client must be
 // a plain client: a transactional ID in its options would fence its producer.
 func ReadTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Record, error) {
+	return ReadTopicFrom(ctx, client, topic, 0)
+}
+
+// ReadTopicFrom is ReadTopic from offset, or from the start of the topic's one partition where that is later.
+func ReadTopicFrom(ctx context.Context, client *kgo.Client, topic string, offset int64) ([]*kgo.Record, error) {
 	admin := kadm.NewClient(client)
 	starts, err := admin.ListStartOffsets(ctx, topic)
 	if err == nil {
@@ -32,9 +37,9 @@ func ReadTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Re
 	remaining := make(map[int32]int64)
 	partitions := make(map[int32]kgo.Offset)
 	ends.Each(func(end kadm.ListedOffset) {
-		if start, ok := starts.Lookup(topic, end.Partition); ok && start.Offset < end.Offset {
+		if start, ok := starts.Lookup(topic, end.Partition); ok && max(start.Offset, offset) < end.Offset {
 			remaining[end.Partition] = end.Offset
-			partitions[end.Partition] = kgo.NewOffset().At(start.Offset)
+			partitions[end.Partition] = kgo.NewOffset().At(max(start.Offset, offset))
 		}
 	})
 	if len(remaining) == 0 {

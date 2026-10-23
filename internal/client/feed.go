@@ -349,7 +349,7 @@ func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
 	if err != nil {
 		return nil, err
 	}
-	records, err := admin.ReadTopic(ctx, h.kafka, admin.TenantTopic(h.tenant))
+	records, err := admin.ReadTopicFrom(ctx, h.kafka, admin.TenantTopic(h.tenant), local.feedOffset())
 	if err != nil {
 		return nil, err
 	}
@@ -643,7 +643,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	if err != nil {
 		return AwaitResult{}, err
 	}
-	records, err := admin.ReadTopic(waitCtx, h.kafka, topic)
+	records, err := admin.ReadTopicFrom(waitCtx, h.kafka, topic, local.feedOffset())
 	if err != nil {
 		return AwaitResult{}, err
 	}

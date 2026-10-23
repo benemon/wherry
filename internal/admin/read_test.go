@@ -131,3 +131,23 @@ func TestReadAdvertisementsKeepsLatestLiveAuthorised(t *testing.T) {
 		t.Fatalf("advertisements: %+v", latest)
 	}
 }
+
+func TestReadTopicFromStartsAtTheOffset(t *testing.T) {
+	client := readerCluster(t, "topic-a")
+	ctx := context.Background()
+	for _, value := range []string{"before", "after"} {
+		if err := client.ProduceSync(ctx, &kgo.Record{Topic: "topic-a", Value: []byte(value)}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	from, err := ReadTopicFrom(readCtx, client, "topic-a", 1)
+	if err != nil || len(from) != 1 || string(from[0].Value) != "after" {
+		t.Fatalf("from offset 1: %v, %v; want the later record alone", from, err)
+	}
+	all, err := ReadTopicFrom(readCtx, client, "topic-a", 0)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("from offset 0: %d records, %v; want both", len(all), err)
+	}
+}

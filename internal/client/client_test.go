@@ -1652,3 +1652,33 @@ func TestSubmitRefusesADeadlinePastTheRunCap(t *testing.T) {
 		t.Fatalf("submit at the cap: %v", err)
 	}
 }
+
+// Every record about a run is written after the run's submission, so a read for the run starts at the tenant feed's
+// end as the host published the submission; a record below that offset is not read.
+func TestRunHistoryStartsAtTheFeedOffsetOfItsSubmission(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	if err := receiver.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: admin.TenantTopic("tenant-a"), Key: []byte("run-earlier"), Value: []byte("unreadable")}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	submitted := f.submit(t, defaultSelector())
+	local, err := f.host.localRun(submitted.RunID)
+	if err != nil || local.FeedOffset != 1 {
+		t.Fatalf("local record %#v, %v; want the feed offset after the earlier record", local, err)
+	}
+	// A record keyed by the run below the recorded offset, which a whole-feed read would count as unreadable.
+	if err := receiver.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: admin.TenantTopic("tenant-a"), Key: []byte(submitted.RunID), Value: []byte("unreadable")}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	local.FeedOffset = 2
+	if err := f.host.writeRun(*local); err != nil {
+		t.Fatal(err)
+	}
+	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+	receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+	r, err := f.host.history(f.ctx, submitted.RunID)
+	if err != nil || r.status().Status.State != wire.TaskStateWorking || r.skipped != 0 {
+		t.Fatalf("history %v; want WORKING with nothing skipped, the earlier record unread", err)
+	}
+}
