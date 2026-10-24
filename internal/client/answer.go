@@ -252,11 +252,11 @@ func removeLock(path string) {
 func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, encoded []byte, retry func(format string, args ...any)) bool {
 	local, err := h.localRun(runID)
 	if err != nil {
-		retry("run %s: skipped a seal request: the run's local record is unreadable", runID)
+		retry("run %q: skipped a seal request: the run's local record is unreadable", runID)
 		return false
 	}
 	if local == nil {
-		retry("run %s: skipped a seal request: this host has no local record of the run", runID)
+		retry("run %q: skipped a seal request: this host has no local record of the run", runID)
 		return false
 	}
 	r, err := h.history(ctx, runID)
@@ -272,7 +272,7 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 		return true
 	}
 	if request.Run != runID {
-		logger.Printf("run %s: skipped a seal request from %s for attempt %d, which names run %s", runID, request.Receiver, request.Attempt, request.Run)
+		logger.Printf("run %s: skipped a seal request from %s for attempt %d, which names run %q", runID, request.Receiver, request.Attempt, request.Run)
 		return true
 	}
 	// Answer passes over expired requests; the expiry is checked again before the write.

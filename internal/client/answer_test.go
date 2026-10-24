@@ -390,7 +390,7 @@ func TestAnswerLogsARequestForARunWithoutALocalRecord(t *testing.T) {
 	f.logged(t, "host-b", "following the tenant feed for seal requests", 0)
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	if lines := f.logged(t, "host-b", "run "+runID+": skipped a seal request: this host has no local record of the run", 1500*time.Millisecond); len(lines) != 1 {
+	if lines := f.logged(t, "host-b", fmt.Sprintf("run %q: skipped a seal request: this host has no local record of the run", runID), 1500*time.Millisecond); len(lines) != 1 {
 		t.Fatalf("want one line; logs:\n%s", f.logs.String())
 	}
 }
@@ -560,7 +560,7 @@ func TestARequestBeforeTheLocalRecordIsAnswered(t *testing.T) {
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
 	// Several retry passes read the request while the record is aside; each logs the same reason.
-	if lines := f.logged(t, "host-a", "run "+runID+": skipped a seal request: this host has no local record of the run", 3*retryInterval+500*time.Millisecond); len(lines) != 1 {
+	if lines := f.logged(t, "host-a", fmt.Sprintf("run %q: skipped a seal request: this host has no local record of the run", runID), 3*retryInterval+500*time.Millisecond); len(lines) != 1 {
 		t.Fatalf("want the reason logged once while it waited; logs:\n%s", f.logs.String())
 	}
 	if seals := f.seals(t, "host-a"); seals != 0 {
