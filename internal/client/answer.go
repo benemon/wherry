@@ -6,9 +6,11 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"syscall"
@@ -22,12 +24,19 @@ import (
 )
 
 // Answer follows the tenant feed from the earliest run of this host that has not ended and answers each seal request for
-// a run this host submitted, until ctx ends.
+// a run this host submitted, until ctx ends. Each line it logs names its process and release, since every answerer of a
+// state directory reads every request.
 func (h *Host) Answer(ctx context.Context) error {
 	f, err := h.follow(ctx)
 	if err != nil {
 		return err
 	}
+	version := "(devel)"
+	if info, ok := debug.ReadBuildInfo(); ok {
+		version = info.Main.Version
+	}
+	logger := log.New(h.logger.Writer(), fmt.Sprintf("%sanswerer pid=%d version=%s: ", h.logger.Prefix(), os.Getpid(), version), h.logger.Flags())
+	logger.Print("following the tenant feed for seal requests")
 	h.sweep(ctx)
 	// pending holds unexpired requests not yet settled, as when read before their run's local record existed, retried at
 	// each retry interval.
@@ -43,10 +52,10 @@ func (h *Host) Answer(ctx context.Context) error {
 		retry := func(format string, args ...any) {
 			if reason := fmt.Sprintf(format, args...); logged[key] != reason {
 				logged[key] = reason
-				h.logger.Print(reason)
+				logger.Print(reason)
 			}
 		}
-		if waiting := pending[key]; !time.Now().Before(time.UnixMilli(waiting.expiryMS)) || h.answer(ctx, waiting.run, waiting.value, retry) {
+		if waiting := pending[key]; !time.Now().Before(time.UnixMilli(waiting.expiryMS)) || h.answer(ctx, logger, waiting.run, waiting.value, retry) {
 			delete(pending, key)
 			delete(logged, key)
 		}
@@ -237,13 +246,17 @@ func removeLock(path string) {
 
 // answer seals the credentials a request asks for when it comes from a live member of the run's pool holding the
 // active attempt of the run this host submitted, unanswered and unexpired, and names only credentials this host
-// holds: the run's agent's under the pool's terms, and task credentials the run declares. It logs a trusted request
-// for its own run that it skips, by run, receiver and credential names only. It reports whether the request is
-// settled; a failure a later pass can clear is logged through retry and leaves it unsettled, so Answer tries it again
-// until it expires.
-func (h *Host) answer(ctx context.Context, runID string, encoded []byte, retry func(format string, args ...any)) bool {
+// holds: the run's agent's under the pool's terms, and task credentials the run declares. It logs each request it skips
+// or settles, by run, attempt, receiver and credential names only. It reports whether the request is settled; a failure
+// a later pass can clear is logged through retry and leaves it unsettled, so Answer tries it again until it expires.
+func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, encoded []byte, retry func(format string, args ...any)) bool {
 	local, err := h.localRun(runID)
-	if err != nil || local == nil {
+	if err != nil {
+		retry("run %s: skipped a seal request: the run's local record is unreadable", runID)
+		return false
+	}
+	if local == nil {
+		retry("run %s: skipped a seal request: this host has no local record of the run", runID)
 		return false
 	}
 	r, err := h.history(ctx, runID)
@@ -254,23 +267,29 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte, retry f
 	request, err := authorize(ctx, r, encoded, func(v view) (wire.SealRequest, error) {
 		return admin.AuthorizeSealRequest(v.state, v.keys, encoded, r.pool, h.tenant)
 	})
-	if err != nil || request.Run != runID {
+	if err != nil {
+		logger.Printf("run %s: skipped a seal request: %v", runID, err)
+		return true
+	}
+	if request.Run != runID {
+		logger.Printf("run %s: skipped a seal request from %s for attempt %d, which names run %s", runID, request.Receiver, request.Attempt, request.Run)
 		return true
 	}
 	// Answer passes over expired requests; the expiry is checked again before the write.
 	if time.UnixMilli(request.ExpiryMS).After(time.Now().Add(requestLifetime)) {
-		h.logger.Printf("run %s: skipped a seal request from %s that expires beyond the seal wait", runID, request.Receiver)
+		logger.Printf("run %s: skipped a seal request from %s that expires beyond the seal wait", runID, request.Receiver)
 		return true
 	}
 	// The check, the write and the marker run under the attempt's lock, so concurrent answerers write one seal.
 	unlock, err := h.lockAttempt(ctx, runID, request.Attempt)
 	if err != nil {
-		h.logger.Printf("run %s: lock the attempt: %v", runID, err)
+		logger.Printf("run %s: lock the attempt: %v", runID, err)
 		return true
 	}
 	defer unlock()
 	marker := h.markerPath(runID, request.Attempt)
 	if _, err := os.Stat(marker); err == nil {
+		logger.Printf("run %s: skipped a seal request from %s for attempt %d, which another answerer already sealed", runID, request.Receiver, request.Attempt)
 		return true
 	}
 	if reason := h.active(ctx, request); reason != "" {
@@ -279,13 +298,13 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte, retry f
 	}
 	local, err = h.localRun(runID)
 	if err != nil || local == nil {
-		h.logger.Printf("run %s: read the local record before sealing: %v", runID, err)
+		logger.Printf("run %s: read the local record before sealing: %v", runID, err)
 		return true
 	}
 	// A new key would stop the markers already on the feed mapping to their names.
 	if len(local.RedactionKey) != 32 {
 		path, _ := h.runPath(runID)
-		h.logger.Printf("run %s: refused to seal: the redaction key in %s is %d bytes, not 32", runID, path, len(local.RedactionKey))
+		logger.Printf("run %s: refused to seal: the redaction key in %s is %d bytes, not 32", runID, path, len(local.RedactionKey))
 		return true
 	}
 	terms := r.v.state.Pools[r.pool].Agents
@@ -295,42 +314,42 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte, retry f
 		path, configured := h.credentials[name]
 		switch {
 		case i >= len(request.Credentials) && !slices.Contains(local.TaskCredentials, name):
-			h.logger.Printf("run %s: skipped a seal request for task credential %s, which the run does not declare", runID, name)
+			logger.Printf("run %s: skipped a seal request for task credential %s, which the run does not declare", runID, name)
 			return true
 		case i < len(request.Credentials) && (agent < 0 || !slices.Contains(terms[agent].Credentials, name)):
-			h.logger.Printf("run %s: skipped a seal request for credential %s, which agent %s's terms do not approve", runID, name, local.Placement.Agent)
+			logger.Printf("run %s: skipped a seal request for credential %s, which agent %s's terms do not approve", runID, name, local.Placement.Agent)
 			return true
 		case !configured:
-			h.logger.Printf("run %s: skipped a seal request for credential %s, which this host does not configure", runID, name)
+			logger.Printf("run %s: skipped a seal request for credential %s, which this host does not configure", runID, name)
 			return true
 		}
 		if values[name], err = os.ReadFile(path); err != nil {
-			h.logger.Printf("run %s: read credential %s: %v", runID, name, errors.Unwrap(err))
+			logger.Printf("run %s: read credential %s: %v", runID, name, errors.Unwrap(err))
 			return true
 		}
 	}
 	if len(request.S3Inputs)+len(request.S3Outputs) > 0 {
 		for _, input := range request.S3Inputs {
 			if !slices.Contains(local.S3Inputs, input) {
-				h.logger.Printf("run %s: skipped a seal request for S3 input %s, which the run does not declare", runID, input)
+				logger.Printf("run %s: skipped a seal request for S3 input %s, which the run does not declare", runID, input)
 				return true
 			}
 		}
 		for _, output := range request.S3Outputs {
 			if !slices.Contains(local.S3Outputs, output) {
-				h.logger.Printf("run %s: skipped a seal request for S3 output %s, which the run does not declare", runID, output)
+				logger.Printf("run %s: skipped a seal request for S3 output %s, which the run does not declare", runID, output)
 				return true
 			}
 		}
 		storage := r.v.state.Pools[r.pool].Storage
 		store, err := h.bucket(r.pool, storage)
 		if err != nil {
-			h.logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)
+			logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)
 			return true
 		}
 		urls, err := presign(ctx, store, storage.Bucket, h.tenant, runID, request.S3Inputs, request.S3Outputs, time.UnixMilli(local.DeadlineMS))
 		if err != nil {
-			h.logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)
+			logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)
 			return true
 		}
 		maps.Copy(values, urls)
@@ -342,15 +361,16 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte, retry f
 	}, request.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: values, RedactionKey: local.RedactionKey})
 	if err != nil {
 		// Seal's errors name credentials, never values.
-		h.logger.Printf("run %s: seal for %s not built: %v", runID, request.Receiver, err)
+		logger.Printf("run %s: seal for %s not built: %v", runID, request.Receiver, err)
 		return true
 	}
 	if !time.Now().Before(time.UnixMilli(request.ExpiryMS)) {
+		logger.Printf("run %s: skipped a seal request from %s for attempt %d, which expired while its seal was built", runID, request.Receiver, request.Attempt)
 		return true
 	}
 	// A terminal status or another claim that landed while the seal was built stops the write.
 	if reason := h.active(ctx, request); reason != "" {
-		h.logger.Printf("run %s: %s", runID, reason)
+		logger.Printf("run %s: %s", runID, reason)
 		return true
 	}
 	// The marker follows the acknowledged write: a crash between them answers again, and the receiver opens the first
@@ -360,11 +380,11 @@ func (h *Host) answer(ctx context.Context, runID string, encoded []byte, retry f
 		return false
 	}
 	if err := writeState(marker, answerMarker{ExpiryMS: request.ExpiryMS}); err != nil {
-		h.logger.Printf("run %s: record a seal answer: %v", runID, err)
+		logger.Printf("run %s: record a seal answer: %v", runID, err)
 	}
-	h.logger.Printf("run %s: sealed %v to %s for attempt %d", runID, append(slices.Clone(request.Credentials), request.TaskCredentials...), request.Receiver, request.Attempt)
+	logger.Printf("run %s: sealed %v to %s for attempt %d", runID, append(slices.Clone(request.Credentials), request.TaskCredentials...), request.Receiver, request.Attempt)
 	if len(request.S3Inputs)+len(request.S3Outputs) > 0 {
-		h.logger.Printf("run %s: sealed URLs for S3 inputs %v and outputs %v to %s", runID, request.S3Inputs, request.S3Outputs, request.Receiver)
+		logger.Printf("run %s: sealed URLs for S3 inputs %v and outputs %v to %s", runID, request.S3Inputs, request.S3Outputs, request.Receiver)
 	}
 	return true
 }

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -460,6 +461,76 @@ func TestAnswerSealsPresignedURLsForTheRunsObjects(t *testing.T) {
 	}
 	if strings.Contains(f.logs.String(), "X-Amz") {
 		t.Fatalf("host logs hold a URL:\n%s", f.logs.String())
+	}
+}
+
+// The answerer logs a seal with URLs, a second answerer's skip of the sealed attempt and an unauthorised request; no
+// answerer line holds a credential value, a URL, the storage secret or the run's redaction key.
+func TestAnswererLogsHoldNoSecret(t *testing.T) {
+	o := newUploadOracle(t)
+	if err := os.WriteFile(o.config.SecretKeyFile, []byte("storage-secret-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t)
+	terms := testTerms()
+	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	if err := f.service.PoolCreate(f.ctx, "pool-s3", terms); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {
+		t.Fatal(err)
+	}
+	f.host.storage = o.config
+	receiver := f.addReceiver(t, "receiver-s3", "pool-s3")
+	receiver.advertise(t, f.ctx, nil)
+	task, _ := submitS3(t, f, receiver, 10*time.Minute)
+	runID := task.submission.Wherry.Run
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	asked.record.S3Inputs, asked.record.S3Outputs = []string{"dataset.bin"}, []string{"out/report.pdf"}
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	answering(t, f, f.host)
+	f.waitSeals(t, "host-a", 1)
+	values := asked.open(t, f, "host-a")
+	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, log.New(f.logs, "twin: ", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	twin.storage = f.host.storage
+	answering(t, f, twin)
+	f.logged(t, "twin", "run "+runID+": skipped a seal request from receiver-s3 for attempt 1, which another answerer already sealed", 0)
+	outsider := f.addReceiver(t, "receiver-b", "pool-a")
+	forged := newRequest(t, outsider.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, runID, outsider.sign(t, &forged.record))
+	// Both answerers read the forged request.
+	for strings.Count(f.logs.String(), "run "+runID+": skipped a seal request: record names another pool or tenant than its run") < 2 {
+		if f.ctx.Err() != nil {
+			t.Fatalf("logs:\n%s", f.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	local, err := f.host.localRun(runID)
+	if err != nil || local == nil {
+		t.Fatalf("local record %v, %v", local, err)
+	}
+	secrets := []string{"model-token", "storage-secret-value", o.endpoint, "X-Amz", "https://",
+		hex.EncodeToString(local.RedactionKey), base64.StdEncoding.EncodeToString(local.RedactionKey), base64.RawURLEncoding.EncodeToString(local.RedactionKey)}
+	for _, value := range values {
+		secrets = append(secrets, string(value))
+	}
+	var answerer int
+	for line := range strings.Lines(f.logs.String()) {
+		if !strings.Contains(line, "answerer pid=") {
+			continue
+		}
+		answerer++
+		for _, secret := range secrets {
+			if strings.Contains(line, secret) {
+				t.Fatalf("answerer line holds %q: %s", secret, line)
+			}
+		}
+	}
+	if answerer < 6 {
+		t.Fatalf("%d answerer lines; logs:\n%s", answerer, f.logs.String())
 	}
 }
 
