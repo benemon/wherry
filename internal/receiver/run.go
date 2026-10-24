@@ -762,7 +762,34 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 	}
 	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.adapter.Labels), handle.Name)
+	var pending []adapter.Line
+	// shutdown commits what is pending and the lines the adapter delivered that the run has not taken, under its own
+	// deadline, since ctx is already done, and returns the task. A commit the shutdown cut short can leave its
+	// transaction open. It ignores the delivery budget: the receiver is going away and an adopter continues the run.
+	shutdown := func() kgo.AckStatus {
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cancel()
+		for drained := false; !drained; {
+			select {
+			case line := <-lines:
+				pending = append(pending, line)
+			default:
+				drained = true
+			}
+		}
+		if err := run.producer.EndTransaction(shutdownCtx, kgo.TryAbort); err != nil {
+			return run.abandon(err)
+		}
+		if err := run.commit(shutdownCtx, run.chunks(pending, false)...); err != nil {
+			return run.abandon(err)
+		}
+		return kgo.AckRelease
+	}
 	if err := run.commit(ctx, run.statusRecords("started", taskStatus(wire.TaskStateWorking, ""), &offset, nil)...); err != nil {
+		if ctx.Err() != nil {
+			pending = held
+			return shutdown()
+		}
 		return run.abandon(err)
 	}
 	// retryUntil bounds following again over a lost plugin link to one lock duration from the loss, after
@@ -774,7 +801,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	defer heartbeat.Stop()
 	checks := time.NewTicker(stateCheckInterval)
 	defer checks.Stop()
-	var pending []adapter.Line
 	position := offset
 	recognise, keep := resultRecognizer(run.adapter.output)
 	take := func(line adapter.Line) (agentResult, bool) {
@@ -787,16 +813,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			stopFollow()
 			return run.finish(ctx, handle, pending, result)
 		}
-	}
-	// shutdown commits what is pending under its own deadline, since ctx is already done, and returns the task.
-	// It ignores the delivery budget: the receiver is going away and an adopter continues the run.
-	shutdown := func() kgo.AckStatus {
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-		defer cancel()
-		if err := run.commit(shutdownCtx, run.chunks(pending, false)...); err != nil {
-			return run.abandon(err)
-		}
-		return kgo.AckRelease
 	}
 	// stopHeld ends the run when the receiver holds its cancel or a denial lasting one lock interval.
 	stopHeld := func() (kgo.AckStatus, bool) {
@@ -892,6 +908,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			// Heartbeats go to the pool's events alone: adoption needs them, hosts follow the chunks.
 			records := append(run.chunks(pending[:len(pending)-held], false), run.events(run.status("heartbeat", taskStatus(wire.TaskStateWorking, ""), &at, nil)))
 			if err := run.commit(ctx, records...); err != nil {
+				if ctx.Err() != nil {
+					return shutdown()
+				}
 				return run.abandon(err)
 			}
 			pending = pending[len(pending)-held:]

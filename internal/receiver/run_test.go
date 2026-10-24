@@ -1305,6 +1305,12 @@ func TestShutdownCommitsHeldTranscriptLine(t *testing.T) {
 	f.adapter.endDelay = 30 * time.Second
 	ctx, shutdown := context.WithCancel(f.ctx)
 	done := startInFlight(t, f, ctx, "run-shutdown")
+	for f.adapter.deliveredCount() == 0 {
+		if f.ctx.Err() != nil {
+			t.Fatalf("the adapter never delivered the line; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	shutdown()
 	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("claimOne after shutdown: %v", err)
@@ -1315,6 +1321,73 @@ func TestShutdownCommitsHeldTranscriptLine(t *testing.T) {
 		}
 	}
 	t.Fatalf("the transcript line held for the next commit was lost at shutdown; logs:\n%s", f.logs.String())
+}
+
+// shutdownAt cancels the receiver as its run's status of kind is produced, once the adapter has delivered a line, so
+// the shutdown lands while that status's commit is in flight.
+type shutdownAt struct {
+	f        fixture
+	kind     string
+	shutdown context.CancelFunc
+}
+
+func (h shutdownAt) OnProduceRecordBuffered(record *kgo.Record) {
+	var status wire.RunStatus
+	if wire.ParseRecord(record.Value, h.f.keys(), &status) != nil || status.Wherry.Kind != h.kind {
+		return
+	}
+	for h.f.adapter.deliveredCount() == 0 && h.f.ctx.Err() == nil {
+		time.Sleep(10 * time.Millisecond)
+	}
+	h.shutdown()
+}
+
+func TestShutdownDuringACommitCommitsTheDeliveredLine(t *testing.T) {
+	for _, kind := range []string{"started", "heartbeat"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newFixture(t, noResultStream)
+			f.adapter.endDelay = 30 * time.Second
+			ctx, shutdown := context.WithCancel(f.ctx)
+			base, err := kgo.NewClient(append(f.receiver.base.Opts(), kgo.WithHooks(shutdownAt{f, kind, shutdown}))...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(base.Close)
+			f.receiver.base = base
+			f.answer(t, credentialName)
+			f.submit(t, f.host, nil)
+			if err := f.receiver.claimOne(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				t.Fatalf("claimOne after shutdown: %v", err)
+			}
+			for _, chunk := range f.chunks(t) {
+				if strings.Contains(chunk.ArtifactUpdate.Artifact.Parts[0].Text, "working") {
+					return
+				}
+			}
+			t.Fatalf("the delivered transcript line was lost to a shutdown during the %s commit; logs:\n%s", kind, f.logs.String())
+		})
+	}
+}
+
+func TestShutdownDuringTheStartedCommitCommitsAnAdoptersHeldLines(t *testing.T) {
+	f, record := adopting(t)
+	ctx, shutdown := context.WithCancel(f.ctx)
+	base, err := kgo.NewClient(append(f.receiver.base.Opts(), kgo.WithHooks(shutdownAt{f, "started", shutdown}))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(base.Close)
+	f.receiver.base = base
+	done := f.executing(t, ctx, record, 2)
+	request := f.request(t, 1)
+	f.held(t)
+	f.sealFor(t, request, map[string][]byte{credentialName: []byte(testToken)})
+	if status := <-done; status != kgo.AckRelease {
+		t.Fatalf("adopter ended %v, want the task released; logs:\n%s", status, f.logs.String())
+	}
+	if chunks := f.chunks(t); len(chunks) != 2 || chunks[0].ArtifactUpdate.Artifact.Parts[0].Text != `{"type":"assistant","message":"token `+redacted+`"}` {
+		t.Fatalf("adopter's transcript %+v, want both held lines with the run's marker; logs:\n%s", chunks, f.logs.String())
+	}
 }
 
 func (f fixture) deleteACLs(t *testing.T) {

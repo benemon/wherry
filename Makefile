@@ -29,8 +29,10 @@ vet: ## Vet both modules
 
 .PHONY: test
 # Two packages at a time: more exhaust macOS's ephemeral ports with the in-process Kafka connections the tests open.
+# The timeout bounds each package's test binary: internal/receiver, the slowest, runs up to 12 minutes on a 4-core
+# arm64 host whose CPU lacks SHA-512 instructions, past the 10-minute default.
 test: ## Test both modules
-	go test -p 2 ./...
+	go test -p 2 -timeout 30m ./...
 	cd adapter && go test ./...
 
 $(GO_LICENSES):

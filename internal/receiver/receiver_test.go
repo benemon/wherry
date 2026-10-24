@@ -104,9 +104,10 @@ type fakeAdapter struct {
 	// ended makes Follow end with that terminal after the stream, result line or not.
 	ended *adapter.Terminal
 	// linkLost makes that many Follows end with adapter.ErrLinkLost after at most one line; froms
-	// records the offset of every Follow.
-	linkLost int
-	froms    []int64
+	// records the offset of every Follow and delivered the lines Follows put on the receiver's channel.
+	linkLost  int
+	froms     []int64
+	delivered int
 	// hang makes Sweep and Ready block until their context ends.
 	hang bool
 	// outputs are what Collect streams, unless collectErr fails it; collects counts the calls, stopsBefore the
@@ -187,6 +188,9 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, 
 		if offset >= from {
 			select {
 			case lines <- adapter.Line{Offset: offset, Next: next, Data: []byte(data)}:
+				f.mu.Lock()
+				f.delivered++
+				f.mu.Unlock()
 			case <-ctx.Done():
 				return adapter.Terminal{}, ctx.Err()
 			}
@@ -304,6 +308,12 @@ func (f *fakeAdapter) Metrics(ctx context.Context) ([]adapter.Sample, error) {
 		return nil, ctx.Err()
 	}
 	return samples, nil
+}
+
+func (f *fakeAdapter) deliveredCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.delivered
 }
 
 func (f *fakeAdapter) sweepCount() int {
@@ -739,14 +749,19 @@ func (f fixture) execute(t *testing.T, record *kgo.Record, attempt int64) kgo.Ac
 	return f.receiver.execute(f.ctx, f.service.Admin, record, f.admitted(t, record), attempt)
 }
 
-// run starts the receiver's Run and returns the channel its error arrives on.
+// run starts the receiver's Run, which the test's end stops, and returns the channel its error arrives on.
 func (f fixture) run(t *testing.T, ctx context.Context) <-chan error {
 	t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- f.receiver.Run(ctx) }()
+	ctx, stop := context.WithCancel(ctx)
+	done, returned := make(chan error, 1), make(chan struct{})
+	go func() {
+		defer close(returned)
+		done <- f.receiver.Run(ctx)
+	}()
 	t.Cleanup(func() {
+		stop()
 		select {
-		case <-done:
+		case <-returned:
 		case <-time.After(10 * time.Second):
 		}
 	})
