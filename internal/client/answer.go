@@ -344,7 +344,8 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 		storage := r.v.state.Pools[r.pool].Storage
 		store, err := h.bucket(r.pool, storage)
 		if err != nil {
-			logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)
+			// The error can name the storage key files; submit reports it, so the answerer logs a fixed reason.
+			logger.Printf("run %s: skipped a seal request for S3 URLs: the host's storage credential could not be used", runID)
 			return true
 		}
 		urls, err := presign(ctx, store, storage.Bucket, h.tenant, runID, request.S3Inputs, request.S3Outputs, time.UnixMilli(local.DeadlineMS))
