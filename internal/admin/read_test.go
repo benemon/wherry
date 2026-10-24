@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"slices"
 	"testing"
 	"time"
 
@@ -149,5 +150,28 @@ func TestReadTopicFromStartsAtTheOffset(t *testing.T) {
 	all, err := ReadTopicFrom(readCtx, client, "topic-a", 0)
 	if err != nil || len(all) != 2 {
 		t.Fatalf("from offset 0: %d records, %v; want both", len(all), err)
+	}
+}
+
+// Concurrent reads on one client would otherwise build each reader in the same spare capacity of its options.
+func TestReadTopicLeavesTheClientsOptionsUnwritten(t *testing.T) {
+	base := readerCluster(t, "topic-a")
+	ctx := context.Background()
+	if err := base.ProduceSync(ctx, &kgo.Record{Topic: "topic-a", Value: []byte("kept")}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	opts := append(make([]kgo.Opt, 0, len(base.Opts())+3), base.Opts()...)
+	client, err := kgo.NewClient(opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := ReadTopic(readCtx, client, "topic-a"); err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(opts[len(opts):cap(opts)], func(opt kgo.Opt) bool { return opt != nil }) {
+		t.Fatal("ReadTopic wrote its reader's options into the client's")
 	}
 }

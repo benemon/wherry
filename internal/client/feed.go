@@ -420,7 +420,7 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 	}
 	// Below the log start the follower's read position never reaches the committed end.
 	starts.Each(func(logStart kadm.ListedOffset) { start = max(start, logStart.Offset) })
-	reader, err := kgo.NewClient(append(h.kafka.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.KeepControlRecords(),
+	reader, err := kgo.NewClient(append(slices.Clone(h.kafka.Opts()), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.KeepControlRecords(),
 		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: {partition: kgo.NewOffset().At(start)}}))...)
 	if err != nil {
 		return nil, err

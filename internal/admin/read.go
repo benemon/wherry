@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/benemon/wherry/internal/signed"
@@ -45,7 +46,7 @@ func ReadTopicFrom(ctx context.Context, client *kgo.Client, topic string, offset
 	if len(remaining) == 0 {
 		return nil, nil
 	}
-	reader, err := kgo.NewClient(append(client.Opts(),
+	reader, err := kgo.NewClient(append(slices.Clone(client.Opts()),
 		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
 		// A trailing abort marker is the last offset below the bound; it must be seen to finish.
 		kgo.KeepControlRecords(),

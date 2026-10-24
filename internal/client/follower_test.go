@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -120,6 +121,26 @@ func TestTheFollowerStartsWithoutReadingTheFeed(t *testing.T) {
 	}
 	if end := committedEnd(t, f); follower.start != end {
 		t.Fatalf("follower starts at %d; want the committed end %d, as no run's deadline is ahead", follower.start, end)
+	}
+}
+
+// A follower started while the host reads would otherwise build its reader in the same spare capacity of the host's
+// options.
+func TestTheFollowerLeavesTheHostsOptionsUnwritten(t *testing.T) {
+	f := newFixture(t)
+	opts := append(make([]kgo.Opt, 0, len(f.host.kafka.Opts())+3), f.host.kafka.Opts()...)
+	kafka, err := kgo.NewClient(opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(kafka.Close)
+	host, err := NewHost(kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	following(t, f, host)
+	if slices.ContainsFunc(opts[len(opts):cap(opts)], func(opt kgo.Opt) bool { return opt != nil }) {
+		t.Fatal("the follower wrote its reader's options into the host's")
 	}
 }
 
