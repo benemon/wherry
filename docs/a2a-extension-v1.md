@@ -143,8 +143,9 @@ A submission is the task of one run.
   submission is at most the pool's recorded `record_limit` bytes, the
   broker's record limit for the pool's tasks topic, and the `raw` and `data`
   parts together hold at most the smallest `inline_limit` the matching
-  adapters declare. Over either, a host with storage carries the inputs as
-  [S3 inputs](#s3-inputs-and-outputs), and without storage refuses the run.
+  adapters declare. Over either, a host carries the inputs as
+  [S3 inputs](#s3-inputs-and-outputs) when the pool has storage and the host
+  a storage credential, and otherwise refuses the run.
 - `credentials` lists task credentials, each `{name, file}`: a credential of the
   host, by the name in its configuration, that the agent gets as the file `file`
   in its credentials directory. `name` is at most 32 lowercase letters, digits
@@ -568,8 +569,8 @@ signature's protected header carrying its public key as `jwk`.
   key is retired at the rotate record's broker timestamp. A retired key
   verifies the owner's statuses, transcript chunks, outputs, results and
   echoes on a tenant feed, and its statuses on a pool's events, that the
-  broker appended before that timestamp, and nothing else. A record the broker appended at or after it does not
-  verify under the retired key. Readers that admit work, such as a receiver
+  broker appended before that timestamp, and nothing else. A record the
+  broker appended at or after it does not verify under the retired key. Readers that admit work, such as a receiver
   admitting a task or a cancel or a host answering a seal request, accept
   the current key alone.
 - Any other action is rejected.
@@ -794,8 +795,9 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `end` | `receiver`, or `tenant` and `host` | records a membership end |
 | `skip` | `offset`, `sha256` | passes over the undecodable record at that offset with that SHA-256 |
 
-`terms` has the members of the [pool terms](reference.md#pool-terms) file,
-with `max_queue_deadline_ms` and `lock_duration_ms` in milliseconds for its
+`terms` has the members of the [pool terms](reference.md#pool-terms) file
+and `record_limit`, the tasks topic's record limit that `pool create` reads
+from the broker, with `max_queue_deadline_ms` and `lock_duration_ms` in milliseconds for its
 `max_queue_deadline` and `lock_duration`. `config` holds `receiver` and `pool`,
 which equal the record's, the receiver's `capacity`, and its `adapters` in
 routing order. Each adapter is the

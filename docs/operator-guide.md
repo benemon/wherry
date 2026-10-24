@@ -655,18 +655,11 @@ receiver gets no seal, so that receiver stops the job and the run ends
 
 ## Inputs and outputs
 
-A run's outputs hold its `output_limit` in 256 entries at most. Two limits
-bound a task's inline input files. The first is the broker's record limit,
-which `pool create` records in the pool's terms and the host measures the
-signed submission against. The second is each adapter's declared limit: an
-adapter implements `InlineLimit` with the most inline input bytes it
-delivers, or zero when it declares none, and receivers advertise it. A host
-applies the smallest nonzero limit among the adapters in the chosen pool that
-satisfy the task, read from each receiver's last advertisement, live or
-stale. Over either limit, a pool with storage and a configured host storage
-credential carries every inline input through S3; otherwise submit refuses
-before publishing, naming the limit. The receiver keeps the adapter's
-dispatch check as a backstop.
+A run's outputs hold its `output_limit` in 256 entries at most. The broker's
+record limit and each adapter's declared limit bound a task's inline input
+files, as [`wherry submit`](reference.md#wherry-submit) describes; an adapter
+declares its limit through `InlineLimit`, and the receiver keeps the
+adapter's dispatch check as a backstop.
 
 The agent creates `WHERRY_OUTPUT_DIR` when it writes its first output.
 Outputs are collected once the agent writes its result line and the job is
