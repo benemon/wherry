@@ -14,7 +14,7 @@ import (
 )
 
 // rotateSelf rotates f.receiver's own key as `wherry receiver run --rotate-key` does at start, then refreshes.
-func rotateSelf(t *testing.T, f *fixture) ed25519.PrivateKey {
+func rotateSelf(t *testing.T, f *fixture) {
 	t.Helper()
 	// A retired key counts only strictly before its rotation's broker time, which has millisecond resolution.
 	time.Sleep(2 * time.Millisecond)
@@ -24,7 +24,6 @@ func rotateSelf(t *testing.T, f *fixture) ed25519.PrivateKey {
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	return next
 }
 
 func rotatePeer(t *testing.T, f fixture, id string, old ed25519.PrivateKey) {
@@ -37,7 +36,7 @@ func rotatePeer(t *testing.T, f fixture, id string, old ed25519.PrivateKey) {
 	}
 }
 
-// a completed run, its ack lost, is redelivered after its receiver restarts with --rotate-key.
+// A completed run whose ack was lost is acknowledged on redelivery after its receiver restarts with --rotate-key.
 func TestCompletedRunRedeliveredAfterSelfRotation(t *testing.T) {
 	for _, rotate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "control", true: "rotated"}[rotate], func(t *testing.T) {
@@ -59,7 +58,7 @@ func TestCompletedRunRedeliveredAfterSelfRotation(t *testing.T) {
 	}
 }
 
-// the same, redelivered past its queue deadline: the redelivery writes a rejection after the terminal.
+// A completed run redelivered past its queue deadline after a rotation is acknowledged on redelivery.
 func TestCompletedRunPastQueueDeadlineAfterSelfRotation(t *testing.T) {
 	f := newFixture(t, resultStream)
 	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli() })
@@ -71,7 +70,7 @@ func TestCompletedRunPastQueueDeadlineAfterSelfRotation(t *testing.T) {
 	}
 }
 
-// a run held and running past its queue deadline, released at shutdown, is redelivered after the restart.
+// A held run past its queue deadline is admitted for adoption after its holder rotates.
 func TestHeldRunPastQueueDeadline(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -100,7 +99,7 @@ func TestHeldRunPastQueueDeadline(t *testing.T) {
 	}
 }
 
-// the adopter's resume offset.
+// An adopter resumes from the offset of a heartbeat signed before the rotation.
 func TestLastOffsetAfterSelfRotation(t *testing.T) {
 	f := newFixture(t, resultStream)
 	task := testSubmission("run-adopt")
@@ -116,7 +115,7 @@ func TestLastOffsetAfterSelfRotation(t *testing.T) {
 	}
 }
 
-// cancel matching for a run the rotated receiver held.
+// A cancel of a run the rotated receiver held still reaches the redelivered run.
 func TestCancelOfHeldRunAfterSelfRotation(t *testing.T) {
 	f := newFixture(t, resultStream)
 	record := f.submit(t, f.host, nil)
@@ -143,7 +142,7 @@ func TestCancelOfHeldRunAfterSelfRotation(t *testing.T) {
 	}
 }
 
-// run ID ownership by status when the owner's submission is unreadable, as for a host that has ended.
+// A held run ID stays bound to its tenant after the holder rotates, when the owner's submission is unreadable.
 func TestRunIDOfAnotherTenantAfterHolderRotation(t *testing.T) {
 	for _, rotate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "control", true: "rotated"}[rotate], func(t *testing.T) {

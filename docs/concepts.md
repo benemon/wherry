@@ -103,8 +103,8 @@ names its owner and key in its `kid`, and a reader verifies it against that
 owner's current key, read from the owner's own key topic, before it decodes the
 payload. A host reading its tenant feed, and a receiver reading its pool's
 statuses, also accept a key the owner has rotated away, for records the
-broker appended before that rotation. No host or
-receiver can vouch for another's key.
+broker appended before that rotation. No host or receiver can vouch for
+another's key.
 
 A reader then checks the record against `wherry.admin`. A submission or
 cancel must come from a live host of a tenant entitled to the pool whose
@@ -235,9 +235,8 @@ Everything the task receives lands as files. A submission's `raw` and
 within the broker's record limit, which `pool create` records, and the
 limit each adapter declares. Over either, they go through S3 when the pool
 has storage and the host a storage credential; otherwise submit refuses,
-naming the limit. Task credentials are
-files in the directory `WHERRY_CREDENTIALS_DIR` names, and never
-environment variables. The receiver opens the prompt with the names of the
+naming the limit. Task credentials are files in the directory
+`WHERRY_CREDENTIALS_DIR` names, and never environment variables. The receiver opens the prompt with the names of the
 files and of the outputs the task expects.
 
 The agent leaves its outputs in the directory `WHERRY_OUTPUT_DIR` names.
