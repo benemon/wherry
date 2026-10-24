@@ -241,7 +241,7 @@ func sha(data []byte) string {
 }
 
 func TestTaskCredentialIsRedactedFromTranscriptAndOutputs(t *testing.T) {
-	stream := []string{`{"type":"assistant","message":"key ` + deployValue + `"}`, `{"type":"result","result":"done","is_error":false}`}
+	stream := []string{`{"type":"assistant","message":"key ` + deployValue + `"}`, doneOutcome}
 	f := newFixture(t, stream)
 	f.adapter.outputs = []adapter.Output{{Name: "report.md", Size: int64(len("key " + deployValue + "\n")), Data: []byte("key " + deployValue + "\n")}}
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withDeployKey), 1)
@@ -263,7 +263,7 @@ func TestTaskCredentialIsRedactedFromTranscriptAndOutputs(t *testing.T) {
 	}
 }
 
-func TestPreambleNamesFilesNeverValues(t *testing.T) {
+func TestPreambleNamesFilesAndTheOutcomeContract(t *testing.T) {
 	directories := adapter.Directories{Input: "/local/inputs", Output: "/local/outputs", Credentials: "/secrets/credentials"}
 	inputs := []string{"data.csv"}
 	credentials := []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}
@@ -271,21 +271,18 @@ func TestPreambleNamesFilesNeverValues(t *testing.T) {
 	got := preamble(directories, inputs, credentials, outputs, nil, "run-a")
 	for _, want := range []string{"input directory is /local/inputs", "credentials directory /secrets/credentials", "output directory /local/outputs",
 		"WHERRY_INPUT_DIR", "Input files: /local/inputs/data.csv.", "Credential files: /secrets/credentials/id_ed25519.",
-		"/local/outputs/report.md (required), /local/outputs/notes/extra.txt."} {
+		"/local/outputs/report.md (required), /local/outputs/notes/extra.txt.",
+		"write an A2A TaskStatus JSON object to /local/outputs/.wherry/outcome.json", `"TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_AUTH_REQUIRED"`,
+		`"role": "ROLE_AGENT"`, `{"data": {"credential": "<name>"}}`, "This run's credentials are deploy-key."} {
 		if !strings.Contains(got, want) {
 			t.Errorf("preamble %q lacks %q", got, want)
-		}
-	}
-	for _, never := range []string{"deploy-key"} {
-		if strings.Contains(got, never) {
-			t.Errorf("preamble %q holds %q", got, never)
 		}
 	}
 	if unreported := preamble(adapter.Directories{}, inputs, nil, nil, nil, "run-a"); !strings.Contains(unreported, "Input files: $WHERRY_INPUT_DIR/data.csv.") {
 		t.Errorf("preamble %q, want the variable for a directory the adapter does not report", unreported)
 	}
-	if preamble(directories, nil, nil, nil, nil, "run-a") != "" {
-		t.Error("a run that declares no files has a preamble")
+	if bare := preamble(directories, nil, nil, nil, nil, "run-a"); !strings.Contains(bare, "/local/outputs/.wherry/outcome.json") || !strings.Contains(bare, "This run has no credentials.") {
+		t.Errorf("preamble %q, want the outcome contract for a run that declares no files", bare)
 	}
 }
 
@@ -361,7 +358,7 @@ func TestCollectionHonoursThePoolOutputLimit(t *testing.T) {
 	terms := testTerms()
 	terms.OutputLimit = 1000
 	f, task, _ := runWithOutputsUnder(t, terms, nil, []adapter.Output{{Name: "grew.bin", Size: 2000, Data: []byte("x")}, file("report.md", "r")}, nil)
-	if !reflect.DeepEqual(f.adapter.limits, adapter.Limits{Files: wire.MaxOutputs, FileBytes: 1000, TotalBytes: 1000, StreamBytes: wire.MaxS3Object}) {
+	if !reflect.DeepEqual(f.adapter.limits, adapter.Limits{Files: wire.MaxOutputs, FileBytes: 1000, TotalBytes: 1000, Stream: []string{wire.OutcomeFile}, StreamBytes: wire.MaxS3Object}) {
 		t.Fatalf("collected under %+v, want the pool's output limit", f.adapter.limits)
 	}
 	if listed := manifest(t, task); len(listed.Outputs) != 1 || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "grew.bin", Size: 2000, Reason: "exceeds output limit"}}) {
@@ -493,7 +490,7 @@ func TestResultTextIsBounded(t *testing.T) {
 	run := testActiveRun(t, f, "run-t", 1)
 	part := func(text string) wire.Part {
 		var result wire.Result
-		if err := wire.ParseRecord(run.result(taskStatus(wire.TaskStateCompleted, ""), text, nil).Value, f.keys(), &result); err != nil {
+		if err := wire.ParseRecord(run.result(taskStatus(wire.TaskStateCompleted, ""), text).Value, f.keys(), &result); err != nil {
 			t.Fatal(err)
 		}
 		return result.Task.Artifacts[0].Parts[0]
@@ -510,13 +507,11 @@ func TestResultTextIsBounded(t *testing.T) {
 	}
 }
 
-// The largest result the receiver builds from bounded fields fits a default producer's batch, with the agent's result
-// metadata made of an 8-byte value that each 27-byte marker replaces.
+// The largest result the receiver builds from bounded fields fits a default producer's batch: an agent's message that
+// JSON escaping would lengthen travels raw in its status as in its artifact, beside the credential it needs.
 func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-w", 1)
-	value := "12345678"
-	run.deliver(map[string][]byte{"c": []byte(value)})
 	parts := []wire.Part{{Text: "p"}}
 	for i := 1; i < wire.MaxParts; i++ {
 		parts = append(parts, wire.Part{Raw: wire.StdBytes{byte(i)}, Filename: fmt.Sprintf("%0255d", i)})
@@ -527,13 +522,18 @@ func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: strings.Repeat("0", 64), Size: 1 << 62})
 		run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: name, Size: 1 << 62, Reason: "rejected: size changed while read"})
 	}
-	metadata := agentResultMetadata([]byte(`{"type":"result","usage":{"k":"`+strings.Repeat(value, (wire.MaxAgentResult-40)/len(value))+`"}}`), "usage")
-	record := run.result(taskStatus(wire.TaskStateFailed, strings.Repeat("x", wire.MaxText)), strings.Repeat("\x01", wire.MaxText), metadata)
+	text := strings.Repeat("\x01", wire.MaxText)
+	status := taskStatus(wire.TaskStateAuthRequired, text)
+	status.Message.Parts = append(status.Message.Parts, wire.Part{Data: []byte(`{"credential":"` + strings.Repeat("c", 32) + `"}`), MediaType: "application/json"})
+	record := run.result(status, text)
 	size := len(record.Key) + len(record.Value) + 97
 	t.Logf("largest result: %d-byte batch", size)
-	marker := []byte(signed.RedactionMarker(testRedactionKey, "c"))
-	if markers := bytes.Count(decodedPayload(record.Value), marker); metadata == nil || markers != (wire.MaxAgentResult-40)/len(value) || size > 1000012 {
-		t.Fatalf("largest result is a %d-byte batch with %d markers, metadata %v", size, markers, metadata != nil)
+	var result wire.Result
+	if err := wire.ParseRecord(record.Value, f.keys(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if raw := result.Task.Status.Message.Parts[0].Raw; len(raw) != wire.MaxText || size > 1000012 {
+		t.Fatalf("largest result is a %d-byte batch with a %d-byte raw status message", size, len(raw))
 	}
 }
 
@@ -561,15 +561,16 @@ func TestOptionalOutputMissingIsListed(t *testing.T) {
 	}
 }
 
+// Outputs not collected leave the outcome file unread too.
 func TestOutputsNotCollected(t *testing.T) {
 	for name, test := range map[string]struct {
 		required bool
-		state    wire.TaskState
-	}{"required": {true, wire.TaskStateFailed}, "optional": {false, wire.TaskStateCompleted}} {
+		message  string
+	}{"required": {true, "required output report.md not returned: not collected"}, "optional": {false, "agent reported no outcome"}} {
 		t.Run(name, func(t *testing.T) {
 			_, task, _ := runWithOutputs(t, []wire.ExpectedOutput{{Name: "report.md", Required: test.required}}, []adapter.Output{file("report.md", "r")}, context.DeadlineExceeded)
-			if task.Status.State != test.state {
-				t.Fatalf("ended %s, want %s", task.Status.State, test.state)
+			if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != test.message {
+				t.Fatalf("ended %s %+v, want FAILED with %q", task.Status.State, task.Status.Message, test.message)
 			}
 			if listed := manifest(t, task); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "report.md", Reason: "not collected"}}) {
 				t.Fatalf("returned %+v, not returned %+v", listed.Outputs, listed.NotReturned)
@@ -667,7 +668,7 @@ func TestCredentialFormsAreRedacted(t *testing.T) {
 	const agentValue, taskValue = "sk-token-with-newline\n", `pass"word\back-slash` + "\r\n"
 	stream := []string{
 		`{"type":"assistant","message":"cat gives sk-token-with-newline\n and pass\"word\\back-slash\r\n"}`,
-		`{"type":"result","result":"used sk-token-with-newline\n","is_error":false,"usage":{"note":"pass\"word\\back-slash"}}`,
+		`{"state":"TASK_STATE_COMPLETED","message":{"role":"ROLE_AGENT","parts":[{"text":"used sk-token-with-newline\n with pass\"word\\back-slash"}]}}`,
 	}
 	f := newFixture(t, stream)
 	f.adapter.outputs = []adapter.Output{file("report.md", `token sk-token-with-newline, password pass"word\back-slash`)}
@@ -683,25 +684,27 @@ func TestCredentialFormsAreRedacted(t *testing.T) {
 	if data := string(f.outputChunks(t)[0].ArtifactUpdate.Artifact.Parts[0].Raw); data != "token "+agent+", password "+task {
 		t.Fatalf("output %q", data)
 	}
-	result := f.lastTask(t).Artifacts[0]
-	if text := result.Parts[0].Text; text != "used "+agent+"\n" {
+	last := f.lastTask(t)
+	if text := last.Artifacts[0].Parts[0].Text; text != "used "+agent+"\n with "+task {
 		t.Fatalf("result %q", text)
 	}
-	if metadata := string(result.Metadata); strings.Contains(metadata, "back-slash") || !strings.Contains(metadata, task) {
-		t.Fatalf("result metadata %s", metadata)
+	if text := last.Status.Message.Parts[0].Text; text != "used "+agent+"\n with "+task {
+		t.Fatalf("status message %q", text)
 	}
 }
 
-// A job that would not stop at the delivery budget keeps the agent's result, and its outputs are never read.
+// A job that would not stop at the delivery budget ends the run unread: its outputs and outcome file are never collected.
 func TestOutputsOfAJobThatWouldNotStopAreNotCollected(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.adapter.stopErr = errors.New("stop failed")
 	f.adapter.outputs = []adapter.Output{file("report.md", "r")}
 	run := testActiveRun(t, f, "run-unstopped", int64(testTerms().DeliveryLimit)-1)
 	run.expected = []wire.ExpectedOutput{{Name: "report.md"}, {Name: "notes.md"}}
-	result, _ := resultLine([]byte(resultStream[1]))
-	if status := run.finish(f.ctx, f.adapter.handle("run-unstopped"), nil, result); status != kgo.AckAccept {
-		t.Fatalf("status %v, want the result accepted", status)
+	if status := run.conclude(f.ctx, f.adapter.handle("run-unstopped"), nil, adapter.Terminal{Started: true}); status != kgo.AckReject {
+		t.Fatalf("status %v, want the run failed", status)
+	}
+	if task := f.lastTask(t); task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != "agent reported no outcome" {
+		t.Fatalf("task %s %+v, want FAILED with no outcome", task.Status.State, task.Status.Message)
 	}
 	want := []wire.UnreturnedOutput{{Name: "report.md", Reason: "not collected"}, {Name: "notes.md", Reason: "not collected"}}
 	if listed := manifest(t, f.lastTask(t)); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, want) || f.adapter.collects != 0 {

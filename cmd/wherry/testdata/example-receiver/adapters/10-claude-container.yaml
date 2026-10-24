@@ -1,7 +1,6 @@
 name: claude-container
 platform: nomad
 agent: claude
-output: claude
 credential: claude-oauth-token
 labels:
   isolation: container

@@ -306,40 +306,18 @@ func TestReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 	if err := ValidateReceiverRecord(record, "receiver-a", terms); err != nil {
 		t.Fatal(err)
 	}
-	badLabels, outsideAgent, outsideCredential, unknownOutput := modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a")
+	badLabels, outsideAgent, outsideCredential := modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a")
 	badLabels.Adapters[0].Labels = map[string]string{"wherry.io/gpu": "yes"}
 	outsideAgent.Adapters[0].Agent = "agent-z"
 	outsideCredential.Adapters[0].Credential = "other"
-	unknownOutput.Adapters[0].Output = "other"
 	for name, outside := range map[string]ReceiverConfig{
 		"reserved label": badLabels,
 		"agent":          outsideAgent,
 		"credential":     outsideCredential,
-		"output":         unknownOutput,
 	} {
 		record.Config = &outside
 		if err := ValidateReceiverRecord(record, "receiver-a", terms); err == nil {
 			t.Fatalf("accepted a configuration with a %s outside the terms", name)
-		}
-	}
-}
-
-func TestAdapterReplyFile(t *testing.T) {
-	for _, test := range []struct {
-		output, reply string
-		ok            bool
-	}{
-		{"file", "", true},
-		{"file", "out/reply.txt", true},
-		{"file", "../reply.md", false},
-		{"", "reply.md", false},
-		{"claude", "reply.md", false},
-		{"codex", "reply.md", false},
-	} {
-		config := modelConfig("receiver-a", "pool-a")
-		config.Adapters[0].Output, config.Adapters[0].ReplyFile = test.output, test.reply
-		if err := ValidateConfig(config, modelTerms()); (err == nil) != test.ok {
-			t.Fatalf("output %q reply_file %q: err %v, want ok %t", test.output, test.reply, err, test.ok)
 		}
 	}
 }

@@ -53,8 +53,7 @@ literally and interprets only the agent name.
 An adapter whose agent lists `models` runs `default_model` unless you pass
 `model`, one of those `models`, to `submit`; an agent with one model runs
 it, and with two or more and no `default_model` you must pass one. A model outside them, or none where one is required, returns
-`INVALID_ARGUMENT`. `await` returns the `model` asked for and, where the
-agent reports them, the `served_models` that ran it.
+`INVALID_ARGUMENT`. `await` returns the `model` asked for.
 
 ## Submit, then keep working
 
@@ -117,14 +116,18 @@ Without a background command, call the `await` tool with the id, and call it
 again until the run ends; nothing tells you when it does. It waits up to 45
 seconds and returns one of:
 
-- `TASK_STATE_COMPLETED` with `artifacts`: the result. `outputs` lists
-  each returned file with the local `path` it was written to and its
-  `sha256`; read the files there. `not_returned` lists each expected file
-  that did not come back, with the reason.
-- `TASK_STATE_FAILED` with `artifacts` holding the agent's result when the
-  agent reported the failure, or a `message` when the receiver could not
-  run it, a required output did not come back, or a credential went
-  unanswered (see the next section).
+- `TASK_STATE_COMPLETED` with the agent's answer in `message` and
+  `artifacts`. `outputs` lists each returned file with the local `path` it
+  was written to and its `sha256`; read the files there. `not_returned`
+  lists each expected file that did not come back, with the reason.
+- `TASK_STATE_FAILED` with a `message`: what went wrong as the agent
+  reported it, or why the receiver could not run it, a required output did
+  not come back, or a credential went unanswered (see the next section).
+- `TASK_STATE_AUTH_REQUIRED` with a `message` from the agent naming the
+  credential it needs. The run has ended; add the credential to the host's
+  configuration and submit again.
+- Every ended run also returns `transcript`, the local path of the
+  `transcript.jsonl` holding the agent's redacted standard output.
 - `TASK_STATE_REJECTED` or `TASK_STATE_CANCELED` with a `message` that
   says why.
 - `TASK_STATE_SUBMITTED` with the `message`

@@ -774,18 +774,18 @@ func largestRecords() ([]feedRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Redaction lengthens the agent's result record by at most 10 bytes in 8.
-	agentResult, _ := json.Marshal(map[string]map[string]string{"agent_result": {"k": strings.Repeat("x", wire.MaxAgentResult*10/8)}}) // strings always encode
 	history := message
 	history.Parts = pointers
 	result := func(metadata []byte) *wire.Result {
 		return &wire.Result{
 			Task: wire.Task{
 				ID: run, ContextID: run, History: []wire.Message{history}, Metadata: metadata,
-				Status: wire.TaskStatus{State: wire.TaskStateFailed, Timestamp: "2006-01-02T15:04:05.000Z", Message: &wire.Message{
-					MessageID: "msg-" + strings.Repeat("0", 32), Role: wire.RoleAgent, Parts: []wire.Part{{Text: strings.Repeat("x", wire.MaxText)}}, Extensions: []string{wire.ExtensionURI},
+				Status: wire.TaskStatus{State: wire.TaskStateAuthRequired, Timestamp: "2006-01-02T15:04:05.000Z", Message: &wire.Message{
+					MessageID: "msg-" + strings.Repeat("0", 32), Role: wire.RoleAgent, Extensions: []string{wire.ExtensionURI}, Parts: []wire.Part{
+						{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}, {Data: []byte(`{"credential":"` + name + `"}`), MediaType: "application/json"},
+					},
 				}},
-				Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}}, Metadata: agentResult, Extensions: []string{wire.ExtensionURI}}},
+				Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}}, Extensions: []string{wire.ExtensionURI}}},
 			},
 			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
 		}
@@ -801,7 +801,7 @@ func largestRecords() ([]feedRecord, error) {
 			},
 			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
 		}},
-		// Receiver texts are names and fixed words, which JSON does not escape; a result text that it would travels raw.
+		// Receiver texts are names and fixed words, which JSON does not escape; an agent's text that it would travels raw.
 		{"a result", result(encodedMetadata)},
 		{"a result returning S3 outputs", result(encodedS3Metadata)},
 		{"a transcript chunk", &wire.Chunk{

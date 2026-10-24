@@ -1,7 +1,6 @@
 name: codex-edge
 platform: nomad-edge
 agent: codex
-output: codex
 credential: openai-api-key
 labels:
   isolation: host

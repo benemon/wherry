@@ -32,9 +32,8 @@ import (
 type AwaitResult struct {
 	Task   *wire.Task
 	Status wire.TaskStatus
-	// Model is the model the run's placement names, and ServedModels the models the agent's result reports serving it.
-	Model        string
-	ServedModels []string
+	// Model is the model the run's placement names.
+	Model string
 	// Outputs are the run's outputs that verified against its result.
 	Outputs []Output
 	// Stored are the S3 outputs the result lists for DownloadOutputs.
@@ -858,14 +857,6 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			outcome.Redacted = map[string]int{}
 			outcome.Status = unredactStatus(outcome.Status, markers, outcome.Redacted)
 			if outcome.Task != nil {
-				for _, artifact := range outcome.Task.Artifacts {
-					var metadata struct {
-						ServedModels []string `json:"served_models"`
-					}
-					if artifact.ArtifactID == "result" && json.Unmarshal(artifact.Metadata, &metadata) == nil {
-						outcome.ServedModels = metadata.ServedModels
-					}
-				}
 				task := *outcome.Task
 				task.Status, task.Artifacts = outcome.Status, slices.Clone(task.Artifacts)
 				for i := range task.Artifacts {

@@ -208,7 +208,7 @@ var redacted = signed.RedactionMarker(testRedactionKey, credentialName)
 func TestDeliveredCredentialIsRedacted(t *testing.T) {
 	f := newFixture(t, []string{
 		`{"type":"assistant","message":"token ` + testToken + `"}`,
-		`{"type":"result","result":"used ` + testToken + `","is_error":false,"usage":{"note":"` + testToken + `"}}`,
+		completedWith("used " + testToken),
 	})
 	f.answer(t, credentialName)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
@@ -234,9 +234,9 @@ func TestDeliveredCredentialIsRedacted(t *testing.T) {
 			t.Fatalf("result %q, want the credential redacted", text)
 		}
 	})
-	t.Run("metadata", func(t *testing.T) {
-		if metadata := string(result.Metadata); strings.Contains(metadata, testToken) || !strings.Contains(metadata, redacted) {
-			t.Fatalf("result metadata %s, want the credential redacted", metadata)
+	t.Run("status message", func(t *testing.T) {
+		if text := f.lastTask(t).Status.Message.Parts[0].Text; text != "used "+redacted {
+			t.Fatalf("status message %q, want the credential redacted", text)
 		}
 	})
 }
@@ -275,7 +275,7 @@ func TestCancelSeenWithTheSealEndsTheTurn(t *testing.T) {
 
 // A value shorter than minRedact matches ordinary output, so it is logged and left in place.
 func TestShortCredentialIsLoggedNotRedacted(t *testing.T) {
-	f := newFixture(t, []string{`{"type":"assistant","message":"checked"}`, `{"type":"result","result":"done","is_error":false}`})
+	f := newFixture(t, []string{`{"type":"assistant","message":"checked: false"}`, doneOutcome})
 	answerSeals(t, f.ctx, f.service.Admin, f.keys(), testTenant, testHost, credentialName, "false")
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept || f.lastTask(t).Status.State != wire.TaskStateCompleted {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
@@ -283,27 +283,8 @@ func TestShortCredentialIsLoggedNotRedacted(t *testing.T) {
 	if !strings.Contains(f.logs.String(), "run run-a: credential "+credentialName+" too short to redact") {
 		t.Fatalf("logs:\n%s", f.logs.String())
 	}
-	chunks := f.chunks(t)
-	if last := chunks[len(chunks)-1].ArtifactUpdate.Artifact.Parts[0].Text; !strings.Contains(last, `"is_error":false`) {
-		t.Fatalf("transcript line %q, want the short value left in place", last)
-	}
-}
-
-// Redaction inside result metadata keeps it valid JSON, so signing it never fails.
-func TestRedactedMetadataStaysValid(t *testing.T) {
-	f := newFixture(t, resultStream)
-	run := testActiveRun(t, f, "run-m", 1)
-	run.deliver(map[string][]byte{credentialName: []byte("1234567890")})
-	agent, ok := resultLine([]byte(`{"type":"result","result":"done","is_error":false,"usage":{"count":1234567890,"note":"id 1234567890"}}`))
-	if !ok {
-		t.Fatal("fixture is not a result line")
-	}
-	var result wire.Result
-	if err := wire.ParseRecord(run.result(taskStatus(wire.TaskStateCompleted, ""), agent.Result, agent.metadata).Value, f.keys(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if metadata := string(result.Task.Artifacts[0].Metadata); !strings.Contains(metadata, `"count":1234567890`) || !strings.Contains(metadata, `"note":"id `+signed.RedactionMarker(testRedactionKey, credentialName)+`"`) {
-		t.Fatalf("metadata %s, want the string value redacted and the number kept", metadata)
+	if first := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0].Text; !strings.Contains(first, "checked: false") {
+		t.Fatalf("transcript line %q, want the short value left in place", first)
 	}
 }
 
@@ -354,7 +335,7 @@ func adopting(t *testing.T) (fixture, *kgo.Record) {
 	t.Helper()
 	f := newFixture(t, []string{
 		`{"type":"assistant","message":"token ` + testToken + `"}`,
-		`{"type":"result","result":"used ` + testToken + `","is_error":false}`,
+		completedWith("used " + testToken),
 	})
 	f.adapter.job = adapter.JobRunning
 	return f, f.submit(t, f.host, nil)
@@ -430,7 +411,7 @@ func TestAnAdopterWithoutASealFails(t *testing.T) {
 // The held transcript is bounded: the oldest lines go, the log records the gap, and the transcript resumes past it.
 func TestAnAdopterDropsTheOldestHeldLines(t *testing.T) {
 	line := strings.Repeat("x", 1<<20)
-	f := newFixture(t, append(slices.Repeat([]string{line}, 6), `{"type":"result","result":"done","is_error":false}`))
+	f := newFixture(t, append(slices.Repeat([]string{line}, 6), doneOutcome))
 	f.adapter.job = adapter.JobRunning
 	done := f.executing(t, f.ctx, f.submit(t, f.host, nil), 2)
 	request := f.request(t, 1)

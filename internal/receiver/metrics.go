@@ -3,7 +3,6 @@ package receiver
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"math"
 	"slices"
@@ -36,7 +35,7 @@ type metrics struct {
 	capacity                                                      prometheus.Gauge
 	startFailures, dispatchOutcomes, stopFailures, purgeFailures  *prometheus.CounterVec
 	sweepFailures, collectionFailures, sealWaits, redactions      *prometheus.CounterVec
-	busErrors, denials, tokens, cost, dropped                     *prometheus.CounterVec
+	busErrors, denials, dropped                                   *prometheus.CounterVec
 	renewalFailures, transactionAborts, ambiguousCommits, fenced  prometheus.Counter
 
 	adapterDescs map[string]*prometheus.Desc
@@ -88,8 +87,6 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.transactionAborts = counter("transaction_aborts_total", "Transactions aborted after a failed produce.")
 	m.ambiguousCommits = counter("ambiguous_commits_total", "Transaction commits with an unknown outcome.")
 	m.fenced = counter("fenced_total", "Runs given up to a newer holder.")
-	m.tokens = counters("agent_reported_tokens_total", "Tokens as agents report them, by kind.", "tenant", "agent", "model", "kind")
-	m.cost = counters("agent_reported_cost_usd_total", "Cost in US dollars as agents report it.", "tenant", "agent", "model")
 	m.dropped = counters("metrics_dropped_total", "Adapter samples refused, and adapter Metrics calls that failed, by reason.", "adapter", "reason")
 	for _, family := range adapterFamilies {
 		labels := []string{"adapter"}
@@ -258,9 +255,9 @@ func (r *Receiver) placementLabels(placement wire.Placement) (string, string) {
 	return placement.Agent, "other"
 }
 
-// ended counts a run that reached a terminal state, with the time since its claim when this attempt claimed it, and
-// the tokens and cost its agent's result reports. A state outside wire's is labelled other.
-func (run *activeRun) ended(state wire.TaskState, resultMetadata []byte) {
+// ended counts a run that reached a terminal state, with the time since its claim when this attempt claimed it. A
+// state outside wire's is labelled other.
+func (run *activeRun) ended(state wire.TaskState) {
 	m, tenant := run.receiver.metrics, run.task.Wherry.Tenant
 	adapter := cmp.Or(run.adapter.Name, "none")
 	agent, model := run.receiver.placementLabels(run.task.Wherry.Placement)
@@ -271,30 +268,5 @@ func (run *activeRun) ended(state wire.TaskState, resultMetadata []byte) {
 	m.runs.WithLabelValues(tenant, adapter, agent, model, label).Inc()
 	if !run.claimed.IsZero() {
 		m.runDuration.WithLabelValues(tenant, adapter, agent, model, label).Observe(time.Since(run.claimed).Seconds())
-	}
-	var reported struct {
-		AgentResult struct {
-			Usage struct {
-				Input     *float64 `json:"input_tokens"`
-				Output    *float64 `json:"output_tokens"`
-				CacheRead *float64 `json:"cache_read_input_tokens"`
-				Cached    *float64 `json:"cached_input_tokens"`
-				Reasoning *float64 `json:"reasoning_output_tokens"`
-			} `json:"usage"`
-			Cost *float64 `json:"total_cost_usd"`
-		} `json:"agent_result"`
-	}
-	if resultMetadata == nil {
-		return
-	}
-	_ = json.Unmarshal(resultMetadata, &reported) // a field of another type adds nothing
-	usage := reported.AgentResult.Usage
-	for kind, value := range map[string]*float64{"input": usage.Input, "output": usage.Output, "cached": cmp.Or(usage.CacheRead, usage.Cached), "reasoning": usage.Reasoning} {
-		if value != nil && *value >= 0 {
-			m.tokens.WithLabelValues(tenant, agent, model, kind).Add(*value)
-		}
-	}
-	if cost := reported.AgentResult.Cost; cost != nil && *cost >= 0 {
-		m.cost.WithLabelValues(tenant, agent, model).Add(*cost)
 	}
 }
