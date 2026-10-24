@@ -17,6 +17,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -58,11 +59,12 @@ func runMCP(ctx context.Context, args []string) error {
 		return err
 	}
 	logger := log.New(os.Stderr, "", 0)
-	connect := func() (*busclient.Host, error) { return busclient.Connect(config, logger) }
 	dir, err := os.Getwd()
 	if err != nil {
 		return err
 	}
+	connect, closeHost := sharedHost(func() (*busclient.Host, error) { return busclient.Connect(config, logger) })
+	defer closeHost()
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	go answer(ctx, connect, logger)
@@ -88,6 +90,32 @@ func awaitCommand(configFile string) (func(id string) string, error) {
 	return func(id string) string { return "wherry await " + id + " --config-file " + quoted }, nil
 }
 
+// sharedHost returns a connect that opens one host on its first successful call and returns it to every later call, and
+// a close for that host. A failed open is retried on the next call.
+func sharedHost(open func() (*busclient.Host, error)) (func() (*busclient.Host, error), func()) {
+	var mu sync.Mutex
+	var host *busclient.Host
+	connect := func() (*busclient.Host, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if host == nil {
+			opened, err := open()
+			if err != nil {
+				return nil, err
+			}
+			host = opened
+		}
+		return host, nil
+	}
+	return connect, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if host != nil {
+			host.Close()
+		}
+	}
+}
+
 // answer answers seal requests for as long as the server runs, so a credentialed task is sealed while the harness
 // is between await calls.
 func answer(ctx context.Context, connect func() (*busclient.Host, error), logger *log.Logger) {
@@ -95,7 +123,6 @@ func answer(ctx context.Context, connect func() (*busclient.Host, error), logger
 		host, err := connect()
 		if err == nil {
 			err = host.Answer(ctx)
-			host.Close()
 		}
 		if err != nil {
 			logger.Printf("answer seal requests: %v", err)
@@ -303,8 +330,8 @@ type transcriptReply struct {
 	Skipped    int              `json:"skipped,omitempty"`
 }
 
-// newMCPServer serves the wherry tools. Each call opens its own connection: a Host's consumer serves one operation at a
-// time, and a harness may call status while an await is in flight.
+// newMCPServer serves the wherry tools. Every call uses the host connect returns, which the server's seal-request
+// answering shares, so the process runs one tenant-feed follower.
 func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), awaitCommand func(id string) string) *mcp.Server {
 	version := "(devel)"
 	if info, ok := debug.ReadBuildInfo(); ok {
@@ -322,7 +349,6 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, receiversOutput{}, toolFailure(err)
 		}
-		defer client.Close()
 		receivers, err := client.Receivers(ctx)
 		if err != nil {
 			return nil, receiversOutput{}, toolFailure(err)
@@ -349,7 +375,6 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, submitOutput{}, toolFailure(err)
 		}
-		defer client.Close()
 		result, err := client.Submit(ctx, submission)
 		if err != nil {
 			return nil, submitOutput{}, toolFailure(err)
@@ -367,7 +392,6 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, statusOutput{}, toolFailure(err)
 		}
-		defer client.Close()
 		var runs busclient.RunsResult
 		if input.ID != "" {
 			result, err := client.Status(ctx, input.ID)
@@ -400,7 +424,6 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, awaitReply{}, toolFailure(err)
 		}
-		defer client.Close()
 		if token := request.Params.GetProgressToken(); token != nil {
 			stop := notifyProgress(ctx, request.Session, token, input.ID)
 			defer stop()
@@ -454,7 +477,6 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, cancelOutput{}, toolFailure(err)
 		}
-		defer client.Close()
 		result, err := client.Cancel(ctx, input.ID)
 		if err != nil {
 			return nil, cancelOutput{}, toolFailure(err)
@@ -471,7 +493,6 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, eventsOutput{}, toolFailure(err)
 		}
-		defer client.Close()
 		result, err := client.Events(ctx, input.ID)
 		if err != nil {
 			return nil, eventsOutput{}, toolFailure(err)
@@ -513,7 +534,6 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, transcriptReply{}, toolFailure(err)
 		}
-		defer client.Close()
 		result, err := client.Transcript(ctx, input.ID)
 		if err != nil {
 			return nil, transcriptReply{}, toolFailure(err)
@@ -568,7 +588,6 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, cleanupOutput{}, toolFailure(err)
 		}
-		defer client.Close()
 		if err := client.Cleanup(ctx, input.ID); err != nil {
 			return nil, cleanupOutput{}, toolFailure(err)
 		}

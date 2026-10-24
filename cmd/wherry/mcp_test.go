@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -300,6 +301,60 @@ func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 	if len(events.Events) != 2 || events.Events[0].Kind != "claimed" || events.Events[1].State != string(wire.TaskStateCompleted) ||
 		events.Events[1].Receiver != "receiver-a" {
 		t.Fatalf("events %#v", events)
+	}
+}
+
+func TestMCPToolCallsShareOneHost(t *testing.T) {
+	b := newBus(t)
+	ctx := b.ctx
+	open := b.connect(t)
+	var attempts, hosts atomic.Int64
+	connect, closeHost := sharedHost(func() (*busclient.Host, error) {
+		if attempts.Add(1) == 1 {
+			return nil, errors.New("broker unreachable")
+		}
+		hosts.Add(1)
+		return open()
+	})
+	defer closeHost()
+	session := mcpSession(t, connect, nil)
+	if failure := callToolError(t, ctx, session, "receivers", map[string]any{}); failure.Code != "UNAVAILABLE" {
+		t.Fatalf("receivers before the host connects %#v, want UNAVAILABLE", failure)
+	}
+	answerCtx, stop := context.WithCancel(ctx)
+	answered := make(chan struct{})
+	go func() { defer close(answered); answer(answerCtx, connect, log.New(io.Discard, "", 0)) }()
+	defer func() { stop(); <-answered }()
+
+	var receivers receiversOutput
+	callTool(t, ctx, session, "receivers", map[string]any{}, &receivers)
+	var submitted submitOutput
+	callTool(t, ctx, session, "submit", submitArguments, &submitted)
+	awaited := make(chan string, 1)
+	go func() {
+		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "await", Arguments: map[string]any{"id": submitted.ID}})
+		if err != nil || result.IsError {
+			awaited <- fmt.Sprint(err, result)
+			return
+		}
+		var reply awaitReply
+		encoded, _ := json.Marshal(result.StructuredContent)
+		json.Unmarshal(encoded, &reply)
+		awaited <- reply.State
+	}()
+	admitted := b.tasks(t, submitted.ID)[0]
+	b.feed(t, submitted.ID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
+	var status statusOutput
+	callTool(t, ctx, session, "status", map[string]any{"id": submitted.ID}, &status)
+	callTool(t, ctx, session, "status", map[string]any{}, &status)
+	b.feed(t, submitted.ID, b.result(t, admitted, []wire.Part{{Text: "done"}}), b.status(t, admitted, "terminal-1", "terminal", now(wire.TaskStateCompleted)))
+	if state := <-awaited; state != string(wire.TaskStateCompleted) {
+		t.Fatalf("await %s", state)
+	}
+	var events eventsOutput
+	callTool(t, ctx, session, "events", map[string]any{"id": submitted.ID}, &events)
+	if hosts.Load() != 1 {
+		t.Fatalf("%d hosts opened for the tool calls and the answer loop, want 1", hosts.Load())
 	}
 }
 

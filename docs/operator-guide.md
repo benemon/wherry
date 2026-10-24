@@ -950,7 +950,9 @@ state directory.
 ## Harness integration
 
 `wherry mcp` serves the host operations as MCP tools over stdio. It reads
-the client configuration and opens a Kafka connection for each tool call.
+the client configuration and opens one Kafka connection when it starts,
+which every tool call and seal answer reuses. While the connection fails,
+the server retries it on each tool call and every five seconds.
 [Reference](reference.md#mcp-tools) lists the tools.
 
 Prerequisites: `wherry` on the harness's `PATH`, and the client
