@@ -32,12 +32,13 @@ type Terms struct {
 	LockDurationMS     Millis       `json:"lock_duration_ms,omitzero" yaml:"lock_duration"`
 	ProducerByteRate   int64        `json:"producer_byte_rate" yaml:"producer_byte_rate"`
 	RequestPercentage  float64      `json:"request_percentage" yaml:"request_percentage"`
-	InlineLimit        int64        `json:"inline_limit,omitzero" yaml:"inline_limit"`
 	OutputLimit        int64        `json:"output_limit,omitzero" yaml:"output_limit"`
 	// VCS holds the hosts, as wire.GitInput.VCSHost names them, a git input may clone from; none allows no git input.
 	VCS []string `json:"vcs,omitzero" yaml:"vcs"`
 	// Storage is the pool's S3 lane; nil allows no S3 input or output.
 	Storage *Storage `json:"storage,omitzero" yaml:"storage"`
+	// RecordLimit is the tasks topic's record limit as pool create reads it from the broker; no pool file sets it.
+	RecordLimit int64 `json:"record_limit,omitzero" yaml:"-"`
 }
 
 // Millis is a duration in milliseconds, which pool YAML writes as a Go duration such as 15s or 336h.
@@ -101,7 +102,6 @@ func (storage Storage) validate() error {
 const (
 	DefaultDeliveryLimit      = 5
 	DefaultLockDurationMS     = 15000
-	DefaultInlineLimit        = 256 << 10
 	DefaultOutputLimit        = 8 << 20
 	DefaultMaxQueueDeadlineMS = 14 * 24 * 60 * 60 * 1000
 	MaxRunDurationMS          = 6 * 60 * 60 * 1000
@@ -125,9 +125,6 @@ func withDefaults(terms Terms) Terms {
 	}
 	if terms.MaxQueueDeadlineMS == 0 {
 		terms.MaxQueueDeadlineMS = DefaultMaxQueueDeadlineMS
-	}
-	if terms.InlineLimit == 0 {
-		terms.InlineLimit = DefaultInlineLimit
 	}
 	if terms.OutputLimit == 0 {
 		terms.OutputLimit = DefaultOutputLimit
@@ -609,7 +606,7 @@ func load(raw []rawRecord) (State, error) {
 
 func validateTerms(terms Terms) error {
 	if len(terms.Agents) == 0 || terms.DeliveryLimit <= 0 || terms.LockDurationMS <= 0 || terms.ProducerByteRate <= 0 || terms.RequestPercentage <= 0 ||
-		terms.MaxQueueDeadlineMS < 0 || terms.InlineLimit < 0 || terms.OutputLimit < 0 {
+		terms.MaxQueueDeadlineMS < 0 || terms.RecordLimit < 0 || terms.OutputLimit < 0 {
 		return errors.New("invalid pool terms")
 	}
 	if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == terms.DefaultAgent }) {

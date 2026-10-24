@@ -29,6 +29,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/twmb/franz-go/pkg/kadm"
 )
 
 const testBucket = "wherry-test"
@@ -290,6 +291,104 @@ func TestSubmitMovesInputsOverSmallestAdapterLimitToS3(t *testing.T) {
 	path := "/" + testBucket + "/" + wire.S3InputKey("tenant-a", result.RunID, "data.bin")
 	if got := o.object(path); !bytes.Equal(got, data) {
 		t.Fatalf("uploaded input is %d bytes, want %d", len(got), len(data))
+	}
+}
+
+// recordLimitFixture adds pool-r, with storage at a fake S3 store whose credential the host holds when stored is true,
+// whose tasks topic carries records of at most 100000 bytes, and a live receiver in it alone.
+func recordLimitFixture(t *testing.T, stored bool) (*fixture, *uploadOracle, *testReceiver) {
+	t.Helper()
+	o := newUploadOracle(t)
+	f := newFixture(t)
+	terms := testTerms()
+	if stored {
+		terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+		f.host.storage = o.config
+	}
+	if err := f.service.PoolCreate(f.ctx, "pool-r", terms); err != nil {
+		t.Fatal(err)
+	}
+	limit := "100000"
+	if responses, err := kadm.NewClient(f.service.Admin).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &limit}}, admin.PoolTasksTopic("pool-r")); err != nil || responses[0].Err != nil {
+		t.Fatalf("alter topic: %v %v", err, responses)
+	}
+	if err := f.service.PoolCreate(f.ctx, "pool-r", terms); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-r"); err != nil {
+		t.Fatal(err)
+	}
+	receiver := f.addReceiver(t, "receiver-r", "pool-r")
+	receiver.advertise(t, f.ctx, nil)
+	return f, o, receiver
+}
+
+func TestSubmitMovesInputsOverTheRecordLimitToS3(t *testing.T) {
+	f, o, receiver := recordLimitFixture(t, true)
+	data := make([]byte, 60000)
+	rand.Read(data)
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: data, Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := receiver.claim(t, f.ctx, result.RunID)[0].submission
+	if len(task.Message.Parts) != 1 || !slices.Equal(task.Wherry.S3Inputs, []wire.S3Input{{Name: "data.bin", Size: 60000, SHA256: hexSum(data)}}) {
+		t.Fatalf("submission has %d parts and S3 inputs %+v; want only an S3 input", len(task.Message.Parts), task.Wherry.S3Inputs)
+	}
+	if got := o.object("/" + testBucket + "/" + wire.S3InputKey("tenant-a", result.RunID, "data.bin")); !bytes.Equal(got, data) {
+		t.Fatalf("uploaded input is %d bytes, want %d", len(got), len(data))
+	}
+}
+
+func TestSubmitRefusesARecordOverTheLimitWithoutStorage(t *testing.T) {
+	f, _, _ := recordLimitFixture(t, false)
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 60000), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "-byte record, over pool pool-r's 100000-byte record limit") {
+		t.Fatalf("submit = %v; want the record size and the record limit named", err)
+	}
+	if n := f.tasksEnd(t, "pool-r"); n != 0 {
+		t.Fatalf("pool tasks hold %d records after the refused submission", n)
+	}
+}
+
+func TestSubmitRefusesAPromptOverTheRecordLimit(t *testing.T) {
+	f, _, _ := recordLimitFixture(t, true)
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: strings.Repeat("p", 80000), Parts: []wire.Part{{Raw: []byte("x"), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "the 80000-byte prompt makes a ") || !strings.Contains(err.Error(), "over pool pool-r's 100000-byte record limit") {
+		t.Fatalf("submit = %v; want the prompt and the record limit named", err)
+	}
+	if n := f.tasksEnd(t, "pool-r"); n != 0 {
+		t.Fatalf("pool tasks hold %d records after the refused submission", n)
+	}
+}
+
+// A stale receiver keeps the limit its plugin declared, and would fail the run at dispatch with input-too-large if it
+// claimed the inputs inline.
+func TestSubmitAppliesTheAdapterLimitOfAStaleReceiver(t *testing.T) {
+	o := newUploadOracle(t)
+	f := newFixture(t)
+	terms := testTerms()
+	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	if err := f.service.PoolCreate(f.ctx, "pool-inline", terms); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-inline"); err != nil {
+		t.Fatal(err)
+	}
+	f.host.storage = o.config
+	receiver := f.addReceiver(t, "receiver-a", "pool-inline")
+	receiver.advertise(t, f.ctx, nil)
+	f.addReceiver(t, "receiver-b", "pool-inline").advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.Offers[0].InlineLimit = 1000
+		ad.AtMS = time.Now().Add(-10 * liveness).UnixMilli()
+	})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 2000), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := receiver.claim(t, f.ctx, result.RunID)[0].submission
+	if len(task.Message.Parts) != 1 || len(task.Wherry.S3Inputs) != 1 || task.Wherry.S3Inputs[0].Size != 2000 {
+		t.Fatalf("submission has %d parts and S3 inputs %+v; want only an S3 input", len(task.Message.Parts), task.Wherry.S3Inputs)
 	}
 }
 

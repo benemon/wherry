@@ -309,9 +309,8 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 
 // TestFilesOnRealBroker runs a task with an input, a task credential and outputs filling the output limit from a
 // host's Submit to its Await on the real broker: the outputs' chunks commit in the result's transaction, within the
-// broker's record limit, and the host verifies them. The pool's inline limit is the highest a default broker carries
-// and the input fills it, and 250 long-named outputs over the limit lengthen the result, so the result commits only
-// because its history does not carry the input.
+// broker's record limit, and the host verifies them. A 480 KiB input travels inline, and 250 long-named outputs over the
+// limit lengthen the result, so the result commits only because its history does not carry the input.
 func TestFilesOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
@@ -323,7 +322,6 @@ func TestFilesOnRealBroker(t *testing.T) {
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
 	terms := testTerms()
-	terms.InlineLimit = 493227
 	encoded, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
 	if err != nil {
 		t.Fatal(err)
@@ -331,7 +329,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
-	input := make([]byte, terms.InlineLimit)
+	input := make([]byte, 480<<10)
 	rand.Read(input)
 	dir := t.TempDir()
 	credential, deployKey := filepath.Join(dir, credentialName), filepath.Join(dir, "deploy-key")

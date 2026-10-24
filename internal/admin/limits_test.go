@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	json "encoding/json/v2"
-	"errors"
-	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -16,7 +14,6 @@ import (
 
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
-	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -40,13 +37,13 @@ func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := state.Pools["pool-a"]; got.InlineLimit != 256<<10 || got.OutputLimit != 8<<20 || got.MaxQueueDeadlineMS != DefaultMaxQueueDeadlineMS {
-		t.Fatalf("defaults %#v, want 256 KiB, 8 MiB and a 14-day max queue deadline", got)
+	if got := state.Pools["pool-a"]; got.OutputLimit != 8<<20 || got.MaxQueueDeadlineMS != DefaultMaxQueueDeadlineMS {
+		t.Fatalf("defaults %#v, want 8 MiB and a 14-day max queue deadline", got)
 	}
-	terms.InlineLimit, terms.OutputLimit = 1000, 2000
+	terms.OutputLimit = 2000
 	state, err = Fold([]Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}})
-	if got := state.Pools["pool-a"]; err != nil || got.InlineLimit != 1000 || got.OutputLimit != 2000 {
-		t.Fatalf("limits %d and %d, %v; want the terms' own", got.InlineLimit, got.OutputLimit, err)
+	if got := state.Pools["pool-a"]; err != nil || got.OutputLimit != 2000 {
+		t.Fatalf("limit %d, %v; want the terms' own", got.OutputLimit, err)
 	}
 	terms.OutputLimit = -1
 	if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms}); err == nil {
@@ -210,36 +207,41 @@ func setTopicLimit(t *testing.T, service *Service, topic, value string) {
 	}
 }
 
-// kfake's brokers accept 1048588-byte batches, so franz-go's 1000012-byte producer maximum is the limit until a
-// topic sets a lower one.
-func TestPoolCreateRefusesLimitsTheBrokerCannotCarry(t *testing.T) {
+// kfake's brokers accept 1048588-byte batches, so franz-go's 1000012-byte producer maximum is the limit until the
+// broker or the tasks topic sets a lower one.
+func TestPoolCreateRecordsTheRecordLimit(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
 	terms := modelTerms()
-	terms.InlineLimit = math.MaxInt64
-	if err := service.PoolCreate(ctx, "pool-a", terms); err == nil || err.Error() != "inline limit 9223372036854775807 bytes is over the 1000012-byte record limit" {
-		t.Fatalf("pool create = %v; want an inline limit no record carries refused before it is measured", err)
+	recorded := func() int64 {
+		t.Helper()
+		if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+			t.Fatal(err)
+		}
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state.Pools["pool-a"].RecordLimit
 	}
-	terms.InlineLimit = 520 << 10
-	err := service.PoolCreate(ctx, "pool-a", terms)
-	if err == nil || !strings.Contains(err.Error(), "inline limit 532480 bytes makes a ") || !strings.Contains(err.Error(), "-byte submission record, over the 1000012-byte record limit") {
-		t.Fatalf("pool create = %v; want the submission refused against the producer maximum", err)
+	if got := recorded(); got != 1000012 {
+		t.Fatalf("record limit %d; want the producer maximum", got)
 	}
-	if state, err := service.LoadState(ctx); err != nil || len(state.Pools) != 0 {
-		t.Fatalf("pools %v, %v; want none written", state.Pools, err)
+	message := "1000000"
+	responses, err := kadm.NewClient(service.Admin).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "message.max.bytes", Value: &message}})
+	if err == nil {
+		err = responses[0].Err
 	}
-	terms.InlineLimit = 480 << 10
-	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
-		t.Fatalf("480 KiB inline limit: %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := recorded(); got != 1000000 {
+		t.Fatalf("record limit %d; want the broker's message.max.bytes", got)
 	}
 	setTopicLimit(t, service, PoolTasksTopic("pool-a"), "600000")
-	if err := service.PoolCreate(ctx, "pool-a", terms); err == nil || !strings.Contains(err.Error(), "over the 600000-byte record limit") {
-		t.Fatalf("pool create = %v; want the task topic's limit", err)
-	}
-	terms.InlineLimit = 1 << 10
-	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
-		t.Fatal(err)
+	if got := recorded(); got != 600000 {
+		t.Fatalf("record limit %d; want the task topic's max.message.bytes", got)
 	}
 	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
@@ -265,10 +267,10 @@ func TestCheckReportsLimitsTheBrokerNoLongerCarries(t *testing.T) {
 	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
 		t.Fatal(err)
 	}
-	// Terms that leave the limits out are recorded without them, so a release that predates them still reads the pool.
+	// Terms that leave the output limit out are recorded without it, so a release that predates it still reads the pool.
 	records, err := ReadTopic(ctx, service.Operator, AdminTopic)
-	if err != nil || len(records) != 1 || strings.Contains(string(records[0].Value), "inline_limit") || strings.Contains(string(records[0].Value), "output_limit") {
-		t.Fatalf("pool record %v, %v; want one without limits", records, err)
+	if err != nil || len(records) != 1 || strings.Contains(string(records[0].Value), "output_limit") {
+		t.Fatalf("pool record %v, %v; want one without an output limit", records, err)
 	}
 	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
@@ -319,9 +321,8 @@ func TestCheckFailsOnAMissingTenantFeed(t *testing.T) {
 	}
 }
 
-// The largest records are what the broker measures: on a real broker with a topic limit, the largest submission
-// at the highest inline limit pool create accepts is produced, and one 1 KiB over is refused by the broker; a topic
-// at the broker's defaults carries the largest chunks.
+// The largest records are what the broker measures: on a real broker, a topic at the broker's defaults carries the
+// largest chunks.
 func TestLargestRecordsFitTheBrokerOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
@@ -329,54 +330,17 @@ func TestLargestRecordsFitTheBrokerOnRealBroker(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	// Uncompressed, the records' zeros weigh what incompressible inputs would.
+	// Uncompressed, the records' zeros weigh what incompressible outputs would.
 	client, err := kgo.NewClient(kgo.SeedBrokers(address), kgo.ProducerBatchCompression(kgo.NoCompression()), kgo.RecordRetries(0))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	service := &Service{Admin: client}
-	pool := strings.ReplaceAll("limits-"+time.Now().Format("150405.000000"), ".", "")
-	limit := "600000"
-	if _, err := kadm.NewClient(client).CreateTopics(ctx, 1, -1, map[string]*string{"max.message.bytes": &limit}, PoolTasksTopic(pool)); err != nil {
-		t.Fatal(err)
-	}
-	accepted := int64(0)
-	for low, high := int64(0), int64(600000); low <= high; {
-		middle := (low + high) / 2
-		terms := modelTerms()
-		terms.InlineLimit = middle
-		if err := service.checkLimits(ctx, NewState(), pool, terms); err == nil {
-			accepted, low = middle, middle+1
-		} else {
-			high = middle - 1
-		}
-	}
-	if accepted < 200000 {
-		t.Fatalf("highest accepted inline limit %d", accepted)
-	}
-	for _, test := range []struct {
-		inline int64
-		fits   bool
-	}{{accepted, true}, {accepted + 1<<10, false}} {
-		submission, _, err := largestRecords(test.inline)
-		if err != nil {
-			t.Fatal(err)
-		}
-		err = client.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic(pool), Key: []byte(largestKey), Value: submission}).FirstErr()
-		if test.fits && err != nil {
-			t.Fatalf("inline %d (%d-byte value): %v", test.inline, len(submission), err)
-		}
-		if !test.fits && !errors.Is(err, kerr.MessageTooLarge) {
-			t.Fatalf("inline %d (%d-byte value) = %v; want the broker to refuse it", test.inline, len(submission), err)
-		}
-	}
-	// A feed at the broker's defaults carries the largest transcript and output chunks.
-	feed := PoolEventsTopic(pool)
+	feed := PoolEventsTopic(strings.ReplaceAll("limits-"+time.Now().Format("150405.000000"), ".", ""))
 	if _, err := kadm.NewClient(client).CreateTopics(ctx, 1, -1, nil, feed); err != nil {
 		t.Fatal(err)
 	}
-	_, records, err := largestRecords(0)
+	records, err := largestRecords()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,33 +349,6 @@ func TestLargestRecordsFitTheBrokerOnRealBroker(t *testing.T) {
 			t.Fatalf("%s, %d bytes: %v", record.name, len(record.value), err)
 		}
 		t.Logf("%s: %d-byte batch", record.name, batchSize(record.value))
-	}
-	t.Logf("topic limit %s: highest inline limit %d", limit, accepted)
-}
-
-// The largest submission must hold a git input at every bound, or a pool could accept terms whose git submissions the
-// broker refuses.
-func TestLargestSubmissionHoldsTheLargestGitInput(t *testing.T) {
-	submission, _, err := largestRecords(0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	segments := bytes.Split(submission, []byte("."))
-	if len(segments) != 3 {
-		t.Fatalf("submission is not a compact JWS")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(string(segments[1]))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded wire.Submission
-	if err := json.Unmarshal(payload, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	git := decoded.Wherry.Git
-	if git == nil || len(git.Remote) != wire.MaxGitRemote || len(git.Ref) != wire.MaxGitRef || len(git.Path) != 512 ||
-		len(git.HostKey) != wire.MaxGitHostKey || strings.Count(git.HostKey, `"`) != wire.MaxGitHostKey-len("h k ") || len(git.Credential) != 32 {
-		t.Fatalf("largest submission's git input %+v; want every field at its bound", git)
 	}
 }
 
@@ -518,7 +455,7 @@ func TestPoolStorage(t *testing.T) {
 
 // A pool's limits must carry a result returning every output through S3, which lists each one's key.
 func TestLargestResultReturnsS3OutputsAtTheirBounds(t *testing.T) {
-	_, feed, err := largestRecords(0)
+	feed, err := largestRecords()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,8 +6,6 @@ delivery_limit: 6
 lock_duration: 30s
 producer_byte_rate: 1048576
 request_percentage: 10
-# 480 KiB, under the 493227-byte ceiling of brokers and topics at their defaults.
-inline_limit: 491520
 output_limit: 16777216
 vcs:
   - github.com

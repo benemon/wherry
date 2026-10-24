@@ -207,16 +207,21 @@ key, no input may be named `known_hosts`.
 `--git-changes` adds `changes.patch` or `changes.bundle` to the expected
 outputs, unless `--output` names it already; neither is required.
 
-Input files hold the pool's [`inline_limit`](#pool-terms) together; `submit`
-refuses more before it publishes, naming the size and the limit. Among the
-live offers in the chosen pool whose adapter launches the placed agent and
-satisfies the selector, the smallest declared adapter `inline_limit` also
-applies. When the inputs are over that adapter limit, a pool with storage and
-a configured host storage credential uploads every inline input through S3
-instead. Otherwise `submit` refuses before publishing, names the adapter and
-its effective cap, and says that a pool with storage would carry the inputs
-through S3. An undeclared adapter limit is zero and does not lower the pool
-limit. Input and credential file names are [file
+Input files travel inline in the submission record under two limits. The
+first is the smallest `inline_limit` an adapter declares among the chosen
+pool's receivers whose adapter launches the placed agent and satisfies the
+selector, read from each receiver's last advertisement, live or stale; an
+ended receiver does not count, and an undeclared adapter limit is zero and
+sets none. The second is the pool's [record limit](#record-limit), which
+`pool create` records in the terms: `submit` measures the signed submission
+record against it. `submit` applies the adapter limit to the input files
+together, then the record limit to the record. Over either, a pool with
+storage and a configured host storage credential uploads every inline input
+through S3. Otherwise `submit` refuses before publishing, naming the adapter
+and its limit or the record's size and the record limit, and says that a pool
+with storage would carry the inputs through S3. A record still over the record
+limit with every input in S3 is refused naming the prompt's size and the
+record limit. Input and credential file names are [file
 names](a2a-extension-v1.md#submission), and output names relative paths of
 them. `submit` refuses a credential its configuration does not map to a file.
 
@@ -233,7 +238,7 @@ It uploads each S3 input to `wherry/<tenant>/<run>/inputs/<name>` in the pool's
 bucket with one PUT, then publishes the task with each input's name, size and
 SHA-256 and no URL. S3 input names are file names, distinct from the input
 files' names, and the run's parts and S3 inputs number at most 256 together. S3
-inputs do not count against `inline_limit`. When publishing fails, `submit`
+inputs count against neither limit. When publishing fails, `submit`
 deletes what it uploaded. It also refuses a run with S3 inputs or outputs whose
 task credentials and presigned URLs would not fit one 64 KiB seal, naming the
 seal's size. A
@@ -764,8 +769,8 @@ before any adapter took it, has `adapter="none"`.
 | `wherry_adapter_placement_seconds` | histogram | `adapter` | time from dispatch to the agent task starting |
 
 A rejection's `reason` is its fixed text, such as `run expired`. A reason that
-quotes the task counts as `invalid inputs`,
-`git remote host outside the pool's vcs hosts` or `pool has no storage`.
+quotes the task counts as `git remote host outside the pool's vcs hosts` or
+`pool has no storage`.
 
 A seal wait is `expired` when the run's deadline passes, `unanswered` when
 the 5-minute wait ends and the run fails, and `adopter_refused` when an
@@ -986,7 +991,6 @@ ignored. Any other entry and a directory with no agent files are errors.
 | `lock_duration` | optional duration, default `15s`: the share group's `share.record.lock.duration.ms` |
 | `producer_byte_rate` | host quota, bytes per second |
 | `request_percentage` | host quota, percentage of broker request time |
-| `inline_limit` | optional, default 262144 (256 KiB): bytes of a task's input files together |
 | `output_limit` | optional, default 8388608 (8 MiB): bytes of one output, and of a run's outputs together |
 | `vcs` | optional, default none: the hosts a [git input](a2a-extension-v1.md#git-input) may clone from |
 | `storage` | optional, default none: `{endpoint, bucket}`, the S3-compatible store of the pool's [S3 inputs and outputs](a2a-extension-v1.md#s3-inputs-and-outputs) |
@@ -1060,8 +1064,6 @@ delivery_limit: 6
 lock_duration: 30s
 producer_byte_rate: 1048576
 request_percentage: 10
-# 480 KiB, under the 493227-byte ceiling of brokers and topics at their defaults.
-inline_limit: 491520
 output_limit: 16777216
 vcs:
   - github.com
@@ -1094,8 +1096,6 @@ delivery_limit: 6
 lock_duration: 30s
 producer_byte_rate: 1048576
 request_percentage: 10
-# 480 KiB, under the 493227-byte ceiling of brokers and topics at their defaults.
-inline_limit: 491520
 output_limit: 16777216
 vcs:
   - github.com
@@ -1144,35 +1144,27 @@ A record limit is the lowest of `message.max.bytes` across the brokers,
 1000012 bytes, the most a wherry producer batches, and `max.message.bytes`
 on the topic the record goes to: the pool's tasks topic for submissions,
 and the feeds of the tenants entitled to the pool for chunks.
-`pool create`, `pool entitle` and `check` sign five records and measure
-them as record batches: the largest bounded submission, the largest output
-chunk, of 256 KiB, two largest results, and the largest transcript chunk, a
-line of 512 KiB. Each result has the run's message with its 256 input files
-named but not carried, a status text and a result text of 64 KiB each, and
-the agent's result record at 20 KiB, its 16 KiB bound plus the growth
-redaction adds. One result lists 256 returned and 256 unreturned outputs
-with 512-byte names, the other 256 S3 outputs with their keys. A receiver's
-labels and an adapter's job name have no bound and are left empty.
-Any one over its record limit refuses the terms, naming its size and the
-limit, and an `inline_limit` above the tasks topic's record limit is
-refused before it is measured.
+`pool create` records the tasks topic's record limit in the pool's terms,
+and [`submit`](#wherry-submit) measures each submission against it. A pool file
+does not set it.
 
-The largest bounded submission has every field that has a bound at its maximum:
-256 parts, each an input file with a 255-byte name, one of them holding
-`inline_limit` bytes, and a git input with a 2048-byte remote, a 255-byte ref, a
-512-byte path and an 8 KiB host key of quotes, which JSON escapes, naming the
-one task credential it declares. The prompt's text, part metadata and media types, the
-selector, the other task credentials and the outputs have no bound and are left
-empty. A task with a large prompt can still exceed the record limit; `submit`
-then fails naming the record's size.
+`pool create`, `pool entitle` and `check` sign four records and measure
+them as record batches: the largest output chunk, of 256 KiB, two largest
+results, and the largest transcript chunk, a line of 512 KiB. Each result
+has the run's message with its 256 input files named but not carried, a
+status text and a result text of 64 KiB each, and the agent's result record
+at 20 KiB, its 16 KiB bound plus the growth redaction adds. One result lists
+256 returned and 256 unreturned outputs with 512-byte names, the other 256 S3
+outputs with their keys. A receiver's labels and an adapter's job name have
+no bound and are left empty. Any one over its record limit refuses the terms,
+naming its size and the limit.
 
 An input file travels base64-encoded inside the signed record, which is itself
-base64url-encoded, so a submission takes about 16/9 of `inline_limit` plus about
-123 KB. As `pool create`'s check measures them on a broker at its defaults,
-the submission at the default `inline_limit` is 589198 bytes, the output chunk
-468119 bytes, the results 791017 and 803627 bytes (with S3 outputs) and the transcript chunk 933508 bytes, so a feed's `max.message.bytes`
-below 933508 refuses every pool; with brokers and topics at their defaults, the
-highest `inline_limit` that fits is 493227 bytes, about 481 KiB.
+base64url-encoded, so an inline input takes about 16/9 of its size in the
+submission record. As `pool create`'s check measures them on a broker at its
+defaults, the output chunk is 468119 bytes, the results 791017 and 803627
+bytes (with S3 outputs) and the transcript chunk 933508 bytes, so a feed's
+`max.message.bytes` below 933508 refuses every pool.
 
 `pool create` and `pool entitle` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.admin`, which they

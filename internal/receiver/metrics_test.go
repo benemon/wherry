@@ -256,21 +256,13 @@ func TestStateOutsideTheTaskStatesIsLabelledOther(t *testing.T) {
 }
 
 func TestRejectionReasonsThatQuoteTheTaskAreFixed(t *testing.T) {
-	terms := testTerms()
-	terms.InlineLimit = 100
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
-	f.rejected(t, f.submit(t, f.host, func(task *wire.Submission) {
-		task.Message.Parts = append(task.Message.Parts, wire.Part{Raw: make(wire.StdBytes, 101), Filename: "data.bin"})
-	}), "inline inputs are 101 bytes, over the 100-byte limit")
-	f.rejected(t, f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
-		withGit(wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"})(task)
-	}), "git remote host git.example.test is not in pool "+testPool+"'s vcs hosts")
+	f := newFixture(t, resultStream)
+	f.rejected(t, f.submit(t, f.host, withGit(wire.GitInput{Remote: "https://git.example.test/org/repo.git", Ref: "main"})),
+		"git remote host git.example.test is not in pool "+testPool+"'s vcs hosts")
 	text := scraped(t, f.receiver,
-		`wherry_rejections_total{pool="pool-a",reason="invalid inputs",tenant="tenant-a"} 1`,
 		`wherry_rejections_total{pool="pool-a",reason="git remote host outside the pool's vcs hosts",tenant="tenant-a"} 1`,
 	)
-	for _, forbidden := range []string{"bytes", "101", "data.bin", "git.example.test", "run-a", "run-b"} {
+	for _, forbidden := range []string{"git.example.test", "run-a"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("scrape holds %q:\n%s", forbidden, text)
 		}

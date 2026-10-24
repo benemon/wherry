@@ -303,24 +303,6 @@ func TestRedeliveredClaimedTurnPastRunDeadlineStopsItsJob(t *testing.T) {
 	}
 }
 
-func TestAdmitAppliesThePoolInlineLimit(t *testing.T) {
-	terms := testTerms()
-	terms.InlineLimit = 100
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
-	withInput := func(size int) func(*wire.Submission) {
-		return func(task *wire.Submission) {
-			task.Message.Parts = append(task.Message.Parts, wire.Part{Raw: make(wire.StdBytes, size), Filename: "data.bin"})
-		}
-	}
-	f.rejected(t, f.submit(t, f.host, withInput(101)), "inline inputs are 101 bytes, over the 100-byte limit")
-	if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
-		withInput(100)(task)
-	})); admitted == nil {
-		t.Fatalf("inputs at the pool's limit: ack %v", ack)
-	}
-}
-
 func TestPlacementOutsideOffersReleasesWithoutARecord(t *testing.T) {
 	f := newFixture(t, resultStream)
 	for name, mutate := range map[string]func(*wire.Submission){

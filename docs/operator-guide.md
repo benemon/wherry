@@ -88,8 +88,9 @@ as one file and as a `--config-dir` directory.
 - `max_queue_deadline` is the longest queue deadline a task may ask for,
   and bounds how long after its submission a run's task is admitted. It
   defaults to 14 days. See [Retention](#retention).
-- `inline_limit` and `output_limit` bound a task's input files and a
-  run's outputs; they default to 256 KiB and 8 MiB. See
+- `output_limit` bounds a run's outputs; it defaults to 8 MiB. The
+  broker's record limit bounds a task's inline input files, and
+  `pool create` records it in the terms. See
   [Size a pool against the broker](#size-a-pool-against-the-broker).
 - `vcs` lists the hosts a task's agent may clone from; without it the
   pool takes no git input. See [Git repositories](#git-repositories).
@@ -133,27 +134,24 @@ retention drops below its bound, and a pool topic whose timestamp type is not
 Every task and every output or transcript chunk is one Kafka record, so
 the broker's record limit bounds what a pool can carry. `pool create` reads
 `message.max.bytes` from every broker and `max.message.bytes` from the
-pool's tasks topic and its tenants' feeds, signs the largest bounded
-submission `inline_limit` allows and the largest output and transcript
-chunks, and refuses the terms when one is over the limit of the topics it
-goes to. A transcript chunk can be 933508 bytes, so keep each tenant feed's
-`max.message.bytes` at or above that:
+pool's tasks topic and its tenants' feeds, records the tasks topic's record
+limit in the pool's terms, signs the largest output and transcript chunks
+and results, and refuses the terms when one is over the limit of the feeds
+it goes to. A transcript chunk can be 933508 bytes, so keep each tenant
+feed's `max.message.bytes` at or above that:
 
 ```
-inline limit 524288 bytes makes a 1029104-byte submission record, over the 1000012-byte record limit
+a transcript chunk record is 933508 bytes, over the 900000-byte record limit
 ```
 
-The bounded submission fills every field that has a bound, including 256
-input files with the longest names. A prompt has no bound, so a task with
-a large prompt can still be refused by the broker; `submit` names the
-record's size when it is.
-
-Input files grow by about 16/9 on the wire, since they are base64-encoded
-inside a record that is itself base64url-encoded. With brokers and topics
-at their defaults the 1000012-byte producer batch is the limit, and
-`inline_limit` can rise to about 481 KiB. wherry producers batch at most
-1000012 bytes, so raising `message.max.bytes` and `max.message.bytes` does
-not take it further; lowering them brings it down. An output chunk holds
+`wherry submit` measures each signed submission against the recorded
+record limit. Input files grow by about 16/9 on the wire, since they are
+base64-encoded inside a record that is itself base64url-encoded. With
+brokers and topics at their defaults the 1000012-byte producer batch is the
+limit. wherry producers batch at most 1000012 bytes, so raising
+`message.max.bytes` and `max.message.bytes` does not take it further;
+lowering them brings it down. Run `pool create` again after changing either,
+so the terms record the new limit. An output chunk holds
 256 KiB whatever `output_limit` is, so `output_limit` spans as many records
 as it needs and the record limit does not bound it.
 
@@ -657,15 +655,18 @@ receiver gets no seal, so that receiver stops the job and the run ends
 
 ## Inputs and outputs
 
-A task's input files hold the pool's `inline_limit` together, and a run's
-outputs its `output_limit` in 256 entries at most. An adapter implements
-`InlineLimit` with the most inline input bytes it delivers, or zero when it
-declares none. Receivers advertise that cap. A host applies the smallest
-nonzero cap among the live adapters in the chosen pool that satisfy the task.
-When the task exceeds it, a pool with storage and a configured host storage
+A run's outputs hold its `output_limit` in 256 entries at most. Two limits
+bound a task's inline input files. The first is the broker's record limit,
+which `pool create` records in the pool's terms and the host measures the
+signed submission against. The second is each adapter's declared limit: an
+adapter implements `InlineLimit` with the most inline input bytes it
+delivers, or zero when it declares none, and receivers advertise it. A host
+applies the smallest nonzero limit among the adapters in the chosen pool that
+satisfy the task, read from each receiver's last advertisement, live or
+stale. Over either limit, a pool with storage and a configured host storage
 credential carries every inline input through S3; otherwise submit refuses
-before publishing. The receiver keeps the adapter's dispatch check as a
-backstop.
+before publishing, naming the limit. The receiver keeps the adapter's
+dispatch check as a backstop.
 
 The agent creates `WHERRY_OUTPUT_DIR` when it writes its first output.
 Outputs are collected once the agent writes its result line and the job is

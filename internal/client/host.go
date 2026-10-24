@@ -265,31 +265,40 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	if err := wire.ValidateInputs(input.Parts, v.state.Pools[pool].InlineLimit); err != nil {
+	if err := wire.ValidateInputs(input.Parts, math.MaxInt64); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	if limit, limiting := adapterInlineLimit(v.state, pool, placement, ads); limit > 0 && limit < v.state.Pools[pool].InlineLimit {
+	// A receiver keeps its plugin's declared limit through a restart, so an advertisement of any age counts.
+	declared, err := admin.ReadAdvertisements(ctx, h.kafka, v.state, v.keys, now, math.MaxInt64)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	storable := v.state.Pools[pool].Storage != nil && h.storage != nil
+	toS3 := func() {
+		parts := make([]wire.Part, 0, len(input.Parts))
+		for _, part := range input.Parts {
+			switch {
+			case part.Raw != nil:
+				input.S3Inputs = append(input.S3Inputs, S3File{Name: wire.InputName(part), Body: bytes.NewReader(part.Raw)})
+			case part.Data != nil:
+				input.S3Inputs = append(input.S3Inputs, S3File{Name: wire.InputName(part), Body: bytes.NewReader(part.Data)})
+			default:
+				parts = append(parts, part)
+			}
+		}
+		input.Parts = parts
+		s3Inputs = s3Inputs[:0]
+		for _, file := range input.S3Inputs {
+			s3Inputs = append(s3Inputs, file.Name)
+		}
+		stored = true
+	}
+	if limit, limiting := adapterInlineLimit(v.state, pool, placement, declared); limit > 0 {
 		if err := wire.ValidateInputs(input.Parts, limit); err != nil {
-			if v.state.Pools[pool].Storage == nil || h.storage == nil {
+			if !storable {
 				return SubmitResult{}, fmt.Errorf("%w: inline inputs are over adapter %s's %d-byte limit; a pool with storage and a host storage credential would carry the inputs through S3", ErrInvalidInput, limiting, limit)
 			}
-			parts := make([]wire.Part, 0, len(input.Parts))
-			for _, part := range input.Parts {
-				switch {
-				case part.Raw != nil:
-					input.S3Inputs = append(input.S3Inputs, S3File{Name: wire.InputName(part), Body: bytes.NewReader(part.Raw)})
-				case part.Data != nil:
-					input.S3Inputs = append(input.S3Inputs, S3File{Name: wire.InputName(part), Body: bytes.NewReader(part.Data)})
-				default:
-					parts = append(parts, part)
-				}
-			}
-			input.Parts = parts
-			s3Inputs = s3Inputs[:0]
-			for _, file := range input.S3Inputs {
-				s3Inputs = append(s3Inputs, file.Name)
-			}
-			stored = true
+			toS3()
 		}
 	}
 	if input.QueueDeadline > v.state.Pools[pool].MaxQueueDeadline() {
@@ -306,6 +315,23 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		return SubmitResult{}, err
 	}
 	submission.Wherry.Credentials, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, outputs, input.Git
+	encoded, err := wire.SignRecord(submission, h.key)
+	if err != nil {
+		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	if limit := v.state.Pools[pool].RecordLimit; int64(len(encoded)) > limit {
+		if !storable {
+			return SubmitResult{}, fmt.Errorf("%w: the submission is a %d-byte record, over pool %s's %d-byte record limit; a pool with storage and a host storage credential would carry the inputs through S3", ErrInvalidInput, len(encoded), pool, limit)
+		}
+		toS3()
+		submission.Message.Parts = append([]wire.Part{{Text: input.Prompt}}, input.Parts...)
+		if encoded, err = wire.SignRecord(submission, h.key); err != nil {
+			return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		}
+		if int64(len(encoded)) > limit {
+			return SubmitResult{}, fmt.Errorf("%w: the %d-byte prompt makes a %d-byte submission record, over pool %s's %d-byte record limit", ErrInvalidInput, len(input.Prompt), len(encoded), pool, limit)
+		}
+	}
 	if stored {
 		storage := v.state.Pools[pool].Storage
 		store, err := h.bucket(pool, storage)

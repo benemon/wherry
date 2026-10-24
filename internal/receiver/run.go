@@ -239,9 +239,6 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if !modelInTerms(terms.Agents[agent], placement.Model) {
 		return reject("model not in the pool's terms")
 	}
-	if err := wire.ValidateInputs(task.Message.Parts, terms.InlineLimit); err != nil {
-		return rejectAs("invalid inputs", err.Error())
-	}
 	adapter, offered := r.offer(placement)
 	if !offered {
 		r.logger.Printf("run %s: no current offer for agent %s satisfying its selector", run, placement.Agent)

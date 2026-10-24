@@ -275,7 +275,7 @@ func TestRecordValidation(t *testing.T) {
 	}
 }
 
-// The inline limit is the pool's, so a submission of any size signs and admission applies the limit.
+// The limits on inline inputs are the broker's and the adapters', so a submission of any size signs and the host applies them.
 func TestValidateInputsAppliesTheLimit(t *testing.T) {
 	parts := []Part{{Text: "hello"}, {Raw: make(StdBytes, 60), Filename: "a"}, {Data: []byte(`"` + strings.Repeat("x", 38) + `"`), Filename: "b"}}
 	if err := ValidateInputs(parts, 100); err != nil {
