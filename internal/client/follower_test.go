@@ -271,3 +271,40 @@ func TestARunBelowTheFollowersStartIsReadOnce(t *testing.T) {
 		t.Fatalf("await %#v, %v; want COMPLETED", awaited, err)
 	}
 }
+
+// Await and the Answer it runs fetch the records after the run's feed offset, however long the feed's history.
+func TestAnsweringFetchesOnlyTheRecordsAfterTheRunsOffset(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	backlog := make([]*kgo.Record, 2000)
+	for i := range backlog {
+		backlog[i] = &kgo.Record{Topic: admin.TenantTopic("tenant-a"), Key: []byte("run-other"), Value: []byte("unreadable")}
+	}
+	if err := receiver.kafka.ProduceSync(f.ctx, backlog...).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	_, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	hook := &feedHook{}
+	host := f.hooked(t, hook)
+	done := make(chan AwaitResult, 1)
+	go func() {
+		awaited, err := host.Await(f.ctx, runID, 20*time.Second)
+		if err != nil {
+			t.Errorf("await: %v", err)
+		}
+		done <- awaited
+	}()
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	f.waitSeals(t, "host-a", 1)
+	fetched := hook.fetched.Load()
+	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateCompleted, nil), receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil))
+	if awaited := <-done; awaited.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("await %#v; want COMPLETED", awaited)
+	}
+	if fetched >= 50 {
+		t.Fatalf("answering fetched %d feed records; want the few after the run's offset, not the backlog of 2000", fetched)
+	}
+}
