@@ -10,6 +10,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"log"
 	"maps"
 	"os"
 	"path/filepath"
@@ -355,6 +357,86 @@ func TestAnswerSkipsRequestsItCannotTrust(t *testing.T) {
 	}
 }
 
+// logged waits until the fixture's logs hold want and then for settle, and returns the lines holding want, failing the
+// test unless each starts with the answerer prefix of host's logger.
+func (f *fixture) logged(t *testing.T, host, want string, settle time.Duration) []string {
+	t.Helper()
+	for !strings.Contains(f.logs.String(), want) {
+		if f.ctx.Err() != nil {
+			t.Fatalf("no line holds %q; logs:\n%s", want, f.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(settle)
+	prefix := fmt.Sprintf("%s: answerer pid=%d version=", host, os.Getpid())
+	var lines []string
+	for line := range strings.Lines(f.logs.String()) {
+		if strings.Contains(line, want) {
+			if !strings.HasPrefix(line, prefix) || strings.HasPrefix(line, prefix+":") {
+				t.Fatalf("line %q lacks the answerer prefix %q and a version", line, prefix)
+			}
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func TestAnswerLogsARequestForARunWithoutALocalRecord(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	other := f.newHost(t, "host-b", t.TempDir())
+	answering(t, f, other)
+	f.logged(t, "host-b", "following the tenant feed for seal requests", 0)
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	if lines := f.logged(t, "host-b", fmt.Sprintf("run %q: skipped a seal request: this host has no local record of the run", runID), 1500*time.Millisecond); len(lines) != 1 {
+		t.Fatalf("want one line; logs:\n%s", f.logs.String())
+	}
+}
+
+func TestAnswerLogsAnUnauthorisedRequest(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	f.pool(t, "pool-b")
+	outsider := f.addReceiver(t, "receiver-b", "pool-b")
+	binding := outsider.binding(task, 1)
+	binding.Pool = "pool-a"
+	asked := newRequest(t, binding, "model")
+	receiver.feed(t, f.ctx, runID, outsider.sign(t, &asked.record))
+	answering(t, f, f.host)
+	if lines := f.logged(t, "host-a", "run "+runID+": skipped a seal request: record is not from a live member of the pool", 1500*time.Millisecond); len(lines) != 1 {
+		t.Fatalf("want one line; logs:\n%s", f.logs.String())
+	}
+	if seals := f.seals(t, "host-a"); seals != 0 {
+		t.Fatalf("host topic holds %d seals", seals)
+	}
+}
+
+// A second answerer on the state directory, reading the request after the first sealed it, logs the marker.
+func TestAnswerLogsAnAttemptAnotherAnswererSealed(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	answering(t, f, f.host)
+	f.waitSeals(t, "host-a", 1)
+	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, log.New(f.logs, "twin: ", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	answering(t, f, twin)
+	want := "run " + runID + ": skipped a seal request from receiver-a for attempt 1, which another answerer already sealed"
+	if lines := f.logged(t, "twin", want, 1500*time.Millisecond); len(lines) != 1 {
+		t.Fatalf("want one line; logs:\n%s", f.logs.String())
+	}
+	if seals := f.seals(t, "host-a"); seals != 1 {
+		t.Fatalf("host topic holds %d seals", seals)
+	}
+}
+
 // Every host of the tenant reads the feed; only the host that submitted the run answers its request.
 func TestAnswerSkipsAnotherHostsRun(t *testing.T) {
 	f := newFixture(t)
@@ -477,7 +559,10 @@ func TestARequestBeforeTheLocalRecordIsAnswered(t *testing.T) {
 	answering(t, f, f.host)
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	time.Sleep(1500 * time.Millisecond)
+	// Several retry passes read the request while the record is aside; each logs the same reason.
+	if lines := f.logged(t, "host-a", fmt.Sprintf("run %q: skipped a seal request: this host has no local record of the run", runID), 3*retryInterval+500*time.Millisecond); len(lines) != 1 {
+		t.Fatalf("want the reason logged once while it waited; logs:\n%s", f.logs.String())
+	}
 	if seals := f.seals(t, "host-a"); seals != 0 {
 		t.Fatalf("sealed %d times without a local record", seals)
 	}

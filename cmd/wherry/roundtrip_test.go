@@ -333,7 +333,12 @@ func TestRoundTrip(t *testing.T) {
 			t.Fatalf("host logs carry a credential:\n%s", hostLogs.String())
 		}
 	}
-	if !strings.Contains(hostLogs.String(), "host: run "+submitted.RunID+": sealed [model deploy-key] to receiver-a for attempt 1") {
+	sealed := false
+	for line := range strings.Lines(hostLogs.String()) {
+		sealed = sealed || strings.HasPrefix(line, fmt.Sprintf("host: answerer pid=%d version=", os.Getpid())) &&
+			strings.HasSuffix(line, ": run "+submitted.RunID+": sealed [model deploy-key] to receiver-a for attempt 1\n")
+	}
+	if !sealed {
 		t.Fatalf("the host did not answer the seal request; logs:\n%s", hostLogs.String())
 	}
 
