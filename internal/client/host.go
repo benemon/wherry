@@ -257,21 +257,23 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		return SubmitResult{}, err
 	}
 	now := time.Now()
-	ads, err := admin.ReadAdvertisements(ctx, h.kafka, v.state, v.keys, now, liveness)
+	// A receiver keeps its plugin's declared limit through a restart, so an advertisement of any age counts for the
+	// adapter limit; placement takes live ones alone.
+	declared, err := admin.ReadAdvertisements(ctx, h.kafka, v.state, v.keys, now, math.MaxInt64)
 	if err != nil {
 		return SubmitResult{}, err
 	}
+	ads := maps.Clone(declared)
+	maps.DeleteFunc(ads, func(_ string, ad wire.Advertisement) bool {
+		age := now.Sub(time.UnixMilli(ad.AtMS))
+		return age > liveness || age < -liveness
+	})
 	pool, placement, err := resolvePlacement(v.state, h.tenant, input.Agent, input.Model, input.Selector, ads)
 	if err != nil {
 		return SubmitResult{}, err
 	}
 	if err := wire.ValidateInputs(input.Parts, math.MaxInt64); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
-	}
-	// A receiver keeps its plugin's declared limit through a restart, so an advertisement of any age counts.
-	declared, err := admin.ReadAdvertisements(ctx, h.kafka, v.state, v.keys, now, math.MaxInt64)
-	if err != nil {
-		return SubmitResult{}, err
 	}
 	storable := v.state.Pools[pool].Storage != nil && h.storage != nil
 	toS3 := func() {
