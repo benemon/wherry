@@ -785,7 +785,7 @@ minutes.
 ## MCP tools
 
 `wherry mcp` serves eight tools over stdio. Each takes and returns JSON with
-a declared schema and uses the server's one Kafka connection. `deadline` and
+a declared schema and uses the server's one host. `deadline` and
 `queue_deadline` are Go durations, such as `90m`; omitted, they take the CLI
 defaults, `2h` and `10m`.
 
