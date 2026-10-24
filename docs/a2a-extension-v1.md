@@ -69,8 +69,9 @@ A reader accepts a signed record only when all of these hold:
    [key topic](#key-records), has the `kid` key ID, and the signature
    verifies against it. A reader that does not know the key ID re-reads
    the owner's key topic once before it rejects the record. A host reading
-   its tenant feed also accepts a [retired key](#key-records) for a record
-   the broker appended before that key's rotation.
+   its tenant feed, and a receiver reading its pool's statuses, also accept
+   a [retired key](#key-records) for a record the broker appended before
+   that key's rotation.
 3. The payload decodes strictly, has `v` 1 and passes the rules for its
    type.
 4. The owner the payload names equals the `kid` owner.
@@ -563,8 +564,8 @@ signature's protected header carrying its public key as `jwk`.
   key. A `rotate` whose `key` is the current key is rejected. The replaced
   key is retired at the rotate record's broker timestamp. A retired key
   verifies the owner's statuses, transcript chunks, outputs, results and
-  echoes on a tenant feed that the broker appended before that timestamp,
-  and nothing else. A record the broker appended at or after it does not
+  echoes on a tenant feed, and its statuses on a pool's events, that the
+  broker appended before that timestamp, and nothing else. A record the broker appended at or after it does not
   verify under the retired key. Readers that admit work, such as a receiver
   admitting a task or a cancel or a host answering a seal request, accept
   the current key alone.
