@@ -95,7 +95,7 @@ func spare(ad wire.Advertisement) int64 {
 	return ad.Capacity - ad.InFlight
 }
 
-// adapterInlineLimit returns the smallest declared limit of the live adapters in pool that satisfy placement.
+// adapterInlineLimit returns the smallest declared limit of the advertised adapters in pool that satisfy placement.
 func adapterInlineLimit(state admin.State, pool string, placement wire.Placement, ads map[string]wire.Advertisement) (int64, string) {
 	var limit int64
 	var limiting string

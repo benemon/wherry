@@ -81,8 +81,8 @@ func TestPoolConfigDirectoryMatchesSingleFile(t *testing.T) {
 	}
 }
 
-// TestPoolConfigExampleParses reads the reference's complete pool terms in both forms; they set every field, and their
-// first agent every agent field.
+// TestPoolConfigExampleParses reads the reference's complete pool terms in both forms; they set every field a pool file
+// sets, and their first agent every agent field.
 func TestPoolConfigExampleParses(t *testing.T) {
 	want, err := readPoolConfig(filepath.Join("testdata", "example-pool.yaml"), false)
 	if err != nil {
@@ -97,7 +97,7 @@ func TestPoolConfigExampleParses(t *testing.T) {
 	}
 	for _, fields := range []reflect.Value{reflect.ValueOf(want), reflect.ValueOf(want.Agents[0])} {
 		for i := range fields.NumField() {
-			if fields.Field(i).IsZero() {
+			if fields.Field(i).IsZero() && fields.Type().Field(i).Tag.Get("yaml") != "-" {
 				t.Errorf("example pool leaves %s.%s unset", fields.Type().Name(), fields.Type().Field(i).Name)
 			}
 		}
@@ -138,6 +138,21 @@ func TestPoolConfigRejectsSealLifetime(t *testing.T) {
 	line := fmt.Sprintf("unknown field at line %d", bytes.Count(pool, []byte("\n"))+1)
 	if _, err := readPoolConfig(file, false); err == nil || !strings.Contains(err.Error(), line) {
 		t.Fatalf("pool config = %v, want seal_lifetime_ms refused as an unknown field", err)
+	}
+}
+
+func TestPoolConfigRejectsInlineLimit(t *testing.T) {
+	pool, err := os.ReadFile(filepath.Join("testdata", "pool-nomad.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "pool.yaml")
+	if err := os.WriteFile(file, append(pool, "inline_limit: 262144\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	line := fmt.Sprintf("unknown field at line %d", bytes.Count(pool, []byte("\n"))+1)
+	if _, err := readPoolConfig(file, false); err == nil || !strings.Contains(err.Error(), line) {
+		t.Fatalf("pool config = %v, want inline_limit refused as an unknown field", err)
 	}
 }
 

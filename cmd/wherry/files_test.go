@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/wire"
 )
@@ -32,7 +31,7 @@ func TestSubmitFileFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	large := filepath.Join(t.TempDir(), "large.bin")
-	if err := os.WriteFile(large, make([]byte, admin.DefaultInlineLimit+1), 0o600); err != nil {
+	if err := os.WriteFile(large, make([]byte, 49153), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	base := []string{"--prompt", "summarise the data"}
@@ -42,7 +41,7 @@ func TestSubmitFileFlags(t *testing.T) {
 	}{
 		"credential without a file": {[]string{"--credential", "deploy-key"}, "want NAME=FILE"},
 		"unconfigured credential":   {[]string{"--credential", "absent=token"}, "credential absent is not in this host's configuration"},
-		"inputs over the limit":     {[]string{"--input", large}, "inline inputs are 262145 bytes, over the 262144-byte limit"},
+		"inputs over the limit":     {[]string{"--input", large}, "inline inputs are over adapter lab's 49152-byte limit"},
 		"output escaping":           {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
 		"credential file escaping":  {[]string{"--credential", "deploy-key=../id"}, "credential files must be unique portable file names"},
 		"unknown output suffix":     {[]string{"--output", "report.md:needed"}, "want NAME[:required][:s3]"},

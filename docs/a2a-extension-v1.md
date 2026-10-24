@@ -139,9 +139,12 @@ A submission is the task of one run.
   `filename` is required and is a file name: at most 255 bytes of letters,
   digits, `.`, `_` and `-`, whose first character is not `.`. A `raw` part is
   delivered as its bytes under `filename`, and a `data` part as its JSON under
-  `filename` with `.json` added. The delivered names are unique, and the `raw`
-  and `data` parts together hold at most the pool's `inline_limit` bytes, 256
-  KiB unless its terms set another.
+  `filename` with `.json` added. The delivered names are unique. The signed
+  submission is at most the pool's recorded `record_limit` bytes, the
+  broker's record limit for the pool's tasks topic, and the `raw` and `data`
+  parts together hold at most the smallest `inline_limit` the matching
+  adapters declare. Over either, a host with storage carries the inputs as
+  [S3 inputs](#s3-inputs-and-outputs), and without storage refuses the run.
 - `credentials` lists task credentials, each `{name, file}`: a credential of the
   host, by the name in its configuration, that the agent gets as the file `file`
   in its credentials directory. `name` is at most 32 lowercase letters, digits
@@ -229,7 +232,6 @@ part. The fixed texts are:
   `run expired`, `queue deadline exceeds the pool's max queue deadline`,
   `queue deadline passed`, `run deadline passed`,
   `unsupported message part`, `run ID in use`,
-  `inline inputs are <n> bytes, over the <limit>-byte limit`,
   `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
 - failed: `timeout`, `log stream failed`,
@@ -470,10 +472,11 @@ An advertisement reports a receiver's liveness and capacity.
   and `data` parts the adapter delivers, absent when it declares no limit
   and never negative. It is empty when no adapter is ready. Readers take an
   adapter's agent and labels from the receiver's configuration record on
-  `wherry.admin`. Each `adapter` appears at most once. When the smallest
-  `inline_limit` among the live offers that satisfy a placement is below
-  the pool's, a host submitting inputs over it carries them as S3 inputs,
-  or refuses the run when the pool or the host has no storage.
+  `wherry.admin`. Each `adapter` appears at most once. A host takes the
+  smallest `inline_limit` among the offers that satisfy a placement in each
+  receiver's last advertisement, live or stale; submitting inputs over it,
+  the host carries them as S3 inputs, or refuses the run when the pool or
+  the host has no storage.
 - `capacity` and `in_flight` are 0 or more, and `at_ms` is over 0.
 - A receiver advertises every 30 seconds, with or without a ready adapter.
   Placement passes over a receiver whose `offers` is empty. Readers take
@@ -833,8 +836,7 @@ A receiver that claims a submission:
 4. rejects it when its agent is outside the pool's terms; with
    `model not in the pool's terms` when the agent has `models` and the
    placement names no model or one outside the current `models`, or the
-   agent has no `models` and the placement names one; and when its `raw` and
-   `data` parts together exceed the pool's `inline_limit`;
+   agent has no `models` and the placement names one;
 5. releases it when no ready adapter satisfies the placement;
 6. rejects it with `duplicate submission` when it is not the run's earliest
    submission on the pool's task topic that a live host's current key
@@ -1021,8 +1023,8 @@ storage before use.
   URL, so an adopter cannot redact it. A fetch that fails or does not verify
   ends the job before the agent starts, and the receiver ends the run
   `TASK_STATE_FAILED` with `an S3 input was not fetched, or did not match its
-  size and SHA-256`, without returning the task to the pool. S3 inputs do not
-  count against `inline_limit`.
+  size and SHA-256`, without returning the task to the pool. S3 inputs count
+  against neither `record_limit` nor `inline_limit`.
 - **Out.** After the agent's result line and the job's stop, the adapter
   streams each S3 output it finds as it collects, and the receiver sends it
   to its presigned PUT as it reads it, with the size the adapter listed as

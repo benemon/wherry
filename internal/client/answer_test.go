@@ -900,24 +900,3 @@ func TestSubmitNamesARecordTheBrokerRefuses(t *testing.T) {
 		t.Fatalf("submit = %v; want the record size and a remedy", err)
 	}
 }
-
-func TestSubmitRefusesInlineInputsOverThePoolLimit(t *testing.T) {
-	f := newFixture(t)
-	terms := testTerms()
-	terms.InlineLimit = 1000
-	if err := f.service.PoolCreate(f.ctx, "pool-a", terms); err != nil {
-		t.Fatal(err)
-	}
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-	parts := []wire.Part{{Raw: make(wire.StdBytes, 1000), Filename: "a.bin"}, {Raw: wire.StdBytes("x"), Filename: "b.bin"}}
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Parts: parts, Deadline: time.Minute, QueueDeadline: time.Minute})
-	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "inline inputs are 1001 bytes, over the 1000-byte limit") {
-		t.Fatalf("submit = %v; want the size and the limit named", err)
-	}
-	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
-		t.Fatal("published inputs over the limit")
-	}
-	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Parts: parts[:1], Deadline: time.Minute, QueueDeadline: time.Minute}); err != nil {
-		t.Fatalf("inputs at the limit: %v", err)
-	}
-}

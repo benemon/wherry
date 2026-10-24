@@ -363,6 +363,8 @@ func testTerms() admin.Terms {
 	return admin.Terms{
 		Agents:       []admin.AgentTerms{{Name: "claude", Credentials: []string{credentialName, "cred-lab", "cred-cloud"}}, {Name: "codex", Credentials: []string{}}},
 		DefaultAgent: "claude", DeliveryLimit: 10, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
+		// What pool create records at a broker's defaults: franz-go's producer maximum.
+		RecordLimit: 1000012,
 	}
 }
 

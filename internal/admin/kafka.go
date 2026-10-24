@@ -120,7 +120,7 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 	if err != nil {
 		return err
 	}
-	if err := service.checkLimits(ctx, current, pool, effective); err != nil {
+	if terms.RecordLimit, err = service.checkLimits(ctx, current, pool); err != nil {
 		return err
 	}
 	if err := service.checkPoolFeedsRetention(ctx, current, pool, retention.feed); err != nil {
@@ -250,7 +250,7 @@ func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) erro
 		current.Entitlements[tenant] = map[string]bool{}
 	}
 	current.Entitlements[tenant][pool] = true
-	if err := service.checkLimits(ctx, current, pool, terms); err != nil {
+	if _, err := service.checkLimits(ctx, current, pool); err != nil {
 		return err
 	}
 	retention, err := poolRetention(terms)
@@ -291,8 +291,8 @@ func (service *Service) Check(ctx context.Context) error {
 			return fmt.Errorf("receiver %s: %w", receiver, err)
 		}
 	}
-	for pool, terms := range state.Pools {
-		if err := service.checkLimits(ctx, state, pool, terms); err != nil {
+	for pool := range state.Pools {
+		if _, err := service.checkLimits(ctx, state, pool); err != nil {
 			return fmt.Errorf("pool %s: %w", pool, err)
 		}
 	}
@@ -659,30 +659,23 @@ func (service *Service) brokerSetting(ctx context.Context, name string, pick fun
 	return value, nil
 }
 
-// checkLimits refuses terms whose largest submission or output chunk is a record the broker or a producer would
-// refuse.
-func (service *Service) checkLimits(ctx context.Context, state State, pool string, terms Terms) error {
+// checkLimits refuses a pool whose largest receiver records the broker or a producer would refuse, and returns the
+// record limit of its tasks topic.
+func (service *Service) checkLimits(ctx context.Context, state State, pool string) (int64, error) {
 	tasks, feeds, err := service.recordLimits(ctx, state, pool)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	// Inputs only grow on the wire, so this refuses an inline limit no record carries before allocating it.
-	if terms.InlineLimit > tasks {
-		return fmt.Errorf("inline limit %d bytes is over the %d-byte record limit", terms.InlineLimit, tasks)
-	}
-	submission, feed, err := largestRecords(terms.InlineLimit)
+	feed, err := largestRecords()
 	if err != nil {
-		return err
-	}
-	if size := batchSize(submission); size > tasks {
-		return fmt.Errorf("inline limit %d bytes makes a %d-byte submission record, over the %d-byte record limit", terms.InlineLimit, size, tasks)
+		return 0, err
 	}
 	for _, record := range feed {
 		if size := batchSize(record.value); size > feeds {
-			return fmt.Errorf("%s record is %d bytes, over the %d-byte record limit", record.name, size, feeds)
+			return 0, fmt.Errorf("%s record is %d bytes, over the %d-byte record limit", record.name, size, feeds)
 		}
 	}
-	return nil
+	return tasks, nil
 }
 
 // recordLimits are the largest record batches that every broker and franz-go's producers accept, and with them the
@@ -746,41 +739,20 @@ type feedRecord struct {
 	value []byte
 }
 
-// largestRecords signs, with a throwaway key, the largest bounded submission whose inputs fit inlineLimit and the
-// largest bounded records a receiver writes to a feed. Fields with no bound are left empty.
-func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
+// largestRecords signs, with a throwaway key, the largest bounded records a receiver writes to a feed. Fields with no
+// bound are left empty.
+func largestRecords() ([]feedRecord, error) {
 	_, key, err := ed25519.GenerateKey(nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	name, run, hash := strings.Repeat("n", 32), largestKey, strings.Repeat("0", 64)
-	parts := make([]wire.Part, wire.MaxParts)
 	pointers := make([]wire.Part, wire.MaxParts)
 	pointer, _ := json.Marshal(wire.PointerMetadata{SHA256: hash, Size: math.MaxInt64}) // a string and an integer always encode
-	for i := range parts {
-		parts[i] = wire.Part{Raw: wire.StdBytes{}, Filename: fmt.Sprintf("%0255d", i)}
-		pointers[i] = wire.Part{URL: "unstored:input", Filename: parts[i].Filename, Metadata: pointer}
+	for i := range pointers {
+		pointers[i] = wire.Part{URL: "unstored:input", Filename: fmt.Sprintf("%0255d", i), Metadata: pointer}
 	}
-	parts[0].Raw = make(wire.StdBytes, inlineLimit)
 	message := wire.Message{MessageID: "msg-" + strings.Repeat("0", 32), ContextID: run, TaskID: run, Role: wire.RoleUser, Extensions: []string{wire.ExtensionURI}}
-	submitted := message
-	submitted.Parts = parts
-	submission, err := wire.SignRecord(&wire.Submission{
-		Message: submitted,
-		Wherry: wire.SubmissionBinding{
-			Tenant: name, Host: name, Pool: name, Run: run, Placement: wire.Placement{Agent: name},
-			DeadlineMS: math.MaxInt64, QueueDeadlineMS: math.MaxInt64,
-			Credentials: []wire.TaskCredential{{Name: name, File: strings.Repeat("f", 255)}},
-			// A quote is the printable character JSON lengthens most.
-			Git: &wire.GitInput{
-				Remote: "ssh://h/" + strings.Repeat("a", wire.MaxGitRemote-len("ssh://h/")), Ref: strings.Repeat("r", wire.MaxGitRef),
-				Path: strings.Repeat("a/", 255) + "aa", Credential: name, HostKey: "h k " + strings.Repeat(`"`, wire.MaxGitHostKey-len("h k ")),
-			},
-		},
-	}, key)
-	if err != nil {
-		return nil, nil, err
-	}
 	binding := wire.ReceiverBinding{Receiver: name, Tenant: name, Pool: name, Run: run, Attempt: math.MaxInt64}
 	outputName := strings.Repeat("a/", 255) + "aa"
 	// A result lists at most 256 collected entries and the expected outputs missing among them. An S3 output is an
@@ -793,11 +765,11 @@ func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	}
 	encodedMetadata, err := json.Marshal(metadata)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	encodedS3Metadata, err := json.Marshal(s3Metadata)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// Redaction lengthens the agent's result record by at most 10 bytes in 8.
 	agentResult, _ := json.Marshal(map[string]map[string]string{"agent_result": {"k": strings.Repeat("x", wire.MaxAgentResult*10/8)}}) // strings always encode
@@ -841,11 +813,11 @@ func largestRecords(inlineLimit int64) ([]byte, []feedRecord, error) {
 	for i, record := range records {
 		value, err := wire.SignRecord(record.value, key)
 		if err != nil {
-			return nil, nil, fmt.Errorf("sign %s: %w", record.name, err)
+			return nil, fmt.Errorf("sign %s: %w", record.name, err)
 		}
 		feed[i] = feedRecord{record.name, value}
 	}
-	return submission, feed, nil
+	return feed, nil
 }
 
 func createBundle(path string) (*os.File, error) {

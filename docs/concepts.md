@@ -230,9 +230,12 @@ from the platform, and files and task credentials from the task.
 ## Files in and out
 
 Everything the task receives lands as files. A submission's `raw` and
-`data` parts are input files, at most the pool's inline limit together
-(256 KiB by default), that the agent
-finds in the directory `WHERRY_INPUT_DIR` names. Task credentials are
+`data` parts are input files that the agent finds in the directory
+`WHERRY_INPUT_DIR` names. They travel inline in the submission record,
+within the broker's record limit, which `pool create` records, and the
+limit each adapter declares. Over either, they go through S3 when the pool
+has storage and the host a storage credential; otherwise submit refuses,
+naming the limit. Task credentials are
 files in the directory `WHERRY_CREDENTIALS_DIR` names, and never
 environment variables. The receiver opens the prompt with the names of the
 files and of the outputs the task expects.
