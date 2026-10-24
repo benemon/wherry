@@ -570,21 +570,22 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	for _, record := range records {
 		run := string(record.Key)
 		var named wire.RunStatus
-		err := wire.ParseRecord(record.Value, peers, &named)
+		history := wire.ParseHistory(record.Timestamp)
+		err := history(record.Value, peers, &named)
 		// A member that rotated its key since the last refresh is re-read once per read of the topic.
 		if owner, topic, stale := staleKey(record.Value, peers, peerTopics); err != nil && stale && !reread[owner] {
 			reread[owner] = true
 			if peers, err = r.rereadKey(ctx, &r.peers, owner, topic); err != nil {
 				return poolEvents{}, err
 			}
-			err = wire.ParseRecord(record.Value, peers, &named)
+			err = history(record.Value, peers, &named)
 		}
 		if err != nil {
 			events.others[run] = append(events.others[run], record.Value)
 			continue
 		}
 		// A status binds its run's tenant through the task hash; the pool and membership are checked here.
-		status, err := admin.AuthorizeStatus(wire.ParseRecord, state, peers, record.Value, r.config.Pool, named.Wherry.Tenant)
+		status, err := admin.AuthorizeStatus(history, state, peers, record.Value, r.config.Pool, named.Wherry.Tenant)
 		if err != nil || status.Wherry.Run != run || seen[status.Wherry.EventID] {
 			continue
 		}

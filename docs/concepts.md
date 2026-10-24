@@ -101,8 +101,9 @@ records included, is a versioned EdDSA
 [JWS](https://datatracker.ietf.org/doc/html/rfc7515). A record on a shared topic
 names its owner and key in its `kid`, and a reader verifies it against that
 owner's current key, read from the owner's own key topic, before it decodes the
-payload. A host reading its tenant feed also accepts a key the owner has
-rotated away, for records the broker appended before that rotation. No host or
+payload. A host reading its tenant feed, and a receiver reading its pool's
+statuses, also accept a key the owner has rotated away, for records the
+broker appended before that rotation. No host or
 receiver can vouch for another's key.
 
 A reader then checks the record against `wherry.admin`. A submission or
