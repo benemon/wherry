@@ -26,6 +26,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"golang.org/x/sync/errgroup"
 )
 
 // Errors the client returns for a run or placement that cannot proceed.
@@ -112,7 +113,9 @@ type Adapter struct {
 
 // Host implements the operations of a tenant's host principal.
 type Host struct {
-	kafka       *kgo.Client
+	kafka *kgo.Client
+	// reader reads every topic the host reads other than through its follower.
+	reader      *admin.Reader
 	key         ed25519.PrivateKey
 	tenant      string
 	host        string
@@ -134,11 +137,12 @@ func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir stri
 	if !prefixed || !split || !wire.ValidName(tenant) || !wire.ValidName(host) {
 		return nil, errors.New("principal is not a host principal wherry.tnt.<tenant>.<host>")
 	}
-	return &Host{kafka: kafka, key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, logger: logger}, nil
+	return &Host{kafka: kafka, reader: admin.NewReader(kafka), key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, logger: logger}, nil
 }
 
-// Close closes the Kafka connection.
+// Close closes the Kafka connections.
 func (h *Host) Close() {
+	h.reader.Close()
 	h.kafka.Close()
 }
 
@@ -146,7 +150,7 @@ func (h *Host) Close() {
 func (h *Host) Register(ctx context.Context) (string, error) {
 	owner := signed.HostOwner(h.tenant, h.host)
 	topic := admin.HostTopic(h.tenant, h.host)
-	keys, err := admin.ReadKeys(ctx, h.kafka, map[string]string{owner: topic})
+	keys, err := h.reader.ReadKeys(ctx, map[string]string{owner: topic})
 	if err != nil {
 		return "", err
 	}
@@ -161,7 +165,7 @@ func (h *Host) Register(ctx context.Context) (string, error) {
 			return "", err
 		}
 		// A concurrent first registration may have landed first; only the first counts.
-		keys, err := admin.ReadKeys(ctx, h.kafka, map[string]string{owner: topic})
+		keys, err := h.reader.ReadKeys(ctx, map[string]string{owner: topic})
 		if err != nil {
 			return "", err
 		}
@@ -181,7 +185,7 @@ type view struct {
 }
 
 func (h *Host) load(ctx context.Context) (view, error) {
-	state, err := admin.Load(ctx, h.kafka)
+	state, err := h.reader.Load(ctx)
 	if err != nil {
 		return view{}, err
 	}
@@ -189,7 +193,7 @@ func (h *Host) load(ctx context.Context) (view, error) {
 	for pool := range state.Entitlements[h.tenant] {
 		maps.Copy(topics, admin.PoolKeyTopics(state, pool))
 	}
-	keys, err := admin.ReadKeys(ctx, h.kafka, topics)
+	keys, err := h.reader.ReadKeys(ctx, topics)
 	if err != nil {
 		return view{}, err
 	}
@@ -245,21 +249,27 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	// Connect folds the key topic only when <host_key>.next exists, and receivers refuse a task under any key but the
 	// current one without writing a status.
 	owner := signed.HostOwner(h.tenant, h.host)
-	keys, err := admin.ReadKeys(ctx, h.kafka, map[string]string{owner: admin.HostTopic(h.tenant, h.host)})
-	if err != nil {
+	var keys signed.Keys
+	var v view
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() (err error) {
+		keys, err = h.reader.ReadKeys(groupCtx, map[string]string{owner: admin.HostTopic(h.tenant, h.host)})
+		return err
+	})
+	group.Go(func() (err error) {
+		v, err = h.load(groupCtx)
+		return err
+	})
+	if err := group.Wait(); err != nil {
 		return SubmitResult{}, err
 	}
 	if current := keys[owner].Current; current == nil || !current.Equal(h.key.Public()) {
 		return SubmitResult{}, errors.New("the host key is not the current key of this host's key topic: when <host_key>.next exists, the next wherry command completes the interrupted wherry key rotate; otherwise this host was re-keyed elsewhere and needs wherry init on a re-provisioned host")
 	}
-	v, err := h.load(ctx)
-	if err != nil {
-		return SubmitResult{}, err
-	}
 	now := time.Now()
 	// A receiver keeps its plugin's declared limit through a restart, so an advertisement of any age counts for the
 	// adapter limit; placement takes live ones alone.
-	declared, err := admin.ReadAdvertisements(ctx, h.kafka, v.state, v.keys, now, math.MaxInt64)
+	declared, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, now, math.MaxInt64)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -471,7 +481,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 		return nil, err
 	}
 	now := time.Now()
-	ads, err := admin.ReadAdvertisements(ctx, h.kafka, v.state, v.keys, now, math.MaxInt64)
+	ads, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, now, math.MaxInt64)
 	if err != nil {
 		return nil, err
 	}

@@ -442,7 +442,9 @@ func TestLoadNamesALaterReleasesRecord(t *testing.T) {
 	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := readRaw(ctx, service.Operator)
+	reader := NewReader(service.Operator)
+	t.Cleanup(reader.Close)
+	raw, err := readRaw(ctx, reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +455,7 @@ func TestLoadNamesALaterReleasesRecord(t *testing.T) {
 	if _, err := service.LoadState(ctx); !errors.Is(err, ErrNewerRecord) || strings.Contains(err.Error(), "wherry admin skip") {
 		t.Fatalf("load over a later release's record: %v; want ErrNewerRecord and no skip advice", err)
 	}
-	raw, err = readRaw(ctx, service.Operator)
+	raw, err = readRaw(ctx, reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +489,9 @@ func TestAdminSkipRecoversOnlyUndecodableRecords(t *testing.T) {
 	if _, err := service.LoadState(ctx); err == nil || !strings.Contains(err.Error(), "sha256="+hash) {
 		t.Fatalf("loaded state over an uncovered undecodable record: %v", err)
 	}
-	raw, err := readRaw(ctx, service.Operator)
+	reader := NewReader(service.Operator)
+	t.Cleanup(reader.Close)
+	raw, err := readRaw(ctx, reader)
 	if err != nil {
 		t.Fatal(err)
 	}

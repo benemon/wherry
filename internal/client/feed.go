@@ -25,6 +25,7 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"golang.org/x/sync/errgroup"
 )
 
 // AwaitResult is the accepted outcome of a run; Task is nil when a status record ended it.
@@ -158,18 +159,20 @@ func newRunView(h *Host, v view, runID string, local *runRecord) *runView {
 	return r
 }
 
-// authorize runs check, and once per kid runs it again after re-reading the whole view, when the kid's owner is not
-// in it, or the owner's key topic, when the kid names a key other than a live entitled member's current one.
-func authorize[T any](ctx context.Context, r *runView, value []byte, check func(view) (T, error)) (T, error) {
+// parseHistory verifies a feed record; a test counts verifications through it.
+var parseHistory = wire.ParseHistory
+
+// authorize runs check on a record signed under kid, and once per kid runs it again after re-reading the whole view,
+// when the kid's owner is not in it, or the owner's key topic, when the kid names a key other than a live entitled
+// member's current one.
+func authorize[T any](ctx context.Context, r *runView, kid string, check func(view) (T, error)) (T, error) {
 	result, err := check(r.v)
 	if err == nil {
 		return result, nil
 	}
-	jws, parseErr := jose.ParseSignedCompact(string(value), []jose.SignatureAlgorithm{jose.EdDSA})
-	if parseErr != nil || len(jws.Signatures) != 1 {
+	if kid == "" {
 		return result, err
 	}
-	kid := jws.Signatures[0].Protected.KeyID
 	owner, keyID, _ := strings.Cut(kid, "/")
 	if r.reread[kid] {
 		return result, err
@@ -188,7 +191,7 @@ func authorize[T any](ctx context.Context, r *runView, value []byte, check func(
 	if r.v.state.Ended[admin.ReceiverPrincipal(owner)] || !r.v.state.Entitlements[r.h.tenant][config.Pool] || current != nil && signed.KeyID(current) == keyID {
 		return result, err
 	}
-	keys, readErr := admin.ReadKeys(ctx, r.h.kafka, map[string]string{owner: admin.ReceiverTopic(owner)})
+	keys, readErr := r.h.reader.ReadKeys(ctx, map[string]string{owner: admin.ReceiverTopic(owner)})
 	if readErr != nil {
 		return result, err
 	}
@@ -196,11 +199,11 @@ func authorize[T any](ctx context.Context, r *runView, value []byte, check func(
 	return check(r.v)
 }
 
-// addEcho keeps an echo of the run, reporting whether record was one.
-func (r *runView) addEcho(ctx context.Context, record *kgo.Record) bool {
+// addEcho keeps an echo of the run signed under kid, reporting whether record was one.
+func (r *runView) addEcho(ctx context.Context, record *kgo.Record, kid string) bool {
 	value := record.Value
-	echo, err := authorize(ctx, r, value, func(v view) (wire.Echo, error) {
-		return admin.AuthorizeEcho(wire.ParseHistory(record.Timestamp), v.state, v.keys, value, r.h.tenant)
+	echo, err := authorize(ctx, r, kid, func(v view) (wire.Echo, error) {
+		return admin.AuthorizeEcho(parseHistory(record.Timestamp), v.state, v.keys, value, r.h.tenant)
 	})
 	if err != nil || echo.Run != r.run {
 		return false
@@ -216,40 +219,48 @@ func (r *runView) addEcho(ctx context.Context, record *kgo.Record) bool {
 	return true
 }
 
-// add keeps a status, chunk or result of the run; a record keyed by the run that is none of them counts as unread.
-func (r *runView) add(ctx context.Context, record *kgo.Record) {
+// add keeps a status, chunk, output or result of the run, authorised as the record type typ its JWS header names and
+// signed under kid; a record keyed by the run that is none of them counts as unread.
+func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) {
 	value := record.Value
-	history := wire.ParseHistory(record.Timestamp)
+	history := parseHistory(record.Timestamp)
 	if r.pool != "" {
-		if status, err := authorize(ctx, r, value, func(v view) (wire.RunStatus, error) {
-			return admin.AuthorizeStatus(history, v.state, v.keys, value, r.pool, r.h.tenant)
-		}); err == nil && status.Wherry.Run == r.run {
-			r.entries = append(r.entries, entry{receiver: status.Wherry.Receiver, status: &status})
-			return
-		}
-		if chunk, err := authorize(ctx, r, value, func(v view) (wire.Chunk, error) {
-			return admin.AuthorizeChunk(history, v.state, v.keys, value, r.pool, r.h.tenant)
-		}); err == nil && chunk.Wherry.Run == r.run {
-			r.entries = append(r.entries, entry{receiver: chunk.Wherry.Receiver, chunk: &chunk})
-			return
-		}
-		if output, err := authorize(ctx, r, value, func(v view) (wire.Output, error) {
-			return admin.AuthorizeOutput(history, v.state, v.keys, value, r.pool, r.h.tenant)
-		}); err == nil && output.Wherry.Run == r.run {
-			r.entries = append(r.entries, entry{receiver: output.Wherry.Receiver, output: &output})
-			return
-		}
-		if result, err := authorize(ctx, r, value, func(v view) (wire.Result, error) {
-			return admin.AuthorizeResult(history, v.state, v.keys, value, r.pool, r.h.tenant)
-		}); err == nil && result.Wherry.Run == r.run {
-			r.entries = append(r.entries, entry{receiver: result.Wherry.Receiver, result: &result})
-			return
-		}
-		// Answer reads seal requests; they shape no outcome.
-		if request, err := authorize(ctx, r, value, func(v view) (wire.SealRequest, error) {
-			return admin.AuthorizeSealRequest(v.state, v.keys, value, r.pool, r.h.tenant)
-		}); err == nil && request.Run == r.run {
-			return
+		switch typ {
+		case wire.StatusType:
+			if status, err := authorize(ctx, r, kid, func(v view) (wire.RunStatus, error) {
+				return admin.AuthorizeStatus(history, v.state, v.keys, value, r.pool, r.h.tenant)
+			}); err == nil && status.Wherry.Run == r.run {
+				r.entries = append(r.entries, entry{receiver: status.Wherry.Receiver, status: &status})
+				return
+			}
+		case wire.ChunkType:
+			if chunk, err := authorize(ctx, r, kid, func(v view) (wire.Chunk, error) {
+				return admin.AuthorizeChunk(history, v.state, v.keys, value, r.pool, r.h.tenant)
+			}); err == nil && chunk.Wherry.Run == r.run {
+				r.entries = append(r.entries, entry{receiver: chunk.Wherry.Receiver, chunk: &chunk})
+				return
+			}
+		case wire.OutputType:
+			if output, err := authorize(ctx, r, kid, func(v view) (wire.Output, error) {
+				return admin.AuthorizeOutput(history, v.state, v.keys, value, r.pool, r.h.tenant)
+			}); err == nil && output.Wherry.Run == r.run {
+				r.entries = append(r.entries, entry{receiver: output.Wherry.Receiver, output: &output})
+				return
+			}
+		case wire.ResultType:
+			if result, err := authorize(ctx, r, kid, func(v view) (wire.Result, error) {
+				return admin.AuthorizeResult(history, v.state, v.keys, value, r.pool, r.h.tenant)
+			}); err == nil && result.Wherry.Run == r.run {
+				r.entries = append(r.entries, entry{receiver: result.Wherry.Receiver, result: &result})
+				return
+			}
+		case wire.SealRequestType:
+			// Answer reads seal requests; they shape no outcome.
+			if request, err := authorize(ctx, r, kid, func(v view) (wire.SealRequest, error) {
+				return admin.AuthorizeSealRequest(v.state, v.keys, value, r.pool, r.h.tenant)
+			}); err == nil && request.Run == r.run {
+				return
+			}
 		}
 	}
 	if string(record.Key) == r.run {
@@ -257,18 +268,31 @@ func (r *runView) add(ctx context.Context, record *kgo.Record) {
 	}
 }
 
-// read takes a bounded read of the feed: echoes first, so a status committed before its run's echo still binds.
+// read takes a bounded read of the feed: echoes first, so a status committed before its run's echo still binds. Each
+// record goes to the one check its JWS type names.
 func (r *runView) read(ctx context.Context, records []*kgo.Record) {
+	types, kids := make([]string, len(records)), make([]string, len(records))
 	echoes := make([]bool, len(records))
 	for i, record := range records {
-		echoes[i] = r.addEcho(ctx, record)
+		types[i], kids[i] = header(record.Value)
+		echoes[i] = types[i] == wire.EchoType && r.addEcho(ctx, record, kids[i])
 	}
 	for i, record := range records {
 		if !echoes[i] {
-			r.add(ctx, record)
+			r.add(ctx, record, types[i], kids[i])
 		}
 	}
 	r.derive()
+}
+
+// header returns the record type and kid of value's JWS header, empty when value is no single-signature JWS.
+func header(value []byte) (string, string) {
+	jws, err := jose.ParseSignedCompact(string(value), []jose.SignatureAlgorithm{jose.EdDSA})
+	if err != nil || len(jws.Signatures) != 1 {
+		return "", ""
+	}
+	typ, _ := jws.Signatures[0].Protected.ExtraHeaders[jose.HeaderType].(string)
+	return typ, jws.Signatures[0].Protected.KeyID
 }
 
 // derive binds the kept records to the run against the current view, dropping those from a receiver that is no longer a
@@ -342,10 +366,6 @@ func (r *runView) derive() {
 }
 
 func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
-	v, err := h.load(ctx)
-	if err != nil {
-		return nil, err
-	}
 	local, err := h.localRun(runID)
 	if err != nil {
 		return nil, err
@@ -353,12 +373,29 @@ func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
 	h.followMu.Lock()
 	f := h.follower
 	h.followMu.Unlock()
-	records, _, err := h.readFeed(ctx, f, local.feedOffset())
-	if err != nil {
+	var v view
+	var records []*kgo.Record
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() (err error) {
+		v, err = h.load(groupCtx)
+		return err
+	})
+	group.Go(func() (err error) {
+		records, _, err = h.readFeed(groupCtx, f, local.feedOffset())
+		return err
+	})
+	if err := group.Wait(); err != nil {
 		return nil, err
 	}
+	// As Runs groups the feed, a record keyed by another run is never this run's.
+	var keyed []*kgo.Record
+	for _, record := range records {
+		if string(record.Key) == runID {
+			keyed = append(keyed, record)
+		}
+	}
 	r := newRunView(h, v, runID, local)
-	r.read(ctx, records)
+	r.read(ctx, keyed)
 	return r, nil
 }
 
@@ -420,7 +457,7 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 	}
 	// Below the log start the follower's read position never reaches the committed end.
 	starts.Each(func(logStart kadm.ListedOffset) { start = max(start, logStart.Offset) })
-	reader, err := kgo.NewClient(append(slices.Clone(h.kafka.Opts()), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.KeepControlRecords(),
+	reader, err := kgo.NewClient(append(slices.Clone(h.kafka.Opts()), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.KeepControlRecords(), kgo.DisableClientMetrics(),
 		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: {partition: kgo.NewOffset().At(start)}}))...)
 	if err != nil {
 		return nil, err
@@ -497,11 +534,11 @@ func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.
 			return nil, 0, ctx.Err()
 		}
 	}
-	records, err := admin.ReadTopicFrom(ctx, h.kafka, topic, offset)
+	records, err := h.reader.ReadFrom(ctx, topic, offset)
 	if err != nil {
 		return nil, 0, err
 	}
-	// ReadTopicFrom reads to its own, possibly later, bound, so what follows starts after its last record.
+	// ReadFrom reads to its own, possibly later, bound, so what follows starts after its last record.
 	for _, record := range records {
 		end = max(end, record.Offset+1)
 	}
@@ -550,7 +587,7 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 	if err != nil {
 		return RunsResult{}, err
 	}
-	records, err := admin.ReadTopic(ctx, h.kafka, admin.TenantTopic(h.tenant))
+	records, err := h.reader.ReadFrom(ctx, admin.TenantTopic(h.tenant), 0)
 	if err != nil {
 		return RunsResult{}, err
 	}
@@ -867,8 +904,8 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		next = max(next, read)
 		kept, unread := len(r.entries), r.unread
 		for _, record := range records {
-			if !r.addEcho(waitCtx, record) {
-				r.add(waitCtx, record)
+			if typ, kid := header(record.Value); typ != wire.EchoType || !r.addEcho(waitCtx, record, kid) {
+				r.add(waitCtx, record, typ, kid)
 			}
 		}
 		if len(r.entries) == kept && r.unread == unread {

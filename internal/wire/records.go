@@ -232,13 +232,22 @@ type StartFailure struct {
 	Class   string          `json:"class"`
 }
 
+// The JWS types of the tenant feed's records, which a reader of the feed routes each record by.
+const (
+	StatusType = "application/vnd.wherry.status.v1+jws"
+	ChunkType  = "application/vnd.wherry.chunk.v1+jws"
+	ResultType = "application/vnd.wherry.result.v1+jws"
+	OutputType = "application/vnd.wherry.output.v1+jws"
+	EchoType   = "application/vnd.wherry.echo.v1+jws"
+)
+
 func (*Submission) jwsType() string    { return "application/vnd.wherry.submission.v1+jws" }
 func (*Cancel) jwsType() string        { return "application/vnd.wherry.cancel.v1+jws" }
-func (*RunStatus) jwsType() string     { return "application/vnd.wherry.status.v1+jws" }
-func (*Chunk) jwsType() string         { return "application/vnd.wherry.chunk.v1+jws" }
-func (*Result) jwsType() string        { return "application/vnd.wherry.result.v1+jws" }
-func (*Output) jwsType() string        { return "application/vnd.wherry.output.v1+jws" }
-func (*Echo) jwsType() string          { return "application/vnd.wherry.echo.v1+jws" }
+func (*RunStatus) jwsType() string     { return StatusType }
+func (*Chunk) jwsType() string         { return ChunkType }
+func (*Result) jwsType() string        { return ResultType }
+func (*Output) jwsType() string        { return OutputType }
+func (*Echo) jwsType() string          { return EchoType }
 func (*Advertisement) jwsType() string { return "application/vnd.wherry.advertisement.v1+jws" }
 func (*StartFailure) jwsType() string  { return "application/vnd.wherry.start-failure.v1+jws" }
 func (*SealRequest) jwsType() string   { return SealRequestType }

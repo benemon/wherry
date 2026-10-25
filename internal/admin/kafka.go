@@ -94,6 +94,7 @@ func KafkaOpts(broker string, ca []byte, user, password string) ([]kgo.Opt, erro
 		kgo.SeedBrokers(broker),
 		kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
 		kgo.SASL(scram.Auth{User: user, Pass: password}.AsSha512Mechanism()),
+		kgo.DisableClientMetrics(),
 	}, nil
 }
 
@@ -310,7 +311,9 @@ func (service *Service) LoadState(ctx context.Context) (State, error) {
 // offset, bound to its SHA-256. It writes directly: loading state fails until
 // the skip exists.
 func (service *Service) Skip(ctx context.Context, offset int64, hash string) error {
-	raw, err := readRaw(ctx, service.Operator)
+	reader := NewReader(service.Operator)
+	defer reader.Close()
+	raw, err := readRaw(ctx, reader)
 	if err != nil {
 		return err
 	}

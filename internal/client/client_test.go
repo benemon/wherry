@@ -11,12 +11,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,9 +77,9 @@ func testTerms() admin.Terms {
 	}
 }
 
-func newFixtureNoHost(t *testing.T) *fixture {
+func newFixtureNoHost(t *testing.T, opts ...kfake.Opt) *fixture {
 	t.Helper()
-	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("PLAIN", "wherry.operator", "operator-password"))
+	cluster := kfake.MustCluster(append([]kfake.Opt{kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("PLAIN", "wherry.operator", "operator-password")}, opts...)...)
 	t.Cleanup(cluster.Close)
 	if err := cluster.CreateTopic(admin.AdminTopic, 1, nil); err != nil {
 		t.Fatal(err)
@@ -99,9 +101,9 @@ func newFixtureNoHost(t *testing.T) *fixture {
 	return f
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t *testing.T, opts ...kfake.Opt) *fixture {
 	t.Helper()
-	f := newFixtureNoHost(t)
+	f := newFixtureNoHost(t, opts...)
 	f.stateDir = t.TempDir()
 	f.secret = filepath.Join(t.TempDir(), "model")
 	if err := os.WriteFile(f.secret, []byte("model-token"), 0o600); err != nil {
@@ -137,7 +139,7 @@ func (f *fixture) connect(t *testing.T, path string) (*kgo.Client, string) {
 		t.Fatal(err)
 	}
 	kafka, err := kgo.NewClient(kgo.SeedBrokers(f.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
-		kgo.FetchMaxWait(10*time.Millisecond), kgo.FetchIsolationLevel(kgo.ReadCommitted()))
+		kgo.FetchMaxWait(10*time.Millisecond), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.DisableClientMetrics())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1719,5 +1721,127 @@ func TestRunHistoryStartsAtTheFeedOffsetOfItsSubmission(t *testing.T) {
 	r, err := f.host.history(f.ctx, submitted.RunID)
 	if err != nil || r.status().Status.State != wire.TaskStateWorking || r.skipped != 0 {
 		t.Fatalf("history %v; want WORKING with nothing skipped, the earlier record unread", err)
+	}
+}
+
+// A host opens a few connections for wherry status and wherry submit with three receivers on one broker, where a client
+// per topic read opened 17 and 21.
+func TestStatusAndSubmitShareConnections(t *testing.T) {
+	f := newFixture(t, kfake.NumBrokers(1))
+	for _, id := range []string{"receiver-a", "receiver-b", "receiver-c"} {
+		f.addReceiver(t, id, "pool-a").advertise(t, f.ctx, nil)
+	}
+	_, task := f.admitted(t)
+	for _, c := range []struct {
+		name      string
+		limit     int64
+		operation func(*Host) error
+	}{
+		{"status", 6, func(h *Host) error {
+			_, err := h.Status(f.ctx, task.submission.Wherry.Run)
+			return err
+		}},
+		{"submit", 7, func(h *Host) error {
+			_, err := h.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Deadline: 30 * time.Minute, QueueDeadline: 10 * time.Minute})
+			return err
+		}},
+	} {
+		var dials atomic.Int64
+		var dialer net.Dialer
+		kafka, err := kgo.NewClient(append(f.host.kafka.Opts(), kgo.Dialer(func(ctx context.Context, network, host string) (net.Conn, error) {
+			dials.Add(1)
+			return dialer.DialContext(ctx, network, host)
+		}))...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := NewHost(kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = c.operation(h)
+		h.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if n := dials.Load(); n > c.limit {
+			t.Errorf("%s opened %d connections; want at most %d", c.name, n, c.limit)
+		}
+	}
+}
+
+// A run's history passes over records keyed by other runs without verifying them.
+func TestHistorySkipsOtherRunsRecords(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	run := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, run, receiver.chunk(t, task, 1, 0), receiver.chunk(t, task, 1, 5))
+	var verifications atomic.Int64
+	parseHistory = func(appended time.Time) func([]byte, signed.Keys, wire.Record) error {
+		parse := wire.ParseHistory(appended)
+		return func(encoded []byte, keys signed.Keys, value wire.Record) error {
+			verifications.Add(1)
+			return parse(encoded, keys, value)
+		}
+	}
+	t.Cleanup(func() { parseHistory = wire.ParseHistory })
+	read := func() (StatusResult, TranscriptResult, int64) {
+		t.Helper()
+		verifications.Store(0)
+		status, err := f.host.Status(f.ctx, run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		transcript, err := f.host.Transcript(f.ctx, run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return status, transcript, verifications.Load()
+	}
+	status, transcript, verified := read()
+	if status.Status.State != wire.TaskStateWorking || len(transcript.Lines) != 2 || verified == 0 {
+		t.Fatalf("status %s, %d transcript lines, %d verifications", status.Status.State, len(transcript.Lines), verified)
+	}
+	for i := range 10 {
+		other := task
+		other.submission.Wherry.Run = fmt.Sprintf("run-other-%d", i)
+		values := make([][]byte, 100)
+		for j := range values {
+			values[j] = receiver.status(t, other, 1, fmt.Sprintf("heartbeat-%d", j), "heartbeat", wire.TaskStateWorking, nil)
+		}
+		receiver.feed(t, f.ctx, other.submission.Wherry.Run, values...)
+	}
+	afterStatus, afterTranscript, afterVerified := read()
+	if !reflect.DeepEqual(afterStatus, status) || !reflect.DeepEqual(afterTranscript, transcript) {
+		t.Fatalf("after 1,000 records of other runs: status %+v, transcript %+v; want %+v, %+v", afterStatus, afterTranscript, status, transcript)
+	}
+	if afterVerified != verified {
+		t.Fatalf("%d verifications after 1,000 records of other runs; want %d", afterVerified, verified)
+	}
+}
+
+// A failed read of one receiver's key topic fails the whole load, so nothing is placed on the keys the other reads
+// returned.
+func TestFailedKeyReadFailsTheLoad(t *testing.T) {
+	f := newFixture(t)
+	for _, id := range []string{"receiver-a", "receiver-b", "receiver-c"} {
+		f.addReceiver(t, id, "pool-a").advertise(t, f.ctx, nil)
+	}
+	deleted, err := kadm.NewClient(f.service.Admin).DeleteTopics(f.ctx, admin.ReceiverTopic("receiver-b"))
+	if err == nil {
+		err = deleted.Error()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := f.tasksEnd(t, "pool-a")
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Deadline: 30 * time.Minute, QueueDeadline: 10 * time.Minute}); err == nil {
+		t.Fatal("submitted over a key load missing a receiver's keys")
+	}
+	if end := f.tasksEnd(t, "pool-a"); end != tasks {
+		t.Fatalf("task topic end %d; want %d", end, tasks)
+	}
+	if receivers, err := f.host.Receivers(f.ctx); err == nil {
+		t.Fatalf("listed %d receivers over a key load missing a receiver's keys", len(receivers))
 	}
 }

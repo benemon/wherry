@@ -1017,7 +1017,9 @@ func (f fixture) advertisedOffers(t *testing.T) wire.Advertisement {
 	if err != nil {
 		t.Fatal(err)
 	}
-	latest, err := admin.ReadAdvertisements(f.ctx, f.service.Admin, state, f.keys(), time.Now(), 2*time.Minute)
+	reader := admin.NewReader(f.service.Admin)
+	defer reader.Close()
+	latest, err := reader.ReadAdvertisements(f.ctx, state, f.keys(), time.Now(), 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
