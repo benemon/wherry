@@ -1,9 +1,11 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -124,7 +126,9 @@ func TestReadAdvertisementsKeepsLatestLiveAuthorised(t *testing.T) {
 	advertise("receiver-b", "pool-b", now.Add(-time.Hour), 3)
 	advertise("receiver-b", "pool-a", now, 4)
 	advertise("receiver-a", "pool-a", now.Add(time.Hour), 5)
-	latest, err := ReadAdvertisements(ctx, client, state, keys, now, 2*time.Minute)
+	reader := NewReader(client)
+	defer reader.Close()
+	latest, err := reader.ReadAdvertisements(ctx, state, keys, now, 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,5 +177,88 @@ func TestReadTopicLeavesTheClientsOptionsUnwritten(t *testing.T) {
 	}
 	if slices.ContainsFunc(opts[len(opts):cap(opts)], func(opt kgo.Opt) bool { return opt != nil }) {
 		t.Fatal("ReadTopic wrote its reader's options into the client's")
+	}
+}
+
+// ReadAdvertisements verifies each receiver's records newest first and stops at the first that authorises, which is
+// the receiver's latest authorised record by time, the later of equal times, as verifying every record finds.
+func TestReadAdvertisementsVerifiesNewestFirst(t *testing.T) {
+	state := modelState(t)
+	ended := state
+	ended.Ended = map[string]bool{ReceiverPrincipal("receiver-b"): true}
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}, "receiver-b": {Current: key.Public().(ed25519.PublicKey)}}
+	now := time.UnixMilli(1_800_000_000_000)
+	liveness := 2 * time.Minute
+	advertisement := func(receiver, pool string, age time.Duration, capacity int64) []byte {
+		return sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Agent: "agent-a"}}, Capacity: capacity, AtMS: now.Add(-age).UnixMilli()}, key)
+	}
+	// forged is record's header and payload under other's signature, so its kid names the receiver's current key.
+	forged := func(record, other []byte) []byte {
+		parts := bytes.Split(record, []byte("."))
+		parts[2] = bytes.Split(other, []byte("."))[2]
+		return bytes.Join(parts, []byte("."))
+	}
+	for _, c := range []struct {
+		name    string
+		state   State
+		records [][]byte
+		want    map[string]int64
+	}{
+		{"newest valid", state, [][]byte{advertisement("receiver-a", "pool-a", 10*time.Second, 1), advertisement("receiver-a", "pool-a", 5*time.Second, 2)}, map[string]int64{"receiver-a": 2}},
+		{"newest forged", state, [][]byte{advertisement("receiver-a", "pool-a", 10*time.Second, 1), forged(advertisement("receiver-a", "pool-a", 5*time.Second, 9), advertisement("receiver-a", "pool-a", 10*time.Second, 1))}, map[string]int64{"receiver-a": 1}},
+		{"newest from an ended receiver", ended, [][]byte{advertisement("receiver-a", "pool-a", 10*time.Second, 1), advertisement("receiver-b", "pool-b", 10*time.Second, 2), advertisement("receiver-b", "pool-b", 5*time.Second, 3)}, map[string]int64{"receiver-a": 1}},
+		{"equal times", state, [][]byte{advertisement("receiver-a", "pool-a", 5*time.Second, 1), advertisement("receiver-a", "pool-a", 5*time.Second, 2)}, map[string]int64{"receiver-a": 2}},
+		{"none verify", state, [][]byte{forged(advertisement("receiver-a", "pool-a", 10*time.Second, 1), advertisement("receiver-b", "pool-b", 5*time.Second, 2)), forged(advertisement("receiver-b", "pool-b", 5*time.Second, 3), advertisement("receiver-a", "pool-a", 10*time.Second, 4))}, map[string]int64{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			client := readerCluster(t, ReceiversTopic)
+			ctx := context.Background()
+			// verified is the latest authorised record of each receiver found by verifying every record.
+			verified := map[string]wire.Advertisement{}
+			for _, value := range c.records {
+				if err := client.ProduceSync(ctx, &kgo.Record{Topic: ReceiversTopic, Value: value}).FirstErr(); err != nil {
+					t.Fatal(err)
+				}
+				advertisement, err := AuthorizeAdvertisement(c.state, keys, value)
+				if age := now.Sub(time.UnixMilli(advertisement.AtMS)); err != nil || age > liveness || age < -liveness {
+					continue
+				}
+				if previous, ok := verified[advertisement.Receiver]; !ok || advertisement.AtMS >= previous.AtMS {
+					verified[advertisement.Receiver] = advertisement
+				}
+			}
+			reader := NewReader(client)
+			defer reader.Close()
+			latest, err := reader.ReadAdvertisements(ctx, c.state, keys, now, liveness)
+			if err != nil {
+				t.Fatal(err)
+			}
+			capacities := map[string]int64{}
+			for receiver, advertisement := range latest {
+				capacities[receiver] = advertisement.Capacity
+			}
+			if !reflect.DeepEqual(latest, verified) || !reflect.DeepEqual(capacities, c.want) {
+				t.Fatalf("advertisements %+v; want %+v with capacities %v", latest, verified, c.want)
+			}
+		})
+	}
+}
+
+// A failed read of one key topic fails ReadKeys whole, with no keys from the reads that succeeded.
+func TestReadKeysFailsWholeOnOneFailedRead(t *testing.T) {
+	client := readerCluster(t, "keys-a")
+	ctx := context.Background()
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	registration, err := signed.RegisterKey("receiver-a", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ProduceSync(ctx, &kgo.Record{Topic: "keys-a", Value: registration}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := ReadKeys(ctx, client, map[string]string{"receiver-a": "keys-a", "receiver-b": "keys-missing"})
+	if err == nil || keys != nil {
+		t.Fatalf("keys %v, %v; want an error and no keys", keys, err)
 	}
 }

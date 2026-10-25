@@ -264,7 +264,8 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 		retry("run %s: read the run for a seal request: %v", runID, err)
 		return false
 	}
-	request, err := authorize(ctx, r, encoded, func(v view) (wire.SealRequest, error) {
+	_, kid := header(encoded)
+	request, err := authorize(ctx, r, kid, func(v view) (wire.SealRequest, error) {
 		return admin.AuthorizeSealRequest(v.state, v.keys, encoded, r.pool, h.tenant)
 	})
 	if err != nil {
