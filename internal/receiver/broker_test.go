@@ -20,6 +20,7 @@ import (
 	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -115,7 +116,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 	logs := &syncBuffer{}
 	adapter := &fakeAdapter{stream: noResultStream, endDelay: time.Minute}
 	r := &Receiver{id: receiverID, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
+		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: adapter}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
@@ -177,8 +178,8 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
-	credential := filepath.Join(t.TempDir(), credentialName)
-	if err := os.WriteFile(credential, []byte(testToken), 0o600); err != nil {
+	credentialFile := filepath.Join(t.TempDir(), credentialName)
+	if err := os.WriteFile(credentialFile, []byte(testToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	hostLogs := &syncBuffer{}
@@ -187,7 +188,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), map[string]client.Source{credentialName: {File: credential}}, nil, log.New(hostLogs, "", 0))
+	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), map[string]credential.Source{credentialName: {File: credentialFile}}, nil, log.New(hostLogs, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +204,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	logs := &syncBuffer{}
 	adapter := &fakeAdapter{stream: resultStream}
 	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
+		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: adapter}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
@@ -250,7 +251,7 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The host configures the credential, so submit takes the run, but its source never resolves.
-	unresolved := map[string]client.Source{credentialName: {Env: "WHERRY_TEST_UNSET_" + b.host}}
+	unresolved := map[string]credential.Source{credentialName: {Env: "WHERRY_TEST_UNSET_" + b.host}}
 	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), unresolved, nil, log.New(&syncBuffer{}, "", 0))
 	if err != nil {
 		t.Fatal(err)
@@ -267,7 +268,7 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 	logs := &syncBuffer{}
 	fake := &fakeAdapter{stream: resultStream}
 	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
+		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
@@ -335,8 +336,8 @@ func TestFilesOnRealBroker(t *testing.T) {
 	input := make([]byte, 480<<10)
 	rand.Read(input)
 	dir := t.TempDir()
-	credential, deployKey := filepath.Join(dir, credentialName), filepath.Join(dir, "deploy-key")
-	if err := os.WriteFile(credential, []byte(testToken), 0o600); err != nil {
+	credentialFile, deployKey := filepath.Join(dir, credentialName), filepath.Join(dir, "deploy-key")
+	if err := os.WriteFile(credentialFile, []byte(testToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(deployKey, []byte(deployValue), 0o600); err != nil {
@@ -349,7 +350,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(),
-		map[string]client.Source{credentialName: {File: credential}, "deploy-key": {File: deployKey}}, nil, log.New(hostLogs, "", 0))
+		map[string]credential.Source{credentialName: {File: credentialFile}, "deploy-key": {File: deployKey}}, nil, log.New(hostLogs, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +376,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	}
 	fake := &fakeAdapter{stream: resultStream, outputs: outputs}
 	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
+		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
@@ -433,8 +434,8 @@ func TestGitInputOnRealBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	credential, deployKey := filepath.Join(dir, credentialName), filepath.Join(dir, "deploy-key")
-	if err := os.WriteFile(credential, []byte(testToken), 0o600); err != nil {
+	credentialFile, deployKey := filepath.Join(dir, credentialName), filepath.Join(dir, "deploy-key")
+	if err := os.WriteFile(credentialFile, []byte(testToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(deployKey, []byte(deployValue), 0o600); err != nil {
@@ -451,7 +452,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(),
-		map[string]client.Source{credentialName: {File: credential}, "deploy-key": {File: deployKey}},
+		map[string]credential.Source{credentialName: {File: credentialFile}, "deploy-key": {File: deployKey}},
 		[]client.GitCredential{{URL: "ssh://git@git.example.test/", Credential: "deploy-key", HostKey: hostKeyFile}}, log.New(hostLogs, "", 0))
 	if err != nil {
 		t.Fatal(err)
@@ -469,7 +470,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	patch := []byte("From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n")
 	fake := &fakeAdapter{stream: resultStream, outputs: []adapter.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
 	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
+		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)

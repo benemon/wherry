@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -87,12 +88,12 @@ type CancelResult struct {
 	Skipped int
 }
 
-// Receiver describes a receiver of a pool the tenant is entitled to, its adapters as wherry.admin records them and its
+// Receiver describes a receiver of a pool the tenant is entitled to, its profiles as wherry.admin records them and its
 // latest advertisement.
 type Receiver struct {
 	ReceiverID   string    `json:"receiver_id"`
 	Pool         string    `json:"pool"`
-	Adapters     []Adapter `json:"adapters"`
+	Profiles     []Profile `json:"profiles"`
 	Capacity     int64     `json:"capacity"`
 	InFlight     int64     `json:"in_flight"`
 	HeartbeatAge string    `json:"heartbeat_age"`
@@ -100,10 +101,11 @@ type Receiver struct {
 	Ended        bool      `json:"ended"`
 }
 
-// Adapter is one adapter of a receiver: the agent and labels from its config record, the agent's models, default
-// model and credentials from its pool's terms, and whether the receiver's live advertisement offers it.
-type Adapter struct {
+// Profile is one profile of a receiver: its plugin type, agent and labels from its config record, the agent's models,
+// default model and credentials from its pool's terms, and whether the receiver's live advertisement offers it.
+type Profile struct {
 	Name         string            `json:"name"`
+	Plugin       string            `json:"plugin"`
 	Agent        string            `json:"agent"`
 	InlineLimit  int64             `json:"inline_limit,omitzero"`
 	Models       []string          `json:"models,omitzero"`
@@ -130,7 +132,7 @@ type Host struct {
 	tenant      string
 	host        string
 	stateDir    string
-	credentials map[string]Source
+	credentials map[string]credential.Source
 	git         []GitCredential
 	// storage is the host's S3 credential, nil when its configuration has none.
 	storage *StorageConfig
@@ -141,7 +143,7 @@ type Host struct {
 }
 
 // NewHost constructs a host over a plain Kafka connection authenticated as principal.
-func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir string, credentials map[string]Source, git []GitCredential, logger *log.Logger) (*Host, error) {
+func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir string, credentials map[string]credential.Source, git []GitCredential, logger *log.Logger) (*Host, error) {
 	// TenantPrincipal("", "") is the prefix and the separator between tenant and host.
 	names, prefixed := strings.CutPrefix(principal, strings.TrimSuffix(admin.TenantPrincipal("", ""), "."))
 	tenant, host, split := strings.Cut(names, ".")
@@ -304,7 +306,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	now := time.Now()
 	// A receiver keeps its plugin's declared limit through a restart, so an advertisement of any age counts for the
-	// adapter limit; placement takes live ones alone.
+	// profile limit; placement takes live ones alone.
 	declared, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, now, math.MaxInt64)
 	if err != nil {
 		return SubmitResult{}, err
@@ -358,10 +360,10 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 		stored = true
 	}
-	if limit, limiting := adapterInlineLimit(v.state, pool, placement, declared); limit > 0 {
+	if limit, limiting := profileInlineLimit(v.state, pool, placement, declared); limit > 0 {
 		if err := wire.ValidateInputs(input.Parts, limit); err != nil {
 			if !storable {
-				return SubmitResult{}, fmt.Errorf("%w: inline inputs are over adapter %s's %d-byte limit; a pool with storage and a host storage credential would carry the inputs through S3", ErrInvalidInput, limiting, limit)
+				return SubmitResult{}, fmt.Errorf("%w: inline inputs are over profile %s's %d-byte limit; a pool with storage and a host storage credential would carry the inputs through S3", ErrInvalidInput, limiting, limit)
 			}
 			toS3()
 		}
@@ -546,7 +548,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			continue
 		}
 		receiver := Receiver{
-			ReceiverID: id, Pool: config.Pool, Adapters: []Adapter{}, HeartbeatAge: "-", Status: "silent",
+			ReceiverID: id, Pool: config.Pool, Profiles: []Profile{}, HeartbeatAge: "-", Status: "silent",
 			Ended: v.state.Ended[admin.ReceiverPrincipal(id)],
 		}
 		ad, advertised := ads[id]
@@ -561,29 +563,29 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 				receiver.Status = "live"
 			}
 		}
-		for _, adapter := range config.Adapters {
+		for _, profile := range config.Profiles {
 			if receiver.Ended {
 				break
 			}
-			labels := adapter.Labels
+			labels := profile.Labels
 			if labels == nil {
 				labels = map[string]string{}
 			}
-			offerIndex := slices.IndexFunc(ad.Offers, func(offer wire.Offer) bool { return offer.Adapter == adapter.Name })
+			offerIndex := slices.IndexFunc(ad.Offers, func(offer wire.Offer) bool { return offer.Profile == profile.Name })
 			ready := receiver.Status == "live" && offerIndex >= 0
-			listed := Adapter{Name: adapter.Name, Agent: adapter.Agent, Labels: labels, Ready: ready}
+			listed := Profile{Name: profile.Name, Plugin: profile.Plugin, Agent: profile.Agent, Labels: labels, Ready: ready}
 			if offerIndex >= 0 {
 				listed.InlineLimit = ad.Offers[offerIndex].InlineLimit
 			}
 			agents := v.state.Pools[config.Pool].Agents
-			if index := slices.IndexFunc(agents, func(agent admin.AgentTerms) bool { return agent.Name == adapter.Agent }); index >= 0 {
+			if index := slices.IndexFunc(agents, func(agent admin.AgentTerms) bool { return agent.Name == profile.Agent }); index >= 0 {
 				listed.Models, listed.DefaultModel = agents[index].Models, agents[index].DefaultModel
 				for _, credential := range agents[index].Credentials {
 					_, configured := h.credentials[credential.Name]
 					listed.Credentials = append(listed.Credentials, Credential{Name: credential.Name, Optional: credential.Optional(), Configured: configured})
 				}
 			}
-			receiver.Adapters = append(receiver.Adapters, listed)
+			receiver.Profiles = append(receiver.Profiles, listed)
 		}
 		result = append(result, receiver)
 	}

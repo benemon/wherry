@@ -76,7 +76,7 @@ The [pool terms example](configuration.md#pool-terms-example) sets every field,
 as one file and as a `--config-dir` directory.
 
 - `delivery_limit` bounds how often the broker delivers one task. Each
-  start failure, and each member with no matching adapter, returns a task
+  start failure, and each member with no matching profile, returns a task
   to the pool and uses a delivery, so set it to at least the number of
   receivers in the pool, plus a margin. From attempt
   `delivery_limit` minus 1, a receiver ends a run it would return to the
@@ -115,10 +115,10 @@ as one file and as a `--config-dir` directory.
 - An agent's `models` lists the models a task may name for it, and its
   optional `default_model`, one of them, the one a task naming none runs.
   An agent with one model defaults to it; with two or more `models` and no
-  `default_model`, every task for the agent names a model. wherry does not interpret the names. The agent's adapters read the task's
+  `default_model`, every task for the agent names a model. wherry does not interpret the names. The agent's profiles read the task's
   model from `WHERRY_MODEL`, as in
   [Add a receiver](#add-a-receiver). Without `models` a task names no model
-  and the adapter's command sets it.
+  and the profile's command sets it.
 
 Running `pool create` again for an existing pool records the new terms.
 Adding or removing an agent's `models` rejects that agent's queued and
@@ -207,22 +207,25 @@ A tenant can be entitled to several pools; run `pool entitle` once per pool.
 
 ## Add a receiver
 
-A receiver's configuration lists its adapters in routing order. Each adapter
-launches one agent on a platform and carries the labels tasks select on. It
+A receiver's configuration lists the plugins it runs, keyed by adapter
+type, and each plugin's profiles in routing order. Each profile launches one
+agent through its plugin and carries the labels tasks select on. It
 delivers the agent's credentials at the targets the pool's terms give them,
-so no adapter names a credential. Two adapters can launch the same agent with
-different labels, such as one running in containers and one on the host.
+so no profile names an agent credential. Two profiles can launch the same
+agent with different labels, such as one running in containers and one on
+the host.
 
 Write the configuration as a directory:
 
 ```
 nomad-1/
   receiver.yaml
-  platforms/
-    nomad.yaml
-  adapters/
-    10-container.yaml
-    20-host.yaml
+  plugins/
+    nomad/
+      plugin.yaml
+      profiles/
+        10-container.yaml
+        20-host.yaml
 ```
 
 `receiver.yaml` holds the receiver's `capacity`:
@@ -231,24 +234,23 @@ nomad-1/
 capacity: 2
 ```
 
-Each file in `platforms/` names a platform, its adapter type and the
-connection settings its adapters share:
+`plugins/nomad/plugin.yaml` holds the `config` every profile of the Nomad
+plugin shares, here the cluster's connection settings and the name of the
+[platform credential](#platform-credentials) that authenticates to it:
 
 ```yaml
-name: nomad
-type: nomad
 config:
   address: https://nomad.example.com:4646
   ca_file: /etc/wherry/nomad-ca.pem
   namespace: agents
+  credential: nomad-token
 ```
 
-Each file in `adapters/` is one adapter on one of those platforms, with the
-settings particular to it:
+Each file in `plugins/nomad/profiles/` is one profile of the plugin, with
+the settings particular to it:
 
 ```yaml
 name: container
-platform: nomad
 agent: coder
 labels:
   isolation: container
@@ -263,10 +265,10 @@ config:
 `20-host.yaml` declares `name: host`, `labels` with `isolation: host`, and
 an `exec` runtime on a node pool whose nodes have the agent installed.
 
-The adapter files' names set routing order, lowest first, so a numeric
-prefix orders them. An adapter takes its platform's `type`, and its `config`
-is the platform's `config` plus its own. The two share no top-level key: a
-key set in both is an error. The
+The profile files' names set routing order within the plugin, lowest first,
+so a numeric prefix orders them. A profile's `config` is its plugin's
+`config` plus its own. The two share no top-level key: a key set in both is
+an error. The
 [directory layout](configuration.md#receiver-configuration-directory) lists
 every rule.
 
@@ -274,18 +276,20 @@ A single YAML file holding the whole
 [receiver configuration](configuration.md#receiver-configuration) also works in
 place of the directory.
 The [receiver configuration example](configuration.md#receiver-configuration-example)
-gives one configuration in both forms, with two platforms and two adapters.
+gives one configuration in both forms, with one plugin and two profiles.
 
-A task with no selector runs on the first ready adapter, `container` here,
-and `--selector isolation=host` runs on the second. Every member of a pool
-must honour the labels its adapters declare. The client places a task by
-one member's labels, but any member can claim it. A member with no
-matching adapter returns the task.
+A task with no selector runs on the first ready profile, `container` here,
+and `--selector isolation=host` runs on the second. A receiver running
+several plugins visits them in a fixed order, so give profiles of different
+plugins labels that tell them apart. Every member of a pool must honour the
+labels its profiles declare. The client places a task by one member's
+labels, but any member can claim it. A member with no matching profile
+returns the task.
 
 The [Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
 cover the `config` section.
 
-Every adapter runs its harness unchanged: the receiver reads no harness's
+Every profile runs its harness unchanged: the receiver reads no harness's
 output format, and the run ends when the job ends, with the outcome the
 agent writes as the prompt asks
 ([agent contract](configuration.md#agent-contract)).
@@ -300,7 +304,6 @@ allows. Without `--ephemeral`, Codex writes session files under
 
 ```yaml
 name: codex
-platform: nomad-codex
 agent: codex
 labels:
   isolation: host
@@ -317,7 +320,7 @@ config:
           --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
 ```
 
-An adapter whose agent has `models` in the pool's terms reads the task's
+A profile whose agent has `models` in the pool's terms reads the task's
 model from `WHERRY_MODEL`, which the plugin sets only when the task has a
 model, and falls back to a model of its own. The shell command sets the
 fallback first, `test -n "$WHERRY_MODEL" || WHERRY_MODEL=<model>;`, with a model
@@ -335,15 +338,37 @@ arguments.
      --config-dir nomad-1 --bundle-file nomad-1.bundle
    ```
 
-   When the platform does not issue the receiver's credential itself, add
-   `--platform-credential-file PLATFORM=FILE` to put a token in the bundle
-   for the adapters of one platform. Give it once for each platform that
-   needs one.
-
 2. Deliver the bundle to the receiver through the platform's secret
-   mechanism.
+   mechanism, and write the receiver's [local
+   configuration](configuration.md#receiver-local-configuration) with a
+   source for each [platform credential](#platform-credentials) its
+   profiles name.
 
 3. Start the receiver, as in [Run a receiver](#run-a-receiver).
+
+### Platform credentials
+
+A plugin that authenticates to its platform with a token takes it as a
+platform credential. The receiver configuration names the credential with
+`credential: <name>` beside the address it authenticates, normally in the
+plugin's `config`, and the receiver's [local
+configuration](configuration.md#receiver-local-configuration) maps the name
+to a [source](security.md#credential-sources) on the receiver's host, as a
+host's configuration maps its agent credentials:
+
+```yaml
+credentials:
+  nomad-token:
+    file: /etc/wherry/nomad-token
+```
+
+The source is a file readable by the receiver's user and its group alone,
+an environment variable, or a command such as a vault client's, resolved
+when the receiver configures the profile. It never reaches `wherry.admin` or
+the bundle. To rotate the token, replace the value at its source and
+restart the receiver; the bundle stays as it is. A profile that names no
+credential leaves the plugin to its own default, such as the Nomad plugin's
+`NOMAD_TOKEN`.
 
 ### Change a receiver's configuration
 
@@ -354,38 +379,42 @@ wherry admin receiver configure nomad-1 --config-dir nomad-1
 The receiver exits when it reads the new record at its next configuration check,
 which runs every 15 seconds, and its platform restarts it with the new
 configuration. Runs in flight are adopted on redelivery. When the new
-configuration renames the adapter or changes its agent, the run's job is stopped
+configuration renames the profile or changes its agent, the run's job is stopped
 and purged, and the run is dispatched again. The bundle and password do not
 change.
 
 ## Run a receiver
 
-`wherry receiver run --bundle-file FILE --state-dir DIR --plugin-dir DIR` needs:
+`wherry receiver run --config-file FILE` needs:
 
+- its [local configuration](configuration.md#receiver-local-configuration),
+  at `/etc/wherry/config.yaml` unless `--config-file` names another file;
 - the bundle, readable by the receiver alone;
 - a state directory that survives restarts. It holds the receiver's
   private keys, and a receiver that loses them cannot start under the same
   name again;
-- a plugin directory holding the plugin for every adapter type in its
-  configuration, as in [Install adapter plugins](#install-adapter-plugins);
+- a plugin directory holding the plugin of every plugin type in its
+  configuration, as in [Install plugins](#install-plugins);
+- a source for each [platform credential](#platform-credentials) its
+  profiles name;
 - a supervisor that restarts the process when it exits, since a
   configuration change ends it;
 - for the Nomad plugin, a Nomad token with the
-  [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy), from the bundle or `NOMAD_TOKEN`
+  [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy), from a platform credential or `NOMAD_TOKEN`
   in the receiver's environment.
 
 On first start the receiver logs `registered key: signing=<key id>`, then
-`configured: pool=<pool> adapters=<n> capacity=<n>`. It logs
+`configured: pool=<pool> profiles=<n> capacity=<n>`. It logs
 `waiting for configuration` while its record is missing. After its first
 advertisement, `wherry receivers` on a host of an entitled tenant shows it
 `live`.
 
-A plugin that exits is started again and its adapters configured again;
+A plugin that exits is started again and its profiles configured again;
 the receiver logs `plugin exited; restarting`, then `plugin restarted`.
-[Adapter plugins](commands.md#adapter-plugins) covers what runs in flight
+[Plugins](commands.md#plugins) covers what runs in flight
 meanwhile.
 
-### Install adapter plugins
+### Install plugins
 
 The receiver ships with no adapters. Each plugin has its own
 [wherry-plugins releases](https://github.com/benemon/wherry-plugins/releases),
@@ -423,7 +452,7 @@ The receiver refuses a plugin directory or binary owned by a user other
 than root or the receiver's, or that group or others can write, and a
 plugin that is not a regular file. It checks again before restarting a
 plugin. It exits with
-`adapter <name>: no plugin for type <type>` when a type's plugin is
+`profile <name>: no plugin for type <type>` when a type's plugin is
 missing. Install a new plugin version while the receiver is stopped, or
 restart the receiver after replacing it.
 
@@ -432,7 +461,9 @@ restart the receiver after replacing it.
 On Nomad, the receiver can run as a service job whose
 [workload identity](https://developer.hashicorp.com/nomad/docs/concepts/workload-identity)
 supplies `NOMAD_TOKEN`, with the bundle in a
-[Nomad variable](https://developer.hashicorp.com/nomad/docs/concepts/variables):
+[Nomad variable](https://developer.hashicorp.com/nomad/docs/concepts/variables)
+and a local configuration that names no credential source, so the plugin
+takes the workload identity's token:
 
 ```hcl
 job "wherry-receiver" {
@@ -450,13 +481,20 @@ job "wherry-receiver" {
 
       config {
         command = "/usr/local/bin/wherry"
-        args    = ["receiver", "--bundle-file", "${NOMAD_SECRETS_DIR}/bundle.yaml",
-                   "--state-dir", "${NOMAD_ALLOC_DIR}/data",
-                   "--plugin-dir", "/usr/local/libexec/wherry/plugins"]
+        args    = ["receiver", "run", "--config-file", "${NOMAD_TASK_DIR}/config.yaml"]
       }
 
       identity {
         env = true
+      }
+
+      template {
+        destination = "${NOMAD_TASK_DIR}/config.yaml"
+        data        = <<EOF
+bundle: {{ env "NOMAD_SECRETS_DIR" }}/bundle.yaml
+state_dir: {{ env "NOMAD_ALLOC_DIR" }}/data
+plugin_dir: /usr/local/libexec/wherry/plugins
+EOF
       }
 
       template {
@@ -474,7 +512,7 @@ job "wherry-receiver" {
 ```
 
 The plugin directory is the one installed on the node, as in
-[Install adapter plugins](#install-adapter-plugins). As the task sees them, root
+[Install plugins](#install-plugins). As the task sees them, root
 or the receiver's user must own the directory and the binary, neither group nor
 others may write them, and the binary must be a regular file. The plugin runs in
 the receiver's task with its environment, so the workload identity's
@@ -491,20 +529,20 @@ nomad acl policy apply -namespace agents -job wherry-receiver \
   wherry-receiver receiver-policy.hcl
 ```
 
-The adapter's `ca_file` is then `/secrets/nomad-ca.pem`, the path inside
+The plugin's `ca_file` is then `/secrets/nomad-ca.pem`, the path inside
 the task.
 
 ### Metrics
 
-Start the receiver with `--metrics-addr HOST:PORT` to serve its metrics at
+Set `metrics_addr` in the receiver's [local
+configuration](configuration.md#receiver-local-configuration) to serve its metrics at
 `/metrics` in the Prometheus text format. The endpoint is plain HTTP with no
 authentication, so bind it to an address only the scraper reaches, such as
 the receiver host's address on a monitoring network, or put an
 authenticating proxy in front of it:
 
-```sh
-wherry receiver run --bundle-file bundle.yaml --state-dir /var/lib/wherry \
-  --plugin-dir /usr/local/libexec/wherry/plugins --metrics-addr 10.0.8.21:9464
+```yaml
+metrics_addr: 10.0.8.21:9464
 ```
 
 Scrape it as any Prometheus target:
@@ -579,7 +617,7 @@ For a host:
 For a receiver, restart it once with `--rotate-key`:
 
 ```sh
-wherry receiver run --bundle-file nomad-1.bundle --rotate-key
+wherry receiver run --rotate-key
 ```
 
 It rotates `signing.key` before it claims anything and logs
@@ -614,9 +652,9 @@ It loads `wherry.admin`, validates every receiver configuration against its
 pool's current terms, checks that every pool's largest records still fit the
 broker's record limit, reports topic retention below the pool's required
 bounds, and confirms that every ACL the state calls for exists. It does not
-check an adapter's `type` or `config` section; at start the receiver finds the
-type's plugin, the plugin checks the section, and the receiver exits with
-`adapter <name>: ...` on an error. Run it after changing a pool's terms, since
+check a plugin's type or a profile's `config` section; at start the receiver
+finds the type's plugin, the plugin checks each profile's section, and the
+receiver exits with `profile <name>: ...` on an error. Run it after changing a pool's terms, since
 receivers keep the configuration they started with.
 
 ## Recover from an undecodable `wherry.admin` record
@@ -640,10 +678,10 @@ error says so, and upgrading `wherry` reads it.
 ## Inputs and outputs
 
 A run's outputs hold its `output_limit` in 256 entries at most. The broker's
-record limit and each adapter's declared limit bound a task's inline input
-files, as [`wherry submit`](commands.md#wherry-submit) describes; an adapter
-declares its limit through `InlineLimit`, and the receiver keeps the
-adapter's dispatch check as a backstop.
+record limit and each profile's declared limit bound a task's inline input
+files, as [`wherry submit`](commands.md#wherry-submit) describes; a plugin
+declares each profile's limit through `InlineLimit`, and the receiver keeps
+the plugin's dispatch check as a backstop.
 
 The agent creates `WHERRY_OUTPUT_DIR` when it writes its first output.
 Outputs are collected once the job ends and is stopped, whatever its exit
@@ -945,16 +983,31 @@ reports such records as written by a later release; do not skip them, upgrade
 it. A harness does not restart a running `wherry mcp` when its binary
 changes, so restart the MCP server after upgrading.
 
-Prerequisites: the new `wherry` binary, and each receiver's bundle and
-state directory.
+This release is a clean break. It renames the configured unit a task is
+placed on from adapter to profile, replaces the receiver configuration's
+`platforms` and `adapters` with `plugins` and their `profiles`, moves the
+receiver's settings from flags to its [local
+configuration](configuration.md#receiver-local-configuration), takes platform
+credentials from local sources in place of the bundle, and moves the adapter
+protocol to version 9. Hosts, receivers and plugins upgrade together, and an
+existing cluster is reset rather than migrated: rewrite each receiver
+configuration in the new form, add the receivers again, and write each
+receiver's local configuration with a source for every platform credential
+it names. Update dashboards and alerts keyed on the receiver metrics'
+`adapter` label to `profile`.
+
+Between releases that keep the record formats, upgrade in place.
+Prerequisites: the new `wherry` binary, and each receiver's local
+configuration, bundle and state directory.
 
 1. Replace the binary on every host and receiver host with the new
    release's, verified as in [Install wherry](quickstart.md#install-wherry).
 2. Replace the plugins in each receiver's plugin directory together with the
-   receiver binary, verified as in [Install adapter plugins](#install-adapter-plugins); a receiver refuses a plugin of another adapter protocol
-   version. This release speaks adapter protocol version 7 and refuses a
-   version 6 plugin.
-3. Restart each receiver with the same bundle and state directory. On
+   receiver binary, verified as in [Install plugins](#install-plugins); a receiver refuses a plugin of another adapter protocol
+   version. This release speaks adapter protocol version 9 and refuses a
+   version 8 plugin.
+3. Restart each receiver with the same local configuration, bundle and
+   state directory. On
    `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its
    tasks to the pool. The next delivery of each task adopts the running
    job, on the restarted receiver or another member, and resumes the

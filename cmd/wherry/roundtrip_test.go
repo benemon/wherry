@@ -35,6 +35,7 @@ import (
 	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/receiver"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
@@ -47,8 +48,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// platformText is the receiver bundle's platform credential for the test plugin's adapter, and deployText the host's
-// task credential.
+// platformText is the receiver's platform credential for the test plugin's profile, and deployText the host's task
+// credential.
 const (
 	platformText = "s3cr3t-platform-credential"
 	deployText   = "s3cr3t-deploy-key-credential"
@@ -167,7 +168,7 @@ func resalt(t *testing.T, service *admin.Service, bundlePath string) {
 
 // TestRoundTrip runs a task from a host's Submit through a receiver and the test plugin process to the host's Await,
 // on records each side produces for the other: provisioning through wherry admin, bundles, the host and receiver
-// constructors, plugin discovery and the adapter link, the real claim, admission, the seal request Await answers, dual
+// constructors, plugin discovery and the adapter link, the platform credential's local source, the real claim, admission, the seal request Await answers, dual
 // write and feed reads.
 func TestRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -189,15 +190,14 @@ func TestRoundTrip(t *testing.T) {
 	terms.Storage = &admin.Storage{Endpoint: bucket.endpoint, Bucket: s3Bucket}
 	hostBundle, otherBundle, receiverBundle := filepath.Join(dir, "host.yaml"), filepath.Join(dir, "other.yaml"), filepath.Join(dir, "receiver.yaml")
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2,
-		Adapters: []admin.AdapterSettings{{Name: "fake", Platform: "fake-platform", Type: "fake", Agent: "claude", Labels: map[string]string{"gpu": "yes"}, Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000}}}}
+		Profiles: []admin.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude", Labels: map[string]string{"gpu": "yes"},
+			Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000, "credential": "fake-token"}}}}
 	for _, step := range []func() error{
 		func() error { return service.PoolCreate(ctx, "pool-a", terms) },
 		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-a", hostBundle) },
 		func() error { return service.HostAdd(ctx, "tenant-a", "host-b", otherBundle) },
-		func() error {
-			return service.ReceiverAdd(ctx, config, map[string]string{"fake-platform": platformText}, receiverBundle)
-		},
+		func() error { return service.ReceiverAdd(ctx, config, receiverBundle) },
 	} {
 		if err := step(); err != nil {
 			t.Fatal(err)
@@ -220,18 +220,24 @@ func TestRoundTrip(t *testing.T) {
 	logger := log.New(logs, "receiver: ", 0)
 	newReceiver := func(plugins *plugins) *receiver.Receiver {
 		t.Helper()
-		r, err := receiver.New(bundle, stateDir, false, plugins.factory(bundle), logger, prometheus.NewRegistry())
+		r, err := receiver.New(bundle, stateDir, false, plugins.profile, logger, prometheus.NewRegistry())
 		if err != nil {
 			t.Fatal(err)
 		}
 		return r
 	}
 	missing := &plugins{dir: t.TempDir(), logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
-	if err := newReceiver(missing).Run(ctx); err == nil || err.Error() != "adapter fake: no plugin for type fake" {
+	if err := newReceiver(missing).Run(ctx); err == nil || err.Error() != "profile fake: credential \"fake-token\" has no source in the receiver's configuration" {
+		t.Fatalf("receiver without the credential's source: %v; want a configuration error", err)
+	}
+	t.Setenv("WHERRY_ROUNDTRIP_PLATFORM", platformText+"\n")
+	sources := map[string]credential.Source{"fake-token": {Env: "WHERRY_ROUNDTRIP_PLATFORM"}}
+	missing = &plugins{dir: t.TempDir(), credentials: sources, logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	if err := newReceiver(missing).Run(ctx); err == nil || err.Error() != "profile fake: no plugin for type fake" {
 		t.Fatalf("receiver without its plugin: %v; want a configuration error", err)
 	}
 	read := recordPlugin(t)
-	plugins := &plugins{dir: pluginDir, logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: pluginDir, credentials: sources, logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
 	r := newReceiver(plugins)
 	runCtx, stop := context.WithCancel(ctx)
@@ -249,7 +255,7 @@ func TestRoundTrip(t *testing.T) {
 	// for the agent's optional credential.
 	t.Setenv("WHERRY_ROUNDTRIP_MODEL", credentialText)
 	hostConfig := busclient.Config{Bundle: hostBundle, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
-		Credentials: map[string]busclient.Source{"model": {Env: "WHERRY_ROUNDTRIP_MODEL"}, "deploy-key": {Command: []string{"cat", deployPath}}}}
+		Credentials: map[string]credential.Source{"model": {Env: "WHERRY_ROUNDTRIP_MODEL"}, "deploy-key": {Command: []string{"cat", deployPath}}}}
 	hostConfig.Storage = bucket.config
 	maps.Copy(hostConfig.Credentials, bucket.sources)
 	if _, err := busclient.Init(ctx, hostConfig); err != nil {
@@ -322,10 +328,10 @@ func TestRoundTrip(t *testing.T) {
 		!strings.Contains(string(runs[0].Prompt), "This run's credentials are model, deploy-key, github-token (not supplied).") {
 		t.Fatalf("plugin runs %+v; want one dispatch with the host's sealed credentials at their targets, the input, and the unsupplied credential named", runs)
 	}
-	if configured.Platform != platformText || configured.Pool != "pool-a" || configured.Agent != "claude" {
-		t.Fatalf("plugin configured with %+v; want the bundle's platform credential and the adapter's settings", configured)
+	if configured.Credential != platformText || configured.Pool != "pool-a" || configured.Agent != "claude" || strings.Contains(string(configured.Config), "credential") {
+		t.Fatalf("plugin configured with %+v; want the source's platform credential, the profile's settings and no credential key", configured)
 	}
-	// A plugin crash: the receiver restarts it and configures its adapter again, platform credential included.
+	// A plugin crash: the receiver restarts it and configures its profile again, platform credential included.
 	if err := syscall.Kill(read()[0].PID, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +452,7 @@ const s3Bucket = "wherry-test"
 type s3Store struct {
 	endpoint string
 	config   *busclient.StorageConfig
-	sources  map[string]busclient.Source
+	sources  map[string]credential.Source
 	store    *minio.Client
 	client   *http.Client
 }
@@ -460,7 +466,7 @@ func s3Oracle(t *testing.T) *s3Store {
 		t.Log("WHERRY_S3_TEST_ENDPOINT not set: no real S3 leg")
 		return nil
 	}
-	sources := map[string]busclient.Source{"s3-access": {File: os.Getenv("WHERRY_S3_TEST_ACCESS_KEY_FILE")}, "s3-secret": {File: os.Getenv("WHERRY_S3_TEST_SECRET_KEY_FILE")}}
+	sources := map[string]credential.Source{"s3-access": {File: os.Getenv("WHERRY_S3_TEST_ACCESS_KEY_FILE")}, "s3-secret": {File: os.Getenv("WHERRY_S3_TEST_SECRET_KEY_FILE")}}
 	keys := make([]string, 2)
 	for i, path := range []string{sources["s3-access"].File, sources["s3-secret"].File} {
 		key, err := os.ReadFile(path)
@@ -542,7 +548,7 @@ func fallbackS3(t *testing.T) *s3Store {
 		t.Fatal(err)
 	}
 	return &s3Store{endpoint: server.URL, config: &busclient.StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"},
-		sources: map[string]busclient.Source{"s3-access": {File: access}, "s3-secret": {File: secret}}, client: server.Client()}
+		sources: map[string]credential.Source{"s3-access": {File: access}, "s3-secret": {File: secret}}, client: server.Client()}
 }
 
 func hexSHA(data []byte) string {

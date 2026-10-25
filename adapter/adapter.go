@@ -26,10 +26,10 @@ type Line struct {
 	Data   []byte
 }
 
-// Run is the material needed to start one platform job; the adapter records Attempt, Adapter and Agent
+// Run is the material needed to start one platform job; the adapter records Attempt, Profile and Agent
 // in platform metadata.
 type Run struct {
-	ID, Adapter, Agent string
+	ID, Profile, Agent string
 	// Model is the model the agent runs, as the pool's terms name it; empty leaves the agent's own. The adapter passes
 	// it to the agent as WHERRY_MODEL and never interprets it.
 	Model   string
@@ -143,13 +143,13 @@ const (
 	JobNeverStarted
 )
 
-// Job is a run's job as Lookup finds it, with the attempt, adapter and agent its platform metadata records.
+// Job is a run's job as Lookup finds it, with the attempt, profile and agent its platform metadata records.
 type Job struct {
 	State JobState
 	// Handle is set unless State is JobAbsent.
 	Handle         Handle
 	Attempt        int64
-	Adapter, Agent string
+	Profile, Agent string
 }
 
 // Terminal is how a followed job ended.
@@ -164,19 +164,20 @@ type Terminal struct {
 	Reason string
 }
 
-// ErrLinkLost is the error a plugin adapter's call returns when the link to its plugin process is down.
+// ErrLinkLost is the error a profile's call returns when the link to its plugin process is down.
 var ErrLinkLost = errors.New("plugin link lost")
 
-// ErrMessageTooLarge is the error a plugin adapter's call returns when a message exceeds the link's size limit.
+// ErrMessageTooLarge is the error a profile's call returns when a message exceeds the link's size limit.
 var ErrMessageTooLarge = errors.New("message too large")
 
-// Adapter is the platform seam; implementations hold platform credentials only.
+// Adapter is the platform seam: a plugin's handle on one configured profile. Implementations hold platform credentials
+// only.
 type Adapter interface {
 	// Directories reports where the agent finds its input, output and credentials directories.
 	Directories() Directories
 	// InlineLimit reports the most inline input bytes the adapter delivers, or zero when it declares none.
 	InlineLimit() int64
-	// Ready reports whether the adapter can currently start a job.
+	// Ready reports whether the profile can currently start a job.
 	Ready(ctx context.Context) (bool, error)
 	// Dispatch starts a run's job, converging on an existing one, and returns once it has started or ended.
 	// The core treats an error as OutcomeUnknown.
@@ -195,8 +196,8 @@ type Adapter interface {
 	Purge(ctx context.Context, runID string) error
 	Release(ctx context.Context, runID string) error
 	Sweep(ctx context.Context) error
-	// Metrics reports the adapter's samples of the families the core declares for adapters. The core drops a sample
-	// outside them, and gives every sample's adapter label the adapter's own name.
+	// Metrics reports the profile's samples of the families the core declares for adapters. The core drops a sample
+	// outside them, and gives every sample's profile label the profile's own name.
 	Metrics(ctx context.Context) ([]Sample, error)
 }
 
@@ -267,11 +268,11 @@ func ReservedEnv(name string) bool {
 	return set || slices.Contains([]string{"HOME", "WHERRY_INPUT_DIR", "WHERRY_OUTPUT_DIR", "WHERRY_CREDENTIALS_DIR", "WHERRY_MODEL"}, name)
 }
 
-// Settings configure one adapter in a plugin.
+// Settings describe one profile in a plugin.
 type Settings struct {
 	Name, Pool, Agent string
-	// Config is the adapter's config section of the receiver configuration, as JSON.
+	// Config is the profile's merged config from the receiver configuration, without its credential key, as JSON.
 	Config []byte
-	// Platform is the receiver bundle's platform credential for the adapter, empty for none.
-	Platform string
+	// Credential is the value of the platform credential the profile's config names, empty for none.
+	Credential string
 }

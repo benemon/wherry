@@ -1,10 +1,13 @@
-# Adapter plugins
+# Adapters
 
-A receiver runs each task through an adapter, and each adapter type is a
-plugin: a separate binary the receiver starts from its plugin directory and
-talks to over the adapter protocol. The
-[adapter plugins reference](commands.md#adapter-plugins) specifies what a
-receiver expects of a plugin, and the protocol is the Go module in
+An adapter is a plugin: the binary `wherry-plugin-<type>` that supplies
+support for one kind of platform, which the receiver starts from its plugin
+directory and talks to over the adapter protocol. A receiver runs each task
+on a profile, a named, configured use of an adapter with its agent, labels
+and runtime, and one adapter serves every profile of its type in the
+receiver's [configuration](configuration.md#receiver-configuration). The
+[plugins reference](commands.md#plugins) specifies what a receiver expects
+of a plugin, and the protocol is the Go module in
 [`adapter`](https://github.com/benemon/wherry/tree/main/adapter).
 
 The plugins live in
@@ -29,9 +32,9 @@ plugins. A cluster's clients can themselves be bare-metal hosts, virtual
 machines or cloud instances. Nomad places each job on a client whose driver
 is healthy, within the node pool and datacenters the job names.
 
-A wherry adapter names one driver and its configuration, and the
-receiver's configuration can hold several Nomad adapters, each with its
-own driver and labels. So one receiver can offer containers, host
+A profile of the Nomad adapter names one driver and its configuration, and
+the receiver's configuration can hold several profiles of the Nomad
+adapter, each with its own driver and labels. So one receiver can offer containers, host
 processes and virtual machines side by side, and a task chooses between
 them by its agent and label selector, the way it chooses anything else.
 The Nomad plugin hands the driver to Nomad unchanged; the drivers

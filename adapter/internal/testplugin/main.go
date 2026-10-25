@@ -127,7 +127,7 @@ func (f *fake) Dispatch(_ context.Context, run adapter.Run) (adapter.Outcome, ad
 			if f.config.NeverStarted != "" {
 				state = adapter.JobNeverStarted
 			}
-			f.jobs[run.ID] = &adapter.Job{State: state, Handle: handle, Attempt: run.Attempt, Adapter: run.Adapter, Agent: run.Agent}
+			f.jobs[run.ID] = &adapter.Job{State: state, Handle: handle, Attempt: run.Attempt, Profile: run.Profile, Agent: run.Agent}
 		}
 		return adapter.OutcomeCreated, f.jobs[run.ID].Handle, nil
 	}
@@ -223,11 +223,11 @@ func (f *fake) Sweep(context.Context) error {
 	return nil
 }
 
-// Metrics reports a gauge labelled with the adapter's name and a histogram.
+// Metrics reports a gauge labelled with the profile's name and a histogram.
 func (f *fake) Metrics(context.Context) ([]adapter.Sample, error) {
 	f.panics("Metrics")
 	return []adapter.Sample{
-		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"adapter": f.settings.Name}, Kind: adapter.KindGauge, Value: 2},
+		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"profile": f.settings.Name}, Kind: adapter.KindGauge, Value: 2},
 		{Family: "wherry_adapter_placement_seconds", Kind: adapter.KindHistogram, Histogram: adapter.Histogram{Buckets: []uint64{0, 1, 2}, Sum: 3.5, Count: 2}},
 	}, nil
 }
@@ -238,7 +238,7 @@ func main() {
 	}
 	adapter.Serve(func(settings adapter.Settings, logger hclog.Logger) (adapter.Adapter, error) {
 		write(record{Call: "configure", Settings: settings})
-		logger.Info("configuring adapter", "adapter", settings.Name)
+		logger.Info("configuring profile", "profile", settings.Name)
 		var decoded config
 		if len(settings.Config) > 0 {
 			if err := json.Unmarshal(settings.Config, &decoded); err != nil {

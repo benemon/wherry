@@ -8,13 +8,12 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
@@ -26,99 +25,13 @@ import (
 // host key a task cloning under each URL prefix takes. InputRoots are the
 // directories the MCP server sends inputs from.
 type Config struct {
-	Bundle      string            `yaml:"bundle"`
-	HostKey     string            `yaml:"host_key"`
-	StateDir    string            `yaml:"state_dir"`
-	Credentials map[string]Source `yaml:"credentials"`
-	Git         []GitCredential   `yaml:"git"`
-	Storage     *StorageConfig    `yaml:"storage"`
-	InputRoots  []string          `yaml:"input_roots"`
-}
-
-// Source is where a credential's value comes from, exactly one of: File, a regular file its group cannot write and
-// others cannot access; Env, an environment variable of the process answering the seal; Command, an argv run without a
-// shell whose stdout is the value.
-type Source struct {
-	File    string   `yaml:"file"`
-	Env     string   `yaml:"env"`
-	Command []string `yaml:"command"`
-}
-
-// commandTimeout bounds a command source, long enough for an interactive unlock such as a password manager's; tests
-// shorten it.
-var commandTimeout = 60 * time.Second
-
-// resolve reads the source's value. Its errors name no value or path, and quote nothing the command writes; its
-// stderr is discarded.
-func (source Source) resolve(ctx context.Context) ([]byte, error) {
-	switch {
-	case source.Env != "":
-		value := os.Getenv(source.Env)
-		if value == "" {
-			return nil, errors.New("its environment variable is unset or empty")
-		}
-		return []byte(value), nil
-	case len(source.Command) > 0:
-		ctx, cancel := context.WithTimeout(ctx, commandTimeout)
-		defer cancel()
-		command := exec.CommandContext(ctx, source.Command[0], source.Command[1:]...)
-		stdout := &boundedBuffer{limit: signed.MaxSeal}
-		// WaitDelay stops a child that keeps the output open from holding the answer past the timeout.
-		command.Stdout, command.WaitDelay = stdout, time.Second
-		err := command.Run()
-		var exit *exec.ExitError
-		switch {
-		case stdout.over:
-			return nil, fmt.Errorf("its command wrote over %d bytes", signed.MaxSeal)
-		case errors.Is(ctx.Err(), context.DeadlineExceeded):
-			return nil, fmt.Errorf("its command did not finish within %s", commandTimeout)
-		case errors.As(err, &exit):
-			return nil, fmt.Errorf("its command exited with status %d", exit.ExitCode())
-		case err != nil:
-			return nil, errors.New("its command did not start")
-		case len(stdout.data) == 0:
-			return nil, errors.New("its command wrote nothing")
-		}
-		return stdout.data, nil
-	}
-	file, err := os.Open(source.File)
-	if err != nil {
-		// The cause without the path.
-		return nil, errors.Unwrap(err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, errors.Unwrap(err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, errors.New("its file is not a regular file")
-	}
-	// Group read is allowed so a secrets agent can template the file for a service group.
-	if info.Mode().Perm()&0o027 != 0 {
-		return nil, errors.New("its file is writable by its group or open to others; chmod 600 it")
-	}
-	value, err := io.ReadAll(file)
-	if err != nil {
-		return nil, errors.Unwrap(err)
-	}
-	return value, nil
-}
-
-// boundedBuffer fails the write that would take it past limit bytes.
-type boundedBuffer struct {
-	data  []byte
-	limit int
-	over  bool
-}
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	if len(b.data)+len(p) > b.limit {
-		b.over = true
-		return 0, errors.New("output over its bound")
-	}
-	b.data = append(b.data, p...)
-	return len(p), nil
+	Bundle      string                       `yaml:"bundle"`
+	HostKey     string                       `yaml:"host_key"`
+	StateDir    string                       `yaml:"state_dir"`
+	Credentials map[string]credential.Source `yaml:"credentials"`
+	Git         []GitCredential              `yaml:"git"`
+	Storage     *StorageConfig               `yaml:"storage"`
+	InputRoots  []string                     `yaml:"input_roots"`
 }
 
 // GitCredential gives a task whose git remote starts with URL the credential Credential and, for ssh, the known_hosts
@@ -146,7 +59,7 @@ func DefaultConfigPath() (string, error) {
 
 // LoadConfig decodes the config at path, defaulting host_key and state_dir.
 func LoadConfig(path string) (Config, error) {
-	path, err := expandHome(path)
+	path, err := ExpandHome(path)
 	if err != nil {
 		return Config{}, err
 	}
@@ -172,18 +85,15 @@ func LoadConfig(path string) (Config, error) {
 		config.StateDir = filepath.Join(home, ".config", "wherry", "state")
 	}
 	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir} {
-		if *path, err = expandHome(*path); err != nil {
+		if *path, err = ExpandHome(*path); err != nil {
 			return Config{}, err
 		}
 	}
 	for name, source := range config.Credentials {
-		if kinds := len(slices.DeleteFunc([]bool{source.File != "", source.Env != "", len(source.Command) > 0}, func(set bool) bool { return !set })); kinds != 1 {
-			return Config{}, fmt.Errorf("config credential %s needs exactly one of file, env and command", name)
+		if err := source.Validate(); err != nil {
+			return Config{}, fmt.Errorf("config credential %s: %w", name, err)
 		}
-		if len(source.Command) > 0 && source.Command[0] == "" {
-			return Config{}, fmt.Errorf("config credential %s: command names no program", name)
-		}
-		if source.File, err = expandHome(source.File); err != nil {
+		if source.File, err = ExpandHome(source.File); err != nil {
 			return Config{}, err
 		}
 		config.Credentials[name] = source
@@ -199,7 +109,7 @@ func LoadConfig(path string) (Config, error) {
 			return Config{}, fmt.Errorf("config git url %s names credential %s, which credentials does not configure", entry.URL, entry.Credential)
 		}
 		if entry.HostKey != "" {
-			if config.Git[i].HostKey, err = expandHome(entry.HostKey); err != nil {
+			if config.Git[i].HostKey, err = ExpandHome(entry.HostKey); err != nil {
 				return Config{}, err
 			}
 			if _, err := os.ReadFile(config.Git[i].HostKey); err != nil {
@@ -218,7 +128,7 @@ func LoadConfig(path string) (Config, error) {
 		}
 	}
 	for i, root := range config.InputRoots {
-		if config.InputRoots[i], err = expandHome(root); err != nil {
+		if config.InputRoots[i], err = ExpandHome(root); err != nil {
 			return Config{}, err
 		}
 		if !filepath.IsAbs(config.InputRoots[i]) {
@@ -309,7 +219,8 @@ func RotateKey(ctx context.Context, config Config) (string, string, error) {
 	return signed.KeyID(old.Public().(ed25519.PublicKey)), signed.KeyID(next.Public().(ed25519.PublicKey)), nil
 }
 
-func expandHome(path string) (string, error) {
+// ExpandHome expands a leading ~ or ~/ to the user's home directory.
+func ExpandHome(path string) (string, error) {
 	if path != "~" && !strings.HasPrefix(path, "~/") {
 		return path, nil
 	}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/wire"
 )
 
@@ -22,9 +23,9 @@ func TestEachSourceKindIsSealed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("WHERRY_TEST_MODEL_TOKEN", "model-from-env")
-	f.host.credentials["model"] = Source{Env: "WHERRY_TEST_MODEL_TOKEN"}
-	f.host.credentials["deploy-key"] = Source{File: deployKey}
-	f.host.credentials["vault-token"] = Source{Command: []string{"sh", "-c", `printf 'vault-from-command\n'; echo command-stderr >&2`}}
+	f.host.credentials["model"] = credential.Source{Env: "WHERRY_TEST_MODEL_TOKEN"}
+	f.host.credentials["deploy-key"] = credential.Source{File: deployKey}
+	f.host.credentials["vault-token"] = credential.Source{Command: []string{"sh", "-c", `printf 'vault-from-command\n'; echo command-stderr >&2`}}
 	receiver, task := f.admittedWith(t, []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}, {Name: "vault-token", Env: "VAULT_TOKEN"}})
 	runID := task.submission.Wherry.Run
 	asked := newRequest(t, receiver.binding(task, 1), "model")
@@ -46,23 +47,18 @@ func TestEachSourceKindIsSealed(t *testing.T) {
 // A source that fails to resolve leaves the request unsettled, logged by credential name and cause alone: no value, no
 // output of the command and no path reaches the logs.
 func TestAFailingSourceIsLoggedByNameAlone(t *testing.T) {
-	previous := commandTimeout
-	commandTimeout = 300 * time.Millisecond
-	t.Cleanup(func() { commandTimeout = previous })
 	const secret = "source-output-never-logged"
 	for name, test := range map[string]struct {
-		source Source
+		source credential.Source
 		want   string
 	}{
-		"env unset": {Source{Env: "WHERRY_TEST_UNSET_TOKEN"}, "its environment variable is unset or empty"},
-		"command fails": {Source{Command: []string{"sh", "-c", "printf " + secret + "; echo " + secret + " >&2; exit 3"}},
+		"env unset": {credential.Source{Env: "WHERRY_TEST_UNSET_TOKEN"}, "its environment variable is unset or empty"},
+		"command fails": {credential.Source{Command: []string{"sh", "-c", "printf " + secret + "; echo " + secret + " >&2; exit 3"}},
 			"its command exited with status 3"},
-		"command times out": {Source{Command: []string{"sh", "-c", "printf " + secret + "; echo " + secret + " >&2; sleep 5"}},
-			"its command did not finish within 300ms"},
-		"command over size":      {Source{Command: []string{"sh", "-c", "yes " + secret + " | head -c 70000"}}, "its command wrote over 65536 bytes"},
-		"command writes nothing": {Source{Command: []string{"sh", "-c", "echo " + secret + " >&2"}}, "its command wrote nothing"},
-		"command missing":        {Source{Command: []string{filepath.Join(t.TempDir(), secret)}}, "its command did not start"},
-		"file missing":           {Source{File: filepath.Join(t.TempDir(), secret)}, "no such file or directory"},
+		"command over size":      {credential.Source{Command: []string{"sh", "-c", "yes " + secret + " | head -c 70000"}}, "its command wrote over 65536 bytes"},
+		"command writes nothing": {credential.Source{Command: []string{"sh", "-c", "echo " + secret + " >&2"}}, "its command wrote nothing"},
+		"command missing":        {credential.Source{Command: []string{filepath.Join(t.TempDir(), secret)}}, "its command did not start"},
+		"file missing":           {credential.Source{File: filepath.Join(t.TempDir(), secret)}, "no such file or directory"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
@@ -104,7 +100,7 @@ func TestAFailingSourceIsLoggedByNameAlone(t *testing.T) {
 func TestACommandSourceRunsOutsideTheAttemptLock(t *testing.T) {
 	f := newFixture(t)
 	started := filepath.Join(t.TempDir(), "started")
-	f.host.credentials["model"] = Source{Command: []string{"sh", "-c", "touch " + started + "; sleep 3; printf model-token"}}
+	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", "touch " + started + "; sleep 3; printf model-token"}}
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
 	asked := newRequest(t, receiver.binding(task, 1), "model")
@@ -175,8 +171,8 @@ func TestConfigSourcesAndGit(t *testing.T) {
 	}
 	path := filepath.Join(dir, "config.yaml")
 	for name, test := range map[string]struct{ config, want string }{
-		"two kinds":                      {"credentials:\n  a: {file: x, env: A}\n", "config credential a needs exactly one of file, env and command"},
-		"no kind":                        {"credentials:\n  a: {}\n", "config credential a needs exactly one of file, env and command"},
+		"two kinds":                      {"credentials:\n  a: {file: x, env: A}\n", "config credential a: needs exactly one of file, env and command"},
+		"no kind":                        {"credentials:\n  a: {}\n", "config credential a: needs exactly one of file, env and command"},
 		"a literal":                      {"credentials:\n  a: value\n", "decode config"},
 		"an empty command":               {"credentials:\n  a:\n    command: ['']\n", "config credential a: command names no program"},
 		"a git url":                      {"git:\n  - url: 'git@github.com:'\n", "config git url git@github.com: must start with https:// or ssh://"},
@@ -207,42 +203,5 @@ func TestConfigSourcesAndGit(t *testing.T) {
 	if config, err := LoadConfig(path); err != nil || !slices.Equal(config.Credentials["a"].Command, []string{"vault", "print", "token"}) || config.Git[0].HostKey != hostKey ||
 		*config.Storage != (StorageConfig{AccessKey: "s3", SecretKey: "a"}) {
 		t.Fatalf("config %+v, %v", config, err)
-	}
-}
-
-// A file source must be a regular file its group cannot write and others cannot access; the refusal names neither the
-// path nor the value.
-func TestFileSourcePermissions(t *testing.T) {
-	const value = "file-source-value"
-	path := filepath.Join(t.TempDir(), "credential")
-	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, mode := range []os.FileMode{0o644, 0o660, 0o602, 0o620, 0o604, 0o601} {
-		if err := os.Chmod(path, mode); err != nil {
-			t.Fatal(err)
-		}
-		got, err := Source{File: path}.resolve(context.Background())
-		if err == nil || err.Error() != "its file is writable by its group or open to others; chmod 600 it" {
-			t.Fatalf("resolve a file of mode %o = %q, %v; want it refused", mode, got, err)
-		}
-		if strings.Contains(err.Error(), path) || strings.Contains(err.Error(), value) {
-			t.Fatalf("resolve a file of mode %o: error %q holds the path or the value", mode, err)
-		}
-	}
-	for _, mode := range []os.FileMode{0o600, 0o400, 0o640} {
-		if err := os.Chmod(path, mode); err != nil {
-			t.Fatal(err)
-		}
-		if got, err := (Source{File: path}).resolve(context.Background()); err != nil || string(got) != value {
-			t.Fatalf("resolve a file of mode %o = %q, %v", mode, got, err)
-		}
-	}
-	dir := filepath.Join(t.TempDir(), value)
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := (Source{File: dir}).resolve(context.Background()); err == nil || err.Error() != "its file is not a regular file" {
-		t.Fatalf("resolve a directory: %v", err)
 	}
 }

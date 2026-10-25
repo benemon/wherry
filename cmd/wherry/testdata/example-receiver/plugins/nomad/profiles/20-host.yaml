@@ -1,5 +1,4 @@
-name: codex-host
-platform: nomad
+name: host
 agent: codex
 labels:
   isolation: host

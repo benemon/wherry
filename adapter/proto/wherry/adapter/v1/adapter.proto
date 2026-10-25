@@ -1,5 +1,5 @@
-// The adapter protocol, version 8: the receiver core calls a plugin's adapters
-// over this service, and every request names its adapter.
+// The adapter protocol, version 9: the receiver core calls a plugin's profiles
+// over this service, and every request names its profile.
 syntax = "proto3";
 
 package wherry.adapter.v1;
@@ -7,7 +7,7 @@ package wherry.adapter.v1;
 option go_package = "github.com/benemon/wherry/adapter/internal/adapterv1";
 
 service Adapter {
-  // Configure builds an adapter in the plugin, replacing one of the same name.
+  // Configure builds a profile in the plugin, replacing one of the same name.
   rpc Configure(ConfigureRequest) returns (ConfigureResponse);
   rpc Ready(ReadyRequest) returns (ReadyResponse);
   rpc Dispatch(DispatchRequest) returns (DispatchResponse);
@@ -20,7 +20,7 @@ service Adapter {
   rpc Purge(PurgeRequest) returns (PurgeResponse);
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
   rpc Sweep(SweepRequest) returns (SweepResponse);
-  // Metrics reports the adapter's samples of the families the core declares for adapters.
+  // Metrics reports the profile's samples of the families the core declares for adapters.
   rpc Metrics(MetricsRequest) returns (MetricsResponse);
 }
 
@@ -47,7 +47,7 @@ message Handle {
 
 message Run {
   string id = 1;
-  string adapter = 2;
+  string profile = 2;
   string agent = 3;
   reserved 4;
   int64 attempt = 5;
@@ -84,7 +84,7 @@ message Job {
   JobState state = 1;
   Handle handle = 2;
   int64 attempt = 3;
-  string adapter = 4;
+  string profile = 4;
   string agent = 5;
 }
 
@@ -105,12 +105,12 @@ message Line {
 }
 
 message ConfigureRequest {
-  string adapter = 1;
+  string profile = 1;
   string pool = 2;
   string agent = 3;
   reserved 4;
   bytes config = 5;
-  string platform = 6;
+  string credential = 6;
 }
 
 message ConfigureResponse {
@@ -127,7 +127,7 @@ message Directories {
 }
 
 message ReadyRequest {
-  string adapter = 1;
+  string profile = 1;
 }
 
 message ReadyResponse {
@@ -135,7 +135,7 @@ message ReadyResponse {
 }
 
 message DispatchRequest {
-  string adapter = 1;
+  string profile = 1;
   Run run = 2;
 }
 
@@ -145,7 +145,7 @@ message DispatchResponse {
 }
 
 message LookupRequest {
-  string adapter = 1;
+  string profile = 1;
   string run_id = 2;
   reserved 3;
 }
@@ -155,7 +155,7 @@ message LookupResponse {
 }
 
 message FollowRequest {
-  string adapter = 1;
+  string profile = 1;
   Handle handle = 2;
   int64 from = 3;
 }
@@ -168,7 +168,7 @@ message FollowResponse {
 }
 
 message StopRequest {
-  string adapter = 1;
+  string profile = 1;
   Handle handle = 2;
 }
 
@@ -183,7 +183,7 @@ message Limits {
 }
 
 message CollectRequest {
-  string adapter = 1;
+  string profile = 1;
   Handle handle = 2;
   Limits limits = 3;
 }
@@ -201,7 +201,7 @@ message CollectResponse {
 }
 
 message PurgeRequest {
-  string adapter = 1;
+  string profile = 1;
   string run_id = 2;
   reserved 3;
 }
@@ -209,7 +209,7 @@ message PurgeRequest {
 message PurgeResponse {}
 
 message ReleaseRequest {
-  string adapter = 1;
+  string profile = 1;
   string run_id = 2;
   reserved 3;
 }
@@ -217,13 +217,13 @@ message ReleaseRequest {
 message ReleaseResponse {}
 
 message SweepRequest {
-  string adapter = 1;
+  string profile = 1;
 }
 
 message SweepResponse {}
 
 message MetricsRequest {
-  string adapter = 1;
+  string profile = 1;
 }
 
 message MetricsResponse {

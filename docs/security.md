@@ -175,6 +175,26 @@ run <id>: resolve credential <name>: its file is writable by its group or open t
 The `submit` of the [MCP server](mcp.md) refuses as an input every file
 a `file` source names, including the storage keys' files.
 
+## Platform credentials
+
+A receiver takes the credential a plugin authenticates to its platform
+with, such as a Nomad token, from a source on the receiver's host. A
+profile's `config` names the credential with `credential: <name>`, and the
+`credentials` of the receiver's [local
+configuration](configuration.md#receiver-local-configuration) map the name
+to a `file`, `env` or `command` source. The receiver resolves it with the
+host's implementation and under the host's rules: the same file mode rule,
+the same 60-second command timeout with standard error discarded, and
+errors that name no path or value. An `env` or `command` source uses the
+receiver's environment. The receiver trims a trailing CR and LF from the
+value and passes it to the plugin when it configures the profile, at start
+and after a configuration change.
+
+The source never leaves the receiver's host: `wherry.admin`, which every
+principal reads, records only the credential's name, and the receiver's
+bundle holds its Kafka identity alone. A rotated platform token takes effect
+on the receiver's next start without a new bundle.
+
 ## Git credentials
 
 `submit` matches a git input's remote, written as an `ssh://` or `https://`

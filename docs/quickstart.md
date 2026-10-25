@@ -10,14 +10,14 @@ parts involved.
   [Prepare Kafka](operations.md#prepare-kafka), with its super user and
   `wherry.operator` credentials on the operator's machine.
 - A Nomad cluster with a namespace for agent jobs (`agents` below) and a
-  token or workload identity carrying the
+  token carrying the
   [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy).
 - The `wherry` binary on the operator's machine, the host and the receiver
   host, installed from a release as in [Install wherry](#install-wherry).
 - `wherry-plugin-nomad` on the receiver host, installed from a
   [wherry-plugins release](https://github.com/benemon/wherry-plugins/releases)
   in `/usr/local/libexec/wherry/plugins` as in
-  [Install adapter plugins](operations.md#install-adapter-plugins).
+  [Install plugins](operations.md#install-plugins).
 - An agent the Nomad nodes can run: an image for a container driver, or an
   install on the node for `exec`. The
   [agent contract](configuration.md#agent-contract) lists what it must do.
@@ -100,15 +100,16 @@ Copy `alice-laptop.bundle` to `~/.config/wherry/` on the host, keeping mode
 ## 5. Add the receiver
 
 Write the configuration as a directory, `nomad-1/`, with one file for the
-receiver, one for each platform, and one for each adapter:
+receiver, one for the Nomad plugin, and one for each of its profiles:
 
 ```
 nomad-1/
   receiver.yaml
-  platforms/
-    nomad.yaml
-  adapters/
-    10-container.yaml
+  plugins/
+    nomad/
+      plugin.yaml
+      profiles/
+        10-container.yaml
 ```
 
 `nomad-1/receiver.yaml`:
@@ -117,22 +118,21 @@ nomad-1/
 capacity: 2
 ```
 
-`nomad-1/platforms/nomad.yaml`:
+`nomad-1/plugins/nomad/plugin.yaml`, naming the Nomad token as the
+credential `nomad-token`:
 
 ```yaml
-name: nomad
-type: nomad
 config:
   address: https://nomad.example.com:4646
   ca_file: /etc/wherry/nomad-ca.pem
   namespace: agents
+  credential: nomad-token
 ```
 
-`nomad-1/adapters/10-container.yaml`:
+`nomad-1/plugins/nomad/profiles/10-container.yaml`:
 
 ```yaml
 name: container
-platform: nomad
 agent: coder
 labels:
   isolation: container
@@ -150,7 +150,7 @@ config:
       memory_mb: 2048
 ```
 
-`agent-run` stands for the agent's headless command. The adapter delivers
+`agent-run` stands for the agent's headless command. The profile delivers
 the tenant's sealed `model-api-key` to the job as `MODEL_API_KEY`.
 
 ```sh
@@ -163,10 +163,22 @@ Copy `nomad-1.bundle` to `/etc/wherry/` on the receiver host, keeping mode
 
 ## 6. Start the receiver
 
+On the receiver host, put the Nomad token in `/etc/wherry/nomad-token` with
+mode 0600, and write the receiver's [local
+configuration](configuration.md#receiver-local-configuration),
+`/etc/wherry/config.yaml`:
+
+```yaml
+bundle: /etc/wherry/nomad-1.bundle
+state_dir: /var/lib/wherry
+plugin_dir: /usr/local/libexec/wherry/plugins
+credentials:
+  nomad-token:
+    file: /etc/wherry/nomad-token
+```
+
 ```sh
-NOMAD_TOKEN=<token> wherry receiver run \
-  --bundle-file /etc/wherry/nomad-1.bundle --state-dir /var/lib/wherry \
-  --plugin-dir /usr/local/libexec/wherry/plugins
+wherry receiver run
 ```
 
 The receiver creates its signing key, `signing.key`, in `/var/lib/wherry`,
@@ -174,7 +186,7 @@ registers it, and logs:
 
 ```
 receiver: <time> registered key: signing=<key id>
-receiver: <time> configured: pool=build adapters=1 capacity=2
+receiver: <time> configured: pool=build profiles=1 capacity=2
 ```
 
 [Run a receiver](operations.md#run-a-receiver) covers running it
@@ -217,7 +229,7 @@ wherry receivers
 
 ```
 receiver=nomad-1 pool=build capacity=2 in_flight=0 heartbeat_age=12s status=live
-  adapter=container agent=coder ready=true labels=isolation=container credentials=model-api-key
+  profile=container plugin=nomad agent=coder ready=true labels=isolation=container credentials=model-api-key
 ```
 
 A credential this host has no source for shows as
@@ -237,7 +249,7 @@ The host prints the run ID and the pool:
 run_id=run-<id> pool=build
 ```
 
-`--selector isolation=container` asks for the adapter's label explicitly.
+`--selector isolation=container` asks for the profile's label explicitly.
 
 ## 11. Await the result
 

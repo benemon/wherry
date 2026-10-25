@@ -84,9 +84,9 @@ type fakeAdapter struct {
 	lastDeadline time.Time
 	lookups      int
 	lookupErr    error
-	// job is the state Lookup reports; jobAdapter and jobAgent override the metadata it reports.
+	// job is the state Lookup reports; jobProfile and jobAgent override the metadata it reports.
 	job                  adapter.JobState
-	jobAdapter, jobAgent string
+	jobProfile, jobAgent string
 	// neverStarted makes Follow report a job whose agent never started, of class neverClass or else driver, for
 	// neverReason.
 	neverStarted bool
@@ -175,7 +175,7 @@ func (f *fakeAdapter) Lookup(ctx context.Context, runID string) (adapter.Job, er
 	if f.job == adapter.JobAbsent {
 		return adapter.Job{}, nil
 	}
-	return adapter.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Adapter: cmp.Or(f.jobAdapter, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
+	return adapter.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Profile: cmp.Or(f.jobProfile, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
 }
 
 // Follow emits the stream, then ends the job after endDelay or when its context ends.
@@ -386,7 +386,7 @@ func testTerms() admin.Terms {
 func testConfig(receiver string) admin.ReceiverConfig {
 	return admin.ReceiverConfig{
 		Receiver: receiver, Pool: testPool, Capacity: 1,
-		Adapters: []admin.AdapterSettings{{Name: "nomad", Type: "fake", Agent: "claude", Labels: map[string]string{"zone": "dc1", "example.com/gpu": "none"}, Config: map[string]any{}}},
+		Profiles: []admin.ProfileSettings{{Name: "nomad", Plugin: "fake", Agent: "claude", Labels: map[string]string{"zone": "dc1", "example.com/gpu": "none"}, Config: map[string]any{}}},
 	}
 }
 
@@ -475,7 +475,7 @@ func must(t *testing.T) func([]byte, error) []byte {
 func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiver, *syncBuffer) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.ReceiverAdd(f.ctx, config, nil, path); err != nil {
+	if err := f.service.ReceiverAdd(f.ctx, config, path); err != nil {
 		t.Fatal(err)
 	}
 	encoded, err := os.ReadFile(path)
@@ -502,9 +502,9 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		t.Fatal(err)
 	}
 	logs := &syncBuffer{}
-	factory := func(pool string, settings admin.AdapterSettings) (Named, error) {
+	factory := func(pool string, settings admin.ProfileSettings) (Named, error) {
 		adapter, ok := f.adapters[settings.Name]
-		if !ok || settings.Type != "fake" {
+		if !ok || settings.Plugin != "fake" {
 			return Named{}, errors.New("no fake adapter")
 		}
 		adapter.mu.Lock()
@@ -661,7 +661,7 @@ func (f fixture) addPeer(t *testing.T, id, pool string) ed25519.PrivateKey {
 	t.Helper()
 	config := testConfig(id)
 	config.Pool = pool
-	if err := f.service.ReceiverAdd(f.ctx, config, nil, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := f.service.ReceiverAdd(f.ctx, config, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	_, signing, err := ed25519.GenerateKey(rand.Reader)
@@ -931,7 +931,7 @@ func (f fixture) appendConfig(t *testing.T, config admin.ReceiverConfig) {
 func TestConfigureRefusesConfigOutsideTerms(t *testing.T) {
 	f := newFixture(t, resultStream)
 	config := testConfig(testReceiver)
-	config.Adapters[0].Agent = "gemini"
+	config.Profiles[0].Agent = "gemini"
 	f.appendConfig(t, config)
 	restarted := &Receiver{id: testReceiver, base: f.receiver.base, logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
 	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "outside pool terms") {
@@ -1052,28 +1052,28 @@ func TestAdvertisement(t *testing.T) {
 		t.Fatal(err)
 	}
 	advertisement := f.advertisedOffers(t)
-	want := []wire.Offer{{Adapter: "nomad", Agent: "claude", InlineLimit: 49152}}
+	want := []wire.Offer{{Profile: "nomad", Agent: "claude", InlineLimit: 49152}}
 	if !reflect.DeepEqual(advertisement.Offers, want) || advertisement.Pool != testPool || advertisement.Capacity != 1 {
 		t.Fatalf("advertisement %#v, want offers %#v", advertisement, want)
 	}
 }
 
-func TestAdvertisedOffersAreTheConfiguredAdapters(t *testing.T) {
+func TestAdvertisedOffersAreTheConfiguredProfiles(t *testing.T) {
 	m := newMultiFixture(t)
 	state, err := m.service.LoadState(m.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var want []wire.Offer
-	for _, settings := range state.Receivers[testReceiver].Adapters {
-		want = append(want, wire.Offer{Adapter: settings.Name, Agent: settings.Agent})
+	for _, settings := range state.Receivers[testReceiver].Profiles {
+		want = append(want, wire.Offer{Profile: settings.Name, Agent: settings.Agent})
 	}
 	if offers := m.advertisedOffers(t).Offers; !reflect.DeepEqual(offers, want) {
-		t.Fatalf("offers %#v, want each adapter wherry.admin configures, in order: %#v", offers, want)
+		t.Fatalf("offers %#v, want each profile wherry.admin configures, in order: %#v", offers, want)
 	}
 }
 
-func TestReceiverWithNoReadyAdapterAdvertisesNoOffers(t *testing.T) {
+func TestReceiverWithNoReadyProfileAdvertisesNoOffers(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.adapter.mu.Lock()
 	f.adapter.unready = true
@@ -1089,7 +1089,7 @@ func TestReceiverWithNoReadyAdapterAdvertisesNoOffers(t *testing.T) {
 	}
 }
 
-func TestReadinessErrorLogsAndLeavesAdapterOut(t *testing.T) {
+func TestReadinessErrorLogsAndLeavesProfileOut(t *testing.T) {
 	m := newMultiFixture(t)
 	m.lab.mu.Lock()
 	m.lab.readyErr = errors.New("nomad unreachable")
@@ -1099,13 +1099,13 @@ func TestReadinessErrorLogsAndLeavesAdapterOut(t *testing.T) {
 	}
 	var got []string
 	for _, offer := range m.advertisedOffers(t).Offers {
-		got = append(got, offer.Adapter)
+		got = append(got, offer.Profile)
 	}
 	if want := []string{"cloud", "edge"}; !slices.Equal(got, want) {
-		t.Fatalf("advertised adapters %v, want %v", got, want)
+		t.Fatalf("advertised profiles %v, want %v", got, want)
 	}
 	// A plain error, as a plugin built before adapter.Error returns, logs its text alone.
-	if logs := m.logs.String(); !strings.Contains(logs, "adapter lab readiness: nomad unreachable\n") {
+	if logs := m.logs.String(); !strings.Contains(logs, "profile lab readiness: nomad unreachable\n") {
 		t.Fatalf("readiness error not logged: %q", m.logs.String())
 	}
 }
@@ -1127,13 +1127,13 @@ func TestHungAdapterDoesNotStopAdvertising(t *testing.T) {
 	}
 	var got []string
 	for _, offer := range m.advertisedOffers(t).Offers {
-		got = append(got, offer.Adapter)
+		got = append(got, offer.Profile)
 	}
 	if want := []string{"cloud", "edge"}; !slices.Equal(got, want) {
-		t.Fatalf("advertised adapters %v, want %v", got, want)
+		t.Fatalf("advertised profiles %v, want %v", got, want)
 	}
 	logs := m.logs.String()
-	if !strings.Contains(logs, "adapter lab sweep: timed out") || !strings.Contains(logs, "adapter lab readiness: timed out") {
+	if !strings.Contains(logs, "profile lab sweep: timed out") || !strings.Contains(logs, "profile lab readiness: timed out") {
 		t.Fatalf("hung adapter's calls not logged: %q", logs)
 	}
 }
@@ -1160,7 +1160,7 @@ func TestSweepErrorIsolated(t *testing.T) {
 		t.Fatalf("published %d offers after a sweep error, want 3", offers)
 	}
 	logs := m.logs.String()
-	if want := `adapter lab sweep: op=list jobs class=unavailable: Get "[redacted-url] connection refused` + "\n"; !strings.Contains(logs, want) || strings.Contains(logs, "token=abc") {
+	if want := `profile lab sweep: op=list jobs class=unavailable: Get "[redacted-url] connection refused` + "\n"; !strings.Contains(logs, want) || strings.Contains(logs, "token=abc") {
 		t.Fatalf("sweep error log lacks %q or holds the URL: %q", want, logs)
 	}
 }
@@ -1200,17 +1200,17 @@ type multiFixture struct {
 	lab, cloud, edge *fakeAdapter
 }
 
-// newMultiFixture configures adapters lab, cloud and edge, in that order, for one agent with the labels
+// newMultiFixture configures profiles lab, cloud and edge, in that order, for one agent with the labels
 // their operator declares: lab and cloud both carry class=cpu, only cloud an accelerator, edge class=arm. The agent's
 // credential is answered.
 func newMultiFixture(t *testing.T) multiFixture {
 	t.Helper()
 	m := multiFixture{lab: &fakeAdapter{stream: resultStream}, cloud: &fakeAdapter{stream: resultStream}, edge: &fakeAdapter{stream: resultStream}}
 	config := testConfig(testReceiver)
-	config.Adapters = []admin.AdapterSettings{
-		{Name: "lab", Type: "fake", Agent: "claude", Labels: map[string]string{"site": "lab", "class": "cpu"}, Config: map[string]any{}},
-		{Name: "cloud", Type: "fake", Agent: "claude", Labels: map[string]string{"site": "cloud", "class": "cpu", "example.com/accelerator": "gpu"}, Config: map[string]any{}},
-		{Name: "edge", Type: "fake", Agent: "claude", Labels: map[string]string{"site": "edge", "class": "arm"}, Config: map[string]any{}},
+	config.Profiles = []admin.ProfileSettings{
+		{Name: "lab", Plugin: "fake", Agent: "claude", Labels: map[string]string{"site": "lab", "class": "cpu"}, Config: map[string]any{}},
+		{Name: "cloud", Plugin: "fake", Agent: "claude", Labels: map[string]string{"site": "cloud", "class": "cpu", "example.com/accelerator": "gpu"}, Config: map[string]any{}},
+		{Name: "edge", Plugin: "fake", Agent: "claude", Labels: map[string]string{"site": "edge", "class": "arm"}, Config: map[string]any{}},
 	}
 	m.fixture = newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakeAdapter{"lab": m.lab, "cloud": m.cloud, "edge": m.edge})
 	m.answer(t, credentialName)
@@ -1255,7 +1255,7 @@ func (m multiFixture) routed(t *testing.T, selector ...wire.Requirement) string 
 	record := m.submit(t, m.host, func(task *wire.Submission) {
 		task.Wherry.Placement.Selector = append([]wire.Requirement{}, selector...)
 	})
-	return m.admitted(t, record).adapter.Name
+	return m.admitted(t, record).profile.Name
 }
 
 func TestEachSelectorOperatorRoutes(t *testing.T) {
@@ -1280,7 +1280,7 @@ func TestEachSelectorOperatorRoutes(t *testing.T) {
 	}
 }
 
-func TestUnreadyAdapterIsNeverChosen(t *testing.T) {
+func TestUnreadyProfileIsNeverChosen(t *testing.T) {
 	m := newMultiFixture(t)
 	m.lab.mu.Lock()
 	m.lab.unready = true
@@ -1289,8 +1289,8 @@ func TestUnreadyAdapterIsNeverChosen(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, offer := range m.advertisedOffers(t).Offers {
-		if offer.Adapter == "lab" {
-			t.Fatal("an adapter that is not ready was advertised")
+		if offer.Profile == "lab" {
+			t.Fatal("a profile that is not ready was advertised")
 		}
 	}
 	if got := m.routed(t, in("class", "cpu")); got != "cloud" {
@@ -1303,11 +1303,11 @@ func TestUnreadyAdapterIsNeverChosen(t *testing.T) {
 	}
 }
 
-func TestAdaptersAreBuiltForTheReceiversPool(t *testing.T) {
+func TestProfilesAreBuiltForTheReceiversPool(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.adapter.mu.Lock()
 	defer f.adapter.mu.Unlock()
 	if f.adapter.pool != testPool {
-		t.Fatalf("adapter built for pool %q, want %q", f.adapter.pool, testPool)
+		t.Fatalf("profile built for pool %q, want %q", f.adapter.pool, testPool)
 	}
 }

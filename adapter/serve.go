@@ -20,8 +20,8 @@ import (
 // record, which brokers cap at a few MiB; 64 MiB leaves room.
 const maxMessage = 64 << 20
 
-// Serve runs a plugin process for the receiver that started it, building one adapter with factory for
-// each Configure and routing every call to the adapter it names. factory gets the logger whose lines the
+// Serve runs a plugin process for the receiver that started it, building one profile with factory for
+// each Configure and routing every call to the profile it names. factory gets the logger whose lines the
 // receiver relays. It returns when the receiver ends the link.
 func Serve(factory func(Settings, hclog.Logger) (Adapter, error)) {
 	// JSON lines keep their level when the receiver relays them; os.Stderr is read before plugin.Serve
@@ -29,7 +29,7 @@ func Serve(factory func(Settings, hclog.Logger) (Adapter, error)) {
 	logger := hclog.New(&hclog.LoggerOptions{Output: os.Stderr, JSONFormat: true, Level: hclog.Info})
 	plugin.Serve(&plugin.ServeConfig{
 		HandshakeConfig: handshake,
-		Plugins:         plugin.PluginSet{pluginName: &grpcPlugin{server: &server{factory: factory, logger: logger, adapters: map[string]Adapter{}}}},
+		Plugins:         plugin.PluginSet{pluginName: &grpcPlugin{server: &server{factory: factory, logger: logger, profiles: map[string]Adapter{}}}},
 		GRPCServer: func(options []grpc.ServerOption) *grpc.Server {
 			return grpc.NewServer(append(options, grpc.MaxRecvMsgSize(maxMessage),
 				grpc.ChainUnaryInterceptor(recoverUnary(logger)), grpc.ChainStreamInterceptor(recoverStream(logger)))...)
@@ -39,24 +39,24 @@ func Serve(factory func(Settings, hclog.Logger) (Adapter, error)) {
 }
 
 // recovered turns a panic in one call into that call's error; the panic value is not logged, since it
-// can hold the call's material. adapter is read after the panic, since a stream names it in its first message.
-func recovered(logger hclog.Logger, method string, adapter *string, err *error) {
+// can hold the call's material. profile is read after the panic, since a stream names it in its first message.
+func recovered(logger hclog.Logger, method string, profile *string, err *error) {
 	if value := recover(); value != nil {
-		logger.Error("adapter call panicked", "method", method, "adapter", *adapter, "stack", string(debug.Stack()))
-		*err = status.Error(codes.Internal, "adapter "+*adapter+" panicked in "+method)
+		logger.Error("profile call panicked", "method", method, "profile", *profile, "stack", string(debug.Stack()))
+		*err = status.Error(codes.Internal, "profile "+*profile+" panicked in "+method)
 	}
 }
 
-type named interface{ GetAdapter() string }
+type named interface{ GetProfile() string }
 
 func recoverUnary(logger hclog.Logger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (_ any, err error) {
-		// go-plugin's own services share the server, and their requests name no adapter.
-		adapter := ""
+		// go-plugin's own services share the server, and their requests name no profile.
+		profile := ""
 		if request, ok := req.(named); ok {
-			adapter = request.GetAdapter()
+			profile = request.GetProfile()
 		}
-		defer recovered(logger, info.FullMethod, &adapter, &err)
+		defer recovered(logger, info.FullMethod, &profile, &err)
 		return handler(ctx, req)
 	}
 }
@@ -64,21 +64,21 @@ func recoverUnary(logger hclog.Logger) grpc.UnaryServerInterceptor {
 func recoverStream(logger hclog.Logger) grpc.StreamServerInterceptor {
 	return func(srv any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 		wrapped := &namingStream{ServerStream: stream}
-		defer recovered(logger, info.FullMethod, &wrapped.adapter, &err)
+		defer recovered(logger, info.FullMethod, &wrapped.profile, &err)
 		return handler(srv, wrapped)
 	}
 }
 
-// namingStream records the adapter a stream's request names as the handler receives it.
+// namingStream records the profile a stream's request names as the handler receives it.
 type namingStream struct {
 	grpc.ServerStream
-	adapter string
+	profile string
 }
 
 func (s *namingStream) RecvMsg(m any) error {
 	err := s.ServerStream.RecvMsg(m)
 	if request, ok := m.(named); ok && err == nil {
-		s.adapter = request.GetAdapter()
+		s.profile = request.GetProfile()
 	}
 	return err
 }
@@ -88,15 +88,15 @@ type server struct {
 	factory  func(Settings, hclog.Logger) (Adapter, error)
 	logger   hclog.Logger
 	mu       sync.RWMutex
-	adapters map[string]Adapter
+	profiles map[string]Adapter
 }
 
-func (s *server) adapter(name string) (Adapter, error) {
+func (s *server) profile(name string) (Adapter, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	adapter, ok := s.adapters[name]
+	adapter, ok := s.profiles[name]
 	if !ok {
-		return nil, status.Errorf(codes.NotFound, "adapter %s is not configured", name)
+		return nil, status.Errorf(codes.NotFound, "profile %s is not configured", name)
 	}
 	return adapter, nil
 }
@@ -126,12 +126,12 @@ func callStatus(err error) error {
 }
 
 func (s *server) Configure(_ context.Context, req *adapterv1.ConfigureRequest) (*adapterv1.ConfigureResponse, error) {
-	adapter, err := s.factory(Settings{Name: req.Adapter, Pool: req.Pool, Agent: req.Agent, Config: req.Config, Platform: req.Platform}, s.logger)
+	adapter, err := s.factory(Settings{Name: req.Profile, Pool: req.Pool, Agent: req.Agent, Config: req.Config, Credential: req.Credential}, s.logger)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	s.mu.Lock()
-	s.adapters[req.Adapter] = adapter
+	s.profiles[req.Profile] = adapter
 	s.mu.Unlock()
 	directories := adapter.Directories()
 	return &adapterv1.ConfigureResponse{Directories: &adapterv1.Directories{
@@ -140,7 +140,7 @@ func (s *server) Configure(_ context.Context, req *adapterv1.ConfigureRequest) (
 }
 
 func (s *server) Ready(ctx context.Context, req *adapterv1.ReadyRequest) (*adapterv1.ReadyResponse, error) {
-	adapter, err := s.adapter(req.Adapter)
+	adapter, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
@@ -152,13 +152,13 @@ func (s *server) Ready(ctx context.Context, req *adapterv1.ReadyRequest) (*adapt
 }
 
 func (s *server) Dispatch(ctx context.Context, req *adapterv1.DispatchRequest) (*adapterv1.DispatchResponse, error) {
-	adapter, err := s.adapter(req.Adapter)
+	adapter, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
 	message := req.GetRun()
 	run := Run{
-		ID: message.GetId(), Adapter: message.GetAdapter(), Agent: message.GetAgent(), Model: message.GetModel(), Attempt: message.GetAttempt(),
+		ID: message.GetId(), Profile: message.GetProfile(), Agent: message.GetAgent(), Model: message.GetModel(), Attempt: message.GetAttempt(),
 		Prompt: message.GetPrompt(),
 	}
 	for _, input := range message.GetInputs() {
@@ -178,7 +178,7 @@ func (s *server) Dispatch(ctx context.Context, req *adapterv1.DispatchRequest) (
 }
 
 func (s *server) Lookup(ctx context.Context, req *adapterv1.LookupRequest) (*adapterv1.LookupResponse, error) {
-	adapter, err := s.adapter(req.Adapter)
+	adapter, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
@@ -187,14 +187,14 @@ func (s *server) Lookup(ctx context.Context, req *adapterv1.LookupRequest) (*ada
 		return nil, callStatus(err)
 	}
 	return &adapterv1.LookupResponse{Job: &adapterv1.Job{
-		State: adapterv1.JobState(job.State), Handle: handleMessage(job.Handle), Attempt: job.Attempt, Adapter: job.Adapter, Agent: job.Agent,
+		State: adapterv1.JobState(job.State), Handle: handleMessage(job.Handle), Attempt: job.Attempt, Profile: job.Profile, Agent: job.Agent,
 	}}, nil
 }
 
 // Follow runs the adapter's Follow on the handler's goroutine, so a panic in it is recovered, and sends
 // its lines from another.
 func (s *server) Follow(req *adapterv1.FollowRequest, stream grpc.ServerStreamingServer[adapterv1.FollowResponse]) error {
-	adapter, err := s.adapter(req.Adapter)
+	adapter, err := s.profile(req.Profile)
 	if err != nil {
 		return err
 	}
@@ -230,7 +230,7 @@ func (s *server) Follow(req *adapterv1.FollowRequest, stream grpc.ServerStreamin
 }
 
 func (s *server) Stop(ctx context.Context, req *adapterv1.StopRequest) (*adapterv1.StopResponse, error) {
-	adapter, err := s.adapter(req.Adapter)
+	adapter, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +243,7 @@ const maxPiece = 1 << 20
 // Collect runs the adapter's Collect on the handler's goroutine, as Follow does, and sends its outputs in pieces
 // from another.
 func (s *server) Collect(req *adapterv1.CollectRequest, stream grpc.ServerStreamingServer[adapterv1.CollectResponse]) error {
-	adapter, err := s.adapter(req.Adapter)
+	adapter, err := s.profile(req.Profile)
 	if err != nil {
 		return err
 	}
@@ -319,7 +319,7 @@ func sendBody(stream grpc.ServerStreamingServer[adapterv1.CollectResponse], outp
 }
 
 func (s *server) Purge(ctx context.Context, req *adapterv1.PurgeRequest) (*adapterv1.PurgeResponse, error) {
-	adapter, err := s.adapter(req.Adapter)
+	adapter, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +327,7 @@ func (s *server) Purge(ctx context.Context, req *adapterv1.PurgeRequest) (*adapt
 }
 
 func (s *server) Release(ctx context.Context, req *adapterv1.ReleaseRequest) (*adapterv1.ReleaseResponse, error) {
-	adapter, err := s.adapter(req.Adapter)
+	adapter, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
@@ -335,7 +335,7 @@ func (s *server) Release(ctx context.Context, req *adapterv1.ReleaseRequest) (*a
 }
 
 func (s *server) Sweep(ctx context.Context, req *adapterv1.SweepRequest) (*adapterv1.SweepResponse, error) {
-	adapter, err := s.adapter(req.Adapter)
+	adapter, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +343,7 @@ func (s *server) Sweep(ctx context.Context, req *adapterv1.SweepRequest) (*adapt
 }
 
 func (s *server) Metrics(ctx context.Context, req *adapterv1.MetricsRequest) (*adapterv1.MetricsResponse, error) {
-	adapter, err := s.adapter(req.Adapter)
+	adapter, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}

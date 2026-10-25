@@ -27,15 +27,15 @@ var (
 	configureTimeout  = 30 * time.Second
 )
 
-// Plugin is one plugin process and every adapter configured in it. When the process exits, Plugin starts
-// it again with back-off and configures every adapter again; until then their calls return ErrLinkLost.
+// Plugin is one plugin process and every profile configured in it. When the process exits, Plugin starts
+// it again with back-off and configures every profile again; until then their calls return ErrLinkLost.
 type Plugin struct {
 	// resolve checks the plugin binary and returns its path, before every start.
 	resolve func() (string, error)
 	// path is the binary the latest start ran, for log lines.
 	path   string
 	logger hclog.Logger
-	// configure serialises Configure with a restart, which configures every adapter in settings.
+	// configure serialises Configure with a restart, which configures every profile in settings.
 	configure sync.Mutex
 	settings  []Settings
 	mu        sync.Mutex
@@ -59,7 +59,7 @@ func Launch(resolve func() (string, error), logs io.Writer) (*Plugin, error) {
 	return p, nil
 }
 
-// start launches the process and configures every adapter in settings; the caller holds configure.
+// start launches the process and configures every profile in settings; the caller holds configure.
 func (p *Plugin) start() (*plugin.Client, adapterv1.AdapterClient, error) {
 	path, err := p.resolve()
 	if err != nil {
@@ -95,18 +95,18 @@ func (p *Plugin) start() (*plugin.Client, adapterv1.AdapterClient, error) {
 	for _, settings := range p.settings {
 		if _, err := configure(rpc, settings); err != nil {
 			client.Kill()
-			return nil, nil, fmt.Errorf("adapter %s: %w", settings.Name, err)
+			return nil, nil, fmt.Errorf("profile %s: %w", settings.Name, err)
 		}
 	}
 	return client, rpc, nil
 }
 
-// configure builds settings' adapter in the plugin and returns what the plugin reports of it.
+// configure builds settings' profile in the plugin and returns what the plugin reports of it.
 func configure(rpc adapterv1.AdapterClient, settings Settings) (*adapterv1.ConfigureResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), configureTimeout)
 	defer cancel()
 	resp, err := rpc.Configure(ctx, &adapterv1.ConfigureRequest{
-		Adapter: settings.Name, Pool: settings.Pool, Agent: settings.Agent, Config: settings.Config, Platform: settings.Platform,
+		Profile: settings.Name, Pool: settings.Pool, Agent: settings.Agent, Config: settings.Config, Credential: settings.Credential,
 	})
 	if err != nil {
 		return nil, callError(ctx, err)
@@ -159,7 +159,7 @@ func (p *Plugin) supervise(client *plugin.Client) {
 	}
 }
 
-// Configure builds an adapter in the plugin and returns it; the plugin configures it again after a restart.
+// Configure builds a profile in the plugin and returns its handle; the plugin configures it again after a restart.
 func (p *Plugin) Configure(settings Settings) (Adapter, error) {
 	p.configure.Lock()
 	defer p.configure.Unlock()
@@ -231,7 +231,7 @@ func callError(ctx context.Context, err error) error {
 	return errors.New(call.Message())
 }
 
-// remote is one adapter in a plugin process.
+// remote is one profile in a plugin process.
 type remote struct {
 	plugin      *Plugin
 	name        string
@@ -247,7 +247,7 @@ func (r *remote) Ready(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	resp, err := rpc.Ready(ctx, &adapterv1.ReadyRequest{Adapter: r.name})
+	resp, err := rpc.Ready(ctx, &adapterv1.ReadyRequest{Profile: r.name})
 	if err != nil {
 		return false, callError(ctx, err)
 	}
@@ -260,7 +260,7 @@ func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
 		return OutcomeUnknown, Handle{}, err
 	}
 	message := &adapterv1.Run{
-		Id: run.ID, Adapter: run.Adapter, Agent: run.Agent, Model: run.Model, Attempt: run.Attempt, Prompt: run.Prompt,
+		Id: run.ID, Profile: run.Profile, Agent: run.Agent, Model: run.Model, Attempt: run.Attempt, Prompt: run.Prompt,
 	}
 	for _, input := range run.Inputs {
 		message.Inputs = append(message.Inputs, &adapterv1.File{Name: input.Name, Data: input.Data})
@@ -271,7 +271,7 @@ func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
 	for _, fetch := range run.Fetches {
 		message.Fetches = append(message.Fetches, &adapterv1.Fetch{Name: fetch.Name, Url: fetch.URL, Size: fetch.Size, Sha256: fetch.SHA256})
 	}
-	resp, err := rpc.Dispatch(ctx, &adapterv1.DispatchRequest{Adapter: r.name, Run: message})
+	resp, err := rpc.Dispatch(ctx, &adapterv1.DispatchRequest{Profile: r.name, Run: message})
 	if err != nil {
 		err = callError(ctx, err)
 		var tooLarge *InputTooLargeError
@@ -288,12 +288,12 @@ func (r *remote) Lookup(ctx context.Context, runID string) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
-	resp, err := rpc.Lookup(ctx, &adapterv1.LookupRequest{Adapter: r.name, RunId: runID})
+	resp, err := rpc.Lookup(ctx, &adapterv1.LookupRequest{Profile: r.name, RunId: runID})
 	if err != nil {
 		return Job{}, callError(ctx, err)
 	}
 	job := resp.GetJob()
-	return Job{State: JobState(job.GetState()), Handle: handleOf(job.GetHandle()), Attempt: job.GetAttempt(), Adapter: job.GetAdapter(), Agent: job.GetAgent()}, nil
+	return Job{State: JobState(job.GetState()), Handle: handleOf(job.GetHandle()), Attempt: job.GetAttempt(), Profile: job.GetProfile(), Agent: job.GetAgent()}, nil
 }
 
 func (r *remote) Follow(ctx context.Context, handle Handle, from int64, lines chan<- Line) (Terminal, error) {
@@ -301,7 +301,7 @@ func (r *remote) Follow(ctx context.Context, handle Handle, from int64, lines ch
 	if err != nil {
 		return Terminal{}, err
 	}
-	stream, err := rpc.Follow(ctx, &adapterv1.FollowRequest{Adapter: r.name, Handle: handleMessage(handle), From: from})
+	stream, err := rpc.Follow(ctx, &adapterv1.FollowRequest{Profile: r.name, Handle: handleMessage(handle), From: from})
 	if err != nil {
 		return Terminal{}, callError(ctx, err)
 	}
@@ -330,7 +330,7 @@ func (r *remote) Stop(ctx context.Context, handle Handle) error {
 	if err != nil {
 		return err
 	}
-	_, err = rpc.Stop(ctx, &adapterv1.StopRequest{Adapter: r.name, Handle: handleMessage(handle)})
+	_, err = rpc.Stop(ctx, &adapterv1.StopRequest{Profile: r.name, Handle: handleMessage(handle)})
 	return callError(ctx, err)
 }
 
@@ -342,7 +342,7 @@ func (r *remote) Collect(ctx context.Context, handle Handle, limits Limits, outp
 	if err != nil {
 		return err
 	}
-	stream, err := rpc.Collect(ctx, &adapterv1.CollectRequest{Adapter: r.name, Handle: handleMessage(handle), Limits: &adapterv1.Limits{
+	stream, err := rpc.Collect(ctx, &adapterv1.CollectRequest{Profile: r.name, Handle: handleMessage(handle), Limits: &adapterv1.Limits{
 		Files: int64(limits.Files), FileBytes: limits.FileBytes, TotalBytes: limits.TotalBytes, Stream: limits.Stream, StreamBytes: limits.StreamBytes,
 	}})
 	if err != nil {
@@ -416,7 +416,7 @@ func (r *remote) Purge(ctx context.Context, runID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = rpc.Purge(ctx, &adapterv1.PurgeRequest{Adapter: r.name, RunId: runID})
+	_, err = rpc.Purge(ctx, &adapterv1.PurgeRequest{Profile: r.name, RunId: runID})
 	return callError(ctx, err)
 }
 
@@ -425,7 +425,7 @@ func (r *remote) Release(ctx context.Context, runID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = rpc.Release(ctx, &adapterv1.ReleaseRequest{Adapter: r.name, RunId: runID})
+	_, err = rpc.Release(ctx, &adapterv1.ReleaseRequest{Profile: r.name, RunId: runID})
 	return callError(ctx, err)
 }
 
@@ -434,7 +434,7 @@ func (r *remote) Sweep(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = rpc.Sweep(ctx, &adapterv1.SweepRequest{Adapter: r.name})
+	_, err = rpc.Sweep(ctx, &adapterv1.SweepRequest{Profile: r.name})
 	return callError(ctx, err)
 }
 
@@ -443,7 +443,7 @@ func (r *remote) Metrics(ctx context.Context) ([]Sample, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := rpc.Metrics(ctx, &adapterv1.MetricsRequest{Adapter: r.name})
+	resp, err := rpc.Metrics(ctx, &adapterv1.MetricsRequest{Profile: r.name})
 	if err != nil {
 		return nil, callError(ctx, err)
 	}

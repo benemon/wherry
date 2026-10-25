@@ -20,10 +20,10 @@ var Credentials = []adapter.Secret{
 	{Name: "conformance-file", File: "conformance-key", Value: []byte("conformance-file-value")},
 }
 
-// Run checks the adapters factory, the one a plugin hands Serve, builds against the adapter contract on their
-// platform, giving it a logger that discards. completes configures an adapter whose job runs for at least ten seconds
+// Run checks the profiles factory, the one a plugin hands Serve, builds against the adapter contract on their
+// platform, giving it a logger that discards. completes configures a profile whose job runs for at least ten seconds
 // and exits 0; neverStarts one whose job the platform ends before its agent starts. Every job the suite creates is
-// purged. inlineLimit is the cap both configured adapters report. The completing job's run carries Credentials.
+// purged. inlineLimit is the cap both configured profiles report. The completing job's run carries Credentials.
 func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Adapter, error), completes, neverStarts adapter.Settings, inlineLimit int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
@@ -55,7 +55,7 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 	})
 
 	t.Run("Completes", func(t *testing.T) {
-		run := adapter.Run{ID: id, Adapter: completes.Name, Agent: completes.Agent, Attempt: 3, Prompt: []byte("conformance prompt"), Credentials: Credentials}
+		run := adapter.Run{ID: id, Profile: completes.Name, Agent: completes.Agent, Attempt: 3, Prompt: []byte("conformance prompt"), Credentials: Credentials}
 		purgeAfter(t, running, run)
 		handle := dispatch(t, ctx, running, run)
 		if _, again := dispatchOutcome(t, ctx, running, run); again.Name != handle.Name {
@@ -65,8 +65,8 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 		if err != nil || job.State != adapter.JobRunning {
 			t.Fatalf("lookup while running = %+v, %v; want running", job, err)
 		}
-		if job.Attempt != run.Attempt || job.Adapter != run.Adapter || job.Agent != run.Agent || job.Handle.Name != handle.Name {
-			t.Fatalf("lookup metadata %+v; want attempt %d, adapter %s, agent %s, job %s", job, run.Attempt, run.Adapter, run.Agent, handle.Name)
+		if job.Attempt != run.Attempt || job.Profile != run.Profile || job.Agent != run.Agent || job.Handle.Name != handle.Name {
+			t.Fatalf("lookup metadata %+v; want attempt %d, profile %s, agent %s, job %s", job, run.Attempt, run.Profile, run.Agent, handle.Name)
 		}
 		if terminal := follow(t, ctx, running, handle); !terminal.Started || terminal.ExitCode != 0 {
 			t.Fatalf("terminal %+v; want started with exit code 0", terminal)
@@ -85,7 +85,7 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 	})
 
 	t.Run("Stop", func(t *testing.T) {
-		run := adapter.Run{ID: id, Adapter: completes.Name, Agent: completes.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
+		run := adapter.Run{ID: id, Profile: completes.Name, Agent: completes.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
 		purgeAfter(t, running, run)
 		handle := dispatch(t, ctx, running, run)
 		for range 2 {
@@ -99,7 +99,7 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 	})
 
 	t.Run("NeverStarts", func(t *testing.T) {
-		run := adapter.Run{ID: id + "-never", Adapter: neverStarts.Name, Agent: neverStarts.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
+		run := adapter.Run{ID: id + "-never", Profile: neverStarts.Name, Agent: neverStarts.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
 		purgeAfter(t, failing, run)
 		handle := dispatch(t, ctx, failing, run)
 		if job, err := failing.Lookup(ctx, run.ID); err != nil || job.State != adapter.JobNeverStarted {

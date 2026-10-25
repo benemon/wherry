@@ -31,32 +31,33 @@ import (
 // ErrConfigChanged is returned by Run when wherry.admin holds a configuration other than the one it started with.
 var ErrConfigChanged = errors.New("receiver configuration changed")
 
-// Named is a constructed adapter with its configured name and the agent it launches.
+// Named is a configured profile with its name, the agent it launches and its plugin's handle on it.
 type Named struct {
 	Name  string
 	Agent string
-	// Labels are the operator's declared labels for the adapter.
+	// Labels are the operator's declared labels for the profile.
 	Labels  map[string]string
 	Adapter adapter.Adapter
 }
 
-// AdapterFactory builds one adapter for the receiver's pool from its settings in the receiver's configuration record.
-type AdapterFactory func(pool string, settings admin.AdapterSettings) (Named, error)
+// ProfileFactory configures one profile for the receiver's pool from its settings in the receiver's configuration
+// record.
+type ProfileFactory func(pool string, settings admin.ProfileSettings) (Named, error)
 
-// Receiver claims tasks for one pool and runs them through its adapters.
+// Receiver claims tasks for one pool and runs them through its profiles.
 type Receiver struct {
 	id      string
 	base    *kgo.Client
 	signing ed25519.PrivateKey
-	factory AdapterFactory
+	factory ProfileFactory
 	logger  *log.Logger
 	metrics *metrics
 	// rotateKey, set by New only, has Run replace the signing key in keyFile before it claims anything.
 	keyFile   string
 	rotateKey bool
-	// config and adapters are set by configure before any claim and never change.
+	// config and profiles are set by configure before any claim and never change.
 	config   admin.ReceiverConfig
-	adapters []Named
+	profiles []Named
 	mu       sync.Mutex
 	state    admin.State
 	// peers holds the pool's receiver keys, this receiver's included; hosts the keys of entitled tenants' hosts.
@@ -80,7 +81,7 @@ type Receiver struct {
 // New builds the receiver's Kafka client from bundle and loads or creates its signing key in stateDir, settling a
 // rotation an earlier start left. With rotateKey, Run rotates the key. Once configured, the receiver registers its
 // metric families on registry.
-func New(bundle admin.Bundle, stateDir string, rotateKey bool, factory AdapterFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
+func New(bundle admin.Bundle, stateDir string, rotateKey bool, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
 	id, ok := strings.CutPrefix(bundle.Principal, admin.ReceiverPrincipal(""))
 	if !ok || !wire.ValidName(id) {
 		return nil, errors.New("bundle principal is not a receiver principal")
@@ -227,7 +228,7 @@ func (r *Receiver) register(ctx context.Context) error {
 }
 
 // configure waits for this receiver's configuration record, validates it against its pool's
-// terms and builds its adapters.
+// terms and configures its profiles.
 func (r *Receiver) configure(ctx context.Context) error {
 	waiting := false
 	for {
@@ -243,18 +244,18 @@ func (r *Receiver) configure(ctx context.Context) error {
 			if err := admin.ValidateReceiverRecord(record, r.id, state.Pools[config.Pool]); err != nil {
 				return fmt.Errorf("configuration: %w", err)
 			}
-			adapters := make([]Named, 0, len(config.Adapters))
-			for _, settings := range config.Adapters {
+			profiles := make([]Named, 0, len(config.Profiles))
+			for _, settings := range config.Profiles {
 				named, err := r.factory(config.Pool, settings)
 				if err != nil {
-					return fmt.Errorf("adapter %s: %s", settings.Name, logText(r.redactLive, err))
+					return fmt.Errorf("profile %s: %s", settings.Name, logText(r.redactLive, err))
 				}
-				adapters = append(adapters, named)
+				profiles = append(profiles, named)
 			}
-			r.config, r.adapters = config, adapters
+			r.config, r.profiles = config, profiles
 			r.metrics.registerFor(r)
 			r.metrics.capacity.Set(float64(config.Capacity))
-			r.logger.Printf("configured: pool=%s adapters=%d capacity=%d", config.Pool, len(adapters), config.Capacity)
+			r.logger.Printf("configured: pool=%s profiles=%d capacity=%d", config.Pool, len(profiles), config.Capacity)
 			return r.refresh(ctx)
 		}
 		if !waiting {
@@ -473,11 +474,11 @@ func kid(encoded []byte) (string, string, bool) {
 	return strings.Cut(protected.KID, "/")
 }
 
-// advertise sweeps each adapter, then publishes one offer per ready adapter with its agent; with none ready it
-// publishes no offers and keeps its liveness and capacity visible. Each adapter call has one advertise
-// interval, so a hung adapter delays the next advertisement by at most that much per call.
+// advertise sweeps each profile, then publishes one offer per ready profile with its agent; with none ready it
+// publishes no offers and keeps its liveness and capacity visible. Each profile call has one advertise
+// interval, so a hung plugin delays the next advertisement by at most that much per call.
 func (r *Receiver) advertise(ctx context.Context) error {
-	for _, named := range r.adapters {
+	for _, named := range r.profiles {
 		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)
 		err := named.Adapter.Sweep(callCtx)
 		cancel()
@@ -486,26 +487,26 @@ func (r *Receiver) advertise(ctx context.Context) error {
 		}
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
-			r.logger.Printf("adapter %s sweep: timed out", named.Name)
+			r.logger.Printf("profile %s sweep: timed out", named.Name)
 		case err != nil:
-			r.logger.Printf("adapter %s sweep: %s", named.Name, logText(r.redactLive, err))
+			r.logger.Printf("profile %s sweep: %s", named.Name, logText(r.redactLive, err))
 		}
 	}
 	offers := []wire.Offer{}
-	for _, named := range r.adapters {
+	for _, named := range r.profiles {
 		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)
 		ready, err := named.Adapter.Ready(callCtx)
 		cancel()
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
-			r.logger.Printf("adapter %s readiness: timed out", named.Name)
+			r.logger.Printf("profile %s readiness: timed out", named.Name)
 			continue
 		case err != nil:
-			r.logger.Printf("adapter %s readiness: %s", named.Name, logText(r.redactLive, err))
+			r.logger.Printf("profile %s readiness: %s", named.Name, logText(r.redactLive, err))
 			continue
 		}
 		if ready {
-			offers = append(offers, wire.Offer{Adapter: named.Name, Agent: named.Agent, InlineLimit: named.Adapter.InlineLimit()})
+			offers = append(offers, wire.Offer{Profile: named.Name, Agent: named.Agent, InlineLimit: named.Adapter.InlineLimit()})
 		}
 	}
 	r.mu.Lock()
@@ -525,14 +526,15 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	return nil
 }
 
-// offer returns this receiver's first adapter, in declared order, that is in its current offers and launches the
-// placement's agent with configured labels satisfying its selector.
+// offer returns this receiver's first profile, in record order, that is in its current offers and launches the
+// placement's agent with configured labels satisfying its selector. The record lists each plugin's profiles in their
+// declared order, plugins sorted by type, so the host's placement and this routing compute the same match.
 func (r *Receiver) offer(placement wire.Placement) (Named, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, named := range r.adapters {
+	for _, named := range r.profiles {
 		if named.Agent == placement.Agent && wire.Satisfies(placement.Selector, named.Labels) &&
-			slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Adapter == named.Name }) {
+			slices.ContainsFunc(r.offers, func(offer wire.Offer) bool { return offer.Profile == named.Name }) {
 			return named, true
 		}
 	}

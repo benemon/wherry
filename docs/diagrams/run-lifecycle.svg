@@ -161,7 +161,7 @@
     <text x="72" y="992">Redelivery. The receiver renews the share group's acquisition lock every 10 s. When a holder stops renewing, or releases the task, the broker delivers the submission again, as the next attempt.</text>
     <circle cx="54" cy="1018" r="9" fill="#3f6b4a"/>
     <text x="54" y="1022" text-anchor="middle" font-size="10" font-weight="700" fill="#fffdf7">A</text>
-    <text x="72" y="1022">Adoption. On a redelivery the receiver looks up the run's job in each adapter. A job of the same adapter and agent is adopted without a Dispatch: the receiver asks for its own seal</text>
+    <text x="72" y="1022">Adoption. On a redelivery the receiver looks up the run's job in each profile. A job of the same profile and agent is adopted without a Dispatch: the receiver asks for its own seal</text>
     <text x="72" y="1037">when the run has credentials or S3 outputs, then follows from the highest log offset of its started and heartbeat statuses. Any other job under the run's ID is stopped and purged, and the run is dispatched again.</text>
     <text x="72" y="1056">A host seals only to the receiver that wrote the run's first claimed status, so a run another receiver adopts ends TASK_STATE_FAILED when its seal wait ends.</text>
   </g>

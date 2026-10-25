@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -162,7 +165,7 @@ func TestRelativePluginDirRunsTheCheckedBinary(t *testing.T) {
 	t.Chdir(dir)
 	plugins := &plugins{dir: ".", logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
-	_, err := plugins.adapter("build", admin.AdapterSettings{Name: "exec", Type: "fake", Agent: "claude"}, "")
+	_, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"})
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Fatal("a binary found on PATH ran in place of the checked plugin")
 	}
@@ -177,7 +180,7 @@ func TestRestartChecksThePluginAgain(t *testing.T) {
 	logs := &syncBuffer{}
 	plugins := &plugins{dir: dir, logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
-	if _, err := plugins.adapter("build", admin.AdapterSettings{Name: "exec", Type: "fake", Agent: "claude"}, ""); err != nil {
+	if _, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(filepath.Join(dir, "wherry-plugin-fake"), 0o775); err != nil {
@@ -201,7 +204,7 @@ func TestRestartChecksThePluginAgain(t *testing.T) {
 func TestMissingPluginIsAConfigurationError(t *testing.T) {
 	plugins := &plugins{dir: t.TempDir(), logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
-	_, err := plugins.adapter("build", admin.AdapterSettings{Name: "lab", Type: "nomad", Agent: "claude"}, "")
+	_, err := plugins.profile("build", admin.ProfileSettings{Name: "lab", Plugin: "nomad", Agent: "claude"})
 	if err == nil || err.Error() != "no plugin for type nomad" {
 		t.Fatalf("got %v, want no plugin for type nomad", err)
 	}
@@ -221,12 +224,12 @@ func TestOneProcessPerAdapterType(t *testing.T) {
 	}
 	plugins := &plugins{dir: dir, logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
-	for _, settings := range []admin.AdapterSettings{
-		{Name: "exec", Type: "fake", Agent: "claude"}, {Name: "podman", Type: "fake", Agent: "claude"}, {Name: "edge", Type: "other", Agent: "claude"},
+	for _, settings := range []admin.ProfileSettings{
+		{Name: "exec", Plugin: "fake", Agent: "claude"}, {Name: "podman", Plugin: "fake", Agent: "claude"}, {Name: "edge", Plugin: "other", Agent: "claude"},
 	} {
-		named, err := plugins.adapter("build", settings, "")
+		named, err := plugins.profile("build", settings)
 		if err != nil || named.Name != settings.Name {
-			t.Fatalf("adapter %s: %+v, %v", settings.Name, named, err)
+			t.Fatalf("profile %s: %+v, %v", settings.Name, named, err)
 		}
 	}
 	processes := map[string]int{}
@@ -234,7 +237,7 @@ func TestOneProcessPerAdapterType(t *testing.T) {
 		processes[record.Settings.Name] = record.PID
 	}
 	if len(processes) != 3 || processes["exec"] != processes["podman"] || processes["exec"] == processes["edge"] {
-		t.Fatalf("adapters configured in processes %v; want exec and podman in one, edge in another", processes)
+		t.Fatalf("profiles configured in processes %v; want exec and podman in one, edge in another", processes)
 	}
 }
 
@@ -246,11 +249,18 @@ func TestReadBundleIsStrict(t *testing.T) {
 	if _, err := admin.ReadBundle(path); err == nil {
 		t.Fatal("accepted a bundle with an unknown field")
 	}
+	// The bundle holds only the receiver's Kafka identity; platform credentials come from the local configuration.
 	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\nplatform:\n  lab: token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := admin.ReadBundle(path); err == nil {
+		t.Fatal("accepted a bundle carrying platform credentials")
+	}
+	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	bundle, err := admin.ReadBundle(path)
-	if err != nil || bundle.Platform["lab"] != "token" || bundle.Principal != "wherry.rcv.r" {
+	if err != nil || bundle.Principal != "wherry.rcv.r" {
 		t.Fatalf("bundle %#v err %v", bundle, err)
 	}
 	if err := os.WriteFile(path, []byte("broker: b\nca: c\npassword: p\n"), 0o600); err != nil {
@@ -298,5 +308,128 @@ func TestMetricsServeOnlyTheMetricsPath(t *testing.T) {
 		if path == "/metrics" && (!strings.Contains(string(body), "wherry_build_info{") || !strings.Contains(string(body), "go_goroutines ")) {
 			t.Fatalf("metrics lack the build info and runtime collectors:\n%s", body)
 		}
+	}
+}
+
+// writeLocalConfig writes a receiver local configuration file and returns its path.
+func writeLocalConfig(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestReceiverLocalConfigExampleParses(t *testing.T) {
+	config, err := loadReceiverLocalConfig(filepath.Join("testdata", "example-receiver-config.yaml"))
+	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464",
+		Credentials: map[string]credential.Source{"nomad-token": {File: "/etc/wherry/nomad-token"}}}
+	if err != nil || !reflect.DeepEqual(config, want) {
+		t.Fatalf("example = %+v, %v; want %+v", config, err, want)
+	}
+	documented(t, "example-receiver-config.yaml")
+}
+
+func TestReceiverLocalConfigDefaultsAndExpansion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	config, err := loadReceiverLocalConfig(writeLocalConfig(t, "bundle: ~/wherry/receiver.bundle\ncredentials:\n  token: {file: ~/token}\n"))
+	want := receiverLocalConfig{Bundle: filepath.Join(home, "wherry", "receiver.bundle"), StateDir: filepath.Join(home, "wherry", "state"),
+		PluginDir: "/usr/local/libexec/wherry/plugins", Credentials: map[string]credential.Source{"token": {File: filepath.Join(home, "token")}}}
+	if err != nil || !reflect.DeepEqual(config, want) {
+		t.Fatalf("config = %+v, %v; want %+v", config, err, want)
+	}
+}
+
+func TestReceiverLocalConfigRefusals(t *testing.T) {
+	for name, test := range map[string]struct{ content, want string }{
+		"an unknown field":     {"bundle: b\nbundle_file: b\n", "decode config: invalid or unknown field at line 2"},
+		"no bundle":            {"state_dir: s\n", "config requires bundle"},
+		"two kinds of source":  {"bundle: b\ncredentials:\n  token: {file: x, env: A}\n", "config credential token: needs exactly one of file, env and command"},
+		"no kind of source":    {"bundle: b\ncredentials:\n  token: {}\n", "config credential token: needs exactly one of file, env and command"},
+		"an empty command":     {"bundle: b\ncredentials:\n  token:\n    command: ['']\n", "config credential token: command names no program"},
+		"a literal credential": {"bundle: b\ncredentials:\n  token: nomad-token-value\n", "decode config"},
+	} {
+		_, err := loadReceiverLocalConfig(writeLocalConfig(t, test.content))
+		if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), "nomad-tok") {
+			t.Errorf("config with %s: %v; want %q and no value", name, err, test.want)
+		}
+	}
+}
+
+// receiver run reads the file --config-file names, and /etc/wherry/config.yaml without it; the flags the file replaced
+// are refused.
+func TestReceiverRunTakesItsConfigFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.yaml")
+	err := run([]string{"receiver", "run", "--config-file", writeLocalConfig(t, "bundle: "+missing+"\n")}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "read bundle") || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("receiver run --config-file = %v; want the named file's bundle read", err)
+	}
+	if _, statErr := os.Stat(defaultReceiverConfig); statErr == nil {
+		t.Logf("%s exists here; not checking the default", defaultReceiverConfig)
+	} else if err := run([]string{"receiver", "run"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), defaultReceiverConfig) {
+		t.Fatalf("receiver run = %v; want %s read", err, defaultReceiverConfig)
+	}
+	for _, flag := range []string{"--bundle-file", "--state-dir", "--plugin-dir", "--metrics-addr"} {
+		var stderr bytes.Buffer
+		if err := run([]string{"receiver", "run", flag, "x"}, io.Discard, &stderr); err == nil || !strings.Contains(err.Error(), "flag provided but not defined: "+strings.TrimPrefix(flag, "-")) {
+			t.Errorf("receiver run %s = %v; want the flag refused", flag, err)
+		}
+	}
+}
+
+// A profile's config names its platform credential; the plugin gets the source's value, without its trailing newline,
+// in Settings.Credential, and a config without the credential key.
+func TestProfileCredentialReachesThePluginInPlaceOfItsName(t *testing.T) {
+	const value = "nomad-platform-token-value"
+	read := recordPlugin(t)
+	token := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(token, []byte(value+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"nomad-token": {File: token}}, logs: io.Discard,
+		registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	defer plugins.close()
+	settings := admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "nomad-token", "outputs": true}}
+	if _, err := plugins.profile("build", settings); err != nil {
+		t.Fatal(err)
+	}
+	records := read()
+	if len(records) != 1 || records[0].Settings.Credential != value || string(records[0].Settings.Config) != `{"outputs":true}` {
+		t.Fatalf("plugin configured with %+v; want the credential's value and the config without its key", records)
+	}
+	if settings.Config["credential"] != "nomad-token" {
+		t.Fatal("configuring the profile changed its recorded settings")
+	}
+}
+
+// A credential name without a source, or a source that does not resolve, fails the profile's configuration with an
+// error naming the credential and neither its value nor its file.
+func TestProfileCredentialFailures(t *testing.T) {
+	const value = "nomad-platform-token-value"
+	dir := t.TempDir()
+	open := filepath.Join(dir, "open-token")
+	if err := os.WriteFile(open, []byte(value), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The file source permission rule is the host's.
+	if err := os.Chmod(open, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"open-token": {File: open}}, logs: io.Discard,
+		registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	defer plugins.close()
+	for name, want := range map[string]string{
+		"nomad-token": `credential "nomad-token" has no source in the receiver's configuration`,
+		"open-token":  "resolve credential open-token: its file is writable by its group or open to others; chmod 600 it",
+	} {
+		_, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": name}})
+		if err == nil || err.Error() != want || strings.Contains(err.Error(), value) || strings.Contains(err.Error(), dir) {
+			t.Errorf("credential %s: %v; want %q", name, err, want)
+		}
+	}
+	if len(plugins.running) != 0 {
+		t.Fatal("a plugin started for a profile whose credential did not resolve")
 	}
 }

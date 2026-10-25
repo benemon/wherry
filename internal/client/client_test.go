@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -166,7 +167,7 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := NewHost(kafka, key, principal, stateDir, map[string]Source{"model": {File: f.secret}, "openai": {File: f.secret}}, nil, log.New(f.logs, host+": ", 0))
+	h, err := NewHost(kafka, key, principal, stateDir, map[string]credential.Source{"model": {File: f.secret}, "openai": {File: f.secret}}, nil, log.New(f.logs, host+": ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,13 +177,13 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 	return h
 }
 
-// addReceiver provisions a receiver whose lab adapter launches claude and cloud adapter codex, and registers its signing
+// addReceiver provisions a receiver whose lab profile launches claude and cloud profile codex, and registers its signing
 // key.
 func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 	t.Helper()
-	config := admin.ReceiverConfig{Receiver: id, Pool: pool, Capacity: 2, Adapters: []admin.AdapterSettings{
-		{Name: "lab", Type: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
-		{Name: "cloud", Type: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
+	config := admin.ReceiverConfig{Receiver: id, Pool: pool, Capacity: 2, Profiles: []admin.ProfileSettings{
+		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
+		{Name: "cloud", Plugin: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
 	}}
 	return f.addReceiverConfig(t, config)
 }
@@ -190,7 +191,7 @@ func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 func (f *fixture) addReceiverConfig(t *testing.T, config admin.ReceiverConfig) *testReceiver {
 	t.Helper()
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.ReceiverAdd(f.ctx, config, nil, bundle); err != nil {
+	if err := f.service.ReceiverAdd(f.ctx, config, bundle); err != nil {
 		t.Fatal(err)
 	}
 	kafka, _ := f.connect(t, bundle)
@@ -225,12 +226,12 @@ func (r *testReceiver) sign(t *testing.T, record wire.Record) []byte {
 }
 
 func claudeOffer() wire.Offer {
-	return wire.Offer{Adapter: "lab", Agent: "claude"}
+	return wire.Offer{Profile: "lab", Agent: "claude"}
 }
 
-// bothOffers makes both of addReceiver's adapters ready.
+// bothOffers makes both of addReceiver's profiles ready.
 func bothOffers() []wire.Offer {
-	return []wire.Offer{claudeOffer(), {Adapter: "cloud", Agent: "codex"}}
+	return []wire.Offer{claudeOffer(), {Profile: "cloud", Agent: "codex"}}
 }
 
 // advertise publishes a live advertisement; mutate may change it before it is signed.
@@ -481,31 +482,31 @@ func TestSubmitNoMatchingReceiverProducesNothing(t *testing.T) {
 	}
 }
 
-func TestSubmitMatchesOneAdaptersLabels(t *testing.T) {
+func TestSubmitMatchesOneProfilesLabels(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{
 		{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}, {Key: "region", Operator: wire.OpIn, Values: []string{"eu"}},
 	}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
 	if !errors.Is(err, ErrNoMatchingReceiver) {
-		t.Fatalf("submit matched labels of two different adapters: %v", err)
+		t.Fatalf("submit matched labels of two different profiles: %v", err)
 	}
 }
 
-func TestSubmitMatchesAcrossAdapters(t *testing.T) {
+func TestSubmitMatchesAcrossProfiles(t *testing.T) {
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
 	selector := []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}
 	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: selector, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
 	if err != nil {
-		t.Fatalf("second adapter did not match: %v", err)
+		t.Fatalf("second profile did not match: %v", err)
 	}
 	if placement := receiver.claim(t, f.ctx, result.RunID)[0].submission.Wherry.Placement; placement.Agent != "codex" || !reflect.DeepEqual(placement.Selector, selector) {
 		t.Fatalf("placement %#v, want codex under the submitted selector", placement)
 	}
 	for name, input := range map[string]SubmitInput{
-		"explicit agent the matching adapter does not launch": {Agent: "claude", Selector: selector},
+		"explicit agent the matching profile does not launch": {Agent: "claude", Selector: selector},
 		"agent outside the pool's terms":                      {Agent: "gemini"},
 	} {
 		input.Prompt, input.Deadline, input.QueueDeadline = "work", time.Minute, time.Minute
@@ -515,20 +516,20 @@ func TestSubmitMatchesAcrossAdapters(t *testing.T) {
 	}
 }
 
-func TestSubmitRefusesInputsOverSmallestAdapterInlineLimit(t *testing.T) {
+func TestSubmitRefusesInputsOverSmallestProfileInlineLimit(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 1000 })
 	f.addReceiver(t, "receiver-b", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 5000 })
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 2000), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
-	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "adapter lab's 1000-byte limit") || !strings.Contains(err.Error(), "pool with storage") {
-		t.Fatalf("submit = %v, want invalid input naming adapter lab's 1000-byte limit and storage", err)
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "profile lab's 1000-byte limit") || !strings.Contains(err.Error(), "pool with storage") {
+		t.Fatalf("submit = %v, want invalid input naming profile lab's 1000-byte limit and storage", err)
 	}
 	if n := f.tasksEnd(t, "pool-a"); n != 0 {
 		t.Fatalf("pool tasks hold %d records after the refused input", n)
 	}
 }
 
-func TestSubmitKeepsInputsWithinAdapterInlineLimit(t *testing.T) {
+func TestSubmitKeepsInputsWithinProfileInlineLimit(t *testing.T) {
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 1000 })
@@ -545,13 +546,13 @@ func TestSubmitKeepsInputsWithinAdapterInlineLimit(t *testing.T) {
 
 func TestSubmitIgnoresInlineLimitOfOfferOutsideSelector(t *testing.T) {
 	f := newFixture(t)
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2, Adapters: []admin.AdapterSettings{
-		{Name: "lab", Type: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}},
-		{Name: "other", Type: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}},
+	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2, Profiles: []admin.ProfileSettings{
+		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}},
+		{Name: "other", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}},
 	}}
 	receiver := f.addReceiverConfig(t, config)
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.Offers = []wire.Offer{{Adapter: "lab", Agent: "claude", InlineLimit: 5000}, {Adapter: "other", Agent: "claude", InlineLimit: 100}}
+		ad.Offers = []wire.Offer{{Profile: "lab", Agent: "claude", InlineLimit: 5000}, {Profile: "other", Agent: "claude", InlineLimit: 100}}
 	})
 	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 900), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
 	if err != nil {
@@ -586,7 +587,7 @@ func TestSubmitModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lab := receivers[len(receivers)-1].Adapters[0]; lab.Agent != "claude" || !slices.Equal(lab.Models, []string{"haiku", "sonnet"}) || lab.DefaultModel != "haiku" {
+	if lab := receivers[len(receivers)-1].Profiles[0]; lab.Agent != "claude" || !slices.Equal(lab.Models, []string{"haiku", "sonnet"}) || lab.DefaultModel != "haiku" {
 		t.Fatalf("receivers list %+v, want claude's models and default model from the pool terms", lab)
 	}
 	for model, want := range map[string]string{"": "haiku", "sonnet": "sonnet"} {
@@ -634,11 +635,11 @@ func TestResolvePlacementModel(t *testing.T) {
 	terms.Agents[1].Models, terms.Agents[1].DefaultModel = []string{"gpt-5-mini"}, "gpt-5-mini"
 	state := admin.NewState()
 	state.Pools["pool-a"] = terms
-	state.Receivers["receiver-a"] = admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Adapters: []admin.AdapterSettings{
-		{Name: "lab", Type: "nomad", Agent: "claude"}, {Name: "cloud", Type: "aws", Agent: "codex"},
+	state.Receivers["receiver-a"] = admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []admin.ProfileSettings{
+		{Name: "lab", Plugin: "nomad", Agent: "claude"}, {Name: "cloud", Plugin: "aws", Agent: "codex"},
 	}}
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
-	ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Offers: []wire.Offer{{Adapter: "lab"}, {Adapter: "cloud"}}}}
+	ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Offers: []wire.Offer{{Profile: "lab"}, {Profile: "cloud"}}}}
 	for name, test := range map[string]struct{ agent, model, wantAgent, wantModel string }{
 		"default agent's default model":            {"", "", "codex", "gpt-5-mini"},
 		"fallback skips the default lacking model": {"", "sonnet", "claude", "sonnet"},
@@ -723,19 +724,19 @@ func TestResolvePlacement(t *testing.T) {
 	terms.Agents = append(terms.Agents, admin.AgentTerms{Name: "gemini"})
 	terms.DefaultAgent = "codex"
 	// The declared agent order is claude, codex, gemini; codex is the default.
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Adapters: []admin.AdapterSettings{
-		{Name: "lab", Type: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "a100"}},
-		{Name: "batch", Type: "nomad", Agent: "gemini", Labels: map[string]string{"runtime": "exec", "region": "us"}},
-		{Name: "cloud", Type: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
-		{Name: "spare", Type: "nomad", Agent: "codex", Labels: map[string]string{"runtime": "wasm"}},
-		{Name: "rogue", Type: "nomad", Agent: "other"},
+	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []admin.ProfileSettings{
+		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "a100"}},
+		{Name: "batch", Plugin: "nomad", Agent: "gemini", Labels: map[string]string{"runtime": "exec", "region": "us"}},
+		{Name: "cloud", Plugin: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
+		{Name: "spare", Plugin: "nomad", Agent: "codex", Labels: map[string]string{"runtime": "wasm"}},
+		{Name: "rogue", Plugin: "nomad", Agent: "other"},
 	}}
 	state := admin.NewState()
 	state.Pools["pool-a"] = terms
 	state.Receivers["receiver-a"] = config
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
-	offer := func(adapter, agent string) wire.Offer {
-		return wire.Offer{Adapter: adapter, Agent: agent}
+	offer := func(profile, agent string) wire.Offer {
+		return wire.Offer{Profile: profile, Agent: agent}
 	}
 	ready := []wire.Offer{offer("lab", "claude"), offer("batch", "gemini"), offer("cloud", "codex"), offer("rogue", "other")}
 	requirement := func(key, operator string, values ...string) wire.Requirement {
@@ -751,17 +752,17 @@ func TestResolvePlacement(t *testing.T) {
 		"declared order after the default":        {"", []wire.Requirement{requirement("region", wire.OpExists)}, ready, "claude"},
 		"explicit agent":                          {"gemini", nil, ready, "gemini"},
 		"explicit agent outside the terms":        {"other", nil, ready, ""},
-		"explicit agent no ready adapter matches": {"claude", []wire.Requirement{requirement("region", wire.OpIn, "us")}, ready, ""},
+		"explicit agent no ready profile matches": {"claude", []wire.Requirement{requirement("region", wire.OpIn, "us")}, ready, ""},
 		"In":                                  {"", []wire.Requirement{requirement("region", wire.OpIn, "us", "ap")}, ready, "gemini"},
 		"NotIn":                               {"", []wire.Requirement{requirement("runtime", wire.OpNotIn, "exec")}, ready, "claude"},
 		"NotIn passes an absent key":          {"", []wire.Requirement{requirement("gpu", wire.OpNotIn, "a100")}, ready, "codex"},
 		"Exists":                              {"", []wire.Requirement{requirement("gpu", wire.OpExists)}, ready, "claude"},
 		"DoesNotExist":                        {"", []wire.Requirement{requirement("region", wire.OpDoesNotExist)}, ready, "codex"},
-		"all requirements on one adapter":     {"", []wire.Requirement{requirement("runtime", wire.OpIn, "exec"), requirement("gpu", wire.OpExists)}, ready, ""},
-		"not-ready adapter never chosen":      {"", []wire.Requirement{requirement("runtime", wire.OpIn, "wasm")}, ready, ""},
+		"all requirements on one profile":     {"", []wire.Requirement{requirement("runtime", wire.OpIn, "exec"), requirement("gpu", wire.OpExists)}, ready, ""},
+		"not-ready profile never chosen":      {"", []wire.Requirement{requirement("runtime", wire.OpIn, "wasm")}, ready, ""},
 		"not-ready default falls to declared": {"", nil, ready[:2], "claude"},
 		"advertised agent ignored":            {"claude", nil, []wire.Offer{offer("cloud", "claude")}, ""},
-		"adapter outside the record":          {"", nil, []wire.Offer{offer("edge", "codex")}, ""},
+		"profile outside the record":          {"", nil, []wire.Offer{offer("edge", "codex")}, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ads := map[string]wire.Advertisement{"receiver-a": {Receiver: "receiver-a", Pool: "pool-a", Offers: test.offers, Capacity: 1}}
@@ -784,15 +785,15 @@ func TestResolvePlacementChoosesMostSpareThenLowestID(t *testing.T) {
 	state.Pools["pool-a"], state.Pools["pool-b"], state.Pools["pool-c"] = testTerms(), testTerms(), testTerms()
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true, "pool-b": true}
 	ads := map[string]wire.Advertisement{}
-	member := func(id, pool string, capacity, inFlight int64, adapter string) {
-		state.Receivers[id] = admin.ReceiverConfig{Receiver: id, Pool: pool, Adapters: []admin.AdapterSettings{
-			{Name: "lab", Type: "nomad", Agent: "claude"}, {Name: "cloud", Type: "aws", Agent: "codex"},
+	member := func(id, pool string, capacity, inFlight int64, profile string) {
+		state.Receivers[id] = admin.ReceiverConfig{Receiver: id, Pool: pool, Profiles: []admin.ProfileSettings{
+			{Name: "lab", Plugin: "nomad", Agent: "claude"}, {Name: "cloud", Plugin: "aws", Agent: "codex"},
 		}}
-		ads[id] = wire.Advertisement{Receiver: id, Pool: pool, Capacity: capacity, InFlight: inFlight, Offers: []wire.Offer{{Adapter: adapter, Agent: "x"}}}
+		ads[id] = wire.Advertisement{Receiver: id, Pool: pool, Capacity: capacity, InFlight: inFlight, Offers: []wire.Offer{{Profile: profile, Agent: "x"}}}
 	}
 	member("receiver-d", "pool-b", 5, 2, "lab")   // spare 3
 	member("receiver-c", "pool-a", 5, 2, "lab")   // spare 3, lower ID
-	member("receiver-b", "pool-a", 9, 0, "cloud") // most spare, but its ready adapter launches codex
+	member("receiver-b", "pool-a", 9, 0, "cloud") // most spare, but its ready profile launches codex
 	member("receiver-a", "pool-c", 9, 0, "lab")   // most spare, pool not entitled
 	member("receiver-e", "pool-a", 4, 2, "lab")   // spare 2
 	pool, placement, err := resolvePlacement(state, "tenant-a", "claude", "", nil, ads)
@@ -1111,14 +1112,14 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 		t.Fatalf("receivers %v, want %v", order, want)
 	}
 	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 ||
-		!reflect.DeepEqual(a.Adapters, []Adapter{
-			{Name: "lab", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
-			{Name: "cloud", Agent: "codex", Credentials: []Credential{{Name: "openai", Configured: true}, {Name: "github-token", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
+		!reflect.DeepEqual(a.Profiles, []Profile{
+			{Name: "lab", Plugin: "nomad", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
+			{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Configured: true}, {Name: "github-token", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 		}) {
 		t.Fatalf("live receiver %#v", a)
 	}
-	if b := got["receiver-b"]; b.Status != "stale" || b.Capacity != 4 || b.InFlight != 2 || len(b.Adapters) != 2 || b.Adapters[0].Ready || b.Adapters[1].Ready {
-		t.Fatalf("stale receiver %#v; want its adapters listed, none ready", b)
+	if b := got["receiver-b"]; b.Status != "stale" || b.Capacity != 4 || b.InFlight != 2 || len(b.Profiles) != 2 || b.Profiles[0].Ready || b.Profiles[1].Ready {
+		t.Fatalf("stale receiver %#v; want its profiles listed, none ready", b)
 	}
 	if c := got["receiver-c"]; c.Status != "silent" || c.HeartbeatAge != "-" {
 		t.Fatalf("silent receiver %#v", c)
@@ -1498,7 +1499,7 @@ func TestReceiversDoesNotShowAFutureAdvertisementAsLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(receivers) != 1 || receivers[0].Status == "live" || strings.HasPrefix(receivers[0].HeartbeatAge, "-") || receivers[0].Adapters[0].Ready {
+	if len(receivers) != 1 || receivers[0].Status == "live" || strings.HasPrefix(receivers[0].HeartbeatAge, "-") || receivers[0].Profiles[0].Ready {
 		t.Fatalf("receivers %#v; want a future advertisement neither live, ready nor of negative age", receivers)
 	}
 }
@@ -1510,11 +1511,11 @@ func TestReceiversListsALiveReceiverWithNoOffers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(receivers) != 1 || receivers[0].Status != "live" || !reflect.DeepEqual(receivers[0].Adapters, []Adapter{
-		{Name: "lab", Agent: "claude", Credentials: []Credential{{Name: "model", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: false},
-		{Name: "cloud", Agent: "codex", Credentials: []Credential{{Name: "openai", Configured: true}, {Name: "github-token", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
+	if len(receivers) != 1 || receivers[0].Status != "live" || !reflect.DeepEqual(receivers[0].Profiles, []Profile{
+		{Name: "lab", Plugin: "nomad", Agent: "claude", Credentials: []Credential{{Name: "model", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: false},
+		{Name: "cloud", Plugin: "aws", Agent: "codex", Credentials: []Credential{{Name: "openai", Configured: true}, {Name: "github-token", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 	}) {
-		t.Fatalf("receivers %#v; want the live receiver with its configured adapters, none ready", receivers)
+		t.Fatalf("receivers %#v; want the live receiver with its configured profiles, none ready", receivers)
 	}
 }
 

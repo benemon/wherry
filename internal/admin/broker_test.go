@@ -299,7 +299,7 @@ func provision(t *testing.T) *fixture {
 	must(service.TenantAdd(ctx, f.tenantB, f.poolB))
 	for _, receiver := range [][2]string{{f.receiverA, f.poolA}, {f.receiverB, f.poolB}} {
 		path := filepath.Join(dir, receiver[0])
-		must(service.ReceiverAdd(ctx, modelConfig(receiver[0], receiver[1]), nil, path))
+		must(service.ReceiverAdd(ctx, modelConfig(receiver[0], receiver[1]), path))
 		f.bundles[ReceiverPrincipal(receiver[0])] = readBundle(t, path)
 	}
 	for _, host := range [][2]string{{f.tenantA, f.hostA1}, {f.tenantA, f.hostA2}, {f.tenantB, f.hostB1}} {

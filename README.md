@@ -18,8 +18,8 @@ first task.
 ## Configuration
 
 [Configuration](https://benemon.github.io/wherry/configuration) lists the
-client configuration, bundle, pool terms, receiver configuration and
-environment variables.
+client configuration, the receiver's local configuration, bundle, pool
+terms, receiver configuration and environment variables.
 
 ## Operations
 

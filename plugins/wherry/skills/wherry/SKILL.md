@@ -32,27 +32,27 @@ Do short or interactive work yourself.
 
 Call `receivers` first. For each receiver it returns:
 
-- `adapters`: each with the `agent` it runs, its `labels`, `credentials`,
+- `profiles`: each with its `plugin`, the `agent` it runs, its `labels`, `credentials`,
   the agent's credentials by `name` with `optional` and `configured`,
   whether this host has a source for each, and `ready`, whether the
   receiver's live advertisement offers it now. A live receiver
-  with no ready adapter lists every adapter with `ready` false, and no task
+  with no ready profile lists every profile with `ready` false, and no task
   is placed on it.
 - `status` (`live`, `stale`, `silent` or `ended`), `capacity` and
   `in_flight`: whether it is live and has room.
 
-Pick an `agent` from the adapters, or omit it to take the pool's default.
-Build `selector` from the labels of the adapters you want: a list of
+Pick an `agent` from the profiles, or omit it to take the pool's default.
+Build `selector` from the labels of the profiles you want: a list of
 `{key, operator, values}` where `operator` is `In` or `NotIn` (with
 `values`), or `Exists` or `DoesNotExist` (without). Every requirement must
-hold. Omit `selector` when any adapter will do. A malformed key or value
-returns `INVALID_ARGUMENT`; a selector no live adapter satisfies returns
+hold. Omit `selector` when any profile will do. A malformed key or value
+returns `INVALID_ARGUMENT`; a selector no live profile satisfies returns
 `NO_MATCHING_RECEIVER`.
 
-Labels are the operator's description of each adapter. wherry matches them
+Labels are the operator's description of each profile. wherry matches them
 literally and interprets only the agent name.
 
-An adapter whose agent lists `models` runs `default_model` unless you pass
+A profile whose agent lists `models` runs `default_model` unless you pass
 `model`, one of those `models`, to `submit`; an agent with one model runs
 it, and with two or more and no `default_model` you must pass one. A model outside them, or none where one is required, returns
 `INVALID_ARGUMENT`. `await` returns the `model` asked for.
@@ -90,7 +90,7 @@ To send files, add `inputs`: paths of regular files beneath one of the wherry
 MCP server's input roots (the directory it runs in, unless the user's wherry
 configuration lists `input_roots`), which the agent finds under their base
 names in its input directory. Inputs travel inside the task's broker record up
-to the broker's record limit and the smallest matching adapter's limit. When
+to the broker's record limit and the smallest matching profile's limit. When
 they would exceed either and the chosen pool has storage and the host its
 storage credential, wherry automatically carries them through S3; otherwise
 submit refuses before publishing and names the limit.

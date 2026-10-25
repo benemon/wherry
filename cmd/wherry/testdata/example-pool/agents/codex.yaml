@@ -1,4 +1,4 @@
-# Without models, a task names no model and the adapter's command picks one.
+# Without models, a task names no model and the profile's command picks one.
 name: codex
 credentials:
   - {name: openai-api-key, env: CODEX_API_KEY}

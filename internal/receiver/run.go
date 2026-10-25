@@ -146,7 +146,7 @@ func (r *Receiver) claimOne(ctx context.Context) error {
 	}
 	r.adjustInFlight(1)
 	defer r.adjustInFlight(-1)
-	tenant, routed := admitted.task.Wherry.Tenant, admitted.adapter.Name
+	tenant, routed := admitted.task.Wherry.Tenant, admitted.profile.Name
 	r.metrics.admissions.WithLabelValues(tenant, routed).Inc()
 	if attemptOf(record) == 1 {
 		r.metrics.queueWait.WithLabelValues(tenant, routed).Observe(time.Since(record.Timestamp).Seconds())
@@ -163,7 +163,7 @@ func (r *Receiver) claimOne(ctx context.Context) error {
 type admission struct {
 	task     *wire.Submission
 	taskHash string
-	adapter  Named
+	profile  Named
 	history  []wire.Message
 	inputs   []adapter.File
 	// agentCredentials are the agent's credentials the run's host supplies, and unsupplied the optional ones it does not.
@@ -244,7 +244,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if !modelInTerms(terms.Agents[agent], placement.Model) {
 		return reject("model not in the pool's terms")
 	}
-	adapter, offered := r.offer(placement)
+	profile, offered := r.offer(placement)
 	if !offered {
 		r.logger.Printf("run %s: no current offer for agent %s satisfying its selector", run, placement.Agent)
 		r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
@@ -268,7 +268,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		}
 	}
 	history := []wire.Message{task.Message}
-	admitted := &admission{task: &task, taskHash: hash, adapter: adapter, history: history, cancelled: cancelled}
+	admitted := &admission{task: &task, taskHash: hash, profile: profile, history: history, cancelled: cancelled}
 	if cancelled {
 		return admitted, 0
 	}
@@ -465,9 +465,9 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 	return err
 }
 
-// startFailure names the adapter the task was routed to.
-func (r *Receiver) startFailure(task *wire.Submission, attempt int64, adapter, class string) *kgo.Record {
-	failure := &wire.StartFailure{Wherry: r.binding(task, attempt), Adapter: adapter, Agent: task.Wherry.Placement.Agent, Class: class}
+// startFailure names the profile the task was routed to.
+func (r *Receiver) startFailure(task *wire.Submission, attempt int64, profile, class string) *kgo.Record {
+	failure := &wire.StartFailure{Wherry: r.binding(task, attempt), Profile: profile, Agent: task.Wherry.Placement.Agent, Class: class}
 	return &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: r.sign(failure)}
 }
 
@@ -556,7 +556,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	defer producer.Close()
 	run := &activeRun{
-		receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, adapter: admitted.adapter,
+		receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, profile: admitted.profile,
 		expected: admitted.outputs, deadline: deadline, claimed: time.Now(),
 	}
 	defer func() {
@@ -577,7 +577,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	offset := int64(0)
 	if attempt > 1 {
-		r.metrics.redeliveries.WithLabelValues(task.Wherry.Tenant, admitted.adapter.Name).Inc()
+		r.metrics.redeliveries.WithLabelValues(task.Wherry.Tenant, admitted.profile.Name).Inc()
 		offset, err = r.lastOffset(lookupCtx, task, run.taskHash)
 		if err != nil {
 			r.logger.Printf("run %s: read events: %v", runID, err)
@@ -587,24 +587,24 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	var handle adapter.Handle
 	adopted, neverStarted := false, false
 	if attempt > 1 {
-		// Offers can change between attempts, so the run may live in an adapter other than the matched one.
-		for _, named := range r.adapters {
+		// Offers can change between attempts, so the run may live in a profile other than the matched one.
+		for _, named := range r.profiles {
 			job, err := named.Adapter.Lookup(lookupCtx, runID)
 			if err != nil {
 				if lookupCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, "timeout", nil)
 				}
-				r.logger.Printf("run %s: lookup in adapter %s: %s", runID, named.Name, logText(run.redactText, err))
+				r.logger.Printf("run %s: lookup in profile %s: %s", runID, named.Name, logText(run.redactText, err))
 				return run.returnTask(ctx, nil)
 			}
 			if job.State == adapter.JobAbsent {
 				continue
 			}
-			// A job of another adapter of this receiver on the same backend is that adapter's Lookup to judge.
-			if job.Adapter != named.Name && slices.ContainsFunc(r.adapters, func(other Named) bool { return other.Name == job.Adapter }) {
+			// A job of another profile of this receiver on the same backend is that profile's Lookup to judge.
+			if job.Profile != named.Name && slices.ContainsFunc(r.profiles, func(other Named) bool { return other.Name == job.Profile }) {
 				continue
 			}
-			if job.Adapter != named.Name || job.Agent != task.Wherry.Placement.Agent {
+			if job.Profile != named.Name || job.Agent != task.Wherry.Placement.Agent {
 				if err := named.Adapter.Stop(ctx, job.Handle); err != nil {
 					r.metrics.stopFailures.WithLabelValues(named.Name).Inc()
 					r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
@@ -615,11 +615,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 					r.logger.Printf("run %s: purge: %s", runID, logText(run.redactText, err))
 					return run.returnTask(ctx, nil)
 				}
-				r.logger.Printf("run %s: purged a job from adapter %q agent %q", runID, job.Adapter, job.Agent)
+				r.logger.Printf("run %s: purged a job from profile %q agent %q", runID, job.Profile, job.Agent)
 				continue
 			}
-			r.logger.Printf("run %s: found attempt %d's job in adapter %s", runID, job.Attempt, named.Name)
-			handle, run.adapter = job.Handle, named
+			r.logger.Printf("run %s: found attempt %d's job in profile %s", runID, job.Attempt, named.Name)
+			handle, run.profile = job.Handle, named
 			adopted, neverStarted = job.State != adapter.JobNeverStarted, job.State == adapter.JobNeverStarted
 			if adopted {
 				r.metrics.adoptions.WithLabelValues(task.Wherry.Tenant, named.Name).Inc()
@@ -660,7 +660,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	outputNames := s3Outputs(admitted.outputs)
 	if !adopted {
-		named := run.adapter
+		named := run.profile
 		credentials := slices.Concat(admitted.agentCredentials, admitted.credentials)
 		var secrets []adapter.Secret
 		var fetches []adapter.Fetch
@@ -685,7 +685,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			promptInputs = append(promptInputs, input.Name)
 		}
 		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, adapter.Run{
-			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Attempt: attempt,
+			ID: runID, Profile: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Attempt: attempt,
 			Prompt: []byte(preamble(named.Adapter.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID) +
 				prompt(admitted.history)),
 			Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
@@ -697,17 +697,17 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			return run.fail(ctx, "timeout", nil)
 		case errors.As(err, &tooLarge) && dispatched == adapter.OutcomeNothingCreated:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
-			// The adapter's name for the input reaches the status only when it is one of the run's inputs.
+			// The plugin's name for the input reaches the status only when it is one of the run's inputs.
 			name := "an input"
 			if slices.ContainsFunc(admitted.inputs, func(input adapter.File) bool { return input.Name == tooLarge.Name }) {
 				name = "input " + tooLarge.Name
 			}
-			r.logger.Printf("run %s: adapter %s cannot deliver %s", runID, named.Name, name)
+			r.logger.Printf("run %s: profile %s cannot deliver %s", runID, named.Name, name)
 			if err := run.commit(ctx, r.startFailure(task, attempt, named.Name, "input-too-large")); err != nil {
 				return run.abandon(err)
 			}
 			r.metrics.startFailures.WithLabelValues(named.Name, "input-too-large").Inc()
-			return run.fail(ctx, name+" takes the run's inputs over what adapter "+named.Name+" delivers", nil)
+			return run.fail(ctx, name+" takes the run's inputs over what profile "+named.Name+" delivers", nil)
 		case errors.Is(err, adapter.ErrMessageTooLarge):
 			r.logger.Printf("run %s: dispatch rejected: message too large", runID)
 			dispatched = adapter.OutcomeUnknown
@@ -720,8 +720,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "created").Inc()
 		case adapter.OutcomeNothingCreated:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
-			r.logger.Printf("run %s: adapter %s created no job", runID, named.Name)
-			return run.startFailure(ctx, "dispatch", "adapter "+named.Name+" created no job")
+			r.logger.Printf("run %s: profile %s created no job", runID, named.Name)
+			return run.startFailure(ctx, "dispatch", "profile "+named.Name+" created no job")
 		default:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
 			job, resolved := run.reconcile(runCtx)
@@ -730,19 +730,19 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				r.logger.Printf("run %s: dispatch unresolved", runID)
 				return run.returnTask(ctx, nil)
 			case job.State == adapter.JobAbsent:
-				return run.startFailure(ctx, "dispatch", "adapter "+named.Name+" created no job")
+				return run.startFailure(ctx, "dispatch", "profile "+named.Name+" created no job")
 			case job.State == adapter.JobNeverStarted:
 				return run.startFailure(ctx, "platform", "job never started")
 			}
 			dispatchedHandle = job.Handle
 		}
 		handle = dispatchedHandle
-		run.labels = admitted.adapter.Labels
+		run.labels = admitted.profile.Labels
 	}
 	if len(handle.Data) > maxHandle {
-		r.logger.Printf("run %s: adapter %s returned a handle over %d bytes", runID, run.adapter.Name, maxHandle)
-		if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
-			r.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
+		r.logger.Printf("run %s: profile %s returned a handle over %d bytes", runID, run.profile.Name, maxHandle)
+		if err := run.profile.Adapter.Stop(ctx, handle); err != nil {
+			r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 			r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 		}
 		return run.returnTask(ctx, nil)
@@ -759,7 +759,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	ended := make(chan followed, 1)
 	follow := func(from int64) {
 		go func() {
-			terminal, err := run.adapter.Adapter.Follow(followCtx, handle, from, lines)
+			terminal, err := run.profile.Adapter.Follow(followCtx, handle, from, lines)
 			ended <- followed{terminal, err}
 		}()
 	}
@@ -781,7 +781,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			return run.stopAndFail(ctx, handle, err.Error(), nil)
 		}
 	}
-	r.logger.Printf("run %s: attempt %d in adapter %s with %s (%s)", runID, attempt, run.adapter.Name, wire.TermsText(admitted.adapter.Labels), handle.Name)
+	r.logger.Printf("run %s: attempt %d in profile %s with %s (%s)", runID, attempt, run.profile.Name, wire.TermsText(admitted.profile.Labels), handle.Name)
 	var pending []adapter.Line
 	// shutdown commits what is pending and the lines the adapter delivered that the run has not taken, under its own
 	// deadline, since ctx is already done, and returns the task. A commit the shutdown cut short can leave its
@@ -1019,8 +1019,8 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle
 			return signed.SealValues{}, run.fail(ctx, "timeout", nil), false
 		case waitCtx.Err() != nil && job != nil:
 			waited("adopter_refused")
-			if err := run.adapter.Adapter.Stop(ctx, *job); err != nil {
-				r.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
+			if err := run.profile.Adapter.Stop(ctx, *job); err != nil {
+				r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 				r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 				return signed.SealValues{}, run.returnTask(ctx, nil), false
 			}
@@ -1114,9 +1114,9 @@ type activeRun struct {
 	taskHash string
 	history  []wire.Message
 	attempt  int64
-	// adapter holds the run's platform material, released at the end.
-	adapter Named
-	// labels is set when this attempt dispatched the job; an adopted job's adapter labels are unknown.
+	// profile holds the run's platform material, released at the end.
+	profile Named
+	// labels is set when this attempt dispatched the job; an adopted job's profile labels are unknown.
 	labels map[string]string
 	job    string
 	// deadline is the run's; puts are the presigned PUT URLs of its S3 outputs, by name, which an attempt holds once
@@ -1194,7 +1194,7 @@ func (run *activeRun) redact(data []byte, limit int64) *redactedForm {
 // nothing a form's replacer holds, is larger than a piece and the forms.
 func (run *activeRun) redactTo(out io.Writer, data []byte) {
 	if replaced := redactTo(out, data, run.redactions); replaced > 0 {
-		run.receiver.metrics.redactions.WithLabelValues(run.task.Wherry.Tenant, cmp.Or(run.adapter.Name, "none")).Add(float64(replaced))
+		run.receiver.metrics.redactions.WithLabelValues(run.task.Wherry.Tenant, cmp.Or(run.profile.Name, "none")).Add(float64(replaced))
 	}
 }
 
@@ -1365,8 +1365,8 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 }
 
 func (run *activeRun) stopAndFail(ctx context.Context, handle adapter.Handle, reason string, pending []adapter.Line) kgo.AckStatus {
-	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
-		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
+	if err := run.profile.Adapter.Stop(ctx, handle); err != nil {
+		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
 	}
@@ -1374,8 +1374,8 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle adapter.Handle, re
 }
 
 func (run *activeRun) stopAndCancel(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
-	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
-		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
+	if err := run.profile.Adapter.Stop(ctx, handle); err != nil {
+		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
 	}
@@ -1384,8 +1384,8 @@ func (run *activeRun) stopAndCancel(ctx context.Context, handle adapter.Handle, 
 
 // deny stops a run on a denied receiver and releases its task to the pool; the terminal status is best effort.
 func (run *activeRun) deny(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
-	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
-		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
+	if err := run.profile.Adapter.Stop(ctx, handle); err != nil {
+		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return kgo.AckRelease
 	}
@@ -1439,10 +1439,10 @@ func unansweredReason(credentials []string, urls bool) string {
 // run's terminal message names when the return spends the delivery budget.
 func (run *activeRun) startFailure(ctx context.Context, class, cause string) kgo.AckStatus {
 	run.startCause = logText(run.receiver.redactLive, errors.New(cause))
-	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.attempt, run.adapter.Name, class)); err != nil {
+	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.attempt, run.profile.Name, class)); err != nil {
 		return run.abandon(err)
 	}
-	run.receiver.metrics.startFailures.WithLabelValues(run.adapter.Name, class).Inc()
+	run.receiver.metrics.startFailures.WithLabelValues(run.profile.Name, class).Inc()
 	if err := run.purge(ctx); err != nil {
 		// Shutdown: the next holder's Lookup finds the job again.
 		if ctx.Err() != nil {
@@ -1458,9 +1458,9 @@ func (run *activeRun) startFailure(ctx context.Context, class, cause string) kgo
 func (run *activeRun) purge(ctx context.Context) error {
 	deadline := time.Now().Add(purgeDeadline)
 	for {
-		err := run.adapter.Adapter.Purge(ctx, run.task.Wherry.Run)
+		err := run.profile.Adapter.Purge(ctx, run.task.Wherry.Run)
 		if err != nil {
-			run.receiver.metrics.purgeFailures.WithLabelValues(run.adapter.Name).Inc()
+			run.receiver.metrics.purgeFailures.WithLabelValues(run.profile.Name).Inc()
 		}
 		if err == nil || ctx.Err() != nil || !time.Now().Before(deadline) {
 			return err
@@ -1483,11 +1483,11 @@ func (run *activeRun) reconcile(ctx context.Context) (adapter.Job, bool) {
 		if i > 0 {
 			sleep(ctx, reconcileInterval)
 		}
-		job, err := run.adapter.Adapter.Lookup(ctx, run.task.Wherry.Run)
+		job, err := run.profile.Adapter.Lookup(ctx, run.task.Wherry.Run)
 		if err == nil {
 			return job, true
 		}
-		run.receiver.logger.Printf("run %s: lookup in adapter %s: %s", run.task.Wherry.Run, run.adapter.Name, logText(run.redactText, err))
+		run.receiver.logger.Printf("run %s: lookup in profile %s: %s", run.task.Wherry.Run, run.profile.Name, logText(run.redactText, err))
 	}
 	return adapter.Job{}, false
 }
@@ -1523,8 +1523,8 @@ func (run *activeRun) conclude(ctx context.Context, handle adapter.Handle, pendi
 		return run.deny(ctx, handle, pending)
 	}
 	stopped := true
-	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
-		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
+	if err := run.profile.Adapter.Stop(ctx, handle); err != nil {
+		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		// At the budget the run ends with no outputs or outcome file read, and the job is left to the adapter's sweep.
 		if !run.receiver.budgetSpent(run.attempt) {
@@ -1579,7 +1579,7 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 		case errors.Is(err, context.DeadlineExceeded):
 			reason = "timeout"
 		}
-		run.receiver.metrics.collectionFailures.WithLabelValues(run.adapter.Name, reason).Inc()
+		run.receiver.metrics.collectionFailures.WithLabelValues(run.profile.Name, reason).Inc()
 		run.receiver.logger.Printf("run %s: outputs not collected: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		for _, output := range run.expected {
 			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "not collected"})
@@ -1666,7 +1666,7 @@ func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stop
 	stream := append(s3Outputs(run.expected), wire.OutcomeFile)
 	go func() {
 		defer close(outputs)
-		ended <- run.adapter.Adapter.Collect(ctx, handle, adapter.Limits{
+		ended <- run.profile.Adapter.Collect(ctx, handle, adapter.Limits{
 			Files: wire.MaxOutputs, FileBytes: limit, TotalBytes: limit, Stream: stream, StreamBytes: wire.MaxS3Object,
 		}, outputs)
 	}()
@@ -1843,7 +1843,7 @@ func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result st
 }
 
 func (run *activeRun) release(ctx context.Context) {
-	if err := run.adapter.Adapter.Release(ctx, run.task.Wherry.Run); err != nil {
+	if err := run.profile.Adapter.Release(ctx, run.task.Wherry.Run); err != nil {
 		run.receiver.logger.Printf("run %s: release: %s", run.task.Wherry.Run, logText(run.redactText, err))
 	}
 }
@@ -1977,7 +1977,7 @@ func (run *activeRun) result(status wire.TaskStatus, result string) *kgo.Record 
 		part = wire.Part{Raw: wire.StdBytes(result), MediaType: "text/plain"}
 	}
 	metadata, _ := json.Marshal(wire.ResultMetadata{ // strings, numbers and a string map always encode
-		ReceiverID: run.receiver.id, Pool: run.receiver.config.Pool, Adapter: run.adapter.Name, Labels: run.labels, Job: run.job,
+		ReceiverID: run.receiver.id, Pool: run.receiver.config.Pool, Profile: run.profile.Name, Labels: run.labels, Job: run.job,
 		Outputs: run.returned, S3Outputs: run.s3Returned, NotReturned: run.unreturned,
 	})
 	return run.feed(&wire.Result{

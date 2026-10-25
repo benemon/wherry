@@ -1,36 +1,34 @@
 capacity: 3
-platforms:
-  - name: nomad
-    type: nomad
-    # Every adapter on this platform takes these keys and must not set them itself.
+plugins:
+  nomad:
+    # Every profile of this plugin takes these keys and must not set them itself.
     config:
       address: https://nomad.example.com:4646
       ca_file: /etc/wherry/nomad-ca.pem
       namespace: agents
-adapters:
-  - name: claude-container
-    platform: nomad
-    agent: claude
-    labels:
-      isolation: container
-    config:
-      runtime:
-        driver: docker
+      credential: nomad-token
+    profiles:
+      - name: container
+        agent: claude
+        labels:
+          isolation: container
         config:
-          image: registry.example.com/claude-agent:1.0
-  - name: codex-host
-    platform: nomad
-    agent: codex
-    labels:
-      isolation: host
-    config:
-      node_pool: codex
-      runtime:
-        driver: exec
+          runtime:
+            driver: docker
+            config:
+              image: registry.example.com/claude-agent:1.0
+      - name: host
+        agent: codex
+        labels:
+          isolation: host
         config:
-          command: /bin/sh
-          args:
-            - -c
-            - >-
-              exec codex exec --json --ephemeral --skip-git-repo-check
-              --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
+          node_pool: codex
+          runtime:
+            driver: exec
+            config:
+              command: /bin/sh
+              args:
+                - -c
+                - >-
+                  exec codex exec --json --ephemeral --skip-git-repo-check
+                  --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"

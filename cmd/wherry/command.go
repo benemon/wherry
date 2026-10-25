@@ -201,17 +201,17 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 		for _, receiver := range receivers {
 			fmt.Fprintf(stdout, "receiver=%s pool=%s capacity=%d in_flight=%d heartbeat_age=%s status=%s\n",
 				receiver.ReceiverID, receiver.Pool, receiver.Capacity, receiver.InFlight, receiver.HeartbeatAge, receiver.Status)
-			for _, adapter := range receiver.Adapters {
-				fmt.Fprintf(stdout, "  adapter=%s agent=%s ready=%t labels=%s", adapter.Name, adapter.Agent, adapter.Ready, wire.TermsText(adapter.Labels))
-				if adapter.InlineLimit > 0 {
-					fmt.Fprintf(stdout, " inline_limit=%d", adapter.InlineLimit)
+			for _, profile := range receiver.Profiles {
+				fmt.Fprintf(stdout, "  profile=%s plugin=%s agent=%s ready=%t labels=%s", profile.Name, profile.Plugin, profile.Agent, profile.Ready, wire.TermsText(profile.Labels))
+				if profile.InlineLimit > 0 {
+					fmt.Fprintf(stdout, " inline_limit=%d", profile.InlineLimit)
 				}
-				if len(adapter.Models) > 0 {
-					fmt.Fprintf(stdout, " models=%s default_model=%s", strings.Join(adapter.Models, ","), adapter.DefaultModel)
+				if len(profile.Models) > 0 {
+					fmt.Fprintf(stdout, " models=%s default_model=%s", strings.Join(profile.Models, ","), profile.DefaultModel)
 				}
-				if len(adapter.Credentials) > 0 {
-					names := make([]string, 0, len(adapter.Credentials))
-					for _, credential := range adapter.Credentials {
+				if len(profile.Credentials) > 0 {
+					names := make([]string, 0, len(profile.Credentials))
+					for _, credential := range profile.Credentials {
 						var notes []string
 						if !credential.Configured {
 							notes = append(notes, "missing")
@@ -265,7 +265,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	configFile := flags.String("config-file", "", "host configuration file")
 	agent := flags.String("agent", "", "agent to run (default: the pool's default agent)")
 	model := flags.String("model", "", "model the agent runs, one of its models as receivers lists them (default: the agent's default model)")
-	selectorText := flags.String("selector", "", "labels the adapter must carry: key=v|v, key!=v|v, key, !key, comma-separated")
+	selectorText := flags.String("selector", "", "labels the profile must carry: key=v|v, key!=v|v, key, !key, comma-separated")
 	prompt := flags.String("prompt", "", "prompt text")
 	promptFile := flags.String("prompt-file", "", "prompt file")
 	gitRemote := flags.String("git", "", "REMOTE@REF: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit")

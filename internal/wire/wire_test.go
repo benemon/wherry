@@ -185,7 +185,7 @@ func TestAttemptRequired(t *testing.T) {
 		"status":        {validStatus(), []string{`"attempt":1`}},
 		"chunk":         {validChunk(), []string{`"attempt":1`}},
 		"result":        {validResult(), []string{`"attempt":1`}},
-		"start failure": {&StartFailure{V: 1, Wherry: receiverBinding(), Adapter: "nomad", Agent: "claude", Class: "launch"}, []string{`"attempt":1`}},
+		"start failure": {&StartFailure{V: 1, Wherry: receiverBinding(), Profile: "nomad", Agent: "claude", Class: "launch"}, []string{`"attempt":1`}},
 	} {
 		empty := func() Record { return reflect.New(reflect.TypeOf(test.value).Elem()).Interface().(Record) }
 		encoded := recordJSON(t, test.value)
@@ -662,20 +662,20 @@ func TestSatisfies(t *testing.T) {
 }
 
 func TestValidateOffers(t *testing.T) {
-	offer := Offer{Adapter: "nomad", Agent: "claude"}
+	offer := Offer{Profile: "nomad", Agent: "claude"}
 	for name, test := range map[string]struct {
 		offers []Offer
 		ok     bool
 	}{
 		"one":               {[]Offer{offer}, true},
-		"distinct adapters": {[]Offer{offer, {Adapter: "kubernetes", Agent: "claude"}}, true},
+		"distinct profiles": {[]Offer{offer, {Profile: "kubernetes", Agent: "claude"}}, true},
 		"none":              {nil, true},
 		"empty":             {[]Offer{}, true},
-		"duplicate adapter": {[]Offer{offer, {Adapter: "nomad", Agent: "codex"}}, false},
-		"negative limit":    {[]Offer{{Adapter: "nomad", Agent: "claude", InlineLimit: -1}}, false},
-		"missing agent":     {[]Offer{{Adapter: "nomad"}}, false},
-		"uppercase agent":   {[]Offer{{Adapter: "nomad", Agent: "Claude"}}, false},
-		"missing adapter":   {[]Offer{{Agent: "claude"}}, false},
+		"duplicate profile": {[]Offer{offer, {Profile: "nomad", Agent: "codex"}}, false},
+		"negative limit":    {[]Offer{{Profile: "nomad", Agent: "claude", InlineLimit: -1}}, false},
+		"missing agent":     {[]Offer{{Profile: "nomad"}}, false},
+		"uppercase agent":   {[]Offer{{Profile: "nomad", Agent: "Claude"}}, false},
+		"missing profile":   {[]Offer{{Agent: "claude"}}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateOffers(test.offers); (err == nil) != test.ok {
@@ -685,7 +685,7 @@ func TestValidateOffers(t *testing.T) {
 	}
 }
 
-// An offer is an adapter and its agent; labels belong to the configuration record, so a signed offer carrying them
+// An offer is a profile and its agent; labels belong to the configuration record, so a signed offer carrying them
 // does not decode. The payload is the producer's advertisement with labels added to its offer.
 func TestAdvertisementOfferWithLabelsDoesNotDecode(t *testing.T) {
 	keys, _, receiver := testKeys(t)

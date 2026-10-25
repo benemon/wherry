@@ -8,17 +8,21 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/receiver"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/prometheus/client_golang/prometheus"
@@ -26,46 +30,98 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// defaultPluginDir is where the docs and the receiver image install plugins.
-const defaultPluginDir = "/usr/local/libexec/wherry/plugins"
+// The defaults of the receiver's local configuration; the docs and the receiver image install plugins in
+// defaultPluginDir.
+const (
+	defaultReceiverConfig = "/etc/wherry/config.yaml"
+	defaultPluginDir      = "/usr/local/libexec/wherry/plugins"
+)
+
+// receiverLocalConfig is the receiver's local configuration file. Credentials maps the name a profile's config gives
+// its platform credential to the source of its value.
+type receiverLocalConfig struct {
+	Bundle      string                       `yaml:"bundle"`
+	StateDir    string                       `yaml:"state_dir"`
+	PluginDir   string                       `yaml:"plugin_dir"`
+	MetricsAddr string                       `yaml:"metrics_addr"`
+	Credentials map[string]credential.Source `yaml:"credentials"`
+}
+
+// loadReceiverLocalConfig decodes the receiver's local configuration at path, defaulting state_dir and plugin_dir.
+func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
+	path, err := client.ExpandHome(path)
+	if err != nil {
+		return receiverLocalConfig{}, err
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return receiverLocalConfig{}, err
+	}
+	var config receiverLocalConfig
+	if err := admin.DecodeYAML(encoded, &config); err != nil {
+		return receiverLocalConfig{}, fmt.Errorf("decode config: %w", err)
+	}
+	if config.Bundle == "" {
+		return receiverLocalConfig{}, errors.New("config requires bundle")
+	}
+	for _, path := range []*string{&config.Bundle, &config.StateDir, &config.PluginDir} {
+		if *path, err = client.ExpandHome(*path); err != nil {
+			return receiverLocalConfig{}, err
+		}
+	}
+	if config.StateDir == "" {
+		config.StateDir = filepath.Join(filepath.Dir(config.Bundle), "state")
+	}
+	if config.PluginDir == "" {
+		config.PluginDir = defaultPluginDir
+	}
+	for name, source := range config.Credentials {
+		if err := source.Validate(); err != nil {
+			return receiverLocalConfig{}, fmt.Errorf("config credential %s: %w", name, err)
+		}
+		if source.File, err = client.ExpandHome(source.File); err != nil {
+			return receiverLocalConfig{}, err
+		}
+		config.Credentials[name] = source
+	}
+	return config, nil
+}
 
 func runReceiver(args []string, stdout, stderr io.Writer) error {
-	const usage = "usage: wherry receiver run --bundle-file FILE [--state-dir DIR] [--plugin-dir DIR] [--metrics-addr HOST:PORT] [--rotate-key]"
+	const usage = "usage: wherry receiver run [--config-file FILE] [--rotate-key]"
 	if len(args) == 0 || args[0] != "run" {
 		return errors.New(usage)
 	}
 	flags := flag.NewFlagSet("receiver run", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	bundlePath := flags.String("bundle-file", "", "receiver bundle file")
-	stateDir := flags.String("state-dir", "", "directory holding the receiver's keys (default: state beside the bundle file)")
-	pluginDir := flags.String("plugin-dir", defaultPluginDir, "directory holding the adapter plugins, wherry-plugin-<type>")
-	metricsAddr := flags.String("metrics-addr", "", "HOST:PORT to serve /metrics on, off when empty")
+	configPath := flags.String("config-file", defaultReceiverConfig, "the receiver's local configuration file")
 	rotateKey := flags.Bool("rotate-key", false, "replace the receiver's signing key at start, before it claims anything")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
-	if *bundlePath == "" || flags.NArg() != 0 {
+	if flags.NArg() != 0 {
 		return errors.New(usage)
 	}
-	if *stateDir == "" {
-		*stateDir = filepath.Join(filepath.Dir(*bundlePath), "state")
+	config, err := loadReceiverLocalConfig(*configPath)
+	if err != nil {
+		return err
 	}
-	bundle, err := admin.ReadBundle(*bundlePath)
+	bundle, err := admin.ReadBundle(config.Bundle)
 	if err != nil {
 		return err
 	}
 	logger := log.New(stdout, "receiver: ", log.LstdFlags|log.LUTC)
 	registry := newRegistry()
-	if *metricsAddr != "" {
-		listener, err := net.Listen("tcp", *metricsAddr)
+	if config.MetricsAddr != "" {
+		listener, err := net.Listen("tcp", config.MetricsAddr)
 		if err != nil {
 			return fmt.Errorf("metrics address: %w", err)
 		}
 		defer serveMetrics(listener, registry, logger).Close()
 	}
-	plugins := &plugins{dir: *pluginDir, registry: registry, running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, registry: registry, running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
-	r, err := receiver.New(bundle, *stateDir, *rotateKey, plugins.factory(bundle), logger, registry)
+	r, err := receiver.New(bundle, config.StateDir, *rotateKey, plugins.profile, logger, registry)
 	if err != nil {
 		return err
 	}
@@ -107,40 +163,52 @@ func serveMetrics(listener net.Listener, registry *prometheus.Registry, logger *
 	return server
 }
 
-// plugins runs one plugin process per adapter type, started for the first adapter of that type.
+// plugins runs one plugin process per adapter type, started for the first profile of that type.
 type plugins struct {
-	dir      string
-	logs     io.Writer
-	registry prometheus.Registerer
-	running  map[string]*adapter.Plugin
+	dir         string
+	credentials map[string]credential.Source
+	logs        io.Writer
+	registry    prometheus.Registerer
+	running     map[string]*adapter.Plugin
 }
 
-// adapter configures one adapter in its type's plugin; platform is the bundle's platform credential for it.
-// factory configures each adapter through its type's plugin with the bundle's credential for its platform.
-func (p *plugins) factory(bundle admin.Bundle) receiver.AdapterFactory {
-	return func(pool string, settings admin.AdapterSettings) (receiver.Named, error) {
-		return p.adapter(pool, settings, bundle.Platform[settings.Platform])
+// profile configures one profile in its type's plugin, handing the plugin the value of the credential its config names
+// in place of the name.
+func (p *plugins) profile(pool string, settings admin.ProfileSettings) (receiver.Named, error) {
+	config := maps.Clone(settings.Config)
+	var value []byte
+	if named, ok := config["credential"]; ok {
+		delete(config, "credential")
+		name, _ := named.(string)
+		source, ok := p.credentials[name]
+		if !ok {
+			return receiver.Named{}, fmt.Errorf("credential %q has no source in the receiver's configuration", name)
+		}
+		var err error
+		if value, err = source.Resolve(context.Background()); err != nil {
+			return receiver.Named{}, fmt.Errorf("resolve credential %s: %w", name, err)
+		}
 	}
-}
-
-func (p *plugins) adapter(pool string, settings admin.AdapterSettings, platform string) (receiver.Named, error) {
-	running, ok := p.running[settings.Type]
+	running, ok := p.running[settings.Plugin]
 	if !ok {
 		var err error
-		running, err = adapter.Launch(func() (string, error) { return pluginPath(p.dir, settings.Type) }, p.logs)
+		running, err = adapter.Launch(func() (string, error) { return pluginPath(p.dir, settings.Plugin) }, p.logs)
 		if err != nil {
 			return receiver.Named{}, err
 		}
-		p.running[settings.Type] = running
+		p.running[settings.Plugin] = running
 		p.registry.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{
-			Name: "wherry_plugin_restarts_total", Help: "Times an adapter plugin was started again.", ConstLabels: prometheus.Labels{"pool": pool, "type": settings.Type},
+			Name: "wherry_plugin_restarts_total", Help: "Times an adapter plugin was started again.", ConstLabels: prometheus.Labels{"pool": pool, "type": settings.Plugin},
 		}, func() float64 { return float64(running.Restarts()) }))
 	}
-	config, err := json.Marshal(settings.Config)
+	encoded, err := json.Marshal(config)
 	if err != nil {
 		return receiver.Named{}, err
 	}
-	configured, err := running.Configure(adapter.Settings{Name: settings.Name, Pool: pool, Agent: settings.Agent, Config: config, Platform: platform})
+	// A value read from a file ends in the newline its editor wrote, which no platform token holds.
+	configured, err := running.Configure(adapter.Settings{
+		Name: settings.Name, Pool: pool, Agent: settings.Agent, Config: encoded, Credential: strings.TrimRight(string(value), "\r\n"),
+	})
 	if err != nil {
 		return receiver.Named{}, err
 	}

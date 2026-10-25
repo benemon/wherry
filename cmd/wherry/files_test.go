@@ -16,6 +16,7 @@ import (
 	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/wire"
 )
 
@@ -25,7 +26,7 @@ func TestSubmitFileFlags(t *testing.T) {
 	if err := os.WriteFile(deployKey, []byte("deploy-key-value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b.credentials["deploy-key"], b.credentials["vault-token"] = busclient.Source{File: deployKey}, busclient.Source{File: deployKey}
+	b.credentials["deploy-key"], b.credentials["vault-token"] = credential.Source{File: deployKey}, credential.Source{File: deployKey}
 	input := filepath.Join(t.TempDir(), "data.csv")
 	if err := os.WriteFile(input, []byte("a,b\n1,2\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -45,7 +46,7 @@ func TestSubmitFileFlags(t *testing.T) {
 		"agent credential target":     {[]string{"--credential", "deploy-key:env=MODEL_API_KEY"}, "task credential deploy-key takes the environment variable MODEL_API_KEY of one of agent claude's credentials"},
 		"reserved env target":         {[]string{"--credential", "deploy-key:env=HOME"}, "credential deploy-key: env must match"},
 		"shared target":               {[]string{"--credential", "deploy-key:env=TOKEN", "--credential", "vault-token:env=TOKEN"}, "credentials deploy-key and vault-token share a target"},
-		"inputs over the limit":       {[]string{"--input", large}, "inline inputs are over adapter lab's 49152-byte limit"},
+		"inputs over the limit":       {[]string{"--input", large}, "inline inputs are over profile lab's 49152-byte limit"},
 		"output escaping":             {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
 		"output in the outcome dir":   {[]string{"--output", ".wherry/outcome.json"}, "expected outputs must be unique relative paths of portable file names"},
 		"transcript output":           {[]string{"--output", "transcript.jsonl"}, "expected output transcript.jsonl is reserved for the run's transcript"},
@@ -199,7 +200,7 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 		return path
 	}
 	config := busclient.Config{StateDir: filepath.Join(work, "state"), HostKey: write(filepath.Join(work, "host.key")), Bundle: write(filepath.Join(outside, "bundle.yaml")),
-		Credentials: map[string]busclient.Source{"model": {File: write(filepath.Join(work, "secrets", "model"))}, "github-token": {Env: "GITHUB_TOKEN"},
+		Credentials: map[string]credential.Source{"model": {File: write(filepath.Join(work, "secrets", "model"))}, "github-token": {Env: "GITHUB_TOKEN"},
 			"s3-access": {File: write(filepath.Join(work, "s3", "access.key"))}, "s3-secret": {File: write(filepath.Join(work, "s3", "secret.key"))}},
 		Storage: &busclient.StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"}}
 	write(filepath.Join(config.StateDir, "runs", "run-a.json"))
@@ -270,7 +271,7 @@ func TestMCPInputsStayInTheInputRoots(t *testing.T) {
 	}
 	config := busclient.Config{InputRoots: []string{first, second}, StateDir: filepath.Join(second, "state"),
 		HostKey: write(filepath.Join(first, "wherry", "host.key")), Bundle: write(filepath.Join(outside, "bundle.yaml")),
-		Credentials: map[string]busclient.Source{"model": {File: write(filepath.Join(first, "wherry", "model"))}}}
+		Credentials: map[string]credential.Source{"model": {File: write(filepath.Join(first, "wherry", "model"))}}}
 	write(filepath.Join(config.StateDir, "runs", "run-a.json"))
 	link := filepath.Join(first, "out")
 	if err := os.Symlink(write(filepath.Join(outside, "elsewhere")), link); err != nil {
