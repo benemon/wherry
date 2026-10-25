@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -250,6 +251,7 @@ func TestRoundTrip(t *testing.T) {
 	hostConfig := busclient.Config{Bundle: hostBundle, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
 		Credentials: map[string]busclient.Source{"model": {Env: "WHERRY_ROUNDTRIP_MODEL"}, "deploy-key": {Command: []string{"cat", deployPath}}}}
 	hostConfig.Storage = bucket.config
+	maps.Copy(hostConfig.Credentials, bucket.sources)
 	if _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -444,6 +446,7 @@ const s3Bucket = "wherry-test"
 type s3Store struct {
 	endpoint string
 	config   *busclient.StorageConfig
+	sources  map[string]busclient.Source
 	store    *minio.Client
 	client   *http.Client
 }
@@ -457,9 +460,9 @@ func s3Oracle(t *testing.T) *s3Store {
 		t.Log("WHERRY_S3_TEST_ENDPOINT not set: no real S3 leg")
 		return nil
 	}
-	config := &busclient.StorageConfig{AccessKeyFile: os.Getenv("WHERRY_S3_TEST_ACCESS_KEY_FILE"), SecretKeyFile: os.Getenv("WHERRY_S3_TEST_SECRET_KEY_FILE")}
+	sources := map[string]busclient.Source{"s3-access": {File: os.Getenv("WHERRY_S3_TEST_ACCESS_KEY_FILE")}, "s3-secret": {File: os.Getenv("WHERRY_S3_TEST_SECRET_KEY_FILE")}}
 	keys := make([]string, 2)
-	for i, path := range []string{config.AccessKeyFile, config.SecretKeyFile} {
+	for i, path := range []string{sources["s3-access"].File, sources["s3-secret"].File} {
 		key, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -491,7 +494,7 @@ func s3Oracle(t *testing.T) *s3Store {
 			t.Fatal(err)
 		}
 	}
-	return &s3Store{endpoint: proxy.URL, config: config, store: store, client: proxy.Client()}
+	return &s3Store{endpoint: proxy.URL, config: &busclient.StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"}, sources: sources, store: store, client: proxy.Client()}
 }
 
 func fallbackS3(t *testing.T) *s3Store {
@@ -538,7 +541,8 @@ func fallbackS3(t *testing.T) *s3Store {
 	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return &s3Store{endpoint: server.URL, config: &busclient.StorageConfig{AccessKeyFile: access, SecretKeyFile: secret}, client: server.Client()}
+	return &s3Store{endpoint: server.URL, config: &busclient.StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"},
+		sources: map[string]busclient.Source{"s3-access": {File: access}, "s3-secret": {File: secret}}, client: server.Client()}
 }
 
 func hexSHA(data []byte) string {

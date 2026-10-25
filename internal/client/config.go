@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"crypto/ed25519"
-	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -27,21 +26,22 @@ import (
 // host key a task cloning under each URL prefix takes. InputRoots are the
 // directories the MCP server sends inputs from.
 type Config struct {
-	Bundle      string            `json:"bundle"`
-	HostKey     string            `json:"host_key,omitzero"`
-	StateDir    string            `json:"state_dir,omitzero"`
-	Credentials map[string]Source `json:"credentials,omitzero"`
-	Git         []GitCredential   `json:"git,omitzero"`
-	Storage     *StorageConfig    `json:"storage,omitzero"`
-	InputRoots  []string          `json:"input_roots,omitzero"`
+	Bundle      string            `yaml:"bundle"`
+	HostKey     string            `yaml:"host_key"`
+	StateDir    string            `yaml:"state_dir"`
+	Credentials map[string]Source `yaml:"credentials"`
+	Git         []GitCredential   `yaml:"git"`
+	Storage     *StorageConfig    `yaml:"storage"`
+	InputRoots  []string          `yaml:"input_roots"`
 }
 
-// Source is where a credential's value comes from, exactly one of: File, a file; Env, an environment variable of the
-// process answering the seal; Command, an argv run without a shell whose stdout is the value.
+// Source is where a credential's value comes from, exactly one of: File, a regular file its group cannot write and
+// others cannot access; Env, an environment variable of the process answering the seal; Command, an argv run without a
+// shell whose stdout is the value.
 type Source struct {
-	File    string   `json:"file,omitzero"`
-	Env     string   `json:"env,omitzero"`
-	Command []string `json:"command,omitzero"`
+	File    string   `yaml:"file"`
+	Env     string   `yaml:"env"`
+	Command []string `yaml:"command"`
 }
 
 // commandTimeout bounds a command source, long enough for an interactive unlock such as a password manager's; tests
@@ -81,9 +81,25 @@ func (source Source) resolve(ctx context.Context) ([]byte, error) {
 		}
 		return stdout.data, nil
 	}
-	value, err := os.ReadFile(source.File)
+	file, err := os.Open(source.File)
 	if err != nil {
 		// The cause without the path.
+		return nil, errors.Unwrap(err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, errors.Unwrap(err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("its file is not a regular file")
+	}
+	// Group read is allowed so a secrets agent can template the file for a service group.
+	if info.Mode().Perm()&0o027 != 0 {
+		return nil, errors.New("its file is writable by its group or open to others; chmod 600 it")
+	}
+	value, err := io.ReadAll(file)
+	if err != nil {
 		return nil, errors.Unwrap(err)
 	}
 	return value, nil
@@ -108,15 +124,15 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 // GitCredential gives a task whose git remote starts with URL the credential Credential and, for ssh, the known_hosts
 // file HostKey.
 type GitCredential struct {
-	URL        string `json:"url"`
-	Credential string `json:"credential,omitzero"`
-	HostKey    string `json:"host_key,omitzero"`
+	URL        string `yaml:"url"`
+	Credential string `yaml:"credential"`
+	HostKey    string `yaml:"host_key"`
 }
 
-// StorageConfig names the owner-only files holding the host's S3 access key and secret key.
+// StorageConfig names the credentials holding the host's S3 access key and secret key.
 type StorageConfig struct {
-	AccessKeyFile string `json:"access_key_file"`
-	SecretKeyFile string `json:"secret_key_file"`
+	AccessKey string `yaml:"access_key"`
+	SecretKey string `yaml:"secret_key"`
 }
 
 // DefaultConfigPath returns the per-user default path.
@@ -125,7 +141,7 @@ func DefaultConfigPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "wherry", "config.json"), nil
+	return filepath.Join(home, ".config", "wherry", "config.yaml"), nil
 }
 
 // LoadConfig decodes the config at path, defaulting host_key and state_dir.
@@ -139,7 +155,7 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, err
 	}
 	var config Config
-	if err := json.Unmarshal(encoded, &config, signed.Strict); err != nil {
+	if err := admin.DecodeYAML(encoded, &config); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if config.Bundle == "" {
@@ -155,14 +171,7 @@ func LoadConfig(path string) (Config, error) {
 	if config.StateDir == "" {
 		config.StateDir = filepath.Join(home, ".config", "wherry", "state")
 	}
-	paths := []*string{&config.Bundle, &config.HostKey, &config.StateDir}
-	if config.Storage != nil {
-		if config.Storage.AccessKeyFile == "" || config.Storage.SecretKeyFile == "" {
-			return Config{}, errors.New("config storage requires access_key_file and secret_key_file")
-		}
-		paths = append(paths, &config.Storage.AccessKeyFile, &config.Storage.SecretKeyFile)
-	}
-	for _, path := range paths {
+	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir} {
 		if *path, err = expandHome(*path); err != nil {
 			return Config{}, err
 		}
@@ -195,6 +204,16 @@ func LoadConfig(path string) (Config, error) {
 			}
 			if _, err := os.ReadFile(config.Git[i].HostKey); err != nil {
 				return Config{}, fmt.Errorf("config git url %s: host_key is not a readable file", entry.URL)
+			}
+		}
+	}
+	if config.Storage != nil {
+		if config.Storage.AccessKey == "" || config.Storage.SecretKey == "" {
+			return Config{}, errors.New("config storage requires access_key and secret_key")
+		}
+		for _, key := range [][2]string{{"access_key", config.Storage.AccessKey}, {"secret_key", config.Storage.SecretKey}} {
+			if _, configured := config.Credentials[key[1]]; !configured {
+				return Config{}, fmt.Errorf("config storage %s names credential %s, which credentials does not configure", key[0], key[1])
 			}
 		}
 	}

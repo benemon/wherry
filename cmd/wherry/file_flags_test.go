@@ -202,7 +202,7 @@ func TestAdminArgsRejectsUnknownOptions(t *testing.T) {
 func TestHostConfigFileAndIgnoredEnvironment(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("WHERRY_"+"CONFIG", filepath.Join(t.TempDir(), "bad.json"))
+	t.Setenv("WHERRY_"+"CONFIG", filepath.Join(t.TempDir(), "bad.yaml"))
 	keyPath := filepath.Join(home, "host.key")
 	key, err := trust.GenerateSigningKeyFile(keyPath)
 	if err != nil {
@@ -212,13 +212,13 @@ func TestHostConfigFileAndIgnoredEnvironment(t *testing.T) {
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	config := []byte(`{"bundle":"missing.yaml","host_key":"` + keyPath + `"}`)
-	defaultPath := filepath.Join(configDir, "config.json")
+	config := []byte("bundle: missing.yaml\nhost_key: " + keyPath + "\n")
+	defaultPath := filepath.Join(configDir, "config.yaml")
 	if err := os.WriteFile(defaultPath, config, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for name, args := range map[string][]string{
-		"explicit": {"key", "--config-file", "~/.config/wherry/config.json"},
+		"explicit": {"key", "--config-file", "~/.config/wherry/config.yaml"},
 		"default":  {"key"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -234,7 +234,7 @@ func TestHostConfigFileAndIgnoredEnvironment(t *testing.T) {
 }
 
 func TestHostCommandsReadConfigFile(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "missing.json")
+	missing := filepath.Join(t.TempDir(), "missing.yaml")
 	for name, args := range map[string][]string{
 		"init":      {"init", "--config-file", missing},
 		"key":       {"key", "--config-file", missing},
@@ -250,7 +250,7 @@ func TestHostCommandsReadConfigFile(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			err := run(args, &stdout, &stderr)
-			if err == nil || !strings.Contains(err.Error(), "missing.json") {
+			if err == nil || !strings.Contains(err.Error(), "missing.yaml") {
 				t.Fatalf("run(%q) = %v, want the configured path read", args, err)
 			}
 		})

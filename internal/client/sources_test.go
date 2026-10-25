@@ -173,29 +173,76 @@ func TestConfigSourcesAndGit(t *testing.T) {
 	if err := os.WriteFile(hostKey, []byte("git.example.test ssh-ed25519 AAAA\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "config.json")
+	path := filepath.Join(dir, "config.yaml")
 	for name, test := range map[string]struct{ config, want string }{
-		"two kinds":          {`"credentials":{"a":{"file":"x","env":"A"}}`, "config credential a needs exactly one of file, env and command"},
-		"no kind":            {`"credentials":{"a":{}}`, "config credential a needs exactly one of file, env and command"},
-		"a literal":          {`"credentials":{"a":"value"}`, "decode config"},
-		"an empty command":   {`"credentials":{"a":{"command":[""]}}`, "config credential a: command names no program"},
-		"a git url":          {`"git":[{"url":"git@github.com:"}]`, "config git url git@github.com: must start with https:// or ssh://"},
-		"a git url twice":    {`"git":[{"url":"https://a/"},{"url":"https://a/"}]`, "config git url https://a/ is listed twice"},
-		"an unknown source":  {`"git":[{"url":"https://a/","credential":"absent"}]`, "names credential absent, which credentials does not configure"},
-		"an unreadable key":  {`"git":[{"url":"ssh://a/","host_key":"` + filepath.Join(dir, "absent") + `"}]`, "config git url ssh://a/: host_key is not a readable file"},
-		"a directory as key": {`"git":[{"url":"ssh://a/","host_key":"` + dir + `"}]`, "config git url ssh://a/: host_key is not a readable file"},
+		"two kinds":                      {"credentials:\n  a: {file: x, env: A}\n", "config credential a needs exactly one of file, env and command"},
+		"no kind":                        {"credentials:\n  a: {}\n", "config credential a needs exactly one of file, env and command"},
+		"a literal":                      {"credentials:\n  a: value\n", "decode config"},
+		"an empty command":               {"credentials:\n  a:\n    command: ['']\n", "config credential a: command names no program"},
+		"a git url":                      {"git:\n  - url: 'git@github.com:'\n", "config git url git@github.com: must start with https:// or ssh://"},
+		"a git url twice":                {"git:\n  - url: https://a/\n  - url: https://a/\n", "config git url https://a/ is listed twice"},
+		"an unknown source":              {"git:\n  - url: https://a/\n    credential: absent\n", "names credential absent, which credentials does not configure"},
+		"an unreadable key":              {"git:\n  - url: ssh://a/\n    host_key: " + filepath.Join(dir, "absent") + "\n", "config git url ssh://a/: host_key is not a readable file"},
+		"a directory as key":             {"git:\n  - url: ssh://a/\n    host_key: " + dir + "\n", "config git url ssh://a/: host_key is not a readable file"},
+		"storage without its secret key": {"credentials:\n  a: {env: A}\nstorage:\n  access_key: a\n", "config storage requires access_key and secret_key"},
+		"storage without its access key": {"credentials:\n  a: {env: A}\nstorage:\n  secret_key: a\n", "config storage requires access_key and secret_key"},
+		"an unknown access key": {"credentials:\n  a: {env: A}\nstorage:\n  access_key: absent\n  secret_key: a\n",
+			"config storage access_key names credential absent, which credentials does not configure"},
+		"an unknown secret key": {"credentials:\n  a: {env: A}\nstorage:\n  access_key: a\n  secret_key: absent\n",
+			"config storage secret_key names credential absent, which credentials does not configure"},
+		"storage key files": {"storage:\n  access_key_file: a\n  secret_key_file: b\n", "decode config"},
 	} {
-		if err := os.WriteFile(path, []byte(`{"bundle":"bundle.yaml",`+test.config+`}`), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("bundle: bundle.yaml\n"+test.config), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("config with %s: %v, want %q", name, err, test.want)
 		}
 	}
-	if err := os.WriteFile(path, []byte(`{"bundle":"bundle.yaml","credentials":{"a":{"command":["vault","print","token"]}},"git":[{"url":"ssh://a/","credential":"a","host_key":"`+hostKey+`"}]}`), 0o600); err != nil {
+	config := "bundle: bundle.yaml\ncredentials:\n  a:\n    command: [vault, print, token]\n  s3: {env: S3}\ngit:\n  - url: ssh://a/\n    credential: a\n    host_key: " + hostKey +
+		"\nstorage:\n  access_key: s3\n  secret_key: a\n"
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if config, err := LoadConfig(path); err != nil || !slices.Equal(config.Credentials["a"].Command, []string{"vault", "print", "token"}) || config.Git[0].HostKey != hostKey {
+	if config, err := LoadConfig(path); err != nil || !slices.Equal(config.Credentials["a"].Command, []string{"vault", "print", "token"}) || config.Git[0].HostKey != hostKey ||
+		*config.Storage != (StorageConfig{AccessKey: "s3", SecretKey: "a"}) {
 		t.Fatalf("config %+v, %v", config, err)
+	}
+}
+
+// A file source must be a regular file its group cannot write and others cannot access; the refusal names neither the
+// path nor the value.
+func TestFileSourcePermissions(t *testing.T) {
+	const value = "file-source-value"
+	path := filepath.Join(t.TempDir(), "credential")
+	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []os.FileMode{0o644, 0o660, 0o602, 0o620, 0o604, 0o601} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		got, err := Source{File: path}.resolve(context.Background())
+		if err == nil || err.Error() != "its file is writable by its group or open to others; chmod 600 it" {
+			t.Fatalf("resolve a file of mode %o = %q, %v; want it refused", mode, got, err)
+		}
+		if strings.Contains(err.Error(), path) || strings.Contains(err.Error(), value) {
+			t.Fatalf("resolve a file of mode %o: error %q holds the path or the value", mode, err)
+		}
+	}
+	for _, mode := range []os.FileMode{0o600, 0o400, 0o640} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := (Source{File: path}).resolve(context.Background()); err != nil || string(got) != value {
+			t.Fatalf("resolve a file of mode %o = %q, %v", mode, got, err)
+		}
+	}
+	dir := filepath.Join(t.TempDir(), value)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Source{File: dir}).resolve(context.Background()); err == nil || err.Error() != "its file is not a regular file" {
+		t.Fatalf("resolve a directory: %v", err)
 	}
 }

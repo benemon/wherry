@@ -737,9 +737,9 @@ func TestUsageErrors(t *testing.T) {
 
 func TestKeyAndInit(t *testing.T) {
 	dir := t.TempDir()
-	config := filepath.Join(dir, "config.json")
+	config := filepath.Join(dir, "config.yaml")
 	keyPath := filepath.Join(dir, "keys", "host.key")
-	if err := os.WriteFile(config, []byte(`{"bundle":"`+filepath.Join(dir, "missing.yaml")+`","host_key":"`+keyPath+`","state_dir":"`+dir+`"}`), 0o600); err != nil {
+	if err := os.WriteFile(config, []byte("bundle: "+filepath.Join(dir, "missing.yaml")+"\nhost_key: "+keyPath+"\nstate_dir: "+dir+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer

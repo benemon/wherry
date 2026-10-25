@@ -399,7 +399,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	if stored {
 		storage := v.state.Pools[pool].Storage
-		store, err := h.bucket(pool, storage)
+		store, err := h.bucket(ctx, pool, storage)
 		if err != nil {
 			return SubmitResult{}, err
 		}

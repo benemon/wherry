@@ -619,15 +619,21 @@ Every credential has a source on the host and a target in the agent. The
 host's [client configuration](reference.md#client-configuration) maps each
 credential name to one source:
 
-```json
-"credentials": {
-  "openai-api-key": {"file": "~/.config/wherry/credentials/openai"},
-  "github-token":   {"env": "GITHUB_TOKEN"},
-  "vault-token":    {"command": ["vault", "print", "token"]}
-}
+```yaml
+credentials:
+  openai-api-key:
+    file: ~/.config/wherry/credentials/openai
+  github-token:
+    env: GITHUB_TOKEN
+  vault-token:
+    command: [vault, print, token]
 ```
 
-A `file` source is read as it is, trailing newline included. An `env`
+The configuration lives at `~/.config/wherry/config.yaml`. A `file` source is
+read as it is, trailing newline included. Its file must be a regular file
+that its group cannot write and others cannot access: mode 0600 is the
+recommended mode, and mode 0640 is accepted for a secrets agent that
+templates the file for a service group. An `env`
 source is read from the environment of the process answering the seal,
 `wherry await` or `wherry mcp`. A `command` source runs without a shell,
 with the answerer's environment, for at most 60 seconds, which leaves time
@@ -730,9 +736,22 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    aws s3api put-bucket-policy --endpoint-url https://s3.example.com --bucket wherry --policy file://alice.json
    ```
 
-   The host keeps the access key and secret key in two files of mode 0600, named
-   under `storage` in its [configuration](reference.md#client-configuration).
-   Receivers and agents never hold it; they get presigned URLs, a GET per input
+   The host keeps the access key and secret key as two credentials, each with
+   its own source, and names them under `storage` in its
+   [configuration](reference.md#client-configuration):
+
+   ```yaml
+   credentials:
+     s3-access-key:
+       file: ~/.config/wherry/credentials/s3-access-key
+     s3-secret-key:
+       command: [op, read, "op://wherry/s3/secret-key"]
+   storage:
+     access_key: s3-access-key
+     secret_key: s3-secret-key
+   ```
+
+   Receivers and agents never hold the S3 credential; they get presigned URLs, a GET per input
    for 15 minutes and a PUT per output until the run's deadline, 7 days at
    most.
 
@@ -773,11 +792,13 @@ wherry submit --prompt "Fix the failing test" \
 The host's `git` configuration gives the clone its credential and, for
 `ssh`, its host key:
 
-```json
-"git": [
-  {"url": "https://github.com/acme/", "credential": "github-token"},
-  {"url": "ssh://git@gitlab.example/", "credential": "deploy-key", "host_key": "~/.config/wherry/known_hosts/gitlab"}
-]
+```yaml
+git:
+  - url: https://github.com/acme/
+    credential: github-token
+  - url: ssh://git@gitlab.example/
+    credential: deploy-key
+    host_key: ~/.config/wherry/known_hosts/gitlab
 ```
 
 `submit` matches the remote, with a `user@host:path` remote written as

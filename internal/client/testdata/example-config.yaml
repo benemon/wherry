@@ -1,0 +1,28 @@
+bundle: ~/.config/wherry/laptop.bundle
+host_key: ~/.config/wherry/laptop.key
+state_dir: ~/.local/state/wherry
+credentials:
+  claude-oauth-token:
+    file: ~/.config/wherry/credentials/claude-oauth-token
+  model-api-key:
+    file: ~/.config/wherry/credentials/model-api-key
+  openai-api-key:
+    command: [op, read, "op://wherry/openai/credential"]
+  github-token:
+    env: GITHUB_TOKEN
+  deploy-key:
+    file: ~/.config/wherry/credentials/deploy-key
+  s3-access-key:
+    file: ~/.config/wherry/credentials/s3-access-key
+  s3-secret-key:
+    command: [op, read, "op://wherry/s3/secret-key"]
+git:
+  - url: https://github.com/acme/
+    credential: github-token
+  - url: ssh://git@gitlab.example/
+    credential: deploy-key
+    host_key: ~/.config/wherry/known_hosts/gitlab
+input_roots: [~/src, ~/notes]
+storage:
+  access_key: s3-access-key
+  secret_key: s3-secret-key

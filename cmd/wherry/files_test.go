@@ -199,8 +199,9 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 		return path
 	}
 	config := busclient.Config{StateDir: filepath.Join(work, "state"), HostKey: write(filepath.Join(work, "host.key")), Bundle: write(filepath.Join(outside, "bundle.yaml")),
-		Credentials: map[string]busclient.Source{"model": {File: write(filepath.Join(work, "secrets", "model"))}, "github-token": {Env: "GITHUB_TOKEN"}},
-		Storage:     &busclient.StorageConfig{AccessKeyFile: write(filepath.Join(work, "s3", "access.key")), SecretKeyFile: write(filepath.Join(work, "s3", "secret.key"))}}
+		Credentials: map[string]busclient.Source{"model": {File: write(filepath.Join(work, "secrets", "model"))}, "github-token": {Env: "GITHUB_TOKEN"},
+			"s3-access": {File: write(filepath.Join(work, "s3", "access.key"))}, "s3-secret": {File: write(filepath.Join(work, "s3", "secret.key"))}},
+		Storage: &busclient.StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"}}
 	write(filepath.Join(config.StateDir, "runs", "run-a.json"))
 	read := inputReader(inputOpener(work, config))
 	for name, path := range map[string]string{
@@ -211,8 +212,8 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 		"a link to the host key": link(config.HostKey, "key"),
 		"the state":              filepath.Join(config.StateDir, "runs", "run-a.json"),
 		"a credential":           config.Credentials["model"].File,
-		"a storage access key":   config.Storage.AccessKeyFile,
-		"a storage secret key":   config.Storage.SecretKeyFile,
+		"a storage access key":   config.Credentials["s3-access"].File,
+		"a storage secret key":   config.Credentials["s3-secret"].File,
 		"a directory":            filepath.Join(work, "secrets"),
 		"a missing file":         filepath.Join(work, "absent"),
 		"a parent path":          filepath.Join(work, "..", filepath.Base(outside), "bundle.yaml"),

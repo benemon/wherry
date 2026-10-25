@@ -784,7 +784,7 @@ func resultParts(parts []wire.Part) []resultPart {
 
 // inputOpener opens an MCP input: a regular file beneath one of the configured input roots, or dir when there are
 // none, and none of the host's own files, so a client steered by its prompt cannot send the host key, the bundle, the
-// state, a credential or a storage key. Files are compared by identity, since path strings miss case-insensitive
+// state or a credential, the storage keys included. Files are compared by identity, since path strings miss case-insensitive
 // spellings and hard links. Relative paths resolve against dir.
 func inputOpener(dir string, config busclient.Config) func(string) (*os.File, error) {
 	configured := config.InputRoots
@@ -802,9 +802,6 @@ func inputOpener(dir string, config busclient.Config) func(string) (*os.File, er
 		if source.File != "" {
 			protected = append(protected, source.File)
 		}
-	}
-	if config.Storage != nil {
-		protected = append(protected, config.Storage.AccessKeyFile, config.Storage.SecretKeyFile)
 	}
 	refused := invalidArgument("inputs must be readable regular files beneath one of the MCP server's input roots, outside the wherry configuration")
 	// The host's files are looked up on each call, since the state directory and host key can appear after startup.
