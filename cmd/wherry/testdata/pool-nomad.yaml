@@ -1,7 +1,7 @@
 agents:
   - name: claude
     credentials:
-      - claude-oauth-token
+      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN}
 default_agent: claude
 delivery_limit: 5
 lock_duration: 15s

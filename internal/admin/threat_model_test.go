@@ -306,14 +306,12 @@ func TestReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 	if err := ValidateReceiverRecord(record, "receiver-a", terms); err != nil {
 		t.Fatal(err)
 	}
-	badLabels, outsideAgent, outsideCredential := modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a")
+	badLabels, outsideAgent := modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a")
 	badLabels.Adapters[0].Labels = map[string]string{"wherry.io/gpu": "yes"}
 	outsideAgent.Adapters[0].Agent = "agent-z"
-	outsideCredential.Adapters[0].Credential = "other"
 	for name, outside := range map[string]ReceiverConfig{
 		"reserved label": badLabels,
 		"agent":          outsideAgent,
-		"credential":     outsideCredential,
 	} {
 		record.Config = &outside
 		if err := ValidateReceiverRecord(record, "receiver-a", terms); err == nil {
@@ -334,11 +332,11 @@ func TestAdminRecordDecodeIsStrict(t *testing.T) {
 }
 
 func modelTerms() Terms {
-	return Terms{Agents: []AgentTerms{{Name: "agent-a", Credentials: []string{"model"}}}, DefaultAgent: "agent-a", DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1000000, RequestPercentage: 50}
+	return Terms{Agents: []AgentTerms{{Name: "agent-a", Credentials: []AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "agent-a", DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1000000, RequestPercentage: 50}
 }
 
 func modelConfig(receiver, pool string) ReceiverConfig {
-	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Adapters: []AdapterSettings{{Name: "adapter-a", Type: "fake", Agent: "agent-a", Credential: "model"}}}
+	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Adapters: []AdapterSettings{{Name: "adapter-a", Type: "fake", Agent: "agent-a"}}}
 }
 
 func modelState(t *testing.T) State {

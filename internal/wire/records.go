@@ -14,6 +14,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/signed"
 	jose "github.com/go-jose/go-jose/v4"
 )
@@ -87,16 +88,56 @@ type SubmissionBinding struct {
 	DeadlineMS      int64            `json:"deadline_at_ms"`
 	QueueDeadlineMS int64            `json:"queue_deadline_at_ms"`
 	Credentials     []TaskCredential `json:"credentials,omitzero"`
-	Outputs         []ExpectedOutput `json:"outputs,omitzero"`
-	Git             *GitInput        `json:"git,omitzero"`
-	S3Inputs        []S3Input        `json:"s3_inputs,omitzero"`
+	// Unsupplied names the agent's optional credentials this host has no source for, which the run goes without.
+	Unsupplied []string         `json:"unsupplied_credentials,omitzero"`
+	Outputs    []ExpectedOutput `json:"outputs,omitzero"`
+	Git        *GitInput        `json:"git,omitzero"`
+	S3Inputs   []S3Input        `json:"s3_inputs,omitzero"`
 }
 
-// TaskCredential is a credential of the host that the run's agent gets as the file File in its credentials
-// directory.
+// TaskCredential is a credential of the host that the run's agent gets at exactly one target: the environment variable
+// Env, or the file File in its credentials directory.
 type TaskCredential struct {
 	Name string `json:"name"`
-	File string `json:"file"`
+	Env  string `json:"env,omitzero"`
+	File string `json:"file,omitzero"`
+}
+
+// Target names where a credential is delivered.
+func (c TaskCredential) Target() string {
+	if c.Env != "" {
+		return "environment variable " + c.Env
+	}
+	return "file " + c.File
+}
+
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// ValidateCredentials checks a list of credentials: unique valid names, each with exactly one target, an environment
+// variable no adapter reserves or a portable file name, and no two sharing a target. Errors never quote a value.
+func ValidateCredentials(credentials []TaskCredential) error {
+	for i, credential := range credentials {
+		if !ValidName(credential.Name) {
+			return errors.New("credential names are at most 32 lowercase letters, digits and hyphens")
+		}
+		switch {
+		case (credential.Env == "") == (credential.File == ""):
+			return fmt.Errorf("credential %s needs exactly one of env and file", credential.Name)
+		case credential.Env != "" && (!envName.MatchString(credential.Env) || adapter.ReservedEnv(credential.Env)):
+			return fmt.Errorf("credential %s: env must match [A-Za-z_][A-Za-z0-9_]* and not be a variable adapters set", credential.Name)
+		case credential.File != "" && !ValidFileName(credential.File):
+			return fmt.Errorf("credential %s: file must be a portable file name", credential.Name)
+		}
+		for _, other := range credentials[:i] {
+			if other.Name == credential.Name {
+				return fmt.Errorf("credential %s is listed twice", credential.Name)
+			}
+			if other.Target() == credential.Target() {
+				return fmt.Errorf("credentials %s and %s share a target", other.Name, credential.Name)
+			}
+		}
+	}
+	return nil
 }
 
 // ExpectedOutput is a file the agent is asked to leave in its outputs directory; a run that does not return a
@@ -339,15 +380,13 @@ func (value *Submission) validate() error {
 	if _, err := inputBytes(value.Message.Parts); err != nil {
 		return err
 	}
-	files := map[string]bool{}
-	for _, credential := range binding.Credentials {
-		if !ValidName(credential.Name) {
-			return errors.New("credential names are at most 32 lowercase letters, digits and hyphens")
+	if err := ValidateCredentials(binding.Credentials); err != nil {
+		return err
+	}
+	for i, name := range binding.Unsupplied {
+		if !ValidName(name) || slices.Contains(binding.Unsupplied[:i], name) {
+			return errors.New("unsupplied credentials are unique credential names")
 		}
-		if !ValidFileName(credential.File) || files[credential.File] {
-			return errors.New("credential files must be unique portable file names")
-		}
-		files[credential.File] = true
 	}
 	if len(binding.Outputs) > MaxOutputs {
 		return errors.New("a submission expects at most 256 outputs")

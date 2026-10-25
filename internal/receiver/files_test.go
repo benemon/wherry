@@ -146,7 +146,7 @@ func TestLongTaskCredentialNameIsRejected(t *testing.T) {
 	}
 }
 
-func TestTaskCredentialsReachTheAdapterAsFiles(t *testing.T) {
+func TestCredentialsReachTheAdapterAtTheirTargets(t *testing.T) {
 	f := newFixture(t, resultStream)
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withDeployKey), 1)
 	request := f.request(t, 1)
@@ -158,21 +158,20 @@ func TestTaskCredentialsReachTheAdapterAsFiles(t *testing.T) {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
 	run := f.lastRun()
-	if string(run.Credential) != testToken || !slices.EqualFunc(run.Credentials, []adapter.Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte(deployValue)}},
-		func(a, b adapter.Secret) bool {
-			return a.Name == b.Name && a.File == b.File && bytes.Equal(a.Value, b.Value)
-		}) {
-		t.Fatalf("dispatched credential %q and task credentials %+v", run.Credential, run.Credentials)
+	if want := []adapter.Secret{{Name: credentialName, Env: credentialEnv, Value: []byte(testToken)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(deployValue)}}; !reflect.DeepEqual(run.Credentials, want) {
+		t.Fatalf("dispatched %d credentials, want the agent's at its environment variable and the task's at its file", len(run.Credentials))
 	}
-	if len(run.Inputs) != 0 || strings.Contains(string(run.Prompt), deployValue) || !strings.Contains(string(run.Prompt), "Credential files: /task/secrets/credentials/id_ed25519.") {
-		t.Fatalf("inputs %+v and prompt %q; want the credential file named, its value nowhere", run.Inputs, run.Prompt)
+	prompt := string(run.Prompt)
+	if len(run.Inputs) != 0 || strings.Contains(prompt, deployValue) || strings.Contains(prompt, testToken) || !strings.Contains(prompt, "Credential files: /task/secrets/credentials/id_ed25519.") ||
+		!strings.Contains(prompt, "Credential environment variables: "+credentialEnv+".") || !strings.Contains(prompt, "This run's credentials are "+credentialName+", deploy-key.") {
+		t.Fatalf("inputs %+v and prompt %q; want each credential's target named, its value nowhere", run.Inputs, run.Prompt)
 	}
 }
 
-func TestTaskCredentialsWithoutAnAgentCredential(t *testing.T) {
-	config := testConfig(testReceiver)
-	config.Adapters[0].Credential = ""
-	f := newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+func TestTaskCredentialsOfAnAgentWithoutCredentials(t *testing.T) {
+	terms := testTerms()
+	terms.Agents[0].Credentials = nil
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withDeployKey), 1)
 	request := f.request(t, 1)
 	if request.Credentials == nil || len(request.Credentials) != 0 || !slices.Equal(request.TaskCredentials, []string{"deploy-key"}) {
@@ -182,8 +181,8 @@ func TestTaskCredentialsWithoutAnAgentCredential(t *testing.T) {
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
-	if run := f.lastRun(); run.Credential != nil || len(run.Credentials) != 1 || string(run.Credentials[0].Value) != deployValue {
-		t.Fatalf("dispatched %q and %+v", run.Credential, run.Credentials)
+	if run := f.lastRun(); len(run.Credentials) != 1 || string(run.Credentials[0].Value) != deployValue {
+		t.Fatalf("dispatched %+v", run.Credentials)
 	}
 }
 
@@ -196,8 +195,57 @@ func TestTaskCredentialOfTheAgentsNameIsAskedOnce(t *testing.T) {
 	if status := f.execute(t, record, 1); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
-	if run := f.lastRun(); string(run.Credential) != testToken || len(run.Credentials) != 1 || string(run.Credentials[0].Value) != testToken || run.Credentials[0].File != "token" {
-		t.Fatalf("dispatched %q and %+v", run.Credential, run.Credentials)
+	if run := f.lastRun(); len(run.Credentials) != 2 || run.Credentials[0].Env != credentialEnv || run.Credentials[1].File != "token" ||
+		string(run.Credentials[0].Value) != testToken || string(run.Credentials[1].Value) != testToken {
+		t.Fatalf("dispatched %d credentials, want the one value at both targets", len(run.Credentials))
+	}
+}
+
+// optionalTerms give claude, beside its required credential, an optional one its host may not supply.
+func optionalTerms() admin.Terms {
+	terms := testTerms()
+	optional := false
+	terms.Agents[0].Credentials = append(terms.Agents[0].Credentials, admin.AgentCredential{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional})
+	return terms
+}
+
+// A run whose host has no source for an optional credential goes without it, its preamble naming it not supplied, and
+// an agent that needs it ends the run in AUTH_REQUIRED naming it.
+func TestAnUnsuppliedOptionalCredentialIsNamedInThePreamble(t *testing.T) {
+	outcome := `{"state":"TASK_STATE_AUTH_REQUIRED","message":{"role":"ROLE_AGENT","parts":[{"text":"gh needs a token"},{"data":{"credential":"github-token"}}]}}`
+	fake := &fakeAdapter{stream: noResultStream, outputs: []adapter.Output{outcomeOutput(outcome)}}
+	f := newFixtureWith(t, noResultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": fake})
+	f.answer(t, credentialName)
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Unsupplied = []string{"github-token"} })
+	if ack := f.execute(t, record, 1); ack != kgo.AckReject {
+		t.Fatalf("ack %v; logs:\n%s", ack, f.logs.String())
+	}
+	run := f.lastRun()
+	if len(run.Credentials) != 1 || run.Credentials[0].Name != credentialName {
+		t.Fatalf("dispatched %d credentials, want the supplied one alone", len(run.Credentials))
+	}
+	if prompt := string(run.Prompt); !strings.Contains(prompt, "This run's credentials are "+credentialName+", github-token (not supplied).") || strings.Contains(prompt, "GH_TOKEN") {
+		t.Fatalf("prompt %q; want the unsupplied credential named, its target not", prompt)
+	}
+	status := f.lastTask(t).Status
+	if status.State != wire.TaskStateAuthRequired || len(status.Message.Parts) != 2 || string(status.Message.Parts[1].Data) != `{"credential":"github-token"}` {
+		t.Fatalf("ended %s with %+v, want AUTH_REQUIRED naming github-token", status.State, status.Message)
+	}
+}
+
+func TestAdmissionRefusesCredentialsOutsideTheAgentsTerms(t *testing.T) {
+	for name, mutate := range map[string]func(*wire.Submission){
+		"a required credential unsupplied": func(task *wire.Submission) { task.Wherry.Unsupplied = []string{credentialName} },
+		"a task credential on an agent target": func(task *wire.Submission) {
+			task.Wherry.Credentials = []wire.TaskCredential{{Name: "deploy-key", Env: credentialEnv}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixtureWith(t, resultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+			if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, mutate)); admitted != nil || ack != kgo.AckReject {
+				t.Fatalf("admitted %v with ack %v, want a rejection", admitted, ack)
+			}
+		})
 	}
 }
 
@@ -266,22 +314,23 @@ func TestTaskCredentialIsRedactedFromTranscriptAndOutputs(t *testing.T) {
 func TestPreambleNamesFilesAndTheOutcomeContract(t *testing.T) {
 	directories := adapter.Directories{Input: "/local/inputs", Output: "/local/outputs", Credentials: "/secrets/credentials"}
 	inputs := []string{"data.csv"}
-	credentials := []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}
+	credentials := []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}, {Name: "github-token", Env: "GH_TOKEN"}}
 	outputs := []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes/extra.txt"}}
-	got := preamble(directories, inputs, credentials, outputs, nil, "run-a")
+	got := preamble(directories, inputs, credentials, []string{"vault-token"}, outputs, nil, "run-a")
 	for _, want := range []string{"input directory is /local/inputs", "credentials directory /secrets/credentials", "output directory /local/outputs",
-		"WHERRY_INPUT_DIR", "Input files: /local/inputs/data.csv.", "Credential files: /secrets/credentials/id_ed25519.",
+		"WHERRY_INPUT_DIR", "Input files: /local/inputs/data.csv.", "Credential files: /secrets/credentials/id_ed25519. Never print or copy their contents.",
+		"Credential environment variables: GH_TOKEN. Never print or copy their values.",
 		"/local/outputs/report.md (required), /local/outputs/notes/extra.txt.",
 		"write an A2A TaskStatus JSON object to /local/outputs/.wherry/outcome.json", `"TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_AUTH_REQUIRED"`,
-		`"role": "ROLE_AGENT"`, `{"data": {"credential": "<name>"}}`, "This run's credentials are deploy-key."} {
+		`"role": "ROLE_AGENT"`, `{"data": {"credential": "<name>"}}`, "This run's credentials are deploy-key, github-token, vault-token (not supplied)."} {
 		if !strings.Contains(got, want) {
 			t.Errorf("preamble %q lacks %q", got, want)
 		}
 	}
-	if unreported := preamble(adapter.Directories{}, inputs, nil, nil, nil, "run-a"); !strings.Contains(unreported, "Input files: $WHERRY_INPUT_DIR/data.csv.") {
+	if unreported := preamble(adapter.Directories{}, inputs, nil, nil, nil, nil, "run-a"); !strings.Contains(unreported, "Input files: $WHERRY_INPUT_DIR/data.csv.") {
 		t.Errorf("preamble %q, want the variable for a directory the adapter does not report", unreported)
 	}
-	if bare := preamble(directories, nil, nil, nil, nil, "run-a"); !strings.Contains(bare, "/local/outputs/.wherry/outcome.json") || !strings.Contains(bare, "This run has no credentials.") {
+	if bare := preamble(directories, nil, nil, nil, nil, nil, "run-a"); !strings.Contains(bare, "/local/outputs/.wherry/outcome.json") || !strings.Contains(bare, "This run has no credentials.") {
 		t.Errorf("preamble %q, want the outcome contract for a run that declares no files", bare)
 	}
 }

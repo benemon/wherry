@@ -116,7 +116,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 	adapter := &fakeAdapter{stream: noResultStream, endDelay: time.Minute}
 	r := &Receiver{id: receiverID, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: adapter}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: adapter}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -187,7 +187,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), map[string]string{credentialName: credential}, log.New(hostLogs, "", 0))
+	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), map[string]client.Source{credentialName: {File: credential}}, nil, log.New(hostLogs, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	adapter := &fakeAdapter{stream: resultStream}
 	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: adapter}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: adapter}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -225,8 +225,9 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	if err != nil || awaited.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("await %+v, %v; receiver logs:\n%s\nhost logs:\n%s", awaited, err, logs.String(), hostLogs.String())
 	}
-	if dispatches, _, _, _ := adapter.counts(); dispatches != 1 || string(adapter.lastRun.Credential) != testToken {
-		t.Fatalf("dispatches %d with credential %q, want the host's credential once", dispatches, adapter.lastRun.Credential)
+	if dispatches, _, _, _ := adapter.counts(); dispatches != 1 || len(adapter.lastRun.Credentials) != 1 ||
+		adapter.lastRun.Credentials[0].Env != credentialEnv || string(adapter.lastRun.Credentials[0].Value) != testToken {
+		t.Fatalf("dispatches %d with %d credentials, want the host's credential once", dispatches, len(adapter.lastRun.Credentials))
 	}
 	if strings.Contains(logs.String()+hostLogs.String(), testToken) {
 		t.Fatalf("logs carry the credential:\n%s\n%s", logs.String(), hostLogs.String())
@@ -248,7 +249,7 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), map[string]string{}, log.New(&syncBuffer{}, "", 0))
+	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), map[string]client.Source{}, nil, log.New(&syncBuffer{}, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +266,7 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 	fake := &fakeAdapter{stream: resultStream}
 	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: fake}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -346,7 +347,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(),
-		map[string]string{credentialName: credential, "deploy-key": deployKey}, log.New(hostLogs, "", 0))
+		map[string]client.Source{credentialName: {File: credential}, "deploy-key": {File: deployKey}}, nil, log.New(hostLogs, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +374,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	fake := &fakeAdapter{stream: resultStream, outputs: outputs}
 	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: fake}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -400,7 +401,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 		t.Fatalf("outputs %d, rejected %+v, not returned %d; want big.bin intact, report.md redacted and 250 over the limit", len(awaited.Outputs), awaited.Rejected, len(awaited.NotReturned))
 	}
 	run := fake.lastRun
-	if len(run.Inputs) != 1 || !bytes.Equal(run.Inputs[0].Data, input) || len(run.Credentials) != 1 || string(run.Credentials[0].Value) != deployValue {
+	if len(run.Inputs) != 1 || !bytes.Equal(run.Inputs[0].Data, input) || len(run.Credentials) != 2 || string(run.Credentials[1].Value) != deployValue {
 		t.Fatalf("dispatched inputs %+v and credentials %d", run.Inputs, len(run.Credentials))
 	}
 	if strings.Contains(logs.String()+hostLogs.String(), deployValue) {
@@ -409,8 +410,8 @@ func TestFilesOnRealBroker(t *testing.T) {
 }
 
 // TestGitInputOnRealBroker runs a git task from a host's Submit to its Await on the real broker: the client writes an
-// scp-like remote as an ssh URL, refuses a remote outside the pool's VCS hosts before publishing, and declares the patch
-// output; the receiver delivers the host key as known_hosts and the clone commands with the key's path, never its value.
+// scp-like remote as an ssh URL, takes the credential and host key of the git entry the remote falls under, refuses a
+// remote outside the pool's VCS hosts before publishing, and declares the patch output; the receiver delivers the host key as known_hosts and the clone commands with the key's path, never its value.
 func TestGitInputOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
@@ -437,6 +438,10 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	if err := os.WriteFile(deployKey, []byte(deployValue), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	hostKeyFile := filepath.Join(dir, "known_hosts")
+	if err := os.WriteFile(hostKeyFile, []byte(testHostKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	hostLogs := &syncBuffer{}
 	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
 	hostKafka, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
@@ -444,7 +449,8 @@ func TestGitInputOnRealBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(),
-		map[string]string{credentialName: credential, "deploy-key": deployKey}, log.New(hostLogs, "", 0))
+		map[string]client.Source{credentialName: {File: credential}, "deploy-key": {File: deployKey}},
+		[]client.GitCredential{{URL: "ssh://git@git.example.test/", Credential: "deploy-key", HostKey: hostKeyFile}}, log.New(hostLogs, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +468,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	fake := &fakeAdapter{stream: resultStream, outputs: []adapter.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
 	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.AdapterSettings) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Adapter: fake}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -470,8 +476,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	defer func() { stop(); <-done }()
 	b.joined(t, ctx, logs)
 	input := client.SubmitInput{
-		Prompt: "change the README", Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}},
-		Git:        &wire.GitInput{Remote: "git@git.example.test:org/repo.git", Ref: "main", Credential: "deploy-key", HostKey: testHostKey},
+		Prompt: "change the README", Git: &wire.GitInput{Remote: "git@git.example.test:org/repo.git", Ref: "main"},
 		GitChanges: "patch", Deadline: time.Minute, QueueDeadline: time.Minute,
 	}
 	var submitted client.SubmitResult
@@ -505,12 +510,12 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	}
 	run := fake.lastRun
 	if len(run.Inputs) != 1 || run.Inputs[0].Name != wire.KnownHostsFile || string(run.Inputs[0].Data) != testHostKey ||
-		len(run.Credentials) != 1 || string(run.Credentials[0].Value) != deployValue {
+		len(run.Credentials) != 2 || run.Credentials[1].File != wire.GitCredentialFile || string(run.Credentials[1].Value) != deployValue {
 		t.Fatalf("dispatched inputs %+v and credentials %d", run.Inputs, len(run.Credentials))
 	}
 	prompt := string(run.Prompt)
 	for _, want := range []string{
-		"-- 'ssh://git@git.example.test/org/repo.git' 'repo'", `-i "/task/secrets/credentials/id_ed25519"`, `UserKnownHostsFile="/task/inputs/known_hosts"`,
+		"-- 'ssh://git@git.example.test/org/repo.git' 'repo'", `-i "/task/secrets/credentials/git-credential"`, `UserKnownHostsFile="/task/inputs/known_hosts"`,
 		`format-patch --output="/task/outputs/changes.patch" refs/wherry/start..HEAD`, "/task/outputs/changes.patch.",
 	} {
 		if !strings.Contains(prompt, want) {

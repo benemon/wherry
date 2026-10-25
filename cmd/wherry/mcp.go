@@ -176,17 +176,16 @@ type receiversOutput struct {
 }
 
 type gitInput struct {
-	Remote     string `json:"remote" jsonschema:"repository the agent clones: an https or ssh url, or user@host:path"`
-	Ref        string `json:"ref" jsonschema:"branch, tag or commit to check out"`
-	Path       string `json:"path,omitempty" jsonschema:"checkout directory, relative; defaults to the repository name"`
-	Credential string `json:"credential,omitempty" jsonschema:"name of one of the credentials, which the agent clones with: a token for https, a private key for ssh"`
-	HostKey    string `json:"host_key,omitempty" jsonschema:"local file of OpenSSH known_hosts lines for the host of an ssh remote, read as an input is; required for ssh"`
-	Changes    string `json:"changes,omitempty" jsonschema:"patch or bundle: ask for the agent's commits back as the output changes.patch or changes.bundle"`
+	Remote  string `json:"remote" jsonschema:"repository the agent clones: an https or ssh url, or user@host:path"`
+	Ref     string `json:"ref" jsonschema:"branch, tag or commit to check out"`
+	Path    string `json:"path,omitempty" jsonschema:"checkout directory, relative; defaults to the repository name"`
+	Changes string `json:"changes,omitempty" jsonschema:"patch or bundle: ask for the agent's commits back as the output changes.patch or changes.bundle"`
 }
 
 type credentialInput struct {
 	Name string `json:"name" jsonschema:"credential name in this host's wherry config"`
-	File string `json:"file" jsonschema:"file name the agent finds it under in WHERRY_CREDENTIALS_DIR"`
+	File string `json:"file,omitempty" jsonschema:"file name the agent finds it under in WHERRY_CREDENTIALS_DIR; exactly one of file and env"`
+	Env  string `json:"env,omitempty" jsonschema:"environment variable the agent finds it in; exactly one of file and env"`
 }
 
 type outputInput struct {
@@ -201,10 +200,10 @@ type submitInput struct {
 	Agent         string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
 	Model         string             `json:"model,omitempty" jsonschema:"model the agent runs, one of its models as receivers lists them; default: the agent's default model"`
 	Selector      []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the adapter must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
-	Git           *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts"`
+	Git           *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts, and its credential and an ssh remote's host key come from the git entry of this host's wherry config whose url is the longest prefix of the remote"`
 	Inputs        []string           `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names; over the broker's record limit or an adapter's declared limit they go through the pool's bucket when the pool has storage and the host a storage credential, else submit refuses"`
 	S3Inputs      []string           `json:"s3_inputs,omitempty" jsonschema:"local files of up to 5 GiB each uploaded to the pool's bucket and fetched into the agent's WHERRY_INPUT_DIR under their base names"`
-	Credentials   []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent as files in WHERRY_CREDENTIALS_DIR"`
+	Credentials   []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent, each as a file in WHERRY_CREDENTIALS_DIR or in an environment variable; no two share a target, and none takes the target of one of the agent's own credentials"`
 	Outputs       []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; await writes the returned ones locally"`
 	Deadline      string             `json:"deadline,omitempty" jsonschema:"task deadline, a Go duration such as 90m; default 2h"`
 	QueueDeadline string             `json:"queue_deadline,omitempty" jsonschema:"queue deadline, a Go duration such as 30m; default 10m"`
@@ -342,7 +341,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receivers",
-		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each adapter's agent and labels as wherry.admin records them, its inline_limit from the offer, and its agent's models and default_model from the pool's terms, with ready set when the receiver's live advertisement offers the adapter. A live receiver with no ready adapter lists every adapter with ready false. Read it to choose an agent and selector before submit.",
+		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each adapter's agent and labels as wherry.admin records them, its inline_limit from the offer, and its agent's models, default_model and credentials from the pool's terms, each credential with optional and configured, whether this host has a source for it, with ready set when the receiver's live advertisement offers the adapter. A live receiver with no ready adapter lists every adapter with ready false. Read it to choose an agent and selector before submit.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()
@@ -358,7 +357,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with await, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which await writes locally. While this server runs, it seals the agent's and the task's configured credentials to the receiver that claims the task when that receiver asks for them.",
+		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with await, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which await writes locally. While this server runs, it seals the agent's and the task's configured credentials to the receiver that claims the task when that receiver asks for them. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		submission, err := submitFromInput(input, readInput, openInput)
 		if err != nil {
@@ -688,19 +687,11 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 		Deadline: deadline, QueueDeadline: queueDeadline,
 	}
 	if input.Git != nil {
-		submission.Git = &wire.GitInput{Remote: input.Git.Remote, Ref: input.Git.Ref, Path: input.Git.Path, Credential: input.Git.Credential}
+		submission.Git = &wire.GitInput{Remote: input.Git.Remote, Ref: input.Git.Ref, Path: input.Git.Path}
 		submission.GitChanges = input.Git.Changes
-		if input.Git.HostKey != "" {
-			// One byte over the bound is read, so validation refuses a longer file without reading all of it.
-			key, err := readInput(input.Git.HostKey, wire.MaxGitHostKey+1)
-			if err != nil {
-				return busclient.SubmitInput{}, err
-			}
-			submission.Git.HostKey = string(key.Raw)
-		}
 	}
 	for _, credential := range input.Credentials {
-		submission.Credentials = append(submission.Credentials, wire.TaskCredential{Name: credential.Name, File: credential.File})
+		submission.Credentials = append(submission.Credentials, wire.TaskCredential{Name: credential.Name, Env: credential.Env, File: credential.File})
 	}
 	for _, output := range input.Outputs {
 		submission.Outputs = append(submission.Outputs, wire.ExpectedOutput{Name: output.Name, Required: output.Required, Storage: output.Storage})
@@ -807,8 +798,10 @@ func inputOpener(dir string, config busclient.Config) func(string) (*os.File, er
 		}
 	}
 	protected := []string{config.StateDir, config.HostKey, config.Bundle}
-	for _, path := range config.Credentials {
-		protected = append(protected, path)
+	for _, source := range config.Credentials {
+		if source.File != "" {
+			protected = append(protected, source.File)
+		}
 	}
 	if config.Storage != nil {
 		protected = append(protected, config.Storage.AccessKeyFile, config.Storage.SecretKeyFile)

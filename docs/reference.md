@@ -123,7 +123,7 @@ and receiver ID:
 
 ```
 receiver=<id> pool=<pool> capacity=<n> in_flight=<n> heartbeat_age=<age> status=<status>
-  adapter=<name> agent=<agent> ready=<bool> labels=<k=v,...> [inline_limit=<n>] [models=<m,...> default_model=<m>]
+  adapter=<name> agent=<agent> ready=<bool> labels=<k=v,...> [inline_limit=<n>] [models=<m,...> default_model=<m>] [credentials=<name[(missing,optional)],...>]
 ```
 
 `status` is `live` when the latest advertisement is dated within 120
@@ -134,14 +134,19 @@ receiver's configuration record, and an agent's `models` and
 `ready` is true when the receiver is live
 and its advertisement offers the adapter. A live receiver with no ready
 adapter lists each adapter with `ready=false`. `inline_limit`, when set, is
-the most inline input bytes the offered adapter delivers.
+the most inline input bytes the offered adapter delivers. `credentials` names
+the agent's credentials in the pool's terms, marking `missing` each this
+host's configuration has no [source](#client-configuration) for and
+`optional` each a run goes without, as in
+`credentials=openai-api-key,github-token(missing,optional)`. It shows no
+target.
 
 `--json` prints a JSON array, one object per receiver:
 
 | Member | Content |
 | --- | --- |
 | `receiver_id`, `pool` | strings |
-| `adapters` | `{name, agent, inline_limit, models, default_model, labels, ready}`; optional values are omitted when unset |
+| `adapters` | `{name, agent, inline_limit, models, default_model, credentials, labels, ready}`, `credentials` holding `{name, optional, configured}`; optional values are omitted when unset |
 | `capacity`, `in_flight` | integers from the latest advertisement |
 | `heartbeat_age` | Go duration string, or `-` |
 | `status` | `live`, `stale`, `silent` or `ended` |
@@ -167,12 +172,10 @@ and needs `wherry init` on a re-provisioned host.
 | `--prompt-file` | | file holding the prompt |
 | `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
-| `--git-credential NAME` | | the `--credential` credential the agent clones with: a token for `https`, a private key for `ssh` |
-| `--git-host-key FILE` | | file of OpenSSH `known_hosts` lines naming the remote's host; required for `ssh` |
 | `--git-changes patch\|bundle` | | ask for the agent's commits back as the output `changes.patch` or `changes.bundle` |
 | `--input FILE` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
 | `--s3-input FILE` | | file of at most 5 GiB that `submit` uploads to the pool's bucket and the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
-| `--credential NAME=FILE` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR`; repeatable |
+| `--credential NAME:file=FILE` or `--credential NAME:env=VAR` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR` or in the environment variable `VAR`; repeatable |
 | `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket, in either order; repeatable |
 | `--deadline` | `2h` | time from now by which the run must end |
 | `--queue-deadline` | `10m` | time from now by which a receiver must claim it |
@@ -201,8 +204,14 @@ whose host is not one of the pool's [`vcs`](#pool-terms) hosts:
 invalid input: git remote host github.com is not in pool build's vcs hosts
 ```
 
-`--git-host-key` reads at most one byte over the 8 KiB bound. With a host
-key, no input may be named `known_hosts`.
+The clone's credential and host key come from the client configuration's
+[`git`](#client-configuration) entry whose `url` is the longest prefix of the
+remote. The entry's credential joins the task as a task credential the agent
+gets as the file `git-credential` in `WHERRY_CREDENTIALS_DIR`, so no
+`--credential` may name it as well, and `submit` reads at most one byte over
+the 8 KiB bound of its host key file. A remote under no entry clones without a
+credential, and an `ssh` remote under no entry with a host key is refused.
+With a host key, no input may be named `known_hosts`.
 
 `--git-changes` adds `changes.patch` or `changes.bundle` to the expected
 outputs, unless `--output` names it already; neither is required.
@@ -223,7 +232,29 @@ with storage would carry the inputs through S3. A record still over the record
 limit with every input in S3 is refused naming the prompt's size and the
 record limit. Input and credential file names are [file
 names](a2a-extension-v1.md#submission), and output names relative paths of
-them. `submit` refuses a credential its configuration does not map to a file.
+them. A credential's environment variable matches `[A-Za-z_][A-Za-z0-9_]*`
+and is none an adapter sets for the agent, such as `HOME` or
+`WHERRY_CREDENTIALS_DIR`. The task's credentials have unique names and
+targets, and none takes the target of one of the agent's credentials:
+
+```
+invalid input: task credential deploy-key takes the environment variable GH_TOKEN of one of agent codex's credentials
+```
+
+A task credential named as one of the agent's is sealed once and delivered at
+both targets.
+
+`submit` refuses, before it publishes, a task credential or a required
+credential of the placed agent that the client configuration has no
+[source](#client-configuration) for:
+
+```
+invalid input: auth required: credential openai-api-key is not in this host's configuration
+```
+
+An optional credential of the agent without a source is named in the
+submission's `unsupplied_credentials`; the run goes without it, and its
+[prompt](#agent-contract) names it as not supplied.
 
 `--s3-input` and `:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
 `submit` refuses them, before it uploads or publishes anything, when the
@@ -241,12 +272,13 @@ files' names, and the run's parts and S3 inputs number at most 256 together. S3
 inputs count against neither limit. When publishing fails, `submit`
 deletes what it uploaded. It also refuses a run with S3 inputs or outputs whose
 task credentials and presigned URLs would not fit one 64 KiB seal, naming the
-seal's size. A
+seal's size; a task credential from a `command` source is not counted, since the
+command runs only to answer a seal. A
 presigned URL of about 420 bytes takes about 840 bytes of the seal, so one seal
 carries about 75.
 
 `submit` seals nothing. The receiver that claims the task asks for the
-credential its adapter delivers, the task's credentials and presigned URLs
+agent's credentials the host supplies, the task's credentials and presigned URLs
 for its S3 inputs and outputs, and `wherry await` or `wherry mcp` answers
 ([sealed credentials](concepts.md#sealed-credentials)). When no seal
 answers the request within 5 minutes, the run ends `TASK_STATE_FAILED` with a message
@@ -323,7 +355,8 @@ verification, and with status 1 when the timeout passes.
 While it waits, `await` answers the seal requests on the tenant feed for
 every run this host submitted that has not ended, once per attempt, and logs on standard error
 each answer and each verified request of its own runs that it skips or
-refuses, by run, receiver and credential names.
+refuses, by run, receiver and credential names. It resolves each credential's
+[source](#credential-sources) at the answer.
 
 ### `wherry cleanup RUN_ID`
 
@@ -453,7 +486,8 @@ and events topics, and sets the configuration of share group `p-<pool>`:
 `share.auto.offset.reset=earliest`, `share.isolation.level=read_committed`,
 `share.delivery.count.limit` and `share.record.lock.duration.ms` from the
 terms' `delivery_limit` and `lock_duration`, 5 and `15s` when the terms omit
-them. It refuses a delivery limit above the lowest
+them. It refuses, before it reads the broker, terms whose agent credentials
+break the [pool terms](#pool-terms) rules, and a delivery limit above the lowest
 `group.share.max.delivery.count.limit` across the brokers, and terms whose
 [records do not fit the broker](#record-limit). For an existing pool it
 records the new terms and sets the group configuration again. On new and
@@ -603,15 +637,16 @@ configuration error, and the receiver exits with
 `adapter <name>: ...` on an error.
 
 A plugin inherits the receiver's environment. The receiver passes each
-adapter its name, pool, agent, credential name and `config` section, and
-the bundle's `platform` entry for the adapter's platform when there is one.
+adapter its name, pool, agent and `config` section, and the bundle's
+`platform` entry for the adapter's platform when there is one. An adapter
+takes no credential of its own.
 
 A plugin also reports, for each adapter, the paths of the input, output and
 credentials directories as its agent sees them, which the receiver writes
 into the prompt, and implements `InlineLimit` to report the most inline input
 bytes it delivers. Zero declares no adapter limit. Dispatch carries a run's
-input files and task credentials with the prompt, and a fetch for each S3
-input: its name, presigned URL,
+input files and every delivered credential with the prompt, and a fetch for
+each S3 input: its name, presigned URL,
 size and SHA-256, which the plugin fetches and verifies before the agent
 starts, reporting a job that never started with class `fetch` when it
 cannot. A plugin that cannot deliver an input reports it, and the run ends
@@ -630,12 +665,15 @@ not against one that runs commands of its own
 
 The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
-certificate pair made for each start, protocol version 7. The receiver refuses a
+certificate pair made for each start, protocol version 8. The receiver refuses a
 plugin of any other protocol version at its start, so the receiver and its
-plugins upgrade together. Version 7 removes the turn from the run Dispatch
-carries and from Lookup, Purge and Release, which name a job by run ID alone.
-The receiver refuses a version 6 plugin with
-`incompatible API version with plugin. Plugin version: 6, Client versions: [7]`.
+plugins upgrade together. Version 8 removes the adapter's credential from
+Configure and the run's single credential from Dispatch: the run carries every
+credential as an `adapter.Secret` holding its name, value and exactly one
+target, `Env`, an environment variable the plugin sets for the agent, or
+`File`, a file it writes in the agent's credentials directory.
+The receiver refuses a version 7 plugin with
+`incompatible API version with plugin. Plugin version: 7, Client versions: [8]`.
 The receiver refuses a plugin that offers no TLS certificate. Every call names
 its adapter. A plugin accepts messages up to 64 MiB; the receiver logs a larger
 Dispatch as `dispatch rejected: message too large`.
@@ -813,16 +851,16 @@ defaults, `2h` and `10m`.
   `model` is as `--model` takes it, and a model outside the agent's `models`
   fails with `INVALID_ARGUMENT` naming the model, agent and pool.
   `selector` is an array of `{key, operator, values}`. `git` is
-  `{remote, ref, path, credential, host_key, changes}`, as `--git`,
-  `--git-path`, `--git-credential`, `--git-host-key` and `--git-changes` take
-  them, with `remote` and `ref` required; `host_key` is a file path, read as an
-  input is. `inputs` and `s3_inputs` are arrays of file paths, `credentials` an
-  array of `{name, file}` and `outputs` an array of `{name, required, storage}`,
+  `{remote, ref, path, changes}`, as `--git`, `--git-path` and `--git-changes`
+  take them, with `remote` and `ref` required; its credential and host key come
+  from the client configuration's `git` entries, as for `submit`. `inputs` and
+  `s3_inputs` are arrays of file paths, `credentials` an array of `{name, file}`
+  or `{name, env}` and `outputs` an array of `{name, required, storage}`,
   as `--input`, `--s3-input`, `--credential` and `--output` take them;
   `storage` `s3` is `:s3`. An input or S3 input must resolve, through any
   symbolic links, to a regular file beneath one of the
   [`input_roots`](#client-configuration), and to none of `state_dir`,
-  `host_key`, `bundle`, a credential file or a storage key file; a relative
+  `host_key`, `bundle`, a file a `file` source names or a storage key file; a relative
   path is taken from the server's working directory.
 - `status` returns the latest verified state of a run without
   waiting. `runs` holds one entry for the run `id` names, or,
@@ -907,7 +945,8 @@ A JSON object at `~/.config/wherry/config.json`, or at the host command's
 | `bundle` | required | the host's bundle |
 | `host_key` | `~/.config/wherry/host.key` | host signing key file |
 | `state_dir` | `~/.config/wherry/state` | run records and answered seal requests |
-| `credentials` | none | credential name to the file holding its value; a trailing newline is part of the value the agent gets, and the receiver redacts the value with and without it |
+| `credentials` | none | credential name to its [source](#credential-sources), exactly one of `{"file": PATH}`, `{"env": VAR}` and `{"command": [PROGRAM, ARG...]}` |
+| `git` | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`, both optional ([git credentials](#git-credentials)) |
 | `storage` | none | `{access_key_file, secret_key_file}`: regular files holding the access key and secret key of the host's S3 credential, each granting its group and others no access; a host without it uses no S3 lane |
 | `input_roots` | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
 
@@ -918,12 +957,53 @@ made when this host submits the run, `runs/<run>/outputs/` for the outputs
 it answered, with a `.lock` beside it that every process sharing the
 directory holds while it answers that attempt. `submit` writes the run's
 record before it publishes the task, and removes it when publishing
-fails. The
-credential file is read at each answer, and its contents are sealed as
-they are. A seal is at most 64 KiB, which bounds the values one seal
+fails. A seal is at most 64 KiB, which bounds the values one seal
 carries. The receiver redacts no credential value shorter than 8 bytes
 once its trailing CR and LF are removed, and logs
 `run <id>: credential <name> too short to redact`.
+
+### Credential sources
+
+The answering process, `wherry await` or `wherry mcp`, resolves each source
+when it answers a seal request, after it authorises the request and before it
+takes the attempt's lock, so a slow source holds up no other answerer of the
+host. The configuration holds no value and no source prompts.
+
+| Source | Value |
+| --- | --- |
+| `file` | the file's contents as they are; a trailing newline is part of the value the agent gets, and the receiver redacts the value with and without it |
+| `env` | the variable in the answering process's environment; unset or empty fails the answer |
+| `command` | the standard output of the program, run without a shell with the answering process's environment and no standard input, byte for byte as for a file; standard error is discarded |
+
+A command has 60 seconds, time for an interactive unlock such as a password
+manager's, and at most 64 KiB of output. A command that exits non-zero, runs
+out of time or writes more fails the answer. A failed source leaves the
+request unanswered, logged by credential name and cause alone, and the
+answerer tries it again each second until the request expires:
+
+```
+run <id>: resolve credential <name>: its command exited with status 1
+```
+
+The `submit` of the [MCP server](#mcp-tools) refuses as an input every file
+a `file` source names.
+
+### Git credentials
+
+`submit` matches a git input's remote, written as an `ssh://` or `https://`
+URL, against the `url` of each `git` entry and takes the entry with the
+longest matching prefix, as git's `credential.<url>` settings do. The entry's
+credential joins the task as a task credential the agent gets as the file
+`git-credential` in `WHERRY_CREDENTIALS_DIR`, and the contents of its
+`host_key` file become the git input's host key. A remote no entry matches
+clones without a credential. The pool's [`vcs`](#pool-terms) hosts still
+decide which hosts a remote may name.
+
+The `url` prefix is the credential's scope: every task cloning under it
+receives the credential, so a prefix ends with `/` and names no more than the
+credential grants. Loading the configuration refuses a `url` that does not
+start with `https://` or `ssh://` or repeats another, a `credential` with no
+source in `credentials`, and a `host_key` that is not a readable file.
 
 The storage key files are read whenever the host uploads, presigns,
 downloads or deletes, with surrounding whitespace removed; the client
@@ -943,10 +1023,16 @@ The configuration of host `laptop`, setting every member:
   "host_key": "~/.config/wherry/laptop.key",
   "state_dir": "~/.local/state/wherry",
   "credentials": {
-    "claude-oauth-token": "~/.config/wherry/credentials/claude-oauth-token",
-    "model-api-key": "~/.config/wherry/credentials/model-api-key",
-    "openai-api-key": "~/.config/wherry/credentials/openai-api-key"
+    "claude-oauth-token": {"file": "~/.config/wherry/credentials/claude-oauth-token"},
+    "model-api-key": {"file": "~/.config/wherry/credentials/model-api-key"},
+    "openai-api-key": {"command": ["op", "read", "op://wherry/openai/credential"]},
+    "github-token": {"env": "GITHUB_TOKEN"},
+    "deploy-key": {"file": "~/.config/wherry/credentials/deploy-key"}
   },
+  "git": [
+    {"url": "https://github.com/acme/", "credential": "github-token"},
+    {"url": "ssh://git@gitlab.example/", "credential": "deploy-key", "host_key": "~/.config/wherry/known_hosts/gitlab"}
+  ],
   "input_roots": ["~/src", "~/notes"],
   "storage": {
     "access_key_file": "~/.config/wherry/s3-access-key",
@@ -955,9 +1041,12 @@ The configuration of host `laptop`, setting every member:
 }
 ```
 
-JSON takes no comments. `credentials` holds the value of each credential the
-adapters of the [receiver configuration example](#receiver-configuration-example)
-deliver; the host reads the file each time a receiver asks for it.
+JSON takes no comments. `credentials` holds a source for each credential the
+agents of the [pool terms example](#pool-terms-example) take: two files, a
+password manager's command for `openai-api-key`, and the answering process's
+`GITHUB_TOKEN` for `github-token`, which `git` also gives every task cloning
+under `https://github.com/acme/`. Each source resolves each time a receiver
+asks for its credential.
 
 ## Bundle
 
@@ -984,7 +1073,7 @@ ignored. Any other entry and a directory with no agent files are errors.
 
 | Field | Content |
 | --- | --- |
-| `agents` | one or more `{name, credentials, models, default_model}`: an agent, the credential names it may take, and optionally the models a task may name for it and the one a task naming none runs |
+| `agents` | one or more `{name, credentials, models, default_model}`: an agent, the [credentials](#agent-credentials) it takes, and optionally the models a task may name for it and the one a task naming none runs |
 | `default_agent` | an agent from `agents`, used when a task names none; optional when `agents` holds one, which it then defaults to |
 | `max_queue_deadline` | optional duration, default `336h` (14 days): the longest queue deadline a run may ask for, and the time from a run's submission past which a receiver rejects it unclaimed; it also sets the pool topics' retention |
 | `delivery_limit` | optional, default 5: the share group's `share.delivery.count.limit` |
@@ -1003,6 +1092,25 @@ receiver rejects one whose model has left the terms since with
 `model not in the pool's terms`. A task for an agent without `models` names
 no model, and its adapters run the model their command sets. wherry does not
 interpret a model name.
+
+### Agent credentials
+
+Each entry of an agent's `credentials` is `{name, env, file, required}`: a
+credential name, exactly one target, and whether a run needs it. `env` names
+the environment variable the agent gets the value in, matching
+`[A-Za-z_][A-Za-z0-9_]*` and none an adapter sets for the agent: `HOME`,
+`WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR`, `WHERRY_CREDENTIALS_DIR`,
+`WHERRY_MODEL` and the variables of `adapter.AgentEnvironment`. `file` names
+the file it gets in `WHERRY_CREDENTIALS_DIR`, a [file
+name](a2a-extension-v1.md#submission). `required` defaults to `true`. An
+agent's credentials have unique names, and no two share a target; `pool
+create` refuses terms that break a rule, naming the agent and credential.
+
+`submit` refuses a task when its host has no source for a required
+credential of the placed agent. A run goes without an optional credential
+its host has no source for, and its [prompt](#agent-contract) names it as not
+supplied. Every adapter of the agent delivers the agent's credentials, each at
+its target.
 
 Each entry of `vcs` is a lowercase host name, optionally with a `:port` of
 1 to 65535, and appears once. A remote's host drops its scheme's default
@@ -1044,18 +1152,20 @@ Terms for pool `build` that set every field, as one file for
 agents:
   - name: claude
     credentials:
-      - claude-oauth-token
+      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN}
     models:
       - haiku
       - sonnet
     default_model: haiku
   - name: coder
     credentials:
-      - model-api-key
+      - {name: model-api-key, env: MODEL_API_KEY}
   # Without models, a task names no model and the adapter's command picks one.
   - name: codex
     credentials:
-      - openai-api-key
+      - {name: openai-api-key, env: CODEX_API_KEY}
+      # A run whose host has no source for it goes without it.
+      - {name: github-token, env: GH_TOKEN, required: false}
 default_agent: claude
 max_queue_deadline: 72h
 # Each receiver with no matching adapter spends one delivery, so this covers the pool's receivers plus a margin.
@@ -1111,7 +1221,7 @@ storage:
 ```yaml
 name: claude
 credentials:
-  - claude-oauth-token
+  - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN}
 models:
   - haiku
   - sonnet
@@ -1123,7 +1233,7 @@ default_model: haiku
 ```yaml
 name: coder
 credentials:
-  - model-api-key
+  - {name: model-api-key, env: MODEL_API_KEY}
 ```
 
 `agents/codex.yaml`:
@@ -1132,7 +1242,9 @@ credentials:
 # Without models, a task names no model and the adapter's command picks one.
 name: codex
 credentials:
-  - openai-api-key
+  - {name: openai-api-key, env: CODEX_API_KEY}
+  # A run whose host has no source for it goes without it.
+  - {name: github-token, env: GH_TOKEN, required: false}
 ```
 
 The agent files are read in file-name order, so `coder` precedes `codex` in
@@ -1207,7 +1319,6 @@ Each adapter entry:
 | `name` | adapter name, unique in the receiver |
 | `platform` | the platform entry it takes its type, shared `config` and bundle credential from |
 | `agent` | the agent it launches, from the pool's terms |
-| `credential` | optional; a credential the terms allow for the agent, delivered to the job |
 | `labels` | optional; [labels](#labels) for placement |
 | `config` | the adapter type's settings |
 
@@ -1247,7 +1358,8 @@ Receiver `nomad-1` in pool `build`, against the
 adapters in routing order. Each adapter's `config`
 holds only what the example needs; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
-lists every setting. As one file for
+lists every setting. Neither adapter names a credential: each delivers its
+agent's credentials at the targets the pool's terms give them. As one file for
 `receiver add nomad-1 --pool build --config-file nomad-1.yaml`:
 
 ```yaml
@@ -1271,11 +1383,9 @@ adapters:
   - name: claude-container
     platform: nomad
     agent: claude
-    credential: claude-oauth-token
     labels:
       isolation: container
     config:
-      credential_env: CLAUDE_CODE_OAUTH_TOKEN
       runtime:
         driver: docker
         config:
@@ -1283,12 +1393,10 @@ adapters:
   - name: codex-edge
     platform: nomad-edge
     agent: codex
-    credential: openai-api-key
     labels:
       isolation: host
       site: edge
     config:
-      credential_env: CODEX_API_KEY
       node_pool: codex
       runtime:
         driver: exec
@@ -1351,11 +1459,9 @@ config:
 name: claude-container
 platform: nomad
 agent: claude
-credential: claude-oauth-token
 labels:
   isolation: container
 config:
-  credential_env: CLAUDE_CODE_OAUTH_TOKEN
   runtime:
     driver: docker
     config:
@@ -1368,12 +1474,10 @@ config:
 name: codex-edge
 platform: nomad-edge
 agent: codex
-credential: openai-api-key
 labels:
   isolation: host
   site: edge
 config:
-  credential_env: CODEX_API_KEY
   node_pool: codex
   runtime:
     driver: exec
@@ -1399,9 +1503,11 @@ lists its settings and the jobs it runs.
 
 ### Agent contract
 
-The agent receives the prompt in a file and the credential, when its
-adapter delivers one, as its plugin documents; for Nomad, in
+The agent receives the prompt in a file as its plugin documents; for Nomad, in
 [the plugin's agent jobs](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs).
+It receives each of the run's credentials at its target: in the environment
+variable or the file in `WHERRY_CREDENTIALS_DIR` the
+[agent's terms](#agent-credentials) or the task name.
 `WHERRY_INPUT_DIR`, `WHERRY_CREDENTIALS_DIR` and `WHERRY_OUTPUT_DIR` hold
 the paths of its [input, credential and output
 directories](a2a-extension-v1.md#inputs-and-outputs). `WHERRY_MODEL` holds
@@ -1414,8 +1520,11 @@ The agent writes JSON lines to standard output. The receiver publishes each
 line as a transcript chunk and reads nothing from them.
 
 The prompt tells every agent to write, when it finishes, whatever happened,
-an A2A `TaskStatus` JSON object to `$WHERRY_OUTPUT_DIR/.wherry/outcome.json`,
-and lists the run's credential names:
+an A2A `TaskStatus` JSON object to `$WHERRY_OUTPUT_DIR/.wherry/outcome.json`.
+It names each credential file's path and each credential environment variable,
+and lists the run's credential names, marking each optional credential the
+host did not supply, as in
+`This run's credentials are openai-api-key, github-token (not supplied).`:
 
 ```json
 {"state": "TASK_STATE_COMPLETED", "message": {"role": "ROLE_AGENT", "parts": [{"text": "<the answer, or what went wrong>"}]}}
@@ -1443,7 +1552,8 @@ not `ROLE_AGENT`, or reports `TASK_STATE_AUTH_REQUIRED` without a
 message's text parts, joined by newlines, and the `credential` part. Its text
 is redacted like any agent text and becomes
 `[redacted text over 65536 bytes]` when it passes 64 KiB once redacted.
-`TASK_STATE_AUTH_REQUIRED` ends the run, which is not resumed. A required
+`TASK_STATE_AUTH_REQUIRED` ends the run, which is not resumed; the tenant
+supplies the credential and submits again. A required
 output that is not returned fails the run with
 `required output <name> not returned: <reason>` as the status message,
 whatever the file reports. Outputs that are not collected leave the file

@@ -100,6 +100,9 @@ func KafkaOpts(broker string, ca []byte, user, password string) ([]kgo.Opt, erro
 
 func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms) error {
 	effective := withDefaults(terms)
+	if err := validateTerms(effective); err != nil {
+		return err
+	}
 	retention, err := poolRetention(effective)
 	if err != nil {
 		return err

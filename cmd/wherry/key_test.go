@@ -14,6 +14,7 @@ import (
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -34,7 +35,7 @@ func newKeyHost(t *testing.T) keyHost {
 	address := cluster.ListenAddrs()[0]
 	service := &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
 		Broker: address, CA: ca, DeliveryCeiling: 10}
-	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, DefaultAgent: "claude",
+	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []admin.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	dir := t.TempDir()
 	h := keyHost{ctx: ctx, service: service, config: filepath.Join(dir, "config.json"), keyPath: filepath.Join(dir, "host.key"), stateDir: filepath.Join(dir, "state")}
@@ -213,7 +214,7 @@ func TestReceiverRotateKey(t *testing.T) {
 	address := cluster.ListenAddrs()[0]
 	service := &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
 		Broker: address, CA: ca, DeliveryCeiling: 10}
-	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, DefaultAgent: "claude",
+	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []admin.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
@@ -222,7 +223,7 @@ func TestReceiverRotateKey(t *testing.T) {
 	bundle, stateDir := filepath.Join(dir, "receiver.yaml"), filepath.Join(dir, "state")
 	keyPath := filepath.Join(stateDir, "signing.key")
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1,
-		Adapters: []admin.AdapterSettings{{Name: "fake", Platform: "fake-platform", Type: "fake", Agent: "claude", Credential: "model"}}}
+		Adapters: []admin.AdapterSettings{{Name: "fake", Platform: "fake-platform", Type: "fake", Agent: "claude"}}}
 	if err := service.ReceiverAdd(ctx, config, map[string]string{"fake-platform": platformText}, bundle); err != nil {
 		t.Fatal(err)
 	}

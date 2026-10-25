@@ -42,6 +42,7 @@ import (
 const (
 	testToken      = "sk-ant-oat01-test-credential-never-logged"
 	credentialName = "claude-oauth-token"
+	credentialEnv  = "CLAUDE_CODE_OAUTH_TOKEN"
 	testPool       = "pool-a"
 	testTenant     = "tenant-a"
 	testHost       = "host-a"
@@ -372,7 +373,10 @@ type fixture struct {
 
 func testTerms() admin.Terms {
 	return admin.Terms{
-		Agents:       []admin.AgentTerms{{Name: "claude", Credentials: []string{credentialName, "cred-lab", "cred-cloud"}}, {Name: "codex", Credentials: []string{}}},
+		Agents: []admin.AgentTerms{
+			{Name: "claude", Credentials: []admin.AgentCredential{{TaskCredential: wire.TaskCredential{Name: credentialName, Env: credentialEnv}}}},
+			{Name: "codex", Credentials: []admin.AgentCredential{}},
+		},
 		DefaultAgent: "claude", DeliveryLimit: 10, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
 		// What pool create records at a broker's defaults: franz-go's producer maximum.
 		RecordLimit: 1000012,
@@ -382,7 +386,7 @@ func testTerms() admin.Terms {
 func testConfig(receiver string) admin.ReceiverConfig {
 	return admin.ReceiverConfig{
 		Receiver: receiver, Pool: testPool, Capacity: 1,
-		Adapters: []admin.AdapterSettings{{Name: "nomad", Type: "fake", Agent: "claude", Credential: credentialName, Labels: map[string]string{"zone": "dc1", "example.com/gpu": "none"}, Config: map[string]any{}}},
+		Adapters: []admin.AdapterSettings{{Name: "nomad", Type: "fake", Agent: "claude", Labels: map[string]string{"zone": "dc1", "example.com/gpu": "none"}, Config: map[string]any{}}},
 	}
 }
 
@@ -506,7 +510,7 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		adapter.mu.Lock()
 		adapter.pool, adapter.name, adapter.agent = pool, settings.Name, settings.Agent
 		adapter.mu.Unlock()
-		return Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Adapter: adapter}, nil
+		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Adapter: adapter}, nil
 	}
 	return &Receiver{id: config.Receiver, base: base, signing: signing, factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
 }
@@ -1180,19 +1184,19 @@ type multiFixture struct {
 }
 
 // newMultiFixture configures adapters lab, cloud and edge, in that order, for one agent with the labels
-// their operator declares: lab and cloud both carry class=cpu, only cloud an accelerator, edge class=arm.
-// Only lab's credential is answered.
+// their operator declares: lab and cloud both carry class=cpu, only cloud an accelerator, edge class=arm. The agent's
+// credential is answered.
 func newMultiFixture(t *testing.T) multiFixture {
 	t.Helper()
 	m := multiFixture{lab: &fakeAdapter{stream: resultStream}, cloud: &fakeAdapter{stream: resultStream}, edge: &fakeAdapter{stream: resultStream}}
 	config := testConfig(testReceiver)
 	config.Adapters = []admin.AdapterSettings{
-		{Name: "lab", Type: "fake", Agent: "claude", Credential: "cred-lab", Labels: map[string]string{"site": "lab", "class": "cpu"}, Config: map[string]any{}},
-		{Name: "cloud", Type: "fake", Agent: "claude", Credential: "cred-cloud", Labels: map[string]string{"site": "cloud", "class": "cpu", "example.com/accelerator": "gpu"}, Config: map[string]any{}},
+		{Name: "lab", Type: "fake", Agent: "claude", Labels: map[string]string{"site": "lab", "class": "cpu"}, Config: map[string]any{}},
+		{Name: "cloud", Type: "fake", Agent: "claude", Labels: map[string]string{"site": "cloud", "class": "cpu", "example.com/accelerator": "gpu"}, Config: map[string]any{}},
 		{Name: "edge", Type: "fake", Agent: "claude", Labels: map[string]string{"site": "edge", "class": "arm"}, Config: map[string]any{}},
 	}
 	m.fixture = newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakeAdapter{"lab": m.lab, "cloud": m.cloud, "edge": m.edge})
-	m.answer(t, "cred-lab")
+	m.answer(t, credentialName)
 	return m
 }
 

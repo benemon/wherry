@@ -1,6 +1,6 @@
 name: claude
 credentials:
-  - claude-oauth-token
+  - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN}
 models:
   - haiku
   - sonnet

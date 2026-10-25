@@ -32,8 +32,10 @@ Do short or interactive work yourself.
 
 Call `receivers` first. For each receiver it returns:
 
-- `adapters`: each with the `agent` it runs, its `labels`, and `ready`,
-  whether the receiver's live advertisement offers it now. A live receiver
+- `adapters`: each with the `agent` it runs, its `labels`, `credentials`,
+  the agent's credentials by `name` with `optional` and `configured`,
+  whether this host has a source for each, and `ready`, whether the
+  receiver's live advertisement offers it now. A live receiver
   with no ready adapter lists every adapter with `ready` false, and no task
   is placed on it.
 - `status` (`live`, `stale`, `silent` or `ended`), `capacity` and
@@ -73,9 +75,10 @@ how you learn the run ended, so you skip the await loop below. Then carry on
 with other work.
 
 `git` names a repository the agent clones itself: `remote` (an `https` or `ssh`
-URL, or `user@host:path`) and `ref` are required. Add `credential`, the name of
-one of your `credentials`, for a private repository; `host_key`, a file of
-`known_hosts` lines naming the host (or `[host]:port`), for an `ssh` remote; and
+URL, or `user@host:path`) and `ref` are required. The clone's credential, and an
+`ssh` remote's host key, come from the `git` entry of the user's wherry
+configuration whose `url` is the longest prefix of the remote; a remote under no
+entry clones anonymously, and an `ssh` one then returns `INVALID_ARGUMENT`. Add
 `changes`, `patch` or `bundle`, to get its commits back as the output
 `changes.patch` or `changes.bundle`, which you apply with `git am` or
 `git fetch`. The remote's host must be one of the pool's VCS hosts, or
@@ -92,10 +95,12 @@ they would exceed either and the chosen pool has storage and the host its
 storage credential, wherry automatically carries them through S3; otherwise
 submit refuses before publishing and names the limit.
 The server refuses any other path, and the host's state directory, host key,
-bundle, credential files and storage key files. To give the agent a credential
-as a file, add `credentials`: `{name, file}` with `name` a credential in the
-user's wherry configuration and `file` the name it gets in
-`WHERRY_CREDENTIALS_DIR`; you never see the value. To get files back, add
+bundle, credential files and storage key files. To give the agent a credential,
+add `credentials`: `{name, file}` or `{name, env}` with `name` a credential in
+the user's wherry configuration and `file` the name it gets in
+`WHERRY_CREDENTIALS_DIR`, or `env` the environment variable it gets; you never
+see the value. Two credentials cannot share a target, nor can one take the
+target of an agent's own credential. To get files back, add
 `outputs`: `{name, required}` for each file the agent should leave in
 `WHERRY_OUTPUT_DIR`. The prompt the agent receives names all of them.
 
@@ -124,7 +129,8 @@ seconds and returns one of:
   reported it, or why the receiver could not run it, a required output did
   not come back, or a credential went unanswered (see the next section).
 - `TASK_STATE_AUTH_REQUIRED` with a `message` from the agent naming the
-  credential it needs. The run has ended; add the credential to the host's
+  credential it needs, often an optional one the host has no source for. The
+  run has ended; add a source for the credential to the host's
   configuration and submit again.
 - Every ended run also returns `transcript`, the local path of the
   `transcript.jsonl` holding the agent's redacted standard output.
@@ -154,13 +160,18 @@ with `truncated` set and its full size in `bytes`.
 
 ## A run that needs a credential
 
-The receiver that claims a task asks this host for the credential the
-agent needs, and the wherry MCP server answers while it runs, as `wherry
-await` does. When no answer arrives within 5 minutes, usually because the
-credential is not configured, the run ends `TASK_STATE_FAILED` with a
-`message` that names the credential and never holds its value. Tell the user
-to put the credential in a file and add it under that name to `credentials`
-in their wherry configuration. Never ask for the value or handle it
+`submit` returns `INVALID_ARGUMENT` with `auth required: credential NAME is not
+in this host's configuration` when the host has no source for a credential the
+agent requires or the task names. An optional credential the host lacks is not
+delivered, and the agent's prompt names it as not supplied.
+
+The receiver that claims a task asks this host for the run's credentials, and
+the wherry MCP server answers while it runs, as `wherry await` does. When no
+answer arrives within 5 minutes, usually because a credential's source failed
+to resolve, the run ends `TASK_STATE_FAILED` with a `message` that names the
+credentials and never holds their values. Tell the user to add a source for
+the credential under that name to `credentials` in their wherry configuration:
+a file, an environment variable of the process answering, or a command. Never ask for the value or handle it
 yourself. When the user says it is in place, call `submit` again with the
 same input, and start its `await` as before.
 

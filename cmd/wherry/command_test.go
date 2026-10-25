@@ -77,7 +77,8 @@ type bus struct {
 	hostBundle  string
 	hostKey     ed25519.PrivateKey
 	stateDir    string
-	credentials map[string]string
+	credentials map[string]busclient.Source
+	git         []busclient.GitCredential
 	receiverKey ed25519.PrivateKey
 	receiver    *kgo.Client
 	// logs holds what the bus's hosts log.
@@ -104,8 +105,11 @@ func newBus(t *testing.T) *bus {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	b := &bus{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, stateDir: t.TempDir(), logs: &syncBuffer{}}
-	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, DefaultAgent: "claude",
-		DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
+	optional := false
+	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []admin.AgentCredential{
+		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},
+		{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional},
+	}}}, DefaultAgent: "claude", DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
 		VCS: []string{"git.example.test"}}
 	if err := b.service.PoolCreate(ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
@@ -118,7 +122,7 @@ func newBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	receiverBundle := filepath.Join(t.TempDir(), "receiver.yaml")
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Adapters: []admin.AdapterSettings{{Name: "lab", Type: "nomad", Agent: "claude", Credential: "model", Labels: map[string]string{"runtime": "exec"}}}}
+	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Adapters: []admin.AdapterSettings{{Name: "lab", Type: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}}}
 	if err := b.service.ReceiverAdd(ctx, config, nil, receiverBundle); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +130,7 @@ func newBus(t *testing.T) *bus {
 	if err := os.WriteFile(credential, []byte(credentialText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b.credentials = map[string]string{"model": credential}
+	b.credentials = map[string]busclient.Source{"model": {File: credential}}
 	if _, b.hostKey, err = ed25519.GenerateKey(rand.Reader); err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +194,7 @@ func (b *bus) connect(t *testing.T) func() (*busclient.Host, error) {
 		if err != nil {
 			return nil, err
 		}
-		return busclient.NewHost(kafka, b.hostKey, principal, b.stateDir, b.credentials, log.New(b.logs, "", 0))
+		return busclient.NewHost(kafka, b.hostKey, principal, b.stateDir, b.credentials, b.git, log.New(b.logs, "", 0))
 	}
 }
 
@@ -340,6 +344,10 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "inline_limit=49152") {
 		t.Fatalf("receivers output %q does not carry the adapter's inline limit", stdout.String())
+	}
+	// The agent's credentials by name, with whether this host has a source for each; their targets stay out.
+	if output := stdout.String(); !strings.Contains(output, " credentials=model,github-token(missing,optional)\n") || strings.Contains(output, "GH_TOKEN") {
+		t.Fatalf("receivers output %q, want the agent's credentials marked configured or missing", output)
 	}
 }
 
@@ -766,30 +774,42 @@ func TestSubmitBadGitInputWithoutReceiver(t *testing.T) {
 
 func TestSubmitGitFlags(t *testing.T) {
 	b := newBus(t)
-	hostKey := filepath.Join(t.TempDir(), "known_hosts")
-	if err := os.WriteFile(hostKey, []byte("git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"), 0o600); err != nil {
+	hostKey := "git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
+	dir := t.TempDir()
+	for name, contents := range map[string]string{"known_hosts": hostKey, "other_known_hosts": "# the shorter prefix's key\n" + hostKey, "deploy-key": "deploy-key-value"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.credentials["deploy-key"] = busclient.Source{File: filepath.Join(dir, "deploy-key")}
+	b.git = []busclient.GitCredential{
+		{URL: "ssh://git@git.example.test/", Credential: "model", HostKey: filepath.Join(dir, "other_known_hosts")},
+		{URL: "ssh://git@git.example.test/org/", Credential: "deploy-key", HostKey: filepath.Join(dir, "known_hosts")},
+	}
+	client, err := b.connect(t)()
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(client.Close)
 	base := []string{"--agent", "claude", "--selector", "runtime=exec,!gpu", "--prompt", "fix the bug"}
 	for name, test := range map[string]struct {
 		flags []string
 		want  string
 	}{
 		"no ref":            {[]string{"--git", "https://git.example.test/org/repo.git"}, "--git takes REMOTE@REF"},
-		"path without git":  {[]string{"--git-path", "repo"}, "--git-path, --git-credential, --git-host-key and --git-changes need --git"},
-		"changes alone":     {[]string{"--git-changes", "patch"}, "--git-path, --git-credential, --git-host-key and --git-changes need --git"},
+		"path without git":  {[]string{"--git-path", "repo"}, "--git-path and --git-changes need --git"},
+		"changes alone":     {[]string{"--git-changes", "patch"}, "--git-path and --git-changes need --git"},
 		"userinfo":          {[]string{"--git", "https://user:s3cr3t@git.example.test/org/repo.git@main"}, "https git remote must not carry user information"},
 		"traversal":         {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-path", "../x"}, "git path must be a relative path"},
 		"outside vcs hosts": {[]string{"--git", "https://github.com/org/repo.git@main"}, "git remote host github.com is not in pool pool-a's vcs hosts"},
 		"vcs host port":     {[]string{"--git", "https://git.example.test:8443/org/repo.git@main"}, "git remote host git.example.test:8443 is not in pool pool-a's vcs hosts"},
-		"ssh without key":   {[]string{"--git", "git@git.example.test:org/repo.git@main"}, "ssh git remote requires host_key"},
-		"undeclared":        {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-credential", "model"}, "git credential must be one of the submission's task credentials"},
+		"ssh without key":   {[]string{"--git", "ssh://deploy@git.example.test/org/repo.git@main"}, "ssh git remote requires host_key"},
 		"changes":           {[]string{"--git", "https://git.example.test/org/repo.git@main", "--git-changes", "diff"}, "git changes must be patch or bundle"},
-		"missing key file":  {[]string{"--git", "git@git.example.test:org/repo.git@main", "--git-host-key", filepath.Join(t.TempDir(), "absent")}, "no such file"},
+		"credential twice":  {[]string{"--git", "git@git.example.test:org/repo.git@main", "--credential", "deploy-key:env=DEPLOY_KEY"}, "credential deploy-key is listed twice"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			err := runSubmit(b.ctx, b.client, append(slices.Clone(base), test.flags...), &stdout, &stderr)
+			err := runSubmit(b.ctx, client, append(slices.Clone(base), test.flags...), &stdout, &stderr)
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), "s3cr3t") {
 				t.Fatalf("submit error %v, want %q", err, test.want)
 			}
@@ -798,26 +818,36 @@ func TestSubmitGitFlags(t *testing.T) {
 	if records, err := admin.ReadTopic(b.ctx, b.receiver, admin.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
 		t.Fatalf("refused submissions published %d tasks, %v", len(records), err)
 	}
-	var stdout, stderr bytes.Buffer
-	flags := append(slices.Clone(base), "--git", "git@git.example.test:org/repo.git@v1.2.0", "--git-path", "src/repo", "--git-credential", "model",
-		"--credential", "model=id_ed25519", "--git-host-key", hostKey, "--git-changes", "patch")
-	if err := runSubmit(b.ctx, b.client, flags, &stdout, &stderr); err != nil {
-		t.Fatal(err)
+	submit := func(flags ...string) wire.Submission {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if err := runSubmit(b.ctx, client, append(slices.Clone(base), flags...), &stdout, &stderr); err != nil {
+			t.Fatal(err)
+		}
+		runID, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
+		return b.tasks(t, runID)[0].submission
 	}
-	runID, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
-	submission := b.tasks(t, runID)[0].submission
+	// The longest URL prefix of the remote gives the clone its credential and host key.
+	submission := submit("--git", "git@git.example.test:org/repo.git@v1.2.0", "--git-path", "src/repo", "--git-changes", "patch")
 	if placement := submission.Wherry.Placement; placement.Agent != "claude" || !reflect.DeepEqual(placement.Selector, []wire.Requirement{
 		{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}, {Key: "gpu", Operator: wire.OpDoesNotExist},
 	}) {
 		t.Fatalf("placement %#v, want the --agent and --selector flags", placement)
 	}
-	want := wire.GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "v1.2.0", Path: "src/repo", Credential: "model",
-		HostKey: "git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"}
+	want := wire.GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "v1.2.0", Path: "src/repo", Credential: "deploy-key", HostKey: hostKey}
 	if git := submission.Wherry.Git; git == nil || *git != want || len(submission.Message.Parts) != 1 {
 		t.Fatalf("submitted git %+v and parts %+v, want %+v and the prompt alone", git, submission.Message.Parts, want)
 	}
+	if credentials := submission.Wherry.Credentials; !slices.Equal(credentials, []wire.TaskCredential{{Name: "deploy-key", File: wire.GitCredentialFile}}) {
+		t.Fatalf("submitted credentials %+v, want the git entry's at the git credential file", credentials)
+	}
 	if !slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: wire.GitPatch}}) {
 		t.Fatalf("submitted outputs %+v, want the patch", submission.Wherry.Outputs)
+	}
+	// A remote under no entry clones anonymously.
+	submission = submit("--git", "https://git.example.test/org/repo.git@main")
+	if git := submission.Wherry.Git; git == nil || git.Credential != "" || git.HostKey != "" || len(submission.Wherry.Credentials) != 0 {
+		t.Fatalf("submitted git %+v and credentials %+v, want an anonymous clone", git, submission.Wherry.Credentials)
 	}
 }
 

@@ -249,7 +249,7 @@ func TestOversizedSealDoesNotOpen(t *testing.T) {
 	binding := testBinding(key)
 	big := map[string][]byte{"model": []byte(strings.Repeat("x", 48<<10))}
 	sealed := compact(t, craft(t, jose.ECDH_ES_A256KW, jose.A256GCM, &key.PublicKey, headers(binding), "", plaintext(t, sealPlaintext{Version: 1, Binding: binding, SealValues: SealValues{Values: big, RedactionKey: sealRedactionKey}})))
-	if len(sealed) <= maxSeal {
+	if len(sealed) <= MaxSeal {
 		t.Fatalf("fixture is %d bytes, within the limit", len(sealed))
 	}
 	if _, err := OpenSeal(sealed, binding, key, time.Now()); err == nil {

@@ -15,10 +15,11 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"gopkg.in/yaml.v3"
 )
 
 // A pool record written before the limits existed, as EncodeRecord writes modelTerms.
-const poolRecordWithoutLimits = `{"v":1,"kind":"pool","pool":"pool-a","terms":{"agents":[{"name":"agent-a","credentials":["model"]}],"default_agent":"agent-a","delivery_limit":3,"lock_duration_ms":15000,"producer_byte_rate":1000000,"request_percentage":50},"at_ms":1}`
+const poolRecordWithoutLimits = `{"v":1,"kind":"pool","pool":"pool-a","terms":{"agents":[{"name":"agent-a","credentials":[{"name":"model","env":"MODEL_API_KEY"}]}],"default_agent":"agent-a","delivery_limit":3,"lock_duration_ms":15000,"producer_byte_rate":1000000,"request_percentage":50},"at_ms":1}`
 
 func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 	terms := modelTerms()
@@ -412,6 +413,54 @@ func TestPoolModels(t *testing.T) {
 		}
 		if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}); err == nil {
 			t.Errorf("%s encoded", name)
+		}
+	}
+}
+
+func TestPoolCredentialTargets(t *testing.T) {
+	var terms Terms
+	if err := yaml.Unmarshal([]byte(`
+agents:
+  - name: codex
+    credentials:
+      - {name: openai-api-key, env: CODEX_API_KEY}
+      - {name: github-token, env: GH_TOKEN, required: false}
+      - {name: deploy-key, file: id_ed25519}
+producer_byte_rate: 1000000
+request_percentage: 50
+`), &terms); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateTerms(withDefaults(terms)); err != nil {
+		t.Fatalf("valid credential targets refused: %v", err)
+	}
+	if credentials := terms.Agents[0].Credentials; credentials[0].Optional() || !credentials[1].Optional() || credentials[2].Optional() || credentials[2].File != "id_ed25519" {
+		t.Fatalf("credentials %+v, want only github-token optional and deploy-key at its file", credentials)
+	}
+	credential := func(name, env, file string) AgentCredential {
+		return AgentCredential{TaskCredential: wire.TaskCredential{Name: name, Env: env, File: file}}
+	}
+	for name, credentials := range map[string][]AgentCredential{
+		"a reserved env target":    {credential("model", "HOME", "")},
+		"a reserved WHERRY_ env":   {credential("model", "WHERRY_CREDENTIALS_DIR", "")},
+		"an invalid env name":      {credential("model", "MODEL-KEY", "")},
+		"a duplicate name":         {credential("model", "MODEL_API_KEY", ""), credential("model", "OTHER_KEY", "")},
+		"two on one env target":    {credential("model", "MODEL_API_KEY", ""), credential("other", "MODEL_API_KEY", "")},
+		"two on one file target":   {credential("model", "", "key"), credential("other", "", "key")},
+		"both env and file":        {credential("model", "MODEL_API_KEY", "key")},
+		"neither env nor file":     {credential("model", "", "")},
+		"a file outside the rules": {credential("model", "", "../key")},
+	} {
+		terms := modelTerms()
+		terms.Agents[0].Credentials = credentials
+		if err := validateTerms(terms); err == nil {
+			t.Errorf("accepted %s", name)
+		}
+		if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}); err == nil {
+			t.Errorf("%s encoded", name)
+		}
+		if err := (&Service{}).PoolCreate(context.Background(), "pool-a", terms); err == nil || !strings.Contains(err.Error(), "agent agent-a: credential") {
+			t.Errorf("pool create with %s: %v; want the credential refused before the broker is read", name, err)
 		}
 	}
 }

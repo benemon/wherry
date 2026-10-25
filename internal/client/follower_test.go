@@ -60,7 +60,7 @@ func (f *fixture) hooked(t *testing.T, hook *feedHook) *Host {
 		t.Fatal(err)
 	}
 	t.Cleanup(kafka.Close)
-	host, err := NewHost(kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.logger)
+	host, err := NewHost(kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestTheFollowerLeavesTheHostsOptionsUnwritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(kafka.Close)
-	host, err := NewHost(kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.logger)
+	host, err := NewHost(kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
 	if err != nil {
 		t.Fatal(err)
 	}

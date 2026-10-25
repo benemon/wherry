@@ -139,11 +139,11 @@ func (p *plugins) adapter(pool string, settings admin.AdapterSettings, platform 
 	if err != nil {
 		return receiver.Named{}, err
 	}
-	configured, err := running.Configure(adapter.Settings{Name: settings.Name, Pool: pool, Agent: settings.Agent, Credential: settings.Credential, Config: config, Platform: platform})
+	configured, err := running.Configure(adapter.Settings{Name: settings.Name, Pool: pool, Agent: settings.Agent, Config: config, Platform: platform})
 	if err != nil {
 		return receiver.Named{}, err
 	}
-	return receiver.Named{Name: settings.Name, Agent: settings.Agent, Credential: settings.Credential, Labels: settings.Labels, Adapter: configured}, nil
+	return receiver.Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Adapter: configured}, nil
 }
 
 func (p *plugins) close() {

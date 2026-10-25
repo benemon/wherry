@@ -126,7 +126,7 @@ func callStatus(err error) error {
 }
 
 func (s *server) Configure(_ context.Context, req *adapterv1.ConfigureRequest) (*adapterv1.ConfigureResponse, error) {
-	adapter, err := s.factory(Settings{Name: req.Adapter, Pool: req.Pool, Agent: req.Agent, Credential: req.Credential, Config: req.Config, Platform: req.Platform}, s.logger)
+	adapter, err := s.factory(Settings{Name: req.Adapter, Pool: req.Pool, Agent: req.Agent, Config: req.Config, Platform: req.Platform}, s.logger)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -159,13 +159,13 @@ func (s *server) Dispatch(ctx context.Context, req *adapterv1.DispatchRequest) (
 	message := req.GetRun()
 	run := Run{
 		ID: message.GetId(), Adapter: message.GetAdapter(), Agent: message.GetAgent(), Model: message.GetModel(), Attempt: message.GetAttempt(),
-		Prompt: message.GetPrompt(), Credential: message.Credential,
+		Prompt: message.GetPrompt(),
 	}
 	for _, input := range message.GetInputs() {
 		run.Inputs = append(run.Inputs, File{Name: input.GetName(), Data: input.GetData()})
 	}
 	for _, secret := range message.GetCredentials() {
-		run.Credentials = append(run.Credentials, Secret{Name: secret.GetName(), File: secret.GetFile(), Value: secret.GetValue()})
+		run.Credentials = append(run.Credentials, Secret{Name: secret.GetName(), Env: secret.GetEnv(), File: secret.GetFile(), Value: secret.GetValue()})
 	}
 	for _, fetch := range message.GetFetches() {
 		run.Fetches = append(run.Fetches, Fetch{Name: fetch.GetName(), URL: fetch.GetUrl(), Size: fetch.GetSize(), SHA256: fetch.GetSha256()})

@@ -31,11 +31,10 @@ import (
 // ErrConfigChanged is returned by Run when wherry.admin holds a configuration other than the one it started with.
 var ErrConfigChanged = errors.New("receiver configuration changed")
 
-// Named is a constructed adapter with its configured name, the agent it launches and that agent's credential.
+// Named is a constructed adapter with its configured name and the agent it launches.
 type Named struct {
-	Name       string
-	Agent      string
-	Credential string
+	Name  string
+	Agent string
 	// Labels are the operator's declared labels for the adapter.
 	Labels  map[string]string
 	Adapter adapter.Adapter

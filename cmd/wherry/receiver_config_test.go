@@ -19,13 +19,11 @@ config:
   address: https://nomad.example:4646
   ca_file: /secrets/nomad-ca.crt
   namespace: wherry
-  credential_env: CLAUDE_CODE_OAUTH_TOKEN
 `
 
 const labPodman = `name: nomad-podman
 platform: lab-nomad
 agent: claude
-credential: claude-oauth-token
 labels:
   isolation: container
 config:
@@ -39,7 +37,6 @@ config:
 const labExec = `name: nomad-exec
 platform: lab-nomad
 agent: claude
-credential: claude-oauth-token
 labels:
   isolation: host
 config:

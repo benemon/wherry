@@ -41,7 +41,7 @@ Write `build-terms.yaml`:
 agents:
   - name: coder
     credentials:
-      - model-api-key
+      - {name: model-api-key, env: MODEL_API_KEY}
 default_agent: coder
 delivery_limit: 5
 lock_duration: 15s
@@ -52,6 +52,8 @@ request_percentage: 10
 ```sh
 wherry admin pool create build --config-file build-terms.yaml
 ```
+
+The agent gets `model-api-key` in the environment variable `MODEL_API_KEY`.
 
 ## 3. Entitle a tenant
 
@@ -97,7 +99,6 @@ config:
   address: https://nomad.example.com:4646
   ca_file: /etc/wherry/nomad-ca.pem
   namespace: agents
-  credential_env: MODEL_API_KEY
 ```
 
 `nomad-1/adapters/10-container.yaml`:
@@ -106,7 +107,6 @@ config:
 name: container
 platform: nomad
 agent: coder
-credential: model-api-key
 labels:
   isolation: container
 config:
@@ -162,13 +162,17 @@ On the host, put the model credential in a file and write
 {
   "bundle": "~/.config/wherry/alice-laptop.bundle",
   "credentials": {
-    "model-api-key": "~/.config/wherry/model-api-key"
+    "model-api-key": {"file": "~/.config/wherry/model-api-key"}
   }
 }
 ```
 
 When a receiver claims a task and asks for the credential, `wherry await`
-seals the file's contents byte for byte to that receiver.
+seals the file's contents byte for byte to that receiver. A credential can
+also come from an environment variable of the answering process,
+`{"env": "MODEL_API_KEY"}`, or from a command's output,
+`{"command": ["op", "read", "op://wherry/model/credential"]}`
+([client configuration](reference.md#client-configuration)).
 
 ## 8. Register the host key
 
@@ -188,8 +192,12 @@ wherry receivers
 
 ```
 receiver=nomad-1 pool=build capacity=2 in_flight=0 heartbeat_age=12s status=live
-  adapter=container agent=coder ready=true labels=isolation=container
+  adapter=container agent=coder ready=true labels=isolation=container credentials=model-api-key
 ```
+
+A credential this host has no source for shows as
+`model-api-key(missing)`, and `wherry submit` refuses the task with
+`auth required: credential model-api-key is not in this host's configuration`.
 
 ## 10. Submit a task
 
@@ -225,8 +233,9 @@ or the run ends `TASK_STATE_FAILED`.
 
 A run that ends in `TASK_STATE_FAILED` with a message naming a credential
 received no seal for it within 5 minutes: the host was not running `await`,
-or does not configure the credential. The run does not resume.
+or its source did not resolve, which the answerer logs as
+`run <id>: resolve credential <name>: <cause>`. The run does not resume.
 
-1. Add the credential's file to `credentials` in the host configuration.
+1. Fix the credential's source in `credentials` in the host configuration.
 2. Submit the task again with `wherry submit`, which starts a new run.
 3. Run `wherry await` with the new run ID, which answers its request.

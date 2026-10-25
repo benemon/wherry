@@ -106,7 +106,7 @@ func configure(rpc adapterv1.AdapterClient, settings Settings) (*adapterv1.Confi
 	ctx, cancel := context.WithTimeout(context.Background(), configureTimeout)
 	defer cancel()
 	resp, err := rpc.Configure(ctx, &adapterv1.ConfigureRequest{
-		Adapter: settings.Name, Pool: settings.Pool, Agent: settings.Agent, Credential: settings.Credential, Config: settings.Config, Platform: settings.Platform,
+		Adapter: settings.Name, Pool: settings.Pool, Agent: settings.Agent, Config: settings.Config, Platform: settings.Platform,
 	})
 	if err != nil {
 		return nil, callError(ctx, err)
@@ -260,13 +260,13 @@ func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
 		return OutcomeUnknown, Handle{}, err
 	}
 	message := &adapterv1.Run{
-		Id: run.ID, Adapter: run.Adapter, Agent: run.Agent, Model: run.Model, Attempt: run.Attempt, Prompt: run.Prompt, Credential: run.Credential,
+		Id: run.ID, Adapter: run.Adapter, Agent: run.Agent, Model: run.Model, Attempt: run.Attempt, Prompt: run.Prompt,
 	}
 	for _, input := range run.Inputs {
 		message.Inputs = append(message.Inputs, &adapterv1.File{Name: input.Name, Data: input.Data})
 	}
 	for _, secret := range run.Credentials {
-		message.Credentials = append(message.Credentials, &adapterv1.Secret{Name: secret.Name, File: secret.File, Value: secret.Value})
+		message.Credentials = append(message.Credentials, &adapterv1.Secret{Name: secret.Name, Env: secret.Env, File: secret.File, Value: secret.Value})
 	}
 	for _, fetch := range run.Fetches {
 		message.Fetches = append(message.Fetches, &adapterv1.Fetch{Name: fetch.Name, Url: fetch.URL, Size: fetch.Size, Sha256: fetch.SHA256})

@@ -25,7 +25,7 @@ func TestSubmitFileFlags(t *testing.T) {
 	if err := os.WriteFile(deployKey, []byte("deploy-key-value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b.credentials["deploy-key"] = deployKey
+	b.credentials["deploy-key"], b.credentials["vault-token"] = busclient.Source{File: deployKey}, busclient.Source{File: deployKey}
 	input := filepath.Join(t.TempDir(), "data.csv")
 	if err := os.WriteFile(input, []byte("a,b\n1,2\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -39,15 +39,19 @@ func TestSubmitFileFlags(t *testing.T) {
 		flags []string
 		want  string
 	}{
-		"credential without a file": {[]string{"--credential", "deploy-key"}, "want NAME=FILE"},
-		"unconfigured credential":   {[]string{"--credential", "absent=token"}, "credential absent is not in this host's configuration"},
-		"inputs over the limit":     {[]string{"--input", large}, "inline inputs are over adapter lab's 49152-byte limit"},
-		"output escaping":           {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
-		"output in the outcome dir": {[]string{"--output", ".wherry/outcome.json"}, "expected outputs must be unique relative paths of portable file names"},
-		"transcript output":         {[]string{"--output", "transcript.jsonl"}, "expected output transcript.jsonl is reserved for the run's transcript"},
-		"credential file escaping":  {[]string{"--credential", "deploy-key=../id"}, "credential files must be unique portable file names"},
-		"unknown output suffix":     {[]string{"--output", "report.md:needed"}, "want NAME[:required][:s3]"},
-		"repeated output suffix":    {[]string{"--output", "report.md:required:required"}, "want NAME[:required][:s3]"},
+		"credential without a target": {[]string{"--credential", "deploy-key"}, "want NAME:file=FILE or NAME:env=VAR"},
+		"credential of another kind":  {[]string{"--credential", "deploy-key:path=id"}, "want NAME:file=FILE or NAME:env=VAR"},
+		"unconfigured credential":     {[]string{"--credential", "absent:file=token"}, "auth required: credential absent is not in this host's configuration"},
+		"agent credential target":     {[]string{"--credential", "deploy-key:env=MODEL_API_KEY"}, "task credential deploy-key takes the environment variable MODEL_API_KEY of one of agent claude's credentials"},
+		"reserved env target":         {[]string{"--credential", "deploy-key:env=HOME"}, "credential deploy-key: env must match"},
+		"shared target":               {[]string{"--credential", "deploy-key:env=TOKEN", "--credential", "vault-token:env=TOKEN"}, "credentials deploy-key and vault-token share a target"},
+		"inputs over the limit":       {[]string{"--input", large}, "inline inputs are over adapter lab's 49152-byte limit"},
+		"output escaping":             {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
+		"output in the outcome dir":   {[]string{"--output", ".wherry/outcome.json"}, "expected outputs must be unique relative paths of portable file names"},
+		"transcript output":           {[]string{"--output", "transcript.jsonl"}, "expected output transcript.jsonl is reserved for the run's transcript"},
+		"credential file escaping":    {[]string{"--credential", "deploy-key:file=../id"}, "credential deploy-key: file must be a portable file name"},
+		"unknown output suffix":       {[]string{"--output", "report.md:needed"}, "want NAME[:required][:s3]"},
+		"repeated output suffix":      {[]string{"--output", "report.md:required:required"}, "want NAME[:required][:s3]"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -58,7 +62,8 @@ func TestSubmitFileFlags(t *testing.T) {
 		})
 	}
 	var stdout, stderr bytes.Buffer
-	flags := append(slices.Clone(base), "--input", input, "--credential", "deploy-key=id_ed25519", "--output", "report.md:required", "--output", "notes/extra.txt")
+	flags := append(slices.Clone(base), "--input", input, "--credential", "deploy-key:file=id_ed25519", "--credential", "vault-token:env=VAULT_TOKEN",
+		"--output", "report.md:required", "--output", "notes/extra.txt")
 	if err := runSubmit(b.ctx, b.client, flags, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +73,7 @@ func TestSubmitFileFlags(t *testing.T) {
 	if len(parts) != 2 || parts[1].Filename != "data.csv" || string(parts[1].Raw) != "a,b\n1,2\n" {
 		t.Fatalf("submitted parts %#v", parts)
 	}
-	if !slices.Equal(submission.Wherry.Credentials, []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}) ||
+	if !slices.Equal(submission.Wherry.Credentials, []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}, {Name: "vault-token", Env: "VAULT_TOKEN"}}) ||
 		!slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes/extra.txt"}}) {
 		t.Fatalf("submitted credentials %+v and outputs %+v", submission.Wherry.Credentials, submission.Wherry.Outputs)
 	}
@@ -194,7 +199,7 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 		return path
 	}
 	config := busclient.Config{StateDir: filepath.Join(work, "state"), HostKey: write(filepath.Join(work, "host.key")), Bundle: write(filepath.Join(outside, "bundle.yaml")),
-		Credentials: map[string]string{"model": write(filepath.Join(work, "secrets", "model"))},
+		Credentials: map[string]busclient.Source{"model": {File: write(filepath.Join(work, "secrets", "model"))}, "github-token": {Env: "GITHUB_TOKEN"}},
 		Storage:     &busclient.StorageConfig{AccessKeyFile: write(filepath.Join(work, "s3", "access.key")), SecretKeyFile: write(filepath.Join(work, "s3", "secret.key"))}}
 	write(filepath.Join(config.StateDir, "runs", "run-a.json"))
 	read := inputReader(inputOpener(work, config))
@@ -205,7 +210,7 @@ func TestMCPInputsStayInTheWorkingDirectory(t *testing.T) {
 		"the host key":           "host.key",
 		"a link to the host key": link(config.HostKey, "key"),
 		"the state":              filepath.Join(config.StateDir, "runs", "run-a.json"),
-		"a credential":           config.Credentials["model"],
+		"a credential":           config.Credentials["model"].File,
 		"a storage access key":   config.Storage.AccessKeyFile,
 		"a storage secret key":   config.Storage.SecretKeyFile,
 		"a directory":            filepath.Join(work, "secrets"),
@@ -264,7 +269,7 @@ func TestMCPInputsStayInTheInputRoots(t *testing.T) {
 	}
 	config := busclient.Config{InputRoots: []string{first, second}, StateDir: filepath.Join(second, "state"),
 		HostKey: write(filepath.Join(first, "wherry", "host.key")), Bundle: write(filepath.Join(outside, "bundle.yaml")),
-		Credentials: map[string]string{"model": write(filepath.Join(first, "wherry", "model"))}}
+		Credentials: map[string]busclient.Source{"model": {File: write(filepath.Join(first, "wherry", "model"))}}}
 	write(filepath.Join(config.StateDir, "runs", "run-a.json"))
 	link := filepath.Join(first, "out")
 	if err := os.Symlink(write(filepath.Join(outside, "elsewhere")), link); err != nil {
@@ -299,7 +304,7 @@ func TestMCPInputsStayInTheInputRoots(t *testing.T) {
 			return filepath.Join(root, strings.ToUpper(relative))
 		}
 		refused["the host key, upper-cased"] = upper(first, config.HostKey)
-		refused["a credential, upper-cased"] = upper(first, config.Credentials["model"])
+		refused["a credential, upper-cased"] = upper(first, config.Credentials["model"].File)
 		refused["the state, upper-cased"] = upper(second, filepath.Join(config.StateDir, "runs", "run-a.json"))
 	} else {
 		t.Log("the temporary directory is case-sensitive; case-varied paths are not exercised")
@@ -331,43 +336,42 @@ func TestAwaitSaysHowToApplyGitChanges(t *testing.T) {
 
 func TestMCPSubmitCarriesTheGitInput(t *testing.T) {
 	b := newBus(t)
-	work := t.TempDir()
-	session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{Credentials: b.credentials}))
 	const key = "git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
-	if err := os.WriteFile(filepath.Join(work, "known_hosts"), []byte(key), 0o600); err != nil {
+	hostKey := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(hostKey, []byte(key), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	git := map[string]any{"remote": "git@git.example.test:org/repo.git", "ref": "main", "path": "src/repo", "credential": "model", "host_key": "known_hosts", "changes": "bundle"}
+	b.git = []busclient.GitCredential{{URL: "ssh://git@git.example.test/", Credential: "model", HostKey: hostKey}}
+	session := mcpSessionReading(t, b.connect(t), nil, inputOpener(t.TempDir(), busclient.Config{Credentials: b.credentials}))
+	git := map[string]any{"remote": "git@git.example.test:org/repo.git", "ref": "main", "path": "src/repo", "changes": "bundle"}
 	var submitted submitOutput
-	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "fix it", "credentials": []map[string]any{{"name": "model", "file": "id_ed25519"}}, "git": git}, &submitted)
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "fix it", "git": git}, &submitted)
 	submission := b.tasks(t, submitted.ID)[0].submission
 	want := wire.GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", Path: "src/repo", Credential: "model", HostKey: key}
-	if submission.Wherry.Git == nil || *submission.Wherry.Git != want || !slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: wire.GitBundle}}) {
-		t.Fatalf("submitted git %+v and outputs %+v", submission.Wherry.Git, submission.Wherry.Outputs)
+	if submission.Wherry.Git == nil || *submission.Wherry.Git != want || !slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: wire.GitBundle}}) ||
+		!slices.Equal(submission.Wherry.Credentials, []wire.TaskCredential{{Name: "model", File: wire.GitCredentialFile}}) {
+		t.Fatalf("submitted git %+v, credentials %+v and outputs %+v", submission.Wherry.Git, submission.Wherry.Credentials, submission.Wherry.Outputs)
 	}
-	// The host key is read as an input is, so it cannot name a credential of this host's configuration.
-	git["host_key"] = b.credentials["model"]
-	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "git": git}); failure.Code != "INVALID_ARGUMENT" || strings.Contains(failure.Message, credentialText) {
-		t.Fatalf("submit with a credential as the host key: %+v", failure)
-	}
-	if err := os.WriteFile(filepath.Join(work, "github_known_hosts"), []byte("github.com"+key[len("git.example.test"):]), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	git["host_key"], git["remote"] = "github_known_hosts", "ssh://git@github.com/org/repo.git"
-	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "credentials": []map[string]any{{"name": "model", "file": "id_ed25519"}}, "git": git}); failure.Code != "INVALID_ARGUMENT" ||
-		failure.Message != "invalid input: git remote host github.com is not in pool pool-a's vcs hosts" {
-		t.Fatalf("submit outside the vcs hosts: %+v", failure)
+	git["remote"] = "ssh://git@github.com/org/repo.git"
+	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "git": git}); failure.Code != "INVALID_ARGUMENT" ||
+		failure.Message != "invalid input: ssh git remote requires host_key" {
+		t.Fatalf("submit of an ssh remote under no git entry: %+v", failure)
 	}
 }
 
-// A host key file is read only to one byte over its bound: the CLI stops reading a pipe there, and the MCP server asks
-// its reader for no more.
+// A git entry's host key file is read only to one byte over its bound: submit stops reading a pipe there.
 func TestGitHostKeyReadIsBounded(t *testing.T) {
 	b := newBus(t)
 	fifo := filepath.Join(t.TempDir(), "known_hosts")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	b.git = []busclient.GitCredential{{URL: "ssh://git@git.example.test/", HostKey: fifo}}
+	client, err := b.connect(t)()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.Close)
 	written := make(chan error, 1)
 	go func() {
 		writer, err := os.OpenFile(fifo, os.O_WRONLY, 0)
@@ -379,22 +383,11 @@ func TestGitHostKeyReadIsBounded(t *testing.T) {
 	}()
 	const rule = "git host_key must be at most 8 KiB of OpenSSH known_hosts lines"
 	var stdout, stderr bytes.Buffer
-	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "x", "--git", "git@git.example.test:org/repo.git@main", "--git-host-key", fifo}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), rule) {
+	if err := runSubmit(b.ctx, client, []string{"--prompt", "x", "--git", "git@git.example.test:org/repo.git@main"}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), rule) {
 		t.Fatalf("submit = %v, want %q", err, rule)
 	}
 	if err := <-written; err == nil {
-		t.Fatal("the CLI read the whole host key file")
-	}
-	var limits []int64
-	read := func(path string, limit int64) (wire.Part, error) {
-		limits = append(limits, limit)
-		return wire.Part{Raw: wire.StdBytes("k")}, nil
-	}
-	if _, err := submitFromInput(submitInput{Prompt: "x", Git: &gitInput{Remote: "git@git.example.test:org/repo.git", Ref: "main", HostKey: "known_hosts"}}, read, nil); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(limits, []int64{wire.MaxGitHostKey + 1}) {
-		t.Fatalf("host key read with limits %v, want one byte over the bound", limits)
+		t.Fatal("submit read the whole host key file")
 	}
 }
 
