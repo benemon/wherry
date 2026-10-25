@@ -52,7 +52,7 @@ check(sidebar)
 // wherry-plugins' examples/ to src/examples/ for the Adapters page's snippet imports; they are not pages.
 export default defineConfig({
   title: 'wherry',
-  description: 'Agent task delegation over Kafka.',
+  description: 'An execution fabric for delegated agent work.',
   base: '/wherry/',
   srcDir: 'src',
   srcExclude: ['examples/**'],

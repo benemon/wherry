@@ -5,7 +5,7 @@
   </picture>
 </h1>
 
-Agent task delegation over Kafka. The
+An execution fabric for delegated agent work. The
 [Introduction](https://benemon.github.io/wherry/introduction) describes the
 model and [what ships](https://benemon.github.io/wherry/introduction#what-ships).
 
