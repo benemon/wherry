@@ -5,61 +5,54 @@
   </picture>
 </h1>
 
-A coding agent runs its subagents on the machine the agent itself runs on.
-wherry sends a task to other compute, starts an unmodified agent there, and
-returns the result to the caller. Kafka carries every exchange between
-hosts and receivers. [Concepts](docs/concepts.md) explains the model.
+Agent task delegation over Kafka.
 
-## What ships
+wherry sends a coding agent's tasks to receivers on other compute, runs an
+unmodified agent there, and returns the result. The
+[Introduction](https://benemon.github.io/wherry/introduction#what-ships) lists
+what ships.
 
-One `wherry` binary with three sides:
+## Getting started
 
-- **Operator:** `wherry admin` creates pools and their terms, entitles
-  tenants, adds hosts and receivers with their Kafka principals, ACLs and
-  bundles, records receiver configurations, revokes access, and checks the
-  result against the broker.
-- **Host:** `wherry init` and `wherry key` register and show the host's signing
-  key. `receivers` lists the receivers the tenant may use with their adapters
-  and labels. `submit` places a task by agent and label selector and publishes
-  it. `await`, `status`, `events` and `cancel` follow and stop a run, and
-  `await` answers the claiming receiver's request for the agent's
-  credential. `status` without a run ID lists every run the host
-  can see, `transcript` prints a run's agent output, and `cleanup` deletes
-  a run's S3 objects. `mcp` serves every one of these commands but `init`
-  and `key` as an MCP tool of the same name; see
-  [Harness integration](#harness-integration).
-- **Receiver:** `wherry receiver run` claims its pool's tasks and runs each one
-  as a job through an adapter plugin, such as the Nomad plugin from
-  [wherry-plugins](https://github.com/benemon/wherry-plugins). The adapter
-  protocol is the Go module in [`adapter`](adapter).
+The [Quickstart](https://benemon.github.io/wherry/quickstart) installs
+`wherry` from a release, provisions one pool with one receiver, and runs a
+first task.
 
-Submissions, statuses, transcript chunks and results are A2A v1.0 objects;
-[the wherry A2A extension](docs/a2a-extension-v1.md) specifies every
-record.
+## Configuration
 
-## Documentation
+[Configuration](https://benemon.github.io/wherry/configuration) lists the
+client configuration, bundle, pool terms, receiver configuration and
+environment variables.
 
-- [Concepts](docs/concepts.md)
-- [Getting started](docs/getting-started.md)
-- [Operator guide](docs/operator-guide.md)
-- [Reference](docs/reference.md)
-- [The wherry A2A extension](docs/a2a-extension-v1.md)
+## Operations
+
+[Operations](https://benemon.github.io/wherry/operations) covers preparing
+Kafka, adding tenants, hosts and receivers, revocation, key rotation and
+upgrades.
 
 ## Harness integration
 
-`wherry mcp` is an MCP server (protocol 2026-07-28 and earlier) on stdio.
-It reads the host's configuration and offers eight tools: `receivers`,
-`submit`, `status`, `await`, `cancel`, `events`, `transcript` and
-`cleanup`. Each takes and returns JSON with a declared schema. `await`
-waits up to 45 seconds, then returns the final state with its result or
-message, or `retry_after` while the run is unfinished. `submit` also
-returns `await`, the `wherry await` command a harness runs in the background
-to learn when the run ends.
+[Harness integration](https://benemon.github.io/wherry/operations#harness-integration)
+installs the [`plugins/wherry`](plugins/wherry) MCP server and Agent Skill,
+and [MCP tools](https://benemon.github.io/wherry/mcp) lists the tools.
 
-[`plugins/wherry`](plugins/wherry) packages the server with a `wherry`
-Agent Skill that teaches the submit and await protocol. The
-[operator guide](docs/operator-guide.md#harness-integration) covers
-installing it.
+## Building from source
+
+wherry needs the Go version `go.mod` names. Build the binary with either:
+
+```sh
+make build
+go build -o wherry ./cmd/wherry
+```
+
+The adapter protocol is its own Go module in [`adapter`](adapter), with its
+own `go.mod` and `adapter/v*` tags.
+
+## Make targets
+
+`make help` lists the targets. `make check` runs every CI gate: gofmt, vet,
+the unit tests of both modules, the dependency licence check and the
+attribution-marker check.
 
 ## Tests
 
@@ -89,3 +82,27 @@ go test -p 1 -count=1 ./internal/admin/ ./internal/receiver/ ./internal/client/ 
 ```
 
 The packages share the broker's `wherry.admin`, so they run one at a time.
+
+## Documentation site
+
+The site is [VitePress](https://vitepress.dev/) in `docs-site`, built from
+the pages in `docs`. Its Adapters page embeds the receiver examples of
+[wherry-plugins](https://github.com/benemon/wherry-plugins), checked out
+beside this repository or named by `WHERRY_PLUGINS_DIR`:
+
+```sh
+(cd docs-site && npm ci)
+make docs
+```
+
+The build fails on a link to a missing page or anchor. The `pages` workflow
+publishes the site from `main`.
+
+## Releases
+
+A `v*` tag cuts a release: `.github/workflows/release.yml` checks that the
+tagged commit's `ci` run on `main` passed, then runs `make sbom` and `make dist`,
+attests the archives' provenance, signs `checksums.txt` with cosign, and
+publishes the archives, checksums, signature and SBOM. A tag with a hyphenated
+qualifier, such as `v0.1.0-rc.1`, publishes a prerelease. `adapter/v*` tags
+version the adapter module and publish nothing.

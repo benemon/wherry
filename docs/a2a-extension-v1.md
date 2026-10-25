@@ -9,7 +9,7 @@ objects: submissions, statuses, transcript chunks, output chunks and
 results hold one under its A2A field name, beside a `wherry` object of
 bindings. Every `Message` and `Artifact` wherry writes
 lists the URI above in its `extensions`, and readers reject one that does
-not. [Concepts](concepts.md) explains the roles and topics this document
+not. [Key concepts](concepts.md) explains the roles and topics this document
 names.
 
 ## Encoding
@@ -129,7 +129,7 @@ A submission is the task of one run.
   unique values, `Exists` and `DoesNotExist` none; each key appears once.
   `placement.model` is one of the agent's `models` in the pool's terms, and
   absent for an agent with none.
-  [Reference](reference.md#labels) gives the key and value grammar.
+  [Commands](commands.md#labels) gives the key and value grammar.
 - `deadline_at_ms` and `queue_deadline_at_ms` are Unix milliseconds by which the
   run must end and a receiver must claim it, each 0 or more. A receiver ends
   the run no later than six hours after `queue_deadline_at_ms`.
@@ -178,7 +178,7 @@ A submission is the task of one run.
   `s3_inputs` number at most 256 together.
 - `git` is the run's [git input](#git-input), optional. With a `host_key`,
   no input file or S3 input is named `known_hosts`. A host fills its
-  `credential` and `host_key` from the [git entry](reference.md#client-configuration)
+  `credential` and `host_key` from the [git entry](configuration.md#client-configuration)
   of its configuration that the remote falls under, and adds that credential
   to `credentials` at the file `git-credential`.
 
@@ -232,7 +232,7 @@ A status reports one attempt of a run.
 | `started` | `TASK_STATE_WORKING` | the job has started | |
 | `heartbeat` | `TASK_STATE_WORKING` | every 10 seconds while the job runs | pool events only |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
-| `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `TASK_STATE_AUTH_REQUIRED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](reference.md#agent-contract), or the reason as message text |
+| `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `TASK_STATE_AUTH_REQUIRED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration.md#agent-contract), or the reason as message text |
 
 A receiver writes each status other than a heartbeat to the pool's events
 and the tenant feed, with identical bytes, in one Kafka transaction. Readers
@@ -831,13 +831,13 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `end` | `receiver`, or `tenant` and `host` | records a membership end |
 | `skip` | `offset`, `sha256` | passes over the undecodable record at that offset with that SHA-256 |
 
-`terms` has the members of the [pool terms](reference.md#pool-terms) file
+`terms` has the members of the [pool terms](configuration.md#pool-terms) file
 and `record_limit`, the tasks topic's record limit that `pool create` reads
 from the broker, with `max_queue_deadline_ms` and `lock_duration_ms` in milliseconds for its
 `max_queue_deadline` and `lock_duration`. `config` holds `receiver` and `pool`,
 which equal the record's, the receiver's `capacity`, and its `adapters` in
 routing order. Each adapter is the
-[adapter entry](reference.md#receiver-configuration) as `name`, `platform`
+[adapter entry](configuration.md#receiver-configuration) as `name`, `platform`
 naming the platform, the platform's `type`, `agent`,
 and `labels` when set, and the merged `config`. An `end` names
 exactly one of `receiver`, or `tenant` and `host`.
@@ -930,7 +930,7 @@ hold `/`. It cannot hold `..` or `//`, or end in `/`, `.` or `.lock`.
 Readers reject a submission that breaks these rules.
 
 The remote's host must be one of the pool's
-[`vcs`](reference.md#pool-terms) hosts: its host name in lowercase, with
+[`vcs`](configuration.md#pool-terms) hosts: its host name in lowercase, with
 `:port` when the remote names a port other than its scheme's default, 443
 for `https` and 22 for `ssh`. A pool without `vcs` accepts no git input.
 Clients refuse a git input outside the VCS hosts before they publish, and
@@ -988,7 +988,7 @@ image's are the operator's to keep clear of them. The pool's VCS hosts
 bound what a receiver accepts; the platform's egress policy bounds where
 the agent connects.
 
-The [operator guide](operator-guide.md#git-repositories) states the limits
+[Operations](operations.md#git-repositories) states the limits
 of these settings against an agent that runs commands.
 
 ## Inputs and outputs
@@ -1015,7 +1015,7 @@ directory, of each input file, of each credential file and of each expected
 output, with `(required)` after a required one, so an agent without a shell
 finds them, the environment variables that hold credentials, the commands of
 the [git input](#git-input), and the
-[outcome contract](reference.md#agent-contract) with the run's credential
+[outcome contract](configuration.md#agent-contract) with the run's credential
 names, an optional credential its host did not supply marked
 `(not supplied)`. The lines name S3 inputs by path, never by URL. The adapter reports the
 directories' paths as its agent sees them; a directory it does not report

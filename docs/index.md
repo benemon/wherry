@@ -5,25 +5,32 @@ hero:
     light: /svg/wherry-stacked.svg
     dark: /svg/wherry-stacked-cream.svg
     alt: wherry
-  tagline: A coding agent sends its subagent tasks to other compute, runs an unmodified agent there, and gets the result back over Kafka.
+  tagline: Agent task delegation over Kafka.
+  text: wherry sends a coding agent's tasks to receivers on other compute, runs an unmodified agent there, and returns the result.
   actions:
     - theme: brand
-      text: Getting started
-      link: /getting-started
+      text: Quickstart
+      link: /quickstart
     - theme: alt
-      text: Concepts
+      text: Key concepts
       link: /concepts
 features:
-  - title: Concepts
-    details: Pools, tenants, hosts and receivers, and how a task travels.
-    link: /concepts
-  - title: Operations
-    details: Prepare Kafka, create pools, add hosts and receivers, revoke and upgrade.
-    link: /operator-guide
-  - title: Adapters
-    details: The plugin protocol and the plugins that run agents on Nomad and Kubernetes.
+  - title: Any agent harness
+    details: The MCP server and CLI fit any harness, and the agent runs unmodified.
+    link: /operations#harness-integration
+  - title: Any platform
+    details: Adapter plugins run agents on Nomad, Kubernetes and OpenShift, and systemd.
     link: /adapters
-  - title: Reference
-    details: Every command, tool, setting and record.
-    link: /reference
+  - title: Sealed credentials
+    details: Each credential is sealed to one receiver for one attempt.
+    link: /security#sealed-credentials
+  - title: Signed records
+    details: Every shared record is signed and checked against the operator's state.
+    link: /design#topics
+  - title: Large files through S3
+    details: Inputs and outputs of up to 5 GiB travel through an S3-compatible bucket.
+    link: /concepts#files-in-and-out
+  - title: Runs that survive restarts
+    details: A receiver's runs continue after it restarts, through adoption and redelivery.
+    link: /concepts#runs-and-attempts
 ---

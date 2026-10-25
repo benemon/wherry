@@ -74,3 +74,25 @@
   height: 28px;
   width: auto;
 }
+
+/* The hero text sits below the tagline, at the tagline's size. */
+.VPHero .main {
+  display: flex;
+  flex-direction: column;
+}
+
+.VPHero .main .heading {
+  order: 1;
+}
+
+.VPHero .main .actions {
+  order: 2;
+}
+
+.VPHero .heading .text {
+  max-width: 392px;
+  letter-spacing: normal;
+  line-height: 28px;
+  font-size: 18px;
+  font-weight: 500;
+}

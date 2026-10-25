@@ -1,0 +1,125 @@
+# Design
+
+How wherry lays its records out on Kafka, how a receiver gets its
+configuration, and the topics and ACLs `wherry admin` creates.
+
+## Topics
+
+Kafka cannot filter records on the broker, so records consumed
+differently live on different topics.
+
+| Topic | Writers | Readers | Holds |
+| --- | --- | --- | --- |
+| `wherry.admin` | the operator | every principal | pool terms, receiver configurations, hosts, entitlements, membership ends, skips |
+| `wherry.receivers` | receivers | receivers, hosts | advertisements |
+| `wherry.receiver.<receiver>` | that receiver | its pool's members, entitled tenants' hosts | its keys |
+| `wherry.pool.<pool>.tasks` | entitled tenants' hosts | the pool's receivers, through its share group | submissions |
+| `wherry.pool.<pool>.events` | the pool's receivers, entitled tenants' hosts | the pool's receivers | statuses, heartbeats, start failures, cancels |
+| `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, transcript chunks, results, echoes, seal requests |
+| `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key, seals |
+
+A host and a receiver read and write these topics as their grants allow,
+beside the platform, object storage and git remote a run uses.
+
+![wherry's implementation: a host, the Kafka topics, a receiver with adapter plugins, a platform job, object storage and a git remote](diagrams/implementation.svg)
+
+`wherry.admin` records and seals carry no signature: each sits on a topic only
+one principal can write, so Kafka authenticates it. Every other record, key
+records included, is a versioned EdDSA
+[JWS](https://datatracker.ietf.org/doc/html/rfc7515). A record on a shared topic
+names its owner and key in its `kid`, and a reader verifies it against that
+owner's current key, read from the owner's own key topic, before it decodes the
+payload. A host reading its tenant feed, and a receiver reading its pool's
+statuses, also accept a key the owner has rotated away, for records the
+broker appended before that rotation. No host or receiver can vouch for
+another's key.
+
+A reader then checks the record against `wherry.admin`. A submission or
+cancel must come from a live host of a tenant entitled to the pool whose
+topic it arrived on. A receiver record must come from a live member of the
+pool the run was placed in, on behalf of a tenant entitled to it.
+[The wherry A2A extension](a2a-extension-v1.md) specifies every record.
+
+Every topic has one partition, `LogAppendTime` timestamps and
+`cleanup.policy=delete`. Nothing is compacted and no topic is deleted. A
+pool's task and event topics keep records for its maximum queue deadline plus six hours
+plus a day, 15 days 6 hours by default, the tenant feed for 30 days and
+`wherry.receivers` for 7; the identity and configuration topics keep them
+forever.
+
+Every principal reads all of `wherry.admin`, so tenants see each other's
+names, hosts, entitlements and pools.
+
+## Configuration delivery
+
+A receiver's configuration is a record on `wherry.admin`: its capacity
+(the runs it holds at once) and its ordered adapters, each with a name, a
+type, an agent, labels and the adapter's own settings. It holds no secrets
+and names no credential: every adapter of an agent delivers the agent's
+credentials as the pool's terms give them. `wherry admin` refuses a
+configuration that names an agent outside the pool's terms.
+
+A receiver starts with its bundle, a state directory and a plugin directory. It
+registers its signing key, waits for its configuration record, validates it
+against the terms and builds its adapters. It then advertises every 30 seconds.
+When a new configuration record appears, the receiver stops and exits, so its
+platform restarts it with the new configuration. Runs in flight are adopted on
+redelivery.
+
+## Kafka resources
+
+### Topics
+
+`wherry admin` creates each topic with one partition, the broker's default
+replication factor, `cleanup.policy=delete` and
+`message.timestamp.type=LogAppendTime`.
+
+| Topic | Created by | `retention.ms` |
+| --- | --- | --- |
+| `wherry.admin` | any recording command | `-1` |
+| `wherry.receivers` | any recording command | `604800000` (7 days) |
+| `wherry.pool.<pool>.tasks` | `pool create` | `max_queue_deadline` plus 30 hours, in milliseconds; default `1317600000` |
+| `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` sets the same value |
+| `wherry.tenant.<tenant>` | `pool entitle`, `host add` | `2592000000` (30 days) |
+| `wherry.receiver.<receiver>` | `receiver add` | `-1` |
+| `wherry.host.<tenant>.<host>` | `host add` | `-1` |
+
+The tasks retention keeps `max_queue_deadline`, the six-hour maximum run time,
+and a one-day margin. Events stay at least as long as tasks. A tenant feed
+must stay for at least `max_queue_deadline` plus six hours; its 30-day default exceeds
+the default requirement of `1231200000`. Identity and configuration topics
+stay at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
+
+`wherry admin` leaves an existing topic's configuration as it is, except
+that `pool create` sets the retention and timestamp type of the pool's tasks
+and events topics. A tenant feed's retention can be changed with Kafka's own
+tools. `pool create` and `pool entitle` refuse terms that need more than an
+entitled tenant's feed keeps, and `wherry admin check` reports a topic below
+its bound and a pool topic whose timestamp type is not `LogAppendTime`.
+
+### ACLs
+
+Every grant allows from any host. Resources are literal except the
+transactional ID prefix.
+
+| Principal | Resource | Operations |
+| --- | --- | --- |
+| `wherry.operator` | topic `wherry.admin` | Read, Write, Describe |
+| host | topic `wherry.admin` | Read, Describe |
+| host | topic `wherry.receivers` | Read, Describe |
+| host | topic `wherry.tenant.<own tenant>` | Read, Describe |
+| host | topic `wherry.host.<own tenant>.<own host>` | Read, Write, Describe |
+| host | topics `wherry.pool.<p>.tasks` and `.events`, each entitled pool | Write, Describe |
+| host | topic `wherry.receiver.<r>`, each receiver of an entitled pool | Read, Describe |
+| receiver | topic `wherry.admin` | Read, Describe |
+| receiver | topic `wherry.receiver.<own>` | Read, Write, Describe |
+| receiver | topic `wherry.receiver.<peer>`, each other member of its pool | Read, Describe |
+| receiver | topic `wherry.receivers` | Read, Write, Describe |
+| receiver | topic `wherry.pool.<own pool>.tasks` | Read, Describe |
+| receiver | topic `wherry.pool.<own pool>.events` | Read, Write, Describe |
+| receiver | group `p-<own pool>` | Read, Describe, DescribeConfigs |
+| receiver | transactional ID prefix `p.<own pool>.` | Write, Describe |
+| receiver | topic `wherry.tenant.<t>`, each tenant entitled to its pool | Write, Describe |
+| receiver | topic `wherry.host.<t>.<h>`, each host of those tenants | Read, Describe |
+
+A principal whose membership has ended has no grants.
