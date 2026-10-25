@@ -158,9 +158,6 @@ func newRunView(h *Host, v view, runID string, local *runRecord) *runView {
 	return r
 }
 
-// parseHistory verifies a feed record; a test counts verifications through it.
-var parseHistory = wire.ParseHistory
-
 // authorize runs check on a record signed under kid, and once per kid runs it again after re-reading the whole view,
 // when the kid's owner is not in it, or the owner's key topic, when the kid names a key other than a live entitled
 // member's current one.
@@ -202,7 +199,7 @@ func authorize[T any](ctx context.Context, r *runView, kid string, check func(vi
 func (r *runView) addEcho(ctx context.Context, record *kgo.Record, kid string) bool {
 	value := record.Value
 	echo, err := authorize(ctx, r, kid, func(v view) (wire.Echo, error) {
-		return admin.AuthorizeEcho(parseHistory(record.Timestamp), v.state, v.keys, value, r.h.tenant)
+		return admin.AuthorizeEcho(wire.ParseHistory(record.Timestamp), v.state, v.keys, value, r.h.tenant)
 	})
 	if err != nil || echo.Run != r.run {
 		return false
@@ -222,7 +219,7 @@ func (r *runView) addEcho(ctx context.Context, record *kgo.Record, kid string) b
 // signed under kid; a record keyed by the run that is none of them counts as unread.
 func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) {
 	value := record.Value
-	history := parseHistory(record.Timestamp)
+	history := wire.ParseHistory(record.Timestamp)
 	if r.pool != "" {
 		switch typ {
 		case wire.StatusType:

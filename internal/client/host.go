@@ -380,7 +380,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		return SubmitResult{}, err
 	}
 	submission.Wherry.Credentials, submission.Wherry.Unsupplied, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, unsupplied, outputs, input.Git
-	encoded, err := signRecord(submission, h.key)
+	encoded, err := wire.SignRecord(submission, h.key)
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
@@ -390,7 +390,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 		toS3()
 		submission.Message.Parts = append([]wire.Part{{Text: input.Prompt}}, input.Parts...)
-		if encoded, err = signRecord(submission, h.key); err != nil {
+		if encoded, err = wire.SignRecord(submission, h.key); err != nil {
 			return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 		}
 		if int64(len(encoded)) > limit {
@@ -409,7 +409,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 		submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage.Bucket, h.tenant, runID, input.S3Inputs)
 		if err == nil && len(submission.Wherry.S3Inputs) > 0 {
-			if encoded, err = signRecord(submission, h.key); err != nil {
+			if encoded, err = wire.SignRecord(submission, h.key); err != nil {
 				err = fmt.Errorf("%w: %v", ErrInvalidInput, err)
 			}
 		}
@@ -465,9 +465,6 @@ func (h *Host) Cancel(ctx context.Context, runID string) (CancelResult, error) {
 	}
 	return CancelResult{RunID: runID, Skipped: r.skipped}, nil
 }
-
-// signRecord signs a submission; a test counts signatures through it.
-var signRecord = wire.SignRecord
 
 func (h *Host) submission(runID, pool string, placement wire.Placement, parts []wire.Part, deadline, queueDeadline time.Duration, now time.Time) (*wire.Submission, error) {
 	return &wire.Submission{

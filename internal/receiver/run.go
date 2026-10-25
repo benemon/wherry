@@ -2036,10 +2036,9 @@ func attemptOf(record *kgo.Record) int64 {
 	return max(1, int64(record.DeliveryCount()))
 }
 
-// preamble tells the agent the full path of each file it has and of each it is asked to leave, so an agent without a
-// shell finds them, how to clone a git input, and how to report the run's outcome; it names credentials and their
-// targets, never their values, and the agent's optional credentials its host did not supply, so the agent can name the
-// one it needs. A directory the adapter does not report is named by its environment variable.
+// preamble is the agent's instructions for the run. It names credentials and their targets, never their values, and
+// gives full paths, so an agent without a shell finds its files. A directory the adapter does not report is named by
+// its environment variable.
 func preamble(directories adapter.Directories, inputs []string, credentials []wire.TaskCredential, unsupplied []string, outputs []wire.ExpectedOutput, git *wire.GitInput, run string) string {
 	input, output, credential := cmp.Or(directories.Input, "$WHERRY_INPUT_DIR"), cmp.Or(directories.Output, "$WHERRY_OUTPUT_DIR"),
 		cmp.Or(directories.Credentials, "$WHERRY_CREDENTIALS_DIR")

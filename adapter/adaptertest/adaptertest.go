@@ -23,8 +23,7 @@ var Credentials = []adapter.Secret{
 // Run checks the adapters factory, the one a plugin hands Serve, builds against the adapter contract on their
 // platform, giving it a logger that discards. completes configures an adapter whose job runs for at least ten seconds
 // and exits 0; neverStarts one whose job the platform ends before its agent starts. Every job the suite creates is
-// purged. inlineLimit is the cap both configured adapters report. The completing job's run carries a credential at an
-// environment variable target and one at a file target, which the adapter delivers to its agent.
+// purged. inlineLimit is the cap both configured adapters report. The completing job's run carries Credentials.
 func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Adapter, error), completes, neverStarts adapter.Settings, inlineLimit int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
