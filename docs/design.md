@@ -3,6 +3,27 @@
 How wherry lays its records out on Kafka, how a receiver gets its
 configuration, and the topics and ACLs `wherry admin` creates.
 
+## Why Kafka
+
+wherry puts Kafka at the centre of identity, authorisation, task
+distribution and history, and runs no server of its own. Each need is one
+Kafka already meets:
+
+- identity is a SCRAM principal over TLS, and authorisation is ACLs the
+  broker enforces;
+- a share group hands each task to one receiver, holds it under a renewed
+  acquisition lock, and redelivers it when that receiver dies;
+- transactions fence an earlier attempt and commit a run's last records
+  together;
+- the log is the history every host and receiver reads, and a topic per
+  audience keeps each reader to its own records.
+
+The cost is a Kafka cluster to operate: version 4.3, with share groups, a
+SCRAM listener and an authoriser, as
+[Prepare Kafka](operations.md#prepare-kafka) lists. An organisation that
+already runs Kafka adds topics and principals to it. One that does not
+takes on a cluster to run.
+
 ## Topics
 
 Kafka cannot filter records on the broker, so records consumed

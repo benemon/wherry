@@ -5,7 +5,7 @@ hero:
     light: /svg/wherry-stacked.svg
     dark: /svg/wherry-stacked-cream.svg
     alt: wherry
-  tagline: Agent task delegation over Kafka.
+  tagline: wherry brings delegated AI agent execution onto infrastructure you control, with governed access, flexible workload placement and recoverable execution.
   actions:
     - theme: brand
       text: Quickstart
@@ -14,22 +14,10 @@ hero:
       text: Key concepts
       link: /concepts
 features:
-  - title: Any agent harness
-    details: For developers. The MCP server and CLI fit any harness, and the agent runs unmodified.
-    link: /operations#harness-integration
-  - title: Runs that survive restarts
-    details: For developers. A receiver's runs continue after it restarts, through adoption and redelivery.
-    link: /concepts#runs-and-attempts
-  - title: Your compute, your Kafka
-    details: For platform teams. Agents run on Nomad, Kubernetes and OpenShift, or systemd, and every record stays on your own Kafka cluster.
-    link: /adapters
-  - title: Open source, no hosted control plane
-    details: For platform teams. wherry is MPL-2.0 and sends nothing to a third party; the hosts and receivers are yours.
-    link: /governance#where-your-data-goes
-  - title: Governed by the operator
-    details: For governance. The operator issues every identity, the broker enforces every grant, and every shared record is signed and kept.
-    link: /governance
-  - title: Sealed credentials
-    details: For security. Each credential is sealed to one receiver for one attempt and delivered to its target in the agent.
-    link: /security#sealed-credentials
+  - title: Run delegated AI workloads on infrastructure you control
+    link: /introduction#run-delegated-ai-workloads-on-infrastructure-you-control
+  - title: Delegate execution without surrendering control of identity and credentials
+    link: /introduction#delegate-execution-without-surrendering-control-of-identity-and-credentials
+  - title: Make delegated agent execution recoverable and observable
+    link: /introduction#make-delegated-agent-execution-recoverable-and-observable
 ---

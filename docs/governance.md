@@ -1,6 +1,6 @@
 # Governance
 
-Who may take part, how every claim is checked, what record remains, and
+Who may take part, how every claim is checked, what history remains, and
 where a run's data goes.
 
 ## Identity and grants
@@ -23,7 +23,7 @@ from a live host of a tenant entitled to the pool, and a receiver's record
 from a live member of the pool the run was placed in. No host or receiver
 can vouch for another's key. [Topics](design.md#topics) gives the detail.
 
-## Audit trail
+## Run history
 
 Every operator action is a record on `wherry.admin`, which keeps its
 records forever. A run's submission, statuses, heartbeats, transcript and
@@ -31,6 +31,8 @@ result are records on its pool's and tenant's topics: the task and event
 topics keep them for the pool's maximum queue deadline plus a day and six
 hours, 15 days 6 hours by default, and the tenant feed for 30 days.
 [`wherry events`](commands.md#wherry-events-run-id) prints a run's status history.
+Retention bounds this history. It holds what wherry carried; what an agent
+did inside its job stays in that job's platform logs.
 
 ## Where your data goes
 
