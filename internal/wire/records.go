@@ -69,7 +69,7 @@ func parse(verify func([]byte, string, signed.Keys, any) (string, error), encode
 	return nil
 }
 
-// Placement is what a run asks of its pool: an agent, the labels an adapter
+// Placement is what a run asks of its pool: an agent, the labels a profile
 // must carry, and the model the agent runs, empty for an agent whose terms
 // name no models.
 type Placement struct {
@@ -268,7 +268,7 @@ type SealRequest struct {
 type StartFailure struct {
 	V       int             `json:"v"`
 	Wherry  ReceiverBinding `json:"wherry"`
-	Adapter string          `json:"adapter"`
+	Profile string          `json:"profile"`
 	Agent   string          `json:"agent"`
 	Class   string          `json:"class"`
 }
@@ -581,7 +581,7 @@ func (value *StartFailure) validate() error {
 	if err := value.Wherry.validate(); err != nil {
 		return err
 	}
-	return validateIDs(map[string]string{"adapter": value.Adapter, "agent": value.Agent, "class": value.Class})
+	return validateIDs(map[string]string{"profile": value.Profile, "agent": value.Agent, "class": value.Class})
 }
 
 func (value *SealRequest) validate() error {

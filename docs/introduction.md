@@ -41,7 +41,7 @@ One `wherry` binary with three sides:
   bundles, records receiver configurations, revokes access, and checks the
   result against the broker.
 - **Host:** `wherry init` and `wherry key` register and show the host's signing
-  key. `receivers` lists the receivers the tenant may use with their adapters
+  key. `receivers` lists the receivers the tenant may use with their profiles
   and labels. `submit` places a task by agent and label selector and publishes
   it. `await`, `status`, `events` and `cancel` follow and stop a run, and
   `await` answers the claiming receiver's request for the agent's
@@ -51,7 +51,8 @@ One `wherry` binary with three sides:
   and `key` as an MCP tool of the same name; see
   [Harness integration](operations.md#harness-integration).
 - **Receiver:** `wherry receiver run` claims its pool's tasks and runs each one
-  as a job through an adapter plugin, such as the Nomad plugin from
+  as a job on one of its profiles, through an adapter: a plugin, such as
+  the Nomad plugin from
   [wherry-plugins](https://github.com/benemon/wherry-plugins). The adapter
   protocol is the Go module in
   [`adapter`](https://github.com/benemon/wherry/tree/main/adapter).

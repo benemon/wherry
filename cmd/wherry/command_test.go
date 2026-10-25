@@ -24,6 +24,7 @@ import (
 
 	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
@@ -77,7 +78,7 @@ type bus struct {
 	hostBundle  string
 	hostKey     ed25519.PrivateKey
 	stateDir    string
-	credentials map[string]busclient.Source
+	credentials map[string]credential.Source
 	git         []busclient.GitCredential
 	receiverKey ed25519.PrivateKey
 	receiver    *kgo.Client
@@ -122,15 +123,15 @@ func newBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	receiverBundle := filepath.Join(t.TempDir(), "receiver.yaml")
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Adapters: []admin.AdapterSettings{{Name: "lab", Type: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}}}
-	if err := b.service.ReceiverAdd(ctx, config, nil, receiverBundle); err != nil {
+	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []admin.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}}}
+	if err := b.service.ReceiverAdd(ctx, config, receiverBundle); err != nil {
 		t.Fatal(err)
 	}
-	credential := filepath.Join(t.TempDir(), "model")
-	if err := os.WriteFile(credential, []byte(credentialText), 0o600); err != nil {
+	model := filepath.Join(t.TempDir(), "model")
+	if err := os.WriteFile(model, []byte(credentialText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b.credentials = map[string]busclient.Source{"model": {File: credential}}
+	b.credentials = map[string]credential.Source{"model": {File: model}}
 	if _, b.hostKey, err = ed25519.GenerateKey(rand.Reader); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +153,7 @@ func newBus(t *testing.T) *bus {
 	}
 	b.produce(t, admin.ReceiverTopic("receiver-a"), "receiver-a", registration)
 	b.produce(t, admin.ReceiversTopic, "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
-		Offers: []wire.Offer{{Adapter: "lab", Agent: "claude", InlineLimit: 49152}}, Capacity: 1, AtMS: time.Now().UnixMilli()}))
+		Offers: []wire.Offer{{Profile: "lab", Agent: "claude", InlineLimit: 49152}}, Capacity: 1, AtMS: time.Now().UnixMilli()}))
 	return b
 }
 
@@ -331,7 +332,7 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	wantKeys := []string{"adapters", "capacity", "ended", "heartbeat_age", "in_flight", "pool", "receiver_id", "status"}
+	wantKeys := []string{"capacity", "ended", "heartbeat_age", "in_flight", "pool", "profiles", "receiver_id", "status"}
 	if !reflect.DeepEqual(keys, wantKeys) {
 		t.Fatalf("got JSON fields %v, want %v", keys, wantKeys)
 	}
@@ -342,8 +343,8 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	if err := runReceivers(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "inline_limit=49152") {
-		t.Fatalf("receivers output %q does not carry the adapter's inline limit", stdout.String())
+	if !strings.Contains(stdout.String(), "  profile=lab plugin=nomad agent=claude ready=true labels=runtime=exec inline_limit=49152") {
+		t.Fatalf("receivers output %q does not carry the profile, its plugin and its inline limit", stdout.String())
 	}
 	// The agent's credentials by name, with whether this host has a source for each; their targets stay out.
 	if output := stdout.String(); !strings.Contains(output, " credentials=model,github-token(missing,optional)\n") || strings.Contains(output, "GH_TOKEN") {
@@ -781,7 +782,7 @@ func TestSubmitGitFlags(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	b.credentials["deploy-key"] = busclient.Source{File: filepath.Join(dir, "deploy-key")}
+	b.credentials["deploy-key"] = credential.Source{File: filepath.Join(dir, "deploy-key")}
 	b.git = []busclient.GitCredential{
 		{URL: "ssh://git@git.example.test/", Credential: "model", HostKey: filepath.Join(dir, "other_known_hosts")},
 		{URL: "ssh://git@git.example.test/org/", Credential: "deploy-key", HostKey: filepath.Join(dir, "known_hosts")},

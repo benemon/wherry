@@ -24,11 +24,14 @@
   statuses, transcript and result. Each receiver is its own principal with
   an Ed25519 signing key, which it creates on first start and keeps in its
   state directory.
-- **An adapter** is the part of a receiver that runs jobs on one platform.
-  Adapters are plugins: the receiver ships with none, and runs one plugin
-  process per adapter type from its plugin directory, linked to it by
-  mutual TLS. Plugins exist for Nomad and Kubernetes. A receiver holds one or more
-  adapters, and each adapter launches one agent.
+- **An adapter** is a plugin, the binary `wherry-plugin-<type>` that runs
+  jobs on one kind of platform. The receiver ships with none, and runs one
+  plugin process per adapter type from its plugin directory, linked to it
+  by mutual TLS. Plugins exist for Nomad, Kubernetes and systemd.
+- **A profile** is a named, configured use of an adapter: the agent it
+  launches, its labels and its runtime. A task is placed on a profile and a
+  run is routed to one. A receiver holds one or more profiles, and each
+  profile launches one agent.
 - **The agent** is the program a job runs, such as a coding agent's
   headless command. wherry does not modify it. The receiver passes it a
   prompt file and reads its standard output.
@@ -42,9 +45,7 @@ Identity is a Kafka principal authenticated with
 over TLS. `wherry admin` creates each host and receiver principal, sets a
 generated password, and writes a **bundle**: a file, mode 0600, holding the
 broker address, the broker's CA certificate, the principal and its
-password, and for a receiver any platform credential its platform does not
-issue by its own identity mechanism. The operator hands the bundle to the
-host or receiver. It never travels over Kafka.
+password. The operator hands the bundle to the host or receiver. It never travels over Kafka.
 
 | Principal | Name |
 | --- | --- |
@@ -71,27 +72,29 @@ The operators are `In`, `NotIn`, `Exists` and `DoesNotExist`;
 [Commands](commands.md#selectors) gives the grammar.
 
 **Labels describe characteristics**, such as a GPU, a network segment or an
-isolation level. The operator declares them per adapter in the receiver's
+isolation level. The operator declares them per profile in the receiver's
 configuration record. Keys are arbitrary and may carry the operator's own
 prefix, such as `example.com/gpu`; the prefix `wherry.io/` is reserved.
-The platform, runtime, node pool and datacenter an adapter uses are part
+The platform, runtime, node pool and datacenter a profile uses are part
 of its configuration, and are neither labels nor selectable.
 
 **The client resolves placement before it signs.** It reads the receiver
 configurations on `wherry.admin` for their labels, and the advertisements on
-`wherry.receivers` for liveness, capacity and which adapters are ready. A
+`wherry.receivers` for liveness, capacity and which profiles are ready. A
 receiver whose latest advertisement is at most 120 seconds old is live. For each
 live receiver in a pool the tenant is entitled to, the client looks for a ready
-adapter that launches the agent with labels the selector accepts. With no agent
-named, each receiver takes the pool's default agent if a ready adapter launches
+profile that launches the agent with labels the selector accepts. With no agent
+named, each receiver takes the pool's default agent if a ready profile launches
 it, otherwise the first other agent in the terms' order that one does. Among the
 receivers that can take the task, the one with the most spare capacity wins,
 whichever agent it would run, and ties go to the lowest receiver ID. The client
 signs the agent, the selector and the chosen pool into the task.
 
-**The receiver routes** a task it claims to its first ready adapter, in
-declared order, whose agent and labels satisfy the task. An agent outside
-the pool's terms is rejected. A task no ready adapter satisfies is a start
+**The receiver routes** a task it claims to its first ready profile, in
+order within its plugin, whose agent and labels satisfy the task. It visits
+plugins in the order of their types, the same order the client uses, and
+labels choose between plugins. An agent outside
+the pool's terms is rejected. A task no ready profile satisfies is a start
 failure: the receiver records it on the pool's events and returns the task
 to the pool.
 
@@ -101,7 +104,7 @@ Everything the task receives lands as files. A submission's `raw` and
 `data` parts are input files that the agent finds in the directory
 `WHERRY_INPUT_DIR` names. They travel inline in the submission record,
 within the broker's record limit, which `pool create` records, and the
-limit each adapter declares. Over either, they go through S3 when the pool
+limit each profile declares. Over either, they go through S3 when the pool
 has storage and the host a storage credential; otherwise submit refuses,
 naming the limit. Credentials are files in the directory
 `WHERRY_CREDENTIALS_DIR` names or environment variables, each at its
@@ -159,8 +162,8 @@ Each pool reads its tasks through the Kafka
 acquisition lock for the whole run and renews it every 10 seconds. When a
 receiver stops renewing, the broker delivers the task again, and that
 delivery is the next attempt. The receiver that takes it looks for the
-run's job in each of its adapters. If the job exists and came from the
-same adapter and agent, the receiver adopts it, asks for a seal of its own,
+run's job in each of its profiles. If the job exists and came from the
+same profile and agent, as its platform metadata records, the receiver adopts it, asks for a seal of its own,
 and once it opens resumes the transcript from the last log offset recorded
 in a heartbeat. Any other job under the
 run's ID is stopped and purged, and the run is dispatched again. Each

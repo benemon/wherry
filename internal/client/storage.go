@@ -53,7 +53,7 @@ func (h *Host) bucket(ctx context.Context, pool string, storage *admin.Storage) 
 	}
 	var keys [2]string
 	for i, name := range []string{h.storage.AccessKey, h.storage.SecretKey} {
-		key, err := h.credentials[name].resolve(ctx)
+		key, err := h.credentials[name].Resolve(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("read storage credential %s: %w", name, err)
 		}
@@ -140,7 +140,7 @@ func (h *Host) checkSealSize(ctx context.Context, store *minio.Client, bucket, t
 		if len(source.Command) > 0 {
 			continue
 		}
-		if values[credential.Name], err = source.resolve(ctx); err != nil {
+		if values[credential.Name], err = source.Resolve(ctx); err != nil {
 			return fmt.Errorf("read credential %s: %w", credential.Name, err)
 		}
 		names = append(names, credential.Name)

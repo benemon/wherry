@@ -201,7 +201,7 @@ func CutUTF8(s string, n int) string {
 type ResultMetadata struct {
 	ReceiverID  string             `json:"receiver_id"`
 	Pool        string             `json:"pool"`
-	Adapter     string             `json:"adapter,omitempty"`
+	Profile     string             `json:"profile,omitempty"`
 	Labels      map[string]string  `json:"labels,omitempty"`
 	Job         string             `json:"job,omitempty"`
 	Outputs     []ReturnedOutput   `json:"outputs,omitempty"`

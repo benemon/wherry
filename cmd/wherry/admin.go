@@ -14,11 +14,12 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 func runAdmin(args []string, stdout, stderr io.Writer) error {
-	pos, options, platformFiles, err := adminArgs(args)
+	pos, options, err := adminArgs(args)
 	if err != nil {
 		return err
 	}
@@ -65,7 +66,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return service.PoolCreate(ctx, pos[2], terms)
 	case "receiver add":
 		if len(pos) != 3 || options["pool"] == "" || options["bundle-file"] == "" {
-			return errors.New("usage: wherry admin receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> --bundle-file FILE [--platform-credential-file PLATFORM=FILE ...]")
+			return errors.New("usage: wherry admin receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> --bundle-file FILE")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -76,11 +77,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		config.Receiver, config.Pool = pos[2], options["pool"]
-		platform, err := platformCredentials(config, platformFiles)
-		if err != nil {
-			return err
-		}
-		return service.ReceiverAdd(ctx, config, platform, options["bundle-file"])
+		return service.ReceiverAdd(ctx, config, options["bundle-file"])
 	case "receiver configure":
 		if len(pos) != 3 {
 			return errors.New("usage: wherry admin receiver configure ID <--config-file FILE|--config-dir DIR>")
@@ -157,9 +154,8 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	}
 }
 
-func adminArgs(args []string) ([]string, map[string]string, []string, error) {
-	var positional, platformFiles []string
-	var optionNames []string
+func adminArgs(args []string) ([]string, map[string]string, error) {
+	var positional, optionNames []string
 	options := map[string]string{}
 	for i := 0; i < len(args); i++ {
 		if !strings.HasPrefix(args[i], "--") {
@@ -167,17 +163,13 @@ func adminArgs(args []string) ([]string, map[string]string, []string, error) {
 			continue
 		}
 		if i+1 == len(args) {
-			return nil, nil, nil, errors.New("admin option requires a value")
+			return nil, nil, errors.New("admin option requires a value")
 		}
 		name := strings.TrimPrefix(args[i], "--")
-		switch _, repeated := options[name]; {
-		case name == "platform-credential-file":
-			platformFiles = append(platformFiles, args[i+1])
-		case repeated:
-			return nil, nil, nil, fmt.Errorf("option --%s is given twice", name)
-		default:
-			options[name] = args[i+1]
+		if _, repeated := options[name]; repeated {
+			return nil, nil, fmt.Errorf("option --%s is given twice", name)
 		}
+		options[name] = args[i+1]
 		optionNames = append(optionNames, name)
 		i++
 	}
@@ -187,7 +179,7 @@ func adminArgs(args []string) ([]string, map[string]string, []string, error) {
 	}
 	allowed := map[string]map[string]bool{
 		"pool create":        {"config-file": true, "config-dir": true},
-		"receiver add":       {"pool": true, "config-file": true, "config-dir": true, "bundle-file": true, "platform-credential-file": true},
+		"receiver add":       {"pool": true, "config-file": true, "config-dir": true, "bundle-file": true},
 		"receiver configure": {"config-file": true, "config-dir": true},
 		"pool entitle":       {"tenant": true},
 		"host add":           {"tenant": true, "bundle-file": true},
@@ -199,11 +191,11 @@ func adminArgs(args []string) ([]string, map[string]string, []string, error) {
 	if allowed != nil {
 		for _, name := range optionNames {
 			if !allowed[name] {
-				return nil, nil, nil, fmt.Errorf("unknown option --%s", name)
+				return nil, nil, fmt.Errorf("unknown option --%s", name)
 			}
 		}
 	}
-	return positional, options, platformFiles, nil
+	return positional, options, nil
 }
 
 func configInput(options map[string]string) (string, bool, error) {
@@ -240,69 +232,44 @@ func readYAML(path string, value any) error {
 	return admin.DecodeYAML(encoded, value)
 }
 
-// platformCredentials reads each PLATFORM=FILE of --platform-credential-file, refusing a platform no adapter of config
-// uses or one named twice.
-func platformCredentials(config admin.ReceiverConfig, files []string) (map[string]string, error) {
-	var platform map[string]string
-	for _, value := range files {
-		name, path, ok := strings.Cut(value, "=")
-		if !ok {
-			return nil, errors.New("--platform-credential-file takes PLATFORM=FILE")
-		}
-		if !slices.ContainsFunc(config.Adapters, func(adapter admin.AdapterSettings) bool { return adapter.Platform == name }) {
-			return nil, fmt.Errorf("--platform-credential-file names platform %q, which no adapter in the configuration uses", name)
-		}
-		if _, repeated := platform[name]; repeated {
-			return nil, fmt.Errorf("--platform-credential-file names platform %q twice", name)
-		}
-		credential, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		if platform == nil {
-			platform = map[string]string{}
-		}
-		platform[name] = strings.TrimRight(string(credential), "\r\n")
-	}
-	return platform, nil
-}
-
-// receiverPlatform and receiverAdapter are the platform and adapter entries of a receiver config, in either form.
-type receiverPlatform struct {
-	Name   string         `yaml:"name"`
-	Type   string         `yaml:"type"`
-	Config map[string]any `yaml:"config"`
-}
-
-type receiverAdapter struct {
-	Name     string            `yaml:"name"`
-	Platform string            `yaml:"platform"`
-	Agent    string            `yaml:"agent"`
-	Labels   map[string]string `yaml:"labels"`
+// receiverPlugin and receiverProfile are a plugin's and a profile's entries in a receiver config, in either form.
+type receiverPlugin struct {
 	Config   map[string]any    `yaml:"config"`
+	Profiles []receiverProfile `yaml:"profiles"`
 }
 
-// readReceiverConfig reads a receiver config from a single file holding capacity, platforms and adapters, or from a
-// directory holding receiver.yaml, platforms/*.yaml and adapters/*.yaml, where adapter file order is routing order.
-// An adapter's config takes its platform's top-level keys, which it must not repeat.
+type receiverProfile struct {
+	Name   string            `yaml:"name"`
+	Agent  string            `yaml:"agent"`
+	Labels map[string]string `yaml:"labels"`
+	Config map[string]any    `yaml:"config"`
+}
+
+// readReceiverConfig reads a receiver config from a single file holding capacity and plugins, or from a directory
+// holding receiver.yaml and, for each adapter type, plugins/<type>/plugin.yaml with plugins/<type>/profiles/*.yaml,
+// where profile file order is routing order within the plugin.
 func readReceiverConfig(path string, directory bool) (admin.ReceiverConfig, error) {
 	if !directory {
 		var file struct {
-			Capacity  int64              `yaml:"capacity"`
-			Platforms []receiverPlatform `yaml:"platforms"`
-			Adapters  []receiverAdapter  `yaml:"adapters"`
+			Capacity int64                     `yaml:"capacity"`
+			Plugins  map[string]receiverPlugin `yaml:"plugins"`
 		}
 		if err := readYAML(path, &file); err != nil {
 			return admin.ReceiverConfig{}, err
 		}
-		return receiverConfig(file.Capacity, labelled(path, "platforms", file.Platforms), labelled(path, "adapters", file.Adapters))
+		var plugins []plugin
+		for kind, value := range file.Plugins {
+			where := fmt.Sprintf("%s: plugins.%s", path, kind)
+			plugins = append(plugins, plugin{where, kind, value.Config, labelled(where, "profiles", value.Profiles)})
+		}
+		return receiverConfig(file.Capacity, plugins)
 	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return admin.ReceiverConfig{}, err
 	}
 	for _, entry := range entries {
-		if name := entry.Name(); !strings.HasPrefix(name, ".") && name != "receiver.yaml" && name != "platforms" && name != "adapters" {
+		if name := entry.Name(); !strings.HasPrefix(name, ".") && name != "receiver.yaml" && name != "plugins" {
 			return admin.ReceiverConfig{}, fmt.Errorf("%s does not belong in a receiver config directory", filepath.Join(path, name))
 		}
 	}
@@ -312,21 +279,51 @@ func readReceiverConfig(path string, directory bool) (admin.ReceiverConfig, erro
 	if err := readYAML(filepath.Join(path, "receiver.yaml"), &receiver); err != nil {
 		return admin.ReceiverConfig{}, err
 	}
-	platforms, err := readEntries[receiverPlatform](filepath.Join(path, "platforms"))
+	kinds, err := os.ReadDir(filepath.Join(path, "plugins"))
 	if err != nil {
 		return admin.ReceiverConfig{}, err
 	}
-	adapters, err := readEntries[receiverAdapter](filepath.Join(path, "adapters"))
-	if err != nil {
-		return admin.ReceiverConfig{}, err
+	var plugins []plugin
+	for _, kind := range kinds {
+		dir := filepath.Join(path, "plugins", kind.Name())
+		if strings.HasPrefix(kind.Name(), ".") {
+			continue
+		}
+		if !kind.IsDir() {
+			return admin.ReceiverConfig{}, fmt.Errorf("%s is not a plugin directory", dir)
+		}
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			return admin.ReceiverConfig{}, err
+		}
+		for _, file := range files {
+			if name := file.Name(); !strings.HasPrefix(name, ".") && name != "plugin.yaml" && name != "profiles" {
+				return admin.ReceiverConfig{}, fmt.Errorf("%s does not belong in a plugin directory", filepath.Join(dir, name))
+			}
+		}
+		var settings struct {
+			Config map[string]any `yaml:"config"`
+		}
+		if err := readYAML(filepath.Join(dir, "plugin.yaml"), &settings); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return admin.ReceiverConfig{}, fmt.Errorf("%s: %w", filepath.Join(dir, "plugin.yaml"), err)
+		}
+		profiles, err := readEntries[receiverProfile](filepath.Join(dir, "profiles"))
+		if err != nil {
+			return admin.ReceiverConfig{}, err
+		}
+		plugins = append(plugins, plugin{dir, kind.Name(), settings.Config, profiles})
 	}
-	if len(adapters) == 0 {
-		return admin.ReceiverConfig{}, fmt.Errorf("%s holds no adapters", filepath.Join(path, "adapters"))
-	}
-	return receiverConfig(receiver.Capacity, platforms, adapters)
+	return receiverConfig(receiver.Capacity, plugins)
 }
 
-// entry is a decoded platform or adapter with the place it was read from, which errors name.
+// plugin is a decoded plugin entry with the place it was read from, which errors name.
+type plugin struct {
+	where, kind string
+	config      map[string]any
+	profiles    []entry[receiverProfile]
+}
+
+// entry is a decoded profile with the place it was read from, which errors name.
 type entry[T any] struct {
 	where string
 	value T
@@ -335,7 +332,7 @@ type entry[T any] struct {
 func labelled[T any](path, list string, values []T) []entry[T] {
 	entries := make([]entry[T], len(values))
 	for i, value := range values {
-		entries[i] = entry[T]{fmt.Sprintf("%s: %s[%d]", path, list, i), value}
+		entries[i] = entry[T]{fmt.Sprintf("%s.%s[%d]", path, list, i), value}
 	}
 	return entries
 }
@@ -357,36 +354,39 @@ func readEntries[T any](dir string) ([]entry[T], error) {
 	return entries, nil
 }
 
-func receiverConfig(capacity int64, platforms []entry[receiverPlatform], adapters []entry[receiverAdapter]) (admin.ReceiverConfig, error) {
+// receiverConfig lists the profiles of plugins sorted by type, each plugin's in their order, every profile's config
+// taking its plugin's keys, which it must not repeat.
+func receiverConfig(capacity int64, plugins []plugin) (admin.ReceiverConfig, error) {
 	config := admin.ReceiverConfig{Capacity: cmp.Or(capacity, 1)}
-	byName := map[string]receiverPlatform{}
-	for _, p := range platforms {
-		if _, ok := byName[p.value.Name]; ok || p.value.Name == "" {
-			return config, fmt.Errorf("%s: platform name %q is empty or repeated", p.where, p.value.Name)
-		}
-		byName[p.value.Name] = p.value
+	if len(plugins) == 0 {
+		return config, errors.New("receiver config holds no plugins")
 	}
+	slices.SortFunc(plugins, func(a, b plugin) int { return strings.Compare(a.kind, b.kind) })
 	names := map[string]bool{}
-	for _, a := range adapters {
-		adapter := a.value
-		if names[adapter.Name] {
-			return config, fmt.Errorf("%s: adapter name %q is repeated", a.where, adapter.Name)
+	for _, p := range plugins {
+		if !wire.ValidName(p.kind) {
+			return config, fmt.Errorf("%s: adapter type %q is not a valid name", p.where, p.kind)
 		}
-		names[adapter.Name] = true
-		p, ok := byName[adapter.Platform]
-		if !ok {
-			return config, fmt.Errorf("%s: unknown platform %q", a.where, adapter.Platform)
+		if len(p.profiles) == 0 {
+			return config, fmt.Errorf("%s holds no profiles", p.where)
 		}
-		if adapter.Config == nil {
-			adapter.Config = map[string]any{}
-		}
-		for key, value := range p.Config {
-			if _, ok := adapter.Config[key]; ok {
-				return config, fmt.Errorf("%s: config key %q is also set by platform %q", a.where, key, p.Name)
+		for _, e := range p.profiles {
+			profile := e.value
+			if names[profile.Name] {
+				return config, fmt.Errorf("%s: profile name %q is repeated", e.where, profile.Name)
 			}
-			adapter.Config[key] = value
+			names[profile.Name] = true
+			if profile.Config == nil {
+				profile.Config = map[string]any{}
+			}
+			for key, value := range p.config {
+				if _, ok := profile.Config[key]; ok {
+					return config, fmt.Errorf("%s: profile %q sets config key %q, which plugin %s sets", e.where, profile.Name, key, p.kind)
+				}
+				profile.Config[key] = value
+			}
+			config.Profiles = append(config.Profiles, admin.ProfileSettings{Name: profile.Name, Plugin: p.kind, Agent: profile.Agent, Labels: profile.Labels, Config: profile.Config})
 		}
-		config.Adapters = append(config.Adapters, admin.AdapterSettings{Name: adapter.Name, Platform: p.Name, Type: p.Type, Agent: adapter.Agent, Labels: adapter.Labels, Config: adapter.Config})
 	}
 	return config, nil
 }

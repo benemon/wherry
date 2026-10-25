@@ -296,7 +296,7 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 			logger.Printf("run %s: skipped a seal request for credential %s, which this host does not configure", runID, name)
 			return true
 		}
-		if values[name], err = source.resolve(ctx); err != nil {
+		if values[name], err = source.Resolve(ctx); err != nil {
 			retry("run %s: resolve credential %s: %v", runID, name, err)
 			return false
 		}

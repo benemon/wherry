@@ -154,7 +154,7 @@ func TestRunIDOfAnotherTenantAfterHolderRotation(t *testing.T) {
 			}
 			t.Cleanup(producer.Close)
 			task := testSubmission("run-x")
-			holder := &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(must(t)(wire.SignRecord(task, f.host))), history: []wire.Message{task.Message}, attempt: 1, adapter: f.receiver.adapters[0]}
+			holder := &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(must(t)(wire.SignRecord(task, f.host))), history: []wire.Message{task.Message}, attempt: 1, profile: f.receiver.profiles[0]}
 			if err := holder.commit(f.ctx, holder.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
 				t.Fatal(err)
 			}

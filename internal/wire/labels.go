@@ -24,10 +24,10 @@ const (
 	OpDoesNotExist = "DoesNotExist"
 )
 
-// Offer is an adapter a receiver can currently dispatch to and the agent it
+// Offer is a profile a receiver can currently dispatch to and the agent it
 // launches. Its labels live in the receiver's configuration record.
 type Offer struct {
-	Adapter     string `json:"adapter"`
+	Profile     string `json:"profile"`
 	Agent       string `json:"agent"`
 	InlineLimit int64  `json:"inline_limit,omitzero"`
 }
@@ -122,14 +122,14 @@ func Satisfies(selector []Requirement, labels map[string]string) bool {
 
 func validateOffers(offers []Offer) error {
 	for i, offer := range offers {
-		if err := validateIDs(map[string]string{"offer adapter": offer.Adapter, "offer agent": offer.Agent}); err != nil {
+		if err := validateIDs(map[string]string{"offer profile": offer.Profile, "offer agent": offer.Agent}); err != nil {
 			return err
 		}
 		if offer.InlineLimit < 0 {
 			return errors.New("offer inline limit must not be negative")
 		}
-		if slices.ContainsFunc(offers[:i], func(other Offer) bool { return other.Adapter == offer.Adapter }) {
-			return errors.New("duplicate offer adapter")
+		if slices.ContainsFunc(offers[:i], func(other Offer) bool { return other.Profile == offer.Profile }) {
+			return errors.New("duplicate offer profile")
 		}
 	}
 	return nil

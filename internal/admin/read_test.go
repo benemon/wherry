@@ -116,7 +116,7 @@ func TestReadAdvertisementsKeepsLatestLiveAuthorised(t *testing.T) {
 	now := time.UnixMilli(1_800_000_000_000)
 	advertise := func(receiver, pool string, at time.Time, capacity int64) {
 		t.Helper()
-		encoded := sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Agent: "agent-a"}}, Capacity: capacity, AtMS: at.UnixMilli()}, key)
+		encoded := sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Profile: "nomad", Agent: "agent-a"}}, Capacity: capacity, AtMS: at.UnixMilli()}, key)
 		if err := client.ProduceSync(ctx, &kgo.Record{Topic: ReceiversTopic, Value: encoded}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
@@ -191,7 +191,7 @@ func TestReadAdvertisementsVerifiesNewestFirst(t *testing.T) {
 	now := time.UnixMilli(1_800_000_000_000)
 	liveness := 2 * time.Minute
 	advertisement := func(receiver, pool string, age time.Duration, capacity int64) []byte {
-		return sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Agent: "agent-a"}}, Capacity: capacity, AtMS: now.Add(-age).UnixMilli()}, key)
+		return sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Profile: "nomad", Agent: "agent-a"}}, Capacity: capacity, AtMS: now.Add(-age).UnixMilli()}, key)
 	}
 	// forged is record's header and payload under other's signature, so its kid names the receiver's current key.
 	forged := func(record, other []byte) []byte {

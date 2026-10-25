@@ -164,13 +164,13 @@ func eventually(t *testing.T, what string, check func() error) {
 	}
 }
 
-func TestCallsReachTheAdapterTheyName(t *testing.T) {
+func TestCallsReachTheProfileTheyName(t *testing.T) {
 	p, record, _ := launch(t)
 	a, b := configured(t, p, "a", "{}"), configured(t, p, "b", "{}")
 	for name, adapter := range map[string]Adapter{"a": a, "b": b} {
-		outcome, handle, err := adapter.Dispatch(context.Background(), Run{ID: "run-" + name, Adapter: name, Agent: "claude"})
+		outcome, handle, err := adapter.Dispatch(context.Background(), Run{ID: "run-" + name, Profile: name, Agent: "claude"})
 		if err != nil || outcome != OutcomeCreated || handle.Name != name+"/run-"+name {
-			t.Fatalf("adapter %s dispatch: %v %+v %v; want its own instance's handle", name, outcome, handle, err)
+			t.Fatalf("profile %s dispatch: %v %+v %v; want its own instance's handle", name, outcome, handle, err)
 		}
 	}
 	for _, entry := range records(t, record) {
@@ -192,14 +192,14 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 	t.Setenv("WHERRY_TESTPLUGIN_ENV", "from-the-receiver")
 	p, record, _ := launch(t)
 	a := configured(t, p, "a", "{}")
-	run := Run{ID: "run-a", Adapter: "a", Agent: "claude", Model: "sonnet", Attempt: 3, Prompt: []byte("hello"),
+	run := Run{ID: "run-a", Profile: "a", Agent: "claude", Model: "sonnet", Attempt: 3, Prompt: []byte("hello"),
 		Inputs:      []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty", Data: []byte{}}},
 		Credentials: []Secret{{Name: "model", Env: "MODEL_API_KEY", Value: []byte(runCredential)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(runCredential)}},
 		Fetches:     []Fetch{{Name: "dataset.bin", URL: "https://store.example.test/bucket/key?X-Amz-Signature=0", Size: 5 << 20, SHA256: strings.Repeat("a", 64)}}}
 	if _, _, err := a.Dispatch(context.Background(), run); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-b", Adapter: "a", Agent: "claude"}); err != nil {
+	if _, _, err := a.Dispatch(context.Background(), Run{ID: "run-b", Profile: "a", Agent: "claude"}); err != nil {
 		t.Fatal(err)
 	}
 	var dispatched []*Run
@@ -260,23 +260,23 @@ func TestPanicStaysInItsCall(t *testing.T) {
 		t.Fatalf("panicking sweep returned %v; want that call's error", err)
 	}
 	if err := b.Sweep(context.Background()); err != nil {
-		t.Fatalf("other adapter after a panic: %v", err)
+		t.Fatalf("other profile after a panic: %v", err)
 	}
 	if ready, err := a.Ready(context.Background()); !ready || err != nil {
-		t.Fatalf("panicked adapter's next call: %v %v", ready, err)
+		t.Fatalf("panicked profile's next call: %v %v", ready, err)
 	}
 	streaming := configured(t, p, "c", `{"panic":"Follow"}`)
 	_, err := streaming.Follow(context.Background(), Handle{}, 0, make(chan Line, 4))
-	if err == nil || errors.Is(err, ErrLinkLost) || !strings.Contains(err.Error(), "adapter c panicked") {
-		t.Fatalf("panicking follow returned %v; want that call's error, naming its adapter", err)
+	if err == nil || errors.Is(err, ErrLinkLost) || !strings.Contains(err.Error(), "profile c panicked") {
+		t.Fatalf("panicking follow returned %v; want that call's error, naming its profile", err)
 	}
 	if err := b.Sweep(context.Background()); err != nil {
-		t.Fatalf("other adapter after a follow panic: %v", err)
+		t.Fatalf("other profile after a follow panic: %v", err)
 	}
 	// The plugin's log reaches the receiver asynchronously, and go-plugin re-logs its fields in map order and
-	// interleaves concurrent entries, so the log is awaited for the adapter alone.
-	eventually(t, "follow panic logged with its adapter", func() error {
-		if !strings.Contains(logs.String(), "adapter=c") {
+	// interleaves concurrent entries, so the log is awaited for the profile alone.
+	eventually(t, "follow panic logged with its profile", func() error {
+		if !strings.Contains(logs.String(), "profile=c") {
 			return fmt.Errorf("logs:\n%s", logs.String())
 		}
 		return nil
@@ -286,18 +286,18 @@ func TestPanicStaysInItsCall(t *testing.T) {
 	}
 }
 
-func TestConfigureFailureStaysWithItsAdapter(t *testing.T) {
+func TestConfigureFailureStaysWithItsProfile(t *testing.T) {
 	p, _, _ := launch(t)
 	a := configured(t, p, "a", "{}")
 	if _, err := p.Configure(Settings{Name: "bad", Config: []byte(`{"fail":true}`)}); err == nil || !strings.Contains(err.Error(), "configured to fail") {
 		t.Fatalf("failing configure returned %v", err)
 	}
 	if ready, err := a.Ready(context.Background()); !ready || err != nil {
-		t.Fatalf("adapter after another's configure failure: %v %v", ready, err)
+		t.Fatalf("profile after another's configure failure: %v %v", ready, err)
 	}
 }
 
-func TestRestartConfiguresEveryAdapter(t *testing.T) {
+func TestRestartConfiguresEveryProfile(t *testing.T) {
 	shortRestart(t)
 	p, record, _ := launch(t)
 	a, b := configured(t, p, "a", "{}"), configured(t, p, "b", "{}")
@@ -308,7 +308,7 @@ func TestRestartConfiguresEveryAdapter(t *testing.T) {
 		}
 		return nil
 	})
-	eventually(t, "both adapters back after the restart", func() error {
+	eventually(t, "both profiles back after the restart", func() error {
 		for _, adapter := range []Adapter{a, b} {
 			if _, _, err := adapter.Dispatch(context.Background(), Run{ID: "after"}); err != nil {
 				return err
@@ -339,7 +339,7 @@ func TestOneProcessPerPlugin(t *testing.T) {
 		pids[entry.PID] = true
 	}
 	if len(pids) != 1 {
-		t.Fatalf("adapters configured in processes %v; want one", pids)
+		t.Fatalf("profiles configured in processes %v; want one", pids)
 	}
 }
 
@@ -382,7 +382,7 @@ func TestPlaintextConnectionFails(t *testing.T) {
 	configured(t, p, "a", "{}")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := dial(t, p, insecure.NewCredentials()).Ready(ctx, &adapterv1.ReadyRequest{Adapter: "a"}); status.Code(err) != codes.Unavailable {
+	if _, err := dial(t, p, insecure.NewCredentials()).Ready(ctx, &adapterv1.ReadyRequest{Profile: "a"}); status.Code(err) != codes.Unavailable {
 		t.Fatalf("plaintext call returned %v; want a refused connection", err)
 	}
 }
@@ -394,7 +394,7 @@ func TestTLSWithoutClientCertificateFails(t *testing.T) {
 	defer cancel()
 	// The server's certificate is accepted, so only the missing client certificate can fail the call.
 	creds := credentials.NewTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
-	if _, err := dial(t, p, creds).Ready(ctx, &adapterv1.ReadyRequest{Adapter: "a"}); status.Code(err) != codes.Unavailable {
+	if _, err := dial(t, p, creds).Ready(ctx, &adapterv1.ReadyRequest{Profile: "a"}); status.Code(err) != codes.Unavailable {
 		t.Fatalf("call without a client certificate returned %v; want a refused connection", err)
 	}
 }
@@ -405,7 +405,7 @@ func TestRefusesPluginWithoutMutualTLS(t *testing.T) {
 	t.Setenv("WHERRY_TESTPLUGIN_PLAINTEXT", "1")
 	p, err := Launch(fixed(testPlugin), &syncBuffer{})
 	if err == nil {
-		_, configureErr := p.Configure(Settings{Name: "a", Platform: platformCredential})
+		_, configureErr := p.Configure(Settings{Name: "a", Credential: platformCredential})
 		p.Close()
 		t.Fatalf("launched a plugin that offered no mutual TLS; configure returned %v", configureErr)
 	}
@@ -420,7 +420,7 @@ func TestSecretsStayOutOfLogs(t *testing.T) {
 	logLevel = hclog.Trace
 	t.Cleanup(func() { logLevel = previous })
 	p, record, logs := launch(t)
-	a, err := p.Configure(Settings{Name: "a", Pool: "pool-a", Agent: "claude", Config: []byte("{}"), Platform: platformCredential})
+	a, err := p.Configure(Settings{Name: "a", Pool: "pool-a", Agent: "claude", Config: []byte("{}"), Credential: platformCredential})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,13 +435,13 @@ func TestSecretsStayOutOfLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	killed := kill(t, p)
-	eventually(t, "adapter back after the restart", func() error {
+	eventually(t, "profile back after the restart", func() error {
 		_, err := a.Ready(context.Background())
 		return err
 	})
 	reconfigured := false
 	for _, entry := range records(t, record) {
-		reconfigured = reconfigured || entry.Call == "configure" && entry.PID != killed && entry.Settings.Platform == platformCredential
+		reconfigured = reconfigured || entry.Call == "configure" && entry.PID != killed && entry.Settings.Credential == platformCredential
 	}
 	output := logs.String()
 	if !reconfigured || !strings.Contains(output, "plugin restarted") || !strings.Contains(output, "starting plugin") {
@@ -466,7 +466,7 @@ func TestMetricsCrossTheLink(t *testing.T) {
 	p, _, _ := launch(t)
 	samples, err := configured(t, p, "a", "{}").Metrics(context.Background())
 	want := []Sample{
-		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"adapter": "a"}, Kind: KindGauge, Value: 2},
+		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"profile": "a"}, Kind: KindGauge, Value: 2},
 		{Family: "wherry_adapter_placement_seconds", Kind: KindHistogram, Histogram: Histogram{Buckets: []uint64{0, 1, 2}, Sum: 3.5, Count: 2}},
 	}
 	if err != nil || len(samples) != len(want) {
@@ -474,7 +474,7 @@ func TestMetricsCrossTheLink(t *testing.T) {
 	}
 	for i := range want {
 		if samples[i].Family != want[i].Family || samples[i].Kind != want[i].Kind || samples[i].Value != want[i].Value ||
-			!reflect.DeepEqual(samples[i].Histogram, want[i].Histogram) || len(samples[i].Labels) != len(want[i].Labels) || samples[i].Labels["adapter"] != want[i].Labels["adapter"] {
+			!reflect.DeepEqual(samples[i].Histogram, want[i].Histogram) || len(samples[i].Labels) != len(want[i].Labels) || samples[i].Labels["profile"] != want[i].Labels["profile"] {
 			t.Fatalf("sample %d = %+v; want %+v", i, samples[i], want[i])
 		}
 	}
@@ -490,7 +490,7 @@ func TestLargeDispatch(t *testing.T) {
 		t.Fatalf("prompt over the limit returned %v; want ErrMessageTooLarge", err)
 	}
 	if ready, err := a.Ready(context.Background()); !ready || err != nil {
-		t.Fatalf("adapter after an oversized message: %v %v", ready, err)
+		t.Fatalf("profile after an oversized message: %v %v", ready, err)
 	}
 }
 
@@ -639,25 +639,26 @@ func TestServeHandsTheAdapterItsLogger(t *testing.T) {
 	p, _, logs := launch(t)
 	configured(t, p, "logged", "{}")
 	eventually(t, "the plugin's own log line relayed", func() error {
-		if output := logs.String(); !strings.Contains(output, "configuring adapter") || !strings.Contains(output, "adapter=logged") {
+		if output := logs.String(); !strings.Contains(output, "configuring profile") || !strings.Contains(output, "profile=logged") {
 			return fmt.Errorf("logs:\n%s", output)
 		}
 		return nil
 	})
 }
 
-// A plugin built against protocol version 7 still takes an adapter credential and is incompatible.
-func TestVersionSevenPluginIsRefused(t *testing.T) {
+// A plugin built against protocol version 8 still names the configured unit an adapter and takes its credential from
+// the bundle, and is incompatible.
+func TestVersionEightPluginIsRefused(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "wherry-plugin-old")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|7|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|8|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	p, err := Launch(fixed(script), &syncBuffer{})
 	if err == nil {
 		p.Close()
-		t.Fatal("launched a version 7 plugin")
+		t.Fatal("launched a version 8 plugin")
 	}
-	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 7, Client versions: [8]") {
+	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 8, Client versions: [9]") {
 		t.Fatalf("launch error %v; want the version named", err)
 	}
 }

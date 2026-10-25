@@ -666,8 +666,8 @@ func TestOutputChunksAreBoundedAndCommittedWithTheResult(t *testing.T) {
 
 func TestInputTooLargeFailsTheTurnNamingIt(t *testing.T) {
 	for name, test := range map[string]struct{ reported, message string }{
-		"one of the run's inputs": {"data.csv", "input data.csv takes the run's inputs over what adapter nomad delivers"},
-		"a name the run lacks":    {"other\nname", "an input takes the run's inputs over what adapter nomad delivers"},
+		"one of the run's inputs": {"data.csv", "input data.csv takes the run's inputs over what profile nomad delivers"},
+		"a name the run lacks":    {"other\nname", "an input takes the run's inputs over what profile nomad delivers"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
@@ -689,7 +689,7 @@ func TestInputTooLargeFailsTheTurnNamingIt(t *testing.T) {
 					failures = append(failures, failure)
 				}
 			}
-			if len(failures) != 1 || failures[0].Class != "input-too-large" || failures[0].Adapter != "nomad" {
+			if len(failures) != 1 || failures[0].Class != "input-too-large" || failures[0].Profile != "nomad" {
 				t.Fatalf("start failures %+v, want one input-too-large", failures)
 			}
 		})

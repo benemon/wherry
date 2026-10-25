@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
@@ -42,7 +43,7 @@ const testBucket = "wherry-test"
 type oracle struct {
 	endpoint string
 	config   *StorageConfig
-	sources  map[string]Source
+	sources  map[string]credential.Source
 	store    *minio.Client
 	client   *http.Client
 	secret   string
@@ -51,7 +52,7 @@ type oracle struct {
 type uploadOracle struct {
 	endpoint string
 	config   *StorageConfig
-	sources  map[string]Source
+	sources  map[string]credential.Source
 	mu       sync.Mutex
 	objects  map[string][]byte
 }
@@ -92,7 +93,7 @@ func newUploadOracle(t *testing.T) *uploadOracle {
 		t.Fatal(err)
 	}
 	o.endpoint, o.config = server.URL, &StorageConfig{AccessKey: "storage-access", SecretKey: "storage-secret"}
-	o.sources = map[string]Source{"storage-access": {File: access}, "storage-secret": {File: secret}}
+	o.sources = map[string]credential.Source{"storage-access": {File: access}, "storage-secret": {File: secret}}
 	return o
 }
 
@@ -109,10 +110,10 @@ func newOracle(t *testing.T) *oracle {
 		t.Skip("WHERRY_S3_TEST_ENDPOINT not set")
 	}
 	config := &StorageConfig{AccessKey: "storage-access", SecretKey: "storage-secret"}
-	sources := map[string]Source{"storage-access": {File: os.Getenv("WHERRY_S3_TEST_ACCESS_KEY_FILE")}, "storage-secret": {File: os.Getenv("WHERRY_S3_TEST_SECRET_KEY_FILE")}}
+	sources := map[string]credential.Source{"storage-access": {File: os.Getenv("WHERRY_S3_TEST_ACCESS_KEY_FILE")}, "storage-secret": {File: os.Getenv("WHERRY_S3_TEST_SECRET_KEY_FILE")}}
 	var keys [2]string
 	for i, name := range []string{config.AccessKey, config.SecretKey} {
-		key, err := sources[name].resolve(context.Background())
+		key, err := sources[name].Resolve(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -272,7 +273,7 @@ func TestSubmitUploadsS3InputsBeforePublishing(t *testing.T) {
 	}
 }
 
-func TestSubmitMovesInputsOverSmallestAdapterLimitToS3(t *testing.T) {
+func TestSubmitMovesInputsOverSmallestProfileLimitToS3(t *testing.T) {
 	o := newUploadOracle(t)
 	f := newFixture(t)
 	terms := testTerms()
@@ -398,7 +399,7 @@ func TestSubmitRefusesAPromptOverTheRecordLimit(t *testing.T) {
 
 // A stale receiver keeps the limit its plugin declared, and would fail the run at dispatch with input-too-large if it
 // claimed the inputs inline.
-func TestSubmitAppliesTheAdapterLimitOfAStaleReceiver(t *testing.T) {
+func TestSubmitAppliesTheProfileLimitOfAStaleReceiver(t *testing.T) {
 	o := newUploadOracle(t)
 	f := newFixture(t)
 	terms := testTerms()
@@ -634,7 +635,7 @@ func TestS3UseIsRefusedBeforePublishing(t *testing.T) {
 func TestStorageKeysResolveThroughSources(t *testing.T) {
 	const access, secret = "storage-access-value", "storage-secret-value"
 	t.Setenv("WHERRY_TEST_STORAGE_ACCESS", access+"\n")
-	h := &Host{storage: &StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"}, credentials: map[string]Source{
+	h := &Host{storage: &StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"}, credentials: map[string]credential.Source{
 		"s3-access": {Env: "WHERRY_TEST_STORAGE_ACCESS"},
 		"s3-secret": {Command: []string{"printf", secret + "\n"}},
 	}}
@@ -653,7 +654,7 @@ func TestStorageKeysResolveThroughSources(t *testing.T) {
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for name, source := range map[string]Source{"open file": {File: path}, "unset env": {Env: "WHERRY_TEST_STORAGE_UNSET"}, "failing command": {Command: []string{"sh", "-c", "printf " + secret + "; exit 2"}}} {
+	for name, source := range map[string]credential.Source{"open file": {File: path}, "unset env": {Env: "WHERRY_TEST_STORAGE_UNSET"}, "failing command": {Command: []string{"sh", "-c", "printf " + secret + "; exit 2"}}} {
 		h.credentials["s3-secret"] = source
 		_, err := h.bucket(context.Background(), "pool-s3", pool)
 		if err == nil || !strings.HasPrefix(err.Error(), "read storage credential s3-secret: its ") {

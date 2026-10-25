@@ -54,14 +54,14 @@ func TestScrapeAfterARun(t *testing.T) {
 	}
 	scraped(t, f.receiver,
 		`wherry_claims_total{pool="pool-a",tenant="tenant-a"} 1`,
-		`wherry_admissions_total{adapter="nomad",pool="pool-a",tenant="tenant-a"} 1`,
-		`wherry_queue_wait_seconds_count{adapter="nomad",pool="pool-a",tenant="tenant-a"} 1`,
-		`wherry_dispatch_outcomes_total{adapter="nomad",outcome="created",pool="pool-a"} 1`,
+		`wherry_admissions_total{pool="pool-a",profile="nomad",tenant="tenant-a"} 1`,
+		`wherry_queue_wait_seconds_count{pool="pool-a",profile="nomad",tenant="tenant-a"} 1`,
+		`wherry_dispatch_outcomes_total{outcome="created",pool="pool-a",profile="nomad"} 1`,
 		`wherry_seal_waits_total{outcome="sealed",pool="pool-a",tenant="tenant-a"} 1`,
 		`wherry_seal_wait_seconds_count{pool="pool-a",tenant="tenant-a"} 1`,
-		`wherry_runs_total{adapter="nomad",agent="claude",model="",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
-		`wherry_run_duration_seconds_count{adapter="nomad",agent="claude",model="",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
-		`wherry_in_flight{adapter="nomad",pool="pool-a"} 0`,
+		`wherry_runs_total{agent="claude",model="",pool="pool-a",profile="nomad",state="completed",tenant="tenant-a"} 1`,
+		`wherry_run_duration_seconds_count{agent="claude",model="",pool="pool-a",profile="nomad",state="completed",tenant="tenant-a"} 1`,
+		`wherry_in_flight{pool="pool-a",profile="nomad"} 0`,
 		`wherry_capacity{pool="pool-a"} 1`,
 	)
 }
@@ -86,10 +86,10 @@ func TestScrapeCarriesNoRunMaterial(t *testing.T) {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
 	text := scraped(t, f.receiver,
-		`wherry_runs_total{adapter="nomad",agent="claude",model="",pool="pool-a",`,
+		`wherry_runs_total{agent="claude",model="",pool="pool-a",profile="nomad",`,
 		`state="failed",tenant="tenant-a"} 1`,
-		`wherry_redactions_total{adapter="nomad",pool="pool-a",tenant="tenant-a"} `,
-		`wherry_sweep_failures_total{adapter="nomad",pool="pool-a"} `,
+		`wherry_redactions_total{pool="pool-a",profile="nomad",tenant="tenant-a"} `,
+		`wherry_sweep_failures_total{pool="pool-a",profile="nomad"} `,
 	)
 	host := strings.TrimPrefix(s.endpoint(), "https://")
 	for _, forbidden := range []string{"run-a", credentialName, testToken, host, s3Bucket, s3Signature, "X-Amz", "dataset.bin", "report.pdf", "agent reported no outcome", "node-secret-7", testHost} {
@@ -101,7 +101,7 @@ func TestScrapeCarriesNoRunMaterial(t *testing.T) {
 
 // adapterReceiver is a configured receiver with one fake adapter, enough to scrape its adapter families.
 func adapterReceiver(fake *fakeAdapter) *Receiver {
-	r := &Receiver{config: admin.ReceiverConfig{Pool: testPool}, adapters: []Named{{Name: "nomad", Adapter: fake}}, metrics: newMetrics(prometheus.NewRegistry())}
+	r := &Receiver{config: admin.ReceiverConfig{Pool: testPool}, profiles: []Named{{Name: "nomad", Adapter: fake}}, metrics: newMetrics(prometheus.NewRegistry())}
 	r.metrics.registerFor(r)
 	return r
 }
@@ -114,7 +114,7 @@ func TestAdapterSamplesAreValidated(t *testing.T) {
 	r := adapterReceiver(&fakeAdapter{samples: []adapter.Sample{
 		{Family: "wherry_adapter_platform_errors_total", Labels: map[string]string{"class": "denied"}, Kind: adapter.KindCounter, Value: 4},
 		{Family: "wherry_adapter_cleanup_pending", Kind: adapter.KindGauge, Value: 2},
-		{Family: "wherry_adapter_sweep_deletions_total", Labels: map[string]string{"kind": "variable", "adapter": "nomad"}, Kind: adapter.KindCounter, Value: 7},
+		{Family: "wherry_adapter_sweep_deletions_total", Labels: map[string]string{"kind": "variable", "profile": "nomad"}, Kind: adapter.KindCounter, Value: 7},
 		{Family: "wherry_adapter_placement_seconds", Kind: adapter.KindHistogram, Histogram: placement(0, 1, 2, 2, 3, 3, 3, 3, 3, 3)},
 		{Family: "wherry_adapter_jobs_total", Kind: adapter.KindCounter, Value: 11},
 		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"node": "node-1"}, Kind: adapter.KindGauge, Value: 12},
@@ -122,15 +122,15 @@ func TestAdapterSamplesAreValidated(t *testing.T) {
 		{Family: "wherry_adapter_sweep_deletions_total", Labels: map[string]string{"kind": "job"}, Kind: adapter.KindGauge, Value: 14},
 	}})
 	text := scraped(t, r,
-		`wherry_adapter_platform_errors_total{adapter="nomad",class="denied",pool="pool-a"} 4`,
-		`wherry_adapter_cleanup_pending{adapter="nomad",pool="pool-a"} 2`,
-		`wherry_adapter_sweep_deletions_total{adapter="nomad",kind="variable",pool="pool-a"} 7`,
-		`wherry_adapter_placement_seconds_bucket{adapter="nomad",pool="pool-a",le="2"} 1`,
-		`wherry_adapter_placement_seconds_count{adapter="nomad",pool="pool-a"} 3`,
-		`wherry_metrics_dropped_total{adapter="nomad",pool="pool-a",reason="unknown_family"} `,
-		`wherry_metrics_dropped_total{adapter="nomad",pool="pool-a",reason="unknown_label"} `,
-		`wherry_metrics_dropped_total{adapter="nomad",pool="pool-a",reason="label_value"} `,
-		`wherry_metrics_dropped_total{adapter="nomad",pool="pool-a",reason="kind"} `,
+		`wherry_adapter_platform_errors_total{class="denied",pool="pool-a",profile="nomad"} 4`,
+		`wherry_adapter_cleanup_pending{pool="pool-a",profile="nomad"} 2`,
+		`wherry_adapter_sweep_deletions_total{kind="variable",pool="pool-a",profile="nomad"} 7`,
+		`wherry_adapter_placement_seconds_bucket{pool="pool-a",profile="nomad",le="2"} 1`,
+		`wherry_adapter_placement_seconds_count{pool="pool-a",profile="nomad"} 3`,
+		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="unknown_family"} `,
+		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="unknown_label"} `,
+		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="label_value"} `,
+		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="kind"} `,
 	)
 	for _, dropped := range []string{"wherry_adapter_jobs_total", "node-1", "run-a", "} 11\n", "} 12\n", "} 13\n", "} 14\n"} {
 		if strings.Contains(text, dropped) {
@@ -139,13 +139,13 @@ func TestAdapterSamplesAreValidated(t *testing.T) {
 	}
 }
 
-func TestAdapterSampleCannotSpeakForAnotherAdapter(t *testing.T) {
+func TestAdapterSampleCannotSpeakForAnotherProfile(t *testing.T) {
 	r := adapterReceiver(&fakeAdapter{samples: []adapter.Sample{
-		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"adapter": "other"}, Kind: adapter.KindGauge, Value: 5},
+		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"profile": "other"}, Kind: adapter.KindGauge, Value: 5},
 	}})
-	text := scraped(t, r, `wherry_adapter_cleanup_pending{adapter="nomad",pool="pool-a"} 5`)
-	if strings.Contains(text, `adapter="other"`) {
-		t.Fatalf("scrape holds another adapter's sample:\n%s", text)
+	text := scraped(t, r, `wherry_adapter_cleanup_pending{pool="pool-a",profile="nomad"} 5`)
+	if strings.Contains(text, `profile="other"`) {
+		t.Fatalf("scrape holds another profile's sample:\n%s", text)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestHungAdapterMetricsServeTheLastGoodSamples(t *testing.T) {
 	t.Cleanup(func() { metricsDeadline = previous })
 	fake := &fakeAdapter{samples: []adapter.Sample{{Family: "wherry_adapter_cleanup_pending", Kind: adapter.KindGauge, Value: 3}}}
 	r := adapterReceiver(fake)
-	scraped(t, r, `wherry_adapter_cleanup_pending{adapter="nomad",pool="pool-a"} 3`)
+	scraped(t, r, `wherry_adapter_cleanup_pending{pool="pool-a",profile="nomad"} 3`)
 	fake.mu.Lock()
 	fake.metricsHang, fake.samples = true, nil
 	fake.mu.Unlock()
@@ -165,7 +165,7 @@ func TestHungAdapterMetricsServeTheLastGoodSamples(t *testing.T) {
 		go func() { done <- scrape(t, r) }()
 		select {
 		case text := <-done:
-			if !strings.Contains(text, `wherry_adapter_cleanup_pending{adapter="nomad",pool="pool-a"} 3`) {
+			if !strings.Contains(text, `wherry_adapter_cleanup_pending{pool="pool-a",profile="nomad"} 3`) {
 				t.Fatalf("scrape of a hung adapter lacks its last good sample:\n%s", text)
 			}
 			if elapsed := time.Since(began); elapsed > time.Second {
@@ -175,7 +175,7 @@ func TestHungAdapterMetricsServeTheLastGoodSamples(t *testing.T) {
 			t.Fatal("scrape of a hung adapter did not return")
 		}
 	}
-	scraped(t, r, `wherry_metrics_dropped_total{adapter="nomad",pool="pool-a",reason="timeout"} `)
+	scraped(t, r, `wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="timeout"} `)
 }
 
 // A turn whose agent the pool's terms do not name, such as an interrupted turn ended after the terms changed, counts
@@ -186,7 +186,7 @@ func TestAgentOutsideTheTermsIsLabelledOther(t *testing.T) {
 	run.task.Wherry.Placement.Agent = "gemini"
 	run.ended(wire.TaskStateCompleted)
 	text := scraped(t, f.receiver,
-		`wherry_runs_total{adapter="nomad",agent="other",model="",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
+		`wherry_runs_total{agent="other",model="",pool="pool-a",profile="nomad",state="completed",tenant="tenant-a"} 1`,
 	)
 	if strings.Contains(text, "gemini") {
 		t.Fatalf("scrape holds the unnamed agent:\n%s", text)
@@ -205,8 +205,8 @@ func TestModelOutsideTheTermsIsLabelledOther(t *testing.T) {
 		run.ended(wire.TaskStateCompleted)
 	}
 	text := scraped(t, f.receiver,
-		`wherry_runs_total{adapter="nomad",agent="claude",model="sonnet",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
-		`wherry_runs_total{adapter="nomad",agent="claude",model="other",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
+		`wherry_runs_total{agent="claude",model="sonnet",pool="pool-a",profile="nomad",state="completed",tenant="tenant-a"} 1`,
+		`wherry_runs_total{agent="claude",model="other",pool="pool-a",profile="nomad",state="completed",tenant="tenant-a"} 1`,
 	)
 	if strings.Contains(text, "opus") {
 		t.Fatalf("scrape holds the model outside the terms:\n%s", text)
@@ -217,7 +217,7 @@ func TestModelOutsideTheTermsIsLabelledOther(t *testing.T) {
 func TestStateOutsideTheTaskStatesIsLabelledOther(t *testing.T) {
 	f := newFixture(t, resultStream)
 	testActiveRun(t, f, "run-x", 1).ended(wire.TaskState("TASK_STATE_RUN_A"))
-	text := scraped(t, f.receiver, `wherry_runs_total{adapter="nomad",agent="claude",model="",pool="pool-a",state="other",tenant="tenant-a"} 1`)
+	text := scraped(t, f.receiver, `wherry_runs_total{agent="claude",model="",pool="pool-a",profile="nomad",state="other",tenant="tenant-a"} 1`)
 	if strings.Contains(text, "run_a") {
 		t.Fatalf("scrape holds the unknown state:\n%s", text)
 	}

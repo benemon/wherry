@@ -1,6 +1,6 @@
 default_agent: claude
 max_queue_deadline: 72h
-# Each receiver with no matching adapter spends one delivery, so this covers the pool's receivers plus a margin.
+# Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
 lock_duration: 30s

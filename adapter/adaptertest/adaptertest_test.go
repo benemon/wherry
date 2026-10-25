@@ -48,7 +48,7 @@ func TestConformanceThroughThePlugin(t *testing.T) {
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			t.Fatal(err)
 		}
-		delivered = delivered || entry.Call == "dispatch" && entry.Run.Adapter == "completes" && reflect.DeepEqual(entry.Run.Credentials, adaptertest.Credentials)
+		delivered = delivered || entry.Call == "dispatch" && entry.Run.Profile == "completes" && reflect.DeepEqual(entry.Run.Credentials, adaptertest.Credentials)
 	}
 	if !delivered {
 		t.Fatalf("no dispatch carried %+v across the protocol", adaptertest.Credentials)

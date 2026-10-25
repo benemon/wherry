@@ -41,9 +41,6 @@ type Bundle struct {
 	CA        string `yaml:"ca"`
 	Principal string `yaml:"principal"`
 	Password  string `yaml:"password"`
-	// Platform holds platform credentials by platform name, for platforms that
-	// do not issue one by their own identity.
-	Platform map[string]string `yaml:"platform,omitempty"`
 }
 
 // DecodeYAML decodes encoded into value, refusing unknown fields. An error names only the lines it found, since the
@@ -148,7 +145,7 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 	return service.reconcileACLs(ctx, state)
 }
 
-func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, platform map[string]string, bundlePath string) (err error) {
+func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, bundlePath string) (err error) {
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return err
@@ -183,7 +180,7 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	if err := service.reconcileACLs(ctx, state); err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(config.Receiver), password, platform})
+	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(config.Receiver), password})
 }
 
 // ReceiverConfigure records a new configuration for an existing receiver in its
@@ -234,7 +231,7 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err := service.applyQuota(ctx, state, tenant, principal); err != nil {
 		return err
 	}
-	return writeBundle(bundle, Bundle{service.Broker, service.CA, principal, password, nil})
+	return writeBundle(bundle, Bundle{service.Broker, service.CA, principal, password})
 }
 
 func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) error {
@@ -763,7 +760,7 @@ func largestRecords() ([]feedRecord, error) {
 	outputName := strings.Repeat("a/", 255) + "aa"
 	// A result lists at most 256 collected entries and the expected outputs missing among them. An S3 output is an
 	// expected one, listed with its key, so a result returning 256 of them misses none.
-	metadata, s3Metadata := wire.ResultMetadata{ReceiverID: name, Pool: name, Adapter: name}, wire.ResultMetadata{ReceiverID: name, Pool: name, Adapter: name}
+	metadata, s3Metadata := wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name}, wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name}
 	for range wire.MaxOutputs {
 		metadata.Outputs = append(metadata.Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64})
 		metadata.NotReturned = append(metadata.NotReturned, wire.UnreturnedOutput{Name: outputName, Size: math.MaxInt64, Reason: "rejected: size changed while read"})

@@ -75,6 +75,38 @@ under `https://github.com/acme/`. `storage` takes the S3 access key from a
 file and the secret key from the password manager. Each source resolves each time a receiver
 asks for its credential.
 
+## Receiver local configuration
+
+A YAML file at `/etc/wherry/config.yaml`, or at the path
+`wherry receiver run --config-file` names, read when the receiver starts. It is decoded as the
+client configuration is: unknown and duplicate fields are errors, a decode
+error names only its line numbers, and a leading `~/` is expanded in the
+flag and in every path.
+
+| Field | Default | Content |
+| --- | --- | --- |
+| `bundle` | required | the receiver's bundle |
+| `state_dir` | `state` in the bundle file's directory | the receiver's signing key |
+| `plugin_dir` | `/usr/local/libexec/wherry/plugins` | the directory holding the `wherry-plugin-<type>` binaries |
+| `metrics_addr` | none | `HOST:PORT` to serve [`/metrics`](operations.md#metrics) on; without it the receiver serves no metrics |
+| `credentials` | none | [platform credential](#platform-credentials) name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]`, validated and resolved as the host's |
+
+### Receiver local configuration example
+
+The local configuration of receiver `nomad-1`, setting every field, with a
+source for the `nomad-token` credential the [receiver configuration
+example](#receiver-configuration-example) names:
+
+```yaml
+bundle: /etc/wherry/receiver.bundle
+state_dir: /var/lib/wherry/state
+plugin_dir: /usr/local/libexec/wherry/plugins
+metrics_addr: ":9464"
+credentials:
+  nomad-token:
+    file: /etc/wherry/nomad-token
+```
+
 ## Bundle
 
 A YAML file that `wherry admin` writes with mode 0600. Unknown fields are
@@ -89,7 +121,6 @@ and is not part of it, and a password of nothing else is refused.
 | `ca` | PEM CA certificate for the broker's TLS certificate |
 | `principal` | SCRAM-SHA-512 user name |
 | `password` | SCRAM password |
-| `platform` | receivers only: platform name to platform credential |
 
 ## Pool terms
 
@@ -117,7 +148,7 @@ it names, or `default_model`; with no `default_model` it must name one, and
 `submit` refuses it otherwise. One naming a model outside `models` fails `submit`, and a
 receiver rejects one whose model has left the terms since with
 `model not in the pool's terms`. A task for an agent without `models` names
-no model, and its adapters run the model their command sets. wherry does not
+no model, and its profiles run the model their command sets. wherry does not
 interpret a model name.
 
 ### Agent credentials
@@ -136,7 +167,7 @@ create` refuses terms that break a rule, naming the agent and credential.
 `submit` refuses a task when its host has no source for a required
 credential of the placed agent. A run goes without an optional credential
 its host has no source for, and its [prompt](#agent-contract) names it as not
-supplied. Every adapter of the agent delivers the agent's credentials, each at
+supplied. Every profile of the agent delivers the agent's credentials, each at
 its target.
 
 Each entry of `vcs` is a lowercase host name, optionally with a `:port` of
@@ -165,7 +196,7 @@ broker bounds it between
 `group.share.min.record.lock.duration.ms` and
 `group.share.max.record.lock.duration.ms`. Every delivery counts against
 `delivery_limit`, including a release after a start failure and a release
-by a member with no matching adapter. From attempt
+by a member with no matching profile. From attempt
 `delivery_limit` minus 1, a receiver ends a run `TASK_STATE_FAILED` with
 `delivery budget exhausted` where it would release it, except in the cases
 the [extension](a2a-extension-v1.md#delivery-budget) lists.
@@ -187,7 +218,7 @@ agents:
   - name: coder
     credentials:
       - {name: model-api-key, env: MODEL_API_KEY}
-  # Without models, a task names no model and the adapter's command picks one.
+  # Without models, a task names no model and the profile's command picks one.
   - name: codex
     credentials:
       - {name: openai-api-key, env: CODEX_API_KEY}
@@ -195,7 +226,7 @@ agents:
       - {name: github-token, env: GH_TOKEN, required: false}
 default_agent: claude
 max_queue_deadline: 72h
-# Each receiver with no matching adapter spends one delivery, so this covers the pool's receivers plus a margin.
+# Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
 lock_duration: 30s
@@ -227,7 +258,7 @@ build/
 ```yaml
 default_agent: claude
 max_queue_deadline: 72h
-# Each receiver with no matching adapter spends one delivery, so this covers the pool's receivers plus a margin.
+# Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
 lock_duration: 30s
@@ -266,7 +297,7 @@ credentials:
 `agents/codex.yaml`:
 
 ```yaml
-# Without models, a task names no model and the adapter's command picks one.
+# Without models, a task names no model and the profile's command picks one.
 name: codex
 credentials:
   - {name: openai-api-key, env: CODEX_API_KEY}
@@ -322,37 +353,44 @@ entitled to.
 What `receiver add` and `receiver configure` read, recorded on
 `wherry.admin`: a [directory](#receiver-configuration-directory) named by
 `--config-dir`, or a single YAML file named by `--config-file` with the same
-entries in lists. Exactly one is required. The receiver and pool come from
-the command. Unknown fields are errors.
+entries in maps and lists. Exactly one is required. The receiver and pool
+come from the command. Unknown fields are errors.
 
 | Field of the single file | Content |
 | --- | --- |
 | `capacity` | optional, default 1: runs the receiver holds at once, positive |
-| `platforms` | one or more platform entries |
-| `adapters` | one or more adapter entries, in routing order |
+| `plugins` | one or more plugin entries, keyed by adapter type |
 
-Each platform entry:
-
-| Field | Content |
-| --- | --- |
-| `name` | platform name, unique in the receiver |
-| `type` | the adapter type of its adapters; the receiver runs `wherry-plugin-<type>` for it |
-| `config` | settings shared by its adapters |
-
-Each adapter entry:
+A plugin entry's key is an [adapter](adapters.md) type name; the receiver
+runs `wherry-plugin-<type>` from its plugin directory for it. Each plugin
+entry:
 
 | Field | Content |
 | --- | --- |
-| `name` | adapter name, unique in the receiver |
-| `platform` | the platform entry it takes its type, shared `config` and bundle credential from |
+| `config` | optional; settings every profile of the plugin takes |
+| `profiles` | one or more profile entries, in routing order |
+
+Each profile entry:
+
+| Field | Content |
+| --- | --- |
+| `name` | profile name, unique in the receiver |
 | `agent` | the agent it launches, from the pool's terms |
 | `labels` | optional; [labels](commands.md#labels) for placement |
-| `config` | the adapter type's settings |
+| `config` | the plugin's settings for this profile |
 
-An adapter's `config` is its platform's `config` merged with its own at the
-top level. A top-level key set in both is an error that names the adapter
-entry's file or list index, the key and the platform:
-`<where>: config key "<key>" is also set by platform "<platform>"`. Nested values do not merge.
+A profile's `config` is its plugin's `config` merged with its own at the
+top level. A top-level key set in both is an error that names the profile
+entry's file or list index, the key and the plugin. Nested values do not
+merge. A `credential` key in the merged `config` names a [platform
+credential](#platform-credentials).
+
+The receiver routes a run to the first ready profile, in order within its
+plugin, whose agent and labels satisfy the task. It visits the plugins in
+the order of their types, so the host and the receiver compute the same
+match, but labels choose between plugins and no configuration relies on an
+order between them. The record on `wherry.admin` holds each profile with
+its name, plugin type, agent, labels and merged `config`.
 
 ### Receiver configuration directory
 
@@ -360,73 +398,73 @@ The directory holds:
 
 ```
 receiver.yaml
-platforms/
-  <platform>.yaml
-adapters/
-  <adapter>.yaml
+plugins/
+  <type>/
+    plugin.yaml
+    profiles/
+      <profile>.yaml
 ```
 
 | File | Fields |
 | --- | --- |
 | `receiver.yaml` | `capacity` |
-| `platforms/*.yaml` | one platform entry |
-| `adapters/*.yaml` | one adapter entry; routing order is the lexical order of the file names |
+| `plugins/<type>/plugin.yaml` | optional: the plugin's `config` |
+| `plugins/<type>/profiles/*.yaml` | one profile entry; routing order within the plugin is the lexical order of the file names |
 
-Unknown fields, an unknown platform, a repeated adapter or platform name,
-an empty `adapters/`, a nested directory, and any file other than
-`receiver.yaml` and `.yaml` files in `platforms/` and `adapters/` are
-errors. Files and directories whose names start with `.` are ignored. The
-command writes nothing when the directory has an error.
+Unknown fields, a repeated profile name, a plugin with no profile files, and
+any other file or directory are errors. Files and directories whose names
+start with `.` are ignored. The command writes nothing when the directory
+has an error.
 
 ### Receiver configuration example
 
 Receiver `nomad-1` in pool `build`, against the
-[pool terms example](#pool-terms-example): one Nomad cluster and two
-adapters in routing order, one running its agent in a container and one as
-an isolated process on the host. Each adapter's `config`
-holds only what the example needs; the
+[pool terms example](#pool-terms-example): one Nomad plugin and two
+profiles in routing order, `container` running its agent in a container and
+`host` running its agent as an isolated process on the host. The plugin's
+`config` holds the cluster's address and the name of its token, and each
+profile's `config` holds only what the example needs; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
-lists every setting. Neither adapter names a credential: each delivers its
-agent's credentials at the targets the pool's terms give them. As one file for
+lists every setting. Neither profile names an agent credential: each
+delivers its agent's credentials at the targets the pool's terms give them.
+As one file for
 `receiver add nomad-1 --pool build --config-file nomad-1.yaml`:
 
 ```yaml
 capacity: 3
-platforms:
-  - name: nomad
-    type: nomad
-    # Every adapter on this platform takes these keys and must not set them itself.
+plugins:
+  nomad:
+    # Every profile of this plugin takes these keys and must not set them itself.
     config:
       address: https://nomad.example.com:4646
       ca_file: /etc/wherry/nomad-ca.pem
       namespace: agents
-adapters:
-  - name: claude-container
-    platform: nomad
-    agent: claude
-    labels:
-      isolation: container
-    config:
-      runtime:
-        driver: docker
+      credential: nomad-token
+    profiles:
+      - name: container
+        agent: claude
+        labels:
+          isolation: container
         config:
-          image: registry.example.com/claude-agent:1.0
-  - name: codex-host
-    platform: nomad
-    agent: codex
-    labels:
-      isolation: host
-    config:
-      node_pool: codex
-      runtime:
-        driver: exec
+          runtime:
+            driver: docker
+            config:
+              image: registry.example.com/claude-agent:1.0
+      - name: host
+        agent: codex
+        labels:
+          isolation: host
         config:
-          command: /bin/sh
-          args:
-            - -c
-            - >-
-              exec codex exec --json --ephemeral --skip-git-repo-check
-              --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
+          node_pool: codex
+          runtime:
+            driver: exec
+            config:
+              command: /bin/sh
+              args:
+                - -c
+                - >-
+                  exec codex exec --json --ephemeral --skip-git-repo-check
+                  --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
 ```
 
 The same configuration as a directory for
@@ -435,11 +473,12 @@ The same configuration as a directory for
 ```
 nomad-1/
   receiver.yaml
-  platforms/
-    nomad.yaml
-  adapters/
-    10-claude-container.yaml
-    20-codex-host.yaml
+  plugins/
+    nomad/
+      plugin.yaml
+      profiles/
+        10-container.yaml
+        20-host.yaml
 ```
 
 `receiver.yaml`:
@@ -448,23 +487,21 @@ nomad-1/
 capacity: 3
 ```
 
-`platforms/nomad.yaml`:
+`plugins/nomad/plugin.yaml`:
 
 ```yaml
-name: nomad
-type: nomad
-# Every adapter on this platform takes these keys and must not set them itself.
+# Every profile of this plugin takes these keys and must not set them itself.
 config:
   address: https://nomad.example.com:4646
   ca_file: /etc/wherry/nomad-ca.pem
   namespace: agents
+  credential: nomad-token
 ```
 
-`adapters/10-claude-container.yaml`:
+`plugins/nomad/profiles/10-container.yaml`:
 
 ```yaml
-name: claude-container
-platform: nomad
+name: container
 agent: claude
 labels:
   isolation: container
@@ -475,11 +512,10 @@ config:
       image: registry.example.com/claude-agent:1.0
 ```
 
-`adapters/20-codex-host.yaml`:
+`plugins/nomad/profiles/20-host.yaml`:
 
 ```yaml
-name: codex-host
-platform: nomad
+name: host
 agent: codex
 labels:
   isolation: host
@@ -496,16 +532,30 @@ config:
           --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
 ```
 
-A task runs on the first ready adapter of its agent whose labels satisfy its
-selector. Each adapter here launches a different agent, so a task for
-`claude`, the pool's default agent, runs on `claude-container`, and
-`--selector isolation=host` leaves it no adapter.
+A task runs on the first ready profile of its agent whose labels satisfy its
+selector. Each profile here launches a different agent, so a task for
+`claude`, the pool's default agent, runs on `container`, and
+`--selector isolation=host` leaves it no profile.
 
-### Adapter settings
+### Profile settings
 
-An adapter's `config` section belongs to its plugin. The
+A profile's `config` section belongs to its plugin. The
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
 lists its settings and the jobs it runs.
+
+### Platform credentials
+
+A merged profile `config` may set `credential: <name>`, normally in the
+plugin's `config` beside the address it authenticates. The receiver
+resolves the name from the `credentials` of its [local
+configuration](#receiver-local-configuration) when it configures the
+profile, at start and after a configuration change, so a rotated value
+takes effect on the receiver's next start. It trims a trailing CR and LF
+from the value, removes the `credential` key from the `config` it sends the
+plugin, and passes the value to the plugin in the profile's `Configure`. A
+name with no source fails that profile's configuration with an error naming
+the profile and the credential. Sources stay on the receiver's host and are
+never recorded on `wherry.admin`.
 
 ### Agent contract
 
@@ -518,7 +568,7 @@ variable or the file in `WHERRY_CREDENTIALS_DIR` the
 the paths of its [input, credential and output
 directories](a2a-extension-v1.md#inputs-and-outputs). `WHERRY_MODEL` holds
 the task's model when its agent has [`models`](#pool-terms), and is not set
-otherwise, so the adapter's command reads it with its own fallback, such as
+otherwise, so the profile's command reads it with its own fallback, such as
 `test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;` before
 `--model "$WHERRY_MODEL"`.
 

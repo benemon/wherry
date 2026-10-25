@@ -42,7 +42,7 @@ differently live on different topics.
 A host and a receiver read and write these topics as their grants allow,
 beside the platform, object storage and git remote a run uses.
 
-![wherry's implementation: a host, the Kafka topics, a receiver with adapter plugins, a platform job, object storage and a git remote](diagrams/implementation.svg)
+![wherry's implementation: a host, the Kafka topics, a receiver with its plugins, a platform job, object storage and a git remote](diagrams/implementation.svg)
 
 `wherry.admin` records and seals carry no signature: each sits on a topic only
 one principal can write, so Kafka authenticates it. Every other record, key
@@ -74,15 +74,18 @@ names, hosts, entitlements and pools.
 ## Configuration delivery
 
 A receiver's configuration is a record on `wherry.admin`: its capacity
-(the runs it holds at once) and its ordered adapters, each with a name, a
-type, an agent, labels and the adapter's own settings. It holds no secrets
-and names no credential: every adapter of an agent delivers the agent's
-credentials as the pool's terms give them. `wherry admin` refuses a
-configuration that names an agent outside the pool's terms.
+(the runs it holds at once) and its profiles, each with a name, its plugin's
+type, an agent, labels and its merged settings for the plugin. It holds no
+secrets and names no agent credential: every profile of an agent delivers
+the agent's credentials as the pool's terms give them. A profile's settings
+may name a platform credential, whose source the receiver's local
+configuration holds. `wherry admin` refuses a configuration that names an
+agent outside the pool's terms.
 
-A receiver starts with its bundle, a state directory and a plugin directory. It
-registers its signing key, waits for its configuration record, validates it
-against the terms and builds its adapters. It then advertises every 30 seconds.
+A receiver starts with its local configuration, which names its bundle, a
+state directory, a plugin directory and the sources of its platform
+credentials. It registers its signing key, waits for its configuration
+record, validates it against the terms and configures its profiles. It then advertises every 30 seconds.
 When a new configuration record appears, the receiver stops and exits, so its
 platform restarts it with the new configuration. Runs in flight are adopted on
 redelivery.

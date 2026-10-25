@@ -12,7 +12,7 @@ import (
 )
 
 // resolvePlacement chooses, among live advertisements in the tenant's entitled pools, the member with the most spare
-// capacity, then the lowest receiver ID, that has a ready adapter launching the agent with labels satisfying selector.
+// capacity, then the lowest receiver ID, that has a ready profile launching the agent with labels satisfying selector.
 // An empty agent takes the pool's default agent, then its declared order. Labels come from the operator's config
 // record, never the advertisement. When no member places the task and a pool's terms refuse its model, the error is
 // that refusal.
@@ -40,7 +40,7 @@ func resolvePlacement(state admin.State, tenant, agent, model string, selector [
 }
 
 // place returns the first agent, by preference, whose terms in pool hold model and that one of the member's ready
-// adapters launches with labels satisfying selector. An empty model takes the agent's default model, and an agent with
+// profiles launches with labels satisfying selector. An empty model takes the agent's default model, and an agent with
 // models but no default requires one.
 func place(terms admin.Terms, pool string, config admin.ReceiverConfig, agent, model string, selector []wire.Requirement, offers []wire.Offer) (wire.Placement, error) {
 	if agent != "" {
@@ -73,8 +73,8 @@ func place(terms admin.Terms, pool string, config admin.ReceiverConfig, agent, m
 	}
 	for _, candidate := range candidates {
 		for _, offer := range offers {
-			index := slices.IndexFunc(config.Adapters, func(adapter admin.AdapterSettings) bool { return adapter.Name == offer.Adapter })
-			if index >= 0 && config.Adapters[index].Agent == candidate.Name && wire.Satisfies(selector, config.Adapters[index].Labels) {
+			index := slices.IndexFunc(config.Profiles, func(profile admin.ProfileSettings) bool { return profile.Name == offer.Profile })
+			if index >= 0 && config.Profiles[index].Agent == candidate.Name && wire.Satisfies(selector, config.Profiles[index].Labels) {
 				placed := wire.Placement{Agent: candidate.Name, Selector: selector, Model: model}
 				if model == "" {
 					placed.Model = candidate.DefaultModel
@@ -95,8 +95,8 @@ func spare(ad wire.Advertisement) int64 {
 	return ad.Capacity - ad.InFlight
 }
 
-// adapterInlineLimit returns the smallest declared limit of the advertised adapters in pool that satisfy placement.
-func adapterInlineLimit(state admin.State, pool string, placement wire.Placement, ads map[string]wire.Advertisement) (int64, string) {
+// profileInlineLimit returns the smallest declared limit of the advertised profiles in pool that satisfy placement.
+func profileInlineLimit(state admin.State, pool string, placement wire.Placement, ads map[string]wire.Advertisement) (int64, string) {
 	var limit int64
 	var limiting string
 	for _, receiver := range slices.Sorted(maps.Keys(ads)) {
@@ -106,12 +106,12 @@ func adapterInlineLimit(state admin.State, pool string, placement wire.Placement
 		}
 		config := state.Receivers[receiver]
 		for _, offer := range ad.Offers {
-			index := slices.IndexFunc(config.Adapters, func(adapter admin.AdapterSettings) bool { return adapter.Name == offer.Adapter })
-			if index < 0 || config.Adapters[index].Agent != placement.Agent || !wire.Satisfies(placement.Selector, config.Adapters[index].Labels) {
+			index := slices.IndexFunc(config.Profiles, func(profile admin.ProfileSettings) bool { return profile.Name == offer.Profile })
+			if index < 0 || config.Profiles[index].Agent != placement.Agent || !wire.Satisfies(placement.Selector, config.Profiles[index].Labels) {
 				continue
 			}
 			if offer.InlineLimit > 0 && (limit == 0 || offer.InlineLimit < limit) {
-				limit, limiting = offer.InlineLimit, offer.Adapter
+				limit, limiting = offer.InlineLimit, offer.Profile
 			}
 		}
 	}

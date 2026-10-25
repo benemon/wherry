@@ -2,6 +2,14 @@
 
 URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
+**Change note, 2026-10-25:** edited in place at version 1. The configured
+unit a run is routed to is a profile, a named, configured use of an adapter.
+The member `adapter` of advertisement offers, start failures and result
+metadata is renamed `profile`. The receiver configuration on
+`wherry.admin` holds `profiles` in place of `adapters`, each with `plugin`
+in place of `type` and no `platform`. Messages that named the adapter name
+the profile.
+
 Hosts and receivers exchange A2A tasks over Kafka with no server between
 them. This extension fixes the record formats and the checks each reader
 applies. Five of the records carry [A2A v1.0](https://a2a-protocol.org/)
@@ -28,7 +36,7 @@ names.
   have `parts`, each present even when empty. A `data` part holds valid
   JSON.
 - A2A identifiers (`messageId`, `taskId`, `contextId`, `artifactId`) and
-  wherry's tenant, host, receiver, pool, adapter, agent and event IDs are
+  wherry's tenant, host, receiver, pool, profile, agent and event IDs are
   non-empty and lowercase. `metadata`, wherever it appears, is a JSON object.
 - A task hash is the lowercase hex SHA-256 of a submission's record value,
   the compact JWS bytes as they appear on the topic.
@@ -144,7 +152,7 @@ A submission is the task of one run.
   submission is at most the pool's recorded `record_limit` bytes, the
   broker's record limit for the pool's tasks topic, and the `raw` and `data`
   parts together hold at most the smallest `inline_limit` the matching
-  adapters declare. Over either, a host carries the inputs as
+  profiles declare. Over either, a host carries the inputs as
   [S3 inputs](#s3-inputs-and-outputs) when the pool has storage and the host
   a storage credential, and otherwise refuses the run.
 - `credentials` lists task credentials, each `{name, env}` or `{name, file}`:
@@ -262,10 +270,10 @@ base64 does. The fixed texts are:
   `S3 output <name>`),
   `receiver denied`, `delivery budget exhausted`,
   `start failed and the job could not be removed`,
-  `input <name> takes the run's inputs over what adapter <adapter>
-  delivers`, naming the input at which they pass the adapter's limit (or
-  `an input takes the run's inputs over what adapter <adapter> delivers`
-  when the adapter names no input of the run),
+  `input <name> takes the run's inputs over what profile <profile>
+  delivers`, naming the input at which they pass the profile's limit (or
+  `an input takes the run's inputs over what profile <profile> delivers`
+  when the plugin names no input of the run),
   `required output <name> not returned: <reason>` with a reason from
   [Metadata](#metadata), and, when the [seal wait](#seal-request) expires,
   `credential <name> was not answered within 5m; add it to credentials in
@@ -409,15 +417,15 @@ The `metadata` of a result's `Task` says where the run executed:
 
 - `receiver_id` (string): the receiver that wrote the result.
 - `pool` (string): the pool.
-- `adapter` (string): the adapter that ran or matched the run. It is
-  absent when no ready adapter satisfied the placement.
-- `labels` (object of strings): the labels of the adapter this attempt
+- `profile` (string): the profile that ran or matched the run. It is
+  absent when no ready profile satisfied the placement.
+- `labels` (object of strings): the labels of the profile this attempt
   dispatched the job to. It is absent when no job was dispatched, when the
-  attempt adopted an earlier attempt's job, and when the adapter declares no
+  attempt adopted an earlier attempt's job, and when the profile declares no
   labels.
-- `job` (string): the adapter's reference for the job on its platform, for
+- `job` (string): the plugin's reference for the job on its platform, for
   diagnosis only. It is absent when no job was dispatched or adopted, and
-  when the adapter gives none.
+  when the plugin gives none.
 - `outputs` (array): each output the run returned, as `{name, sha256,
   size}`, where `sha256` is the lowercase hex SHA-256 and `size` the byte
   count of the bytes its output chunks carry. The receiver computes both.
@@ -464,7 +472,7 @@ An echo tells every host of a tenant where a run was admitted.
 
 A receiver writes the echo in the transaction that holds the run's
 `claimed` or `rejected` status, or its `terminal` status when the receiver
-ends at the [delivery budget](#delivery-budget) a run no ready adapter
+ends at the [delivery budget](#delivery-budget) a run no ready profile
 satisfies. The echo's fields copy the submission's. A
 host that has no record of the run takes the run's pool from its first
 valid echo, and ignores records of the run from any other pool. A status or
@@ -479,24 +487,24 @@ An advertisement reports a receiver's liveness and capacity.
 {
   "v": 1,
   "receiver": "nomad-1", "pool": "build",
-  "offers": [{"adapter": "container", "agent": "coder"}],
+  "offers": [{"profile": "container", "agent": "coder"}],
   "capacity": 2, "in_flight": 0,
   "at_ms": 1789998000000
 }
 ```
 
-- `offers` lists the receiver's ready adapters in declared order, each as
-  `adapter`, `agent` and, optionally, `inline_limit`, the bytes of `raw`
-  and `data` parts the adapter delivers, absent when it declares no limit
-  and never negative. It is empty when no adapter is ready. Readers take an
-  adapter's agent and labels from the receiver's configuration record on
-  `wherry.admin`. Each `adapter` appears at most once. A host takes the
+- `offers` lists the receiver's ready profiles in routing order, each as
+  `profile`, `agent` and, optionally, `inline_limit`, the bytes of `raw`
+  and `data` parts the profile delivers, absent when it declares no limit
+  and never negative. It is empty when no profile is ready. Readers take a
+  profile's agent and labels from the receiver's configuration record on
+  `wherry.admin`. Each `profile` appears at most once. A host takes the
   smallest `inline_limit` among the offers that satisfy a placement in each
   receiver's last advertisement, live or stale; submitting inputs over it,
   the host carries them as S3 inputs, or refuses the run when the pool or
   the host has no storage.
 - `capacity` and `in_flight` are 0 or more, and `at_ms` is over 0.
-- A receiver advertises every 30 seconds, with or without a ready adapter.
+- A receiver advertises every 30 seconds, with or without a ready profile.
   Placement passes over a receiver whose `offers` is empty. Readers take
   each receiver's
   latest valid advertisement, and treat it as live when `at_ms` is within
@@ -516,7 +524,7 @@ start failure ends the run as its class describes.
 {
   "v": 1,
   "wherry": {"receiver": "nomad-1", "tenant": "alice", "pool": "build", "run": "run-0f3c...", "attempt": 2},
-  "adapter": "container",
+  "profile": "container",
   "agent": "coder",
   "class": "dispatch"
 }
@@ -524,15 +532,15 @@ start failure ends the run as its class describes.
 
 | `class` | Meaning |
 | --- | --- |
-| `dispatch` | the adapter created no job for the run |
+| `dispatch` | the plugin created no job for the run |
 | `platform` | the platform ended the job before its agent task started, for example when the image cannot be pulled |
-| `input-too-large` | the adapter cannot deliver one of the run's inputs; the receiver then ends the run `TASK_STATE_FAILED` naming the input, and releases nothing |
+| `input-too-large` | the profile cannot deliver one of the run's inputs; the receiver then ends the run `TASK_STATE_FAILED` naming the input, and releases nothing |
 
 A `platform` start failure can follow the run's `started` status, when the
 job ended before its agent task started. The platform's reason for it goes to
 the receiver's log, not to the start failure.
 
-`adapter` is the adapter the receiver routed the task to.
+`profile` is the profile the receiver routed the task to.
 
 ### Delivery budget
 
@@ -542,7 +550,7 @@ message text `delivery budget exhausted` instead. When the attempt's own
 start failure spends the budget, the text continues
 `after <attempt> attempts; last: <cause>`, where the cause is
 `job never started (<class>): <reason>` with the platform's class and
-reason, `job never started`, or `adapter <adapter> created no job`. The
+reason, `job never started`, or `profile <profile> created no job`. The
 cause carries the marker of each credential value delivered to a run the
 receiver holds in place of the value, has no URLs, and is one line of at
 most 512 bytes. This covers start
@@ -550,7 +558,7 @@ failures, a dispatch whose outcome the receiver cannot resolve, a failed
 read of the pool's events or of the host's topic once the run is claimed,
 and a failure to find, stop or remove the run's job. When only stopping the
 job fails at the budget, the run ends from the agent's exit status without
-its outputs or outcome file, and the adapter's sweep removes the job. These
+its outputs or outcome file, and the plugin's sweep removes the job. These
 releases are exempt:
 
 - a receiver that cannot read the pool's events at admission releases the
@@ -835,11 +843,11 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 and `record_limit`, the tasks topic's record limit that `pool create` reads
 from the broker, with `max_queue_deadline_ms` and `lock_duration_ms` in milliseconds for its
 `max_queue_deadline` and `lock_duration`. `config` holds `receiver` and `pool`,
-which equal the record's, the receiver's `capacity`, and its `adapters` in
-routing order. Each adapter is the
-[adapter entry](configuration.md#receiver-configuration) as `name`, `platform`
-naming the platform, the platform's `type`, `agent`,
-and `labels` when set, and the merged `config`. An `end` names
+which equal the record's, the receiver's `capacity`, and its `profiles` in
+routing order, the plugins in the order of their types. Each profile is the
+[profile entry](configuration.md#receiver-configuration) as `name`, `plugin`
+naming its plugin's type, `agent`, `labels` when set, and the merged
+`config`, which keeps a `credential` name and never a credential value. An `end` names
 exactly one of `receiver`, or `tenant` and `host`.
 Readers fold the records in order. A reader loads no state when:
 
@@ -875,7 +883,7 @@ A receiver that claims a submission:
    `model not in the pool's terms` when the agent has `models` and the
    placement names no model or one outside the current `models`, or the
    agent has no `models` and the placement names one;
-5. releases it when no ready adapter satisfies the placement;
+5. releases it when no ready profile satisfies the placement;
 6. rejects it with `duplicate submission` when it is not the run's earliest
    submission on the pool's task topic that a live host's current key
    verifies;

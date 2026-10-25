@@ -40,9 +40,9 @@ func testRecords() map[string]Record {
 		"result": &Result{Task: Task{ID: "run-a", ContextID: "run-a", Status: TaskStatus{State: "TASK_STATE_COMPLETED", Timestamp: testTime}, Artifacts: []Artifact{}, History: []Message{testMessage("run-a")}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
 		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Placement: placement, TaskHash: testHash, MessageID: "message-a"},
-		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Adapter: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
+		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Profile: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
 		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 1},
-		"start failure":                &StartFailure{Wherry: testBinding(), Adapter: "nomad", Agent: "claude", Class: "launch"},
+		"start failure":                &StartFailure{Wherry: testBinding(), Profile: "nomad", Agent: "claude", Class: "launch"},
 		"seal request": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
 			Credentials: []string{"model"}, ExpiryMS: 1},
 		"seal request for task credentials alone": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
@@ -168,7 +168,7 @@ func TestRecordValidation(t *testing.T) {
 			value.TaskHash = ""
 			return value
 		},
-		"advertisement with a duplicate offer adapter": func(r map[string]Record) Record {
+		"advertisement with a duplicate offer profile": func(r map[string]Record) Record {
 			value := r["advertisement"].(*Advertisement)
 			value.Offers = append(value.Offers, value.Offers[0])
 			return value
@@ -275,7 +275,7 @@ func TestRecordValidation(t *testing.T) {
 	}
 }
 
-// The limits on inline inputs are the broker's and the adapters', so a submission of any size signs and the host applies them.
+// The limits on inline inputs are the broker's and the profiles', so a submission of any size signs and the host applies them.
 func TestValidateInputsAppliesTheLimit(t *testing.T) {
 	parts := []Part{{Text: "hello"}, {Raw: make(StdBytes, 60), Filename: "a"}, {Data: []byte(`"` + strings.Repeat("x", 38) + `"`), Filename: "b"}}
 	if err := ValidateInputs(parts, 100); err != nil {

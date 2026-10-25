@@ -19,7 +19,7 @@ import (
 // durationBuckets bound the core's histograms, in seconds, from one second to six hours.
 var durationBuckets = []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400, 21600}
 
-// metricsDeadline bounds each adapter's Metrics call at scrape time; a variable so tests can shorten it.
+// metricsDeadline bounds each profile's Metrics call at scrape time; a variable so tests can shorten it.
 var metricsDeadline = 2 * time.Second
 
 // Every label value is drawn from the receiver's configuration, its pool's terms and entitlements, or a fixed list in
@@ -39,7 +39,7 @@ type metrics struct {
 	renewalFailures, transactionAborts, ambiguousCommits, fenced  prometheus.Counter
 
 	adapterDescs map[string]*prometheus.Desc
-	// lastGood holds, by adapter, the samples of its latest Metrics call that answered.
+	// lastGood holds, by profile, the samples of its latest Metrics call that answered.
 	mu       sync.Mutex
 	lastGood map[string][]prometheus.Metric
 }
@@ -62,34 +62,34 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 		return vec
 	}
 	m.claims = counters("claims_total", "Tasks claimed and authorised.", "tenant")
-	m.admissions = counters("admissions_total", "Tasks admitted to run.", "tenant", "adapter")
+	m.admissions = counters("admissions_total", "Tasks admitted to run.", "tenant", "profile")
 	m.rejections = counters("rejections_total", "Tasks rejected, by reason.", "tenant", "reason")
-	m.runs = counters("runs_total", "Runs ended, by terminal state.", "tenant", "adapter", "agent", "model", "state")
-	m.adoptions = counters("adoptions_total", "Runs that adopted an earlier attempt's job.", "tenant", "adapter")
-	m.redeliveries = counters("redeliveries_total", "Runs executed on a redelivery.", "tenant", "adapter")
-	m.runDuration = histograms("run_duration_seconds", "Time from claim to a run's terminal state.", "tenant", "adapter", "agent", "model", "state")
-	m.queueWait = histograms("queue_wait_seconds", "Time from submission to first claim.", "tenant", "adapter")
-	m.inFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_in_flight", Help: "Tasks held, by the adapter they were routed to."}, []string{"adapter"})
+	m.runs = counters("runs_total", "Runs ended, by terminal state.", "tenant", "profile", "agent", "model", "state")
+	m.adoptions = counters("adoptions_total", "Runs that adopted an earlier attempt's job.", "tenant", "profile")
+	m.redeliveries = counters("redeliveries_total", "Runs executed on a redelivery.", "tenant", "profile")
+	m.runDuration = histograms("run_duration_seconds", "Time from claim to a run's terminal state.", "tenant", "profile", "agent", "model", "state")
+	m.queueWait = histograms("queue_wait_seconds", "Time from submission to first claim.", "tenant", "profile")
+	m.inFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_in_flight", Help: "Tasks held, by the profile they were routed to."}, []string{"profile"})
 	m.capacity = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_capacity", Help: "Tasks the receiver holds at once."})
 	m.collectors = append(m.collectors, m.inFlight, m.capacity)
-	m.startFailures = counters("start_failures_total", "Start failures, by class.", "adapter", "class")
-	m.dispatchOutcomes = counters("dispatch_outcomes_total", "Dispatch outcomes.", "adapter", "outcome")
-	m.stopFailures = counters("stop_failures_total", "Failed adapter Stop calls.", "adapter")
-	m.purgeFailures = counters("purge_failures_total", "Failed adapter Purge calls.", "adapter")
-	m.sweepFailures = counters("sweep_failures_total", "Failed adapter Sweep calls.", "adapter")
-	m.collectionFailures = counters("collection_failures_total", "Runs whose outputs were not collected, by reason.", "adapter", "reason")
+	m.startFailures = counters("start_failures_total", "Start failures, by class.", "profile", "class")
+	m.dispatchOutcomes = counters("dispatch_outcomes_total", "Dispatch outcomes.", "profile", "outcome")
+	m.stopFailures = counters("stop_failures_total", "Failed adapter Stop calls.", "profile")
+	m.purgeFailures = counters("purge_failures_total", "Failed adapter Purge calls.", "profile")
+	m.sweepFailures = counters("sweep_failures_total", "Failed adapter Sweep calls.", "profile")
+	m.collectionFailures = counters("collection_failures_total", "Runs whose outputs were not collected, by reason.", "profile", "reason")
 	m.sealWaits = counters("seal_waits_total", "Seal waits, by outcome.", "tenant", "outcome")
 	m.sealWait = histograms("seal_wait_seconds", "Time a run waited for its seal.", "tenant")
-	m.redactions = counters("redactions_total", "Credential values replaced in published output.", "tenant", "adapter")
+	m.redactions = counters("redactions_total", "Credential values replaced in published output.", "tenant", "profile")
 	m.busErrors = counters("bus_errors_total", "Kafka operation errors, by operation.", "op")
 	m.denials = counters("denials_total", "Kafka authorisation errors, by the capability denied.", "op")
 	m.renewalFailures = counter("renewal_failures_total", "Failed claim renewals.")
 	m.transactionAborts = counter("transaction_aborts_total", "Transactions aborted after a failed produce.")
 	m.ambiguousCommits = counter("ambiguous_commits_total", "Transaction commits with an unknown outcome.")
 	m.fenced = counter("fenced_total", "Runs given up to a newer holder.")
-	m.dropped = counters("metrics_dropped_total", "Adapter samples refused, and adapter Metrics calls that failed, by reason.", "adapter", "reason")
+	m.dropped = counters("metrics_dropped_total", "Adapter samples refused, and adapter Metrics calls that failed, by reason.", "profile", "reason")
 	for _, family := range adapterFamilies {
-		labels := []string{"adapter"}
+		labels := []string{"profile"}
 		if family.label != "" {
 			labels = append(labels, family.label)
 		}
@@ -98,7 +98,7 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	return m
 }
 
-// adapterFamily is a metric family the core declares for adapters: its one label besides adapter, if any, takes only
+// adapterFamily is a metric family the core declares for adapters: its one label besides profile, if any, takes only
 // values.
 type adapterFamily struct {
 	name, help string
@@ -122,7 +122,7 @@ func (m *metrics) registerFor(r *Receiver) {
 	})
 }
 
-// adapterCollector collects the adapters' samples at scrape time.
+// adapterCollector collects the profiles' samples at scrape time.
 type adapterCollector struct{ receiver *Receiver }
 
 func (c adapterCollector) Describe(descs chan<- *prometheus.Desc) {
@@ -131,12 +131,12 @@ func (c adapterCollector) Describe(descs chan<- *prometheus.Desc) {
 	}
 }
 
-// Collect calls every adapter's Metrics at once, each within metricsDeadline. An adapter whose call fails gives the
+// Collect calls every profile's Metrics at once, each within metricsDeadline. A profile whose call fails gives the
 // samples of its last call that answered.
 func (c adapterCollector) Collect(out chan<- prometheus.Metric) {
 	m := c.receiver.metrics
 	var wg sync.WaitGroup
-	for _, named := range c.receiver.adapters {
+	for _, named := range c.receiver.profiles {
 		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), metricsDeadline)
 			defer cancel()
@@ -159,7 +159,7 @@ func (c adapterCollector) Collect(out chan<- prometheus.Metric) {
 	wg.Wait()
 }
 
-// adapterMetrics keeps the samples that fit the core's adapter families, with the adapter label pinned to name, and
+// adapterMetrics keeps the samples that fit the core's adapter families, with the profile label pinned to name, and
 // counts each one it drops by reason.
 func (m *metrics) adapterMetrics(name string, samples []adapter.Sample) []prometheus.Metric {
 	var kept []prometheus.Metric
@@ -184,7 +184,7 @@ func (m *metrics) adapterMetrics(name string, samples []adapter.Sample) []promet
 	return kept
 }
 
-// adapterLabels returns the label values of sample's family, the adapter's name first, or the reason sample is
+// adapterLabels returns the label values of sample's family, the profile's name first, or the reason sample is
 // dropped.
 func adapterLabels(name string, sample adapter.Sample) ([]string, string) {
 	index := slices.IndexFunc(adapterFamilies, func(family adapterFamily) bool { return family.name == sample.Family })
@@ -193,7 +193,7 @@ func adapterLabels(name string, sample adapter.Sample) ([]string, string) {
 	}
 	family := adapterFamilies[index]
 	for key := range sample.Labels {
-		if key != "adapter" && key != family.label {
+		if key != "profile" && key != family.label {
 			return nil, "unknown_label"
 		}
 	}
@@ -259,14 +259,14 @@ func (r *Receiver) placementLabels(placement wire.Placement) (string, string) {
 // state outside wire's is labelled other.
 func (run *activeRun) ended(state wire.TaskState) {
 	m, tenant := run.receiver.metrics, run.task.Wherry.Tenant
-	adapter := cmp.Or(run.adapter.Name, "none")
+	profile := cmp.Or(run.profile.Name, "none")
 	agent, model := run.receiver.placementLabels(run.task.Wherry.Placement)
 	label := "other"
 	if wire.ValidTaskState(state) {
 		label = strings.ToLower(strings.TrimPrefix(string(state), "TASK_STATE_"))
 	}
-	m.runs.WithLabelValues(tenant, adapter, agent, model, label).Inc()
+	m.runs.WithLabelValues(tenant, profile, agent, model, label).Inc()
 	if !run.claimed.IsZero() {
-		m.runDuration.WithLabelValues(tenant, adapter, agent, model, label).Observe(time.Since(run.claimed).Seconds())
+		m.runDuration.WithLabelValues(tenant, profile, agent, model, label).Observe(time.Since(run.claimed).Seconds())
 	}
 }

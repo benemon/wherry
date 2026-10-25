@@ -223,8 +223,8 @@ func TestReceiverRotateKey(t *testing.T) {
 	bundle, stateDir := filepath.Join(dir, "receiver.yaml"), filepath.Join(dir, "state")
 	keyPath := filepath.Join(stateDir, "signing.key")
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1,
-		Adapters: []admin.AdapterSettings{{Name: "fake", Platform: "fake-platform", Type: "fake", Agent: "claude"}}}
-	if err := service.ReceiverAdd(ctx, config, map[string]string{"fake-platform": platformText}, bundle); err != nil {
+		Profiles: []admin.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude"}}}
+	if err := service.ReceiverAdd(ctx, config, bundle); err != nil {
 		t.Fatal(err)
 	}
 	resalt(t, service, bundle)
@@ -249,12 +249,16 @@ func TestReceiverRotateKey(t *testing.T) {
 		}
 		return key
 	}
+	localConfig := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(localConfig, []byte("bundle: "+bundle+"\nstate_dir: "+stateDir+"\nplugin_dir: "+t.TempDir()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// With no plugin the receiver stops at configuration, which comes before it advertises or claims anything.
 	start := func(extra ...string) string {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
-		args := append([]string{"receiver", "run", "--bundle-file", bundle, "--state-dir", stateDir, "--plugin-dir", t.TempDir()}, extra...)
-		if err := run(args, &stdout, &stderr); err == nil || err.Error() != "adapter fake: no plugin for type fake" {
+		args := append([]string{"receiver", "run", "--config-file", localConfig}, extra...)
+		if err := run(args, &stdout, &stderr); err == nil || err.Error() != "profile fake: no plugin for type fake" {
 			t.Fatalf("receiver run %v: %v; want it to stop at configuration", extra, err)
 		}
 		return stdout.String()

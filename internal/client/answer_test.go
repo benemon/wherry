@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
@@ -456,7 +457,7 @@ func TestAnswerLogsACredentialThisHostLacks(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
-	f.host.credentials = map[string]Source{}
+	f.host.credentials = map[string]credential.Source{}
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
 	answering(t, f, f.host)
@@ -680,7 +681,7 @@ func TestAnswerSealsTheRunsTaskCredentials(t *testing.T) {
 	if err := os.WriteFile(deployKey, []byte("deploy-key-value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.host.credentials["deploy-key"] = Source{File: deployKey}
+	f.host.credentials["deploy-key"] = credential.Source{File: deployKey}
 	receiver, task := f.admittedWith(t, []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}})
 	runID := task.submission.Wherry.Run
 	asked := newRequest(t, receiver.binding(task, 1), "model")
@@ -915,7 +916,7 @@ func TestSubmitRefusesALongCredentialName(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	name := strings.Repeat("c", 33)
-	f.host.credentials[name] = Source{File: f.secret}
+	f.host.credentials[name] = credential.Source{File: f.secret}
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Credentials: []wire.TaskCredential{{Name: name, File: "token"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "credential names are at most 32") {
 		t.Fatalf("submit = %v; want the name refused", err)

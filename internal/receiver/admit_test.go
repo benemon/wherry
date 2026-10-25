@@ -43,7 +43,7 @@ func TestFirstTurnPromptUnchanged(t *testing.T) {
 func TestAdmitAcceptsValidTask(t *testing.T) {
 	f := newFixture(t, resultStream)
 	admitted := f.admitted(t, f.submit(t, f.host, nil))
-	if admitted.adapter.Name != "nomad" || admitted.adapter.Agent != "claude" || admitted.adapter.Labels["zone"] != "dc1" || prompt(admitted.history) != "hi" {
+	if admitted.profile.Name != "nomad" || admitted.profile.Agent != "claude" || admitted.profile.Labels["zone"] != "dc1" || prompt(admitted.history) != "hi" {
 		t.Fatalf("got %#v", admitted)
 	}
 }
@@ -331,8 +331,8 @@ func TestPlacementSelectorSelectsAnOffer(t *testing.T) {
 	admitted := f.admitted(t, f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Placement.Selector = []wire.Requirement{in("zone", "dc1"), exists("example.com/gpu")}
 	}))
-	if admitted.adapter.Name != "nomad" || admitted.adapter.Labels["example.com/gpu"] != "none" {
-		t.Fatalf("adapter %#v", admitted.adapter)
+	if admitted.profile.Name != "nomad" || admitted.profile.Labels["example.com/gpu"] != "none" {
+		t.Fatalf("profile %#v", admitted.profile)
 	}
 }
 

@@ -6,7 +6,7 @@ lacks, or tasks that can run while you do other work. The remote agent sees
 only the prompt, the files you send and, if given, a pushed git ref it
 clones itself.
 
-1. `wherry receivers --json` lists receivers with each adapter's `agent`,
+1. `wherry receivers --json` lists receivers with each profile's `agent`,
    `labels`, `ready` and `credentials`, each agent credential's `name`, with
    `optional` and `configured`, whether this host has a source for it. Pick
    an agent and build a selector from the labels.
@@ -18,7 +18,7 @@ clones itself.
    `changes.patch` (`git am` it). The clone's credential and an `ssh` remote's
    host key come from the `git` entries of your wherry configuration. Add `--input FILE` for each file the
    agent needs (inputs that would take the task over the broker's record limit
-   or a matching adapter's limit go through S3 when the pool and host have
+   or a matching profile's limit go through S3 when the pool and host have
    storage; otherwise submit refuses before publishing),
    `--credential NAME:file=FILE` or `--credential NAME:env=VAR` for each
    configured credential it needs as a file or an environment variable, and `--output NAME[:required]` for each file you want back. Where the

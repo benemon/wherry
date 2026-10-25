@@ -20,7 +20,7 @@ type AgentTerms struct {
 	Name        string            `json:"name" yaml:"name"`
 	Credentials []AgentCredential `json:"credentials" yaml:"credentials"`
 	// Models are the models a task may name for the agent, and DefaultModel the one a task naming none runs. Models
-	// without a DefaultModel make every task name one; neither leaves the model to the agent's adapters.
+	// without a DefaultModel make every task name one; neither leaves the model to the agent's profiles.
 	Models       []string `json:"models,omitzero" yaml:"models"`
 	DefaultModel string   `json:"default_model,omitzero" yaml:"default_model"`
 }
@@ -158,20 +158,18 @@ type ReceiverConfig struct {
 	Receiver string            `json:"receiver"`
 	Pool     string            `json:"pool"`
 	Capacity int64             `json:"capacity"`
-	Adapters []AdapterSettings `json:"adapters"`
+	Profiles []ProfileSettings `json:"profiles"`
 }
 
-// AdapterSettings configures one adapter: the agent it launches, the
-// labels its operator declares for it, and settings its type decodes
-// (runtime, node pool and the like stay there).
-type AdapterSettings struct {
-	Name string `json:"name"`
-	// Platform names the platform entry the adapter takes its type, shared config and bundle credential from.
-	Platform string            `json:"platform"`
-	Type     string            `json:"type"`
-	Agent    string            `json:"agent"`
-	Labels   map[string]string `json:"labels,omitzero"`
-	Config   map[string]any    `json:"config"`
+// ProfileSettings configures one profile: the adapter type whose plugin runs it, the agent it launches, the labels its
+// operator declares for it, and its plugin's config merged with its own, which the plugin decodes (runtime, node pool
+// and the like stay there).
+type ProfileSettings struct {
+	Name   string            `json:"name"`
+	Plugin string            `json:"plugin"`
+	Agent  string            `json:"agent"`
+	Labels map[string]string `json:"labels,omitzero"`
+	Config map[string]any    `json:"config"`
 }
 
 type Record struct {
@@ -317,19 +315,19 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	if err := validateNames(config.Receiver, config.Pool); err != nil {
 		return err
 	}
-	if config.Capacity <= 0 || len(config.Adapters) == 0 {
-		return errors.New("receiver config needs a capacity and adapters")
+	if config.Capacity <= 0 || len(config.Profiles) == 0 {
+		return errors.New("receiver config needs a capacity and profiles")
 	}
 	names := map[string]bool{}
-	for _, adapter := range config.Adapters {
-		if validateNames(adapter.Name) != nil || names[adapter.Name] || adapter.Type == "" {
-			return errors.New("adapters need unique valid names and a type")
+	for _, profile := range config.Profiles {
+		if validateNames(profile.Name) != nil || names[profile.Name] || !wire.ValidName(profile.Plugin) {
+			return errors.New("profiles need unique valid names and a valid adapter type")
 		}
-		names[adapter.Name] = true
-		if err := wire.ValidateLabels(adapter.Labels); err != nil {
+		names[profile.Name] = true
+		if err := wire.ValidateLabels(profile.Labels); err != nil {
 			return err
 		}
-		if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == adapter.Agent }) {
+		if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == profile.Agent }) {
 			return errors.New("receiver agent is outside pool terms")
 		}
 	}

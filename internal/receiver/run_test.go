@@ -39,7 +39,7 @@ func testActiveRun(t *testing.T, f fixture, run string, attempt int64) *activeRu
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
 	})
 	task := f.parse(t, record)
-	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, adapter: f.receiver.adapters[0], redactionKey: testRedactionKey}
+	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, profile: f.receiver.profiles[0], redactionKey: testRedactionKey}
 }
 
 func TestStatusesAreDualWritten(t *testing.T) {
@@ -148,13 +148,13 @@ func TestSealWaitExpiryFailsWithoutCredentialValue(t *testing.T) {
 }
 
 // lab and cloud both launch claude; a task routed to cloud names cloud in its start failure.
-func TestStartFailureNamesTheRoutedAdapter(t *testing.T) {
+func TestStartFailureNamesTheRoutedProfile(t *testing.T) {
 	m := newMultiFixture(t)
 	m.cloud.outcome = adapter.OutcomeNothingCreated
 	if status := m.execute(t, "run-a", accelerated, 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
-	if failures := m.startFailures(t); len(failures) != 1 || failures[0].Class != "dispatch" || failures[0].Adapter != "cloud" {
+	if failures := m.startFailures(t); len(failures) != 1 || failures[0].Class != "dispatch" || failures[0].Profile != "cloud" {
 		t.Fatalf("start failures %#v, want one dispatch naming cloud", failures)
 	}
 }
@@ -167,7 +167,7 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 			t.Fatalf("status %v", status)
 		}
 		want := map[string]any{
-			"receiver_id": testReceiver, "pool": testPool, "adapter": "nomad",
+			"receiver_id": testReceiver, "pool": testPool, "profile": "nomad",
 			"labels": map[string]any{"zone": "dc1", "example.com/gpu": "none"},
 			"job":    "agent-run-a",
 		}
@@ -182,7 +182,7 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 		if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
-		want := map[string]any{"receiver_id": testReceiver, "pool": testPool, "adapter": "cloud", "job": "agent-run-moved"}
+		want := map[string]any{"receiver_id": testReceiver, "pool": testPool, "profile": "cloud", "job": "agent-run-moved"}
 		if got := decodeObject(t, m.lastTask(t).Metadata); !reflect.DeepEqual(got, want) {
 			t.Fatalf("task metadata %v, want %v", got, want)
 		}
@@ -645,7 +645,7 @@ func TestFencedStartFailureLeavesTheJob(t *testing.T) {
 	if err := adopter.commit(f.ctx, adopter.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
 		t.Fatal(err)
 	}
-	if status := zombie.startFailure(f.ctx, "dispatch", "adapter nomad created no job"); status != 0 {
+	if status := zombie.startFailure(f.ctx, "dispatch", "profile nomad created no job"); status != 0 {
 		t.Fatalf("fenced start failure returned ack %v, want 0 (no acknowledgement)", status)
 	}
 	f.adapter.mu.Lock()
@@ -659,7 +659,7 @@ func TestStartFailureWriteDenialEntersDenial(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-a", 1)
 	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.PoolEventsTopic(testPool)).Operations(kadm.OpWrite))
-	if status := run.startFailure(f.ctx, "dispatch", "adapter nomad created no job"); status != kgo.AckRelease {
+	if status := run.startFailure(f.ctx, "dispatch", "profile nomad created no job"); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
 	if !f.receiver.holds(capWrite) || !strings.Contains(f.logs.String(), "run run-a: write failed") {
@@ -840,7 +840,7 @@ func TestLookupErrorIsLogged(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.adapter.lookupErr = &adapter.Error{Op: "read job", Class: "unavailable", Err: errors.New("connection refused")}
 	f.execute(t, f.submit(t, f.host, nil), 2)
-	if logs := f.logs.String(); !strings.Contains(logs, "lookup in adapter "+f.receiver.adapters[0].Name+": op=read job class=unavailable: connection refused\n") {
+	if logs := f.logs.String(); !strings.Contains(logs, "lookup in profile "+f.receiver.profiles[0].Name+": op=read job class=unavailable: connection refused\n") {
 		t.Fatalf("lookup error not logged: %q", logs)
 	}
 }
@@ -980,7 +980,7 @@ func TestOutcomeMessageTravelsRawWhenEscapingGrowsIt(t *testing.T) {
 	}
 }
 
-func TestReceiverRoutesToMatchedAdapter(t *testing.T) {
+func TestReceiverRoutesToMatchedProfile(t *testing.T) {
 	m := newMultiFixture(t)
 	m.answer(t, "cred-cloud")
 	if status := m.execute(t, "run-lambda", accelerated, 1); status != kgo.AckAccept {
@@ -997,7 +997,7 @@ func TestReceiverRoutesToMatchedAdapter(t *testing.T) {
 	labDispatches, _, _, _ = m.lab.counts()
 	cloudDispatches, _, _, _ = m.cloud.counts()
 	if labDispatches != 1 || cloudDispatches != 1 {
-		t.Fatalf("exec, offered by both, went to lab=%d cloud=%d; want the first configured adapter", labDispatches, cloudDispatches-1)
+		t.Fatalf("exec, offered by both, went to lab=%d cloud=%d; want the first configured profile", labDispatches, cloudDispatches-1)
 	}
 }
 
@@ -1014,10 +1014,10 @@ func TestReceiverRedeliveryAdoptsViaLookup(t *testing.T) {
 		t.Fatalf("lookups lab=%d cloud=%d, want one each in order", labLookups, cloudLookups)
 	}
 	if labDispatches != 0 || labFollows != 0 || labReleases != 0 {
-		t.Fatalf("matched adapter used: dispatches=%d follows=%d releases=%d", labDispatches, labFollows, labReleases)
+		t.Fatalf("matched profile used: dispatches=%d follows=%d releases=%d", labDispatches, labFollows, labReleases)
 	}
 	if cloudDispatches != 0 || cloudFollows != 1 || cloudReleases != 1 {
-		t.Fatalf("adopting adapter: dispatches=%d follows=%d releases=%d, want 0, 1, 1", cloudDispatches, cloudFollows, cloudReleases)
+		t.Fatalf("adopting profile: dispatches=%d follows=%d releases=%d, want 0, 1, 1", cloudDispatches, cloudFollows, cloudReleases)
 	}
 	if _, edgeLookups, _, _ := m.edge.counts(); edgeLookups != 0 {
 		t.Fatalf("lookup continued past the first hit: edge lookups=%d", edgeLookups)
@@ -1038,7 +1038,7 @@ func TestReceiverFirstAttemptSkipsLookup(t *testing.T) {
 }
 
 // Every adapter of an agent delivers the agent's credentials, each at the target the pool's terms give it.
-func TestReceiverDeliversTheAgentsCredentialsInEveryAdapter(t *testing.T) {
+func TestReceiverDeliversTheAgentsCredentialsInEveryProfile(t *testing.T) {
 	m := newMultiFixture(t)
 	want := []adapter.Secret{{Name: credentialName, Env: credentialEnv, Value: []byte(testToken)}}
 	for _, routed := range []struct {
@@ -1467,7 +1467,7 @@ func TestReturnTaskAtTheBudgetFailsWithoutRemoving(t *testing.T) {
 
 func TestMismatchedJobIsPurgedNotAdopted(t *testing.T) {
 	for name, mismatch := range map[string]func(*fakeAdapter){
-		"adapter": func(adapter *fakeAdapter) { adapter.jobAdapter = "renamed" },
+		"profile": func(adapter *fakeAdapter) { adapter.jobProfile = "renamed" },
 		"agent":   func(adapter *fakeAdapter) { adapter.jobAgent = "codex" },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1478,15 +1478,15 @@ func TestMismatchedJobIsPurgedNotAdopted(t *testing.T) {
 				t.Fatalf("status %v", status)
 			}
 			m.cloud.mu.Lock()
-			stops, purges, follows, adapter, agent := m.cloud.stops, m.cloud.purges, m.cloud.follows, cmp.Or(m.cloud.jobAdapter, "cloud"), cmp.Or(m.cloud.jobAgent, "claude")
+			stops, purges, follows, profile, agent := m.cloud.stops, m.cloud.purges, m.cloud.follows, cmp.Or(m.cloud.jobProfile, "cloud"), cmp.Or(m.cloud.jobAgent, "claude")
 			m.cloud.mu.Unlock()
 			if stops != 1 || purges != 1 || follows != 0 {
 				t.Fatalf("mismatched job: stops=%d purges=%d follows=%d, want stopped and purged, not followed", stops, purges, follows)
 			}
 			if dispatches, _, follows, _ := m.lab.counts(); dispatches != 1 || follows != 1 {
-				t.Fatalf("matched adapter dispatches=%d follows=%d, want a fresh dispatch", dispatches, follows)
+				t.Fatalf("matched profile dispatches=%d follows=%d, want a fresh dispatch", dispatches, follows)
 			}
-			if want := fmt.Sprintf("run run-mismatch: purged a job from adapter %q agent %q", adapter, agent); !strings.Contains(m.logs.String(), want) {
+			if want := fmt.Sprintf("run run-mismatch: purged a job from profile %q agent %q", profile, agent); !strings.Contains(m.logs.String(), want) {
 				t.Fatalf("logs lack %q:\n%s", want, m.logs.String())
 			}
 		})
@@ -1500,7 +1500,7 @@ func TestNeverStartedJobIsAPlatformStartFailure(t *testing.T) {
 	if status := f.execute(t, f.submit(t, f.host, nil), 2); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
-	if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != "platform" || failures[0].Adapter != "nomad" {
+	if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != "platform" || failures[0].Profile != "nomad" {
 		t.Fatalf("start failures %#v, want one platform start failure", failures)
 	}
 	if kinds := f.kinds(t); slices.Contains(kinds, "started") {
@@ -1718,7 +1718,7 @@ func TestStartFailureAtTheDeliveryBudgetFails(t *testing.T) {
 			if test.ack != kgo.AckReject {
 				return
 			}
-			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted after 9 attempts; last: adapter nomad created no job" {
+			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted after 9 attempts; last: profile nomad created no job" {
 				t.Fatalf("terminal %s %q", state, reason)
 			}
 		})
@@ -1840,10 +1840,35 @@ func TestShutdownAtTheBudgetStillReleases(t *testing.T) {
 	}
 }
 
-func TestJobOfAnotherAdapterIsLeftToIt(t *testing.T) {
+// A job is adopted by the profile whose name its platform metadata records: the Run.Profile it was dispatched with.
+func TestAdoptionMatchesTheProfileNameInJobMetadata(t *testing.T) {
+	m := newMultiFixture(t)
+	if status := m.execute(t, "run-first", accelerated, 1); status != kgo.AckAccept {
+		t.Fatalf("status %v", status)
+	}
+	m.cloud.mu.Lock()
+	dispatched := m.cloud.lastRun.Profile
+	m.cloud.mu.Unlock()
+	if dispatched != "cloud" {
+		t.Fatalf("dispatched with profile %q, want cloud", dispatched)
+	}
+	m = newMultiFixture(t)
+	m.cloud.job, m.cloud.jobProfile = adapter.JobRunning, dispatched
+	if status := m.execute(t, "run-adopted", accelerated, 2); status != kgo.AckAccept {
+		t.Fatalf("status %v", status)
+	}
+	if dispatches, _, follows, _ := m.cloud.counts(); dispatches != 0 || follows != 1 {
+		t.Fatalf("cloud dispatches=%d follows=%d, want the job its metadata names cloud adopted", dispatches, follows)
+	}
+	if want := "run run-adopted: found attempt 1's job in profile cloud"; !strings.Contains(m.logs.String(), want) {
+		t.Fatalf("logs lack %q:\n%s", want, m.logs.String())
+	}
+}
+
+func TestJobOfAnotherProfileIsLeftToIt(t *testing.T) {
 	m := newMultiFixture(t)
 	// lab and cloud share one backend: both find the job, labelled with cloud.
-	m.lab.job, m.lab.jobAdapter = adapter.JobRunning, "cloud"
+	m.lab.job, m.lab.jobProfile = adapter.JobRunning, "cloud"
 	m.cloud.job = adapter.JobRunning
 	m.answer(t, "cred-cloud")
 	if status := m.execute(t, "run-shared", cpu, 2); status != kgo.AckAccept {

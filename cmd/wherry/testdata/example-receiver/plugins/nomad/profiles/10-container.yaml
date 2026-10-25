@@ -1,5 +1,4 @@
-name: claude-container
-platform: nomad
+name: container
 agent: claude
 labels:
   isolation: container

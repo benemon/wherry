@@ -9,7 +9,7 @@ agents:
   - name: coder
     credentials:
       - {name: model-api-key, env: MODEL_API_KEY}
-  # Without models, a task names no model and the adapter's command picks one.
+  # Without models, a task names no model and the profile's command picks one.
   - name: codex
     credentials:
       - {name: openai-api-key, env: CODEX_API_KEY}
@@ -17,7 +17,7 @@ agents:
       - {name: github-token, env: GH_TOKEN, required: false}
 default_agent: claude
 max_queue_deadline: 72h
-# Each receiver with no matching adapter spends one delivery, so this covers the pool's receivers plus a margin.
+# Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
 lock_duration: 30s

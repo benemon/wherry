@@ -167,7 +167,7 @@ func TestRevocationRunsAllSixStepsInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := modelConfig("receiver-a", "pool-a")
-	if err := service.ReceiverAdd(ctx, config, nil, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, config, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	wait := 500 * time.Millisecond
@@ -254,7 +254,7 @@ func TestProvisioningSurvivesReconciliation(t *testing.T) {
 	}
 	config := modelConfig(receiver, pool)
 	bundlePath := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := service.ReceiverAdd(ctx, config, nil, bundlePath); err != nil {
+	if err := service.ReceiverAdd(ctx, config, bundlePath); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
@@ -307,8 +307,8 @@ func TestReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	badLabels, outsideAgent := modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a")
-	badLabels.Adapters[0].Labels = map[string]string{"wherry.io/gpu": "yes"}
-	outsideAgent.Adapters[0].Agent = "agent-z"
+	badLabels.Profiles[0].Labels = map[string]string{"wherry.io/gpu": "yes"}
+	outsideAgent.Profiles[0].Agent = "agent-z"
 	for name, outside := range map[string]ReceiverConfig{
 		"reserved label": badLabels,
 		"agent":          outsideAgent,
@@ -336,7 +336,7 @@ func modelTerms() Terms {
 }
 
 func modelConfig(receiver, pool string) ReceiverConfig {
-	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Adapters: []AdapterSettings{{Name: "adapter-a", Type: "fake", Agent: "agent-a"}}}
+	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Profiles: []ProfileSettings{{Name: "profile-a", Plugin: "fake", Agent: "agent-a"}}}
 }
 
 func modelState(t *testing.T) State {
@@ -548,7 +548,7 @@ func TestEchoAdvertisementAndSealRequestBindTheirPool(t *testing.T) {
 		t.Fatal("accepted an echo placing a run in a pool the receiver is not in")
 	}
 	advertisement := func(pool string) []byte {
-		return sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: pool, Offers: []wire.Offer{{Adapter: "nomad", Agent: "agent-a"}}, Capacity: 1, AtMS: 1}, key)
+		return sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: pool, Offers: []wire.Offer{{Profile: "nomad", Agent: "agent-a"}}, Capacity: 1, AtMS: 1}, key)
 	}
 	if _, err := AuthorizeAdvertisement(state, keys, advertisement("pool-a")); err != nil {
 		t.Fatal(err)
@@ -587,7 +587,7 @@ func TestReceiverConfigureKeepsThePrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), nil, path); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), path); err != nil {
 		t.Fatal(err)
 	}
 	encoded, err := os.ReadFile(path)
@@ -629,7 +629,7 @@ func TestReceiverConfigureKeepsThePrincipal(t *testing.T) {
 	if err := login(); err != nil {
 		t.Fatalf("configure changed the receiver's credential: %v", err)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), nil, filepath.Join(t.TempDir(), "again.yaml")); err == nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "again.yaml")); err == nil {
 		t.Fatal("re-added an existing receiver, rotating its password")
 	}
 	if err := service.ReceiverConfigure(ctx, modelConfig("receiver-z", "pool-a")); err == nil {
@@ -644,7 +644,7 @@ func TestRevocationProbeRetriesOnlyWhileABrokerAuthorises(t *testing.T) {
 	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), nil, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	window, interval := probeWindow, probeInterval
@@ -669,7 +669,7 @@ func TestRevocationProbeRetriesOnlyWhileABrokerAuthorises(t *testing.T) {
 	if step := stepThree(service.RevokeReceiver(ctx, "receiver-a", time.Millisecond, lagging)); !step.Complete || *calls != 3 {
 		t.Fatalf("lagging broker: step %+v after %d probes; want complete after 3", step, *calls)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), nil, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	login, calls, password := probe(errors.New("authentication failure"))
