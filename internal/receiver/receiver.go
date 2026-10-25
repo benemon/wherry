@@ -2,7 +2,6 @@
 package receiver
 
 import (
-	"cmp"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -40,10 +39,6 @@ type Named struct {
 	// Labels are the operator's declared labels for the adapter.
 	Labels  map[string]string
 	Adapter adapter.Adapter
-	// output selects the result recogniser: codex, file, or Claude Code stream-json otherwise. With file, the
-	// result is replyFile, an output the job writes.
-	output    string
-	replyFile string
 }
 
 // AdapterFactory builds one adapter for the receiver's pool from its settings in the receiver's configuration record.
@@ -251,10 +246,6 @@ func (r *Receiver) configure(ctx context.Context) error {
 				named, err := r.factory(config.Pool, settings)
 				if err != nil {
 					return fmt.Errorf("adapter %s: %s", settings.Name, logText(nil, err))
-				}
-				named.output = settings.Output
-				if named.output == "file" {
-					named.replyFile = cmp.Or(settings.ReplyFile, "reply.md")
 				}
 				adapters = append(adapters, named)
 			}

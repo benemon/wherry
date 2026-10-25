@@ -260,17 +260,17 @@ type outputReply struct {
 }
 
 type awaitReply struct {
-	ID           string                  `json:"id"`
-	State        string                  `json:"state"`
-	Model        string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
-	ServedModels []string                `json:"served_models,omitempty" jsonschema:"models the agent's result reports serving the run, where its harness reports them"`
-	RetryAfter   int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling await again"`
-	Message      string                  `json:"message,omitempty" jsonschema:"status message, such as a credential the run could not obtain, or this host's note that the queue deadline passed and no receiver claimed the run"`
-	Artifacts    []resultArtifact        `json:"artifacts,omitempty"`
-	Outputs      []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
-	NotReturned  []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the run did not return or this host could not verify, each with its reason"`
-	Redacted     map[string]int          `json:"redacted,omitempty" jsonschema:"redaction markers in the message and artifacts by the credential or S3 object each names"`
-	Skipped      int                     `json:"skipped,omitempty"`
+	ID          string                  `json:"id"`
+	State       string                  `json:"state"`
+	Model       string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
+	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling await again"`
+	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, or this host's note that the queue deadline passed and no receiver claimed the run"`
+	Transcript  string                  `json:"transcript,omitempty" jsonschema:"path of the run's redacted transcript, one JSON line per transcript line, written locally"`
+	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
+	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
+	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the run did not return or this host could not verify, each with its reason"`
+	Redacted    map[string]int          `json:"redacted,omitempty" jsonschema:"redaction markers in the message and artifacts by the credential or S3 object each names"`
+	Skipped     int                     `json:"skipped,omitempty"`
 }
 
 type cleanupOutput struct {
@@ -440,7 +440,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			return nil, awaitReply{}, toolFailure(err)
 		}
 		output := awaitReply{
-			ID: input.ID, State: string(result.Status.State), Model: result.Model, ServedModels: result.ServedModels, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
+			ID: input.ID, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
 			Redacted: result.Redacted, Skipped: result.Skipped,
 		}
 		if result.Task != nil {
@@ -465,6 +465,12 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: written.Path, SHA256: written.SHA256, Size: written.Size})
 		}
 		output.NotReturned = append(append(result.NotReturned, result.Rejected...), rejected...)
+		if result.Unclaimed != "" {
+			return nil, output, nil
+		}
+		if _, output.Transcript, err = writeTranscript(ctx, client, input.ID, ""); err != nil {
+			return nil, awaitReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: "the run's transcript could not be written to the state directory"}
+		}
 		return nil, output, nil
 	})
 

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -39,22 +38,6 @@ func testActiveRun(t *testing.T, f fixture, run string, attempt int64) *activeRu
 	})
 	task := f.parse(t, record)
 	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, adapter: f.receiver.adapters[0], redactionKey: testRedactionKey}
-}
-
-func TestRunEndingWithoutResultFails(t *testing.T) {
-	f := newFixture(t, noResultStream)
-	task := runToTask(t, f)
-	if task.Status.State != wire.TaskStateFailed || task.Artifacts[0].Parts[0].Text != "agent ended without a result" {
-		t.Fatalf("unexpected task: %#v", task)
-	}
-	f.adapter.mu.Lock()
-	defer f.adapter.mu.Unlock()
-	if f.adapter.stops != 1 {
-		t.Fatalf("run ended without a result but Stop was called %d times, want 1", f.adapter.stops)
-	}
-	if logs := f.logs.String(); !strings.Contains(logs, `agent ended with exit code 1 signal "" on node node-1`) {
-		t.Fatalf("logs lack the terminal state:\n%s", logs)
-	}
 }
 
 func TestStatusesAreDualWritten(t *testing.T) {
@@ -280,14 +263,11 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 	}
 }
 
-func TestOversizedAgentOutputIsBoundedAndResultMetadataIsAllowListed(t *testing.T) {
+func TestOversizedAgentOutputIsBounded(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
 	huge := strings.Repeat("x", 3<<19)
-	f.adapter.stream = []string{
-		`{"type":"assistant","message":"` + huge + `"}`,
-		`{"type":"result","result":"` + huge + `","is_error":false,"duration_ms":1234,"duration_api_ms":1200,"num_turns":2,"total_cost_usd":0.25,"usage":{"input_tokens":10},"credential":"sk-live-must-not-travel"}`,
-	}
+	f.adapter.stream = []string{`{"type":"assistant","message":"` + huge + `"}`, completedWith(strings.Repeat("x", 3<<17))}
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v, want accept", status)
 	}
@@ -295,24 +275,15 @@ func TestOversizedAgentOutputIsBoundedAndResultMetadataIsAllowListed(t *testing.
 	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "[redacted text over 65536 bytes]" {
 		t.Fatalf("task ended %s with result %#v", task.Status.State, task.Artifacts[0].Parts[0])
 	}
-	chunks := f.chunks(t)
-	if len(chunks) != 2 {
-		t.Fatalf("chunks %d, want the transcript and result lines", len(chunks))
+	if part := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0]; part.URL != "unstored:oversize" || part.Text != "" {
+		t.Fatalf("chunk part %#v, want an oversized pointer", part)
 	}
-	for i, chunk := range chunks {
-		part := chunk.ArtifactUpdate.Artifact.Parts[0]
-		if part.URL != "unstored:oversize" || part.Text != "" {
-			t.Fatalf("chunk %d part %#v, want an oversized pointer", i, part)
-		}
-	}
-	metadata := decodeObject(t, task.Artifacts[0].Metadata)
-	want := map[string]any{"agent_result": map[string]any{
-		"duration_ms": 1234.0, "duration_api_ms": 1200.0, "num_turns": 2.0,
-		"total_cost_usd": 0.25, "usage": map[string]any{"input_tokens": 10.0},
-	}}
-	if !reflect.DeepEqual(metadata, want) {
-		t.Fatalf("result metadata %v, want only usage, cost and duration fields", metadata)
-	}
+}
+
+// completedWith is the outcome file of a completed run that answers text.
+func completedWith(text string) string {
+	encoded, _ := json.Marshal(text) // a string always encodes
+	return `{"state":"TASK_STATE_COMPLETED","message":{"role":"ROLE_AGENT","parts":[{"text":` + string(encoded) + `}]}}`
 }
 
 func TestHeartbeatsStayOffTheFeed(t *testing.T) {
@@ -341,8 +312,9 @@ func TestTaskResultDataPartWhenJSON(t *testing.T) {
 	for _, result := range []string{`{"answer":42,"items":[1,2]}`, `[true,null]`, `42`} {
 		t.Run(result, func(t *testing.T) {
 			f := newFixture(t, resultStream)
+			f.adapter.stream = []string{completedWith(result)}
 			run := testActiveRun(t, f, "run-json", 1)
-			if status := run.finish(f.ctx, adapter.Handle{}, nil, agentResult{Result: result}); status != kgo.AckAccept {
+			if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != kgo.AckAccept {
 				t.Fatalf("status %v", status)
 			}
 			part := f.lastTask(t).Artifacts[0].Parts[0]
@@ -357,8 +329,9 @@ func TestTaskResultTextPartOtherwise(t *testing.T) {
 	for _, result := range []string{"done", `{"answer":`, `{"k":1,"k":2}`, "42 is the answer"} {
 		t.Run(result, func(t *testing.T) {
 			f := newFixture(t, resultStream)
+			f.adapter.stream = []string{completedWith(result)}
 			run := testActiveRun(t, f, "run-text", 1)
-			if status := run.finish(f.ctx, adapter.Handle{}, nil, agentResult{Result: result}); status != kgo.AckAccept {
+			if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != kgo.AckAccept {
 				t.Fatalf("status %v", status)
 			}
 			task := f.lastTask(t)
@@ -376,7 +349,7 @@ func TestTaskResultTextPartOtherwise(t *testing.T) {
 func TestResultSharesTheTerminalTransaction(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-terminal", 1)
-	run.finish(f.ctx, adapter.Handle{}, []adapter.Line{{Offset: 0, Next: 5, Data: []byte("line")}}, agentResult{Result: "done"})
+	run.conclude(f.ctx, adapter.Handle{}, []adapter.Line{{Offset: 0, Next: 5, Data: []byte("line")}}, adapter.Terminal{Started: true})
 	records := f.records(t, admin.TenantTopic(testTenant))
 	if len(records) != 3 {
 		t.Fatalf("feed records %d, want the last chunk, the result and the terminal", len(records))
@@ -398,7 +371,7 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 	t.Run("stop", func(t *testing.T) {
 		f := newFixture(t, resultStream)
 		run := testActiveRun(t, f, "run-release-stop", 1)
-		if status := run.finish(f.ctx, adapter.Handle{}, nil, agentResult{Result: "done"}); status != kgo.AckAccept {
+		if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
 		f.adapter.mu.Lock()
@@ -422,7 +395,7 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 	})
 }
 
-func TestResultLineStopsAllocationBeforeTerminal(t *testing.T) {
+func TestEndOfJobStopsAllocationBeforeTerminal(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-result-stop", 1)
 	f.adapter.stopCheck = func() error {
@@ -431,8 +404,8 @@ func TestResultLineStopsAllocationBeforeTerminal(t *testing.T) {
 		}
 		return nil
 	}
-	if status := run.finish(f.ctx, adapter.Handle{}, nil, agentResult{Result: "done"}); status != kgo.AckAccept {
-		t.Fatalf("finish status %v, want accept", status)
+	if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != kgo.AckAccept {
+		t.Fatalf("conclude status %v, want accept", status)
 	}
 	f.adapter.mu.Lock()
 	stops := f.adapter.stops
@@ -449,7 +422,7 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 		call func(*activeRun, context.Context, []adapter.Line) kgo.AckStatus
 	}{
 		{"result", func(run *activeRun, ctx context.Context, pending []adapter.Line) kgo.AckStatus {
-			return run.finish(ctx, adapter.Handle{}, pending, agentResult{Result: "done"})
+			return run.conclude(ctx, adapter.Handle{}, pending, adapter.Terminal{Started: true})
 		}},
 		{"failure", func(run *activeRun, ctx context.Context, pending []adapter.Line) kgo.AckStatus {
 			return run.stopAndFail(ctx, adapter.Handle{}, "timeout", pending)
@@ -478,9 +451,9 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 				t.Fatalf("chunks %#v, want the pending line as the last chunk", chunks)
 			}
 			if test.name == "result" {
-				// The agent's result stands; the job that would not stop is left to the sweep.
-				if task := f.lastTask(t); status != kgo.AckAccept || task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
-					t.Fatalf("status %v task %#v, want the completed result accepted", status, task.Status)
+				// The job that would not stop is left to the sweep, its outcome file unread.
+				if task := f.lastTask(t); status != kgo.AckReject || task.Status.State != wire.TaskStateFailed || task.Artifacts[0].Parts[0].Text != "agent reported no outcome" {
+					t.Fatalf("status %v task %#v, want the run failed with no outcome", status, task.Status)
 				}
 				return
 			}
@@ -529,6 +502,44 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	}
 	if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("resume offset %d err %v, want 42", got, err)
+	}
+}
+
+// An adopter follows from the last heartbeat, publishes each line from there once, through its own heartbeats, and ends
+// the run from the outcome file.
+func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
+	stream := []string{`{"type":"assistant","message":"one"}`, `{"type":"assistant","message":"two"}`, `{"type":"assistant","message":"three"}`, completedWith("adopted answer")}
+	f := newFixture(t, stream)
+	f.answer(t, credentialName)
+	f.adapter.job, f.adapter.endDelay = adapter.JobRunning, 4*renewInterval
+	record := f.submit(t, f.host, nil)
+	resume := int64(len(stream[0]) + 1)
+	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", f.heartbeat(t, f.parse(t, record), wire.TaskHash(record.Value), testReceiver, f.receiver.signing, resume, nil))
+	if status := f.execute(t, record, 2); status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Status.Message.Parts[0].Text != "adopted answer" {
+		t.Fatalf("task %s %+v, want the outcome file's", task.Status.State, task.Status.Message)
+	}
+	var seqs []int64
+	for _, chunk := range f.chunks(t) {
+		seqs = append(seqs, chunk.Wherry.Seq)
+	}
+	want := []int64{resume, resume + int64(len(stream[1])+1), resume + int64(len(stream[1])+len(stream[2])+2)}
+	f.adapter.mu.Lock()
+	froms := slices.Clone(f.adapter.froms)
+	f.adapter.mu.Unlock()
+	if !slices.Equal(seqs, want) || !slices.Equal(froms, []int64{resume}) {
+		t.Fatalf("chunks at %v followed from %v, want each line from %d once: %v", seqs, froms, resume, want)
+	}
+	heartbeats := 0
+	for _, status := range f.eventStatuses(t) {
+		if status.Wherry.Kind == "heartbeat" && status.Wherry.Attempt == 2 {
+			heartbeats++
+		}
+	}
+	if heartbeats == 0 {
+		t.Fatal("the adopter wrote no heartbeat")
 	}
 }
 
@@ -790,7 +801,7 @@ func TestAdapterErrorLogsAreRedacted(t *testing.T) {
 	}{
 		{"stop on result", func(t *testing.T, f fixture, run *activeRun) {
 			f.adapter.stopErr = failure
-			run.finish(f.ctx, adapter.Handle{}, nil, agentResult{Result: "done"})
+			run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true})
 		}},
 		{"stop on failure", func(t *testing.T, f fixture, run *activeRun) {
 			f.adapter.stopErr = failure
@@ -834,382 +845,138 @@ func TestLookupErrorIsLogged(t *testing.T) {
 	}
 }
 
-func TestResultLine(t *testing.T) {
-	if result, ok := resultLine([]byte(`{"type":"result","result":"ok","is_error":true}`)); !ok || result.Result != "ok" || !result.IsError {
-		t.Fatalf("got %#v %v", result, ok)
-	}
-	for _, line := range []string{`{"type":"assistant"}`, `not json`, ``} {
-		if _, ok := resultLine([]byte(line)); ok {
-			t.Fatalf("%q treated as a result", line)
-		}
-	}
+// outcomeOutput is an outcome file the job leaves, streamed as an adapter streams it.
+func outcomeOutput(data string) adapter.Output {
+	return adapter.Output{Name: wire.OutcomeFile, Size: int64(len(data)), Body: io.NopCloser(strings.NewReader(data))}
 }
 
-// testdata/codex holds `codex exec --json` output captured from codex-cli 0.147.0 on 2026-10-20 (codex-fixtures-2026-10-20).
-func codexFixture(t *testing.T, name string) []string {
-	t.Helper()
-	data, err := os.ReadFile("testdata/codex/" + name + ".jsonl")
-	if err != nil {
-		t.Fatal(err)
+func TestOutcomeFileEndsTheRun(t *testing.T) {
+	outcome := func(state, role, parts string) string {
+		return `{"state":"` + state + `","message":{"role":"` + role + `","parts":[` + parts + `]}}`
 	}
-	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-}
-
-func recogniseFixture(lines []string, output string) (agentResult, bool) {
-	recognise, _ := resultRecognizer(output)
-	for _, line := range lines {
-		if result, ok := recognise(adapter.Line{Data: []byte(line)}); ok {
-			return result, true
-		}
-	}
-	return agentResult{}, false
-}
-
-func TestCodexResultFixtures(t *testing.T) {
+	exited, killed := &adapter.Terminal{Started: true, ExitCode: 3}, &adapter.Terminal{Started: true, ExitCode: 137, Signal: "SIGKILL"}
 	for _, test := range []struct {
-		name    string
-		result  string
-		isError bool
-		ok      bool
+		name     string
+		terminal *adapter.Terminal
+		outcome  string
+		state    wire.TaskState
+		message  string
+		ack      kgo.AckStatus
 	}{
-		{name: "success", result: "STEADY", ok: true},
-		{name: "tool", result: "fixture input", ok: true},
-		{name: "failure", result: "unexpected status 404 Not Found: The model `no-such-model-wherry` does not exist or you do not have access to it., url: https://api.openai.com/v1/responses, cf-ray: a4d97196785c1ef2-LHR, request id: req_a413a8f759d2447e898432c4ce0596d8", isError: true, ok: true},
-		{name: "interrupted"},
+		{name: "completed", outcome: outcome("TASK_STATE_COMPLETED", "ROLE_AGENT", `{"text":"the answer"}`), state: wire.TaskStateCompleted, message: "the answer", ack: kgo.AckAccept},
+		{name: "completed after an exit", terminal: exited, outcome: outcome("TASK_STATE_COMPLETED", "ROLE_AGENT", `{"text":"the answer"}`), state: wire.TaskStateCompleted, message: "the answer", ack: kgo.AckAccept},
+		{name: "failed", outcome: outcome("TASK_STATE_FAILED", "ROLE_AGENT", `{"text":"the tests fail"}`), state: wire.TaskStateFailed, message: "the tests fail", ack: kgo.AckReject},
+		{name: "auth required", terminal: exited, outcome: outcome("TASK_STATE_AUTH_REQUIRED", "ROLE_AGENT", `{"text":"the token expired"},{"data":{"credential":"cred-lab"}}`),
+			state: wire.TaskStateAuthRequired, message: "the token expired\n{\"credential\":\"cred-lab\"}", ack: kgo.AckReject},
+		{name: "missing after an exit", terminal: exited, state: wire.TaskStateFailed, message: "agent exited 3", ack: kgo.AckReject},
+		{name: "missing after a signal", terminal: killed, state: wire.TaskStateFailed, message: "agent ended by SIGKILL", ack: kgo.AckReject},
+		{name: "missing", state: wire.TaskStateFailed, message: "agent reported no outcome", ack: kgo.AckReject},
+		{name: "bad JSON", outcome: `{"state":`, state: wire.TaskStateFailed, message: "agent reported no outcome", ack: kgo.AckReject},
+		{name: "unknown state", terminal: exited, outcome: outcome("TASK_STATE_WORKING", "ROLE_AGENT", `{"text":"still going"}`), state: wire.TaskStateFailed, message: "agent exited 3", ack: kgo.AckReject},
+		{name: "wrong role", outcome: outcome("TASK_STATE_COMPLETED", "ROLE_USER", `{"text":"the answer"}`), state: wire.TaskStateFailed, message: "agent reported no outcome", ack: kgo.AckReject},
+		{name: "auth required without its credential", outcome: outcome("TASK_STATE_AUTH_REQUIRED", "ROLE_AGENT", `{"text":"the token expired"}`), state: wire.TaskStateFailed, message: "agent reported no outcome", ack: kgo.AckReject},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			result, ok := recogniseFixture(codexFixture(t, test.name), "codex")
-			if ok != test.ok || result.Result != test.result || result.IsError != test.isError {
-				t.Fatalf("result = %#v, %t", result, ok)
+			fake := &fakeAdapter{stream: noResultStream, ended: test.terminal}
+			if test.outcome != "" {
+				fake.outputs = []adapter.Output{outcomeOutput(test.outcome)}
 			}
-			if test.name == "success" {
-				metadata := decodeObject(t, result.metadata)
-				agent := metadata["agent_result"].(map[string]any)
-				if len(agent) != 1 || agent["usage"] == nil || metadata["served_models"] != nil {
-					t.Fatalf("metadata = %v, want only usage and no served models", metadata)
+			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": fake})
+			f.answer(t, credentialName)
+			if ack := f.execute(t, f.submit(t, f.host, nil), 1); ack != test.ack {
+				t.Fatalf("ack %v, want %v", ack, test.ack)
+			}
+			task := f.lastTask(t)
+			terminal := f.feedStatuses(t)[len(f.feedStatuses(t))-1].StatusUpdate.Status
+			for _, status := range []wire.TaskStatus{task.Status, terminal} {
+				var texts []string
+				for _, part := range status.Message.Parts {
+					texts = append(texts, cmp.Or(part.Text, string(part.Data)))
+				}
+				if status.State != test.state || strings.Join(texts, "\n") != test.message {
+					t.Fatalf("status %s with %q, want %s with %q", status.State, texts, test.state, test.message)
+				}
+			}
+			if result := task.Artifacts[0].Parts[0].Text; result != strings.Split(test.message, "\n")[0] {
+				t.Fatalf("result %q, want the message's text", result)
+			}
+			f.adapter.mu.Lock()
+			defer f.adapter.mu.Unlock()
+			if f.adapter.collects != 1 || f.adapter.stops != 1 {
+				t.Fatalf("collects %d stops %d, want the job stopped and its outputs collected once", f.adapter.collects, f.adapter.stops)
+			}
+		})
+	}
+}
+
+func TestOutcomeFileIsNotAnOutput(t *testing.T) {
+	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream, outputs: []adapter.Output{
+		{Name: wire.OutcomeDir + "/notes.md", Size: 5, Data: []byte("notes")}, {Name: "report.md", Size: 6, Data: []byte("report")},
+	}}})
+	f.answer(t, credentialName)
+	f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md", Required: true}}
+	}), 1)
+	task := f.lastTask(t)
+	listed := manifest(t, task)
+	if task.Status.State != wire.TaskStateCompleted || len(listed.Outputs) != 1 || listed.Outputs[0].Name != "report.md" || len(listed.NotReturned) != 0 {
+		t.Fatalf("task %s outputs %+v not returned %+v, want report.md alone", task.Status.State, listed.Outputs, listed.NotReturned)
+	}
+	for _, output := range f.outputChunks(t) {
+		if output.ArtifactUpdate.Artifact.ArtifactID != "report.md" {
+			t.Fatalf("output %s published", output.ArtifactUpdate.Artifact.ArtifactID)
+		}
+	}
+	f.adapter.mu.Lock()
+	defer f.adapter.mu.Unlock()
+	if !slices.Contains(f.adapter.limits.Stream, wire.OutcomeFile) {
+		t.Fatalf("collect limits %+v, want the outcome file streamed outside the output limits", f.adapter.limits)
+	}
+}
+
+func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
+	marker := signed.RedactionMarker(testRedactionKey, credentialName)
+	for _, test := range []struct {
+		name, text, want string
+	}{
+		{name: "credential", text: "used " + testToken, want: "used " + marker},
+		{name: "over", text: strings.Repeat("x", wire.MaxText+1), want: overText},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			outcome := `{"state":"TASK_STATE_AUTH_REQUIRED","message":{"role":"ROLE_AGENT","parts":[{"text":"` + test.text + `"},{"data":{"credential":"cred-lab"}}]}}`
+			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: noResultStream, outputs: []adapter.Output{outcomeOutput(outcome)}}})
+			f.answer(t, credentialName)
+			f.execute(t, f.submit(t, f.host, nil), 1)
+			task := f.lastTask(t)
+			terminal := f.feedStatuses(t)[len(f.feedStatuses(t))-1].StatusUpdate.Status
+			for _, status := range []wire.TaskStatus{task.Status, terminal} {
+				if status.State != wire.TaskStateAuthRequired || status.Message.Parts[0].Text != test.want {
+					t.Fatalf("status %s with %.80q, want %s with %.80q", status.State, status.Message.Parts[0].Text, wire.TaskStateAuthRequired, test.want)
+				}
+			}
+			if result := task.Artifacts[0].Parts[0].Text; result != test.want {
+				t.Fatalf("result %.80q, want %.80q", result, test.want)
+			}
+			for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
+				if strings.Contains(string(decodedPayload(record.Value)), testToken) {
+					t.Fatal("the credential value reached the feed")
 				}
 			}
 		})
 	}
 }
 
-func TestResultRecognizersRejectOtherFormat(t *testing.T) {
-	if result, ok := recogniseFixture(codexFixture(t, "success"), "claude"); ok {
-		t.Fatalf("Claude recogniser accepted Codex result %#v", result)
-	}
-	if result, ok := recogniseFixture(resultStream, "codex"); ok {
-		t.Fatalf("Codex recogniser accepted Claude result %#v", result)
-	}
-}
-
-func TestCodexRecognizerIgnoresMismatchedMembers(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		lines   []string
-		result  string
-		isError bool
-	}{
-		{"string error", []string{`{"type":"turn.failed","error":"quota exceeded"}`}, "quota exceeded", true},
-		{"array item", []string{`{"type":"item.completed","item":["x"]}`, `{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`, `{"type":"item.completed","item":"x"}`, `{"type":"turn.completed","item":"x","error":7}`}, "ok", false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if result, ok := recogniseFixture(test.lines, "codex"); !ok || result.Result != test.result || result.IsError != test.isError {
-				t.Fatalf("result = %#v, %t", result, ok)
-			}
-		})
-	}
-}
-
-func TestResultRecognizerKeepsTheAgentMessage(t *testing.T) {
-	recognise, keep := resultRecognizer("codex")
-	var offset, message int64 = 0, -1
-	for _, line := range codexFixture(t, "tool") {
-		recognise(adapter.Line{Offset: offset, Data: []byte(line)})
-		if strings.Contains(line, `"agent_message"`) {
-			message = offset
-		}
-		if kept, ok := keep(); ok != (message >= 0) || ok && kept != message {
-			t.Fatalf("at %d keep = %d, %t; want the last agent message at %d", offset, kept, ok, message)
-		}
-		offset += int64(len(line) + 1)
-	}
-	_, keep = resultRecognizer("claude")
-	if _, ok := keep(); ok {
-		t.Fatal("Claude recogniser keeps a line")
-	}
-}
-
-func TestRunUsesCodexResultRecognizer(t *testing.T) {
-	config := testConfig(testReceiver)
-	config.Adapters[0].Output = "codex"
-	stream := codexFixture(t, "success")
-	f := newFixtureWith(t, stream, testTerms(), config, map[string]*fakeAdapter{"nomad": {stream: stream}})
-	task := runToTask(t, f)
-	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "STEADY" {
-		t.Fatalf("unexpected task: %#v", task)
-	}
-}
-
-func TestCodexAdoptionPastTheAgentMessage(t *testing.T) {
-	config := testConfig(testReceiver)
-	config.Adapters[0].Output = "codex"
-	success := codexFixture(t, "success")
-	// A warning item after the final agent message, so a heartbeat can pass that message before turn.completed.
-	before := append(slices.Clone(success[:4]), success[1])
-	f := newFixtureWith(t, before, testTerms(), config, map[string]*fakeAdapter{"nomad": {stream: before, endDelay: 30 * time.Second}})
-	f.answer(t, credentialName)
-	record := f.submit(t, f.host, nil)
-	var message int64
-	for _, line := range success[:3] {
-		message += int64(len(line) + 1)
-	}
-	ctx, stop := context.WithCancel(f.ctx)
-	defer stop()
-	first := f.executing(t, ctx, record, 1)
-	for heartbeat := (*wire.RunStatus)(nil); heartbeat == nil; time.Sleep(20 * time.Millisecond) {
-		for _, status := range f.eventStatuses(t) {
-			if status.Wherry.Kind == "heartbeat" && *status.Wherry.LogOffset > 0 {
-				heartbeat = &status
-			}
-		}
-		if heartbeat != nil && *heartbeat.Wherry.LogOffset != message {
-			t.Fatalf("heartbeat at %d, want the agent message at %d", *heartbeat.Wherry.LogOffset, message)
-		}
-		if f.ctx.Err() != nil {
-			t.Fatalf("no heartbeat past offset 0; logs:\n%s", f.logs.String())
-		}
-	}
-	stop()
-	if status := <-first; status != kgo.AckRelease {
-		t.Fatalf("attempt 1 status %v, want release", status)
-	}
-	f.adapter.mu.Lock()
-	f.adapter.stream, f.adapter.job = append(before, success[4]), adapter.JobRunning
-	f.adapter.mu.Unlock()
-	if status := f.execute(t, record, 2); status != kgo.AckAccept {
-		t.Fatalf("status %v, want the adopted run accepted", status)
-	}
-	if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "STEADY" {
-		t.Fatalf("adopted task %v result %q, want the agent message as the result", task.Status.State, task.Artifacts[0].Parts[0].Text)
-	}
-	f.adapter.mu.Lock()
-	from := f.adapter.froms[len(f.adapter.froms)-1]
-	f.adapter.mu.Unlock()
-	if from != message {
-		t.Fatalf("adopter followed from %d, want the agent message at %d", from, message)
-	}
-}
-
-func TestCodexHeartbeatsPublishPastTheAgentMessage(t *testing.T) {
-	config := testConfig(testReceiver)
-	config.Adapters[0].Output = "codex"
-	success := codexFixture(t, "success")
-	stream := slices.Clone(success[:4])
-	for range 20 {
-		stream = append(stream, success[1])
-	}
-	f := newFixtureWith(t, stream, testTerms(), config, map[string]*fakeAdapter{"nomad": {stream: stream, endDelay: 30 * time.Second}})
-	f.answer(t, credentialName)
-	ctx, stop := context.WithCancel(f.ctx)
-	defer stop()
-	done := f.executing(t, ctx, f.submit(t, f.host, nil), 1)
-	for deadline := time.Now().Add(10 * renewInterval); len(f.chunks(t)) < len(stream)-1; {
-		if time.Now().After(deadline) {
-			t.Fatalf("heartbeats published %d chunks, want all %d but the newest line", len(f.chunks(t)), len(stream)-1)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	stop()
-	<-done
-}
-
-func replyOutput(text string) adapter.Output {
-	return adapter.Output{Name: "reply.md", Size: int64(len(text)), Body: io.NopCloser(strings.NewReader(text))}
-}
-
-func TestFileOutputOutcomes(t *testing.T) {
-	over := wire.MaxText + 1
-	for _, test := range []struct {
-		name     string
-		stream   []string
-		terminal adapter.Terminal
-		outputs  []adapter.Output
-		collect  error
-		state    wire.TaskState
-		result   string
-	}{
-		{name: "reply", terminal: adapter.Terminal{Started: true}, outputs: []adapter.Output{replyOutput("done " + testToken)}, state: wire.TaskStateCompleted, result: "done " + signed.RedactionMarker(testRedactionKey, credentialName)},
-		{name: "reply as data", terminal: adapter.Terminal{Started: true}, outputs: []adapter.Output{{Name: "reply.md", Size: 4, Data: []byte("done")}}, state: wire.TaskStateCompleted, result: "done"},
-		{name: "no reply", terminal: adapter.Terminal{Started: true}, state: wire.TaskStateFailed, result: "agent wrote no reply file"},
-		{name: "not collected", terminal: adapter.Terminal{Started: true}, collect: errors.New("collect failed"), state: wire.TaskStateFailed, result: "outputs not collected"},
-		{name: "exit with reply", terminal: adapter.Terminal{Started: true, ExitCode: 3}, outputs: []adapter.Output{replyOutput("partial")}, state: wire.TaskStateFailed, result: "partial"},
-		{name: "exit", terminal: adapter.Terminal{Started: true, ExitCode: 3}, state: wire.TaskStateFailed, result: "agent exited 3"},
-		{name: "signal", terminal: adapter.Terminal{Started: true, ExitCode: 137, Signal: "SIGKILL"}, state: wire.TaskStateFailed, result: "agent ended by SIGKILL"},
-		{name: "over", terminal: adapter.Terminal{Started: true}, outputs: []adapter.Output{replyOutput(strings.Repeat("x", over))}, state: wire.TaskStateCompleted, result: "[redacted text over 65536 bytes]"},
-		{name: "stdout terminals", stream: append(slices.Clone(resultStream), codexFixture(t, "success")...), terminal: adapter.Terminal{Started: true}, outputs: []adapter.Output{replyOutput("from file")}, state: wire.TaskStateCompleted, result: "from file"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			config := testConfig(testReceiver)
-			config.Adapters[0].Output = "file"
-			stream := test.stream
-			if stream == nil {
-				stream = noResultStream
-			}
-			f := newFixtureWith(t, stream, testTerms(), config, map[string]*fakeAdapter{"nomad": {stream: stream, ended: &test.terminal, outputs: test.outputs, collectErr: test.collect}})
-			f.answer(t, credentialName)
-			f.execute(t, f.submit(t, f.host, nil), 1)
-			task := f.lastTask(t)
-			if part := task.Artifacts[0].Parts[0]; task.Status.State != test.state || part.Text != test.result {
-				t.Fatalf("task %s with %q, want %s with %q", task.Status.State, part.Text, test.state, test.result)
-			}
-			if task.Artifacts[0].Metadata != nil {
-				t.Fatalf("result metadata %s, want none", task.Artifacts[0].Metadata)
-			}
-		})
-	}
-}
-
-func TestFileReplyIsNotAnOutput(t *testing.T) {
-	config := testConfig(testReceiver)
-	config.Adapters[0].Output = "file"
-	terms := testTerms()
-	terms.OutputLimit = 16
-	f := newFixtureWith(t, noResultStream, terms, config, map[string]*fakeAdapter{"nomad": {stream: noResultStream, ended: &adapter.Terminal{Started: true}, outputs: []adapter.Output{
-		{Name: "report.txt", Size: 16, Data: []byte(strings.Repeat("r", 16))}, replyOutput(strings.Repeat("a", 32)),
+// An agent's text that escaping would lengthen past its base64 form travels raw in the status message, as in the result.
+func TestOutcomeMessageTravelsRawWhenEscapingGrowsIt(t *testing.T) {
+	text := strings.Repeat(`\u0001`, 64)
+	f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: noResultStream, outputs: []adapter.Output{
+		outcomeOutput(`{"state":"TASK_STATE_FAILED","message":{"role":"ROLE_AGENT","parts":[{"text":"` + text + `"}]}}`),
 	}}})
 	f.answer(t, credentialName)
 	f.execute(t, f.submit(t, f.host, nil), 1)
-	task := f.lastTask(t)
-	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != strings.Repeat("a", 32) {
-		t.Fatalf("task %s with %q, want the reply as the result", task.Status.State, task.Artifacts[0].Parts[0].Text)
-	}
-	listed := manifest(t, task)
-	if len(listed.Outputs) != 1 || listed.Outputs[0].Name != "report.txt" || len(listed.NotReturned) != 0 {
-		t.Fatalf("outputs %+v not returned %+v, want report.txt alone within the limit", listed.Outputs, listed.NotReturned)
-	}
-	for _, output := range f.outputChunks(t) {
-		if output.ArtifactUpdate.Artifact.ArtifactID != "report.txt" {
-			t.Fatalf("output %s published", output.ArtifactUpdate.Artifact.ArtifactID)
-		}
-	}
-	f.adapter.mu.Lock()
-	defer f.adapter.mu.Unlock()
-	if !slices.Contains(f.adapter.limits.Stream, "reply.md") {
-		t.Fatalf("collect limits %+v, want the reply streamed outside the output limits", f.adapter.limits)
-	}
-}
-
-func TestFileReplyNameIsNotAnExpectedOutput(t *testing.T) {
-	for _, storage := range []string{"", wire.StorageS3} {
-		t.Run(cmp.Or(storage, "local"), func(t *testing.T) {
-			config := testConfig(testReceiver)
-			config.Adapters[0].Output = "file"
-			s := newStore(t)
-			f := newFixtureWith(t, noResultStream, s3Terms(s.endpoint()), config, map[string]*fakeAdapter{"nomad": {stream: noResultStream, ended: &adapter.Terminal{Started: true}, outputs: []adapter.Output{replyOutput("done")}}})
-			done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) {
-				task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "reply.md", Required: true, Storage: storage}}
-			}), 1)
-			f.sealS3(t, validURLs(s.endpoint()))
-			<-done
-			task := f.lastTask(t)
-			if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != "required output reply.md not returned: is the adapter's reply file" {
-				t.Fatalf("task %s with %v, want the required output failed as the reply file", task.Status.State, task.Status.Message)
-			}
-			listed := manifest(t, task)
-			if len(listed.NotReturned) != 1 || listed.NotReturned[0].Name != "reply.md" || listed.NotReturned[0].Reason != "is the adapter's reply file" {
-				t.Fatalf("not returned %+v, want reply.md as the adapter's reply file", listed.NotReturned)
-			}
-			f.adapter.mu.Lock()
-			defer f.adapter.mu.Unlock()
-			if !slices.Equal(f.adapter.limits.Stream, []string{"reply.md"}) {
-				t.Fatalf("collect streams %v, want reply.md once", f.adapter.limits.Stream)
-			}
-		})
-	}
-}
-
-// podmanResultLine is the result record in testdata/podman-cri-stdout.log, a Nomad Podman task log capture,
-// without its CRI framing.
-func podmanResultLine(t *testing.T) string {
-	t.Helper()
-	raw, err := os.ReadFile("testdata/podman-cri-stdout.log")
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
-	framed := strings.SplitN(lines[len(lines)-1], " ", 4)
-	if len(framed) != 4 || framed[1] != "stdout" || framed[2] != "F" {
-		t.Fatalf("unexpected CRI framing %.80q", lines[len(lines)-1])
-	}
-	return framed[3]
-}
-
-func TestResultArtifactCarriesAgentResult(t *testing.T) {
-	line := podmanResultLine(t)
-	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
-	f.adapter.stream = []string{line}
-	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
-		t.Fatalf("status %v", status)
-	}
-	artifact := f.lastTask(t).Artifacts[0]
-	decoded := decodeObject(t, []byte(line))
-	if artifact.Parts[0].Text != decoded["result"] {
-		t.Fatalf("result part %#v, want the record's result", artifact.Parts[0])
-	}
-	want := map[string]any{}
-	for _, name := range []string{"duration_ms", "duration_api_ms", "num_turns", "total_cost_usd", "usage", "modelUsage"} {
-		want[name] = decoded[name]
-	}
-	got := decodeObject(t, artifact.Metadata)
-	if len(got) != 2 || !reflect.DeepEqual(got["agent_result"], want) {
-		t.Fatalf("artifact metadata %s, want only the result's resource-use fields and its served models", artifact.Metadata)
-	}
-	if served := got["served_models"]; !reflect.DeepEqual(served, []any{"claude-haiku-5-5"}) {
-		t.Fatalf("served models %v, want the capture's modelUsage key", served)
-	}
-}
-
-func TestAgentResultOmittedWhenOversized(t *testing.T) {
-	// The retained object is {"usage":{"pad":"<n bytes>"}}: n plus 20 bytes.
-	line := func(pad int, result string) []byte {
-		return []byte(`{"type":"result","result":"` + result + `","usage":{"pad":"` + strings.Repeat("x", pad) + `"}}`)
-	}
-	if result, _ := resultLine(line(wire.MaxAgentResult-20, strings.Repeat("r", 2*wire.MaxAgentResult))); result.metadata == nil {
-		t.Fatal("agent_result at the bound, with a larger result member, was omitted")
-	}
-	result, ok := resultLine(line(wire.MaxAgentResult-19, "done"))
-	if !ok || result.metadata != nil {
-		t.Fatalf("agent_result one byte over the bound kept: ok=%t metadata %d bytes", ok, len(result.metadata))
-	}
-	f := newFixture(t, resultStream)
-	run := testActiveRun(t, f, "run-oversized", 1)
-	if status := run.finish(f.ctx, adapter.Handle{}, nil, result); status != kgo.AckAccept {
-		t.Fatalf("status %v", status)
-	}
-	if artifact := f.lastTask(t).Artifacts[0]; artifact.Metadata != nil || artifact.Parts[0].Text != "done" {
-		t.Fatalf("result artifact %#v, want text done and no metadata", artifact)
-	}
-}
-
-func TestAgentResultOmittedWhenNotObject(t *testing.T) {
-	for _, data := range []string{`["result"]`, `"result"`, `null`, `42`, `{"type":"result","a":1,"a":2}`, "{\"type\":\"result\",\"a\":\"\xff\"}"} {
-		if metadata := agentResultMetadata([]byte(data), "a"); metadata != nil {
-			t.Fatalf("%q produced metadata %s", data, metadata)
-		}
-	}
-	// encoding/json accepts the duplicate member, so the line is a result whose record cannot travel.
-	result, ok := resultLine([]byte(`{"type":"result","result":"done","n":1,"n":2}`))
-	if !ok || result.metadata != nil {
-		t.Fatalf("ok=%t metadata %s", ok, result.metadata)
-	}
-	f := newFixture(t, resultStream)
-	run := testActiveRun(t, f, "run-duplicate", 1)
-	if status := run.finish(f.ctx, adapter.Handle{}, nil, result); status != kgo.AckAccept {
-		t.Fatalf("status %v", status)
-	}
-	if artifact := f.lastTask(t).Artifacts[0]; artifact.Metadata != nil {
-		t.Fatalf("result artifact metadata %s, want none", artifact.Metadata)
+	part := f.lastTask(t).Status.Message.Parts[0]
+	if part.Text != "" || string(part.Raw) != strings.Repeat("\x01", 64) || part.MediaType != "text/plain" {
+		t.Fatalf("status message part %+v, want the text raw", part)
 	}
 }
 
@@ -1502,7 +1269,7 @@ func TestResultAfterLastingDenialReleasesTask(t *testing.T) {
 	f.receiver.mu.Lock()
 	f.receiver.deniedSince = time.Now().Add(-time.Hour)
 	f.receiver.mu.Unlock()
-	if status := run.finish(f.ctx, adapter.Handle{}, nil, agentResult{Result: "done"}); status != kgo.AckRelease {
+	if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release: an untrusted result must not end the task", status)
 	}
 	if state, reason := terminalReason(t, f, "run-denied-result"); state != wire.TaskStateFailed || reason != "receiver denied" {
@@ -1592,7 +1359,7 @@ func TestAmbiguousCommitReadBack(t *testing.T) {
 				}
 				return kerr.RequestTimedOut
 			}
-			if status := run.finish(f.ctx, adapter.Handle{}, nil, agentResult{Result: "done"}); status != test.ack {
+			if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != test.ack {
 				t.Fatalf("status %v, want %v; logs:\n%s", status, test.ack, f.logs.String())
 			}
 			if _, _, _, releases := f.adapter.counts(); releases != test.releases {

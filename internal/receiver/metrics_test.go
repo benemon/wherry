@@ -48,8 +48,7 @@ func scraped(t *testing.T, r *Receiver, series ...string) string {
 }
 
 func TestScrapeAfterARun(t *testing.T) {
-	f := newFixture(t, []string{`{"type":"assistant","message":"working"}`,
-		`{"type":"result","result":"done","is_error":false,"total_cost_usd":0.25,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3}}`})
+	f := newFixture(t, resultStream)
 	if task := runToTask(t, f); task.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("task %#v", task)
 	}
@@ -62,10 +61,6 @@ func TestScrapeAfterARun(t *testing.T) {
 		`wherry_seal_wait_seconds_count{pool="pool-a",tenant="tenant-a"} 1`,
 		`wherry_runs_total{adapter="nomad",agent="claude",model="",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
 		`wherry_run_duration_seconds_count{adapter="nomad",agent="claude",model="",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
-		`wherry_agent_reported_tokens_total{agent="claude",kind="input",model="",pool="pool-a",tenant="tenant-a"} 10`,
-		`wherry_agent_reported_tokens_total{agent="claude",kind="output",model="",pool="pool-a",tenant="tenant-a"} 5`,
-		`wherry_agent_reported_tokens_total{agent="claude",kind="cached",model="",pool="pool-a",tenant="tenant-a"} 3`,
-		`wherry_agent_reported_cost_usd_total{agent="claude",model="",pool="pool-a",tenant="tenant-a"} 0.25`,
 		`wherry_in_flight{adapter="nomad",pool="pool-a"} 0`,
 		`wherry_capacity{pool="pool-a"} 1`,
 	)
@@ -97,7 +92,7 @@ func TestScrapeCarriesNoRunMaterial(t *testing.T) {
 		`wherry_sweep_failures_total{adapter="nomad",pool="pool-a"} `,
 	)
 	host := strings.TrimPrefix(s.endpoint(), "https://")
-	for _, forbidden := range []string{"run-a", credentialName, testToken, host, s3Bucket, s3Signature, "X-Amz", "dataset.bin", "report.pdf", "agent ended without a result", "node-secret-7", testHost} {
+	for _, forbidden := range []string{"run-a", credentialName, testToken, host, s3Bucket, s3Signature, "X-Amz", "dataset.bin", "report.pdf", "agent reported no outcome", "node-secret-7", testHost} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("scrape holds %q:\n%s", forbidden, text)
 		}
@@ -189,10 +184,9 @@ func TestAgentOutsideTheTermsIsLabelledOther(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-x", 1)
 	run.task.Wherry.Placement.Agent = "gemini"
-	run.ended(wire.TaskStateCompleted, []byte(`{"agent_result":{"usage":{"input_tokens":4}}}`))
+	run.ended(wire.TaskStateCompleted)
 	text := scraped(t, f.receiver,
 		`wherry_runs_total{adapter="nomad",agent="other",model="",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
-		`wherry_agent_reported_tokens_total{agent="other",kind="input",model="",pool="pool-a",tenant="tenant-a"} 4`,
 	)
 	if strings.Contains(text, "gemini") {
 		t.Fatalf("scrape holds the unnamed agent:\n%s", text)
@@ -208,47 +202,21 @@ func TestModelOutsideTheTermsIsLabelledOther(t *testing.T) {
 	for _, model := range []string{"sonnet", "opus"} {
 		run := testActiveRun(t, f, "run-"+model, 1)
 		run.task.Wherry.Placement.Model = model
-		run.ended(wire.TaskStateCompleted, []byte(`{"agent_result":{"usage":{"input_tokens":4}}}`))
+		run.ended(wire.TaskStateCompleted)
 	}
 	text := scraped(t, f.receiver,
 		`wherry_runs_total{adapter="nomad",agent="claude",model="sonnet",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
 		`wherry_runs_total{adapter="nomad",agent="claude",model="other",pool="pool-a",state="completed",tenant="tenant-a"} 1`,
-		`wherry_agent_reported_tokens_total{agent="claude",kind="input",model="other",pool="pool-a",tenant="tenant-a"} 4`,
 	)
 	if strings.Contains(text, "opus") {
 		t.Fatalf("scrape holds the model outside the terms:\n%s", text)
 	}
 }
 
-// Reported cost counts under the placement's model as the agent's terms bound it, and a result without a cost adds
-// none.
-func TestCostIsLabelledByModel(t *testing.T) {
-	terms := testTerms()
-	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, "haiku"
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
-	for model, result := range map[string]string{
-		"sonnet": `{"agent_result":{"total_cost_usd":0.5}}`,
-		"opus":   `{"agent_result":{"total_cost_usd":0.25}}`,
-		"haiku":  `{"agent_result":{"usage":{"input_tokens":4}}}`,
-	} {
-		run := testActiveRun(t, f, "run-"+model, 1)
-		run.task.Wherry.Placement.Model = model
-		run.ended(wire.TaskStateCompleted, []byte(result))
-	}
-	text := scraped(t, f.receiver,
-		`wherry_agent_reported_cost_usd_total{agent="claude",model="sonnet",pool="pool-a",tenant="tenant-a"} 0.5`,
-		`wherry_agent_reported_cost_usd_total{agent="claude",model="other",pool="pool-a",tenant="tenant-a"} 0.25`,
-		`wherry_agent_reported_tokens_total{agent="claude",kind="input",model="haiku",pool="pool-a",tenant="tenant-a"} 4`,
-	)
-	if strings.Contains(text, "opus") || strings.Contains(text, `wherry_agent_reported_cost_usd_total{agent="claude",model="haiku"`) {
-		t.Fatalf("scrape holds the model outside the terms or a cost the result did not report:\n%s", text)
-	}
-}
-
 // A state outside wire's task states counts under state other.
 func TestStateOutsideTheTaskStatesIsLabelledOther(t *testing.T) {
 	f := newFixture(t, resultStream)
-	testActiveRun(t, f, "run-x", 1).ended(wire.TaskState("TASK_STATE_RUN_A"), nil)
+	testActiveRun(t, f, "run-x", 1).ended(wire.TaskState("TASK_STATE_RUN_A"))
 	text := scraped(t, f.receiver, `wherry_runs_total{adapter="nomad",agent="claude",model="",pool="pool-a",state="other",tenant="tenant-a"} 1`)
 	if strings.Contains(text, "run_a") {
 		t.Fatalf("scrape holds the unknown state:\n%s", text)

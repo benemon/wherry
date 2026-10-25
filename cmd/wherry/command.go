@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"flag"
@@ -422,16 +425,10 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	if result.Unclaimed != "" {
 		return errors.New(result.Unclaimed)
 	}
-	if result.Model != "" || len(result.ServedModels) > 0 {
-		fmt.Fprintf(stderr, "model=%s served_models=%s\n", result.Model, strings.Join(result.ServedModels, ","))
+	if result.Model != "" {
+		fmt.Fprintf(stderr, "model=%s\n", result.Model)
 	}
-	if result.Task != nil {
-		for _, artifact := range result.Task.Artifacts {
-			for _, part := range artifact.Parts {
-				fmt.Fprintln(stdout, partText(part))
-			}
-		}
-	} else if result.Status.Message != nil {
+	if result.Status.Message != nil {
 		for _, part := range result.Status.Message.Parts {
 			fmt.Fprintln(stdout, partText(part))
 		}
@@ -450,7 +447,12 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 	for _, output := range downloaded {
 		paths = append(paths, output.Path)
 	}
-	for i, output := range append(result.Outputs, downloaded...) {
+	transcript, transcriptPath, err := writeTranscript(ctx, client, runID, *outputsDir)
+	if err != nil {
+		return fmt.Errorf("write transcript: %w", err)
+	}
+	paths = append(paths, transcriptPath)
+	for i, output := range append(append(result.Outputs, downloaded...), transcript) {
 		fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, paths[i], output.SHA256, output.Size)
 		switch output.Name {
 		case wire.GitPatch:
@@ -654,6 +656,32 @@ func runTranscript(ctx context.Context, client *busclient.Host, args []string, s
 	warnRedacted(stderr, result.Redacted)
 	warnSkipped(stderr, result.Skipped)
 	return nil
+}
+
+// writeTranscript writes runID's transcript, as transcript prints it, to dir or else the run's outputs directory, and
+// returns it as an output with the path it was written to.
+func writeTranscript(ctx context.Context, client *busclient.Host, runID, dir string) (busclient.Output, string, error) {
+	result, err := client.Transcript(ctx, runID)
+	if err != nil {
+		return busclient.Output{}, "", err
+	}
+	var data bytes.Buffer
+	for _, line := range viewLines(result.Lines) {
+		switch part := line.Part; {
+		case part.URL != "":
+		case part.Raw != nil:
+			fmt.Fprintf(&data, "%s\n", part.Raw)
+		default:
+			fmt.Fprintln(&data, part.Text)
+		}
+	}
+	sum := sha256.Sum256(data.Bytes())
+	transcript := busclient.Output{Name: wire.TranscriptFile, SHA256: hex.EncodeToString(sum[:]), Size: int64(data.Len()), Data: data.Bytes()}
+	paths, err := client.WriteOutputs(runID, dir, []busclient.Output{transcript})
+	if err != nil {
+		return busclient.Output{}, "", err
+	}
+	return transcript, paths[0], nil
 }
 
 // parseRequirements reads key=v|v (In), key!=v|v (NotIn), key (Exists) and !key (DoesNotExist), comma-separated.

@@ -43,6 +43,8 @@ func TestSubmitFileFlags(t *testing.T) {
 		"unconfigured credential":   {[]string{"--credential", "absent=token"}, "credential absent is not in this host's configuration"},
 		"inputs over the limit":     {[]string{"--input", large}, "inline inputs are over adapter lab's 49152-byte limit"},
 		"output escaping":           {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
+		"output in the outcome dir": {[]string{"--output", ".wherry/outcome.json"}, "expected outputs must be unique relative paths of portable file names"},
+		"transcript output":         {[]string{"--output", "transcript.jsonl"}, "expected output transcript.jsonl is reserved for the run's transcript"},
 		"credential file escaping":  {[]string{"--credential", "deploy-key=../id"}, "credential files must be unique portable file names"},
 		"unknown output suffix":     {[]string{"--output", "report.md:needed"}, "want NAME[:required][:s3]"},
 		"repeated output suffix":    {[]string{"--output", "report.md:required:required"}, "want NAME[:required][:s3]"},
@@ -131,8 +133,8 @@ func TestAwaitFailsOnAnOutputItCannotVerify(t *testing.T) {
 	if err == nil || !strings.Contains(stderr.String(), "output report.md not returned: rejected by this host: size or hash mismatch") {
 		t.Fatalf("await = %v, stderr %q; want the output refused", err, stderr.String())
 	}
-	if _, statErr := os.Stat(filepath.Join(b.stateDir, "runs", runID, "outputs")); statErr == nil {
-		t.Fatal("wrote an outputs directory for an output that failed verification")
+	if _, statErr := os.Stat(filepath.Join(b.stateDir, "runs", runID, "outputs", "report.md")); statErr == nil {
+		t.Fatal("wrote an output that failed verification")
 	}
 }
 

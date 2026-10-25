@@ -50,8 +50,11 @@ const (
 
 var testRedactionKey = []byte("0123456789abcdef0123456789abcdef")
 
+// doneOutcome is the outcome file of a completed run that answers done.
+const doneOutcome = `{"state":"TASK_STATE_COMPLETED","message":{"role":"ROLE_AGENT","parts":[{"text":"done"}]}}`
+
 var (
-	resultStream   = []string{`{"type":"assistant","message":"working"}`, `{"type":"result","result":"done","is_error":false}`}
+	resultStream   = []string{`{"type":"assistant","message":"working"}`, doneOutcome}
 	noResultStream = []string{`{"type":"assistant","message":"working"}`}
 )
 
@@ -99,9 +102,9 @@ type fakeAdapter struct {
 	calls    []string
 	sweeps   int
 	sweepErr error
-	// endDelay holds a stream without a result line open before it ends.
+	// endDelay holds the job open after its stream before it ends.
 	endDelay time.Duration
-	// ended makes Follow end with that terminal after the stream, result line or not.
+	// ended makes Follow end with that terminal after the stream, rather than an exit of 0.
 	ended *adapter.Terminal
 	// linkLost makes that many Follows end with adapter.ErrLinkLost after at most one line; froms
 	// records the offset of every Follow and delivered the lines Follows put on the receiver's channel.
@@ -110,7 +113,7 @@ type fakeAdapter struct {
 	delivered int
 	// hang makes Sweep and Ready block until their context ends.
 	hang bool
-	// outputs are what Collect streams, unless collectErr fails it; collects counts the calls, stopsBefore the
+	// outputs are what Collect streams after the outcome file, unless collectErr fails it; collects counts the calls, stopsBefore the
 	// Stops each one followed and limits the last one's limits.
 	outputs    []adapter.Output
 	collectErr error
@@ -174,7 +177,7 @@ func (f *fakeAdapter) Lookup(ctx context.Context, runID string) (adapter.Job, er
 	return adapter.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Adapter: cmp.Or(f.jobAdapter, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
 }
 
-// Follow emits the stream; a stream with a result keeps running like a live task, one without ends.
+// Follow emits the stream, then ends the job after endDelay or when its context ends.
 func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, lines chan<- adapter.Line) (adapter.Terminal, error) {
 	f.mu.Lock()
 	f.follows++
@@ -206,21 +209,18 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, 
 	if followErr != nil {
 		return adapter.Terminal{}, followErr
 	}
-	if ended != nil || !slices.ContainsFunc(stream, func(data string) bool { _, ok := resultLine([]byte(data)); return ok }) {
-		select {
-		case <-time.After(endDelay):
-		case <-ctx.Done():
-		}
-		switch {
-		case neverStarted:
-			return adapter.Terminal{Class: cmp.Or(neverClass, "driver"), Node: "node-1", Reason: neverReason}, nil
-		case ended != nil:
-			return *ended, nil
-		}
-		return adapter.Terminal{Started: true, ExitCode: 1, Node: "node-1"}, nil
+	select {
+	case <-time.After(endDelay):
+	case <-ctx.Done():
+		return adapter.Terminal{}, ctx.Err()
 	}
-	<-ctx.Done()
-	return adapter.Terminal{}, ctx.Err()
+	switch {
+	case neverStarted:
+		return adapter.Terminal{Class: cmp.Or(neverClass, "driver"), Node: "node-1", Reason: neverReason}, nil
+	case ended != nil:
+		return *ended, nil
+	}
+	return adapter.Terminal{Started: true, Node: "node-1"}, nil
 }
 
 func (f *fakeAdapter) Stop(context.Context, adapter.Handle) error {
@@ -240,6 +240,17 @@ func (f *fakeAdapter) Collect(ctx context.Context, _ adapter.Handle, limits adap
 	f.limits = limits
 	f.stopsBefore = append(f.stopsBefore, f.stops)
 	outputs, err, hangs := slices.Clone(f.outputs), f.collectErr, f.collectHangs
+	// The job leaves as its outcome file the last line of its stream that holds a state, as an agent that prints its
+	// outcome too does.
+	for _, data := range slices.Backward(f.stream) {
+		var reported struct {
+			State string `json:"state"`
+		}
+		if json.Unmarshal([]byte(data), &reported) == nil && reported.State != "" {
+			outputs = append([]adapter.Output{{Name: wire.OutcomeFile, Size: int64(len(data)), Data: []byte(data)}}, outputs...)
+			break
+		}
+	}
 	f.mu.Unlock()
 	if hangs {
 		<-ctx.Done()

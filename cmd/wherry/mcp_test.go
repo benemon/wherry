@@ -658,6 +658,33 @@ func transcriptRun(t *testing.T) (*bus, string) {
 	return b, runID
 }
 
+// await writes the run's transcript beside its outputs as transcript prints it, prints its path like an output's, and MCP
+// await returns the path.
+func TestAwaitWritesTheTranscript(t *testing.T) {
+	b, runID := transcriptRun(t)
+	var printed bytes.Buffer
+	if err := runTranscript(b.ctx, b.client, []string{runID}, &printed, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(b.stateDir, "runs", runID, "outputs", "transcript.jsonl")
+	var stdout, stderr bytes.Buffer
+	if err := runAwait(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr); err == nil || err.Error() != "run ended in TASK_STATE_CANCELED" {
+		t.Fatalf("await: %v", err)
+	}
+	want := fmt.Sprintf("output=transcript.jsonl path=%s sha256=%s size=%d\n", path, hashOf(printed.String()), printed.Len())
+	if written, err := os.ReadFile(path); err != nil || printed.Len() == 0 || string(written) != printed.String() || !strings.HasSuffix(stdout.String(), want) {
+		t.Fatalf("transcript.jsonl %q, %v; stdout %q; want %q and its path", written, err, stdout.String(), printed.String())
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	var reply awaitReply
+	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "await", map[string]any{"id": runID}, &reply)
+	if written, err := os.ReadFile(path); err != nil || reply.Transcript != path || string(written) != printed.String() {
+		t.Fatalf("MCP await transcript %q, written %q, %v; want %s holding %q", reply.Transcript, written, err, path, printed.String())
+	}
+}
+
 func TestMCPTranscript(t *testing.T) {
 	b, runID := transcriptRun(t)
 	ctx := b.ctx

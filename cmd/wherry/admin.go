@@ -278,8 +278,6 @@ type receiverAdapter struct {
 	Name       string            `yaml:"name"`
 	Platform   string            `yaml:"platform"`
 	Agent      string            `yaml:"agent"`
-	Output     string            `yaml:"output"`
-	ReplyFile  string            `yaml:"reply_file"`
 	Credential string            `yaml:"credential"`
 	Labels     map[string]string `yaml:"labels"`
 	Config     map[string]any    `yaml:"config"`
@@ -389,7 +387,7 @@ func receiverConfig(capacity int64, platforms []entry[receiverPlatform], adapter
 			}
 			adapter.Config[key] = value
 		}
-		config.Adapters = append(config.Adapters, admin.AdapterSettings{Name: adapter.Name, Platform: p.Name, Type: p.Type, Agent: adapter.Agent, Output: adapter.Output, ReplyFile: adapter.ReplyFile, Credential: adapter.Credential, Labels: adapter.Labels, Config: adapter.Config})
+		config.Adapters = append(config.Adapters, admin.AdapterSettings{Name: adapter.Name, Platform: p.Name, Type: p.Type, Agent: adapter.Agent, Credential: adapter.Credential, Labels: adapter.Labels, Config: adapter.Config})
 	}
 	return config, nil
 }

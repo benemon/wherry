@@ -251,7 +251,7 @@ func TestS3URLsAreRedacted(t *testing.T) {
 	get := presigned(s.endpoint(), wire.S3InputKey(testTenant, "run-a", "dataset.bin"))
 	quoted := strings.ReplaceAll(get, "&", `&`)
 	stream := []string{`{"type":"assistant","message":"fetched ` + get + `"}`, `{"type":"assistant","message":"signature ` + s3Signature + `"}`,
-		`{"type":"result","result":"used ` + quoted + `","is_error":false}`}
+		completedWith("used " + quoted)}
 	f := s3Fixture(t, s, stream, []adapter.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
 	f.sealS3(t, validURLs(s.endpoint()))

@@ -25,8 +25,6 @@ config:
 const labPodman = `name: nomad-podman
 platform: lab-nomad
 agent: claude
-output: file
-reply_file: out/reply.md
 credential: claude-oauth-token
 labels:
   isolation: container
@@ -41,7 +39,6 @@ config:
 const labExec = `name: nomad-exec
 platform: lab-nomad
 agent: claude
-output: codex
 credential: claude-oauth-token
 labels:
   isolation: host
@@ -135,7 +132,7 @@ func TestReceiverConfigExampleParses(t *testing.T) {
 		t.Fatal(err)
 	}
 	documented(t, "example-receiver.yaml", "example-receiver/receiver.yaml", "example-receiver/platforms/nomad.yaml", "example-receiver/platforms/nomad-edge.yaml",
-		"example-receiver/adapters/10-claude-container.yaml", "example-receiver/adapters/20-codex-edge.yaml", "example-receiver/adapters/30-coder-host.yaml")
+		"example-receiver/adapters/10-claude-container.yaml", "example-receiver/adapters/20-codex-edge.yaml")
 }
 
 func TestReceiverConfigDirectoryAdapterTakesPlatformType(t *testing.T) {

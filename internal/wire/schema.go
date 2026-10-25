@@ -50,11 +50,13 @@ var taskStates = map[TaskState]bool{
 	TaskStateAuthRequired:  true,
 }
 
+// A run that needs a credential ends: it is not resumed.
 var terminalStates = map[TaskState]bool{
-	TaskStateCompleted: true,
-	TaskStateFailed:    true,
-	TaskStateCanceled:  true,
-	TaskStateRejected:  true,
+	TaskStateCompleted:    true,
+	TaskStateFailed:       true,
+	TaskStateCanceled:     true,
+	TaskStateRejected:     true,
+	TaskStateAuthRequired: true,
 }
 
 // ValidTaskState reports whether state is an A2A task state.
@@ -195,9 +197,6 @@ func CutUTF8(s string, n int) string {
 	return s[:n]
 }
 
-// MaxAgentResult bounds the resource-use fields of the agent's result record that a result's metadata carries.
-const MaxAgentResult = 16 << 10
-
 // ResultMetadata is a result's task metadata: where its run ran, and the outputs it returned and did not.
 type ResultMetadata struct {
 	ReceiverID  string             `json:"receiver_id"`
@@ -277,6 +276,16 @@ const (
 
 // KnownHostsFile is the input file a git input's host key is delivered as.
 const KnownHostsFile = "known_hosts"
+
+// OutcomeDir is reserved beneath a run's output directory, and OutcomeFile in it is where the agent reports how the
+// run ended. No output is collected from OutcomeDir.
+const (
+	OutcomeDir  = ".wherry"
+	OutcomeFile = OutcomeDir + "/outcome.json"
+)
+
+// TranscriptFile is where a host writes a run's transcript among its outputs, so no output takes its name.
+const TranscriptFile = "transcript.jsonl"
 
 // GitPatch and GitBundle are the outputs a run asking for its git changes back expects: a patch series, or a bundle.
 const (

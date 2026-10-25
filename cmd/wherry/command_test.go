@@ -262,7 +262,9 @@ func (b *bus) status(t *testing.T, task task, eventID, kind string, status wire.
 
 func (b *bus) result(t *testing.T, task task, parts []wire.Part) []byte {
 	run := task.submission.Wherry.Run
-	return b.sign(t, &wire.Result{Task: wire.Task{ID: run, ContextID: run, History: []wire.Message{task.submission.Message}, Status: now(wire.TaskStateCompleted),
+	status := now(wire.TaskStateCompleted)
+	status.Message = &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: parts, Extensions: []string{wire.ExtensionURI}}
+	return b.sign(t, &wire.Result{Task: wire.Task{ID: run, ContextID: run, History: []wire.Message{task.submission.Message}, Status: status,
 		Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: parts, Extensions: []string{wire.ExtensionURI}}}},
 		Wherry: wire.ResultBinding{ReceiverBinding: b.binding(task), TaskHash: task.hash}})
 }
@@ -383,7 +385,8 @@ func TestSubmitModelOutsideTheTerms(t *testing.T) {
 	}
 }
 
-// awaitOutput publishes a completed result with parts for an admitted run and returns what await prints.
+// awaitOutput publishes a completed result with parts for an admitted run and returns what await prints before the
+// transcript's line.
 func awaitOutput(t *testing.T, parts []wire.Part) string {
 	t.Helper()
 	b := newBus(t)
@@ -394,7 +397,17 @@ func awaitOutput(t *testing.T, parts []wire.Part) string {
 	if err := runAwait(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	return stdout.String()
+	return withoutTranscript(t, stdout.String())
+}
+
+// withoutTranscript is await's stdout without its last line, which must name the run's empty transcript.
+func withoutTranscript(t *testing.T, stdout string) string {
+	t.Helper()
+	printed, last, _ := strings.Cut(strings.TrimSuffix(stdout, "\n"), "\noutput=transcript.jsonl path=")
+	if !strings.HasSuffix(last, "/outputs/transcript.jsonl sha256="+hashOf("")+" size=0") {
+		t.Fatalf("stdout %q, want the transcript's path last", stdout)
+	}
+	return printed + "\n"
 }
 
 func TestAwaitPrintsNonTextPartPlaceholders(t *testing.T) {
@@ -459,8 +472,8 @@ func TestAwaitPrintsFailed(t *testing.T) {
 	if err == nil || err.Error() != "run ended in TASK_STATE_FAILED" {
 		t.Fatalf("error %v", err)
 	}
-	want := "TASK_STATE_FAILED\n"
-	if stdout.String() != want || stderr.Len() != 0 {
+	want := "TASK_STATE_FAILED\ncredential token was not answered within 5m\n"
+	if got := withoutTranscript(t, stdout.String()); got != want || stderr.Len() != 0 {
 		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
 	}
 }
@@ -482,7 +495,7 @@ func TestCancelCLI(t *testing.T) {
 	if err == nil || err.Error() != "run ended in TASK_STATE_CANCELED" {
 		t.Fatalf("await error %v", err)
 	}
-	if stdout.String() != "TASK_STATE_CANCELED\n" || stderr.Len() != 0 {
+	if withoutTranscript(t, stdout.String()) != "TASK_STATE_CANCELED\n" || stderr.Len() != 0 {
 		t.Fatalf("await stdout %q stderr %q", stdout.String(), stderr.String())
 	}
 	stdout.Reset()

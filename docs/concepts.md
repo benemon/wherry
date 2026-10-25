@@ -240,7 +240,7 @@ naming the limit. Task credentials are files in the directory
 files and of the outputs the task expects.
 
 The agent leaves its outputs in the directory `WHERRY_OUTPUT_DIR` names.
-Once the agent has written its result and the job is stopped, the adapter
+Once the job ends and is stopped, whatever its exit, the adapter
 collects the regular files there, up to 256 entries and the pool's output
 limit (8 MiB by default), without
 following links. The receiver redacts each file, publishes it in chunks on

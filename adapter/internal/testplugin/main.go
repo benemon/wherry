@@ -31,10 +31,12 @@ var outputs = []adapter.Output{
 }
 
 type config struct {
-	Panic       string `json:"panic"`
-	Fail        bool   `json:"fail"`
-	Outputs     bool   `json:"outputs"`
-	InlineLimit int64  `json:"inline_limit"`
+	Panic   string `json:"panic"`
+	Fail    bool   `json:"fail"`
+	Outputs bool   `json:"outputs"`
+	// Finish makes the job end after its lines and leave an outcome file, as an agent that completed does.
+	Finish      bool  `json:"finish"`
+	InlineLimit int64 `json:"inline_limit"`
 	// TooLarge names the input Dispatch refuses.
 	TooLarge string `json:"too_large"`
 	// NeverStarted is the reason Follow ends the job with, as one that never started.
@@ -106,7 +108,7 @@ func (f *fake) Lookup(context.Context, string) (adapter.Job, error) {
 	return adapter.Job{}, nil
 }
 
-// Follow emits the lines from offset from, then holds the stream open like a running job.
+// Follow emits the lines from offset from, then holds the stream open like a running job unless it finishes.
 func (f *fake) Follow(ctx context.Context, _ adapter.Handle, from int64, out chan<- adapter.Line) (adapter.Terminal, error) {
 	f.panics("Follow")
 	if f.config.NeverStarted != "" {
@@ -124,6 +126,9 @@ func (f *fake) Follow(ctx context.Context, _ adapter.Handle, from int64, out cha
 		}
 		offset = next
 	}
+	if f.config.Finish {
+		return adapter.Terminal{Started: true, Node: "fake-node"}, nil
+	}
 	<-ctx.Done()
 	return adapter.Terminal{}, ctx.Err()
 }
@@ -138,7 +143,12 @@ func (f *fake) Collect(ctx context.Context, _ adapter.Handle, limits adapter.Lim
 	if !f.config.Outputs {
 		return errors.New("no outputs configured")
 	}
-	for _, output := range outputs {
+	collected := outputs
+	if f.config.Finish {
+		outcome := []byte(`{"state":"TASK_STATE_COMPLETED","message":{"role":"ROLE_AGENT","parts":[{"text":"done"}]}}`)
+		collected = append([]adapter.Output{{Name: ".wherry/outcome.json", Size: int64(len(outcome)), Data: outcome}}, outputs...)
+	}
+	for _, output := range collected {
 		if output.Data != nil && slices.Contains(limits.Stream, output.Name) {
 			output.Body, output.Data = io.NopCloser(bytes.NewReader(output.Data)), nil
 		}

@@ -269,17 +269,14 @@ the default queue deadline and run deadline together.
 `--outputs-dir DIR` sets where the run's outputs go, by default
 `<state_dir>/runs/<run>/outputs/`.
 
-It prints the state on the first line. For a run that ended with a result,
-each following line is one part of a result artifact. For a run that ended
-with a status alone, each line is one part of the status message. A part
-prints as its text, its JSON data, `[url <url>]`, or
-`[raw <media type> <n> bytes]`.
+It prints the state on the first line, and each part of the status message
+on a line after it, for every state: the agent's answer or what went wrong,
+as its [outcome file](#agent-contract) reports it, or the
+receiver's reason. A part prints as its text, its JSON data,
+`[url <url>]`, or `[raw <media type> <n> bytes]`.
 
-For a run whose placement names a model, or whose agent's result names the
-models that served it, `await` prints
-`model=<model> served_models=<model,...>` on standard error. The receiver
-takes `served_models` from the `modelUsage` keys of a Claude result; a
-Codex result names no model, so it is empty there.
+For a run whose placement names a model, `await` prints `model=<model>` on
+standard error.
 
 `await` writes each output that [verifies](a2a-extension-v1.md#inputs-and-outputs)
 against the result, at its relative path beneath the outputs directory, and
@@ -291,6 +288,11 @@ output=<name> path=<path> sha256=<hex> size=<bytes>
 
 For `changes.patch` it also prints `apply with: git am <path>`, and for
 `changes.bundle` `fetch with: git fetch <path> HEAD`, on standard error.
+
+`await` writes the run's redacted transcript to `transcript.jsonl` in the
+outputs directory, one line per transcript line as `wherry transcript`
+prints them, and prints its line as it prints an output's, last. No
+expected output takes the name `transcript.jsonl`.
 
 It prints `output <name> not returned: <reason>` on standard error for each
 output the result lists as not returned and each one that fails
@@ -613,8 +615,8 @@ input: its name, presigned URL,
 size and SHA-256, which the plugin fetches and verifies before the agent
 starts, reporting a job that never started with class `fetch` when it
 cannot. A plugin that cannot deliver an input reports it, and the run ends
-`TASK_STATE_FAILED` naming it. After the agent's result line the receiver
-stops the job and asks the plugin to collect its outputs, which arrive over
+`TASK_STATE_FAILED` naming it. Once the job ends the receiver
+stops it and asks the plugin to collect its outputs, which arrive over
 the link in pieces of at most 1 MiB. The outputs the receiver names for
 streaming, its S3 outputs, the plugin streams as the receiver reads them.
 
@@ -760,8 +762,6 @@ before any adapter took it, has `adapter="none"`.
 | `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
 | `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
-| `wherry_agent_reported_tokens_total` | counter | `tenant`, `agent`, `model`, `kind` | tokens an agent's result reports: `input`, `output`, `cached`, `reasoning` |
-| `wherry_agent_reported_cost_usd_total` | counter | `tenant`, `agent`, `model` | cost in US dollars an agent's result reports |
 | `wherry_metrics_dropped_total` | counter | `adapter`, `reason` | adapter samples dropped and `Metrics` calls that failed |
 | `wherry_adapter_platform_errors_total` | counter | `adapter`, `class` | platform API errors: `unavailable`, `denied`, `conflict`, `timeout`, `other` |
 | `wherry_adapter_cleanup_pending` | gauge | `adapter` | the adapter's ended jobs awaiting cleanup |
@@ -799,7 +799,7 @@ defaults, `2h` and `10m`.
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
 | `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline`, `queue_deadline` | `id`, `pool`, `await` |
 | `status` | `id`, optional | `runs`, `skipped` |
-| `await` | `id` | `id`, `state`, `model`, `served_models`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped` |
+| `await` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `transcript`, `redacted`, `skipped` |
 | `cancel` | `id` | `id`, `skipped` |
 | `events` | `id` | `id`, `events`, `transcripts`, `redacted`, `skipped` |
 | `transcript` | `id`, `offset`, `limit` | `id`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
@@ -836,8 +836,8 @@ defaults, `2h` and `10m`.
   the RFC 3339 time of the latest status. While the run has none, it is this
   host's submission of the run when its record holds one, else the Kafka
   timestamp of the run's echo.
-- `await` waits up to 45 seconds. It returns the outcome with `message` and
-  `artifacts`, or, while the run is unfinished, its current `state` with
+- `await` waits up to 45 seconds. It returns the outcome with `message`, the
+  status message's parts as `wherry await` prints them, and `artifacts`, or, while the run is unfinished, its current `state` with
   `retry_after` set to 5. For a run whose queue deadline passes with no
   status from a receiver, it returns at once with `state`
   `TASK_STATE_SUBMITTED`, the `message` `status` gives, and no
@@ -849,9 +849,9 @@ defaults, `2h` and `10m`.
   each in `outputs` as `{name, path, sha256, size}`, S3 outputs included, which
   it downloads and verifies, then deletes the run's prefix, as `wherry await`
   does. `not_returned` holds `{name, size, reason}` for each output the result
-  lists as not returned and each one that fails verification. `model` is the
-  run's placement's model, and `served_models` the models the agent's result
-  names, as `wherry await` prints them.
+  lists as not returned and each one that fails verification. `transcript` is
+  the path of the `transcript.jsonl` it writes as `wherry await` does. `model`
+  is the run's placement's model.
 - `status`, `await`, `events` and `transcript` show each redaction marker as
   `wherry status` and `wherry await` print it, and `redacted` maps each name
   to the number of its markers in the messages, the artifacts, or every line
@@ -1151,9 +1151,10 @@ does not set it.
 `pool create`, `pool entitle` and `check` sign four records and measure
 them as record batches: the largest output chunk, of 256 KiB, two largest
 results, and the largest transcript chunk, a line of 512 KiB. Each result
-has the run's message with its 256 input files named but not carried, a
-status text and a result text of 64 KiB each, and the agent's result record
-at 20 KiB, its 16 KiB bound plus the growth redaction adds. One result lists
+has the run's message with its 256 input files named but not carried, and a
+status message and a result text of 64 KiB each, both raw, as an agent's text
+that JSON escaping would lengthen travels, with a `TASK_STATE_AUTH_REQUIRED`
+status's `credential` part. One result lists
 256 returned and 256 unreturned outputs with 512-byte names, the other 256 S3
 outputs with their keys. A receiver's labels and an adapter's job name have
 no bound and are left empty. Any one over its record limit refuses the terms,
@@ -1206,8 +1207,6 @@ Each adapter entry:
 | `name` | adapter name, unique in the receiver |
 | `platform` | the platform entry it takes its type, shared `config` and bundle credential from |
 | `agent` | the agent it launches, from the pool's terms |
-| `output` | optional, default `claude`: `claude` for Claude Code stream-json, `codex` for `codex exec --json`, or `file` for a reply file |
-| `reply_file` | optional, only with `output: file`, default `reply.md`: the output name of the reply file |
 | `credential` | optional; a credential the terms allow for the agent, delivered to the job |
 | `labels` | optional; [labels](#labels) for placement |
 | `config` | the adapter type's settings |
@@ -1244,8 +1243,8 @@ command writes nothing when the directory has an error.
 ### Receiver configuration example
 
 Receiver `nomad-1` in pool `build`, against the
-[pool terms example](#pool-terms-example): two Nomad clusters and three
-adapters in routing order, one for each `output`. Each adapter's `config`
+[pool terms example](#pool-terms-example): two Nomad clusters and two
+adapters in routing order. Each adapter's `config`
 holds only what the example needs; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
 lists every setting. As one file for
@@ -1272,7 +1271,6 @@ adapters:
   - name: claude-container
     platform: nomad
     agent: claude
-    output: claude
     credential: claude-oauth-token
     labels:
       isolation: container
@@ -1285,7 +1283,6 @@ adapters:
   - name: codex-edge
     platform: nomad-edge
     agent: codex
-    output: codex
     credential: openai-api-key
     labels:
       isolation: host
@@ -1302,28 +1299,6 @@ adapters:
             - >-
               exec codex exec --json --ephemeral --skip-git-repo-check
               --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
-  - name: coder-host
-    platform: nomad
-    agent: coder
-    output: file
-    # The run ends when the job does, with this output as its result.
-    reply_file: answer.md
-    credential: model-api-key
-    labels:
-      isolation: host
-    config:
-      credential_env: MODEL_API_KEY
-      node_pool: hosts
-      runtime:
-        driver: exec
-        config:
-          command: /bin/sh
-          args:
-            - -c
-            - >-
-              mkdir -p "$WHERRY_OUTPUT_DIR" &&
-              exec harness run < "$NOMAD_TASK_DIR/prompt.txt"
-              > "$WHERRY_OUTPUT_DIR/answer.md"
 ```
 
 The same configuration as a directory for
@@ -1338,7 +1313,6 @@ nomad-1/
   adapters/
     10-claude-container.yaml
     20-codex-edge.yaml
-    30-coder-host.yaml
 ```
 
 `receiver.yaml`:
@@ -1377,7 +1351,6 @@ config:
 name: claude-container
 platform: nomad
 agent: claude
-output: claude
 credential: claude-oauth-token
 labels:
   isolation: container
@@ -1395,7 +1368,6 @@ config:
 name: codex-edge
 platform: nomad-edge
 agent: codex
-output: codex
 credential: openai-api-key
 labels:
   isolation: host
@@ -1412,33 +1384,6 @@ config:
         - >-
           exec codex exec --json --ephemeral --skip-git-repo-check
           --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
-```
-
-`adapters/30-coder-host.yaml`:
-
-```yaml
-name: coder-host
-platform: nomad
-agent: coder
-output: file
-# The run ends when the job does, with this output as its result.
-reply_file: answer.md
-credential: model-api-key
-labels:
-  isolation: host
-config:
-  credential_env: MODEL_API_KEY
-  node_pool: hosts
-  runtime:
-    driver: exec
-    config:
-      command: /bin/sh
-      args:
-        - -c
-        - >-
-          mkdir -p "$WHERRY_OUTPUT_DIR" &&
-          exec harness run < "$NOMAD_TASK_DIR/prompt.txt"
-          > "$WHERRY_OUTPUT_DIR/answer.md"
 ```
 
 A task runs on the first ready adapter of its agent whose labels satisfy its
@@ -1466,40 +1411,47 @@ otherwise, so the adapter's command reads it with its own fallback, such as
 `--model "$WHERRY_MODEL"`.
 
 The agent writes JSON lines to standard output. The receiver publishes each
-line as a transcript chunk. With the adapter's `output` absent or `claude`,
-the line that decodes as a JSON object with `"type": "result"` ends the
-run: its `result` string becomes the result, and `"is_error": true` makes
-the state `TASK_STATE_FAILED`. Claude Code's
-[headless](https://docs.claude.com/en/docs/claude-code/headless) stream-json
-output writes this format. The result's
-[metadata](a2a-extension-v1.md#metadata) keeps its resource-use fields and
-the models that served it.
+line as a transcript chunk and reads nothing from them.
 
-With `output: codex`, the format `codex exec --json` writes, the receiver
-keeps the text of the last `item.completed` line whose `item.type` is
-`agent_message`. A `turn.completed` line ends the run with that text as the
-result and its `usage` as metadata. A `turn.failed` line ends it as
-`TASK_STATE_FAILED` with its `error.message`, or `error` itself when it is
-a string, as the result. `error` lines and `error` items do not end the
-run.
+The prompt tells every agent to write, when it finishes, whatever happened,
+an A2A `TaskStatus` JSON object to `$WHERRY_OUTPUT_DIR/.wherry/outcome.json`,
+and lists the run's credential names:
 
-With `output: file`, no line ends the run; it ends when the job does. The
-receiver collects the outputs and takes the output `reply_file` names as
-the result, redacted like any result. The reply is not returned as an output
-and counts against no output limit; a reply over 64 KiB becomes
-`[redacted text over 65536 bytes]`. The `reply_file` name is reserved on
-that adapter: an expected output of that name is listed as not returned with
-the reason `is the adapter's reply file`. A job that exits 0 with a reply
-completes with it, and one that exits 0 without a reply fails with the
-message `agent wrote no reply file`, or `outputs not collected` when the
-receiver could not collect the outputs. An empty reply completes the run
-with an empty result; `wherry await` then prints the state and an empty
-line. A job that exits non-zero or by a signal fails with its reply as the
-result, or without one with `agent exited <code>` or
-`agent ended by <signal>`. The result carries no `agent_result` metadata.
+```json
+{"state": "TASK_STATE_COMPLETED", "message": {"role": "ROLE_AGENT", "parts": [{"text": "<the answer, or what went wrong>"}]}}
+```
 
-The receiver stops the job once it reads the line that ends the run. A job
-that ends without one fails with the message `agent ended without a result`.
+`state` is `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or
+`TASK_STATE_AUTH_REQUIRED`. With `TASK_STATE_AUTH_REQUIRED`, a further part
+`{"data": {"credential": "<name>"}}` names the credential the agent needs,
+as the [`credential` data part](a2a-extension-v1.md#the-credential-data-part)
+defines it.
+
+The run ends when the job ends. The receiver stops the job, collects its
+outputs whatever its exit, and reads the outcome file:
+
+| Outcome file | Exit | The run ends |
+| --- | --- | --- |
+| valid | any | in its state, with its message as the status message and its text as the result |
+| missing or invalid | non-zero or a signal | `TASK_STATE_FAILED`, with `agent exited <code>` or `agent ended by <signal>` |
+| missing or invalid | 0 | `TASK_STATE_FAILED`, with `agent reported no outcome` |
+
+A file is invalid when it is over 512 KiB, does not decode as a
+`TaskStatus`, names another state, has no message or a message whose role is
+not `ROLE_AGENT`, or reports `TASK_STATE_AUTH_REQUIRED` without a
+`credential` part holding a credential name. The status message keeps the
+message's text parts, joined by newlines, and the `credential` part. Its text
+is redacted like any agent text and becomes
+`[redacted text over 65536 bytes]` when it passes 64 KiB once redacted.
+`TASK_STATE_AUTH_REQUIRED` ends the run, which is not resumed. A required
+output that is not returned fails the run with
+`required output <name> not returned: <reason>` as the status message,
+whatever the file reports. Outputs that are not collected leave the file
+unread.
+
+`.wherry/` beneath the output directory is reserved: nothing in it is
+collected as an output, and no output name leads into it, since no segment
+of an output name starts with a dot.
 
 A run's time is capped at its deadline, and at six hours after its queue
 deadline. `submit` refuses a deadline later than the queue deadline plus six

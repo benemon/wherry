@@ -208,8 +208,7 @@ A status reports one attempt of a run.
   status per event ID.
 - `log_offset` is the agent output offset an adopter follows from, on
   `started` and `heartbeat`. The transcript is published up to at least
-  that offset. From an adapter with `output: codex`, a heartbeat's
-  `log_offset` is at most the offset of the last `agent_message` line.
+  that offset.
 
 | `kind` | State | Written when | Extra |
 | --- | --- | --- | --- |
@@ -217,7 +216,7 @@ A status reports one attempt of a run.
 | `started` | `TASK_STATE_WORKING` | the job has started | |
 | `heartbeat` | `TASK_STATE_WORKING` | every 10 seconds while the job runs | pool events only |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
-| `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the run has ended | the reason as message text, except for completion and a failure the agent reports |
+| `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `TASK_STATE_AUTH_REQUIRED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](reference.md#agent-contract), or the reason as message text |
 
 A receiver writes each status other than a heartbeat to the pool's events
 and the tenant feed, with identical bytes, in one Kafka transaction. Readers
@@ -226,7 +225,12 @@ read committed records only. Readers order a run's statuses and results by
 later one.
 
 A status message is an A2A `Message` with `role` `ROLE_AGENT` and one text
-part. The fixed texts are:
+part. The message of a `TASK_STATE_AUTH_REQUIRED` status adds the
+[`credential` data part](#the-credential-data-part). The agent's text is
+redacted, replaced by `[redacted text over 65536 bytes]` when it passes
+64 KiB once redacted, and travels as a `raw` part with media type
+`text/plain` when escaping it as a JSON string would make it longer than
+base64 does. The fixed texts are:
 
 - rejected: `agent is outside the pool terms`,
   `model not in the pool's terms`, `duplicate submission`,
@@ -235,8 +239,8 @@ part. The fixed texts are:
   `unsupported message part`, `run ID in use`,
   `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
-- failed: `timeout`, `log stream failed`,
-  `agent ended without a result`,
+- failed: `timeout`, `log stream failed`, `agent exited <code>`,
+  `agent ended by <signal>`, `agent reported no outcome`,
   `an S3 input was not fetched, or did not match its size and SHA-256`,
   `the URL for S3 input <name> is not one of pool <pool>'s storage` (or
   `S3 output <name>`),
@@ -256,13 +260,28 @@ part. The fixed texts are:
   adds `and presigned URLs for the S3 inputs and outputs` and the
   instruction is `add the credentials and storage`; for URLs alone it is
   `presigned URLs for the S3 inputs and outputs were not answered within
-  5m; configure them`. The text names credentials, never their values. A
-  failure the agent reports carries no message; its result holds the
-  agent's text;
+  5m; configure them`. The text names credentials, never their values;
 - canceled: `canceled by user`.
 
 The `wherry` CLI and MCP server pass the message text through and do not
 read it.
+
+### The credential data part
+
+An agent that needs a credential it lacks ends its run
+`TASK_STATE_AUTH_REQUIRED` and names the credential in a data part of its
+message:
+
+```json
+{"data": {"credential": "deploy-key"}, "mediaType": "application/json"}
+```
+
+`credential` is a credential name: at most 32 lowercase letters, digits and
+hyphens, redacted like any agent text. It names one of the credentials the
+prompt lists, or another the run needs and was not given. A run in
+`TASK_STATE_AUTH_REQUIRED` has ended: wherry treats the state as terminal
+and does not resume the run. The host submits a new run once it holds the
+credential.
 
 ## Chunk
 
@@ -347,15 +366,15 @@ A result is the A2A `Task` a run ends with.
 ```
 
 - `task.id` and `task.contextId` are the run ID. `task.status` is the
-  run's final status.
+  run's final status, with the message its `terminal` status carries.
 - `task.history` holds the run's submitted message alone. Each `raw` and
   `data` part is replaced by a `url` part with the value `unstored:input`,
   the input's `filename` and `mediaType`, and `metadata` holding the hex
   `sha256` and `size` in bytes of its `raw` bytes or its `data` JSON. A
   reader requires `history[0].messageId` to equal the `message_id` of the
   run's echo.
-- `task.artifacts` holds the artifact `result`, with one part: the agent's
-  result as a `data` part with media type `application/json` when it is
+- `task.artifacts` holds the artifact `result`, with one part: the text of
+  the agent's message, or the receiver's reason, as a `data` part with media type `application/json` when it is
   JSON, a `raw` part with media type `text/plain` when it is not valid
   UTF-8 or escaping it as a JSON string would make it longer than base64
   does, and otherwise a text
@@ -395,7 +414,6 @@ The `metadata` of a result's `Task` says where the run executed:
 | `reason` | Meaning |
 | --- | --- |
 | `missing` | an expected output the agent did not leave |
-| `is the adapter's reply file` | an expected output the agent did not leave, whose name is the adapter's `reply_file` |
 | `not collected` | the adapter did not collect the outputs; every expected output is listed with it |
 | `exceeds output limit` | the file is over the pool's `output_limit`, or would take the run's outputs over it |
 | `rejected: symlink`, `rejected: fifo`, `rejected: device`, `rejected: socket`, `rejected: irregular file` | the entry is not a regular file and was not read |
@@ -409,26 +427,8 @@ The `metadata` of a result's `Task` says where the run executed:
 | `not uploaded: request failed`, `not uploaded: invalid request` | the PUT did not complete, or could not be built |
 
 `outputs`, `s3_outputs` and `not_returned` are present on a result of a run
-the agent ended with its result line, or of a run whose adapter has
-`output: file` and whose job ended after its agent task started, and
-absent when they would be empty.
-
-The `metadata` of the `result` artifact holds `agent_result` (object): the
-resource-use members `duration_ms`, `duration_api_ms`, `num_turns`,
-`total_cost_usd`, `usage` and `modelUsage` from the agent's final result
-line, or, from an adapter with `output: codex`, `usage` from its
-`turn.completed` line. The receiver re-encodes them, so member order and
-string escaping can differ from the line in the transcript. `agent_result`
-is absent when none of those members is present, when the line is not an
-RFC 7493 object, when the retained object exceeds 16 KiB as encoded, and
-when the run ends without a result line.
-
-Beside `agent_result`, `served_models` (array of strings) holds the keys of
-the result line's `modelUsage`, sorted: the models that served the run as
-Claude Code reports them. It is absent when `agent_result` is, when
-`modelUsage` is absent, empty or not an object, and when the metadata with
-it would exceed 16 KiB as encoded. A Codex `turn.completed` line names no
-model, so a Codex result has none.
+whose job ended after its agent started, and absent when they would be
+empty.
 
 ## Echo
 
@@ -802,7 +802,7 @@ from the broker, with `max_queue_deadline_ms` and `lock_duration_ms` in millisec
 which equal the record's, the receiver's `capacity`, and its `adapters` in
 routing order. Each adapter is the
 [adapter entry](reference.md#receiver-configuration) as `name`, `platform`
-naming the platform, the platform's `type`, `agent`, `output`, `reply_file`,
+naming the platform, the platform's `type`, `agent`,
 `credential` and `labels` when set, and the merged `config`. An `end` names
 exactly one of `receiver`, or `tenant` and `host`.
 Readers fold the records in order. A reader loads no state when:
@@ -972,17 +972,23 @@ their paths:
 `WHERRY_MODEL` holds the placement's model when the placement names one,
 and is not set otherwise.
 
-When the run has inputs, task credentials, expected outputs or a git input, the
-receiver opens the prompt with lines giving the absolute path of each directory,
-of each input file, of each credential file and of each expected output, with
-`(required)` after a required one, so an agent without a shell finds them, and
-the commands of the [git input](#git-input). The lines name S3 inputs by path,
-never by URL. The adapter reports the directories' paths as its agent sees them;
-a directory it does not report appears as its variable. The lines hold no
-credential value.
+The receiver opens the prompt with lines giving the absolute path of each
+directory, of each input file, of each credential file and of each expected
+output, with `(required)` after a required one, so an agent without a shell
+finds them, the commands of the [git input](#git-input), and the
+[outcome contract](reference.md#agent-contract) with the run's credential
+names. The lines name S3 inputs by path, never by URL. The adapter reports the
+directories' paths as its agent sees them; a directory it does not report
+appears as its variable. The lines hold no credential value.
 
-After the agent's result line, the receiver stops the job, then asks the adapter
-to collect the outputs. The adapter lists every entry beneath the outputs
+`.wherry/` beneath the outputs directory is reserved for the outcome file. No
+output name leads into it, and the receiver collects nothing in it as an
+output. A host writes the run's transcript among its outputs as
+`transcript.jsonl`, so a submission expecting an output of that name is
+invalid.
+
+When the job ends, the receiver stops it, then asks the adapter to collect the
+outputs, whatever the job's exit. The adapter lists every entry beneath the outputs
 directory without following links, and refuses the whole tree, reading nothing,
 when it holds more than 256 entries. It reads only regular files: one at most
 the pool's `output_limit`, 8 MiB unless its terms set another, and together at
@@ -996,7 +1002,7 @@ returned file as [output chunks](#output-chunk) and in the result's
 [metadata](#metadata). A required output listed in `not_returned` ends
 the run `TASK_STATE_FAILED` with
 `required output <name> not returned: <reason>`; an optional one leaves
-the state as the agent's result set it.
+the state as the agent's outcome file set it.
 
 A host takes a run's outputs from the attempt and receiver of the result
 that ended it, ignoring every other attempt's chunks. For each output the
@@ -1027,7 +1033,7 @@ storage before use.
   `TASK_STATE_FAILED` with `an S3 input was not fetched, or did not match its
   size and SHA-256`, without returning the task to the pool. S3 inputs count
   against neither `record_limit` nor `inline_limit`.
-- **Out.** After the agent's result line and the job's stop, the adapter
+- **Out.** Once the job ends and is stopped, the adapter
   streams each S3 output it finds as it collects, and the receiver sends it
   to its presigned PUT as it reads it, with the size the adapter listed as
   its Content-Length, hashing the bytes it sends. It follows no redirect.

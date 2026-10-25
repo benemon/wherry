@@ -357,6 +357,9 @@ func (value *Submission) validate() error {
 		if !ValidOutputName(output.Name) || outputs[output.Name] {
 			return errors.New("expected outputs must be unique relative paths of portable file names")
 		}
+		if output.Name == TranscriptFile {
+			return errors.New("expected output " + TranscriptFile + " is reserved for the run's transcript")
+		}
 		if output.Storage != "" && output.Storage != StorageS3 {
 			return errors.New("an expected output's storage is s3 or absent")
 		}

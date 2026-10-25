@@ -257,8 +257,7 @@ A single YAML file holding the whole
 [receiver configuration](reference.md#receiver-configuration) also works in
 place of the directory.
 The [receiver configuration example](reference.md#receiver-configuration-example)
-gives one configuration in both forms, with two platforms and an adapter for
-each `output`.
+gives one configuration in both forms, with two platforms and two adapters.
 
 A task with no selector runs on the first ready adapter, `container` here,
 and `--selector isolation=host` runs on the second. Every member of a pool
@@ -269,8 +268,12 @@ matching adapter returns the task.
 The [Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
 cover the `config` section.
 
-A Codex adapter declares `output: codex`, so the receiver reads the
-`codex exec --json` format. `codex exec` reads its API key from
+Every adapter runs its harness unchanged: the receiver reads no harness's
+output format, and the run ends when the job ends, with the outcome the
+agent writes as the prompt asks
+([agent contract](reference.md#agent-contract)).
+
+`codex exec` reads its API key from
 `CODEX_API_KEY` and ignores `OPENAI_API_KEY`, so the adapter sets
 `credential_env` to `CODEX_API_KEY`. Its platform,
 `nomad-codex` here, is the `nomad` platform without `credential_env`, since
@@ -283,7 +286,6 @@ allows. Without `--ephemeral`, Codex writes session files under
 name: codex
 platform: nomad-codex
 agent: codex
-output: codex
 credential: openai-api-key
 labels:
   isolation: host
@@ -311,37 +313,6 @@ Nomad reads `${...}` in driver configuration as its own interpolation and
 fails the task on `${WHERRY_MODEL:-<model>}`, so the fallback avoids braces.
 The value reaches the command through the environment, never pasted into its
 arguments.
-
-An adapter for any other harness declares `output: file`: the receiver ends
-the run when the job ends and takes the reply from a file the job writes to
-its output directory, `reply.md` unless `reply_file` names another. The
-command writes the harness's reply there, so the harness itself is
-unchanged, and its exit code decides whether the run completes:
-
-```yaml
-name: harness
-platform: nomad
-agent: coder
-output: file
-credential: model-api-key
-labels:
-  isolation: host
-config:
-  node_pool: default
-  runtime:
-    driver: exec
-    config:
-      command: /bin/sh
-      args:
-        - -c
-        - >-
-          exec harness run < "$NOMAD_TASK_DIR/prompt.txt"
-          > "$WHERRY_OUTPUT_DIR/reply.md"
-```
-
-A receiver or host of an earlier release cannot decode a configuration record
-that sets `output` or `reply_file`, and stops reading `wherry.admin` while it
-holds one. Upgrade every receiver and host before a configuration sets them.
 
 1. Write the configuration and add the receiver:
 
@@ -662,9 +633,9 @@ declares its limit through `InlineLimit`, and the receiver keeps the
 adapter's dispatch check as a backstop.
 
 The agent creates `WHERRY_OUTPUT_DIR` when it writes its first output.
-Outputs are collected once the agent writes its result line and the job is
-stopped, including when that line reports a failure. A run that ends
-without the agent's result line, by timeout or otherwise, returns none.
+Outputs are collected once the job ends and is stopped, whatever its exit
+and whatever outcome the agent reports. A run that ends before its job does,
+by timeout or otherwise, returns none.
 
 ## S3 storage
 
