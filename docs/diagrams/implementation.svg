@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 890" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
   <title id="title">wherry implementation view</title>
-  <desc id="desc">The host laptop of tenant alice runs a coding agent harness with the wherry skill and the wherry mcp server, both using the wherry client, beside its signing key, bundle, credential files, storage credential and state directory. The operator's wherry admin writes wherry.admin. Seven Kafka topics sit between host and receiver: the host reads wherry.admin, wherry.receivers, receiver key topics and its tenant feed, writes the pool's tasks and events, and reads and writes its own host topic. The receiver nomad-1 reads wherry.admin and the pool's tasks through the share group p-pool, reads and writes wherry.receivers, its own key topic and the pool's events, writes the tenant feed and reads the host topic. The receiver runs adapter plugins over mutual TLS, which run the unmodified agent as a Nomad job or Kubernetes pod. Optional paths: the host and the receiver reach an S3-compatible bucket, the host with its own credential and the receiver and adapter with presigned URLs from the seal, and the agent clones a git remote on one of the pool's VCS hosts.</desc>
+  <desc id="desc">The host laptop of tenant alice runs a coding agent harness with the wherry skill and the wherry mcp server, both using the wherry client, beside its signing key, bundle, credential sources, storage credential and state directory. The operator's wherry admin writes wherry.admin. Seven Kafka topics sit between host and receiver: the host reads wherry.admin, wherry.receivers, receiver key topics and its tenant feed, writes the pool's tasks and events, and reads and writes its own host topic. The receiver nomad-1 reads wherry.admin and the pool's tasks through the share group p-pool, reads and writes wherry.receivers, its own key topic and the pool's events, writes the tenant feed and reads the host topic. The receiver runs adapter plugins over mutual TLS, which run the unmodified agent as a Nomad job or Kubernetes pod. Optional paths: the host and the receiver reach an S3-compatible bucket, the host with its own credential and the receiver and adapter with presigned URLs from the seal, and the agent clones a git remote on one of the pool's VCS hosts.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e4a35"/>
@@ -44,7 +44,7 @@
     <rect x="60" y="466" width="290" height="110" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="205" y="490" text-anchor="middle" font-weight="600">Host files</text>
     <text x="205" y="509" text-anchor="middle" font-size="10.5" fill="#2e4a35">Ed25519 signing key and bundle</text>
-    <text x="205" y="524" text-anchor="middle" font-size="10.5" fill="#2e4a35">credential files and storage credential</text>
+    <text x="205" y="524" text-anchor="middle" font-size="10.5" fill="#2e4a35">credential sources and storage credential</text>
     <text x="205" y="539" text-anchor="middle" font-size="10.5" fill="#2e4a35">state directory: run records with</text>
     <text x="205" y="554" text-anchor="middle" font-size="10.5" fill="#2e4a35">redaction keys, verified outputs</text>
   </g>
@@ -195,7 +195,7 @@
 
   <path d="M 1340 560 V 724" stroke="#2e4a35" stroke-width="1.5" fill="none" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
   <text x="1332" y="626" text-anchor="end" font-size="10" fill="#2e4a35">the agent clones</text>
-  <text x="1332" y="640" text-anchor="end" font-size="10" fill="#2e4a35">with a task credential</text>
+  <text x="1332" y="640" text-anchor="end" font-size="10" fill="#2e4a35">with the host's git credential</text>
 
   <!-- legend -->
   <g font-size="10.5" fill="#2e4a35">
