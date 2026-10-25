@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 620" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
   <title id="title">wherry logical architecture by capability</title>
-  <desc id="desc">A coding agent on the caller's host delegates a task through harness integration. Placement chooses a receiver and an adapter, context delivery carries the prompt, files, credentials and repository to the job as files, and a platform adapter runs the unmodified agent as a job on the user's platform. Results carry statuses, transcript, outputs and the result back, redacted, and the caller verifies outputs before writing them. Authority and trust spans every exchange: operator-issued identities and grants enforced by the broker, signed records checked against the operator's state, and credentials sealed to one receiver for one attempt.</desc>
+  <desc id="desc">A coding agent on the caller's host delegates a task through harness integration. Placement chooses a receiver and an adapter, context delivery carries the prompt, files and repository to the job as files and each credential to its environment variable or file target, and a platform adapter runs the unmodified agent as a job on the user's platform. Results carry statuses, transcript, outputs and the result back, redacted, and the caller verifies outputs before writing them. Authority and trust spans every exchange: operator-issued identities and grants enforced by the broker, signed records checked against the operator's state, and credentials sealed to one receiver for one attempt.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e4a35"/>
@@ -22,7 +22,7 @@
 
     <rect x="40" y="232" width="200" height="176" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="140" y="260" text-anchor="middle" font-weight="600">Caller's host</text>
-    <text x="140" y="280" text-anchor="middle" font-size="10.5" fill="#2e4a35">credential files</text>
+    <text x="140" y="280" text-anchor="middle" font-size="10.5" fill="#2e4a35">credential sources</text>
     <text x="140" y="295" text-anchor="middle" font-size="10.5" fill="#2e4a35">input files</text>
     <text x="140" y="310" text-anchor="middle" font-size="10.5" fill="#2e4a35">verified outputs</text>
   </g>
@@ -61,7 +61,7 @@
 
     <rect x="302" y="232" width="570" height="76" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="587" y="256" text-anchor="middle" font-weight="600">Context delivery</text>
-    <text x="587" y="275" text-anchor="middle" font-size="10.5" fill="#2e4a35">prompt, input files, task credentials and a git repository, delivered to the job as files</text>
+    <text x="587" y="275" text-anchor="middle" font-size="10.5" fill="#2e4a35">prompt, input files, agent and task credentials at env or file targets, and a git repository</text>
     <text x="587" y="290" text-anchor="middle" font-size="10.5" fill="#2e4a35">large files travel beside the log, which carries their names, sizes and hashes</text>
 
     <rect x="302" y="332" width="570" height="76" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
@@ -95,7 +95,7 @@
   <path d="M 872 166 H 934" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
   <text x="906" y="158" text-anchor="start" font-size="10.5" fill="#2e4a35">dispatch</text>
   <path d="M 872 270 H 1010 V 214" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-  <text x="941" y="262" text-anchor="middle" font-size="10.5" fill="#2e4a35">files</text>
+  <text x="941" y="262" text-anchor="middle" font-size="10.5" fill="#2e4a35">files, env</text>
   <path d="M 1070 208 V 370 H 878" stroke="#3f6b4a" stroke-width="1.5" stroke-dasharray="5 3" fill="none" marker-end="url(#arrow-back)"/>
   <text x="1080" y="300" font-size="10.5" fill="#3f6b4a">transcript,</text>
   <text x="1080" y="315" font-size="10.5" fill="#3f6b4a">outputs, result</text>
