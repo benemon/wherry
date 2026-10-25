@@ -249,7 +249,9 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), map[string]client.Source{}, nil, log.New(&syncBuffer{}, "", 0))
+	// The host configures the credential, so submit takes the run, but its source never resolves.
+	unresolved := map[string]client.Source{credentialName: {Env: "WHERRY_TEST_UNSET_" + b.host}}
+	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), unresolved, nil, log.New(&syncBuffer{}, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
