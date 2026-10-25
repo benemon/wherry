@@ -76,6 +76,8 @@ func (source Source) resolve(ctx context.Context) ([]byte, error) {
 			return nil, fmt.Errorf("its command exited with status %d", exit.ExitCode())
 		case err != nil:
 			return nil, errors.New("its command did not start")
+		case len(stdout.data) == 0:
+			return nil, errors.New("its command wrote nothing")
 		}
 		return stdout.data, nil
 	}

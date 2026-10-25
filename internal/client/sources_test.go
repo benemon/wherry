@@ -59,9 +59,10 @@ func TestAFailingSourceIsLoggedByNameAlone(t *testing.T) {
 			"its command exited with status 3"},
 		"command times out": {Source{Command: []string{"sh", "-c", "printf " + secret + "; echo " + secret + " >&2; sleep 5"}},
 			"its command did not finish within 300ms"},
-		"command over size": {Source{Command: []string{"sh", "-c", "yes " + secret + " | head -c 70000"}}, "its command wrote over 65536 bytes"},
-		"command missing":   {Source{Command: []string{filepath.Join(t.TempDir(), secret)}}, "its command did not start"},
-		"file missing":      {Source{File: filepath.Join(t.TempDir(), secret)}, "no such file or directory"},
+		"command over size":      {Source{Command: []string{"sh", "-c", "yes " + secret + " | head -c 70000"}}, "its command wrote over 65536 bytes"},
+		"command writes nothing": {Source{Command: []string{"sh", "-c", "echo " + secret + " >&2"}}, "its command wrote nothing"},
+		"command missing":        {Source{Command: []string{filepath.Join(t.TempDir(), secret)}}, "its command did not start"},
+		"file missing":           {Source{File: filepath.Join(t.TempDir(), secret)}, "no such file or directory"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
