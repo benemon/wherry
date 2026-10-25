@@ -63,12 +63,13 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 		}
 		defer serveMetrics(listener, registry, logger).Close()
 	}
-	plugins := &plugins{dir: *pluginDir, logs: stdout, registry: registry, running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: *pluginDir, registry: registry, running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
 	r, err := receiver.New(bundle, *stateDir, *rotateKey, plugins.factory(bundle), logger, registry)
 	if err != nil {
 		return err
 	}
+	plugins.logs = r.PluginLogs(stdout)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := r.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {

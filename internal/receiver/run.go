@@ -17,6 +17,7 @@ import (
 	"hash"
 	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -558,6 +559,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, adapter: admitted.adapter,
 		expected: admitted.outputs, deadline: deadline, claimed: time.Now(),
 	}
+	defer func() {
+		r.liveMu.Lock()
+		delete(r.live, run)
+		r.liveMu.Unlock()
+	}()
 
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
 		return run.abandon(err)
@@ -588,7 +594,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				if lookupCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, "timeout", nil)
 				}
-				r.logger.Printf("run %s: lookup in adapter %s: %s", runID, named.Name, logText(run, err))
+				r.logger.Printf("run %s: lookup in adapter %s: %s", runID, named.Name, logText(run.redactText, err))
 				return run.returnTask(ctx, nil)
 			}
 			if job.State == adapter.JobAbsent {
@@ -601,12 +607,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			if job.Adapter != named.Name || job.Agent != task.Wherry.Placement.Agent {
 				if err := named.Adapter.Stop(ctx, job.Handle); err != nil {
 					r.metrics.stopFailures.WithLabelValues(named.Name).Inc()
-					r.logger.Printf("run %s: stop: %s", runID, logText(run, err))
+					r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 					return run.returnTask(ctx, nil)
 				}
 				if err := named.Adapter.Purge(ctx, runID); err != nil {
 					r.metrics.purgeFailures.WithLabelValues(named.Name).Inc()
-					r.logger.Printf("run %s: purge: %s", runID, logText(run, err))
+					r.logger.Printf("run %s: purge: %s", runID, logText(run.redactText, err))
 					return run.returnTask(ctx, nil)
 				}
 				r.logger.Printf("run %s: purged a job from adapter %q agent %q", runID, job.Adapter, job.Agent)
@@ -629,7 +635,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		return run.cancel(ctx, nil)
 	}
 	if neverStarted {
-		return run.startFailure(ctx, "platform")
+		return run.startFailure(ctx, "platform", "job never started")
 	}
 	if runCtx.Err() != nil && ctx.Err() == nil {
 		if adopted {
@@ -706,7 +712,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.logger.Printf("run %s: dispatch rejected: message too large", runID)
 			dispatched = adapter.OutcomeUnknown
 		case err != nil:
-			r.logger.Printf("run %s: dispatch failed: %s", runID, logText(run, err))
+			r.logger.Printf("run %s: dispatch failed: %s", runID, logText(run.redactText, err))
 			dispatched = adapter.OutcomeUnknown
 		}
 		switch dispatched {
@@ -715,7 +721,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		case adapter.OutcomeNothingCreated:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
 			r.logger.Printf("run %s: adapter %s created no job", runID, named.Name)
-			return run.startFailure(ctx, "dispatch")
+			return run.startFailure(ctx, "dispatch", "adapter "+named.Name+" created no job")
 		default:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
 			job, resolved := run.reconcile(runCtx)
@@ -724,9 +730,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				r.logger.Printf("run %s: dispatch unresolved", runID)
 				return run.returnTask(ctx, nil)
 			case job.State == adapter.JobAbsent:
-				return run.startFailure(ctx, "dispatch")
+				return run.startFailure(ctx, "dispatch", "adapter "+named.Name+" created no job")
 			case job.State == adapter.JobNeverStarted:
-				return run.startFailure(ctx, "platform")
+				return run.startFailure(ctx, "platform", "job never started")
 			}
 			dispatchedHandle = job.Handle
 		}
@@ -737,7 +743,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		r.logger.Printf("run %s: adapter %s returned a handle over %d bytes", runID, run.adapter.Name, maxHandle)
 		if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 			r.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-			r.logger.Printf("run %s: stop: %s", runID, logText(run, err))
+			r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 		}
 		return run.returnTask(ctx, nil)
 	}
@@ -869,14 +875,15 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				retry = time.After(followRetryInterval)
 			case end.err != nil:
 				// A dropped stream does not mean the task ended; stop it rather than leave it running.
-				r.logger.Printf("run %s: follow failed: %s", runID, logText(run, end.err))
+				r.logger.Printf("run %s: follow failed: %s", runID, logText(run.redactText, end.err))
 				return run.stopAndFail(ctx, handle, "log stream failed", pending)
 			case !end.terminal.Started && end.terminal.Class == adapter.ClassFetch:
 				r.logger.Printf("run %s: job never started: an S3 input was not fetched%s", runID, run.startReason(end.terminal))
 				return run.stopAndFail(ctx, handle, "an S3 input was not fetched, or did not match its size and SHA-256", pending)
 			case !end.terminal.Started:
-				r.logger.Printf("run %s: job never started (%s)%s", runID, end.terminal.Class, run.startReason(end.terminal))
-				return run.startFailure(ctx, "platform")
+				cause := "job never started (" + end.terminal.Class + ")" + run.startReason(end.terminal)
+				r.logger.Printf("run %s: %s", runID, cause)
+				return run.startFailure(ctx, "platform", cause)
 			default:
 				return run.conclude(ctx, handle, pending, end.terminal)
 			}
@@ -1014,7 +1021,7 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle
 			waited("adopter_refused")
 			if err := run.adapter.Adapter.Stop(ctx, *job); err != nil {
 				r.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-				r.logger.Printf("run %s: stop: %s", runID, logText(run, err))
+				r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 				return signed.SealValues{}, run.returnTask(ctx, nil), false
 			}
 			return signed.SealValues{}, run.fail(ctx, unansweredReason(append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), nil), false
@@ -1131,6 +1138,8 @@ type activeRun struct {
 	outcome *wire.TaskStatus
 	// claimed is when this attempt began executing the run, zero for a run ended without executing it.
 	claimed time.Time
+	// startCause is the redacted cause of this attempt's start failure, empty without one.
+	startCause string
 }
 
 // redaction is a form of a delivered value and the marker that replaces it.
@@ -1164,6 +1173,13 @@ func (run *activeRun) deliver(values map[string][]byte) {
 		}
 	}
 	slices.SortFunc(run.redactions, func(a, b redaction) int { return len(b.value) - len(a.value) })
+	r := run.receiver
+	r.liveMu.Lock()
+	if r.live == nil {
+		r.live = map[*activeRun][]redaction{}
+	}
+	r.live[run] = slices.Clone(run.redactions)
+	r.liveMu.Unlock()
 }
 
 // redact replaces each form of each delivered credential value in data with its marker, in order, as bytes.ReplaceAll
@@ -1177,9 +1193,17 @@ func (run *activeRun) redact(data []byte, limit int64) *redactedForm {
 // redactTo writes data redacted to out. The data passes through in pieces of redactPiece bytes, so no write, and
 // nothing a form's replacer holds, is larger than a piece and the forms.
 func (run *activeRun) redactTo(out io.Writer, data []byte) {
+	if replaced := redactTo(out, data, run.redactions); replaced > 0 {
+		run.receiver.metrics.redactions.WithLabelValues(run.task.Wherry.Tenant, cmp.Or(run.adapter.Name, "none")).Add(float64(replaced))
+	}
+}
+
+// redactTo writes data to out with each of forms, longest first, replaced by its marker, and returns how many it
+// replaced.
+func redactTo(out io.Writer, data []byte, forms []redaction) int {
 	w, replaced := out, 0
-	for i := len(run.redactions) - 1; i >= 0; i-- {
-		w = &replacer{value: run.redactions[i].value, marker: run.redactions[i].marker, next: w, replaced: &replaced}
+	for i := len(forms) - 1; i >= 0; i-- {
+		w = &replacer{value: forms[i].value, marker: forms[i].marker, next: w, replaced: &replaced}
 	}
 	for piece := range slices.Chunk(data, redactPiece) {
 		w.Write(piece)
@@ -1187,9 +1211,37 @@ func (run *activeRun) redactTo(out io.Writer, data []byte) {
 	if first, ok := w.(*replacer); ok {
 		first.flush()
 	}
-	if replaced > 0 {
-		run.receiver.metrics.redactions.WithLabelValues(run.task.Wherry.Tenant, cmp.Or(run.adapter.Name, "none")).Add(float64(replaced))
+	return replaced
+}
+
+// redactLive is text with every form of the values delivered to a run this receiver holds replaced by its marker, for
+// text no one run owns.
+func (r *Receiver) redactLive(text string) string {
+	r.liveMu.Lock()
+	forms := slices.Concat(slices.Collect(maps.Values(r.live))...)
+	r.liveMu.Unlock()
+	slices.SortFunc(forms, func(a, b redaction) int { return len(b.value) - len(a.value) })
+	var out strings.Builder
+	redactTo(&out, []byte(text), forms)
+	return out.String()
+}
+
+// PluginLogs is out with redactLive applied to each write. hclog writes each plugin log line, and each line of plugin
+// stderr go-plugin forwards, in one write.
+func (r *Receiver) PluginLogs(out io.Writer) io.Writer {
+	return pluginLogs{r, out}
+}
+
+type pluginLogs struct {
+	r   *Receiver
+	out io.Writer
+}
+
+func (l pluginLogs) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(l.out, l.r.redactLive(string(p))); err != nil {
+		return 0, err
 	}
+	return len(p), nil
 }
 
 // redactText is redact for receiver and agent text, which becomes a marker when its redacted form passes wire.MaxText.
@@ -1208,10 +1260,9 @@ var reasonURL = regexp.MustCompile(`(?i)https?://\S+`)
 // maxLogText bounds the adapter text one log line carries, in bytes.
 const maxLogText = 512
 
-// logText is err's text for the log: an adapter.Error's op and any class, then its text, with run's delivered values
-// redacted when run is set, without URLs, on one line of at most maxLogText bytes. The cap follows redaction, which
-// could otherwise miss a value it cut.
-func logText(run *activeRun, err error) string {
+// logText is err's text for the log: an adapter.Error's op and any class, then its text, redacted by redact, without
+// URLs, on one line of at most maxLogText bytes. The cap follows redaction, which could otherwise miss a value it cut.
+func logText(redact func(string) string, err error) string {
 	text := err.Error()
 	if failure, ok := err.(*adapter.Error); ok {
 		text = "op=" + failure.Op
@@ -1222,10 +1273,7 @@ func logText(run *activeRun, err error) string {
 			text += ": " + failure.Err.Error()
 		}
 	}
-	if run != nil {
-		text = run.redactText(text)
-	}
-	text = strings.NewReplacer("\r", " ", "\n", " ").Replace(reasonURL.ReplaceAllString(text, "[redacted-url]"))
+	text = strings.NewReplacer("\r", " ", "\n", " ").Replace(reasonURL.ReplaceAllString(redact(text), "[redacted-url]"))
 	return wire.CutUTF8(text, maxLogText)
 }
 
@@ -1238,7 +1286,7 @@ func (run *activeRun) startReason(terminal adapter.Terminal) string {
 	case terminal.Class == adapter.ClassFetch:
 		return ": [omitted]"
 	}
-	return ": " + logText(run, errors.New(terminal.Reason))
+	return ": " + logText(run.redactText, errors.New(terminal.Reason))
 }
 
 // redactedForm is the redacted form of some bytes: the bytes while they fit limit, and the size and SHA-256 of all of
@@ -1319,7 +1367,7 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 func (run *activeRun) stopAndFail(ctx context.Context, handle adapter.Handle, reason string, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run, err))
+		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
 	}
 	return run.fail(ctx, reason, pending)
@@ -1328,7 +1376,7 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle adapter.Handle, re
 func (run *activeRun) stopAndCancel(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run, err))
+		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
 	}
 	return run.cancel(ctx, pending)
@@ -1338,7 +1386,7 @@ func (run *activeRun) stopAndCancel(ctx context.Context, handle adapter.Handle, 
 func (run *activeRun) deny(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run, err))
+		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return kgo.AckRelease
 	}
 	const reason = "receiver denied"
@@ -1387,8 +1435,10 @@ func unansweredReason(credentials []string, urls bool) string {
 	return subject + " " + verb + " not answered within " + strings.TrimSuffix(wire.SealWait.String(), "0s") + "; " + configure + " in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
 }
 
-// startFailure purges the run's job and returns the task to the pool for a member that can start it.
-func (run *activeRun) startFailure(ctx context.Context, class string) kgo.AckStatus {
+// startFailure purges the run's job and returns the task to the pool for a member that can start it; cause is what the
+// run's terminal message names when the return spends the delivery budget.
+func (run *activeRun) startFailure(ctx context.Context, class, cause string) kgo.AckStatus {
+	run.startCause = logText(run.receiver.redactLive, errors.New(cause))
 	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.attempt, run.adapter.Name, class)); err != nil {
 		return run.abandon(err)
 	}
@@ -1415,7 +1465,7 @@ func (run *activeRun) purge(ctx context.Context) error {
 		if err == nil || ctx.Err() != nil || !time.Now().Before(deadline) {
 			return err
 		}
-		run.receiver.logger.Printf("run %s: purge: %s", run.task.Wherry.Run, logText(run, err))
+		run.receiver.logger.Printf("run %s: purge: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		sleep(ctx, renewInterval)
 	}
 }
@@ -1437,7 +1487,7 @@ func (run *activeRun) reconcile(ctx context.Context) (adapter.Job, bool) {
 		if err == nil {
 			return job, true
 		}
-		run.receiver.logger.Printf("run %s: lookup in adapter %s: %s", run.task.Wherry.Run, run.adapter.Name, logText(run, err))
+		run.receiver.logger.Printf("run %s: lookup in adapter %s: %s", run.task.Wherry.Run, run.adapter.Name, logText(run.redactText, err))
 	}
 	return adapter.Job{}, false
 }
@@ -1457,8 +1507,12 @@ func (run *activeRun) returnTask(ctx context.Context, pending []adapter.Line) kg
 }
 
 func (run *activeRun) budgetRecords(pending []adapter.Line) []*kgo.Record {
-	status := taskStatus(wire.TaskStateFailed, budgetReason)
-	return append(append(run.chunks(pending, true), run.result(status, budgetReason)), run.statusRecords("terminal", status, nil, nil)...)
+	reason := budgetReason
+	if run.startCause != "" {
+		reason = fmt.Sprintf("%s after %d attempts; last: %s", budgetReason, run.attempt, run.startCause)
+	}
+	status := taskStatus(wire.TaskStateFailed, reason)
+	return append(append(run.chunks(pending, true), run.result(status, reason)), run.statusRecords("terminal", status, nil, nil)...)
 }
 
 // conclude ends the run whose job ended as terminal says: with the status its outcome file reports, or failed for how
@@ -1471,7 +1525,7 @@ func (run *activeRun) conclude(ctx context.Context, handle adapter.Handle, pendi
 	stopped := true
 	if err := run.adapter.Adapter.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.adapter.Name).Inc()
-		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run, err))
+		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		// At the budget the run ends with no outputs or outcome file read, and the job is left to the adapter's sweep.
 		if !run.receiver.budgetSpent(run.attempt) {
 			return kgo.AckRelease
@@ -1526,7 +1580,7 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 			reason = "timeout"
 		}
 		run.receiver.metrics.collectionFailures.WithLabelValues(run.adapter.Name, reason).Inc()
-		run.receiver.logger.Printf("run %s: outputs not collected: %s", run.task.Wherry.Run, logText(run, err))
+		run.receiver.logger.Printf("run %s: outputs not collected: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		for _, output := range run.expected {
 			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "not collected"})
 		}
@@ -1790,7 +1844,7 @@ func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result st
 
 func (run *activeRun) release(ctx context.Context) {
 	if err := run.adapter.Adapter.Release(ctx, run.task.Wherry.Run); err != nil {
-		run.receiver.logger.Printf("run %s: release: %s", run.task.Wherry.Run, logText(run, err))
+		run.receiver.logger.Printf("run %s: release: %s", run.task.Wherry.Run, logText(run.redactText, err))
 	}
 }
 

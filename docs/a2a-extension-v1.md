@@ -538,7 +538,14 @@ the receiver's log, not to the start failure.
 
 From an attempt of the pool's `delivery_limit` minus 1, a receiver that
 would release a task to the pool ends the run `TASK_STATE_FAILED` with the
-message text `delivery budget exhausted` instead. This covers start
+message text `delivery budget exhausted` instead. When the attempt's own
+start failure spends the budget, the text continues
+`after <attempt> attempts; last: <cause>`, where the cause is
+`job never started (<class>): <reason>` with the platform's class and
+reason, `job never started`, or `adapter <adapter> created no job`. The
+cause carries the marker of each credential value delivered to a run the
+receiver holds in place of the value, has no URLs, and is one line of at
+most 512 bytes. This covers start
 failures, a dispatch whose outcome the receiver cannot resolve, a failed
 read of the pool's events or of the host's topic once the run is claimed,
 and a failure to find, stop or remove the run's job. When the agent has

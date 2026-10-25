@@ -604,7 +604,11 @@ mode 0700 and keeps `signing.key` in it. On start it:
    events once, and starts advertising and claiming.
 
 It logs its own lines to standard output with the prefix `receiver: `;
-plugin and link lines are hclog lines named `plugin`. It exits on
+plugin and link lines are hclog lines named `plugin`. Plugin lines, the
+plugin's raw standard error that go-plugin relays, and adapter sweep and
+readiness errors carry the
+[marker](a2a-extension-v1.md#seal) of each credential value
+delivered to a run the receiver holds in place of the value. It exits on
 `SIGINT` or `SIGTERM` without stopping its jobs, and fails with
 `receiver configuration changed` when a configuration record that differs
 from its own appears. An adapter type that is not a valid name ends it with

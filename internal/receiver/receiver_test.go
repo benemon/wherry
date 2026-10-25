@@ -1165,6 +1165,23 @@ func TestSweepErrorIsolated(t *testing.T) {
 	}
 }
 
+// Sweep and readiness errors belong to no run, so the credentials of every live run are redacted from them.
+func TestSweepAndReadinessErrorsAreRedactedAgainstLiveRuns(t *testing.T) {
+	f := newFixture(t, resultStream)
+	testActiveRun(t, f, "run-a", 1).deliver(map[string][]byte{credentialName: []byte(testToken)})
+	f.adapter.mu.Lock()
+	f.adapter.sweepErr, f.adapter.readyErr = errors.New("sweep echoed "+testToken), errors.New("readiness echoed "+testToken)
+	f.adapter.mu.Unlock()
+	if err := f.receiver.advertise(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	marker := signed.RedactionMarker(testRedactionKey, credentialName)
+	logs := f.logs.String()
+	if !strings.Contains(logs, "sweep: sweep echoed "+marker+"\n") || !strings.Contains(logs, "readiness: readiness echoed "+marker+"\n") || strings.Contains(logs, testToken) {
+		t.Fatalf("sweep and readiness errors not logged redacted: %q", logs)
+	}
+}
+
 func TestReceiverSweepsOnTick(t *testing.T) {
 	f := newFixture(t, resultStream)
 	ctx, cancel := context.WithCancel(f.ctx)

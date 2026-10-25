@@ -72,6 +72,9 @@ type Receiver struct {
 	admissionMu sync.Mutex
 	// cancelled holds the runs cancelled by a host of their tenant.
 	cancelled map[runKey]bool
+	// live holds the forms of the values delivered to each run this receiver holds.
+	liveMu sync.Mutex
+	live   map[*activeRun][]redaction
 }
 
 // New builds the receiver's Kafka client from bundle and loads or creates its signing key in stateDir, settling a
@@ -244,7 +247,7 @@ func (r *Receiver) configure(ctx context.Context) error {
 			for _, settings := range config.Adapters {
 				named, err := r.factory(config.Pool, settings)
 				if err != nil {
-					return fmt.Errorf("adapter %s: %s", settings.Name, logText(nil, err))
+					return fmt.Errorf("adapter %s: %s", settings.Name, logText(r.redactLive, err))
 				}
 				adapters = append(adapters, named)
 			}
@@ -485,7 +488,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 		case errors.Is(err, context.DeadlineExceeded):
 			r.logger.Printf("adapter %s sweep: timed out", named.Name)
 		case err != nil:
-			r.logger.Printf("adapter %s sweep: %s", named.Name, logText(nil, err))
+			r.logger.Printf("adapter %s sweep: %s", named.Name, logText(r.redactLive, err))
 		}
 	}
 	offers := []wire.Offer{}
@@ -498,7 +501,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 			r.logger.Printf("adapter %s readiness: timed out", named.Name)
 			continue
 		case err != nil:
-			r.logger.Printf("adapter %s readiness: %s", named.Name, logText(nil, err))
+			r.logger.Printf("adapter %s readiness: %s", named.Name, logText(r.redactLive, err))
 			continue
 		}
 		if ready {

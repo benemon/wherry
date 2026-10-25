@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -43,6 +44,9 @@ type config struct {
 	NeverStarted string `json:"never_started"`
 	// SweepError is the text of the adapter.Error Sweep returns.
 	SweepError string `json:"sweep_error"`
+	// Log is a value Configure logs, through its logger and as a raw line on file descriptor 2, which go-plugin relays as
+	// it relays a panic; os.Stderr goes to plugin.Serve's stdio stream instead.
+	Log string `json:"log"`
 	// Jobs makes the plugin keep each run's job as a platform does, for the conformance suite: Lookup finds it, Follow
 	// and Stop end it, Purge removes it, and Collect finds no outputs in it unless Outputs is set.
 	Jobs bool `json:"jobs"`
@@ -243,6 +247,10 @@ func main() {
 		}
 		if decoded.Fail {
 			return nil, errors.New("configured to fail")
+		}
+		if decoded.Log != "" {
+			logger.Info("configured", "log", decoded.Log)
+			fmt.Fprintln(os.NewFile(2, "stderr"), "[ERROR] raw "+decoded.Log)
 		}
 		return &fake{settings: settings, config: decoded, jobs: map[string]*adapter.Job{}}, nil
 	})

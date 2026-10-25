@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -643,7 +645,7 @@ func TestFencedStartFailureLeavesTheJob(t *testing.T) {
 	if err := adopter.commit(f.ctx, adopter.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
 		t.Fatal(err)
 	}
-	if status := zombie.startFailure(f.ctx, "dispatch"); status != 0 {
+	if status := zombie.startFailure(f.ctx, "dispatch", "adapter nomad created no job"); status != 0 {
 		t.Fatalf("fenced start failure returned ack %v, want 0 (no acknowledgement)", status)
 	}
 	f.adapter.mu.Lock()
@@ -657,7 +659,7 @@ func TestStartFailureWriteDenialEntersDenial(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-a", 1)
 	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.PoolEventsTopic(testPool)).Operations(kadm.OpWrite))
-	if status := run.startFailure(f.ctx, "dispatch"); status != kgo.AckRelease {
+	if status := run.startFailure(f.ctx, "dispatch", "adapter nomad created no job"); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
 	if !f.receiver.holds(capWrite) || !strings.Contains(f.logs.String(), "run run-a: write failed") {
@@ -828,7 +830,7 @@ func TestAdapterErrorLogsAreRedacted(t *testing.T) {
 }
 
 func TestAdapterErrorWithoutClassLogsNoClass(t *testing.T) {
-	if got := logText(nil, &adapter.Error{Op: "read allocation", Err: errors.New("not found")}); got != "op=read allocation: not found" {
+	if got := logText((&Receiver{}).redactLive, &adapter.Error{Op: "read allocation", Err: errors.New("not found")}); got != "op=read allocation: not found" {
 		t.Fatalf("logText = %q", got)
 	}
 }
@@ -1555,6 +1557,76 @@ func TestStartReasonIsRedactedOnOneBoundedLine(t *testing.T) {
 	}
 }
 
+// A plugin's log lines and the stderr go-plugin forwards reach the receiver's log with every live run's delivered
+// credentials redacted.
+func TestPluginOutputIsRedactedAgainstLiveRuns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wherry-plugin-fake")
+	if output, err := exec.Command("go", "build", "-o", path, "github.com/benemon/wherry/adapter/internal/testplugin").CombinedOutput(); err != nil {
+		t.Fatalf("build test plugin: %v\n%s", err, output)
+	}
+	f := newFixture(t, resultStream)
+	testActiveRun(t, f, "run-a", 1).deliver(map[string][]byte{credentialName: []byte(testToken)})
+	logs := &syncBuffer{}
+	plugin, err := adapter.Launch(func() (string, error) { return path, nil }, f.receiver.PluginLogs(logs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(plugin.Close)
+	if _, err := plugin.Configure(adapter.Settings{Name: "lab", Pool: testPool, Agent: "claude", Config: []byte(`{"log":"` + testToken + `"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	marker := signed.RedactionMarker(testRedactionKey, credentialName)
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		output := logs.String()
+		if strings.Contains(output, testToken) {
+			t.Fatalf("plugin output holds the credential:\n%s", output)
+		}
+		if strings.Contains(output, "configured: log="+marker) && strings.Contains(output, "[ERROR] raw "+marker) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("plugin output lacks the redacted log line and stderr line:\n%s", output)
+		}
+	}
+}
+
+// A run whose adapter fails to start on every attempt ends naming the last failure, with the credentials of every live
+// run redacted, on one bounded line.
+func TestBudgetExhaustedByStartFailuresNamesTheLastCause(t *testing.T) {
+	const otherToken = "ghp-other-run-credential-never-logged"
+	prefix := "delivery budget exhausted after 4 attempts; last: "
+	for _, test := range []struct{ name, reason, want string }{
+		{"own credential", "failed to create image " + testToken,
+			prefix + "job never started (driver): failed to create image " + signed.RedactionMarker(testRedactionKey, credentialName)},
+		{"another run's credential", "failed to create image " + otherToken,
+			prefix + "job never started (driver): failed to create image " + signed.RedactionMarker(testRedactionKey, "github-token")},
+		{"bounded", strings.Repeat("x", 2*maxLogText),
+			prefix + ("job never started (driver): " + strings.Repeat("x", maxLogText))[:maxLogText]},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			terms := testTerms()
+			terms.DeliveryLimit = 5
+			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {}})
+			testActiveRun(t, f, "run-b", 1).deliver(map[string][]byte{"github-token": []byte(otherToken)})
+			f.adapter.neverStarted, f.adapter.neverReason = true, test.reason
+			f.answer(t, credentialName)
+			record := f.submit(t, f.host, nil)
+			for attempt := int64(1); attempt <= 4; attempt++ {
+				want := kgo.AckRelease
+				if attempt == 4 {
+					want = kgo.AckReject
+				}
+				if status := f.execute(t, record, attempt); status != want {
+					t.Fatalf("attempt %d status %v, want %v; logs:\n%s", attempt, status, want, f.logs.String())
+				}
+			}
+			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != test.want {
+				t.Fatalf("terminal %s %q, want %q", state, reason, test.want)
+			}
+		})
+	}
+}
+
 func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -1646,7 +1718,7 @@ func TestStartFailureAtTheDeliveryBudgetFails(t *testing.T) {
 			if test.ack != kgo.AckReject {
 				return
 			}
-			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
+			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted after 9 attempts; last: adapter nomad created no job" {
 				t.Fatalf("terminal %s %q", state, reason)
 			}
 		})
