@@ -188,8 +188,8 @@ agent gets at the target the task's parent chooses. The pool's terms do not
 govern them, and none may take the target of one of the agent's
 credentials.
 
-`wherry submit` refuses a task at once, with `auth required: credential
-<name> is not in this host's configuration`, when the host has no source
+`wherry submit` refuses a task at once, with
+`auth required: credential <name> is not in this host's configuration`, when the host has no source
 for a required credential of the placed agent or for a task credential. An
 optional credential the host has no source for is not delivered; the
 prompt names it as not supplied.
