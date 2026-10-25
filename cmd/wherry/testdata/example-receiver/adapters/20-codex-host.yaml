@@ -1,9 +1,8 @@
-name: codex-edge
-platform: nomad-edge
+name: codex-host
+platform: nomad
 agent: codex
 labels:
   isolation: host
-  site: edge
 config:
   node_pool: codex
   runtime:

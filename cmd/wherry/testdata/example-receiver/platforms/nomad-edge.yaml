@@ -1,7 +1,0 @@
-# A second cluster; --platform-credential-file nomad-edge=FILE gives its adapters their own token.
-name: nomad-edge
-type: nomad
-config:
-  address: https://nomad-edge.example.com:4646
-  ca_file: /etc/wherry/nomad-edge-ca.pem
-  namespace: agents

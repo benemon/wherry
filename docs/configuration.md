@@ -381,8 +381,9 @@ command writes nothing when the directory has an error.
 ### Receiver configuration example
 
 Receiver `nomad-1` in pool `build`, against the
-[pool terms example](#pool-terms-example): two Nomad clusters and two
-adapters in routing order. Each adapter's `config`
+[pool terms example](#pool-terms-example): one Nomad cluster and two
+adapters in routing order, one running its agent in a container and one as
+an isolated process on the host. Each adapter's `config`
 holds only what the example needs; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
 lists every setting. Neither adapter names a credential: each delivers its
@@ -399,13 +400,6 @@ platforms:
       address: https://nomad.example.com:4646
       ca_file: /etc/wherry/nomad-ca.pem
       namespace: agents
-  # A second cluster; --platform-credential-file nomad-edge=FILE gives its adapters their own token.
-  - name: nomad-edge
-    type: nomad
-    config:
-      address: https://nomad-edge.example.com:4646
-      ca_file: /etc/wherry/nomad-edge-ca.pem
-      namespace: agents
 adapters:
   - name: claude-container
     platform: nomad
@@ -417,12 +411,11 @@ adapters:
         driver: docker
         config:
           image: registry.example.com/claude-agent:1.0
-  - name: codex-edge
-    platform: nomad-edge
+  - name: codex-host
+    platform: nomad
     agent: codex
     labels:
       isolation: host
-      site: edge
     config:
       node_pool: codex
       runtime:
@@ -443,11 +436,10 @@ The same configuration as a directory for
 nomad-1/
   receiver.yaml
   platforms/
-    nomad-edge.yaml
     nomad.yaml
   adapters/
     10-claude-container.yaml
-    20-codex-edge.yaml
+    20-codex-host.yaml
 ```
 
 `receiver.yaml`:
@@ -468,18 +460,6 @@ config:
   namespace: agents
 ```
 
-`platforms/nomad-edge.yaml`:
-
-```yaml
-# A second cluster; --platform-credential-file nomad-edge=FILE gives its adapters their own token.
-name: nomad-edge
-type: nomad
-config:
-  address: https://nomad-edge.example.com:4646
-  ca_file: /etc/wherry/nomad-edge-ca.pem
-  namespace: agents
-```
-
 `adapters/10-claude-container.yaml`:
 
 ```yaml
@@ -495,15 +475,14 @@ config:
       image: registry.example.com/claude-agent:1.0
 ```
 
-`adapters/20-codex-edge.yaml`:
+`adapters/20-codex-host.yaml`:
 
 ```yaml
-name: codex-edge
-platform: nomad-edge
+name: codex-host
+platform: nomad
 agent: codex
 labels:
   isolation: host
-  site: edge
 config:
   node_pool: codex
   runtime:
