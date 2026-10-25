@@ -156,22 +156,20 @@ under a supervisor, or as a Nomad job.
 ## 7. Configure the host
 
 On the host, put the model credential in a file and write
-`~/.config/wherry/config.json`:
+`~/.config/wherry/config.yaml`, keeping the credential file at mode 0600:
 
-```json
-{
-  "bundle": "~/.config/wherry/alice-laptop.bundle",
-  "credentials": {
-    "model-api-key": {"file": "~/.config/wherry/model-api-key"}
-  }
-}
+```yaml
+bundle: ~/.config/wherry/alice-laptop.bundle
+credentials:
+  model-api-key:
+    file: ~/.config/wherry/model-api-key
 ```
 
 When a receiver claims a task and asks for the credential, `wherry await`
 seals the file's contents byte for byte to that receiver. A credential can
 also come from an environment variable of the answering process,
-`{"env": "MODEL_API_KEY"}`, or from a command's output,
-`{"command": ["op", "read", "op://wherry/model/credential"]}`
+`env: MODEL_API_KEY`, or from a command's output,
+`command: [op, read, "op://wherry/model/credential"]`
 ([client configuration](reference.md#client-configuration)).
 
 ## 8. Register the host key

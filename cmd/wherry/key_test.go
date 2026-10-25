@@ -38,7 +38,7 @@ func newKeyHost(t *testing.T) keyHost {
 	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []admin.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	dir := t.TempDir()
-	h := keyHost{ctx: ctx, service: service, config: filepath.Join(dir, "config.json"), keyPath: filepath.Join(dir, "host.key"), stateDir: filepath.Join(dir, "state")}
+	h := keyHost{ctx: ctx, service: service, config: filepath.Join(dir, "config.yaml"), keyPath: filepath.Join(dir, "host.key"), stateDir: filepath.Join(dir, "state")}
 	bundle := filepath.Join(dir, "host.yaml")
 	for _, step := range []func() error{
 		func() error { return service.PoolCreate(ctx, "pool-a", terms) },
@@ -50,7 +50,7 @@ func newKeyHost(t *testing.T) keyHost {
 		}
 	}
 	resalt(t, service, bundle)
-	if err := os.WriteFile(h.config, []byte(`{"bundle":"`+bundle+`","host_key":"`+h.keyPath+`","state_dir":"`+h.stateDir+`"}`), 0o600); err != nil {
+	if err := os.WriteFile(h.config, []byte("bundle: "+bundle+"\nhost_key: "+h.keyPath+"\nstate_dir: "+h.stateDir+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer

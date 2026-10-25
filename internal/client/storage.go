@@ -20,7 +20,6 @@ import (
 
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
-	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -45,34 +44,25 @@ var storageTransport http.RoundTripper
 
 // bucket opens a pool's bucket, path-style, with this host's storage credential, which never leaves the host: the
 // receiver and the agent see only URLs it presigns.
-func (h *Host) bucket(pool string, storage *admin.Storage) (*minio.Client, error) {
+func (h *Host) bucket(ctx context.Context, pool string, storage *admin.Storage) (*minio.Client, error) {
 	if h.storage == nil {
 		return nil, fmt.Errorf("%w: this host's configuration has no storage credential for S3 inputs and outputs", ErrInvalidInput)
 	}
 	if storage == nil {
 		return nil, fmt.Errorf("%w: pool %s has no storage for S3 inputs and outputs", ErrInvalidInput, pool)
 	}
-	access, err := readKey(h.storage.AccessKeyFile)
-	if err != nil {
-		return nil, err
-	}
-	secret, err := readKey(h.storage.SecretKeyFile)
-	if err != nil {
-		return nil, err
+	var keys [2]string
+	for i, name := range []string{h.storage.AccessKey, h.storage.SecretKey} {
+		key, err := h.credentials[name].resolve(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("read storage credential %s: %w", name, err)
+		}
+		keys[i] = strings.TrimSpace(string(key))
 	}
 	// minio drops the default port Host adds, as presigned URLs are signed without it.
 	return minio.New(storage.Host(), &minio.Options{
-		Creds: credentials.NewStaticV4(access, secret, ""), Secure: true, BucketLookup: minio.BucketLookupPath, Transport: storageTransport,
+		Creds: credentials.NewStaticV4(keys[0], keys[1], ""), Secure: true, BucketLookup: minio.BucketLookupPath, Transport: storageTransport,
 	})
-}
-
-// readKey reads a storage key file that only its owner can read or write.
-func readKey(path string) (string, error) {
-	key, err := trust.ReadOwnerOnly(path)
-	if err != nil {
-		return "", fmt.Errorf("storage key file: %w", err)
-	}
-	return strings.TrimSpace(string(key)), nil
 }
 
 // uploadInputs puts each file under the run's prefix with one PUT and returns the S3 inputs with the size and SHA-256 of
@@ -189,7 +179,7 @@ func (h *Host) DownloadOutputs(ctx context.Context, runID string, result AwaitRe
 			return nil, nil, err
 		}
 		storage := v.state.Pools[local.Pool].Storage
-		store, err := h.bucket(local.Pool, storage)
+		store, err := h.bucket(ctx, local.Pool, storage)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -283,7 +273,7 @@ func (h *Host) Cleanup(ctx context.Context, runID string) error {
 		return fmt.Errorf("%w: run %s has not ended", ErrInvalidInput, runID)
 	}
 	storage := r.v.state.Pools[r.pool].Storage
-	store, err := h.bucket(r.pool, storage)
+	store, err := h.bucket(ctx, r.pool, storage)
 	if err != nil {
 		return err
 	}

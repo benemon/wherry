@@ -1160,31 +1160,38 @@ func TestEventsBindsRecordsToTheRun(t *testing.T) {
 }
 
 func TestConfigRejectsUnknownField(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"bundle":"bundle.yaml","unknown":true}`), 0o600); err != nil {
+	const secret = "sk-live-config-secret"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("bundle: bundle.yaml\nstray_field: "+secret+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadConfig(path); err == nil {
-		t.Fatal("config with unknown field was accepted")
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "line 2") || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "stray_field") {
+		t.Fatalf("config with an unknown field: %v, want it refused at its line, quoting nothing from the file", err)
+	}
+}
+
+func TestDefaultConfigPathIsYAML(t *testing.T) {
+	if path, err := DefaultConfigPath(); err != nil || !strings.HasSuffix(path, filepath.Join(".config", "wherry", "config.yaml")) {
+		t.Fatalf("default config path %s, %v", path, err)
 	}
 }
 
 func TestConfigInputRoots(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
+	path := filepath.Join(dir, "config.yaml")
 	for name, test := range map[string]struct{ root, want string }{
 		"missing":  {filepath.Join(dir, "absent"), "does not exist or is not a directory"},
 		"a file":   {path, "does not exist or is not a directory"},
 		"relative": {".", "must be absolute"},
 	} {
-		if err := os.WriteFile(path, []byte(`{"bundle":"bundle.yaml","input_roots":["`+test.root+`"]}`), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("bundle: bundle.yaml\ninput_roots: ['"+test.root+"']\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("config with an input root that is %s: %v, want %q", name, err, test.want)
 		}
 	}
-	if err := os.WriteFile(path, []byte(`{"bundle":"bundle.yaml","input_roots":["~"]}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("bundle: bundle.yaml\ninput_roots: ['~']\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	home, err := os.UserHomeDir()
@@ -1208,11 +1215,11 @@ func TestConfigExampleLoads(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".config/wherry/known_hosts/gitlab"), []byte("gitlab.example ssh-ed25519 AAAA\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	example, err := os.ReadFile(filepath.Join("testdata", "example-config.json"))
+	example, err := os.ReadFile(filepath.Join("testdata", "example-config.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	config, err := LoadConfig(filepath.Join("testdata", "example-config.json"))
+	config, err := LoadConfig(filepath.Join("testdata", "example-config.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1231,8 +1238,8 @@ func TestConfigExampleLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(reference), "```json\n"+string(example)+"```\n") {
-		t.Fatal("docs/reference.md has no code block holding testdata/example-config.json")
+	if !strings.Contains(string(reference), "```yaml\n"+string(example)+"```\n") {
+		t.Fatal("docs/reference.md has no code block holding testdata/example-config.yaml")
 	}
 }
 

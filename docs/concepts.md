@@ -181,7 +181,8 @@ credentials, each with its target: an environment variable or a file in
 the directory `WHERRY_CREDENTIALS_DIR` names, and whether the agent
 requires it. The host's configuration maps each credential name to one
 source: a file, an environment variable of the process answering the seal,
-or a command whose output is the value. A task can also declare **task
+or a command whose output is the value. A file source's file is refused
+when its group can write it or others can access it. A task can also declare **task
 credentials**: credentials of the host, such as a deploy key, that the
 agent gets at the target the task's parent chooses. The pool's terms do not
 govern them, and none may take the target of one of the agent's

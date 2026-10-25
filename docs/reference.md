@@ -10,7 +10,7 @@
   then connects to Kafka. `key` connects only to settle a
   [leftover next key](#wherry-key-rotate).
 - Every host command takes `--config-file FILE`. It defaults to
-  `~/.config/wherry/config.json`. A leading `~/` is expanded.
+  `~/.config/wherry/config.yaml`. A leading `~/` is expanded.
 - A command's flags may come before or after its `RUN_ID`.
 - A failed command prints `wherry: <error>` on standard error and exits
   with status 1.
@@ -933,18 +933,19 @@ error text from the bus, the broker or the host key.
 
 ## Client configuration
 
-A JSON object at `~/.config/wherry/config.json`, or at the host command's
-`--config-file` path. Unknown and duplicate members are errors. A leading
-`~/` is expanded in the flag and in every path.
+A YAML file at `~/.config/wherry/config.yaml`, or at the host command's
+`--config-file` path. Unknown and duplicate fields are errors, and a decode
+error names only its line numbers. A leading `~/` is expanded in the flag and
+in every path.
 
-| Member | Default | Content |
+| Field | Default | Content |
 | --- | --- | --- |
 | `bundle` | required | the host's bundle |
 | `host_key` | `~/.config/wherry/host.key` | host signing key file |
 | `state_dir` | `~/.config/wherry/state` | run records and answered seal requests |
-| `credentials` | none | credential name to its [source](#credential-sources), exactly one of `{"file": PATH}`, `{"env": VAR}` and `{"command": [PROGRAM, ARG...]}` |
+| `credentials` | none | credential name to its [source](#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]` |
 | `git` | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`, both optional ([git credentials](#git-credentials)) |
-| `storage` | none | `{access_key_file, secret_key_file}`: regular files holding the access key and secret key of the host's S3 credential, each granting its group and others no access; a host without it uses no S3 lane |
+| `storage` | none | `{access_key, secret_key}`: the names of the credentials in `credentials` holding the access key and secret key of the host's S3 credential; a host without it uses no S3 lane |
 | `input_roots` | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
 
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
@@ -982,8 +983,17 @@ answerer tries it again each second until the request expires:
 run <id>: resolve credential <name>: its command exited with status 1
 ```
 
+A `file` source must name a regular file that its group cannot write and
+others cannot read, write or execute. Mode 0600 is the recommended mode.
+Group read is accepted, so a secrets agent can template the file for a
+service group at mode 0640. A file that breaks the rule fails the answer:
+
+```
+run <id>: resolve credential <name>: its file is writable by its group or open to others; chmod 600 it
+```
+
 The `submit` of the [MCP server](#mcp-tools) refuses as an input every file
-a `file` source names.
+a `file` source names, including the storage keys' files.
 
 ### Git credentials
 
@@ -1002,47 +1012,57 @@ credential grants. Loading the configuration refuses a `url` that does not
 start with `https://` or `ssh://` or repeats another, a `credential` with no
 source in `credentials`, and a `host_key` that is not a readable file.
 
-The storage key files are read whenever the host uploads, presigns,
-downloads or deletes, with surrounding whitespace removed; the client
-refuses a file that is not regular or that grants its group or others any
-access. The credential
-never leaves the host: receivers and agents get only the URLs it presigns.
+The storage keys resolve through their credentials' sources whenever the
+host uploads, presigns, downloads or deletes, with surrounding whitespace
+removed. Loading the configuration refuses a `storage` block missing either
+name, or naming a credential with no source in `credentials`. A source that
+fails names the credential and the cause:
+`read storage credential <name>: its environment variable is unset or empty`.
+The credential never leaves the host: receivers and agents get only the URLs it presigns.
 Scope it to `wherry/<tenant>/` in each pool's bucket
 ([operator guide](operator-guide.md#s3-storage)).
 
 ### Client configuration example
 
-The configuration of host `laptop`, setting every member:
+The configuration of host `laptop`, setting every field:
 
-```json
-{
-  "bundle": "~/.config/wherry/laptop.bundle",
-  "host_key": "~/.config/wherry/laptop.key",
-  "state_dir": "~/.local/state/wherry",
-  "credentials": {
-    "claude-oauth-token": {"file": "~/.config/wherry/credentials/claude-oauth-token"},
-    "model-api-key": {"file": "~/.config/wherry/credentials/model-api-key"},
-    "openai-api-key": {"command": ["op", "read", "op://wherry/openai/credential"]},
-    "github-token": {"env": "GITHUB_TOKEN"},
-    "deploy-key": {"file": "~/.config/wherry/credentials/deploy-key"}
-  },
-  "git": [
-    {"url": "https://github.com/acme/", "credential": "github-token"},
-    {"url": "ssh://git@gitlab.example/", "credential": "deploy-key", "host_key": "~/.config/wherry/known_hosts/gitlab"}
-  ],
-  "input_roots": ["~/src", "~/notes"],
-  "storage": {
-    "access_key_file": "~/.config/wherry/s3-access-key",
-    "secret_key_file": "~/.config/wherry/s3-secret-key"
-  }
-}
+```yaml
+bundle: ~/.config/wherry/laptop.bundle
+host_key: ~/.config/wherry/laptop.key
+state_dir: ~/.local/state/wherry
+credentials:
+  claude-oauth-token:
+    file: ~/.config/wherry/credentials/claude-oauth-token
+  model-api-key:
+    file: ~/.config/wherry/credentials/model-api-key
+  openai-api-key:
+    command: [op, read, "op://wherry/openai/credential"]
+  github-token:
+    env: GITHUB_TOKEN
+  deploy-key:
+    file: ~/.config/wherry/credentials/deploy-key
+  s3-access-key:
+    file: ~/.config/wherry/credentials/s3-access-key
+  s3-secret-key:
+    command: [op, read, "op://wherry/s3/secret-key"]
+git:
+  - url: https://github.com/acme/
+    credential: github-token
+  - url: ssh://git@gitlab.example/
+    credential: deploy-key
+    host_key: ~/.config/wherry/known_hosts/gitlab
+input_roots: [~/src, ~/notes]
+storage:
+  access_key: s3-access-key
+  secret_key: s3-secret-key
 ```
 
-JSON takes no comments. `credentials` holds a source for each credential the
-agents of the [pool terms example](#pool-terms-example) take: two files, a
-password manager's command for `openai-api-key`, and the answering process's
+`credentials` holds a source for each credential the agents of the
+[pool terms example](#pool-terms-example) take: two files, a password
+manager's command for `openai-api-key`, and the answering process's
 `GITHUB_TOKEN` for `github-token`, which `git` also gives every task cloning
-under `https://github.com/acme/`. Each source resolves each time a receiver
+under `https://github.com/acme/`. `storage` takes the S3 access key from a
+file and the secret key from the password manager. Each source resolves each time a receiver
 asks for its credential.
 
 ## Bundle

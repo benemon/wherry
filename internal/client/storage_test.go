@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -41,6 +42,7 @@ const testBucket = "wherry-test"
 type oracle struct {
 	endpoint string
 	config   *StorageConfig
+	sources  map[string]Source
 	store    *minio.Client
 	client   *http.Client
 	secret   string
@@ -49,6 +51,7 @@ type oracle struct {
 type uploadOracle struct {
 	endpoint string
 	config   *StorageConfig
+	sources  map[string]Source
 	mu       sync.Mutex
 	objects  map[string][]byte
 }
@@ -88,7 +91,8 @@ func newUploadOracle(t *testing.T) *uploadOracle {
 	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	o.endpoint, o.config = server.URL, &StorageConfig{AccessKeyFile: access, SecretKeyFile: secret}
+	o.endpoint, o.config = server.URL, &StorageConfig{AccessKey: "storage-access", SecretKey: "storage-secret"}
+	o.sources = map[string]Source{"storage-access": {File: access}, "storage-secret": {File: secret}}
 	return o
 }
 
@@ -104,15 +108,17 @@ func newOracle(t *testing.T) *oracle {
 	if target == "" {
 		t.Skip("WHERRY_S3_TEST_ENDPOINT not set")
 	}
-	config := &StorageConfig{AccessKeyFile: os.Getenv("WHERRY_S3_TEST_ACCESS_KEY_FILE"), SecretKeyFile: os.Getenv("WHERRY_S3_TEST_SECRET_KEY_FILE")}
-	access, err := readKey(config.AccessKeyFile)
-	if err != nil {
-		t.Fatal(err)
+	config := &StorageConfig{AccessKey: "storage-access", SecretKey: "storage-secret"}
+	sources := map[string]Source{"storage-access": {File: os.Getenv("WHERRY_S3_TEST_ACCESS_KEY_FILE")}, "storage-secret": {File: os.Getenv("WHERRY_S3_TEST_SECRET_KEY_FILE")}}
+	var keys [2]string
+	for i, name := range []string{config.AccessKey, config.SecretKey} {
+		key, err := sources[name].resolve(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys[i] = strings.TrimSpace(string(key))
 	}
-	secret, err := readKey(config.SecretKeyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	access, secret := keys[0], keys[1]
 	parsed, err := url.Parse(target)
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +158,7 @@ func newOracle(t *testing.T) *oracle {
 	}
 	client := proxy.Client()
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &oracle{endpoint: proxy.URL, config: config, store: store, client: client, secret: secret}
+	return &oracle{endpoint: proxy.URL, config: config, sources: sources, store: store, client: client, secret: secret}
 }
 
 // object is the content of key in the test bucket, or nil when it does not exist.
@@ -196,6 +202,7 @@ func storageFixture(t *testing.T) (*fixture, *oracle, *testReceiver) {
 		t.Fatal(err)
 	}
 	f.host.storage = o.config
+	maps.Copy(f.host.credentials, o.sources)
 	receiver := f.addReceiver(t, "receiver-s3", "pool-s3")
 	receiver.advertise(t, f.ctx, nil)
 	return f, o, receiver
@@ -277,6 +284,7 @@ func TestSubmitMovesInputsOverSmallestAdapterLimitToS3(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.host.storage = o.config
+	maps.Copy(f.host.credentials, o.sources)
 	receiver := f.addReceiver(t, "receiver-a", "pool-inline")
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 1000 })
 	f.addReceiver(t, "receiver-b", "pool-inline").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 5000 })
@@ -305,6 +313,7 @@ func recordLimitFixture(t *testing.T, stored bool) (*fixture, *uploadOracle, *te
 	if stored {
 		terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 		f.host.storage = o.config
+		maps.Copy(f.host.credentials, o.sources)
 	}
 	if err := f.service.PoolCreate(f.ctx, "pool-r", terms); err != nil {
 		t.Fatal(err)
@@ -401,6 +410,7 @@ func TestSubmitAppliesTheAdapterLimitOfAStaleReceiver(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.host.storage = o.config
+	maps.Copy(f.host.credentials, o.sources)
 	receiver := f.addReceiver(t, "receiver-a", "pool-inline")
 	receiver.advertise(t, f.ctx, nil)
 	f.addReceiver(t, "receiver-b", "pool-inline").advertise(t, f.ctx, func(ad *wire.Advertisement) {
@@ -492,7 +502,7 @@ func TestAnswerSealsPresignedURLsForTheRunsObjects(t *testing.T) {
 // answerer line holds a credential value, a URL, the storage secret or the run's redaction key.
 func TestAnswererLogsHoldNoSecret(t *testing.T) {
 	o := newUploadOracle(t)
-	if err := os.WriteFile(o.config.SecretKeyFile, []byte("storage-secret-value"), 0o600); err != nil {
+	if err := os.WriteFile(o.sources["storage-secret"].File, []byte("storage-secret-value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f := newFixture(t)
@@ -505,6 +515,7 @@ func TestAnswererLogsHoldNoSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.host.storage = o.config
+	maps.Copy(f.host.credentials, o.sources)
 	receiver := f.addReceiver(t, "receiver-s3", "pool-s3")
 	receiver.advertise(t, f.ctx, nil)
 	task, _ := submitS3(t, f, receiver, 10*time.Minute)
@@ -606,7 +617,7 @@ func TestS3UseIsRefusedBeforePublishing(t *testing.T) {
 	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "this host's configuration has no storage credential") {
 		t.Fatalf("submit without a storage credential = %v", err)
 	}
-	f.host.storage = &StorageConfig{AccessKeyFile: f.secret, SecretKeyFile: f.secret}
+	f.host.storage = &StorageConfig{AccessKey: "model", SecretKey: "model"}
 	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "pool pool-a has no storage for S3 inputs and outputs") {
 		t.Fatalf("submit to a pool without storage = %v", err)
 	}
@@ -619,26 +630,40 @@ func TestS3UseIsRefusedBeforePublishing(t *testing.T) {
 	}
 }
 
-func TestStorageKeyFilesMustBeTheOwnersAlone(t *testing.T) {
+// The storage keys resolve through their credentials' sources, trimmed, and a failure names the credential alone.
+func TestStorageKeysResolveThroughSources(t *testing.T) {
+	const access, secret = "storage-access-value", "storage-secret-value"
+	t.Setenv("WHERRY_TEST_STORAGE_ACCESS", access+"\n")
+	h := &Host{storage: &StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"}, credentials: map[string]Source{
+		"s3-access": {Env: "WHERRY_TEST_STORAGE_ACCESS"},
+		"s3-secret": {Command: []string{"printf", secret + "\n"}},
+	}}
+	pool := &admin.Storage{Endpoint: "https://s3.example.test", Bucket: testBucket}
+	store, err := h.bucket(context.Background(), "pool-s3", pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if creds, err := store.GetCreds(); err != nil || creds.AccessKeyID != access || creds.SecretAccessKey != secret {
+		t.Fatalf("S3 client holds %q and %q, %v; want the env and command sources' values", creds.AccessKeyID, creds.SecretAccessKey, err)
+	}
 	path := filepath.Join(t.TempDir(), "secret.key")
-	if err := os.WriteFile(path, []byte("secret\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readKey(path); err == nil || !strings.Contains(err.Error(), "chmod 600") {
-		t.Fatalf("read a key file others can read: %v", err)
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if key, err := readKey(path); err != nil || key != "secret" {
-		t.Fatalf("read %q, %v", key, err)
-	}
-	dir := filepath.Join(t.TempDir(), "keys")
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readKey(dir); err == nil || !strings.Contains(err.Error(), "not a regular file") {
-		t.Fatalf("read a directory as a key file: %v", err)
+	for name, source := range map[string]Source{"open file": {File: path}, "unset env": {Env: "WHERRY_TEST_STORAGE_UNSET"}, "failing command": {Command: []string{"sh", "-c", "printf " + secret + "; exit 2"}}} {
+		h.credentials["s3-secret"] = source
+		_, err := h.bucket(context.Background(), "pool-s3", pool)
+		if err == nil || !strings.HasPrefix(err.Error(), "read storage credential s3-secret: its ") {
+			t.Fatalf("bucket with a secret key from a %s: %v, want the credential named", name, err)
+		}
+		for _, held := range []string{access, secret, path} {
+			if strings.Contains(err.Error(), held) {
+				t.Fatalf("bucket with a secret key from a %s: error %q holds %q", name, err, held)
+			}
+		}
 	}
 }
 

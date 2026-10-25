@@ -95,7 +95,7 @@ they would exceed either and the chosen pool has storage and the host its
 storage credential, wherry automatically carries them through S3; otherwise
 submit refuses before publishing and names the limit.
 The server refuses any other path, and the host's state directory, host key,
-bundle, credential files and storage key files. To give the agent a credential,
+bundle and every file a credential source names, including the storage keys' files. To give the agent a credential,
 add `credentials`: `{name, file}` or `{name, env}` with `name` a credential in
 the user's wherry configuration and `file` the name it gets in
 `WHERRY_CREDENTIALS_DIR`, or `env` the environment variable it gets; you never
