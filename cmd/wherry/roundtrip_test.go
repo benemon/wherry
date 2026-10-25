@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -175,8 +176,11 @@ func TestRoundTrip(t *testing.T) {
 	service := &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
 		Broker: address, CA: ca, DeliveryCeiling: 10}
 	dir := t.TempDir()
-	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}}, DefaultAgent: "claude",
-		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	optional := false
+	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []admin.AgentCredential{
+		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},
+		{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional},
+	}}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	bucket := s3Oracle(t)
 	if bucket == nil {
 		bucket = fallbackS3(t)
@@ -184,7 +188,7 @@ func TestRoundTrip(t *testing.T) {
 	terms.Storage = &admin.Storage{Endpoint: bucket.endpoint, Bucket: s3Bucket}
 	hostBundle, otherBundle, receiverBundle := filepath.Join(dir, "host.yaml"), filepath.Join(dir, "other.yaml"), filepath.Join(dir, "receiver.yaml")
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2,
-		Adapters: []admin.AdapterSettings{{Name: "fake", Platform: "fake-platform", Type: "fake", Agent: "claude", Credential: "model", Labels: map[string]string{"gpu": "yes"}, Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000}}}}
+		Adapters: []admin.AdapterSettings{{Name: "fake", Platform: "fake-platform", Type: "fake", Agent: "claude", Labels: map[string]string{"gpu": "yes"}, Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000}}}}
 	for _, step := range []func() error{
 		func() error { return service.PoolCreate(ctx, "pool-a", terms) },
 		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
@@ -240,8 +244,11 @@ func TestRoundTrip(t *testing.T) {
 	if err := os.WriteFile(deployPath, []byte(deployText), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The agent's credential comes from the answerer's environment and the task's from a command; the host has no source
+	// for the agent's optional credential.
+	t.Setenv("WHERRY_ROUNDTRIP_MODEL", credentialText)
 	hostConfig := busclient.Config{Bundle: hostBundle, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
-		Credentials: map[string]string{"model": credentialPath, "deploy-key": deployPath}}
+		Credentials: map[string]busclient.Source{"model": {Env: "WHERRY_ROUNDTRIP_MODEL"}, "deploy-key": {Command: []string{"cat", deployPath}}}}
 	hostConfig.Storage = bucket.config
 	if _, err := busclient.Init(ctx, hostConfig); err != nil {
 		t.Fatal(err)
@@ -306,13 +313,14 @@ func TestRoundTrip(t *testing.T) {
 			configured = record.Settings
 		}
 	}
-	if len(runs) != 1 || runs[0].ID != submitted.RunID || string(runs[0].Credential) != credentialText || string(runs[0].Prompt) == "" ||
+	if len(runs) != 1 || runs[0].ID != submitted.RunID || string(runs[0].Prompt) == "" ||
 		len(runs[0].Inputs) != 1 || runs[0].Inputs[0].Name != "data.csv" || string(runs[0].Inputs[0].Data) != "a,b\n" ||
-		len(runs[0].Credentials) != 1 || string(runs[0].Credentials[0].Value) != deployText || runs[0].Credentials[0].File != "id_ed25519" ||
-		!strings.Contains(string(runs[0].Prompt), "Input files: /fake/inputs/data.csv.") {
-		t.Fatalf("plugin runs %+v; want one dispatch with the host's sealed credentials and the input", runs)
+		!reflect.DeepEqual(runs[0].Credentials, []adapter.Secret{{Name: "model", Env: "MODEL_API_KEY", Value: []byte(credentialText)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(deployText)}}) ||
+		!strings.Contains(string(runs[0].Prompt), "Input files: /fake/inputs/data.csv.") ||
+		!strings.Contains(string(runs[0].Prompt), "This run's credentials are model, deploy-key, github-token (not supplied).") {
+		t.Fatalf("plugin runs %+v; want one dispatch with the host's sealed credentials at their targets, the input, and the unsupplied credential named", runs)
 	}
-	if configured.Platform != platformText || configured.Pool != "pool-a" || configured.Agent != "claude" || configured.Credential != "model" {
+	if configured.Platform != platformText || configured.Pool != "pool-a" || configured.Agent != "claude" {
 		t.Fatalf("plugin configured with %+v; want the bundle's platform credential and the adapter's settings", configured)
 	}
 	// A plugin crash: the receiver restarts it and configures its adapter again, platform credential included.

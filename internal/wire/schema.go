@@ -277,6 +277,9 @@ const (
 // KnownHostsFile is the input file a git input's host key is delivered as.
 const KnownHostsFile = "known_hosts"
 
+// GitCredentialFile is the credentials file a git input's credential is delivered as.
+const GitCredentialFile = "git-credential"
+
 // OutcomeDir is reserved beneath a run's output directory, and OutcomeFile in it is where the agent reports how the
 // run ended. No output is collected from OutcomeDir.
 const (
@@ -366,8 +369,8 @@ func (g *GitInput) Validate(credentials []TaskCredential) error {
 	if len(checkout) > 512 || slices.ContainsFunc(strings.Split(checkout, "/"), func(segment string) bool { return !gitSegment.MatchString(segment) }) {
 		return errors.New("git path must be a relative path of at most 512 bytes without . or .. segments; name one when the repository's name is not a portable file name")
 	}
-	if g.Credential != "" && !slices.ContainsFunc(credentials, func(credential TaskCredential) bool { return credential.Name == g.Credential }) {
-		return errors.New("git credential must be one of the submission's task credentials")
+	if g.Credential != "" && !slices.ContainsFunc(credentials, func(credential TaskCredential) bool { return credential.Name == g.Credential && credential.File != "" }) {
+		return errors.New("git credential must be one of the submission's task credentials, delivered as a file")
 	}
 	switch {
 	case parsed.Scheme == "ssh" && g.HostKey == "":

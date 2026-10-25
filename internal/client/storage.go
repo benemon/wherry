@@ -137,7 +137,8 @@ func presign(ctx context.Context, store *minio.Client, bucket, tenant, run strin
 }
 
 // checkSealSize refuses a run whose seal would pass its limit: it seals the run's task credentials and URLs for its S3
-// inputs and outputs, presigned as the answer will, to a throwaway key. The agent's own credential is not counted.
+// inputs and outputs, presigned as the answer will, to a throwaway key. The agent's credentials are not counted, nor a
+// task credential from a command source, which runs only to answer a seal.
 func (h *Host) checkSealSize(ctx context.Context, store *minio.Client, bucket, tenant, run string, credentials []wire.TaskCredential, inputs, outputs []string, deadline time.Time) error {
 	values, err := presign(ctx, store, bucket, tenant, run, inputs, outputs, deadline)
 	if err != nil {
@@ -145,8 +146,12 @@ func (h *Host) checkSealSize(ctx context.Context, store *minio.Client, bucket, t
 	}
 	var names []string
 	for _, credential := range credentials {
-		if values[credential.Name], err = os.ReadFile(h.credentials[credential.Name]); err != nil {
-			return fmt.Errorf("read credential %s: %w", credential.Name, errors.Unwrap(err))
+		source := h.credentials[credential.Name]
+		if len(source.Command) > 0 {
+			continue
+		}
+		if values[credential.Name], err = source.resolve(ctx); err != nil {
+			return fmt.Errorf("read credential %s: %w", credential.Name, err)
 		}
 		names = append(names, credential.Name)
 	}

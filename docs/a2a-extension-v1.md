@@ -107,7 +107,8 @@ A submission is the task of one run.
     },
     "deadline_at_ms": 1790000000000,
     "queue_deadline_at_ms": 1789998800000,
-    "credentials": [{"name": "deploy-key", "file": "id_ed25519"}],
+    "credentials": [{"name": "deploy-key", "file": "git-credential"}, {"name": "vault-token", "env": "VAULT_TOKEN"}],
+    "unsupplied_credentials": ["github-token"],
     "outputs": [{"name": "report.md", "required": true}, {"name": "plot.pdf", "storage": "s3"}],
     "s3_inputs": [{"name": "dataset.parquet", "size": 5242880, "sha256": "4f1c..."}],
     "git": {
@@ -146,12 +147,24 @@ A submission is the task of one run.
   adapters declare. Over either, a host carries the inputs as
   [S3 inputs](#s3-inputs-and-outputs) when the pool has storage and the host
   a storage credential, and otherwise refuses the run.
-- `credentials` lists task credentials, each `{name, file}`: a credential of the
-  host, by the name in its configuration, that the agent gets as the file `file`
-  in its credentials directory. `name` is at most 32 lowercase letters, digits
-  and hyphens, starting and ending with a letter or digit, and `file` follows
-  the file name rules; each `file` appears once, while a `name` can repeat.
-  The pool's terms do not govern task credentials.
+- `credentials` lists task credentials, each `{name, env}` or `{name, file}`:
+  a credential of the host, by the name in its configuration, that the agent
+  gets in the environment variable `env` or as the file `file` in its
+  credentials directory. `name` is at most 32 lowercase letters, digits and
+  hyphens, starting and ending with a letter or digit, and appears once.
+  Each credential has exactly one target: `env` matches
+  `[A-Za-z_][A-Za-z0-9_]*` and is no variable an adapter sets
+  (`adapter.ReservedEnv`), and `file` follows the file name rules. No two
+  credentials share a target, and no task credential takes the target of one
+  of the agent's credentials in the pool's terms. A task credential may
+  share its name with one of the agent's credentials; the seal carries the
+  value once and the agent gets it at both targets. The pool's terms do not
+  otherwise govern task credentials.
+- `unsupplied_credentials` names the agent's optional credentials in the
+  pool's terms for which the host has no source, each once; absent when there
+  are none. The run goes without them, and the prompt names them as not
+  supplied. A receiver rejects a submission that names a required credential
+  of the agent here.
 - `outputs` lists at most 256 files the agent is asked to leave, each
   `{name, required, storage}`. `name` is a relative path of file names joined by
   `/`, at most 512 bytes, and appears once. `required` defaults to false.
@@ -164,7 +177,10 @@ A submission is the task of one run.
   lowercase hex SHA-256. It holds no URL. The message's parts and
   `s3_inputs` number at most 256 together.
 - `git` is the run's [git input](#git-input), optional. With a `host_key`,
-  no input file or S3 input is named `known_hosts`.
+  no input file or S3 input is named `known_hosts`. A host fills its
+  `credential` and `host_key` from the [git entry](reference.md#client-configuration)
+  of its configuration that the remote falls under, and adds that credential
+  to `credentials` at the file `git-credential`.
 
 A submission whose input names repeat, among its input files, its S3 inputs
 and `known_hosts`, fails to decode, so a receiver drops it at
@@ -278,7 +294,8 @@ message:
 
 `credential` is a credential name: at most 32 lowercase letters, digits and
 hyphens, redacted like any agent text. It names one of the credentials the
-prompt lists, or another the run needs and was not given. A run in
+prompt lists, including an optional one the prompt marks `(not supplied)`,
+or another the run needs and was not given. A run in
 `TASK_STATE_AUTH_REQUIRED` has ended: wherry treats the state as terminal
 and does not resume the run. The host submits a new run once it holds the
 credential.
@@ -581,8 +598,8 @@ ignored.
 
 ## Seal request
 
-A receiver that claims a run whose adapter delivers a credential asks the
-run's host for it. It makes a P-256 key pair for the attempt and commits a
+A receiver that claims a run whose agent takes credentials asks the run's
+host for them. It makes a P-256 key pair for the attempt and commits a
 seal request to the tenant feed in a transaction of its own, after the
 run's `claimed` status.
 
@@ -606,9 +623,10 @@ run's `claimed` status.
   thumbprint, unpadded base64url. `expiry_at_ms` is over 0. Credential
   names are non-empty and lowercase, `s3_inputs` are file names and
   `s3_outputs` follow the `outputs` name rules.
-- `credentials` names the credential of the adapter the run was routed to,
-  and is empty when the adapter delivers none.
-- `task_credentials` names the run's task credentials other than that one,
+- `credentials` names the agent's credentials in the pool's terms, less those
+  the submission lists in `unsupplied_credentials`, and is empty when there
+  are none.
+- `task_credentials` names the run's task credentials other than those,
   and is absent when there are none. A name appears once across both
   lists.
 - `s3_inputs` and `s3_outputs` name the run's S3 inputs and S3 outputs, for which the seal is to carry presigned URLs; each is absent
@@ -618,9 +636,9 @@ run's `claimed` status.
   again differs from the first attempt's, so an adopter cannot redact the
   first attempt's S3 input URLs, and an adapter never exposes its fetch URLs
   to the job.
-- The four lists are not all empty. A run needs a seal when its adapter
-  delivers a credential, or the run has task credentials, S3 inputs or S3
-  outputs; an adopter, when it has credentials or S3 outputs.
+- The four lists are not all empty. A run needs a seal when its agent takes
+  a credential its host supplies, or the run has task credentials, S3 inputs
+  or S3 outputs; an adopter, when it has credentials or S3 outputs.
 - `expiry_at_ms` is 5 minutes after the request. The receiver holds the claim
   until a seal opens, a cancel of the run arrives, or `expiry_at_ms` passes.
   At expiry it ends the run `TASK_STATE_FAILED` with a message naming the
@@ -651,7 +669,7 @@ these hold:
    which is `claimed`, `started` or `heartbeat`.
 6. Every name in `credentials` is in the pool's terms for the run's agent,
    every name in `task_credentials` is a task credential the run declares,
-   and the host's configuration maps every name to a file.
+   and the host's configuration gives every name a source.
 7. Every name in `s3_inputs` and `s3_outputs` is an S3 input or S3 output
    the run declares, the pool's terms have `storage`, and the host's
    configuration has a storage credential.
@@ -672,7 +690,16 @@ credential.
 
 A host records a run locally before it publishes the run's submission, so a
 request can follow the task at once; a request read while the record is
-absent is checked again on each later pass until it expires. The host holds
+absent is checked again on each later pass until it expires. Once the
+request passes checks 1 to 3 and 6, the host resolves each credential's
+source, before it takes the attempt's lock, so a slow command holds up no
+other answerer: a `file` source reads the file, an `env` source the
+answering process's environment variable, and a `command` source runs its
+argv without a shell for at most 60 seconds, its stdout, at most 64 KiB,
+the value. A source that fails to resolve, an unset or empty variable, a
+command that exits non-zero, times out or writes too much, leaves the
+request for a later pass, logged by credential name and cause alone; the
+host discards a command's stderr. The host holds
 an exclusive lock on the attempt, shared by every process using its state
 directory, from these checks to the record of its answer, and gives up
 waiting for the lock when its own work ends.
@@ -722,7 +749,8 @@ request's `key`.
 - A seal is at most 64 KiB in compact form. A host refuses to build a larger
   one and logs the credential names. At submit, a host refuses a run with S3
   inputs or outputs whose seal of its task credentials and presigned URLs
-  would exceed 64 KiB.
+  would exceed 64 KiB, counting no `command` source, which runs only to
+  answer a seal.
 
 The receiver reads the host's topic from its end at the time of the request. It
 refuses a seal over 64 KiB, and opens a seal only when the header's `typ`
@@ -803,7 +831,7 @@ which equal the record's, the receiver's `capacity`, and its `adapters` in
 routing order. Each adapter is the
 [adapter entry](reference.md#receiver-configuration) as `name`, `platform`
 naming the platform, the platform's `type`, `agent`,
-`credential` and `labels` when set, and the merged `config`. An `end` names
+and `labels` when set, and the merged `config`. An `end` names
 exactly one of `receiver`, or `tenant` and `host`.
 Readers fold the records in order. A reader loads no state when:
 
@@ -879,8 +907,8 @@ key and the credential as files, and gives the agent the commands.
   most 512 bytes, taken from the agent's working directory. It defaults to
   the last segment of the remote's path without a `.git` suffix.
 - `credential` (string, optional): the `name` of one of the submission's
-  `credentials`, which the agent clones with: a token for an `https`
-  remote, a private key for an `ssh` one.
+  `credentials` delivered as a file, which the agent clones with: a token
+  for an `https` remote, a private key for an `ssh` one.
 - `host_key` (string): OpenSSH `known_hosts` lines for the remote's host,
   at most 8 KiB of printable ASCII with no tab or other control character,
   each blank, a comment or an entry of at least three space-separated
@@ -963,9 +991,11 @@ their paths:
 - `WHERRY_INPUT_DIR`: the run's input files, from the `raw` and `data`
   parts of its message, under their delivered names, its S3 inputs, and
   `known_hosts` for a git input with a host key.
-- `WHERRY_CREDENTIALS_DIR`: the run's task credentials, each as the file
-  its `file` names. The adapter writes credential values only there, as
-  files, and never into the environment or the input directory.
+- `WHERRY_CREDENTIALS_DIR`: the run's credentials with a `file` target, the
+  agent's and the task's, each as the file its `file` names. A credential
+  with an `env` target is in that environment variable instead. The adapter
+  delivers credential values only at their targets, and never into the
+  input directory.
 - `WHERRY_OUTPUT_DIR`: where the agent leaves its outputs. The agent
   creates the directory when it does not exist.
 
@@ -975,9 +1005,11 @@ and is not set otherwise.
 The receiver opens the prompt with lines giving the absolute path of each
 directory, of each input file, of each credential file and of each expected
 output, with `(required)` after a required one, so an agent without a shell
-finds them, the commands of the [git input](#git-input), and the
+finds them, the environment variables that hold credentials, the commands of
+the [git input](#git-input), and the
 [outcome contract](reference.md#agent-contract) with the run's credential
-names. The lines name S3 inputs by path, never by URL. The adapter reports the
+names, an optional credential its host did not supply marked
+`(not supplied)`. The lines name S3 inputs by path, never by URL. The adapter reports the
 directories' paths as its agent sees them; a directory it does not report
 appears as its variable. The lines hold no credential value.
 

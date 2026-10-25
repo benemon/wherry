@@ -192,9 +192,9 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 	t.Setenv("WHERRY_TESTPLUGIN_ENV", "from-the-receiver")
 	p, record, _ := launch(t)
 	a := configured(t, p, "a", "{}")
-	run := Run{ID: "run-a", Adapter: "a", Agent: "claude", Model: "sonnet", Attempt: 3, Prompt: []byte("hello"), Credential: []byte(runCredential),
+	run := Run{ID: "run-a", Adapter: "a", Agent: "claude", Model: "sonnet", Attempt: 3, Prompt: []byte("hello"),
 		Inputs:      []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty", Data: []byte{}}},
-		Credentials: []Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte(runCredential)}},
+		Credentials: []Secret{{Name: "model", Env: "MODEL_API_KEY", Value: []byte(runCredential)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(runCredential)}},
 		Fetches:     []Fetch{{Name: "dataset.bin", URL: "https://store.example.test/bucket/key?X-Amz-Signature=0", Size: 5 << 20, SHA256: strings.Repeat("a", 64)}}}
 	if _, _, err := a.Dispatch(context.Background(), run); err != nil {
 		t.Fatal(err)
@@ -212,12 +212,12 @@ func TestDispatchCarriesTheRun(t *testing.T) {
 		}
 	}
 	got := dispatched[0]
-	if len(dispatched) != 2 || got.ID != run.ID || got.Model != "sonnet" || got.Attempt != 3 || string(got.Prompt) != "hello" || string(got.Credential) != runCredential ||
+	if len(dispatched) != 2 || got.ID != run.ID || got.Model != "sonnet" || got.Attempt != 3 || string(got.Prompt) != "hello" ||
 		!reflect.DeepEqual(got.Inputs, []File{{Name: "data.csv", Data: []byte("a,b\n")}, {Name: "empty"}}) || !reflect.DeepEqual(got.Credentials, run.Credentials) ||
 		!reflect.DeepEqual(got.Fetches, run.Fetches) {
 		t.Fatalf("plugin got %+v; want %+v", got, run)
 	}
-	if dispatched[1].Credential != nil || dispatched[1].Model != "" {
+	if dispatched[1].Credentials != nil || dispatched[1].Model != "" {
 		t.Fatalf("run without credential or model arrived as %+v", dispatched[1])
 	}
 }
@@ -420,7 +420,7 @@ func TestSecretsStayOutOfLogs(t *testing.T) {
 	logLevel = hclog.Trace
 	t.Cleanup(func() { logLevel = previous })
 	p, record, logs := launch(t)
-	a, err := p.Configure(Settings{Name: "a", Pool: "pool-a", Agent: "claude", Credential: "model", Config: []byte("{}"), Platform: platformCredential})
+	a, err := p.Configure(Settings{Name: "a", Pool: "pool-a", Agent: "claude", Config: []byte("{}"), Platform: platformCredential})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,8 +428,8 @@ func TestSecretsStayOutOfLogs(t *testing.T) {
 		taskCredential = "ghp-task-credential-never-logged"
 		fetchURL       = "https://s3.example/bucket/wherry/tenant-a/run-a/inputs/data.bin?X-Amz-Signature=fetch-signature-never-logged"
 	)
-	run := Run{ID: "run-a", Prompt: []byte("hello"), Credential: []byte(runCredential),
-		Credentials: []Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte(taskCredential)}},
+	run := Run{ID: "run-a", Prompt: []byte("hello"),
+		Credentials: []Secret{{Name: "model", Env: "MODEL_API_KEY", Value: []byte(runCredential)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(taskCredential)}},
 		Fetches:     []Fetch{{Name: "data.bin", URL: fetchURL, Size: 4, SHA256: strings.Repeat("0", 64)}}}
 	if _, _, err := a.Dispatch(context.Background(), run); err != nil {
 		t.Fatal(err)
@@ -646,18 +646,18 @@ func TestServeHandsTheAdapterItsLogger(t *testing.T) {
 	})
 }
 
-// A plugin built against protocol version 6 still carries turn fields and is incompatible.
-func TestVersionSixPluginIsRefused(t *testing.T) {
+// A plugin built against protocol version 7 still takes an adapter credential and is incompatible.
+func TestVersionSevenPluginIsRefused(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "wherry-plugin-old")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|6|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|7|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	p, err := Launch(fixed(script), &syncBuffer{})
 	if err == nil {
 		p.Close()
-		t.Fatal("launched a version 6 plugin")
+		t.Fatal("launched a version 7 plugin")
 	}
-	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 6, Client versions: [7]") {
+	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 7, Client versions: [8]") {
 		t.Fatalf("launch error %v; want the version named", err)
 	}
 }

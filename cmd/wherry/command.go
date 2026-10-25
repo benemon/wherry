@@ -209,6 +209,24 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 				if len(adapter.Models) > 0 {
 					fmt.Fprintf(stdout, " models=%s default_model=%s", strings.Join(adapter.Models, ","), adapter.DefaultModel)
 				}
+				if len(adapter.Credentials) > 0 {
+					names := make([]string, 0, len(adapter.Credentials))
+					for _, credential := range adapter.Credentials {
+						var notes []string
+						if !credential.Configured {
+							notes = append(notes, "missing")
+						}
+						if credential.Optional {
+							notes = append(notes, "optional")
+						}
+						if len(notes) > 0 {
+							names = append(names, credential.Name+"("+strings.Join(notes, ",")+")")
+						} else {
+							names = append(names, credential.Name)
+						}
+					}
+					fmt.Fprintf(stdout, " credentials=%s", strings.Join(names, ","))
+				}
 				fmt.Fprintln(stdout)
 			}
 		}
@@ -252,8 +270,6 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	promptFile := flags.String("prompt-file", "", "prompt file")
 	gitRemote := flags.String("git", "", "REMOTE@REF: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit")
 	gitPath := flags.String("git-path", "", "checkout directory, relative (default: the repository name)")
-	gitCredential := flags.String("git-credential", "", "name of the --credential credential the agent clones with")
-	gitHostKey := flags.String("git-host-key", "", "file of OpenSSH known_hosts lines for an ssh remote's host")
 	gitChanges := flags.String("git-changes", "", "patch or bundle: ask for the agent's commits back as changes.patch or changes.bundle")
 	var inputs []string
 	flags.Func("input", "file to deliver to the agent's input directory (repeatable)", func(value string) error {
@@ -261,12 +277,17 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return nil
 	})
 	var credentials []wire.TaskCredential
-	flags.Func("credential", "NAME=FILE: deliver configured credential NAME as file FILE in the agent's credentials directory (repeatable)", func(value string) error {
-		name, file, ok := strings.Cut(value, "=")
-		if !ok {
-			return errors.New("want NAME=FILE")
+	flags.Func("credential", "NAME:file=FILE or NAME:env=VAR: deliver configured credential NAME as file FILE in the agent's credentials directory or in its environment variable VAR (repeatable)", func(value string) error {
+		name, target, _ := strings.Cut(value, ":")
+		kind, at, _ := strings.Cut(target, "=")
+		switch {
+		case kind == "file" && at != "":
+			credentials = append(credentials, wire.TaskCredential{Name: name, File: at})
+		case kind == "env" && at != "":
+			credentials = append(credentials, wire.TaskCredential{Name: name, Env: at})
+		default:
+			return errors.New("want NAME:file=FILE or NAME:env=VAR")
 		}
-		credentials = append(credentials, wire.TaskCredential{Name: name, File: file})
 		return nil
 	})
 	var s3Inputs []string
@@ -282,7 +303,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git REMOTE@REF [--git-path PATH] [--git-credential NAME] [--git-host-key FILE] [--git-changes patch|bundle]] [--input FILE]... [--s3-input FILE]... [--credential NAME=FILE]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE]... [--s3-input FILE]... [--credential NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {
@@ -294,22 +315,9 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		if at < 0 {
 			return errors.New("--git takes REMOTE@REF")
 		}
-		git = &wire.GitInput{Remote: (*gitRemote)[:at], Ref: (*gitRemote)[at+1:], Path: *gitPath, Credential: *gitCredential}
-		if *gitHostKey != "" {
-			file, err := os.Open(*gitHostKey)
-			if err != nil {
-				return err
-			}
-			// One byte over the bound is read, so validation refuses a longer file without reading all of it.
-			key, err := io.ReadAll(io.LimitReader(file, wire.MaxGitHostKey+1))
-			file.Close()
-			if err != nil {
-				return err
-			}
-			git.HostKey = string(key)
-		}
-	} else if wasSet(flags, "git-path") || wasSet(flags, "git-credential") || wasSet(flags, "git-host-key") || wasSet(flags, "git-changes") {
-		return errors.New("--git-path, --git-credential, --git-host-key and --git-changes need --git")
+		git = &wire.GitInput{Remote: (*gitRemote)[:at], Ref: (*gitRemote)[at+1:], Path: *gitPath}
+	} else if wasSet(flags, "git-path") || wasSet(flags, "git-changes") {
+		return errors.New("--git-path and --git-changes need --git")
 	}
 	promptSet := wasSet(flags, "prompt")
 	promptFileSet := wasSet(flags, "prompt-file")

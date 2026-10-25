@@ -43,11 +43,16 @@ func (f fixture) request(t *testing.T, n int) wire.SealRequest {
 	}
 }
 
+// dispatched returns the dispatches, the value the last delivered at the agent's credential's target, and its attempt.
 func (f fixture) dispatched(t *testing.T) (int, []byte, int64) {
 	t.Helper()
 	f.adapter.mu.Lock()
 	defer f.adapter.mu.Unlock()
-	return f.adapter.dispatches, f.adapter.lastRun.Credential, f.adapter.lastRun.Attempt
+	var value []byte
+	if index := slices.IndexFunc(f.adapter.lastRun.Credentials, func(secret adapter.Secret) bool { return secret.Env == credentialEnv }); index >= 0 {
+		value = f.adapter.lastRun.Credentials[index].Value
+	}
+	return f.adapter.dispatches, value, f.adapter.lastRun.Attempt
 }
 
 func TestSealRequestAsksForTheAttemptsCredential(t *testing.T) {

@@ -43,6 +43,9 @@ type config struct {
 	NeverStarted string `json:"never_started"`
 	// SweepError is the text of the adapter.Error Sweep returns.
 	SweepError string `json:"sweep_error"`
+	// Jobs makes the plugin keep each run's job as a platform does, for the conformance suite: Lookup finds it, Follow
+	// and Stop end it, Purge removes it, and Collect finds no outputs in it unless Outputs is set.
+	Jobs bool `json:"jobs"`
 }
 
 type record struct {
@@ -75,6 +78,17 @@ func write(entry record) {
 type fake struct {
 	settings adapter.Settings
 	config   config
+	jobsMu   sync.Mutex
+	jobs     map[string]*adapter.Job
+}
+
+// end marks the job of a run ended, when the plugin keeps jobs.
+func (f *fake) end(runID string) {
+	f.jobsMu.Lock()
+	defer f.jobsMu.Unlock()
+	if job := f.jobs[runID]; job != nil && job.State == adapter.JobRunning {
+		job.State = adapter.JobEnded
+	}
 }
 
 func (f *fake) panics(method string) {
@@ -100,16 +114,34 @@ func (f *fake) Dispatch(_ context.Context, run adapter.Run) (adapter.Outcome, ad
 	if f.config.TooLarge != "" {
 		return adapter.OutcomeNothingCreated, adapter.Handle{}, &adapter.InputTooLargeError{Name: f.config.TooLarge}
 	}
-	return adapter.OutcomeCreated, adapter.Handle{Data: []byte(run.ID), Name: f.settings.Name + "/" + run.ID}, nil
+	handle := adapter.Handle{Data: []byte(run.ID), Name: f.settings.Name + "/" + run.ID}
+	if f.config.Jobs {
+		f.jobsMu.Lock()
+		defer f.jobsMu.Unlock()
+		if f.jobs[run.ID] == nil {
+			state := adapter.JobRunning
+			if f.config.NeverStarted != "" {
+				state = adapter.JobNeverStarted
+			}
+			f.jobs[run.ID] = &adapter.Job{State: state, Handle: handle, Attempt: run.Attempt, Adapter: run.Adapter, Agent: run.Agent}
+		}
+		return adapter.OutcomeCreated, f.jobs[run.ID].Handle, nil
+	}
+	return adapter.OutcomeCreated, handle, nil
 }
 
-func (f *fake) Lookup(context.Context, string) (adapter.Job, error) {
+func (f *fake) Lookup(_ context.Context, runID string) (adapter.Job, error) {
 	f.panics("Lookup")
+	f.jobsMu.Lock()
+	defer f.jobsMu.Unlock()
+	if job := f.jobs[runID]; job != nil {
+		return *job, nil
+	}
 	return adapter.Job{}, nil
 }
 
 // Follow emits the lines from offset from, then holds the stream open like a running job unless it finishes.
-func (f *fake) Follow(ctx context.Context, _ adapter.Handle, from int64, out chan<- adapter.Line) (adapter.Terminal, error) {
+func (f *fake) Follow(ctx context.Context, handle adapter.Handle, from int64, out chan<- adapter.Line) (adapter.Terminal, error) {
 	f.panics("Follow")
 	if f.config.NeverStarted != "" {
 		return adapter.Terminal{Class: "validation", Node: "fake-node", Reason: f.config.NeverStarted}, nil
@@ -127,19 +159,24 @@ func (f *fake) Follow(ctx context.Context, _ adapter.Handle, from int64, out cha
 		offset = next
 	}
 	if f.config.Finish {
+		f.end(string(handle.Data))
 		return adapter.Terminal{Started: true, Node: "fake-node"}, nil
 	}
 	<-ctx.Done()
 	return adapter.Terminal{}, ctx.Err()
 }
 
-func (f *fake) Stop(context.Context, adapter.Handle) error {
+func (f *fake) Stop(_ context.Context, handle adapter.Handle) error {
 	f.panics("Stop")
+	f.end(string(handle.Data))
 	return nil
 }
 
 func (f *fake) Collect(ctx context.Context, _ adapter.Handle, limits adapter.Limits, out chan<- adapter.Output) error {
 	f.panics("Collect")
+	if f.config.Jobs && !f.config.Outputs {
+		return nil
+	}
 	if !f.config.Outputs {
 		return errors.New("no outputs configured")
 	}
@@ -161,8 +198,11 @@ func (f *fake) Collect(ctx context.Context, _ adapter.Handle, limits adapter.Lim
 	return nil
 }
 
-func (f *fake) Purge(context.Context, string) error {
+func (f *fake) Purge(_ context.Context, runID string) error {
 	f.panics("Purge")
+	f.jobsMu.Lock()
+	defer f.jobsMu.Unlock()
+	delete(f.jobs, runID)
 	return nil
 }
 
@@ -204,6 +244,6 @@ func main() {
 		if decoded.Fail {
 			return nil, errors.New("configured to fail")
 		}
-		return &fake{settings: settings, config: decoded}, nil
+		return &fake{settings: settings, config: decoded, jobs: map[string]*adapter.Job{}}, nil
 	})
 }

@@ -22,8 +22,8 @@ const SealType = "application/vnd.wherry.seal.v2+jwe"
 
 const redactionDomain = "wherry-redaction-v1"
 
-// maxSeal bounds a seal's compact serialisation, and with it the credentials it carries.
-const maxSeal = 64 << 10
+// MaxSeal bounds a seal's compact serialisation, and with it the credentials it carries.
+const MaxSeal = 64 << 10
 
 // SealBinding is the one attempt and key a seal is for. A seal carries it in its protected header and again in its
 // plaintext.
@@ -129,7 +129,7 @@ func Seal(binding SealBinding, key *ecdsa.PublicKey, values SealValues) ([]byte,
 	if err != nil {
 		return nil, err
 	}
-	if len(compact) > maxSeal {
+	if len(compact) > MaxSeal {
 		return nil, fmt.Errorf("a seal of %v is %d bytes, over the 64 KiB limit", binding.Names(), len(compact))
 	}
 	return []byte(compact), nil
@@ -141,7 +141,7 @@ func OpenSeal(encoded []byte, expected SealBinding, key *ecdsa.PrivateKey, now t
 	if expected.KeyID != SealKeyID(&key.PublicKey) {
 		return SealValues{}, errors.New("seal key is not the expected key")
 	}
-	if len(encoded) > maxSeal {
+	if len(encoded) > MaxSeal {
 		return SealValues{}, errors.New("seal exceeds its size limit")
 	}
 	jwe, err := jose.ParseEncryptedCompact(string(encoded), []jose.KeyAlgorithm{jose.ECDH_ES_A256KW}, []jose.ContentEncryption{jose.A256GCM})

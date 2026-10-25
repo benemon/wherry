@@ -92,6 +92,22 @@ as one file and as a `--config-dir` directory.
   broker's record limit bounds a task's inline input files, and
   `pool create` records it in the terms. See
   [Size a pool against the broker](#size-a-pool-against-the-broker).
+- An agent's `credentials` lists the credentials it takes, each
+  `{name, env}` or `{name, file}`: the environment variable, or the file in
+  the directory `WHERRY_CREDENTIALS_DIR` names, the agent finds it at.
+  `required: false` lets a run go without it when the submitting host has no
+  source for it. `pool create` refuses a duplicate name, two credentials on
+  one target, both or neither of `env` and `file`, and an `env` an adapter
+  sets itself, such as `HOME` or `WHERRY_CREDENTIALS_DIR`:
+
+  ```yaml
+  agents:
+    - name: codex
+      credentials:
+        - {name: openai-api-key, env: CODEX_API_KEY}
+        - {name: github-token, env: GH_TOKEN, required: false}
+  ```
+
 - `vcs` lists the hosts a task's agent may clone from; without it the
   pool takes no git input. See [Git repositories](#git-repositories).
 - An agent's `models` lists the models a task may name for it, and its
@@ -190,8 +206,9 @@ A tenant can be entitled to several pools; run `pool entitle` once per pool.
 ## Add a receiver
 
 A receiver's configuration lists its adapters in routing order. Each adapter
-launches one agent on a platform, may deliver one credential, and carries
-the labels tasks select on. Two adapters can launch the same agent with
+launches one agent on a platform and carries the labels tasks select on. It
+delivers the agent's credentials at the targets the pool's terms give them,
+so no adapter names a credential. Two adapters can launch the same agent with
 different labels, such as one running in containers and one on the host.
 
 Write the configuration as a directory:
@@ -222,7 +239,6 @@ config:
   address: https://nomad.example.com:4646
   ca_file: /etc/wherry/nomad-ca.pem
   namespace: agents
-  credential_env: MODEL_API_KEY
 ```
 
 Each file in `adapters/` is one adapter on one of those platforms, with the
@@ -232,7 +248,6 @@ settings particular to it:
 name: container
 platform: nomad
 agent: coder
-credential: model-api-key
 labels:
   isolation: container
 config:
@@ -274,10 +289,9 @@ agent writes as the prompt asks
 ([agent contract](reference.md#agent-contract)).
 
 `codex exec` reads its API key from
-`CODEX_API_KEY` and ignores `OPENAI_API_KEY`, so the adapter sets
-`credential_env` to `CODEX_API_KEY`. Its platform,
-`nomad-codex` here, is the `nomad` platform without `credential_env`, since
-a key set in both is an error. The task sends the prompt file to
+`CODEX_API_KEY` and ignores `OPENAI_API_KEY`, so the pool's terms give the
+`codex` agent's credential the target `env: CODEX_API_KEY`, as in
+[Create a pool](#create-a-pool). The task sends the prompt file to
 `codex exec` on standard input, and `--sandbox` takes a mode the platform
 allows. Without `--ephemeral`, Codex writes session files under
 `CODEX_HOME` (default `~/.codex`), which the task must be able to write:
@@ -286,12 +300,10 @@ allows. Without `--ephemeral`, Codex writes session files under
 name: codex
 platform: nomad-codex
 agent: codex
-credential: openai-api-key
 labels:
   isolation: host
 config:
   node_pool: codex
-  credential_env: CODEX_API_KEY
   runtime:
     driver: exec
     config:
@@ -604,20 +616,55 @@ error says so, and upgrading `wherry` reads it.
 
 ## Run credentialed tasks
 
-A receiver asks the submitting host for an adapter's credential when it
+Every credential has a source on the host and a target in the agent. The
+host's [client configuration](reference.md#client-configuration) maps each
+credential name to one source:
+
+```json
+"credentials": {
+  "openai-api-key": {"file": "~/.config/wherry/credentials/openai"},
+  "github-token":   {"env": "GITHUB_TOKEN"},
+  "vault-token":    {"command": ["vault", "print", "token"]}
+}
+```
+
+A `file` source is read as it is, trailing newline included. An `env`
+source is read from the environment of the process answering the seal,
+`wherry await` or `wherry mcp`. A `command` source runs without a shell,
+with the answerer's environment, for at most 60 seconds, which leaves time
+for an interactive unlock such as a password manager's; its standard output
+is the value, at most 64 KiB, and its standard error is discarded. The
+configuration holds no literal values.
+
+`wherry receivers` lists each agent's credential names, marking those this
+host has no source for, such as
+`credentials=openai-api-key,github-token(missing,optional)`. `wherry
+submit` refuses a task with `auth required: credential <name> is not in
+this host's configuration` when the host has no source for a required
+credential of the placed agent, or for a task credential. An optional
+credential the host has no source for is not delivered, and the prompt
+names it as not supplied. A task credential takes a target with
+`--credential NAME:file=FILE` or `--credential NAME:env=VAR`; `submit`
+refuses one whose target is one of the agent's credentials' targets or
+another task credential's.
+
+A receiver asks the submitting host for the run's credentials when it
 claims the task, and the host answers only while `wherry await` or
-`wherry mcp` runs on it. A parent that submits a task whose adapter takes
-a credential keeps one of them running until the task starts; without an
-answer within 5 minutes, the run ends `TASK_STATE_FAILED` with a message
-that names each unanswered credential, never its value. Add the credential to
-`credentials` in the host's wherry configuration, then submit a new run with
-`wherry await` or `wherry mcp` running on the host.
+`wherry mcp` runs on it. A parent that submits a task with credentials
+keeps one of them running until the task starts; without an answer within
+5 minutes, the run ends `TASK_STATE_FAILED` with a message that names each
+unanswered credential, never its value. The answerer resolves each source
+when it answers, before it takes the attempt's lock, so a slow command
+holds up no other answerer of the host. A source that fails to resolve, an
+unset or empty variable, a command that exits non-zero, times out or writes
+over 64 KiB, is logged as `run <id>: resolve credential <name>: <cause>`,
+by name and exit status alone, and the answerer tries the request again
+each second until it expires.
 
 The host answers only for a credential the pool's terms approve for the
 run's agent, or a task credential the run declares, that its configuration
-maps to a file, and only to the receiver that first claimed the run.
-`wherry submit` refuses a task credential its configuration does not map
-to a file. It logs each verified request of its
+has a source for, and only to the receiver that first claimed the run. It
+logs each verified request of its
 own runs that it skips or refuses, by run, receiver and credential name, on
 standard error. A receiver that adopts a running job asks for its own seal
 and publishes nothing of the job until it opens. A run adopted by a second
@@ -721,10 +768,30 @@ A task can name a repository for its agent to clone:
 
 ```sh
 wherry submit --prompt "Fix the failing test" \
-  --git git@github.com:team/app.git@main \
-  --credential deploy-key=id_ed25519 --git-credential deploy-key \
-  --git-host-key github-known-hosts --git-changes patch
+  --git https://github.com/acme/app.git@main --git-changes patch
 ```
+
+The host's `git` configuration gives the clone its credential and, for
+`ssh`, its host key:
+
+```json
+"git": [
+  {"url": "https://github.com/acme/", "credential": "github-token"},
+  {"url": "ssh://git@gitlab.example/", "credential": "deploy-key", "host_key": "~/.config/wherry/known_hosts/gitlab"}
+]
+```
+
+`submit` matches the remote, with a `user@host:path` remote written as
+`ssh://user@host/path`, against the entries' URLs and takes the entry whose
+URL is its longest prefix. The entry's credential joins the task as a task
+credential in the file `git-credential` of the credentials directory, and
+its `host_key` file becomes the task's host key. A remote under no entry
+clones anonymously, and an `ssh` remote under none is refused for want of
+a host key. The URL prefix is the credential's scope: every task cloning
+under it receives that credential, so end each URL with `/` and keep it as
+narrow as the token. Loading the configuration checks that each entry's
+credential has a source and its `host_key` is a readable file. A task
+credential of the entry's credential name is refused.
 
 The agent runs `git` itself, from its image or host, with the commands the
 prompt gives it; the receiver and the adapter run no git. The
@@ -811,15 +878,15 @@ parent sent, and what it can do with them is bounded by their scope and
 lifetime, the platform's egress policy, and the receiver's redaction of what it
 returns.
 
-The parent supplies least privilege; wherry passes the credential as a
-file and checks the host, nothing more:
+The host's configuration supplies least privilege; wherry passes the
+credential as a file and checks the host, nothing more:
 
 - For `https`, a short-lived token for one repository, such as a GitHub App
   installation token. The credential helper answers with the user name
   `x-access-token`, which installation tokens require.
 - For `ssh`, a deploy key for the repository, created for the run and removed
   afterwards where the forge allows it, and the forge's host key from a source
-  you trust, passed as `--git-host-key`. Every entry must name the remote's
+  you trust, named by the git entry's `host_key`. Every entry must name the remote's
   host, or `[host]:port` for a port other than 22; hashed entries, and entries
   with a wildcard pattern even beside the host, are refused. `ssh` checks the
   host key strictly and ignores every other `known_hosts`.

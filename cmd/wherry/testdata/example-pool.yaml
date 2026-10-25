@@ -1,18 +1,20 @@
 agents:
   - name: claude
     credentials:
-      - claude-oauth-token
+      - {name: claude-oauth-token, env: CLAUDE_CODE_OAUTH_TOKEN}
     models:
       - haiku
       - sonnet
     default_model: haiku
   - name: coder
     credentials:
-      - model-api-key
+      - {name: model-api-key, env: MODEL_API_KEY}
   # Without models, a task names no model and the adapter's command picks one.
   - name: codex
     credentials:
-      - openai-api-key
+      - {name: openai-api-key, env: CODEX_API_KEY}
+      # A run whose host has no source for it goes without it.
+      - {name: github-token, env: GH_TOKEN, required: false}
 default_agent: claude
 max_queue_deadline: 72h
 # Each receiver with no matching adapter spends one delivery, so this covers the pool's receivers plus a margin.

@@ -8,6 +8,7 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"math"
@@ -54,11 +55,11 @@ type SubmitInput struct {
 	Prompt   string
 	// Parts follow the prompt's text part.
 	Parts []wire.Part
-	// Credentials name credentials this host configures, delivered to the agent as files.
+	// Credentials name credentials this host configures, each delivered to the agent at its target.
 	Credentials []wire.TaskCredential
 	// Outputs are the files the agent is asked to leave.
 	Outputs []wire.ExpectedOutput
-	// Git is the repository the agent clones.
+	// Git is the repository the agent clones; its credential and host key come from the host's git configuration.
 	Git *wire.GitInput
 	// GitChanges, patch or bundle, asks for the clone's changes back as that output.
 	GitChanges string
@@ -99,16 +100,25 @@ type Receiver struct {
 	Ended        bool      `json:"ended"`
 }
 
-// Adapter is one adapter of a receiver: the agent and labels from its config record, the agent's models and default
-// model from its pool's terms, and whether the receiver's live advertisement offers it.
+// Adapter is one adapter of a receiver: the agent and labels from its config record, the agent's models, default
+// model and credentials from its pool's terms, and whether the receiver's live advertisement offers it.
 type Adapter struct {
 	Name         string            `json:"name"`
 	Agent        string            `json:"agent"`
 	InlineLimit  int64             `json:"inline_limit,omitzero"`
 	Models       []string          `json:"models,omitzero"`
 	DefaultModel string            `json:"default_model,omitzero"`
+	Credentials  []Credential      `json:"credentials,omitzero"`
 	Labels       map[string]string `json:"labels"`
 	Ready        bool              `json:"ready"`
+}
+
+// Credential is one of an agent's credentials: whether a run goes without it when its host has no source for it, and
+// whether this host has one.
+type Credential struct {
+	Name       string `json:"name"`
+	Optional   bool   `json:"optional,omitzero"`
+	Configured bool   `json:"configured"`
 }
 
 // Host implements the operations of a tenant's host principal.
@@ -120,7 +130,8 @@ type Host struct {
 	tenant      string
 	host        string
 	stateDir    string
-	credentials map[string]string
+	credentials map[string]Source
+	git         []GitCredential
 	// storage is the host's S3 credential, nil when its configuration has none.
 	storage *StorageConfig
 	logger  *log.Logger
@@ -130,14 +141,14 @@ type Host struct {
 }
 
 // NewHost constructs a host over a plain Kafka connection authenticated as principal.
-func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir string, credentials map[string]string, logger *log.Logger) (*Host, error) {
+func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir string, credentials map[string]Source, git []GitCredential, logger *log.Logger) (*Host, error) {
 	// TenantPrincipal("", "") is the prefix and the separator between tenant and host.
 	names, prefixed := strings.CutPrefix(principal, strings.TrimSuffix(admin.TenantPrincipal("", ""), "."))
 	tenant, host, split := strings.Cut(names, ".")
 	if !prefixed || !split || !wire.ValidName(tenant) || !wire.ValidName(host) {
 		return nil, errors.New("principal is not a host principal wherry.tnt.<tenant>.<host>")
 	}
-	return &Host{kafka: kafka, reader: admin.NewReader(kafka), key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, logger: logger}, nil
+	return &Host{kafka: kafka, reader: admin.NewReader(kafka), key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, git: git, logger: logger}, nil
 }
 
 // Close closes the Kafka connections.
@@ -211,6 +222,31 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if input.Git != nil {
 		git := *input.Git
 		git.Remote = sshRemote(git.Remote)
+		// The entry whose URL is the longest prefix of the remote gives the clone its credential and host key.
+		git.Credential, git.HostKey = "", ""
+		var matched *GitCredential
+		for i, entry := range h.git {
+			if strings.HasPrefix(git.Remote, entry.URL) && (matched == nil || len(entry.URL) > len(matched.URL)) {
+				matched = &h.git[i]
+			}
+		}
+		if matched != nil && matched.Credential != "" {
+			git.Credential = matched.Credential
+			input.Credentials = append(slices.Clone(input.Credentials), wire.TaskCredential{Name: matched.Credential, File: wire.GitCredentialFile})
+		}
+		if matched != nil && matched.HostKey != "" {
+			file, err := os.Open(matched.HostKey)
+			if err != nil {
+				return SubmitResult{}, err
+			}
+			// One byte over the bound is read, so validation refuses a longer file without reading all of it.
+			key, err := io.ReadAll(io.LimitReader(file, wire.MaxGitHostKey+1))
+			file.Close()
+			if err != nil {
+				return SubmitResult{}, err
+			}
+			git.HostKey = string(key)
+		}
 		// Validate never quotes a value in its errors, so its text is safe to return.
 		if err := git.Validate(input.Credentials); err != nil {
 			return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
@@ -229,7 +265,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	}
 	for _, credential := range input.Credentials {
 		if _, configured := h.credentials[credential.Name]; !configured {
-			return SubmitResult{}, fmt.Errorf("%w: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
+			return SubmitResult{}, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
 		}
 	}
 	// A receiver cuts a run at the queue deadline plus the run cap, so a later deadline would be cut silently.
@@ -282,6 +318,23 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
+	agents := v.state.Pools[pool].Agents
+	agent := agents[slices.IndexFunc(agents, func(agent admin.AgentTerms) bool { return agent.Name == placement.Agent })]
+	var unsupplied []string
+	for _, credential := range agent.Credentials {
+		if _, configured := h.credentials[credential.Name]; configured {
+			continue
+		}
+		if !credential.Optional() {
+			return SubmitResult{}, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
+		}
+		unsupplied = append(unsupplied, credential.Name)
+	}
+	for _, credential := range input.Credentials {
+		if slices.ContainsFunc(agent.Targets(), func(target wire.TaskCredential) bool { return target.Target() == credential.Target() }) {
+			return SubmitResult{}, fmt.Errorf("%w: task credential %s takes the %s of one of agent %s's credentials", ErrInvalidInput, credential.Name, credential.Target(), agent.Name)
+		}
+	}
 	if err := wire.ValidateInputs(input.Parts, math.MaxInt64); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
@@ -326,7 +379,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	submission.Wherry.Credentials, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, outputs, input.Git
+	submission.Wherry.Credentials, submission.Wherry.Unsupplied, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, unsupplied, outputs, input.Git
 	encoded, err := wire.SignRecord(submission, h.key)
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
@@ -523,6 +576,10 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			agents := v.state.Pools[config.Pool].Agents
 			if index := slices.IndexFunc(agents, func(agent admin.AgentTerms) bool { return agent.Name == adapter.Agent }); index >= 0 {
 				listed.Models, listed.DefaultModel = agents[index].Models, agents[index].DefaultModel
+				for _, credential := range agents[index].Credentials {
+					_, configured := h.credentials[credential.Name]
+					listed.Credentials = append(listed.Credentials, Credential{Name: credential.Name, Optional: credential.Optional(), Configured: configured})
+				}
 			}
 			receiver.Adapters = append(receiver.Adapters, listed)
 		}

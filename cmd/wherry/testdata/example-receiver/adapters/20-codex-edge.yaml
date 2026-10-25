@@ -1,12 +1,10 @@
 name: codex-edge
 platform: nomad-edge
 agent: codex
-credential: openai-api-key
 labels:
   isolation: host
   site: edge
 config:
-  credential_env: CODEX_API_KEY
   node_pool: codex
   runtime:
     driver: exec

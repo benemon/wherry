@@ -491,7 +491,7 @@ func TestAnswererLogsHoldNoSecret(t *testing.T) {
 	answering(t, f, f.host)
 	f.waitSeals(t, "host-a", 1)
 	values := asked.open(t, f, "host-a")
-	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, log.New(f.logs, "twin: ", 0))
+	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, log.New(f.logs, "twin: ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}

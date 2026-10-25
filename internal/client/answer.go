@@ -247,7 +247,8 @@ func removeLock(path string) {
 // answer seals the credentials a request asks for when it comes from a live member of the run's pool holding the
 // active attempt of the run this host submitted, unanswered and unexpired, and names only credentials this host
 // holds: the run's agent's under the pool's terms, and task credentials the run declares. It logs each request it skips
-// or settles, by run, attempt, receiver and credential names only. It reports whether the request is settled; a failure
+// or settles, by run, attempt, receiver and credential names only, and a source that fails to resolve by name and
+// cause, never its value or output. It reports whether the request is settled; a failure
 // a later pass can clear is logged through retry and leaves it unsettled, so Answer tries it again until it expires.
 func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, encoded []byte, retry func(format string, args ...any)) bool {
 	local, err := h.localRun(runID)
@@ -281,6 +282,28 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 		logger.Printf("run %s: skipped a seal request from %s that expires beyond the seal wait", runID, request.Receiver)
 		return true
 	}
+	// Sources resolve before the attempt's lock, so a slow command does not hold up the host's other answerers.
+	terms := r.v.state.Pools[r.pool].Agents
+	agent := slices.IndexFunc(terms, func(terms admin.AgentTerms) bool { return terms.Name == local.Placement.Agent })
+	values := map[string][]byte{}
+	for i, name := range append(slices.Clone(request.Credentials), request.TaskCredentials...) {
+		source, configured := h.credentials[name]
+		switch {
+		case i >= len(request.Credentials) && !slices.Contains(local.TaskCredentials, name):
+			logger.Printf("run %s: skipped a seal request for task credential %s, which the run does not declare", runID, name)
+			return true
+		case i < len(request.Credentials) && (agent < 0 || !slices.ContainsFunc(terms[agent].Credentials, func(credential admin.AgentCredential) bool { return credential.Name == name })):
+			logger.Printf("run %s: skipped a seal request for credential %s, which agent %s's terms do not approve", runID, name, local.Placement.Agent)
+			return true
+		case !configured:
+			logger.Printf("run %s: skipped a seal request for credential %s, which this host does not configure", runID, name)
+			return true
+		}
+		if values[name], err = source.resolve(ctx); err != nil {
+			retry("run %s: resolve credential %s: %v", runID, name, err)
+			return false
+		}
+	}
 	// The check, the write and the marker run under the attempt's lock, so concurrent answerers write one seal.
 	unlock, err := h.lockAttempt(ctx, runID, request.Attempt)
 	if err != nil {
@@ -307,27 +330,6 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 		path, _ := h.runPath(runID)
 		logger.Printf("run %s: refused to seal: the redaction key in %s is %d bytes, not 32", runID, path, len(local.RedactionKey))
 		return true
-	}
-	terms := r.v.state.Pools[r.pool].Agents
-	agent := slices.IndexFunc(terms, func(terms admin.AgentTerms) bool { return terms.Name == local.Placement.Agent })
-	values := map[string][]byte{}
-	for i, name := range append(slices.Clone(request.Credentials), request.TaskCredentials...) {
-		path, configured := h.credentials[name]
-		switch {
-		case i >= len(request.Credentials) && !slices.Contains(local.TaskCredentials, name):
-			logger.Printf("run %s: skipped a seal request for task credential %s, which the run does not declare", runID, name)
-			return true
-		case i < len(request.Credentials) && (agent < 0 || !slices.Contains(terms[agent].Credentials, name)):
-			logger.Printf("run %s: skipped a seal request for credential %s, which agent %s's terms do not approve", runID, name, local.Placement.Agent)
-			return true
-		case !configured:
-			logger.Printf("run %s: skipped a seal request for credential %s, which this host does not configure", runID, name)
-			return true
-		}
-		if values[name], err = os.ReadFile(path); err != nil {
-			logger.Printf("run %s: read credential %s: %v", runID, name, errors.Unwrap(err))
-			return true
-		}
 	}
 	if len(request.S3Inputs)+len(request.S3Outputs) > 0 {
 		for _, input := range request.S3Inputs {

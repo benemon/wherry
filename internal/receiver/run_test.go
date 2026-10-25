@@ -148,7 +148,6 @@ func TestSealWaitExpiryFailsWithoutCredentialValue(t *testing.T) {
 // lab and cloud both launch claude; a task routed to cloud names cloud in its start failure.
 func TestStartFailureNamesTheRoutedAdapter(t *testing.T) {
 	m := newMultiFixture(t)
-	m.answer(t, "cred-cloud")
 	m.cloud.outcome = adapter.OutcomeNothingCreated
 	if status := m.execute(t, "run-a", accelerated, 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
@@ -178,7 +177,6 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 	t.Run("adopted", func(t *testing.T) {
 		m := newMultiFixture(t)
 		m.cloud.job = adapter.JobRunning
-		m.answer(t, "cred-cloud")
 		if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
@@ -866,8 +864,8 @@ func TestOutcomeFileEndsTheRun(t *testing.T) {
 		{name: "completed", outcome: outcome("TASK_STATE_COMPLETED", "ROLE_AGENT", `{"text":"the answer"}`), state: wire.TaskStateCompleted, message: "the answer", ack: kgo.AckAccept},
 		{name: "completed after an exit", terminal: exited, outcome: outcome("TASK_STATE_COMPLETED", "ROLE_AGENT", `{"text":"the answer"}`), state: wire.TaskStateCompleted, message: "the answer", ack: kgo.AckAccept},
 		{name: "failed", outcome: outcome("TASK_STATE_FAILED", "ROLE_AGENT", `{"text":"the tests fail"}`), state: wire.TaskStateFailed, message: "the tests fail", ack: kgo.AckReject},
-		{name: "auth required", terminal: exited, outcome: outcome("TASK_STATE_AUTH_REQUIRED", "ROLE_AGENT", `{"text":"the token expired"},{"data":{"credential":"cred-lab"}}`),
-			state: wire.TaskStateAuthRequired, message: "the token expired\n{\"credential\":\"cred-lab\"}", ack: kgo.AckReject},
+		{name: "auth required", terminal: exited, outcome: outcome("TASK_STATE_AUTH_REQUIRED", "ROLE_AGENT", `{"text":"the token expired"},{"data":{"credential":"github-token"}}`),
+			state: wire.TaskStateAuthRequired, message: "the token expired\n{\"credential\":\"github-token\"}", ack: kgo.AckReject},
 		{name: "missing after an exit", terminal: exited, state: wire.TaskStateFailed, message: "agent exited 3", ack: kgo.AckReject},
 		{name: "missing after a signal", terminal: killed, state: wire.TaskStateFailed, message: "agent ended by SIGKILL", ack: kgo.AckReject},
 		{name: "missing", state: wire.TaskStateFailed, message: "agent reported no outcome", ack: kgo.AckReject},
@@ -1037,30 +1035,21 @@ func TestReceiverFirstAttemptSkipsLookup(t *testing.T) {
 	}
 }
 
-func TestReceiverCredentialPerAdapter(t *testing.T) {
+// Every adapter of an agent delivers the agent's credentials, each at the target the pool's terms give it.
+func TestReceiverDeliversTheAgentsCredentialsInEveryAdapter(t *testing.T) {
 	m := newMultiFixture(t)
-	if status := m.execute(t, "run-lab", cpu, 1); status != kgo.AckAccept {
-		t.Fatalf("lab status %v", status)
-	}
-	if got := string(m.lab.lastRun.Credential); got != testToken {
-		t.Fatal("lab adapter did not receive its own credential")
-	}
-	if status := m.execute(t, "run-edge", arm, 1); status != kgo.AckAccept {
-		t.Fatalf("edge status %v", status)
-	}
-	if m.edge.lastRun.Credential != nil {
-		t.Fatal("adapter without a configured credential received one")
-	}
-	if status := m.execute(t, "run-cloud", accelerated, 1); status != kgo.AckReject {
-		t.Fatalf("cloud status %v, want reject", status)
-	}
-	if dispatches, _, _, releases := m.cloud.counts(); dispatches != 0 || releases != 1 {
-		t.Fatalf("cloud dispatches=%d releases=%d, want 0 and 1", dispatches, releases)
-	}
-	statuses := m.feedStatuses(t)
-	want := "credential cred-cloud was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
-	if got := statuses[len(statuses)-1].StatusUpdate.Status.Message.Parts[0].Text; got != want {
-		t.Fatalf("reason %q", got)
+	want := []adapter.Secret{{Name: credentialName, Env: credentialEnv, Value: []byte(testToken)}}
+	for _, routed := range []struct {
+		run      string
+		selector []wire.Requirement
+		adapter  *fakeAdapter
+	}{{"run-lab", cpu, m.lab}, {"run-edge", arm, m.edge}} {
+		if status := m.execute(t, routed.run, routed.selector, 1); status != kgo.AckAccept {
+			t.Fatalf("%s status %v", routed.run, status)
+		}
+		if got := routed.adapter.lastRun.Credentials; !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s dispatched %d credentials, want the agent's at its environment variable", routed.run, len(got))
+		}
 	}
 	if strings.Contains(m.logs.String(), testToken) {
 		t.Fatal("credential value appeared in receiver logs")

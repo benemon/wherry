@@ -17,13 +17,33 @@ import (
 )
 
 type AgentTerms struct {
-	Name        string   `json:"name" yaml:"name"`
-	Credentials []string `json:"credentials" yaml:"credentials"`
+	Name        string            `json:"name" yaml:"name"`
+	Credentials []AgentCredential `json:"credentials" yaml:"credentials"`
 	// Models are the models a task may name for the agent, and DefaultModel the one a task naming none runs. Models
 	// without a DefaultModel make every task name one; neither leaves the model to the agent's adapters.
 	Models       []string `json:"models,omitzero" yaml:"models"`
 	DefaultModel string   `json:"default_model,omitzero" yaml:"default_model"`
 }
+
+// AgentCredential is a credential an agent takes, at the target its TaskCredential names. A required credential the
+// submitting host has no source for refuses the submission; Required defaults to true.
+type AgentCredential struct {
+	wire.TaskCredential `yaml:",inline"`
+	Required            *bool `json:"required,omitzero" yaml:"required"`
+}
+
+// Optional reports whether a run goes without the credential when its host has no source for it.
+func (c AgentCredential) Optional() bool { return c.Required != nil && !*c.Required }
+
+// Targets are the agent credentials as task credentials, for the checks they share.
+func (agent AgentTerms) Targets() []wire.TaskCredential {
+	targets := make([]wire.TaskCredential, 0, len(agent.Credentials))
+	for _, credential := range agent.Credentials {
+		targets = append(targets, credential.TaskCredential)
+	}
+	return targets
+}
+
 type Terms struct {
 	Agents             []AgentTerms `json:"agents" yaml:"agents"`
 	DefaultAgent       string       `json:"default_agent,omitzero" yaml:"default_agent"`
@@ -142,17 +162,16 @@ type ReceiverConfig struct {
 }
 
 // AdapterSettings configures one adapter: the agent it launches, the
-// credential that agent takes, the labels its operator declares for it, and
-// settings its type decodes (runtime, node pool and the like stay there).
+// labels its operator declares for it, and settings its type decodes
+// (runtime, node pool and the like stay there).
 type AdapterSettings struct {
 	Name string `json:"name"`
 	// Platform names the platform entry the adapter takes its type, shared config and bundle credential from.
-	Platform   string            `json:"platform"`
-	Type       string            `json:"type"`
-	Agent      string            `json:"agent"`
-	Credential string            `json:"credential,omitzero"`
-	Labels     map[string]string `json:"labels,omitzero"`
-	Config     map[string]any    `json:"config"`
+	Platform string            `json:"platform"`
+	Type     string            `json:"type"`
+	Agent    string            `json:"agent"`
+	Labels   map[string]string `json:"labels,omitzero"`
+	Config   map[string]any    `json:"config"`
 }
 
 type Record struct {
@@ -310,12 +329,8 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 		if err := wire.ValidateLabels(adapter.Labels); err != nil {
 			return err
 		}
-		index := slices.IndexFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == adapter.Agent })
-		if index < 0 {
+		if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == adapter.Agent }) {
 			return errors.New("receiver agent is outside pool terms")
-		}
-		if adapter.Credential != "" && !slices.Contains(terms.Agents[index].Credentials, adapter.Credential) {
-			return errors.New("receiver credential is outside pool terms")
 		}
 	}
 	return nil
@@ -621,10 +636,8 @@ func validateTerms(terms Terms) error {
 		if agent.DefaultModel != "" && !slices.Contains(agent.Models, agent.DefaultModel) {
 			return errors.New("an agent's default_model must be one of its models")
 		}
-		for _, credential := range agent.Credentials {
-			if validateNames(credential) != nil {
-				return errors.New("invalid credential name")
-			}
+		if err := wire.ValidateCredentials(agent.Targets()); err != nil {
+			return fmt.Errorf("agent %s: %w", agent.Name, err)
 		}
 	}
 	return nil

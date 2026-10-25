@@ -1,4 +1,6 @@
 # Without models, a task names no model and the adapter's command picks one.
 name: codex
 credentials:
-  - openai-api-key
+  - {name: openai-api-key, env: CODEX_API_KEY}
+  # A run whose host has no source for it goes without it.
+  - {name: github-token, env: GH_TOKEN, required: false}

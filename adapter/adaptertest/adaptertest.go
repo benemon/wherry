@@ -14,10 +14,17 @@ import (
 
 const maxHandle = 4 << 10
 
+// Credentials are the credentials the completing job's run carries, one at each kind of target.
+var Credentials = []adapter.Secret{
+	{Name: "conformance-env", Env: "CONFORMANCE_TOKEN", Value: []byte("conformance-env-value")},
+	{Name: "conformance-file", File: "conformance-key", Value: []byte("conformance-file-value")},
+}
+
 // Run checks the adapters factory, the one a plugin hands Serve, builds against the adapter contract on their
 // platform, giving it a logger that discards. completes configures an adapter whose job runs for at least ten seconds
 // and exits 0; neverStarts one whose job the platform ends before its agent starts. Every job the suite creates is
-// purged. inlineLimit is the cap both configured adapters report.
+// purged. inlineLimit is the cap both configured adapters report. The completing job's run carries a credential at an
+// environment variable target and one at a file target, which the adapter delivers to its agent.
 func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Adapter, error), completes, neverStarts adapter.Settings, inlineLimit int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
@@ -49,7 +56,7 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 	})
 
 	t.Run("Completes", func(t *testing.T) {
-		run := adapter.Run{ID: id, Adapter: completes.Name, Agent: completes.Agent, Attempt: 3, Prompt: []byte("conformance prompt")}
+		run := adapter.Run{ID: id, Adapter: completes.Name, Agent: completes.Agent, Attempt: 3, Prompt: []byte("conformance prompt"), Credentials: Credentials}
 		purgeAfter(t, running, run)
 		handle := dispatch(t, ctx, running, run)
 		if _, again := dispatchOutcome(t, ctx, running, run); again.Name != handle.Name {

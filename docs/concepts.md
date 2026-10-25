@@ -29,7 +29,7 @@ the agent.
   own Kafka principal with its own Ed25519 signing key. A compromised host
   is a compromise of its tenant.
 - **A pool** is a set of receivers that share terms and trust each other fully.
-  Its terms name the agents it runs, the credentials each agent takes, the
+  Its terms name the agents it runs, the credentials each agent takes and their targets, the
   share-group delivery limit and lock duration, and the quotas its tenants'
   hosts get. A tenant is entitled to one or more pools. A host entitled through
   several pools gets the lowest of their quotas.
@@ -160,9 +160,10 @@ to the pool.
 
 A receiver's configuration is a record on `wherry.admin`: its capacity
 (the runs it holds at once) and its ordered adapters, each with a name, a
-type, an agent, an optional credential, labels and the adapter's own
-settings. It holds no secrets. `wherry admin` refuses a configuration that
-names an agent or credential outside the pool's terms.
+type, an agent, labels and the adapter's own settings. It holds no secrets
+and names no credential: every adapter of an agent delivers the agent's
+credentials as the pool's terms give them. `wherry admin` refuses a
+configuration that names an agent outside the pool's terms.
 
 A receiver starts with its bundle, a state directory and a plugin directory. It
 registers its signing key, waits for its configuration record, validates it
@@ -174,23 +175,34 @@ redelivery.
 ## Sealed credentials
 
 The agent usually needs a model credential, and each tenant's work runs on
-that tenant's own credential. The pool's terms name the credentials each
-agent may take, and the receiver configuration names the one an adapter
-delivers. The host's configuration maps each credential name to a file.
-A task can also declare **task credentials**: credentials of the host,
-such as a deploy key, that the agent gets as files. The task's parent
-chooses them, so the pool's terms do not govern them.
+that tenant's own credential. Every credential has a **source** on the
+host and a **target** in the agent. The pool's terms list each agent's
+credentials, each with its target: an environment variable or a file in
+the directory `WHERRY_CREDENTIALS_DIR` names, and whether the agent
+requires it. The host's configuration maps each credential name to one
+source: a file, an environment variable of the process answering the seal,
+or a command whose output is the value. A task can also declare **task
+credentials**: credentials of the host, such as a deploy key, that the
+agent gets at the target the task's parent chooses. The pool's terms do not
+govern them, and none may take the target of one of the agent's
+credentials.
+
+`wherry submit` refuses a task at once, with `auth required: credential
+<name> is not in this host's configuration`, when the host has no source
+for a required credential of the placed agent or for a task credential. An
+optional credential the host has no source for is not delivered; the
+prompt names it as not supplied.
 
 A host seals nothing when it submits. The receiver that claims a run
-whose adapter delivers a credential makes a P-256 key pair for that
+with credentials to deliver makes a P-256 key pair for that
 attempt and publishes a signed **seal request** on the tenant feed: the
 run and attempt, the public key, the credential names and an expiry
 5 minutes out. The host that submitted the run answers it while `wherry
 await` or `wherry mcp` runs. It checks the request's signature against the
 receiver's registered key, that the receiver is a live member of the run's
 pool and holds the run's current attempt, that the pool's terms approve
-the agent's credential for the run's agent, and that the run declares each
-task credential. It then writes a **seal** to
+each agent credential for the run's agent, and that the run declares each
+task credential. It resolves each credential's source, then writes a **seal** to
 its own topic: a compact JWE (`ECDH-ES+A256KW` with `A256GCM`, through
 [go-jose](https://github.com/go-jose/go-jose)) encrypted to the request's
 key and bound in its protected header to the tenant, pool, receiver, key
@@ -218,8 +230,11 @@ their values, by design.
 
 A run whose seal does not arrive within 5 minutes ends in
 `TASK_STATE_FAILED` with a message naming each credential the host did not
-answer. The tenant adds the credential to `credentials` in its wherry
-configuration and submits a new run. A parent that submits a task needing
+answer. The tenant fixes the credential's source in `credentials` in its
+wherry configuration and submits a new run. An agent that finds a
+credential missing or refused during the run ends it in
+`TASK_STATE_AUTH_REQUIRED` naming the credential; that state is final, and
+the tenant submits a new run. A parent that submits a task needing
 credentials keeps `wherry await` or `wherry mcp` running until the task
 starts.
 
@@ -235,9 +250,10 @@ Everything the task receives lands as files. A submission's `raw` and
 within the broker's record limit, which `pool create` records, and the
 limit each adapter declares. Over either, they go through S3 when the pool
 has storage and the host a storage credential; otherwise submit refuses,
-naming the limit. Task credentials are files in the directory
-`WHERRY_CREDENTIALS_DIR` names, and never environment variables. The receiver opens the prompt with the names of the
-files and of the outputs the task expects.
+naming the limit. Credentials are files in the directory
+`WHERRY_CREDENTIALS_DIR` names or environment variables, each at its
+target. The receiver opens the prompt with the names of the files, the
+credentials' targets and the outputs the task expects.
 
 The agent leaves its outputs in the directory `WHERRY_OUTPUT_DIR` names.
 Once the job ends and is stopped, whatever its exit, the adapter
@@ -264,9 +280,13 @@ downloads and verifies the outputs and deletes the run's objects. The
 host's storage credential never leaves the host, and S3 outputs, which go
 to the host's own bucket, are not redacted.
 
-A task can also name a git repository: a remote, a ref, the task
-credential to clone with and, for `ssh`, the host key. The agent clones it
-with `git` itself; wherry runs no git. The receiver delivers the host key
+A task can also name a git repository: a remote and a ref. The host's
+`git` configuration gives the clone its credential and, for `ssh`, its host
+key: the entry whose URL is the longest prefix of the remote. The credential
+joins the task as a task credential in the file `git-credential`. The URL
+prefix is the credential's scope, since every task cloning under it receives
+the credential. A remote under no entry clones anonymously. The agent clones
+it with `git` itself; wherry runs no git. The receiver delivers the host key
 as the input file `known_hosts` and opens the prompt with the clone
 commands, which read the credential from its file. The remote's host must
 be one of the pool's VCS hosts. The agent returns its commits as a patch

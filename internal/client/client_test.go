@@ -70,8 +70,15 @@ func (b *syncBuffer) String() string {
 }
 
 func testTerms() admin.Terms {
+	optional := false
 	return admin.Terms{
-		Agents:        []admin.AgentTerms{{Name: "claude", Credentials: []string{"model"}}, {Name: "codex", Credentials: []string{"openai"}}},
+		Agents: []admin.AgentTerms{
+			{Name: "claude", Credentials: []admin.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}},
+			{Name: "codex", Credentials: []admin.AgentCredential{
+				{TaskCredential: wire.TaskCredential{Name: "openai", Env: "OPENAI_API_KEY"}},
+				{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional},
+			}},
+		},
 		DefaultAgent:  "claude",
 		DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
 	}
@@ -159,7 +166,7 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := NewHost(kafka, key, principal, stateDir, map[string]string{"model": f.secret, "openai": f.secret}, log.New(f.logs, host+": ", 0))
+	h, err := NewHost(kafka, key, principal, stateDir, map[string]Source{"model": {File: f.secret}, "openai": {File: f.secret}}, nil, log.New(f.logs, host+": ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,8 +181,8 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 	t.Helper()
 	config := admin.ReceiverConfig{Receiver: id, Pool: pool, Capacity: 2, Adapters: []admin.AdapterSettings{
-		{Name: "lab", Type: "nomad", Agent: "claude", Credential: "model", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
-		{Name: "cloud", Type: "aws", Agent: "codex", Credential: "openai", Labels: map[string]string{"runtime": "exec"}},
+		{Name: "lab", Type: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
+		{Name: "cloud", Type: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
 	}}
 	return f.addReceiverConfig(t, config)
 }
@@ -431,7 +438,7 @@ func TestRegisterIsIdempotentAndRefusesAnotherKey(t *testing.T) {
 		t.Fatalf("host topic holds %d records, %v; want one registration", len(records), err)
 	}
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
-	impostor, err := NewHost(f.host.kafka, other, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.logger)
+	impostor, err := NewHost(f.host.kafka, other, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,11 +449,11 @@ func TestRegisterIsIdempotentAndRefusesAnotherKey(t *testing.T) {
 
 func TestNewHostParsesPrincipal(t *testing.T) {
 	for _, principal := range []string{"wherry.rcv.receiver-a", "wherry.tnt.tenant-a", "wherry.tnt.tenant-a.host.a", "wherry.tnt.Tenant.host-a", "tnt.tenant-a.host-a"} {
-		if _, err := NewHost(nil, nil, principal, "", nil, nil); err == nil {
+		if _, err := NewHost(nil, nil, principal, "", nil, nil, nil); err == nil {
 			t.Errorf("accepted principal %q", principal)
 		}
 	}
-	host, err := NewHost(nil, nil, "wherry.tnt.tenant-a.host-a", "", nil, nil)
+	host, err := NewHost(nil, nil, "wherry.tnt.tenant-a.host-a", "", nil, nil, nil)
 	if err != nil || host.tenant != "tenant-a" || host.host != "host-a" {
 		t.Fatalf("host %#v, %v", host, err)
 	}
@@ -539,8 +546,8 @@ func TestSubmitKeepsInputsWithinAdapterInlineLimit(t *testing.T) {
 func TestSubmitIgnoresInlineLimitOfOfferOutsideSelector(t *testing.T) {
 	f := newFixture(t)
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2, Adapters: []admin.AdapterSettings{
-		{Name: "lab", Type: "nomad", Agent: "claude", Credential: "model", Labels: map[string]string{"runtime": "podman"}},
-		{Name: "other", Type: "nomad", Agent: "claude", Credential: "model", Labels: map[string]string{"runtime": "exec"}},
+		{Name: "lab", Type: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}},
+		{Name: "other", Type: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}},
 	}}
 	receiver := f.addReceiverConfig(t, config)
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
@@ -1105,8 +1112,8 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	}
 	if a := got["receiver-a"]; a.Status != "live" || a.Capacity != 3 || a.InFlight != 1 ||
 		!reflect.DeepEqual(a.Adapters, []Adapter{
-			{Name: "lab", Agent: "claude", InlineLimit: 49152, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
-			{Name: "cloud", Agent: "codex", Labels: map[string]string{"runtime": "exec"}, Ready: false},
+			{Name: "lab", Agent: "claude", InlineLimit: 49152, Credentials: []Credential{{Name: "model", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: true},
+			{Name: "cloud", Agent: "codex", Credentials: []Credential{{Name: "openai", Configured: true}, {Name: "github-token", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 		}) {
 		t.Fatalf("live receiver %#v", a)
 	}
@@ -1193,10 +1200,13 @@ func TestConfigInputRoots(t *testing.T) {
 func TestConfigExampleLoads(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	for _, root := range []string{"src", "notes"} {
-		if err := os.Mkdir(filepath.Join(home, root), 0o700); err != nil {
+	for _, root := range []string{"src", "notes", ".config/wherry/known_hosts"} {
+		if err := os.MkdirAll(filepath.Join(home, root), 0o700); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.WriteFile(filepath.Join(home, ".config/wherry/known_hosts/gitlab"), []byte("gitlab.example ssh-ed25519 AAAA\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	example, err := os.ReadFile(filepath.Join("testdata", "example-config.json"))
 	if err != nil {
@@ -1398,7 +1408,7 @@ func TestRegisterConcurrently(t *testing.T) {
 	for i := range hosts {
 		kafka, principal := f.connect(t, bundle)
 		_, key, _ := ed25519.GenerateKey(rand.Reader)
-		host, err := NewHost(kafka, key, principal, t.TempDir(), nil, log.New(io.Discard, "", 0))
+		host, err := NewHost(kafka, key, principal, t.TempDir(), nil, nil, log.New(io.Discard, "", 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1494,8 +1504,8 @@ func TestReceiversListsALiveReceiverWithNoOffers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(receivers) != 1 || receivers[0].Status != "live" || !reflect.DeepEqual(receivers[0].Adapters, []Adapter{
-		{Name: "lab", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: false},
-		{Name: "cloud", Agent: "codex", Labels: map[string]string{"runtime": "exec"}, Ready: false},
+		{Name: "lab", Agent: "claude", Credentials: []Credential{{Name: "model", Configured: true}}, Labels: map[string]string{"runtime": "podman", "region": "eu"}, Ready: false},
+		{Name: "cloud", Agent: "codex", Credentials: []Credential{{Name: "openai", Configured: true}, {Name: "github-token", Optional: true}}, Labels: map[string]string{"runtime": "exec"}, Ready: false},
 	}) {
 		t.Fatalf("receivers %#v; want the live receiver with its configured adapters, none ready", receivers)
 	}
@@ -1755,7 +1765,7 @@ func TestStatusAndSubmitShareConnections(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h, err := NewHost(kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.logger)
+		h, err := NewHost(kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
 		if err != nil {
 			t.Fatal(err)
 		}

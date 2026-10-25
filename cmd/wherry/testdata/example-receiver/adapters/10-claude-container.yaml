@@ -1,11 +1,9 @@
 name: claude-container
 platform: nomad
 agent: claude
-credential: claude-oauth-token
 labels:
   isolation: container
 config:
-  credential_env: CLAUDE_CODE_OAUTH_TOKEN
   runtime:
     driver: docker
     config:

@@ -1,4 +1,4 @@
-// The adapter protocol, version 7: the receiver core calls a plugin's adapters
+// The adapter protocol, version 8: the receiver core calls a plugin's adapters
 // over this service, and every request names its adapter.
 syntax = "proto3";
 
@@ -52,8 +52,7 @@ message Run {
   reserved 4;
   int64 attempt = 5;
   bytes prompt = 6;
-  optional bytes credential = 7;
-  reserved 8;
+  reserved 7, 8;
   repeated File inputs = 9;
   repeated Secret credentials = 10;
   repeated Fetch fetches = 11;
@@ -73,10 +72,12 @@ message File {
   bytes data = 2;
 }
 
+// Secret is a credential delivered at exactly one of env and file.
 message Secret {
   string name = 1;
   string file = 2;
   bytes value = 3;
+  string env = 4;
 }
 
 message Job {
@@ -107,7 +108,7 @@ message ConfigureRequest {
   string adapter = 1;
   string pool = 2;
   string agent = 3;
-  string credential = 4;
+  reserved 4;
   bytes config = 5;
   string platform = 6;
 }

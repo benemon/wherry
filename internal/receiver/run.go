@@ -165,6 +165,9 @@ type admission struct {
 	adapter  Named
 	history  []wire.Message
 	inputs   []adapter.File
+	// agentCredentials are the agent's credentials the run's host supplies, and unsupplied the optional ones it does not.
+	agentCredentials []wire.TaskCredential
+	unsupplied       []string
 	// credentials, outputs, git and s3Inputs are what the run declares.
 	credentials []wire.TaskCredential
 	outputs     []wire.ExpectedOutput
@@ -276,6 +279,20 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return reject("run deadline passed")
 	}
 	declared := task.Wherry
+	var supplied []wire.TaskCredential
+	for _, credential := range terms.Agents[agent].Credentials {
+		switch {
+		case !slices.Contains(declared.Unsupplied, credential.Name):
+			supplied = append(supplied, credential.TaskCredential)
+		case !credential.Optional():
+			return reject("the host does not supply a required credential of the agent")
+		}
+	}
+	for _, credential := range declared.Credentials {
+		if slices.ContainsFunc(terms.Agents[agent].Targets(), func(target wire.TaskCredential) bool { return target.Target() == credential.Target() }) {
+			return reject("a task credential takes the target of one of the agent's credentials")
+		}
+	}
 	if declared.Git != nil {
 		if host := declared.Git.VCSHost(); !slices.Contains(terms.VCS, host) {
 			return rejectAs("git remote host outside the pool's vcs hosts", "git remote host "+host+" is not in pool "+r.config.Pool+"'s vcs hosts")
@@ -289,6 +306,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return reject(rejection)
 	}
 	admitted.inputs, admitted.credentials, admitted.outputs, admitted.git, admitted.s3Inputs = inputs, declared.Credentials, declared.Outputs, declared.Git, declared.S3Inputs
+	admitted.agentCredentials, admitted.unsupplied = supplied, declared.Unsupplied
 	return admitted, 0
 }
 
@@ -620,10 +638,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		return run.fail(ctx, "timeout", nil)
 	}
-	// The agent credential is asked for under the pool's terms; a task credential of the same name rides with it.
+	// The agent's credentials are asked for under the pool's terms; a task credential of the same name rides with one.
 	agentCredentials, taskCredentials := []string{}, []string{}
-	if run.adapter.Credential != "" {
-		agentCredentials = append(agentCredentials, run.adapter.Credential)
+	for _, credential := range admitted.agentCredentials {
+		agentCredentials = append(agentCredentials, credential.Name)
 	}
 	for _, credential := range admitted.credentials {
 		if !slices.Contains(agentCredentials, credential.Name) && !slices.Contains(taskCredentials, credential.Name) {
@@ -637,7 +655,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	outputNames := s3Outputs(admitted.outputs)
 	if !adopted {
 		named := run.adapter
-		var credential []byte
+		credentials := slices.Concat(admitted.agentCredentials, admitted.credentials)
 		var secrets []adapter.Secret
 		var fetches []adapter.Fetch
 		if len(agentCredentials)+len(taskCredentials)+len(inputNames)+len(outputNames) > 0 {
@@ -647,11 +665,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 			values := sealed.Values
 			run.redactionKey = sealed.RedactionKey
-			if named.Credential != "" {
-				credential = values[named.Credential]
-			}
-			for _, declared := range admitted.credentials {
-				secrets = append(secrets, adapter.Secret{Name: declared.Name, File: declared.File, Value: values[declared.Name]})
+			for _, credential := range credentials {
+				secrets = append(secrets, adapter.Secret{Name: credential.Name, Env: credential.Env, File: credential.File, Value: values[credential.Name]})
 			}
 			run.deliver(values)
 			if fetches, run.puts, err = run.presigned(values, admitted.s3Inputs, outputNames); err != nil {
@@ -665,8 +680,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, adapter.Run{
 			ID: runID, Adapter: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Attempt: attempt,
-			Prompt:     []byte(preamble(named.Adapter.Directories(), append(promptInputs, inputNames...), admitted.credentials, admitted.outputs, admitted.git, runID) + prompt(admitted.history)),
-			Credential: credential, Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
+			Prompt: []byte(preamble(named.Adapter.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID) +
+				prompt(admitted.history)),
+			Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
 		var tooLarge *adapter.InputTooLargeError
 		switch {
@@ -1967,9 +1983,10 @@ func attemptOf(record *kgo.Record) int64 {
 }
 
 // preamble tells the agent the full path of each file it has and of each it is asked to leave, so an agent without a
-// shell finds them, how to clone a git input, and how to report the run's outcome; it names credentials and their files,
-// never their values. A directory the adapter does not report is named by its environment variable.
-func preamble(directories adapter.Directories, inputs []string, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput, git *wire.GitInput, run string) string {
+// shell finds them, how to clone a git input, and how to report the run's outcome; it names credentials and their
+// targets, never their values, and the agent's optional credentials its host did not supply, so the agent can name the
+// one it needs. A directory the adapter does not report is named by its environment variable.
+func preamble(directories adapter.Directories, inputs []string, credentials []wire.TaskCredential, unsupplied []string, outputs []wire.ExpectedOutput, git *wire.GitInput, run string) string {
 	input, output, credential := cmp.Or(directories.Input, "$WHERRY_INPUT_DIR"), cmp.Or(directories.Output, "$WHERRY_OUTPUT_DIR"),
 		cmp.Or(directories.Credentials, "$WHERRY_CREDENTIALS_DIR")
 	lines := []string{"Your input directory is " + input + ", your credentials directory " + credential + " and your output directory " + output +
@@ -1981,12 +1998,25 @@ func preamble(directories adapter.Directories, inputs []string, credentials []wi
 		}
 		lines = append(lines, "Input files: "+strings.Join(paths, ", ")+".")
 	}
-	if len(credentials) > 0 {
-		paths := make([]string, 0, len(credentials))
-		for _, file := range credentials {
-			paths = append(paths, credential+"/"+file.File)
+	var paths, variables, names []string
+	for _, delivered := range credentials {
+		if delivered.Env != "" {
+			variables = append(variables, delivered.Env)
+		} else {
+			paths = append(paths, credential+"/"+delivered.File)
 		}
+		if !slices.Contains(names, delivered.Name) {
+			names = append(names, delivered.Name)
+		}
+	}
+	if len(paths) > 0 {
 		lines = append(lines, "Credential files: "+strings.Join(paths, ", ")+". Never print or copy their contents.")
+	}
+	if len(variables) > 0 {
+		lines = append(lines, "Credential environment variables: "+strings.Join(variables, ", ")+". Never print or copy their values.")
+	}
+	for _, name := range unsupplied {
+		names = append(names, name+" (not supplied)")
 	}
 	if len(outputs) > 0 {
 		paths := make([]string, 0, len(outputs))
@@ -2002,17 +2032,13 @@ func preamble(directories adapter.Directories, inputs []string, credentials []wi
 	if git != nil {
 		lines = append(lines, gitPreamble(git, run, input+"/"+wire.KnownHostsFile, credential, output, credentials, outputs)...)
 	}
-	names := "This run has no credentials."
-	if len(credentials) > 0 {
-		listed := make([]string, 0, len(credentials))
-		for _, declared := range credentials {
-			listed = append(listed, declared.Name)
-		}
-		names = "This run's credentials are " + strings.Join(listed, ", ") + "."
+	listed := "This run has no credentials."
+	if len(names) > 0 {
+		listed = "This run's credentials are " + strings.Join(names, ", ") + "."
 	}
 	lines = append(lines, "When you finish, whatever happened, write an A2A TaskStatus JSON object to "+output+"/"+wire.OutcomeFile+", creating its directory: "+
 		`{"state": "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_AUTH_REQUIRED", "message": {"role": "ROLE_AGENT", "parts": [{"text": "<the answer, or what went wrong>"}]}}. `+
-		`For TASK_STATE_AUTH_REQUIRED, add the part {"data": {"credential": "<name>"}} naming the credential you need. `+names)
+		`For TASK_STATE_AUTH_REQUIRED, add the part {"data": {"credential": "<name>"}} naming the credential you need. `+listed)
 	return strings.Join(lines, "\n") + "\n\n"
 }
 
@@ -2028,7 +2054,9 @@ func preamble(directories adapter.Directories, inputs []string, credentials []wi
 func gitPreamble(git *wire.GitInput, run, knownHosts, credentialDir, outputDir string, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput) []string {
 	remote, ref, checkout := "'"+git.Remote+"'", "'"+git.Ref+"'", "'"+git.Checkout()+"'"
 	keyFile := ""
-	if index := slices.IndexFunc(credentials, func(credential wire.TaskCredential) bool { return credential.Name == git.Credential }); index >= 0 {
+	if index := slices.IndexFunc(credentials, func(credential wire.TaskCredential) bool {
+		return credential.Name == git.Credential && credential.File != ""
+	}); index >= 0 {
 		keyFile = credentialDir + "/" + credentials[index].File
 	}
 	scheme, _, _ := strings.Cut(git.Remote, "://")

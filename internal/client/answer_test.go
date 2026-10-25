@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -423,7 +422,7 @@ func TestAnswerLogsAnAttemptAnotherAnswererSealed(t *testing.T) {
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
 	answering(t, f, f.host)
 	f.waitSeals(t, "host-a", 1)
-	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, log.New(f.logs, "twin: ", 0))
+	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, log.New(f.logs, "twin: ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +456,7 @@ func TestAnswerLogsACredentialThisHostLacks(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
-	f.host.credentials = map[string]string{}
+	f.host.credentials = map[string]Source{}
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
 	answering(t, f, f.host)
@@ -501,7 +500,7 @@ func TestConcurrentAnswerersWriteOneSeal(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
-	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.logger)
+	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +676,7 @@ func TestAnswerSealsTheRunsTaskCredentials(t *testing.T) {
 	if err := os.WriteFile(deployKey, []byte("deploy-key-value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.host.credentials["deploy-key"] = deployKey
+	f.host.credentials["deploy-key"] = Source{File: deployKey}
 	receiver, task := f.admittedWith(t, []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}})
 	runID := task.submission.Wherry.Run
 	asked := newRequest(t, receiver.binding(task, 1), "model")
@@ -716,7 +715,7 @@ func TestSubmitRefusesAnUnconfiguredCredential(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Credentials: []wire.TaskCredential{{Name: "absent", File: "token"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
-	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "credential absent is not in this host's configuration") {
+	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "auth required: credential absent is not in this host's configuration") {
 		t.Fatalf("submit = %v; want the unconfigured credential named", err)
 	}
 	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
@@ -747,42 +746,12 @@ func TestEverySealCarriesTheKeyMintedAtSubmit(t *testing.T) {
 	}
 }
 
-// fifo makes a named pipe for a credential, so an answerer reading it blocks until the test writes the value.
-func fifo(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "credential")
-	if err := syscall.Mkfifo(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-// reading returns the write end of a credential pipe once an answerer has opened it to read.
-func (f *fixture) reading(t *testing.T, path string) *os.File {
-	t.Helper()
-	opened := make(chan *os.File, 1)
-	go func() {
-		if writer, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
-			opened <- writer
-		}
-	}()
-	select {
-	case writer := <-opened:
-		return writer
-	case <-f.ctx.Done():
-		t.Fatalf("no answerer read %s; logs:\n%s", path, f.logs.String())
-		return nil
-	}
-}
-
 // Two answerers each reading the run's record before either seals, for different attempts, seal the one key.
 func TestConcurrentAnswerersForTwoAttemptsSealOneKey(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
-	first, second := fifo(t), fifo(t)
-	f.host.credentials = map[string]string{"model": first}
-	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, map[string]string{"model": second}, f.host.logger)
+	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -790,42 +759,39 @@ func TestConcurrentAnswerersForTwoAttemptsSealOneKey(t *testing.T) {
 	t.Cleanup(func() { seal = previous })
 	var mu sync.Mutex
 	sealed := map[int64][]byte{}
+	held, release := make(chan struct{}), make(chan struct{})
 	seal = func(binding signed.SealBinding, key *ecdsa.PublicKey, values signed.SealValues) ([]byte, error) {
 		mu.Lock()
 		sealed[binding.Attempt] = values.RedactionKey
 		mu.Unlock()
+		if binding.Attempt == 1 {
+			close(held)
+			<-release
+		}
 		return previous(binding, key, values)
 	}
-	// Attempt 1's request expires while its answer is held, so the twin, starting later, passes over it to attempt 2.
+	// Attempt 1's request expires while its seal is held, so the twin, starting later, passes over it to attempt 2.
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	asked.record.ExpiryMS = time.Now().Add(2 * time.Second).UnixMilli()
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
 	answering(t, f, f.host)
-	held := f.reading(t, first)
+	select {
+	case <-held:
+	case <-f.ctx.Done():
+		t.Fatalf("attempt 1's seal was never built; logs:\n%s", f.logs.String())
+	}
 	time.Sleep(time.Until(time.UnixMilli(asked.record.ExpiryMS)))
 	later := newRequest(t, receiver.binding(task, 2), "model")
 	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "claimed-2", "claimed", wire.TaskStateWorking, nil), receiver.sign(t, &later.record))
 	answering(t, f, twin)
-	twinHeld := f.reading(t, second)
-	for _, writer := range []*os.File{held, twinHeld} {
-		writer.WriteString("model-token")
-		writer.Close()
-	}
 	f.waitSeals(t, "host-a", 1)
+	close(release)
 	local, err := f.host.localRun(runID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for len(sealed) < 2 {
-		mu.Unlock()
-		if f.ctx.Err() != nil {
-			t.Fatalf("attempt 1's seal was never built; logs:\n%s", f.logs.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-		mu.Lock()
-	}
 	if !bytes.Equal(sealed[1], local.RedactionKey) || !bytes.Equal(sealed[2], local.RedactionKey) {
 		t.Fatalf("attempts sealed redaction keys %x, want both the run's %x", sealed, local.RedactionKey)
 	}
@@ -945,7 +911,7 @@ func TestSubmitRefusesALongCredentialName(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	name := strings.Repeat("c", 33)
-	f.host.credentials[name] = f.secret
+	f.host.credentials[name] = Source{File: f.secret}
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Credentials: []wire.TaskCredential{{Name: name, File: "token"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "credential names are at most 32") {
 		t.Fatalf("submit = %v; want the name refused", err)

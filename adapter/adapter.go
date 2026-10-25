@@ -32,11 +32,11 @@ type Run struct {
 	ID, Adapter, Agent string
 	// Model is the model the agent runs, as the pool's terms name it; empty leaves the agent's own. The adapter passes
 	// it to the agent as WHERRY_MODEL and never interprets it.
-	Model              string
-	Attempt            int64
-	Prompt, Credential []byte
-	// Inputs and Fetches go in the directory WHERRY_INPUT_DIR names, and Credentials in the one WHERRY_CREDENTIALS_DIR
-	// names, each as a file under its name; the core has validated every name.
+	Model   string
+	Attempt int64
+	Prompt  []byte
+	// Inputs and Fetches go in the directory WHERRY_INPUT_DIR names, each as a file under its name. Credentials are every
+	// credential the agent gets, each at its target; the core has validated every name and target.
 	Inputs      []File
 	Credentials []Secret
 	Fetches     []Fetch
@@ -61,10 +61,11 @@ type File struct {
 	Data []byte
 }
 
-// Secret is one task credential, delivered as the file File.
+// Secret is one credential of a run, delivered at exactly one target: the environment variable Env, or the file File in
+// the directory WHERRY_CREDENTIALS_DIR names. Value is a credential: never log it or put it in an error.
 type Secret struct {
-	Name, File string
-	Value      []byte
+	Name, Env, File string
+	Value           []byte
 }
 
 // Directories are the absolute paths of a job's input, output and credentials directories as the agent sees them. The
@@ -269,8 +270,6 @@ func ReservedEnv(name string) bool {
 // Settings configure one adapter in a plugin.
 type Settings struct {
 	Name, Pool, Agent string
-	// Credential names the credential the adapter's agent takes, empty for none.
-	Credential string
 	// Config is the adapter's config section of the receiver configuration, as JSON.
 	Config []byte
 	// Platform is the receiver bundle's platform credential for the adapter, empty for none.
