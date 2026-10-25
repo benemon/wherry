@@ -638,7 +638,7 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 // status is the latest verified status of the run, SUBMITTED until a receiver reports one.
 func (r *runView) status() StatusResult {
 	result := StatusResult{RunID: r.run, Pool: r.pool, Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Model: r.model(), Skipped: r.skipped}
-	if r.local != nil && r.local.SubmittedMS > 0 {
+	if r.local != nil {
 		result.Updated = time.UnixMilli(r.local.SubmittedMS)
 	} else {
 		result.Updated = r.binding.echoedAt
@@ -843,6 +843,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		r.derive()
 		return nil
 	}
+	// The view loaded before the feed read misses a member ended during it, whose records this drops.
 	if err := rederive(); err != nil {
 		return AwaitResult{}, err
 	}

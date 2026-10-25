@@ -600,7 +600,11 @@ func TestAFailedTaskWriteLeavesNoRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.host.publish(cancelled, fresh, time.Now()); err == nil {
+	encoded, err := wire.SignRecord(fresh, f.host.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.host.publish(cancelled, fresh, encoded, time.Now()); err == nil {
 		t.Fatal("publish succeeded on a cancelled context")
 	}
 	if local, err := f.host.localRun("run-fresh"); err != nil || local != nil {
