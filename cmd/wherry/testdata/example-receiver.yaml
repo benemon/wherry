@@ -7,13 +7,6 @@ platforms:
       address: https://nomad.example.com:4646
       ca_file: /etc/wherry/nomad-ca.pem
       namespace: agents
-  # A second cluster; --platform-credential-file nomad-edge=FILE gives its adapters their own token.
-  - name: nomad-edge
-    type: nomad
-    config:
-      address: https://nomad-edge.example.com:4646
-      ca_file: /etc/wherry/nomad-edge-ca.pem
-      namespace: agents
 adapters:
   - name: claude-container
     platform: nomad
@@ -25,12 +18,11 @@ adapters:
         driver: docker
         config:
           image: registry.example.com/claude-agent:1.0
-  - name: codex-edge
-    platform: nomad-edge
+  - name: codex-host
+    platform: nomad
     agent: codex
     labels:
       isolation: host
-      site: edge
     config:
       node_pool: codex
       runtime:

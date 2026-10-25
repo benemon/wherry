@@ -128,8 +128,8 @@ func TestReceiverConfigExampleParses(t *testing.T) {
 	if err := admin.ValidateConfig(want, terms); err != nil {
 		t.Fatal(err)
 	}
-	documented(t, "example-receiver.yaml", "example-receiver/receiver.yaml", "example-receiver/platforms/nomad.yaml", "example-receiver/platforms/nomad-edge.yaml",
-		"example-receiver/adapters/10-claude-container.yaml", "example-receiver/adapters/20-codex-edge.yaml")
+	documented(t, "example-receiver.yaml", "example-receiver/receiver.yaml", "example-receiver/platforms/nomad.yaml",
+		"example-receiver/adapters/10-claude-container.yaml", "example-receiver/adapters/20-codex-host.yaml")
 }
 
 func TestReceiverConfigDirectoryAdapterTakesPlatformType(t *testing.T) {
