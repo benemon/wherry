@@ -5,12 +5,9 @@
   </picture>
 </h1>
 
-Agent task delegation over Kafka.
-
-wherry sends a coding agent's tasks to receivers on other compute, runs an
-unmodified agent there, and returns the result. The
-[Introduction](https://benemon.github.io/wherry/introduction#what-ships) lists
-what ships.
+Agent task delegation over Kafka. The
+[Introduction](https://benemon.github.io/wherry/introduction) describes the
+model and [what ships](https://benemon.github.io/wherry/introduction#what-ships).
 
 ## Getting started
 

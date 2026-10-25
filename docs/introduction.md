@@ -1,9 +1,10 @@
 # Introduction
 
-A coding agent runs its subagents on the machine the agent itself runs on.
-wherry sends a task to other compute, starts an unmodified agent there, and
-returns the result to the caller. Kafka carries every exchange between
-hosts and receivers. [Key concepts](concepts.md) explains the model.
+Running an agent has well-known answers: containers, sandboxes, clusters.
+Handing a coding agent's work to that infrastructure, across machines,
+tenants and trust boundaries, and getting the result back, has no standard
+answer. wherry is agent task delegation over Kafka.
+[Key concepts](concepts.md) explains the model.
 
 ## The problem
 
@@ -17,6 +18,12 @@ unmodified agent there, and returns the result to the caller. Every
 exchange is a record on a Kafka cluster the user also runs. Kafka supplies
 identity, authorisation, isolation, history, work distribution and atomic
 writes.
+
+wherry is open source under the Mozilla Public License 2.0 and has no
+hosted control plane. The hosts, the receivers, the Kafka cluster and the
+object storage are all the user's, so the tasks, their files and their
+results stay on infrastructure the user governs.
+[Where your data goes](governance.md#where-your-data-goes) traces each one.
 
 wherry's capabilities sit between the caller and the platform that runs
 the agent.

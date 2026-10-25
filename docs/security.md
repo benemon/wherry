@@ -1,7 +1,10 @@
 # Security
 
 How a run's credentials travel from the host to one attempt of one
-receiver, and where the host takes their values from.
+receiver, where the host takes their values from, and how they reach the
+agent: the agent holds each value at its target while it runs.
+[Governance](governance.md) covers identity, grants, signed records and
+the audit trail.
 
 ## Sealed credentials
 

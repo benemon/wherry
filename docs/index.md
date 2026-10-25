@@ -6,7 +6,6 @@ hero:
     dark: /svg/wherry-stacked-cream.svg
     alt: wherry
   tagline: Agent task delegation over Kafka.
-  text: wherry sends a coding agent's tasks to receivers on other compute, runs an unmodified agent there, and returns the result.
   actions:
     - theme: brand
       text: Quickstart
@@ -16,21 +15,21 @@ hero:
       link: /concepts
 features:
   - title: Any agent harness
-    details: The MCP server and CLI fit any harness, and the agent runs unmodified.
+    details: For developers. The MCP server and CLI fit any harness, and the agent runs unmodified.
     link: /operations#harness-integration
-  - title: Any platform
-    details: Adapter plugins run agents on Nomad, Kubernetes and OpenShift, and systemd.
-    link: /adapters
-  - title: Sealed credentials
-    details: Each credential is sealed to one receiver for one attempt.
-    link: /security#sealed-credentials
-  - title: Signed records
-    details: Every shared record is signed and checked against the operator's state.
-    link: /design#topics
-  - title: Large files through S3
-    details: Inputs and outputs of up to 5 GiB travel through an S3-compatible bucket.
-    link: /concepts#files-in-and-out
   - title: Runs that survive restarts
-    details: A receiver's runs continue after it restarts, through adoption and redelivery.
+    details: For developers. A receiver's runs continue after it restarts, through adoption and redelivery.
     link: /concepts#runs-and-attempts
+  - title: Your compute, your Kafka
+    details: For platform teams. Agents run on Nomad, Kubernetes and OpenShift, or systemd, and every record stays on your own Kafka cluster.
+    link: /adapters
+  - title: Open source, no hosted control plane
+    details: For platform teams. wherry is MPL-2.0 and sends nothing to a third party; the hosts and receivers are yours.
+    link: /governance#where-your-data-goes
+  - title: Governed by the operator
+    details: For governance. The operator issues every identity, the broker enforces every grant, and every shared record is signed and kept.
+    link: /governance
+  - title: Sealed credentials
+    details: For security. Each credential is sealed to one receiver for one attempt and delivered to its target in the agent.
+    link: /security#sealed-credentials
 ---

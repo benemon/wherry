@@ -15,7 +15,13 @@ const sidebar = [
     items: [
       { text: 'Key concepts', link: '/concepts' },
       { text: 'Design', link: '/design' },
-      { text: 'Security', link: '/security' },
+      {
+        text: 'Governance and security',
+        items: [
+          { text: 'Governance', link: '/governance' },
+          { text: 'Security', link: '/security' },
+        ],
+      },
       { text: 'Configuration', link: '/configuration' },
       { text: 'Operations', link: '/operations' },
       { text: 'Adapters', link: '/adapters' },
