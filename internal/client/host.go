@@ -380,7 +380,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		return SubmitResult{}, err
 	}
 	submission.Wherry.Credentials, submission.Wherry.Unsupplied, submission.Wherry.Outputs, submission.Wherry.Git = input.Credentials, unsupplied, outputs, input.Git
-	encoded, err := wire.SignRecord(submission, h.key)
+	encoded, err := signRecord(submission, h.key)
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
@@ -390,7 +390,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 		toS3()
 		submission.Message.Parts = append([]wire.Part{{Text: input.Prompt}}, input.Parts...)
-		if encoded, err = wire.SignRecord(submission, h.key); err != nil {
+		if encoded, err = signRecord(submission, h.key); err != nil {
 			return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 		}
 		if int64(len(encoded)) > limit {
@@ -407,8 +407,14 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		if err := h.checkSealSize(ctx, store, storage.Bucket, h.tenant, runID, input.Credentials, s3Inputs, s3Outputs, deadline); err != nil {
 			return SubmitResult{}, err
 		}
-		if submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage.Bucket, h.tenant, runID, input.S3Inputs); err == nil {
-			err = h.publish(ctx, submission, now)
+		submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage.Bucket, h.tenant, runID, input.S3Inputs)
+		if err == nil && len(submission.Wherry.S3Inputs) > 0 {
+			if encoded, err = signRecord(submission, h.key); err != nil {
+				err = fmt.Errorf("%w: %v", ErrInvalidInput, err)
+			}
+		}
+		if err == nil {
+			err = h.publish(ctx, submission, encoded, now)
 		}
 		if err != nil {
 			if cleanupErr := h.removePrefix(ctx, store, storage.Bucket, runID); cleanupErr != nil {
@@ -418,7 +424,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 		return SubmitResult{RunID: runID, Pool: pool}, nil
 	}
-	if err := h.publish(ctx, submission, now); err != nil {
+	if err := h.publish(ctx, submission, encoded, now); err != nil {
 		return SubmitResult{}, err
 	}
 	return SubmitResult{RunID: runID, Pool: pool}, nil
@@ -460,6 +466,9 @@ func (h *Host) Cancel(ctx context.Context, runID string) (CancelResult, error) {
 	return CancelResult{RunID: runID, Skipped: r.skipped}, nil
 }
 
+// signRecord signs a submission; a test counts signatures through it.
+var signRecord = wire.SignRecord
+
 func (h *Host) submission(runID, pool string, placement wire.Placement, parts []wire.Part, deadline, queueDeadline time.Duration, now time.Time) (*wire.Submission, error) {
 	return &wire.Submission{
 		Message: wire.Message{MessageID: wire.RandomID("msg-"), ContextID: runID, TaskID: runID, Role: wire.RoleUser, Parts: parts, Extensions: []string{wire.ExtensionURI}},
@@ -470,14 +479,10 @@ func (h *Host) submission(runID, pool string, placement wire.Placement, parts []
 	}, nil
 }
 
-// publish records the run locally, then writes the submission to its pool's task topic. The record comes first so
-// this host answers the seal request a receiver may send as soon as it claims the task; a failed write removes the
-// record.
-func (h *Host) publish(ctx context.Context, submission *wire.Submission, now time.Time) error {
-	encoded, err := wire.SignRecord(submission, h.key)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
-	}
+// publish records the run locally, then writes encoded, the signed submission, to its pool's task topic. The record
+// comes first so this host answers the seal request a receiver may send as soon as it claims the task; a failed write
+// removes the record.
+func (h *Host) publish(ctx context.Context, submission *wire.Submission, encoded []byte, now time.Time) error {
 	binding := submission.Wherry
 	record := runRecord{
 		Run: binding.Run, Pool: binding.Pool, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(), DeadlineMS: binding.DeadlineMS,

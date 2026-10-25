@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -338,6 +339,50 @@ func TestSubmitMovesInputsOverTheRecordLimitToS3(t *testing.T) {
 	}
 	if got := o.object("/" + testBucket + "/" + wire.S3InputKey("tenant-a", result.RunID, "data.bin")); !bytes.Equal(got, data) {
 		t.Fatalf("uploaded input is %d bytes, want %d", len(got), len(data))
+	}
+}
+
+// countSignatures counts the records signRecord signs until the test ends.
+func countSignatures(t *testing.T) *int {
+	t.Helper()
+	n := 0
+	signRecord = func(value wire.Record, key ed25519.PrivateKey) ([]byte, error) {
+		n++
+		return wire.SignRecord(value, key)
+	}
+	t.Cleanup(func() { signRecord = wire.SignRecord })
+	return &n
+}
+
+func TestSubmitWithoutAnS3MoveSignsOnce(t *testing.T) {
+	f, _, receiver := recordLimitFixture(t, true)
+	signatures := countSignatures(t)
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: []byte("data"), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *signatures != 1 {
+		t.Fatalf("submit signed %d records, want the measured submission published as it is", *signatures)
+	}
+	if task := receiver.claim(t, f.ctx, result.RunID)[0].submission; len(task.Message.Parts) != 2 || task.Wherry.S3Inputs != nil {
+		t.Fatalf("submission has %d parts and S3 inputs %+v; want the input inline", len(task.Message.Parts), task.Wherry.S3Inputs)
+	}
+}
+
+func TestSubmitResignsAfterAnS3Move(t *testing.T) {
+	f, _, receiver := recordLimitFixture(t, true)
+	signatures := countSignatures(t)
+	data := make([]byte, 60000)
+	rand.Read(data)
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: data, Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *signatures != 3 {
+		t.Fatalf("submit signed %d records, want the measure, the re-measure after the move and the published submission", *signatures)
+	}
+	if task := receiver.claim(t, f.ctx, result.RunID)[0].submission; !slices.Equal(task.Wherry.S3Inputs, []wire.S3Input{{Name: "data.bin", Size: 60000, SHA256: hexSum(data)}}) {
+		t.Fatalf("submission S3 inputs %+v; want the uploaded input", task.Wherry.S3Inputs)
 	}
 }
 
