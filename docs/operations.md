@@ -1,11 +1,13 @@
-# Operator guide
+# Operations
 
 Before a tenant can submit, an operator prepares the Kafka cluster,
 creates a pool with its terms, entitles the tenant, adds its hosts, and
 adds and runs at least one receiver. Later the operator reconfigures
 receivers, revokes access and recovers from faults. This guide covers each
-task. [Concepts](concepts.md) explains the model, and
-[Reference](reference.md) lists every command, file and field.
+task. [Key concepts](concepts.md) explains the model,
+[Commands](commands.md) and [Configuration](configuration.md) list every
+command, file and field, and [Security](security.md#run-credentialed-tasks)
+covers credentialed tasks.
 
 ## Prepare Kafka
 
@@ -64,13 +66,13 @@ Prerequisites: the `wherry admin` environment
 ([Set up `wherry admin`](#set-up-wherry-admin)).
 
 A pool's terms apply to every receiver in it. Write them as a
-[terms file](reference.md#pool-terms) and create the pool:
+[terms file](configuration.md#pool-terms) and create the pool:
 
 ```sh
 wherry admin pool create build --config-file build-terms.yaml
 ```
 
-The [pool terms example](reference.md#pool-terms-example) sets every field,
+The [pool terms example](configuration.md#pool-terms-example) sets every field,
 as one file and as a `--config-dir` directory.
 
 - `delivery_limit` bounds how often the broker delivers one task. Each
@@ -198,8 +200,8 @@ Prerequisites: the `wherry admin` environment
    the host's Kafka password.
 
 The tenant then writes its
-[client configuration](reference.md#client-configuration) and runs
-`wherry init`, as in [Getting started](getting-started.md#7-configure-the-host).
+[client configuration](configuration.md#client-configuration) and runs
+`wherry init`, as in [Quickstart](quickstart.md#_7-configure-the-host).
 
 A tenant can be entitled to several pools; run `pool entitle` once per pool.
 
@@ -265,13 +267,13 @@ The adapter files' names set routing order, lowest first, so a numeric
 prefix orders them. An adapter takes its platform's `type`, and its `config`
 is the platform's `config` plus its own. The two share no top-level key: a
 key set in both is an error. The
-[directory layout](reference.md#receiver-configuration-directory) lists
+[directory layout](configuration.md#receiver-configuration-directory) lists
 every rule.
 
 A single YAML file holding the whole
-[receiver configuration](reference.md#receiver-configuration) also works in
+[receiver configuration](configuration.md#receiver-configuration) also works in
 place of the directory.
-The [receiver configuration example](reference.md#receiver-configuration-example)
+The [receiver configuration example](configuration.md#receiver-configuration-example)
 gives one configuration in both forms, with two platforms and two adapters.
 
 A task with no selector runs on the first ready adapter, `container` here,
@@ -286,7 +288,7 @@ cover the `config` section.
 Every adapter runs its harness unchanged: the receiver reads no harness's
 output format, and the run ends when the job ends, with the outcome the
 agent writes as the prompt asks
-([agent contract](reference.md#agent-contract)).
+([agent contract](configuration.md#agent-contract)).
 
 `codex exec` reads its API key from
 `CODEX_API_KEY` and ignores `OPENAI_API_KEY`, so the pool's terms give the
@@ -380,15 +382,37 @@ advertisement, `wherry receivers` on a host of an entitled tenant shows it
 
 A plugin that exits is started again and its adapters configured again;
 the receiver logs `plugin exited; restarting`, then `plugin restarted`.
-[Adapter plugins](reference.md#adapter-plugins) covers what runs in flight
+[Adapter plugins](commands.md#adapter-plugins) covers what runs in flight
 meanwhile.
 
 ### Install adapter plugins
 
-The receiver ships with no adapters. Build each plugin from
-[wherry-plugins](https://github.com/benemon/wherry-plugins) and install it
-as `wherry-plugin-<type>` in one directory on the receiver host, owned by
-root and writable by no one else:
+The receiver ships with no adapters. Each plugin has its own
+[wherry-plugins releases](https://github.com/benemon/wherry-plugins/releases),
+tagged `<plugin>/<version>`, such as `nomad/<version>`. Each carries
+`wherry-plugin-<plugin>_<version>_linux_<arch>.tar.gz` for `amd64` and
+`arm64`, `checksums.txt` and `checksums.txt.sigstore.json`. Download the
+archive and the checksums, verify the checksums' signature with
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/), check
+the archive against them, and extract the plugin:
+
+```sh
+plugin=nomad version=<version> arch=amd64
+base=https://github.com/benemon/wherry-plugins/releases/download/$plugin/$version
+archive=wherry-plugin-${plugin}_${version}_linux_${arch}.tar.gz
+curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp "^https://github\.com/benemon/wherry-plugins/\.github/workflows/release\.yml@refs/tags/$plugin/v" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+grep "  $archive\$" checksums.txt | sha256sum -c -
+tar -xzf "$archive" --strip-components=1 "${archive%.tar.gz}/wherry-plugin-$plugin"
+```
+
+`gh attestation verify "$archive" -R benemon/wherry-plugins` verifies the
+archive's provenance attestation in place of the signature and checksum steps.
+
+Install each plugin as `wherry-plugin-<type>` in one directory on the
+receiver host, owned by root and writable by no one else:
 
 ```sh
 install -d -o root -g root -m 0755 /usr/local/libexec/wherry/plugins
@@ -497,7 +521,7 @@ Whoever can scrape a receiver sees every tenant's activity on its pool: its
 runs and their outcomes, durations, rejections and seal waits. Give scrape access only to those who may
 see all of the pool's tenants. No label or value carries a prompt, output,
 run ID, error text, URL, image, path, node or credential name.
-[Metrics](reference.md#metrics) lists the families.
+[Metrics](commands.md#metrics) lists the families.
 
 ## Revoke a host or receiver
 
@@ -613,74 +637,11 @@ The command refuses a record that decodes, so a skip cannot hide state such
 as a membership end. It also refuses a record a later release wrote; the
 error says so, and upgrading `wherry` reads it.
 
-## Run credentialed tasks
-
-Every credential has a source on the host and a target in the agent. The
-host's [client configuration](reference.md#client-configuration) maps each
-credential name to one source:
-
-```yaml
-credentials:
-  openai-api-key:
-    file: ~/.config/wherry/credentials/openai
-  github-token:
-    env: GITHUB_TOKEN
-  vault-token:
-    command: [vault, print, token]
-```
-
-The configuration lives at `~/.config/wherry/config.yaml`. A `file` source is
-read as it is, trailing newline included. Its file must be a regular file
-that its group cannot write and others cannot access: mode 0600 is the
-recommended mode, and mode 0640 is accepted for a secrets agent that
-templates the file for a service group. An `env`
-source is read from the environment of the process answering the seal,
-`wherry await` or `wherry mcp`. A `command` source runs without a shell,
-with the answerer's environment, for at most 60 seconds, which leaves time
-for an interactive unlock such as a password manager's; its standard output
-is the value, at most 64 KiB, and its standard error is discarded. The
-configuration holds no literal values.
-
-`wherry receivers` lists each agent's credential names, marking those this
-host has no source for, such as
-`credentials=openai-api-key,github-token(missing,optional)`. `wherry
-submit` refuses a task with `auth required: credential <name> is not in
-this host's configuration` when the host has no source for a required
-credential of the placed agent, or for a task credential. An optional
-credential the host has no source for is not delivered, and the prompt
-names it as not supplied. A task credential takes a target with
-`--credential NAME:file=FILE` or `--credential NAME:env=VAR`; `submit`
-refuses one whose target is one of the agent's credentials' targets or
-another task credential's.
-
-A receiver asks the submitting host for the run's credentials when it
-claims the task, and the host answers only while `wherry await` or
-`wherry mcp` runs on it. A parent that submits a task with credentials
-keeps one of them running until the task starts; without an answer within
-5 minutes, the run ends `TASK_STATE_FAILED` with a message that names each
-unanswered credential, never its value. The answerer resolves each source
-when it answers, before it takes the attempt's lock, so a slow command
-holds up no other answerer of the host. A source that fails to resolve, an
-unset or empty variable, a command that exits non-zero, times out or writes
-over 64 KiB, is logged as `run <id>: resolve credential <name>: <cause>`,
-by name and exit status alone, and the answerer tries the request again
-each second until it expires.
-
-The host answers only for a credential the pool's terms approve for the
-run's agent, or a task credential the run declares, that its configuration
-has a source for, and only to the receiver that first claimed the run. It
-logs each verified request of its
-own runs that it skips or refuses, by run, receiver and credential name, on
-standard error. A receiver that adopts a running job asks for its own seal
-and publishes nothing of the job until it opens. A run adopted by a second
-receiver gets no seal, so that receiver stops the job and the run ends
-`TASK_STATE_FAILED` naming the credentials; submit a new run.
-
 ## Inputs and outputs
 
 A run's outputs hold its `output_limit` in 256 entries at most. The broker's
 record limit and each adapter's declared limit bound a task's inline input
-files, as [`wherry submit`](reference.md#wherry-submit) describes; an adapter
+files, as [`wherry submit`](commands.md#wherry-submit) describes; an adapter
 declares its limit through `InlineLimit`, and the receiver keeps the
 adapter's dispatch check as a backstop.
 
@@ -702,7 +663,7 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    encryption, store-managed or KMS. Every run's objects live under
    `wherry/<tenant>/<run>/` in it.
 
-2. Name it in the pool's [terms](reference.md#pool-terms). The endpoint is
+2. Name it in the pool's [terms](configuration.md#pool-terms). The endpoint is
    `https://` and the host, with `:port` when it is not 443, and no path;
    wherry refuses a plain `http` endpoint.
 
@@ -738,7 +699,7 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
 
    The host keeps the access key and secret key as two credentials, each with
    its own source, and names them under `storage` in its
-   [configuration](reference.md#client-configuration):
+   [configuration](configuration.md#client-configuration):
 
    ```yaml
    credentials:
@@ -828,7 +789,7 @@ rules and the commands. For the agent to follow them:
   command.
 
 Allow the hosts a pool's tasks may clone from with `vcs` in its
-[terms](reference.md#pool-terms):
+[terms](configuration.md#pool-terms):
 
 ```yaml
 vcs:
@@ -987,9 +948,10 @@ changes, so restart the MCP server after upgrading.
 Prerequisites: the new `wherry` binary, and each receiver's bundle and
 state directory.
 
-1. Replace the binary on every host and receiver host.
+1. Replace the binary on every host and receiver host with the new
+   release's, verified as in [Install wherry](quickstart.md#install-wherry).
 2. Replace the plugins in each receiver's plugin directory together with the
-   receiver binary; a receiver refuses a plugin of another adapter protocol
+   receiver binary, verified as in [Install adapter plugins](#install-adapter-plugins); a receiver refuses a plugin of another adapter protocol
    version. This release speaks adapter protocol version 7 and refuses a
    version 6 plugin.
 3. Restart each receiver with the same bundle and state directory. On
@@ -1006,7 +968,7 @@ the client configuration and connects to Kafka as one host when it starts.
 Every tool call and seal answer reuses that host and its one tenant-feed
 follower. While the connection fails, the server retries it on each tool
 call and every five seconds.
-[Reference](reference.md#mcp-tools) lists the tools.
+[MCP tools](mcp.md) lists the tools.
 
 Prerequisites: `wherry` on the harness's `PATH`, and the client
 configuration, bundle, host key and credential files readable by the

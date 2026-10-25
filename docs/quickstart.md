@@ -1,37 +1,64 @@
-# Getting started
+# Quickstart
 
 This guide provisions one pool with one Nomad receiver, entitles one tenant
-with one host, and runs a first task. [Concepts](concepts.md) explains the
+with one host, and runs a first task. [Key concepts](concepts.md) explains the
 parts involved.
 
 ## Prerequisites
 
 - A Kafka cluster prepared as in
-  [Prepare Kafka](operator-guide.md#prepare-kafka), with its super user and
+  [Prepare Kafka](operations.md#prepare-kafka), with its super user and
   `wherry.operator` credentials on the operator's machine.
 - A Nomad cluster with a namespace for agent jobs (`agents` below) and a
   token or workload identity carrying the
   [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy).
 - The `wherry` binary on the operator's machine, the host and the receiver
-  host. Build it with Go 1.27 or later from a checkout of this repository:
-
-  ```sh
-  go build -o wherry ./cmd/wherry
-  ```
-
-- `wherry-plugin-nomad` on the receiver host, built from
-  [wherry-plugins](https://github.com/benemon/wherry-plugins/tree/main/nomad)
-  and installed in `/usr/local/libexec/wherry/plugins` as in
-  [Install adapter plugins](operator-guide.md#install-adapter-plugins).
+  host, installed from a release as in [Install wherry](#install-wherry).
+- `wherry-plugin-nomad` on the receiver host, installed from a
+  [wherry-plugins release](https://github.com/benemon/wherry-plugins/releases)
+  in `/usr/local/libexec/wherry/plugins` as in
+  [Install adapter plugins](operations.md#install-adapter-plugins).
 - An agent the Nomad nodes can run: an image for a container driver, or an
   install on the node for `exec`. The
-  [agent contract](reference.md#agent-contract) lists what it must do.
+  [agent contract](configuration.md#agent-contract) lists what it must do.
 - The model credential the agent needs, in a file on the host.
+
+### Install wherry
+
+Each [release](https://github.com/benemon/wherry/releases) carries
+`wherry_<version>_<os>_<arch>.tar.gz` for `linux` and `darwin` on `amd64` and
+`arm64`, `checksums.txt` with each archive's SHA-256, and
+`checksums.txt.sigstore.json`, the keyless signature over it, and
+`wherry.cdx.json`, a CycloneDX SBOM. `<version>` is a release tag. Download the archive and the checksums, verify the checksums'
+signature with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/),
+check the archive against them, and extract the binary:
+
+```sh
+version=<version> os=linux arch=amd64
+base=https://github.com/benemon/wherry/releases/download/$version
+archive=wherry_${version}_${os}_${arch}.tar.gz
+curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp '^https://github\.com/benemon/wherry/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+grep "  $archive\$" checksums.txt | sha256sum -c -
+tar -xzf "$archive" --strip-components=1 "${archive%.tar.gz}/wherry"
+install -m 0755 wherry /usr/local/bin/wherry
+```
+
+On macOS, `shasum -a 256 -c -` takes the place of `sha256sum -c -`. Each
+archive also carries a provenance attestation, which
+[GitHub's CLI](https://cli.github.com/) verifies in place of the signature and
+checksum steps:
+
+```sh
+gh attestation verify "$archive" -R benemon/wherry
+```
 
 ## 1. Set up `wherry admin`
 
 On the operator's machine, export the six `WHERRY_TRUST_*` variables in
-[Set up `wherry admin`](operator-guide.md#set-up-wherry-admin).
+[Set up `wherry admin`](operations.md#set-up-wherry-admin).
 
 ## 2. Create a pool
 
@@ -150,7 +177,7 @@ receiver: <time> registered key: signing=<key id>
 receiver: <time> configured: pool=build adapters=1 capacity=2
 ```
 
-[Run a receiver](operator-guide.md#run-a-receiver) covers running it
+[Run a receiver](operations.md#run-a-receiver) covers running it
 under a supervisor, or as a Nomad job.
 
 ## 7. Configure the host
@@ -170,7 +197,7 @@ seals the file's contents byte for byte to that receiver. A credential can
 also come from an environment variable of the answering process,
 `env: MODEL_API_KEY`, or from a command's output,
 `command: [op, read, "op://wherry/model/credential"]`
-([client configuration](reference.md#client-configuration)).
+([client configuration](configuration.md#client-configuration)).
 
 ## 8. Register the host key
 

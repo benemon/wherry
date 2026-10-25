@@ -1234,12 +1234,12 @@ func TestConfigExampleLoads(t *testing.T) {
 		!slices.Equal(config.InputRoots, []string{filepath.Join(home, "src"), filepath.Join(home, "notes")}) {
 		t.Fatalf("host key %s, state dir %s, input roots %v, want each under %s", config.HostKey, config.StateDir, config.InputRoots, home)
 	}
-	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", "reference.md"))
+	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", "configuration.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(reference), "```yaml\n"+string(example)+"```\n") {
-		t.Fatal("docs/reference.md has no code block holding testdata/example-config.yaml")
+		t.Fatal("docs/configuration.md has no code block holding testdata/example-config.yaml")
 	}
 }
 

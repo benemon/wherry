@@ -26,6 +26,14 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # The Adapters page embeds the receiver examples from wherry-plugins.
+      - name: Check out wherry-plugins
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: benemon/wherry-plugins
+          ref: main
+          path: wherry-plugins
+          persist-credentials: false
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -36,6 +44,8 @@ jobs:
         run: npm ci
         working-directory: docs-site
       - name: Build documentation
+        env:
+          WHERRY_PLUGINS_DIR: ${{ github.workspace }}/wherry-plugins
         run: make docs
       - name: Configure GitHub Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6

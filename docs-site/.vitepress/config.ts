@@ -2,34 +2,60 @@ import { existsSync } from 'node:fs'
 import { defineConfig } from 'vitepress'
 
 const sidebar = [
-  { text: 'Quick start', items: [{ text: 'Getting started', link: '/getting-started' }] },
-  { text: 'Concepts', items: [{ text: 'Concepts', link: '/concepts' }] },
-  { text: 'Operations', items: [{ text: 'Operator guide', link: '/operator-guide' }] },
-  { text: 'Adapters', items: [{ text: 'Adapter plugins', link: '/adapters' }] },
   {
-    text: 'Reference',
+    text: 'Get started',
     items: [
-      { text: 'Reference', link: '/reference' },
-      { text: 'The wherry A2A extension', link: '/a2a-extension-v1' },
+      { text: 'Introduction', link: '/introduction' },
+      { text: 'Quickstart', link: '/quickstart' },
+      { text: 'Use cases', link: '/use-cases' },
+    ],
+  },
+  {
+    text: 'Docs',
+    items: [
+      { text: 'Key concepts', link: '/concepts' },
+      { text: 'Design', link: '/design' },
+      {
+        text: 'Governance and security',
+        items: [
+          { text: 'Governance', link: '/governance' },
+          { text: 'Security', link: '/security' },
+        ],
+      },
+      { text: 'Configuration', link: '/configuration' },
+      { text: 'Operations', link: '/operations' },
+      { text: 'Adapters', link: '/adapters' },
+      {
+        text: 'APIs',
+        items: [
+          { text: 'Commands', link: '/commands' },
+          { text: 'MCP tools', link: '/mcp' },
+          { text: 'The wherry A2A extension', link: '/a2a-extension-v1' },
+        ],
+      },
     ],
   },
 ]
 
-for (const group of sidebar) {
-  for (const item of group.items) {
-    if (!existsSync(new URL(`../../docs${item.link}.md`, import.meta.url))) {
+const check = (items) => {
+  for (const item of items) {
+    if (item.items) check(item.items)
+    else if (!existsSync(new URL(`../../docs${item.link}.md`, import.meta.url))) {
       throw new Error(`Sidebar page does not exist: ${item.link}`)
     }
   }
 }
+check(sidebar)
 
 // The pages are the repository's docs/, copied to src/ by the build, so they also read as plain Markdown on GitHub;
-// rendered from outside this directory, their imports would not resolve against node_modules.
+// rendered from outside this directory, their imports would not resolve against node_modules. The build also copies
+// wherry-plugins' examples/ to src/examples/ for the Adapters page's snippet imports; they are not pages.
 export default defineConfig({
   title: 'wherry',
-  description: 'Run a coding agent’s subagent tasks on other compute, over Kafka.',
+  description: 'An execution fabric for delegated agent work.',
   base: '/wherry/',
   srcDir: 'src',
+  srcExclude: ['examples/**'],
   ignoreDeadLinks: false,
   vite: { publicDir: '../../brand' },
   head: [
@@ -44,8 +70,9 @@ export default defineConfig({
     // The lockup carries the wordmark.
     siteTitle: false,
     nav: [
-      { text: 'Getting started', link: '/getting-started' },
-      { text: 'Reference', link: '/reference' },
+      { text: 'Quickstart', link: '/quickstart' },
+      { text: 'Configuration', link: '/configuration' },
+      { text: 'Commands', link: '/commands' },
       { text: 'GitHub', link: 'https://github.com/benemon/wherry' },
     ],
     sidebar,

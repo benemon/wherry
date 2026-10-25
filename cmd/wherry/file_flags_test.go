@@ -108,10 +108,10 @@ func TestPoolConfigExampleParses(t *testing.T) {
 	documented(t, "example-pool.yaml", "example-pool/pool.yaml", "example-pool/agents/claude.yaml", "example-pool/agents/coder.yaml", "example-pool/agents/codex.yaml")
 }
 
-// documented fails unless docs/reference.md holds each testdata file as a whole code block.
+// documented fails unless docs/configuration.md holds each testdata file as a whole code block.
 func documented(t *testing.T, files ...string) {
 	t.Helper()
-	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", "reference.md"))
+	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", "configuration.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func documented(t *testing.T, files ...string) {
 			t.Fatal(err)
 		}
 		if !strings.Contains(string(reference), "```yaml\n"+string(example)+"```\n") {
-			t.Errorf("docs/reference.md has no code block holding testdata/%s", file)
+			t.Errorf("docs/configuration.md has no code block holding testdata/%s", file)
 		}
 	}
 }
