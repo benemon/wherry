@@ -671,11 +671,10 @@ The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
 certificate pair made for each start, protocol version 8. The receiver refuses a
 plugin of any other protocol version at its start, so the receiver and its
-plugins upgrade together. Version 8 removes the adapter's credential from
-Configure and the run's single credential from Dispatch: the run carries every
-credential as an `adapter.Secret` holding its name, value and exactly one
-target, `Env`, an environment variable the plugin sets for the agent, or
-`File`, a file it writes in the agent's credentials directory.
+plugins upgrade together. Configure carries no credential. Dispatch carries
+every credential of the run as an `adapter.Secret` holding its name, its value
+and exactly one target: `Env`, an environment variable the plugin sets for the
+agent, or `File`, a file it writes in the agent's credentials directory.
 The receiver refuses a version 7 plugin with
 `incompatible API version with plugin. Plugin version: 7, Client versions: [8]`.
 The receiver refuses a plugin that offers no TLS certificate. Every call names
@@ -817,12 +816,6 @@ quotes the task counts as `git remote host outside the pool's vcs hosts` or
 A seal wait is `expired` when the run's deadline passes, `unanswered` when
 the 5-minute wait ends and the run fails, and `adopter_refused` when an
 adopter's wait ends and it stops the job before the run fails.
-
-Agent-reported usage comes from a run's result: Claude Code's `usage` fields
-`input_tokens`, `output_tokens` and `cache_read_input_tokens`, and its
-`total_cost_usd`; Codex's `input_tokens`, `output_tokens`,
-`cached_input_tokens` and `reasoning_output_tokens`. An absent field adds
-nothing. The figures are the agent's own, unchecked.
 
 The core histograms' buckets are 1, 5, 15, 30 and 60 seconds, 2, 5, 10 and 30
 minutes, and 1, 2, 4 and 6 hours. `wherry_adapter_placement_seconds` uses

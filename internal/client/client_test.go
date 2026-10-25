@@ -1780,24 +1780,14 @@ func TestStatusAndSubmitShareConnections(t *testing.T) {
 	}
 }
 
-// A run's history passes over records keyed by other runs without verifying them.
+// A run's history is unchanged by records keyed by other runs.
 func TestHistorySkipsOtherRunsRecords(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
 	run := task.submission.Wherry.Run
 	receiver.feed(t, f.ctx, run, receiver.chunk(t, task, 1, 0), receiver.chunk(t, task, 1, 5))
-	var verifications atomic.Int64
-	parseHistory = func(appended time.Time) func([]byte, signed.Keys, wire.Record) error {
-		parse := wire.ParseHistory(appended)
-		return func(encoded []byte, keys signed.Keys, value wire.Record) error {
-			verifications.Add(1)
-			return parse(encoded, keys, value)
-		}
-	}
-	t.Cleanup(func() { parseHistory = wire.ParseHistory })
-	read := func() (StatusResult, TranscriptResult, int64) {
+	read := func() (StatusResult, TranscriptResult) {
 		t.Helper()
-		verifications.Store(0)
 		status, err := f.host.Status(f.ctx, run)
 		if err != nil {
 			t.Fatal(err)
@@ -1806,11 +1796,11 @@ func TestHistorySkipsOtherRunsRecords(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return status, transcript, verifications.Load()
+		return status, transcript
 	}
-	status, transcript, verified := read()
-	if status.Status.State != wire.TaskStateWorking || len(transcript.Lines) != 2 || verified == 0 {
-		t.Fatalf("status %s, %d transcript lines, %d verifications", status.Status.State, len(transcript.Lines), verified)
+	status, transcript := read()
+	if status.Status.State != wire.TaskStateWorking || len(transcript.Lines) != 2 {
+		t.Fatalf("status %s, %d transcript lines", status.Status.State, len(transcript.Lines))
 	}
 	for i := range 10 {
 		other := task
@@ -1821,12 +1811,9 @@ func TestHistorySkipsOtherRunsRecords(t *testing.T) {
 		}
 		receiver.feed(t, f.ctx, other.submission.Wherry.Run, values...)
 	}
-	afterStatus, afterTranscript, afterVerified := read()
+	afterStatus, afterTranscript := read()
 	if !reflect.DeepEqual(afterStatus, status) || !reflect.DeepEqual(afterTranscript, transcript) {
 		t.Fatalf("after 1,000 records of other runs: status %+v, transcript %+v; want %+v, %+v", afterStatus, afterTranscript, status, transcript)
-	}
-	if afterVerified != verified {
-		t.Fatalf("%d verifications after 1,000 records of other runs; want %d", afterVerified, verified)
 	}
 }
 

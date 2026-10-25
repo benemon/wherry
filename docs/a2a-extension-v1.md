@@ -548,9 +548,10 @@ receiver holds in place of the value, has no URLs, and is one line of at
 most 512 bytes. This covers start
 failures, a dispatch whose outcome the receiver cannot resolve, a failed
 read of the pool's events or of the host's topic once the run is claimed,
-and a failure to find, stop or remove the run's job. When the agent has
-written its result and only stopping the job fails, the run ends with that
-result. These releases are exempt:
+and a failure to find, stop or remove the run's job. When only stopping the
+job fails at the budget, the run ends from the agent's exit status without
+its outputs or outcome file, and the adapter's sweep removes the job. These
+releases are exempt:
 
 - a receiver that cannot read the pool's events at admission releases the
   task, since it cannot check for a committed terminal;

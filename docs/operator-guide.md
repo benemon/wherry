@@ -494,8 +494,7 @@ scrape_configs:
 
 The `tenant` label names each entitled tenant whose runs reach the pool.
 Whoever can scrape a receiver sees every tenant's activity on its pool: its
-runs and their outcomes, durations, rejections and seal waits, and the
-tokens and cost its agents report. Give scrape access only to those who may
+runs and their outcomes, durations, rejections and seal waits. Give scrape access only to those who may
 see all of the pool's tenants. No label or value carries a prompt, output,
 run ID, error text, URL, image, path, node or credential name.
 [Metrics](reference.md#metrics) lists the families.

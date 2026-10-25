@@ -244,12 +244,9 @@ func removeLock(path string) {
 	}
 }
 
-// answer seals the credentials a request asks for when it comes from a live member of the run's pool holding the
-// active attempt of the run this host submitted, unanswered and unexpired, and names only credentials this host
-// holds: the run's agent's under the pool's terms, and task credentials the run declares. It logs each request it skips
-// or settles, by run, attempt, receiver and credential names only, and a source that fails to resolve by name and
-// cause, never its value or output. It reports whether the request is settled; a failure
-// a later pass can clear is logged through retry and leaves it unsettled, so Answer tries it again until it expires.
+// answer seals the credentials a valid request asks for. Its logs carry names and causes, never a value or a source's
+// output. It reports whether the request is settled; a failure a later pass can clear is logged through retry and
+// leaves it unsettled, so Answer tries it again until it expires.
 func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, encoded []byte, retry func(format string, args ...any)) bool {
 	local, err := h.localRun(runID)
 	if err != nil {
