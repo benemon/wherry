@@ -132,7 +132,7 @@ func (f *fixture) pool(t *testing.T, pool string) {
 }
 
 // connect opens a plain client as the principal of the bundle at path.
-func (f *fixture) connect(t *testing.T, path string) (*kgo.Client, string) {
+func (f *fixture) connect(t *testing.T, path string, extra ...kgo.Opt) (*kgo.Client, string) {
 	t.Helper()
 	encoded, err := os.ReadFile(path)
 	if err != nil {
@@ -146,8 +146,8 @@ func (f *fixture) connect(t *testing.T, path string) (*kgo.Client, string) {
 	if _, err := kadm.NewClient(f.service.Admin).AlterUserSCRAMs(f.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
 		t.Fatal(err)
 	}
-	kafka, err := kgo.NewClient(kgo.SeedBrokers(f.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
-		kgo.FetchMaxWait(10*time.Millisecond), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.DisableClientMetrics())
+	kafka, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(f.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
+		kgo.FetchMaxWait(10 * time.Millisecond), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.DisableClientMetrics()}, extra...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func (r *testReceiver) claim(t *testing.T, ctx context.Context, runID string) []
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := admin.ReadTopic(ctx, r.kafka, admin.PoolTasksTopic(r.pool))
+	records, err := readTopic(ctx, r.kafka, admin.PoolTasksTopic(r.pool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +423,7 @@ func TestHostEndToEnd(t *testing.T) {
 		t.Fatalf("status %#v, %v", status, err)
 	}
 	// Submit seals nothing: the host topic holds the host's key alone.
-	if records, err := admin.ReadTopic(f.ctx, receiver.kafka, admin.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
+	if records, err := readTopic(f.ctx, receiver.kafka, admin.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
 		t.Fatalf("host topic holds %d records, %v; want the key registration alone", len(records), err)
 	}
 }
@@ -434,7 +434,7 @@ func TestRegisterIsIdempotentAndRefusesAnotherKey(t *testing.T) {
 	if err != nil || id != signed.KeyID(f.host.key.Public().(ed25519.PublicKey)) {
 		t.Fatalf("second register %q, %v", id, err)
 	}
-	records, err := admin.ReadTopic(f.ctx, f.host.kafka, admin.HostTopic("tenant-a", "host-a"))
+	records, err := readTopic(f.ctx, f.host.kafka, admin.HostTopic("tenant-a", "host-a"))
 	if err != nil || len(records) != 1 {
 		t.Fatalf("host topic holds %d records, %v; want one registration", len(records), err)
 	}
@@ -462,7 +462,7 @@ func TestNewHostParsesPrincipal(t *testing.T) {
 
 func (f *fixture) tasksEnd(t *testing.T, pool string) int {
 	t.Helper()
-	records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic(pool))
+	records, err := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic(pool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1090,7 +1090,7 @@ func TestCancelWritesToTheEchosPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := admin.ReadTopic(f.ctx, receiver.kafka, admin.PoolEventsTopic("pool-a"))
+	records, err := readTopic(f.ctx, receiver.kafka, admin.PoolEventsTopic("pool-a"))
 	if err != nil || len(records) != 1 {
 		t.Fatalf("pool events hold %d records, %v", len(records), err)
 	}
@@ -1868,5 +1868,93 @@ func TestFailedKeyReadFailsTheLoad(t *testing.T) {
 	}
 	if receivers, err := f.host.Receivers(f.ctx); err == nil {
 		t.Fatalf("listed %d receivers over a key load missing a receiver's keys", len(receivers))
+	}
+}
+
+// traffic counts the connections that clients built from a client's options open and the requests they send.
+type traffic struct{ connections, requests atomic.Int64 }
+
+func (c *traffic) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ net.Conn, err error) {
+	if err == nil {
+		c.connections.Add(1)
+	}
+}
+
+func (c *traffic) OnBrokerE2E(kgo.BrokerMetadata, int16, kgo.BrokerE2E) { c.requests.Add(1) }
+
+// A host that only reads dials one client: a seed connection, then a request and a fetch connection to the one broker.
+func TestHostReadsBoundTheirConnectionsAndRequests(t *testing.T) {
+	f := newFixture(t, kfake.NumBrokers(1))
+	_, task := f.admitted(t)
+	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name                  string
+		connections, requests int64
+		read                  func(*Host) error
+	}{
+		{"receivers", 3, 30, func(h *Host) error { _, err := h.Receivers(f.ctx); return err }},
+		{"status", 3, 30, func(h *Host) error { _, err := h.Status(f.ctx, task.submission.Wherry.Run); return err }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var counted traffic
+			kafka, principal := f.connect(t, bundle, kgo.WithHooks(&counted))
+			host, err := NewHost(kafka, f.host.key, principal, t.TempDir(), nil, nil, log.New(io.Discard, "", 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer host.Close()
+			if err := c.read(host); err != nil {
+				t.Fatal(err)
+			}
+			connections, requests := counted.connections.Load(), counted.requests.Load()
+			t.Logf("%s: %d connections, %d requests", c.name, connections, requests)
+			if connections > c.connections || requests > c.requests {
+				t.Fatalf("%s opened %d connections and sent %d requests, want at most %d and %d", c.name, connections, requests, c.connections, c.requests)
+			}
+		})
+	}
+}
+
+// readTopic reads topic from its start through a reader of its own.
+func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Record, error) {
+	reader := admin.NewReader(client)
+	defer reader.Close()
+	return reader.ReadFrom(ctx, topic, 0)
+}
+
+// The host reads the advertisements of the last 24 hours: a receiver advertising before them is silent and submit takes
+// no inline limit from it, and one advertising within them is stale and limits submit.
+func TestHostReadsTheAdvertisementWindow(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.AtMS, ad.Offers[0].InlineLimit = time.Now().Add(-25*time.Hour).UnixMilli(), 100
+	})
+	f.addReceiver(t, "receiver-b", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
+		ad.AtMS, ad.Offers[0].InlineLimit = time.Now().Add(-23*time.Hour).UnixMilli(), 1000
+	})
+	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, nil)
+	receivers, err := f.host.Receivers(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := map[string]string{}
+	for _, receiver := range receivers {
+		statuses[receiver.ReceiverID] = receiver.Status
+	}
+	if want := map[string]string{"receiver-a": "silent", "receiver-b": "stale", "receiver-c": "live"}; !reflect.DeepEqual(statuses, want) {
+		t.Fatalf("statuses %v, want %v", statuses, want)
+	}
+	submit := func(size int) error {
+		_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, size), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+		return err
+	}
+	if err := submit(500); err != nil {
+		t.Fatalf("submit within the stale receiver's limit: %v", err)
+	}
+	if err := submit(2000); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "1000-byte limit") {
+		t.Fatalf("submit over the stale receiver's limit = %v, want invalid input naming its 1000-byte limit", err)
 	}
 }

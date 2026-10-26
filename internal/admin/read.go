@@ -17,25 +17,12 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// ReadTopic reads a topic from its start to its last stable offset with a
-// dedicated read_committed reader built from client's options. client must be
-// a plain client: a transactional ID in its options would fence its producer.
-func ReadTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Record, error) {
-	return ReadTopicFrom(ctx, client, topic, 0)
-}
-
-// ReadTopicFrom is ReadTopic from offset, or from the start of the topic's one partition where that is later.
-func ReadTopicFrom(ctx context.Context, client *kgo.Client, topic string, offset int64) ([]*kgo.Record, error) {
-	reader := NewReader(client)
-	defer reader.Close()
-	return reader.ReadFrom(ctx, topic, offset)
-}
-
-// Reader reads topics as ReadTopicFrom does through one read_committed client, built from a plain client's options on
-// its first read, so its reads share that client's connections and concurrent reads share its fetches. Reads of one
-// topic run one at a time.
+// Reader reads topics through one read_committed client, built from a plain client's options on its first read, so its
+// reads share that client's connections and concurrent reads share its fetches. Reads of one topic run one at a time.
 type Reader struct {
 	base *kgo.Client
+	// mu is held to build or close client.
+	mu sync.Mutex
 	// poll is held to poll client or change what it consumes, so every polled partition belongs to a read in reads.
 	poll   chan struct{}
 	client *kgo.Client
@@ -52,7 +39,8 @@ type read struct {
 	done       chan struct{}
 }
 
-// NewReader returns a Reader that lists offsets through client and reads with a client built from its options.
+// NewReader returns a Reader that lists offsets and reads through a client built from client's options. client must be
+// a plain client: a transactional ID in its options would fence its producer.
 func NewReader(client *kgo.Client) *Reader {
 	return &Reader{base: client, poll: make(chan struct{}, 1), reads: map[string]*read{}}
 }
@@ -61,28 +49,57 @@ func NewReader(client *kgo.Client) *Reader {
 func (r *Reader) Close() {
 	r.poll <- struct{}{}
 	defer func() { <-r.poll }()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.closed = true
 	if r.client != nil {
 		r.client.Close()
 	}
 }
 
+// Admin returns an admin client over the reader's client.
+func (r *Reader) Admin() (*kadm.Client, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil, kgo.ErrClientClosed
+	}
+	if r.client == nil {
+		client, err := kgo.NewClient(append(slices.Clone(r.base.Opts()),
+			kgo.FetchIsolationLevel(kgo.ReadCommitted()),
+			// A trailing abort marker is the last offset below the bound; it must be seen to finish.
+			kgo.KeepControlRecords(),
+			kgo.DisableClientMetrics())...)
+		if err != nil {
+			return nil, err
+		}
+		r.client = client
+	}
+	return kadm.NewClient(r.client), nil
+}
+
 // ReadFrom reads topic from offset, or from the start of the topic's one partition where that is later, to its last
 // stable offset.
 func (r *Reader) ReadFrom(ctx context.Context, topic string, offset int64) ([]*kgo.Record, error) {
-	admin := kadm.NewClient(r.base)
-	starts, err := admin.ListStartOffsets(ctx, topic)
-	if err == nil {
-		err = starts.Error()
-	}
-	var ends kadm.ListedOffsets
-	if err == nil {
-		ends, err = admin.ListCommittedOffsets(ctx, topic)
-	}
-	if err == nil {
-		err = ends.Error()
-	}
+	admin, err := r.Admin()
 	if err != nil {
+		return nil, err
+	}
+	var starts, ends kadm.ListedOffsets
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() (err error) {
+		if starts, err = admin.ListStartOffsets(groupCtx, topic); err == nil {
+			err = starts.Error()
+		}
+		return err
+	})
+	group.Go(func() (err error) {
+		if ends, err = admin.ListCommittedOffsets(groupCtx, topic); err == nil {
+			err = ends.Error()
+		}
+		return err
+	})
+	if err := group.Wait(); err != nil {
 		return nil, err
 	}
 	current := &read{remaining: map[int32]int64{}, partitions: map[int32]kgo.Offset{}, done: make(chan struct{})}
@@ -146,17 +163,6 @@ func (r *Reader) ReadFrom(ctx context.Context, topic string, offset int64) ([]*k
 func (r *Reader) add(topic string, current *read) error {
 	if r.closed {
 		return kgo.ErrClientClosed
-	}
-	if r.client == nil {
-		client, err := kgo.NewClient(append(slices.Clone(r.base.Opts()),
-			kgo.FetchIsolationLevel(kgo.ReadCommitted()),
-			// A trailing abort marker is the last offset below the bound; it must be seen to finish.
-			kgo.KeepControlRecords(),
-			kgo.DisableClientMetrics())...)
-		if err != nil {
-			return err
-		}
-		r.client = client
 	}
 	r.reads[topic] = current
 	r.client.AddConsumePartitions(map[string]map[int32]kgo.Offset{topic: maps.Clone(current.partitions)})
@@ -304,7 +310,21 @@ func HostKeyTopics(state State, pool string) map[string]string {
 // ReadAdvertisements returns each receiver's latest authorised advertisement
 // that is no older than liveness at now and no later than liveness ahead of it.
 func (r *Reader) ReadAdvertisements(ctx context.Context, state State, keys signed.Keys, now time.Time, liveness time.Duration) (map[string]wire.Advertisement, error) {
-	records, err := r.ReadFrom(ctx, ReceiversTopic, 0)
+	admin, err := r.Admin()
+	if err != nil {
+		return nil, err
+	}
+	// The topic's timestamps are the broker's append times; at_ms is the receiver's clock, up to liveness ahead of them.
+	starts, err := admin.ListOffsetsAfterMilli(ctx, now.Add(-2*liveness).UnixMilli(), ReceiversTopic)
+	if err == nil {
+		err = starts.Error()
+	}
+	if err != nil {
+		return nil, err
+	}
+	var start int64
+	starts.Each(func(listed kadm.ListedOffset) { start = listed.Offset })
+	records, err := r.ReadFrom(ctx, ReceiversTopic, start)
 	if err != nil {
 		return nil, err
 	}

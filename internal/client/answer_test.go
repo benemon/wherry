@@ -54,7 +54,7 @@ func (r request) open(t *testing.T, f *fixture, host string) map[string][]byte {
 
 func (r request) openSealed(t *testing.T, f *fixture, host string) signed.SealValues {
 	t.Helper()
-	records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", host))
+	records, err := readTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", host))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func (r request) openSealed(t *testing.T, f *fixture, host string) signed.SealVa
 // seals counts the records on host's topic other than its key registration.
 func (f *fixture) seals(t *testing.T, host string) int {
 	t.Helper()
-	records, err := admin.ReadTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", host))
+	records, err := readTopic(f.ctx, f.service.Admin, admin.HostTopic("tenant-a", host))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -773,7 +773,7 @@ func TestSubmitRefusesAnUnconfiguredCredential(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "auth required: credential absent is not in this host's configuration") {
 		t.Fatalf("submit = %v; want the unconfigured credential named", err)
 	}
-	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
+	if records, _ := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
 		t.Fatal("published a task naming an unconfigured credential")
 	}
 }
@@ -971,7 +971,7 @@ func TestSubmitRefusesALongCredentialName(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "credential names are at most 32") {
 		t.Fatalf("submit = %v; want the name refused", err)
 	}
-	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
+	if records, _ := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
 		t.Fatal("published a credential name over 32 characters")
 	}
 }
@@ -987,7 +987,7 @@ func TestSubmitRefusesOver256ExpectedOutputs(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "a submission expects at most 256 outputs") {
 		t.Fatalf("submit = %v; want the outputs refused", err)
 	}
-	if records, _ := admin.ReadTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
+	if records, _ := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
 		t.Fatal("published over 256 expected outputs")
 	}
 }

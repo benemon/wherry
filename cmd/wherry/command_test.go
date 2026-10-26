@@ -231,7 +231,7 @@ func (b *bus) tasks(t *testing.T, runID string) []task {
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := admin.ReadTopic(b.ctx, b.receiver, admin.PoolTasksTopic("pool-a"))
+	records, err := readTopic(b.ctx, b.receiver, admin.PoolTasksTopic("pool-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestSubmitNeverPrintsCredential(t *testing.T) {
 		t.Fatalf("submit printed the credential: stdout %q stderr %q", stdout.String(), stderr.String())
 	}
 	// Submit seals nothing; the receiver that claims the task asks for the credential.
-	if records, err := admin.ReadTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
+	if records, err := readTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
 		t.Fatalf("host topic holds %d records, %v; want the key registration alone", len(records), err)
 	}
 }
@@ -462,7 +462,7 @@ func (b *bus) cancelRun(t *testing.T, admitted task) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := admin.ReadTopic(b.ctx, b.receiver, admin.PoolEventsTopic("pool-a"))
+	records, err := readTopic(b.ctx, b.receiver, admin.PoolEventsTopic("pool-a"))
 	if err != nil || len(records) != 1 {
 		t.Fatalf("pool events hold %d records, %v", len(records), err)
 	}
@@ -816,7 +816,7 @@ func TestSubmitGitFlags(t *testing.T) {
 			}
 		})
 	}
-	if records, err := admin.ReadTopic(b.ctx, b.receiver, admin.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
+	if records, err := readTopic(b.ctx, b.receiver, admin.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
 		t.Fatalf("refused submissions published %d tasks, %v", len(records), err)
 	}
 	submit := func(flags ...string) wire.Submission {
@@ -894,4 +894,11 @@ func TestVersionNeedsNoConfigOrBroker(t *testing.T) {
 	if len(lines) < 2 || !strings.HasPrefix(lines[0], "version=") || !strings.HasPrefix(lines[1], "revision=") {
 		t.Fatalf("version printed %q, want version= and revision= lines", stdout.String())
 	}
+}
+
+// readTopic reads topic from its start through a reader of its own.
+func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Record, error) {
+	reader := admin.NewReader(client)
+	defer reader.Close()
+	return reader.ReadFrom(ctx, topic, 0)
 }

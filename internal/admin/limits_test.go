@@ -297,7 +297,7 @@ func TestCheckReportsLimitsTheBrokerNoLongerCarries(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Terms that leave the output limit out are recorded without it; its default applies where the terms are read.
-	records, err := ReadTopic(ctx, service.Operator, AdminTopic)
+	records, err := readTopic(ctx, service.Operator, AdminTopic)
 	if err != nil || len(records) != 1 || strings.Contains(string(records[0].Value), "output_limit") {
 		t.Fatalf("pool record %v, %v; want one without an output limit", records, err)
 	}

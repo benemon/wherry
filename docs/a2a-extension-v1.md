@@ -500,7 +500,7 @@ An advertisement reports a receiver's liveness and capacity.
   profile's agent and labels from the receiver's configuration record on
   `wherry.admin`. Each `profile` appears at most once. A host takes the
   smallest `inline_limit` among the offers that satisfy a placement in each
-  receiver's last advertisement, live or stale; submitting inputs over it,
+  receiver's last advertisement within 24 hours; submitting inputs over it,
   the host carries them as S3 inputs, or refuses the run when the pool or
   the host has no storage.
 - `capacity` and `in_flight` are 0 or more, and `at_ms` is over 0.

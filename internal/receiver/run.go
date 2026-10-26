@@ -452,7 +452,7 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 	}
 	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	events, readErr := admin.ReadTopic(readCtx, r.base, admin.PoolEventsTopic(r.config.Pool))
+	events, readErr := r.reader.ReadFrom(readCtx, admin.PoolEventsTopic(r.config.Pool), 0)
 	if readErr != nil {
 		r.logger.Printf("read back transaction: %v", readErr)
 		return err
@@ -481,7 +481,7 @@ type runSubmission struct {
 func (r *Receiver) readSubmissions(ctx context.Context, run string) ([]runSubmission, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	records, err := admin.ReadTopic(ctx, r.base, admin.PoolTasksTopic(r.config.Pool))
+	records, err := r.reader.ReadFrom(ctx, admin.PoolTasksTopic(r.config.Pool), 0)
 	if err != nil {
 		r.deny(err, capRead)
 		return nil, err

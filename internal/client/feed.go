@@ -506,7 +506,11 @@ func (f *follower) from(offset int64) ([]*kgo.Record, int64, <-chan struct{}, er
 // or when f's fetches fail.
 func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.Record, int64, error) {
 	topic := admin.TenantTopic(h.tenant)
-	ends, err := kadm.NewClient(h.kafka).ListCommittedOffsets(ctx, topic)
+	listing, err := h.reader.Admin()
+	if err != nil {
+		return nil, 0, err
+	}
+	ends, err := listing.ListCommittedOffsets(ctx, topic)
 	if err == nil {
 		err = ends.Error()
 	}

@@ -46,6 +46,10 @@ var errUndecodable = errors.New("decode")
 // liveness is how old an advertisement may be for its receiver to count as live.
 const liveness = 120 * time.Second
 
+// advertisementWindow is how old an advertisement may be for its receiver to count as stale and for submit to take its
+// inline limits.
+const advertisementWindow = 24 * time.Hour
+
 // SubmitInput is a root task's routing, prompt, inputs and requested outputs.
 type SubmitInput struct {
 	// Agent names what runs; empty takes the pool's default.
@@ -305,9 +309,9 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		return SubmitResult{}, errors.New("the host key is not the current key of this host's key topic: when <host_key>.next exists, the next wherry command completes the interrupted wherry key rotate; otherwise this host was re-keyed elsewhere and needs wherry init on a re-provisioned host")
 	}
 	now := time.Now()
-	// A receiver keeps its plugin's declared limit through a restart, so an advertisement of any age counts for the
-	// profile limit; placement takes live ones alone.
-	declared, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, now, math.MaxInt64)
+	// A receiver keeps its plugin's declared limit through a restart, so an advertisement within advertisementWindow
+	// counts for the profile limit; placement takes live ones alone.
+	declared, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, now, advertisementWindow)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -538,7 +542,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 		return nil, err
 	}
 	now := time.Now()
-	ads, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, now, math.MaxInt64)
+	ads, err := h.reader.ReadAdvertisements(ctx, v.state, v.keys, now, advertisementWindow)
 	if err != nil {
 		return nil, err
 	}

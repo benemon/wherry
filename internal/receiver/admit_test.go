@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json/jsontext"
+	"net"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -996,5 +998,39 @@ func TestCancelOfAnotherTenantDoesNotStopTheRun(t *testing.T) {
 	}
 	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateCanceled || reason != "canceled by user" {
 		t.Fatalf("terminal %s %q, want CANCELED", state, reason)
+	}
+}
+
+// traffic counts the connections that clients built from a client's options open.
+type traffic struct{ connections atomic.Int64 }
+
+func (c *traffic) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ net.Conn, err error) {
+	if err == nil {
+		c.connections.Add(1)
+	}
+}
+
+// Admissions read through the receiver's one reader, so a second admits over the first's connections. kfake runs three
+// brokers, so one client opens at most a seed connection and a request and a fetch connection to each; a metadata
+// request goes to any broker, so the second may open the request connection to one the first did not need.
+func TestAdmissionsShareTheReadersConnections(t *testing.T) {
+	f := newFixture(t, resultStream)
+	var counted traffic
+	base, err := kgo.NewClient(append(f.receiver.base.Opts(), kgo.WithHooks(&counted))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	f.receiver.base, f.receiver.reader = base, admin.NewReader(base)
+	defer f.receiver.reader.Close()
+	var opened []int64
+	for _, run := range []string{"run-a", "run-b"} {
+		before := counted.connections.Load()
+		f.admitted(t, f.turn(t, run, 1))
+		opened = append(opened, counted.connections.Load()-before)
+	}
+	t.Logf("admissions opened %v connections", opened)
+	if opened[0] > 7 || opened[1] > 1 {
+		t.Fatalf("admissions opened %v connections, want at most 7 and then 1", opened)
 	}
 }
