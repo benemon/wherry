@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -45,6 +46,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/twmb/franz-go/pkg/kversion"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"gopkg.in/yaml.v3"
 )
@@ -74,7 +77,7 @@ func (b *syncBuffer) String() string {
 }
 
 // tlsCluster is kfake behind TLS with a throwaway CA, so bundles carry a real CA and principals log in over TLS.
-func tlsCluster(t *testing.T) (*kfake.Cluster, string) {
+func tlsCluster(t *testing.T, opts ...kfake.Opt) (*kfake.Cluster, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -96,8 +99,8 @@ func tlsCluster(t *testing.T) (*kfake.Cluster, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cluster := kfake.MustCluster(kfake.TLS(&tls.Config{Certificates: []tls.Certificate{pair}}), kfake.EnableSASL(), kfake.EnableACLs(),
-		kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("SCRAM-SHA-512", "wherry.operator", "operator-password"))
+	cluster := kfake.MustCluster(append([]kfake.Opt{kfake.TLS(&tls.Config{Certificates: []tls.Certificate{pair}}), kfake.EnableSASL(), kfake.EnableACLs(),
+		kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("SCRAM-SHA-512", "wherry.operator", "operator-password")}, opts...)...)
 	t.Cleanup(cluster.Close)
 	return cluster, string(certPEM)
 }
@@ -146,6 +149,73 @@ func TestPasswordLineBreakIsNotThePassword(t *testing.T) {
 	}
 	if err := service.Probe("wherry.admin")(ctx, "admin", "other"); errors.Is(err, admin.ErrStillAuthorised) {
 		t.Fatal("probe with a wrong password logged in")
+	}
+}
+
+// apiVersions counts the connections clients built from a client's options open and the ApiVersions requests they write.
+type apiVersions struct{ connections, requests atomic.Int64 }
+
+func (c *apiVersions) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ net.Conn, err error) {
+	if err == nil {
+		c.connections.Add(1)
+	}
+}
+
+func (c *apiVersions) OnBrokerWrite(_ kgo.BrokerMetadata, key int16, _ int, _, _ time.Duration, err error) {
+	if key == int16(kmsg.ApiVersions) && err == nil {
+		c.requests.Add(1)
+	}
+}
+
+// A broker answers ApiVersions at v4 at most, so every client KafkaOpts builds asks at v4 and sends one ApiVersions
+// request a connection; every other API keeps franz-go's default maximum.
+func TestKafkaOptsAskApiVersionsOncePerConnection(t *testing.T) {
+	ctx := context.Background()
+	brokerVersions := kversion.Stable()
+	brokerVersions.SetMaxKeyVersion(int16(kmsg.ApiVersions), 4)
+	cluster, ca := tlsCluster(t, kfake.MaxVersions(brokerVersions))
+	opts, err := admin.KafkaOpts(cluster.ListenAddrs()[0], []byte(ca), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var counted apiVersions
+	client, err := kgo.NewClient(append(opts, kgo.WithHooks(&counted))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	brokers, err := kadm.NewClient(client).ListBrokers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, broker := range brokers {
+		if _, err := client.Broker(int(broker.NodeID)).Request(ctx, kmsg.NewPtrMetadataRequest()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	connections, requests := counted.connections.Load(), counted.requests.Load()
+	t.Logf("%d connections, %d ApiVersions requests", connections, requests)
+	if connections <= int64(len(brokers)) || requests != connections {
+		t.Fatalf("%d connections sent %d ApiVersions requests, want one each over a seed and %d brokers", connections, requests, len(brokers))
+	}
+	versions, _ := client.OptValue(kgo.MaxVersions).(*kversion.Versions)
+	if versions == nil {
+		t.Fatal("KafkaOpts sets no max versions")
+	}
+	differ := map[int16][2]int16{}
+	defaults := kversion.Stable()
+	defaults.EachMaxKeyVersion(func(key, version int16) {
+		if own, _ := versions.LookupMaxKeyVersion(key); own != version {
+			differ[key] = [2]int16{version, own}
+		}
+	})
+	versions.EachMaxKeyVersion(func(key, version int16) {
+		if _, ok := defaults.LookupMaxKeyVersion(key); !ok {
+			differ[key] = [2]int16{-1, version}
+		}
+	})
+	if want := map[int16][2]int16{int16(kmsg.ApiVersions): {5, 4}}; !reflect.DeepEqual(differ, want) {
+		t.Fatalf("max versions differ from the default at %v, want only ApiVersions, 5 to 4", differ)
 	}
 }
 

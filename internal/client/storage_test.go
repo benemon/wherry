@@ -261,7 +261,7 @@ func TestSubmitUploadsS3InputsBeforePublishing(t *testing.T) {
 		t.Fatalf("submission's S3 inputs %+v", task.submission.Wherry.S3Inputs)
 	}
 	// The task carries the inputs' coordinates and no URL.
-	records, err := admin.ReadTopic(f.ctx, receiver.kafka, admin.PoolTasksTopic("pool-s3"))
+	records, err := readTopic(f.ctx, receiver.kafka, admin.PoolTasksTopic("pool-s3"))
 	if err != nil {
 		t.Fatal(err)
 	}

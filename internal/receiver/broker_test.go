@@ -115,7 +115,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 	}
 	logs := &syncBuffer{}
 	adapter := &fakeAdapter{stream: noResultStream, endDelay: time.Minute}
-	r := &Receiver{id: receiverID, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: receiverID, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: adapter}, nil
 		}}
@@ -203,7 +203,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	logs := &syncBuffer{}
 	adapter := &fakeAdapter{stream: resultStream}
-	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: adapter}, nil
 		}}
@@ -267,7 +267,7 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	logs := &syncBuffer{}
 	fake := &fakeAdapter{stream: resultStream}
-	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
 		}}
@@ -375,7 +375,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 		outputs = append(outputs, adapter.Output{Name: strings.Repeat(fmt.Sprintf("x%0249d/", i), 2) + "over", Size: 1})
 	}
 	fake := &fakeAdapter{stream: resultStream, outputs: outputs}
-	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
 		}}
@@ -469,7 +469,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	logs := &syncBuffer{}
 	patch := []byte("From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n")
 	fake := &fakeAdapter{stream: resultStream, outputs: []adapter.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
-	r := &Receiver{id: b.receiver, base: base, signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
 		}}
@@ -492,7 +492,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submit never placed: %v", err)
 	}
-	tasks, err := admin.ReadTopic(ctx, b.kafka, admin.PoolTasksTopic(b.pool))
+	tasks, err := readTopic(ctx, b.kafka, admin.PoolTasksTopic(b.pool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +501,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	if _, err := host.Submit(ctx, outside); !errors.Is(err, client.ErrInvalidInput) || !strings.Contains(err.Error(), "git remote host github.com is not in pool "+b.pool+"'s vcs hosts") {
 		t.Fatalf("submit outside the vcs hosts = %v; want a refusal naming the host and the pool", err)
 	}
-	if after, err := admin.ReadTopic(ctx, b.kafka, admin.PoolTasksTopic(b.pool)); err != nil || len(after) != len(tasks) {
+	if after, err := readTopic(ctx, b.kafka, admin.PoolTasksTopic(b.pool)); err != nil || len(after) != len(tasks) {
 		t.Fatalf("task topic holds %d records after the refusal, %v; want %d", len(after), err, len(tasks))
 	}
 	awaited, err := host.Await(ctx, submitted.RunID, 60*time.Second)

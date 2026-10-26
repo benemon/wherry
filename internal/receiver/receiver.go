@@ -47,8 +47,10 @@ type ProfileFactory func(pool string, settings admin.ProfileSettings) (Named, er
 
 // Receiver claims tasks for one pool and runs them through its profiles.
 type Receiver struct {
-	id      string
-	base    *kgo.Client
+	id   string
+	base *kgo.Client
+	// reader reads every topic the receiver reads.
+	reader  *admin.Reader
 	signing ed25519.PrivateKey
 	factory ProfileFactory
 	logger  *log.Logger
@@ -112,7 +114,7 @@ func New(bundle admin.Bundle, stateDir string, rotateKey bool, factory ProfileFa
 		base.Close()
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	return &Receiver{id: id, base: base, signing: signing, keyFile: keyFile, rotateKey: rotateKey, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, rotateKey: rotateKey, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
 // newClient is a client of the receiver's connection with extra options.
@@ -124,6 +126,7 @@ func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
 // and claims until ctx ends or the configuration changes.
 func (r *Receiver) Run(ctx context.Context) error {
 	defer r.base.Close()
+	defer r.reader.Close()
 	if err := r.register(ctx); err != nil {
 		return err
 	}
@@ -201,7 +204,7 @@ func (r *Receiver) every(ctx context.Context, interval time.Duration, step func(
 func (r *Receiver) register(ctx context.Context) error {
 	topic := admin.ReceiverTopic(r.id)
 	public := r.signing.Public().(ed25519.PublicKey)
-	records, err := admin.ReadTopic(ctx, r.base, topic)
+	records, err := r.reader.ReadFrom(ctx, topic, 0)
 	if err != nil {
 		return fmt.Errorf("read key topic: %w", err)
 	}
@@ -214,7 +217,7 @@ func (r *Receiver) register(ctx context.Context) error {
 			return fmt.Errorf("register keys: %w", err)
 		}
 		r.logger.Printf("registered key: signing=%s", signed.KeyID(public))
-		if records, err = admin.ReadTopic(ctx, r.base, topic); err != nil {
+		if records, err = r.reader.ReadFrom(ctx, topic, 0); err != nil {
 			return fmt.Errorf("read key topic: %w", err)
 		}
 	}
@@ -235,7 +238,7 @@ func (r *Receiver) register(ctx context.Context) error {
 func (r *Receiver) configure(ctx context.Context) error {
 	waiting := false
 	for {
-		state, err := admin.Load(ctx, r.base)
+		state, err := r.reader.Load(ctx)
 		if err != nil {
 			return fmt.Errorf("read wherry.admin: %w", err)
 		}
@@ -279,13 +282,13 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	// A bounded read can wait on another holder's open transaction; never longer than this.
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	state, err := admin.Load(ctx, r.base)
+	state, err := r.reader.Load(ctx)
 	var peers, hosts signed.Keys
 	if err == nil {
-		peers, err = admin.ReadKeys(ctx, r.base, admin.PoolKeyTopics(state, r.config.Pool))
+		peers, err = r.reader.ReadKeys(ctx, admin.PoolKeyTopics(state, r.config.Pool))
 	}
 	if err == nil {
-		hosts, err = admin.ReadKeys(ctx, r.base, admin.HostKeyTopics(state, r.config.Pool))
+		hosts, err = r.reader.ReadKeys(ctx, admin.HostKeyTopics(state, r.config.Pool))
 	}
 	if err != nil {
 		r.deny(err, capRead)
@@ -446,7 +449,7 @@ func staleKey(encoded []byte, keys signed.Keys, topics map[string]string) (strin
 
 // rereadKey refolds owner's key topic into keys, which is r.hosts or r.peers, and returns the new keys.
 func (r *Receiver) rereadKey(ctx context.Context, keys *signed.Keys, owner, topic string) (signed.Keys, error) {
-	fresh, err := admin.ReadKeys(ctx, r.base, map[string]string{owner: topic})
+	fresh, err := r.reader.ReadKeys(ctx, map[string]string{owner: topic})
 	if err != nil {
 		r.deny(err, capRead)
 		return nil, err
@@ -555,7 +558,7 @@ type poolEvents struct {
 func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	records, err := admin.ReadTopic(ctx, r.base, admin.PoolEventsTopic(r.config.Pool))
+	records, err := r.reader.ReadFrom(ctx, admin.PoolEventsTopic(r.config.Pool), 0)
 	if err != nil {
 		r.deny(err, capRead)
 		return poolEvents{}, err

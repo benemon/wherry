@@ -512,7 +512,7 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		adapter.mu.Unlock()
 		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Adapter: adapter}, nil
 	}
-	return &Receiver{id: config.Receiver, base: base, signing: signing, factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
+	return &Receiver{id: config.Receiver, base: base, reader: admin.NewReader(base), signing: signing, factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
 }
 
 func (f fixture) produce(t *testing.T, topic, key string, value []byte) *kgo.Record {
@@ -633,7 +633,7 @@ func answerSeals(t *testing.T, ctx context.Context, kafka *kgo.Client, keys sign
 		defer close(done)
 		answered := map[string]bool{}
 		for ctx.Err() == nil {
-			records, err := admin.ReadTopic(ctx, kafka, admin.TenantTopic(tenant))
+			records, err := readTopic(ctx, kafka, admin.TenantTopic(tenant))
 			for _, record := range records {
 				var request wire.SealRequest
 				if err != nil || wire.ParseRecord(record.Value, keys, &request) != nil || answered[request.KeyID] || !slices.Equal(request.Credentials, []string{credential}) {
@@ -677,7 +677,7 @@ func (f fixture) addPeer(t *testing.T, id, pool string) ed25519.PrivateKey {
 
 func (f fixture) records(t *testing.T, topic string) []*kgo.Record {
 	t.Helper()
-	records, err := admin.ReadTopic(f.ctx, f.service.Admin, topic)
+	records, err := readTopic(f.ctx, f.service.Admin, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -874,7 +874,7 @@ func TestRegisterAcceptsARotationToItsKeys(t *testing.T) {
 	f := newFixture(t, resultStream)
 	_, next, _ := ed25519.GenerateKey(rand.Reader)
 	f.produce(t, admin.ReceiverTopic(testReceiver), testReceiver, must(t)(signed.RotateKey(testReceiver, f.receiver.signing, next)))
-	rotated := &Receiver{id: testReceiver, base: f.receiver.base, signing: next, logger: f.receiver.logger}
+	rotated := &Receiver{id: testReceiver, base: f.receiver.base, reader: admin.NewReader(f.receiver.base), signing: next, logger: f.receiver.logger}
 	if err := rotated.register(f.ctx); err != nil {
 		t.Fatalf("a receiver holding the keys its topic rotated to did not start: %v", err)
 	}
@@ -892,7 +892,7 @@ func TestRegisterAcceptsARotationToItsKeys(t *testing.T) {
 
 func TestRegisterRefusesAnotherKey(t *testing.T) {
 	f := newFixture(t, resultStream)
-	other := &Receiver{id: testReceiver, base: f.receiver.base, logger: f.receiver.logger}
+	other := &Receiver{id: testReceiver, base: f.receiver.base, reader: admin.NewReader(f.receiver.base), logger: f.receiver.logger}
 	_, other.signing, _ = ed25519.GenerateKey(rand.Reader)
 	if err := other.register(f.ctx); err == nil {
 		t.Fatal("started over a key topic holding another signing key")
@@ -905,7 +905,7 @@ func TestRegisterRefusesAnotherKey(t *testing.T) {
 func TestConfigureWaitsForItsRecord(t *testing.T) {
 	f := newFixture(t, resultStream)
 	// The superuser reads wherry.admin; no record names receiver-z.
-	waiting := &Receiver{id: "receiver-z", base: f.service.Admin, logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
+	waiting := &Receiver{id: "receiver-z", base: f.service.Admin, reader: admin.NewReader(f.service.Admin), logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
 	ctx, cancel := context.WithTimeout(f.ctx, time.Second)
 	defer cancel()
 	if err := waiting.configure(ctx); !errors.Is(err, context.DeadlineExceeded) {
@@ -933,7 +933,7 @@ func TestConfigureRefusesConfigOutsideTerms(t *testing.T) {
 	config := testConfig(testReceiver)
 	config.Profiles[0].Agent = "gemini"
 	f.appendConfig(t, config)
-	restarted := &Receiver{id: testReceiver, base: f.receiver.base, logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
+	restarted := &Receiver{id: testReceiver, base: f.receiver.base, reader: admin.NewReader(f.receiver.base), logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
 	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "outside pool terms") {
 		t.Fatalf("configure: %v, want a refusal naming the terms", err)
 	}
@@ -1310,4 +1310,11 @@ func TestProfilesAreBuiltForTheReceiversPool(t *testing.T) {
 	if f.adapter.pool != testPool {
 		t.Fatalf("profile built for pool %q, want %q", f.adapter.pool, testPool)
 	}
+}
+
+// readTopic reads topic from its start through a reader of its own.
+func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Record, error) {
+	reader := admin.NewReader(client)
+	defer reader.Close()
+	return reader.ReadFrom(ctx, topic, 0)
 }

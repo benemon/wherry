@@ -124,7 +124,7 @@ func TestRealBrokerFixture(t *testing.T) {
 			if loaded, err := trust.LoadSigningKeyFile(path); err != nil || !loaded.Equal(next) {
 				t.Fatalf("%s key file does not hold the next key: %v", c.owner, err)
 			}
-			records, err := ReadTopic(ctx, client, c.topic)
+			records, err := readTopic(ctx, client, c.topic)
 			if err != nil {
 				t.Fatal(err)
 			}

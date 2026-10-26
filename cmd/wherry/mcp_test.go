@@ -585,7 +585,7 @@ func answeredSeal(t *testing.T, b *bus) signed.SealValues {
 	binding := signed.SealBinding{Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
 		Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS}
 	for {
-		records, err := admin.ReadTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a"))
+		records, err := readTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a"))
 		if err != nil {
 			t.Fatal(err)
 		}

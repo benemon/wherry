@@ -7,15 +7,18 @@ import (
 	json "encoding/json/v2"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 	"gopkg.in/yaml.v3"
 )
 
@@ -297,7 +300,7 @@ func TestCheckReportsLimitsTheBrokerNoLongerCarries(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Terms that leave the output limit out are recorded without it; its default applies where the terms are read.
-	records, err := ReadTopic(ctx, service.Operator, AdminTopic)
+	records, err := readTopic(ctx, service.Operator, AdminTopic)
 	if err != nil || len(records) != 1 || strings.Contains(string(records[0].Value), "output_limit") {
 		t.Fatalf("pool record %v, %v; want one without an output limit", records, err)
 	}
@@ -583,5 +586,59 @@ func TestSingleAnswerTermsDefault(t *testing.T) {
 	two.Agents = []AgentTerms{{Name: "agent-a"}, {Name: "agent-b"}}
 	if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &two, AtMS: 1}); err == nil {
 		t.Fatal("two agents without a default agent encoded")
+	}
+}
+
+// wherry.receivers is created compacted, and one created before converges on the next admin write.
+func TestReceiversTopicIsCompactedOnNewAndExistingTopics(t *testing.T) {
+	cluster, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	var mu sync.Mutex
+	created := map[string]string{}
+	cluster.ControlKey(int16(kmsg.CreateTopics), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, topic := range request.(*kmsg.CreateTopicsRequest).Topics {
+			if topic.Topic == ReceiversTopic {
+				for _, config := range topic.Configs {
+					created[config.Name] = *config.Value
+				}
+			}
+		}
+		return nil, nil, false
+	})
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"cleanup.policy": "compact,delete", "message.timestamp.type": "LogAppendTime", "retention.ms": "604800000", "segment.ms": "3600000", "max.compaction.lag.ms": "3600000"}
+	mu.Lock()
+	if !reflect.DeepEqual(created, want) {
+		t.Errorf("created %s with %v, want %v", ReceiversTopic, created, want)
+	}
+	mu.Unlock()
+	configs := func() map[string]string {
+		t.Helper()
+		got := map[string]string{}
+		for name := range want {
+			values, err := service.topicConfigs(ctx, name, ReceiversTopic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got[name] = values[ReceiversTopic]
+		}
+		return got
+	}
+	if got := configs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("new %s configs %v, want %v", ReceiversTopic, got, want)
+	}
+	setTopicConfig(t, service, ReceiversTopic, "cleanup.policy", "delete")
+	setTopicConfig(t, service, ReceiversTopic, "segment.ms", "604800000")
+	if err := service.PoolCreate(ctx, "pool-b", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if got := configs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("existing %s configs %v, want %v", ReceiversTopic, got, want)
 	}
 }

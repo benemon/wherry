@@ -73,7 +73,7 @@ func (h keyHost) key(t *testing.T) ed25519.PrivateKey {
 func (h keyHost) topic(t *testing.T) ([]*kgo.Record, signed.KeyState) {
 	t.Helper()
 	owner, topic := signed.HostOwner("tenant-a", "host-a"), admin.HostTopic("tenant-a", "host-a")
-	records, err := admin.ReadTopic(h.ctx, h.service.Admin, topic)
+	records, err := readTopic(h.ctx, h.service.Admin, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestReceiverRotateKey(t *testing.T) {
 	topic := admin.ReceiverTopic("receiver-a")
 	folded := func() ([]*kgo.Record, signed.KeyState) {
 		t.Helper()
-		records, err := admin.ReadTopic(ctx, service.Admin, topic)
+		records, err := readTopic(ctx, service.Admin, topic)
 		if err != nil {
 			t.Fatal(err)
 		}
