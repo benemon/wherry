@@ -420,7 +420,11 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 		return h.follower, nil
 	}
 	topic := admin.TenantTopic(h.tenant)
-	ends, err := kadm.NewClient(h.kafka).ListCommittedOffsets(ctx, topic)
+	listing, err := h.reader.Admin()
+	if err != nil {
+		return nil, err
+	}
+	ends, err := listing.ListCommittedOffsets(ctx, topic)
 	if err == nil {
 		err = ends.Error()
 	}
@@ -444,7 +448,7 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 			}
 		}
 	}
-	starts, err := kadm.NewClient(h.kafka).ListStartOffsets(ctx, topic)
+	starts, err := listing.ListStartOffsets(ctx, topic)
 	if err == nil {
 		err = starts.Error()
 	}
@@ -506,43 +510,37 @@ func (f *follower) from(offset int64) ([]*kgo.Record, int64, <-chan struct{}, er
 // or when f's fetches fail.
 func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.Record, int64, error) {
 	topic := admin.TenantTopic(h.tenant)
-	listing, err := h.reader.Admin()
-	if err != nil {
-		return nil, 0, err
-	}
-	ends, err := listing.ListCommittedOffsets(ctx, topic)
-	if err == nil {
-		err = ends.Error()
-	}
-	if err != nil {
-		return nil, 0, err
-	}
-	var end int64
-	ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
-	for f != nil && f.start <= offset && f.ctx.Err() == nil {
-		records, read, woken, err := f.from(offset)
-		if read >= end {
-			return records, read, nil
+	if f != nil && f.start <= offset && f.ctx.Err() == nil {
+		listing, err := h.reader.Admin()
+		if err != nil {
+			return nil, 0, err
+		}
+		ends, err := listing.ListCommittedOffsets(ctx, topic)
+		if err == nil {
+			err = ends.Error()
 		}
 		if err != nil {
-			break
+			return nil, 0, err
 		}
-		select {
-		case <-woken:
-		case <-f.ctx.Done():
-		case <-ctx.Done():
-			return nil, 0, ctx.Err()
+		var end int64
+		ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
+		for f.ctx.Err() == nil {
+			records, read, woken, err := f.from(offset)
+			if read >= end {
+				return records, read, nil
+			}
+			if err != nil {
+				break
+			}
+			select {
+			case <-woken:
+			case <-f.ctx.Done():
+			case <-ctx.Done():
+				return nil, 0, ctx.Err()
+			}
 		}
 	}
-	records, err := h.reader.ReadFrom(ctx, topic, offset)
-	if err != nil {
-		return nil, 0, err
-	}
-	// ReadFrom reads to its own, possibly later, bound, so what follows starts after its last record.
-	for _, record := range records {
-		end = max(end, record.Offset+1)
-	}
-	return records, end, nil
+	return h.reader.ReadFromWithEnd(ctx, topic, offset)
 }
 
 // admit applies filter to a status.

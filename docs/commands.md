@@ -130,9 +130,8 @@ receiver=<id> pool=<pool> capacity=<n> in_flight=<n> heartbeat_age=<age> status=
 ```
 
 `status` is `live` when the latest advertisement is dated within 120
-seconds of now, either side, `stale` when it is dated within 24 hours,
-`silent` when there is none within 24 hours, and `ended` after the
-receiver's membership end. Profiles, their plugins and their labels come from the
+seconds of now, either side, `stale` otherwise, `silent` when there is none,
+and `ended` after the receiver's membership end. Profiles, their plugins and their labels come from the
 receiver's configuration record, and an agent's `models` and
 `default_model` from the pool's [terms](configuration.md#pool-terms) when it has them.
 `ready` is true when the receiver is live
@@ -223,7 +222,7 @@ outputs, unless `--output` names it already; neither is required.
 Input files travel inline in the submission record under two limits. The
 first is the smallest `inline_limit` declared for a profile among the chosen
 pool's receivers' profiles that launch the placed agent and satisfy the
-selector, read from each receiver's last advertisement within 24 hours; an
+selector, read from each receiver's last advertisement, live or stale; an
 ended receiver does not count, and an undeclared profile limit is zero and
 sets none. The second is the pool's [record limit](configuration.md#record-limit), which
 `pool create` records in the terms: `submit` measures the signed submission

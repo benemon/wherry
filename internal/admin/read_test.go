@@ -5,9 +5,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"maps"
 	"reflect"
 	"slices"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,12 +16,19 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
 func readerCluster(t *testing.T, topics ...string) *kgo.Client {
 	t.Helper()
-	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"))
+	return readerClusterOf(t, nil, topics...)
+}
+
+// readerClusterOf is readerCluster with extra cluster options.
+func readerClusterOf(t *testing.T, opts []kfake.Opt, topics ...string) *kgo.Client {
+	t.Helper()
+	cluster := kfake.MustCluster(append([]kfake.Opt{kfake.EnableSASL(), kfake.Superuser("SCRAM-SHA-512", "admin", "password")}, opts...)...)
 	t.Cleanup(cluster.Close)
 	for _, topic := range topics {
 		if err := cluster.CreateTopic(topic, 1, nil); err != nil {
@@ -273,41 +281,41 @@ func TestReadKeysFailsWholeOnOneFailedRead(t *testing.T) {
 	}
 }
 
-// fetched counts the records fetched from a topic by clients built from a client's options.
-type fetched struct {
-	topic   string
-	records atomic.Int64
+// requests counts the requests of each key that clients built from a client's options send.
+type requests struct {
+	mu   sync.Mutex
+	keys map[int16]int
 }
 
-func (c *fetched) OnFetchBatchRead(_ kgo.BrokerMetadata, topic string, _ int32, metrics kgo.FetchBatchMetrics) {
-	if topic == c.topic {
-		c.records.Add(int64(metrics.NumRecords))
-	}
+func (c *requests) OnBrokerE2E(_ kgo.BrokerMetadata, key int16, _ kgo.BrokerE2E) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.keys[key]++
 }
 
-// kfake stamps LogAppendTime with its own clock, so the test's CreateTime topic stands in for wherry.receivers with
-// the record timestamps the broker would have appended.
-func TestReadAdvertisementsFetchesTheWindowAlone(t *testing.T) {
-	client := readerCluster(t, ReceiversTopic)
+func (c *requests) count(key kmsg.Key) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.keys[int16(key)]
+}
+
+// Several key topics are read in one listing of each kind and one fetch; kfake's one broker leads them all, as kadm
+// sends a listing to each leader.
+func TestReadKeysListsAndFetchesTheTopicsTogether(t *testing.T) {
+	topics := map[string]string{"receiver-a": "keys-a", "receiver-b": "keys-b", "receiver-c": "keys-c"}
+	client := readerClusterOf(t, []kfake.Opt{kfake.NumBrokers(1)}, slices.Collect(maps.Values(topics))...)
 	ctx := context.Background()
-	state := modelState(t)
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	keys := signed.Keys{"receiver-a": {Current: key.Public().(ed25519.PublicKey)}, "receiver-b": {Current: key.Public().(ed25519.PublicKey)}}
-	now := time.Now()
-	liveness := 24 * time.Hour
-	advertise := func(receiver, pool string, age time.Duration) {
-		t.Helper()
-		encoded := sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Profile: "nomad", Agent: "agent-a"}}, Capacity: 1, AtMS: now.Add(-age).UnixMilli()}, key)
-		if err := client.ProduceSync(ctx, &kgo.Record{Topic: ReceiversTopic, Value: encoded, Timestamp: now.Add(-age)}).FirstErr(); err != nil {
+	for owner, topic := range topics {
+		_, key, _ := ed25519.GenerateKey(rand.Reader)
+		record, err := signed.RegisterKey(owner, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: record}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, age := range []time.Duration{72 * time.Hour, 60 * time.Hour, 49 * time.Hour} {
-		advertise("receiver-a", "pool-a", age)
-	}
-	advertise("receiver-a", "pool-a", 25*time.Hour)
-	advertise("receiver-b", "pool-b", 23*time.Hour)
-	counted := &fetched{topic: ReceiversTopic}
+	counted := &requests{keys: map[int16]int{}}
 	hooked, err := kgo.NewClient(append(client.Opts(), kgo.WithHooks(counted))...)
 	if err != nil {
 		t.Fatal(err)
@@ -315,14 +323,84 @@ func TestReadAdvertisementsFetchesTheWindowAlone(t *testing.T) {
 	defer hooked.Close()
 	reader := NewReader(hooked)
 	defer reader.Close()
-	latest, err := reader.ReadAdvertisements(ctx, state, keys, now, liveness)
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	keys, err := reader.ReadKeys(readCtx, topics)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := latest["receiver-b"]; len(latest) != 1 || !ok {
+	for owner := range topics {
+		if keys[owner].Current == nil {
+			t.Fatalf("keys %v; want each owner's key", keys)
+		}
+	}
+	listed, fetched := counted.count(kmsg.ListOffsets), counted.count(kmsg.Fetch)
+	t.Logf("%d list offsets and %d fetch requests", listed, fetched)
+	if listed != 2 || fetched != 1 {
+		t.Fatalf("sent %d list offsets and %d fetch requests, want 2 and 1", listed, fetched)
+	}
+}
+
+// The reader groups advertisements by the receiver its signed payload names, never by the Kafka key, so a record
+// another receiver writes under a receiver's key is never that receiver's advertisement.
+func TestReadAdvertisementsIgnoresTheKafkaKey(t *testing.T) {
+	client := readerCluster(t, ReceiversTopic)
+	ctx := context.Background()
+	state := modelState(t)
+	_, keyA, _ := ed25519.GenerateKey(rand.Reader)
+	_, keyB, _ := ed25519.GenerateKey(rand.Reader)
+	keys := signed.Keys{"receiver-a": {Current: keyA.Public().(ed25519.PublicKey)}, "receiver-b": {Current: keyB.Public().(ed25519.PublicKey)}}
+	now := time.Now()
+	advertise := func(receiver, pool string, capacity int64, key ed25519.PrivateKey) {
+		t.Helper()
+		encoded := sign(t, &wire.Advertisement{Receiver: receiver, Pool: pool, Offers: []wire.Offer{{Profile: "nomad", Agent: "agent-a"}}, Capacity: capacity, AtMS: now.UnixMilli()}, key)
+		if err := client.ProduceSync(ctx, &kgo.Record{Topic: ReceiversTopic, Key: []byte("receiver-a"), Value: encoded}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	advertise("receiver-b", "pool-b", 1, keyB)
+	advertise("receiver-a", "pool-a", 2, keyB)
+	reader := NewReader(client)
+	defer reader.Close()
+	latest, err := reader.ReadAdvertisements(ctx, state, keys, now, 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := latest["receiver-a"]; ok || len(latest) != 1 || latest["receiver-b"].Capacity != 1 {
 		t.Fatalf("advertisements %+v; want receiver-b's alone", latest)
 	}
-	if records := counted.records.Load(); records != 2 {
-		t.Fatalf("fetched %d records of %s, want the 2 appended within twice the liveness", records, ReceiversTopic)
+}
+
+// Compaction leaves gaps in a topic's offsets but never removes its last record, so a read still ends.
+func TestReadFromReadsOverCompactedGaps(t *testing.T) {
+	cluster := kfake.MustCluster()
+	t.Cleanup(cluster.Close)
+	if err := cluster.CreateTopic("topic-a", 1, map[string]string{"cleanup.policy": "compact,delete"}); err != nil {
+		t.Fatal(err)
+	}
+	client, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.FetchMaxWait(10*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.Close)
+	ctx := context.Background()
+	for _, key := range []string{"a", "b", "b", "c"} {
+		if err := client.ProduceSync(ctx, &kgo.Record{Topic: "topic-a", Key: []byte(key), Value: []byte(key)}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cluster.Compact()
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	records, err := readTopic(readCtx, client, "topic-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var offsets []int64
+	for _, record := range records {
+		offsets = append(offsets, record.Offset)
+	}
+	if !slices.Equal(offsets, []int64{0, 2, 3}) {
+		t.Fatalf("read offsets %v, want 0, 2 and 3 around the compacted 1", offsets)
 	}
 }

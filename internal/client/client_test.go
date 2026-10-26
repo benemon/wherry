@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"gopkg.in/yaml.v3"
@@ -1871,8 +1873,13 @@ func TestFailedKeyReadFailsTheLoad(t *testing.T) {
 	}
 }
 
-// traffic counts the connections that clients built from a client's options open and the requests they send.
-type traffic struct{ connections, requests atomic.Int64 }
+// traffic counts the connections that clients built from a client's options open and the requests of each key they
+// send.
+type traffic struct {
+	connections atomic.Int64
+	mu          sync.Mutex
+	keys        map[int16]int64
+}
 
 func (c *traffic) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ net.Conn, err error) {
 	if err == nil {
@@ -1880,9 +1887,56 @@ func (c *traffic) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ net.C
 	}
 }
 
-func (c *traffic) OnBrokerE2E(kgo.BrokerMetadata, int16, kgo.BrokerE2E) { c.requests.Add(1) }
+func (c *traffic) OnBrokerE2E(_ kgo.BrokerMetadata, key int16, _ kgo.BrokerE2E) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.keys == nil {
+		c.keys = map[int16]int64{}
+	}
+	c.keys[key]++
+}
+
+// counts are a scenario's connections, requests, offset listings and fetches, and its requests by key.
+type counts struct {
+	connections, requests, listings, fetches int64
+	keys                                     map[int16]int64
+}
+
+func (c *traffic) counts() counts {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var requests int64
+	for _, n := range c.keys {
+		requests += n
+	}
+	return counts{c.connections.Load(), requests, c.keys[int16(kmsg.ListOffsets)], c.keys[int16(kmsg.Fetch)], maps.Clone(c.keys)}
+}
+
+// countedHost is a host connected as the principal of the bundle at path through a client counted by counted.
+func (f *fixture) countedHost(t *testing.T, bundle, stateDir string, counted *traffic) *Host {
+	t.Helper()
+	kafka, principal := f.connect(t, bundle, kgo.WithHooks(counted))
+	host, err := NewHost(kafka, f.host.key, principal, stateDir, nil, nil, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Close)
+	return host
+}
+
+// bound fails t when got lists offsets other than want's number of times or exceeds want in another count; a zero
+// requests or fetches bound is none, for counts the follower's polling sets.
+func bound(t *testing.T, name string, got, want counts) {
+	t.Helper()
+	t.Logf("%s: %+v", name, got)
+	if got.listings != want.listings || got.connections > want.connections || want.requests > 0 && got.requests > want.requests || want.fetches > 0 && got.fetches > want.fetches {
+		t.Fatalf("%s: %+v, want %d listings and at most %+v", name, got, want.listings, want)
+	}
+}
 
 // A host that only reads dials one client: a seed connection, then a request and a fetch connection to the one broker.
+// Each read lists start and committed offsets once; the tenant feed's committed end is listed apart only to wait for
+// a follower.
 func TestHostReadsBoundTheirConnectionsAndRequests(t *testing.T) {
 	f := newFixture(t, kfake.NumBrokers(1))
 	_, task := f.admitted(t)
@@ -1891,31 +1945,43 @@ func TestHostReadsBoundTheirConnectionsAndRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
-		name                  string
-		connections, requests int64
-		read                  func(*Host) error
+		name string
+		want counts
+		read func(*Host) error
 	}{
-		{"receivers", 3, 30, func(h *Host) error { _, err := h.Receivers(f.ctx); return err }},
-		{"status", 3, 30, func(h *Host) error { _, err := h.Status(f.ctx, task.submission.Wherry.Run); return err }},
+		{"receivers", counts{3, 31, 6, 4, nil}, func(h *Host) error { _, err := h.Receivers(f.ctx); return err }},
+		{"status", counts{3, 31, 6, 4, nil}, func(h *Host) error { _, err := h.Status(f.ctx, task.submission.Wherry.Run); return err }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var counted traffic
-			kafka, principal := f.connect(t, bundle, kgo.WithHooks(&counted))
-			host, err := NewHost(kafka, f.host.key, principal, t.TempDir(), nil, nil, log.New(io.Discard, "", 0))
-			if err != nil {
+			if err := c.read(f.countedHost(t, bundle, t.TempDir(), &counted)); err != nil {
 				t.Fatal(err)
 			}
-			defer host.Close()
-			if err := c.read(host); err != nil {
-				t.Fatal(err)
-			}
-			connections, requests := counted.connections.Load(), counted.requests.Load()
-			t.Logf("%s: %d connections, %d requests", c.name, connections, requests)
-			if connections > c.connections || requests > c.requests {
-				t.Fatalf("%s opened %d connections and sent %d requests, want at most %d and %d", c.name, connections, requests, c.connections, c.requests)
-			}
+			bound(t, c.name, counted.counts(), c.want)
 		})
 	}
+}
+
+// Await of a finished run reads it through the reader and the follower alone; the host's own client dials nothing. The
+// follower's consuming client opens a seed and a fetch connection, and one of either client's may reopen.
+func TestAwaitOfAFinishedRunBoundsItsConnectionsAndRequests(t *testing.T) {
+	f := newFixture(t, kfake.NumBrokers(1))
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateCompleted, nil), receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil))
+	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-c", bundle); err != nil {
+		t.Fatal(err)
+	}
+	var counted traffic
+	awaited, err := f.countedHost(t, bundle, f.host.stateDir, &counted).Await(f.ctx, runID, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if awaited.Status.State != wire.TaskStateCompleted {
+		t.Fatalf("awaited %s, want COMPLETED", awaited.Status.State)
+	}
+	bound(t, "await", counted.counts(), counts{6, 0, 11, 0, nil})
 }
 
 // readTopic reads topic from its start through a reader of its own.
@@ -1923,38 +1989,4 @@ func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Re
 	reader := admin.NewReader(client)
 	defer reader.Close()
 	return reader.ReadFrom(ctx, topic, 0)
-}
-
-// The host reads the advertisements of the last 24 hours: a receiver advertising before them is silent and submit takes
-// no inline limit from it, and one advertising within them is stale and limits submit.
-func TestHostReadsTheAdvertisementWindow(t *testing.T) {
-	f := newFixture(t)
-	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.AtMS, ad.Offers[0].InlineLimit = time.Now().Add(-25*time.Hour).UnixMilli(), 100
-	})
-	f.addReceiver(t, "receiver-b", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) {
-		ad.AtMS, ad.Offers[0].InlineLimit = time.Now().Add(-23*time.Hour).UnixMilli(), 1000
-	})
-	f.addReceiver(t, "receiver-c", "pool-a").advertise(t, f.ctx, nil)
-	receivers, err := f.host.Receivers(f.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statuses := map[string]string{}
-	for _, receiver := range receivers {
-		statuses[receiver.ReceiverID] = receiver.Status
-	}
-	if want := map[string]string{"receiver-a": "silent", "receiver-b": "stale", "receiver-c": "live"}; !reflect.DeepEqual(statuses, want) {
-		t.Fatalf("statuses %v, want %v", statuses, want)
-	}
-	submit := func(size int) error {
-		_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, size), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
-		return err
-	}
-	if err := submit(500); err != nil {
-		t.Fatalf("submit within the stale receiver's limit: %v", err)
-	}
-	if err := submit(2000); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "1000-byte limit") {
-		t.Fatalf("submit over the stale receiver's limit = %v, want invalid input naming its 1000-byte limit", err)
-	}
 }

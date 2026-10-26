@@ -37,6 +37,8 @@ type read struct {
 	records    []*kgo.Record
 	err        error
 	done       chan struct{}
+	// end is the highest last stable offset listed for the topic.
+	end int64
 }
 
 // NewReader returns a Reader that lists offsets and reads through a client built from client's options. client must be
@@ -81,59 +83,110 @@ func (r *Reader) Admin() (*kadm.Client, error) {
 // ReadFrom reads topic from offset, or from the start of the topic's one partition where that is later, to its last
 // stable offset.
 func (r *Reader) ReadFrom(ctx context.Context, topic string, offset int64) ([]*kgo.Record, error) {
+	records, _, err := r.ReadFromWithEnd(ctx, topic, offset)
+	return records, err
+}
+
+// ReadFromWithEnd is ReadFrom that also returns the last stable offset it reads to.
+func (r *Reader) ReadFromWithEnd(ctx context.Context, topic string, offset int64) ([]*kgo.Record, int64, error) {
+	reads, err := r.readFrom(ctx, map[string]int64{topic: offset})
+	if err != nil {
+		return nil, 0, err
+	}
+	return reads[topic].records, reads[topic].end, reads[topic].err
+}
+
+// readFrom reads each topic as ReadFrom does from its offset, listing their offsets in one request of each kind and
+// fetching them together. A topic's own failure is its read's error; the error returned fails every topic.
+func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[string]*read, error) {
+	reads := map[string]*read{}
+	if len(offsets) == 0 {
+		// kadm lists every topic when it is given none.
+		return reads, nil
+	}
 	admin, err := r.Admin()
 	if err != nil {
 		return nil, err
 	}
+	topics := slices.Collect(maps.Keys(offsets))
 	var starts, ends kadm.ListedOffsets
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() (err error) {
-		if starts, err = admin.ListStartOffsets(groupCtx, topic); err == nil {
-			err = starts.Error()
-		}
+		starts, err = admin.ListStartOffsets(groupCtx, topics...)
 		return err
 	})
 	group.Go(func() (err error) {
-		if ends, err = admin.ListCommittedOffsets(groupCtx, topic); err == nil {
-			err = ends.Error()
-		}
+		ends, err = admin.ListCommittedOffsets(groupCtx, topics...)
 		return err
 	})
 	if err := group.Wait(); err != nil {
 		return nil, err
 	}
-	current := &read{remaining: map[int32]int64{}, partitions: map[int32]kgo.Offset{}, done: make(chan struct{})}
-	ends.Each(func(end kadm.ListedOffset) {
-		if start, ok := starts.Lookup(topic, end.Partition); ok && max(start.Offset, offset) < end.Offset {
-			current.remaining[end.Partition] = end.Offset
-			current.partitions[end.Partition] = kgo.NewOffset().At(max(start.Offset, offset))
+	for topic, offset := range offsets {
+		current := &read{remaining: map[int32]int64{}, partitions: map[int32]kgo.Offset{}, done: make(chan struct{})}
+		reads[topic] = current
+		for partition, end := range ends[topic] {
+			start, ok := starts.Lookup(topic, partition)
+			if current.err = cmp.Or(end.Err, start.Err); current.err != nil {
+				break
+			}
+			current.end = max(current.end, end.Offset)
+			if ok && max(start.Offset, offset) < end.Offset {
+				current.remaining[partition] = end.Offset
+				current.partitions[partition] = kgo.NewOffset().At(max(start.Offset, offset))
+			}
 		}
-	})
-	if len(current.remaining) == 0 {
-		return nil, nil
+		if current.err != nil || len(current.remaining) == 0 {
+			close(current.done)
+		}
+	}
+	// pending is a read of offsets' topics still in progress, nil when none is.
+	pending := func() *read {
+		for _, current := range reads {
+			select {
+			case <-current.done:
+			default:
+				return current
+			}
+		}
+		return nil
 	}
 	registered := false
 	for {
+		current := pending()
+		if current == nil {
+			return reads, nil
+		}
 		select {
 		case <-current.done:
-			return current.records, current.err
+			continue
 		case <-ctx.Done():
 			if registered {
 				// The client fetches a read's partitions until they are removed.
-				select {
-				case r.poll <- struct{}{}:
-					if r.reads[topic] == current {
-						r.finish(topic, current, ctx.Err())
+				for current := pending(); current != nil; current = pending() {
+					select {
+					case r.poll <- struct{}{}:
+						for topic, current := range reads {
+							if r.reads[topic] == current {
+								r.finish(topic, current, ctx.Err())
+							}
+						}
+						<-r.poll
+					case <-current.done:
 					}
-					<-r.poll
-				case <-current.done:
 				}
 			}
 			return nil, ctx.Err()
 		case r.poll <- struct{}{}:
 		}
 		if !registered {
-			if other := r.reads[topic]; other != nil {
+			var other *read
+			for topic := range reads {
+				if r.reads[topic] != nil {
+					other = r.reads[topic]
+				}
+			}
+			if other != nil {
 				<-r.poll
 				select {
 				case <-other.done:
@@ -142,7 +195,7 @@ func (r *Reader) ReadFrom(ctx context.Context, topic string, offset int64) ([]*k
 				}
 				continue
 			}
-			if err := r.add(topic, current); err != nil {
+			if err := r.add(reads); err != nil {
 				<-r.poll
 				return nil, err
 			}
@@ -159,13 +212,21 @@ func (r *Reader) ReadFrom(ctx context.Context, topic string, offset int64) ([]*k
 	}
 }
 
-// add starts consuming current's partitions; the caller holds poll.
-func (r *Reader) add(topic string, current *read) error {
+// add starts consuming the partitions of the reads in progress among reads; the caller holds poll.
+func (r *Reader) add(reads map[string]*read) error {
 	if r.closed {
 		return kgo.ErrClientClosed
 	}
-	r.reads[topic] = current
-	r.client.AddConsumePartitions(map[string]map[int32]kgo.Offset{topic: maps.Clone(current.partitions)})
+	partitions := map[string]map[int32]kgo.Offset{}
+	for topic, current := range reads {
+		select {
+		case <-current.done:
+		default:
+			r.reads[topic] = current
+			partitions[topic] = maps.Clone(current.partitions)
+		}
+	}
+	r.client.AddConsumePartitions(partitions)
 	return nil
 }
 
@@ -256,30 +317,27 @@ func ReadKeys(ctx context.Context, client *kgo.Client, topics map[string]string)
 	return reader.ReadKeys(ctx, topics)
 }
 
-// ReadKeys is the package's ReadKeys through r, which reads the topics concurrently.
+// ReadKeys is the package's ReadKeys through r, which reads the topics together.
 func (r *Reader) ReadKeys(ctx context.Context, topics map[string]string) (signed.Keys, error) {
-	var mu sync.Mutex
-	keys := signed.Keys{}
-	group, ctx := errgroup.WithContext(ctx)
-	for owner, topic := range topics {
-		group.Go(func() error {
-			records, err := r.ReadFrom(ctx, topic, 0)
-			if err != nil {
-				return err
-			}
-			state := signed.KeyState{}
-			for _, record := range records {
-				// ApplyKeyRecord returns the prior state with its error.
-				state, _ = signed.ApplyKeyRecord(state, owner, record.Value, record.Timestamp)
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			keys[owner] = state
-			return nil
-		})
+	offsets := map[string]int64{}
+	for _, topic := range topics {
+		offsets[topic] = 0
 	}
-	if err := group.Wait(); err != nil {
+	reads, err := r.readFrom(ctx, offsets)
+	if err != nil {
 		return nil, err
+	}
+	keys := signed.Keys{}
+	for owner, topic := range topics {
+		if err := reads[topic].err; err != nil {
+			return nil, err
+		}
+		state := signed.KeyState{}
+		for _, record := range reads[topic].records {
+			// ApplyKeyRecord returns the prior state with its error.
+			state, _ = signed.ApplyKeyRecord(state, owner, record.Value, record.Timestamp)
+		}
+		keys[owner] = state
 	}
 	return keys, nil
 }
@@ -310,21 +368,7 @@ func HostKeyTopics(state State, pool string) map[string]string {
 // ReadAdvertisements returns each receiver's latest authorised advertisement
 // that is no older than liveness at now and no later than liveness ahead of it.
 func (r *Reader) ReadAdvertisements(ctx context.Context, state State, keys signed.Keys, now time.Time, liveness time.Duration) (map[string]wire.Advertisement, error) {
-	admin, err := r.Admin()
-	if err != nil {
-		return nil, err
-	}
-	// The topic's timestamps are the broker's append times; at_ms is the receiver's clock, up to liveness ahead of them.
-	starts, err := admin.ListOffsetsAfterMilli(ctx, now.Add(-2*liveness).UnixMilli(), ReceiversTopic)
-	if err == nil {
-		err = starts.Error()
-	}
-	if err != nil {
-		return nil, err
-	}
-	var start int64
-	starts.Each(func(listed kadm.ListedOffset) { start = listed.Offset })
-	records, err := r.ReadFrom(ctx, ReceiversTopic, start)
+	records, err := r.ReadFrom(ctx, ReceiversTopic, 0)
 	if err != nil {
 		return nil, err
 	}

@@ -1001,8 +1001,14 @@ func TestCancelOfAnotherTenantDoesNotStopTheRun(t *testing.T) {
 	}
 }
 
-// traffic counts the connections that clients built from a client's options open.
-type traffic struct{ connections atomic.Int64 }
+// traffic counts the connections that clients built from a client's options open and the offset listings they send.
+type traffic struct{ connections, listings atomic.Int64 }
+
+func (c *traffic) OnBrokerE2E(_ kgo.BrokerMetadata, key int16, _ kgo.BrokerE2E) {
+	if key == int16(kmsg.ListOffsets) {
+		c.listings.Add(1)
+	}
+}
 
 func (c *traffic) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ net.Conn, err error) {
 	if err == nil {
@@ -1023,14 +1029,14 @@ func TestAdmissionsShareTheReadersConnections(t *testing.T) {
 	defer base.Close()
 	f.receiver.base, f.receiver.reader = base, admin.NewReader(base)
 	defer f.receiver.reader.Close()
-	var opened []int64
+	var opened, listed []int64
 	for _, run := range []string{"run-a", "run-b"} {
-		before := counted.connections.Load()
+		connections, listings := counted.connections.Load(), counted.listings.Load()
 		f.admitted(t, f.turn(t, run, 1))
-		opened = append(opened, counted.connections.Load()-before)
+		opened, listed = append(opened, counted.connections.Load()-connections), append(listed, counted.listings.Load()-listings)
 	}
-	t.Logf("admissions opened %v connections", opened)
-	if opened[0] > 7 || opened[1] > 1 {
-		t.Fatalf("admissions opened %v connections, want at most 7 and then 1", opened)
+	t.Logf("admissions opened %v connections and sent %v offset listings", opened, listed)
+	if opened[0] > 7 || opened[1] > 1 || !slices.Equal(listed, []int64{4, 4}) {
+		t.Fatalf("admissions opened %v connections and sent %v offset listings, want at most 7 and then 1, and 4 each", opened, listed)
 	}
 }

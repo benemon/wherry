@@ -26,6 +26,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/twmb/franz-go/pkg/kversion"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"gopkg.in/yaml.v3"
 )
@@ -89,11 +90,15 @@ func KafkaOpts(broker string, ca []byte, user, password string) ([]kgo.Opt, erro
 	if !roots.AppendCertsFromPEM(ca) {
 		return nil, errors.New("CA contains no certificates")
 	}
+	// Brokers that answer ApiVersions at v4 at most refuse v5, the default, at a round trip per broker per client.
+	versions := kversion.Stable()
+	versions.SetMaxKeyVersion(18, 4)
 	return []kgo.Opt{
 		kgo.SeedBrokers(broker),
 		kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
 		kgo.SASL(scram.Auth{User: user, Pass: password}.AsSha512Mechanism()),
 		kgo.DisableClientMetrics(),
+		kgo.MaxVersions(versions),
 	}, nil
 }
 
@@ -411,9 +416,15 @@ func (service *Service) Skip(ctx context.Context, offset int64, hash string) err
 // hold anything the agent printed.
 const tenantRetentionMS = 30 * 24 * 60 * 60 * 1000
 
-// receiversRetentionMS bounds wherry.receivers: readers want only each
-// receiver's latest advertisement.
-const receiversRetentionMS = "604800000"
+// receiversConfigs are wherry.receivers' topic configs: readers want only each receiver's latest advertisement, which
+// is its key's latest record. Compaction cleans closed segments alone, so a segment closes within the compaction lag.
+var receiversConfigs = map[string]string{
+	"cleanup.policy":         "compact,delete",
+	"message.timestamp.type": "LogAppendTime",
+	"retention.ms":           "604800000",
+	"segment.ms":             "3600000",
+	"max.compaction.lag.ms":  "3600000",
+}
 
 const retentionMarginMS = 24 * 60 * 60 * 1000
 
@@ -435,7 +446,11 @@ func (service *Service) appendChecked(ctx context.Context, key []byte, record Re
 	if err := service.createTopics(ctx, "-1", AdminTopic); err != nil {
 		return State{}, err
 	}
-	if err := service.createTopics(ctx, receiversRetentionMS, ReceiversTopic); err != nil {
+	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
+		return State{}, err
+	}
+	// A topic created with older configs converges on the next admin write.
+	if err := service.configureTopics(ctx, receiversConfigs, ReceiversTopic); err != nil {
 		return State{}, err
 	}
 	state, err := service.LoadState(ctx)
@@ -460,7 +475,14 @@ func (service *Service) appendChecked(ctx context.Context, key []byte, record Re
 }
 
 func (service *Service) createTopics(ctx context.Context, retentionMS string, topics ...string) error {
-	configs := map[string]*string{"cleanup.policy": kadm.StringPtr("delete"), "message.timestamp.type": kadm.StringPtr("LogAppendTime"), "retention.ms": &retentionMS}
+	return service.createTopicsWith(ctx, map[string]string{"cleanup.policy": "delete", "message.timestamp.type": "LogAppendTime", "retention.ms": retentionMS}, topics...)
+}
+
+func (service *Service) createTopicsWith(ctx context.Context, values map[string]string, topics ...string) error {
+	configs := map[string]*string{}
+	for name, value := range values {
+		configs[name] = kadm.StringPtr(value)
+	}
 	responses, err := kadm.NewClient(service.Admin).CreateTopics(ctx, 1, -1, configs, topics...)
 	if err != nil {
 		return err
@@ -474,13 +496,17 @@ func (service *Service) createTopics(ctx context.Context, retentionMS string, to
 }
 
 func (service *Service) configureTopicRetention(ctx context.Context, value string, topics ...string) error {
+	// Admission measures a run's age from the broker's timestamp of its submission.
+	return service.configureTopics(ctx, map[string]string{"retention.ms": value, "message.timestamp.type": "LogAppendTime"}, topics...)
+}
+
+func (service *Service) configureTopics(ctx context.Context, values map[string]string, topics ...string) error {
 	request := kmsg.NewPtrIncrementalAlterConfigsRequest()
 	for _, topic := range topics {
 		resource := kmsg.NewIncrementalAlterConfigsRequestResource()
 		resource.ResourceType = kmsg.ConfigResourceTypeTopic
 		resource.ResourceName = topic
-		// Admission measures a run's age from the broker's timestamp of its submission.
-		for name, value := range map[string]string{"retention.ms": value, "message.timestamp.type": "LogAppendTime"} {
+		for name, value := range values {
 			config := kmsg.NewIncrementalAlterConfigsRequestResourceConfig()
 			config.Name = name
 			config.Value = &value
@@ -495,7 +521,7 @@ func (service *Service) configureTopicRetention(ctx context.Context, value strin
 	}
 	for _, resource := range response.(*kmsg.IncrementalAlterConfigsResponse).Resources {
 		if resource.ErrorCode != 0 {
-			return fmt.Errorf("configure topic %s retention: %w", resource.ResourceName, kerr.ErrorForCode(resource.ErrorCode))
+			return fmt.Errorf("configure topic %s: %w", resource.ResourceName, kerr.ErrorForCode(resource.ErrorCode))
 		}
 	}
 	return nil
