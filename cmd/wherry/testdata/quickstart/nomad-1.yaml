@@ -1,0 +1,36 @@
+capacity: 2
+plugins:
+  nomad:
+    # Both plugin profiles inherit this config; each states only how it differs.
+    config:
+      address: https://nomad.example.com:4646
+      ca_file: /etc/wherry/nomad-ca.pem
+      namespace: agents
+      credential: nomad-token
+      runtime:
+        driver: docker
+        config:
+          image: registry.example.com/claude-agent:1.0
+          command: /bin/sh
+          args:
+            - -c
+            - cd "$NOMAD_TASK_DIR" && exec claude -p --output-format stream-json --verbose < prompt.txt
+        resources:
+          cpu: 1000
+          memory_mb: 2048
+    profiles:
+      - name: container
+        agent: claude
+        labels:
+          isolation: container
+      - name: host
+        agent: claude
+        labels:
+          isolation: host
+        config:
+          node_pool: agents-host
+          runtime:
+            driver: exec
+            # The exec driver takes no image, so the plugin profile removes the inherited one.
+            config:
+              image: null

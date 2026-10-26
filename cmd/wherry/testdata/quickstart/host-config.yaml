@@ -1,0 +1,4 @@
+bundle: ~/.config/wherry/laptop.bundle
+credentials:
+  claude-oauth-token:
+    file: ~/.config/wherry/credentials/claude-oauth-token

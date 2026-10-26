@@ -105,13 +105,13 @@ func TestPoolConfigExampleParses(t *testing.T) {
 	if _, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: "build", Terms: &want}); err != nil {
 		t.Fatal(err)
 	}
-	documented(t, "example-pool.yaml", "example-pool/pool.yaml", "example-pool/agents/claude.yaml", "example-pool/agents/coder.yaml", "example-pool/agents/codex.yaml")
+	documented(t, "configuration.md", "example-pool.yaml", "example-pool/pool.yaml", "example-pool/agents/claude.yaml", "example-pool/agents/coder.yaml", "example-pool/agents/codex.yaml")
 }
 
-// documented fails unless docs/configuration.md holds each testdata file as a whole code block.
-func documented(t *testing.T, files ...string) {
+// documented fails unless the page docs/<page> holds each testdata file as a whole code block.
+func documented(t *testing.T, page string, files ...string) {
 	t.Helper()
-	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", "configuration.md"))
+	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", page))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func documented(t *testing.T, files ...string) {
 			t.Fatal(err)
 		}
 		if !strings.Contains(string(reference), "```yaml\n"+string(example)+"```\n") {
-			t.Errorf("docs/configuration.md has no code block holding testdata/%s", file)
+			t.Errorf("docs/%s has no code block holding testdata/%s", page, file)
 		}
 	}
 }

@@ -137,7 +137,9 @@ func TestReceiverConfigExampleParses(t *testing.T) {
 	if err := admin.ValidateConfig(want, terms); err != nil {
 		t.Fatal(err)
 	}
-	documented(t, "example-receiver.yaml", "example-receiver/receiver.yaml", "example-receiver/plugins/nomad/plugin.yaml",
+	documented(t, "configuration.md", "example-receiver.yaml", "example-receiver/receiver.yaml", "example-receiver/plugins/nomad/plugin.yaml",
+		"example-receiver/plugins/nomad/profiles/10-container.yaml", "example-receiver/plugins/nomad/profiles/20-host.yaml")
+	documented(t, "operations.md", "example-receiver/receiver.yaml", "example-receiver/plugins/nomad/plugin.yaml",
 		"example-receiver/plugins/nomad/profiles/10-container.yaml", "example-receiver/plugins/nomad/profiles/20-host.yaml")
 }
 

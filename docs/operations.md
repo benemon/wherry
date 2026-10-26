@@ -183,39 +183,45 @@ output collection use a changed limit within that window.
 
 Prerequisites: the `wherry admin` environment
 ([Set up `wherry admin`](#set-up-wherry-admin)) and the pool.
+[Quickstart: Host](quickstart.md#host) walks through these steps for host
+`laptop` of tenant `acme`, with its complete configuration.
 
 1. Entitle the tenant to a pool:
 
    ```sh
-   wherry admin pool entitle build --tenant alice
+   wherry admin pool entitle build --tenant acme
    ```
 
 2. Add each host the tenant submits from:
 
    ```sh
-   wherry admin host add laptop --tenant alice --bundle-file alice-laptop.bundle
+   wherry admin host add laptop --tenant acme --bundle-file laptop.bundle
    ```
 
 3. Hand the bundle to the host's user over a channel you trust. It holds
    the host's Kafka password.
 
 The tenant then writes its
-[client configuration](configuration.md#client-configuration) and runs
-`wherry init`, as in [Quickstart](quickstart.md#_7-configure-the-host).
+[client configuration](configuration.md#client-configuration), with a source
+for each credential the pool's agents take, and runs `wherry init`, as in
+[Quickstart](quickstart.md#_3-write-the-host-configuration).
 
 A tenant can be entitled to several pools; run `pool entitle` once per pool.
 
 ## Add a receiver
 
 A receiver's configuration lists the plugins it runs, keyed by adapter
-type, and each plugin's profiles in routing order. Each profile launches one
-agent through its plugin and carries the labels tasks select on. It
-delivers the agent's credentials at the targets the pool's terms give them,
-so no profile names an agent credential. Two profiles can launch the same
-agent with different labels, such as one running in containers and one on
-the host.
+type, and each plugin's profiles in routing order. Each plugin profile
+launches one agent through its plugin and carries the labels tasks select
+on. It delivers the agent's credentials at the targets the pool's terms give
+them, so no plugin profile names an agent credential. Two plugin profiles
+can launch the same agent with different labels, such as one running in
+containers and one on the host. [Quickstart: Receiver](quickstart.md#receiver)
+walks through adding and starting receiver `nomad-1`, with every file it
+writes.
 
-Write the configuration as a directory:
+This configuration of receiver `nomad-1`, against the
+[pool terms example](configuration.md#pool-terms-example), is a directory:
 
 ```
 nomad-1/
@@ -231,7 +237,7 @@ nomad-1/
 `receiver.yaml` holds the receiver's `capacity`:
 
 ```yaml
-capacity: 2
+capacity: 3
 ```
 
 `plugins/nomad/plugin.yaml` holds the `config` every plugin profile of the
@@ -239,6 +245,7 @@ Nomad plugin inherits, here the cluster's connection settings and the name of th
 [platform credential](#platform-credentials) that authenticates to it:
 
 ```yaml
+# Every plugin profile of this plugin inherits these keys and can override them.
 config:
   address: https://nomad.example.com:4646
   ca_file: /etc/wherry/nomad-ca.pem
@@ -246,68 +253,26 @@ config:
   credential: nomad-token
 ```
 
-Each file in `plugins/nomad/profiles/` is one profile of the plugin, with
-the settings particular to it:
+Each file in `plugins/nomad/profiles/` is one plugin profile, with the
+settings particular to it. `10-container.yaml` runs `claude` in a container:
 
 ```yaml
 name: container
-agent: coder
+agent: claude
 labels:
   isolation: container
 config:
-  node_pool: default
   runtime:
     driver: docker
     config:
-      image: registry.example.com/agent:1.0
+      image: registry.example.com/claude-agent:1.0
 ```
 
-`20-host.yaml` declares `name: host`, `labels` with `isolation: host`, and
-an `exec` runtime on a node pool whose nodes have the agent installed.
-
-The plugin profile files' names set routing order within the plugin, lowest
-first, so a numeric prefix orders them. A plugin profile's `config` is its
-plugin's `config` merged with its own: maps merge key by key, the plugin
-profile's value wins, a list replaces the plugin's whole, and `key: null`
-removes an inherited key. A plugin's `labels`, in `plugin.yaml`, merge into
-each plugin profile's `labels` in the same way.
-[Plugin profile merge](configuration.md#plugin-profile-merge) gives every
-rule, and the
-[directory layout](configuration.md#receiver-configuration-directory) the
-files.
-
-A single YAML file holding the whole
-[receiver configuration](configuration.md#receiver-configuration) also works in
-place of the directory.
-The [receiver configuration example](configuration.md#receiver-configuration-example)
-gives one configuration in both forms, with one plugin and two profiles.
-
-A task with no selector runs on the first ready profile, `container` here,
-and `--selector isolation=host` runs on the second. A receiver running
-several plugins visits them in a fixed order, so give profiles of different
-plugins labels that tell them apart. Every member of a pool must honour the
-labels its profiles declare. The client places a task by one member's
-labels, but any member can claim it. A member with no matching profile
-returns the task.
-
-The [Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
-cover the `config` section.
-
-Every profile runs its harness unchanged: the receiver reads no harness's
-output format, and the run ends when the job ends, with the outcome the
-agent writes as the prompt asks
-([agent contract](configuration.md#agent-contract)).
-
-`codex exec` reads its API key from
-`CODEX_API_KEY` and ignores `OPENAI_API_KEY`, so the pool's terms give the
-`codex` agent's credential the target `env: CODEX_API_KEY`, as in
-[Create a pool](#create-a-pool). The task sends the prompt file to
-`codex exec` on standard input, and `--sandbox` takes a mode the platform
-allows. Without `--ephemeral`, Codex writes session files under
-`CODEX_HOME` (default `~/.codex`), which the task must be able to write:
+`20-host.yaml` runs `codex` under the `exec` driver, on a node pool whose
+nodes have Codex installed:
 
 ```yaml
-name: codex
+name: host
 agent: codex
 labels:
   isolation: host
@@ -324,7 +289,49 @@ config:
           --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
 ```
 
-A profile whose agent has `models` in the pool's terms reads the task's
+The plugin profile files' names set routing order within the plugin, lowest
+first, so a numeric prefix orders them. A plugin profile's `config` is its
+plugin's `config` merged with its own: maps merge key by key, the plugin
+profile's value wins, a list replaces the plugin's whole, and `key: null`
+removes an inherited key. A plugin's `labels`, in `plugin.yaml`, merge into
+each plugin profile's `labels` in the same way.
+[Plugin profile merge](configuration.md#plugin-profile-merge) gives every
+rule, and the
+[directory layout](configuration.md#receiver-configuration-directory) the
+files.
+
+A single YAML file holding the whole
+[receiver configuration](configuration.md#receiver-configuration) also works in
+place of the directory.
+The [receiver configuration example](configuration.md#receiver-configuration-example)
+gives this configuration in both forms.
+
+A task runs on the first ready plugin profile, in routing order, whose agent
+and labels satisfy it. A task for `claude`, the pool's default agent, runs
+on `container`, and a task with `--agent codex` runs on `host`. A receiver
+running several plugins visits them in a fixed order, so give plugin
+profiles of different plugins labels that tell them apart. Every member of a
+pool must honour the labels its plugin profiles declare. The client places a
+task by one member's labels, but any member can claim it. A member with no
+matching plugin profile returns the task.
+
+The [Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
+cover the `config` section.
+
+Every plugin profile runs its harness unchanged: the receiver reads no
+harness's output format, and the run ends when the job ends, with the
+outcome the agent writes as the prompt asks
+([agent contract](configuration.md#agent-contract)).
+
+`codex exec` reads its API key from
+`CODEX_API_KEY` and ignores `OPENAI_API_KEY`, so the pool's terms give the
+`codex` agent's credential the target `env: CODEX_API_KEY`, as in
+[Create a pool](#create-a-pool). Plugin profile `host` sends the prompt file
+to `codex exec` on standard input, and `--sandbox` takes a mode the platform
+allows. Without `--ephemeral`, Codex writes session files under
+`CODEX_HOME` (default `~/.codex`), which the task must be able to write.
+
+A plugin profile whose agent has `models` in the pool's terms reads the task's
 model from `WHERRY_MODEL`, which the plugin sets only when the task has a
 model, and falls back to a model of its own. The shell command sets the
 fallback first, `test -n "$WHERRY_MODEL" || WHERRY_MODEL=<model>;`, with a model
@@ -354,7 +361,7 @@ arguments.
    mechanism, and write the receiver's [local
    configuration](configuration.md#receiver-local-configuration) with a
    source for each [platform credential](#platform-credentials) its
-   profiles name.
+   plugin profiles name.
 
 3. Start the receiver, as in [Run a receiver](#run-a-receiver).
 
@@ -366,21 +373,33 @@ platform credential. The receiver configuration names the credential with
 plugin's `config`, and the receiver's [local
 configuration](configuration.md#receiver-local-configuration) maps the name
 to a [source](security.md#credential-sources) on the receiver's host, as a
-host's configuration maps its agent credentials:
+host's configuration maps its agent credentials. This local configuration
+gives `nomad-token` a file source:
 
 ```yaml
+bundle: /etc/wherry/receiver.bundle
+state_dir: /var/lib/wherry/state
+plugin_dir: /usr/local/libexec/wherry/plugins
+metrics_addr: ":9464"
 credentials:
   nomad-token:
     file: /etc/wherry/nomad-token
 ```
 
+A name with no source fails that plugin profile's configuration, and the
+receiver exits with:
+
+```
+profile container: credential "nomad-token" has no source in the receiver's configuration
+```
+
 The source is a file readable by the receiver's user and its group alone,
 an environment variable, or a command such as a vault client's, resolved
-when the receiver configures the profile. It never reaches `wherry.admin` or
-the bundle. To rotate the token, replace the value at its source and
-restart the receiver; the bundle stays as it is. A profile that names no
-credential leaves the plugin to its own default, such as the Nomad plugin's
-`NOMAD_TOKEN`.
+when the receiver configures the plugin profile. It never reaches
+`wherry.admin` or the bundle. To rotate the token, replace the value at its
+source and restart the receiver; the bundle stays as it is. A plugin profile
+that names no credential leaves the plugin to its own default, such as the
+Nomad plugin's `NOMAD_TOKEN`.
 
 ### Change a receiver's configuration
 
