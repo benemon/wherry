@@ -37,12 +37,20 @@ func mcpSession(t *testing.T, connect func() (*busclient.Host, error), progress 
 	return mcpSessionReading(t, connect, progress, inputOpener(t.TempDir(), busclient.Config{}))
 }
 
+// testLog writes the MCP server's log to the test's, so a failure the tool reports by class alone shows its cause.
+type testLog struct{ t *testing.T }
+
+func (l testLog) Write(p []byte) (int, error) {
+	l.t.Log(strings.TrimSuffix(string(p), "\n"))
+	return len(p), nil
+}
+
 // mcpSessionReading is mcpSession with submit opening its inputs through openInput.
 func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), progress *atomic.Int64, openInput func(string) (*os.File, error)) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(openInput), openInput, func(id string) string { return "wherry await " + id }).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, inputReader(openInput), openInput, func(id string) string { return "wherry await " + id }, log.New(testLog{t}, "mcp server: ", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +561,14 @@ func TestMCPErrorsCarryNoSecrets(t *testing.T) {
 }
 
 func TestMCPServerAnswersSealRequests(t *testing.T) {
-	b := newBus(t)
+	if values := answeredSeal(t, newBus(t)); string(values.Values["model"]) != credentialText {
+		t.Fatalf("sealed %q, want the configured credential", values.Values["model"])
+	}
+}
+
+// answeredSeal is the seal the MCP server's answering writes for a request for the model credential of an admitted run.
+func answeredSeal(t *testing.T, b *bus) signed.SealValues {
+	t.Helper()
 	admitted := b.admitted(t)
 	runID := admitted.submission.Wherry.Run
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -576,10 +591,7 @@ func TestMCPServerAnswersSealRequests(t *testing.T) {
 		}
 		for _, record := range records {
 			if values, err := signed.OpenSeal(record.Value, binding, key, time.Now()); err == nil {
-				if string(values.Values["model"]) != credentialText {
-					t.Fatalf("sealed %q, want the configured credential", values.Values["model"])
-				}
-				return
+				return values
 			}
 		}
 		if b.ctx.Err() != nil {
@@ -902,5 +914,64 @@ func TestToolFailureCodes(t *testing.T) {
 		if failure := toolFailure(err).(*toolError); failure.Code != want {
 			t.Errorf("%v: code %s, want %s", err, failure.Code, want)
 		}
+	}
+}
+
+// An UNAVAILABLE reaches the model by class alone; the server's log keeps the cause.
+func TestMCPUnavailableLogsItsCause(t *testing.T) {
+	ctx := context.Background()
+	var logged bytes.Buffer
+	connect := func() (*busclient.Host, error) {
+		return nil, errors.New("dial broker.example:9093: connection refused")
+	}
+	open := inputOpener(t.TempDir(), busclient.Config{})
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry await " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { serverSession.Close() })
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "v0"}, nil).Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { session.Close() })
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "receivers", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := toolText(result); !result.IsError || !strings.Contains(text, "UNAVAILABLE") || strings.Contains(text, "broker.example") {
+		t.Fatalf("tool result %q; want UNAVAILABLE without its cause", text)
+	}
+	if !strings.Contains(logged.String(), "tool failed: dial broker.example:9093: connection refused") {
+		t.Fatalf("server log %q; want the cause", logged.String())
+	}
+}
+
+// The server's log keeps an UNAVAILABLE's cause with each credential value the host resolved replaced by its marker.
+func TestMCPUnavailableLogRedactsResolvedCredentials(t *testing.T) {
+	answeredSeal(t, newBus(t))
+	ctx := context.Background()
+	var logged bytes.Buffer
+	connect := func() (*busclient.Host, error) {
+		return nil, errors.New("dial broker.example:9093: rejected " + credentialText)
+	}
+	open := inputOpener(t.TempDir(), busclient.Config{})
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry await " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { serverSession.Close() })
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "v0"}, nil).Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { session.Close() })
+	if failure := callToolError(t, ctx, session, "receivers", map[string]any{}); failure != (toolError{Code: "UNAVAILABLE", Message: "the wherry bus could not complete the request; the wherry CLI reports the cause"}) {
+		t.Fatalf("tool error %#v; want UNAVAILABLE alone", failure)
+	}
+	if want := "tool failed: dial broker.example:9093: rejected " + signed.RedactionMarker(nil, "model") + "\n"; logged.String() != want {
+		t.Fatalf("server log %q, want %q", logged.String(), want)
 	}
 }

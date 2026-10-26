@@ -57,6 +57,7 @@ func (h *Host) bucket(ctx context.Context, pool string, storage *admin.Storage) 
 		if err != nil {
 			return nil, fmt.Errorf("read storage credential %s: %w", name, err)
 		}
+		hold(name, key)
 		keys[i] = strings.TrimSpace(string(key))
 	}
 	// minio drops the default port Host adds, as presigned URLs are signed without it.
@@ -143,6 +144,7 @@ func (h *Host) checkSealSize(ctx context.Context, store *minio.Client, bucket, t
 		if values[credential.Name], err = source.Resolve(ctx); err != nil {
 			return fmt.Errorf("read credential %s: %w", credential.Name, err)
 		}
+		hold(credential.Name, values[credential.Name])
 		names = append(names, credential.Name)
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

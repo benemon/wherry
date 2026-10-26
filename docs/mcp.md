@@ -105,4 +105,4 @@ error text from the bus, the broker or the host key.
 | `OUTPUTS_NOT_WRITTEN` | the run's verified outputs could not be written to the state directory, or its S3 outputs downloaded, or the run's prefix deleted |
 | `CANCELLED` | the request was cancelled |
 | `VERSION_SKEW` | `wherry.admin` holds records a later release wrote; upgrade `wherry` and restart the MCP server |
-| `UNAVAILABLE` | any other failure; the CLI reports the cause |
+| `UNAVAILABLE` | any other failure; the server writes its cause to standard error, which the harness keeps in its MCP server log, and the CLI reports it too |

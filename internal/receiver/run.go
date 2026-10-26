@@ -30,6 +30,7 @@ import (
 
 	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
@@ -43,8 +44,6 @@ const (
 	readTimeout  = 30 * time.Second
 	maxHandle    = 4 << 10
 	budgetReason = "delivery budget exhausted"
-	minRedact    = 8
-	redactPiece  = 64 << 10
 	// heldLimit bounds the transcript an adopter holds while it waits for its seal.
 	heldLimit = 4 << 20
 	// maxOutcome bounds the outcome file read; message text past wire.MaxText becomes the over-size marker.
@@ -1125,7 +1124,7 @@ type activeRun struct {
 	puts     map[string]string
 	// redactions are the forms of the values this attempt received, longest first, and redactionKey the run's key
 	// from its seal.
-	redactions   []redaction
+	redactions   []redact.Form
 	redactionKey []byte
 	// expected are the outputs the run declares; outputs are the chunks of those the run returns, and returned and
 	// unreturned list them for the result.
@@ -1142,60 +1141,26 @@ type activeRun struct {
 	startCause string
 }
 
-// redaction is a form of a delivered value and the marker that replaces it.
-type redaction struct {
-	value, marker []byte
-}
-
 // deliver keeps the forms of each credential value delivered to the run, each with the marker of the value's name under
 // the run's key, which names no credential.
 func (run *activeRun) deliver(values map[string][]byte) {
-	run.redactions = addForms(run.redactions, run.redactionKey, values, func(name string) {
+	run.redactions = redact.AddForms(run.redactions, run.redactionKey, values, func(name string) {
 		run.receiver.logger.Printf("run %s: credential %s too short to redact", run.task.Wherry.Run, name)
 	})
 	r := run.receiver
 	r.liveMu.Lock()
 	if r.live == nil {
-		r.live = map[*activeRun][]redaction{}
+		r.live = map[*activeRun][]redact.Form{}
 	}
 	r.live[run] = slices.Clone(run.redactions)
 	r.liveMu.Unlock()
-}
-
-// addForms is forms with the forms each of values is published in added, longest first: the value without trailing CR
-// and LF, as credential files written by echo or a CLI end in a newline that transcripts and outputs drop, and that form
-// escaped as a JSON string, as a transcript line carries it. A value shorter than minRedact once trimmed matches
-// ordinary text and JSON literals, so short gets its name and it is left. Both forms take the marker of the value's
-// name under key. A marker holding a form of any value would publish it, so that marker is [*], which no form of
-// minRedact bytes fits in.
-func addForms(forms []redaction, key []byte, values map[string][]byte, short func(name string)) []redaction {
-	for name, value := range values {
-		trimmed := bytes.TrimRight(value, "\r\n")
-		if len(trimmed) < minRedact {
-			short(name)
-			continue
-		}
-		escaped, _ := jsontext.AppendQuote(nil, trimmed) // invalid UTF-8 is replaced, and that form never appears in a transcript
-		marker := []byte(signed.RedactionMarker(key, name))
-		forms = append(forms, redaction{value: trimmed, marker: marker})
-		if escaped = escaped[1 : len(escaped)-1]; !bytes.Equal(escaped, trimmed) {
-			forms = append(forms, redaction{value: escaped, marker: marker})
-		}
-	}
-	for i, form := range forms {
-		if slices.ContainsFunc(forms, func(other redaction) bool { return bytes.Contains(form.marker, other.value) }) {
-			forms[i].marker = []byte("[*]")
-		}
-	}
-	slices.SortFunc(forms, func(a, b redaction) int { return len(b.value) - len(a.value) })
-	return forms
 }
 
 // HoldPlatformCredential has the receiver redact value, the platform credential name names, from the plugin output and
 // errors it logs, in the forms of a run credential, for as long as it runs. A platform credential has no run key, so
 // its marker is that of its name under no key.
 func (r *Receiver) HoldPlatformCredential(name string, value []byte) {
-	forms := addForms(nil, nil, map[string][]byte{name: value}, func(name string) {
+	forms := redact.AddForms(nil, nil, map[string][]byte{name: value}, func(name string) {
 		r.logger.Printf("platform credential %s too short to redact", name)
 	})
 	r.liveMu.Lock()
@@ -1211,28 +1176,11 @@ func (run *activeRun) redact(data []byte, limit int64) *redactedForm {
 	return out
 }
 
-// redactTo writes data redacted to out. The data passes through in pieces of redactPiece bytes, so no write, and
-// nothing a form's replacer holds, is larger than a piece and the forms.
+// redactTo writes data redacted to out, counting the values it replaced.
 func (run *activeRun) redactTo(out io.Writer, data []byte) {
-	if replaced := redactTo(out, data, run.redactions); replaced > 0 {
+	if replaced := redact.To(out, data, run.redactions); replaced > 0 {
 		run.receiver.metrics.redactions.WithLabelValues(run.task.Wherry.Tenant, cmp.Or(run.profile.Name, "none")).Add(float64(replaced))
 	}
-}
-
-// redactTo writes data to out with each of forms, longest first, replaced by its marker, and returns how many it
-// replaced.
-func redactTo(out io.Writer, data []byte, forms []redaction) int {
-	w, replaced := out, 0
-	for i := len(forms) - 1; i >= 0; i-- {
-		w = &replacer{value: forms[i].value, marker: forms[i].marker, next: w, replaced: &replaced}
-	}
-	for piece := range slices.Chunk(data, redactPiece) {
-		w.Write(piece)
-	}
-	if first, ok := w.(*replacer); ok {
-		first.flush()
-	}
-	return replaced
 }
 
 // redactLive is text with every form of the platform credentials and of the values delivered to a run this receiver
@@ -1241,9 +1189,9 @@ func (r *Receiver) redactLive(text string) string {
 	r.liveMu.Lock()
 	forms := slices.Concat(append(slices.Collect(maps.Values(r.live)), r.platform)...)
 	r.liveMu.Unlock()
-	slices.SortFunc(forms, func(a, b redaction) int { return len(b.value) - len(a.value) })
+	slices.SortFunc(forms, func(a, b redact.Form) int { return len(b.Value) - len(a.Value) })
 	var out strings.Builder
-	redactTo(&out, []byte(text), forms)
+	redact.To(&out, []byte(text), forms)
 	return out.String()
 }
 
@@ -1333,41 +1281,6 @@ func (r *redactedForm) Write(p []byte) (int, error) {
 func (r *redactedForm) over() bool { return r.size > r.limit }
 
 func (r *redactedForm) hash() string { return hex.EncodeToString(r.sum.Sum(nil)) }
-
-// replacer writes on to next what it is written with each occurrence of value replaced by marker, holding back only
-// the bytes a match could still begin in.
-type replacer struct {
-	value, marker []byte
-	next          io.Writer
-	held          []byte
-	replaced      *int
-}
-
-func (w *replacer) Write(p []byte) (int, error) {
-	w.held = append(w.held, p...)
-	for {
-		i := bytes.Index(w.held, w.value)
-		if i < 0 {
-			break
-		}
-		w.next.Write(w.held[:i])
-		w.next.Write(w.marker)
-		w.held = w.held[i+len(w.value):]
-		*w.replaced++
-	}
-	cut := max(len(w.held)-len(w.value)+1, 0)
-	w.next.Write(w.held[:cut])
-	w.held = slices.Clone(w.held[cut:])
-	return len(p), nil
-}
-
-func (w *replacer) flush() {
-	w.next.Write(w.held)
-	w.held = nil
-	if next, ok := w.next.(*replacer); ok {
-		next.flush()
-	}
-}
 
 func (run *activeRun) commit(ctx context.Context, records ...*kgo.Record) error {
 	return run.receiver.transact(ctx, run.producer, records...)

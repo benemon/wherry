@@ -188,7 +188,8 @@ end the run's handling; a queue deadline longer than the pool's
 `max_queue_deadline` is an `INVALID_ARGUMENT`, so ask for a shorter one. `CANCELLED` means the call itself was
 cancelled. `VERSION_SKEW` means the pool's records come from a later wherry
 release than the running MCP server: tell the user to upgrade `wherry` and
-restart the server, since a harness keeps the old process running. `UNAVAILABLE` is any other failure; the user can run the same
-operation with the `wherry` CLI to see the cause. `OUTPUTS_NOT_WRITTEN` means
+restart the server, since a harness keeps the old process running. `UNAVAILABLE` is any other failure; its cause is in the MCP
+server's log, and the user can also run the same operation with the `wherry`
+CLI to see it. `OUTPUTS_NOT_WRITTEN` means
 the result arrived but its outputs could not be written, downloaded or cleaned
 up; the `wherry await` CLI reports the cause.
