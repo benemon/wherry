@@ -125,7 +125,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	plugins.logs = r.PluginLogs(stdout)
+	plugins.logs, plugins.hold = r.PluginLogs(stdout), r.HoldPlatformCredential
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := r.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -163,10 +163,12 @@ func serveMetrics(listener net.Listener, registry *prometheus.Registry, logger *
 	return server
 }
 
-// plugins runs one plugin process per adapter type, started for the first profile of that type.
+// plugins runs one plugin process per adapter type, started for the first profile of that type. hold takes each platform
+// credential value before any plugin is handed it, so the receiver redacts it from what logs gets.
 type plugins struct {
 	dir         string
 	credentials map[string]credential.Source
+	hold        func(name string, value []byte)
 	logs        io.Writer
 	registry    prometheus.Registerer
 	running     map[string]*adapter.Plugin
@@ -188,6 +190,7 @@ func (p *plugins) profile(pool string, settings admin.ProfileSettings) (receiver
 		if value, err = source.Resolve(context.Background()); err != nil {
 			return receiver.Named{}, fmt.Errorf("resolve credential %s: %w", name, err)
 		}
+		p.hold(name, value)
 	}
 	running, ok := p.running[settings.Plugin]
 	if !ok {

@@ -470,8 +470,9 @@ empty revision. A build from a working tree with uncommitted changes adds
 `wherry.operator`, with the [environment](configuration.md#environment-variables) set.
 It writes every `wherry.admin` record as `wherry.operator`, creating
 `wherry.admin` and `wherry.receivers` first if they are missing. Options
-take a value and can appear anywhere after `admin`. An option without a
-value fails with `admin option requires a value`, one the command does not
+other than `--dry-run` take a value, and options can appear anywhere after
+`admin`. An option without a value fails with
+`admin option requires a value`, one the command does not
 take with `unknown option --<name>`, and a repeated one with
 `option --<name> is given twice`. `pool create`,
 `pool entitle`, `host add` and `receiver add` then create every ACL the new
@@ -518,7 +519,7 @@ feed, grants its ACLs, applies its quotas, and writes its bundle.
 
 ```sh
 wherry admin receiver add RECEIVER --pool POOL \
-  <--config-file FILE|--config-dir DIR> --bundle-file FILE
+  <--config-file FILE|--config-dir DIR> <--bundle-file FILE|--dry-run>
 ```
 
 Reads the [receiver configuration](configuration.md#receiver-configuration) from a
@@ -528,17 +529,53 @@ grants its ACLs, and writes its bundle. It refuses an existing receiver.
 The bundle holds the receiver's Kafka identity alone; the receiver's [local
 configuration](configuration.md#receiver-local-configuration) gives the
 sources of its [platform credentials](configuration.md#platform-credentials).
+With `--dry-run`, it makes the same checks and prints each plugin profile as
+the record would hold it, in the format of `receiver show`, and creates and
+writes nothing; `--bundle-file` is then not needed.
 
 ### `wherry admin receiver configure RECEIVER`
 
 ```sh
-wherry admin receiver configure RECEIVER <--config-file FILE|--config-dir DIR>
+wherry admin receiver configure RECEIVER <--config-file FILE|--config-dir DIR> [--dry-run]
 ```
 
 Records a new configuration for a live receiver in its pool. The
 principal, password and bundle stay as they are. The receiver exits when it
 reads a record that differs from the configuration it runs, and its platform
 restarts it.
+
+With `--dry-run`, it reads and validates the configuration as it does to
+record it, against the receiver's pool's terms, and prints the resolution
+in the format of [`receiver show`](#wherry-admin-receiver-show-receiver),
+writing nothing to Kafka. A configuration it refuses fails in the same way
+with or without `--dry-run`.
+
+### `wherry admin receiver show RECEIVER`
+
+Prints the receiver's recorded configuration as YAML: `capacity`, then
+`profiles`, each plugin profile resolved, in routing order, with its
+`name`, `plugin`, `agent`, `labels` and merged `config`
+([Plugin profile merge](configuration.md#plugin-profile-merge)):
+
+```yaml
+capacity: 3
+profiles:
+    - name: claude
+      plugin: nomad
+      agent: claude
+      labels:
+        platform: nomad
+      config:
+        address: https://nomad.example.com:4646
+        credential: nomad-token
+        runtime:
+            config:
+                image: registry.example.com/claude-agent:1.0
+            driver: docker
+```
+
+A `credential` key shows the credential's name, which is all the record
+holds; neither `show` nor `--dry-run` prints a credential value.
 
 ### `wherry admin host revoke HOST --tenant TENANT`
 
@@ -612,10 +649,12 @@ On start it:
 
 It logs its own lines to standard output with the prefix `receiver: `;
 plugin and link lines are hclog lines named `plugin`. Plugin lines, the
-plugin's raw standard error that go-plugin relays, and profile sweep and
-readiness errors carry the
+plugin's raw standard error that go-plugin relays, and profile configure,
+sweep and readiness errors carry the
 [marker](a2a-extension-v1.md#seal) of each credential value
-delivered to a run the receiver holds in place of the value. It exits on
+delivered to a run the receiver holds, and of each [platform
+credential](configuration.md#platform-credentials) value, in place of the
+value. It exits on
 `SIGINT` or `SIGTERM` without stopping its jobs, and fails with
 `receiver configuration changed` when a configuration record that differs
 from its own appears. A configuration record whose plugin type is not a
@@ -754,7 +793,8 @@ reason above. A run's calls (dispatch, lookup, follow, stop, collect, purge
 and release) replace each credential value delivered to the run with its
 redaction marker; an adopter's lookup comes before its seal and has no values
 yet. The pool's calls (sweep, readiness and configure) belong to no run and
-replace no values. Every call's text has its URLs replaced, its line breaks
+replace each value delivered to a run the receiver holds and each platform
+credential value. Every call's text has its URLs replaced, its line breaks
 turned into spaces and is cut to 512 bytes. A profile's configure error ends
 the receiver with `profile <name>: <text>`.
 

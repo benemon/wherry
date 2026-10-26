@@ -234,8 +234,8 @@ nomad-1/
 capacity: 2
 ```
 
-`plugins/nomad/plugin.yaml` holds the `config` every profile of the Nomad
-plugin shares, here the cluster's connection settings and the name of the
+`plugins/nomad/plugin.yaml` holds the `config` every plugin profile of the
+Nomad plugin inherits, here the cluster's connection settings and the name of the
 [platform credential](#platform-credentials) that authenticates to it:
 
 ```yaml
@@ -265,12 +265,16 @@ config:
 `20-host.yaml` declares `name: host`, `labels` with `isolation: host`, and
 an `exec` runtime on a node pool whose nodes have the agent installed.
 
-The profile files' names set routing order within the plugin, lowest first,
-so a numeric prefix orders them. A profile's `config` is its plugin's
-`config` plus its own. The two share no top-level key: a key set in both is
-an error. The
-[directory layout](configuration.md#receiver-configuration-directory) lists
-every rule.
+The plugin profile files' names set routing order within the plugin, lowest
+first, so a numeric prefix orders them. A plugin profile's `config` is its
+plugin's `config` merged with its own: maps merge key by key, the plugin
+profile's value wins, a list replaces the plugin's whole, and `key: null`
+removes an inherited key. A plugin's `labels`, in `plugin.yaml`, merge into
+each plugin profile's `labels` in the same way.
+[Plugin profile merge](configuration.md#plugin-profile-merge) gives every
+rule, and the
+[directory layout](configuration.md#receiver-configuration-directory) the
+files.
 
 A single YAML file holding the whole
 [receiver configuration](configuration.md#receiver-configuration) also works in
@@ -331,7 +335,15 @@ fails the task on `${WHERRY_MODEL:-<model>}`, so the fallback avoids braces.
 The value reaches the command through the environment, never pasted into its
 arguments.
 
-1. Write the configuration and add the receiver:
+1. Write the configuration and check it. `--dry-run` validates it against
+   the pool's terms and prints each plugin profile as the record would hold
+   it, writing nothing:
+
+   ```sh
+   wherry admin receiver add nomad-1 --pool build --config-dir nomad-1 --dry-run
+   ```
+
+   Then add the receiver:
 
    ```sh
    wherry admin receiver add nomad-1 --pool build \
@@ -371,6 +383,19 @@ credential leaves the plugin to its own default, such as the Nomad plugin's
 `NOMAD_TOKEN`.
 
 ### Change a receiver's configuration
+
+Check the configuration first. `--dry-run` reads and validates it against
+the pool's terms as `configure` does, and prints each plugin profile as the
+record would hold it, with its plugin's `config` and `labels` merged in,
+writing nothing:
+
+```sh
+wherry admin receiver configure nomad-1 --config-dir nomad-1 --dry-run
+```
+
+Compare the output with what the receiver runs now, which
+`wherry admin receiver show nomad-1` prints in the same format, then record
+the configuration:
 
 ```sh
 wherry admin receiver configure nomad-1 --config-dir nomad-1

@@ -1147,38 +1147,59 @@ type redaction struct {
 	value, marker []byte
 }
 
-// deliver keeps the forms each credential value is published in: the value without trailing CR and LF, as credential
-// files written by echo or a CLI end in a newline that transcripts and outputs drop, and that form escaped as a JSON
-// string, as a transcript line carries it. A value shorter than minRedact once trimmed matches ordinary text and JSON
-// literals, so it is logged and left. Both forms take the marker of the value's name under the run's key, which names
-// no credential. A marker holding a form of any delivered value would publish it, so that marker is [*], which no form
-// of minRedact bytes fits in.
+// deliver keeps the forms of each credential value delivered to the run, each with the marker of the value's name under
+// the run's key, which names no credential.
 func (run *activeRun) deliver(values map[string][]byte) {
-	for name, value := range values {
-		trimmed := bytes.TrimRight(value, "\r\n")
-		if len(trimmed) < minRedact {
-			run.receiver.logger.Printf("run %s: credential %s too short to redact", run.task.Wherry.Run, name)
-			continue
-		}
-		escaped, _ := jsontext.AppendQuote(nil, trimmed) // invalid UTF-8 is replaced, and that form never appears in a transcript
-		marker := []byte(signed.RedactionMarker(run.redactionKey, name))
-		run.redactions = append(run.redactions, redaction{value: trimmed, marker: marker})
-		if escaped = escaped[1 : len(escaped)-1]; !bytes.Equal(escaped, trimmed) {
-			run.redactions = append(run.redactions, redaction{value: escaped, marker: marker})
-		}
-	}
-	for i, form := range run.redactions {
-		if slices.ContainsFunc(run.redactions, func(other redaction) bool { return bytes.Contains(form.marker, other.value) }) {
-			run.redactions[i].marker = []byte("[*]")
-		}
-	}
-	slices.SortFunc(run.redactions, func(a, b redaction) int { return len(b.value) - len(a.value) })
+	run.redactions = addForms(run.redactions, run.redactionKey, values, func(name string) {
+		run.receiver.logger.Printf("run %s: credential %s too short to redact", run.task.Wherry.Run, name)
+	})
 	r := run.receiver
 	r.liveMu.Lock()
 	if r.live == nil {
 		r.live = map[*activeRun][]redaction{}
 	}
 	r.live[run] = slices.Clone(run.redactions)
+	r.liveMu.Unlock()
+}
+
+// addForms is forms with the forms each of values is published in added, longest first: the value without trailing CR
+// and LF, as credential files written by echo or a CLI end in a newline that transcripts and outputs drop, and that form
+// escaped as a JSON string, as a transcript line carries it. A value shorter than minRedact once trimmed matches
+// ordinary text and JSON literals, so short gets its name and it is left. Both forms take the marker of the value's
+// name under key. A marker holding a form of any value would publish it, so that marker is [*], which no form of
+// minRedact bytes fits in.
+func addForms(forms []redaction, key []byte, values map[string][]byte, short func(name string)) []redaction {
+	for name, value := range values {
+		trimmed := bytes.TrimRight(value, "\r\n")
+		if len(trimmed) < minRedact {
+			short(name)
+			continue
+		}
+		escaped, _ := jsontext.AppendQuote(nil, trimmed) // invalid UTF-8 is replaced, and that form never appears in a transcript
+		marker := []byte(signed.RedactionMarker(key, name))
+		forms = append(forms, redaction{value: trimmed, marker: marker})
+		if escaped = escaped[1 : len(escaped)-1]; !bytes.Equal(escaped, trimmed) {
+			forms = append(forms, redaction{value: escaped, marker: marker})
+		}
+	}
+	for i, form := range forms {
+		if slices.ContainsFunc(forms, func(other redaction) bool { return bytes.Contains(form.marker, other.value) }) {
+			forms[i].marker = []byte("[*]")
+		}
+	}
+	slices.SortFunc(forms, func(a, b redaction) int { return len(b.value) - len(a.value) })
+	return forms
+}
+
+// HoldPlatformCredential has the receiver redact value, the platform credential name names, from the plugin output and
+// errors it logs, in the forms of a run credential, for as long as it runs. A platform credential has no run key, so
+// its marker is that of its name under no key.
+func (r *Receiver) HoldPlatformCredential(name string, value []byte) {
+	forms := addForms(nil, nil, map[string][]byte{name: value}, func(name string) {
+		r.logger.Printf("platform credential %s too short to redact", name)
+	})
+	r.liveMu.Lock()
+	r.platform = append(r.platform, forms...)
 	r.liveMu.Unlock()
 }
 
@@ -1214,11 +1235,11 @@ func redactTo(out io.Writer, data []byte, forms []redaction) int {
 	return replaced
 }
 
-// redactLive is text with every form of the values delivered to a run this receiver holds replaced by its marker, for
-// text no one run owns.
+// redactLive is text with every form of the platform credentials and of the values delivered to a run this receiver
+// holds replaced by its marker, for text no one run owns.
 func (r *Receiver) redactLive(text string) string {
 	r.liveMu.Lock()
-	forms := slices.Concat(slices.Collect(maps.Values(r.live))...)
+	forms := slices.Concat(append(slices.Collect(maps.Values(r.live)), r.platform)...)
 	r.liveMu.Unlock()
 	slices.SortFunc(forms, func(a, b redaction) int { return len(b.value) - len(a.value) })
 	var out strings.Builder

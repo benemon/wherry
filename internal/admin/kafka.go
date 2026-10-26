@@ -145,6 +145,25 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 	return service.reconcileACLs(ctx, state)
 }
 
+// ReceiverCheck makes ReceiverAdd's checks of config and returns it as the record would hold it, writing nothing.
+func (service *Service) ReceiverCheck(ctx context.Context, config ReceiverConfig) (ReceiverConfig, error) {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return ReceiverConfig{}, err
+	}
+	if _, exists := state.Receivers[config.Receiver]; exists {
+		return ReceiverConfig{}, errors.New("receiver exists; change its configuration with receiver configure")
+	}
+	terms, ok := state.Pools[config.Pool]
+	if !ok {
+		return ReceiverConfig{}, errors.New("receiver names unknown pool")
+	}
+	if err := ValidateConfig(config, terms); err != nil {
+		return ReceiverConfig{}, err
+	}
+	return asRecorded(Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config})
+}
+
 func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, bundlePath string) (err error) {
 	state, err := service.LoadState(ctx)
 	if err != nil {
@@ -184,23 +203,42 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 }
 
 // ReceiverConfigure records a new configuration for an existing receiver in its
-// pool. The principal, its password and the bundle are untouched; the receiver
-// exits on the new record and its platform restarts it.
-func (service *Service) ReceiverConfigure(ctx context.Context, config ReceiverConfig) error {
+// pool and returns it as recorded. The principal, its password and the bundle
+// are untouched; the receiver exits on the new record and its platform restarts
+// it. With dryRun it writes nothing and returns the configuration as the record
+// would hold it.
+func (service *Service) ReceiverConfigure(ctx context.Context, config ReceiverConfig, dryRun bool) (ReceiverConfig, error) {
 	state, err := service.LoadState(ctx)
 	if err != nil {
-		return err
+		return ReceiverConfig{}, err
 	}
 	current, ok := state.Receivers[config.Receiver]
 	if !ok || state.Ended[ReceiverPrincipal(config.Receiver)] {
-		return errors.New("no live receiver by that name")
+		return ReceiverConfig{}, errors.New("no live receiver by that name")
 	}
 	config.Pool = current.Pool
 	if err := ValidateConfig(config, state.Pools[config.Pool]); err != nil {
-		return err
+		return ReceiverConfig{}, err
 	}
-	_, err = service.appendChecked(ctx, []byte(config.Receiver), Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config})
-	return err
+	record := Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config}
+	if !dryRun {
+		state, err = service.appendChecked(ctx, []byte(config.Receiver), record)
+		return state.Receivers[config.Receiver], err
+	}
+	return asRecorded(record)
+}
+
+// asRecorded is record's configuration as a reader of the encoded record would decode it.
+func asRecorded(record Record) (ReceiverConfig, error) {
+	encoded, err := EncodeRecord(record)
+	if err != nil {
+		return ReceiverConfig{}, err
+	}
+	decoded, err := DecodeRecord(encoded)
+	if err != nil {
+		return ReceiverConfig{}, err
+	}
+	return *decoded.Config, nil
 }
 
 func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath string) (err error) {
