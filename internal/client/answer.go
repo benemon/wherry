@@ -29,7 +29,7 @@ import (
 func (h *Host) Answer(ctx context.Context) error {
 	f, err := h.follow(ctx)
 	if err != nil {
-		return err
+		return ignoreCancel(ctx, err)
 	}
 	version := "(devel)"
 	if info, ok := debug.ReadBuildInfo(); ok {
@@ -44,18 +44,23 @@ func (h *Host) Answer(ctx context.Context) error {
 		run      string
 		value    []byte
 		expiryMS int64
+		// failed holds when each of its credentials' command sources last failed.
+		failed map[string]time.Time
 	}
 	pending := map[string]request{}
 	// logged holds each pending request's last logged reason, so a request retried each interval logs a reason once.
 	logged := map[string]string{}
 	settle := func(key string) {
 		retry := func(format string, args ...any) {
+			if ctx.Err() != nil {
+				return
+			}
 			if reason := fmt.Sprintf(format, args...); logged[key] != reason {
 				logged[key] = reason
 				logger.Print(reason)
 			}
 		}
-		if waiting := pending[key]; !time.Now().Before(time.UnixMilli(waiting.expiryMS)) || h.answer(ctx, logger, waiting.run, waiting.value, retry) {
+		if waiting := pending[key]; !time.Now().Before(time.UnixMilli(waiting.expiryMS)) || h.answer(ctx, logger, waiting.run, waiting.value, waiting.failed, retry) {
 			delete(pending, key)
 			delete(logged, key)
 		}
@@ -78,7 +83,7 @@ func (h *Host) Answer(ctx context.Context) error {
 			}
 			if json.Unmarshal(jws.UnsafePayloadWithoutVerification(), &unverified) == nil {
 				key := fmt.Sprintf("%d/%d", record.Partition, record.Offset)
-				pending[key] = request{string(record.Key), record.Value, unverified.ExpiryMS}
+				pending[key] = request{string(record.Key), record.Value, unverified.ExpiryMS, map[string]time.Time{}}
 				settle(key)
 			}
 		}
@@ -97,11 +102,19 @@ func (h *Host) Answer(ctx context.Context) error {
 		if f.ctx.Err() != nil {
 			// The follower's owner stopped it; another follower reads every run that has not ended.
 			if f, err = h.follow(ctx); err != nil {
-				return err
+				return ignoreCancel(ctx, err)
 			}
 			next = max(next, f.start)
 		}
 	}
+}
+
+// ignoreCancel drops err when ctx has ended, since work the answerer's own end cuts short is no failure.
+func ignoreCancel(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 // retryInterval separates Answer's passes over requests whose run has no local record yet; lockRetry separates
@@ -110,6 +123,10 @@ const (
 	retryInterval = time.Second
 	lockRetry     = 50 * time.Millisecond
 )
+
+// commandBackoff separates the runs of a command source that failed for a seal request: its command's timeout, so an
+// interactive unlock prompts no more often than it can be answered. Tests shorten it.
+var commandBackoff = 60 * time.Second
 
 // requestLifetime bounds a seal request's expiry: the receiver's seal wait and a minute of clock skew.
 const requestLifetime = wire.SealWait + time.Minute
@@ -246,8 +263,9 @@ func removeLock(path string) {
 
 // answer seals the credentials a valid request asks for. Its logs carry names and causes, never a value or a source's
 // output. It reports whether the request is settled; a failure a later pass can clear is logged through retry and
-// leaves it unsettled, so Answer tries it again until it expires.
-func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, encoded []byte, retry func(format string, args ...any)) bool {
+// leaves it unsettled, so Answer tries it again until it expires. failed holds when each of the request's command
+// sources last failed; while one has failed within commandBackoff, no source is resolved.
+func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, encoded []byte, failed map[string]time.Time, retry func(format string, args ...any)) bool {
 	local, err := h.localRun(runID)
 	if err != nil {
 		retry("run %q: skipped a seal request: the run's local record is unreadable", runID)
@@ -261,6 +279,10 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 	if err != nil {
 		retry("run %s: read the run for a seal request: %v", runID, err)
 		return false
+	}
+	// A run that has ended needs no seal; sweep has removed the marker of an attempt answered before it ended.
+	if r.outcome != nil {
+		return true
 	}
 	_, kid := header(encoded)
 	request, err := authorize(ctx, r, kid, func(v view) (wire.SealRequest, error) {
@@ -278,6 +300,11 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 	if time.UnixMilli(request.ExpiryMS).After(time.Now().Add(requestLifetime)) {
 		logger.Printf("run %s: skipped a seal request from %s that expires beyond the seal wait", runID, request.Receiver)
 		return true
+	}
+	for _, at := range failed {
+		if time.Since(at) < commandBackoff {
+			return false
+		}
 	}
 	// Sources resolve before the attempt's lock, so a slow command does not hold up the host's other answerers.
 	terms := r.v.state.Pools[r.pool].Agents
@@ -297,14 +324,23 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 			return true
 		}
 		if values[name], err = source.Resolve(ctx); err != nil {
-			retry("run %s: resolve credential %s: %v", runID, name, err)
+			if len(source.Command) == 0 {
+				retry("run %s: resolve credential %s: %v", runID, name, err)
+			} else if ctx.Err() == nil {
+				if _, before := failed[name]; !before {
+					logger.Printf("run %s: resolve credential %s: %v", runID, name, err)
+				}
+				failed[name] = time.Now()
+			}
 			return false
 		}
 	}
 	// The check, the write and the marker run under the attempt's lock, so concurrent answerers write one seal.
 	unlock, err := h.lockAttempt(ctx, runID, request.Attempt)
 	if err != nil {
-		logger.Printf("run %s: lock the attempt: %v", runID, err)
+		if ctx.Err() == nil {
+			logger.Printf("run %s: lock the attempt: %v", runID, err)
+		}
 		return true
 	}
 	defer unlock()
@@ -345,12 +381,16 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 		store, err := h.bucket(ctx, r.pool, storage)
 		if err != nil {
 			// The error names the storage credentials; submit reports it, so the answerer logs a fixed reason.
-			logger.Printf("run %s: skipped a seal request for S3 URLs: the host's storage credential could not be used", runID)
+			if ctx.Err() == nil {
+				logger.Printf("run %s: skipped a seal request for S3 URLs: the host's storage credential could not be used", runID)
+			}
 			return true
 		}
 		urls, err := presign(ctx, store, storage.Bucket, h.tenant, runID, request.S3Inputs, request.S3Outputs, time.UnixMilli(local.DeadlineMS))
 		if err != nil {
-			logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)
+			if ctx.Err() == nil {
+				logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)
+			}
 			return true
 		}
 		maps.Copy(values, urls)
@@ -371,7 +411,9 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 	}
 	// A terminal status or another claim that landed while the seal was built stops the write.
 	if reason := h.active(ctx, request); reason != "" {
-		logger.Printf("run %s: %s", runID, reason)
+		if ctx.Err() == nil {
+			logger.Printf("run %s: %s", runID, reason)
+		}
 		return true
 	}
 	// The marker follows the acknowledged write: a crash between them answers again, and the receiver opens the first

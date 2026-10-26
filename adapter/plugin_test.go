@@ -330,6 +330,34 @@ func TestRestartConfiguresEveryProfile(t *testing.T) {
 	}
 }
 
+// A plugin that stops answering without exiting is killed and started again; the call it hung ends.
+func TestHungPluginIsRestarted(t *testing.T) {
+	shortRestart(t)
+	previous := pingInterval
+	pingInterval = 200 * time.Millisecond
+	t.Cleanup(func() { pingInterval = previous })
+	p, _, _ := launch(t)
+	a := configured(t, p, "a", `{"hang":true}`)
+	hung := pid(p)
+	// Close waits on a stopped process; one the supervisor failed to kill is resumed so the test ends.
+	t.Cleanup(func() { _ = syscall.Kill(hung, syscall.SIGCONT) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := a.Ready(ctx); !errors.Is(err, ErrLinkLost) {
+		t.Fatalf("ready on a hung plugin returned %v; want the link lost before its context ended", err)
+	}
+	eventually(t, "the profile back after the restart", func() error {
+		_, _, err := a.Dispatch(context.Background(), Run{ID: "after"})
+		return err
+	})
+	if after := pid(p); after == hung {
+		t.Fatalf("plugin process is still %d", hung)
+	}
+	if restarts := p.Restarts(); restarts != 1 {
+		t.Fatalf("restarts = %d; want 1", restarts)
+	}
+}
+
 func TestOneProcessPerPlugin(t *testing.T) {
 	p, record, _ := launch(t)
 	configured(t, p, "a", "{}")

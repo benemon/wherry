@@ -25,15 +25,20 @@ var (
 	restartBackoff    = time.Second
 	maxRestartBackoff = 30 * time.Second
 	configureTimeout  = 30 * time.Second
+	pingInterval      = 10 * time.Second
+	pingTimeout       = 5 * time.Second
 )
 
-// Plugin is one plugin process and every profile configured in it. When the process exits, Plugin starts
-// it again with back-off and configures every profile again; until then their calls return ErrLinkLost.
+// Plugin is one plugin process and every profile configured in it. When the process exits, or fails or does not
+// answer a ping, Plugin starts it again with back-off and configures every profile again; until then their calls
+// return ErrLinkLost.
 type Plugin struct {
 	// resolve checks the plugin binary and returns its path, before every start.
 	resolve func() (string, error)
 	// path is the binary the latest start ran, for log lines.
-	path   string
+	path string
+	// cmd is the process the latest start ran, killed when it stops answering pings.
+	cmd    *exec.Cmd
 	logger hclog.Logger
 	// configure serialises Configure with a restart, which configures every profile in settings.
 	configure sync.Mutex
@@ -55,7 +60,7 @@ func Launch(resolve func() (string, error), logs io.Writer) (*Plugin, error) {
 		return nil, err
 	}
 	p.client, p.rpc = client, rpc
-	go p.supervise(client)
+	go p.supervise(client, pingInterval)
 	return p, nil
 }
 
@@ -65,11 +70,11 @@ func (p *Plugin) start() (*plugin.Client, adapterv1.AdapterClient, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	p.path = path
+	p.path, p.cmd = path, exec.Command(path)
 	config := &plugin.ClientConfig{
 		HandshakeConfig:  handshake,
 		Plugins:          plugin.PluginSet{pluginName: &grpcPlugin{}},
-		Cmd:              exec.Command(path),
+		Cmd:              p.cmd,
 		AllowedProtocols: []plugin.Protocol{plugin.ProtocolGRPC},
 		AutoMTLS:         true,
 		Logger:           p.logger,
@@ -114,11 +119,21 @@ func configure(rpc adapterv1.AdapterClient, settings Settings) (*adapterv1.Confi
 	return resp, nil
 }
 
-// supervise restarts the process each time it exits, until Close.
-func (p *Plugin) supervise(client *plugin.Client) {
+// supervise restarts the process each time it exits, until Close. A process that fails or does not answer a ping every
+// interval is killed, since go-plugin's Kill waits on a graceful shutdown a hung process never makes.
+func (p *Plugin) supervise(client *plugin.Client, interval time.Duration) {
 	for {
+		pinged := time.Now()
 		for !client.Exited() {
 			time.Sleep(exitPoll)
+			if time.Since(pinged) < interval {
+				continue
+			}
+			if err := ping(client); err != nil && !client.Exited() {
+				p.logger.Warn("plugin did not answer a ping; killing it", "path", p.path, "error", err)
+				_ = p.cmd.Process.Kill()
+			}
+			pinged = time.Now()
 		}
 		p.mu.Lock()
 		if p.closed {
@@ -156,6 +171,22 @@ func (p *Plugin) supervise(client *plugin.Client) {
 			client = next
 			break
 		}
+	}
+}
+
+// ping checks the process answers go-plugin's health check within pingTimeout.
+func ping(client *plugin.Client) error {
+	protocol, err := client.Client()
+	if err != nil {
+		return err
+	}
+	answered := make(chan error, 1)
+	go func() { answered <- protocol.Ping() }()
+	select {
+	case err := <-answered:
+		return err
+	case <-time.After(pingTimeout):
+		return fmt.Errorf("no answer within %s", pingTimeout)
 	}
 }
 
