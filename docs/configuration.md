@@ -406,7 +406,8 @@ rules:
   that path before the plugin sees the configuration. A null with nothing
   inherited at its path is ignored. A null in a plugin's own `config` or
   `labels` is an error naming the plugin and the key path, such as
-  `runtime.config.image`.
+  `runtime.config.image`, and so is a null inside a list, such as
+  `runtime.config.args[1]`, which has nothing to delete.
 - A map at one level and a scalar or a list at the other, for the same key,
   is an error naming the plugin profile and the key path. A null is never
   such a clash.

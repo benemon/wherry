@@ -322,6 +322,14 @@ func TestReceiverConfigRefusesATypeClash(t *testing.T) {
 	}
 }
 
+// A null inside a list deletes nothing, and no plugin receives one.
+func TestReceiverConfigRefusesANullInsideAList(t *testing.T) {
+	_, err := readBase(t, nil, "name: claude\nagent: claude\nconfig: {runtime: {config: {args: [a, ~]}}}\n")
+	if err == nil || !strings.Contains(err.Error(), `profile "claude": config runtime.config.args[1] is null inside a list`) {
+		t.Fatalf("a null inside a list: %v; want it refused naming its path", err)
+	}
+}
+
 // Plugin labels are each profile's defaults, the profile winning per key, in either form.
 func TestReceiverConfigLabelsInheritPerKey(t *testing.T) {
 	config, err := readBase(t, nil, "name: batch\nagent: claude\nlabels: {tier: batch, gpu: \"yes\"}\n", "name: plain\nagent: claude\n",
@@ -371,7 +379,7 @@ func TestReceiverConfigDirectoryRejectsInvalidLayout(t *testing.T) {
 		"profiles in plugin":    {replace: map[string]string{"plugins/nomad/plugin.yaml": labPlugin + "profiles: []\n"}, want: "invalid or unknown field at line"},
 		"unknown profile key":   {replace: map[string]string{"plugins/nomad/profiles/20-nomad-exec.yaml": labExec + "type: nomad\n"}, want: "invalid or unknown field at line"},
 		"duplicate profile":     {replace: map[string]string{"plugins/nomad/profiles/30-again.yaml": labExec}, want: `30-again.yaml: profile name "nomad-exec" is repeated`},
-		"invalid type":          {replace: map[string]string{"plugins/Nomad/profiles/10-x.yaml": strings.Replace(labExec, "nomad-exec", "x", 1)}, want: `adapter type "Nomad" is not a valid name`},
+		"invalid type":          {replace: map[string]string{"plugins/Bad/profiles/10-x.yaml": strings.Replace(labExec, "nomad-exec", "x", 1)}, want: `adapter type "Bad" is not a valid name`},
 		"no profiles":           {replace: map[string]string{"plugins/nomad/profiles/": ""}, remove: []string{"plugins/nomad/profiles/10-nomad-podman.yaml", "plugins/nomad/profiles/20-nomad-exec.yaml"}, want: "holds no profiles"},
 		"no plugins":            {replace: map[string]string{"plugins/": ""}, remove: []string{"plugins/nomad/plugin.yaml", "plugins/nomad/profiles/10-nomad-podman.yaml", "plugins/nomad/profiles/20-nomad-exec.yaml"}, want: "holds no plugins"},
 		"non-yaml profile file": {replace: map[string]string{"plugins/nomad/profiles/30-typo.yml": labExec}, want: "30-typo.yml is not a .yaml file"},

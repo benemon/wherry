@@ -519,7 +519,7 @@ feed, grants its ACLs, applies its quotas, and writes its bundle.
 
 ```sh
 wherry admin receiver add RECEIVER --pool POOL \
-  <--config-file FILE|--config-dir DIR> --bundle-file FILE
+  <--config-file FILE|--config-dir DIR> <--bundle-file FILE|--dry-run>
 ```
 
 Reads the [receiver configuration](configuration.md#receiver-configuration) from a
@@ -529,6 +529,9 @@ grants its ACLs, and writes its bundle. It refuses an existing receiver.
 The bundle holds the receiver's Kafka identity alone; the receiver's [local
 configuration](configuration.md#receiver-local-configuration) gives the
 sources of its [platform credentials](configuration.md#platform-credentials).
+With `--dry-run`, it makes the same checks and prints each plugin profile as
+the record would hold it, in the format of `receiver show`, and creates and
+writes nothing; `--bundle-file` is then not needed.
 
 ### `wherry admin receiver configure RECEIVER`
 

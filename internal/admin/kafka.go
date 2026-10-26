@@ -145,6 +145,25 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 	return service.reconcileACLs(ctx, state)
 }
 
+// ReceiverCheck makes ReceiverAdd's checks of config and returns it as the record would hold it, writing nothing.
+func (service *Service) ReceiverCheck(ctx context.Context, config ReceiverConfig) (ReceiverConfig, error) {
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return ReceiverConfig{}, err
+	}
+	if _, exists := state.Receivers[config.Receiver]; exists {
+		return ReceiverConfig{}, errors.New("receiver exists; change its configuration with receiver configure")
+	}
+	terms, ok := state.Pools[config.Pool]
+	if !ok {
+		return ReceiverConfig{}, errors.New("receiver names unknown pool")
+	}
+	if err := ValidateConfig(config, terms); err != nil {
+		return ReceiverConfig{}, err
+	}
+	return asRecorded(Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config})
+}
+
 func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, bundlePath string) (err error) {
 	state, err := service.LoadState(ctx)
 	if err != nil {
@@ -206,6 +225,11 @@ func (service *Service) ReceiverConfigure(ctx context.Context, config ReceiverCo
 		state, err = service.appendChecked(ctx, []byte(config.Receiver), record)
 		return state.Receivers[config.Receiver], err
 	}
+	return asRecorded(record)
+}
+
+// asRecorded is record's configuration as a reader of the encoded record would decode it.
+func asRecorded(record Record) (ReceiverConfig, error) {
 	encoded, err := EncodeRecord(record)
 	if err != nil {
 		return ReceiverConfig{}, err

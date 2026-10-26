@@ -335,7 +335,15 @@ fails the task on `${WHERRY_MODEL:-<model>}`, so the fallback avoids braces.
 The value reaches the command through the environment, never pasted into its
 arguments.
 
-1. Write the configuration and add the receiver:
+1. Write the configuration and check it. `--dry-run` validates it against
+   the pool's terms and prints each plugin profile as the record would hold
+   it, writing nothing:
+
+   ```sh
+   wherry admin receiver add nomad-1 --pool build --config-dir nomad-1 --dry-run
+   ```
+
+   Then add the receiver:
 
    ```sh
    wherry admin receiver add nomad-1 --pool build \

@@ -129,6 +129,21 @@ func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
 
 // receiver show prints the recorded configuration; configure --dry-run records nothing and prints what recording the
 // file would store, as show prints it once recorded.
+// The record decodes numbers as float64; show prints a whole one as an integer.
+func TestReceiverShowPrintsWholeNumbersAsIntegers(t *testing.T) {
+	var out bytes.Buffer
+	config := admin.ReceiverConfig{Capacity: 1, Profiles: []admin.ProfileSettings{{Name: "p", Plugin: "nomad", Agent: "claude",
+		Config: map[string]any{"memory_mb": float64(1 << 20), "ratio": 0.5, "sizes": []any{float64(2048000)}}}}}
+	if err := showReceiver(&out, config); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"memory_mb: 1048576", "ratio: 0.5", "- 2048000"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("show printed\n%s\nwant %q", out.String(), want)
+		}
+	}
+}
+
 func TestReceiverShowAndDryRun(t *testing.T) {
 	service := adminEnv(t)
 	ctx := context.Background()
@@ -197,6 +212,12 @@ profiles:
 `
 	if dryRun != resolved {
 		t.Fatalf("dry run printed\n%s\nwant\n%s", dryRun, resolved)
+	}
+	if got := wherry("receiver", "add", "receiver-b", "--pool", "pool-a", "--config-file", file, "--dry-run"); got != resolved || records() != before {
+		t.Fatalf("receiver add --dry-run printed\n%s\nand left %d records; want the resolution and %d records", got, records(), before)
+	}
+	if err := runAdmin([]string{"receiver", "show", "receiver-b"}, io.Discard, io.Discard); err == nil {
+		t.Fatal("receiver add --dry-run recorded receiver-b")
 	}
 	if got := wherry("receiver", "show", "receiver-a"); got != shown {
 		t.Fatalf("after a dry run, show printed\n%s\nwant the recorded configuration", got)

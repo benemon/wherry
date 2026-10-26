@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -67,8 +68,9 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		}
 		return service.PoolCreate(ctx, pos[2], terms)
 	case "receiver add":
-		if len(pos) != 3 || options["pool"] == "" || options["bundle-file"] == "" {
-			return errors.New("usage: wherry admin receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> --bundle-file FILE")
+		_, dryRun := options["dry-run"]
+		if len(pos) != 3 || options["pool"] == "" || options["bundle-file"] == "" && !dryRun {
+			return errors.New("usage: wherry admin receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> <--bundle-file FILE|--dry-run>")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -79,6 +81,12 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		config.Receiver, config.Pool = pos[2], options["pool"]
+		if dryRun {
+			if config, err = service.ReceiverCheck(ctx, config); err != nil {
+				return err
+			}
+			return showReceiver(stdout, config)
+		}
 		return service.ReceiverAdd(ctx, config, options["bundle-file"])
 	case "receiver configure":
 		if len(pos) != 3 {
@@ -175,6 +183,10 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 
 // showReceiver writes config's capacity and resolved profiles, in routing order, to out as YAML.
 func showReceiver(out io.Writer, config admin.ReceiverConfig) error {
+	// The record decodes numbers as float64, which YAML would print as 1e+06.
+	for i := range config.Profiles {
+		config.Profiles[i].Config = integral(config.Profiles[i].Config).(map[string]any)
+	}
 	encoded, err := yaml.Marshal(struct {
 		Capacity int64                   `yaml:"capacity"`
 		Profiles []admin.ProfileSettings `yaml:"profiles"`
@@ -184,6 +196,25 @@ func showReceiver(out io.Writer, config admin.ReceiverConfig) error {
 	}
 	_, err = out.Write(encoded)
 	return err
+}
+
+// integral is value with each whole float64 within it as an int64.
+func integral(value any) any {
+	switch value := value.(type) {
+	case float64:
+		if value == math.Trunc(value) && math.Abs(value) < 1<<53 {
+			return int64(value)
+		}
+	case map[string]any:
+		for key, inner := range value {
+			value[key] = integral(inner)
+		}
+	case []any:
+		for i, inner := range value {
+			value[i] = integral(inner)
+		}
+	}
+	return value
 }
 
 func adminArgs(args []string) ([]string, map[string]string, error) {
@@ -216,7 +247,7 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 	}
 	allowed := map[string]map[string]bool{
 		"pool create":        {"config-file": true, "config-dir": true},
-		"receiver add":       {"pool": true, "config-file": true, "config-dir": true, "bundle-file": true},
+		"receiver add":       {"pool": true, "config-file": true, "config-dir": true, "bundle-file": true, "dry-run": true},
 		"receiver configure": {"config-file": true, "config-dir": true, "dry-run": true},
 		"receiver show":      {},
 		"pool entitle":       {"tenant": true},
@@ -428,6 +459,10 @@ func receiverConfig(capacity int64, plugins []plugin) (admin.ReceiverConfig, err
 			if err != nil {
 				return config, fmt.Errorf("%s: profile %q: config %w", e.where, profile.Name, err)
 			}
+			// A null deletes a key; inside a list it has nothing to delete, and no plugin receives one.
+			if path := nullAt(merged, ""); path != "" {
+				return config, fmt.Errorf("%s: profile %q: config %s is null inside a list", e.where, profile.Name, path)
+			}
 			if name, ok := merged["credential"]; ok {
 				if _, ok := name.(string); !ok {
 					return config, fmt.Errorf("%s: profile %q: credential is not a string", e.where, profile.Name)
@@ -480,15 +515,25 @@ func merge(base, over map[string]any, path string) (map[string]any, error) {
 	return merged, nil
 }
 
-// nullAt is the dotted path of a null in values, empty without one.
+// nullAt is the dotted path of a null in values, a list element written as path[i], empty without one.
 func nullAt(values map[string]any, path string) string {
 	for key, value := range values {
-		at := strings.TrimPrefix(path+"."+key, ".")
-		if value == nil {
-			return at
+		if found := nullIn(value, strings.TrimPrefix(path+"."+key, ".")); found != "" {
+			return found
 		}
-		if inner, ok := value.(map[string]any); ok {
-			if found := nullAt(inner, at); found != "" {
+	}
+	return ""
+}
+
+func nullIn(value any, at string) string {
+	switch value := value.(type) {
+	case nil:
+		return at
+	case map[string]any:
+		return nullAt(value, at)
+	case []any:
+		for i, element := range value {
+			if found := nullIn(element, fmt.Sprintf("%s[%d]", at, i)); found != "" {
 				return found
 			}
 		}
