@@ -806,6 +806,26 @@ func TestResolvePlacementChoosesMostSpareThenLowestID(t *testing.T) {
 	}
 }
 
+func TestResolvePlacementPrefersTheDefaultAgentOverSpareCapacity(t *testing.T) {
+	state := admin.NewState()
+	state.Pools["pool-a"] = testTerms()
+	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
+	ads := map[string]wire.Advertisement{}
+	for _, member := range []struct {
+		id, agent string
+		spare     int64
+	}{{"receiver-a", "codex", 9}, {"receiver-b", "claude", 1}} {
+		state.Receivers[member.id] = admin.ReceiverConfig{Receiver: member.id, Pool: "pool-a", Profiles: []admin.ProfileSettings{{Name: member.agent, Plugin: "nomad", Agent: member.agent}}}
+		ads[member.id] = wire.Advertisement{Receiver: member.id, Pool: "pool-a", Capacity: member.spare, Offers: []wire.Offer{{Profile: member.agent, Agent: member.agent}}}
+	}
+	if _, placement, err := resolvePlacement(state, "tenant-a", "", "", nil, ads); err != nil || placement.Agent != "claude" {
+		t.Fatalf("placed %#v %v, want the default agent claude through receiver-b despite receiver-a's spare capacity", placement, err)
+	}
+	if _, placement, err := resolvePlacement(state, "tenant-a", "codex", "", nil, ads); err != nil || placement.Agent != "codex" {
+		t.Fatalf("placed %#v %v, want the named agent codex", placement, err)
+	}
+}
+
 func TestStatusBeforeAndAfterEcho(t *testing.T) {
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")

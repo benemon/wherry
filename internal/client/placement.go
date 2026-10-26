@@ -13,12 +13,14 @@ import (
 
 // resolvePlacement chooses, among live advertisements in the tenant's entitled pools, the member with the most spare
 // capacity, then the lowest receiver ID, that has a ready profile launching the agent with labels satisfying selector.
-// An empty agent takes the pool's default agent, then its declared order. Labels come from the operator's config
+// An empty agent takes the pool's default agent, then its declared order, and a member placing its pool's default
+// agent wins over any member placing another before spare capacity counts. Labels come from the operator's config
 // record, never the advertisement. When no member places the task and a pool's terms refuse its model, the error is
 // that refusal.
 func resolvePlacement(state admin.State, tenant, agent, model string, selector []wire.Requirement, ads map[string]wire.Advertisement) (string, wire.Placement, error) {
 	var chosen *wire.Advertisement
 	var placement wire.Placement
+	var chosenDefault bool
 	var refused error
 	for _, receiver := range slices.Sorted(maps.Keys(ads)) {
 		ad := ads[receiver]
@@ -26,9 +28,10 @@ func resolvePlacement(state admin.State, tenant, agent, model string, selector [
 			continue
 		}
 		placed, err := place(state.Pools[ad.Pool], ad.Pool, state.Receivers[receiver], agent, model, selector, ad.Offers)
+		isDefault := agent == "" && placed.Agent == state.Pools[ad.Pool].DefaultAgent
 		switch {
-		case err == nil && (chosen == nil || spare(ad) > spare(*chosen)):
-			chosen, placement = &ad, placed
+		case err == nil && (chosen == nil || isDefault && !chosenDefault || isDefault == chosenDefault && spare(ad) > spare(*chosen)):
+			chosen, placement, chosenDefault = &ad, placed, isDefault
 		case errors.Is(err, ErrInvalidInput) && refused == nil:
 			refused = err
 		}

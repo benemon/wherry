@@ -78,6 +78,5 @@ export WHERRY_TRUST_BROKER=127.0.0.1:9093
 export WHERRY_TRUST_CA=$dir/ca.crt
 export WHERRY_TRUST_ADMIN_USER=wherry-admin
 export WHERRY_TRUST_ADMIN_PASSWORD_FILE=$dir/admin-password
-export WHERRY_TRUST_OPERATOR_USER=wherry.operator
 export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=$dir/operator-password
 EOF

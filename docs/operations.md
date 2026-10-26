@@ -56,7 +56,6 @@ export WHERRY_TRUST_BROKER=kafka.example.com:9093
 export WHERRY_TRUST_CA=/etc/wherry/kafka-ca.pem
 export WHERRY_TRUST_ADMIN_USER=kafka-admin
 export WHERRY_TRUST_ADMIN_PASSWORD_FILE=/etc/wherry/admin-password
-export WHERRY_TRUST_OPERATOR_USER=wherry.operator
 export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=/etc/wherry/operator-password
 ```
 

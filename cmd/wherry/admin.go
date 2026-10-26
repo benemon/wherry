@@ -37,12 +37,12 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	root, err := adminKafka(broker, ca, "WHERRY_TRUST_ADMIN_USER", "", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
+	root, err := adminKafka(broker, ca, os.Getenv("WHERRY_TRUST_ADMIN_USER"), "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	operator, err := adminKafka(broker, ca, "WHERRY_TRUST_OPERATOR_USER", admin.OperatorPrincipal, "WHERRY_TRUST_OPERATOR_PASSWORD_FILE")
+	operator, err := adminKafka(broker, ca, admin.OperatorPrincipal, "WHERRY_TRUST_OPERATOR_PASSWORD_FILE")
 	if err != nil {
 		return err
 	}
@@ -139,6 +139,9 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		wait, err := time.ParseDuration(cmp.Or(options["wait"], "0s"))
 		if err != nil {
 			return err
+		}
+		if _, given := options["wait"]; given && wait <= 0 {
+			return errors.New("--wait must be positive; omit it to compute the safe wait from the broker's timeouts")
 		}
 		topic := admin.ReceiverTopic(pos[2])
 		if pos[0] == "host" {
@@ -611,9 +614,9 @@ func yamlFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
-// adminKafka connects to broker, trusting ca, as the user userEnv names, or defaultUser when it is unset.
-func adminKafka(broker string, ca []byte, userEnv, defaultUser, passwordEnv string) (*kgo.Client, error) {
-	user, passwordPath := cmp.Or(os.Getenv(userEnv), defaultUser), os.Getenv(passwordEnv)
+// adminKafka connects to broker, trusting ca, as user with the password in the file passwordEnv names.
+func adminKafka(broker string, ca []byte, user, passwordEnv string) (*kgo.Client, error) {
+	passwordPath := os.Getenv(passwordEnv)
 	if user == "" || passwordPath == "" {
 		return nil, errors.New("trust broker credentials are not configured")
 	}

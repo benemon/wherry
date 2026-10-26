@@ -734,7 +734,6 @@ therefore ends within six hours after `max_queue_deadline`.
 | `WHERRY_TRUST_CA` | `wherry admin` | PEM CA file for the broker, also written into bundles |
 | `WHERRY_TRUST_ADMIN_USER` | `wherry admin` | super user name |
 | `WHERRY_TRUST_ADMIN_PASSWORD_FILE` | `wherry admin` | file holding the super user's SCRAM password |
-| `WHERRY_TRUST_OPERATOR_USER` | `wherry admin` | operator principal name, `wherry.operator`, which is the default |
 | `WHERRY_TRUST_OPERATOR_PASSWORD_FILE` | `wherry admin` | file holding the operator's SCRAM password |
 
 A plugin reads its own variables from the receiver's environment; the

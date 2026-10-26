@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	json "encoding/json/v2"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -135,6 +136,33 @@ func TestPoolCreateRefusesMaxQueueDeadlinePastAnEntitledFeed(t *testing.T) {
 	err := service.PoolCreate(ctx, "pool-a", modelTerms())
 	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 1231199999 is below required 1231200000" {
 		t.Fatalf("pool create = %v", err)
+	}
+}
+
+func TestPoolCreateRefusesTermsThatStrandALiveReceiver(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	terms := modelTerms()
+	terms.Agents = append(terms.Agents, AgentTerms{Name: "codex"})
+	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+		t.Fatal(err)
+	}
+	config := ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []ProfileSettings{{Name: "profile-codex", Plugin: "fake", Agent: "codex"}}}
+	if err := service.ReceiverAdd(ctx, config, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	err := service.PoolCreate(ctx, "pool-a", modelTerms())
+	if err == nil || err.Error() != "pool terms would strand live receivers: receiver receiver-a plugin fake profile profile-codex: receiver agent is outside pool terms" {
+		t.Fatalf("pool create without codex = %v", err)
+	}
+	if state, err := service.LoadState(ctx); err != nil || len(state.Pools["pool-a"].Agents) != 2 {
+		t.Fatalf("pool-a terms %v, %v; want the terms with codex kept", state.Pools["pool-a"], err)
+	}
+	terms.Agents = terms.Agents[1:]
+	terms.DefaultAgent = "codex"
+	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+		t.Fatalf("pool create keeping codex = %v", err)
 	}
 }
 

@@ -47,7 +47,7 @@ func TestKafkaClientRejectsPlaintextListener(t *testing.T) {
 	t.Setenv("WHERRY_TRUST_CA", caPath)
 	t.Setenv("WHERRY_TRUST_ADMIN_USER", "admin")
 	t.Setenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE", passwordPath)
-	client, err := adminKafka(cluster.ListenAddrs()[0], pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), "WHERRY_TRUST_ADMIN_USER", "", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
+	client, err := adminKafka(cluster.ListenAddrs()[0], pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), "admin", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,6 @@ func adminEnv(t *testing.T) *admin.Service {
 	t.Setenv("WHERRY_TRUST_CA", filepath.Join(dir, "ca.pem"))
 	t.Setenv("WHERRY_TRUST_ADMIN_USER", "admin")
 	t.Setenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE", filepath.Join(dir, "admin"))
-	t.Setenv("WHERRY_TRUST_OPERATOR_USER", "wherry.operator")
 	t.Setenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE", filepath.Join(dir, "operator"))
 	address := cluster.ListenAddrs()[0]
 	return &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
@@ -124,6 +123,26 @@ func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
 		if !strings.Contains(line, "complete=true") || strings.Contains(line, "error=") {
 			t.Fatalf("step line %q, want completed steps without a cause", line)
 		}
+	}
+}
+
+func TestRevokeRefusesAWaitThatIsNotPositive(t *testing.T) {
+	adminEnv(t)
+	const want = "--wait must be positive; omit it to compute the safe wait from the broker's timeouts"
+	for _, args := range [][]string{
+		{"receiver", "revoke", "receiver-a", "--wait", "0s"},
+		{"receiver", "revoke", "receiver-a", "--wait", "-1s"},
+		{"host", "revoke", "host-a", "--tenant", "tenant-a", "--wait", "0s"},
+		{"host", "revoke", "host-a", "--tenant", "tenant-a", "--wait", "-1s"},
+	} {
+		var stdout bytes.Buffer
+		if err := runAdmin(args, &stdout, io.Discard); err == nil || err.Error() != want || stdout.Len() != 0 {
+			t.Errorf("%q = %v with output %q, want %q before any step", args, err, stdout.String(), want)
+		}
+	}
+	var stdout bytes.Buffer
+	if err := runAdmin([]string{"receiver", "revoke", "receiver-a"}, &stdout, io.Discard); err != nil && err.Error() == want || !strings.HasPrefix(stdout.String(), "step=1 ") {
+		t.Fatalf("revoke without --wait = %v with output %q, want the revocation steps run", err, stdout.String())
 	}
 }
 
