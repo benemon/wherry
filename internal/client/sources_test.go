@@ -122,6 +122,65 @@ func TestACommandSourceRunsOutsideTheAttemptLock(t *testing.T) {
 	f.waitSeals(t, "host-a", 1)
 }
 
+// A command source that fails is not run again for the request until commandBackoff has passed, and its failure is
+// logged once; one that recovers by then still answers the request.
+func TestAFailingCommandSourceBacksOff(t *testing.T) {
+	previous := commandBackoff
+	commandBackoff = 3 * time.Second
+	t.Cleanup(func() { commandBackoff = previous })
+	f := newFixture(t)
+	dir := t.TempDir()
+	runs, token := filepath.Join(dir, "runs"), filepath.Join(dir, "token")
+	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `echo >> "$0"; cat "$1"`, runs, token}}
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	answering(t, f, f.host)
+	want := "run " + runID + ": resolve credential model: its command exited with status 1"
+	f.logged(t, "host-a", want, 4500*time.Millisecond)
+	if ran, _ := os.ReadFile(runs); len(ran) != 2 {
+		t.Fatalf("the command ran %d times in 4.5 seconds, want twice", len(ran))
+	}
+	if lines := f.logged(t, "host-a", want, 0); len(lines) != 1 {
+		t.Fatalf("want one line; logs:\n%s", f.logs.String())
+	}
+	if err := os.WriteFile(token, []byte("model-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.waitSeals(t, "host-a", 1)
+	if values := asked.open(t, f, "host-a"); string(values["model"]) != "model-token" {
+		t.Fatalf("sealed %q, want the value the recovered command wrote", values)
+	}
+}
+
+// A command source cut short by the answerer's own end logs nothing.
+func TestACommandSourceCutShortByTheEndLogsNothing(t *testing.T) {
+	f := newFixture(t)
+	started := filepath.Join(t.TempDir(), "started")
+	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `touch "$0"; exec sleep 30`, started}}
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
+	ctx, stop := context.WithCancel(f.ctx)
+	done := make(chan error, 1)
+	go func() { done <- f.host.Answer(ctx) }()
+	for _, err := os.Stat(started); err != nil; _, err = os.Stat(started) {
+		if f.ctx.Err() != nil {
+			t.Fatalf("the command never started; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stop()
+	if err := <-done; err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+	if logs := f.logs.String(); strings.Contains(logs, "run "+runID) {
+		t.Fatalf("logged work its own end cut short:\n%s", logs)
+	}
+}
+
 func TestSubmitRefusesARequiredAgentCredentialWithoutASource(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)

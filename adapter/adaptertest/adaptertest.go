@@ -176,7 +176,8 @@ func follow(t *testing.T, ctx context.Context, a adapter.Adapter, handle adapter
 	}
 }
 
-// idempotent stops a run's job twice, then releases it twice, then purges it twice; every call succeeds.
+// idempotent stops a run's job twice, then releases it twice, then purges it twice, then stops it again, as a receiver
+// adopting a job the platform has removed does; every call succeeds.
 func idempotent(t *testing.T, ctx context.Context, a adapter.Adapter, runID string, handle adapter.Handle) {
 	t.Helper()
 	for range 2 {
@@ -194,6 +195,11 @@ func idempotent(t *testing.T, ctx context.Context, a adapter.Adapter, runID stri
 	for range 2 {
 		if err := a.Purge(ctx, runID); err != nil {
 			t.Fatalf("purge: %v", err)
+		}
+	}
+	if handle.Data != nil {
+		if err := a.Stop(ctx, handle); err != nil {
+			t.Fatalf("stop after purge: %v", err)
 		}
 	}
 }

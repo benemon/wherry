@@ -473,6 +473,33 @@ func TestAnswerLogsACredentialThisHostLacks(t *testing.T) {
 	}
 }
 
+// A request read after its run ended, as by a later answerer once sweep removed its attempt's marker, resolves no
+// source and logs nothing.
+func TestARequestForAnEndedRunIsSettledQuietly(t *testing.T) {
+	f := newFixture(t)
+	resolved := filepath.Join(t.TempDir(), "resolved")
+	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `echo >> "$0"; printf model-token`, resolved}}
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record), receiver.result(t, task, 1, wire.TaskStateCompleted, nil),
+		receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil))
+	answering(t, f, f.host)
+	// A request for another run, after the first, shows the first has been read.
+	next := f.anotherRun(t, receiver)
+	control := newRequest(t, receiver.binding(next, 1), "model")
+	receiver.feed(t, f.ctx, next.submission.Wherry.Run, receiver.sign(t, &control.record))
+	f.waitSeals(t, "host-a", 1)
+	time.Sleep(1500 * time.Millisecond)
+	control.open(t, f, "host-a")
+	if ran, _ := os.ReadFile(resolved); len(ran) != 1 {
+		t.Fatalf("the command ran %d times, want once, for the live run; logs:\n%s", len(ran), f.logs.String())
+	}
+	if logs := f.logs.String(); strings.Contains(logs, "run "+runID+":") {
+		t.Fatalf("logged the ended run's request:\n%s", logs)
+	}
+}
+
 // A status that ends the attempt while its seal is built stops the write.
 func TestAnEndWhileSealingStopsTheWrite(t *testing.T) {
 	f := newFixture(t)

@@ -16,6 +16,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"syscall"
 
 	"github.com/benemon/wherry/adapter"
 	"github.com/hashicorp/go-hclog"
@@ -53,6 +54,8 @@ type config struct {
 	// Jobs makes the plugin keep each run's job as a platform does, for the conformance suite: Lookup finds it, Follow
 	// and Stop end it, Purge removes it, and Collect finds no outputs in it unless Outputs is set.
 	Jobs bool `json:"jobs"`
+	// Hang makes Ready stop the process without it exiting, so it answers nothing more, go-plugin's pings included.
+	Hang bool `json:"hang"`
 }
 
 type record struct {
@@ -112,6 +115,11 @@ func (f *fake) InlineLimit() int64 { return f.config.InlineLimit }
 
 func (f *fake) Ready(context.Context) (bool, error) {
 	f.panics("Ready")
+	if f.config.Hang {
+		// SIGSTOP reaches the process's threads asynchronously, so this one could answer first; it never does.
+		_ = syscall.Kill(os.Getpid(), syscall.SIGSTOP)
+		select {}
+	}
 	return true, nil
 }
 
