@@ -10,7 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/credential"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const labPlugin = `config:
@@ -196,12 +199,151 @@ func TestReceiverConfigVisitsPluginsSortedByType(t *testing.T) {
 	}
 }
 
-func TestReceiverConfigRefusesAKeySetByPluginAndProfile(t *testing.T) {
-	dir := labTree(t, map[string]string{"plugins/nomad/profiles/20-nomad-exec.yaml": labExec + "  namespace: other\n"})
-	_, err := readReceiverConfig(dir, true)
-	if err == nil || !strings.Contains(err.Error(), "20-nomad-exec.yaml") || !strings.Contains(err.Error(), `profile "nomad-exec"`) ||
-		!strings.Contains(err.Error(), `"namespace"`) || !strings.Contains(err.Error(), "plugin nomad") {
-		t.Fatalf("readReceiverConfig = %v, want an error naming the profile, its file, the key and the plugin", err)
+// basePlugin is a single-file receiver config whose plugin holds a base runtime and labels, its profiles to follow.
+const basePlugin = `plugins:
+  nomad:
+    labels: {platform: nomad, tier: base}
+    config:
+      address: https://nomad.example:4646
+      credential: nomad-token
+      runtime:
+        driver: docker
+        config: {image: base:1, args: [a, b]}
+        resources: {cpu: 1000}
+    profiles:
+`
+
+// readBase reads basePlugin, with replace applied to it, holding profiles.
+func readBase(t *testing.T, replace map[string]string, profiles ...string) (admin.ReceiverConfig, error) {
+	t.Helper()
+	document := basePlugin
+	for old, new := range replace {
+		document = strings.Replace(document, old, new, 1)
+	}
+	for _, profile := range profiles {
+		document += item(profile, "      ")
+	}
+	return readReceiverConfig(filepath.Join(writeTree(t, map[string]string{"receiver.yaml": document}), "receiver.yaml"), false)
+}
+
+// A profile that sets one nested key keeps every sibling its plugin sets, and the plugin's config stays its own for the
+// next profile.
+func TestReceiverConfigOverridesANestedKeyKeepingItsSiblings(t *testing.T) {
+	config, err := readBase(t, nil, "name: claude\nagent: claude\nconfig: {runtime: {config: {image: claude:1}}}\n", "name: plain\nagent: claude\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := func(image string) map[string]any {
+		return map[string]any{"address": "https://nomad.example:4646", "credential": "nomad-token", "runtime": map[string]any{
+			"driver": "docker", "config": map[string]any{"image": image, "args": []any{"a", "b"}}, "resources": map[string]any{"cpu": 1000},
+		}}
+	}
+	if !reflect.DeepEqual(config.Profiles[0].Config, runtime("claude:1")) || !reflect.DeepEqual(config.Profiles[1].Config, runtime("base:1")) {
+		t.Fatalf("configs %+v and %+v; want claude's image over the plugin's runtime and plain with the plugin's", config.Profiles[0].Config, config.Profiles[1].Config)
+	}
+}
+
+func TestReceiverConfigListReplacesWhole(t *testing.T) {
+	config, err := readBase(t, nil, "name: claude\nagent: claude\nconfig: {runtime: {config: {args: [c]}}}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := config.Profiles[0].Config["runtime"].(map[string]any)["config"]; !reflect.DeepEqual(got, map[string]any{"image": "base:1", "args": []any{"c"}}) {
+		t.Fatalf("runtime config %+v; want the profile's list in place of the plugin's", got)
+	}
+}
+
+// A null on a profile removes the inherited key, a map included, and the plugin is configured without it.
+func TestReceiverConfigNullDeletesAnInheritedKey(t *testing.T) {
+	config, err := readBase(t, nil, "name: host\nagent: claude\nconfig:\n  runtime: {driver: exec, config: {image: null, command: /bin/run}, resources: ~}\n",
+		"name: bare\nagent: claude\nconfig: {runtime: null}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"driver": "exec", "config": map[string]any{"args": []any{"a", "b"}, "command": "/bin/run"}}
+	if got := config.Profiles[0].Config["runtime"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("runtime %+v; want %+v", got, want)
+	}
+	if _, ok := config.Profiles[1].Config["runtime"]; ok {
+		t.Fatalf("config %+v; want the inherited runtime removed", config.Profiles[1].Config)
+	}
+	read := recordPlugin(t)
+	token := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(token, []byte("nomad-platform-token-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"nomad-token": {File: token}}, hold: func(string, []byte) {},
+		logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	defer plugins.close()
+	settings := config.Profiles[0]
+	settings.Plugin = "fake"
+	if _, err := plugins.profile("build", settings); err != nil {
+		t.Fatal(err)
+	}
+	if configured := string(read()[0].Settings.Config); strings.Contains(configured, "image") || strings.Contains(configured, "resources") || strings.Contains(configured, "null") {
+		t.Fatalf("plugin configured with %s; want neither deleted key nor a null", configured)
+	}
+}
+
+func TestReceiverConfigIgnoresANullWithNothingInherited(t *testing.T) {
+	config, err := readBase(t, nil, "name: claude\nagent: claude\nlabels: {absent: ~}\nconfig: {extra: null, runtime: {config: {missing: ~}}}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := config.Profiles[0]
+	if _, ok := profile.Config["extra"]; ok || len(profile.Config["runtime"].(map[string]any)["config"].(map[string]any)) != 2 || len(profile.Labels) != 2 {
+		t.Fatalf("profile %+v; want the nulls with nothing under them dropped", profile)
+	}
+}
+
+func TestReceiverConfigRefusesANullInThePlugin(t *testing.T) {
+	for _, test := range []struct{ old, new, want string }{
+		{"image: base:1", "image: ~", "plugin nomad sets config key runtime.config.image to null"},
+		{"tier: base", "tier: null", "plugin nomad sets labels key tier to null"},
+	} {
+		_, err := readBase(t, map[string]string{test.old: test.new}, "name: claude\nagent: claude\n")
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("readReceiverConfig = %v; want %q", err, test.want)
+		}
+	}
+}
+
+// A map against a scalar or a list at one path is refused, in either direction, naming the profile and the path.
+func TestReceiverConfigRefusesATypeClash(t *testing.T) {
+	for config, path := range map[string]string{
+		"{runtime: docker}":              "runtime",
+		"{runtime: {config: [x]}}":       "runtime.config",
+		"{address: {host: nomad.local}}": "address",
+	} {
+		_, err := readBase(t, nil, "name: claude\nagent: claude\nconfig: "+config+"\n")
+		if err == nil || !strings.Contains(err.Error(), `profile "claude": config key `+path+" is a map at one level and not at the other") {
+			t.Errorf("profile config %s: %v; want a type clash at %s", config, err, path)
+		}
+	}
+}
+
+// Plugin labels are each profile's defaults, the profile winning per key, in either form.
+func TestReceiverConfigLabelsInheritPerKey(t *testing.T) {
+	config, err := readBase(t, nil, "name: batch\nagent: claude\nlabels: {tier: batch, gpu: \"yes\"}\n", "name: plain\nagent: claude\n",
+		"name: bare\nagent: claude\nlabels: {platform: null}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []map[string]string{{"platform": "nomad", "tier": "batch", "gpu": "yes"}, {"platform": "nomad", "tier": "base"}, {"tier": "base"}} {
+		if !reflect.DeepEqual(config.Profiles[i].Labels, want) {
+			t.Errorf("profile %s labels %v; want %v", config.Profiles[i].Name, config.Profiles[i].Labels, want)
+		}
+	}
+	config, err = readReceiverConfig(labTree(t, map[string]string{"plugins/nomad/plugin.yaml": "labels: {platform: nomad, isolation: any}\n" + labPlugin}), true)
+	if err != nil || !reflect.DeepEqual(config.Profiles[1].Labels, map[string]string{"platform": "nomad", "isolation": "host"}) {
+		t.Fatalf("directory form: %+v, %v; want plugin.yaml's labels under nomad-exec's", config.Profiles, err)
+	}
+}
+
+func TestReceiverConfigRefusesANonStringCredential(t *testing.T) {
+	_, err := readBase(t, nil, "name: claude\nagent: claude\nconfig: {credential: 5}\n")
+	if err == nil || !strings.Contains(err.Error(), `profile "claude": credential is not a string`) {
+		t.Fatalf("readReceiverConfig = %v; want the credential refused naming the profile", err)
 	}
 }
 

@@ -1,7 +1,7 @@
 capacity: 3
 plugins:
   nomad:
-    # Every profile of this plugin takes these keys and must not set them itself.
+    # Every plugin profile of this plugin inherits these keys and can override them.
     config:
       address: https://nomad.example.com:4646
       ca_file: /etc/wherry/nomad-ca.pem

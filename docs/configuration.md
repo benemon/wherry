@@ -367,8 +367,9 @@ entry:
 
 | Field | Content |
 | --- | --- |
-| `config` | optional; settings every profile of the plugin takes |
-| `profiles` | one or more profile entries, in routing order |
+| `labels` | optional; [labels](commands.md#labels) every plugin profile of the plugin inherits |
+| `config` | optional; settings every plugin profile of the plugin inherits |
+| `profiles` | one or more plugin profile entries, in routing order |
 
 Each profile entry:
 
@@ -379,11 +380,10 @@ Each profile entry:
 | `labels` | optional; [labels](commands.md#labels) for placement |
 | `config` | the plugin's settings for this profile |
 
-A profile's `config` is its plugin's `config` merged with its own at the
-top level. A top-level key set in both is an error that names the profile
-entry's file or list index, the key and the plugin. Nested values do not
-merge. A `credential` key in the merged `config` names a [platform
-credential](#platform-credentials).
+A plugin profile's `config` and `labels` are its plugin's merged with its
+own, as [Plugin profile merge](#plugin-profile-merge) describes. A
+`credential` key in the merged `config` names a [platform
+credential](#platform-credentials), and its value is a string.
 
 The receiver routes a run to the first ready profile, in order within its
 plugin, whose agent and labels satisfy the task. It visits the plugins in
@@ -391,6 +391,70 @@ the order of their types, so the host and the receiver compute the same
 match, but labels choose between plugins and no configuration relies on an
 order between them. The record on `wherry.admin` holds each profile with
 its name, plugin type, agent, labels and merged `config`.
+
+### Plugin profile merge
+
+The plugin holds the base configuration and each plugin profile states how
+it differs. The merge of a plugin profile's `config` onto its plugin's
+`config`, and of its `labels` onto its plugin's `labels`, follows these
+rules:
+
+- Maps merge recursively, and the plugin profile's value wins on every leaf
+  it sets.
+- A list on a plugin profile replaces the plugin's list whole.
+- `key: null`, or `key: ~`, on a plugin profile removes the inherited key at
+  that path before the plugin sees the configuration. A null with nothing
+  inherited at its path is ignored. A null in a plugin's own `config` or
+  `labels` is an error naming the plugin and the key path, such as
+  `runtime.config.image`.
+- A map at one level and a scalar or a list at the other, for the same key,
+  is an error naming the plugin profile and the key path. A null is never
+  such a clash.
+- `credential` merges like any key: a default on the plugin and an exception
+  on a plugin profile.
+- `agent` belongs to the plugin profile alone.
+
+No plugin receives a null. Here the plugin holds the cluster's address, its
+credential, a Docker runtime and a `platform` label. Plugin profile `claude`
+overrides only the image. Plugin profile `host` switches the driver to
+`exec` and deletes the inherited `image`, which the `exec` driver does not
+take: Nomad accepts a job whatever its driver configuration holds, and the
+client then refuses the task, so an inherited key the driver rejects fails
+every run.
+
+```yaml
+plugins:
+  nomad:
+    labels: {platform: nomad}
+    config:
+      address: https://nomad.example.com:4646
+      credential: nomad-token
+      runtime:
+        driver: docker
+        config: {image: registry.example.com/agent-base:1.0}
+        resources: {cpu: 1000, memory_mb: 2048}
+    profiles:
+      - name: claude
+        agent: claude
+        config: {runtime: {config: {image: registry.example.com/claude-agent:1.0}}}
+      - name: host
+        agent: codex
+        labels: {isolation: host}
+        config:
+          runtime:
+            driver: exec
+            config: {image: null, command: /usr/local/bin/codex-run}
+```
+
+Plugin profile `claude` runs with the address, the credential, the `docker`
+driver, the resources and the label `platform: nomad`, and the image
+`registry.example.com/claude-agent:1.0`. Plugin profile `host` runs with the
+same address, credential and resources, the `exec` driver with `command`
+alone in its driver configuration, and the labels `platform: nomad` and
+`isolation: host`.
+`wherry admin receiver configure ID --dry-run` prints what a file resolves
+to, and `wherry admin receiver show ID` prints what a receiver's record
+holds ([commands](commands.md#wherry-admin-receiver-show-receiver)).
 
 ### Receiver configuration directory
 
@@ -408,8 +472,8 @@ plugins/
 | File | Fields |
 | --- | --- |
 | `receiver.yaml` | `capacity` |
-| `plugins/<type>/plugin.yaml` | optional: the plugin's `config` |
-| `plugins/<type>/profiles/*.yaml` | one profile entry; routing order within the plugin is the lexical order of the file names |
+| `plugins/<type>/plugin.yaml` | optional: the plugin's `labels` and `config` |
+| `plugins/<type>/profiles/*.yaml` | one plugin profile entry; routing order within the plugin is the lexical order of the file names |
 
 Unknown fields, a repeated profile name, a plugin with no profile files, and
 any other file or directory are errors. Files and directories whose names
@@ -423,7 +487,7 @@ Receiver `nomad-1` in pool `build`, against the
 profiles in routing order, `container` running its agent in a container and
 `host` running its agent as an isolated process on the host. The plugin's
 `config` holds the cluster's address and the name of its token, and each
-profile's `config` holds only what the example needs; the
+plugin profile's `config` holds only what the example needs; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
 lists every setting. Neither profile names an agent credential: each
 delivers its agent's credentials at the targets the pool's terms give them.
@@ -434,7 +498,7 @@ As one file for
 capacity: 3
 plugins:
   nomad:
-    # Every profile of this plugin takes these keys and must not set them itself.
+    # Every plugin profile of this plugin inherits these keys and can override them.
     config:
       address: https://nomad.example.com:4646
       ca_file: /etc/wherry/nomad-ca.pem
@@ -490,7 +554,7 @@ capacity: 3
 `plugins/nomad/plugin.yaml`:
 
 ```yaml
-# Every profile of this plugin takes these keys and must not set them itself.
+# Every plugin profile of this plugin inherits these keys and can override them.
 config:
   address: https://nomad.example.com:4646
   ca_file: /etc/wherry/nomad-ca.pem
@@ -545,8 +609,10 @@ lists its settings and the jobs it runs.
 
 ### Platform credentials
 
-A merged profile `config` may set `credential: <name>`, normally in the
-plugin's `config` beside the address it authenticates. The receiver
+A merged plugin profile `config` may set `credential: <name>`, normally in
+the plugin's `config` beside the address it authenticates. The name is a
+string; any other value is an error naming the plugin profile when the
+configuration is read. The receiver
 resolves the name from the `credentials` of its [local
 configuration](#receiver-local-configuration) when it configures the
 profile, at start and after a configuration change, so a rotated value
@@ -556,6 +622,16 @@ plugin, and passes the value to the plugin in the profile's `Configure`. A
 name with no source fails that profile's configuration with an error naming
 the profile and the credential. Sources stay on the receiver's host and are
 never recorded on `wherry.admin`.
+
+From the moment it resolves a value until it exits, the receiver replaces
+the value in the plugin lines and plugin standard error it logs and in the
+configure, sweep and readiness errors it logs, in the two forms it replaces
+a [run credential](a2a-extension-v1.md#seal) in: the bytes without
+trailing CR and LF, and those bytes escaped as a JSON string. The marker is
+`[redacted:`, 16 base64url characters and `]`, from the HMAC-SHA256 under an
+empty key of `wherry-redaction-v1` followed by the credential's name. A
+value shorter than 8 bytes once trimmed is not replaced, and the receiver
+logs `platform credential <name> too short to redact`.
 
 ### Agent contract
 

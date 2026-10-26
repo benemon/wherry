@@ -37,6 +37,7 @@ import (
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/receiver"
+	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -224,20 +225,21 @@ func TestRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		plugins.logs, plugins.hold = r.PluginLogs(logs), r.HoldPlatformCredential
 		return r
 	}
-	missing := &plugins{dir: t.TempDir(), logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	missing := &plugins{dir: t.TempDir(), registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	if err := newReceiver(missing).Run(ctx); err == nil || err.Error() != "profile fake: credential \"fake-token\" has no source in the receiver's configuration" {
 		t.Fatalf("receiver without the credential's source: %v; want a configuration error", err)
 	}
 	t.Setenv("WHERRY_ROUNDTRIP_PLATFORM", platformText+"\n")
 	sources := map[string]credential.Source{"fake-token": {Env: "WHERRY_ROUNDTRIP_PLATFORM"}}
-	missing = &plugins{dir: t.TempDir(), credentials: sources, logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	missing = &plugins{dir: t.TempDir(), credentials: sources, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	if err := newReceiver(missing).Run(ctx); err == nil || err.Error() != "profile fake: no plugin for type fake" {
 		t.Fatalf("receiver without its plugin: %v; want a configuration error", err)
 	}
 	read := recordPlugin(t)
-	plugins := &plugins{dir: pluginDir, credentials: sources, logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: pluginDir, credentials: sources, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
 	r := newReceiver(plugins)
 	runCtx, stop := context.WithCancel(ctx)
@@ -554,4 +556,58 @@ func fallbackS3(t *testing.T) *s3Store {
 func hexSHA(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// A plugin that writes its platform credential through its logger, on stdout and on stderr, and returns it in its
+// configure error leaves the receiver's log and its configuration error with the value redacted.
+func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cluster, ca := tlsCluster(t)
+	address := cluster.ListenAddrs()[0]
+	service := &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
+		Broker: address, CA: ca, DeliveryCeiling: 10}
+	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []admin.ProfileSettings{
+		{Name: "fake", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "fake-token", "log_credential": true}},
+	}}
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "receiver.yaml")
+	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, config, bundlePath); err != nil {
+		t.Fatal(err)
+	}
+	resalt(t, service, bundlePath)
+	bundle, err := admin.ReadBundle(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WHERRY_REDACTION_PLATFORM", platformText+"\n")
+	plugins := &plugins{dir: pluginDir, credentials: map[string]credential.Source{"fake-token": {Env: "WHERRY_REDACTION_PLATFORM"}},
+		registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	defer plugins.close()
+	logs := &syncBuffer{}
+	r, err := receiver.New(bundle, filepath.Join(dir, "state"), false, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugins.logs, plugins.hold = r.PluginLogs(logs), r.HoldPlatformCredential
+	marker := signed.RedactionMarker(nil, "fake-token")
+	if err := r.Run(ctx); err == nil || !strings.Contains(err.Error(), "refused credential "+marker) || strings.Contains(err.Error(), platformText) {
+		t.Fatalf("receiver run = %v; want the configure error with the credential redacted", err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		output := logs.String()
+		if strings.Contains(output, platformText) {
+			t.Fatalf("receiver log holds the platform credential:\n%s", output)
+		}
+		if strings.Contains(output, "configured: credential="+marker) && strings.Contains(output, "[ERROR] raw "+marker) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("receiver log lacks the plugin's redacted log and stderr lines:\n%s", output)
+		}
+	}
 }

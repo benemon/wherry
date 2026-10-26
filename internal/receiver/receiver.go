@@ -73,9 +73,11 @@ type Receiver struct {
 	admissionMu sync.Mutex
 	// cancelled holds the runs cancelled by a host of their tenant.
 	cancelled map[runKey]bool
-	// live holds the forms of the values delivered to each run this receiver holds.
-	liveMu sync.Mutex
-	live   map[*activeRun][]redaction
+	// live holds the forms of the values delivered to each run this receiver holds, and platform those of its platform
+	// credentials.
+	liveMu   sync.Mutex
+	live     map[*activeRun][]redaction
+	platform []redaction
 }
 
 // New builds the receiver's Kafka client from bundle and loads or creates its signing key in stateDir, settling a

@@ -47,6 +47,9 @@ type config struct {
 	// Log is a value Configure logs, through its logger and as a raw line on file descriptor 2, which go-plugin relays as
 	// it relays a panic; os.Stderr goes to plugin.Serve's stdio stream instead.
 	Log string `json:"log"`
+	// LogCredential makes Configure write Settings.Credential through its logger, on stdout and as a raw line on file
+	// descriptor 2, then fail with an error that holds it.
+	LogCredential bool `json:"log_credential"`
 	// Jobs makes the plugin keep each run's job as a platform does, for the conformance suite: Lookup finds it, Follow
 	// and Stop end it, Purge removes it, and Collect finds no outputs in it unless Outputs is set.
 	Jobs bool `json:"jobs"`
@@ -251,6 +254,12 @@ func main() {
 		if decoded.Log != "" {
 			logger.Info("configured", "log", decoded.Log)
 			fmt.Fprintln(os.NewFile(2, "stderr"), "[ERROR] raw "+decoded.Log)
+		}
+		if decoded.LogCredential {
+			logger.Info("configured", "credential", settings.Credential)
+			fmt.Println("[INFO] stdout " + settings.Credential)
+			fmt.Fprintln(os.NewFile(2, "stderr"), "[ERROR] raw "+settings.Credential)
+			return nil, errors.New("refused credential " + settings.Credential)
 		}
 		return &fake{settings: settings, config: decoded, jobs: map[string]*adapter.Job{}}, nil
 	})

@@ -388,8 +388,8 @@ func TestProfileCredentialReachesThePluginInPlaceOfItsName(t *testing.T) {
 	if err := os.WriteFile(token, []byte(value+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"nomad-token": {File: token}}, logs: io.Discard,
-		registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"nomad-token": {File: token}}, hold: func(string, []byte) {},
+		logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
 	defer plugins.close()
 	settings := admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "nomad-token", "outputs": true}}
 	if _, err := plugins.profile("build", settings); err != nil {
