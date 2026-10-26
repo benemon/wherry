@@ -73,7 +73,7 @@ func runMCP(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return newMCPServer(connect, inputReader(open), open, await).Run(ctx, &mcp.StdioTransport{})
+	return newMCPServer(connect, inputReader(open), open, await, logger).Run(ctx, &mcp.StdioTransport{})
 }
 
 // awaitCommand returns the shell command that waits for a run, naming configFile, made absolute and quoted, when
@@ -331,7 +331,15 @@ type transcriptReply struct {
 
 // newMCPServer serves the wherry tools. Every call uses the host connect returns, which the server's seal-request
 // answering shares, so the process runs one tenant-feed follower.
-func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), awaitCommand func(id string) string) *mcp.Server {
+func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), awaitCommand func(id string) string, logger *log.Logger) *mcp.Server {
+	// The model sees an UNAVAILABLE's class alone; the server's log, which only the host's user reads, keeps its cause.
+	failure := func(err error) error {
+		mapped := toolFailure(err)
+		if failed, ok := mapped.(*toolError); ok && failed.Code == "UNAVAILABLE" {
+			logger.Printf("tool failed: %v", err)
+		}
+		return mapped
+	}
 	version := "(devel)"
 	if info, ok := debug.ReadBuildInfo(); ok {
 		version = info.Main.Version
@@ -346,11 +354,11 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()
 		if err != nil {
-			return nil, receiversOutput{}, toolFailure(err)
+			return nil, receiversOutput{}, failure(err)
 		}
 		receivers, err := client.Receivers(ctx)
 		if err != nil {
-			return nil, receiversOutput{}, toolFailure(err)
+			return nil, receiversOutput{}, failure(err)
 		}
 		return nil, receiversOutput{Receivers: receivers}, nil
 	})
@@ -372,11 +380,11 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		}()
 		client, err := connect()
 		if err != nil {
-			return nil, submitOutput{}, toolFailure(err)
+			return nil, submitOutput{}, failure(err)
 		}
 		result, err := client.Submit(ctx, submission)
 		if err != nil {
-			return nil, submitOutput{}, toolFailure(err)
+			return nil, submitOutput{}, failure(err)
 		}
 		return nil, submitOutput{ID: result.RunID, Pool: result.Pool, Await: awaitCommand(result.RunID)}, nil
 	})
@@ -389,17 +397,17 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input statusInput) (*mcp.CallToolResult, statusOutput, error) {
 		client, err := connect()
 		if err != nil {
-			return nil, statusOutput{}, toolFailure(err)
+			return nil, statusOutput{}, failure(err)
 		}
 		var runs busclient.RunsResult
 		if input.ID != "" {
 			result, err := client.Status(ctx, input.ID)
 			if err != nil {
-				return nil, statusOutput{}, toolFailure(err)
+				return nil, statusOutput{}, failure(err)
 			}
 			runs = busclient.RunsResult{Runs: []busclient.StatusResult{result}, Skipped: result.Skipped}
 		} else if runs, err = client.Runs(ctx); err != nil {
-			return nil, statusOutput{}, toolFailure(err)
+			return nil, statusOutput{}, failure(err)
 		}
 		output := statusOutput{Runs: []runOutput{}, Skipped: runs.Skipped}
 		for _, result := range runs.Runs {
@@ -421,7 +429,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, awaitReply, error) {
 		client, err := connect()
 		if err != nil {
-			return nil, awaitReply{}, toolFailure(err)
+			return nil, awaitReply{}, failure(err)
 		}
 		if token := request.Params.GetProgressToken(); token != nil {
 			stop := notifyProgress(ctx, request.Session, token, input.ID)
@@ -431,12 +439,12 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			status, err := client.Status(ctx, input.ID)
 			if err != nil {
-				return nil, awaitReply{}, toolFailure(err)
+				return nil, awaitReply{}, failure(err)
 			}
 			return nil, awaitReply{ID: input.ID, State: string(status.Status.State), Model: status.Model, RetryAfter: retryAfter, Skipped: status.Skipped}, nil
 		}
 		if err != nil {
-			return nil, awaitReply{}, toolFailure(err)
+			return nil, awaitReply{}, failure(err)
 		}
 		output := awaitReply{
 			ID: input.ID, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
@@ -480,11 +488,11 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, cancelOutput, error) {
 		client, err := connect()
 		if err != nil {
-			return nil, cancelOutput{}, toolFailure(err)
+			return nil, cancelOutput{}, failure(err)
 		}
 		result, err := client.Cancel(ctx, input.ID)
 		if err != nil {
-			return nil, cancelOutput{}, toolFailure(err)
+			return nil, cancelOutput{}, failure(err)
 		}
 		return nil, cancelOutput{ID: result.RunID, Skipped: result.Skipped}, nil
 	})
@@ -496,11 +504,11 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, eventsOutput, error) {
 		client, err := connect()
 		if err != nil {
-			return nil, eventsOutput{}, toolFailure(err)
+			return nil, eventsOutput{}, failure(err)
 		}
 		result, err := client.Events(ctx, input.ID)
 		if err != nil {
-			return nil, eventsOutput{}, toolFailure(err)
+			return nil, eventsOutput{}, failure(err)
 		}
 		output := eventsOutput{ID: input.ID, Events: []eventOutput{}, Transcripts: []transcriptOutput{}, Redacted: result.Redacted, Skipped: result.Skipped}
 		for _, record := range result.Statuses {
@@ -537,11 +545,11 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		}
 		client, err := connect()
 		if err != nil {
-			return nil, transcriptReply{}, toolFailure(err)
+			return nil, transcriptReply{}, failure(err)
 		}
 		result, err := client.Transcript(ctx, input.ID)
 		if err != nil {
-			return nil, transcriptReply{}, toolFailure(err)
+			return nil, transcriptReply{}, failure(err)
 		}
 		result.Lines = viewLines(result.Lines)
 		output := transcriptReply{ID: input.ID, Attempt: result.Attempt, Total: len(result.Lines), Lines: []transcriptLine{},
@@ -591,10 +599,10 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, cleanupOutput, error) {
 		client, err := connect()
 		if err != nil {
-			return nil, cleanupOutput{}, toolFailure(err)
+			return nil, cleanupOutput{}, failure(err)
 		}
 		if err := client.Cleanup(ctx, input.ID); err != nil {
-			return nil, cleanupOutput{}, toolFailure(err)
+			return nil, cleanupOutput{}, failure(err)
 		}
 		return nil, cleanupOutput{ID: input.ID}, nil
 	})
