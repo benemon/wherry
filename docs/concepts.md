@@ -85,9 +85,10 @@ receiver whose latest advertisement is at most 120 seconds old is live. For each
 live receiver in a pool the tenant is entitled to, the client looks for a ready
 profile that launches the agent with labels the selector accepts. With no agent
 named, each receiver takes the pool's default agent if a ready profile launches
-it, otherwise the first other agent in the terms' order that one does. Among the
-receivers that can take the task, the one with the most spare capacity wins,
-whichever agent it would run, and ties go to the lowest receiver ID. The client
+it, otherwise the first other agent in the terms' order that one does. A
+receiver that would run its pool's default agent wins over any receiver that
+would run another agent. Among the receivers that remain, the one with the most
+spare capacity wins, and ties go to the lowest receiver ID. The client
 signs the agent, the selector and the chosen pool into the task.
 
 **The receiver routes** a task it claims to its first ready profile, in

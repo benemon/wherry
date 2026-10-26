@@ -130,9 +130,8 @@ func TestPasswordLineBreakIsNotThePassword(t *testing.T) {
 	}
 	t.Setenv("WHERRY_TRUST_BROKER", address)
 	t.Setenv("WHERRY_TRUST_CA", caPath)
-	t.Setenv("WHERRY_TEST_USER", "admin")
 	t.Setenv("WHERRY_TEST_PASSWORD_FILE", passwordPath)
-	client, err := adminKafka(address, []byte(ca), "WHERRY_TEST_USER", "", "WHERRY_TEST_PASSWORD_FILE")
+	client, err := adminKafka(address, []byte(ca), "admin", "WHERRY_TEST_PASSWORD_FILE")
 	if err != nil {
 		t.Fatal(err)
 	}

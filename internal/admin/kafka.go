@@ -13,9 +13,11 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -121,6 +123,11 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 	if err != nil {
 		return err
 	}
+	if _, exists := current.Pools[pool]; exists {
+		if err := strandedReceivers(current, pool, terms); err != nil {
+			return err
+		}
+	}
 	if terms.RecordLimit, err = service.checkLimits(ctx, current, pool); err != nil {
 		return err
 	}
@@ -143,6 +150,29 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 		return err
 	}
 	return service.reconcileACLs(ctx, state)
+}
+
+// strandedReceivers refuses terms for pool under which a live receiver's recorded configuration fails ValidateConfig,
+// naming each receiver and profile that fails and why.
+func strandedReceivers(state State, pool string, terms Terms) error {
+	var failures []error
+	for _, receiver := range slices.Sorted(maps.Keys(state.Receivers)) {
+		config := state.Receivers[receiver]
+		if config.Pool != pool || state.Ended[ReceiverPrincipal(receiver)] {
+			continue
+		}
+		for _, profile := range config.Profiles {
+			single := config
+			single.Profiles = []ProfileSettings{profile}
+			if err := ValidateConfig(single, terms); err != nil {
+				failures = append(failures, fmt.Errorf("receiver %s plugin %s profile %s: %w", receiver, profile.Plugin, profile.Name, err))
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("pool terms would strand live receivers: %w", errors.Join(failures...))
+	}
+	return nil
 }
 
 // ReceiverCheck makes ReceiverAdd's checks of config and returns it as the record would hold it, writing nothing.

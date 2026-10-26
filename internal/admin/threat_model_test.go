@@ -209,6 +209,37 @@ func TestRevocationRunsAllSixStepsInOrder(t *testing.T) {
 	}
 }
 
+func TestRevocationWithoutAWaitWaitsTheBrokersLongestTimeout(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	var alters []kadm.AlterConfig
+	for name, value := range map[string]string{"connections.max.reauth.ms": "100", "group.share.max.record.lock.duration.ms": "400", "transaction.max.timeout.ms": "200"} {
+		alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
+	}
+	responses, err := kadm.NewClient(service.Admin).AlterBrokerConfigs(ctx, alters)
+	if err == nil {
+		err = responses[0].Err
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	result := service.RevokeReceiver(ctx, "receiver-a", 0, func(context.Context, string, string) error { return ErrAuthorizationDenied })
+	if !result.Complete {
+		t.Fatalf("incomplete revocation: %+v", result)
+	}
+	if elapsed := time.Since(started); elapsed < 400*time.Millisecond {
+		t.Fatalf("revocation waited %v, want at least the longest broker timeout of 400ms", elapsed)
+	}
+}
+
 func TestRealBrokerTLSListener(t *testing.T) {
 	broker := os.Getenv("WHERRY_TRUST_BROKER")
 	if broker == "" {
@@ -407,7 +438,7 @@ func realService(t *testing.T) (*Service, func()) {
 		return client
 	}
 	root := connect(os.Getenv("WHERRY_TRUST_ADMIN_USER"), os.Getenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE"))
-	operator := connect(os.Getenv("WHERRY_TRUST_OPERATOR_USER"), os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
+	operator := connect(OperatorPrincipal, os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
 	return &Service{Admin: root, Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: string(ca)}, func() { operator.Close(); root.Close() }
 }
 

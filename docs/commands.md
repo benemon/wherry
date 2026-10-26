@@ -17,8 +17,9 @@
 - A failed command prints `wherry: <error>` on standard error and exits
   with status 1.
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
-  positive; the `--wait` of `host revoke` and `receiver revoke` takes the
-  broker-derived wait when zero or less.
+  positive. `host revoke` and `receiver revoke` refuse a `--wait` of zero or
+  less before they revoke anything; without `--wait` they compute the wait
+  from the broker's timeouts.
 - `cancel`, `await`, `status`, `events` and `transcript` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
@@ -493,7 +494,11 @@ them. It refuses, before it reads the broker, terms whose agent credentials
 break the [pool terms](configuration.md#pool-terms) rules, and a delivery limit above the lowest
 `group.share.max.delivery.count.limit` across the brokers, and terms whose
 [records do not fit the broker](configuration.md#record-limit). For an existing pool it
-records the new terms and sets the group configuration again. On new and
+records the new terms and sets the group configuration again. It first
+checks the recorded configuration of every receiver in the pool whose
+membership has not ended against the new terms, as `receiver add` checks a
+new receiver, and refuses the terms when a profile no longer fits, naming
+each receiver, plugin and profile and the reason. On new and
 existing topics it sets the tasks and events `retention.ms` to
 `max_queue_deadline` plus six hours plus one day, and their
 `message.timestamp.type` to `LogAppendTime`. It refuses a `max_queue_deadline` above
@@ -597,7 +602,7 @@ up to 2 minutes. It fails at once when the login fails or the probe returns
 any other error. Step 5 waits the largest of
 `connections.max.reauth.ms`, `group.share.max.record.lock.duration.ms` and
 `transaction.max.timeout.ms` across the brokers, and fails when one of them
-is unbounded. `--wait DURATION` replaces that wait.
+is unbounded. `--wait DURATION` replaces that wait and must be positive.
 
 ### `wherry admin skip OFFSET --sha256 HASH`
 
