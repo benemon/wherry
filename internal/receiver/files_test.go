@@ -20,6 +20,7 @@ import (
 
 	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -430,7 +431,7 @@ func TestRedactionMatchesReplaceAll(t *testing.T) {
 		"long-value-1234567tail123"} {
 		want := []byte(data)
 		for _, form := range run.redactions {
-			want = bytes.ReplaceAll(want, form.value, form.marker)
+			want = bytes.ReplaceAll(want, form.Value, form.Marker)
 		}
 		got := run.redact([]byte(data), 1<<20)
 		if !bytes.Equal(got.data, want) || got.size != int64(len(want)) || got.hash() != fmt.Sprintf("%x", sha256.Sum256(want)) {
@@ -516,7 +517,7 @@ func TestRedactionWorksInBoundedPieces(t *testing.T) {
 	run.deliver(map[string][]byte{"x": []byte("12345678"), "y": []byte("abcdefghijkl")})
 	var largest largestWrite
 	run.redactTo(&largest, bytes.Repeat([]byte("z"), 4<<20))
-	if bound := redactPiece + 8 + 12; largest == 0 || int(largest) > bound {
+	if bound := redact.Piece + 8 + 12; largest == 0 || int(largest) > bound {
 		t.Fatalf("largest write %d bytes, want at most %d", largest, bound)
 	}
 }

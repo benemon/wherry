@@ -334,6 +334,7 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 			}
 			return false
 		}
+		hold(name, values[name])
 	}
 	// The check, the write and the marker run under the attempt's lock, so concurrent answerers write one seal.
 	unlock, err := h.lockAttempt(ctx, runID, request.Attempt)

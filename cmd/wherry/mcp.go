@@ -332,11 +332,12 @@ type transcriptReply struct {
 // newMCPServer serves the wherry tools. Every call uses the host connect returns, which the server's seal-request
 // answering shares, so the process runs one tenant-feed follower.
 func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), awaitCommand func(id string) string, logger *log.Logger) *mcp.Server {
-	// The model sees an UNAVAILABLE's class alone; the server's log, which only the host's user reads, keeps its cause.
+	// The model sees an UNAVAILABLE's class alone; the server's log, which only the host's user reads, keeps its cause
+	// with every credential value the host resolved redacted.
 	failure := func(err error) error {
 		mapped := toolFailure(err)
 		if failed, ok := mapped.(*toolError); ok && failed.Code == "UNAVAILABLE" {
-			logger.Printf("tool failed: %v", err)
+			logger.Print("tool failed: " + busclient.Redact(err.Error()))
 		}
 		return mapped
 	}

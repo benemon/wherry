@@ -20,6 +20,7 @@ import (
 
 	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
@@ -76,8 +77,8 @@ type Receiver struct {
 	// live holds the forms of the values delivered to each run this receiver holds, and platform those of its platform
 	// credentials.
 	liveMu   sync.Mutex
-	live     map[*activeRun][]redaction
-	platform []redaction
+	live     map[*activeRun][]redact.Form
+	platform []redact.Form
 }
 
 // New builds the receiver's Kafka client from bundle and loads or creates its signing key in stateDir, settling a

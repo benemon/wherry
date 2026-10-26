@@ -721,6 +721,29 @@ func TestAnswerSealsTheRunsTaskCredentials(t *testing.T) {
 	}
 }
 
+// Redact replaces each credential value the host resolved, trimmed and JSON-escaped, with the marker of its name
+// under no key, and leaves a value under 8 bytes.
+func TestRedactReplacesResolvedCredentials(t *testing.T) {
+	f := newFixture(t)
+	dir := t.TempDir()
+	for name, value := range map[string]string{"quoted-key": "say \"held\" key\n", "short-key": "abc1234"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f.host.credentials[name] = credential.Source{File: filepath.Join(dir, name)}
+	}
+	receiver, task := f.admittedWith(t, []wire.TaskCredential{{Name: "quoted-key", File: "quoted"}, {Name: "short-key", File: "short"}})
+	asked := newRequest(t, receiver.binding(task, 1), "model")
+	asked.record.TaskCredentials = []string{"quoted-key", "short-key"}
+	receiver.feed(t, f.ctx, task.submission.Wherry.Run, receiver.sign(t, &asked.record))
+	answering(t, f, f.host)
+	f.waitSeals(t, "host-a", 1)
+	marker := signed.RedactionMarker(nil, "quoted-key")
+	if got, want := Redact(`raw say "held" key; json "say \"held\" key"; short abc1234`), "raw "+marker+"; json \""+marker+"\"; short abc1234"; got != want {
+		t.Fatalf("Redact = %q, want %q", got, want)
+	}
+}
+
 // A task credential outside the agent's terms is sealed only when the run declares it, so a pool member cannot ask
 // for any credential the host configures.
 func TestAnswerRefusesAnUndeclaredTaskCredential(t *testing.T) {
