@@ -620,9 +620,19 @@ profile, at start and after a configuration change, so a rotated value
 takes effect on the receiver's next start. It trims a trailing CR and LF
 from the value, removes the `credential` key from the `config` it sends the
 plugin, and passes the value to the plugin in the profile's `Configure`. A
-name with no source fails that profile's configuration with an error naming
-the profile and the credential. Sources stay on the receiver's host and are
-never recorded on `wherry.admin`.
+name with no source fails that plugin profile's configuration, and the
+receiver exits with an error naming the plugin profile and the credential,
+for plugin profile `container` of the [receiver configuration
+example](#receiver-configuration-example):
+
+```
+profile container: credential "nomad-token" has no source in the receiver's configuration
+```
+
+Sources stay on the receiver's host and are never recorded on
+`wherry.admin`. The [Quickstart](quickstart.md#_7-write-the-receiver-s-local-configuration)
+writes a local configuration with a source for each platform credential its
+receiver configuration names.
 
 From the moment it resolves a value until it exits, the receiver replaces
 the value in the plugin lines and plugin standard error it logs and in the

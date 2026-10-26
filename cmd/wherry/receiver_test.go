@@ -328,7 +328,8 @@ func TestReceiverLocalConfigExampleParses(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(config, want) {
 		t.Fatalf("example = %+v, %v; want %+v", config, err, want)
 	}
-	documented(t, "example-receiver-config.yaml")
+	documented(t, "configuration.md", "example-receiver-config.yaml")
+	documented(t, "operations.md", "example-receiver-config.yaml")
 }
 
 func TestReceiverLocalConfigDefaultsAndExpansion(t *testing.T) {
