@@ -103,8 +103,9 @@ type fakeAdapter struct {
 	calls    []string
 	sweeps   int
 	sweepErr error
-	// endDelay holds the job open after its stream before it ends.
+	// endDelay holds the job open after its stream before it ends; pauses hold it that long before the line at each index.
 	endDelay time.Duration
+	pauses   map[int]time.Duration
 	// ended makes Follow end with that terminal after the stream, rather than an exit of 0.
 	ended *adapter.Terminal
 	// linkLost makes that many Follows end with adapter.ErrLinkLost after at most one line; froms
@@ -184,12 +185,17 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, 
 	f.follows++
 	f.froms = append(f.froms, from)
 	lost := f.follows <= f.linkLost
-	stream, followErr, endDelay, neverStarted, neverClass, neverReason, ended := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.neverStarted, f.neverClass, f.neverReason, f.ended
+	stream, followErr, endDelay, pauses, neverStarted, neverClass, neverReason, ended := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.pauses, f.neverStarted, f.neverClass, f.neverReason, f.ended
 	f.mu.Unlock()
 	var offset int64
-	for _, data := range stream {
+	for i, data := range stream {
 		next := offset + int64(len(data)+1)
 		if offset >= from {
+			select {
+			case <-time.After(pauses[i]):
+			case <-ctx.Done():
+				return adapter.Terminal{}, ctx.Err()
+			}
 			select {
 			case lines <- adapter.Line{Offset: offset, Next: next, Data: []byte(data)}:
 				f.mu.Lock()

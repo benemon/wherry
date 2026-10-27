@@ -289,7 +289,8 @@ func completedWith(text string) string {
 func TestHeartbeatsStayOffTheFeed(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	f.adapter.stream = noResultStream
+	// A second line moves the transcript, so a heartbeat commits.
+	f.adapter.stream = append([]string{`{"type":"system"}`}, noResultStream...)
 	f.adapter.endDelay = 4 * renewInterval
 	f.execute(t, f.submit(t, f.host, nil), 1)
 	heartbeats := 0
@@ -305,6 +306,43 @@ func TestHeartbeatsStayOffTheFeed(t *testing.T) {
 		if status.Wherry.Kind == "heartbeat" {
 			t.Fatal("a heartbeat reached the tenant's feed")
 		}
+	}
+}
+
+// A heartbeat commits only when the transcript has moved, so a silent job writes none, and each one still points at
+// the start of a committed line an adopter resumes from.
+func TestHeartbeatsOnlyWhenTheTranscriptMoves(t *testing.T) {
+	stream := []string{`{"type":"assistant","message":"one"}`, `{"type":"assistant","message":"two"}`, `{"type":"assistant","message":"three"}`, completedWith("answer")}
+	f := newFixture(t, stream)
+	f.answer(t, credentialName)
+	f.adapter.pauses, f.adapter.endDelay = map[int]time.Duration{2: 6 * renewInterval}, 3*renewInterval
+	record := f.submit(t, f.host, nil)
+	if status := f.execute(t, record, 1); status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	starts := map[int64]bool{}
+	for _, chunk := range f.chunks(t) {
+		starts[chunk.Wherry.Seq] = true
+	}
+	var offsets []int64
+	for _, status := range f.eventStatuses(t) {
+		if status.Wherry.Kind == "heartbeat" {
+			offsets = append(offsets, *status.Wherry.LogOffset)
+		}
+	}
+	// Two intervals move the transcript, the one before the silence and the one after it; a third can split the
+	// lines that end the silence. The silent intervals and those after the last line write none.
+	first, last := int64(len(stream[0])+1), int64(len(stream[0])+len(stream[1])+len(stream[2])+3)
+	if len(offsets) < 2 || len(offsets) > 3 || offsets[0] != first || offsets[len(offsets)-1] != last {
+		t.Fatalf("heartbeat offsets %v, want %d first, %d last, and one per interval with progress", offsets, first, last)
+	}
+	for i, offset := range offsets {
+		if !starts[offset] || i > 0 && offset <= offsets[i-1] {
+			t.Fatalf("heartbeat offsets %v: %d is a repeat or no committed line's start", offsets, offset)
+		}
+	}
+	if got, err := f.receiver.lastOffset(f.ctx, f.parse(t, record), wire.TaskHash(record.Value)); err != nil || got != last {
+		t.Fatalf("resume offset %d err %v, want %d", got, err, last)
 	}
 }
 

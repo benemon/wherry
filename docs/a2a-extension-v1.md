@@ -238,7 +238,7 @@ A status reports one attempt of a run.
 | --- | --- | --- | --- |
 | `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | |
 | `started` | `TASK_STATE_WORKING` | the job has started | |
-| `heartbeat` | `TASK_STATE_WORKING` | every 10 seconds while the job runs | pool events only |
+| `heartbeat` | `TASK_STATE_WORKING` | the transcript has moved, checked every 10 seconds while the job runs | pool events only |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
 | `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `TASK_STATE_AUTH_REQUIRED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration.md#agent-contract), or the reason as message text |
 
