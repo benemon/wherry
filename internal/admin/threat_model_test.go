@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -304,6 +305,8 @@ func TestRealBrokerTLSListener(t *testing.T) {
 	if broker == "" {
 		t.Skip("WHERRY_TRUST_BROKER is not set")
 	}
+	_, closeService := realService(t)
+	closeService()
 	password, err := os.ReadFile(os.Getenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE"))
 	if err != nil {
 		t.Fatal(err)
@@ -497,8 +500,45 @@ func realService(t *testing.T) (*Service, func()) {
 		return client
 	}
 	root := connect(os.Getenv("WHERRY_TRUST_ADMIN_USER"), os.Getenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE"))
+	if err := disposableBroker(context.Background(), root); err != nil {
+		root.Close()
+		t.Fatal(err)
+	}
 	operator := connect(OperatorPrincipal, os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
 	return &Service{Admin: root, Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: string(ca)}, func() { operator.Close(); root.Close() }
+}
+
+// disposableBroker refuses any broker but the disposable one test/kafka/up.sh starts, whose cluster ID is the
+// WHERRY_TRUST_CLUSTER_ID its env file names: the trust-broker tests write to the broker's wherry.admin.
+func disposableBroker(ctx context.Context, client *kgo.Client) error {
+	want := os.Getenv("WHERRY_TRUST_CLUSTER_ID")
+	if want == "" {
+		return errors.New("WHERRY_TRUST_CLUSTER_ID is not set: the WHERRY_TRUST_BROKER tests run only against the broker test/kafka/up.sh starts, with its env file sourced")
+	}
+	metadata, err := kadm.NewClient(client).BrokerMetadata(ctx)
+	if err != nil {
+		return err
+	}
+	if metadata.Cluster != want {
+		return fmt.Errorf("broker cluster ID %q is not WHERRY_TRUST_CLUSTER_ID %q: the WHERRY_TRUST_BROKER tests run only against the broker test/kafka/up.sh starts", metadata.Cluster, want)
+	}
+	return nil
+}
+
+func TestDisposableBrokerRefusesAnyOtherBroker(t *testing.T) {
+	cluster := kfake.MustCluster(kfake.ClusterID("disposable"))
+	defer cluster.Close()
+	client, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	for marker, refused := range map[string]bool{"": true, "shared": true, "disposable": false} {
+		t.Setenv("WHERRY_TRUST_CLUSTER_ID", marker)
+		if err := disposableBroker(context.Background(), client); (err != nil) != refused {
+			t.Fatalf("with WHERRY_TRUST_CLUSTER_ID %q: %v; want refused %v", marker, err, refused)
+		}
+	}
 }
 
 func TestLoadNamesALaterReleasesRecord(t *testing.T) {
