@@ -52,6 +52,26 @@ func newBrokerPool(t *testing.T, ctx context.Context, address string) brokerPool
 	if _, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, -1, nil, topics...); err != nil {
 		t.Fatal(err)
 	}
+	// A topic answers NOT_LEADER_FOR_PARTITION until its partition has a leader, and not every write path retries it.
+	for {
+		metadata, err := kadm.NewClient(kafka).Metadata(ctx, topics...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		led := true
+		for _, topic := range topics {
+			partition, ok := metadata.Topics[topic].Partitions[0]
+			led = led && ok && partition.Err == nil && partition.Leader >= 0
+		}
+		if led {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 	terms := testTerms()
 	config := testConfig(b.receiver)
 	config.Pool = b.pool
