@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	Min   = 8
-	Piece = 64 << 10
+	minForm = 8
+	Piece   = 64 << 10
 )
 
 // Form is a form of a credential value and the marker that replaces it.
@@ -22,14 +22,14 @@ type Form struct {
 
 // AddForms returns forms with the published forms of each of values added, sorted longest first. A value's forms are
 // the value without trailing CR and LF, as credential files written by echo or a CLI end in a newline that transcripts
-// and outputs drop, and that form escaped as a JSON string, as a transcript line carries it. A value shorter than Min
-// once trimmed matches ordinary text and JSON literals, so short gets its name and it is left. Both forms take the
-// marker of the value's name under key. A marker holding a form of any value would publish it, so that marker is [*],
-// which no form of Min bytes fits in.
+// and outputs drop, and that form escaped as a JSON string, as a transcript line carries it. A value shorter than
+// minForm once trimmed matches ordinary text and JSON literals, so short gets its name and it is left. Both forms take
+// the marker of the value's name under key. A marker holding a form of any value would publish it, so that marker is
+// [*], which no form of minForm bytes fits in.
 func AddForms(forms []Form, key []byte, values map[string][]byte, short func(name string)) []Form {
 	for name, value := range values {
 		trimmed := bytes.TrimRight(value, "\r\n")
-		if len(trimmed) < Min {
+		if len(trimmed) < minForm {
 			short(name)
 			continue
 		}

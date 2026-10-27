@@ -203,18 +203,7 @@ func (service *Service) ReceiverCheck(ctx context.Context, config ReceiverConfig
 }
 
 func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, bundlePath string) (err error) {
-	state, err := service.LoadState(ctx)
-	if err != nil {
-		return err
-	}
-	if _, exists := state.Receivers[config.Receiver]; exists {
-		return errors.New("receiver exists; change its configuration with receiver configure")
-	}
-	terms, ok := state.Pools[config.Pool]
-	if !ok {
-		return errors.New("receiver names unknown pool")
-	}
-	if err := ValidateConfig(config, terms); err != nil {
+	if _, err := service.ReceiverCheck(ctx, config); err != nil {
 		return err
 	}
 	bundle, err := createBundle(bundlePath)
@@ -223,7 +212,7 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	}
 	defer closeBundle(bundle, &err)
 	record := Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config}
-	state, err = service.appendChecked(ctx, []byte(config.Receiver), record)
+	state, err := service.appendChecked(ctx, []byte(config.Receiver), record)
 	if err != nil {
 		return err
 	}
