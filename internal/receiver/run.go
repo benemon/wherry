@@ -824,11 +824,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	var retryUntil time.Time
 	var retry <-chan time.Time
 
-	heartbeat := time.NewTicker(renewInterval)
-	defer heartbeat.Stop()
+	progress := time.NewTicker(renewInterval)
+	defer progress.Stop()
 	checks := time.NewTicker(stateCheckInterval)
 	defer checks.Stop()
-	position, beat := offset, offset
+	position, reported := offset, offset
 	take := func(line adapter.Line) {
 		pending = append(pending, line)
 		position = line.Next
@@ -901,27 +901,27 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			if status, stop := stopHeld(); stop {
 				return status
 			}
-		case <-heartbeat.C:
+		case <-progress.C:
 			if ctx.Err() != nil {
 				stopFollow()
 				return shutdown()
 			}
-			// The heartbeat can win the select against a due check; a held stop still comes first.
+			// The tick can win the select against a due check; a held stop still comes first.
 			if status, stop := stopHeld(); stop {
 				return status
 			}
 			// The newest line stays pending so the terminal transaction always holds the last chunk;
-			// the heartbeat offset is where that line starts, so an adopter reads it again.
+			// the progress offset is where that line starts, so an adopter reads it again.
 			at, held := position, 0
 			if len(pending) > 0 {
 				at, held = pending[len(pending)-1].Offset, 1
 			}
-			// A heartbeat with nothing to flush and the offset of the last one adds nothing an adopter reads.
-			if len(pending) == held && at == beat {
+			// A tick with nothing to flush and the offset last reported adds nothing an adopter reads.
+			if len(pending) == held && at == reported {
 				continue
 			}
-			// Heartbeats go to the pool's events alone: adoption needs them, hosts follow the chunks.
-			records := append(run.chunks(pending[:len(pending)-held], false), run.events(run.status("heartbeat", taskStatus(wire.TaskStateWorking, ""), &at, nil)))
+			// The progress record commits with the chunks it covers.
+			records := append(run.chunks(pending[:len(pending)-held], false), run.progress(at))
 			if err := run.commit(ctx, records...); err != nil {
 				if ctx.Err() != nil {
 					return shutdown()
@@ -930,7 +930,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 			run.chunked += int64(len(pending) - held)
 			pending = pending[len(pending)-held:]
-			beat = at
+			reported = at
 		}
 	}
 }
@@ -1827,11 +1827,22 @@ func (run *activeRun) statusRecords(kind string, status wire.TaskStatus, offset 
 	return run.receiver.statusRecords(run.task, run.status(kind, status, offset, metadata))
 }
 
-// terminal is the terminal status records, counting the attempt's committed chunks and pending's.
+// terminal is the terminal status records, counting the attempt's committed chunks and pending's, and the tombstone of
+// the run's progress.
 func (run *activeRun) terminal(status wire.TaskStatus, pending []adapter.Line) []*kgo.Record {
 	value := run.status("terminal", status, nil, nil)
 	value.Wherry.TranscriptChunks = run.chunked + int64(len(pending))
-	return run.receiver.statusRecords(run.task, value)
+	tombstone := &kgo.Record{Topic: admin.ReceiverProgressTopic(run.receiver.id), Key: []byte(run.task.Wherry.Run)}
+	return append(run.receiver.statusRecords(run.task, value), tombstone)
+}
+
+// progress is the run's progress record at offset on the receiver's progress topic.
+func (run *activeRun) progress(offset int64) *kgo.Record {
+	encoded, err := wire.EncodeProgress(wire.Progress{Tenant: run.task.Wherry.Tenant, TaskHash: run.taskHash, Attempt: run.attempt, LogOffset: offset})
+	if err != nil {
+		panic(fmt.Sprintf("encode progress: %v", err)) // records are built here; invalid ones are programming errors
+	}
+	return &kgo.Record{Topic: admin.ReceiverProgressTopic(run.receiver.id), Key: []byte(run.task.Wherry.Run), Value: encoded}
 }
 
 func (r *Receiver) statusRecords(task *wire.Submission, status *wire.RunStatus) []*kgo.Record {
@@ -1840,10 +1851,6 @@ func (r *Receiver) statusRecords(task *wire.Submission, status *wire.RunStatus) 
 		{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: value},
 		{Topic: admin.TenantTopic(task.Wherry.Tenant), Key: []byte(task.Wherry.Run), Value: value},
 	}
-}
-
-func (run *activeRun) events(value wire.Record) *kgo.Record {
-	return &kgo.Record{Topic: admin.PoolEventsTopic(run.receiver.config.Pool), Key: []byte(run.task.Wherry.Run), Value: run.receiver.sign(value)}
 }
 
 func (run *activeRun) feed(value wire.Record) *kgo.Record {
@@ -1974,19 +1981,44 @@ func inputPointers(history []wire.Message) []wire.Message {
 	return stripped
 }
 
-// lastOffset returns the highest started or heartbeat log offset this run reached under an earlier attempt.
+// lastOffset returns the highest log offset this run reached under an earlier attempt: its started offsets, and the
+// progress of each receiver that held an attempt of it. A holder whose progress topic this receiver cannot read, such
+// as an ended one, contributes nothing.
 func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash string) (int64, error) {
 	events, err := r.readEvents(ctx)
 	if err != nil {
 		return 0, err
 	}
 	var highest int64
+	holders := map[string]bool{}
 	for _, status := range events.statuses[task.Wherry.Run] {
-		if status.Wherry.Tenant != task.Wherry.Tenant || status.Wherry.TaskHash != hash ||
-			(status.Wherry.Kind != "started" && status.Wherry.Kind != "heartbeat") || status.Wherry.LogOffset == nil {
+		if status.Wherry.Tenant != task.Wherry.Tenant || status.Wherry.TaskHash != hash {
 			continue
 		}
-		highest = max(highest, *status.Wherry.LogOffset)
+		holders[status.Wherry.Receiver] = true
+		if status.Wherry.Kind == "started" && status.Wherry.LogOffset != nil {
+			highest = max(highest, *status.Wherry.LogOffset)
+		}
+	}
+	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	for holder := range holders {
+		records, err := r.reader.ReadFrom(readCtx, admin.ReceiverProgressTopic(holder), 0)
+		if authorisationError(err) || errors.Is(err, kerr.UnknownTopicOrPartition) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		for _, record := range records {
+			if string(record.Key) != task.Wherry.Run || record.Value == nil {
+				continue
+			}
+			progress, err := wire.DecodeProgress(record.Value)
+			if err == nil && progress.Tenant == task.Wherry.Tenant && progress.TaskHash == hash {
+				highest = max(highest, progress.LogOffset)
+			}
+		}
 	}
 	return highest, nil
 }

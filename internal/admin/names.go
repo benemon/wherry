@@ -13,6 +13,9 @@ const ReceiversTopic = "wherry.receivers"
 func TenantPrincipal(tenant, host string) string { return "wherry.tnt." + tenant + "." + host }
 func ReceiverPrincipal(receiver string) string   { return "wherry.rcv." + receiver }
 func ReceiverTopic(receiver string) string       { return "wherry.receiver." + receiver }
+func ReceiverProgressTopic(receiver string) string {
+	return "wherry.receiver." + receiver + ".progress"
+}
 func PoolTasksTopic(pool string) string          { return "wherry.pool." + pool + ".tasks" }
 func PoolEventsTopic(pool string) string         { return "wherry.pool." + pool + ".events" }
 func TenantTopic(tenant string) string           { return "wherry.tenant." + tenant }

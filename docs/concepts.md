@@ -165,22 +165,24 @@ receiver stops renewing, the broker delivers the task again, and that
 delivery is the next attempt. The receiver that takes it looks for the
 run's job in each of its profiles. If the job exists and came from the
 same profile and agent, as its platform metadata records, the receiver adopts it, asks for a seal of its own,
-and once it opens resumes the transcript from the last log offset recorded
-in a heartbeat. Any other job under the
+and once it opens resumes the transcript from the run's latest committed
+offset, which each holder records on its own progress topic,
+`wherry.receiver.<receiver>.progress`. Any other job under the
 run's ID is stopped and purged, and the run is dispatched again. Each
 run writes through its own
 [transactional producer](https://kafka.apache.org/documentation/#semantics),
 `p.<pool>.<run>`, so an adopter fences the earlier holder's writes.
 
 A status goes to the pool's events and the tenant feed in one transaction,
-and every reader reads committed records only. Heartbeats go to the pool's
-events alone. The result and the **echo** go to the tenant feed, and
-transcript and output chunks go to the tenant's transcript topic,
-`wherry.tenant.<tenant>.transcript`, in the same transaction as the status
-or result they belong to. A terminal status carries the number of
-transcript chunks its attempt wrote. The echo, written when a receiver
-claims or rejects a run, names the pool and placement the run was admitted
-to, so any host of the tenant can follow or cancel the run. The submitting
+and every reader reads committed records only. The result and the **echo**
+go to the tenant feed, and transcript and output chunks go to the tenant's
+transcript topic, `wherry.tenant.<tenant>.transcript`, in the same
+transaction as the status, result or progress record they belong to. While
+the job runs, the receiver records the run's latest committed transcript
+offset on its progress topic with each renewal. A terminal status carries
+the number of transcript chunks its attempt wrote. The echo, written when a
+receiver claims or rejects a run, names the pool and placement the run was
+admitted to, so any host of the tenant can follow or cancel the run. The submitting
 host also keeps a record of each run in its state directory, so it can report the
 run before a receiver claims it.
 

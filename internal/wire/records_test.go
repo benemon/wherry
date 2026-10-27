@@ -128,6 +128,11 @@ func TestRecordValidation(t *testing.T) {
 			value.Wherry.Kind = "other"
 			return value
 		},
+		"heartbeat status": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.Kind = "heartbeat"
+			return value
+		},
 		"status counting chunks before its terminal": func(r map[string]Record) Record {
 			value := r["status"].(*RunStatus)
 			value.Wherry.TranscriptChunks = 1
@@ -286,6 +291,32 @@ func TestRecordValidation(t *testing.T) {
 }
 
 // The limits on inline inputs are the broker's and the profiles', so a submission of any size signs and the host applies them.
+func TestProgressDecodesStrictly(t *testing.T) {
+	encoded, err := EncodeProgress(Progress{Tenant: "tenant-a", TaskHash: testHash, Attempt: 2, LogOffset: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded, err := DecodeProgress(encoded); err != nil || decoded != (Progress{V: 1, Tenant: "tenant-a", TaskHash: testHash, Attempt: 2, LogOffset: 42}) {
+		t.Fatalf("decoded %+v, %v", decoded, err)
+	}
+	for name, value := range map[string]string{
+		"unknown member":   `{"v":1,"tenant":"tenant-a","task_hash":"` + testHash + `","attempt":1,"log_offset":0,"run":"run-a"}`,
+		"duplicate name":   `{"v":1,"tenant":"tenant-a","tenant":"tenant-b","task_hash":"` + testHash + `","attempt":1,"log_offset":0}`,
+		"unknown version":  `{"v":2,"tenant":"tenant-a","task_hash":"` + testHash + `","attempt":1,"log_offset":0}`,
+		"no attempt":       `{"v":1,"tenant":"tenant-a","task_hash":"` + testHash + `","attempt":0,"log_offset":0}`,
+		"negative offset":  `{"v":1,"tenant":"tenant-a","task_hash":"` + testHash + `","attempt":1,"log_offset":-1}`,
+		"invalid hash":     `{"v":1,"tenant":"tenant-a","task_hash":"abc","attempt":1,"log_offset":0}`,
+		"uppercase tenant": `{"v":1,"tenant":"Tenant","task_hash":"` + testHash + `","attempt":1,"log_offset":0}`,
+	} {
+		if _, err := DecodeProgress([]byte(value)); err == nil {
+			t.Errorf("%s: decoded", name)
+		}
+	}
+	if _, err := EncodeProgress(Progress{Tenant: "tenant-a", TaskHash: testHash}); err == nil {
+		t.Error("encoded progress without an attempt")
+	}
+}
+
 func TestValidateInputsAppliesTheLimit(t *testing.T) {
 	parts := []Part{{Text: "hello"}, {Raw: make(StdBytes, 60), Filename: "a"}, {Data: []byte(`"` + strings.Repeat("x", 38) + `"`), Filename: "b"}}
 	if err := ValidateInputs(parts, 100); err != nil {

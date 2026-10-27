@@ -1848,7 +1848,7 @@ func TestHistorySkipsOtherRunsRecords(t *testing.T) {
 		other.submission.Wherry.Run = fmt.Sprintf("run-other-%d", i)
 		values := make([][]byte, 100)
 		for j := range values {
-			values[j] = receiver.status(t, other, 1, fmt.Sprintf("heartbeat-%d", j), "heartbeat", wire.TaskStateWorking, nil)
+			values[j] = receiver.status(t, other, 1, fmt.Sprintf("claimed-%d", j), "claimed", wire.TaskStateWorking, nil)
 		}
 		receiver.feed(t, f.ctx, other.submission.Wherry.Run, values...)
 	}

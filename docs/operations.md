@@ -137,7 +137,8 @@ bound, and receivers reject a redelivered task whose submission is gone.
 `pool create` sets the retention of the pool's tasks and events topics, new and
 existing, to `max_queue_deadline` plus the six-hour maximum run time plus a
 one-day margin, and their timestamp type to `LogAppendTime`, since a run's age
-runs from the broker's time. With the 14-day default that is `1317600000` ms, 15 days
+runs from the broker's time. It sets the same retention on the progress
+topics of the pool's live receivers. With the 14-day default that is `1317600000` ms, 15 days
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
 statuses and results, and tenant transcript topics transcripts and outputs, for
 30 days, and both must keep them for at least `max_queue_deadline` plus six
@@ -697,7 +698,8 @@ wherry admin check
 It loads `wherry.admin`, validates every receiver configuration against its
 pool's current terms, checks that every pool's largest records still fit the
 broker's record limit, reports topic retention below the pool's required
-bounds, and confirms that every ACL the state calls for exists. It does not
+bounds, including a receiver's progress topic that keeps less than its
+pool's tasks topic, and confirms that every ACL the state calls for exists. It does not
 check a plugin's type or a profile's `config` section; at start the receiver
 finds the type's plugin, the plugin checks each profile's section, and the
 receiver exits with `profile <name>: ...` on an error. Run it after changing a pool's terms, since
@@ -1057,7 +1059,7 @@ configuration, bundle and state directory.
    `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its
    tasks to the pool. The next delivery of each task adopts the running
    job, on the restarted receiver or another member, and resumes the
-   transcript from the last heartbeat offset. Allow the receiver 30 seconds
+   transcript from the run's latest committed offset. Allow the receiver 30 seconds
    to stop before a forced kill: it closes its idle claims before it
    releases the tasks it holds.
 4. Restart the harness sessions that run `wherry mcp`.

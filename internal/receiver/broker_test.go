@@ -48,7 +48,7 @@ func newBrokerPool(t *testing.T, ctx context.Context, address string) brokerPool
 	t.Cleanup(kafka.Close)
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	b := brokerPool{opts: opts, kafka: kafka, receiver: "receiver-" + suffix, pool: "pool-" + suffix, tenant: "tenant-" + suffix, host: "host-" + suffix}
-	topics := []string{admin.AdminTopic, admin.ReceiversTopic, admin.PoolTasksTopic(b.pool), admin.PoolEventsTopic(b.pool), admin.TenantTopic(b.tenant), admin.TenantTranscriptTopic(b.tenant), admin.HostTopic(b.tenant, b.host), admin.ReceiverTopic(b.receiver)}
+	topics := []string{admin.AdminTopic, admin.ReceiversTopic, admin.PoolTasksTopic(b.pool), admin.PoolEventsTopic(b.pool), admin.TenantTopic(b.tenant), admin.TenantTranscriptTopic(b.tenant), admin.HostTopic(b.tenant, b.host), admin.ReceiverTopic(b.receiver), admin.ReceiverProgressTopic(b.receiver)}
 	if _, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, -1, nil, topics...); err != nil {
 		t.Fatal(err)
 	}

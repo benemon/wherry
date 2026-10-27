@@ -34,8 +34,9 @@ differently live on different topics.
 | `wherry.admin` | the operator | every principal | pool terms, receiver configurations, hosts, entitlements, membership ends, skips |
 | `wherry.receivers` | receivers | receivers, hosts | advertisements |
 | `wherry.receiver.<receiver>` | that receiver | its pool's members, entitled tenants' hosts | its keys |
+| `wherry.receiver.<receiver>.progress` | that receiver | its pool's live members | each run's latest committed transcript offset |
 | `wherry.pool.<pool>.tasks` | entitled tenants' hosts | the pool's receivers, through its share group | submissions |
-| `wherry.pool.<pool>.events` | the pool's receivers, entitled tenants' hosts | the pool's receivers | statuses, heartbeats, start failures, cancels |
+| `wherry.pool.<pool>.events` | the pool's receivers, entitled tenants' hosts | the pool's receivers | statuses, start failures, cancels |
 | `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, results, echoes, seal requests |
 | `wherry.tenant.<tenant>.transcript` | receivers of the tenant's pools | the tenant's hosts | transcript chunks, output chunks |
 | `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key, seals |
@@ -45,8 +46,8 @@ beside the platform, object storage and git remote a run uses.
 
 ![wherry's implementation: a host, the Kafka topics, a receiver with its plugins, a platform job, object storage and a git remote](diagrams/implementation.svg)
 
-`wherry.admin` records and seals carry no signature: each sits on a topic only
-one principal can write, so Kafka authenticates it. Every other record, key
+`wherry.admin` records, progress records and seals carry no signature: each
+sits on a topic only one principal can write, so Kafka authenticates it. Every other record, key
 records included, is a versioned EdDSA
 [JWS](https://datatracker.ietf.org/doc/html/rfc7515). A record on a shared topic
 names its owner and key in its `kid`, and a reader verifies it against that
@@ -62,12 +63,19 @@ topic it arrived on. A receiver record must come from a live member of the
 pool the run was placed in, on behalf of a tenant entitled to it.
 [The wherry A2A extension](a2a-extension-v1.md) specifies every record.
 
-Every topic has one partition, `LogAppendTime` timestamps and
-`cleanup.policy=delete`. Nothing is compacted and no topic is deleted. A
-pool's task and event topics keep records for its maximum queue deadline plus six hours
+Every topic has one partition and `LogAppendTime` timestamps, and no topic
+is deleted. A topic is compacted only when its readers need the latest
+record per key and nothing else, and no principal but the record's owner can
+write that key, or a superseded record costs nothing: `wherry.receivers` and
+the progress topics have `cleanup.policy=compact,delete`, every other topic
+`cleanup.policy=delete`. A pool's task and event topics and its receivers'
+progress topics keep records for its maximum queue deadline plus six hours
 plus a day, 15 days 6 hours by default, the tenant feed and transcript
 topic for 30 days and `wherry.receivers` for 7; the identity and
 configuration topics keep them forever.
+
+A deployment has 2 + 2R + 2P + 2T + H topics for R receivers, P pools, T
+tenants and H hosts. The count grows with configuration, never with runs.
 
 Every principal reads all of `wherry.admin`, so tenants see each other's
 names, hosts, entitlements and pools.
@@ -97,7 +105,10 @@ redelivery.
 
 `wherry admin` creates each topic with one partition, the broker's default
 replication factor, `cleanup.policy=delete` and
-`message.timestamp.type=LogAppendTime`.
+`message.timestamp.type=LogAppendTime`, except `wherry.receivers` and the
+progress topics, which it creates with `cleanup.policy=compact,delete`,
+`segment.ms=3600000` and `max.compaction.lag.ms=3600000`, so a segment
+closes and compacts within an hour.
 
 | Topic | Created by | `retention.ms` |
 | --- | --- | --- |
@@ -108,22 +119,26 @@ replication factor, `cleanup.policy=delete` and
 | `wherry.tenant.<tenant>` | `pool entitle`, `host add` | `2592000000` (30 days) |
 | `wherry.tenant.<tenant>.transcript` | `pool entitle`, `host add` | as the tenant feed, `2592000000` (30 days) |
 | `wherry.receiver.<receiver>` | `receiver add` | `-1` |
+| `wherry.receiver.<receiver>.progress` | `receiver add`, `pool create` | as the pool's tasks topic |
 | `wherry.host.<tenant>.<host>` | `host add` | `-1` |
 
 The tasks retention keeps `max_queue_deadline`, the six-hour maximum run time,
-and a one-day margin. Events stay at least as long as tasks. A tenant feed
-and its transcript topic must stay for at least `max_queue_deadline` plus six
-hours; their 30-day default exceeds the default requirement of
-`1231200000`. Identity and configuration topics stay at `-1`, and
-`wherry.receivers` remains a seven-day liveness topic.
+and a one-day margin. Events and the pool's progress topics stay at least as
+long as tasks. A tenant feed and its transcript topic must stay for at least
+`max_queue_deadline` plus six hours; their 30-day default exceeds the
+default requirement of `1231200000`. Identity and configuration topics stay
+at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 
 `wherry admin` leaves an existing topic's configuration as it is, except
 that `pool create` sets the retention and timestamp type of the pool's tasks
-and events topics. A tenant feed's or transcript topic's retention can be
-changed with Kafka's own tools. `pool create` and `pool entitle` refuse terms
-that need more than an entitled tenant's feed or transcript topic keeps, and
-`wherry admin check` reports a topic below its bound and a pool topic whose
-timestamp type is not `LogAppendTime`.
+and events topics, and `receiver add` and `pool create` set every
+configuration above on the progress topics of the pool's live receivers. A
+tenant feed's or transcript topic's retention can be changed with Kafka's
+own tools. `pool create` and `pool entitle` refuse terms that need more than
+an entitled tenant's feed or transcript topic keeps, and `wherry admin
+check` reports a topic below its bound, a progress topic that keeps less
+than its pool's tasks topic, and a pool topic whose timestamp type is not
+`LogAppendTime`.
 
 ### ACLs
 
@@ -142,7 +157,9 @@ transactional ID prefix.
 | host | topic `wherry.receiver.<r>`, each receiver of an entitled pool | Read, Describe |
 | receiver | topic `wherry.admin` | Read, Describe |
 | receiver | topic `wherry.receiver.<own>` | Read, Write, Describe |
+| receiver | topic `wherry.receiver.<own>.progress` | Read, Write, Describe |
 | receiver | topic `wherry.receiver.<peer>`, each other member of its pool | Read, Describe |
+| receiver | topic `wherry.receiver.<peer>.progress`, each other member of its pool | Read, Describe |
 | receiver | topic `wherry.receivers` | Read, Write, Describe |
 | receiver | topic `wherry.pool.<own pool>.tasks` | Read, Describe |
 | receiver | topic `wherry.pool.<own pool>.events` | Read, Write, Describe |

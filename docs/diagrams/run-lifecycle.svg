@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1110" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1732 1142" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
   <title id="title">wherry run lifecycle</title>
-  <desc id="desc">Sequence of one run across the host, the pool's tasks and events topics, the tenant feed, the host topic, the receiver, its adapter plugin and the job. The host resolves placement, records the run locally and publishes a signed submission. A receiver claims it through the share group, admits it and commits the echo and the claimed status. When the run needs a seal, the receiver writes a seal request to the tenant feed, the host's await or mcp reads it and writes a seal to its host topic, and the receiver opens it. The receiver dispatches to the adapter, which starts the job, and writes started. While the job runs, its output lines stream through the adapter to the receiver, which publishes redacted transcript chunks to the tenant feed and heartbeats with the log offset to the pool's events when the transcript has moved. When the agent exits the receiver stops the job, collects outputs and the agent's outcome file, commits chunks, outputs, result and terminal status in one transaction, and acknowledges the delivery. The host's await reads the result and verifies the outputs. A redelivery enters at the claim, as the next attempt; an adoption enters after the claim, where the receiver finds the run's job and skips dispatch.</desc>
+  <desc id="desc">Sequence of one run across the host, the pool's tasks and events topics, the tenant feed, the tenant's transcript topic, the host topic, the receiver's progress topic, the receiver, its adapter plugin and the job. The host resolves placement, records the run locally and publishes a signed submission. A receiver claims it through the share group, admits it and commits the echo and the claimed status. When the run needs a seal, the receiver writes a seal request to the tenant feed, the host's await or mcp reads it and writes a seal to its host topic, and the receiver opens it. The receiver dispatches to the adapter, which starts the job, and writes started with the log offset it follows from. While the job runs, its output lines stream through the adapter to the receiver, which on each renewal commits redacted transcript chunks to the transcript topic and the run's latest log offset to its progress topic in one transaction. When the agent exits the receiver stops the job, collects outputs and the agent's outcome file, commits the last chunks, outputs, result, terminal status and a tombstone for the run's progress record in one transaction, and acknowledges the delivery. The host's await reads the result and verifies the outputs. A redelivery enters at the claim, as the next attempt; an adoption enters after the claim, where the receiver finds the run's job, resumes from the highest of the run's started offsets and its holders' progress records, and skips dispatch.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e4a35"/>
@@ -10,7 +10,7 @@
     </marker>
   </defs>
 
-  <rect width="1400" height="1110" fill="#f4f1e8"/>
+  <rect width="1732" height="1142" fill="#f4f1e8"/>
 
   <!-- ======================= Participants ======================= -->
   <g font-size="12.5" fill="#00290b">
@@ -31,37 +31,49 @@
     <text x="614" y="70" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry.tenant.&lt;tenant&gt;</text>
 
     <rect x="704" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
-    <text x="782" y="52" text-anchor="middle" font-weight="600">Host topic</text>
-    <text x="782" y="70" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry.host.&lt;tenant&gt;.&lt;host&gt;</text>
+    <text x="782" y="49" text-anchor="middle" font-weight="600">Transcript</text>
+    <text x="782" y="64" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry.tenant.&lt;tenant&gt;</text>
+    <text x="782" y="75" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">.transcript</text>
 
-    <rect x="872" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
-    <text x="950" y="52" text-anchor="middle" font-weight="600">Receiver</text>
-    <text x="950" y="70" text-anchor="middle" font-size="10" fill="#2e4a35">nomad-1, pool build</text>
+    <rect x="872" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
+    <text x="950" y="52" text-anchor="middle" font-weight="600">Host topic</text>
+    <text x="950" y="70" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry.host.&lt;tenant&gt;.&lt;host&gt;</text>
 
-    <rect x="1040" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
-    <text x="1118" y="52" text-anchor="middle" font-weight="600">Adapter plugin</text>
-    <text x="1118" y="70" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry-plugin-&lt;type&gt;</text>
+    <rect x="1040" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#3f6b4a" stroke-width="1.5"/>
+    <text x="1118" y="49" text-anchor="middle" font-weight="600">Progress</text>
+    <text x="1118" y="64" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry.receiver.&lt;receiver&gt;</text>
+    <text x="1118" y="75" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">.progress</text>
 
     <rect x="1208" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
-    <text x="1286" y="52" text-anchor="middle" font-weight="600">Job</text>
-    <text x="1286" y="70" text-anchor="middle" font-size="10" fill="#2e4a35">agent on the platform</text>
+    <text x="1286" y="52" text-anchor="middle" font-weight="600">Receiver</text>
+    <text x="1286" y="70" text-anchor="middle" font-size="10" fill="#2e4a35">nomad-1, pool build</text>
+
+    <rect x="1376" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="1454" y="52" text-anchor="middle" font-weight="600">Adapter plugin</text>
+    <text x="1454" y="70" text-anchor="middle" font-size="9" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry-plugin-&lt;type&gt;</text>
+
+    <rect x="1544" y="30" width="156" height="52" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+    <text x="1622" y="52" text-anchor="middle" font-weight="600">Job</text>
+    <text x="1622" y="70" text-anchor="middle" font-size="10" fill="#2e4a35">agent on the platform</text>
   </g>
 
   <!-- lifelines -->
   <g stroke="#b7c0b0" stroke-width="1.5" stroke-dasharray="4 4">
-    <line x1="110" y1="82" x2="110" y2="944"/>
-    <line x1="278" y1="82" x2="278" y2="944"/>
-    <line x1="446" y1="82" x2="446" y2="944"/>
-    <line x1="614" y1="82" x2="614" y2="944"/>
-    <line x1="782" y1="82" x2="782" y2="944"/>
-    <line x1="950" y1="82" x2="950" y2="944"/>
-    <line x1="1118" y1="82" x2="1118" y2="944"/>
-    <line x1="1286" y1="82" x2="1286" y2="944"/>
+    <line x1="110" y1="82" x2="110" y2="976"/>
+    <line x1="278" y1="82" x2="278" y2="976"/>
+    <line x1="446" y1="82" x2="446" y2="976"/>
+    <line x1="614" y1="82" x2="614" y2="976"/>
+    <line x1="782" y1="82" x2="782" y2="976"/>
+    <line x1="950" y1="82" x2="950" y2="976"/>
+    <line x1="1118" y1="82" x2="1118" y2="976"/>
+    <line x1="1286" y1="82" x2="1286" y2="976"/>
+    <line x1="1454" y1="82" x2="1454" y2="976"/>
+    <line x1="1622" y1="82" x2="1622" y2="976"/>
   </g>
 
   <!-- activations: the receiver holds the claim, the host awaits -->
-  <rect x="945" y="210" width="10" height="690" fill="#e8ebdf" stroke="#3f6b4a" stroke-width="1"/>
-  <rect x="105" y="370" width="10" height="560" fill="#e8ebdf" stroke="#3f6b4a" stroke-width="1"/>
+  <rect x="1281" y="210" width="10" height="722" fill="#e8ebdf" stroke="#3f6b4a" stroke-width="1"/>
+  <rect x="105" y="370" width="10" height="592" fill="#e8ebdf" stroke="#3f6b4a" stroke-width="1"/>
 
   <!-- 1. place and record -->
   <rect x="36" y="104" width="350" height="44" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1"/>
@@ -74,104 +86,108 @@
     <text x="194" y="171">signed submission</text>
 
     <!-- 3. claim -->
-    <path d="M 278 212 H 944" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="614" y="205">claim through share group p-&lt;pool&gt;; the attempt is the delivery count</text>
+    <path d="M 278 212 H 1280" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="782" y="205">claim through share group p-&lt;pool&gt;; the attempt is the delivery count</text>
 
     <!-- 4. admission -->
-    <rect x="964" y="228" width="226" height="40" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1"/>
-    <text x="1077" y="245">admits it against wherry.admin</text>
-    <text x="1077" y="260">and the pool's events</text>
+    <rect x="1300" y="228" width="226" height="40" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1"/>
+    <text x="1413" y="245">admits it against wherry.admin</text>
+    <text x="1413" y="260">and the pool's events</text>
 
     <!-- 5. claimed -->
-    <path d="M 944 296 H 452" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <path d="M 1280 296 H 452" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
     <circle cx="614" cy="296" r="3.5" fill="#2e4a35"/>
-    <text x="782" y="289">claimed status, with the echo to the feed</text>
+    <text x="950" y="289">claimed status, with the echo to the feed</text>
 
     <!-- 6. seal -->
-    <rect x="62" y="318" width="934" height="164" rx="4" fill="none" stroke="#3f6b4a" stroke-width="1"/>
+    <rect x="62" y="318" width="1270" height="164" rx="4" fill="none" stroke="#3f6b4a" stroke-width="1"/>
     <text x="72" y="336" text-anchor="start" font-weight="600" fill="#3f6b4a">when the run needs a seal</text>
-    <path d="M 944 360 H 620" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
-    <text x="782" y="353" fill="#3f6b4a">seal request, in its own transaction</text>
+    <path d="M 1280 360 H 620" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
+    <text x="950" y="353" fill="#3f6b4a">seal request, in its own transaction</text>
     <path d="M 614 392 H 116" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
     <text x="362" y="385" fill="#3f6b4a">wherry await or wherry mcp reads it</text>
-    <path d="M 116 424 H 776" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
-    <text x="446" y="417" fill="#3f6b4a">seal, encrypted to the attempt's key</text>
-    <path d="M 782 456 H 944" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
-    <text x="866" y="449" fill="#3f6b4a">opens the seal</text>
+    <path d="M 116 424 H 944" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
+    <text x="530" y="417" fill="#3f6b4a">seal, encrypted to the attempt's key</text>
+    <path d="M 950 456 H 1280" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
+    <text x="1118" y="449" fill="#3f6b4a">opens the seal</text>
 
     <!-- 7. dispatch -->
-    <path d="M 956 520 H 1118" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="1037" y="499">Dispatch: prompt, inputs,</text>
-    <text x="1037" y="513">credentials, fetches</text>
+    <path d="M 1292 520 H 1454" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="1373" y="499">Dispatch: prompt, inputs,</text>
+    <text x="1373" y="513">credentials, fetches</text>
 
     <!-- 8. start -->
-    <path d="M 1118 552 H 1286" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="1202" y="545">starts the job</text>
+    <path d="M 1454 552 H 1622" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="1538" y="545">starts the job</text>
 
     <!-- 9. started -->
-    <path d="M 944 584 H 452" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <path d="M 1280 584 H 452" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
     <circle cx="614" cy="584" r="3.5" fill="#2e4a35"/>
-    <text x="782" y="577">started, with the log offset it follows from</text>
+    <text x="950" y="577">started, with the log offset it follows from</text>
 
     <!-- 10. while the job runs -->
-    <rect x="380" y="604" width="980" height="166" rx="4" fill="none" stroke="#2e4a35" stroke-width="1"/>
-    <text x="390" y="622" text-anchor="start" font-weight="600">while the job runs</text>
-    <path d="M 1286 646 H 1124" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="1202" y="639">output lines</text>
-    <path d="M 1118 678 H 956" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="1037" y="671">Follow stream</text>
-    <path d="M 944 710 H 620" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="782" y="703">transcript chunks, redacted</text>
-    <path d="M 944 750 H 452" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="530" y="743">heartbeat, when the transcript moves</text>
-    <text x="782" y="743">log offset for an adopter</text>
+    <rect x="716" y="604" width="980" height="166" rx="4" fill="none" stroke="#2e4a35" stroke-width="1"/>
+    <text x="726" y="622" text-anchor="start" font-weight="600">while the job runs</text>
+    <path d="M 1622 646 H 1460" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="1538" y="639">output lines</text>
+    <path d="M 1454 678 H 1292" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="1373" y="671">Follow stream</text>
+    <path d="M 1280 710 H 788" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="1034" y="703">transcript chunks, redacted</text>
+    <path d="M 1280 750 H 1124" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="1202" y="743">latest log offset</text>
+    <text x="950" y="743">on each renewal, in one transaction,</text>
+    <text x="950" y="757">when the transcript moves</text>
 
     <!-- 11. result line, stop and collect -->
-    <path d="M 1286 796 H 1124" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="1202" y="789">agent exits</text>
-    <path d="M 956 828 H 1118" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="1037" y="821">Stop, then Collect</text>
+    <path d="M 1622 796 H 1460" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="1538" y="789">agent exits</text>
+    <path d="M 1292 828 H 1454" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="1373" y="821">Stop, then Collect</text>
 
     <!-- 12. end -->
-    <path d="M 944 862 H 452" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <path d="M 1280 862 H 452" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
     <circle cx="614" cy="862" r="3.5" fill="#2e4a35"/>
-    <text x="782" y="855">last chunks, outputs, result and terminal status</text>
+    <text x="950" y="855">last chunks, outputs, result and terminal status</text>
+    <path d="M 1280 894 H 1124" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="1202" y="887">tombstone for the run</text>
+    <text x="950" y="891">in the same transaction</text>
 
     <!-- 13. acknowledge -->
-    <path d="M 944 894 H 284" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="614" y="887">acknowledges the delivery</text>
+    <path d="M 1280 926 H 284" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="782" y="919">acknowledges the delivery</text>
 
     <!-- 14. await -->
-    <path d="M 614 926 H 116" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="362" y="919">await verifies the outputs and returns the result</text>
+    <path d="M 614 958 H 116" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="362" y="951">await verifies the outputs and returns the result</text>
   </g>
 
   <!-- where a redelivery and an adoption enter -->
   <g font-size="10" font-weight="700" fill="#fffdf7" text-anchor="middle">
     <circle cx="300" cy="212" r="9" fill="#3f6b4a"/>
     <text x="300" y="216">R</text>
-    <circle cx="926" cy="500" r="9" fill="#3f6b4a"/>
-    <text x="926" y="504">A</text>
+    <circle cx="1262" cy="500" r="9" fill="#3f6b4a"/>
+    <text x="1262" y="504">A</text>
   </g>
 
-  <rect x="32" y="966" width="1332" height="104" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
+  <rect x="32" y="998" width="1668" height="104" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
   <g font-size="10.5" fill="#2e4a35">
-    <circle cx="54" cy="988" r="9" fill="#3f6b4a"/>
-    <text x="54" y="992" text-anchor="middle" font-size="10" font-weight="700" fill="#fffdf7">R</text>
-    <text x="72" y="992">Redelivery. The receiver renews the share group's acquisition lock every 10 s. When a holder stops renewing, or releases the task, the broker delivers the submission again, as the next attempt.</text>
-    <circle cx="54" cy="1018" r="9" fill="#3f6b4a"/>
-    <text x="54" y="1022" text-anchor="middle" font-size="10" font-weight="700" fill="#fffdf7">A</text>
-    <text x="72" y="1022">Adoption. On a redelivery the receiver looks up the run's job in each profile. A job of the same profile and agent is adopted without a Dispatch: the receiver asks for its own seal</text>
-    <text x="72" y="1037">when the run has credentials or S3 outputs, then follows from the highest log offset of its started and heartbeat statuses. Any other job under the run's ID is stopped and purged, and the run is dispatched again.</text>
-    <text x="72" y="1056">A host seals only to the receiver that wrote the run's first claimed status, so a run another receiver adopts ends TASK_STATE_FAILED when its seal wait ends.</text>
+    <circle cx="54" cy="1020" r="9" fill="#3f6b4a"/>
+    <text x="54" y="1024" text-anchor="middle" font-size="10" font-weight="700" fill="#fffdf7">R</text>
+    <text x="72" y="1024">Redelivery. The receiver renews the share group's acquisition lock every 10 s. When a holder stops renewing, or releases the task, the broker delivers the submission again, as the next attempt.</text>
+    <circle cx="54" cy="1050" r="9" fill="#3f6b4a"/>
+    <text x="54" y="1054" text-anchor="middle" font-size="10" font-weight="700" fill="#fffdf7">A</text>
+    <text x="72" y="1054">Adoption. On a redelivery the receiver looks up the run's job in each profile. A job of the same profile and agent is adopted without a Dispatch: the receiver asks for its own seal when the run has credentials or S3 outputs,</text>
+    <text x="72" y="1069">then follows from the highest log offset of the run's started statuses and of its progress records on the progress topics of the receivers that held it. Any other job under the run's ID is stopped and purged, and the run is dispatched again.</text>
+    <text x="72" y="1088">A host seals only to the receiver that wrote the run's first claimed status, so a run another receiver adopts ends TASK_STATE_FAILED when its seal wait ends.</text>
   </g>
 
   <!-- legend -->
   <g font-size="10.5" fill="#2e4a35">
-    <line x1="32" y1="1092" x2="72" y2="1092" stroke="#2e4a35" stroke-width="1.5"/>
-    <circle cx="52" cy="1092" r="3.5" fill="#2e4a35"/>
-    <text x="80" y="1096">a status written to the pool's events and the tenant feed in one transaction</text>
-    <line x1="560" y1="1092" x2="600" y2="1092" stroke="#3f6b4a" stroke-width="1.5"/>
-    <text x="608" y="1096" fill="#3f6b4a">credential seal path</text>
+    <line x1="32" y1="1124" x2="72" y2="1124" stroke="#2e4a35" stroke-width="1.5"/>
+    <circle cx="52" cy="1124" r="3.5" fill="#2e4a35"/>
+    <text x="80" y="1128">a status written to the pool's events and the tenant feed in one transaction</text>
+    <line x1="560" y1="1124" x2="600" y2="1124" stroke="#3f6b4a" stroke-width="1.5"/>
+    <text x="608" y="1128" fill="#3f6b4a">credential seal path</text>
   </g>
 </svg>

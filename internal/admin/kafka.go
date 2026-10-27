@@ -151,6 +151,9 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 	if err := service.configureTopicRetention(ctx, value, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
 		return err
 	}
+	if err := service.progressTopics(ctx, state, pool); err != nil {
+		return err
+	}
 	if err := service.configureGroup(ctx, pool, effective); err != nil {
 		return err
 	}
@@ -229,6 +232,9 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 		return err
 	}
 	if err := service.createTopics(ctx, "-1", ReceiverTopic(config.Receiver)); err != nil {
+		return err
+	}
+	if err := service.progressTopics(ctx, state, config.Pool); err != nil {
 		return err
 	}
 	if err := service.reconcileACLs(ctx, state); err != nil {
@@ -426,6 +432,35 @@ var receiversConfigs = map[string]string{
 	"max.compaction.lag.ms":  "3600000",
 }
 
+// progressConfigs are a receiver's progress topic configs: an adopter wants each run's latest offset, its key's latest
+// record, while the pool's topics keep the run.
+func progressConfigs(retention retentionBounds) map[string]string {
+	configs := maps.Clone(receiversConfigs)
+	configs["retention.ms"] = strconv.FormatInt(retention.tasks, 10)
+	return configs
+}
+
+// progressTopics creates the progress topics of pool's live receivers and converges existing ones on their configs.
+func (service *Service) progressTopics(ctx context.Context, state State, pool string) error {
+	retention, err := poolRetention(state.Pools[pool])
+	if err != nil {
+		return err
+	}
+	var topics []string
+	for receiver, config := range state.Receivers {
+		if config.Pool == pool && !state.Ended[ReceiverPrincipal(receiver)] {
+			topics = append(topics, ReceiverProgressTopic(receiver))
+		}
+	}
+	if len(topics) == 0 {
+		return nil
+	}
+	if err := service.createTopicsWith(ctx, progressConfigs(retention), topics...); err != nil {
+		return err
+	}
+	return service.configureTopics(ctx, progressConfigs(retention), topics...)
+}
+
 const retentionMarginMS = 24 * 60 * 60 * 1000
 
 type retentionBounds struct {
@@ -601,6 +636,11 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 	for tenant := range state.Entitlements {
 		topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
 	}
+	for receiver := range state.Receivers {
+		if !state.Ended[ReceiverPrincipal(receiver)] {
+			topics = append(topics, ReceiverProgressTopic(receiver))
+		}
+	}
 	retentions, err := service.topicRetentions(ctx, topics...)
 	if err != nil {
 		return err
@@ -634,6 +674,12 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 		}
 		if !retentionAtLeast(retentions[eventsTopic], retentions[tasksTopic]) {
 			return fmt.Errorf("topic %s retention.ms %d is below tasks retention.ms %d", eventsTopic, retentions[eventsTopic], retentions[tasksTopic])
+		}
+		for receiver, config := range state.Receivers {
+			progress := ReceiverProgressTopic(receiver)
+			if config.Pool == pool && !state.Ended[ReceiverPrincipal(receiver)] && !retentionAtLeast(retentions[progress], retentions[tasksTopic]) {
+				return fmt.Errorf("topic %s retention.ms %d is below tasks retention.ms %d", progress, retentions[progress], retentions[tasksTopic])
+			}
 		}
 		for tenant, pools := range state.Entitlements {
 			for _, feed := range []string{TenantTopic(tenant), TenantTranscriptTopic(tenant)} {

@@ -569,10 +569,10 @@ func TestCancelStopsInFlightRun(t *testing.T) {
 	}
 }
 
-func TestRunningTurnSeesCancelBetweenHeartbeats(t *testing.T) {
+func TestRunningTurnSeesCancelBetweenProgressTicks(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	f.adapter.endDelay = 30 * time.Second
-	renewInterval = time.Minute // only the state check, not a heartbeat, can stop the run in time
+	renewInterval = time.Minute // only the state check, not a progress tick, can stop the run in time
 	done := startInFlight(t, f, f.ctx, "run-cancelled")
 	f.publishCancel(t, "run-cancelled", 1, f.host, nil)
 	select {
@@ -588,10 +588,10 @@ func TestRunningTurnSeesCancelBetweenHeartbeats(t *testing.T) {
 	}
 }
 
-func TestHeartbeatHonoursHeldCancel(t *testing.T) {
+func TestProgressTickHonoursHeldCancel(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	f.adapter.endDelay = 30 * time.Second
-	stateCheckInterval = time.Minute // only a heartbeat can stop the run in time
+	stateCheckInterval = time.Minute // only a progress tick can stop the run in time
 	t.Cleanup(func() { stateCheckInterval = time.Second })
 	done := startInFlight(t, f, f.ctx, "run-cancelled")
 	f.publishCancel(t, "run-cancelled", 1, f.host, nil)
@@ -601,7 +601,7 @@ func TestHeartbeatHonoursHeldCancel(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(10 * renewInterval):
-		t.Fatal("heartbeat committed past a cancel the receiver held")
+		t.Fatal("progress committed past a cancel the receiver held")
 	}
 	if state, _ := terminalReason(t, f, "run-cancelled"); state != wire.TaskStateCanceled {
 		t.Fatalf("terminal %s, want CANCELED", state)
@@ -631,7 +631,7 @@ func TestRunsUnderRetention(t *testing.T) {
 	run("run-ancient", 32*time.Hour, "terminal", wire.TaskStateCompleted)
 	completed, _ := run("run-completed", 14*time.Hour, "terminal", wire.TaskStateCompleted)
 	adopted, adoptedTask := run("run-adopted", 50*time.Minute, "started", wire.TaskStateWorking)
-	aged(admin.PoolEventsTopic(testPool), "run-adopted", f.heartbeat(t, adoptedTask, wire.TaskHash(adopted.Value), testReceiver, f.receiver.signing, 41, nil), 50*time.Minute)
+	aged(admin.ReceiverProgressTopic(testReceiver), "run-adopted", progressRecord(t, wire.TaskHash(adopted.Value), 41, nil), 50*time.Minute)
 	f.answer(t, credentialName)
 	f.cluster.ApplyRetention()
 
@@ -797,7 +797,7 @@ func TestRunIDOfAnotherTenantIsRejected(t *testing.T) {
 	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
 		t.Fatalf("dispatches %d, want none", dispatches)
 	}
-	if err := holder.commit(f.ctx, holder.events(holder.status("heartbeat", taskStatus(wire.TaskStateWorking, ""), nil, nil))); err != nil {
+	if err := holder.commit(f.ctx, holder.progress(0)); err != nil {
 		t.Fatalf("tenant-b's turn fenced tenant-a's holder: %v", err)
 	}
 	if after := len(f.records(t, admin.TenantTopic(testTenant))); after != before {

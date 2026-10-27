@@ -289,7 +289,7 @@ func (state State) CheckNames() error {
 		if err := validateNames(receiver); err != nil {
 			return err
 		}
-		for _, value := range []string{ReceiverPrincipal(receiver), ReceiverTopic(receiver)} {
+		for _, value := range []string{ReceiverPrincipal(receiver), ReceiverTopic(receiver), ReceiverProgressTopic(receiver)} {
 			if err := add(value, "receiver "+receiver); err != nil {
 				return err
 			}

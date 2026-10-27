@@ -593,6 +593,74 @@ func TestSingleAnswerTermsDefault(t *testing.T) {
 }
 
 // wherry.receivers is created compacted, and one created before converges on the next admin write.
+func TestProgressTopicIsCompactedOnNewAndExistingTopics(t *testing.T) {
+	cluster, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	topic := ReceiverProgressTopic("receiver-a")
+	var mu sync.Mutex
+	created := map[string]string{}
+	cluster.ControlKey(int16(kmsg.CreateTopics), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, requested := range request.(*kmsg.CreateTopicsRequest).Topics {
+			if requested.Topic == topic {
+				for _, config := range requested.Configs {
+					created[config.Name] = *config.Value
+				}
+			}
+		}
+		return nil, nil, false
+	})
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	retention, err := poolRetention(withDefaults(modelTerms()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"cleanup.policy": "compact,delete", "message.timestamp.type": "LogAppendTime", "retention.ms": strconv.FormatInt(retention.tasks, 10), "segment.ms": "3600000", "max.compaction.lag.ms": "3600000"}
+	mu.Lock()
+	if !reflect.DeepEqual(created, want) {
+		t.Errorf("created %s with %v, want %v", topic, created, want)
+	}
+	mu.Unlock()
+	configs := func() map[string]string {
+		t.Helper()
+		got := map[string]string{}
+		for name := range want {
+			values, err := service.topicConfigs(ctx, name, topic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got[name] = values[topic]
+		}
+		return got
+	}
+	if got := configs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("new %s configs %v, want %v", topic, got, want)
+	}
+	if err := service.Check(ctx); err != nil {
+		t.Fatalf("check of a new progress topic: %v", err)
+	}
+	setTopicConfig(t, service, topic, "cleanup.policy", "delete")
+	setTopicConfig(t, service, topic, "segment.ms", "604800000")
+	setTopicRetention(t, service, topic, 60000)
+	if err := service.Check(ctx); err == nil || !strings.Contains(err.Error(), topic) {
+		t.Fatalf("check of a progress topic below the pool's retention: %v", err)
+	}
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if got := configs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("existing %s configs %v, want %v", topic, got, want)
+	}
+}
+
 func TestReceiversTopicIsCompactedOnNewAndExistingTopics(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
