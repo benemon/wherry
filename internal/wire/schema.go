@@ -233,7 +233,7 @@ func InputName(part Part) string {
 }
 
 // S3Input is a file the run's host uploaded to the run's prefix in its pool's bucket, of Size bytes and SHA-256
-// SHA256, which the adapter fetches into the input directory under Name.
+// SHA256, which the plugin fetches into the input directory under Name.
 type S3Input struct {
 	Name   string `json:"name"`
 	Size   int64  `json:"size"`

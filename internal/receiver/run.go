@@ -28,11 +28,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -67,7 +67,7 @@ var (
 	purgeDeadline = 5 * time.Minute
 	// followRetryInterval separates the Follows of a run whose plugin link is lost.
 	followRetryInterval = time.Second
-	// collectTimeout bounds an adapter's collection of a run's outputs, during which the claim is renewed.
+	// collectTimeout bounds a plugin's collection of a run's outputs, during which the claim is renewed.
 	collectTimeout = 2 * time.Minute
 	// sealWait bounds how long a claimed run waits for its host's seal, which comes only while the parent runs
 	// await or the MCP server; beyond it the run ends failed.
@@ -172,7 +172,7 @@ type admission struct {
 	taskHash string
 	profile  Named
 	history  []wire.Message
-	inputs   []adapter.File
+	inputs   []pluginsdk.File
 	// agentCredentials are the agent's credentials the run's host supplies, and unsupplied the optional ones it does not.
 	agentCredentials []wire.TaskCredential
 	unsupplied       []string
@@ -348,10 +348,10 @@ func s3Outputs(outputs []wire.ExpectedOutput) []string {
 
 // deliverables returns the run's input files: the git input's host key as known_hosts, then the raw and data parts.
 // It returns the rejection reason for a url part.
-func deliverables(history []wire.Message, git *wire.GitInput) ([]adapter.File, string) {
-	var inputs []adapter.File
+func deliverables(history []wire.Message, git *wire.GitInput) ([]pluginsdk.File, string) {
+	var inputs []pluginsdk.File
 	if git != nil && git.HostKey != "" {
-		inputs = append(inputs, adapter.File{Name: wire.KnownHostsFile, Data: []byte(git.HostKey)})
+		inputs = append(inputs, pluginsdk.File{Name: wire.KnownHostsFile, Data: []byte(git.HostKey)})
 	}
 	for _, message := range history {
 		for _, part := range message.Parts {
@@ -359,7 +359,7 @@ func deliverables(history []wire.Message, git *wire.GitInput) ([]adapter.File, s
 			case part.Text != "":
 			case part.Raw != nil || part.Data != nil:
 				// Decoding refused repeated input names, so each is unique.
-				inputs = append(inputs, adapter.File{Name: wire.InputName(part), Data: append(slices.Clone([]byte(part.Raw)), part.Data...)})
+				inputs = append(inputs, pluginsdk.File{Name: wire.InputName(part), Data: append(slices.Clone([]byte(part.Raw)), part.Data...)})
 			default:
 				return nil, "unsupported message part"
 			}
@@ -591,12 +591,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			return run.returnTask(ctx, nil)
 		}
 	}
-	var handle adapter.Handle
+	var handle pluginsdk.Handle
 	adopted, neverStarted := false, false
 	if attempt > 1 {
 		// Offers can change between attempts, so the run may live in a profile other than the matched one.
 		for _, named := range r.profiles {
-			job, err := named.Adapter.Lookup(lookupCtx, runID)
+			job, err := named.Plugin.Lookup(lookupCtx, runID)
 			if err != nil {
 				if lookupCtx.Err() != nil && ctx.Err() == nil {
 					return run.fail(ctx, "timeout", nil)
@@ -604,7 +604,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				r.logger.Printf("run %s: lookup in profile %s: %s", runID, named.Name, logText(run.redactText, err))
 				return run.returnTask(ctx, nil)
 			}
-			if job.State == adapter.JobAbsent {
+			if job.State == pluginsdk.JobAbsent {
 				continue
 			}
 			// A job of another profile of this receiver on the same backend is that profile's Lookup to judge.
@@ -612,12 +612,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				continue
 			}
 			if job.Profile != named.Name || job.Agent != task.Wherry.Placement.Agent {
-				if err := named.Adapter.Stop(ctx, job.Handle); err != nil {
+				if err := named.Plugin.Stop(ctx, job.Handle); err != nil {
 					r.metrics.stopFailures.WithLabelValues(named.Name).Inc()
 					r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 					return run.returnTask(ctx, nil)
 				}
-				if err := named.Adapter.Purge(ctx, runID); err != nil {
+				if err := named.Plugin.Purge(ctx, runID); err != nil {
 					r.metrics.purgeFailures.WithLabelValues(named.Name).Inc()
 					r.logger.Printf("run %s: purge: %s", runID, logText(run.redactText, err))
 					return run.returnTask(ctx, nil)
@@ -627,7 +627,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 			r.logger.Printf("run %s: found attempt %d's job in profile %s", runID, job.Attempt, named.Name)
 			handle, run.profile = job.Handle, named
-			adopted, neverStarted = job.State != adapter.JobNeverStarted, job.State == adapter.JobNeverStarted
+			adopted, neverStarted = job.State != pluginsdk.JobNeverStarted, job.State == pluginsdk.JobNeverStarted
 			if adopted {
 				r.metrics.adoptions.WithLabelValues(task.Wherry.Tenant, named.Name).Inc()
 			}
@@ -669,8 +669,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if !adopted {
 		named := run.profile
 		credentials := slices.Concat(admitted.agentCredentials, admitted.credentials)
-		var secrets []adapter.Secret
-		var fetches []adapter.Fetch
+		var secrets []pluginsdk.Secret
+		var fetches []pluginsdk.Fetch
 		if len(agentCredentials)+len(taskCredentials)+len(inputNames)+len(outputNames) > 0 {
 			sealed, status, ok := run.awaitSeal(ctx, runCtx, nil, agentCredentials, taskCredentials, inputNames, outputNames)
 			if !ok {
@@ -679,7 +679,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			values := sealed.Values
 			run.redactionKey = sealed.RedactionKey
 			for _, credential := range credentials {
-				secrets = append(secrets, adapter.Secret{Name: credential.Name, Env: credential.Env, File: credential.File, Value: values[credential.Name]})
+				secrets = append(secrets, pluginsdk.Secret{Name: credential.Name, Env: credential.Env, File: credential.File, Value: values[credential.Name]})
 			}
 			run.deliver(values)
 			if fetches, run.puts, err = run.presigned(values, admitted.s3Inputs, outputNames); err != nil {
@@ -691,22 +691,22 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		for _, input := range admitted.inputs {
 			promptInputs = append(promptInputs, input.Name)
 		}
-		dispatched, dispatchedHandle, err := named.Adapter.Dispatch(runCtx, adapter.Run{
+		dispatched, dispatchedHandle, err := named.Plugin.Dispatch(runCtx, pluginsdk.Run{
 			ID: runID, Profile: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Attempt: attempt,
-			Prompt: []byte(preamble(named.Adapter.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID) +
+			Prompt: []byte(preamble(named.Plugin.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID) +
 				prompt(admitted.history)),
 			Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
-		var tooLarge *adapter.InputTooLargeError
+		var tooLarge *pluginsdk.InputTooLargeError
 		switch {
 		case err != nil && runCtx.Err() != nil && ctx.Err() == nil:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
 			return run.fail(ctx, "timeout", nil)
-		case errors.As(err, &tooLarge) && dispatched == adapter.OutcomeNothingCreated:
+		case errors.As(err, &tooLarge) && dispatched == pluginsdk.OutcomeNothingCreated:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
 			// The plugin's name for the input reaches the status only when it is one of the run's inputs.
 			name := "an input"
-			if slices.ContainsFunc(admitted.inputs, func(input adapter.File) bool { return input.Name == tooLarge.Name }) {
+			if slices.ContainsFunc(admitted.inputs, func(input pluginsdk.File) bool { return input.Name == tooLarge.Name }) {
 				name = "input " + tooLarge.Name
 			}
 			r.logger.Printf("run %s: profile %s cannot deliver %s", runID, named.Name, name)
@@ -715,17 +715,17 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 			r.metrics.startFailures.WithLabelValues(named.Name, "input-too-large").Inc()
 			return run.fail(ctx, name+" takes the run's inputs over what profile "+named.Name+" delivers", nil)
-		case errors.Is(err, adapter.ErrMessageTooLarge):
+		case errors.Is(err, pluginsdk.ErrMessageTooLarge):
 			r.logger.Printf("run %s: dispatch rejected: message too large", runID)
-			dispatched = adapter.OutcomeUnknown
+			dispatched = pluginsdk.OutcomeUnknown
 		case err != nil:
 			r.logger.Printf("run %s: dispatch failed: %s", runID, logText(run.redactText, err))
-			dispatched = adapter.OutcomeUnknown
+			dispatched = pluginsdk.OutcomeUnknown
 		}
 		switch dispatched {
-		case adapter.OutcomeCreated:
+		case pluginsdk.OutcomeCreated:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "created").Inc()
-		case adapter.OutcomeNothingCreated:
+		case pluginsdk.OutcomeNothingCreated:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
 			r.logger.Printf("run %s: profile %s created no job", runID, named.Name)
 			return run.startFailure(ctx, "dispatch", "profile "+named.Name+" created no job")
@@ -736,9 +736,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			case !resolved:
 				r.logger.Printf("run %s: dispatch unresolved", runID)
 				return run.returnTask(ctx, nil)
-			case job.State == adapter.JobAbsent:
+			case job.State == pluginsdk.JobAbsent:
 				return run.startFailure(ctx, "dispatch", "profile "+named.Name+" created no job")
-			case job.State == adapter.JobNeverStarted:
+			case job.State == pluginsdk.JobNeverStarted:
 				return run.startFailure(ctx, "platform", "job never started")
 			}
 			dispatchedHandle = job.Handle
@@ -748,7 +748,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	if len(handle.Data) > maxHandle {
 		r.logger.Printf("run %s: profile %s returned a handle over %d bytes", runID, run.profile.Name, maxHandle)
-		if err := run.profile.Adapter.Stop(ctx, handle); err != nil {
+		if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
 			r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 			r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 		}
@@ -758,22 +758,22 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 
 	followCtx, stopFollow := context.WithCancel(runCtx)
 	defer stopFollow()
-	lines := make(chan adapter.Line, 64)
+	lines := make(chan pluginsdk.Line, 64)
 	type followed struct {
-		terminal adapter.Terminal
+		terminal pluginsdk.Terminal
 		err      error
 	}
 	ended := make(chan followed, 1)
 	follow := func(from int64) {
 		go func() {
-			terminal, err := run.profile.Adapter.Follow(followCtx, handle, from, lines)
+			terminal, err := run.profile.Plugin.Follow(followCtx, handle, from, lines)
 			ended <- followed{terminal, err}
 		}()
 	}
 	follow(offset)
 	// An adopter holds the job's lines until its own seal gives it the values to redact; the input URLs the job
 	// fetched with are not asked for again.
-	var held []adapter.Line
+	var held []pluginsdk.Line
 	if adopted && len(agentCredentials)+len(taskCredentials)+len(outputNames) > 0 {
 		release := run.hold(lines)
 		sealed, status, ok := run.awaitSeal(ctx, runCtx, &handle, agentCredentials, taskCredentials, nil, outputNames)
@@ -789,8 +789,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 	}
 	r.logger.Printf("run %s: attempt %d in profile %s with %s (%s)", runID, attempt, run.profile.Name, wire.TermsText(admitted.profile.Labels), handle.Name)
-	var pending []adapter.Line
-	// shutdown commits what is pending and the lines the adapter delivered that the run has not taken, under its own
+	var pending []pluginsdk.Line
+	// shutdown commits what is pending and the lines the plugin delivered that the run has not taken, under its own
 	// deadline, since ctx is already done, and returns the task. A commit the shutdown cut short can leave its
 	// transaction open. It ignores the delivery budget: the receiver is going away and an adopter continues the run.
 	shutdown := func() kgo.AckStatus {
@@ -829,7 +829,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	checks := time.NewTicker(stateCheckInterval)
 	defer checks.Stop()
 	position, reported := offset, offset
-	take := func(line adapter.Line) {
+	take := func(line pluginsdk.Line) {
 		pending = append(pending, line)
 		position = line.Next
 	}
@@ -873,7 +873,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				return run.stopAndFail(ctx, handle, "timeout", pending)
 			case ctx.Err() != nil:
 				return shutdown()
-			case errors.Is(end.err, adapter.ErrLinkLost) && (retryUntil.IsZero() || time.Now().Before(retryUntil)):
+			case errors.Is(end.err, pluginsdk.ErrLinkLost) && (retryUntil.IsZero() || time.Now().Before(retryUntil)):
 				if retryUntil.IsZero() {
 					state, _, _ := r.snapshot()
 					retryUntil = time.Now().Add(state.Pools[r.config.Pool].LockDuration())
@@ -884,7 +884,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				// A dropped stream does not mean the task ended; stop it rather than leave it running.
 				r.logger.Printf("run %s: follow failed: %s", runID, logText(run.redactText, end.err))
 				return run.stopAndFail(ctx, handle, "log stream failed", pending)
-			case !end.terminal.Started && end.terminal.Class == adapter.ClassFetch:
+			case !end.terminal.Started && end.terminal.Class == pluginsdk.ClassFetch:
 				r.logger.Printf("run %s: job never started: an S3 input was not fetched%s", runID, run.startReason(end.terminal))
 				return run.stopAndFail(ctx, handle, "an S3 input was not fetched, or did not match its size and SHA-256", pending)
 			case !end.terminal.Started:
@@ -938,7 +938,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 // awaitSeal asks the run's host for the agent's credentials, the task's, and presigned URLs for its S3 inputs and
 // outputs under a key made for this attempt, and waits for the seal while the claim is renewed. The key never leaves
 // this call. A run that ends while it waits stops job, the adopted job, first. False carries the acknowledgement.
-func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle, credentials, taskCredentials, s3Inputs, s3Outputs []string) (signed.SealValues, kgo.AckStatus, bool) {
+func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *pluginsdk.Handle, credentials, taskCredentials, s3Inputs, s3Outputs []string) (signed.SealValues, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
 	runID := task.Wherry.Run
 	key, err := newSealKey()
@@ -1032,7 +1032,7 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle
 			return signed.SealValues{}, run.fail(ctx, "timeout", nil), false
 		case waitCtx.Err() != nil && job != nil:
 			waited("adopter_refused")
-			if err := run.profile.Adapter.Stop(ctx, *job); err != nil {
+			if err := run.profile.Plugin.Stop(ctx, *job); err != nil {
 				r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 				r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 				return signed.SealValues{}, run.returnTask(ctx, nil), false
@@ -1050,10 +1050,10 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *adapter.Handle
 
 // hold reads lines until the returned release, which gives back the most recent of them within heldLimit bytes and
 // logs the lines it dropped. Nothing held is published before the attempt can redact it.
-func (run *activeRun) hold(lines <-chan adapter.Line) func() []adapter.Line {
-	stop, done := make(chan struct{}), make(chan []adapter.Line)
+func (run *activeRun) hold(lines <-chan pluginsdk.Line) func() []pluginsdk.Line {
+	stop, done := make(chan struct{}), make(chan []pluginsdk.Line)
 	go func() {
-		var held []adapter.Line
+		var held []pluginsdk.Line
 		size, dropped := 0, 0
 		for {
 			select {
@@ -1076,7 +1076,7 @@ func (run *activeRun) hold(lines <-chan adapter.Line) func() []adapter.Line {
 			}
 		}
 	}()
-	return func() []adapter.Line {
+	return func() []pluginsdk.Line {
 		close(stop)
 		return <-done
 	}
@@ -1085,7 +1085,7 @@ func (run *activeRun) hold(lines <-chan adapter.Line) func() []adapter.Line {
 // presigned checks the seal's URLs against the pool's storage and returns the run's fetches and PUT URLs. An
 // error names its input or output, never the URL. Each URL's signature joins the redacted forms under the URL's name, so
 // a transcript quoting a URL in part is redacted too, with the URL's marker.
-func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input, outputs []string) ([]adapter.Fetch, map[string]string, error) {
+func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input, outputs []string) ([]pluginsdk.Fetch, map[string]string, error) {
 	state, _, _ := run.receiver.snapshot()
 	storage := state.Pools[run.receiver.config.Pool].Storage
 	tenant, runID := run.task.Wherry.Tenant, run.task.Wherry.Run
@@ -1100,13 +1100,13 @@ func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input,
 		signatures[name] = []byte(parsed.Query().Get("X-Amz-Signature"))
 		return string(value), true
 	}
-	var fetches []adapter.Fetch
+	var fetches []pluginsdk.Fetch
 	for _, input := range inputs {
 		get, ok := check(signed.S3InputValue(input.Name), wire.S3InputKey(tenant, runID, input.Name))
 		if !ok {
 			return nil, nil, errors.New("the URL for S3 input " + input.Name + " is not one of pool " + run.receiver.config.Pool + "'s storage")
 		}
-		fetches = append(fetches, adapter.Fetch{Name: input.Name, URL: get, Size: input.Size, SHA256: input.SHA256})
+		fetches = append(fetches, pluginsdk.Fetch{Name: input.Name, URL: get, Size: input.Size, SHA256: input.SHA256})
 	}
 	puts := map[string]string{}
 	for _, output := range outputs {
@@ -1241,14 +1241,14 @@ var overText = "[redacted text over " + strconv.Itoa(wire.MaxText) + " bytes]"
 
 var reasonURL = regexp.MustCompile(`(?i)https?://\S+`)
 
-// maxLogText bounds the adapter text one log line carries, in bytes.
+// maxLogText bounds the plugin text one log line carries, in bytes.
 const maxLogText = 512
 
-// logText is err's text for the log: an adapter.Error's op and any class, then its text, redacted by redact, without
+// logText is err's text for the log: a pluginsdk.Error's op and any class, then its text, redacted by redact, without
 // URLs, on one line of at most maxLogText bytes. The cap follows redaction, which could otherwise miss a value it cut.
 func logText(redact func(string) string, err error) string {
 	text := err.Error()
-	if failure, ok := err.(*adapter.Error); ok {
+	if failure, ok := err.(*pluginsdk.Error); ok {
 		text = "op=" + failure.Op
 		if failure.Class != "" {
 			text += " class=" + failure.Class
@@ -1261,13 +1261,13 @@ func logText(redact func(string) string, err error) string {
 	return wire.CutUTF8(text, maxLogText)
 }
 
-// startReason is ": " and terminal's reason as logText gives it, or empty when the adapter gave none. A fetch failure's
+// startReason is ": " and terminal's reason as logText gives it, or empty when the plugin gave none. A fetch failure's
 // reason quotes its presigned URL, so it is omitted.
-func (run *activeRun) startReason(terminal adapter.Terminal) string {
+func (run *activeRun) startReason(terminal pluginsdk.Terminal) string {
 	switch {
 	case terminal.Reason == "":
 		return ""
-	case terminal.Class == adapter.ClassFetch:
+	case terminal.Class == pluginsdk.ClassFetch:
 		return ": [omitted]"
 	}
 	return ": " + logText(run.redactText, errors.New(terminal.Reason))
@@ -1313,8 +1313,8 @@ func (run *activeRun) abandon(err error) kgo.AckStatus {
 	return kgo.AckRelease
 }
 
-func (run *activeRun) stopAndFail(ctx context.Context, handle adapter.Handle, reason string, pending []adapter.Line) kgo.AckStatus {
-	if err := run.profile.Adapter.Stop(ctx, handle); err != nil {
+func (run *activeRun) stopAndFail(ctx context.Context, handle pluginsdk.Handle, reason string, pending []pluginsdk.Line) kgo.AckStatus {
+	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
@@ -1322,8 +1322,8 @@ func (run *activeRun) stopAndFail(ctx context.Context, handle adapter.Handle, re
 	return run.fail(ctx, reason, pending)
 }
 
-func (run *activeRun) stopAndCancel(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
-	if err := run.profile.Adapter.Stop(ctx, handle); err != nil {
+func (run *activeRun) stopAndCancel(ctx context.Context, handle pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
+	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return run.returnTask(ctx, pending)
@@ -1332,8 +1332,8 @@ func (run *activeRun) stopAndCancel(ctx context.Context, handle adapter.Handle, 
 }
 
 // deny stops a run on a denied receiver and releases its task to the pool; the terminal status is best effort.
-func (run *activeRun) deny(ctx context.Context, handle adapter.Handle, pending []adapter.Line) kgo.AckStatus {
-	if err := run.profile.Adapter.Stop(ctx, handle); err != nil {
+func (run *activeRun) deny(ctx context.Context, handle pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
+	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		return kgo.AckRelease
@@ -1349,11 +1349,11 @@ func (run *activeRun) deny(ctx context.Context, handle adapter.Handle, pending [
 	return kgo.AckRelease
 }
 
-func (run *activeRun) fail(ctx context.Context, reason string, pending []adapter.Line) kgo.AckStatus {
+func (run *activeRun) fail(ctx context.Context, reason string, pending []pluginsdk.Line) kgo.AckStatus {
 	return run.end(ctx, taskStatus(wire.TaskStateFailed, reason), reason, pending, kgo.AckReject)
 }
 
-func (run *activeRun) cancel(ctx context.Context, pending []adapter.Line) kgo.AckStatus {
+func (run *activeRun) cancel(ctx context.Context, pending []pluginsdk.Line) kgo.AckStatus {
 	return run.end(ctx, taskStatus(wire.TaskStateCanceled, cancelReason), cancelReason, pending, kgo.AckAccept)
 }
 
@@ -1407,7 +1407,7 @@ func (run *activeRun) startFailure(ctx context.Context, class, cause string) kgo
 func (run *activeRun) purge(ctx context.Context) error {
 	deadline := time.Now().Add(purgeDeadline)
 	for {
-		err := run.profile.Adapter.Purge(ctx, run.task.Wherry.Run)
+		err := run.profile.Plugin.Purge(ctx, run.task.Wherry.Run)
 		if err != nil {
 			run.receiver.metrics.purgeFailures.WithLabelValues(run.profile.Name).Inc()
 		}
@@ -1427,24 +1427,24 @@ func (r *Receiver) budgetSpent(attempt int64) bool {
 }
 
 // reconcile looks up the job an ambiguous Dispatch may have created; false means it stays unresolved.
-func (run *activeRun) reconcile(ctx context.Context) (adapter.Job, bool) {
+func (run *activeRun) reconcile(ctx context.Context) (pluginsdk.Job, bool) {
 	for i := 0; i < 3; i++ {
 		if i > 0 {
 			sleep(ctx, reconcileInterval)
 		}
-		job, err := run.profile.Adapter.Lookup(ctx, run.task.Wherry.Run)
+		job, err := run.profile.Plugin.Lookup(ctx, run.task.Wherry.Run)
 		if err == nil {
 			return job, true
 		}
 		run.receiver.logger.Printf("run %s: lookup in profile %s: %s", run.task.Wherry.Run, run.profile.Name, logText(run.redactText, err))
 	}
-	return adapter.Job{}, false
+	return pluginsdk.Job{}, false
 }
 
 // returnTask hands the task back to the pool with any job and its material in place, so the next holder's
 // Lookup finds them. Once the delivery budget is spent it ends the run FAILED instead, and leaves the
-// material to the adapter's sweep.
-func (run *activeRun) returnTask(ctx context.Context, pending []adapter.Line) kgo.AckStatus {
+// material to the plugin's sweep.
+func (run *activeRun) returnTask(ctx context.Context, pending []pluginsdk.Line) kgo.AckStatus {
 	if !run.receiver.budgetSpent(run.attempt) {
 		return kgo.AckRelease
 	}
@@ -1455,7 +1455,7 @@ func (run *activeRun) returnTask(ctx context.Context, pending []adapter.Line) kg
 	return kgo.AckReject
 }
 
-func (run *activeRun) budgetRecords(pending []adapter.Line) []*kgo.Record {
+func (run *activeRun) budgetRecords(pending []pluginsdk.Line) []*kgo.Record {
 	reason := budgetReason
 	if run.startCause != "" {
 		reason = fmt.Sprintf("%s after %d attempts; last: %s", budgetReason, run.attempt, run.startCause)
@@ -1466,16 +1466,16 @@ func (run *activeRun) budgetRecords(pending []adapter.Line) []*kgo.Record {
 
 // conclude ends the run whose job ended as terminal says: with the status its outcome file reports, or failed for how
 // it ended when it left no valid one. The outputs are collected first, whatever the exit, so the file is always read.
-func (run *activeRun) conclude(ctx context.Context, handle adapter.Handle, pending []adapter.Line, terminal adapter.Terminal) kgo.AckStatus {
+func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pending []pluginsdk.Line, terminal pluginsdk.Terminal) kgo.AckStatus {
 	// A result committed after access lapsed is untrusted, so acknowledging it would lose the run.
 	if run.receiver.stopForDenial() {
 		return run.deny(ctx, handle, pending)
 	}
 	stopped := true
-	if err := run.profile.Adapter.Stop(ctx, handle); err != nil {
+	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
-		// At the budget the run ends with no outputs or outcome file read, and the job is left to the adapter's sweep.
+		// At the budget the run ends with no outputs or outcome file read, and the job is left to the plugin's sweep.
 		if !run.receiver.budgetSpent(run.attempt) {
 			return kgo.AckRelease
 		}
@@ -1513,7 +1513,7 @@ func (run *activeRun) conclude(ctx context.Context, handle adapter.Handle, pendi
 // collect reads the outputs of a stopped job, redacts them and keeps their chunks and the result's lists of what the
 // run returned and did not. S3 outputs are uploaded as Collect streams them, unredacted, since they go to the host's own
 // bucket and never to the feed. Every expected output is listed as one or the other.
-func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stopped bool) {
+func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stopped bool) {
 	state, _, _ := run.receiver.snapshot()
 	limit := state.Pools[run.receiver.config.Pool].OutputLimit
 	stored := map[string]storedOutput{}
@@ -1535,7 +1535,7 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 		}
 		return
 	}
-	slices.SortFunc(collected, func(a, b adapter.Output) int { return strings.Compare(a.Name, b.Name) })
+	slices.SortFunc(collected, func(a, b pluginsdk.Output) int { return strings.Compare(a.Name, b.Name) })
 	s3 := s3Outputs(run.expected)
 	var total int64
 	listed := map[string]bool{}
@@ -1560,7 +1560,7 @@ func (run *activeRun) collect(ctx context.Context, handle adapter.Handle, stoppe
 			case output.Size > wire.MaxS3Object:
 				reason = "exceeds the S3 object limit"
 			default:
-				reason = "not streamed by the adapter"
+				reason = "not streamed by the plugin"
 			}
 		case output.Data == nil || total+output.Size > limit:
 			reason = "exceeds output limit"
@@ -1596,10 +1596,10 @@ type storedOutput struct {
 	reason string
 }
 
-// collected runs the adapter's Collect under limit and uploads each streamed S3 output into stored as it arrives.
+// collected runs the plugin's Collect under limit and uploads each streamed S3 output into stored as it arrives.
 // Collect may run until the run's deadline, when its PUT URLs expire. The count and total are checked again here, so a
 // plugin that ignores the limits cannot grow the run's memory.
-func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stopped bool, limit int64, stored map[string]storedOutput) ([]adapter.Output, error) {
+func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, stopped bool, limit int64, stored map[string]storedOutput) ([]pluginsdk.Output, error) {
 	if !stopped {
 		return nil, errors.New("the job was not stopped")
 	}
@@ -1609,17 +1609,17 @@ func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stop
 	}
 	ctx, cancel := context.WithDeadline(ctx, until)
 	defer cancel()
-	outputs := make(chan adapter.Output)
+	outputs := make(chan pluginsdk.Output)
 	ended := make(chan error, 1)
 	// Streamed, the outcome file counts against neither output limit.
 	stream := append(s3Outputs(run.expected), wire.OutcomeFile)
 	go func() {
 		defer close(outputs)
-		ended <- run.profile.Adapter.Collect(ctx, handle, adapter.Limits{
+		ended <- run.profile.Plugin.Collect(ctx, handle, pluginsdk.Limits{
 			Files: wire.MaxOutputs, FileBytes: limit, TotalBytes: limit, Stream: stream, StreamBytes: wire.MaxS3Object,
 		}, outputs)
 	}()
-	var collected []adapter.Output
+	var collected []pluginsdk.Output
 	var total int64
 	var over error
 	for output := range outputs {
@@ -1654,7 +1654,7 @@ func (run *activeRun) collected(ctx context.Context, handle adapter.Handle, stop
 	return collected, nil
 }
 
-var errOverLimits = errors.New("the adapter returned more than the limits")
+var errOverLimits = errors.New("the plugin returned more than the limits")
 
 // errRedirect is what an upload's client returns for a redirect, which it never follows.
 var errRedirect = errors.New("redirected")
@@ -1665,7 +1665,7 @@ var storageClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Requ
 // store uploads a streamed output to its presigned PUT URL with the Content-Length of its listing, as it reads it, and
 // hashes the bytes the request sends. Its reason never quotes the URL or a response body, and is no longer than the
 // longest reason a pool's limits allow for.
-func (run *activeRun) store(ctx context.Context, output adapter.Output) storedOutput {
+func (run *activeRun) store(ctx context.Context, output pluginsdk.Output) storedOutput {
 	put, ok := run.puts[output.Name]
 	switch {
 	case !ok:
@@ -1710,7 +1710,7 @@ func (run *activeRun) store(ctx context.Context, output adapter.Output) storedOu
 // readOutcome reads and decodes an outcome file of at most maxOutcome bytes. Any outcome but a TaskStatus of a state an
 // agent may report, with a ROLE_AGENT message and for TASK_STATE_AUTH_REQUIRED the credential it needs, is nil. The
 // status keeps the message's text and that credential's name, redacted.
-func (run *activeRun) readOutcome(output adapter.Output) *wire.TaskStatus {
+func (run *activeRun) readOutcome(output pluginsdk.Output) *wire.TaskStatus {
 	if output.Size > maxOutcome {
 		return nil
 	}
@@ -1781,7 +1781,7 @@ func (run *activeRun) outputChunks(name string, data []byte) []*kgo.Record {
 }
 
 // end commits the remaining transcript, the outputs, the result and the terminal status in one transaction.
-func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, pending []adapter.Line, ack kgo.AckStatus) kgo.AckStatus {
+func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, pending []pluginsdk.Line, ack kgo.AckStatus) kgo.AckStatus {
 	records := append(append(append(run.chunks(pending, true), run.outputs...), run.result(status, result)), run.terminal(status, pending)...)
 	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
@@ -1792,7 +1792,7 @@ func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result st
 }
 
 func (run *activeRun) release(ctx context.Context) {
-	if err := run.profile.Adapter.Release(ctx, run.task.Wherry.Run); err != nil {
+	if err := run.profile.Plugin.Release(ctx, run.task.Wherry.Run); err != nil {
 		run.receiver.logger.Printf("run %s: release: %s", run.task.Wherry.Run, logText(run.redactText, err))
 	}
 }
@@ -1828,7 +1828,7 @@ func (run *activeRun) statusRecords(kind string, status wire.TaskStatus, offset 
 
 // terminal is the terminal status records, counting the attempt's committed chunks and pending's, and the tombstone of
 // the run's progress.
-func (run *activeRun) terminal(status wire.TaskStatus, pending []adapter.Line) []*kgo.Record {
+func (run *activeRun) terminal(status wire.TaskStatus, pending []pluginsdk.Line) []*kgo.Record {
 	value := run.status("terminal", status, nil, nil)
 	value.Wherry.TranscriptChunks = run.chunked + int64(len(pending))
 	tombstone := &kgo.Record{Topic: admin.ReceiverProgressTopic(run.receiver.id), Key: []byte(run.task.Wherry.Run)}
@@ -1894,7 +1894,7 @@ func taskStatus(state wire.TaskState, reason string) wire.TaskStatus {
 }
 
 // chunks are the transcript lines as artifact updates on the tenant's transcript topic.
-func (run *activeRun) chunks(lines []adapter.Line, last bool) []*kgo.Record {
+func (run *activeRun) chunks(lines []pluginsdk.Line, last bool) []*kgo.Record {
 	records := make([]*kgo.Record, 0, len(lines))
 	for i, line := range lines {
 		form := run.redact(line.Data, wire.MaxLine)
@@ -2029,9 +2029,9 @@ func attemptOf(record *kgo.Record) int64 {
 }
 
 // preamble is the agent's instructions for the run. It names credentials and their targets, never their values, and
-// gives full paths, so an agent without a shell finds its files. A directory the adapter does not report is named by
+// gives full paths, so an agent without a shell finds its files. A directory the plugin does not report is named by
 // its environment variable.
-func preamble(directories adapter.Directories, inputs []string, credentials []wire.TaskCredential, unsupplied []string, outputs []wire.ExpectedOutput, git *wire.GitInput, run string) string {
+func preamble(directories pluginsdk.Directories, inputs []string, credentials []wire.TaskCredential, unsupplied []string, outputs []wire.ExpectedOutput, git *wire.GitInput, run string) string {
 	input, output, credential := cmp.Or(directories.Input, "$WHERRY_INPUT_DIR"), cmp.Or(directories.Output, "$WHERRY_OUTPUT_DIR"),
 		cmp.Or(directories.Credentials, "$WHERRY_CREDENTIALS_DIR")
 	lines := []string{"Your input directory is " + input + ", your credentials directory " + credential + " and your output directory " + output +
@@ -2093,7 +2093,7 @@ func preamble(directories adapter.Directories, inputs []string, credentials []wi
 // its environment variable expands. A credential is read from its file by a credential helper or ssh, so its value
 // reaches no command line.
 //
-// The clone's --config settings persist for later fetches and pushes and complement adapter.AgentEnvironment, which
+// The clone's --config settings persist for later fetches and pushes and complement pluginsdk.AgentEnvironment, which
 // stops system, global and environment configuration being read. They guard a cooperative agent against ambient
 // configuration, not a hostile one, which can override them.
 func gitPreamble(git *wire.GitInput, run, knownHosts, credentialDir, outputDir string, credentials []wire.TaskCredential, outputs []wire.ExpectedOutput) []string {

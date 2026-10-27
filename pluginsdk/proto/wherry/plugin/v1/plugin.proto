@@ -1,12 +1,12 @@
-// The adapter protocol, version 9: the receiver core calls a plugin's profiles
+// The plugin protocol, version 10: the receiver core calls a plugin's profiles
 // over this service, and every request names its profile.
 syntax = "proto3";
 
-package wherry.adapter.v1;
+package wherry.plugin.v1;
 
-option go_package = "github.com/benemon/wherry/adapter/internal/adapterv1";
+option go_package = "github.com/benemon/wherry/pluginsdk/internal/pluginv1";
 
-service Adapter {
+service Plugin {
   // Configure builds a profile in the plugin, replacing one of the same name.
   rpc Configure(ConfigureRequest) returns (ConfigureResponse);
   rpc Ready(ReadyRequest) returns (ReadyResponse);
@@ -20,18 +20,18 @@ service Adapter {
   rpc Purge(PurgeRequest) returns (PurgeResponse);
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
   rpc Sweep(SweepRequest) returns (SweepResponse);
-  // Metrics reports the profile's samples of the families the core declares for adapters.
+  // Metrics reports the profile's samples of the families the core declares for plugins.
   rpc Metrics(MetricsRequest) returns (MetricsResponse);
 }
 
-// Outcome numbers match adapter.Outcome.
+// Outcome numbers match pluginsdk.Outcome.
 enum Outcome {
   OUTCOME_UNKNOWN = 0;
   OUTCOME_NOTHING_CREATED = 1;
   OUTCOME_CREATED = 2;
 }
 
-// JobState numbers match adapter.JobState.
+// JobState numbers match pluginsdk.JobState.
 enum JobState {
   JOB_STATE_ABSENT = 0;
   JOB_STATE_RUNNING = 1;
@@ -59,7 +59,7 @@ message Run {
   string model = 12;
 }
 
-// Fetch is an input the adapter fetches from a presigned URL and verifies before the agent starts.
+// Fetch is an input the plugin fetches from a presigned URL and verifies before the agent starts.
 message Fetch {
   string name = 1;
   string url = 2;
@@ -230,7 +230,7 @@ message MetricsResponse {
   repeated Sample samples = 1;
 }
 
-// Kind numbers match adapter.Kind.
+// Kind numbers match pluginsdk.Kind.
 enum Kind {
   KIND_UNSPECIFIED = 0;
   KIND_COUNTER = 1;
@@ -254,7 +254,7 @@ message Histogram {
   uint64 count = 3;
 }
 
-// ErrorDetail is the status detail of an error the adapter returns as an adapter.Error.
+// ErrorDetail is the status detail of an error the plugin returns as a pluginsdk.Error.
 message ErrorDetail {
   string op = 1;
   string class = 2;

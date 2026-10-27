@@ -6,7 +6,7 @@ lacks, or tasks that can run while you do other work. The remote agent sees
 only the prompt, the files you send and, if given, a pushed git ref it
 clones itself.
 
-1. `wherry receivers --json` lists receivers with each profile's `agent`,
+1. `wherry receivers --json` lists receivers with each plugin profile's `agent`,
    `labels`, `ready` and `credentials`, each agent credential's `name`, with
    `optional` and `configured`, whether this host has a source for it. Pick
    an agent and build a selector from the labels.

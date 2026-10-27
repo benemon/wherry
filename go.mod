@@ -3,7 +3,7 @@ module github.com/benemon/wherry
 go 1.27
 
 require (
-	github.com/benemon/wherry/adapter v0.0.0
+	github.com/benemon/wherry/pluginsdk v0.0.0
 	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/minio/minio-go/v7 v7.4.1
 	github.com/modelcontextprotocol/go-sdk v1.8.0
@@ -60,4 +60,4 @@ require (
 	gopkg.in/ini.v1 v1.67.3 // indirect
 )
 
-replace github.com/benemon/wherry/adapter => ./adapter
+replace github.com/benemon/wherry/pluginsdk => ./pluginsdk

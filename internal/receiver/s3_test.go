@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -84,9 +84,9 @@ func s3Terms(endpoint string) admin.Terms {
 	return terms
 }
 
-func s3Fixture(t *testing.T, s *store, stream []string, outputs []adapter.Output) fixture {
+func s3Fixture(t *testing.T, s *store, stream []string, outputs []pluginsdk.Output) fixture {
 	t.Helper()
-	return newFixtureWith(t, stream, s3Terms(s.endpoint()), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: stream, outputs: outputs}})
+	return newFixtureWith(t, stream, s3Terms(s.endpoint()), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: stream, outputs: outputs}})
 }
 
 func withS3(task *wire.Submission) {
@@ -119,7 +119,7 @@ func validURLs(origin string) func(string, string) (string, string) {
 
 func TestS3ObjectsTravelOnlyInTheSeal(t *testing.T) {
 	s := newStore(t)
-	f := s3Fixture(t, s, resultStream, []adapter.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
+	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
 	record := f.submit(t, f.host, withS3)
 	done := f.executing(t, f.ctx, record, 1)
 	request := f.sealS3(t, validURLs(s.endpoint()))
@@ -131,7 +131,7 @@ func TestS3ObjectsTravelOnlyInTheSeal(t *testing.T) {
 	}
 	run := f.lastRun()
 	get := presigned(s.endpoint(), wire.S3InputKey(testTenant, "run-a", "dataset.bin"))
-	if !slices.Equal(run.Fetches, []adapter.Fetch{{Name: "dataset.bin", URL: get, Size: int64(len(s3Content)), SHA256: sha([]byte(s3Content))}}) {
+	if !slices.Equal(run.Fetches, []pluginsdk.Fetch{{Name: "dataset.bin", URL: get, Size: int64(len(s3Content)), SHA256: sha([]byte(s3Content))}}) {
 		t.Fatalf("fetches %+v", run.Fetches)
 	}
 	if prompt := string(run.Prompt); !strings.Contains(prompt, "Input files: /task/inputs/dataset.bin.") || strings.Contains(prompt, "X-Amz") || strings.Contains(prompt, s.endpoint()) {
@@ -249,7 +249,7 @@ func TestS3URLsAreRedacted(t *testing.T) {
 	quoted := strings.ReplaceAll(get, "&", `&`)
 	stream := []string{`{"type":"assistant","message":"fetched ` + get + `"}`, `{"type":"assistant","message":"signature ` + s3Signature + `"}`,
 		completedWith("used " + quoted)}
-	f := s3Fixture(t, s, stream, []adapter.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
+	f := s3Fixture(t, s, stream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
 	f.sealS3(t, validURLs(s.endpoint()))
 	if status := <-done; status != kgo.AckAccept {
@@ -323,7 +323,7 @@ func TestS3OutputIsStreamedAndHashedAsSent(t *testing.T) {
 		stored = append(first, rest...)
 	}
 	body := &pausedBody{first: content[:half], rest: content[half:], received: received}
-	f := s3Fixture(t, s, resultStream, []adapter.Output{{Name: "report.pdf", Size: int64(len(content)), Body: body}})
+	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: int64(len(content)), Body: body}})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
 	f.sealS3(t, validURLs(s.endpoint()))
 	if status := <-done; status != kgo.AckAccept {
@@ -348,7 +348,7 @@ func TestS3OutputUploadFollowsNoRedirect(t *testing.T) {
 			s.handle = func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, elsewhere.server.URL+r.URL.RequestURI(), status)
 			}
-			f := s3Fixture(t, s, resultStream, []adapter.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
+			f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
 			done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
 			f.sealS3(t, validURLs(s.endpoint()))
 			if status := <-done; status != kgo.AckReject {
@@ -374,7 +374,7 @@ func TestS3OutputRefusedByTheStoreIsNotReturned(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 		io.WriteString(w, "<Error>"+r.URL.RawQuery+"</Error>")
 	}
-	f := s3Fixture(t, s, resultStream, []adapter.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
+	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
 	f.sealS3(t, validURLs(s.endpoint()))
 	<-done
@@ -388,8 +388,8 @@ func TestS3OutputRefusedByTheStoreIsNotReturned(t *testing.T) {
 
 func TestS3FetchFailureFailsTheTurn(t *testing.T) {
 	s := newStore(t)
-	f := newFixtureWith(t, noResultStream, s3Terms(s.endpoint()), testConfig(testReceiver), map[string]*fakeAdapter{
-		"nomad": {stream: noResultStream, neverStarted: true, neverClass: adapter.ClassFetch},
+	f := newFixtureWith(t, noResultStream, s3Terms(s.endpoint()), testConfig(testReceiver), map[string]*fakePlugin{
+		"nomad": {stream: noResultStream, neverStarted: true, neverClass: pluginsdk.ClassFetch},
 	})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
 	f.sealS3(t, validURLs(s.endpoint()))
@@ -404,8 +404,8 @@ func TestS3FetchFailureFailsTheTurn(t *testing.T) {
 // An adopter's seal carries fresh PUT URLs for the turn's S3 outputs and none for its inputs, which the job fetched.
 func TestAnAdoptedRunReturnsAnS3Output(t *testing.T) {
 	s := newStore(t)
-	f := s3Fixture(t, s, resultStream, []adapter.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
-	f.adapter.job = adapter.JobRunning
+	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
+	f.plugin.job = pluginsdk.JobRunning
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 2)
 	request := f.sealS3(t, func(input, output string) (string, string) {
 		return "", presigned(s.endpoint(), wire.S3OutputKey(testTenant, "run-a", output))
@@ -427,7 +427,7 @@ func TestAnAdoptedRunReturnsAnS3Output(t *testing.T) {
 
 func TestAnAttemptWithoutAnUploadURLStoresNothing(t *testing.T) {
 	run := &activeRun{receiver: &Receiver{}, task: testSubmission("run-a")}
-	if stored := run.store(t.Context(), adapter.Output{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}); stored.reason != "not uploaded: no upload URL" {
+	if stored := run.store(t.Context(), pluginsdk.Output{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}); stored.reason != "not uploaded: no upload URL" {
 		t.Fatalf("stored %+v", stored)
 	}
 }

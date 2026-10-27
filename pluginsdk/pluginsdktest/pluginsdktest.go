@@ -1,5 +1,5 @@
-// Package adaptertest is the conformance suite a plugin runs against its platform.
-package adaptertest
+// Package pluginsdktest is the conformance suite a plugin runs against its platform.
+package pluginsdktest
 
 import (
 	"context"
@@ -8,23 +8,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/hashicorp/go-hclog"
 )
 
 const maxHandle = 4 << 10
 
 // Credentials are the credentials the completing job's run carries, one at each kind of target.
-var Credentials = []adapter.Secret{
+var Credentials = []pluginsdk.Secret{
 	{Name: "conformance-env", Env: "CONFORMANCE_TOKEN", Value: []byte("conformance-env-value")},
 	{Name: "conformance-file", File: "conformance-key", Value: []byte("conformance-file-value")},
 }
 
-// Run checks the profiles factory, the one a plugin hands Serve, builds against the adapter contract on their
+// Run checks the profiles factory, the one a plugin hands Serve, builds against the plugin contract on their
 // platform, giving it a logger that discards. completes configures a profile whose job runs for at least ten seconds
 // and exits 0; neverStarts one whose job the platform ends before its agent starts. Every job the suite creates is
 // purged. inlineLimit is the cap both configured profiles report. The completing job's run carries Credentials.
-func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Adapter, error), completes, neverStarts adapter.Settings, inlineLimit int64) {
+func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk.Plugin, error), completes, neverStarts pluginsdk.Settings, inlineLimit int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 	running, err := factory(completes, hclog.NewNullLogger())
@@ -48,21 +48,21 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 
 	t.Run("Absent", func(t *testing.T) {
 		job, err := running.Lookup(ctx, id+"-absent")
-		if err != nil || job.State != adapter.JobAbsent {
+		if err != nil || job.State != pluginsdk.JobAbsent {
 			t.Fatalf("lookup of an unknown run = %+v, %v; want absent", job, err)
 		}
-		idempotent(t, ctx, running, id+"-absent", adapter.Handle{})
+		idempotent(t, ctx, running, id+"-absent", pluginsdk.Handle{})
 	})
 
 	t.Run("Completes", func(t *testing.T) {
-		run := adapter.Run{ID: id, Profile: completes.Name, Agent: completes.Agent, Attempt: 3, Prompt: []byte("conformance prompt"), Credentials: Credentials}
+		run := pluginsdk.Run{ID: id, Profile: completes.Name, Agent: completes.Agent, Attempt: 3, Prompt: []byte("conformance prompt"), Credentials: Credentials}
 		purgeAfter(t, running, run)
 		handle := dispatch(t, ctx, running, run)
 		if _, again := dispatchOutcome(t, ctx, running, run); again.Name != handle.Name {
 			t.Fatalf("second dispatch of the same run returned job %q, first %q", again.Name, handle.Name)
 		}
 		job, err := running.Lookup(ctx, run.ID)
-		if err != nil || job.State != adapter.JobRunning {
+		if err != nil || job.State != pluginsdk.JobRunning {
 			t.Fatalf("lookup while running = %+v, %v; want running", job, err)
 		}
 		if job.Attempt != run.Attempt || job.Profile != run.Profile || job.Agent != run.Agent || job.Handle.Name != handle.Name {
@@ -71,21 +71,21 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 		if terminal := follow(t, ctx, running, handle); !terminal.Started || terminal.ExitCode != 0 {
 			t.Fatalf("terminal %+v; want started with exit code 0", terminal)
 		}
-		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State != adapter.JobEnded {
+		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobEnded {
 			t.Fatalf("lookup after the job ended = %+v, %v; want ended", job, err)
 		}
-		outputs := make(chan adapter.Output, 1)
-		if err := running.Collect(ctx, handle, adapter.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || len(outputs) != 0 {
+		outputs := make(chan pluginsdk.Output, 1)
+		if err := running.Collect(ctx, handle, pluginsdk.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || len(outputs) != 0 {
 			t.Fatalf("collect from a job that wrote no outputs = %d outputs, %v; want none", len(outputs), err)
 		}
 		idempotent(t, ctx, running, run.ID, handle)
-		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State != adapter.JobAbsent {
+		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobAbsent {
 			t.Fatalf("lookup after purge = %+v, %v; want absent", job, err)
 		}
 	})
 
 	t.Run("Stop", func(t *testing.T) {
-		run := adapter.Run{ID: id, Profile: completes.Name, Agent: completes.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
+		run := pluginsdk.Run{ID: id, Profile: completes.Name, Agent: completes.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
 		purgeAfter(t, running, run)
 		handle := dispatch(t, ctx, running, run)
 		for range 2 {
@@ -93,16 +93,16 @@ func Run(t *testing.T, factory func(adapter.Settings, hclog.Logger) (adapter.Ada
 				t.Fatalf("stop: %v", err)
 			}
 		}
-		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State == adapter.JobRunning {
+		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State == pluginsdk.JobRunning {
 			t.Fatalf("lookup after stop = %+v, %v; want the job not running", job, err)
 		}
 	})
 
 	t.Run("NeverStarts", func(t *testing.T) {
-		run := adapter.Run{ID: id + "-never", Profile: neverStarts.Name, Agent: neverStarts.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
+		run := pluginsdk.Run{ID: id + "-never", Profile: neverStarts.Name, Agent: neverStarts.Agent, Attempt: 1, Prompt: []byte("conformance prompt")}
 		purgeAfter(t, failing, run)
 		handle := dispatch(t, ctx, failing, run)
-		if job, err := failing.Lookup(ctx, run.ID); err != nil || job.State != adapter.JobNeverStarted {
+		if job, err := failing.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobNeverStarted {
 			t.Fatalf("lookup = %+v, %v; want never started", job, err)
 		}
 		if terminal := follow(t, ctx, failing, handle); terminal.Started {
@@ -121,7 +121,7 @@ func runID(t *testing.T) string {
 	return "conformance-" + hex.EncodeToString(random)
 }
 
-func purgeAfter(t *testing.T, a adapter.Adapter, run adapter.Run) {
+func purgeAfter(t *testing.T, a pluginsdk.Plugin, run pluginsdk.Run) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -131,7 +131,7 @@ func purgeAfter(t *testing.T, a adapter.Adapter, run adapter.Run) {
 	})
 }
 
-func dispatchOutcome(t *testing.T, ctx context.Context, a adapter.Adapter, run adapter.Run) (adapter.Outcome, adapter.Handle) {
+func dispatchOutcome(t *testing.T, ctx context.Context, a pluginsdk.Plugin, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle) {
 	t.Helper()
 	outcome, handle, err := a.Dispatch(ctx, run)
 	if err != nil {
@@ -143,20 +143,20 @@ func dispatchOutcome(t *testing.T, ctx context.Context, a adapter.Adapter, run a
 	return outcome, handle
 }
 
-func dispatch(t *testing.T, ctx context.Context, a adapter.Adapter, run adapter.Run) adapter.Handle {
+func dispatch(t *testing.T, ctx context.Context, a pluginsdk.Plugin, run pluginsdk.Run) pluginsdk.Handle {
 	t.Helper()
 	outcome, handle := dispatchOutcome(t, ctx, a, run)
-	if outcome != adapter.OutcomeCreated {
+	if outcome != pluginsdk.OutcomeCreated {
 		t.Fatalf("dispatch %s: outcome %d; want created", run.ID, outcome)
 	}
 	return handle
 }
 
-func follow(t *testing.T, ctx context.Context, a adapter.Adapter, handle adapter.Handle) adapter.Terminal {
+func follow(t *testing.T, ctx context.Context, a pluginsdk.Plugin, handle pluginsdk.Handle) pluginsdk.Terminal {
 	t.Helper()
-	lines := make(chan adapter.Line, 64)
+	lines := make(chan pluginsdk.Line, 64)
 	type followed struct {
-		terminal adapter.Terminal
+		terminal pluginsdk.Terminal
 		err      error
 	}
 	ended := make(chan followed, 1)
@@ -178,7 +178,7 @@ func follow(t *testing.T, ctx context.Context, a adapter.Adapter, handle adapter
 
 // idempotent stops a run's job twice, then releases it twice, then purges it twice, then stops it again, as a receiver
 // adopting a job the platform has removed does; every call succeeds.
-func idempotent(t *testing.T, ctx context.Context, a adapter.Adapter, runID string, handle adapter.Handle) {
+func idempotent(t *testing.T, ctx context.Context, a pluginsdk.Plugin, runID string, handle pluginsdk.Handle) {
 	t.Helper()
 	for range 2 {
 		if handle.Data != nil {

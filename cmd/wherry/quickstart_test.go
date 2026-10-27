@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -74,7 +74,7 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unsourced := &plugins{dir: t.TempDir(), registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	unsourced := &plugins{dir: t.TempDir(), registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	_, err = unsourced.profile("build", config.Profiles[0])
 	if err == nil {
 		t.Fatal("configured a profile whose credential has no source")

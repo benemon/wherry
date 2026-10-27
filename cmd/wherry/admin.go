@@ -320,7 +320,7 @@ type receiverProfile struct {
 }
 
 // readReceiverConfig reads a receiver config from a single file holding capacity and plugins, or from a directory
-// holding receiver.yaml and, for each adapter type, plugins/<type>/plugin.yaml with plugins/<type>/profiles/*.yaml,
+// holding receiver.yaml and, for each plugin, plugins/<type>/plugin.yaml with plugins/<type>/profiles/*.yaml,
 // where profile file order is routing order within the plugin.
 func readReceiverConfig(path string, directory bool) (admin.ReceiverConfig, error) {
 	if !directory {
@@ -441,7 +441,7 @@ func receiverConfig(capacity int64, plugins []plugin) (admin.ReceiverConfig, err
 	names := map[string]bool{}
 	for _, p := range plugins {
 		if !wire.ValidName(p.kind) {
-			return config, fmt.Errorf("%s: adapter type %q is not a valid name", p.where, p.kind)
+			return config, fmt.Errorf("%s: plugin %q is not a valid name", p.where, p.kind)
 		}
 		if len(p.profiles) == 0 {
 			return config, fmt.Errorf("%s holds no profiles", p.where)

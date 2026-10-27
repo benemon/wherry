@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -34,7 +34,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	pluginDir = dir
-	if output, err := exec.Command("go", "build", "-o", filepath.Join(dir, "wherry-plugin-fake"), "github.com/benemon/wherry/adapter/internal/testplugin").CombinedOutput(); err != nil {
+	if output, err := exec.Command("go", "build", "-o", filepath.Join(dir, "wherry-plugin-fake"), "github.com/benemon/wherry/pluginsdk/internal/testplugin").CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "build test plugin: %v\n%s", err, output)
 		os.Exit(1)
 	}
@@ -45,10 +45,10 @@ func TestMain(m *testing.M) {
 
 // pluginRecord is the test plugin's record of one call.
 type pluginRecord struct {
-	PID      int              `json:"pid"`
-	Call     string           `json:"call"`
-	Settings adapter.Settings `json:"settings"`
-	Run      *adapter.Run     `json:"run"`
+	PID      int                `json:"pid"`
+	Call     string             `json:"call"`
+	Settings pluginsdk.Settings `json:"settings"`
+	Run      *pluginsdk.Run     `json:"run"`
 }
 
 // recordPlugin points the test plugin's record at a new file and returns a reader for it.
@@ -123,7 +123,7 @@ func TestPluginPathRefusesWritableOrIrregularFiles(t *testing.T) {
 		t.Fatalf("missing plugin: %v", err)
 	}
 	if _, err := pluginPath(dir, "../nomad"); err == nil {
-		t.Fatal("accepted an adapter type naming a path")
+		t.Fatal("accepted a plugin naming a path")
 	}
 	if os.Getuid() == 0 {
 		t.Log("running as root: every file here is root's, so another owner cannot be stood in")
@@ -163,7 +163,7 @@ func TestRelativePluginDirRunsTheCheckedBinary(t *testing.T) {
 	}
 	t.Setenv("PATH", decoys+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Chdir(dir)
-	plugins := &plugins{dir: ".", logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: ".", logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	_, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"})
 	if _, statErr := os.Stat(marker); statErr == nil {
@@ -178,7 +178,7 @@ func TestRestartChecksThePluginAgain(t *testing.T) {
 	read := recordPlugin(t)
 	dir := installPlugin(t)
 	logs := &syncBuffer{}
-	plugins := &plugins{dir: dir, logs: logs, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: dir, logs: logs, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	if _, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}); err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ func TestRestartChecksThePluginAgain(t *testing.T) {
 }
 
 func TestMissingPluginIsAConfigurationError(t *testing.T) {
-	plugins := &plugins{dir: t.TempDir(), logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: t.TempDir(), logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	_, err := plugins.profile("build", admin.ProfileSettings{Name: "lab", Plugin: "nomad", Agent: "claude"})
 	if err == nil || err.Error() != "no plugin for type nomad" {
@@ -210,7 +210,7 @@ func TestMissingPluginIsAConfigurationError(t *testing.T) {
 	}
 }
 
-func TestOneProcessPerAdapterType(t *testing.T) {
+func TestOneProcessPerPlugin(t *testing.T) {
 	read := recordPlugin(t)
 	dir := t.TempDir()
 	for _, kind := range []string{"fake", "other"} {
@@ -222,7 +222,7 @@ func TestOneProcessPerAdapterType(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	plugins := &plugins{dir: dir, logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: dir, logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	for _, settings := range []admin.ProfileSettings{
 		{Name: "exec", Plugin: "fake", Agent: "claude"}, {Name: "podman", Plugin: "fake", Agent: "claude"}, {Name: "edge", Plugin: "other", Agent: "claude"},
@@ -390,7 +390,7 @@ func TestProfileCredentialReachesThePluginInPlaceOfItsName(t *testing.T) {
 		t.Fatal(err)
 	}
 	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"nomad-token": {File: token}}, hold: func(string, []byte) {},
-		logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+		logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	settings := admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "nomad-token", "outputs": true}}
 	if _, err := plugins.profile("build", settings); err != nil {
@@ -419,7 +419,7 @@ func TestProfileCredentialFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"open-token": {File: open}}, logs: io.Discard,
-		registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+		registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	for name, want := range map[string]string{
 		"nomad-token": `credential "nomad-token" has no source in the receiver's configuration`,

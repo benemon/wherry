@@ -881,7 +881,7 @@ func TestRandomID(t *testing.T) {
 	}
 }
 
-// The receiver hands an adapter the inputs without checking names again, so decoding is where they are unique.
+// The receiver hands a plugin the inputs without checking names again, so decoding is where they are unique.
 func TestInputNamesAreUniqueAtDecode(t *testing.T) {
 	repeated := validSubmission()
 	repeated.Message.Parts = append(repeated.Message.Parts, Part{Raw: StdBytes("a"), Filename: "data.csv"}, Part{Raw: StdBytes("b"), Filename: "data.csv"})

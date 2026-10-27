@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 )
 
 // git runs git in dir with env.
@@ -95,7 +95,7 @@ func serveGit(t *testing.T, root, redirect string) *gitServer {
 // poses as it, and an agent's directories holding the forge token as a credential file.
 type oracle struct {
 	root, work, home string
-	directories      adapter.Directories
+	directories      pluginsdk.Directories
 	forge, attacker  *gitServer
 	repository       string
 	// ambient is the environment of a platform whose system, global and environment git configuration rewrites the
@@ -113,7 +113,7 @@ func newOracle(t *testing.T) *oracle {
 	root := t.TempDir()
 	o := &oracle{root: root, work: filepath.Join(root, "work"), home: filepath.Join(root, "home")}
 	agent := filepath.Join(root, "agent")
-	o.directories = adapter.Directories{Input: filepath.Join(agent, "inputs"), Output: filepath.Join(agent, "outputs"), Credentials: filepath.Join(agent, "credentials")}
+	o.directories = pluginsdk.Directories{Input: filepath.Join(agent, "inputs"), Output: filepath.Join(agent, "outputs"), Credentials: filepath.Join(agent, "credentials")}
 	forgeRoot, attackerRoot := filepath.Join(root, "forge"), filepath.Join(root, "attacker")
 	for _, dir := range []string{o.work, o.home, forgeRoot, attackerRoot, o.directories.Input, o.directories.Output, o.directories.Credentials} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -165,15 +165,15 @@ func newOracle(t *testing.T) *oracle {
 	return o
 }
 
-// agentEnvironment is the ambient environment, taken as the one an adapter configures, without adapter.AgentUnset and
-// with adapter.AgentEnvironment over it, as the adapter gives its agent.
+// agentEnvironment is the ambient environment, taken as the one a plugin configures, without pluginsdk.AgentUnset and
+// with pluginsdk.AgentEnvironment over it, as the plugin gives its agent.
 func (o *oracle) agentEnvironment() []string {
 	env := slices.DeleteFunc(slices.Clone(o.ambient), func(variable string) bool {
 		name, _, _ := strings.Cut(variable, "=")
-		return slices.Contains(adapter.AgentUnset, name)
+		return slices.Contains(pluginsdk.AgentUnset, name)
 	})
-	for _, name := range slices.Sorted(maps.Keys(adapter.AgentEnvironment)) {
-		env = append(env, name+"="+adapter.AgentEnvironment[name])
+	for _, name := range slices.Sorted(maps.Keys(pluginsdk.AgentEnvironment)) {
+		env = append(env, name+"="+pluginsdk.AgentEnvironment[name])
 	}
 	return env
 }
@@ -228,7 +228,7 @@ func (o *oracle) preamble(input *wire.GitInput) []string {
 
 // The preamble's commands are the oracle's input. Run as an agent runs them, against a real git over TLS, on a
 // platform whose system, global and environment configuration rewrite the forge to another host, store credentials
-// and trace requests, but under the adapter's environment: they clone the ref from the forge alone, authenticate with
+// and trace requests, but under the plugin's environment: they clone the ref from the forge alone, authenticate with
 // the token from its file, return the agent's commit as a patch that git am applies and a bundle that git fetch
 // reads, push only the run's branch, and leave the token nowhere but the forge.
 func TestGitPreambleCommandsWorkWithGit(t *testing.T) {
@@ -242,7 +242,7 @@ func TestGitPreambleCommandsWorkWithGit(t *testing.T) {
 			t.Fatalf("command %q carries the token, or does not start with git, or redirects", line)
 		}
 	}
-	// The platform's own environment can still set GIT_CURL_VERBOSE, which no adapter removes.
+	// The platform's own environment can still set GIT_CURL_VERBOSE, which no plugin removes.
 	env := append(o.agentEnvironment(), "GIT_CURL_VERBOSE=1")
 	var outputs strings.Builder
 	runAll := func(lines []string) {
@@ -270,7 +270,7 @@ func TestGitPreambleCommandsWorkWithGit(t *testing.T) {
 		}
 	}
 	runAll(lines[3:])
-	// No value switches GIT_CURL_VERBOSE off, so the ambient one traces requests to the output, with the adapter's
+	// No value switches GIT_CURL_VERBOSE off, so the ambient one traces requests to the output, with the plugin's
 	// GIT_TRACE_REDACT hiding the Authorization header.
 	if !strings.Contains(outputs.String(), "Authorization: Basic <redacted>") {
 		t.Errorf("precondition: the platform's GIT_CURL_VERBOSE must trace the authorised request:\n%s", outputs.String())
@@ -315,7 +315,7 @@ func TestGitPreambleCommandsWorkWithGit(t *testing.T) {
 	}
 }
 
-// Without the adapter's environment the platform's rewrite applies, so the clone reaches the other host; the
+// Without the plugin's environment the platform's rewrite applies, so the clone reaches the other host; the
 // clone's own settings still keep the token from it and from the platform's credential store.
 func TestGitCloneKeepsTheTokenFromAnotherHost(t *testing.T) {
 	o := newOracle(t)
@@ -330,7 +330,7 @@ func TestGitCloneKeepsTheTokenFromAnotherHost(t *testing.T) {
 	o.leaks(t, output)
 }
 
-// Without the adapter's environment, a platform's credential store is still never given the token.
+// Without the plugin's environment, a platform's credential store is still never given the token.
 func TestGitCloneStoresTheTokenNowhere(t *testing.T) {
 	o := newOracle(t)
 	if err := os.WriteFile(o.homeConfig, []byte("[credential]\n\thelper = store --file="+o.store+"\n"), 0o600); err != nil {
@@ -530,7 +530,7 @@ func TestGitSSHCloneTrustsOnlyTheHostKey(t *testing.T) {
 	}
 }
 
-// Under the adapter's environment the platform's trace variables write nothing.
+// Under the plugin's environment the platform's trace variables write nothing.
 func TestGitCloneTracesNothing(t *testing.T) {
 	o := newOracle(t)
 	lines := o.preamble(&wire.GitInput{Remote: o.forge.URL + "/org/repo.git", Ref: "feature", Credential: "forge-token"})
@@ -577,7 +577,7 @@ func TestGitCloneTakesNoTemplate(t *testing.T) {
 			t.Fatalf("repository configuration %q, %v; want none of the template's", config, err)
 		}
 	}
-	t.Run("adapter environment", func(t *testing.T) {
+	t.Run("plugin environment", func(t *testing.T) {
 		o.ambient = append(o.ambient, "GIT_TEMPLATE_DIR="+template)
 		if output, err := o.run(t, o.agentEnvironment(), "git init -q own"); err != nil {
 			t.Fatalf("init: %v\n%s", err, output)
@@ -598,7 +598,7 @@ func TestGitCloneTakesNoTemplate(t *testing.T) {
 	})
 }
 
-// GIT_DIR, GIT_WORK_TREE and GIT_EXEC_PATH in the environment an adapter configures do not retarget the clone or the
+// GIT_DIR, GIT_WORK_TREE and GIT_EXEC_PATH in the environment a plugin configures do not retarget the clone or the
 // commands after it, or replace the programs git runs.
 func TestGitCommandsKeepTheirRepository(t *testing.T) {
 	o := newOracle(t)
@@ -631,7 +631,7 @@ func TestGitCommandsKeepTheirRepository(t *testing.T) {
 	}
 }
 
-// GIT_SSL_NO_VERIFY in the environment an adapter configures, or http.sslVerify=false in the platform's configuration,
+// GIT_SSL_NO_VERIFY in the environment a plugin configures, or http.sslVerify=false in the platform's configuration,
 // does not let the clone trust a certificate its CA does not.
 func TestGitCloneVerifiesCertificates(t *testing.T) {
 	o := newOracle(t)
@@ -652,7 +652,7 @@ func TestGitCloneVerifiesCertificates(t *testing.T) {
 	}
 	lines := o.preamble(&wire.GitInput{Remote: o.forge.URL + "/org/repo.git", Ref: "feature", Credential: "forge-token"})
 	for name, env := range map[string]func() []string{
-		"adapter environment": func() []string {
+		"plugin environment": func() []string {
 			o.ambient = append(o.ambient, "GIT_SSL_NO_VERIFY=1")
 			return append(o.agentEnvironment(), "GIT_SSL_CAINFO="+untrusting)
 		},

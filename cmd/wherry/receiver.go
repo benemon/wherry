@@ -19,12 +19,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/receiver"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -119,7 +119,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 		}
 		defer serveMetrics(listener, registry, logger).Close()
 	}
-	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, registry: registry, running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, registry: registry, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	r, err := receiver.New(bundle, config.StateDir, *rotateKey, plugins.profile, logger, registry)
 	if err != nil {
@@ -163,7 +163,7 @@ func serveMetrics(listener net.Listener, registry *prometheus.Registry, logger *
 	return server
 }
 
-// plugins runs one plugin process per adapter type, started for the first profile of that type. hold takes each platform
+// plugins runs one process per plugin, started for the first profile that names it. hold takes each platform
 // credential value before any plugin is handed it, so the receiver redacts it from what logs gets.
 type plugins struct {
 	dir         string
@@ -171,7 +171,7 @@ type plugins struct {
 	hold        func(name string, value []byte)
 	logs        io.Writer
 	registry    prometheus.Registerer
-	running     map[string]*adapter.Plugin
+	running     map[string]*pluginsdk.Process
 }
 
 // profile configures one profile in its type's plugin, handing the plugin the value of the credential its config names
@@ -195,13 +195,13 @@ func (p *plugins) profile(pool string, settings admin.ProfileSettings) (receiver
 	running, ok := p.running[settings.Plugin]
 	if !ok {
 		var err error
-		running, err = adapter.Launch(func() (string, error) { return pluginPath(p.dir, settings.Plugin) }, p.logs)
+		running, err = pluginsdk.Launch(func() (string, error) { return pluginPath(p.dir, settings.Plugin) }, p.logs)
 		if err != nil {
 			return receiver.Named{}, err
 		}
 		p.running[settings.Plugin] = running
 		p.registry.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{
-			Name: "wherry_plugin_restarts_total", Help: "Times an adapter plugin was started again.", ConstLabels: prometheus.Labels{"pool": pool, "type": settings.Plugin},
+			Name: "wherry_plugin_restarts_total", Help: "Times a plugin was started again.", ConstLabels: prometheus.Labels{"pool": pool, "type": settings.Plugin},
 		}, func() float64 { return float64(running.Restarts()) }))
 	}
 	encoded, err := json.Marshal(config)
@@ -209,13 +209,13 @@ func (p *plugins) profile(pool string, settings admin.ProfileSettings) (receiver
 		return receiver.Named{}, err
 	}
 	// A value read from a file ends in the newline its editor wrote, which no platform token holds.
-	configured, err := running.Configure(adapter.Settings{
+	configured, err := running.Configure(pluginsdk.Settings{
 		Name: settings.Name, Pool: pool, Agent: settings.Agent, Config: encoded, Credential: strings.TrimRight(string(value), "\r\n"),
 	})
 	if err != nil {
 		return receiver.Named{}, err
 	}
-	return receiver.Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Adapter: configured}, nil
+	return receiver.Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: configured}, nil
 }
 
 func (p *plugins) close() {
@@ -228,13 +228,13 @@ func (p *plugins) close() {
 // tests can stand in for another owner.
 var receiverUID = os.Getuid()
 
-// pluginPath is the absolute path of the plugin for an adapter type in dir. Whoever can write the
+// pluginPath is the absolute path of the plugin named kind in dir. Whoever can write the
 // directory or the binary runs code as the receiver, so it refuses either when group or others can
 // write it or a user other than root or the receiver's owns it, and a binary that is not a regular
 // file. An absolute path is never looked up on PATH, so the binary checked is the one run.
 func pluginPath(dir, kind string) (string, error) {
 	if !wire.ValidName(kind) {
-		return "", fmt.Errorf("adapter type %q is not a valid name", kind)
+		return "", fmt.Errorf("plugin %q is not a valid name", kind)
 	}
 	dir, err := filepath.Abs(dir)
 	if err != nil {

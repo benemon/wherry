@@ -18,11 +18,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -54,10 +54,10 @@ func (f fixture) submitPayload(t *testing.T, edit func(map[string]any)) *kgo.Rec
 	return f.produce(t, admin.PoolTasksTopic(testPool), "run-a", value)
 }
 
-func (f fixture) lastRun() adapter.Run {
-	f.adapter.mu.Lock()
-	defer f.adapter.mu.Unlock()
-	return f.adapter.lastRun
+func (f fixture) lastRun() pluginsdk.Run {
+	f.plugin.mu.Lock()
+	defer f.plugin.mu.Unlock()
+	return f.plugin.lastRun
 }
 
 func TestInputPartsLandAsNamedFiles(t *testing.T) {
@@ -72,9 +72,9 @@ func TestInputPartsLandAsNamedFiles(t *testing.T) {
 	if status := f.execute(t, record, 1); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
-	want := []adapter.File{{Name: "data.csv", Data: []byte("a,b\n1,2\n")}, {Name: "config.json", Data: []byte(`{"k":[1,2]}`)}, {Name: "empty", Data: []byte{}}}
+	want := []pluginsdk.File{{Name: "data.csv", Data: []byte("a,b\n1,2\n")}, {Name: "config.json", Data: []byte(`{"k":[1,2]}`)}, {Name: "empty", Data: []byte{}}}
 	run := f.lastRun()
-	if !slices.EqualFunc(run.Inputs, want, func(a, b adapter.File) bool { return a.Name == b.Name && bytes.Equal(a.Data, b.Data) }) {
+	if !slices.EqualFunc(run.Inputs, want, func(a, b pluginsdk.File) bool { return a.Name == b.Name && bytes.Equal(a.Data, b.Data) }) {
 		t.Fatalf("inputs %q, want %q", run.Inputs, want)
 	}
 	if prompt := string(run.Prompt); !strings.Contains(prompt, "Input files: /task/inputs/data.csv, /task/inputs/config.json, /task/inputs/empty.") || !strings.HasSuffix(prompt, "\n\nhi") {
@@ -147,7 +147,7 @@ func TestLongTaskCredentialNameIsRejected(t *testing.T) {
 	}
 }
 
-func TestCredentialsReachTheAdapterAtTheirTargets(t *testing.T) {
+func TestCredentialsReachThePluginAtTheirTargets(t *testing.T) {
 	f := newFixture(t, resultStream)
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withDeployKey), 1)
 	request := f.request(t, 1)
@@ -159,7 +159,7 @@ func TestCredentialsReachTheAdapterAtTheirTargets(t *testing.T) {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
 	run := f.lastRun()
-	if want := []adapter.Secret{{Name: credentialName, Env: credentialEnv, Value: []byte(testToken)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(deployValue)}}; !reflect.DeepEqual(run.Credentials, want) {
+	if want := []pluginsdk.Secret{{Name: credentialName, Env: credentialEnv, Value: []byte(testToken)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(deployValue)}}; !reflect.DeepEqual(run.Credentials, want) {
 		t.Fatalf("dispatched %d credentials, want the agent's at its environment variable and the task's at its file", len(run.Credentials))
 	}
 	prompt := string(run.Prompt)
@@ -172,7 +172,7 @@ func TestCredentialsReachTheAdapterAtTheirTargets(t *testing.T) {
 func TestTaskCredentialsOfAnAgentWithoutCredentials(t *testing.T) {
 	terms := testTerms()
 	terms.Agents[0].Credentials = nil
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withDeployKey), 1)
 	request := f.request(t, 1)
 	if request.Credentials == nil || len(request.Credentials) != 0 || !slices.Equal(request.TaskCredentials, []string{"deploy-key"}) {
@@ -214,8 +214,8 @@ func optionalTerms() admin.Terms {
 // an agent that needs it ends the run in AUTH_REQUIRED naming it.
 func TestAnUnsuppliedOptionalCredentialIsNamedInThePreamble(t *testing.T) {
 	outcome := `{"state":"TASK_STATE_AUTH_REQUIRED","message":{"role":"ROLE_AGENT","parts":[{"text":"gh needs a token"},{"data":{"credential":"github-token"}}]}}`
-	fake := &fakeAdapter{stream: noResultStream, outputs: []adapter.Output{outcomeOutput(outcome)}}
-	f := newFixtureWith(t, noResultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": fake})
+	fake := &fakePlugin{stream: noResultStream, outputs: []pluginsdk.Output{outcomeOutput(outcome)}}
+	f := newFixtureWith(t, noResultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
 	f.answer(t, credentialName)
 	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Unsupplied = []string{"github-token"} })
 	if ack := f.execute(t, record, 1); ack != kgo.AckReject {
@@ -242,7 +242,7 @@ func TestAdmissionRefusesCredentialsOutsideTheAgentsTerms(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newFixtureWith(t, resultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+			f := newFixtureWith(t, resultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 			if admitted, ack := f.receiver.admit(f.ctx, f.submit(t, f.host, mutate)); admitted != nil || ack != kgo.AckReject {
 				t.Fatalf("admitted %v with ack %v, want a rejection", admitted, ack)
 			}
@@ -292,7 +292,7 @@ func sha(data []byte) string {
 func TestTaskCredentialIsRedactedFromTranscriptAndOutputs(t *testing.T) {
 	stream := []string{`{"type":"assistant","message":"key ` + deployValue + `"}`, doneOutcome}
 	f := newFixture(t, stream)
-	f.adapter.outputs = []adapter.Output{{Name: "report.md", Size: int64(len("key " + deployValue + "\n")), Data: []byte("key " + deployValue + "\n")}}
+	f.plugin.outputs = []pluginsdk.Output{{Name: "report.md", Size: int64(len("key " + deployValue + "\n")), Data: []byte("key " + deployValue + "\n")}}
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withDeployKey), 1)
 	f.sealFor(t, f.request(t, 1), map[string][]byte{credentialName: []byte(testToken), "deploy-key": []byte(deployValue)})
 	if status := <-done; status != kgo.AckAccept {
@@ -313,7 +313,7 @@ func TestTaskCredentialIsRedactedFromTranscriptAndOutputs(t *testing.T) {
 }
 
 func TestPreambleNamesFilesAndTheOutcomeContract(t *testing.T) {
-	directories := adapter.Directories{Input: "/local/inputs", Output: "/local/outputs", Credentials: "/secrets/credentials"}
+	directories := pluginsdk.Directories{Input: "/local/inputs", Output: "/local/outputs", Credentials: "/secrets/credentials"}
 	inputs := []string{"data.csv"}
 	credentials := []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}, {Name: "github-token", Env: "GH_TOKEN"}}
 	outputs := []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes/extra.txt"}}
@@ -328,37 +328,37 @@ func TestPreambleNamesFilesAndTheOutcomeContract(t *testing.T) {
 			t.Errorf("preamble %q lacks %q", got, want)
 		}
 	}
-	if unreported := preamble(adapter.Directories{}, inputs, nil, nil, nil, nil, "run-a"); !strings.Contains(unreported, "Input files: $WHERRY_INPUT_DIR/data.csv.") {
-		t.Errorf("preamble %q, want the variable for a directory the adapter does not report", unreported)
+	if unreported := preamble(pluginsdk.Directories{}, inputs, nil, nil, nil, nil, "run-a"); !strings.Contains(unreported, "Input files: $WHERRY_INPUT_DIR/data.csv.") {
+		t.Errorf("preamble %q, want the variable for a directory the plugin does not report", unreported)
 	}
 	if bare := preamble(directories, nil, nil, nil, nil, nil, "run-a"); !strings.Contains(bare, "/local/outputs/.wherry/outcome.json") || !strings.Contains(bare, "This run has no credentials.") {
 		t.Errorf("preamble %q, want the outcome contract for a run that declares no files", bare)
 	}
 }
 
-// runWithOutputs runs a turn declaring expected through the fake adapter, which collects outputs or fails with
+// runWithOutputs runs a turn declaring expected through the fake plugin, which collects outputs or fails with
 // collectErr, and returns its result.
-func runWithOutputs(t *testing.T, expected []wire.ExpectedOutput, outputs []adapter.Output, collectErr error) (fixture, *wire.Task, kgo.AckStatus) {
+func runWithOutputs(t *testing.T, expected []wire.ExpectedOutput, outputs []pluginsdk.Output, collectErr error) (fixture, *wire.Task, kgo.AckStatus) {
 	t.Helper()
 	return runWithOutputsUnder(t, testTerms(), expected, outputs, collectErr)
 }
 
 // runWithOutputsUnder is runWithOutputs in a pool of terms.
-func runWithOutputsUnder(t *testing.T, terms admin.Terms, expected []wire.ExpectedOutput, outputs []adapter.Output, collectErr error) (fixture, *wire.Task, kgo.AckStatus) {
+func runWithOutputsUnder(t *testing.T, terms admin.Terms, expected []wire.ExpectedOutput, outputs []pluginsdk.Output, collectErr error) (fixture, *wire.Task, kgo.AckStatus) {
 	t.Helper()
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	f.answer(t, credentialName)
-	f.adapter.outputs, f.adapter.collectErr = outputs, collectErr
+	f.plugin.outputs, f.plugin.collectErr = outputs, collectErr
 	status := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Outputs = expected }), 1)
 	return f, f.lastTask(t), status
 }
 
-func file(name, data string) adapter.Output {
-	return adapter.Output{Name: name, Size: int64(len(data)), Data: []byte(data)}
+func file(name, data string) pluginsdk.Output {
+	return pluginsdk.Output{Name: name, Size: int64(len(data)), Data: []byte(data)}
 }
 
 func TestCollectionRejectsWhatIsNotARegularFile(t *testing.T) {
-	f, task, status := runWithOutputs(t, nil, []adapter.Output{
+	f, task, status := runWithOutputs(t, nil, []pluginsdk.Output{
 		{Name: "link", Size: 9, Mode: fs.ModeSymlink},
 		{Name: "fifo", Mode: fs.ModeNamedPipe},
 		{Name: "tty", Mode: fs.ModeDevice | fs.ModeCharDevice},
@@ -386,12 +386,12 @@ func TestCollectionRejectsWhatIsNotARegularFile(t *testing.T) {
 }
 
 // A plugin that ignores the limits gets its outputs refused, not kept.
-func TestCollectionRefusesAnAdapterPastTheLimits(t *testing.T) {
-	many := make([]adapter.Output, wire.MaxOutputs+1)
+func TestCollectionRefusesAnPluginPastTheLimits(t *testing.T) {
+	many := make([]pluginsdk.Output, wire.MaxOutputs+1)
 	for i := range many {
 		many[i] = file(fmt.Sprintf("f%03d", i), "x")
 	}
-	for name, outputs := range map[string][]adapter.Output{
+	for name, outputs := range map[string][]pluginsdk.Output{
 		"count": many,
 		"total": {file("a", strings.Repeat("a", admin.DefaultOutputLimit/2+1)), file("b", strings.Repeat("b", admin.DefaultOutputLimit/2+1))},
 	} {
@@ -407,16 +407,16 @@ func TestCollectionRefusesAnAdapterPastTheLimits(t *testing.T) {
 func TestCollectionHonoursThePoolOutputLimit(t *testing.T) {
 	terms := testTerms()
 	terms.OutputLimit = 1000
-	f, task, _ := runWithOutputsUnder(t, terms, nil, []adapter.Output{{Name: "grew.bin", Size: 2000, Data: []byte("x")}, file("report.md", "r")}, nil)
-	if !reflect.DeepEqual(f.adapter.limits, adapter.Limits{Files: wire.MaxOutputs, FileBytes: 1000, TotalBytes: 1000, Stream: []string{wire.OutcomeFile}, StreamBytes: wire.MaxS3Object}) {
-		t.Fatalf("collected under %+v, want the pool's output limit", f.adapter.limits)
+	f, task, _ := runWithOutputsUnder(t, terms, nil, []pluginsdk.Output{{Name: "grew.bin", Size: 2000, Data: []byte("x")}, file("report.md", "r")}, nil)
+	if !reflect.DeepEqual(f.plugin.limits, pluginsdk.Limits{Files: wire.MaxOutputs, FileBytes: 1000, TotalBytes: 1000, Stream: []string{wire.OutcomeFile}, StreamBytes: wire.MaxS3Object}) {
+		t.Fatalf("collected under %+v, want the pool's output limit", f.plugin.limits)
 	}
 	if listed := manifest(t, task); len(listed.Outputs) != 1 || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "grew.bin", Size: 2000, Reason: "exceeds output limit"}}) {
 		t.Fatalf("returned %+v, not returned %+v; want grew.bin over the limit", listed.Outputs, listed.NotReturned)
 	}
-	_, task, _ = runWithOutputsUnder(t, terms, []wire.ExpectedOutput{{Name: "a"}}, []adapter.Output{file("a", strings.Repeat("a", 600)), file("b", strings.Repeat("b", 600))}, nil)
+	_, task, _ = runWithOutputsUnder(t, terms, []wire.ExpectedOutput{{Name: "a"}}, []pluginsdk.Output{file("a", strings.Repeat("a", 600)), file("b", strings.Repeat("b", 600))}, nil)
 	if listed := manifest(t, task); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "a", Reason: "not collected"}}) {
-		t.Fatalf("returned %+v, not returned %+v; want an adapter past the pool's limit refused", listed.Outputs, listed.NotReturned)
+		t.Fatalf("returned %+v, not returned %+v; want a plugin past the pool's limit refused", listed.Outputs, listed.NotReturned)
 	}
 }
 
@@ -445,14 +445,14 @@ func TestRedactionMatchesReplaceAll(t *testing.T) {
 func TestRedactionCannotExpandPastTheLimits(t *testing.T) {
 	terms := testTerms()
 	terms.OutputLimit = 4096
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	name, value := "c", "12345678"
 	marker := signed.RedactionMarker(testRedactionKey, name)
-	collect := func(outputs ...adapter.Output) *activeRun {
+	collect := func(outputs ...pluginsdk.Output) *activeRun {
 		run := testActiveRun(t, f, "run-x", 1)
 		run.deliver(map[string][]byte{name: []byte(value)})
-		f.adapter.outputs = outputs
-		run.collect(f.ctx, adapter.Handle{}, true)
+		f.plugin.outputs = outputs
+		run.collect(f.ctx, pluginsdk.Handle{}, true)
 		return run
 	}
 	run := collect(file("expanding.txt", strings.Repeat(value, 450)), file("small.txt", "key "+value))
@@ -470,7 +470,7 @@ func TestRedactionCannotExpandPastTheLimits(t *testing.T) {
 		t.Fatalf("redacted form over %d bytes held %d bytes", wire.MaxLine, len(form.data))
 	}
 	var chunk wire.Chunk
-	if err := wire.ParseRecord(run.chunks([]adapter.Line{{Data: line}}, false)[0].Value, f.keys(), &chunk); err != nil {
+	if err := wire.ParseRecord(run.chunks([]pluginsdk.Line{{Data: line}}, false)[0].Value, f.keys(), &chunk); err != nil {
 		t.Fatal(err)
 	}
 	var pointer wire.PointerMetadata
@@ -489,7 +489,7 @@ func TestEscapeHeavyLineTravelsRaw(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-e", 1)
 	escapes, plain := []byte(strings.Repeat("\x01", 300)), []byte(`{"type":"assistant","message":"<b>&"}`)
-	records := run.chunks([]adapter.Line{{Data: escapes}, {Offset: 300, Data: plain}}, false)
+	records := run.chunks([]pluginsdk.Line{{Data: escapes}, {Offset: 300, Data: plain}}, false)
 	var parts []wire.Part
 	for _, record := range records {
 		var chunk wire.Chunk
@@ -525,7 +525,7 @@ func TestRedactionWorksInBoundedPieces(t *testing.T) {
 func TestOutputNameOver512BytesIsRejected(t *testing.T) {
 	longest := strings.Repeat("a/", 255) + "aa"
 	long := longest + "a"
-	_, task, _ := runWithOutputs(t, nil, []adapter.Output{file(long, "x"), file(longest, "y")}, nil)
+	_, task, _ := runWithOutputs(t, nil, []pluginsdk.Output{file(long, "x"), file(longest, "y")}, nil)
 	listed := manifest(t, task)
 	if quoted := strconv.QuoteToASCII(long)[:256]; len(listed.Outputs) != 1 || len(listed.Outputs[0].Name) != 512 ||
 		!slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: quoted, Size: 1, Reason: "rejected: invalid name"}}) {
@@ -596,13 +596,13 @@ func TestRequiredOutputMissingFailsTheTurn(t *testing.T) {
 	if listed := manifest(t, task); !slices.Equal(listed.NotReturned, want) {
 		t.Fatalf("not returned %+v, want %+v", listed.NotReturned, want)
 	}
-	if f.adapter.collects != 1 || f.adapter.stopsBefore[0] < 1 {
-		t.Fatalf("collected %d times after %v stops, want once after the job was stopped", f.adapter.collects, f.adapter.stopsBefore)
+	if f.plugin.collects != 1 || f.plugin.stopsBefore[0] < 1 {
+		t.Fatalf("collected %d times after %v stops, want once after the job was stopped", f.plugin.collects, f.plugin.stopsBefore)
 	}
 }
 
 func TestOptionalOutputMissingIsListed(t *testing.T) {
-	_, task, status := runWithOutputs(t, []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes.md"}}, []adapter.Output{file("report.md", "r")}, nil)
+	_, task, status := runWithOutputs(t, []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes.md"}}, []pluginsdk.Output{file("report.md", "r")}, nil)
 	if status != kgo.AckAccept || task.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("ended %v %s, want COMPLETED", status, task.Status.State)
 	}
@@ -618,7 +618,7 @@ func TestOutputsNotCollected(t *testing.T) {
 		message  string
 	}{"required": {true, "required output report.md not returned: not collected"}, "optional": {false, "agent reported no outcome"}} {
 		t.Run(name, func(t *testing.T) {
-			_, task, _ := runWithOutputs(t, []wire.ExpectedOutput{{Name: "report.md", Required: test.required}}, []adapter.Output{file("report.md", "r")}, context.DeadlineExceeded)
+			_, task, _ := runWithOutputs(t, []wire.ExpectedOutput{{Name: "report.md", Required: test.required}}, []pluginsdk.Output{file("report.md", "r")}, context.DeadlineExceeded)
 			if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != test.message {
 				t.Fatalf("ended %s %+v, want FAILED with %q", task.Status.State, task.Status.Message, test.message)
 			}
@@ -631,7 +631,7 @@ func TestOutputsNotCollected(t *testing.T) {
 
 func TestOutputChunksAreBoundedAndCommittedWithTheResult(t *testing.T) {
 	data := bytes.Repeat([]byte("0123456789abcdef"), (2*wire.OutputChunk+100)/16)
-	f, task, _ := runWithOutputs(t, nil, []adapter.Output{{Name: "sub/big.bin", Size: int64(len(data)), Data: data}, file("empty", "")}, nil)
+	f, task, _ := runWithOutputs(t, nil, []pluginsdk.Output{{Name: "sub/big.bin", Size: int64(len(data)), Data: data}, file("empty", "")}, nil)
 	outputs := f.outputChunks(t)
 	type chunk struct {
 		name         string
@@ -675,7 +675,7 @@ func TestInputTooLargeFailsTheTurnNamingIt(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.answer(t, credentialName)
-			f.adapter.dispatchErr, f.adapter.outcome = &adapter.InputTooLargeError{Name: test.reported}, adapter.OutcomeNothingCreated
+			f.plugin.dispatchErr, f.plugin.outcome = &pluginsdk.InputTooLargeError{Name: test.reported}, pluginsdk.OutcomeNothingCreated
 			record := f.submit(t, f.host, func(task *wire.Submission) {
 				task.Message.Parts = append(task.Message.Parts, wire.Part{Raw: wire.StdBytes("x"), Filename: "data.csv"})
 			})
@@ -705,7 +705,7 @@ func TestAHungCollectionIsNotCollected(t *testing.T) {
 	t.Cleanup(func() { collectTimeout = previous })
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	f.adapter.collectHangs = true
+	f.plugin.collectHangs = true
 	status := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md", Required: true}}
 	}), 1)
@@ -723,7 +723,7 @@ func TestCredentialFormsAreRedacted(t *testing.T) {
 		`{"state":"TASK_STATE_COMPLETED","message":{"role":"ROLE_AGENT","parts":[{"text":"used sk-token-with-newline\n with pass\"word\\back-slash"}]}}`,
 	}
 	f := newFixture(t, stream)
-	f.adapter.outputs = []adapter.Output{file("report.md", `token sk-token-with-newline, password pass"word\back-slash`)}
+	f.plugin.outputs = []pluginsdk.Output{file("report.md", `token sk-token-with-newline, password pass"word\back-slash`)}
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withDeployKey), 1)
 	f.sealFor(t, f.request(t, 1), map[string][]byte{credentialName: []byte(agentValue), "deploy-key": []byte(taskValue)})
 	if status := <-done; status != kgo.AckAccept {
@@ -748,18 +748,18 @@ func TestCredentialFormsAreRedacted(t *testing.T) {
 // A job that would not stop at the delivery budget ends the run unread: its outputs and outcome file are never collected.
 func TestOutputsOfAJobThatWouldNotStopAreNotCollected(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.adapter.stopErr = errors.New("stop failed")
-	f.adapter.outputs = []adapter.Output{file("report.md", "r")}
+	f.plugin.stopErr = errors.New("stop failed")
+	f.plugin.outputs = []pluginsdk.Output{file("report.md", "r")}
 	run := testActiveRun(t, f, "run-unstopped", int64(testTerms().DeliveryLimit)-1)
 	run.expected = []wire.ExpectedOutput{{Name: "report.md"}, {Name: "notes.md"}}
-	if status := run.conclude(f.ctx, f.adapter.handle("run-unstopped"), nil, adapter.Terminal{Started: true}); status != kgo.AckReject {
+	if status := run.conclude(f.ctx, f.plugin.handle("run-unstopped"), nil, pluginsdk.Terminal{Started: true}); status != kgo.AckReject {
 		t.Fatalf("status %v, want the run failed", status)
 	}
 	if task := f.lastTask(t); task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != "agent reported no outcome" {
 		t.Fatalf("task %s %+v, want FAILED with no outcome", task.Status.State, task.Status.Message)
 	}
 	want := []wire.UnreturnedOutput{{Name: "report.md", Reason: "not collected"}, {Name: "notes.md", Reason: "not collected"}}
-	if listed := manifest(t, f.lastTask(t)); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, want) || f.adapter.collects != 0 {
-		t.Fatalf("returned %+v, not returned %+v after %d collects; want every output not collected and none", listed.Outputs, listed.NotReturned, f.adapter.collects)
+	if listed := manifest(t, f.lastTask(t)); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, want) || f.plugin.collects != 0 {
+		t.Fatalf("returned %+v, not returned %+v after %d collects; want every output not collected and none", listed.Outputs, listed.NotReturned, f.plugin.collects)
 	}
 }

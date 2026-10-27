@@ -18,12 +18,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -37,8 +37,8 @@ type Named struct {
 	Name  string
 	Agent string
 	// Labels are the operator's declared labels for the profile.
-	Labels  map[string]string
-	Adapter adapter.Adapter
+	Labels map[string]string
+	Plugin pluginsdk.Plugin
 }
 
 // ProfileFactory configures one profile for the receiver's pool from its settings in the receiver's configuration
@@ -494,7 +494,7 @@ func kid(encoded []byte) (string, string, bool) {
 func (r *Receiver) advertise(ctx context.Context) error {
 	for _, named := range r.profiles {
 		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)
-		err := named.Adapter.Sweep(callCtx)
+		err := named.Plugin.Sweep(callCtx)
 		cancel()
 		if err != nil {
 			r.metrics.sweepFailures.WithLabelValues(named.Name).Inc()
@@ -509,7 +509,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	offers := []wire.Offer{}
 	for _, named := range r.profiles {
 		callCtx, cancel := context.WithTimeout(ctx, advertiseInterval)
-		ready, err := named.Adapter.Ready(callCtx)
+		ready, err := named.Plugin.Ready(callCtx)
 		cancel()
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
@@ -520,7 +520,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 			continue
 		}
 		if ready {
-			offers = append(offers, wire.Offer{Profile: named.Name, Agent: named.Agent, InlineLimit: named.Adapter.InlineLimit()})
+			offers = append(offers, wire.Offer{Profile: named.Name, Agent: named.Agent, InlineLimit: named.Plugin.InlineLimit()})
 		}
 	}
 	r.mu.Lock()

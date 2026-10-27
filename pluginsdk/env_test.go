@@ -1,4 +1,4 @@
-package adapter
+package pluginsdk
 
 import "testing"
 

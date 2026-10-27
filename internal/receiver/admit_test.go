@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -150,7 +150,7 @@ func TestAdmitRejectsModelOutsideTheTerms(t *testing.T) {
 		terms.Agents[0].Models, terms.Agents[0].DefaultModel = names, names[0]
 		return terms
 	}
-	f := newFixtureWith(t, resultStream, models("haiku", "sonnet"), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, models("haiku", "sonnet"), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Placement.Model = "sonnet" })
 	f.admitted(t, record)
 	terms := models("haiku")
@@ -173,7 +173,7 @@ func TestAdmitRejectsModelOutsideTheTerms(t *testing.T) {
 func TestDispatchCarriesThePlacementModel(t *testing.T) {
 	terms := testTerms()
 	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, "haiku"
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	f.answer(t, credentialName)
 	if status := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Placement.Model = "sonnet" }), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
@@ -199,10 +199,10 @@ func TestRunTimeIsCappedSixHoursAfterTheQueueDeadline(t *testing.T) {
 			if status := f.receiver.execute(context.WithoutCancel(f.ctx), f.service.Admin, record, f.admitted(t, record), 1); status != kgo.AckAccept {
 				t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 			}
-			f.adapter.mu.Lock()
-			defer f.adapter.mu.Unlock()
-			if got := f.adapter.lastDeadline.UnixMilli(); got != test.want {
-				t.Fatalf("run deadline %v, want %v", f.adapter.lastDeadline, time.UnixMilli(test.want))
+			f.plugin.mu.Lock()
+			defer f.plugin.mu.Unlock()
+			if got := f.plugin.lastDeadline.UnixMilli(); got != test.want {
+				t.Fatalf("run deadline %v, want %v", f.plugin.lastDeadline, time.UnixMilli(test.want))
 			}
 		})
 	}
@@ -211,7 +211,7 @@ func TestRunTimeIsCappedSixHoursAfterTheQueueDeadline(t *testing.T) {
 func TestAdmitRejectsRunPastLifetime(t *testing.T) {
 	terms := testTerms()
 	terms.MaxQueueDeadlineMS = 1
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	record := f.turn(t, "run-expired", 1)
 	time.Sleep(10 * time.Millisecond)
 	f.rejected(t, record, "run expired")
@@ -220,7 +220,7 @@ func TestAdmitRejectsRunPastLifetime(t *testing.T) {
 func TestAdmitRejectsQueueDeadlinePastMaxQueueDeadline(t *testing.T) {
 	terms := testTerms()
 	terms.MaxQueueDeadlineMS = admin.Millis(time.Hour.Milliseconds())
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	first := f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-queued", "run-queued", "run-queued"
 		task.Wherry.QueueDeadlineMS = time.Now().Add(2 * time.Hour).UnixMilli()
@@ -231,7 +231,7 @@ func TestAdmitRejectsQueueDeadlinePastMaxQueueDeadline(t *testing.T) {
 func TestRedeliveredClaimedRunPastMaxQueueDeadlineIsAdopted(t *testing.T) {
 	terms := testTerms()
 	terms.MaxQueueDeadlineMS = 50
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream, job: adapter.JobRunning}})
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
 	record := startedTurn(t, f, "run-held", func(task *wire.Submission) {
 		task.Wherry.QueueDeadlineMS = time.Now().Add(20 * time.Millisecond).UnixMilli()
 	})
@@ -240,7 +240,7 @@ func TestRedeliveredClaimedRunPastMaxQueueDeadlineIsAdopted(t *testing.T) {
 	if status := f.receiver.execute(f.ctx, f.service.Admin, record, f.admitted(t, record), 2); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
-	if dispatches, lookups, follows, _ := f.adapter.counts(); dispatches != 0 || lookups != 1 || follows != 1 {
+	if dispatches, lookups, follows, _ := f.plugin.counts(); dispatches != 0 || lookups != 1 || follows != 1 {
 		t.Fatalf("dispatches=%d lookups=%d follows=%d, want the running job adopted", dispatches, lookups, follows)
 	}
 }
@@ -264,7 +264,7 @@ func noRejection(t *testing.T, f fixture) {
 }
 
 func TestRedeliveredClaimedTurnPastQueueDeadlineIsAdopted(t *testing.T) {
-	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream, job: adapter.JobRunning}})
+	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
 	record := startedTurn(t, f, "run-queued-held", func(task *wire.Submission) {
 		task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli()
 	})
@@ -273,7 +273,7 @@ func TestRedeliveredClaimedTurnPastQueueDeadlineIsAdopted(t *testing.T) {
 	if status := f.execute(t, record, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
-	if dispatches, lookups, follows, _ := f.adapter.counts(); dispatches != 0 || lookups != 1 || follows != 1 {
+	if dispatches, lookups, follows, _ := f.plugin.counts(); dispatches != 0 || lookups != 1 || follows != 1 {
 		t.Fatalf("dispatches=%d lookups=%d follows=%d, want the running job adopted", dispatches, lookups, follows)
 	}
 	noRejection(t, f)
@@ -285,7 +285,7 @@ func TestRedeliveredClaimedTurnPastQueueDeadlineIsAdopted(t *testing.T) {
 }
 
 func TestRedeliveredClaimedTurnPastRunDeadlineStopsItsJob(t *testing.T) {
-	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream, job: adapter.JobRunning}})
+	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
 	record := startedTurn(t, f, "run-deadline-held", func(task *wire.Submission) {
 		task.Wherry.QueueDeadlineMS = time.Now().Add(-2 * time.Second).UnixMilli()
 		task.Wherry.DeadlineMS = time.Now().Add(-time.Second).UnixMilli()
@@ -293,9 +293,9 @@ func TestRedeliveredClaimedTurnPastRunDeadlineStopsItsJob(t *testing.T) {
 	if status := f.execute(t, record, 2); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
 	}
-	f.adapter.mu.Lock()
-	dispatches, lookups, stops := f.adapter.dispatches, f.adapter.lookups, f.adapter.stops
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	dispatches, lookups, stops := f.plugin.dispatches, f.plugin.lookups, f.plugin.stops
+	f.plugin.mu.Unlock()
 	if dispatches != 0 || lookups != 1 || stops != 1 {
 		t.Fatalf("dispatches=%d lookups=%d stops=%d, want the found job stopped", dispatches, lookups, stops)
 	}
@@ -308,7 +308,7 @@ func TestRedeliveredClaimedTurnPastRunDeadlineStopsItsJob(t *testing.T) {
 func TestPlacementOutsideOffersReleasesWithoutARecord(t *testing.T) {
 	f := newFixture(t, resultStream)
 	for name, mutate := range map[string]func(*wire.Submission){
-		// codex is inside the terms, but no adapter here launches it.
+		// codex is inside the terms, but no plugin here launches it.
 		"agent":    func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" },
 		"selector": func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("zone", "dc9")} },
 	} {
@@ -362,7 +362,7 @@ func TestReceiverRejectsURLParts(t *testing.T) {
 			if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
 				t.Fatal(err)
 			}
-			if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
+			if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 {
 				t.Fatalf("dispatched %d runs", dispatches)
 			}
 			statuses := f.feedStatuses(t)
@@ -412,24 +412,24 @@ func TestCancelledSubmissionNotDispatched(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		attempt int64
-		job     adapter.JobState
+		job     pluginsdk.JobState
 		stops   int
 	}{
-		{"queued", 1, adapter.JobAbsent, 0},
-		{"redelivered with its job running", 2, adapter.JobRunning, 1},
+		{"queued", 1, pluginsdk.JobAbsent, 0},
+		{"redelivered with its job running", 2, pluginsdk.JobRunning, 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.answer(t, credentialName)
-			f.adapter.job = test.job
+			f.plugin.job = test.job
 			record := f.submit(t, f.host, nil)
 			f.publishCancel(t, "run-a", 1, f.host, nil)
 			if status := f.execute(t, record, test.attempt); status != kgo.AckAccept {
 				t.Fatalf("status %v, want accept", status)
 			}
-			f.adapter.mu.Lock()
-			dispatches, stops, releaseIDs := f.adapter.dispatches, f.adapter.stops, f.adapter.releaseIDs
-			f.adapter.mu.Unlock()
+			f.plugin.mu.Lock()
+			dispatches, stops, releaseIDs := f.plugin.dispatches, f.plugin.stops, f.plugin.releaseIDs
+			f.plugin.mu.Unlock()
 			if dispatches != 0 || stops != test.stops || !slices.Equal(releaseIDs, []string{"run-a"}) {
 				t.Fatalf("dispatches=%d stops=%d releases=%v, want 0, %d and run-a", dispatches, stops, releaseIDs, test.stops)
 			}
@@ -508,7 +508,7 @@ func startInFlight(t *testing.T, f fixture, ctx context.Context, run string) <-c
 	done := make(chan error, 1)
 	go func() { done <- f.receiver.claimOne(ctx, ctx, func() {}) }()
 	for {
-		if _, _, follows, _ := f.adapter.counts(); follows == 1 {
+		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 			return done
 		}
 		if f.ctx.Err() != nil {
@@ -540,7 +540,7 @@ func (f fixture) pollPool(t *testing.T, run string, wait time.Duration) (*kgo.Re
 
 func TestCancelStopsInFlightRun(t *testing.T) {
 	f := newFixture(t, noResultStream)
-	f.adapter.endDelay = 30 * time.Second
+	f.plugin.endDelay = 30 * time.Second
 	done := startInFlight(t, f, f.ctx, "run-cancelled")
 	f.publishCancel(t, "run-cancelled", 1, f.host, nil)
 	select {
@@ -551,9 +551,9 @@ func TestCancelStopsInFlightRun(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("in-flight run kept going after its cancel")
 	}
-	f.adapter.mu.Lock()
-	stops, releaseIDs := f.adapter.stops, f.adapter.releaseIDs
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	stops, releaseIDs := f.plugin.stops, f.plugin.releaseIDs
+	f.plugin.mu.Unlock()
 	if stops != 1 || !slices.Equal(releaseIDs, []string{"run-cancelled"}) {
 		t.Fatalf("stops=%d releases=%v", stops, releaseIDs)
 	}
@@ -571,7 +571,7 @@ func TestCancelStopsInFlightRun(t *testing.T) {
 
 func TestRunningTurnSeesCancelBetweenProgressTicks(t *testing.T) {
 	f := newFixture(t, noResultStream)
-	f.adapter.endDelay = 30 * time.Second
+	f.plugin.endDelay = 30 * time.Second
 	renewInterval = time.Minute // only the state check, not a progress tick, can stop the run in time
 	done := startInFlight(t, f, f.ctx, "run-cancelled")
 	f.publishCancel(t, "run-cancelled", 1, f.host, nil)
@@ -590,7 +590,7 @@ func TestRunningTurnSeesCancelBetweenProgressTicks(t *testing.T) {
 
 func TestProgressTickHonoursHeldCancel(t *testing.T) {
 	f := newFixture(t, noResultStream)
-	f.adapter.endDelay = 30 * time.Second
+	f.plugin.endDelay = 30 * time.Second
 	stateCheckInterval = time.Minute // only a progress tick can stop the run in time
 	t.Cleanup(func() { stateCheckInterval = time.Second })
 	done := startInFlight(t, f, f.ctx, "run-cancelled")
@@ -611,7 +611,7 @@ func TestProgressTickHonoursHeldCancel(t *testing.T) {
 func TestRunsUnderRetention(t *testing.T) {
 	terms := testTerms()
 	terms.MaxQueueDeadlineMS = admin.Millis(time.Hour.Milliseconds())
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream, job: adapter.JobRunning}})
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
 	aged := func(topic, key string, value []byte, age time.Duration) *kgo.Record {
 		t.Helper()
 		record := &kgo.Record{Topic: topic, Key: []byte(key), Value: value, Timestamp: time.Now().Add(-age)}
@@ -653,7 +653,7 @@ func TestRunsUnderRetention(t *testing.T) {
 	if status := f.receiver.execute(f.ctx, f.service.Admin, adopted, f.admitted(t, adopted), 2); status != kgo.AckAccept {
 		t.Fatalf("adopted status %v; logs:\n%s", status, f.logs.String())
 	}
-	if dispatches, _, follows, _ := f.adapter.counts(); dispatches != 0 || follows != 1 {
+	if dispatches, _, follows, _ := f.plugin.counts(); dispatches != 0 || follows != 1 {
 		t.Fatalf("dispatches=%d follows=%d, want the running job adopted", dispatches, follows)
 	}
 }
@@ -744,7 +744,7 @@ func TestAdmitReleasesAtTheBudgetFail(t *testing.T) {
 		"offer unavailable": {func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" }, func(*testing.T, fixture) {}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 			record := f.submit(t, f.host, test.mutate)
 			test.fault(t, f)
 			if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckReject {
@@ -794,7 +794,7 @@ func TestRunIDOfAnotherTenantIsRejected(t *testing.T) {
 	}
 	before := len(f.records(t, admin.TenantTopic(testTenant)))
 	f.rejected(t, f.submit(t, keyB, asTenantB), "run ID in use")
-	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
+	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 {
 		t.Fatalf("dispatches %d, want none", dispatches)
 	}
 	if err := holder.commit(f.ctx, holder.progress(0)); err != nil {
@@ -889,7 +889,7 @@ func (f fixture) terminals(t *testing.T, topic string) int {
 }
 
 func TestUnreadableEventsReleaseACompletedRunWithoutASecondTerminal(t *testing.T) {
-	f := newFixtureWith(t, resultStream, budgetTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, budgetTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	f.answer(t, credentialName)
 	record := f.submit(t, f.host, nil)
 	if status := f.execute(t, record, 1); status != kgo.AckAccept {
@@ -905,7 +905,7 @@ func TestUnreadableEventsReleaseACompletedRunWithoutASecondTerminal(t *testing.T
 }
 
 func TestUnreadableTurnsReleaseAtTheBudget(t *testing.T) {
-	f := newFixtureWith(t, resultStream, budgetTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, budgetTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	record := f.submit(t, f.host, nil)
 	if _, err := kadm.NewClient(f.service.Admin).DeleteTopics(f.ctx, admin.PoolTasksTopic(testPool)); err != nil {
 		t.Fatal(err)
@@ -919,10 +919,10 @@ func TestUnreadableTurnsReleaseAtTheBudget(t *testing.T) {
 }
 
 func TestRunIDOfAnotherTenantIsCheckedBeforeAnyWrite(t *testing.T) {
-	f := newFixtureWith(t, resultStream, budgetTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, budgetTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	keyB := f.tenantB(t)
 	f.submit(t, f.host, nil)
-	// No adapter here launches codex, and attempt 1 is at the budget.
+	// No plugin here launches codex, and attempt 1 is at the budget.
 	f.rejected(t, f.submit(t, keyB, func(task *wire.Submission) {
 		asTenantB(task)
 		task.Wherry.Placement.Agent = "codex"
@@ -956,7 +956,7 @@ func TestCancelOfAnotherTenantDoesNotStopTheRun(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	keyB := f.tenantB(t)
 	f.answer(t, credentialName)
-	f.adapter.endDelay = time.Minute
+	f.plugin.endDelay = time.Minute
 	record := f.submit(t, f.host, nil)
 	// tenant-b's rejection is the first status under run-a.
 	f.rejected(t, f.submit(t, keyB, asTenantB), "run ID in use")
@@ -966,7 +966,7 @@ func TestCancelOfAnotherTenantDoesNotStopTheRun(t *testing.T) {
 	done := make(chan kgo.AckStatus, 1)
 	go func() { done <- f.receiver.execute(ctx, f.service.Admin, record, admitted, 1) }()
 	for {
-		if _, _, follows, _ := f.adapter.counts(); follows > 0 {
+		if _, _, follows, _ := f.plugin.counts(); follows > 0 {
 			break
 		}
 		if f.ctx.Err() != nil {
@@ -976,9 +976,9 @@ func TestCancelOfAnotherTenantDoesNotStopTheRun(t *testing.T) {
 	}
 	f.publishCancel(t, "run-a", 1, keyB, func(cancel *wire.Cancel) { cancel.Tenant, cancel.Host = "tenant-b", "host-b" })
 	time.Sleep(3 * stateCheckInterval)
-	f.adapter.mu.Lock()
-	stops := f.adapter.stops
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	stops := f.plugin.stops
+	f.plugin.mu.Unlock()
 	select {
 	case status := <-done:
 		t.Fatalf("run ended with %v after tenant-b's cancel, want it still running", status)

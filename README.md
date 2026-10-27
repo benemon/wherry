@@ -42,8 +42,8 @@ make build
 go build -o wherry ./cmd/wherry
 ```
 
-The adapter protocol is its own Go module in [`adapter`](adapter), with its
-own `go.mod` and `adapter/v*` tags.
+The plugin protocol is its own Go module in [`pluginsdk`](pluginsdk), with its
+own `go.mod` and `pluginsdk/v*` tags.
 
 ## Make targets
 
@@ -53,7 +53,7 @@ attribution-marker check.
 
 ## Tests
 
-The adapter protocol is its own module: run `go test ./...` in `adapter`
+The plugin protocol is its own module: run `go test ./...` in `pluginsdk`
 as well as at the root.
 
 Unit tests run against an in-process Kafka. Tests that need real services
@@ -83,7 +83,7 @@ The packages share the broker's `wherry.admin`, so they run one at a time.
 ## Documentation site
 
 The site is [VitePress](https://vitepress.dev/) in `docs-site`, built from
-the pages in `docs`. Its Adapters page embeds the receiver examples of
+the pages in `docs`. Its Plugins page embeds the receiver examples of
 [wherry-plugins](https://github.com/benemon/wherry-plugins), checked out
 beside this repository or named by `WHERRY_PLUGINS_DIR`:
 
@@ -101,5 +101,5 @@ A `v*` tag cuts a release: `.github/workflows/release.yml` checks that the
 tagged commit's `ci` run on `main` passed, then runs `make sbom` and `make dist`,
 attests the archives' provenance, signs `checksums.txt` with cosign, and
 publishes the archives, checksums, signature and SBOM. A tag with a hyphenated
-qualifier, such as `v0.1.0-rc.1`, publishes a prerelease. `adapter/v*` tags
-version the adapter module and publish nothing.
+qualifier, such as `v0.1.0-rc.1`, publishes a prerelease. `pluginsdk/v*` tags
+version the `pluginsdk` module and publish nothing.

@@ -30,7 +30,7 @@ results stay on infrastructure the user governs.
 wherry's capabilities sit between the caller and the platform that runs
 the agent.
 
-![wherry's capabilities: harness integration, placement, platform adapters, context delivery, results, and authority and trust](diagrams/architecture.svg)
+![wherry's capabilities: harness integration, placement, platform plugins, context delivery, results, and authority and trust](diagrams/architecture.svg)
 
 ## What ships
 
@@ -41,8 +41,8 @@ One `wherry` binary with three sides:
   bundles, records receiver configurations, revokes access, and checks the
   result against the broker.
 - **Host:** `wherry init` and `wherry key` register and show the host's signing
-  key. `receivers` lists the receivers the tenant may use with their profiles
-  and labels. `submit` places a task by agent and label selector and publishes
+  key. `receivers` lists the receivers the tenant may use with their plugin
+  profiles and labels. `submit` places a task by agent and label selector and publishes
   it. `await`, `status`, `events` and `cancel` follow and stop a run, and
   `await` answers the claiming receiver's request for the agent's
   credential. `status` without a run ID lists every run the host
@@ -51,11 +51,11 @@ One `wherry` binary with three sides:
   and `key` as an MCP tool of the same name; see
   [Harness integration](operations.md#harness-integration).
 - **Receiver:** `wherry receiver run` claims its pool's tasks and runs each one
-  as a job on one of its profiles, through an adapter: a plugin, such as
+  as a job on one of its profiles, through a plugin, such as
   the Nomad plugin from
-  [wherry-plugins](https://github.com/benemon/wherry-plugins). The adapter
+  [wherry-plugins](https://github.com/benemon/wherry-plugins). The plugin
   protocol is the Go module in
-  [`adapter`](https://github.com/benemon/wherry/tree/main/adapter).
+  [`pluginsdk`](https://github.com/benemon/wherry/tree/main/pluginsdk).
 
 Submissions, statuses, transcript chunks and results are A2A v1.0 objects;
 [the wherry A2A extension](a2a-extension-v1.md) specifies every

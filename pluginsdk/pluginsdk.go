@@ -1,6 +1,6 @@
-// Package adapter is the wherry adapter protocol: the interface a platform adapter implements, the
-// plugin server that hosts adapters out of process, and the client the receiver core uses to reach them.
-package adapter
+// Package pluginsdk is the wherry plugin protocol: the interface a plugin implements for each plugin profile, the
+// server that hosts a plugin's profiles out of process, and the client the receiver core uses to reach them.
+package pluginsdk
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 
 // Handle identifies one platform instance of a run.
 type Handle struct {
-	// Data is adapter-private and at most 4 KiB; the adapter versions its encoding.
+	// Data is plugin-private and at most 4 KiB; the plugin versions its encoding.
 	Data []byte
 	// Name is the platform's reference for the job, for diagnosis; the core logs it and never interprets it.
 	Name string
@@ -26,11 +26,11 @@ type Line struct {
 	Data   []byte
 }
 
-// Run is the material needed to start one platform job; the adapter records Attempt, Profile and Agent
+// Run is the material needed to start one platform job; the plugin records Attempt, Profile and Agent
 // in platform metadata.
 type Run struct {
 	ID, Profile, Agent string
-	// Model is the model the agent runs, as the pool's terms name it; empty leaves the agent's own. The adapter passes
+	// Model is the model the agent runs, as the pool's terms name it; empty leaves the agent's own. The plugin passes
 	// it to the agent as WHERRY_MODEL and never interprets it.
 	Model   string
 	Attempt int64
@@ -42,7 +42,7 @@ type Run struct {
 	Fetches     []Fetch
 }
 
-// Fetch is an input the adapter fetches from URL, a presigned https GET the core has checked against its pool's
+// Fetch is an input the plugin fetches from URL, a presigned https GET the core has checked against its pool's
 // storage, and verifies as Size bytes with SHA256 before the agent starts. URL is a credential: never log it or put it
 // in an error. A fetch that fails or does not verify ends the job before its agent starts, with Terminal.Class
 // ClassFetch.
@@ -69,8 +69,8 @@ type Secret struct {
 }
 
 // Directories are the absolute paths of a job's input, output and credentials directories as the agent sees them. The
-// core writes them into the prompt; an adapter whose paths depend on where the job lands reports tokens of its own
-// and resolves them when it delivers the prompt. Empty means the adapter does not know them.
+// core writes them into the prompt; a plugin whose paths depend on where the job lands reports tokens of its own
+// and resolves them when it delivers the prompt. Empty means the plugin does not know them.
 type Directories struct {
 	Input, Output, Credentials string
 }
@@ -105,7 +105,7 @@ func (e *InputTooLargeError) Error() string {
 	return "input " + e.Name + " is too large for the platform"
 }
 
-// Error is an adapter's error from the platform operation Op, with the platform's failure class. The core logs Op,
+// Error is a plugin's error from the platform operation Op, with the platform's failure class. The core logs Op,
 // Class and Err's text, redacted.
 type Error struct {
 	Op, Class string
@@ -127,7 +127,7 @@ type Outcome int
 const (
 	// OutcomeUnknown means a job may exist; the core reconciles it with Lookup.
 	OutcomeUnknown Outcome = iota
-	// OutcomeNothingCreated means the adapter knows no job exists.
+	// OutcomeNothingCreated means the plugin knows no job exists.
 	OutcomeNothingCreated
 	OutcomeCreated
 )
@@ -170,12 +170,12 @@ var ErrLinkLost = errors.New("plugin link lost")
 // ErrMessageTooLarge is the error a profile's call returns when a message exceeds the link's size limit.
 var ErrMessageTooLarge = errors.New("message too large")
 
-// Adapter is the platform seam: a plugin's handle on one configured profile. Implementations hold platform credentials
-// only.
-type Adapter interface {
+// Plugin is the platform seam: a plugin's handle on one configured plugin profile. Implementations hold platform
+// credentials only.
+type Plugin interface {
 	// Directories reports where the agent finds its input, output and credentials directories.
 	Directories() Directories
-	// InlineLimit reports the most inline input bytes the adapter delivers, or zero when it declares none.
+	// InlineLimit reports the most inline input bytes the plugin delivers, or zero when it declares none.
 	InlineLimit() int64
 	// Ready reports whether the profile can currently start a job.
 	Ready(ctx context.Context) (bool, error)
@@ -196,7 +196,7 @@ type Adapter interface {
 	Purge(ctx context.Context, runID string) error
 	Release(ctx context.Context, runID string) error
 	Sweep(ctx context.Context) error
-	// Metrics reports the profile's samples of the families the core declares for adapters. The core drops a sample
+	// Metrics reports the profile's samples of the families the core declares for plugins. The core drops a sample
 	// outside them, and gives every sample's profile label the profile's own name.
 	Metrics(ctx context.Context) ([]Sample, error)
 }
@@ -210,7 +210,7 @@ const (
 	KindHistogram
 )
 
-// Sample is one value of a metric family the core declares for adapters, with its labels.
+// Sample is one value of a metric family the core declares for plugins, with its labels.
 type Sample struct {
 	Family string
 	Labels map[string]string
@@ -228,10 +228,10 @@ type Histogram struct {
 	Count   uint64
 }
 
-// PlacementBuckets are the bounds, in seconds, of wherry_adapter_placement_seconds.
+// PlacementBuckets are the bounds, in seconds, of wherry_plugin_placement_seconds.
 var PlacementBuckets = []float64{1, 2, 5, 10, 30, 60, 120, 300, 600, 1800}
 
-// AgentEnvironment is the environment every adapter gives its agent over the environment it configures: git reads only
+// AgentEnvironment is the environment every plugin gives its agent over the environment it configures: git reads only
 // the clone's own configuration, never prompts and traces nothing. It protects a cooperative agent from ambient
 // configuration; an agent that runs commands can undo all of it.
 var AgentEnvironment = map[string]string{
@@ -242,8 +242,8 @@ var AgentEnvironment = map[string]string{
 	"GIT_TRACE_REDACT": "1",
 }
 
-// AgentUnset are the variables an adapter removes from the environment it configures, since no value switches them off.
-// An adapter cannot remove what the platform or the image sets, so neither may set them.
+// AgentUnset are the variables a plugin removes from the environment it configures, since no value switches them off.
+// A plugin cannot remove what the platform or the image sets, so neither may set them.
 var AgentUnset = []string{
 	"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
 	"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_EXEC_PATH", "GIT_SSL_NO_VERIFY", "GIT_CURL_VERBOSE",
@@ -262,7 +262,7 @@ func AgentEnv(configured map[string]string) map[string]string {
 	return env
 }
 
-// ReservedEnv reports whether an adapter sets the variable name for the agent, so a credential under it would be lost.
+// ReservedEnv reports whether a plugin sets the variable name for the agent, so a credential under it would be lost.
 func ReservedEnv(name string) bool {
 	_, set := AgentEnvironment[name]
 	return set || slices.Contains([]string{"HOME", "WHERRY_INPUT_DIR", "WHERRY_OUTPUT_DIR", "WHERRY_CREDENTIALS_DIR", "WHERRY_MODEL"}, name)

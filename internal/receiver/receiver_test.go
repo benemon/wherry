@@ -26,10 +26,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
@@ -59,12 +59,12 @@ var (
 	noResultStream = []string{`{"type":"assistant","message":"working"}`}
 )
 
-type fakeAdapter struct {
+type fakePlugin struct {
 	mu sync.Mutex
-	// pool, name and agent are the ones the fixture's factory builds the adapter with.
+	// pool, name and agent are the ones the fixture's factory builds the plugin with.
 	pool, name, agent string
 	inlineLimit       int64
-	// unready and readyErr make Ready report the adapter unable to start a job.
+	// unready and readyErr make Ready report the plugin unable to start a job.
 	unready     bool
 	readyErr    error
 	stream      []string
@@ -76,16 +76,16 @@ type fakeAdapter struct {
 	dispatches  int
 	dispatchErr error
 	// outcome is what Dispatch reports, OutcomeCreated when zero, or beside dispatchErr OutcomeUnknown when zero.
-	outcome adapter.Outcome
+	outcome pluginsdk.Outcome
 	// handleSize is the length of the handle data Dispatch and Lookup return.
 	handleSize int
-	lastRun    adapter.Run
+	lastRun    pluginsdk.Run
 	// lastDeadline is the deadline of the context Dispatch last ran under.
 	lastDeadline time.Time
 	lookups      int
 	lookupErr    error
 	// job is the state Lookup reports; jobProfile and jobAgent override the metadata it reports.
-	job                  adapter.JobState
+	job                  pluginsdk.JobState
 	jobProfile, jobAgent string
 	// neverStarted makes Follow report a job whose agent never started, of class neverClass or else driver, for
 	// neverReason.
@@ -107,8 +107,8 @@ type fakeAdapter struct {
 	endDelay time.Duration
 	pauses   map[int]time.Duration
 	// ended makes Follow end with that terminal after the stream, rather than an exit of 0.
-	ended *adapter.Terminal
-	// linkLost makes that many Follows end with adapter.ErrLinkLost after at most one line; froms
+	ended *pluginsdk.Terminal
+	// linkLost makes that many Follows end with pluginsdk.ErrLinkLost after at most one line; froms
 	// records the offset of every Follow and delivered the lines Follows put on the receiver's channel.
 	linkLost  int
 	froms     []int64
@@ -117,25 +117,25 @@ type fakeAdapter struct {
 	hang bool
 	// outputs are what Collect streams after the outcome file, unless collectErr fails it; collects counts the calls, stopsBefore the
 	// Stops each one followed and limits the last one's limits.
-	outputs    []adapter.Output
+	outputs    []pluginsdk.Output
 	collectErr error
 	// collectHangs makes Collect block until its context ends.
 	collectHangs bool
 	collects     int
 	stopsBefore  []int
-	limits       adapter.Limits
+	limits       pluginsdk.Limits
 	// samples are what Metrics reports, unless metricsHang makes it block until its context ends.
-	samples     []adapter.Sample
+	samples     []pluginsdk.Sample
 	metricsHang bool
 }
 
-func (f *fakeAdapter) Directories() adapter.Directories {
-	return adapter.Directories{Input: "/task/inputs", Output: "/task/outputs", Credentials: "/task/secrets/credentials"}
+func (f *fakePlugin) Directories() pluginsdk.Directories {
+	return pluginsdk.Directories{Input: "/task/inputs", Output: "/task/outputs", Credentials: "/task/secrets/credentials"}
 }
 
-func (f *fakeAdapter) InlineLimit() int64 { return f.inlineLimit }
+func (f *fakePlugin) InlineLimit() int64 { return f.inlineLimit }
 
-func (f *fakeAdapter) Ready(ctx context.Context) (bool, error) {
+func (f *fakePlugin) Ready(ctx context.Context) (bool, error) {
 	if f.hung(ctx) {
 		return false, ctx.Err()
 	}
@@ -144,43 +144,43 @@ func (f *fakeAdapter) Ready(ctx context.Context) (bool, error) {
 	return !f.unready && f.readyErr == nil, f.readyErr
 }
 
-func (f *fakeAdapter) handle(runID string) adapter.Handle {
-	return adapter.Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: "agent-" + runID}
+func (f *fakePlugin) handle(runID string) pluginsdk.Handle {
+	return pluginsdk.Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: "agent-" + runID}
 }
 
-func (f *fakeAdapter) Dispatch(ctx context.Context, run adapter.Run) (adapter.Outcome, adapter.Handle, error) {
+func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dispatches++
 	f.lastRun = run
 	f.lastDeadline, _ = ctx.Deadline()
 	if f.dispatchErr != nil {
-		return f.outcome, adapter.Handle{}, f.dispatchErr
+		return f.outcome, pluginsdk.Handle{}, f.dispatchErr
 	}
-	if f.outcome == adapter.OutcomeNothingCreated {
-		return f.outcome, adapter.Handle{}, nil
+	if f.outcome == pluginsdk.OutcomeNothingCreated {
+		return f.outcome, pluginsdk.Handle{}, nil
 	}
-	return cmp.Or(f.outcome, adapter.OutcomeCreated), f.handle(run.ID), nil
+	return cmp.Or(f.outcome, pluginsdk.OutcomeCreated), f.handle(run.ID), nil
 }
 
-func (f *fakeAdapter) Lookup(ctx context.Context, runID string) (adapter.Job, error) {
+func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lookups++
 	if f.lookupErr != nil {
-		return adapter.Job{}, f.lookupErr
+		return pluginsdk.Job{}, f.lookupErr
 	}
 	if err := ctx.Err(); err != nil {
-		return adapter.Job{}, err
+		return pluginsdk.Job{}, err
 	}
-	if f.job == adapter.JobAbsent {
-		return adapter.Job{}, nil
+	if f.job == pluginsdk.JobAbsent {
+		return pluginsdk.Job{}, nil
 	}
-	return adapter.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Profile: cmp.Or(f.jobProfile, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
+	return pluginsdk.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Profile: cmp.Or(f.jobProfile, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
 }
 
 // Follow emits the stream, then ends the job after endDelay or when its context ends.
-func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, lines chan<- adapter.Line) (adapter.Terminal, error) {
+func (f *fakePlugin) Follow(ctx context.Context, _ pluginsdk.Handle, from int64, lines chan<- pluginsdk.Line) (pluginsdk.Terminal, error) {
 	f.mu.Lock()
 	f.follows++
 	f.froms = append(f.froms, from)
@@ -194,43 +194,43 @@ func (f *fakeAdapter) Follow(ctx context.Context, _ adapter.Handle, from int64, 
 			select {
 			case <-time.After(pauses[i]):
 			case <-ctx.Done():
-				return adapter.Terminal{}, ctx.Err()
+				return pluginsdk.Terminal{}, ctx.Err()
 			}
 			select {
-			case lines <- adapter.Line{Offset: offset, Next: next, Data: []byte(data)}:
+			case lines <- pluginsdk.Line{Offset: offset, Next: next, Data: []byte(data)}:
 				f.mu.Lock()
 				f.delivered++
 				f.mu.Unlock()
 			case <-ctx.Done():
-				return adapter.Terminal{}, ctx.Err()
+				return pluginsdk.Terminal{}, ctx.Err()
 			}
 			if lost {
-				return adapter.Terminal{}, adapter.ErrLinkLost
+				return pluginsdk.Terminal{}, pluginsdk.ErrLinkLost
 			}
 		}
 		offset = next
 	}
 	if lost {
-		return adapter.Terminal{}, adapter.ErrLinkLost
+		return pluginsdk.Terminal{}, pluginsdk.ErrLinkLost
 	}
 	if followErr != nil {
-		return adapter.Terminal{}, followErr
+		return pluginsdk.Terminal{}, followErr
 	}
 	select {
 	case <-time.After(endDelay):
 	case <-ctx.Done():
-		return adapter.Terminal{}, ctx.Err()
+		return pluginsdk.Terminal{}, ctx.Err()
 	}
 	switch {
 	case neverStarted:
-		return adapter.Terminal{Class: cmp.Or(neverClass, "driver"), Node: "node-1", Reason: neverReason}, nil
+		return pluginsdk.Terminal{Class: cmp.Or(neverClass, "driver"), Node: "node-1", Reason: neverReason}, nil
 	case ended != nil:
 		return *ended, nil
 	}
-	return adapter.Terminal{Started: true, Node: "node-1"}, nil
+	return pluginsdk.Terminal{Started: true, Node: "node-1"}, nil
 }
 
-func (f *fakeAdapter) Stop(context.Context, adapter.Handle) error {
+func (f *fakePlugin) Stop(context.Context, pluginsdk.Handle) error {
 	f.mu.Lock()
 	f.stops++
 	err, check := f.stopErr, f.stopCheck
@@ -241,7 +241,7 @@ func (f *fakeAdapter) Stop(context.Context, adapter.Handle) error {
 	return err
 }
 
-func (f *fakeAdapter) Collect(ctx context.Context, _ adapter.Handle, limits adapter.Limits, out chan<- adapter.Output) error {
+func (f *fakePlugin) Collect(ctx context.Context, _ pluginsdk.Handle, limits pluginsdk.Limits, out chan<- pluginsdk.Output) error {
 	f.mu.Lock()
 	f.collects++
 	f.limits = limits
@@ -254,7 +254,7 @@ func (f *fakeAdapter) Collect(ctx context.Context, _ adapter.Handle, limits adap
 			State string `json:"state"`
 		}
 		if json.Unmarshal([]byte(data), &reported) == nil && reported.State != "" {
-			outputs = append([]adapter.Output{{Name: wire.OutcomeFile, Size: int64(len(data)), Data: []byte(data)}}, outputs...)
+			outputs = append([]pluginsdk.Output{{Name: wire.OutcomeFile, Size: int64(len(data)), Data: []byte(data)}}, outputs...)
 			break
 		}
 	}
@@ -276,7 +276,7 @@ func (f *fakeAdapter) Collect(ctx context.Context, _ adapter.Handle, limits adap
 	return nil
 }
 
-func (f *fakeAdapter) Purge(context.Context, string) error {
+func (f *fakePlugin) Purge(context.Context, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.purges++
@@ -287,7 +287,7 @@ func (f *fakeAdapter) Purge(context.Context, string) error {
 	return f.purgeErr
 }
 
-func (f *fakeAdapter) Release(_ context.Context, runID string) error {
+func (f *fakePlugin) Release(_ context.Context, runID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releases++
@@ -296,8 +296,8 @@ func (f *fakeAdapter) Release(_ context.Context, runID string) error {
 	return f.releaseErr
 }
 
-// hung blocks until ctx ends when the adapter hangs, and reports whether it did.
-func (f *fakeAdapter) hung(ctx context.Context) bool {
+// hung blocks until ctx ends when the plugin hangs, and reports whether it did.
+func (f *fakePlugin) hung(ctx context.Context) bool {
 	f.mu.Lock()
 	hang := f.hang
 	f.mu.Unlock()
@@ -307,7 +307,7 @@ func (f *fakeAdapter) hung(ctx context.Context) bool {
 	return hang
 }
 
-func (f *fakeAdapter) Sweep(ctx context.Context) error {
+func (f *fakePlugin) Sweep(ctx context.Context) error {
 	if f.hung(ctx) {
 		return ctx.Err()
 	}
@@ -317,7 +317,7 @@ func (f *fakeAdapter) Sweep(ctx context.Context) error {
 	return f.sweepErr
 }
 
-func (f *fakeAdapter) Metrics(ctx context.Context) ([]adapter.Sample, error) {
+func (f *fakePlugin) Metrics(ctx context.Context) ([]pluginsdk.Sample, error) {
 	f.mu.Lock()
 	hang, samples := f.metricsHang, f.samples
 	f.mu.Unlock()
@@ -328,19 +328,19 @@ func (f *fakeAdapter) Metrics(ctx context.Context) ([]adapter.Sample, error) {
 	return samples, nil
 }
 
-func (f *fakeAdapter) deliveredCount() int {
+func (f *fakePlugin) deliveredCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.delivered
 }
 
-func (f *fakeAdapter) sweepCount() int {
+func (f *fakePlugin) sweepCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sweeps
 }
 
-func (f *fakeAdapter) counts() (dispatches, lookups, follows, releases int) {
+func (f *fakePlugin) counts() (dispatches, lookups, follows, releases int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.dispatches, f.lookups, f.follows, f.releases
@@ -371,10 +371,10 @@ type fixture struct {
 	service  *admin.Service
 	host     ed25519.PrivateKey
 	receiver *Receiver
-	adapter  *fakeAdapter
+	plugin   *fakePlugin
 	logs     *syncBuffer
-	// adapters are the fakes the receiver's factory builds, by adapter name.
-	adapters map[string]*fakeAdapter
+	// plugins are the fakes the receiver's factory builds, by profile name.
+	plugins map[string]*fakePlugin
 }
 
 func testTerms() admin.Terms {
@@ -435,12 +435,12 @@ func newService(t *testing.T, ctx context.Context, terms admin.Terms) (*kfake.Cl
 }
 
 func newFixture(t *testing.T, stream []string) fixture {
-	return newFixtureWith(t, stream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{
+	return newFixtureWith(t, stream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{
 		"nomad": {stream: stream},
 	})
 }
 
-func newFixtureWith(t *testing.T, stream []string, terms admin.Terms, config admin.ReceiverConfig, adapters map[string]*fakeAdapter) fixture {
+func newFixtureWith(t *testing.T, stream []string, terms admin.Terms, config admin.ReceiverConfig, plugins map[string]*fakePlugin) fixture {
 	t.Helper()
 	shortIntervals(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -450,7 +450,7 @@ func newFixtureWith(t *testing.T, stream []string, terms admin.Terms, config adm
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := fixture{ctx: ctx, cluster: cluster, service: service, host: host, adapters: adapters, adapter: adapters["nomad"]}
+	f := fixture{ctx: ctx, cluster: cluster, service: service, host: host, plugins: plugins, plugin: plugins["nomad"]}
 	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RegisterKey(signed.HostOwner(testTenant, testHost), host)))
 	f.receiver, f.logs = f.newReceiver(t, config)
 	r := f.receiver
@@ -509,14 +509,14 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 	}
 	logs := &syncBuffer{}
 	factory := func(pool string, settings admin.ProfileSettings) (Named, error) {
-		adapter, ok := f.adapters[settings.Name]
+		plugin, ok := f.plugins[settings.Name]
 		if !ok || settings.Plugin != "fake" {
-			return Named{}, errors.New("no fake adapter")
+			return Named{}, errors.New("no fake plugin")
 		}
-		adapter.mu.Lock()
-		adapter.pool, adapter.name, adapter.agent = pool, settings.Name, settings.Agent
-		adapter.mu.Unlock()
-		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Adapter: adapter}, nil
+		plugin.mu.Lock()
+		plugin.pool, plugin.name, plugin.agent = pool, settings.Name, settings.Agent
+		plugin.mu.Unlock()
+		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin}, nil
 	}
 	return &Receiver{id: config.Receiver, base: base, reader: admin.NewReader(base), signing: signing, factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
 }
@@ -820,7 +820,7 @@ func runToTask(t *testing.T, f fixture) wire.Task {
 	return f.await(t, "run-a", anyTask)
 }
 
-func TestEndToEndWithFakeAdapter(t *testing.T) {
+func TestEndToEndWithFakePlugin(t *testing.T) {
 	f := newFixture(t, resultStream)
 	task := runToTask(t, f)
 	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
@@ -971,7 +971,7 @@ func TestRunJoinsPeriodicWork(t *testing.T) {
 	f := newFixture(t, resultStream)
 	ctx, cancel := context.WithCancel(f.ctx)
 	done := f.run(t, ctx)
-	for f.adapter.sweepCount() < 3 {
+	for f.plugin.sweepCount() < 3 {
 		if f.ctx.Err() != nil {
 			t.Fatal("receiver did not start its periodic work")
 		}
@@ -1053,7 +1053,7 @@ func (f fixture) advertisedOffers(t *testing.T) wire.Advertisement {
 
 func TestAdvertisement(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.adapter.inlineLimit = 49152
+	f.plugin.inlineLimit = 49152
 	if err := f.receiver.advertise(f.ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1081,9 +1081,9 @@ func TestAdvertisedOffersAreTheConfiguredProfiles(t *testing.T) {
 
 func TestReceiverWithNoReadyProfileAdvertisesNoOffers(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.adapter.mu.Lock()
-	f.adapter.unready = true
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	f.plugin.unready = true
+	f.plugin.mu.Unlock()
 	if err := f.receiver.advertise(f.ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1110,13 +1110,13 @@ func TestReadinessErrorLogsAndLeavesProfileOut(t *testing.T) {
 	if want := []string{"cloud", "edge"}; !slices.Equal(got, want) {
 		t.Fatalf("advertised profiles %v, want %v", got, want)
 	}
-	// A plain error, as a plugin built before adapter.Error returns, logs its text alone.
+	// A plain error, as a plugin built before pluginsdk.Error returns, logs its text alone.
 	if logs := m.logs.String(); !strings.Contains(logs, "profile lab readiness: nomad unreachable\n") {
 		t.Fatalf("readiness error not logged: %q", m.logs.String())
 	}
 }
 
-func TestHungAdapterDoesNotStopAdvertising(t *testing.T) {
+func TestHungPluginDoesNotStopAdvertising(t *testing.T) {
 	m := newMultiFixture(t)
 	m.lab.mu.Lock()
 	m.lab.hang = true
@@ -1129,7 +1129,7 @@ func TestHungAdapterDoesNotStopAdvertising(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("advertise waited on a hung adapter")
+		t.Fatal("advertise waited on a hung plugin")
 	}
 	var got []string
 	for _, offer := range m.advertisedOffers(t).Offers {
@@ -1140,14 +1140,14 @@ func TestHungAdapterDoesNotStopAdvertising(t *testing.T) {
 	}
 	logs := m.logs.String()
 	if !strings.Contains(logs, "profile lab sweep: timed out") || !strings.Contains(logs, "profile lab readiness: timed out") {
-		t.Fatalf("hung adapter's calls not logged: %q", logs)
+		t.Fatalf("hung plugin's calls not logged: %q", logs)
 	}
 }
 
 func TestSweepErrorIsolated(t *testing.T) {
 	m := newMultiFixture(t)
 	m.lab.mu.Lock()
-	m.lab.sweepErr = &adapter.Error{Op: "list jobs", Class: "unavailable", Err: errors.New(`Get "https://nomad.example:4646/v1/jobs?prefix=agent-&token=abc": connection refused`)}
+	m.lab.sweepErr = &pluginsdk.Error{Op: "list jobs", Class: "unavailable", Err: errors.New(`Get "https://nomad.example:4646/v1/jobs?prefix=agent-&token=abc": connection refused`)}
 	m.lab.mu.Unlock()
 	before := []int{m.lab.sweepCount(), m.cloud.sweepCount(), m.edge.sweepCount()}
 	if err := m.receiver.advertise(m.ctx); err != nil {
@@ -1175,9 +1175,9 @@ func TestSweepErrorIsolated(t *testing.T) {
 func TestSweepAndReadinessErrorsAreRedactedAgainstLiveRuns(t *testing.T) {
 	f := newFixture(t, resultStream)
 	testActiveRun(t, f, "run-a", 1).deliver(map[string][]byte{credentialName: []byte(testToken)})
-	f.adapter.mu.Lock()
-	f.adapter.sweepErr, f.adapter.readyErr = errors.New("sweep echoed "+testToken), errors.New("readiness echoed "+testToken)
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	f.plugin.sweepErr, f.plugin.readyErr = errors.New("sweep echoed "+testToken), errors.New("readiness echoed "+testToken)
+	f.plugin.mu.Unlock()
 	if err := f.receiver.advertise(f.ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1193,9 +1193,9 @@ func TestReceiverSweepsOnTick(t *testing.T) {
 	ctx, cancel := context.WithCancel(f.ctx)
 	defer cancel()
 	f.run(t, ctx)
-	for f.adapter.sweepCount() < 3 {
+	for f.plugin.sweepCount() < 3 {
 		if f.ctx.Err() != nil {
-			t.Fatalf("sweeps = %d, want repeated sweeps on the advertisement tick", f.adapter.sweepCount())
+			t.Fatalf("sweeps = %d, want repeated sweeps on the advertisement tick", f.plugin.sweepCount())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -1203,7 +1203,7 @@ func TestReceiverSweepsOnTick(t *testing.T) {
 
 type multiFixture struct {
 	fixture
-	lab, cloud, edge *fakeAdapter
+	lab, cloud, edge *fakePlugin
 }
 
 // newMultiFixture configures profiles lab, cloud and edge, in that order, for one agent with the labels
@@ -1211,14 +1211,14 @@ type multiFixture struct {
 // credential is answered.
 func newMultiFixture(t *testing.T) multiFixture {
 	t.Helper()
-	m := multiFixture{lab: &fakeAdapter{stream: resultStream}, cloud: &fakeAdapter{stream: resultStream}, edge: &fakeAdapter{stream: resultStream}}
+	m := multiFixture{lab: &fakePlugin{stream: resultStream}, cloud: &fakePlugin{stream: resultStream}, edge: &fakePlugin{stream: resultStream}}
 	config := testConfig(testReceiver)
 	config.Profiles = []admin.ProfileSettings{
 		{Name: "lab", Plugin: "fake", Agent: "claude", Labels: map[string]string{"site": "lab", "class": "cpu"}, Config: map[string]any{}},
 		{Name: "cloud", Plugin: "fake", Agent: "claude", Labels: map[string]string{"site": "cloud", "class": "cpu", "example.com/accelerator": "gpu"}, Config: map[string]any{}},
 		{Name: "edge", Plugin: "fake", Agent: "claude", Labels: map[string]string{"site": "edge", "class": "arm"}, Config: map[string]any{}},
 	}
-	m.fixture = newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakeAdapter{"lab": m.lab, "cloud": m.cloud, "edge": m.edge})
+	m.fixture = newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakePlugin{"lab": m.lab, "cloud": m.cloud, "edge": m.edge})
 	m.answer(t, credentialName)
 	return m
 }
@@ -1255,7 +1255,7 @@ func (m multiFixture) execute(t *testing.T, run string, selector []wire.Requirem
 	return m.fixture.execute(t, record, attempt)
 }
 
-// routed admits a task with selector and returns the adapter it was routed to.
+// routed admits a task with selector and returns the plugin it was routed to.
 func (m multiFixture) routed(t *testing.T, selector ...wire.Requirement) string {
 	t.Helper()
 	record := m.submit(t, m.host, func(task *wire.Submission) {
@@ -1302,7 +1302,7 @@ func TestUnreadyProfileIsNeverChosen(t *testing.T) {
 	if got := m.routed(t, in("class", "cpu")); got != "cloud" {
 		t.Fatalf("routed to %s, want cloud: lab is not ready", got)
 	}
-	// Only the unready adapter satisfies this selector: a start failure, not a dispatch.
+	// Only the unready plugin satisfies this selector: a start failure, not a dispatch.
 	record := m.submit(t, m.host, func(task *wire.Submission) { task.Wherry.Placement.Selector = []wire.Requirement{in("site", "lab")} })
 	if admitted, ack := m.receiver.admit(m.ctx, record); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("admitted=%v ack=%v, want a start failure and release", admitted != nil, ack)
@@ -1311,10 +1311,10 @@ func TestUnreadyProfileIsNeverChosen(t *testing.T) {
 
 func TestProfilesAreBuiltForTheReceiversPool(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.adapter.mu.Lock()
-	defer f.adapter.mu.Unlock()
-	if f.adapter.pool != testPool {
-		t.Fatalf("profile built for pool %q, want %q", f.adapter.pool, testPool)
+	f.plugin.mu.Lock()
+	defer f.plugin.mu.Unlock()
+	if f.plugin.pool != testPool {
+		t.Fatalf("profile built for pool %q, want %q", f.plugin.pool, testPool)
 	}
 }
 
@@ -1332,14 +1332,14 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			terms, config := testTerms(), testConfig(testReceiver)
 			terms.DeliveryLimit, config.Capacity = 5, 6
-			f := newFixtureWith(t, noResultStream, terms, config, map[string]*fakeAdapter{"nomad": {stream: noResultStream, endDelay: time.Minute}})
+			f := newFixtureWith(t, noResultStream, terms, config, map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: time.Minute}})
 			f.answer(t, credentialName)
 			ctx, stop := context.WithCancel(f.ctx)
 			defer stop()
 			done := f.run(t, ctx)
 			f.submit(t, f.host, nil)
 			for {
-				if _, _, follows, _ := f.adapter.counts(); follows == 1 {
+				if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 					break
 				}
 				if f.ctx.Err() != nil {
