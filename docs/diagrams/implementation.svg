@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 890" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
   <title id="title">wherry implementation view</title>
-  <desc id="desc">The host laptop of tenant alice runs a coding agent harness with the wherry skill and the wherry mcp server, both using the wherry client, beside its signing key, bundle, credential sources, storage credential and state directory. The operator's wherry admin writes wherry.admin. Seven Kafka topics sit between host and receiver: the host reads wherry.admin, wherry.receivers, receiver key topics and its tenant feed, writes the pool's tasks and events, and reads and writes its own host topic. The receiver nomad-1 reads wherry.admin and the pool's tasks through the share group p-pool, reads and writes wherry.receivers, its own key topic and the pool's events, writes the tenant feed and reads the host topic. The receiver runs adapter plugins over mutual TLS, which run the unmodified agent as a Nomad job or Kubernetes pod. Optional paths: the host and the receiver reach an S3-compatible bucket, the host with its own credential and the receiver and adapter with presigned URLs from the seal, and the agent clones a git remote on one of the pool's VCS hosts.</desc>
+  <desc id="desc">The host laptop of tenant alice runs a coding agent harness with the wherry skill and the wherry mcp server, both using the wherry client, beside its signing key, bundle, credential sources, storage credential and state directory. The operator's wherry admin writes wherry.admin. Eight Kafka topics sit between host and receiver: the host reads wherry.admin, wherry.receivers, receiver key topics, its tenant feed and its tenant transcript topic, writes the pool's tasks and events, and reads and writes its own host topic. The receiver nomad-1 reads wherry.admin and the pool's tasks through the share group p-pool, reads and writes wherry.receivers, its own key topic and the pool's events, writes the tenant feed and transcript topic and reads the host topic. The receiver runs adapter plugins over mutual TLS, which run the unmodified agent as a Nomad job or Kubernetes pod. Optional paths: the host and the receiver reach an S3-compatible bucket, the host with its own credential and the receiver and adapter with presigned URLs from the seal, and the agent clones a git remote on one of the pool's VCS hosts.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e4a35"/>
@@ -78,9 +78,9 @@
     <text x="472" y="506">statuses, heartbeats, start failures, cancels</text>
 
     <rect x="456" y="538" width="348" height="60" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
-    <text x="472" y="560" font-size="12" font-weight="600" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#00290b">wherry.tenant.&lt;tenant&gt;</text>
-    <text x="472" y="576">statuses, transcript, outputs, results,</text>
-    <text x="472" y="590">echoes, seal requests</text>
+    <text x="472" y="560" font-size="12" font-weight="600" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#00290b">wherry.tenant.&lt;tenant&gt;[.transcript]</text>
+    <text x="472" y="576">statuses, results, echoes, seal requests;</text>
+    <text x="472" y="590">.transcript: transcript and output chunks</text>
 
     <rect x="456" y="610" width="348" height="60" rx="6" fill="#e8ebdf" stroke="#3f6b4a" stroke-width="1"/>
     <text x="472" y="632" font-size="12" font-weight="600" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#00290b">wherry.host.&lt;tenant&gt;.&lt;host&gt;</text>

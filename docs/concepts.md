@@ -117,11 +117,11 @@ Once the job ends and is stopped, whatever its exit, the adapter
 collects the regular files there, up to 256 entries and the pool's output
 limit (8 MiB by default), without
 following links. The receiver redacts each file, publishes it in chunks on
-the tenant feed with the result, and lists every output in the result with
-the size and SHA-256 it computed, or with the reason it was not returned.
-A required output that is not returned fails the run. `wherry await`
-verifies each output's chunks against the result before it writes the file
-locally.
+the tenant's transcript topic in the result's transaction, and lists every
+output in the result with the size and SHA-256 it computed, or with the
+reason it was not returned. A required output that is not returned fails
+the run. `wherry await` verifies each output's chunks against the result
+before it writes the file locally.
 
 A pool can also carry files through an S3-compatible bucket its operator
 names, up to 5 GiB each. The host uploads an S3 input with its own
@@ -174,11 +174,14 @@ run writes through its own
 
 A status goes to the pool's events and the tenant feed in one transaction,
 and every reader reads committed records only. Heartbeats go to the pool's
-events alone. Transcript chunks, the result and the **echo** go to the
-tenant feed. The echo, written when a receiver claims or rejects a run,
-names the pool and placement the run was admitted to, so any host of the
-tenant can follow or cancel the run. The submitting host also
-keeps a record of each run in its state directory, so it can report the
+events alone. The result and the **echo** go to the tenant feed, and
+transcript and output chunks go to the tenant's transcript topic,
+`wherry.tenant.<tenant>.transcript`, in the same transaction as the status
+or result they belong to. A terminal status carries the number of
+transcript chunks its attempt wrote. The echo, written when a receiver
+claims or rejects a run, names the pool and placement the run was admitted
+to, so any host of the tenant can follow or cancel the run. The submitting
+host also keeps a record of each run in its state directory, so it can report the
 run before a receiver claims it.
 
 A run passes through these records from submission to result.
@@ -225,4 +228,5 @@ provisioned under a new name, with a new principal and key topic.
 
 A compromised key calls for revocation. A
 [key rotation](operations.md#rotate-a-key) keeps the retired key
-verifying the owner's feed records from before the rotation.
+verifying the owner's feed and transcript records from before the
+rotation.

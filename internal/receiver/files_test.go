@@ -265,7 +265,7 @@ func TestMissingTaskCredentialFailsNamingIt(t *testing.T) {
 func (f fixture) outputChunks(t *testing.T) []wire.Output {
 	t.Helper()
 	var outputs []wire.Output
-	for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
+	for _, record := range f.records(t, admin.TenantTranscriptTopic(testTenant)) {
 		var output wire.Output
 		if wire.ParseRecord(record.Value, f.keys(), &output) == nil {
 			outputs = append(outputs, output)
@@ -660,7 +660,9 @@ func TestOutputChunksAreBoundedAndCommittedWithTheResult(t *testing.T) {
 		var result wire.Result
 		return wire.ParseRecord(record.Value, f.keys(), &result) == nil
 	})
-	if !oneTransaction(feed[last-len(outputs) : last+1]) {
+	transcript := f.records(t, admin.TenantTranscriptTopic(testTenant))
+	chunks := transcript[len(transcript)-len(outputs):]
+	if !oneTransaction(chunks) || chunks[0].ProducerID != feed[last].ProducerID || chunks[0].ProducerEpoch != feed[last].ProducerEpoch {
 		t.Fatal("the output chunks are not in the result's transaction")
 	}
 }

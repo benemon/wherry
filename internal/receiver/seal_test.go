@@ -382,7 +382,7 @@ func TestAnAdopterPublishesNothingBeforeItsSeal(t *testing.T) {
 	if len(chunks) != 2 || chunks[0].ArtifactUpdate.Artifact.Parts[0].Text != `{"type":"assistant","message":"token `+redacted+`"}` {
 		t.Fatalf("adopter's transcript %+v, want both lines with the run's marker", chunks)
 	}
-	for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
+	for _, record := range append(f.records(t, admin.TenantTopic(testTenant)), f.records(t, admin.TenantTranscriptTopic(testTenant))...) {
 		var request wire.SealRequest
 		if wire.ParseRecord(record.Value, f.keys(), &request) == nil {
 			continue

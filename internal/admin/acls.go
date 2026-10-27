@@ -17,7 +17,7 @@ func ACLs(state State) []ACL {
 	acls := []ACL{{OperatorPrincipal, "topic", AdminTopic, false, []string{"READ", "WRITE", "DESCRIBE"}}}
 	for principal, host := range state.Hosts {
 		if !state.Ended[principal] {
-			acls = append(acls, ACL{principal, "topic", AdminTopic, false, readDescribe}, ACL{principal, "topic", ReceiversTopic, false, readDescribe}, ACL{principal, "topic", TenantTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, []string{"READ", "WRITE", "DESCRIBE"}})
+			acls = append(acls, ACL{principal, "topic", AdminTopic, false, readDescribe}, ACL{principal, "topic", ReceiversTopic, false, readDescribe}, ACL{principal, "topic", TenantTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", TenantTranscriptTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, []string{"READ", "WRITE", "DESCRIBE"}})
 		}
 	}
 	for receiver, config := range state.Receivers {
@@ -50,7 +50,7 @@ func ACLs(state State) []ACL {
 				if config.Pool != pool || state.Ended[principal] {
 					continue
 				}
-				acls = append(acls, ACL{principal, "topic", TenantTopic(tenant), false, writeDescribe})
+				acls = append(acls, ACL{principal, "topic", TenantTopic(tenant), false, writeDescribe}, ACL{principal, "topic", TenantTranscriptTopic(tenant), false, writeDescribe})
 				for hostPrincipal, host := range state.Hosts {
 					if host.Tenant == tenant && !state.Ended[hostPrincipal] {
 						acls = append(acls, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, readDescribe})

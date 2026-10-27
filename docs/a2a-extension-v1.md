@@ -61,8 +61,8 @@ algorithm `EdDSA` (Ed25519). The protected header holds:
 | submission | `application/vnd.wherry.submission.v1+jws` | host | `wherry.pool.<pool>.tasks` | run ID |
 | cancel | `application/vnd.wherry.cancel.v1+jws` | host | `wherry.pool.<pool>.events` | run ID |
 | status | `application/vnd.wherry.status.v1+jws` | receiver | `wherry.pool.<pool>.events` and `wherry.tenant.<tenant>` | run ID |
-| chunk | `application/vnd.wherry.chunk.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
-| output chunk | `application/vnd.wherry.output.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
+| chunk | `application/vnd.wherry.chunk.v1+jws` | receiver | `wherry.tenant.<tenant>.transcript` | run ID |
+| output chunk | `application/vnd.wherry.output.v1+jws` | receiver | `wherry.tenant.<tenant>.transcript` | run ID |
 | result | `application/vnd.wherry.result.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
 | echo | `application/vnd.wherry.echo.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
 | advertisement | `application/vnd.wherry.advertisement.v1+jws` | receiver | `wherry.receivers` | receiver ID |
@@ -77,9 +77,9 @@ A reader accepts a signed record only when all of these hold:
    [key topic](#key-records), has the `kid` key ID, and the signature
    verifies against it. A reader that does not know the key ID re-reads
    the owner's key topic once before it rejects the record. A host reading
-   its tenant feed, and a receiver reading its pool's statuses, also accept
-   a [retired key](#key-records) for a record the broker appended before
-   that key's rotation.
+   its tenant feed and transcript topic, and a receiver reading its pool's
+   statuses, also accept a [retired key](#key-records) for a record the
+   broker appended before that key's rotation.
 3. The payload decodes strictly, has `v` 1 and passes the rules for its
    type.
 4. The owner the payload names equals the `kid` owner.
@@ -178,7 +178,7 @@ A submission is the task of one run.
   `/`, at most 512 bytes, and appears once. `required` defaults to false.
   `storage` `s3` returns the output through the pool's bucket
   ([S3 inputs and outputs](#s3-inputs-and-outputs)); absent, it returns on
-  the feed.
+  the transcript topic.
 - `s3_inputs` lists files the host uploaded to the pool's bucket, each
   `{name, size, sha256}`: a file name distinct from every input file's,
   appearing once, the object's size in bytes, at most 5 GiB, and its
@@ -225,6 +225,19 @@ A status reports one attempt of a run.
 }
 ```
 
+A `terminal` status's `wherry` object adds the attempt's chunk count:
+
+```json
+"wherry": {
+  "receiver": "nomad-1", "tenant": "alice", "pool": "build",
+  "run": "run-0f3c...", "attempt": 1,
+  "event_id": "event-7c40...",
+  "kind": "terminal",
+  "task_hash": "9d2a...",
+  "transcript_chunks": 42
+}
+```
+
 - `statusUpdate.taskId` and `contextId` are the run ID.
 - `attempt` is the share-group delivery count of the submission, from 1.
 - `task_hash` is the hash of the run's submission.
@@ -233,6 +246,9 @@ A status reports one attempt of a run.
 - `log_offset` is the agent output offset an adopter follows from, on
   `started` and `heartbeat`. The transcript is published up to at least
   that offset.
+- `transcript_chunks` is the number of [chunks](#chunk) the attempt wrote,
+  on `terminal` only, and absent when zero. It commits in the same
+  transaction as the attempt's last chunks.
 
 | `kind` | State | Written when | Extra |
 | --- | --- | --- | --- |
@@ -243,10 +259,19 @@ A status reports one attempt of a run.
 | `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `TASK_STATE_AUTH_REQUIRED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration.md#agent-contract), or the reason as message text |
 
 A receiver writes each status other than a heartbeat to the pool's events
-and the tenant feed, with identical bytes, in one Kafka transaction. Readers
-read committed records only. Readers order a run's statuses and results by
-`attempt`, and records of an earlier attempt do not change the outcome of a
-later one.
+and the tenant feed, with identical bytes, in one Kafka transaction. A run's
+chunks and output chunks commit in the transaction of the status or result
+they belong to, so a transaction spans the tenant feed, the transcript topic
+and the pool's events. Readers read committed records only. A reader sees
+each topic's commit separately, so a `terminal` status can be visible before
+its attempt's last chunks. A host that reads a `terminal` status on the feed
+reads the transcript topic to its last stable offset, and waits until that
+reaches the high watermark it lists after it reads the terminal, before it
+reports the run's transcript or outputs complete. A host reads a run's
+chunks from the first transcript-topic offset at or after the append time of
+the run's earliest echo on the feed, found by `ListOffsets` by timestamp.
+Readers order a run's statuses and results by `attempt`, and records of an
+earlier attempt do not change the outcome of a later one.
 
 A status message is an A2A `Message` with `role` `ROLE_AGENT` and one text
 part. The message of a `TASK_STATE_AUTH_REQUIRED` status adds the
@@ -342,7 +367,8 @@ A chunk is one line of the agent's standard output, as the A2A artifact
 - `append` is false for the line at offset 0 and true after it. `lastChunk`
   is true on the run's final chunk, written with its terminal status.
 
-A run's transcript starts at offset 0.
+A run's transcript starts at offset 0. A receiver writes chunks to
+`wherry.tenant.<tenant>.transcript`.
 
 ## Output chunk
 
@@ -371,7 +397,8 @@ names.
   empty file is one chunk with an empty part.
 - A chunk's identity is its attempt, artifact and index.
 
-A receiver writes a run's output chunks in the transaction that holds its
+A receiver writes a run's output chunks to
+`wherry.tenant.<tenant>.transcript` in the transaction that holds its
 result, before the result.
 
 ## Result
@@ -600,9 +627,10 @@ signature's protected header carrying its public key as `jwk`.
   by the current key and by `key`, and `previous_key_id` names the current
   key. A `rotate` whose `key` is the current key is rejected. The replaced
   key is retired at the rotate record's broker timestamp. A retired key
-  verifies the owner's statuses, transcript chunks, outputs, results and
-  echoes on a tenant feed, and its statuses on a pool's events, that the
-  broker appended before that timestamp, and nothing else. A record the
+  verifies the owner's statuses, results and echoes on a tenant feed, its
+  transcript chunks and outputs on a tenant's transcript topic, and its
+  statuses on a pool's events, that the broker appended before that
+  timestamp, and nothing else. A record the
   broker appended at or after it does not verify under the retired key. Readers that admit work, such as a receiver
   admitting a task or a cancel or a host answering a seal request, accept
   the current key alone.
@@ -1089,9 +1117,9 @@ storage before use.
   together, but is at most 5 GiB, and among the 256 outputs a submission
   expects. Collection waits until the run's deadline, when the PUT URLs
   expire, if that is later than 2 minutes. The receiver does not redact an
-  S3 output, which goes to the host's own bucket and never to the feed. An
-  attempt that adopted an earlier attempt's job uploads to the PUT URLs its
-  own seal carries.
+  S3 output, which goes to the host's own bucket and never to the
+  transcript topic. An attempt that adopted an earlier attempt's job uploads
+  to the PUT URLs its own seal carries.
 - **Back.** The host downloads each S3 output in the result's
   `s3_outputs` that the run declares, at the key for its name, and keeps it
   only when it matches the listed size and SHA-256. It reports each other

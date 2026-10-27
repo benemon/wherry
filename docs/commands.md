@@ -329,6 +329,14 @@ outputs directory, one line per transcript line as `wherry transcript`
 prints them, and prints its line as it prints an output's, last. No
 expected output takes the name `transcript.jsonl`.
 
+`await` reads the run's statuses and result from the tenant feed, and its
+output and transcript chunks from the tenant's transcript topic, from the
+first offset at or after the append time of the run's earliest echo on the
+feed. Once it sees a terminal status, it reads the transcript topic to its
+last stable offset, and waits until that reaches the high watermark it
+lists after it sees the terminal, before it writes the outputs and the
+transcript.
+
 It prints `output <name> not returned: <reason>` on standard error for each
 output the result lists as not returned and each one that fails
 verification. A write never leaves the outputs directory, whatever links
@@ -402,7 +410,10 @@ state. It fails when the run is not found or the read fails.
 ### `wherry events RUN_ID`
 
 Prints a run's verified history: one line per status, one per event ID, in
-feed order, then one line per attempt with its transcript chunk count.
+feed order, then one line per attempt with its transcript chunk count. An
+attempt's terminal status carries its count. For an attempt with no
+terminal status, running or released without one, `events` counts its
+chunks on the tenant's transcript topic.
 
 ```
 attempt=<n> kind=<kind> state=<state> receiver=<id> time=<time> message="<text>"
@@ -422,6 +433,12 @@ place of its lines while it has none, each line comes from the highest earlier
 attempt that has it. An adopter resumes the job's output past the last
 heartbeat's offset, so an adopted run reads from offset 0.
 
+`transcript` reads the lines from the tenant's transcript topic, from the
+first offset at or after the append time of the run's earliest echo on the
+tenant feed. Once the feed holds the run's terminal status, it reads the
+transcript topic to its last stable offset, and waits until that reaches the
+high watermark it lists after it sees the terminal, before it prints.
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--offset` | `0` | lines to skip |
@@ -432,9 +449,9 @@ A negative `--offset` or `--limit` fails with
 
 `transcript` shows a Claude stream-json transcript without each thinking
 block's `signature` and without `system` lines of subtype `thinking_tokens`,
-and counts `--offset` and `--limit` over the lines it shows. The feed keeps
-both. A line it drops a signature from is re-encoded compact with its
-members sorted and escapes resolved; a line that does not decode is shown as
+and counts `--offset` and `--limit` over the lines it shows. The transcript
+topic keeps both. A line it drops a signature from is re-encoded compact
+with its members sorted and escapes resolved; a line that does not decode is shown as
 published.
 
 A line that is not UTF-8 prints as its bytes. For a line over 512 KiB, which
@@ -503,22 +520,25 @@ existing topics it sets the tasks and events `retention.ms` to
 `max_queue_deadline` plus six hours plus one day, and their
 `message.timestamp.type` to `LogAppendTime`. It refuses a `max_queue_deadline` above
 29 days and 18 hours, or one that with six hours added exceeds the
-`retention.ms` of the feed of a tenant entitled to the pool. See
+`retention.ms` of the feed or transcript topic of a tenant entitled to the
+pool. See
 [Topics](design.md#topics-1).
 
 ### `wherry admin pool entitle POOL --tenant TENANT`
 
-Entitles the tenant to an existing pool, creates the tenant feed, and
-grants the tenant's hosts and the pool's receivers their ACLs. It refuses
-when the pool's records do not fit the [record limit](configuration.md#record-limit) with
-the tenant's feed counted, or when the feed's `retention.ms` is below the
+Entitles the tenant to an existing pool, creates the tenant feed and
+transcript topic, and grants the tenant's hosts and the pool's receivers
+their ACLs. It refuses when the pool's records do not fit the
+[record limit](configuration.md#record-limit) with the tenant's feed and
+transcript topic counted, or when the `retention.ms` of either is below the
 pool's `max_queue_deadline` plus six hours, and records nothing. It applies
 each host's [quotas](configuration.md#quotas).
 
 ### `wherry admin host add HOST --tenant TENANT --bundle-file FILE`
 
 Records the host, creates its principal, its key topic and the tenant
-feed, grants its ACLs, applies its quotas, and writes its bundle.
+feed and transcript topic, grants its ACLs, applies its quotas, and writes
+its bundle.
 
 ### `wherry admin receiver add RECEIVER`
 

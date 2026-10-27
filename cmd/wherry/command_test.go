@@ -28,6 +28,7 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -278,7 +279,8 @@ func now(state wire.TaskState) wire.TaskStatus {
 	return wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
 }
 
-// feed commits records to tenant-a's feed in one transaction, as receiver-a does.
+// feed commits records in one transaction, as receiver-a does: chunks and outputs to tenant-a's transcript topic, the
+// others to its feed.
 func (b *bus) feed(t *testing.T, runID string, values ...[]byte) {
 	t.Helper()
 	producer, err := kgo.NewClient(append(b.receiver.Opts(), kgo.TransactionalID(admin.TransactionalPrefix("pool-a")+runID))...)
@@ -290,7 +292,13 @@ func (b *bus) feed(t *testing.T, runID string, values ...[]byte) {
 		t.Fatal(err)
 	}
 	for _, value := range values {
-		if err := producer.ProduceSync(b.ctx, &kgo.Record{Topic: admin.TenantTopic("tenant-a"), Key: []byte(runID), Value: value}).FirstErr(); err != nil {
+		topic := admin.TenantTopic("tenant-a")
+		if jws, err := jose.ParseSignedCompact(string(value), []jose.SignatureAlgorithm{jose.EdDSA}); err == nil {
+			if typ := jws.Signatures[0].Protected.ExtraHeaders[jose.HeaderType]; typ == wire.ChunkType || typ == wire.OutputType {
+				topic = admin.TenantTranscriptTopic("tenant-a")
+			}
+		}
+		if err := producer.ProduceSync(b.ctx, &kgo.Record{Topic: topic, Key: []byte(runID), Value: value}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -609,8 +617,12 @@ func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 	}
 	admitted := b.tasks(t, submitted.RunID)[0]
 	extensions := []string{wire.ExtensionURI}
-	rejected := b.status(t, admitted, "terminal-1", "terminal", wire.TaskStatus{State: wire.TaskStateRejected, Timestamp: "2026-10-17T10:00:00.000Z",
-		Message: &wire.Message{MessageID: "msg-1", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "queue deadline passed"}}, Extensions: extensions}})
+	// The terminal counts its attempt's chunks.
+	rejected := b.sign(t, &wire.RunStatus{
+		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: submitted.RunID, ContextID: submitted.RunID, Status: wire.TaskStatus{State: wire.TaskStateRejected, Timestamp: "2026-10-17T10:00:00.000Z",
+			Message: &wire.Message{MessageID: "msg-1", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "queue deadline passed"}}, Extensions: extensions}}},
+		Wherry: wire.StatusBinding{ReceiverBinding: b.binding(admitted), EventID: "terminal-1", Kind: "terminal", TaskHash: admitted.hash, TranscriptChunks: 2},
+	})
 	records := [][]byte{b.echo(t, admitted), rejected}
 	for seq := range int64(2) {
 		records = append(records, b.sign(t, &wire.Chunk{

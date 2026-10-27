@@ -395,6 +395,80 @@ func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
 	return r, nil
 }
 
+// readTranscript adds the run's chunks and outputs from the tenant's transcript topic, read from the first offset
+// appended at or after the run's earliest echo. A reader sees the feed's and the transcript topic's commits apart, so
+// once the run has an outcome it reads to a last stable offset at or past the topic's end, listed after the outcome was
+// seen.
+func (r *runView) readTranscript(ctx context.Context) error {
+	var echoed time.Time
+	for _, e := range r.entries {
+		if e.echo != nil && (echoed.IsZero() || e.at.Before(echoed)) {
+			echoed = e.at
+		}
+	}
+	// No receiver writes a run's chunks before its echo.
+	if echoed.IsZero() {
+		return nil
+	}
+	topic := admin.TenantTranscriptTopic(r.h.tenant)
+	listing, err := r.h.reader.Admin()
+	if err != nil {
+		return err
+	}
+	var end int64
+	if r.outcome != nil {
+		ends, err := listing.ListEndOffsets(ctx, topic)
+		if err == nil {
+			err = ends.Error()
+		}
+		if err != nil {
+			return err
+		}
+		ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
+	}
+	starts, err := listing.ListOffsetsAfterMilli(ctx, echoed.Add(-transcriptSkew).UnixMilli(), topic)
+	if err == nil {
+		err = starts.Error()
+	}
+	if err != nil {
+		return err
+	}
+	var offset int64
+	starts.Each(func(listed kadm.ListedOffset) { offset = listed.Offset })
+	var records []*kgo.Record
+	for {
+		read, stable, err := r.h.reader.ReadFromWithEnd(ctx, topic, offset)
+		if err != nil {
+			return err
+		}
+		records = append(records, read...)
+		if stable >= end {
+			break
+		}
+		offset = max(offset, stable)
+		select {
+		case <-time.After(transcriptRetry):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	for _, record := range records {
+		if string(record.Key) == r.run {
+			typ, kid := header(record.Value)
+			r.add(ctx, record, typ, kid)
+		}
+	}
+	r.derive()
+	return nil
+}
+
+// transcriptRetry separates reads of the transcript topic waiting for its last stable offset to pass a run's last chunks.
+const transcriptRetry = 50 * time.Millisecond
+
+// transcriptSkew is how far the transcript topic's leader may stamp append times behind the feed's leader; the two
+// topics can have different leaders, each with its own clock. A variable so tests can measure the window exactly.
+var transcriptSkew = time.Minute
+
 // follower reads the tenant feed from start until the context it was started with ends. Its records are unverified:
 // each reader verifies them against the state it loads.
 type follower struct {
@@ -751,8 +825,29 @@ func (h *Host) Events(ctx context.Context, runID string) (EventsResult, error) {
 		record.StatusUpdate.Status = unredactStatus(record.StatusUpdate.Status, markers, result.Redacted)
 		result.Statuses = append(result.Statuses, record)
 	}
+	// An attempt's terminal status counts its chunks; only attempts without one are counted on the transcript topic.
+	ended, counting := map[int64]bool{}, false
+	for _, status := range r.statuses {
+		if status.Wherry.Kind == "terminal" || status.Wherry.Kind == "rejected" {
+			ended[status.Wherry.Attempt] = true
+			if status.Wherry.TranscriptChunks > 0 {
+				result.Chunks[status.Wherry.Attempt] = int(status.Wherry.TranscriptChunks)
+			}
+		}
+	}
+	for _, status := range r.statuses {
+		counting = counting || !ended[status.Wherry.Attempt]
+	}
+	if counting {
+		if err := r.readTranscript(ctx); err != nil {
+			return EventsResult{}, err
+		}
+		result.Skipped = r.skipped
+	}
 	for _, chunk := range r.chunks {
-		result.Chunks[chunk.Wherry.Attempt]++
+		if !ended[chunk.Wherry.Attempt] {
+			result.Chunks[chunk.Wherry.Attempt]++
+		}
 	}
 	return result, nil
 }
@@ -767,6 +862,9 @@ func (h *Host) Transcript(ctx context.Context, runID string) (TranscriptResult, 
 	}
 	if r.pool == "" {
 		return TranscriptResult{}, fmt.Errorf("transcript %s: %w", runID, ErrRunNotFound)
+	}
+	if err := r.readTranscript(ctx); err != nil {
+		return TranscriptResult{}, err
 	}
 	result := TranscriptResult{Redacted: map[string]int{}, Skipped: r.skipped}
 	for _, status := range r.statuses {
@@ -851,6 +949,10 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			outcome := *r.outcome
 			outcome.Skipped, outcome.Model = r.skipped, r.model()
 			if r.result != nil {
+				if err := r.readTranscript(waitCtx); err != nil {
+					return AwaitResult{}, fmt.Errorf("await %s: %w", runID, err)
+				}
+				outcome.Skipped = r.skipped
 				outcome.Outputs, outcome.Stored, outcome.NotReturned, outcome.Rejected = r.verifiedOutputs(r.result)
 			}
 			markers := h.markers(local)
