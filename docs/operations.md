@@ -75,7 +75,7 @@ The [pool terms example](configuration.md#pool-terms-example) sets every field,
 as one file and as a `--config-dir` directory.
 
 - `delivery_limit` bounds how often the broker delivers one task. Each
-  start failure, and each member with no matching profile, returns a task
+  start failure, and each member with no matching plugin profile, returns a task
   to the pool and uses a delivery, so set it to at least the number of
   receivers in the pool, plus a margin. From attempt
   `delivery_limit` minus 1, a receiver ends a run it would return to the
@@ -98,7 +98,7 @@ as one file and as a `--config-dir` directory.
   the directory `WHERRY_CREDENTIALS_DIR` names, the agent finds it at.
   `required: false` lets a run go without it when the submitting host has no
   source for it. `pool create` refuses a duplicate name, two credentials on
-  one target, both or neither of `env` and `file`, and an `env` an adapter
+  one target, both or neither of `env` and `file`, and an `env` a plugin
   sets itself, such as `HOME` or `WHERRY_CREDENTIALS_DIR`:
 
   ```yaml
@@ -213,8 +213,8 @@ A tenant can be entitled to several pools; run `pool entitle` once per pool.
 
 ## Add a receiver
 
-A receiver's configuration lists the plugins it runs, keyed by adapter
-type, and each plugin's profiles in routing order. Each plugin profile
+A receiver's configuration lists the plugins it runs, keyed by plugin,
+and each plugin's profiles in routing order. Each plugin profile
 launches one agent through its plugin and carries the labels tasks select
 on. It delivers the agent's credentials at the targets the pool's terms give
 them, so no plugin profile names an agent credential. Two plugin profiles
@@ -440,10 +440,10 @@ change.
 - a state directory that survives restarts. It holds the receiver's
   private keys, and a receiver that loses them cannot start under the same
   name again;
-- a plugin directory holding the plugin of every plugin type in its
+- a plugin directory holding every plugin in its
   configuration, as in [Install plugins](#install-plugins);
 - a source for each [platform credential](#platform-credentials) its
-  profiles name;
+  plugin profiles name;
 - a supervisor that restarts the process when it exits, since a
   configuration change ends it;
 - for the Nomad plugin, a Nomad token with the
@@ -463,7 +463,7 @@ meanwhile.
 
 ### Install plugins
 
-The receiver ships with no adapters. Each plugin has its own
+The receiver ships with no plugins. Each plugin has its own
 [wherry-plugins releases](https://github.com/benemon/wherry-plugins/releases),
 tagged `<plugin>/<version>`, such as `nomad/<version>`. Each carries
 `wherry-plugin-<plugin>_<version>_linux_<arch>.tar.gz` for `amd64` and
@@ -700,7 +700,7 @@ pool's current terms, checks that every pool's largest records still fit the
 broker's record limit, reports topic retention below the pool's required
 bounds, including a receiver's progress topic that keeps less than its
 pool's tasks topic, and confirms that every ACL the state calls for exists. It does not
-check a plugin's type or a profile's `config` section; at start the receiver
+check a plugin profile's plugin or `config` section; at start the receiver
 finds the type's plugin, the plugin checks each profile's section, and the
 receiver exits with `profile <name>: ...` on an error. Run it after changing a pool's terms, since
 receivers keep the configuration they started with.
@@ -726,7 +726,7 @@ error says so, and upgrading `wherry` reads it.
 ## Inputs and outputs
 
 A run's outputs hold its `output_limit` in 256 entries at most. The broker's
-record limit and each profile's declared limit bound a task's inline input
+record limit and each plugin profile's declared limit bound a task's inline input
 files, as [`wherry submit`](commands.md#wherry-submit) describes; a plugin
 declares each profile's limit through `InlineLimit`, and the receiver keeps
 the plugin's dispatch check as a backstop.
@@ -861,7 +861,7 @@ credential has a source and its `host_key` is a readable file. A task
 credential of the entry's credential name is refused.
 
 The agent runs `git` itself, from its image or host, with the commands the
-prompt gives it; the receiver and the adapter run no git. The
+prompt gives it; the receiver and the plugin run no git. The
 [extension](a2a-extension-v1.md#git-input) defines the remote, ref and path
 rules and the commands. For the agent to follow them:
 
@@ -901,7 +901,7 @@ remote's protocol. `ssh`
 reads no configuration file, uses no agent and no identity but the
 credential, and trusts only the task's host key.
 
-An adapter gives the agent an environment in which `git` reads no system or
+A plugin gives the agent an environment in which `git` reads no system or
 global configuration and no configuration from the environment, uses no
 template, never prompts, and traces nothing, since those could rewrite the
 remote to another host or record the token. The agent has no global `git`
@@ -915,7 +915,7 @@ and `GIT_ALTERNATE_OBJECT_DIRECTORIES` retarget the repository a command
 works on,
 `GIT_EXEC_PATH` chooses the programs `git` runs, `GIT_SSL_NO_VERIFY`
 disables certificate checks, and `GIT_CURL_VERBOSE` traces requests, with
-the Authorization header redacted. An adapter removes them only from the
+the Authorization header redacted. A plugin removes them only from the
 environment it configures, such as the Nomad runtime's `env`. It cannot
 remove what the platform or the image sets: a Nomad `raw_exec` task
 inherits the client's environment, and a container keeps its image's
@@ -931,7 +931,7 @@ hooks and MCP servers of the project it starts in, so a harness started in a
 cloned repository runs that repository's hooks with the agent's credential in
 reach. Started above the checkout, it reads the repository's files without
 loading its project settings, including after the agent changes directory in
-a shell. The start directory is the adapter's to set: on Nomad, a runtime
+a shell. The start directory is the plugin profile's to set: on Nomad, a runtime
 command such as `cd /local && exec claude ...` starts the harness in the task
 directory, and the clone lands below it.
 
@@ -974,7 +974,7 @@ Forge rules that confine the credential's pushes to `wherry/*` make that
 the only branch it can write.
 
 `ssh` refuses a private key that others can read when the agent's user
-owns the file, so the owner and mode an adapter gives credential files decide
+owns the file, so the owner and mode a plugin gives credential files decide
 whether a deploy key works; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs)
 says what it gives.
@@ -1032,17 +1032,19 @@ it. A harness does not restart a running `wherry mcp` when its binary
 changes, so restart the MCP server after upgrading.
 
 This release is a clean break. It renames the configured unit a task is
-placed on from adapter to profile, replaces the receiver configuration's
+placed on from adapter to plugin profile, replaces the receiver configuration's
 `platforms` and `adapters` with `plugins` and their `profiles`, moves the
 receiver's settings from flags to its [local
 configuration](configuration.md#receiver-local-configuration), takes platform
-credentials from local sources in place of the bundle, and moves the adapter
-protocol to version 9. Hosts, receivers and plugins upgrade together, and an
-existing cluster is reset rather than migrated: rewrite each receiver
+credentials from local sources in place of the bundle, and moves the plugin
+protocol to version 10, in the Go module
+`github.com/benemon/wherry/pluginsdk`. Hosts, receivers and plugins
+upgrade together, and an existing cluster is reset rather than migrated: rewrite each receiver
 configuration in the new form, add the receivers again, and write each
 receiver's local configuration with a source for every platform credential
 it names. Update dashboards and alerts keyed on the receiver metrics'
-`adapter` label to `profile`.
+`adapter` label to `profile`, and on the `wherry_adapter_` metrics to
+`wherry_plugin_`.
 
 Between releases that keep the record formats, upgrade in place.
 Prerequisites: the new `wherry` binary, and each receiver's local
@@ -1051,9 +1053,9 @@ configuration, bundle and state directory.
 1. Replace the binary on every host and receiver host with the new
    release's, verified as in [Install wherry](quickstart.md#install-wherry).
 2. Replace the plugins in each receiver's plugin directory together with the
-   receiver binary, verified as in [Install plugins](#install-plugins); a receiver refuses a plugin of another adapter protocol
-   version. This release speaks adapter protocol version 9 and refuses a
-   version 8 plugin.
+   receiver binary, verified as in [Install plugins](#install-plugins); a receiver refuses a plugin of another plugin protocol
+   version. This release speaks plugin protocol version 10 and refuses a
+   version 9 plugin.
 3. Restart each receiver with the same local configuration, bundle and
    state directory. On
    `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its

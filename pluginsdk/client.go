@@ -1,4 +1,4 @@
-package adapter
+package pluginsdk
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/benemon/wherry/adapter/internal/adapterv1"
+	"github.com/benemon/wherry/pluginsdk/internal/pluginv1"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc/codes"
@@ -29,10 +29,10 @@ var (
 	pingTimeout       = 5 * time.Second
 )
 
-// Plugin is one plugin process and every profile configured in it. When the process exits, or fails or does not
-// answer a ping, Plugin starts it again with back-off and configures every profile again; until then their calls
+// Process is one plugin process and every profile configured in it. When the process exits, or fails or does not
+// answer a ping, Process starts it again with back-off and configures every profile again; until then their calls
 // return ErrLinkLost.
-type Plugin struct {
+type Process struct {
 	// resolve checks the plugin binary and returns its path, before every start.
 	resolve func() (string, error)
 	// path is the binary the latest start ran, for log lines.
@@ -46,15 +46,15 @@ type Plugin struct {
 	mu        sync.Mutex
 	client    *plugin.Client
 	// rpc is nil while the process is down.
-	rpc      adapterv1.AdapterClient
+	rpc      pluginv1.PluginClient
 	closed   bool
 	restarts int64
 }
 
 // Launch starts the plugin binary resolve returns over mutual TLS, and calls resolve again before every
 // restart; logs receives the link's and the plugin's log lines.
-func Launch(resolve func() (string, error), logs io.Writer) (*Plugin, error) {
-	p := &Plugin{resolve: resolve, logger: hclog.New(&hclog.LoggerOptions{Name: "plugin", Output: logs, Level: logLevel})}
+func Launch(resolve func() (string, error), logs io.Writer) (*Process, error) {
+	p := &Process{resolve: resolve, logger: hclog.New(&hclog.LoggerOptions{Name: "plugin", Output: logs, Level: logLevel})}
 	client, rpc, err := p.start()
 	if err != nil {
 		return nil, err
@@ -65,7 +65,7 @@ func Launch(resolve func() (string, error), logs io.Writer) (*Plugin, error) {
 }
 
 // start launches the process and configures every profile in settings; the caller holds configure.
-func (p *Plugin) start() (*plugin.Client, adapterv1.AdapterClient, error) {
+func (p *Process) start() (*plugin.Client, pluginv1.PluginClient, error) {
 	path, err := p.resolve()
 	if err != nil {
 		return nil, nil, err
@@ -96,7 +96,7 @@ func (p *Plugin) start() (*plugin.Client, adapterv1.AdapterClient, error) {
 		client.Kill()
 		return nil, nil, err
 	}
-	rpc := raw.(adapterv1.AdapterClient)
+	rpc := raw.(pluginv1.PluginClient)
 	for _, settings := range p.settings {
 		if _, err := configure(rpc, settings); err != nil {
 			client.Kill()
@@ -107,10 +107,10 @@ func (p *Plugin) start() (*plugin.Client, adapterv1.AdapterClient, error) {
 }
 
 // configure builds settings' profile in the plugin and returns what the plugin reports of it.
-func configure(rpc adapterv1.AdapterClient, settings Settings) (*adapterv1.ConfigureResponse, error) {
+func configure(rpc pluginv1.PluginClient, settings Settings) (*pluginv1.ConfigureResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), configureTimeout)
 	defer cancel()
-	resp, err := rpc.Configure(ctx, &adapterv1.ConfigureRequest{
+	resp, err := rpc.Configure(ctx, &pluginv1.ConfigureRequest{
 		Profile: settings.Name, Pool: settings.Pool, Agent: settings.Agent, Config: settings.Config, Credential: settings.Credential,
 	})
 	if err != nil {
@@ -121,7 +121,7 @@ func configure(rpc adapterv1.AdapterClient, settings Settings) (*adapterv1.Confi
 
 // supervise restarts the process each time it exits, until Close. A process that fails or does not answer a ping every
 // interval is killed, since go-plugin's Kill waits on a graceful shutdown a hung process never makes.
-func (p *Plugin) supervise(client *plugin.Client, interval time.Duration) {
+func (p *Process) supervise(client *plugin.Client, interval time.Duration) {
 	for {
 		pinged := time.Now()
 		for !client.Exited() {
@@ -191,7 +191,7 @@ func ping(client *plugin.Client) error {
 }
 
 // Configure builds a profile in the plugin and returns its handle; the plugin configures it again after a restart.
-func (p *Plugin) Configure(settings Settings) (Adapter, error) {
+func (p *Process) Configure(settings Settings) (Plugin, error) {
 	p.configure.Lock()
 	defer p.configure.Unlock()
 	rpc, err := p.link()
@@ -210,7 +210,7 @@ func (p *Plugin) Configure(settings Settings) (Adapter, error) {
 }
 
 // Close stops the process and its restarts.
-func (p *Plugin) Close() {
+func (p *Process) Close() {
 	p.mu.Lock()
 	p.closed, p.rpc = true, nil
 	client := p.client
@@ -219,13 +219,13 @@ func (p *Plugin) Close() {
 }
 
 // Restarts is the number of times the process has been started again since Launch.
-func (p *Plugin) Restarts() int64 {
+func (p *Process) Restarts() int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.restarts
 }
 
-func (p *Plugin) link() (adapterv1.AdapterClient, error) {
+func (p *Process) link() (pluginv1.PluginClient, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.rpc == nil {
@@ -255,7 +255,7 @@ func callError(ctx context.Context, err error) error {
 	}
 	call := status.Convert(err)
 	for _, detail := range call.Details() {
-		if detail, ok := detail.(*adapterv1.ErrorDetail); ok {
+		if detail, ok := detail.(*pluginv1.ErrorDetail); ok {
 			return &Error{Op: detail.Op, Class: detail.Class, Err: errors.New(detail.Message)}
 		}
 	}
@@ -264,7 +264,7 @@ func callError(ctx context.Context, err error) error {
 
 // remote is one profile in a plugin process.
 type remote struct {
-	plugin      *Plugin
+	plugin      *Process
 	name        string
 	directories Directories
 	inlineLimit int64
@@ -278,7 +278,7 @@ func (r *remote) Ready(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	resp, err := rpc.Ready(ctx, &adapterv1.ReadyRequest{Profile: r.name})
+	resp, err := rpc.Ready(ctx, &pluginv1.ReadyRequest{Profile: r.name})
 	if err != nil {
 		return false, callError(ctx, err)
 	}
@@ -290,19 +290,19 @@ func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
 	if err != nil {
 		return OutcomeUnknown, Handle{}, err
 	}
-	message := &adapterv1.Run{
+	message := &pluginv1.Run{
 		Id: run.ID, Profile: run.Profile, Agent: run.Agent, Model: run.Model, Attempt: run.Attempt, Prompt: run.Prompt,
 	}
 	for _, input := range run.Inputs {
-		message.Inputs = append(message.Inputs, &adapterv1.File{Name: input.Name, Data: input.Data})
+		message.Inputs = append(message.Inputs, &pluginv1.File{Name: input.Name, Data: input.Data})
 	}
 	for _, secret := range run.Credentials {
-		message.Credentials = append(message.Credentials, &adapterv1.Secret{Name: secret.Name, Env: secret.Env, File: secret.File, Value: secret.Value})
+		message.Credentials = append(message.Credentials, &pluginv1.Secret{Name: secret.Name, Env: secret.Env, File: secret.File, Value: secret.Value})
 	}
 	for _, fetch := range run.Fetches {
-		message.Fetches = append(message.Fetches, &adapterv1.Fetch{Name: fetch.Name, Url: fetch.URL, Size: fetch.Size, Sha256: fetch.SHA256})
+		message.Fetches = append(message.Fetches, &pluginv1.Fetch{Name: fetch.Name, Url: fetch.URL, Size: fetch.Size, Sha256: fetch.SHA256})
 	}
-	resp, err := rpc.Dispatch(ctx, &adapterv1.DispatchRequest{Profile: r.name, Run: message})
+	resp, err := rpc.Dispatch(ctx, &pluginv1.DispatchRequest{Profile: r.name, Run: message})
 	if err != nil {
 		err = callError(ctx, err)
 		var tooLarge *InputTooLargeError
@@ -319,7 +319,7 @@ func (r *remote) Lookup(ctx context.Context, runID string) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
-	resp, err := rpc.Lookup(ctx, &adapterv1.LookupRequest{Profile: r.name, RunId: runID})
+	resp, err := rpc.Lookup(ctx, &pluginv1.LookupRequest{Profile: r.name, RunId: runID})
 	if err != nil {
 		return Job{}, callError(ctx, err)
 	}
@@ -332,7 +332,7 @@ func (r *remote) Follow(ctx context.Context, handle Handle, from int64, lines ch
 	if err != nil {
 		return Terminal{}, err
 	}
-	stream, err := rpc.Follow(ctx, &adapterv1.FollowRequest{Profile: r.name, Handle: handleMessage(handle), From: from})
+	stream, err := rpc.Follow(ctx, &pluginv1.FollowRequest{Profile: r.name, Handle: handleMessage(handle), From: from})
 	if err != nil {
 		return Terminal{}, callError(ctx, err)
 	}
@@ -361,7 +361,7 @@ func (r *remote) Stop(ctx context.Context, handle Handle) error {
 	if err != nil {
 		return err
 	}
-	_, err = rpc.Stop(ctx, &adapterv1.StopRequest{Profile: r.name, Handle: handleMessage(handle)})
+	_, err = rpc.Stop(ctx, &pluginv1.StopRequest{Profile: r.name, Handle: handleMessage(handle)})
 	return callError(ctx, err)
 }
 
@@ -373,7 +373,7 @@ func (r *remote) Collect(ctx context.Context, handle Handle, limits Limits, outp
 	if err != nil {
 		return err
 	}
-	stream, err := rpc.Collect(ctx, &adapterv1.CollectRequest{Profile: r.name, Handle: handleMessage(handle), Limits: &adapterv1.Limits{
+	stream, err := rpc.Collect(ctx, &pluginv1.CollectRequest{Profile: r.name, Handle: handleMessage(handle), Limits: &pluginv1.Limits{
 		Files: int64(limits.Files), FileBytes: limits.FileBytes, TotalBytes: limits.TotalBytes, Stream: limits.Stream, StreamBytes: limits.StreamBytes,
 	}})
 	if err != nil {
@@ -447,7 +447,7 @@ func (r *remote) Purge(ctx context.Context, runID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = rpc.Purge(ctx, &adapterv1.PurgeRequest{Profile: r.name, RunId: runID})
+	_, err = rpc.Purge(ctx, &pluginv1.PurgeRequest{Profile: r.name, RunId: runID})
 	return callError(ctx, err)
 }
 
@@ -456,7 +456,7 @@ func (r *remote) Release(ctx context.Context, runID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = rpc.Release(ctx, &adapterv1.ReleaseRequest{Profile: r.name, RunId: runID})
+	_, err = rpc.Release(ctx, &pluginv1.ReleaseRequest{Profile: r.name, RunId: runID})
 	return callError(ctx, err)
 }
 
@@ -465,7 +465,7 @@ func (r *remote) Sweep(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = rpc.Sweep(ctx, &adapterv1.SweepRequest{Profile: r.name})
+	_, err = rpc.Sweep(ctx, &pluginv1.SweepRequest{Profile: r.name})
 	return callError(ctx, err)
 }
 
@@ -474,7 +474,7 @@ func (r *remote) Metrics(ctx context.Context) ([]Sample, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := rpc.Metrics(ctx, &adapterv1.MetricsRequest{Profile: r.name})
+	resp, err := rpc.Metrics(ctx, &pluginv1.MetricsRequest{Profile: r.name})
 	if err != nil {
 		return nil, callError(ctx, err)
 	}

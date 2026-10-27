@@ -25,7 +25,7 @@ check-fmt: ## Fail on Go files gofmt would change
 .PHONY: vet
 vet: ## Vet both modules
 	go vet ./...
-	cd adapter && go vet ./...
+	cd pluginsdk && go vet ./...
 
 .PHONY: test
 # Two packages at a time: more exhaust macOS's ephemeral ports with the in-process Kafka connections the tests open.
@@ -33,7 +33,7 @@ vet: ## Vet both modules
 # arm64 host whose CPU lacks SHA-512 instructions, past the 10-minute default.
 test: ## Test both modules
 	go test -p 2 -timeout 30m ./...
-	cd adapter && go test ./...
+	cd pluginsdk && go test ./...
 
 $(GO_LICENSES):
 	go install github.com/google/go-licenses@$(GO_LICENSES_VERSION)
@@ -46,7 +46,7 @@ $(CYCLONEDX):
 # module, do not widen the list to get green.
 check-licenses: $(GO_LICENSES) ## Fail on dependency licences outside the allowlist
 	$(GO_LICENSES) check ./... --allowed_licenses=$(LICENCE_ALLOWLIST)
-	cd adapter && $(GO_LICENSES) check ./... --allowed_licenses=$(LICENCE_ALLOWLIST)
+	cd pluginsdk && $(GO_LICENSES) check ./... --allowed_licenses=$(LICENCE_ALLOWLIST)
 
 .PHONY: check-markers
 # wherry integrates agent harnesses by name, so product names are not

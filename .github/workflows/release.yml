@@ -2,8 +2,8 @@ name: release
 
 # A v* tag is the release act. Tags with a hyphenated qualifier (v0.1.0-rc.1)
 # publish a prerelease. The build lives in the Makefile; CI only picks
-# targets, so a release reproduces locally. adapter/v* tags version the
-# adapter protocol module and publish nothing.
+# targets, so a release reproduces locally. pluginsdk/v* tags version the
+# plugin protocol module and publish nothing.
 on:
   push:
     tags: ['v*']

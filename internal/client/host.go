@@ -64,7 +64,7 @@ type SubmitInput struct {
 	Git *wire.GitInput
 	// GitChanges, patch or bundle, asks for the clone's changes back as that output.
 	GitChanges string
-	// S3Inputs are files uploaded to the pool's bucket before the task is published, which the adapter fetches.
+	// S3Inputs are files uploaded to the pool's bucket before the task is published, which the plugin fetches.
 	S3Inputs      []S3File
 	Deadline      time.Duration
 	QueueDeadline time.Duration

@@ -13,10 +13,10 @@ import (
 	"time"
 	"weak"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -46,13 +46,13 @@ func (f fixture) request(t *testing.T, n int) wire.SealRequest {
 // dispatched returns the dispatches, the value the last delivered at the agent's credential's target, and its attempt.
 func (f fixture) dispatched(t *testing.T) (int, []byte, int64) {
 	t.Helper()
-	f.adapter.mu.Lock()
-	defer f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	defer f.plugin.mu.Unlock()
 	var value []byte
-	if index := slices.IndexFunc(f.adapter.lastRun.Credentials, func(secret adapter.Secret) bool { return secret.Env == credentialEnv }); index >= 0 {
-		value = f.adapter.lastRun.Credentials[index].Value
+	if index := slices.IndexFunc(f.plugin.lastRun.Credentials, func(secret pluginsdk.Secret) bool { return secret.Env == credentialEnv }); index >= 0 {
+		value = f.plugin.lastRun.Credentials[index].Value
 	}
-	return f.adapter.dispatches, value, f.adapter.lastRun.Attempt
+	return f.plugin.dispatches, value, f.plugin.lastRun.Attempt
 }
 
 func TestSealRequestAsksForTheAttemptsCredential(t *testing.T) {
@@ -342,7 +342,7 @@ func adopting(t *testing.T) (fixture, *kgo.Record) {
 		`{"type":"assistant","message":"token ` + testToken + `"}`,
 		completedWith("used " + testToken),
 	})
-	f.adapter.job = adapter.JobRunning
+	f.plugin.job = pluginsdk.JobRunning
 	return f, f.submit(t, f.host, nil)
 }
 
@@ -350,7 +350,7 @@ func adopting(t *testing.T) (fixture, *kgo.Record) {
 func (f fixture) held(t *testing.T) {
 	t.Helper()
 	for {
-		if _, _, follows, _ := f.adapter.counts(); follows > 0 {
+		if _, _, follows, _ := f.plugin.counts(); follows > 0 {
 			break
 		}
 		if f.ctx.Err() != nil {
@@ -402,9 +402,9 @@ func TestAnAdopterWithoutASealFails(t *testing.T) {
 	if status := f.execute(t, record, 2); status != kgo.AckReject || f.lastTask(t).Status.State != wire.TaskStateFailed {
 		t.Fatalf("adopter ended %v; logs:\n%s", status, f.logs.String())
 	}
-	f.adapter.mu.Lock()
-	stops, releases := f.adapter.stops, f.adapter.releases
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	stops, releases := f.plugin.stops, f.plugin.releases
+	f.plugin.mu.Unlock()
 	if stops != 1 || releases != 1 || len(f.chunks(t)) != 0 {
 		t.Fatalf("stops=%d releases=%d chunks=%d, want the job stopped and released with nothing published", stops, releases, len(f.chunks(t)))
 	}
@@ -417,7 +417,7 @@ func TestAnAdopterWithoutASealFails(t *testing.T) {
 func TestAnAdopterDropsTheOldestHeldLines(t *testing.T) {
 	line := strings.Repeat("x", 1<<20)
 	f := newFixture(t, append(slices.Repeat([]string{line}, 6), doneOutcome))
-	f.adapter.job = adapter.JobRunning
+	f.plugin.job = pluginsdk.JobRunning
 	done := f.executing(t, f.ctx, f.submit(t, f.host, nil), 2)
 	request := f.request(t, 1)
 	f.held(t)

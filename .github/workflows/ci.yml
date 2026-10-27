@@ -26,7 +26,7 @@ jobs:
           cache: true
           cache-dependency-path: |
             go.sum
-            adapter/go.sum
+            pluginsdk/go.sum
       - name: Run every gate
         run: make check
 
@@ -43,7 +43,7 @@ jobs:
           cache: true
           cache-dependency-path: |
             go.sum
-            adapter/go.sum
+            pluginsdk/go.sum
       - name: Start Kafka
         run: test/kafka/up.sh "$RUNNER_TEMP/kafka"
       # One package at a time: the packages share the broker's wherry.admin.

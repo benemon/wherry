@@ -3,13 +3,14 @@ package receiver
 import (
 	"errors"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -66,16 +67,16 @@ func TestScrapeAfterARun(t *testing.T) {
 	)
 }
 
-// A credentialed S3 run whose agent prints its credential and URL, then fails, on an adapter whose sweep fails with a
+// A credentialed S3 run whose agent prints its credential and URL, then fails, on a plugin whose sweep fails with a
 // URL in its error, leaves none of that material in a label or value.
 func TestScrapeCarriesNoRunMaterial(t *testing.T) {
 	s := newStore(t)
 	url := presigned(s.endpoint(), wire.S3InputKey(testTenant, "run-a", "dataset.bin"))
 	f := s3Fixture(t, s, []string{`{"type":"assistant","message":"token ` + testToken + ` url ` + url + `"}`}, nil)
-	f.adapter.mu.Lock()
-	f.adapter.ended = &adapter.Terminal{Started: true, ExitCode: 3, Node: "node-secret-7"}
-	f.adapter.sweepErr = errors.New("sweep of " + url + " failed")
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	f.plugin.ended = &pluginsdk.Terminal{Started: true, ExitCode: 3, Node: "node-secret-7"}
+	f.plugin.sweepErr = errors.New("sweep of " + url + " failed")
+	f.plugin.mu.Unlock()
 	if err := f.receiver.advertise(f.ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -99,63 +100,93 @@ func TestScrapeCarriesNoRunMaterial(t *testing.T) {
 	}
 }
 
-// adapterReceiver is a configured receiver with one fake adapter, enough to scrape its adapter families.
-func adapterReceiver(fake *fakeAdapter) *Receiver {
-	r := &Receiver{config: admin.ReceiverConfig{Pool: testPool}, profiles: []Named{{Name: "nomad", Adapter: fake}}, metrics: newMetrics(prometheus.NewRegistry())}
+// pluginReceiver is a configured receiver with one fake plugin, enough to scrape its plugin families.
+func pluginReceiver(fake *fakePlugin) *Receiver {
+	r := &Receiver{config: admin.ReceiverConfig{Pool: testPool}, profiles: []Named{{Name: "nomad", Plugin: fake}}, metrics: newMetrics(prometheus.NewRegistry())}
 	r.metrics.registerFor(r)
 	return r
 }
 
-func placement(buckets ...uint64) adapter.Histogram {
-	return adapter.Histogram{Buckets: buckets, Sum: 12.5, Count: buckets[len(buckets)-1]}
+func placement(buckets ...uint64) pluginsdk.Histogram {
+	return pluginsdk.Histogram{Buckets: buckets, Sum: 12.5, Count: buckets[len(buckets)-1]}
 }
 
-func TestAdapterSamplesAreValidated(t *testing.T) {
-	r := adapterReceiver(&fakeAdapter{samples: []adapter.Sample{
-		{Family: "wherry_adapter_platform_errors_total", Labels: map[string]string{"class": "denied"}, Kind: adapter.KindCounter, Value: 4},
-		{Family: "wherry_adapter_cleanup_pending", Kind: adapter.KindGauge, Value: 2},
-		{Family: "wherry_adapter_sweep_deletions_total", Labels: map[string]string{"kind": "variable", "profile": "nomad"}, Kind: adapter.KindCounter, Value: 7},
-		{Family: "wherry_adapter_placement_seconds", Kind: adapter.KindHistogram, Histogram: placement(0, 1, 2, 2, 3, 3, 3, 3, 3, 3)},
-		{Family: "wherry_adapter_jobs_total", Kind: adapter.KindCounter, Value: 11},
-		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"node": "node-1"}, Kind: adapter.KindGauge, Value: 12},
-		{Family: "wherry_adapter_platform_errors_total", Labels: map[string]string{"class": "run-a"}, Kind: adapter.KindCounter, Value: 13},
-		{Family: "wherry_adapter_sweep_deletions_total", Labels: map[string]string{"kind": "job"}, Kind: adapter.KindGauge, Value: 14},
+func TestPluginSamplesAreValidated(t *testing.T) {
+	r := pluginReceiver(&fakePlugin{samples: []pluginsdk.Sample{
+		{Family: "wherry_plugin_platform_errors_total", Labels: map[string]string{"class": "denied"}, Kind: pluginsdk.KindCounter, Value: 4},
+		{Family: "wherry_plugin_cleanup_pending", Kind: pluginsdk.KindGauge, Value: 2},
+		{Family: "wherry_plugin_sweep_deletions_total", Labels: map[string]string{"kind": "variable", "profile": "nomad"}, Kind: pluginsdk.KindCounter, Value: 7},
+		{Family: "wherry_plugin_placement_seconds", Kind: pluginsdk.KindHistogram, Histogram: placement(0, 1, 2, 2, 3, 3, 3, 3, 3, 3)},
+		{Family: "wherry_plugin_jobs_total", Kind: pluginsdk.KindCounter, Value: 11},
+		{Family: "wherry_plugin_cleanup_pending", Labels: map[string]string{"node": "node-1"}, Kind: pluginsdk.KindGauge, Value: 12},
+		{Family: "wherry_plugin_platform_errors_total", Labels: map[string]string{"class": "run-a"}, Kind: pluginsdk.KindCounter, Value: 13},
+		{Family: "wherry_plugin_sweep_deletions_total", Labels: map[string]string{"kind": "job"}, Kind: pluginsdk.KindGauge, Value: 14},
 	}})
 	text := scraped(t, r,
-		`wherry_adapter_platform_errors_total{class="denied",pool="pool-a",profile="nomad"} 4`,
-		`wherry_adapter_cleanup_pending{pool="pool-a",profile="nomad"} 2`,
-		`wherry_adapter_sweep_deletions_total{kind="variable",pool="pool-a",profile="nomad"} 7`,
-		`wherry_adapter_placement_seconds_bucket{pool="pool-a",profile="nomad",le="2"} 1`,
-		`wherry_adapter_placement_seconds_count{pool="pool-a",profile="nomad"} 3`,
+		`wherry_plugin_platform_errors_total{class="denied",pool="pool-a",profile="nomad"} 4`,
+		`wherry_plugin_cleanup_pending{pool="pool-a",profile="nomad"} 2`,
+		`wherry_plugin_sweep_deletions_total{kind="variable",pool="pool-a",profile="nomad"} 7`,
+		`wherry_plugin_placement_seconds_bucket{pool="pool-a",profile="nomad",le="2"} 1`,
+		`wherry_plugin_placement_seconds_count{pool="pool-a",profile="nomad"} 3`,
 		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="unknown_family"} `,
 		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="unknown_label"} `,
 		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="label_value"} `,
 		`wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="kind"} `,
 	)
-	for _, dropped := range []string{"wherry_adapter_jobs_total", "node-1", "run-a", "} 11\n", "} 12\n", "} 13\n", "} 14\n"} {
+	for _, dropped := range []string{"wherry_plugin_jobs_total", "node-1", "run-a", "} 11\n", "} 12\n", "} 13\n", "} 14\n"} {
 		if strings.Contains(text, dropped) {
 			t.Fatalf("scrape holds the dropped %q:\n%s", dropped, text)
 		}
 	}
 }
 
-func TestAdapterSampleCannotSpeakForAnotherProfile(t *testing.T) {
-	r := adapterReceiver(&fakeAdapter{samples: []adapter.Sample{
-		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"profile": "other"}, Kind: adapter.KindGauge, Value: 5},
+// Every family the core declares for plugins is exported under wherry_plugin_.
+func TestPluginFamiliesAreExportedAsWherryPlugin(t *testing.T) {
+	var samples []pluginsdk.Sample
+	for _, family := range pluginFamilies {
+		if !strings.HasPrefix(family.name, "wherry_plugin_") {
+			t.Fatalf("family %s; want the wherry_plugin_ prefix", family.name)
+		}
+		sample := pluginsdk.Sample{Family: family.name, Kind: family.kind, Value: 1, Histogram: placement(0, 0, 0, 0, 0, 0, 0, 0, 0, 1)}
+		if family.label != "" {
+			sample.Labels = map[string]string{family.label: family.values[0]}
+		}
+		samples = append(samples, sample)
+	}
+	r := pluginReceiver(&fakePlugin{samples: samples})
+	scraped(t, r)
+	gathered, err := r.metrics.registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported := 0
+	for _, family := range gathered {
+		if slices.ContainsFunc(pluginFamilies, func(declared pluginFamily) bool { return declared.name == family.GetName() }) {
+			exported++
+		}
+	}
+	if exported != len(pluginFamilies) {
+		t.Fatalf("exported %d of the %d plugin families", exported, len(pluginFamilies))
+	}
+}
+
+func TestPluginSampleCannotSpeakForAnotherProfile(t *testing.T) {
+	r := pluginReceiver(&fakePlugin{samples: []pluginsdk.Sample{
+		{Family: "wherry_plugin_cleanup_pending", Labels: map[string]string{"profile": "other"}, Kind: pluginsdk.KindGauge, Value: 5},
 	}})
-	text := scraped(t, r, `wherry_adapter_cleanup_pending{pool="pool-a",profile="nomad"} 5`)
+	text := scraped(t, r, `wherry_plugin_cleanup_pending{pool="pool-a",profile="nomad"} 5`)
 	if strings.Contains(text, `profile="other"`) {
 		t.Fatalf("scrape holds another profile's sample:\n%s", text)
 	}
 }
 
-func TestHungAdapterMetricsServeTheLastGoodSamples(t *testing.T) {
+func TestHungPluginMetricsServeTheLastGoodSamples(t *testing.T) {
 	previous := metricsDeadline
 	metricsDeadline = 200 * time.Millisecond
 	t.Cleanup(func() { metricsDeadline = previous })
-	fake := &fakeAdapter{samples: []adapter.Sample{{Family: "wherry_adapter_cleanup_pending", Kind: adapter.KindGauge, Value: 3}}}
-	r := adapterReceiver(fake)
-	scraped(t, r, `wherry_adapter_cleanup_pending{pool="pool-a",profile="nomad"} 3`)
+	fake := &fakePlugin{samples: []pluginsdk.Sample{{Family: "wherry_plugin_cleanup_pending", Kind: pluginsdk.KindGauge, Value: 3}}}
+	r := pluginReceiver(fake)
+	scraped(t, r, `wherry_plugin_cleanup_pending{pool="pool-a",profile="nomad"} 3`)
 	fake.mu.Lock()
 	fake.metricsHang, fake.samples = true, nil
 	fake.mu.Unlock()
@@ -165,14 +196,14 @@ func TestHungAdapterMetricsServeTheLastGoodSamples(t *testing.T) {
 		go func() { done <- scrape(t, r) }()
 		select {
 		case text := <-done:
-			if !strings.Contains(text, `wherry_adapter_cleanup_pending{pool="pool-a",profile="nomad"} 3`) {
-				t.Fatalf("scrape of a hung adapter lacks its last good sample:\n%s", text)
+			if !strings.Contains(text, `wherry_plugin_cleanup_pending{pool="pool-a",profile="nomad"} 3`) {
+				t.Fatalf("scrape of a hung plugin lacks its last good sample:\n%s", text)
 			}
 			if elapsed := time.Since(began); elapsed > time.Second {
-				t.Fatalf("scrape of a hung adapter took %v", elapsed)
+				t.Fatalf("scrape of a hung plugin took %v", elapsed)
 			}
 		case <-time.After(5 * time.Second):
-			t.Fatal("scrape of a hung adapter did not return")
+			t.Fatal("scrape of a hung plugin did not return")
 		}
 	}
 	scraped(t, r, `wherry_metrics_dropped_total{pool="pool-a",profile="nomad",reason="timeout"} `)
@@ -198,7 +229,7 @@ func TestAgentOutsideTheTermsIsLabelledOther(t *testing.T) {
 func TestModelOutsideTheTermsIsLabelledOther(t *testing.T) {
 	terms := testTerms()
 	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, "haiku"
-	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	for _, model := range []string{"sonnet", "opus"} {
 		run := testActiveRun(t, f, "run-"+model, 1)
 		run.task.Wherry.Placement.Model = model

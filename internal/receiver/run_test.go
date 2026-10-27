@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -120,9 +120,9 @@ func TestSealWaitExpiryFailsWithoutCredentialValue(t *testing.T) {
 	if status := f.execute(t, record, 1); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject", status)
 	}
-	f.adapter.mu.Lock()
-	dispatches, releases := f.adapter.dispatches, f.adapter.releases
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	dispatches, releases := f.plugin.dispatches, f.plugin.releases
+	f.plugin.mu.Unlock()
 	if dispatches != 0 || releases != 1 {
 		t.Fatalf("dispatches=%d releases=%d, want 0 and 1", dispatches, releases)
 	}
@@ -150,7 +150,7 @@ func TestSealWaitExpiryFailsWithoutCredentialValue(t *testing.T) {
 // lab and cloud both launch claude; a task routed to cloud names cloud in its start failure.
 func TestStartFailureNamesTheRoutedProfile(t *testing.T) {
 	m := newMultiFixture(t)
-	m.cloud.outcome = adapter.OutcomeNothingCreated
+	m.cloud.outcome = pluginsdk.OutcomeNothingCreated
 	if status := m.execute(t, "run-a", accelerated, 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
@@ -178,7 +178,7 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 	// The adopted job came from an earlier attempt, whose offer this attempt does not know.
 	t.Run("adopted", func(t *testing.T) {
 		m := newMultiFixture(t)
-		m.cloud.job = adapter.JobRunning
+		m.cloud.job = pluginsdk.JobRunning
 		if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
@@ -205,9 +205,9 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.answer(t, credentialName)
-			f.adapter.stream = test.stream
+			f.plugin.stream = test.stream
 			if test.progress {
-				f.adapter.endDelay = 3 * renewInterval
+				f.plugin.endDelay = 3 * renewInterval
 			}
 			f.execute(t, f.submit(t, f.host, nil), 1)
 
@@ -262,7 +262,7 @@ func TestOversizedAgentOutputIsBounded(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
 	huge := strings.Repeat("x", 3<<19)
-	f.adapter.stream = []string{`{"type":"assistant","message":"` + huge + `"}`, completedWith(strings.Repeat("x", 3<<17))}
+	f.plugin.stream = []string{`{"type":"assistant","message":"` + huge + `"}`, completedWith(strings.Repeat("x", 3<<17))}
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v, want accept", status)
 	}
@@ -287,8 +287,8 @@ func TestProgressStaysOffTheStateTopics(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
 	// A second line moves the transcript, so a progress tick commits.
-	f.adapter.stream = append([]string{`{"type":"system"}`}, noResultStream...)
-	f.adapter.endDelay = 4 * renewInterval
+	f.plugin.stream = append([]string{`{"type":"system"}`}, noResultStream...)
+	f.plugin.endDelay = 4 * renewInterval
 	runs := []string{"run-a", "run-b", "run-c"}
 	for _, run := range runs {
 		f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
@@ -325,8 +325,8 @@ func TestProgressStaysOffTheStateTopics(t *testing.T) {
 func TestProgressCommitsWithItsChunks(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	f.adapter.stream = append([]string{`{"type":"system"}`}, noResultStream...)
-	f.adapter.endDelay = 4 * renewInterval
+	f.plugin.stream = append([]string{`{"type":"system"}`}, noResultStream...)
+	f.plugin.endDelay = 4 * renewInterval
 	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.ReceiverProgressTopic(testReceiver)).Operations(kadm.OpAny))
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release when progress cannot be written; logs:\n%s", status, f.logs.String())
@@ -342,7 +342,7 @@ func TestProgressOnlyWhenTheTranscriptMoves(t *testing.T) {
 	stream := []string{`{"type":"assistant","message":"one"}`, `{"type":"assistant","message":"two"}`, `{"type":"assistant","message":"three"}`, completedWith("answer")}
 	f := newFixture(t, stream)
 	f.answer(t, credentialName)
-	f.adapter.pauses, f.adapter.endDelay = map[int]time.Duration{2: 6 * renewInterval}, 3*renewInterval
+	f.plugin.pauses, f.plugin.endDelay = map[int]time.Duration{2: 6 * renewInterval}, 3*renewInterval
 	record := f.submit(t, f.host, nil)
 	if status := f.execute(t, record, 1); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
@@ -381,9 +381,9 @@ func TestTaskResultDataPartWhenJSON(t *testing.T) {
 	for _, result := range []string{`{"answer":42,"items":[1,2]}`, `[true,null]`, `42`} {
 		t.Run(result, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.adapter.stream = []string{completedWith(result)}
+			f.plugin.stream = []string{completedWith(result)}
 			run := testActiveRun(t, f, "run-json", 1)
-			if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != kgo.AckAccept {
+			if status := run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true}); status != kgo.AckAccept {
 				t.Fatalf("status %v", status)
 			}
 			part := f.lastTask(t).Artifacts[0].Parts[0]
@@ -398,9 +398,9 @@ func TestTaskResultTextPartOtherwise(t *testing.T) {
 	for _, result := range []string{"done", `{"answer":`, `{"k":1,"k":2}`, "42 is the answer"} {
 		t.Run(result, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.adapter.stream = []string{completedWith(result)}
+			f.plugin.stream = []string{completedWith(result)}
 			run := testActiveRun(t, f, "run-text", 1)
-			if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != kgo.AckAccept {
+			if status := run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true}); status != kgo.AckAccept {
 				t.Fatalf("status %v", status)
 			}
 			task := f.lastTask(t)
@@ -426,7 +426,7 @@ func TestResultSharesTheTerminalTransaction(t *testing.T) {
 		return commit(ctx, producer)
 	}
 	t.Cleanup(func() { commitTransaction = commit })
-	run.conclude(f.ctx, adapter.Handle{}, []adapter.Line{{Offset: 0, Next: 5, Data: []byte("line")}}, adapter.Terminal{Started: true})
+	run.conclude(f.ctx, pluginsdk.Handle{}, []pluginsdk.Line{{Offset: 0, Next: 5, Data: []byte("line")}}, pluginsdk.Terminal{Started: true})
 	records := f.records(t, admin.TenantTopic(testTenant))
 	if len(records) != 2 || len(f.chunks(t)) != 1 {
 		t.Fatalf("feed records %d and chunks %d, want the result and the terminal, and the last chunk", len(records), len(f.chunks(t)))
@@ -451,26 +451,26 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 	t.Run("stop", func(t *testing.T) {
 		f := newFixture(t, resultStream)
 		run := testActiveRun(t, f, "run-release-stop", 1)
-		if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != kgo.AckAccept {
+		if status := run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true}); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
-		f.adapter.mu.Lock()
-		defer f.adapter.mu.Unlock()
-		if f.adapter.stops != 1 || f.adapter.releases != 1 || f.adapter.releaseIDs[0] != "run-release-stop" {
-			t.Fatalf("stops=%d releases=%v", f.adapter.stops, f.adapter.releaseIDs)
+		f.plugin.mu.Lock()
+		defer f.plugin.mu.Unlock()
+		if f.plugin.stops != 1 || f.plugin.releases != 1 || f.plugin.releaseIDs[0] != "run-release-stop" {
+			t.Fatalf("stops=%d releases=%v", f.plugin.stops, f.plugin.releaseIDs)
 		}
 	})
 	t.Run("dispatch error with no job", func(t *testing.T) {
 		f := newFixture(t, resultStream)
 		f.answer(t, credentialName)
-		f.adapter.dispatchErr = errors.New("dispatch failed")
+		f.plugin.dispatchErr = errors.New("dispatch failed")
 		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 			t.Fatalf("status %v", status)
 		}
-		f.adapter.mu.Lock()
-		defer f.adapter.mu.Unlock()
-		if f.adapter.dispatches != 1 || f.adapter.lookups != 1 || f.adapter.releases != 1 {
-			t.Fatalf("dispatches=%d lookups=%d releases=%d", f.adapter.dispatches, f.adapter.lookups, f.adapter.releases)
+		f.plugin.mu.Lock()
+		defer f.plugin.mu.Unlock()
+		if f.plugin.dispatches != 1 || f.plugin.lookups != 1 || f.plugin.releases != 1 {
+			t.Fatalf("dispatches=%d lookups=%d releases=%d", f.plugin.dispatches, f.plugin.lookups, f.plugin.releases)
 		}
 	})
 }
@@ -478,42 +478,42 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 func TestEndOfJobStopsAllocationBeforeTerminal(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-result-stop", 1)
-	f.adapter.stopCheck = func() error {
+	f.plugin.stopCheck = func() error {
 		if n := len(f.records(t, admin.TenantTopic(testTenant))) + len(f.records(t, admin.TenantTranscriptTopic(testTenant))); n != 0 {
 			return fmt.Errorf("feed records visible before Stop: %d", n)
 		}
 		return nil
 	}
-	if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != kgo.AckAccept {
+	if status := run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true}); status != kgo.AckAccept {
 		t.Fatalf("conclude status %v, want accept", status)
 	}
-	f.adapter.mu.Lock()
-	stops := f.adapter.stops
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	stops := f.plugin.stops
+	f.plugin.mu.Unlock()
 	if stops != 1 || len(f.results(t)) != 1 || len(f.eventStatuses(t)) != 1 {
 		t.Fatalf("stops=%d results=%d events=%d", stops, len(f.results(t)), len(f.eventStatuses(t)))
 	}
 }
 
 func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
-	pending := []adapter.Line{{Offset: 0, Next: 8, Data: []byte("working")}}
+	pending := []pluginsdk.Line{{Offset: 0, Next: 8, Data: []byte("working")}}
 	for _, test := range []struct {
 		name string
-		call func(*activeRun, context.Context, []adapter.Line) kgo.AckStatus
+		call func(*activeRun, context.Context, []pluginsdk.Line) kgo.AckStatus
 	}{
-		{"result", func(run *activeRun, ctx context.Context, pending []adapter.Line) kgo.AckStatus {
-			return run.conclude(ctx, adapter.Handle{}, pending, adapter.Terminal{Started: true})
+		{"result", func(run *activeRun, ctx context.Context, pending []pluginsdk.Line) kgo.AckStatus {
+			return run.conclude(ctx, pluginsdk.Handle{}, pending, pluginsdk.Terminal{Started: true})
 		}},
-		{"failure", func(run *activeRun, ctx context.Context, pending []adapter.Line) kgo.AckStatus {
-			return run.stopAndFail(ctx, adapter.Handle{}, "timeout", pending)
+		{"failure", func(run *activeRun, ctx context.Context, pending []pluginsdk.Line) kgo.AckStatus {
+			return run.stopAndFail(ctx, pluginsdk.Handle{}, "timeout", pending)
 		}},
-		{"cancel", func(run *activeRun, ctx context.Context, pending []adapter.Line) kgo.AckStatus {
-			return run.stopAndCancel(ctx, adapter.Handle{}, pending)
+		{"cancel", func(run *activeRun, ctx context.Context, pending []pluginsdk.Line) kgo.AckStatus {
+			return run.stopAndCancel(ctx, pluginsdk.Handle{}, pending)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.adapter.stopErr = errors.New("stop failed")
+			f.plugin.stopErr = errors.New("stop failed")
 			run := testActiveRun(t, f, "run-stop-failure-"+test.name, 1)
 			if status := test.call(run, f.ctx, pending); status != kgo.AckRelease {
 				t.Fatalf("status %v, want release", status)
@@ -524,7 +524,7 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 		})
 		t.Run(test.name+" at the budget", func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.adapter.stopErr = errors.New("stop failed")
+			f.plugin.stopErr = errors.New("stop failed")
 			run := testActiveRun(t, f, "run-stop-budget-"+test.name, int64(testTerms().DeliveryLimit)-1)
 			status := test.call(run, f.ctx, pending)
 			if chunks := f.chunks(t); len(chunks) != 1 || chunks[0].ArtifactUpdate.Artifact.Parts[0].Text != "working" || !chunks[0].ArtifactUpdate.LastChunk {
@@ -631,7 +631,7 @@ func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
 	stream := []string{`{"type":"assistant","message":"one"}`, `{"type":"assistant","message":"two"}`, `{"type":"assistant","message":"three"}`, completedWith("adopted answer")}
 	f := newFixture(t, stream)
 	f.answer(t, credentialName)
-	f.adapter.job, f.adapter.endDelay = adapter.JobRunning, 4*renewInterval
+	f.plugin.job, f.plugin.endDelay = pluginsdk.JobRunning, 4*renewInterval
 	record := f.submit(t, f.host, nil)
 	resume := int64(len(stream[0]) + 1)
 	f.holding(t, f.parse(t, record), wire.TaskHash(record.Value), testReceiver, f.receiver.signing, "claimed", nil)
@@ -647,9 +647,9 @@ func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
 		seqs = append(seqs, chunk.Wherry.Seq)
 	}
 	want := []int64{resume, resume + int64(len(stream[1])+1), resume + int64(len(stream[1])+len(stream[2])+2)}
-	f.adapter.mu.Lock()
-	froms := slices.Clone(f.adapter.froms)
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	froms := slices.Clone(f.plugin.froms)
+	f.plugin.mu.Unlock()
 	if !slices.Equal(seqs, want) || !slices.Equal(froms, []int64{resume}) {
 		t.Fatalf("chunks at %v followed from %v, want each line from %d once: %v", seqs, froms, resume, want)
 	}
@@ -710,7 +710,7 @@ func TestAdoptionReadFailureReleases(t *testing.T) {
 	if status := f.receiver.execute(f.ctx, f.service.Admin, record, admitted, 2); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
-	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
+	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 {
 		t.Fatalf("adoption read failure dispatched %d jobs", dispatches)
 	}
 }
@@ -807,10 +807,10 @@ func TestFencedStartFailureLeavesTheJob(t *testing.T) {
 	if status := zombie.startFailure(f.ctx, "dispatch", "profile nomad created no job"); status != 0 {
 		t.Fatalf("fenced start failure returned ack %v, want 0 (no acknowledgement)", status)
 	}
-	f.adapter.mu.Lock()
-	defer f.adapter.mu.Unlock()
-	if f.adapter.purges != 0 {
-		t.Fatalf("fenced holder purged %d times, want 0", f.adapter.purges)
+	f.plugin.mu.Lock()
+	defer f.plugin.mu.Unlock()
+	if f.plugin.purges != 0 {
+		t.Fatalf("fenced holder purged %d times, want 0", f.plugin.purges)
 	}
 }
 
@@ -824,16 +824,16 @@ func TestStartFailureWriteDenialEntersDenial(t *testing.T) {
 	if !f.receiver.holds(capWrite) || !strings.Contains(f.logs.String(), "run run-a: write failed") {
 		t.Fatalf("a start failure that could not be written was not denied and logged; logs:\n%s", f.logs.String())
 	}
-	f.adapter.mu.Lock()
-	defer f.adapter.mu.Unlock()
-	if f.adapter.purges != 0 {
-		t.Fatalf("purged %d times without a committed start failure, want 0", f.adapter.purges)
+	f.plugin.mu.Lock()
+	defer f.plugin.mu.Unlock()
+	if f.plugin.purges != 0 {
+		t.Fatalf("purged %d times without a committed start failure, want 0", f.plugin.purges)
 	}
 }
 
 func TestFollowErrorReasonIsFixed(t *testing.T) {
 	f := newFixture(t, nil)
-	f.adapter.followErr = errors.New("upstream detail")
+	f.plugin.followErr = errors.New("upstream detail")
 	task := runToTask(t, f)
 	if got := task.Artifacts[0].Parts[0].Text; got != "log stream failed" {
 		t.Fatalf("result reason %q, want fixed reason", got)
@@ -854,7 +854,7 @@ func shortLock(f fixture, lock time.Duration) {
 
 func TestFollowLinkLossResumesFromOffset(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.adapter.linkLost = 1
+	f.plugin.linkLost = 1
 	f.answer(t, credentialName)
 	f.submit(t, f.host, nil)
 	if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
@@ -863,9 +863,9 @@ func TestFollowLinkLossResumesFromOffset(t *testing.T) {
 	if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
 		t.Fatalf("task %#v after a lost plugin link; want the run completed; logs:\n%s", task.Status, f.logs.String())
 	}
-	f.adapter.mu.Lock()
-	froms := f.adapter.froms
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	froms := f.plugin.froms
+	f.plugin.mu.Unlock()
 	first := int64(len(resultStream[0]) + 1)
 	if !slices.Equal(froms, []int64{0, first}) {
 		t.Fatalf("follows from %v; want 0, then the offset after the line taken before the loss", froms)
@@ -881,7 +881,7 @@ func TestFollowLinkLossResumesFromOffset(t *testing.T) {
 
 func TestFollowLinkLossFailsAfterOneLockDuration(t *testing.T) {
 	f := newFixture(t, noResultStream)
-	f.adapter.linkLost = 1 << 20
+	f.plugin.linkLost = 1 << 20
 	shortLock(f, 2*time.Second)
 	f.answer(t, credentialName)
 	f.submit(t, f.host, nil)
@@ -902,7 +902,7 @@ func TestFollowLinkLossFailsAfterOneLockDuration(t *testing.T) {
 	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "log stream failed" {
 		t.Fatalf("terminal %s %q; want FAILED log stream failed", state, reason)
 	}
-	if _, _, follows, _ := f.adapter.counts(); follows < 2 {
+	if _, _, follows, _ := f.plugin.counts(); follows < 2 {
 		t.Fatalf("followed %d times; want retries before failing", follows)
 	}
 }
@@ -910,7 +910,7 @@ func TestFollowLinkLossFailsAfterOneLockDuration(t *testing.T) {
 func TestOversizedDispatchIsLoggedByName(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	f.adapter.dispatchErr = adapter.ErrMessageTooLarge
+	f.plugin.dispatchErr = pluginsdk.ErrMessageTooLarge
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v", status)
 	}
@@ -923,7 +923,7 @@ func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 	const secret = "token=s3cr3t-dispatch-detail"
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	f.adapter.dispatchErr = errors.New(secret)
+	f.plugin.dispatchErr = errors.New(secret)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v", status)
 	}
@@ -942,7 +942,7 @@ func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 func TestDispatchErrorIsLoggedRedacted(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	f.adapter.dispatchErr = &adapter.Error{Op: "write variable nomad/jobs/agent-run-a-t1", Class: "denied", Err: errors.New("status 403: echoed " + testToken)}
+	f.plugin.dispatchErr = &pluginsdk.Error{Op: "write variable nomad/jobs/agent-run-a-t1", Class: "denied", Err: errors.New("status 403: echoed " + testToken)}
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v", status)
 	}
@@ -952,26 +952,26 @@ func TestDispatchErrorIsLoggedRedacted(t *testing.T) {
 	}
 }
 
-func TestAdapterErrorLogsAreRedacted(t *testing.T) {
-	failure := &adapter.Error{Op: "deregister job", Class: "conflict", Err: errors.New("echoed " + testToken)}
+func TestPluginErrorLogsAreRedacted(t *testing.T) {
+	failure := &pluginsdk.Error{Op: "deregister job", Class: "conflict", Err: errors.New("echoed " + testToken)}
 	for _, test := range []struct {
 		name string
 		call func(*testing.T, fixture, *activeRun)
 	}{
 		{"stop on result", func(t *testing.T, f fixture, run *activeRun) {
-			f.adapter.stopErr = failure
-			run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true})
+			f.plugin.stopErr = failure
+			run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true})
 		}},
 		{"stop on failure", func(t *testing.T, f fixture, run *activeRun) {
-			f.adapter.stopErr = failure
-			run.stopAndFail(f.ctx, adapter.Handle{}, "timeout", nil)
+			f.plugin.stopErr = failure
+			run.stopAndFail(f.ctx, pluginsdk.Handle{}, "timeout", nil)
 		}},
 		{"stop on denial", func(t *testing.T, f fixture, run *activeRun) {
-			f.adapter.stopErr = failure
-			run.deny(f.ctx, adapter.Handle{}, nil)
+			f.plugin.stopErr = failure
+			run.deny(f.ctx, pluginsdk.Handle{}, nil)
 		}},
 		{"release", func(t *testing.T, f fixture, run *activeRun) {
-			f.adapter.releaseErr = failure
+			f.plugin.releaseErr = failure
 			run.release(f.ctx)
 		}},
 	} {
@@ -982,14 +982,14 @@ func TestAdapterErrorLogsAreRedacted(t *testing.T) {
 			test.call(t, f, run)
 			want := "op=deregister job class=conflict: echoed " + signed.RedactionMarker(testRedactionKey, credentialName) + "\n"
 			if logs := f.logs.String(); !strings.Contains(logs, want) || strings.Contains(logs, testToken) {
-				t.Fatalf("adapter error log lacks %q or holds the credential: %q", want, logs)
+				t.Fatalf("plugin error log lacks %q or holds the credential: %q", want, logs)
 			}
 		})
 	}
 }
 
-func TestAdapterErrorWithoutClassLogsNoClass(t *testing.T) {
-	if got := logText((&Receiver{}).redactLive, &adapter.Error{Op: "read allocation", Err: errors.New("not found")}); got != "op=read allocation: not found" {
+func TestPluginErrorWithoutClassLogsNoClass(t *testing.T) {
+	if got := logText((&Receiver{}).redactLive, &pluginsdk.Error{Op: "read allocation", Err: errors.New("not found")}); got != "op=read allocation: not found" {
 		t.Fatalf("logText = %q", got)
 	}
 }
@@ -997,26 +997,26 @@ func TestAdapterErrorWithoutClassLogsNoClass(t *testing.T) {
 // An adopter looks the job up before any seal gives it values to redact.
 func TestLookupErrorIsLogged(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.adapter.lookupErr = &adapter.Error{Op: "read job", Class: "unavailable", Err: errors.New("connection refused")}
+	f.plugin.lookupErr = &pluginsdk.Error{Op: "read job", Class: "unavailable", Err: errors.New("connection refused")}
 	f.execute(t, f.submit(t, f.host, nil), 2)
 	if logs := f.logs.String(); !strings.Contains(logs, "lookup in profile "+f.receiver.profiles[0].Name+": op=read job class=unavailable: connection refused\n") {
 		t.Fatalf("lookup error not logged: %q", logs)
 	}
 }
 
-// outcomeOutput is an outcome file the job leaves, streamed as an adapter streams it.
-func outcomeOutput(data string) adapter.Output {
-	return adapter.Output{Name: wire.OutcomeFile, Size: int64(len(data)), Body: io.NopCloser(strings.NewReader(data))}
+// outcomeOutput is an outcome file the job leaves, streamed as a plugin streams it.
+func outcomeOutput(data string) pluginsdk.Output {
+	return pluginsdk.Output{Name: wire.OutcomeFile, Size: int64(len(data)), Body: io.NopCloser(strings.NewReader(data))}
 }
 
 func TestOutcomeFileEndsTheRun(t *testing.T) {
 	outcome := func(state, role, parts string) string {
 		return `{"state":"` + state + `","message":{"role":"` + role + `","parts":[` + parts + `]}}`
 	}
-	exited, killed := &adapter.Terminal{Started: true, ExitCode: 3}, &adapter.Terminal{Started: true, ExitCode: 137, Signal: "SIGKILL"}
+	exited, killed := &pluginsdk.Terminal{Started: true, ExitCode: 3}, &pluginsdk.Terminal{Started: true, ExitCode: 137, Signal: "SIGKILL"}
 	for _, test := range []struct {
 		name     string
-		terminal *adapter.Terminal
+		terminal *pluginsdk.Terminal
 		outcome  string
 		state    wire.TaskState
 		message  string
@@ -1036,11 +1036,11 @@ func TestOutcomeFileEndsTheRun(t *testing.T) {
 		{name: "auth required without its credential", outcome: outcome("TASK_STATE_AUTH_REQUIRED", "ROLE_AGENT", `{"text":"the token expired"}`), state: wire.TaskStateFailed, message: "agent reported no outcome", ack: kgo.AckReject},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fake := &fakeAdapter{stream: noResultStream, ended: test.terminal}
+			fake := &fakePlugin{stream: noResultStream, ended: test.terminal}
 			if test.outcome != "" {
-				fake.outputs = []adapter.Output{outcomeOutput(test.outcome)}
+				fake.outputs = []pluginsdk.Output{outcomeOutput(test.outcome)}
 			}
-			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": fake})
+			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
 			f.answer(t, credentialName)
 			if ack := f.execute(t, f.submit(t, f.host, nil), 1); ack != test.ack {
 				t.Fatalf("ack %v, want %v", ack, test.ack)
@@ -1059,17 +1059,17 @@ func TestOutcomeFileEndsTheRun(t *testing.T) {
 			if result := task.Artifacts[0].Parts[0].Text; result != strings.Split(test.message, "\n")[0] {
 				t.Fatalf("result %q, want the message's text", result)
 			}
-			f.adapter.mu.Lock()
-			defer f.adapter.mu.Unlock()
-			if f.adapter.collects != 1 || f.adapter.stops != 1 {
-				t.Fatalf("collects %d stops %d, want the job stopped and its outputs collected once", f.adapter.collects, f.adapter.stops)
+			f.plugin.mu.Lock()
+			defer f.plugin.mu.Unlock()
+			if f.plugin.collects != 1 || f.plugin.stops != 1 {
+				t.Fatalf("collects %d stops %d, want the job stopped and its outputs collected once", f.plugin.collects, f.plugin.stops)
 			}
 		})
 	}
 }
 
 func TestOutcomeFileIsNotAnOutput(t *testing.T) {
-	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream, outputs: []adapter.Output{
+	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, outputs: []pluginsdk.Output{
 		{Name: wire.OutcomeDir + "/notes.md", Size: 5, Data: []byte("notes")}, {Name: "report.md", Size: 6, Data: []byte("report")},
 	}}})
 	f.answer(t, credentialName)
@@ -1086,10 +1086,10 @@ func TestOutcomeFileIsNotAnOutput(t *testing.T) {
 			t.Fatalf("output %s published", output.ArtifactUpdate.Artifact.ArtifactID)
 		}
 	}
-	f.adapter.mu.Lock()
-	defer f.adapter.mu.Unlock()
-	if !slices.Contains(f.adapter.limits.Stream, wire.OutcomeFile) {
-		t.Fatalf("collect limits %+v, want the outcome file streamed outside the output limits", f.adapter.limits)
+	f.plugin.mu.Lock()
+	defer f.plugin.mu.Unlock()
+	if !slices.Contains(f.plugin.limits.Stream, wire.OutcomeFile) {
+		t.Fatalf("collect limits %+v, want the outcome file streamed outside the output limits", f.plugin.limits)
 	}
 }
 
@@ -1103,7 +1103,7 @@ func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			outcome := `{"state":"TASK_STATE_AUTH_REQUIRED","message":{"role":"ROLE_AGENT","parts":[{"text":"` + test.text + `"},{"data":{"credential":"cred-lab"}}]}}`
-			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: noResultStream, outputs: []adapter.Output{outcomeOutput(outcome)}}})
+			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, outputs: []pluginsdk.Output{outcomeOutput(outcome)}}})
 			f.answer(t, credentialName)
 			f.execute(t, f.submit(t, f.host, nil), 1)
 			task := f.lastTask(t)
@@ -1128,7 +1128,7 @@ func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
 // An agent's text that escaping would lengthen past its base64 form travels raw in the status message, as in the result.
 func TestOutcomeMessageTravelsRawWhenEscapingGrowsIt(t *testing.T) {
 	text := strings.Repeat(`\u0001`, 64)
-	f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: noResultStream, outputs: []adapter.Output{
+	f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, outputs: []pluginsdk.Output{
 		outcomeOutput(`{"state":"TASK_STATE_FAILED","message":{"role":"ROLE_AGENT","parts":[{"text":"` + text + `"}]}}`),
 	}}})
 	f.answer(t, credentialName)
@@ -1163,7 +1163,7 @@ func TestReceiverRoutesToMatchedProfile(t *testing.T) {
 func TestReceiverRedeliveryAdoptsViaLookup(t *testing.T) {
 	m := newMultiFixture(t)
 	m.answer(t, "cred-cloud")
-	m.cloud.job = adapter.JobRunning
+	m.cloud.job = pluginsdk.JobRunning
 	if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -1185,7 +1185,7 @@ func TestReceiverRedeliveryAdoptsViaLookup(t *testing.T) {
 
 func TestReceiverFirstAttemptSkipsLookup(t *testing.T) {
 	m := newMultiFixture(t)
-	m.cloud.job = adapter.JobRunning
+	m.cloud.job = pluginsdk.JobRunning
 	if status := m.execute(t, "run-first", cpu, 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -1196,19 +1196,19 @@ func TestReceiverFirstAttemptSkipsLookup(t *testing.T) {
 	}
 }
 
-// Every adapter of an agent delivers the agent's credentials, each at the target the pool's terms give it.
+// Every plugin profile of an agent delivers the agent's credentials, each at the target the pool's terms give it.
 func TestReceiverDeliversTheAgentsCredentialsInEveryProfile(t *testing.T) {
 	m := newMultiFixture(t)
-	want := []adapter.Secret{{Name: credentialName, Env: credentialEnv, Value: []byte(testToken)}}
+	want := []pluginsdk.Secret{{Name: credentialName, Env: credentialEnv, Value: []byte(testToken)}}
 	for _, routed := range []struct {
 		run      string
 		selector []wire.Requirement
-		adapter  *fakeAdapter
+		plugin   *fakePlugin
 	}{{"run-lab", cpu, m.lab}, {"run-edge", arm, m.edge}} {
 		if status := m.execute(t, routed.run, routed.selector, 1); status != kgo.AckAccept {
 			t.Fatalf("%s status %v", routed.run, status)
 		}
-		if got := routed.adapter.lastRun.Credentials; !reflect.DeepEqual(got, want) {
+		if got := routed.plugin.lastRun.Credentials; !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s dispatched %d credentials, want the agent's at its environment variable", routed.run, len(got))
 		}
 	}
@@ -1219,12 +1219,12 @@ func TestReceiverDeliversTheAgentsCredentialsInEveryProfile(t *testing.T) {
 
 func TestShutdownCommitsHeldTranscriptLine(t *testing.T) {
 	f := newFixture(t, noResultStream)
-	f.adapter.endDelay = 30 * time.Second
+	f.plugin.endDelay = 30 * time.Second
 	ctx, shutdown := context.WithCancel(f.ctx)
 	done := startInFlight(t, f, ctx, "run-shutdown")
-	for f.adapter.deliveredCount() == 0 {
+	for f.plugin.deliveredCount() == 0 {
 		if f.ctx.Err() != nil {
-			t.Fatalf("the adapter never delivered the line; logs:\n%s", f.logs.String())
+			t.Fatalf("the plugin never delivered the line; logs:\n%s", f.logs.String())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -1240,7 +1240,7 @@ func TestShutdownCommitsHeldTranscriptLine(t *testing.T) {
 	t.Fatalf("the transcript line held for the next commit was lost at shutdown; logs:\n%s", f.logs.String())
 }
 
-// shutdownAt cancels the receiver as its run's status of kind is produced, once the adapter has delivered a line, so
+// shutdownAt cancels the receiver as its run's status of kind is produced, once the plugin has delivered a line, so
 // the shutdown lands while that status's commit is in flight.
 type shutdownAt struct {
 	f        fixture
@@ -1254,7 +1254,7 @@ func (h shutdownAt) OnProduceRecordBuffered(record *kgo.Record) {
 	if !progress && (wire.ParseRecord(record.Value, h.f.keys(), &status) != nil || status.Wherry.Kind != h.kind) {
 		return
 	}
-	for h.f.adapter.deliveredCount() == 0 && h.f.ctx.Err() == nil {
+	for h.f.plugin.deliveredCount() == 0 && h.f.ctx.Err() == nil {
 		time.Sleep(10 * time.Millisecond)
 	}
 	h.shutdown()
@@ -1264,7 +1264,7 @@ func TestShutdownDuringACommitCommitsTheDeliveredLine(t *testing.T) {
 	for _, kind := range []string{"started", "progress"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newFixture(t, noResultStream)
-			f.adapter.endDelay = 30 * time.Second
+			f.plugin.endDelay = 30 * time.Second
 			ctx, shutdown := context.WithCancel(f.ctx)
 			base, err := kgo.NewClient(append(f.receiver.base.Opts(), kgo.WithHooks(shutdownAt{f, kind, shutdown}))...)
 			if err != nil {
@@ -1348,7 +1348,7 @@ func TestDenialStopsClaimingAndAccessResumesIt(t *testing.T) {
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
 	})
 	time.Sleep(2 * time.Second)
-	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 1 {
+	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 1 {
 		t.Fatalf("dispatches %d while denied, want only the task before it", dispatches)
 	}
 	// Access returning resumes claiming.
@@ -1371,7 +1371,7 @@ func TestDeniedReceiverDoesNotClaim(t *testing.T) {
 	defer stop()
 	// The broker still grants access: only the held denial keeps the receiver from claiming.
 	f.receiver.claimLoop(ctx, ctx, func() {})
-	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 || len(f.records(t, admin.PoolEventsTopic(testPool))) != 0 {
+	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 || len(f.records(t, admin.PoolEventsTopic(testPool))) != 0 {
 		t.Fatalf("a denied receiver claimed: dispatches %d", dispatches)
 	}
 	if record, delivered := f.pollPool(t, "run-a", 5*time.Second); !delivered || record.DeliveryCount() != 1 {
@@ -1381,7 +1381,7 @@ func TestDeniedReceiverDoesNotClaim(t *testing.T) {
 
 func TestDeniedReceiverStopsInFlightRunsAfterOneLockInterval(t *testing.T) {
 	f := newFixture(t, noResultStream)
-	f.adapter.endDelay = 30 * time.Second
+	f.plugin.endDelay = 30 * time.Second
 	// kfake refuses a share lock below its minimum; the receiver reads the interval from the terms it folded.
 	f.receiver.mu.Lock()
 	terms := f.receiver.state.Pools[testPool]
@@ -1402,9 +1402,9 @@ func TestDeniedReceiverStopsInFlightRunsAfterOneLockInterval(t *testing.T) {
 	if waited := time.Since(deniedAt); waited < 2*time.Second {
 		t.Fatalf("run stopped %s after the denial, before one lock interval", waited)
 	}
-	f.adapter.mu.Lock()
-	stops, releaseIDs := f.adapter.stops, f.adapter.releaseIDs
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	stops, releaseIDs := f.plugin.stops, f.plugin.releaseIDs
+	f.plugin.mu.Unlock()
 	if stops != 1 || !slices.Equal(releaseIDs, []string{"run-denied"}) {
 		t.Fatalf("stops=%d releases=%v", stops, releaseIDs)
 	}
@@ -1420,7 +1420,7 @@ func TestResultAfterLastingDenialReleasesTask(t *testing.T) {
 	f.receiver.mu.Lock()
 	f.receiver.deniedSince = time.Now().Add(-time.Hour)
 	f.receiver.mu.Unlock()
-	if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != kgo.AckRelease {
+	if status := run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true}); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release: an untrusted result must not end the task", status)
 	}
 	if state, reason := terminalReason(t, f, "run-denied-result"); state != wire.TaskStateFailed || reason != "receiver denied" {
@@ -1510,10 +1510,10 @@ func TestAmbiguousCommitReadBack(t *testing.T) {
 				}
 				return kerr.RequestTimedOut
 			}
-			if status := run.conclude(f.ctx, adapter.Handle{}, nil, adapter.Terminal{Started: true}); status != test.ack {
+			if status := run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true}); status != test.ack {
 				t.Fatalf("status %v, want %v; logs:\n%s", status, test.ack, f.logs.String())
 			}
-			if _, _, _, releases := f.adapter.counts(); releases != test.releases {
+			if _, _, _, releases := f.plugin.counts(); releases != test.releases {
 				t.Fatalf("releases %d, want %d", releases, test.releases)
 			}
 			terminals := 0
@@ -1569,37 +1569,37 @@ func TestAmbiguousDispatchAdoptsTheExistingJob(t *testing.T) {
 	t.Run("lookup finds it", func(t *testing.T) {
 		f := newFixture(t, resultStream)
 		f.answer(t, credentialName)
-		f.adapter.dispatchErr = errors.New("register response lost")
-		f.adapter.job = adapter.JobRunning
+		f.plugin.dispatchErr = errors.New("register response lost")
+		f.plugin.job = pluginsdk.JobRunning
 		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
 			t.Fatalf("status %v, want the existing job followed to its result", status)
 		}
-		f.adapter.mu.Lock()
-		defer f.adapter.mu.Unlock()
-		if f.adapter.dispatches != 1 || f.adapter.follows != 1 || f.adapter.purges != 0 {
-			t.Fatalf("dispatches=%d follows=%d purges=%d", f.adapter.dispatches, f.adapter.follows, f.adapter.purges)
+		f.plugin.mu.Lock()
+		defer f.plugin.mu.Unlock()
+		if f.plugin.dispatches != 1 || f.plugin.follows != 1 || f.plugin.purges != 0 {
+			t.Fatalf("dispatches=%d follows=%d purges=%d", f.plugin.dispatches, f.plugin.follows, f.plugin.purges)
 		}
 	})
 	t.Run("redelivery finds it", func(t *testing.T) {
 		f := newFixture(t, resultStream)
 		f.answer(t, credentialName)
-		f.adapter.dispatchErr = errors.New("register response lost")
-		f.adapter.lookupErr = errors.New("lookup failed")
+		f.plugin.dispatchErr = errors.New("register response lost")
+		f.plugin.lookupErr = errors.New("lookup failed")
 		record := f.submit(t, f.host, nil)
 		if status := f.execute(t, record, 1); status != kgo.AckRelease {
 			t.Fatalf("unresolved dispatch status %v, want release", status)
 		}
-		f.adapter.mu.Lock()
-		lookups, purges, releases := f.adapter.lookups, f.adapter.purges, f.adapter.releases
-		f.adapter.lookupErr, f.adapter.job = nil, adapter.JobRunning
-		f.adapter.mu.Unlock()
+		f.plugin.mu.Lock()
+		lookups, purges, releases := f.plugin.lookups, f.plugin.purges, f.plugin.releases
+		f.plugin.lookupErr, f.plugin.job = nil, pluginsdk.JobRunning
+		f.plugin.mu.Unlock()
 		if lookups != 3 || purges != 0 || releases != 0 || len(f.startFailures(t)) != 0 {
 			t.Fatalf("lookups=%d purges=%d releases=%d start failures=%d; want three lookups and nothing removed", lookups, purges, releases, len(f.startFailures(t)))
 		}
 		if status := f.execute(t, record, 2); status != kgo.AckAccept {
 			t.Fatalf("redelivery status %v, want the job adopted", status)
 		}
-		if dispatches, _, follows, _ := f.adapter.counts(); dispatches != 1 || follows != 1 {
+		if dispatches, _, follows, _ := f.plugin.counts(); dispatches != 1 || follows != 1 {
 			t.Fatalf("dispatches=%d follows=%d, want the one job adopted", dispatches, follows)
 		}
 	})
@@ -1614,9 +1614,9 @@ func TestReturnTaskAtTheBudgetFailsWithoutRemoving(t *testing.T) {
 	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "delivery budget exhausted" {
 		t.Fatalf("terminal %s %q", state, reason)
 	}
-	f.adapter.mu.Lock()
-	calls := f.adapter.calls
-	f.adapter.mu.Unlock()
+	f.plugin.mu.Lock()
+	calls := f.plugin.calls
+	f.plugin.mu.Unlock()
 	if len(calls) != 0 {
 		t.Fatalf("calls %v, want the job and material left in place", calls)
 	}
@@ -1627,13 +1627,13 @@ func TestReturnTaskAtTheBudgetFailsWithoutRemoving(t *testing.T) {
 }
 
 func TestMismatchedJobIsPurgedNotAdopted(t *testing.T) {
-	for name, mismatch := range map[string]func(*fakeAdapter){
-		"profile": func(adapter *fakeAdapter) { adapter.jobProfile = "renamed" },
-		"agent":   func(adapter *fakeAdapter) { adapter.jobAgent = "codex" },
+	for name, mismatch := range map[string]func(*fakePlugin){
+		"profile": func(plugin *fakePlugin) { plugin.jobProfile = "renamed" },
+		"agent":   func(plugin *fakePlugin) { plugin.jobAgent = "codex" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := newMultiFixture(t)
-			m.cloud.job = adapter.JobRunning
+			m.cloud.job = pluginsdk.JobRunning
 			mismatch(m.cloud)
 			if status := m.execute(t, "run-mismatch", cpu, 2); status != kgo.AckAccept {
 				t.Fatalf("status %v", status)
@@ -1657,7 +1657,7 @@ func TestMismatchedJobIsPurgedNotAdopted(t *testing.T) {
 func TestNeverStartedJobIsAPlatformStartFailure(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	f.adapter.job = adapter.JobNeverStarted
+	f.plugin.job = pluginsdk.JobNeverStarted
 	if status := f.execute(t, f.submit(t, f.host, nil), 2); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
@@ -1667,7 +1667,7 @@ func TestNeverStartedJobIsAPlatformStartFailure(t *testing.T) {
 	if kinds := f.kinds(t); slices.Contains(kinds, "started") {
 		t.Fatalf("statuses %v, want no started status for a job that never started", kinds)
 	}
-	if dispatches, _, follows, _ := f.adapter.counts(); dispatches != 0 || follows != 0 {
+	if dispatches, _, follows, _ := f.plugin.counts(); dispatches != 0 || follows != 0 {
 		t.Fatalf("dispatches=%d follows=%d, want neither", dispatches, follows)
 	}
 }
@@ -1681,7 +1681,7 @@ func TestNeverStartedReasonIsLoggedRedacted(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.adapter.stream, f.adapter.neverStarted, f.adapter.neverReason = nil, true, test.reason
+			f.plugin.stream, f.plugin.neverStarted, f.plugin.neverReason = nil, true, test.reason
 			f.answer(t, credentialName)
 			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 				t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
@@ -1701,16 +1701,16 @@ func TestStartReasonIsRedactedOnOneBoundedLine(t *testing.T) {
 	marker := signed.RedactionMarker(testRedactionKey, credentialName)
 	for _, test := range []struct {
 		name     string
-		terminal adapter.Terminal
+		terminal pluginsdk.Terminal
 		want     string
 	}{
-		{"credential", adapter.Terminal{Class: "validation", Reason: "rendered " + testToken}, ": rendered " + marker},
-		{"url", adapter.Terminal{Class: "driver", Reason: `Head "https://registry.example/v2/x?token=abc": no such host`}, `: Head "[redacted-url] no such host`},
-		{"newlines", adapter.Terminal{Class: "validation", Reason: "1 error occurred:\r\n* bad"}, ": 1 error occurred:  * bad"},
-		{"fetch", adapter.Terminal{Class: adapter.ClassFetch, Reason: `error downloading "s3::bucket/object?X-Amz-Signature=abc"`}, ": [omitted]"},
-		{"cap", adapter.Terminal{Class: "driver", Reason: strings.Repeat("x", 2048)}, ": " + strings.Repeat("x", maxLogText)},
-		{"cap after redaction", adapter.Terminal{Class: "driver", Reason: strings.Repeat("x", maxLogText-10) + testToken}, ": " + (strings.Repeat("x", maxLogText-10) + marker)[:maxLogText]},
-		{"empty", adapter.Terminal{Class: "driver"}, ""},
+		{"credential", pluginsdk.Terminal{Class: "validation", Reason: "rendered " + testToken}, ": rendered " + marker},
+		{"url", pluginsdk.Terminal{Class: "driver", Reason: `Head "https://registry.example/v2/x?token=abc": no such host`}, `: Head "[redacted-url] no such host`},
+		{"newlines", pluginsdk.Terminal{Class: "validation", Reason: "1 error occurred:\r\n* bad"}, ": 1 error occurred:  * bad"},
+		{"fetch", pluginsdk.Terminal{Class: pluginsdk.ClassFetch, Reason: `error downloading "s3::bucket/object?X-Amz-Signature=abc"`}, ": [omitted]"},
+		{"cap", pluginsdk.Terminal{Class: "driver", Reason: strings.Repeat("x", 2048)}, ": " + strings.Repeat("x", maxLogText)},
+		{"cap after redaction", pluginsdk.Terminal{Class: "driver", Reason: strings.Repeat("x", maxLogText-10) + testToken}, ": " + (strings.Repeat("x", maxLogText-10) + marker)[:maxLogText]},
+		{"empty", pluginsdk.Terminal{Class: "driver"}, ""},
 	} {
 		if got := run.startReason(test.terminal); got != test.want {
 			t.Errorf("%s: reason %q, want %q", test.name, got, test.want)
@@ -1722,18 +1722,18 @@ func TestStartReasonIsRedactedOnOneBoundedLine(t *testing.T) {
 // credentials redacted.
 func TestPluginOutputIsRedactedAgainstLiveRuns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wherry-plugin-fake")
-	if output, err := exec.Command("go", "build", "-o", path, "github.com/benemon/wherry/adapter/internal/testplugin").CombinedOutput(); err != nil {
+	if output, err := exec.Command("go", "build", "-o", path, "github.com/benemon/wherry/pluginsdk/internal/testplugin").CombinedOutput(); err != nil {
 		t.Fatalf("build test plugin: %v\n%s", err, output)
 	}
 	f := newFixture(t, resultStream)
 	testActiveRun(t, f, "run-a", 1).deliver(map[string][]byte{credentialName: []byte(testToken)})
 	logs := &syncBuffer{}
-	plugin, err := adapter.Launch(func() (string, error) { return path, nil }, f.receiver.PluginLogs(logs))
+	plugin, err := pluginsdk.Launch(func() (string, error) { return path, nil }, f.receiver.PluginLogs(logs))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(plugin.Close)
-	if _, err := plugin.Configure(adapter.Settings{Name: "lab", Pool: testPool, Agent: "claude", Config: []byte(`{"log":"` + testToken + `"}`)}); err != nil {
+	if _, err := plugin.Configure(pluginsdk.Settings{Name: "lab", Pool: testPool, Agent: "claude", Config: []byte(`{"log":"` + testToken + `"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	marker := signed.RedactionMarker(testRedactionKey, credentialName)
@@ -1751,7 +1751,7 @@ func TestPluginOutputIsRedactedAgainstLiveRuns(t *testing.T) {
 	}
 }
 
-// A run whose adapter fails to start on every attempt ends naming the last failure, with the credentials of every live
+// A run whose plugin fails to start on every attempt ends naming the last failure, with the credentials of every live
 // run redacted, on one bounded line.
 func TestBudgetExhaustedByStartFailuresNamesTheLastCause(t *testing.T) {
 	const otherToken = "ghp-other-run-credential-never-logged"
@@ -1767,9 +1767,9 @@ func TestBudgetExhaustedByStartFailuresNamesTheLastCause(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			terms := testTerms()
 			terms.DeliveryLimit = 5
-			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {}})
+			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {}})
 			testActiveRun(t, f, "run-b", 1).deliver(map[string][]byte{"github-token": []byte(otherToken)})
-			f.adapter.neverStarted, f.adapter.neverReason = true, test.reason
+			f.plugin.neverStarted, f.plugin.neverReason = true, test.reason
 			f.answer(t, credentialName)
 			record := f.submit(t, f.host, nil)
 			for attempt := int64(1); attempt <= 4; attempt++ {
@@ -1795,13 +1795,13 @@ func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 		class   string
 		setup   func(*testing.T, fixture)
 	}{
-		{"nothing created", 1, "dispatch", func(t *testing.T, f fixture) { f.adapter.outcome = adapter.OutcomeNothingCreated }},
-		{"unknown and absent", 1, "dispatch", func(t *testing.T, f fixture) { f.adapter.dispatchErr = errors.New("register failed") }},
+		{"nothing created", 1, "dispatch", func(t *testing.T, f fixture) { f.plugin.outcome = pluginsdk.OutcomeNothingCreated }},
+		{"unknown and absent", 1, "dispatch", func(t *testing.T, f fixture) { f.plugin.dispatchErr = errors.New("register failed") }},
 		{"unknown and never started", 1, "platform", func(t *testing.T, f fixture) {
-			f.adapter.dispatchErr, f.adapter.job = errors.New("wait failed"), adapter.JobNeverStarted
+			f.plugin.dispatchErr, f.plugin.job = errors.New("wait failed"), pluginsdk.JobNeverStarted
 		}},
-		{"adopted never started", 2, "platform", func(t *testing.T, f fixture) { f.adapter.job = adapter.JobNeverStarted }},
-		{"followed never started", 1, "platform", func(t *testing.T, f fixture) { f.adapter.stream, f.adapter.neverStarted = nil, true }},
+		{"adopted never started", 2, "platform", func(t *testing.T, f fixture) { f.plugin.job = pluginsdk.JobNeverStarted }},
+		{"followed never started", 1, "platform", func(t *testing.T, f fixture) { f.plugin.stream, f.plugin.neverStarted = nil, true }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
@@ -1813,9 +1813,9 @@ func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 			if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != test.class {
 				t.Fatalf("start failures %#v, want one %s", failures, test.class)
 			}
-			f.adapter.mu.Lock()
-			calls := f.adapter.calls
-			f.adapter.mu.Unlock()
+			f.plugin.mu.Lock()
+			calls := f.plugin.calls
+			f.plugin.mu.Unlock()
 			if !slices.Equal(calls, []string{"purge", "release"}) {
 				t.Fatalf("calls %v, want purge then release", calls)
 			}
@@ -1826,14 +1826,14 @@ func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 func TestPurgeRetriedUntilItSucceeds(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	f.adapter.outcome, f.adapter.purgeFailures = adapter.OutcomeNothingCreated, 2
+	f.plugin.outcome, f.plugin.purgeFailures = pluginsdk.OutcomeNothingCreated, 2
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
-	f.adapter.mu.Lock()
-	defer f.adapter.mu.Unlock()
-	if f.adapter.purges != 3 || f.adapter.releases != 1 {
-		t.Fatalf("purges=%d releases=%d, want 3 and 1", f.adapter.purges, f.adapter.releases)
+	f.plugin.mu.Lock()
+	defer f.plugin.mu.Unlock()
+	if f.plugin.purges != 3 || f.plugin.releases != 1 {
+		t.Fatalf("purges=%d releases=%d, want 3 and 1", f.plugin.purges, f.plugin.releases)
 	}
 }
 
@@ -1843,17 +1843,17 @@ func TestPurgeFailingPastTheDeadlineFails(t *testing.T) {
 	t.Cleanup(func() { purgeDeadline = previous })
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	f.adapter.outcome, f.adapter.purgeErr = adapter.OutcomeNothingCreated, errors.New("deregister denied")
+	f.plugin.outcome, f.plugin.purgeErr = pluginsdk.OutcomeNothingCreated, errors.New("deregister denied")
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject", status)
 	}
 	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "start failed and the job could not be removed" {
 		t.Fatalf("terminal %s %q", state, reason)
 	}
-	f.adapter.mu.Lock()
-	defer f.adapter.mu.Unlock()
-	if f.adapter.purges < 3 {
-		t.Fatalf("purges %d, want retries every renew interval", f.adapter.purges)
+	f.plugin.mu.Lock()
+	defer f.plugin.mu.Unlock()
+	if f.plugin.purges < 3 {
+		t.Fatalf("purges %d, want retries every renew interval", f.plugin.purges)
 	}
 }
 
@@ -1869,7 +1869,7 @@ func TestStartFailureAtTheDeliveryBudgetFails(t *testing.T) {
 		t.Run(fmt.Sprint(test.attempt), func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.answer(t, credentialName)
-			f.adapter.outcome = adapter.OutcomeNothingCreated
+			f.plugin.outcome = pluginsdk.OutcomeNothingCreated
 			if status := f.execute(t, f.submit(t, f.host, nil), test.attempt); status != test.ack {
 				t.Fatalf("status %v, want %v", status, test.ack)
 			}
@@ -1897,20 +1897,20 @@ func TestOversizedHandleIsRejected(t *testing.T) {
 		t.Run(fmt.Sprint(test.size), func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.answer(t, credentialName)
-			f.adapter.handleSize = test.size
+			f.plugin.handleSize = test.size
 			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != test.ack {
 				t.Fatalf("status %v, want %v", status, test.ack)
 			}
 			if test.ack == kgo.AckAccept {
 				return
 			}
-			if _, _, follows, releases := f.adapter.counts(); follows != 0 || releases != 0 || slices.Contains(f.kinds(t), "started") {
+			if _, _, follows, releases := f.plugin.counts(); follows != 0 || releases != 0 || slices.Contains(f.kinds(t), "started") {
 				t.Fatalf("follows=%d releases=%d statuses %v, want the handle refused before started", follows, releases, f.kinds(t))
 			}
-			f.adapter.mu.Lock()
-			defer f.adapter.mu.Unlock()
-			if f.adapter.stops != 1 {
-				t.Fatalf("stops %d, want the job behind the refused handle stopped", f.adapter.stops)
+			f.plugin.mu.Lock()
+			defer f.plugin.mu.Unlock()
+			if f.plugin.stops != 1 {
+				t.Fatalf("stops %d, want the job behind the refused handle stopped", f.plugin.stops)
 			}
 		})
 	}
@@ -1944,12 +1944,12 @@ func TestReleasesAtTheBudgetFail(t *testing.T) {
 				return response, nil, true
 			})
 		}, false},
-		{"adoption lookup", func(t *testing.T, f fixture) { f.adapter.lookupErr = errors.New("lookup failed") }, true},
+		{"adoption lookup", func(t *testing.T, f fixture) { f.plugin.lookupErr = errors.New("lookup failed") }, true},
 		{"mismatch stop", func(t *testing.T, f fixture) {
-			f.adapter.job, f.adapter.jobAgent, f.adapter.stopErr = adapter.JobRunning, "codex", errors.New("stop failed")
+			f.plugin.job, f.plugin.jobAgent, f.plugin.stopErr = pluginsdk.JobRunning, "codex", errors.New("stop failed")
 		}, true},
 		{"mismatch purge", func(t *testing.T, f fixture) {
-			f.adapter.job, f.adapter.jobAgent, f.adapter.purgeErr = adapter.JobRunning, "codex", errors.New("purge failed")
+			f.plugin.job, f.plugin.jobAgent, f.plugin.purgeErr = pluginsdk.JobRunning, "codex", errors.New("purge failed")
 		}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1974,7 +1974,7 @@ func TestReleasesAtTheBudgetFail(t *testing.T) {
 func TestShutdownAtTheBudgetStillReleases(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	f.answer(t, credentialName)
-	f.adapter.endDelay = 30 * time.Second
+	f.plugin.endDelay = 30 * time.Second
 	record := f.submit(t, f.host, nil)
 	admitted := f.admitted(t, record)
 	ctx, shutdown := context.WithCancel(f.ctx)
@@ -1984,7 +1984,7 @@ func TestShutdownAtTheBudgetStillReleases(t *testing.T) {
 		done <- f.receiver.execute(ctx, f.service.Admin, record, admitted, int64(testTerms().DeliveryLimit)-1)
 	}()
 	for {
-		if _, _, follows, _ := f.adapter.counts(); follows > 0 {
+		if _, _, follows, _ := f.plugin.counts(); follows > 0 {
 			break
 		}
 		if f.ctx.Err() != nil {
@@ -2014,7 +2014,7 @@ func TestAdoptionMatchesTheProfileNameInJobMetadata(t *testing.T) {
 		t.Fatalf("dispatched with profile %q, want cloud", dispatched)
 	}
 	m = newMultiFixture(t)
-	m.cloud.job, m.cloud.jobProfile = adapter.JobRunning, dispatched
+	m.cloud.job, m.cloud.jobProfile = pluginsdk.JobRunning, dispatched
 	if status := m.execute(t, "run-adopted", accelerated, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -2029,8 +2029,8 @@ func TestAdoptionMatchesTheProfileNameInJobMetadata(t *testing.T) {
 func TestJobOfAnotherProfileIsLeftToIt(t *testing.T) {
 	m := newMultiFixture(t)
 	// lab and cloud share one backend: both find the job, labelled with cloud.
-	m.lab.job, m.lab.jobProfile = adapter.JobRunning, "cloud"
-	m.cloud.job = adapter.JobRunning
+	m.lab.job, m.lab.jobProfile = pluginsdk.JobRunning, "cloud"
+	m.cloud.job = pluginsdk.JobRunning
 	m.answer(t, "cred-cloud")
 	if status := m.execute(t, "run-shared", cpu, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
@@ -2049,14 +2049,14 @@ func TestJobOfAnotherProfileIsLeftToIt(t *testing.T) {
 func TestNothingCreatedSkipsReconcile(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	f.adapter.outcome = adapter.OutcomeNothingCreated
+	f.plugin.outcome = pluginsdk.OutcomeNothingCreated
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
 	if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != "dispatch" {
 		t.Fatalf("start failures %#v, want one dispatch", failures)
 	}
-	if _, lookups, _, _ := f.adapter.counts(); lookups != 0 {
-		t.Fatalf("lookups %d, want none for an outcome the adapter knows", lookups)
+	if _, lookups, _, _ := f.plugin.counts(); lookups != 0 {
+		t.Fatalf("lookups %d, want none for an outcome the plugin knows", lookups)
 	}
 }

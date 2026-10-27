@@ -36,7 +36,7 @@ Call `receivers` first. For each receiver it returns:
   the agent's credentials by `name` with `optional` and `configured`,
   whether this host has a source for each, and `ready`, whether the
   receiver's live advertisement offers it now. A live receiver
-  with no ready profile lists every profile with `ready` false, and no task
+  with no ready plugin profile lists every profile with `ready` false, and no task
   is placed on it.
 - `status` (`live`, `stale`, `silent` or `ended`), `capacity` and
   `in_flight`: whether it is live and has room.
@@ -90,7 +90,7 @@ To send files, add `inputs`: paths of regular files beneath one of the wherry
 MCP server's input roots (the directory it runs in, unless the user's wherry
 configuration lists `input_roots`), which the agent finds under their base
 names in its input directory. Inputs travel inside the task's broker record up
-to the broker's record limit and the smallest matching profile's limit. When
+to the broker's record limit and the smallest matching plugin profile's limit. When
 they would exceed either and the chosen pool has storage and the host its
 storage credential, wherry automatically carries them through S3; otherwise
 submit refuses before publishing and names the limit.

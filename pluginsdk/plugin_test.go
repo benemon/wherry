@@ -1,4 +1,4 @@
-package adapter
+package pluginsdk
 
 import (
 	"bufio"
@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter/internal/adapterv1"
+	"github.com/benemon/wherry/pluginsdk/internal/pluginv1"
 	"github.com/hashicorp/go-hclog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -38,7 +38,7 @@ const (
 var testPlugin string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "wherry-adapter-test")
+	dir, err := os.MkdirTemp("", "wherry-pluginsdk-test")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -83,7 +83,7 @@ func fixed(path string) func() (string, error) {
 }
 
 // launch starts the test plugin with a fresh record file and returns both.
-func launch(t *testing.T) (*Plugin, string, *syncBuffer) {
+func launch(t *testing.T) (*Process, string, *syncBuffer) {
 	t.Helper()
 	record := filepath.Join(t.TempDir(), "record.jsonl")
 	t.Setenv("WHERRY_TESTPLUGIN_RECORD", record)
@@ -118,7 +118,7 @@ func records(t *testing.T, path string) []recorded {
 	return all
 }
 
-func configured(t *testing.T, p *Plugin, name, config string) Adapter {
+func configured(t *testing.T, p *Process, name, config string) Plugin {
 	t.Helper()
 	a, err := p.Configure(Settings{Name: name, Pool: "pool-a", Agent: "claude", Config: []byte(config)})
 	if err != nil {
@@ -127,13 +127,13 @@ func configured(t *testing.T, p *Plugin, name, config string) Adapter {
 	return a
 }
 
-func pid(p *Plugin) int {
+func pid(p *Process) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.client.ReattachConfig().Pid
 }
 
-func kill(t *testing.T, p *Plugin) int {
+func kill(t *testing.T, p *Process) int {
 	t.Helper()
 	killed := pid(p)
 	if err := syscall.Kill(killed, syscall.SIGKILL); err != nil {
@@ -167,8 +167,8 @@ func eventually(t *testing.T, what string, check func() error) {
 func TestCallsReachTheProfileTheyName(t *testing.T) {
 	p, record, _ := launch(t)
 	a, b := configured(t, p, "a", "{}"), configured(t, p, "b", "{}")
-	for name, adapter := range map[string]Adapter{"a": a, "b": b} {
-		outcome, handle, err := adapter.Dispatch(context.Background(), Run{ID: "run-" + name, Profile: name, Agent: "claude"})
+	for name, profile := range map[string]Plugin{"a": a, "b": b} {
+		outcome, handle, err := profile.Dispatch(context.Background(), Run{ID: "run-" + name, Profile: name, Agent: "claude"})
 		if err != nil || outcome != OutcomeCreated || handle.Name != name+"/run-"+name {
 			t.Fatalf("profile %s dispatch: %v %+v %v; want its own instance's handle", name, outcome, handle, err)
 		}
@@ -309,8 +309,8 @@ func TestRestartConfiguresEveryProfile(t *testing.T) {
 		return nil
 	})
 	eventually(t, "both profiles back after the restart", func() error {
-		for _, adapter := range []Adapter{a, b} {
-			if _, _, err := adapter.Dispatch(context.Background(), Run{ID: "after"}); err != nil {
+		for _, profile := range []Plugin{a, b} {
+			if _, _, err := profile.Dispatch(context.Background(), Run{ID: "after"}); err != nil {
 				return err
 			}
 		}
@@ -389,7 +389,7 @@ func TestFollowLinkLossIsDistinct(t *testing.T) {
 }
 
 // dial connects to the plugin's socket as a party other than the receiver.
-func dial(t *testing.T, p *Plugin, creds credentials.TransportCredentials) adapterv1.AdapterClient {
+func dial(t *testing.T, p *Process, creds credentials.TransportCredentials) pluginv1.PluginClient {
 	t.Helper()
 	p.mu.Lock()
 	addr := p.client.ReattachConfig().Addr
@@ -402,7 +402,7 @@ func dial(t *testing.T, p *Plugin, creds credentials.TransportCredentials) adapt
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	return adapterv1.NewAdapterClient(conn)
+	return pluginv1.NewPluginClient(conn)
 }
 
 func TestPlaintextConnectionFails(t *testing.T) {
@@ -410,7 +410,7 @@ func TestPlaintextConnectionFails(t *testing.T) {
 	configured(t, p, "a", "{}")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := dial(t, p, insecure.NewCredentials()).Ready(ctx, &adapterv1.ReadyRequest{Profile: "a"}); status.Code(err) != codes.Unavailable {
+	if _, err := dial(t, p, insecure.NewCredentials()).Ready(ctx, &pluginv1.ReadyRequest{Profile: "a"}); status.Code(err) != codes.Unavailable {
 		t.Fatalf("plaintext call returned %v; want a refused connection", err)
 	}
 }
@@ -422,7 +422,7 @@ func TestTLSWithoutClientCertificateFails(t *testing.T) {
 	defer cancel()
 	// The server's certificate is accepted, so only the missing client certificate can fail the call.
 	creds := credentials.NewTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
-	if _, err := dial(t, p, creds).Ready(ctx, &adapterv1.ReadyRequest{Profile: "a"}); status.Code(err) != codes.Unavailable {
+	if _, err := dial(t, p, creds).Ready(ctx, &pluginv1.ReadyRequest{Profile: "a"}); status.Code(err) != codes.Unavailable {
 		t.Fatalf("call without a client certificate returned %v; want a refused connection", err)
 	}
 }
@@ -494,8 +494,8 @@ func TestMetricsCrossTheLink(t *testing.T) {
 	p, _, _ := launch(t)
 	samples, err := configured(t, p, "a", "{}").Metrics(context.Background())
 	want := []Sample{
-		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"profile": "a"}, Kind: KindGauge, Value: 2},
-		{Family: "wherry_adapter_placement_seconds", Kind: KindHistogram, Histogram: Histogram{Buckets: []uint64{0, 1, 2}, Sum: 3.5, Count: 2}},
+		{Family: "wherry_plugin_cleanup_pending", Labels: map[string]string{"profile": "a"}, Kind: KindGauge, Value: 2},
+		{Family: "wherry_plugin_placement_seconds", Kind: KindHistogram, Histogram: Histogram{Buckets: []uint64{0, 1, 2}, Sum: 3.5, Count: 2}},
 	}
 	if err != nil || len(samples) != len(want) {
 		t.Fatalf("metrics = %+v, %v; want %+v", samples, err, want)
@@ -546,7 +546,7 @@ func TestInputTooLargeCrossesTheLink(t *testing.T) {
 	}
 }
 
-func collected(t *testing.T, a Adapter, limits Limits) ([]Output, error) {
+func collected(t *testing.T, a Plugin, limits Limits) ([]Output, error) {
 	t.Helper()
 	outputs := make(chan Output, 8)
 	err := a.Collect(context.Background(), Handle{Data: []byte("h")}, limits, outputs)
@@ -644,7 +644,7 @@ func TestCollectFailureCrossesTheLink(t *testing.T) {
 	outputs, err := collected(t, configured(t, p, "a", "{}"), Limits{Files: 256, FileBytes: 8 << 20, TotalBytes: 8 << 20})
 	var failure *Error
 	if err == nil || len(outputs) != 0 || errors.As(err, &failure) || err.Error() != "no outputs configured" {
-		t.Fatalf("collect = %d outputs, %v; want the adapter's error text alone", len(outputs), err)
+		t.Fatalf("collect = %d outputs, %v; want the plugin's error text alone", len(outputs), err)
 	}
 }
 
@@ -653,7 +653,7 @@ func TestErrorCrossesTheLinkWithItsOpAndClass(t *testing.T) {
 	err := configured(t, p, "a", `{"sweep_error":"status 403: permission denied"}`).Sweep(context.Background())
 	var failure *Error
 	if !errors.As(err, &failure) || failure.Op != "list jobs" || failure.Class != "denied" || failure.Err.Error() != "status 403: permission denied" {
-		t.Fatalf("sweep = %#v; want an Error with the adapter's op, class and text", err)
+		t.Fatalf("sweep = %#v; want an Error with the plugin's op, class and text", err)
 	}
 }
 
@@ -663,7 +663,7 @@ func TestErrorWithoutCauseIsItsOp(t *testing.T) {
 	}
 }
 
-func TestServeHandsTheAdapterItsLogger(t *testing.T) {
+func TestServeHandsTheProfileItsLogger(t *testing.T) {
 	p, _, logs := launch(t)
 	configured(t, p, "logged", "{}")
 	eventually(t, "the plugin's own log line relayed", func() error {
@@ -674,18 +674,48 @@ func TestServeHandsTheAdapterItsLogger(t *testing.T) {
 	})
 }
 
-// A plugin of another protocol version is refused.
-func TestVersionEightPluginIsRefused(t *testing.T) {
+// A plugin of protocol version 9, the one before this, is refused.
+func TestVersionNinePluginIsRefused(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "wherry-plugin-old")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|8|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|9|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	p, err := Launch(fixed(script), &syncBuffer{})
 	if err == nil {
 		p.Close()
-		t.Fatal("launched a version 8 plugin")
+		t.Fatal("launched a version 9 plugin")
 	}
-	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 8, Client versions: [9]") {
+	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 9, Client versions: [10]") {
 		t.Fatalf("launch error %v; want the version named", err)
+	}
+}
+
+// A plugin serves protocol version 10 only under the WHERRY_PLUGIN cookie, and refuses to serve without it.
+func TestServeHandshakeUsesThePluginCookie(t *testing.T) {
+	if handshake.MagicCookieKey != "WHERRY_PLUGIN" || handshake.ProtocolVersion != 10 {
+		t.Fatalf("handshake %+v; want cookie key WHERRY_PLUGIN and protocol version 10", handshake)
+	}
+	serve := func(env ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, testPlugin)
+		cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + t.TempDir()}, env...)
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+		line, err := bufio.NewReader(stdout).ReadString('\n')
+		return line, err
+	}
+	line, err := serve("WHERRY_PLUGIN=" + handshake.MagicCookieValue)
+	if err != nil || !strings.HasPrefix(line, "1|10|") {
+		t.Fatalf("handshake line %q, %v; want core protocol 1 and plugin protocol 10", line, err)
+	}
+	if line, err := serve(); err == nil || line != "" {
+		t.Fatalf("served %q without the cookie", line)
 	}
 }

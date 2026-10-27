@@ -14,8 +14,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/signed"
+	"github.com/benemon/wherry/pluginsdk"
 	jose "github.com/go-jose/go-jose/v4"
 )
 
@@ -114,7 +114,7 @@ func (c TaskCredential) Target() string {
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // ValidateCredentials checks a list of credentials: unique valid names, each with exactly one target, an environment
-// variable no adapter reserves or a portable file name, and no two sharing a target. Errors never quote a value.
+// variable no plugin reserves or a portable file name, and no two sharing a target. Errors never quote a value.
 func ValidateCredentials(credentials []TaskCredential) error {
 	for i, credential := range credentials {
 		if !ValidName(credential.Name) {
@@ -123,8 +123,8 @@ func ValidateCredentials(credentials []TaskCredential) error {
 		switch {
 		case (credential.Env == "") == (credential.File == ""):
 			return fmt.Errorf("credential %s needs exactly one of env and file", credential.Name)
-		case credential.Env != "" && (!envName.MatchString(credential.Env) || adapter.ReservedEnv(credential.Env)):
-			return fmt.Errorf("credential %s: env must match [A-Za-z_][A-Za-z0-9_]* and not be a variable adapters set", credential.Name)
+		case credential.Env != "" && (!envName.MatchString(credential.Env) || pluginsdk.ReservedEnv(credential.Env)):
+			return fmt.Errorf("credential %s: env must match [A-Za-z_][A-Za-z0-9_]* and not be a variable plugins set", credential.Name)
 		case credential.File != "" && !ValidFileName(credential.File):
 			return fmt.Errorf("credential %s: file must be a portable file name", credential.Name)
 		}

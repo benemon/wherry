@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -36,7 +36,7 @@ func TestGitInputAdmittedOnlyFromThePoolsVCSHosts(t *testing.T) {
 		"without vcs hosts": {nil, "git remote host git.example.test is not in pool " + testPool + "'s vcs hosts"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newFixtureWith(t, resultStream, vcsTerms(test.hosts...), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+			f := newFixtureWith(t, resultStream, vcsTerms(test.hosts...), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 			f.answer(t, credentialName)
 			record := f.submit(t, f.host, withGit(git))
 			if test.reason != "" {
@@ -61,7 +61,7 @@ func TestGitInputAdmittedOnlyFromThePoolsVCSHosts(t *testing.T) {
 // A continuation is admitted under the pool's current VCS hosts, against the git input its first turn declared.
 
 func TestGitInputReachesTheAgentAsFilesAndCommands(t *testing.T) {
-	f := newFixtureWith(t, resultStream, vcsTerms("git.example.test:2222"), testConfig(testReceiver), map[string]*fakeAdapter{"nomad": {stream: resultStream}})
+	f := newFixtureWith(t, resultStream, vcsTerms("git.example.test:2222"), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	hostKey := "[git.example.test]:2222" + testHostKey[len("git.example.test"):]
 	git := wire.GitInput{Remote: "ssh://git@git.example.test:2222/org/repo.git", Ref: "v1.2.0", Path: "src/repo", Credential: "deploy-key", HostKey: hostKey}
 	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) {
@@ -75,8 +75,8 @@ func TestGitInputReachesTheAgentAsFilesAndCommands(t *testing.T) {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
 	run := f.lastRun()
-	want := []adapter.File{{Name: wire.KnownHostsFile, Data: []byte(hostKey)}, {Name: "data.csv", Data: []byte("a,b\n")}}
-	if !slices.EqualFunc(run.Inputs, want, func(a, b adapter.File) bool { return a.Name == b.Name && bytes.Equal(a.Data, b.Data) }) {
+	want := []pluginsdk.File{{Name: wire.KnownHostsFile, Data: []byte(hostKey)}, {Name: "data.csv", Data: []byte("a,b\n")}}
+	if !slices.EqualFunc(run.Inputs, want, func(a, b pluginsdk.File) bool { return a.Name == b.Name && bytes.Equal(a.Data, b.Data) }) {
 		t.Fatalf("inputs %q, want known_hosts then the input", run.Inputs)
 	}
 	ssh := `ssh -F /dev/null -i "/task/secrets/credentials/id_ed25519" -o IdentitiesOnly=yes -o IdentityAgent=none -o UserKnownHostsFile="/task/inputs/known_hosts" ` +

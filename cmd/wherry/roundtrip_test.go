@@ -33,13 +33,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/receiver"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/prometheus/client_golang/prometheus"
@@ -238,7 +238,7 @@ func resalt(t *testing.T, service *admin.Service, bundlePath string) {
 
 // TestRoundTrip runs a task from a host's Submit through a receiver and the test plugin process to the host's Await,
 // on records each side produces for the other: provisioning through wherry admin, bundles, the host and receiver
-// constructors, plugin discovery and the adapter link, the platform credential's local source, the real claim, admission, the seal request Await answers, dual
+// constructors, plugin discovery and the plugin link, the platform credential's local source, the real claim, admission, the seal request Await answers, dual
 // write and feed reads.
 func TestRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -297,18 +297,18 @@ func TestRoundTrip(t *testing.T) {
 		plugins.logs, plugins.hold = r.PluginLogs(logs), r.HoldPlatformCredential
 		return r
 	}
-	missing := &plugins{dir: t.TempDir(), registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	missing := &plugins{dir: t.TempDir(), registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	if err := newReceiver(missing).Run(ctx); err == nil || err.Error() != "profile fake: credential \"fake-token\" has no source in the receiver's configuration" {
 		t.Fatalf("receiver without the credential's source: %v; want a configuration error", err)
 	}
 	t.Setenv("WHERRY_ROUNDTRIP_PLATFORM", platformText+"\n")
 	sources := map[string]credential.Source{"fake-token": {Env: "WHERRY_ROUNDTRIP_PLATFORM"}}
-	missing = &plugins{dir: t.TempDir(), credentials: sources, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	missing = &plugins{dir: t.TempDir(), credentials: sources, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	if err := newReceiver(missing).Run(ctx); err == nil || err.Error() != "profile fake: no plugin for type fake" {
 		t.Fatalf("receiver without its plugin: %v; want a configuration error", err)
 	}
 	read := recordPlugin(t)
-	plugins := &plugins{dir: pluginDir, credentials: sources, registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+	plugins := &plugins{dir: pluginDir, credentials: sources, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	r := newReceiver(plugins)
 	runCtx, stop := context.WithCancel(ctx)
@@ -382,8 +382,8 @@ func TestRoundTrip(t *testing.T) {
 	if seen, err := other.Await(ctx, submitted.RunID, 20*time.Second); err != nil || seen.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("another host of the tenant: await = %+v, %v; want the run found through its echo", seen, err)
 	}
-	var runs []*adapter.Run
-	var configured adapter.Settings
+	var runs []*pluginsdk.Run
+	var configured pluginsdk.Settings
 	for _, record := range read() {
 		switch record.Call {
 		case "dispatch":
@@ -394,7 +394,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0].ID != submitted.RunID || string(runs[0].Prompt) == "" ||
 		len(runs[0].Inputs) != 1 || runs[0].Inputs[0].Name != "data.csv" || string(runs[0].Inputs[0].Data) != "a,b\n" ||
-		!reflect.DeepEqual(runs[0].Credentials, []adapter.Secret{{Name: "model", Env: "MODEL_API_KEY", Value: []byte(credentialText)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(deployText)}}) ||
+		!reflect.DeepEqual(runs[0].Credentials, []pluginsdk.Secret{{Name: "model", Env: "MODEL_API_KEY", Value: []byte(credentialText)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(deployText)}}) ||
 		!strings.Contains(string(runs[0].Prompt), "Input files: /fake/inputs/data.csv.") ||
 		!strings.Contains(string(runs[0].Prompt), "This run's credentials are model, deploy-key, github-token (not supplied).") {
 		t.Fatalf("plugin runs %+v; want one dispatch with the host's sealed credentials at their targets, the input, and the unsupplied credential named", runs)
@@ -431,7 +431,7 @@ func TestRoundTrip(t *testing.T) {
 
 	if _, err := host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpDoesNotExist}},
 		Prompt: "nowhere to run", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
-		t.Fatal("placed a task no adapter's labels satisfy")
+		t.Fatal("placed a task no plugin's labels satisfy")
 	}
 	inlineCapRoundTrip(t, ctx, bucket, host, read, logs, hostLogs)
 	if bucket.store != nil {
@@ -453,7 +453,7 @@ func inlineCapRoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host
 	if awaited.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("await = %+v; want completed; logs:\n%s\n%s", awaited, logs.String(), hostLogs.String())
 	}
-	var pluginRun *adapter.Run
+	var pluginRun *pluginsdk.Run
 	for _, record := range read() {
 		if record.Call == "dispatch" && record.Run.ID == submitted.RunID {
 			pluginRun = record.Run
@@ -655,7 +655,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	}
 	t.Setenv("WHERRY_REDACTION_PLATFORM", platformText+"\n")
 	plugins := &plugins{dir: pluginDir, credentials: map[string]credential.Source{"fake-token": {Env: "WHERRY_REDACTION_PLATFORM"}},
-		registry: prometheus.NewRegistry(), running: map[string]*adapter.Plugin{}}
+		registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	logs := &syncBuffer{}
 	r, err := receiver.New(bundle, filepath.Join(dir, "state"), false, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())

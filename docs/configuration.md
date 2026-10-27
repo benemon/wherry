@@ -148,7 +148,7 @@ it names, or `default_model`; with no `default_model` it must name one, and
 `submit` refuses it otherwise. One naming a model outside `models` fails `submit`, and a
 receiver rejects one whose model has left the terms since with
 `model not in the pool's terms`. A task for an agent without `models` names
-no model, and its profiles run the model their command sets. wherry does not
+no model, and its plugin profiles run the model their command sets. wherry does not
 interpret a model name.
 
 ### Agent credentials
@@ -156,9 +156,9 @@ interpret a model name.
 Each entry of an agent's `credentials` is `{name, env, file, required}`: a
 credential name, exactly one target, and whether a run needs it. `env` names
 the environment variable the agent gets the value in, matching
-`[A-Za-z_][A-Za-z0-9_]*` and none an adapter sets for the agent: `HOME`,
+`[A-Za-z_][A-Za-z0-9_]*` and none a plugin sets for the agent: `HOME`,
 `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR`, `WHERRY_CREDENTIALS_DIR`,
-`WHERRY_MODEL` and the variables of `adapter.AgentEnvironment`. `file` names
+`WHERRY_MODEL` and the variables of `pluginsdk.AgentEnvironment`. `file` names
 the file it gets in `WHERRY_CREDENTIALS_DIR`, a [file
 name](a2a-extension-v1.md#submission). `required` defaults to `true`. An
 agent's credentials have unique names, and no two share a target; `pool
@@ -167,7 +167,7 @@ create` refuses terms that break a rule, naming the agent and credential.
 `submit` refuses a task when its host has no source for a required
 credential of the placed agent. A run goes without an optional credential
 its host has no source for, and its [prompt](#agent-contract) names it as not
-supplied. Every profile of the agent delivers the agent's credentials, each at
+supplied. Every plugin profile of the agent delivers the agent's credentials, each at
 its target.
 
 Each entry of `vcs` is a lowercase host name, optionally with a `:port` of
@@ -327,7 +327,7 @@ status message and a result text of 64 KiB each, both raw, as an agent's text
 that JSON escaping would lengthen travels, with a `TASK_STATE_AUTH_REQUIRED`
 status's `credential` part. One result lists
 256 returned and 256 unreturned outputs with 512-byte names, the other 256 S3
-outputs with their keys. A receiver's labels and an adapter's job name have
+outputs with their keys. A receiver's labels and a plugin's job name have
 no bound and are left empty. Any one over its record limit refuses the terms,
 naming its size and the limit.
 
@@ -360,9 +360,9 @@ come from the command. Unknown fields are errors.
 | Field of the single file | Content |
 | --- | --- |
 | `capacity` | optional, default 1: runs the receiver holds at once, positive |
-| `plugins` | one or more plugin entries, keyed by adapter type |
+| `plugins` | one or more plugin entries, keyed by plugin |
 
-A plugin entry's key is an [adapter](adapters.md) type name; the receiver
+A plugin entry's key is a [plugin](plugins.md) name; the receiver
 runs `wherry-plugin-<type>` from its plugin directory for it. Each plugin
 entry:
 
@@ -388,10 +388,10 @@ credential](#platform-credentials), and its value is a string.
 
 The receiver routes a run to the first ready profile, in order within its
 plugin, whose agent and labels satisfy the task. It visits the plugins in
-the order of their types, so the host and the receiver compute the same
+the order of their names, so the host and the receiver compute the same
 match, but labels choose between plugins and no configuration relies on an
 order between them. The record on `wherry.admin` holds each profile with
-its name, plugin type, agent, labels and merged `config`.
+its name, plugin, agent, labels and merged `config`.
 
 ### Plugin profile merge
 
@@ -486,7 +486,7 @@ has an error.
 
 Receiver `nomad-1` in pool `build`, against the
 [pool terms example](#pool-terms-example): one Nomad plugin and two
-profiles in routing order, `container` running its agent in a container and
+plugin profiles in routing order, `container` running its agent in a container and
 `host` running its agent as an isolated process on the host. The plugin's
 `config` holds the cluster's address and the name of its token, and each
 plugin profile's `config` holds only what the example needs; the
@@ -605,7 +605,7 @@ selector. Each profile here launches a different agent, so a task for
 
 ### Profile settings
 
-A profile's `config` section belongs to its plugin. The
+A plugin profile's `config` section belongs to its plugin. The
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
 lists its settings and the jobs it runs.
 
@@ -656,7 +656,7 @@ variable or the file in `WHERRY_CREDENTIALS_DIR` the
 the paths of its [input, credential and output
 directories](a2a-extension-v1.md#inputs-and-outputs). `WHERRY_MODEL` holds
 the task's model when its agent has [`models`](#pool-terms), and is not set
-otherwise, so the profile's command reads it with its own fallback, such as
+otherwise, so the plugin profile's command reads it with its own fallback, such as
 `test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;` before
 `--model "$WHERRY_MODEL"`.
 

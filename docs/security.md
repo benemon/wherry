@@ -179,7 +179,7 @@ a `file` source names, including the storage keys' files.
 
 A receiver takes the credential a plugin authenticates to its platform
 with, such as a Nomad token, from a source on the receiver's host. A
-profile's `config` names the credential with `credential: <name>`, and the
+plugin profile's `config` names the credential with `credential: <name>`, and the
 `credentials` of the receiver's [local
 configuration](configuration.md#receiver-local-configuration) map the name
 to a `file`, `env` or `command` source. The receiver resolves it with the

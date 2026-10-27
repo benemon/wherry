@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -38,14 +38,14 @@ type metrics struct {
 	busErrors, denials, dropped                                   *prometheus.CounterVec
 	renewalFailures, transactionAborts, ambiguousCommits, fenced  prometheus.Counter
 
-	adapterDescs map[string]*prometheus.Desc
+	pluginDescs map[string]*prometheus.Desc
 	// lastGood holds, by profile, the samples of its latest Metrics call that answered.
 	mu       sync.Mutex
 	lastGood map[string][]prometheus.Metric
 }
 
 func newMetrics(registry *prometheus.Registry) *metrics {
-	m := &metrics{registry: registry, adapterDescs: map[string]*prometheus.Desc{}, lastGood: map[string][]prometheus.Metric{}}
+	m := &metrics{registry: registry, pluginDescs: map[string]*prometheus.Desc{}, lastGood: map[string][]prometheus.Metric{}}
 	counters := func(name, help string, labels ...string) *prometheus.CounterVec {
 		vec := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "wherry_" + name, Help: help}, labels)
 		m.collectors = append(m.collectors, vec)
@@ -74,9 +74,9 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.collectors = append(m.collectors, m.inFlight, m.capacity)
 	m.startFailures = counters("start_failures_total", "Start failures, by class.", "profile", "class")
 	m.dispatchOutcomes = counters("dispatch_outcomes_total", "Dispatch outcomes.", "profile", "outcome")
-	m.stopFailures = counters("stop_failures_total", "Failed adapter Stop calls.", "profile")
-	m.purgeFailures = counters("purge_failures_total", "Failed adapter Purge calls.", "profile")
-	m.sweepFailures = counters("sweep_failures_total", "Failed adapter Sweep calls.", "profile")
+	m.stopFailures = counters("stop_failures_total", "Failed plugin Stop calls.", "profile")
+	m.purgeFailures = counters("purge_failures_total", "Failed plugin Purge calls.", "profile")
+	m.sweepFailures = counters("sweep_failures_total", "Failed plugin Sweep calls.", "profile")
 	m.collectionFailures = counters("collection_failures_total", "Runs whose outputs were not collected, by reason.", "profile", "reason")
 	m.sealWaits = counters("seal_waits_total", "Seal waits, by outcome.", "tenant", "outcome")
 	m.sealWait = histograms("seal_wait_seconds", "Time a run waited for its seal.", "tenant")
@@ -87,60 +87,60 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.transactionAborts = counter("transaction_aborts_total", "Transactions aborted after a failed produce.")
 	m.ambiguousCommits = counter("ambiguous_commits_total", "Transaction commits with an unknown outcome.")
 	m.fenced = counter("fenced_total", "Runs given up to a newer holder.")
-	m.dropped = counters("metrics_dropped_total", "Adapter samples refused, and adapter Metrics calls that failed, by reason.", "profile", "reason")
-	for _, family := range adapterFamilies {
+	m.dropped = counters("metrics_dropped_total", "Plugin samples refused, and plugin Metrics calls that failed, by reason.", "profile", "reason")
+	for _, family := range pluginFamilies {
 		labels := []string{"profile"}
 		if family.label != "" {
 			labels = append(labels, family.label)
 		}
-		m.adapterDescs[family.name] = prometheus.NewDesc(family.name, family.help, labels, nil)
+		m.pluginDescs[family.name] = prometheus.NewDesc(family.name, family.help, labels, nil)
 	}
 	return m
 }
 
-// adapterFamily is a metric family the core declares for adapters: its one label besides profile, if any, takes only
+// pluginFamily is a metric family the core declares for plugins: its one label besides profile, if any, takes only
 // values.
-type adapterFamily struct {
+type pluginFamily struct {
 	name, help string
-	kind       adapter.Kind
+	kind       pluginsdk.Kind
 	label      string
 	values     []string
 }
 
-var adapterFamilies = []adapterFamily{
-	{"wherry_adapter_platform_errors_total", "Platform API errors, by class.", adapter.KindCounter, "class", []string{"unavailable", "denied", "conflict", "timeout", "other"}},
-	{"wherry_adapter_cleanup_pending", "Ended jobs awaiting cleanup.", adapter.KindGauge, "", nil},
-	{"wherry_adapter_sweep_deletions_total", "Material a sweep deleted, by kind.", adapter.KindCounter, "kind", []string{"job", "variable"}},
-	{"wherry_adapter_placement_seconds", "Time from dispatch to the agent task starting.", adapter.KindHistogram, "", nil},
+var pluginFamilies = []pluginFamily{
+	{"wherry_plugin_platform_errors_total", "Platform API errors, by class.", pluginsdk.KindCounter, "class", []string{"unavailable", "denied", "conflict", "timeout", "other"}},
+	{"wherry_plugin_cleanup_pending", "Ended jobs awaiting cleanup.", pluginsdk.KindGauge, "", nil},
+	{"wherry_plugin_sweep_deletions_total", "Material a sweep deleted, by kind.", pluginsdk.KindCounter, "kind", []string{"job", "variable"}},
+	{"wherry_plugin_placement_seconds", "Time from dispatch to the agent task starting.", pluginsdk.KindHistogram, "", nil},
 }
 
 // registerFor registers the receiver's families on its registry, each labelled with pool, once per process.
 func (m *metrics) registerFor(r *Receiver) {
 	m.register.Do(func() {
 		registerer := prometheus.WrapRegistererWith(prometheus.Labels{"pool": r.config.Pool}, m.registry)
-		registerer.MustRegister(append(m.collectors, adapterCollector{r})...)
+		registerer.MustRegister(append(m.collectors, pluginCollector{r})...)
 	})
 }
 
-// adapterCollector collects the profiles' samples at scrape time.
-type adapterCollector struct{ receiver *Receiver }
+// pluginCollector collects the profiles' samples at scrape time.
+type pluginCollector struct{ receiver *Receiver }
 
-func (c adapterCollector) Describe(descs chan<- *prometheus.Desc) {
-	for _, desc := range c.receiver.metrics.adapterDescs {
+func (c pluginCollector) Describe(descs chan<- *prometheus.Desc) {
+	for _, desc := range c.receiver.metrics.pluginDescs {
 		descs <- desc
 	}
 }
 
 // Collect calls every profile's Metrics at once, each within metricsDeadline. A profile whose call fails gives the
 // samples of its last call that answered.
-func (c adapterCollector) Collect(out chan<- prometheus.Metric) {
+func (c pluginCollector) Collect(out chan<- prometheus.Metric) {
 	m := c.receiver.metrics
 	var wg sync.WaitGroup
 	for _, named := range c.receiver.profiles {
 		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), metricsDeadline)
 			defer cancel()
-			samples, err := named.Adapter.Metrics(ctx)
+			samples, err := named.Plugin.Metrics(ctx)
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			switch {
@@ -149,7 +149,7 @@ func (c adapterCollector) Collect(out chan<- prometheus.Metric) {
 			case err != nil:
 				m.dropped.WithLabelValues(named.Name, "error").Inc()
 			default:
-				m.lastGood[named.Name] = m.adapterMetrics(named.Name, samples)
+				m.lastGood[named.Name] = m.pluginMetrics(named.Name, samples)
 			}
 			for _, metric := range m.lastGood[named.Name] {
 				out <- metric
@@ -159,13 +159,13 @@ func (c adapterCollector) Collect(out chan<- prometheus.Metric) {
 	wg.Wait()
 }
 
-// adapterMetrics keeps the samples that fit the core's adapter families, with the profile label pinned to name, and
+// pluginMetrics keeps the samples that fit the core's plugin families, with the profile label pinned to name, and
 // counts each one it drops by reason.
-func (m *metrics) adapterMetrics(name string, samples []adapter.Sample) []prometheus.Metric {
+func (m *metrics) pluginMetrics(name string, samples []pluginsdk.Sample) []prometheus.Metric {
 	var kept []prometheus.Metric
 	seen := map[string]bool{}
 	for _, sample := range samples {
-		labels, reason := adapterLabels(name, sample)
+		labels, reason := pluginLabels(name, sample)
 		if key := sample.Family + "\xff" + strings.Join(labels, "\xff"); reason == "" && seen[key] {
 			reason = "duplicate"
 		} else {
@@ -173,7 +173,7 @@ func (m *metrics) adapterMetrics(name string, samples []adapter.Sample) []promet
 		}
 		var metric prometheus.Metric
 		if reason == "" {
-			metric, reason = m.adapterMetric(sample, labels)
+			metric, reason = m.pluginMetric(sample, labels)
 		}
 		if reason != "" {
 			m.dropped.WithLabelValues(name, reason).Inc()
@@ -184,14 +184,14 @@ func (m *metrics) adapterMetrics(name string, samples []adapter.Sample) []promet
 	return kept
 }
 
-// adapterLabels returns the label values of sample's family, the profile's name first, or the reason sample is
+// pluginLabels returns the label values of sample's family, the profile's name first, or the reason sample is
 // dropped.
-func adapterLabels(name string, sample adapter.Sample) ([]string, string) {
-	index := slices.IndexFunc(adapterFamilies, func(family adapterFamily) bool { return family.name == sample.Family })
+func pluginLabels(name string, sample pluginsdk.Sample) ([]string, string) {
+	index := slices.IndexFunc(pluginFamilies, func(family pluginFamily) bool { return family.name == sample.Family })
 	if index < 0 {
 		return nil, "unknown_family"
 	}
-	family := adapterFamilies[index]
+	family := pluginFamilies[index]
 	for key := range sample.Labels {
 		if key != "profile" && key != family.label {
 			return nil, "unknown_label"
@@ -210,11 +210,11 @@ func adapterLabels(name string, sample adapter.Sample) ([]string, string) {
 	return []string{name, value}, ""
 }
 
-func (m *metrics) adapterMetric(sample adapter.Sample, labels []string) (prometheus.Metric, string) {
-	desc := m.adapterDescs[sample.Family]
-	if sample.Kind == adapter.KindHistogram {
+func (m *metrics) pluginMetric(sample pluginsdk.Sample, labels []string) (prometheus.Metric, string) {
+	desc := m.pluginDescs[sample.Family]
+	if sample.Kind == pluginsdk.KindHistogram {
 		histogram := sample.Histogram
-		if len(histogram.Buckets) != len(adapter.PlacementBuckets) || math.IsNaN(histogram.Sum) || math.IsInf(histogram.Sum, 0) {
+		if len(histogram.Buckets) != len(pluginsdk.PlacementBuckets) || math.IsNaN(histogram.Sum) || math.IsInf(histogram.Sum, 0) {
 			return nil, "value"
 		}
 		buckets := map[float64]uint64{}
@@ -223,15 +223,15 @@ func (m *metrics) adapterMetric(sample adapter.Sample, labels []string) (prometh
 			if count < previous || count > histogram.Count {
 				return nil, "value"
 			}
-			buckets[adapter.PlacementBuckets[i]], previous = count, count
+			buckets[pluginsdk.PlacementBuckets[i]], previous = count, count
 		}
 		return prometheus.MustNewConstHistogram(desc, histogram.Count, histogram.Sum, buckets, labels...), ""
 	}
-	if math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) || sample.Kind == adapter.KindCounter && sample.Value < 0 {
+	if math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) || sample.Kind == pluginsdk.KindCounter && sample.Value < 0 {
 		return nil, "value"
 	}
 	kind := prometheus.GaugeValue
-	if sample.Kind == adapter.KindCounter {
+	if sample.Kind == pluginsdk.KindCounter {
 		kind = prometheus.CounterValue
 	}
 	return prometheus.MustNewConstMetric(desc, kind, sample.Value, labels...), ""

@@ -161,7 +161,7 @@ type ReceiverConfig struct {
 	Profiles []ProfileSettings `json:"profiles"`
 }
 
-// ProfileSettings configures one profile: the adapter type whose plugin runs it, the agent it launches, the labels its
+// ProfileSettings configures one profile: the plugin that runs it, the agent it launches, the labels its
 // operator declares for it, and its plugin's config merged with its own, which the plugin decodes (runtime, node pool
 // and the like stay there).
 type ProfileSettings struct {
@@ -321,7 +321,7 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	names := map[string]bool{}
 	for _, profile := range config.Profiles {
 		if validateNames(profile.Name) != nil || names[profile.Name] || !wire.ValidName(profile.Plugin) {
-			return errors.New("profiles need unique valid names and a valid adapter type")
+			return errors.New("profiles need unique valid names and a valid plugin")
 		}
 		names[profile.Name] = true
 		if err := wire.ValidateLabels(profile.Labels); err != nil {

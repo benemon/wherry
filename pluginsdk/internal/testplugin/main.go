@@ -1,4 +1,4 @@
-// Command testplugin is a fake adapter plugin for the protocol's tests and the receiver's round trip.
+// Command testplugin is a fake plugin for the protocol's tests and the receiver's round trip.
 //
 // WHERRY_TESTPLUGIN_RECORD names a file that gets one JSON line per Configure and per Dispatch, with the
 // process ID and the value of WHERRY_TESTPLUGIN_ENV. WHERRY_TESTPLUGIN_PLAINTEXT=1 makes the plugin ignore
@@ -18,7 +18,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/hashicorp/go-hclog"
 )
 
@@ -26,7 +26,7 @@ var lines = []string{`{"type":"assistant","message":"working"}`, `{"type":"resul
 
 // outputs are what Collect streams: a file over one message of the link, an empty file and a link it did not read. A
 // regular file the limits name for streaming goes as a Body.
-var outputs = []adapter.Output{
+var outputs = []pluginsdk.Output{
 	{Name: "big.bin", Size: 2<<20 + 1, Data: bytes.Repeat([]byte("b"), 2<<20+1)},
 	{Name: "empty", Size: 0, Data: []byte{}},
 	{Name: "link", Size: 4, Mode: fs.ModeSymlink},
@@ -43,7 +43,7 @@ type config struct {
 	TooLarge string `json:"too_large"`
 	// NeverStarted is the reason Follow ends the job with, as one that never started.
 	NeverStarted string `json:"never_started"`
-	// SweepError is the text of the adapter.Error Sweep returns.
+	// SweepError is the text of the pluginsdk.Error Sweep returns.
 	SweepError string `json:"sweep_error"`
 	// Log is a value Configure logs, through its logger and as a raw line on file descriptor 2, which go-plugin relays as
 	// it relays a panic; os.Stderr goes to plugin.Serve's stdio stream instead.
@@ -59,11 +59,11 @@ type config struct {
 }
 
 type record struct {
-	PID      int              `json:"pid"`
-	Env      string           `json:"env"`
-	Call     string           `json:"call"`
-	Settings adapter.Settings `json:"settings"`
-	Run      *adapter.Run     `json:"run,omitempty"`
+	PID      int                `json:"pid"`
+	Env      string             `json:"env"`
+	Call     string             `json:"call"`
+	Settings pluginsdk.Settings `json:"settings"`
+	Run      *pluginsdk.Run     `json:"run,omitempty"`
 }
 
 var mu sync.Mutex
@@ -86,18 +86,18 @@ func write(entry record) {
 }
 
 type fake struct {
-	settings adapter.Settings
+	settings pluginsdk.Settings
 	config   config
 	jobsMu   sync.Mutex
-	jobs     map[string]*adapter.Job
+	jobs     map[string]*pluginsdk.Job
 }
 
 // end marks the job of a run ended, when the plugin keeps jobs.
 func (f *fake) end(runID string) {
 	f.jobsMu.Lock()
 	defer f.jobsMu.Unlock()
-	if job := f.jobs[runID]; job != nil && job.State == adapter.JobRunning {
-		job.State = adapter.JobEnded
+	if job := f.jobs[runID]; job != nil && job.State == pluginsdk.JobRunning {
+		job.State = pluginsdk.JobEnded
 	}
 }
 
@@ -107,8 +107,8 @@ func (f *fake) panics(method string) {
 	}
 }
 
-func (f *fake) Directories() adapter.Directories {
-	return adapter.Directories{Input: "/fake/inputs", Output: "/fake/outputs", Credentials: "/fake/credentials"}
+func (f *fake) Directories() pluginsdk.Directories {
+	return pluginsdk.Directories{Input: "/fake/inputs", Output: "/fake/outputs", Credentials: "/fake/credentials"}
 }
 
 func (f *fake) InlineLimit() int64 { return f.config.InlineLimit }
@@ -123,71 +123,71 @@ func (f *fake) Ready(context.Context) (bool, error) {
 	return true, nil
 }
 
-func (f *fake) Dispatch(_ context.Context, run adapter.Run) (adapter.Outcome, adapter.Handle, error) {
+func (f *fake) Dispatch(_ context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
 	f.panics("Dispatch")
-	write(record{Call: "dispatch", Settings: adapter.Settings{Name: f.settings.Name}, Run: &run})
+	write(record{Call: "dispatch", Settings: pluginsdk.Settings{Name: f.settings.Name}, Run: &run})
 	if f.config.TooLarge != "" {
-		return adapter.OutcomeNothingCreated, adapter.Handle{}, &adapter.InputTooLargeError{Name: f.config.TooLarge}
+		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, &pluginsdk.InputTooLargeError{Name: f.config.TooLarge}
 	}
-	handle := adapter.Handle{Data: []byte(run.ID), Name: f.settings.Name + "/" + run.ID}
+	handle := pluginsdk.Handle{Data: []byte(run.ID), Name: f.settings.Name + "/" + run.ID}
 	if f.config.Jobs {
 		f.jobsMu.Lock()
 		defer f.jobsMu.Unlock()
 		if f.jobs[run.ID] == nil {
-			state := adapter.JobRunning
+			state := pluginsdk.JobRunning
 			if f.config.NeverStarted != "" {
-				state = adapter.JobNeverStarted
+				state = pluginsdk.JobNeverStarted
 			}
-			f.jobs[run.ID] = &adapter.Job{State: state, Handle: handle, Attempt: run.Attempt, Profile: run.Profile, Agent: run.Agent}
+			f.jobs[run.ID] = &pluginsdk.Job{State: state, Handle: handle, Attempt: run.Attempt, Profile: run.Profile, Agent: run.Agent}
 		}
-		return adapter.OutcomeCreated, f.jobs[run.ID].Handle, nil
+		return pluginsdk.OutcomeCreated, f.jobs[run.ID].Handle, nil
 	}
-	return adapter.OutcomeCreated, handle, nil
+	return pluginsdk.OutcomeCreated, handle, nil
 }
 
-func (f *fake) Lookup(_ context.Context, runID string) (adapter.Job, error) {
+func (f *fake) Lookup(_ context.Context, runID string) (pluginsdk.Job, error) {
 	f.panics("Lookup")
 	f.jobsMu.Lock()
 	defer f.jobsMu.Unlock()
 	if job := f.jobs[runID]; job != nil {
 		return *job, nil
 	}
-	return adapter.Job{}, nil
+	return pluginsdk.Job{}, nil
 }
 
 // Follow emits the lines from offset from, then holds the stream open like a running job unless it finishes.
-func (f *fake) Follow(ctx context.Context, handle adapter.Handle, from int64, out chan<- adapter.Line) (adapter.Terminal, error) {
+func (f *fake) Follow(ctx context.Context, handle pluginsdk.Handle, from int64, out chan<- pluginsdk.Line) (pluginsdk.Terminal, error) {
 	f.panics("Follow")
 	if f.config.NeverStarted != "" {
-		return adapter.Terminal{Class: "validation", Node: "fake-node", Reason: f.config.NeverStarted}, nil
+		return pluginsdk.Terminal{Class: "validation", Node: "fake-node", Reason: f.config.NeverStarted}, nil
 	}
 	var offset int64
 	for _, data := range lines {
 		next := offset + int64(len(data)+1)
 		if offset >= from {
 			select {
-			case out <- adapter.Line{Offset: offset, Next: next, Data: []byte(data)}:
+			case out <- pluginsdk.Line{Offset: offset, Next: next, Data: []byte(data)}:
 			case <-ctx.Done():
-				return adapter.Terminal{}, ctx.Err()
+				return pluginsdk.Terminal{}, ctx.Err()
 			}
 		}
 		offset = next
 	}
 	if f.config.Finish {
 		f.end(string(handle.Data))
-		return adapter.Terminal{Started: true, Node: "fake-node"}, nil
+		return pluginsdk.Terminal{Started: true, Node: "fake-node"}, nil
 	}
 	<-ctx.Done()
-	return adapter.Terminal{}, ctx.Err()
+	return pluginsdk.Terminal{}, ctx.Err()
 }
 
-func (f *fake) Stop(_ context.Context, handle adapter.Handle) error {
+func (f *fake) Stop(_ context.Context, handle pluginsdk.Handle) error {
 	f.panics("Stop")
 	f.end(string(handle.Data))
 	return nil
 }
 
-func (f *fake) Collect(ctx context.Context, _ adapter.Handle, limits adapter.Limits, out chan<- adapter.Output) error {
+func (f *fake) Collect(ctx context.Context, _ pluginsdk.Handle, limits pluginsdk.Limits, out chan<- pluginsdk.Output) error {
 	f.panics("Collect")
 	if f.config.Jobs && !f.config.Outputs {
 		return nil
@@ -198,7 +198,7 @@ func (f *fake) Collect(ctx context.Context, _ adapter.Handle, limits adapter.Lim
 	collected := outputs
 	if f.config.Finish {
 		outcome := []byte(`{"state":"TASK_STATE_COMPLETED","message":{"role":"ROLE_AGENT","parts":[{"text":"done"}]}}`)
-		collected = append([]adapter.Output{{Name: ".wherry/outcome.json", Size: int64(len(outcome)), Data: outcome}}, outputs...)
+		collected = append([]pluginsdk.Output{{Name: ".wherry/outcome.json", Size: int64(len(outcome)), Data: outcome}}, outputs...)
 	}
 	for _, output := range collected {
 		if output.Data != nil && slices.Contains(limits.Stream, output.Name) {
@@ -229,17 +229,17 @@ func (f *fake) Release(context.Context, string) error {
 func (f *fake) Sweep(context.Context) error {
 	f.panics("Sweep")
 	if f.config.SweepError != "" {
-		return &adapter.Error{Op: "list jobs", Class: "denied", Err: errors.New(f.config.SweepError)}
+		return &pluginsdk.Error{Op: "list jobs", Class: "denied", Err: errors.New(f.config.SweepError)}
 	}
 	return nil
 }
 
 // Metrics reports a gauge labelled with the profile's name and a histogram.
-func (f *fake) Metrics(context.Context) ([]adapter.Sample, error) {
+func (f *fake) Metrics(context.Context) ([]pluginsdk.Sample, error) {
 	f.panics("Metrics")
-	return []adapter.Sample{
-		{Family: "wherry_adapter_cleanup_pending", Labels: map[string]string{"profile": f.settings.Name}, Kind: adapter.KindGauge, Value: 2},
-		{Family: "wherry_adapter_placement_seconds", Kind: adapter.KindHistogram, Histogram: adapter.Histogram{Buckets: []uint64{0, 1, 2}, Sum: 3.5, Count: 2}},
+	return []pluginsdk.Sample{
+		{Family: "wherry_plugin_cleanup_pending", Labels: map[string]string{"profile": f.settings.Name}, Kind: pluginsdk.KindGauge, Value: 2},
+		{Family: "wherry_plugin_placement_seconds", Kind: pluginsdk.KindHistogram, Histogram: pluginsdk.Histogram{Buckets: []uint64{0, 1, 2}, Sum: 3.5, Count: 2}},
 	}, nil
 }
 
@@ -247,7 +247,7 @@ func main() {
 	if os.Getenv("WHERRY_TESTPLUGIN_PLAINTEXT") == "1" {
 		os.Unsetenv("PLUGIN_CLIENT_CERT")
 	}
-	adapter.Serve(func(settings adapter.Settings, logger hclog.Logger) (adapter.Adapter, error) {
+	pluginsdk.Serve(func(settings pluginsdk.Settings, logger hclog.Logger) (pluginsdk.Plugin, error) {
 		write(record{Call: "configure", Settings: settings})
 		logger.Info("configuring profile", "profile", settings.Name)
 		var decoded config
@@ -269,6 +269,6 @@ func main() {
 			fmt.Fprintln(os.NewFile(2, "stderr"), "[ERROR] raw "+settings.Credential)
 			return nil, errors.New("refused credential " + settings.Credential)
 		}
-		return &fake{settings: settings, config: decoded, jobs: map[string]*adapter.Job{}}, nil
+		return &fake{settings: settings, config: decoded, jobs: map[string]*pluginsdk.Job{}}, nil
 	})
 }

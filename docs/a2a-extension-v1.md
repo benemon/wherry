@@ -2,8 +2,12 @@
 
 URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
+**Change note, 2026-10-27:** edited in place at version 1. The term adapter
+is retired in favour of plugin, and the output reason `not streamed by the
+adapter` is renamed `not streamed by the plugin`.
+
 **Change note, 2026-10-25:** edited in place at version 1. The configured
-unit a run is routed to is a profile, a named, configured use of an adapter.
+unit a run is routed to is a plugin profile, a named, configured use of a plugin.
 The member `adapter` of advertisement offers, start failures and result
 metadata is renamed `profile`. The receiver configuration on
 `wherry.admin` holds `profiles` in place of `adapters`, each with `plugin`
@@ -36,7 +40,7 @@ names.
   have `parts`, each present even when empty. A `data` part holds valid
   JSON.
 - A2A identifiers (`messageId`, `taskId`, `contextId`, `artifactId`) and
-  wherry's tenant, host, receiver, pool, profile, agent and event IDs are
+  wherry's tenant, host, receiver, pool, plugin profile, agent and event IDs are
   non-empty and lowercase. `metadata`, wherever it appears, is a JSON object.
 - A task hash is the lowercase hex SHA-256 of a submission's record value,
   the compact JWS bytes as they appear on the topic.
@@ -152,7 +156,7 @@ A submission is the task of one run.
   submission is at most the pool's recorded `record_limit` bytes, the
   broker's record limit for the pool's tasks topic, and the `raw` and `data`
   parts together hold at most the smallest `inline_limit` the matching
-  profiles declare. Over either, a host carries the inputs as
+  plugin profiles declare. Over either, a host carries the inputs as
   [S3 inputs](#s3-inputs-and-outputs) when the pool has storage and the host
   a storage credential, and otherwise refuses the run.
 - `credentials` lists task credentials, each `{name, env}` or `{name, file}`:
@@ -161,8 +165,8 @@ A submission is the task of one run.
   credentials directory. `name` is at most 32 lowercase letters, digits and
   hyphens, starting and ending with a letter or digit, and appears once.
   Each credential has exactly one target: `env` matches
-  `[A-Za-z_][A-Za-z0-9_]*` and is no variable an adapter sets
-  (`adapter.ReservedEnv`), and `file` follows the file name rules. No two
+  `[A-Za-z_][A-Za-z0-9_]*` and is no variable a plugin sets
+  (`pluginsdk.ReservedEnv`), and `file` follows the file name rules. No two
   credentials share a target, and no task credential takes the target of one
   of the agent's credentials in the pool's terms. A task credential may
   share its name with one of the agent's credentials; the seal carries the
@@ -445,7 +449,7 @@ The `metadata` of a result's `Task` says where the run executed:
 
 - `receiver_id` (string): the receiver that wrote the result.
 - `pool` (string): the pool.
-- `profile` (string): the profile that ran or matched the run. It is
+- `profile` (string): the plugin profile that ran or matched the run. It is
   absent when no ready profile satisfied the placement.
 - `labels` (object of strings): the labels of the profile this attempt
   dispatched the job to. It is absent when no job was dispatched, when the
@@ -467,13 +471,13 @@ The `metadata` of a result's `Task` says where the run executed:
 | `reason` | Meaning |
 | --- | --- |
 | `missing` | an expected output the agent did not leave |
-| `not collected` | the adapter did not collect the outputs; every expected output is listed with it |
+| `not collected` | the plugin did not collect the outputs; every expected output is listed with it |
 | `exceeds output limit` | the file is over the pool's `output_limit`, or would take the run's outputs over it |
 | `rejected: symlink`, `rejected: fifo`, `rejected: device`, `rejected: socket`, `rejected: irregular file` | the entry is not a regular file and was not read |
 | `rejected: invalid name` | the path is not a relative path of file names of at most 512 bytes; `name` is the path quoted as ASCII, at most 256 bytes |
-| `rejected: size changed while read` | the adapter read a length other than the size it listed |
+| `rejected: size changed while read` | the plugin read a length other than the size it listed |
 | `exceeds the S3 object limit` | an S3 output over 5 GiB |
-| `not streamed by the adapter` | the adapter did not stream an S3 output it found |
+| `not streamed by the plugin` | the plugin did not stream an S3 output it found |
 | `not uploaded: no upload URL` | the attempt holds no PUT URL for the S3 output |
 | `not uploaded: redirected` | the store answered the PUT with a redirect, which the receiver does not follow |
 | `not uploaded: status <code>` | the store answered the PUT with another status than 200 |
@@ -500,7 +504,7 @@ An echo tells every host of a tenant where a run was admitted.
 
 A receiver writes the echo in the transaction that holds the run's
 `claimed` or `rejected` status, or its `terminal` status when the receiver
-ends at the [delivery budget](#delivery-budget) a run no ready profile
+ends at the [delivery budget](#delivery-budget) a run no ready plugin profile
 satisfies. The echo's fields copy the submission's. A
 host that has no record of the run takes the run's pool from its first
 valid echo, and ignores records of the run from any other pool. A status or
@@ -521,7 +525,7 @@ An advertisement reports a receiver's liveness and capacity.
 }
 ```
 
-- `offers` lists the receiver's ready profiles in routing order, each as
+- `offers` lists the receiver's ready plugin profiles in routing order, each as
   `profile`, `agent` and, optionally, `inline_limit`, the bytes of `raw`
   and `data` parts the profile delivers, absent when it declares no limit
   and never negative. It is empty when no profile is ready. Readers take a
@@ -562,7 +566,7 @@ start failure ends the run as its class describes.
 | --- | --- |
 | `dispatch` | the plugin created no job for the run |
 | `platform` | the platform ended the job before its agent task started, for example when the image cannot be pulled |
-| `input-too-large` | the profile cannot deliver one of the run's inputs; the receiver then ends the run `TASK_STATE_FAILED` naming the input, and releases nothing |
+| `input-too-large` | the plugin profile cannot deliver one of the run's inputs; the receiver then ends the run `TASK_STATE_FAILED` naming the input, and releases nothing |
 
 A `platform` start failure can follow the run's `started` status, when the
 job ended before its agent task started. The platform's reason for it goes to
@@ -714,7 +718,7 @@ run's `claimed` status.
   adopts an earlier attempt's job asks for the credentials and the S3
   outputs, not the S3 inputs, which the job has fetched. A GET presigned
   again differs from the first attempt's, so an adopter cannot redact the
-  first attempt's S3 input URLs, and an adapter never exposes its fetch URLs
+  first attempt's S3 input URLs, and a plugin never exposes its fetch URLs
   to the job.
 - The four lists are not all empty. A run needs a seal when its agent takes
   a credential its host supplies, or the run has task credentials, S3 inputs
@@ -840,7 +844,7 @@ plaintext has `v` 1 and its `binding` equals the header's, `values` holds
 exactly the named credentials and URLs, and `redaction_key` is 32 bytes.
 It checks for a cancel, its shutdown, the run deadline and the request's
 expiry before it takes a seal, so a run stopped while its seal arrives is
-never dispatched. It passes the values to the adapter in Dispatch. It logs
+never dispatched. It passes the values to the plugin in Dispatch. It logs
 a seal that does not open by run and attempt, never the reason.
 
 Before it uses a URL, the receiver checks it against the pool's
@@ -908,9 +912,9 @@ and `record_limit`, the tasks topic's record limit that `pool create` reads
 from the broker, with `max_queue_deadline_ms` and `lock_duration_ms` in milliseconds for its
 `max_queue_deadline` and `lock_duration`. `config` holds `receiver` and `pool`,
 which equal the record's, the receiver's `capacity`, and its `profiles` in
-routing order, the plugins in the order of their types. Each profile is the
+routing order, the plugins in the order of their names. Each plugin profile is the
 [profile entry](configuration.md#receiver-configuration) as `name`, `plugin`
-naming its plugin's type, `agent`, `labels` when set, and the merged
+naming its plugin, `agent`, `labels` when set, and the merged
 `config`, which keeps a `credential` name and never a credential value. An `end` names
 exactly one of `receiver`, or `tenant` and `host`.
 Readers fold the records in order. A reader loads no state when:
@@ -947,7 +951,7 @@ A receiver that claims a submission:
    `model not in the pool's terms` when the agent has `models` and the
    placement names no model or one outside the current `models`, or the
    agent has no `models` and the placement names one;
-5. releases it when no ready profile satisfies the placement;
+5. releases it when no ready plugin profile satisfies the placement;
 6. rejects it with `duplicate submission` when it is not the run's earliest
    submission on the pool's task topic that a live host's current key
    verifies;
@@ -1050,11 +1054,11 @@ writes it; for `changes.bundle`, the `git bundle create` command for the
 same range. They ask the agent to push only when the request says so, and
 then only to the branch `wherry/<run>`.
 
-An adapter gives its agent an environment in which `git` reads no system,
+A plugin gives its agent an environment in which `git` reads no system,
 global or environment configuration, uses no template, never prompts and
-traces nothing (`adapter.AgentEnvironment`), and removes from the
+traces nothing (`pluginsdk.AgentEnvironment`), and removes from the
 environment it configures the variables no value switches off
-(`adapter.AgentUnset`), so the platform's configuration does not rewrite,
+(`pluginsdk.AgentUnset`), so the platform's configuration does not rewrite,
 redirect, record or trace the clone. The platform's own environment and an
 image's are the operator's to keep clear of them. The pool's VCS hosts
 bound what a receiver accepts; the platform's egress policy bounds where
@@ -1073,7 +1077,7 @@ their paths:
   `known_hosts` for a git input with a host key.
 - `WHERRY_CREDENTIALS_DIR`: the run's credentials with a `file` target, the
   agent's and the task's, each as the file its `file` names. A credential
-  with an `env` target is in that environment variable instead. The adapter
+  with an `env` target is in that environment variable instead. The plugin
   delivers credential values only at their targets, and never into the
   input directory.
 - `WHERRY_OUTPUT_DIR`: where the agent leaves its outputs. The agent
@@ -1089,7 +1093,7 @@ finds them, the environment variables that hold credentials, the commands of
 the [git input](#git-input), and the
 [outcome contract](configuration.md#agent-contract) with the run's credential
 names, an optional credential its host did not supply marked
-`(not supplied)`. The lines name S3 inputs by path, never by URL. The adapter reports the
+`(not supplied)`. The lines name S3 inputs by path, never by URL. The plugin reports the
 directories' paths as its agent sees them; a directory it does not report
 appears as its variable. The lines hold no credential value.
 
@@ -1099,14 +1103,14 @@ output. A host writes the run's transcript among its outputs as
 `transcript.jsonl`, so a submission expecting an output of that name is
 invalid.
 
-When the job ends, the receiver stops it, then asks the adapter to collect the
-outputs, whatever the job's exit. The adapter lists every entry beneath the outputs
+When the job ends, the receiver stops it, then asks the plugin to collect the
+outputs, whatever the job's exit. The plugin lists every entry beneath the outputs
 directory without following links, and refuses the whole tree, reading nothing,
 when it holds more than 256 entries. It reads only regular files: one at most
 the pool's `output_limit`, 8 MiB unless its terms set another, and together at
 most that, which the receiver checks again. Every other entry is listed with its
 type and left unread. The receiver gives up on a collection that takes over 2
-minutes. An adapter that cannot collect, or a job that could not be stopped,
+minutes. A plugin that cannot collect, or a job that could not be stopped,
 leaves the outputs `not collected`.
 
 The receiver checks every name, redacts every file, and publishes each
@@ -1132,22 +1136,22 @@ carries files of up to 5 GiB each beside the broker. Each run's objects
 live under `wherry/<tenant>/<run>/`: an S3 input at `inputs/<name>`, and an
 S3 output at `outputs/<name>`. The host's own credential,
 scoped by the operator to `wherry/<tenant>/`, uploads, downloads and
-deletes them, and never leaves the host. Receivers and adapters get only
+deletes them, and never leaves the host. Receivers and plugins get only
 the presigned URLs in the [seal](#seal), checked against the pool's
 storage before use.
 
 - **In.** The host uploads each S3 input before it publishes the run and lists
-  it in `s3_inputs`. The adapter fetches it into `WHERRY_INPUT_DIR` from its
+  it in `s3_inputs`. The plugin fetches it into `WHERRY_INPUT_DIR` from its
   presigned GET before the agent starts, and verifies its size and SHA-256. The
-  adapter never exposes the GET URL to the job: an adopter's seal carries no GET
+  plugin never exposes the GET URL to the job: an adopter's seal carries no GET
   URL, so an adopter cannot redact it. A fetch that fails or does not verify
   ends the job before the agent starts, and the receiver ends the run
   `TASK_STATE_FAILED` with `an S3 input was not fetched, or did not match its
   size and SHA-256`, without returning the task to the pool. S3 inputs count
   against neither `record_limit` nor `inline_limit`.
-- **Out.** Once the job ends and is stopped, the adapter
+- **Out.** Once the job ends and is stopped, the plugin
   streams each S3 output it finds as it collects, and the receiver sends it
-  to its presigned PUT as it reads it, with the size the adapter listed as
+  to its presigned PUT as it reads it, with the size the plugin listed as
   its Content-Length, hashing the bytes it sends. It follows no redirect.
   An S3 output counts against neither `output_limit` nor the run's outputs
   together, but is at most 5 GiB, and among the 256 outputs a submission

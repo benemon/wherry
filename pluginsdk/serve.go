@@ -1,4 +1,4 @@
-package adapter
+package pluginsdk
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"runtime/debug"
 	"sync"
 
-	"github.com/benemon/wherry/adapter/internal/adapterv1"
+	"github.com/benemon/wherry/pluginsdk/internal/pluginv1"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
@@ -23,13 +23,13 @@ const maxMessage = 64 << 20
 // Serve runs a plugin process for the receiver that started it, building one profile with factory for
 // each Configure and routing every call to the profile it names. factory gets the logger whose lines the
 // receiver relays. It returns when the receiver ends the link.
-func Serve(factory func(Settings, hclog.Logger) (Adapter, error)) {
+func Serve(factory func(Settings, hclog.Logger) (Plugin, error)) {
 	// JSON lines keep their level when the receiver relays them; os.Stderr is read before plugin.Serve
 	// redirects it.
 	logger := hclog.New(&hclog.LoggerOptions{Output: os.Stderr, JSONFormat: true, Level: hclog.Info})
 	plugin.Serve(&plugin.ServeConfig{
 		HandshakeConfig: handshake,
-		Plugins:         plugin.PluginSet{pluginName: &grpcPlugin{server: &server{factory: factory, logger: logger, profiles: map[string]Adapter{}}}},
+		Plugins:         plugin.PluginSet{pluginName: &grpcPlugin{server: &server{factory: factory, logger: logger, profiles: map[string]Plugin{}}}},
 		GRPCServer: func(options []grpc.ServerOption) *grpc.Server {
 			return grpc.NewServer(append(options, grpc.MaxRecvMsgSize(maxMessage),
 				grpc.ChainUnaryInterceptor(recoverUnary(logger)), grpc.ChainStreamInterceptor(recoverStream(logger)))...)
@@ -84,24 +84,24 @@ func (s *namingStream) RecvMsg(m any) error {
 }
 
 type server struct {
-	adapterv1.UnimplementedAdapterServer
-	factory  func(Settings, hclog.Logger) (Adapter, error)
+	pluginv1.UnimplementedPluginServer
+	factory  func(Settings, hclog.Logger) (Plugin, error)
 	logger   hclog.Logger
 	mu       sync.RWMutex
-	profiles map[string]Adapter
+	profiles map[string]Plugin
 }
 
-func (s *server) profile(name string) (Adapter, error) {
+func (s *server) profile(name string) (Plugin, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	adapter, ok := s.profiles[name]
+	profile, ok := s.profiles[name]
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "profile %s is not configured", name)
 	}
-	return adapter, nil
+	return profile, nil
 }
 
-// callStatus carries the errors the core distinguishes across the link. Only an Error the adapter returns itself
+// callStatus carries the errors the core distinguishes across the link. Only an Error the plugin returns itself
 // carries its op and class as a detail; one wrapped or joined travels as its text, which names each op.
 func callStatus(err error) error {
 	var tooLarge *InputTooLargeError
@@ -117,7 +117,7 @@ func callStatus(err error) error {
 	}
 	if failure, ok := err.(*Error); ok {
 		// A detail whose text is not UTF-8 does not marshal; the error then travels as its text alone.
-		detailed, detailErr := status.New(codes.Unknown, err.Error()).WithDetails(&adapterv1.ErrorDetail{Op: failure.Op, Class: failure.Class, Message: failure.Err.Error()})
+		detailed, detailErr := status.New(codes.Unknown, err.Error()).WithDetails(&pluginv1.ErrorDetail{Op: failure.Op, Class: failure.Class, Message: failure.Err.Error()})
 		if detailErr == nil {
 			return detailed.Err()
 		}
@@ -125,34 +125,34 @@ func callStatus(err error) error {
 	return status.Error(codes.Unknown, err.Error())
 }
 
-func (s *server) Configure(_ context.Context, req *adapterv1.ConfigureRequest) (*adapterv1.ConfigureResponse, error) {
-	adapter, err := s.factory(Settings{Name: req.Profile, Pool: req.Pool, Agent: req.Agent, Config: req.Config, Credential: req.Credential}, s.logger)
+func (s *server) Configure(_ context.Context, req *pluginv1.ConfigureRequest) (*pluginv1.ConfigureResponse, error) {
+	profile, err := s.factory(Settings{Name: req.Profile, Pool: req.Pool, Agent: req.Agent, Config: req.Config, Credential: req.Credential}, s.logger)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	s.mu.Lock()
-	s.profiles[req.Profile] = adapter
+	s.profiles[req.Profile] = profile
 	s.mu.Unlock()
-	directories := adapter.Directories()
-	return &adapterv1.ConfigureResponse{Directories: &adapterv1.Directories{
+	directories := profile.Directories()
+	return &pluginv1.ConfigureResponse{Directories: &pluginv1.Directories{
 		Input: directories.Input, Output: directories.Output, Credentials: directories.Credentials,
-	}, InlineLimit: adapter.InlineLimit()}, nil
+	}, InlineLimit: profile.InlineLimit()}, nil
 }
 
-func (s *server) Ready(ctx context.Context, req *adapterv1.ReadyRequest) (*adapterv1.ReadyResponse, error) {
-	adapter, err := s.profile(req.Profile)
+func (s *server) Ready(ctx context.Context, req *pluginv1.ReadyRequest) (*pluginv1.ReadyResponse, error) {
+	profile, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
-	ready, err := adapter.Ready(ctx)
+	ready, err := profile.Ready(ctx)
 	if err != nil {
 		return nil, callStatus(err)
 	}
-	return &adapterv1.ReadyResponse{Ready: ready}, nil
+	return &pluginv1.ReadyResponse{Ready: ready}, nil
 }
 
-func (s *server) Dispatch(ctx context.Context, req *adapterv1.DispatchRequest) (*adapterv1.DispatchResponse, error) {
-	adapter, err := s.profile(req.Profile)
+func (s *server) Dispatch(ctx context.Context, req *pluginv1.DispatchRequest) (*pluginv1.DispatchResponse, error) {
+	profile, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
@@ -170,31 +170,31 @@ func (s *server) Dispatch(ctx context.Context, req *adapterv1.DispatchRequest) (
 	for _, fetch := range message.GetFetches() {
 		run.Fetches = append(run.Fetches, Fetch{Name: fetch.GetName(), URL: fetch.GetUrl(), Size: fetch.GetSize(), SHA256: fetch.GetSha256()})
 	}
-	outcome, handle, err := adapter.Dispatch(ctx, run)
+	outcome, handle, err := profile.Dispatch(ctx, run)
 	if err != nil {
 		return nil, callStatus(err)
 	}
-	return &adapterv1.DispatchResponse{Outcome: adapterv1.Outcome(outcome), Handle: handleMessage(handle)}, nil
+	return &pluginv1.DispatchResponse{Outcome: pluginv1.Outcome(outcome), Handle: handleMessage(handle)}, nil
 }
 
-func (s *server) Lookup(ctx context.Context, req *adapterv1.LookupRequest) (*adapterv1.LookupResponse, error) {
-	adapter, err := s.profile(req.Profile)
+func (s *server) Lookup(ctx context.Context, req *pluginv1.LookupRequest) (*pluginv1.LookupResponse, error) {
+	profile, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
-	job, err := adapter.Lookup(ctx, req.RunId)
+	job, err := profile.Lookup(ctx, req.RunId)
 	if err != nil {
 		return nil, callStatus(err)
 	}
-	return &adapterv1.LookupResponse{Job: &adapterv1.Job{
-		State: adapterv1.JobState(job.State), Handle: handleMessage(job.Handle), Attempt: job.Attempt, Profile: job.Profile, Agent: job.Agent,
+	return &pluginv1.LookupResponse{Job: &pluginv1.Job{
+		State: pluginv1.JobState(job.State), Handle: handleMessage(job.Handle), Attempt: job.Attempt, Profile: job.Profile, Agent: job.Agent,
 	}}, nil
 }
 
-// Follow runs the adapter's Follow on the handler's goroutine, so a panic in it is recovered, and sends
+// Follow runs the plugin's Follow on the handler's goroutine, so a panic in it is recovered, and sends
 // its lines from another.
-func (s *server) Follow(req *adapterv1.FollowRequest, stream grpc.ServerStreamingServer[adapterv1.FollowResponse]) error {
-	adapter, err := s.profile(req.Profile)
+func (s *server) Follow(req *pluginv1.FollowRequest, stream grpc.ServerStreamingServer[pluginv1.FollowResponse]) error {
+	profile, err := s.profile(req.Profile)
 	if err != nil {
 		return err
 	}
@@ -206,7 +206,7 @@ func (s *server) Follow(req *adapterv1.FollowRequest, stream grpc.ServerStreamin
 		var err error
 		for line := range lines {
 			if err == nil {
-				err = stream.Send(&adapterv1.FollowResponse{Event: &adapterv1.FollowResponse_Line{Line: &adapterv1.Line{Offset: line.Offset, Next: line.Next, Data: line.Data}}})
+				err = stream.Send(&pluginv1.FollowResponse{Event: &pluginv1.FollowResponse_Line{Line: &pluginv1.Line{Offset: line.Offset, Next: line.Next, Data: line.Data}}})
 				if err != nil {
 					cancel()
 				}
@@ -216,7 +216,7 @@ func (s *server) Follow(req *adapterv1.FollowRequest, stream grpc.ServerStreamin
 	}()
 	terminal, err := func() (Terminal, error) {
 		defer close(lines)
-		return adapter.Follow(ctx, handleOf(req.Handle), req.From, lines)
+		return profile.Follow(ctx, handleOf(req.Handle), req.From, lines)
 	}()
 	if sendErr := <-sent; sendErr != nil {
 		return sendErr
@@ -224,26 +224,26 @@ func (s *server) Follow(req *adapterv1.FollowRequest, stream grpc.ServerStreamin
 	if err != nil {
 		return callStatus(err)
 	}
-	return stream.Send(&adapterv1.FollowResponse{Event: &adapterv1.FollowResponse_Terminal{Terminal: &adapterv1.Terminal{
+	return stream.Send(&pluginv1.FollowResponse{Event: &pluginv1.FollowResponse_Terminal{Terminal: &pluginv1.Terminal{
 		Started: terminal.Started, ExitCode: int64(terminal.ExitCode), Signal: terminal.Signal, Class: terminal.Class, Node: terminal.Node, Reason: terminal.Reason,
 	}}})
 }
 
-func (s *server) Stop(ctx context.Context, req *adapterv1.StopRequest) (*adapterv1.StopResponse, error) {
-	adapter, err := s.profile(req.Profile)
+func (s *server) Stop(ctx context.Context, req *pluginv1.StopRequest) (*pluginv1.StopResponse, error) {
+	profile, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
-	return &adapterv1.StopResponse{}, callStatus(adapter.Stop(ctx, handleOf(req.Handle)))
+	return &pluginv1.StopResponse{}, callStatus(profile.Stop(ctx, handleOf(req.Handle)))
 }
 
 // maxPiece bounds the data of one CollectResponse below gRPC's default 4 MiB receive limit.
 const maxPiece = 1 << 20
 
-// Collect runs the adapter's Collect on the handler's goroutine, as Follow does, and sends its outputs in pieces
+// Collect runs the plugin's Collect on the handler's goroutine, as Follow does, and sends its outputs in pieces
 // from another.
-func (s *server) Collect(req *adapterv1.CollectRequest, stream grpc.ServerStreamingServer[adapterv1.CollectResponse]) error {
-	adapter, err := s.profile(req.Profile)
+func (s *server) Collect(req *pluginv1.CollectRequest, stream grpc.ServerStreamingServer[pluginv1.CollectResponse]) error {
+	profile, err := s.profile(req.Profile)
 	if err != nil {
 		return err
 	}
@@ -268,7 +268,7 @@ func (s *server) Collect(req *adapterv1.CollectRequest, stream grpc.ServerStream
 	limits := req.GetLimits()
 	err = func() error {
 		defer close(outputs)
-		return adapter.Collect(ctx, handleOf(req.Handle), Limits{
+		return profile.Collect(ctx, handleOf(req.Handle), Limits{
 			Files: int(limits.GetFiles()), FileBytes: limits.GetFileBytes(), TotalBytes: limits.GetTotalBytes(), Stream: limits.GetStream(), StreamBytes: limits.GetStreamBytes(),
 		}, outputs)
 	}()
@@ -278,7 +278,7 @@ func (s *server) Collect(req *adapterv1.CollectRequest, stream grpc.ServerStream
 	return callStatus(err)
 }
 
-func sendOutput(stream grpc.ServerStreamingServer[adapterv1.CollectResponse], output Output) error {
+func sendOutput(stream grpc.ServerStreamingServer[pluginv1.CollectResponse], output Output) error {
 	if output.Body != nil {
 		return sendBody(stream, output)
 	}
@@ -286,7 +286,7 @@ func sendOutput(stream grpc.ServerStreamingServer[adapterv1.CollectResponse], ou
 	for {
 		piece := data[:min(len(data), maxPiece)]
 		data = data[len(piece):]
-		resp := &adapterv1.CollectResponse{Name: output.Name, Size: output.Size, Mode: uint32(output.Mode), More: len(data) > 0}
+		resp := &pluginv1.CollectResponse{Name: output.Name, Size: output.Size, Mode: uint32(output.Mode), More: len(data) > 0}
 		if output.Data != nil {
 			resp.Data = piece
 		}
@@ -300,17 +300,17 @@ func sendOutput(stream grpc.ServerStreamingServer[adapterv1.CollectResponse], ou
 }
 
 // sendBody sends a streamed output's Body in pieces as it reads them, then a last message with no data.
-func sendBody(stream grpc.ServerStreamingServer[adapterv1.CollectResponse], output Output) error {
+func sendBody(stream grpc.ServerStreamingServer[pluginv1.CollectResponse], output Output) error {
 	piece := make([]byte, maxPiece)
 	for {
 		n, err := io.ReadFull(output.Body, piece)
 		if n > 0 || err == nil {
-			if sendErr := stream.Send(&adapterv1.CollectResponse{Name: output.Name, Size: output.Size, Mode: uint32(output.Mode), Data: piece[:n], More: true}); sendErr != nil {
+			if sendErr := stream.Send(&pluginv1.CollectResponse{Name: output.Name, Size: output.Size, Mode: uint32(output.Mode), Data: piece[:n], More: true}); sendErr != nil {
 				return sendErr
 			}
 		}
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return stream.Send(&adapterv1.CollectResponse{Name: output.Name, Size: output.Size, Mode: uint32(output.Mode), Data: []byte{}})
+			return stream.Send(&pluginv1.CollectResponse{Name: output.Name, Size: output.Size, Mode: uint32(output.Mode), Data: []byte{}})
 		}
 		if err != nil {
 			return err
@@ -318,44 +318,44 @@ func sendBody(stream grpc.ServerStreamingServer[adapterv1.CollectResponse], outp
 	}
 }
 
-func (s *server) Purge(ctx context.Context, req *adapterv1.PurgeRequest) (*adapterv1.PurgeResponse, error) {
-	adapter, err := s.profile(req.Profile)
+func (s *server) Purge(ctx context.Context, req *pluginv1.PurgeRequest) (*pluginv1.PurgeResponse, error) {
+	profile, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
-	return &adapterv1.PurgeResponse{}, callStatus(adapter.Purge(ctx, req.RunId))
+	return &pluginv1.PurgeResponse{}, callStatus(profile.Purge(ctx, req.RunId))
 }
 
-func (s *server) Release(ctx context.Context, req *adapterv1.ReleaseRequest) (*adapterv1.ReleaseResponse, error) {
-	adapter, err := s.profile(req.Profile)
+func (s *server) Release(ctx context.Context, req *pluginv1.ReleaseRequest) (*pluginv1.ReleaseResponse, error) {
+	profile, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
-	return &adapterv1.ReleaseResponse{}, callStatus(adapter.Release(ctx, req.RunId))
+	return &pluginv1.ReleaseResponse{}, callStatus(profile.Release(ctx, req.RunId))
 }
 
-func (s *server) Sweep(ctx context.Context, req *adapterv1.SweepRequest) (*adapterv1.SweepResponse, error) {
-	adapter, err := s.profile(req.Profile)
+func (s *server) Sweep(ctx context.Context, req *pluginv1.SweepRequest) (*pluginv1.SweepResponse, error) {
+	profile, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
-	return &adapterv1.SweepResponse{}, callStatus(adapter.Sweep(ctx))
+	return &pluginv1.SweepResponse{}, callStatus(profile.Sweep(ctx))
 }
 
-func (s *server) Metrics(ctx context.Context, req *adapterv1.MetricsRequest) (*adapterv1.MetricsResponse, error) {
-	adapter, err := s.profile(req.Profile)
+func (s *server) Metrics(ctx context.Context, req *pluginv1.MetricsRequest) (*pluginv1.MetricsResponse, error) {
+	profile, err := s.profile(req.Profile)
 	if err != nil {
 		return nil, err
 	}
-	samples, err := adapter.Metrics(ctx)
+	samples, err := profile.Metrics(ctx)
 	if err != nil {
 		return nil, callStatus(err)
 	}
-	resp := &adapterv1.MetricsResponse{}
+	resp := &pluginv1.MetricsResponse{}
 	for _, sample := range samples {
-		resp.Samples = append(resp.Samples, &adapterv1.Sample{
-			Family: sample.Family, Labels: sample.Labels, Kind: adapterv1.Kind(sample.Kind), Value: sample.Value,
-			Histogram: &adapterv1.Histogram{Buckets: sample.Histogram.Buckets, Sum: sample.Histogram.Sum, Count: sample.Histogram.Count},
+		resp.Samples = append(resp.Samples, &pluginv1.Sample{
+			Family: sample.Family, Labels: sample.Labels, Kind: pluginv1.Kind(sample.Kind), Value: sample.Value,
+			Histogram: &pluginv1.Histogram{Buckets: sample.Histogram.Buckets, Sum: sample.Histogram.Sum, Count: sample.Histogram.Count},
 		})
 	}
 	return resp, nil

@@ -1,4 +1,4 @@
-module github.com/benemon/wherry/adapter
+module github.com/benemon/wherry/pluginsdk
 
 go 1.27
 

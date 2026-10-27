@@ -26,7 +26,7 @@ placement and credential delivery.
 
 Some tasks need specialised hardware, such as a GPU or another
 architecture, or a stronger isolation level than the developer's machine
-gives. The operator labels each profile with what it offers, and a task's
+gives. The operator labels each plugin profile with what it offers, and a task's
 selector picks among them. [Placement](concepts.md#placement) explains the
 labels and selectors, and the
 [receiver configuration example](configuration.md#receiver-configuration-example)

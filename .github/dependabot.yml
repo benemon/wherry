@@ -21,9 +21,9 @@ updates:
       - dependency-name: github.com/twmb/franz-go/pkg/kfake
 
   - package-ecosystem: gomod
-    directory: /adapter
+    directory: /pluginsdk
     schedule:
       interval: weekly
     groups:
-      go-adapter:
+      go-pluginsdk:
         patterns: ["*"]

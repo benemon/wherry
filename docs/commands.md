@@ -32,7 +32,7 @@
 
 ### Names
 
-Tenant, host, receiver, pool, profile, agent and credential names, and adapter types, match
+Tenant, host, receiver, pool, plugin profile, agent and credential names, and plugins, match
 `[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?`: 1 to 32 lowercase letters, digits and
 hyphens, starting and ending with a letter or digit. Names contain no `.`,
 so every principal, topic, group and transactional ID built from them parses
@@ -69,7 +69,7 @@ A selector is a list of requirements, each naming one key once.
 | `DoesNotExist` | none | is absent |
 
 Values within a requirement are unique. An empty selector accepts every
-profile.
+plugin profile.
 
 On the command line a selector is comma-separated:
 
@@ -131,7 +131,7 @@ receiver=<id> pool=<pool> capacity=<n> in_flight=<n> heartbeat_age=<age> status=
 
 `status` is `live` when the latest advertisement is dated within 120
 seconds of now, either side, `stale` otherwise, `silent` when there is none,
-and `ended` after the receiver's membership end. Profiles, their plugins and their labels come from the
+and `ended` after the receiver's membership end. Plugin profiles, their plugins and their labels come from the
 receiver's configuration record, and an agent's `models` and
 `default_model` from the pool's [terms](configuration.md#pool-terms) when it has them.
 `ready` is true when the receiver is live
@@ -170,7 +170,7 @@ and needs `wherry init` on a re-provisioned host.
 | --- | --- | --- |
 | `--agent` | the pool's default, then the terms' order | agent to run |
 | `--model` | the agent's `default_model` | model the agent runs, one of its `models` in the pool's terms |
-| `--selector` | empty | [selector](#selectors) over profile labels |
+| `--selector` | empty | [selector](#selectors) over plugin profile labels |
 | `--prompt` | | prompt text |
 | `--prompt-file` | | file holding the prompt |
 | `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |
@@ -513,7 +513,7 @@ break the [pool terms](configuration.md#pool-terms) rules, and a delivery limit 
 records the new terms and sets the group configuration again. It first
 checks the recorded configuration of every receiver in the pool whose
 membership has not ended against the new terms, as `receiver add` checks a
-new receiver, and refuses the terms when a profile no longer fits, naming
+new receiver, and refuses the terms when a plugin profile no longer fits, naming
 each receiver, plugin and profile and the reason. On new and
 existing topics it sets the tasks and events `retention.ms` to
 `max_queue_deadline` plus six hours plus one day, and their
@@ -646,7 +646,7 @@ timestamp type against the [bounds](design.md#topics-1), checks that each
 live receiver's progress topic keeps records at least as long as its pool's
 tasks topic, and checks that every ACL the
 state calls for is present. It does not report ACLs beyond those, and does not check a
-profile's plugin type or `config` section.
+plugin profile's plugin or `config` section.
 
 ## Receiver command
 
@@ -672,7 +672,7 @@ On start it:
 4. waits for its configuration record on `wherry.admin` and validates it
    against the pool's terms;
 5. starts the [plugins](#plugins) its configuration names from
-   `plugin_dir`, resolves each profile's [platform
+   `plugin_dir`, resolves each plugin profile's [platform
    credential](configuration.md#platform-credentials) and configures each
    profile, reads its pool's events once, and starts advertising and
    claiming.
@@ -687,9 +687,9 @@ credential](configuration.md#platform-credentials) value, in place of the
 value. It exits on
 `SIGINT` or `SIGTERM` without stopping its jobs, and fails with
 `receiver configuration changed` when a configuration record that differs
-from its own appears. A configuration record whose plugin type is not a
-valid adapter type name ends it with
-`configuration: profiles need unique valid names and a valid adapter type`.
+from its own appears. A configuration record whose plugin is not a
+valid plugin name ends it with
+`configuration: profiles need unique valid names and a valid plugin`.
 It refuses to start after its membership end.
 
 With `metrics_addr` set it serves its [metrics](#metrics) at `/metrics` on
@@ -701,9 +701,9 @@ rotates the key.
 
 ### Plugins
 
-The receiver ships with no adapters. For each plugin in its configuration
+The receiver ships with no plugins. For each plugin in its configuration
 it runs `wherry-plugin-<type>` from the plugin directory, one process per
-type, and configures every profile of that plugin in it.
+plugin, and configures every plugin profile of that plugin in it.
 [wherry-plugins](https://github.com/benemon/wherry-plugins) holds the
 plugins, `nomad` among them.
 
@@ -739,8 +739,8 @@ stops it and asks the plugin to collect its outputs, which arrive over
 the link in pieces of at most 1 MiB. The outputs the receiver names for
 streaming, its S3 outputs, the plugin streams as the receiver reads them.
 
-A plugin gives each agent the variables of `adapter.AgentEnvironment` over
-the environment it configures, and removes those of `adapter.AgentUnset`
+A plugin gives each agent the variables of `pluginsdk.AgentEnvironment` over
+the environment it configures, and removes those of `pluginsdk.AgentUnset`
 from that environment, so the platform's `git` configuration does not reach
 a [git input](a2a-extension-v1.md#git-input)'s clone. It cannot remove
 what the platform or the image sets. This protects a cooperative agent,
@@ -749,15 +749,15 @@ not against one that runs commands of its own
 
 The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
-certificate pair made for each start, protocol version 9. The receiver refuses a
+certificate pair made for each start, plugin protocol version 10. The receiver refuses a
 plugin of any other protocol version at its start, so the receiver and its
 plugins upgrade together. Configure carries the profile's platform
 credential, when it names one, and no agent credential. Dispatch carries
-every credential of the run as an `adapter.Secret` holding its name, its value
+every credential of the run as a `pluginsdk.Secret` holding its name, its value
 and exactly one target: `Env`, an environment variable the plugin sets for the
 agent, or `File`, a file it writes in the agent's credentials directory.
-The receiver refuses a version 8 plugin with
-`incompatible API version with plugin. Plugin version: 8, Client versions: [9]`.
+The receiver refuses a version 9 plugin with
+`incompatible API version with plugin. Plugin version: 9, Client versions: [10]`.
 The receiver refuses a plugin that offers no TLS certificate. Every call names
 its profile. A plugin accepts messages up to 64 MiB; the receiver logs a larger
 Dispatch as `dispatch rejected: message too large`.
@@ -768,10 +768,10 @@ and is logged. Each offer carries the profile's declared inline input limit;
 negative limits are invalid.
 
 Each scrape of `/metrics` calls every profile's `Metrics` at once, each within
-2 seconds. A plugin answers with samples of the `wherry_adapter_` families,
+2 seconds. A plugin answers with samples of the `wherry_plugin_` families,
 each a family name, labels, and a counter or gauge value or a histogram. A
 histogram gives the cumulative count at each bound of
-`adapter.PlacementBuckets`, its sum and its count. The receiver drops a
+`pluginsdk.PlacementBuckets`, its sum and its count. The receiver drops a
 sample, and counts it in `wherry_metrics_dropped_total` by reason, when:
 
 - its family is not one of the four (`unknown_family`);
@@ -813,7 +813,7 @@ into spaces and cuts the result to 512 bytes. For class `fetch` the line is
 which can quote a presigned URL, is logged as `[omitted]`. The reason goes
 to the receiver's log only.
 
-A plugin returns a failed platform call as an `adapter.Error`, which names
+A plugin returns a failed platform call as a `pluginsdk.Error`, which names
 the operation (`Op`) and the platform's failure class (`Class`) beside the
 error, and crosses the link as a gRPC status detail. The receiver logs a
 plugin call's error as `op=<op> class=<class>: <text>`, without
@@ -834,11 +834,11 @@ leaves a job whose profile is another of its profiles to that profile, and
 stops and purges
 any other job under the run's ID and dispatches the run again.
 
-The protocol is the Go module `github.com/benemon/wherry/adapter` in this
-repository. [`adapter.proto`](https://github.com/benemon/wherry/blob/main/adapter/proto/wherry/adapter/v1/adapter.proto)
-defines the service, `adapter.Serve` runs a plugin and gives its factory
+The protocol is the Go module `github.com/benemon/wherry/pluginsdk` in this
+repository. [`plugin.proto`](https://github.com/benemon/wherry/blob/main/pluginsdk/proto/wherry/plugin/v1/plugin.proto)
+defines the service, `pluginsdk.Serve` runs a plugin and gives its factory
 the logger whose JSON lines the receiver relays at their level, and
-`adaptertest` is the conformance suite a plugin runs against its platform.
+`pluginsdktest` is the conformance suite a plugin runs against its platform.
 
 ### Metrics
 
@@ -855,7 +855,7 @@ output, error text, URL, image, path, node or credential name. An agent the
 pool's terms do not name is `other`. `model` is the placement's model when the
 agent's `models` in the terms hold it, `other` when they do not, and empty for
 an agent with no `models`. A `state` outside the A2A task states is `other`.
-A run ended without a profile, one given back at the delivery budget
+A run ended without a plugin profile, one given back at the delivery budget
 before any profile took it, has `profile="none"`.
 
 | Family | Type | Labels | Counts |
@@ -887,10 +887,10 @@ before any profile took it, has `profile="none"`.
 | `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
 | `wherry_metrics_dropped_total` | counter | `profile`, `reason` | plugin samples dropped and `Metrics` calls that failed |
-| `wherry_adapter_platform_errors_total` | counter | `profile`, `class` | platform API errors: `unavailable`, `denied`, `conflict`, `timeout`, `other` |
-| `wherry_adapter_cleanup_pending` | gauge | `profile` | the profile's ended jobs awaiting cleanup |
-| `wherry_adapter_sweep_deletions_total` | counter | `profile`, `kind` | material a sweep deleted: `job`, `variable` |
-| `wherry_adapter_placement_seconds` | histogram | `profile` | time from dispatch to the agent task starting |
+| `wherry_plugin_platform_errors_total` | counter | `profile`, `class` | platform API errors: `unavailable`, `denied`, `conflict`, `timeout`, `other` |
+| `wherry_plugin_cleanup_pending` | gauge | `profile` | the profile's ended jobs awaiting cleanup |
+| `wherry_plugin_sweep_deletions_total` | counter | `profile`, `kind` | material a sweep deleted: `job`, `variable` |
+| `wherry_plugin_placement_seconds` | histogram | `profile` | time from dispatch to the agent task starting |
 
 A rejection's `reason` is its fixed text, such as `run expired`. A reason that
 quotes the task counts as `git remote host outside the pool's vcs hosts` or
@@ -901,6 +901,6 @@ the 5-minute wait ends and the run fails, and `adopter_refused` when an
 adopter's wait ends and it stops the job before the run fails.
 
 The core histograms' buckets are 1, 5, 15, 30 and 60 seconds, 2, 5, 10 and 30
-minutes, and 1, 2, 4 and 6 hours. `wherry_adapter_placement_seconds` uses
-`adapter.PlacementBuckets`: 1, 2, 5, 10 and 30 seconds, and 1, 2, 5, 10 and 30
+minutes, and 1, 2, 4 and 6 hours. `wherry_plugin_placement_seconds` uses
+`pluginsdk.PlacementBuckets`: 1, 2, 5, 10 and 30 seconds, and 1, 2, 5, 10 and 30
 minutes.

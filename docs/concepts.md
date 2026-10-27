@@ -24,11 +24,11 @@
   statuses, transcript and result. Each receiver is its own principal with
   an Ed25519 signing key, which it creates on first start and keeps in its
   state directory.
-- **An adapter** is a plugin, the binary `wherry-plugin-<type>` that runs
+- **A plugin** is the binary `wherry-plugin-<type>` that runs
   jobs on one kind of platform. The receiver ships with none, and runs one
-  plugin process per adapter type from its plugin directory, linked to it
+  plugin process per plugin from its plugin directory, linked to it
   by mutual TLS. Plugins exist for Nomad, Kubernetes and systemd.
-- **A profile** is a named, configured use of an adapter: the agent it
+- **A plugin profile** is a named, configured use of a plugin: the agent it
   launches, its labels and its runtime. A task is placed on a profile and a
   run is routed to one. A receiver holds one or more profiles, and each
   profile launches one agent.
@@ -72,7 +72,7 @@ The operators are `In`, `NotIn`, `Exists` and `DoesNotExist`;
 [Commands](commands.md#selectors) gives the grammar.
 
 **Labels describe characteristics**, such as a GPU, a network segment or an
-isolation level. The operator declares them per profile in the receiver's
+isolation level. The operator declares them per plugin profile in the receiver's
 configuration record. Keys are arbitrary and may carry the operator's own
 prefix, such as `example.com/gpu`; the prefix `wherry.io/` is reserved.
 The platform, runtime, node pool and datacenter a profile uses are part
@@ -93,7 +93,7 @@ signs the agent, the selector and the chosen pool into the task.
 
 **The receiver routes** a task it claims to its first ready profile, in
 order within its plugin, whose agent and labels satisfy the task. It visits
-plugins in the order of their types, the same order the client uses, and
+plugins in the order of their names, the same order the client uses, and
 labels choose between plugins. An agent outside
 the pool's terms is rejected. A task no ready profile satisfies is a start
 failure: the receiver records it on the pool's events and returns the task
@@ -105,7 +105,7 @@ Everything the task receives lands as files. A submission's `raw` and
 `data` parts are input files that the agent finds in the directory
 `WHERRY_INPUT_DIR` names. They travel inline in the submission record,
 within the broker's record limit, which `pool create` records, and the
-limit each profile declares. Over either, they go through S3 when the pool
+limit each plugin profile declares. Over either, they go through S3 when the pool
 has storage and the host a storage credential; otherwise submit refuses,
 naming the limit. Credentials are files in the directory
 `WHERRY_CREDENTIALS_DIR` names or environment variables, each at its
@@ -113,7 +113,7 @@ target. The receiver opens the prompt with the names of the files, the
 credentials' targets and the outputs the task expects.
 
 The agent leaves its outputs in the directory `WHERRY_OUTPUT_DIR` names.
-Once the job ends and is stopped, whatever its exit, the adapter
+Once the job ends and is stopped, whatever its exit, the plugin
 collects the regular files there, up to 256 entries and the pool's output
 limit (8 MiB by default), without
 following links. The receiver redacts each file, publishes it in chunks on
@@ -130,7 +130,7 @@ input's name, size and SHA-256. When the claiming receiver asks for the
 seal, the host presigns a short-lived GET per input and a PUT per expected
 S3 output, and seals them with the credentials, so the URLs never sit on
 the broker in the clear. The receiver checks each URL against the pool's
-endpoint and bucket; the adapter fetches the inputs into the input
+endpoint and bucket; the plugin fetches the inputs into the input
 directory and verifies them; the receiver streams each S3 output to its
 PUT URL, hashing what it sends, and lists it in the result. The host then
 downloads and verifies the outputs and deletes the run's objects. The
@@ -163,7 +163,7 @@ Each pool reads its tasks through the Kafka
 acquisition lock for the whole run and renews it every 10 seconds. When a
 receiver stops renewing, the broker delivers the task again, and that
 delivery is the next attempt. The receiver that takes it looks for the
-run's job in each of its profiles. If the job exists and came from the
+run's job in each of its plugin profiles. If the job exists and came from the
 same profile and agent, as its platform metadata records, the receiver adopts it, asks for a seal of its own,
 and once it opens resumes the transcript from the run's latest committed
 offset, which each holder records on its own progress topic,

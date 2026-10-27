@@ -83,7 +83,7 @@ names, hosts, entitlements and pools.
 ## Configuration delivery
 
 A receiver's configuration is a record on `wherry.admin`: its capacity
-(the runs it holds at once) and its profiles, each with a name, its plugin's
+(the runs it holds at once) and its plugin profiles, each with a name, its plugin's
 type, an agent, labels and its merged settings for the plugin. It holds no
 secrets and names no agent credential: every profile of an agent delivers
 the agent's credentials as the pool's terms give them. A profile's settings

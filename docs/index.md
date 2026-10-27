@@ -70,7 +70,7 @@ followed from the CLI or from the agent's own harness.
 
 A coding agent delegates through the same tools whatever runs the work.
 The MCP server fits any harness, the agent that runs the task is
-unmodified, and everything platform-specific stays in an adapter,
+unmodified, and everything platform-specific stays in a plugin,
 so changing where work runs leaves the workflow as it is.
 [Harness integration](operations.md#harness-integration) shows the setup.
 
@@ -87,7 +87,7 @@ long.
 
 wherry is self-hosted and needs Kafka. An operator runs a Kafka 4.3 cluster
 with share groups, SCRAM over TLS and an authoriser, creates pools and
-grants access with `wherry admin`, and runs receivers with the adapters
+grants access with `wherry admin`, and runs receivers with the plugins
 for the target platforms. A coding agent's harness talks to wherry
 through the `wherry` CLI or its MCP server. [Prepare Kafka](operations.md#prepare-kafka)
 lists the cluster settings, [Why Kafka](design.md#why-kafka) explains the

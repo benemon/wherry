@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -147,10 +147,10 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 				t.Fatal(err)
 			}
 			logs := &syncBuffer{}
-			adapter := &fakeAdapter{stream: noResultStream, endDelay: time.Minute}
+			plugin := &fakePlugin{stream: noResultStream, endDelay: time.Minute}
 			r := &Receiver{id: receiverID, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 				factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
-					return Named{Name: settings.Name, Agent: settings.Agent, Adapter: adapter}, nil
+					return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 				}}
 			runCtx, stop := context.WithCancel(ctx)
 			done := make(chan error, 1)
@@ -167,7 +167,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 				t.Fatal(err)
 			}
 			for {
-				if _, _, follows, _ := adapter.counts(); follows == 1 {
+				if _, _, follows, _ := plugin.counts(); follows == 1 {
 					break
 				}
 				if ctx.Err() != nil {
@@ -295,10 +295,10 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	}
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	logs := &syncBuffer{}
-	adapter := &fakeAdapter{stream: resultStream}
+	plugin := &fakePlugin{stream: resultStream}
 	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: adapter}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -319,9 +319,9 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	if err != nil || awaited.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("await %+v, %v; receiver logs:\n%s\nhost logs:\n%s", awaited, err, logs.String(), hostLogs.String())
 	}
-	if dispatches, _, _, _ := adapter.counts(); dispatches != 1 || len(adapter.lastRun.Credentials) != 1 ||
-		adapter.lastRun.Credentials[0].Env != credentialEnv || string(adapter.lastRun.Credentials[0].Value) != testToken {
-		t.Fatalf("dispatches %d with %d credentials, want the host's credential once", dispatches, len(adapter.lastRun.Credentials))
+	if dispatches, _, _, _ := plugin.counts(); dispatches != 1 || len(plugin.lastRun.Credentials) != 1 ||
+		plugin.lastRun.Credentials[0].Env != credentialEnv || string(plugin.lastRun.Credentials[0].Value) != testToken {
+		t.Fatalf("dispatches %d with %d credentials, want the host's credential once", dispatches, len(plugin.lastRun.Credentials))
 	}
 	if strings.Contains(logs.String()+hostLogs.String(), testToken) {
 		t.Fatalf("logs carry the credential:\n%s\n%s", logs.String(), hostLogs.String())
@@ -359,10 +359,10 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 	}
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	logs := &syncBuffer{}
-	fake := &fakeAdapter{stream: resultStream}
+	fake := &fakePlugin{stream: resultStream}
 	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -462,15 +462,15 @@ func TestFilesOnRealBroker(t *testing.T) {
 	for i := range big {
 		big[i] = byte(i * 7)
 	}
-	outputs := []adapter.Output{{Name: "big.bin", Size: int64(len(big)), Data: big}, {Name: "report.md", Size: int64(len(report)), Data: report}}
+	outputs := []pluginsdk.Output{{Name: "big.bin", Size: int64(len(big)), Data: big}, {Name: "report.md", Size: int64(len(report)), Data: report}}
 	// Outputs past the limit, listed in the result by their long names, leave no room for the input in its history.
 	for i := range 250 {
-		outputs = append(outputs, adapter.Output{Name: strings.Repeat(fmt.Sprintf("x%0249d/", i), 2) + "over", Size: 1})
+		outputs = append(outputs, pluginsdk.Output{Name: strings.Repeat(fmt.Sprintf("x%0249d/", i), 2) + "over", Size: 1})
 	}
-	fake := &fakeAdapter{stream: resultStream, outputs: outputs}
+	fake := &fakePlugin{stream: resultStream, outputs: outputs}
 	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -561,10 +561,10 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	logs := &syncBuffer{}
 	patch := []byte("From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n")
-	fake := &fakeAdapter{stream: resultStream, outputs: []adapter.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
+	fake := &fakePlugin{stream: resultStream, outputs: []pluginsdk.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
 	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: fake}, nil
+			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
