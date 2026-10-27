@@ -187,7 +187,7 @@ func TestRetiredKeyAfterRotationRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	admitted, ack := f.receiver.admit(f.ctx, record)
-	if len(events.statuses["run-a"]) != 0 || admitted != nil || ack != kgo.AckReject {
+	if len(events.of("run-a").tenants) != 0 || admitted != nil || ack != kgo.AckReject {
 		t.Errorf("a status signed by the retired key after the rotation counted")
 	}
 }

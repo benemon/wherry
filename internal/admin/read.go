@@ -5,6 +5,7 @@ import (
 	"context"
 	json "encoding/json/v2"
 	"maps"
+	"math"
 	"slices"
 	"sync"
 	"time"
@@ -37,7 +38,7 @@ type read struct {
 	records    []*kgo.Record
 	err        error
 	done       chan struct{}
-	// end is the highest last stable offset listed for the topic.
+	// end is the highest last stable offset listed for the topic, no higher than the read's bound.
 	end int64
 }
 
@@ -89,16 +90,22 @@ func (r *Reader) ReadFrom(ctx context.Context, topic string, offset int64) ([]*k
 
 // ReadFromWithEnd is ReadFrom that also returns the last stable offset it reads to.
 func (r *Reader) ReadFromWithEnd(ctx context.Context, topic string, offset int64) ([]*kgo.Record, int64, error) {
-	reads, err := r.readFrom(ctx, map[string]int64{topic: offset})
+	return r.ReadRange(ctx, topic, offset, math.MaxInt64)
+}
+
+// ReadRange is ReadFromWithEnd that stops before until, and returns until in place of a last stable offset above it.
+func (r *Reader) ReadRange(ctx context.Context, topic string, offset, until int64) ([]*kgo.Record, int64, error) {
+	reads, err := r.readFrom(ctx, map[string]int64{topic: offset}, until)
 	if err != nil {
 		return nil, 0, err
 	}
 	return reads[topic].records, reads[topic].end, reads[topic].err
 }
 
-// readFrom reads each topic as ReadFrom does from its offset, listing their offsets in one request of each kind and
-// fetching them together. A topic's own failure is its read's error; the error returned fails every topic.
-func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[string]*read, error) {
+// readFrom reads each topic as ReadFrom does from its offset, and no further than until, listing their offsets in one
+// request of each kind and fetching them together. A topic's own failure is its read's error; the error returned fails
+// every topic.
+func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64, until int64) (map[string]*read, error) {
 	reads := map[string]*read{}
 	if len(offsets) == 0 {
 		// kadm lists every topic when it is given none.
@@ -130,9 +137,10 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[st
 			if current.err = cmp.Or(end.Err, start.Err); current.err != nil {
 				break
 			}
-			current.end = max(current.end, end.Offset)
-			if ok && max(start.Offset, offset) < end.Offset {
-				current.remaining[partition] = end.Offset
+			bound := min(end.Offset, until)
+			current.end = max(current.end, bound)
+			if ok && max(start.Offset, offset) < bound {
+				current.remaining[partition] = bound
 				current.partitions[partition] = kgo.NewOffset().At(max(start.Offset, offset))
 			}
 		}
@@ -323,7 +331,7 @@ func (r *Reader) ReadKeys(ctx context.Context, topics map[string]string) (signed
 	for _, topic := range topics {
 		offsets[topic] = 0
 	}
-	reads, err := r.readFrom(ctx, offsets)
+	reads, err := r.readFrom(ctx, offsets, math.MaxInt64)
 	if err != nil {
 		return nil, err
 	}

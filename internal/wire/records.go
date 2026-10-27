@@ -280,10 +280,11 @@ const (
 	ResultType = "application/vnd.wherry.result.v1+jws"
 	OutputType = "application/vnd.wherry.output.v1+jws"
 	EchoType   = "application/vnd.wherry.echo.v1+jws"
+	CancelType = "application/vnd.wherry.cancel.v1+jws"
 )
 
 func (*Submission) jwsType() string    { return "application/vnd.wherry.submission.v1+jws" }
-func (*Cancel) jwsType() string        { return "application/vnd.wherry.cancel.v1+jws" }
+func (*Cancel) jwsType() string        { return CancelType }
 func (*RunStatus) jwsType() string     { return StatusType }
 func (*Chunk) jwsType() string         { return ChunkType }
 func (*Result) jwsType() string        { return ResultType }

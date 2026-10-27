@@ -225,12 +225,12 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return nil, kgo.AckReject
 	}
 	// Nothing is written under the run key before its owner is known; unreadable submissions leave it unknown.
-	all, err := r.readSubmissions(ctx, run)
+	first, err := r.readSubmission(ctx, run)
 	if err != nil {
 		r.logger.Printf("read run %s submissions: %v", run, err)
 		return nil, kgo.AckRelease
 	}
-	if foreignRun(all, events.statuses[run], task.Wherry.Tenant) {
+	if foreignRun(first, events.of(run), task.Wherry.Tenant) {
 		return reject("run ID in use")
 	}
 	state, _, _ := r.snapshot()
@@ -250,19 +250,17 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return giveBack()
 	}
 	cancelled := r.cancelledRun(ctx, events, run, task.Wherry.Tenant)
-	if len(all) == 0 || all[0].hash != hash {
+	if first == nil || first.hash != hash {
 		return reject("duplicate submission")
 	}
 	// A run a member already claimed is past the age and deadline checks; its redelivery goes on to adoption.
-	claimed := slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
-		return status.Wherry.TaskHash == hash && status.Wherry.Kind != "rejected"
-	})
+	claimed := events.of(run).claimed[hash]
 	if !claimed {
 		maximum := terms.MaxQueueDeadline()
-		if time.Since(all[0].submitted) > maximum {
+		if time.Since(first.submitted) > maximum {
 			return reject("run expired")
 		}
-		if task.Wherry.QueueDeadlineMS > all[0].submitted.Add(maximum).UnixMilli() {
+		if task.Wherry.QueueDeadlineMS > first.submitted.Add(maximum).UnixMilli() {
 			return reject("queue deadline exceeds the pool's max queue deadline")
 		}
 	}
@@ -319,12 +317,11 @@ func modelInTerms(agent admin.AgentTerms, model string) bool {
 // submission a live host's key verifies, or of its earliest status a holder wrote. Receivers cannot read
 // an ended host's key topic, so for a run whose host has ended the status is the only source.
 // Every non-rejected status counts as a claim, so admission writes nothing else under the run key before this check.
-func foreignRun(all []runSubmission, statuses []wire.RunStatus, tenant string) bool {
-	if len(all) > 0 && all[0].record.Wherry.Tenant != tenant {
+func foreignRun(first *runSubmission, events *runEvents, tenant string) bool {
+	if first != nil && first.tenant != tenant {
 		return true
 	}
-	held := slices.IndexFunc(statuses, func(status wire.RunStatus) bool { return status.Wherry.Kind != "rejected" })
-	return held >= 0 && statuses[held].Wherry.Tenant != tenant
+	return events.firstHolderTenant != "" && events.firstHolderTenant != tenant
 }
 
 // s3Outputs names the outputs that return through the pool's bucket.
@@ -433,6 +430,10 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 	if len(records) == 0 {
 		return nil
 	}
+	// The transaction's records lie past every offset folded before it begins.
+	r.eventsMu.Lock()
+	from := r.events.next
+	r.eventsMu.Unlock()
 	if err := producer.BeginTransaction(); err != nil {
 		return err
 	}
@@ -452,7 +453,7 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 	}
 	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	events, readErr := r.reader.ReadFrom(readCtx, admin.PoolEventsTopic(r.config.Pool), 0)
+	events, readErr := r.reader.ReadFrom(readCtx, admin.PoolEventsTopic(r.config.Pool), from)
 	if readErr != nil {
 		r.logger.Printf("read back transaction: %v", readErr)
 		return err
@@ -470,34 +471,52 @@ func (r *Receiver) startFailure(task *wire.Submission, attempt int64, profile, c
 	return &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: r.sign(failure)}
 }
 
-type runSubmission struct {
-	record *wire.Submission
-	hash   string
-	// submitted is the broker's LogAppendTime for the task record.
-	submitted time.Time
+// tasksFold is the pool's task topic up to next, folded under the view of generation gen to each run's first
+// current-key submission.
+type tasksFold struct {
+	gen  uint64
+	next int64
+	runs map[string]runSubmission
 }
 
-// readSubmissions reads the run's current-key submissions from the pool's task topic in log order.
-func (r *Receiver) readSubmissions(ctx context.Context, run string) ([]runSubmission, error) {
+type runSubmission struct {
+	tenant, hash string
+	// submitted is the broker's LogAppendTime for the task record, and offset its offset.
+	submitted time.Time
+	offset    int64
+}
+
+// readSubmission folds the pool's task topic up to its last stable offset and returns the run's first current-key
+// submission, nil when it has none.
+func (r *Receiver) readSubmission(ctx context.Context, run string) (*runSubmission, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	records, err := r.reader.ReadFrom(ctx, admin.PoolTasksTopic(r.config.Pool), 0)
+	r.tasksMu.Lock()
+	defer r.tasksMu.Unlock()
+	state, _, hosts, gen := r.generation()
+	if r.tasks.runs == nil || r.tasks.gen != gen {
+		r.tasks = tasksFold{gen: gen, runs: map[string]runSubmission{}}
+	}
+	records, next, err := r.reader.ReadFromWithEnd(ctx, admin.PoolTasksTopic(r.config.Pool), r.tasks.next)
 	if err != nil {
 		r.deny(err, capRead)
 		return nil, err
 	}
-	state, _, hosts := r.snapshot()
-	var result []runSubmission
 	for _, record := range records {
-		if string(record.Key) != run {
+		if _, ok := r.tasks.runs[string(record.Key)]; ok {
 			continue
 		}
 		submission, err := admin.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
-		if err == nil && submission.Wherry.Run == run {
-			result = append(result, runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp})
+		if err == nil && submission.Wherry.Run == string(record.Key) {
+			r.tasks.runs[submission.Wherry.Run] = runSubmission{tenant: submission.Wherry.Tenant, hash: wire.TaskHash(record.Value), submitted: record.Timestamp, offset: record.Offset}
 		}
 	}
-	return result, nil
+	r.tasks.next = next
+	first, ok := r.tasks.runs[run]
+	if !ok {
+		return nil, nil
+	}
+	return &first, nil
 }
 
 // renewer keeps the share lock alive from claim until the final acknowledgement,
@@ -1953,15 +1972,7 @@ func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash s
 	if err != nil {
 		return 0, err
 	}
-	var highest int64
-	for _, status := range events.statuses[task.Wherry.Run] {
-		if status.Wherry.Tenant != task.Wherry.Tenant || status.Wherry.TaskHash != hash ||
-			(status.Wherry.Kind != "started" && status.Wherry.Kind != "heartbeat") || status.Wherry.LogOffset == nil {
-			continue
-		}
-		highest = max(highest, *status.Wherry.LogOffset)
-	}
-	return highest, nil
+	return events.of(task.Wherry.Run).logOffset[[2]string{task.Wherry.Tenant, hash}], nil
 }
 
 // attemptOf is the share-group delivery count, which franz-go reports as at least 1

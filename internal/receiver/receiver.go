@@ -76,6 +76,14 @@ type Receiver struct {
 	admissionMu sync.Mutex
 	// cancelled holds the runs cancelled by a host of their tenant.
 	cancelled map[runKey]bool
+	// gen, under mu, changes whenever state, peers or hosts does; a fold of another generation is read again from the
+	// start.
+	gen uint64
+	// events and tasks fold the pool's events and task topics; each mutex is held for a read and fold of its topic.
+	eventsMu sync.Mutex
+	events   eventsFold
+	tasksMu  sync.Mutex
+	tasks    tasksFold
 	// live holds the forms of the values delivered to each run this receiver holds, and platform those of its platform
 	// credentials.
 	liveMu   sync.Mutex
@@ -298,6 +306,9 @@ func (r *Receiver) refresh(ctx context.Context) error {
 		return ErrConfigChanged
 	}
 	r.mu.Lock()
+	if !reflect.DeepEqual(state, r.state) || !reflect.DeepEqual(peers, r.peers) || !reflect.DeepEqual(hosts, r.hosts) {
+		r.gen++
+	}
 	r.state, r.peers, r.hosts = state, peers, hosts
 	r.mu.Unlock()
 	if state.Ended[admin.ReceiverPrincipal(r.id)] {
@@ -412,9 +423,15 @@ func (r *Receiver) stopForDenial() bool {
 }
 
 func (r *Receiver) snapshot() (admin.State, signed.Keys, signed.Keys) {
+	state, peers, hosts, _ := r.generation()
+	return state, peers, hosts
+}
+
+// generation is snapshot with the generation it belongs to.
+func (r *Receiver) generation() (admin.State, signed.Keys, signed.Keys, uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.state, r.peers, r.hosts
+	return r.state, r.peers, r.hosts, r.gen
 }
 
 // authorizeHost calls authorize with the host keys, and once more after re-reading the signing
@@ -456,6 +473,9 @@ func (r *Receiver) rereadKey(ctx context.Context, keys *signed.Keys, owner, topi
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if !reflect.DeepEqual((*keys)[owner], fresh[owner]) {
+		r.gen++
+	}
 	*keys = maps.Clone(*keys)
 	(*keys)[owner] = fresh[owner]
 	return *keys, nil
@@ -463,21 +483,28 @@ func (r *Receiver) rereadKey(ctx context.Context, keys *signed.Keys, owner, topi
 
 // kid returns the owner and key ID a compact JWS names in its protected header.
 func kid(encoded []byte) (string, string, bool) {
+	_, kid := header(encoded)
+	return strings.Cut(kid, "/")
+}
+
+// header returns the type and kid a compact JWS names in its protected header, empty where it names none.
+func header(encoded []byte) (string, string) {
 	header, _, ok := strings.Cut(string(encoded), ".")
 	if !ok {
-		return "", "", false
+		return "", ""
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(header)
 	if err != nil {
-		return "", "", false
+		return "", ""
 	}
 	var protected struct {
-		KID string `json:"kid"`
+		Type string `json:"typ"`
+		KID  string `json:"kid"`
 	}
 	if json.Unmarshal(decoded, &protected) != nil {
-		return "", "", false
+		return "", ""
 	}
-	return strings.Cut(protected.KID, "/")
+	return protected.Type, protected.KID
 }
 
 // advertise sweeps each profile, then publishes one offer per ready profile with its agent; with none ready it
@@ -547,29 +574,93 @@ func (r *Receiver) offer(placement wire.Placement) (Named, bool) {
 	return Named{}, false
 }
 
-// poolEvents is one read of the pool's events topic.
-type poolEvents struct {
-	// statuses holds, per run, the statuses from live pool members in log order, one per event ID.
-	statuses map[string][]wire.RunStatus
-	// others holds, per run, every other record, such as cancels.
-	others map[string][][]byte
+// eventsFold is the pool's events topic up to next, folded under the view of generation gen.
+type eventsFold struct {
+	gen  uint64
+	next int64
+	runs map[string]*runEvents
 }
 
+// runEvents is what admission reads of a run's events. Of the statuses from live pool members: their tenants, the tenant
+// of the earliest that is not a rejection, the task hashes with a terminal one and with one that is not a rejection, and
+// the highest started or heartbeat log offset per tenant and task hash. Of the other records: those of a cancel's type,
+// verified at use. A fold replaces a run's runEvents rather than change it.
+type runEvents struct {
+	firstHolderTenant string
+	tenants           map[string]bool
+	terminal, claimed map[string]bool
+	logOffset         map[[2]string]int64
+	cancels           [][]byte
+	// last is the offset of the run's last folded record.
+	last int64
+}
+
+func (events *runEvents) clone() *runEvents {
+	if events == nil {
+		return &runEvents{tenants: map[string]bool{}, terminal: map[string]bool{}, claimed: map[string]bool{}, logOffset: map[[2]string]int64{}}
+	}
+	clone := *events
+	clone.tenants, clone.terminal, clone.claimed, clone.logOffset = maps.Clone(events.tenants), maps.Clone(events.terminal), maps.Clone(events.claimed), maps.Clone(events.logOffset)
+	clone.cancels = slices.Clip(events.cancels)
+	return &clone
+}
+
+func (events *runEvents) add(status wire.RunStatus) {
+	binding := status.Wherry
+	events.tenants[binding.Tenant] = true
+	if wire.Terminal(status.StatusUpdate.Status.State) {
+		events.terminal[binding.TaskHash] = true
+	}
+	if binding.Kind != "rejected" {
+		events.claimed[binding.TaskHash] = true
+		if events.firstHolderTenant == "" {
+			events.firstHolderTenant = binding.Tenant
+		}
+	}
+	if (binding.Kind == "started" || binding.Kind == "heartbeat") && binding.LogOffset != nil {
+		key := [2]string{binding.Tenant, binding.TaskHash}
+		events.logOffset[key] = max(events.logOffset[key], *binding.LogOffset)
+	}
+}
+
+// poolEvents is the folded events of the pool's runs.
+type poolEvents map[string]*runEvents
+
+// of returns run's events, none when it has none.
+func (events poolEvents) of(run string) *runEvents {
+	if held := events[run]; held != nil {
+		return held
+	}
+	return &runEvents{}
+}
+
+// readEvents folds the pool's events up to their last stable offset and returns the fold's runs.
 func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	records, err := r.reader.ReadFrom(ctx, admin.PoolEventsTopic(r.config.Pool), 0)
+	r.eventsMu.Lock()
+	defer r.eventsMu.Unlock()
+	state, peers, _, gen := r.generation()
+	fold := r.events
+	if fold.runs == nil || fold.gen != gen {
+		fold = eventsFold{gen: gen, runs: map[string]*runEvents{}}
+	}
+	records, next, err := r.reader.ReadFromWithEnd(ctx, admin.PoolEventsTopic(r.config.Pool), fold.next)
 	if err != nil {
 		r.deny(err, capRead)
-		return poolEvents{}, err
+		return nil, err
 	}
-	state, peers, _ := r.snapshot()
 	peerTopics := admin.PoolKeyTopics(state, r.config.Pool)
 	reread := map[string]bool{}
-	events := poolEvents{statuses: map[string][]wire.RunStatus{}, others: map[string][][]byte{}}
-	seen := map[string]bool{}
+	folded := map[string]*runEvents{}
 	for _, record := range records {
 		run := string(record.Key)
+		events := folded[run]
+		if events == nil {
+			events = fold.runs[run].clone()
+			folded[run] = events
+		}
+		events.last = record.Offset
 		var named wire.RunStatus
 		history := wire.ParseHistory(record.Timestamp)
 		err := history(record.Value, peers, &named)
@@ -577,31 +668,32 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 		if owner, topic, stale := staleKey(record.Value, peers, peerTopics); err != nil && stale && !reread[owner] {
 			reread[owner] = true
 			if peers, err = r.rereadKey(ctx, &r.peers, owner, topic); err != nil {
-				return poolEvents{}, err
+				return nil, err
 			}
 			err = history(record.Value, peers, &named)
 		}
 		if err != nil {
-			events.others[run] = append(events.others[run], record.Value)
+			if typ, _ := header(record.Value); typ == wire.CancelType {
+				events.cancels = append(events.cancels, record.Value)
+			}
 			continue
 		}
 		// A status binds its run's tenant through the task hash; the pool and membership are checked here.
 		status, err := admin.AuthorizeStatus(history, state, peers, record.Value, r.config.Pool, named.Wherry.Tenant)
-		if err != nil || status.Wherry.Run != run || seen[status.Wherry.EventID] {
-			continue
+		if err == nil && status.Wherry.Run == run {
+			events.add(status)
 		}
-		seen[status.Wherry.EventID] = true
-		events.statuses[run] = append(events.statuses[run], status)
 	}
-	return events, nil
+	maps.Copy(fold.runs, folded)
+	fold.next = next
+	r.events = fold
+	return maps.Clone(fold.runs), nil
 }
 
 // committedTerminal reports a status in a terminal A2A state, a rejection included, for the exact task
 // record on the pool's events.
 func (events poolEvents) committedTerminal(run, taskHash string) bool {
-	return slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
-		return wire.Terminal(status.StatusUpdate.Status.State) && status.Wherry.TaskHash == taskHash
-	})
+	return events.of(run).terminal[taskHash]
 }
 
 type runKey struct{ tenant, run string }
@@ -609,7 +701,7 @@ type runKey struct{ tenant, run string }
 // cancelledRun reports whether a live host of tenant has cancelled run.
 func (r *Receiver) cancelledRun(ctx context.Context, events poolEvents, run, tenant string) bool {
 	found := false
-	for _, encoded := range events.others[run] {
+	for _, encoded := range events.of(run).cancels {
 		err := r.authorizeHost(ctx, encoded, func(state admin.State, hosts signed.Keys) error {
 			cancel, err := admin.AuthorizeCancel(state, hosts, encoded, r.config.Pool, tenant)
 			if err == nil && cancel.Run != run {
@@ -625,21 +717,17 @@ func (r *Receiver) cancelledRun(ctx context.Context, events poolEvents, run, ten
 	return found
 }
 
-// readCancels rebuilds the cancelled runs from the pool's events.
+// readCancels rebuilds the cancelled runs from the pool's events, then prunes the folds.
 func (r *Receiver) readCancels(ctx context.Context) error {
 	events, err := r.readEvents(ctx)
 	if err != nil {
 		return err
 	}
 	cancelled := map[runKey]bool{}
-	for run, statuses := range events.statuses {
+	for run, held := range events {
 		// A cancel counts for its own tenant only, so a status of another tenant under the run ID, such as a
 		// rejection, cannot lend that tenant's host the run.
-		tenants := map[string]bool{}
-		for _, status := range statuses {
-			tenants[status.Wherry.Tenant] = true
-		}
-		for tenant := range tenants {
+		for tenant := range held.tenants {
 			if r.cancelledRun(ctx, events, run, tenant) {
 				cancelled[runKey{tenant, run}] = true
 			}
@@ -648,6 +736,31 @@ func (r *Receiver) readCancels(ctx context.Context) error {
 	r.mu.Lock()
 	r.cancelled = cancelled
 	r.mu.Unlock()
+	return r.prune(ctx)
+}
+
+// prune drops from the folds the runs whose records there all lie below their topic's log start.
+func (r *Receiver) prune(ctx context.Context) error {
+	listing, err := r.reader.Admin()
+	if err != nil {
+		return err
+	}
+	eventsTopic, tasksTopic := admin.PoolEventsTopic(r.config.Pool), admin.PoolTasksTopic(r.config.Pool)
+	starts, err := listing.ListStartOffsets(ctx, eventsTopic, tasksTopic)
+	if err == nil {
+		err = starts.Error()
+	}
+	if err != nil {
+		return err
+	}
+	eventsStart, _ := starts.Lookup(eventsTopic, 0)
+	tasksStart, _ := starts.Lookup(tasksTopic, 0)
+	r.eventsMu.Lock()
+	maps.DeleteFunc(r.events.runs, func(_ string, held *runEvents) bool { return held.last < eventsStart.Offset })
+	r.eventsMu.Unlock()
+	r.tasksMu.Lock()
+	maps.DeleteFunc(r.tasks.runs, func(_ string, first runSubmission) bool { return first.offset < tasksStart.Offset })
+	r.tasksMu.Unlock()
 	return nil
 }
 

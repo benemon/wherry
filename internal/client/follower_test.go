@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"math"
 	"regexp"
 	"slices"
 	"sync/atomic"
@@ -167,7 +168,7 @@ func TestAFollowerBelowTheLogStartStartsAtIt(t *testing.T) {
 	follower := following(t, f, f.host)
 	ctx, cancel := context.WithTimeout(f.ctx, 5*time.Second)
 	defer cancel()
-	if _, _, err := f.host.readFeed(ctx, follower, end); err != nil {
+	if _, _, err := f.host.readFeed(ctx, follower, end, math.MaxInt64); err != nil {
 		t.Fatalf("read the feed from the log start: %v", err)
 	}
 	if follower.start != end {

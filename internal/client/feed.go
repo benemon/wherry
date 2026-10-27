@@ -127,7 +127,7 @@ type entry struct {
 
 // runView is a run as the tenant feed and this host's local record show it. A run's pool comes from the local record,
 // or else from its first echo; records from any other pool are not the run's. Everything below entries is derived
-// from them by derive.
+// from them and counts by derive.
 type runView struct {
 	h       *Host
 	v       view
@@ -139,6 +139,15 @@ type runView struct {
 	unread int
 	// reread holds the kids whose owner's key topic has been re-read, which bounds re-reads to one per key.
 	reread map[string]bool
+	// counts are the chunks and outputs of a restored checkpoint.
+	counts []counted
+	// first is at or below the offset of the run's first record on the feed, and next past the last record read.
+	first, next int64
+	// topicID is the feed's topic ID, and folded the fingerprint of the view every entry was authorised against, empty
+	// once those views differ.
+	topicID, folded string
+	// written is the run's checkpoint as last read or written.
+	written *feedCheckpoint
 
 	binding  binding
 	statuses []*wire.RunStatus
@@ -148,6 +157,8 @@ type runView struct {
 	outcome  *AwaitResult
 	// result is the result that set the outcome, nil when a status did.
 	result *wire.Result
+	// counted holds, per attempt, the chunks of counts.
+	counted map[int64]int
 }
 
 func newRunView(h *Host, v view, runID string, local *runRecord) *runView {
@@ -359,29 +370,217 @@ func (r *runView) derive() {
 			}
 		}
 	}
+	r.counted = map[int64]int{}
+	for _, c := range r.counts {
+		if !live(c.Receiver) || r.binding.hash != c.TaskHash {
+			r.skipped += c.N
+		} else if c.Type == "chunk" {
+			r.counted[c.Attempt] += c.N
+		}
+	}
 }
 
+// checkpointVersion is the format of feedCheckpoint; a checkpoint of any other is discarded.
+const checkpointVersion = 1
+
+// feedCheckpoint is a run's fold of the tenant feed up to Next: what runView keeps before derive, with transcript and
+// output chunks reduced to counts. Final once the run has an outcome.
+type feedCheckpoint struct {
+	V int `json:"v"`
+	// TopicID is the hex of the feed topic's Kafka topic ID.
+	TopicID string `json:"topic_id"`
+	// View is the fingerprint of the view the entries were authorised against.
+	View string `json:"view"`
+	// First is the offset of the run's first record on the feed, else the read's start.
+	First int64 `json:"first"`
+	// Next is the offset after the last record folded, never above the last stable offset at read time.
+	Next    int64             `json:"next"`
+	Final   bool              `json:"final,omitzero"`
+	Pool    string            `json:"pool,omitzero"`
+	Unread  int               `json:"unread,omitzero"`
+	Entries []checkpointEntry `json:"entries"`
+	Counts  []counted         `json:"counts"`
+}
+
+// checkpointEntry is an entry other than a chunk or an output.
+type checkpointEntry struct {
+	Receiver string          `json:"receiver"`
+	Echo     *wire.Echo      `json:"echo,omitzero"`
+	AtMS     int64           `json:"at_ms,omitzero"`
+	Status   *wire.RunStatus `json:"status,omitzero"`
+	Result   *wire.Result    `json:"result,omitzero"`
+}
+
+// counted is the number of chunks or outputs one receiver wrote under one attempt and task hash.
+type counted struct {
+	Type     string `json:"type"`
+	Receiver string `json:"receiver"`
+	Attempt  int64  `json:"attempt"`
+	TaskHash string `json:"task_hash"`
+	N        int    `json:"n"`
+}
+
+// fingerprint is the SHA-256 of what authorising and deriving the tenant's feed records reads from v.
+func fingerprint(tenant string, v view) string {
+	encoded, _ := json.Marshal([]any{v.state.Receivers, v.state.Ended, v.state.Entitlements[tenant], v.keys}, json.Deterministic(true)) // maps of plain values always encode
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
+}
+
+// restore takes the run's entries and counts from cp.
+func (r *runView) restore(cp *feedCheckpoint) {
+	if r.pool == "" {
+		r.pool = cp.Pool
+	}
+	r.unread, r.counts = cp.Unread, cp.Counts
+	for _, e := range cp.Entries {
+		r.entries = append(r.entries, entry{receiver: e.Receiver, echo: e.Echo, at: time.UnixMilli(e.AtMS), status: e.Status, result: e.Result})
+	}
+}
+
+// checkpoint is the run's checkpoint.
+func (r *runView) checkpoint() feedCheckpoint {
+	cp := feedCheckpoint{
+		V: checkpointVersion, TopicID: r.topicID, View: r.folded, First: r.first, Next: r.next, Final: r.outcome != nil, Pool: r.pool, Unread: r.unread,
+		Entries: []checkpointEntry{}, Counts: slices.Clone(r.counts),
+	}
+	count := func(c counted) {
+		i := slices.IndexFunc(cp.Counts, func(kept counted) bool { kept.N = 0; return kept == c })
+		if i < 0 {
+			cp.Counts = append(cp.Counts, c)
+			i = len(cp.Counts) - 1
+		}
+		cp.Counts[i].N++
+	}
+	for _, e := range r.entries {
+		switch {
+		case e.chunk != nil:
+			count(counted{Type: "chunk", Receiver: e.receiver, Attempt: e.chunk.Wherry.Attempt, TaskHash: e.chunk.Wherry.TaskHash})
+		case e.output != nil:
+			count(counted{Type: "output", Receiver: e.receiver, Attempt: e.output.Wherry.Attempt, TaskHash: e.output.Wherry.TaskHash})
+		default:
+			var at int64
+			if e.echo != nil {
+				at = e.at.UnixMilli()
+			}
+			cp.Entries = append(cp.Entries, checkpointEntry{Receiver: e.receiver, Echo: e.echo, AtMS: at, Status: e.status, Result: e.result})
+		}
+	}
+	return cp
+}
+
+// checkpointPath is the path of a run's checkpoint, in the directory of its outputs.
+func (h *Host) checkpointPath(runID string) (string, bool) {
+	if _, ok := h.runPath(runID); !ok {
+		return "", false
+	}
+	return filepath.Join(h.stateDir, "runs", runID, "feed.json"), true
+}
+
+// readCheckpoint returns the run's checkpoint, nil when it has none of this version that decodes.
+func (h *Host) readCheckpoint(runID string) *feedCheckpoint {
+	path, ok := h.checkpointPath(runID)
+	if !ok {
+		return nil
+	}
+	var cp feedCheckpoint
+	if readState(path, &cp) != nil || cp.V != checkpointVersion {
+		return nil
+	}
+	return &cp
+}
+
+// writeCheckpoint writes the run's checkpoint unless it would hold what the last one read or written does. A run whose
+// pool is unknown has every record unread, which a later echo could bind, so it gets none.
+func (h *Host) writeCheckpoint(r *runView) {
+	cp := r.checkpoint()
+	path, ok := h.checkpointPath(r.run)
+	if r.pool == "" || r.folded == "" || !ok || r.written != nil && r.written.Next == cp.Next && r.written.View == cp.View && r.written.TopicID == cp.TopicID {
+		return
+	}
+	if err := writeState(path, cp); err != nil {
+		h.logger.Printf("run %s: write the feed checkpoint: %v", r.run, err)
+		return
+	}
+	r.written = &cp
+}
+
+// feedTopicID returns the hex of the tenant feed's topic ID.
+func (h *Host) feedTopicID(ctx context.Context) (string, error) {
+	topic := admin.TenantTopic(h.tenant)
+	listing, err := h.reader.Admin()
+	if err != nil {
+		return "", err
+	}
+	topics, err := listing.ListTopics(ctx, topic)
+	if err != nil {
+		return "", err
+	}
+	if err := topics[topic].Err; err != nil {
+		return "", err
+	}
+	id := topics[topic].ID
+	return hex.EncodeToString(id[:]), nil
+}
+
+// history reads the run from its checkpoint.
 func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
+	return h.fold(ctx, h.currentFollower(), runID, func(*feedCheckpoint) bool { return false })
+}
+
+func (h *Host) currentFollower() *follower {
+	h.followMu.Lock()
+	defer h.followMu.Unlock()
+	return h.follower
+}
+
+// fold reads the run from its checkpoint's next offset, or not at all once the checkpoint is final. Where whole holds
+// for the checkpoint, it instead reads the run's window afresh, up to the checkpoint's next offset once final, so every
+// chunk and output is whole. A checkpoint of another feed topic or view is discarded for a read from the local record's
+// feed offset. fold writes the checkpoint of what it read.
+func (h *Host) fold(ctx context.Context, f *follower, runID string, whole func(*feedCheckpoint) bool) (*runView, error) {
 	local, err := h.localRun(runID)
 	if err != nil {
 		return nil, err
 	}
-	h.followMu.Lock()
-	f := h.follower
-	h.followMu.Unlock()
+	cp := h.readCheckpoint(runID)
+	from, until, restore := local.feedOffset(), int64(math.MaxInt64), cp != nil && !whole(cp)
+	switch {
+	case restore:
+		from = cp.Next
+	case cp != nil:
+		from = cp.First
+		if cp.Final {
+			until = cp.Next
+		}
+	}
 	var v view
+	var topicID string
 	var records []*kgo.Record
+	next := from
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() (err error) {
 		v, err = h.load(groupCtx)
 		return err
 	})
 	group.Go(func() (err error) {
-		records, _, err = h.readFeed(groupCtx, f, local.feedOffset())
+		topicID, err = h.feedTopicID(groupCtx)
 		return err
 	})
+	if !restore || !cp.Final {
+		group.Go(func() (err error) {
+			records, next, err = h.readFeed(groupCtx, f, from, until)
+			return err
+		})
+	}
 	if err := group.Wait(); err != nil {
 		return nil, err
+	}
+	if cp != nil && (topicID != cp.TopicID || fingerprint(h.tenant, v) != cp.View) {
+		cp, restore, from = nil, false, local.feedOffset()
+		if records, next, err = h.readFeed(ctx, f, from, math.MaxInt64); err != nil {
+			return nil, err
+		}
 	}
 	// As Runs groups the feed, a record keyed by another run is never this run's.
 	var keyed []*kgo.Record
@@ -391,7 +590,16 @@ func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
 		}
 	}
 	r := newRunView(h, v, runID, local)
+	r.first, r.next, r.topicID, r.written = from, next, topicID, cp
+	if restore {
+		r.first = cp.First
+		r.restore(cp)
+	} else if len(keyed) > 0 {
+		r.first = keyed[0].Offset
+	}
 	r.read(ctx, keyed)
+	r.folded = fingerprint(h.tenant, r.v)
+	h.writeCheckpoint(r)
 	return r, nil
 }
 
@@ -505,10 +713,10 @@ func (f *follower) from(offset int64) ([]*kgo.Record, int64, <-chan struct{}, er
 	return f.records[i:], f.read, f.woken, f.err
 }
 
-// readFeed returns the tenant feed's records from offset up to at least its committed end, listed first, and the offset
-// that follows them. It takes them from f while f runs, if f started at or below offset, and reads them once otherwise
-// or when f's fetches fail.
-func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.Record, int64, error) {
+// readFeed returns the tenant feed's records from offset up to at least its committed end, listed first, or up to until
+// where that is lower, and the offset that follows them. It takes them from f while f runs, if f started at or below
+// offset, and reads them once otherwise or when f's fetches fail.
+func (h *Host) readFeed(ctx context.Context, f *follower, offset, until int64) ([]*kgo.Record, int64, error) {
 	topic := admin.TenantTopic(h.tenant)
 	if f != nil && f.start <= offset && f.ctx.Err() == nil {
 		listing, err := h.reader.Admin()
@@ -523,11 +731,12 @@ func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.
 			return nil, 0, err
 		}
 		var end int64
-		ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
+		ends.Each(func(listed kadm.ListedOffset) { end = min(listed.Offset, until) })
 		for f.ctx.Err() == nil {
 			records, read, woken, err := f.from(offset)
 			if read >= end {
-				return records, read, nil
+				i := sort.Search(len(records), func(i int) bool { return records[i].Offset >= until })
+				return records[:i], min(read, until), nil
 			}
 			if err != nil {
 				break
@@ -540,7 +749,7 @@ func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.
 			}
 		}
 	}
-	return h.reader.ReadFromWithEnd(ctx, topic, offset)
+	return h.reader.ReadRange(ctx, topic, offset, until)
 }
 
 // admit applies filter to a status.
@@ -754,6 +963,9 @@ func (h *Host) Events(ctx context.Context, runID string) (EventsResult, error) {
 	for _, chunk := range r.chunks {
 		result.Chunks[chunk.Wherry.Attempt]++
 	}
+	for attempt, n := range r.counted {
+		result.Chunks[attempt] += n
+	}
 	return result, nil
 }
 
@@ -761,7 +973,7 @@ func (h *Host) Events(ctx context.Context, runID string) (EventsResult, error) {
 // highest attempt, and before the first of them, or in place of them while it has none, each line of the highest
 // earlier attempt that has it. An adopter resumes the job's output past the offset of the last heartbeat.
 func (h *Host) Transcript(ctx context.Context, runID string) (TranscriptResult, error) {
-	r, err := h.history(ctx, runID)
+	r, err := h.fold(ctx, h.currentFollower(), runID, func(*feedCheckpoint) bool { return true })
 	if err != nil {
 		return TranscriptResult{}, err
 	}
@@ -816,20 +1028,14 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			h.logger.Printf("answer seal requests: %v", err)
 		}
 	}()
-	v, err := h.load(waitCtx)
+	// An outcome's outputs are verified from their bytes, which a checkpoint does not keep.
+	r, err := h.fold(waitCtx, f, runID, func(cp *feedCheckpoint) bool {
+		return cp.Final || slices.ContainsFunc(cp.Counts, func(c counted) bool { return c.Type == "output" })
+	})
 	if err != nil {
 		return AwaitResult{}, err
 	}
-	local, err := h.localRun(runID)
-	if err != nil {
-		return AwaitResult{}, err
-	}
-	records, next, err := h.readFeed(waitCtx, f, local.feedOffset())
-	if err != nil {
-		return AwaitResult{}, err
-	}
-	r := newRunView(h, v, runID, local)
-	r.read(waitCtx, records)
+	local := r.local
 	if r.pool == "" {
 		return AwaitResult{}, fmt.Errorf("await %s: %w", runID, ErrRunNotFound)
 	}
@@ -837,6 +1043,9 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		v, err := h.load(waitCtx)
 		if err != nil {
 			return fmt.Errorf("await %s: %w", runID, err)
+		}
+		if fingerprint(h.tenant, v) != r.folded {
+			r.folded = ""
 		}
 		r.v, r.reread = v, map[string]bool{}
 		r.derive()
@@ -864,24 +1073,26 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 				}
 				outcome.Task = &task
 			}
+			h.writeCheckpoint(r)
 			return outcome, nil
 		}
 		if unclaimed := r.unclaimed(time.Now()); unclaimed != "" {
+			h.writeCheckpoint(r)
 			return AwaitResult{Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Model: r.model(), Unclaimed: unclaimed, Skipped: r.skipped}, nil
 		}
 		pollCtx, stopPoll := waitCtx, context.CancelFunc(func() {})
 		if r.local != nil && r.local.QueueDeadlineMS > 0 && len(r.statuses) == 0 {
 			pollCtx, stopPoll = context.WithDeadline(waitCtx, time.UnixMilli(r.local.QueueDeadlineMS+1))
 		}
-		records, read, woken, _ := f.from(next)
-		if read <= next {
+		records, read, woken, _ := f.from(r.next)
+		if read <= r.next {
 			select {
 			case <-woken:
 			case <-pollCtx.Done():
 			case <-f.ctx.Done():
 				// The follower's owner stopped it; another follower, perhaps from a later offset, takes over.
 				if f, err = h.follow(waitCtx); err == nil {
-					records, read, err = h.readFeed(waitCtx, f, next)
+					records, read, err = h.readFeed(waitCtx, f, r.next, math.MaxInt64)
 				}
 			}
 		}
@@ -892,9 +1103,13 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		if err != nil {
 			return AwaitResult{}, err
 		}
-		next = max(next, read)
+		r.next = max(r.next, read)
 		kept, unread := len(r.entries), r.unread
 		for _, record := range records {
+			// As in fold, so the checkpoint written holds the run's records alone.
+			if string(record.Key) != runID {
+				continue
+			}
 			if typ, kid := header(record.Value); typ != wire.EchoType || !r.addEcho(waitCtx, record, kid) {
 				r.add(waitCtx, record, typ, kid)
 			}
