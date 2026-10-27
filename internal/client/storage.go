@@ -57,8 +57,8 @@ func (h *Host) bucket(ctx context.Context, pool string, storage *admin.Storage) 
 		if err != nil {
 			return nil, fmt.Errorf("read storage credential %s: %w", name, err)
 		}
-		hold(name, key)
 		keys[i] = strings.TrimSpace(string(key))
+		hold(name, []byte(keys[i]))
 	}
 	// minio drops the default port Host adds, as presigned URLs are signed without it.
 	return minio.New(storage.Host(), &minio.Options{
