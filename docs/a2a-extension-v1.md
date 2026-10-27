@@ -1111,7 +1111,8 @@ the pool's `output_limit`, 8 MiB unless its terms set another, and together at
 most that, which the receiver checks again. Every other entry is listed with its
 type and left unread. The receiver gives up on a collection that takes over 2
 minutes. A plugin that cannot collect, or a job that could not be stopped,
-leaves the outputs `not collected`.
+leaves the outputs `not collected`; the receiver then asks the plugin for the
+outcome file alone, within another 2 minutes.
 
 The receiver checks every name, redacts every file, and publishes each
 returned file as [output chunks](#output-chunk) and in the result's

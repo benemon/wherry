@@ -531,9 +531,9 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 				t.Fatalf("chunks %#v, want the pending line as the last chunk", chunks)
 			}
 			if test.name == "result" {
-				// The job that would not stop is left to the sweep, its outcome file unread.
-				if task := f.lastTask(t); status != kgo.AckReject || task.Status.State != wire.TaskStateFailed || task.Artifacts[0].Parts[0].Text != "agent reported no outcome" {
-					t.Fatalf("status %v task %#v, want the run failed with no outcome", status, task.Status)
+				// The job that would not stop is left to the sweep, its outcome file read alone.
+				if task := f.lastTask(t); status != kgo.AckAccept || task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
+					t.Fatalf("status %v task %#v, want the run completed with its outcome", status, task.Status)
 				}
 				return
 			}

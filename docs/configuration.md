@@ -700,8 +700,9 @@ is redacted like any agent text and becomes
 supplies the credential and submits again. A required
 output that is not returned fails the run with
 `required output <name> not returned: <reason>` as the status message,
-whatever the file reports. Outputs that are not collected leave the file
-unread.
+whatever the file reports. When the outputs are not collected, the receiver
+asks the plugin for the file alone, within another 2 minutes, reading no
+other output.
 
 `.wherry/` beneath the output directory is reserved: nothing in it is
 collected as an output, and no output name leads into it, since no segment

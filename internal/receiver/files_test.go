@@ -611,7 +611,7 @@ func TestOptionalOutputMissingIsListed(t *testing.T) {
 	}
 }
 
-// Outputs not collected leave the outcome file unread too.
+// Outputs not collected by a plugin whose every Collect fails leave the outcome file unread too.
 func TestOutputsNotCollected(t *testing.T) {
 	for name, test := range map[string]struct {
 		required bool
@@ -626,6 +626,25 @@ func TestOutputsNotCollected(t *testing.T) {
 				t.Fatalf("returned %+v, not returned %+v", listed.Outputs, listed.NotReturned)
 			}
 		})
+	}
+}
+
+// A collection that fails before the outcome file arrives reads the file alone, and the run ends with its status.
+func TestOutcomeIsReadWhenCollectionFails(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.answer(t, credentialName)
+	f.plugin.outputs, f.plugin.collectFailures = []pluginsdk.Output{file("report.md", "r")}, 1
+	status := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md"}}
+	}), 1)
+	if task := f.lastTask(t); status != kgo.AckAccept || task.Status.State != wire.TaskStateCompleted || task.Status.Message.Parts[0].Text != "done" {
+		t.Fatalf("ended %v %s %+v, want COMPLETED with done", status, task.Status.State, task.Status.Message)
+	}
+	if listed := manifest(t, f.lastTask(t)); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "report.md", Reason: "not collected"}}) {
+		t.Fatalf("returned %+v, not returned %+v; want report.md not collected", listed.Outputs, listed.NotReturned)
+	}
+	if limits := f.plugin.limits; f.plugin.collects != 2 || limits.FileBytes != 0 || !slices.Equal(limits.Stream, []string{wire.OutcomeFile}) {
+		t.Fatalf("%d collects, the last under %+v; want a second reading the outcome file alone", f.plugin.collects, limits)
 	}
 }
 
@@ -745,21 +764,25 @@ func TestCredentialFormsAreRedacted(t *testing.T) {
 	}
 }
 
-// A job that would not stop at the delivery budget ends the run unread: its outputs and outcome file are never collected.
+// A job that would not stop at the delivery budget ends the run with its outcome file read alone: its outputs are never
+// collected.
 func TestOutputsOfAJobThatWouldNotStopAreNotCollected(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.plugin.stopErr = errors.New("stop failed")
 	f.plugin.outputs = []pluginsdk.Output{file("report.md", "r")}
 	run := testActiveRun(t, f, "run-unstopped", int64(testTerms().DeliveryLimit)-1)
 	run.expected = []wire.ExpectedOutput{{Name: "report.md"}, {Name: "notes.md"}}
-	if status := run.conclude(f.ctx, f.plugin.handle("run-unstopped"), nil, pluginsdk.Terminal{Started: true}); status != kgo.AckReject {
-		t.Fatalf("status %v, want the run failed", status)
+	if status := run.conclude(f.ctx, f.plugin.handle("run-unstopped"), nil, pluginsdk.Terminal{Started: true}); status != kgo.AckAccept {
+		t.Fatalf("status %v, want the run completed", status)
 	}
-	if task := f.lastTask(t); task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != "agent reported no outcome" {
-		t.Fatalf("task %s %+v, want FAILED with no outcome", task.Status.State, task.Status.Message)
+	if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Status.Message.Parts[0].Text != "done" {
+		t.Fatalf("task %s %+v, want COMPLETED with done", task.Status.State, task.Status.Message)
 	}
 	want := []wire.UnreturnedOutput{{Name: "report.md", Reason: "not collected"}, {Name: "notes.md", Reason: "not collected"}}
-	if listed := manifest(t, f.lastTask(t)); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, want) || f.plugin.collects != 0 {
-		t.Fatalf("returned %+v, not returned %+v after %d collects; want every output not collected and none", listed.Outputs, listed.NotReturned, f.plugin.collects)
+	if listed := manifest(t, f.lastTask(t)); len(listed.Outputs) != 0 || !slices.Equal(listed.NotReturned, want) {
+		t.Fatalf("returned %+v, not returned %+v; want every output not collected", listed.Outputs, listed.NotReturned)
+	}
+	if limits := f.plugin.limits; f.plugin.collects != 1 || limits.FileBytes != 0 || !slices.Equal(limits.Stream, []string{wire.OutcomeFile}) {
+		t.Fatalf("%d collects, the last under %+v; want one reading the outcome file alone", f.plugin.collects, limits)
 	}
 }

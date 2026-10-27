@@ -1475,7 +1475,7 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
-		// At the budget the run ends with no outputs or outcome file read, and the job is left to the plugin's sweep.
+		// At the budget the run ends with only its outcome file read, and the job is left to the plugin's sweep.
 		if !run.receiver.budgetSpent(run.attempt) {
 			return kgo.AckRelease
 		}
@@ -1532,6 +1532,9 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 		run.receiver.logger.Printf("run %s: outputs not collected: %s", run.task.Wherry.Run, logText(run.redactText, err))
 		for _, output := range run.expected {
 			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "not collected"})
+		}
+		if run.outcome == nil {
+			run.collectOutcome(ctx, handle)
 		}
 		return
 	}
@@ -1652,6 +1655,26 @@ func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, st
 		return nil, err
 	}
 	return collected, nil
+}
+
+// collectOutcome runs the plugin's Collect for the outcome file alone, reading no other output, under collectTimeout.
+func (run *activeRun) collectOutcome(ctx context.Context, handle pluginsdk.Handle) {
+	ctx, cancel := context.WithTimeout(ctx, collectTimeout)
+	defer cancel()
+	outputs := make(chan pluginsdk.Output)
+	go func() {
+		defer close(outputs)
+		run.profile.Plugin.Collect(ctx, handle, pluginsdk.Limits{Files: wire.MaxOutputs, Stream: []string{wire.OutcomeFile}, StreamBytes: maxOutcome}, outputs)
+	}()
+	for output := range outputs {
+		if output.Name == wire.OutcomeFile && output.Mode.Type() == 0 {
+			run.outcome = run.readOutcome(output)
+			cancel()
+		}
+		if output.Body != nil {
+			output.Body.Close()
+		}
+	}
 }
 
 var errOverLimits = errors.New("the plugin returned more than the limits")
