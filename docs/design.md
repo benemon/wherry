@@ -36,7 +36,8 @@ differently live on different topics.
 | `wherry.receiver.<receiver>` | that receiver | its pool's members, entitled tenants' hosts | its keys |
 | `wherry.pool.<pool>.tasks` | entitled tenants' hosts | the pool's receivers, through its share group | submissions |
 | `wherry.pool.<pool>.events` | the pool's receivers, entitled tenants' hosts | the pool's receivers | statuses, heartbeats, start failures, cancels |
-| `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, transcript chunks, results, echoes, seal requests |
+| `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, results, echoes, seal requests |
+| `wherry.tenant.<tenant>.transcript` | receivers of the tenant's pools | the tenant's hosts | transcript chunks, output chunks |
 | `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key, seals |
 
 A host and a receiver read and write these topics as their grants allow,
@@ -50,10 +51,10 @@ records included, is a versioned EdDSA
 [JWS](https://datatracker.ietf.org/doc/html/rfc7515). A record on a shared topic
 names its owner and key in its `kid`, and a reader verifies it against that
 owner's current key, read from the owner's own key topic, before it decodes the
-payload. A host reading its tenant feed, and a receiver reading its pool's
-statuses, also accept a key the owner has rotated away, for records the
-broker appended before that rotation. No host or receiver can vouch for
-another's key.
+payload. A host reading its tenant feed and transcript topic, and a receiver
+reading its pool's statuses, also accept a key the owner has rotated away,
+for records the broker appended before that rotation. No host or receiver
+can vouch for another's key.
 
 A reader then checks the record against `wherry.admin`. A submission or
 cancel must come from a live host of a tenant entitled to the pool whose
@@ -64,9 +65,9 @@ pool the run was placed in, on behalf of a tenant entitled to it.
 Every topic has one partition, `LogAppendTime` timestamps and
 `cleanup.policy=delete`. Nothing is compacted and no topic is deleted. A
 pool's task and event topics keep records for its maximum queue deadline plus six hours
-plus a day, 15 days 6 hours by default, the tenant feed for 30 days and
-`wherry.receivers` for 7; the identity and configuration topics keep them
-forever.
+plus a day, 15 days 6 hours by default, the tenant feed and transcript
+topic for 30 days and `wherry.receivers` for 7; the identity and
+configuration topics keep them forever.
 
 Every principal reads all of `wherry.admin`, so tenants see each other's
 names, hosts, entitlements and pools.
@@ -105,21 +106,24 @@ replication factor, `cleanup.policy=delete` and
 | `wherry.pool.<pool>.tasks` | `pool create` | `max_queue_deadline` plus 30 hours, in milliseconds; default `1317600000` |
 | `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` sets the same value |
 | `wherry.tenant.<tenant>` | `pool entitle`, `host add` | `2592000000` (30 days) |
+| `wherry.tenant.<tenant>.transcript` | `pool entitle`, `host add` | as the tenant feed, `2592000000` (30 days) |
 | `wherry.receiver.<receiver>` | `receiver add` | `-1` |
 | `wherry.host.<tenant>.<host>` | `host add` | `-1` |
 
 The tasks retention keeps `max_queue_deadline`, the six-hour maximum run time,
 and a one-day margin. Events stay at least as long as tasks. A tenant feed
-must stay for at least `max_queue_deadline` plus six hours; its 30-day default exceeds
-the default requirement of `1231200000`. Identity and configuration topics
-stay at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
+and its transcript topic must stay for at least `max_queue_deadline` plus six
+hours; their 30-day default exceeds the default requirement of
+`1231200000`. Identity and configuration topics stay at `-1`, and
+`wherry.receivers` remains a seven-day liveness topic.
 
 `wherry admin` leaves an existing topic's configuration as it is, except
 that `pool create` sets the retention and timestamp type of the pool's tasks
-and events topics. A tenant feed's retention can be changed with Kafka's own
-tools. `pool create` and `pool entitle` refuse terms that need more than an
-entitled tenant's feed keeps, and `wherry admin check` reports a topic below
-its bound and a pool topic whose timestamp type is not `LogAppendTime`.
+and events topics. A tenant feed's or transcript topic's retention can be
+changed with Kafka's own tools. `pool create` and `pool entitle` refuse terms
+that need more than an entitled tenant's feed or transcript topic keeps, and
+`wherry admin check` reports a topic below its bound and a pool topic whose
+timestamp type is not `LogAppendTime`.
 
 ### ACLs
 
@@ -132,6 +136,7 @@ transactional ID prefix.
 | host | topic `wherry.admin` | Read, Describe |
 | host | topic `wherry.receivers` | Read, Describe |
 | host | topic `wherry.tenant.<own tenant>` | Read, Describe |
+| host | topic `wherry.tenant.<own tenant>.transcript` | Read, Describe |
 | host | topic `wherry.host.<own tenant>.<own host>` | Read, Write, Describe |
 | host | topics `wherry.pool.<p>.tasks` and `.events`, each entitled pool | Write, Describe |
 | host | topic `wherry.receiver.<r>`, each receiver of an entitled pool | Read, Describe |
@@ -144,6 +149,7 @@ transactional ID prefix.
 | receiver | group `p-<own pool>` | Read, Describe, DescribeConfigs |
 | receiver | transactional ID prefix `p.<own pool>.` | Write, Describe |
 | receiver | topic `wherry.tenant.<t>`, each tenant entitled to its pool | Write, Describe |
+| receiver | topic `wherry.tenant.<t>.transcript`, each tenant entitled to its pool | Write, Describe |
 | receiver | topic `wherry.host.<t>.<h>`, each host of those tenants | Read, Describe |
 
 A principal whose membership has ended has no grants.

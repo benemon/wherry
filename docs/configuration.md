@@ -313,7 +313,8 @@ both forms.
 A record limit is the lowest of `message.max.bytes` across the brokers,
 1000012 bytes, the most a wherry producer batches, and `max.message.bytes`
 on the topic the record goes to: the pool's tasks topic for submissions,
-and the feeds of the tenants entitled to the pool for chunks.
+and the feeds and transcript topics of the tenants entitled to the pool
+for receiver records.
 `pool create` records the tasks topic's record limit in the pool's terms,
 and [`submit`](commands.md#wherry-submit) measures each submission against it. A pool file
 does not set it.
@@ -335,7 +336,7 @@ base64url-encoded, so an inline input takes about 16/9 of its size in the
 submission record. As `pool create`'s check measures them on a broker at its
 defaults, the output chunk is 468119 bytes, the results 791017 and 803627
 bytes (with S3 outputs) and the transcript chunk 933508 bytes, so a feed's
-`max.message.bytes` below 933508 refuses every pool.
+or transcript topic's `max.message.bytes` below 933508 refuses every pool.
 
 `pool create` and `pool entitle` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.admin`, which they

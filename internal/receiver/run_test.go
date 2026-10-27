@@ -289,7 +289,8 @@ func completedWith(text string) string {
 func TestHeartbeatsStayOffTheFeed(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	f.adapter.stream = noResultStream
+	// A second line moves the transcript, so a heartbeat commits.
+	f.adapter.stream = append([]string{`{"type":"system"}`}, noResultStream...)
 	f.adapter.endDelay = 4 * renewInterval
 	f.execute(t, f.submit(t, f.host, nil), 1)
 	heartbeats := 0
@@ -305,6 +306,48 @@ func TestHeartbeatsStayOffTheFeed(t *testing.T) {
 		if status.Wherry.Kind == "heartbeat" {
 			t.Fatal("a heartbeat reached the tenant's feed")
 		}
+	}
+}
+
+// A heartbeat commits only when the transcript has moved, so a silent job writes none, and each one still points at
+// the start of a committed line an adopter resumes from.
+func TestHeartbeatsOnlyWhenTheTranscriptMoves(t *testing.T) {
+	stream := []string{`{"type":"assistant","message":"one"}`, `{"type":"assistant","message":"two"}`, `{"type":"assistant","message":"three"}`, completedWith("answer")}
+	f := newFixture(t, stream)
+	f.answer(t, credentialName)
+	f.adapter.pauses, f.adapter.endDelay = map[int]time.Duration{2: 6 * renewInterval}, 3*renewInterval
+	record := f.submit(t, f.host, nil)
+	if status := f.execute(t, record, 1); status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	starts := map[int64]bool{}
+	for _, chunk := range f.chunks(t) {
+		starts[chunk.Wherry.Seq] = true
+	}
+	var offsets []int64
+	for _, status := range f.eventStatuses(t) {
+		if status.Wherry.Kind == "heartbeat" {
+			offsets = append(offsets, *status.Wherry.LogOffset)
+		}
+	}
+	// Two intervals move the transcript, the one before the silence and the one after it; a third can split the
+	// lines that end the silence. The silent intervals and those after the last line write none.
+	first, last := int64(len(stream[0])+1), int64(len(stream[0])+len(stream[1])+len(stream[2])+3)
+	if len(offsets) < 2 || len(offsets) > 3 || offsets[0] != first || offsets[len(offsets)-1] != last {
+		t.Fatalf("heartbeat offsets %v, want %d first, %d last, and one per interval with progress", offsets, first, last)
+	}
+	for i, offset := range offsets {
+		if !starts[offset] || i > 0 && offset <= offsets[i-1] {
+			t.Fatalf("heartbeat offsets %v: %d is a repeat or no committed line's start", offsets, offset)
+		}
+	}
+	if got, err := f.receiver.lastOffset(f.ctx, f.parse(t, record), wire.TaskHash(record.Value)); err != nil || got != last {
+		t.Fatalf("resume offset %d err %v, want %d", got, err, last)
+	}
+	// The terminal counts the chunks the heartbeats committed with those it commits.
+	statuses := f.feedStatuses(t)
+	if terminal := statuses[len(statuses)-1]; terminal.Wherry.Kind != "terminal" || terminal.Wherry.TranscriptChunks != int64(len(f.chunks(t))) {
+		t.Fatalf("last status %s counts %d chunks, want a terminal counting %d", terminal.Wherry.Kind, terminal.Wherry.TranscriptChunks, len(f.chunks(t)))
 	}
 }
 
@@ -349,18 +392,29 @@ func TestTaskResultTextPartOtherwise(t *testing.T) {
 func TestResultSharesTheTerminalTransaction(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-terminal", 1)
+	run.chunked = 2
+	commits := 0
+	commit := commitTransaction
+	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+		commits++
+		return commit(ctx, producer)
+	}
+	t.Cleanup(func() { commitTransaction = commit })
 	run.conclude(f.ctx, adapter.Handle{}, []adapter.Line{{Offset: 0, Next: 5, Data: []byte("line")}}, adapter.Terminal{Started: true})
 	records := f.records(t, admin.TenantTopic(testTenant))
-	if len(records) != 3 {
-		t.Fatalf("feed records %d, want the last chunk, the result and the terminal", len(records))
+	if len(records) != 2 || len(f.chunks(t)) != 1 {
+		t.Fatalf("feed records %d and chunks %d, want the result and the terminal, and the last chunk", len(records), len(f.chunks(t)))
 	}
 	var result wire.Result
 	var terminal wire.RunStatus
-	if wire.ParseRecord(records[1].Value, f.keys(), &result) != nil || wire.ParseRecord(records[2].Value, f.keys(), &terminal) != nil || terminal.Wherry.Kind != "terminal" {
+	if wire.ParseRecord(records[0].Value, f.keys(), &result) != nil || wire.ParseRecord(records[1].Value, f.keys(), &terminal) != nil || terminal.Wherry.Kind != "terminal" {
 		t.Fatal("the result is not followed by the terminal")
 	}
-	if !oneTransaction(records) {
-		t.Fatal("feed records of the turn's end come from different transactions")
+	if commits != 1 {
+		t.Fatalf("the turn's end took %d transactions, want 1", commits)
+	}
+	if terminal.Wherry.TranscriptChunks != 3 {
+		t.Fatalf("terminal counts %d chunks, want the 2 committed and the last", terminal.Wherry.TranscriptChunks)
 	}
 	if result.Wherry.TaskHash != run.taskHash || result.Wherry.Tenant != testTenant {
 		t.Fatalf("result binding %#v", result.Wherry)
@@ -399,7 +453,7 @@ func TestEndOfJobStopsAllocationBeforeTerminal(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-result-stop", 1)
 	f.adapter.stopCheck = func() error {
-		if n := len(f.records(t, admin.TenantTopic(testTenant))); n != 0 {
+		if n := len(f.records(t, admin.TenantTopic(testTenant))) + len(f.records(t, admin.TenantTranscriptTopic(testTenant))); n != 0 {
 			return fmt.Errorf("feed records visible before Stop: %d", n)
 		}
 		return nil
@@ -438,7 +492,7 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 			if status := test.call(run, f.ctx, pending); status != kgo.AckRelease {
 				t.Fatalf("status %v, want release", status)
 			}
-			if feed, events := len(f.records(t, admin.TenantTopic(testTenant))), len(f.records(t, admin.PoolEventsTopic(testPool))); feed != 0 || events != 0 {
+			if feed, events := len(f.records(t, admin.TenantTopic(testTenant)))+len(f.records(t, admin.TenantTranscriptTopic(testTenant))), len(f.records(t, admin.PoolEventsTopic(testPool))); feed != 0 || events != 0 {
 				t.Fatalf("Stop failure published feed=%d events=%d", feed, events)
 			}
 		})
@@ -771,7 +825,7 @@ func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 	if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != "dispatch" {
 		t.Fatalf("start failures %#v, want one dispatch start failure", failures)
 	}
-	for _, topic := range []string{admin.PoolEventsTopic(testPool), admin.TenantTopic(testTenant)} {
+	for _, topic := range []string{admin.PoolEventsTopic(testPool), admin.TenantTopic(testTenant), admin.TenantTranscriptTopic(testTenant)} {
 		for _, record := range f.records(t, topic) {
 			if strings.Contains(string(record.Value), secret) {
 				t.Fatalf("dispatch error detail published on %s", topic)
@@ -957,7 +1011,7 @@ func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
 			if result := task.Artifacts[0].Parts[0].Text; result != test.want {
 				t.Fatalf("result %.80q, want %.80q", result, test.want)
 			}
-			for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
+			for _, record := range append(f.records(t, admin.TenantTopic(testTenant)), f.records(t, admin.TenantTranscriptTopic(testTenant))...) {
 				if strings.Contains(string(decodedPayload(record.Value)), testToken) {
 					t.Fatal("the credential value reached the feed")
 				}

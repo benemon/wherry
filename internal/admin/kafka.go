@@ -295,7 +295,7 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err := service.createTopics(ctx, "-1", HostTopic(tenant, host)); err != nil {
 		return err
 	}
-	if err := service.createTopics(ctx, strconv.Itoa(tenantRetentionMS), TenantTopic(tenant)); err != nil {
+	if err := service.createTopics(ctx, strconv.Itoa(tenantRetentionMS), TenantTopic(tenant), TenantTranscriptTopic(tenant)); err != nil {
 		return err
 	}
 	if err := service.reconcileACLs(ctx, state); err != nil {
@@ -317,7 +317,7 @@ func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) erro
 		return errors.New("entitlement names unknown pool")
 	}
 	// The pool's records must fit the tenant's feed, so it exists before the entitlement does.
-	if err := service.createTopics(ctx, strconv.Itoa(tenantRetentionMS), TenantTopic(tenant)); err != nil {
+	if err := service.createTopics(ctx, strconv.Itoa(tenantRetentionMS), TenantTopic(tenant), TenantTranscriptTopic(tenant)); err != nil {
 		return err
 	}
 	if current.Entitlements[tenant] == nil {
@@ -412,7 +412,7 @@ func (service *Service) Skip(ctx context.Context, offset int64, hash string) err
 	return fmt.Errorf("wherry.admin has no record at offset %d", offset)
 }
 
-// tenantRetentionMS is the tenant feed's default: it carries transcripts, which
+// tenantRetentionMS is the tenant feed's and transcript topic's default: the transcript topic carries transcripts, which
 // hold anything the agent printed.
 const tenantRetentionMS = 30 * 24 * 60 * 60 * 1000
 
@@ -569,7 +569,7 @@ func (service *Service) checkPoolFeedsRetention(ctx context.Context, state State
 	var topics []string
 	for tenant, pools := range state.Entitlements {
 		if pools[pool] {
-			topics = append(topics, TenantTopic(tenant))
+			topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
 		}
 	}
 	if len(topics) == 0 {
@@ -599,7 +599,7 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 		topics = append(topics, PoolTasksTopic(pool), PoolEventsTopic(pool))
 	}
 	for tenant := range state.Entitlements {
-		topics = append(topics, TenantTopic(tenant))
+		topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
 	}
 	retentions, err := service.topicRetentions(ctx, topics...)
 	if err != nil {
@@ -636,9 +636,10 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 			return fmt.Errorf("topic %s retention.ms %d is below tasks retention.ms %d", eventsTopic, retentions[eventsTopic], retentions[tasksTopic])
 		}
 		for tenant, pools := range state.Entitlements {
-			feed := TenantTopic(tenant)
-			if pools[pool] && !retentionAtLeast(retentions[feed], bounds.feed) {
-				return fmt.Errorf("topic %s retention.ms %d is below required %d", feed, retentions[feed], bounds.feed)
+			for _, feed := range []string{TenantTopic(tenant), TenantTranscriptTopic(tenant)} {
+				if pools[pool] && !retentionAtLeast(retentions[feed], bounds.feed) {
+					return fmt.Errorf("topic %s retention.ms %d is below required %d", feed, retentions[feed], bounds.feed)
+				}
 			}
 		}
 	}
@@ -787,7 +788,7 @@ func (service *Service) recordLimits(ctx context.Context, state State, pool stri
 	topics := []string{PoolTasksTopic(pool)}
 	for tenant, pools := range state.Entitlements {
 		if pools[pool] {
-			topics = append(topics, TenantTopic(tenant))
+			topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
 		}
 	}
 	resources, err := kadm.NewClient(service.Admin).DescribeTopicConfigs(ctx, topics...)

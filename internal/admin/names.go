@@ -16,6 +16,7 @@ func ReceiverTopic(receiver string) string       { return "wherry.receiver." + r
 func PoolTasksTopic(pool string) string          { return "wherry.pool." + pool + ".tasks" }
 func PoolEventsTopic(pool string) string         { return "wherry.pool." + pool + ".events" }
 func TenantTopic(tenant string) string           { return "wherry.tenant." + tenant }
+func TenantTranscriptTopic(tenant string) string { return "wherry.tenant." + tenant + ".transcript" }
 func HostTopic(tenant, host string) string       { return "wherry.host." + tenant + "." + host }
 func PoolGroup(pool string) string               { return "p-" + pool }
 func TransactionalPrefix(pool string) string     { return "p." + pool + "." }
