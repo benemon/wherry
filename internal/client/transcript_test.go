@@ -96,6 +96,10 @@ func TestStatusAndEventsOfAnEndedRunFetchNoTranscriptRecords(t *testing.T) {
 // A transcript read of an older run fetches the transcript topic from the run's first chunk, appended after its echo,
 // and none of the earlier runs' records.
 func TestTranscriptOfAnOlderRunFetchesFromItsEarliestEcho(t *testing.T) {
+	// kfake runs one clock, so the skew allowance would only reach back to the earlier runs.
+	skew := transcriptSkew
+	transcriptSkew = 0
+	t.Cleanup(func() { transcriptSkew = skew })
 	f := newFixture(t)
 	for range 3 {
 		f.endedRun(t, 20)

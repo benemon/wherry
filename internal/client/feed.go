@@ -426,7 +426,7 @@ func (r *runView) readTranscript(ctx context.Context) error {
 		}
 		ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
 	}
-	starts, err := listing.ListOffsetsAfterMilli(ctx, echoed.UnixMilli(), topic)
+	starts, err := listing.ListOffsetsAfterMilli(ctx, echoed.Add(-transcriptSkew).UnixMilli(), topic)
 	if err == nil {
 		err = starts.Error()
 	}
@@ -464,6 +464,10 @@ func (r *runView) readTranscript(ctx context.Context) error {
 
 // transcriptRetry separates reads of the transcript topic waiting for its last stable offset to pass a run's last chunks.
 const transcriptRetry = 50 * time.Millisecond
+
+// transcriptSkew is how far the transcript topic's leader may stamp append times behind the feed's leader; the two
+// topics can have different leaders, each with its own clock. A variable so tests can measure the window exactly.
+var transcriptSkew = time.Minute
 
 // follower reads the tenant feed from start until the context it was started with ends. Its records are unverified:
 // each reader verifies them against the state it loads.
