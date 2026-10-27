@@ -1054,7 +1054,9 @@ configuration, bundle and state directory.
    `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its
    tasks to the pool. The next delivery of each task adopts the running
    job, on the restarted receiver or another member, and resumes the
-   transcript from the last heartbeat offset.
+   transcript from the last heartbeat offset. Allow the receiver 30 seconds
+   to stop before a forced kill: it closes its idle claims before it
+   releases the tasks it holds.
 4. Restart the harness sessions that run `wherry mcp`.
 
 ## Harness integration

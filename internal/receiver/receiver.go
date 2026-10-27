@@ -172,13 +172,21 @@ func (r *Receiver) Run(ctx context.Context) error {
 		defer wg.Done()
 		r.every(ctx, cancelReadInterval, r.readCancels)
 	}()
+	// Held tasks are released only once every idle slot's share client has closed: a closing client releases what its
+	// pending fetch acquired, so a task released earlier would hop through each, one delivery per hop.
+	running, stopRunning := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopRunning()
+	var idle sync.WaitGroup
+	idle.Add(int(r.config.Capacity))
 	for slot := int64(0); slot < r.config.Capacity; slot++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.claimLoop(ctx)
+			r.claimLoop(ctx, running, sync.OnceFunc(idle.Done))
 		}()
 	}
+	idle.Wait()
+	stopRunning()
 	wg.Wait()
 	return context.Cause(ctx)
 }

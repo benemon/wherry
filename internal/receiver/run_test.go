@@ -698,7 +698,7 @@ func TestFollowLinkLossResumesFromOffset(t *testing.T) {
 	f.adapter.linkLost = 1
 	f.answer(t, credentialName)
 	f.submit(t, f.host, nil)
-	if err := f.receiver.claimOne(f.ctx); err != nil {
+	if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
 		t.Fatal(err)
 	}
 	if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
@@ -728,7 +728,7 @@ func TestFollowLinkLossFailsAfterOneLockDuration(t *testing.T) {
 	f.submit(t, f.host, nil)
 	done := make(chan error, 1)
 	started := time.Now()
-	go func() { done <- f.receiver.claimOne(f.ctx) }()
+	go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, func() {}) }()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -1114,7 +1114,7 @@ func TestShutdownDuringACommitCommitsTheDeliveredLine(t *testing.T) {
 			f.receiver.base = base
 			f.answer(t, credentialName)
 			f.submit(t, f.host, nil)
-			if err := f.receiver.claimOne(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if err := f.receiver.claimOne(ctx, ctx, func() {}); err != nil && !errors.Is(err, context.Canceled) {
 				t.Fatalf("claimOne after shutdown: %v", err)
 			}
 			for _, chunk := range f.chunks(t) {
@@ -1210,7 +1210,7 @@ func TestDeniedReceiverDoesNotClaim(t *testing.T) {
 	ctx, stop := context.WithTimeout(f.ctx, 2*time.Second)
 	defer stop()
 	// The broker still grants access: only the held denial keeps the receiver from claiming.
-	f.receiver.claimLoop(ctx)
+	f.receiver.claimLoop(ctx, ctx, func() {})
 	if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 || len(f.records(t, admin.PoolEventsTopic(testPool))) != 0 {
 		t.Fatalf("a denied receiver claimed: dispatches %d", dispatches)
 	}
@@ -1275,7 +1275,7 @@ func TestShareGroupDenialRetestedByClaim(t *testing.T) {
 	f.submit(t, f.host, nil)
 	ctx, stop := context.WithTimeout(f.ctx, 5*time.Second)
 	defer stop()
-	go f.receiver.claimLoop(ctx)
+	go f.receiver.claimLoop(ctx, ctx, func() {})
 	f.await(t, "run-a", anyTask)
 	if f.receiver.denied() {
 		t.Fatal("a claim that worked left the share group denial in place")

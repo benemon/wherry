@@ -359,7 +359,7 @@ func TestReceiverRejectsURLParts(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.answer(t, credentialName)
 			f.submit(t, f.host, func(task *wire.Submission) { task.Message.Parts = append(task.Message.Parts, part) })
-			if err := f.receiver.claimOne(f.ctx); err != nil {
+			if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
 				t.Fatal(err)
 			}
 			if dispatches, _, _, _ := f.adapter.counts(); dispatches != 0 {
@@ -506,7 +506,7 @@ func startInFlight(t *testing.T, f fixture, ctx context.Context, run string) <-c
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
 	})
 	done := make(chan error, 1)
-	go func() { done <- f.receiver.claimOne(ctx) }()
+	go func() { done <- f.receiver.claimOne(ctx, ctx, func() {}) }()
 	for {
 		if _, _, follows, _ := f.adapter.counts(); follows == 1 {
 			return done
