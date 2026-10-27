@@ -828,7 +828,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	defer heartbeat.Stop()
 	checks := time.NewTicker(stateCheckInterval)
 	defer checks.Stop()
-	position := offset
+	position, beat := offset, offset
 	take := func(line adapter.Line) {
 		pending = append(pending, line)
 		position = line.Next
@@ -916,6 +916,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			if len(pending) > 0 {
 				at, held = pending[len(pending)-1].Offset, 1
 			}
+			// A heartbeat with nothing to flush and the offset of the last one adds nothing an adopter reads.
+			if len(pending) == held && at == beat {
+				continue
+			}
 			// Heartbeats go to the pool's events alone: adoption needs them, hosts follow the chunks.
 			records := append(run.chunks(pending[:len(pending)-held], false), run.events(run.status("heartbeat", taskStatus(wire.TaskStateWorking, ""), &at, nil)))
 			if err := run.commit(ctx, records...); err != nil {
@@ -925,6 +929,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				return run.abandon(err)
 			}
 			pending = pending[len(pending)-held:]
+			beat = at
 		}
 	}
 }
