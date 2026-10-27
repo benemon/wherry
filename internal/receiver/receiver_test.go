@@ -730,7 +730,7 @@ func (f fixture) results(t *testing.T) []wire.Result {
 func (f fixture) chunks(t *testing.T) []wire.Chunk {
 	t.Helper()
 	var chunks []wire.Chunk
-	for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
+	for _, record := range f.records(t, admin.TenantTranscriptTopic(testTenant)) {
 		var chunk wire.Chunk
 		if wire.ParseRecord(record.Value, f.keys(), &chunk) == nil {
 			chunks = append(chunks, chunk)

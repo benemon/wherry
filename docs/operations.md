@@ -139,9 +139,10 @@ existing, to `max_queue_deadline` plus the six-hour maximum run time plus a
 one-day margin, and their timestamp type to `LogAppendTime`, since a run's age
 runs from the broker's time. With the 14-day default that is `1317600000` ms, 15 days
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
-statuses, transcripts and results for 30 days and must keep them for at least
-`max_queue_deadline` plus six hours, so `pool create` refuses a maximum above 29
-days and 18 hours, and `pool entitle` refuses a feed that keeps less. Identity and
+statuses and results, and tenant transcript topics transcripts and outputs, for
+30 days, and both must keep them for at least `max_queue_deadline` plus six
+hours, so `pool create` refuses a maximum above 29 days and 18 hours, and
+`pool entitle` refuses a feed or transcript topic that keeps less. Identity and
 configuration topics stay forever. `wherry admin check` reports a topic whose
 retention drops below its bound, and a pool topic whose timestamp type is not
 `LogAppendTime`.
@@ -151,11 +152,12 @@ retention drops below its bound, and a pool topic whose timestamp type is not
 Every task and every output or transcript chunk is one Kafka record, so
 the broker's record limit bounds what a pool can carry. `pool create` reads
 `message.max.bytes` from every broker and `max.message.bytes` from the
-pool's tasks topic and its tenants' feeds, records the tasks topic's record
-limit in the pool's terms, signs the largest output and transcript chunks
-and results, and refuses the terms when one is over the limit of the feeds
-it goes to. A transcript chunk can be 933508 bytes, so keep each tenant
-feed's `max.message.bytes` at or above that:
+pool's tasks topic and its tenants' feeds and transcript topics, records the
+tasks topic's record limit in the pool's terms, signs the largest output and
+transcript chunks and results, and refuses the terms when one is over the
+limit of those tenant topics. A transcript chunk can be 933508 bytes, so keep
+each tenant feed's and transcript topic's `max.message.bytes` at or above
+that:
 
 ```
 a transcript chunk record is 933508 bytes, over the 900000-byte record limit
@@ -172,7 +174,8 @@ so the terms record the new limit. An output chunk holds
 256 KiB whatever `output_limit` is, so `output_limit` spans as many records
 as it needs and the record limit does not bound it.
 
-`pool entitle` makes the same check with the new tenant's feed counted.
+`pool entitle` makes the same check with the new tenant's feed and
+transcript topic counted.
 Lowering a broker or topic limit later can leave a pool's terms too large;
 [`wherry admin check`](#check-a-deployment) reports it. Receivers read
 their pool's terms from `wherry.admin` every 15 seconds, so admission and
@@ -639,9 +642,9 @@ under a new name.
 ## Rotate a key
 
 A rotation replaces a host's or receiver's signing key and keeps its name.
-Readers keep verifying the feed records the old key signed before the
-rotation. For a key that may be compromised, revoke the host or receiver
-instead.
+Readers keep verifying the feed and transcript records the old key signed
+before the rotation. For a key that may be compromised, revoke the host or
+receiver instead.
 
 For a host:
 
@@ -1064,8 +1067,9 @@ configuration, bundle and state directory.
 `wherry mcp` serves the host operations as MCP tools over stdio. It reads
 the client configuration and connects to Kafka as one host when it starts.
 Every tool call and seal answer reuses that host and its one tenant-feed
-follower. While the connection fails, the server retries it on each tool
-call and every five seconds.
+follower, and `await`, `events` and `transcript` also read the tenant's
+transcript topic. While the connection fails, the server retries it on each
+tool call and every five seconds.
 [MCP tools](mcp.md) lists the tools.
 
 Prerequisites: `wherry` on the harness's `PATH`, and the client

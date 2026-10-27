@@ -928,6 +928,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				}
 				return run.abandon(err)
 			}
+			run.chunked += int64(len(pending) - held)
 			pending = pending[len(pending)-held:]
 			beat = at
 		}
@@ -1152,6 +1153,8 @@ type activeRun struct {
 	claimed time.Time
 	// startCause is the redacted cause of this attempt's start failure, empty without one.
 	startCause string
+	// chunked counts the transcript chunks this attempt has committed.
+	chunked int64
 }
 
 // deliver keeps the forms of each credential value delivered to the run, each with the marker of the value's name under
@@ -1338,7 +1341,7 @@ func (run *activeRun) deny(ctx context.Context, handle adapter.Handle, pending [
 	}
 	const reason = "receiver denied"
 	status := taskStatus(wire.TaskStateFailed, reason)
-	if err := run.commit(ctx, append(append(run.chunks(pending, true), run.result(status, reason)), run.statusRecords("terminal", status, nil, nil)...)...); err != nil {
+	if err := run.commit(ctx, append(append(run.chunks(pending, true), run.result(status, reason)), run.terminal(status, pending)...)...); err != nil {
 		run.receiver.logger.Printf("run %s: publish denied status: %v", run.task.Wherry.Run, err)
 	} else {
 		run.ended(status.State)
@@ -1459,7 +1462,7 @@ func (run *activeRun) budgetRecords(pending []adapter.Line) []*kgo.Record {
 		reason = fmt.Sprintf("%s after %d attempts; last: %s", budgetReason, run.attempt, run.startCause)
 	}
 	status := taskStatus(wire.TaskStateFailed, reason)
-	return append(append(run.chunks(pending, true), run.result(status, reason)), run.statusRecords("terminal", status, nil, nil)...)
+	return append(append(run.chunks(pending, true), run.result(status, reason)), run.terminal(status, pending)...)
 }
 
 // conclude ends the run whose job ended as terminal says: with the status its outcome file reports, or failed for how
@@ -1766,7 +1769,7 @@ func (run *activeRun) outputChunks(name string, data []byte) []*kgo.Record {
 		piece := data[:min(len(data), wire.OutputChunk)]
 		data = data[len(piece):]
 		metadata, _ := json.Marshal(wire.OutputMetadata{Index: index}) // an integer always encodes
-		records = append(records, run.feed(&wire.Output{
+		records = append(records, run.transcript(&wire.Output{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
 				TaskID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run,
 				Artifact: wire.Artifact{ArtifactID: name, Parts: []wire.Part{{Raw: append(wire.StdBytes{}, piece...)}}, Extensions: []string{wire.ExtensionURI}},
@@ -1780,7 +1783,7 @@ func (run *activeRun) outputChunks(name string, data []byte) []*kgo.Record {
 
 // end commits the remaining transcript, the outputs, the result and the terminal status in one transaction.
 func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, pending []adapter.Line, ack kgo.AckStatus) kgo.AckStatus {
-	records := append(append(append(run.chunks(pending, true), run.outputs...), run.result(status, result)), run.statusRecords("terminal", status, nil, nil)...)
+	records := append(append(append(run.chunks(pending, true), run.outputs...), run.result(status, result)), run.terminal(status, pending)...)
 	if err := run.commit(ctx, records...); err != nil {
 		return run.abandon(err)
 	}
@@ -1824,6 +1827,13 @@ func (run *activeRun) statusRecords(kind string, status wire.TaskStatus, offset 
 	return run.receiver.statusRecords(run.task, run.status(kind, status, offset, metadata))
 }
 
+// terminal is the terminal status records, counting the attempt's committed chunks and pending's.
+func (run *activeRun) terminal(status wire.TaskStatus, pending []adapter.Line) []*kgo.Record {
+	value := run.status("terminal", status, nil, nil)
+	value.Wherry.TranscriptChunks = run.chunked + int64(len(pending))
+	return run.receiver.statusRecords(run.task, value)
+}
+
 func (r *Receiver) statusRecords(task *wire.Submission, status *wire.RunStatus) []*kgo.Record {
 	value := r.sign(status)
 	return []*kgo.Record{
@@ -1838,6 +1848,10 @@ func (run *activeRun) events(value wire.Record) *kgo.Record {
 
 func (run *activeRun) feed(value wire.Record) *kgo.Record {
 	return &kgo.Record{Topic: admin.TenantTopic(run.task.Wherry.Tenant), Key: []byte(run.task.Wherry.Run), Value: run.receiver.sign(value)}
+}
+
+func (run *activeRun) transcript(value wire.Record) *kgo.Record {
+	return &kgo.Record{Topic: admin.TenantTranscriptTopic(run.task.Wherry.Tenant), Key: []byte(run.task.Wherry.Run), Value: run.receiver.sign(value)}
 }
 
 func (r *Receiver) binding(task *wire.Submission, attempt int64) wire.ReceiverBinding {
@@ -1873,7 +1887,7 @@ func taskStatus(state wire.TaskState, reason string) wire.TaskStatus {
 	return status
 }
 
-// chunks are the transcript lines as artifact updates on the tenant's feed.
+// chunks are the transcript lines as artifact updates on the tenant's transcript topic.
 func (run *activeRun) chunks(lines []adapter.Line, last bool) []*kgo.Record {
 	records := make([]*kgo.Record, 0, len(lines))
 	for i, line := range lines {
@@ -1899,7 +1913,7 @@ func (run *activeRun) chunks(lines []adapter.Line, last bool) []*kgo.Record {
 			},
 			Wherry: wire.ChunkBinding{ReceiverBinding: run.receiver.binding(run.task, run.attempt), TaskHash: run.taskHash, Seq: line.Offset},
 		}
-		records = append(records, run.feed(chunk))
+		records = append(records, run.transcript(chunk))
 	}
 	return records
 }

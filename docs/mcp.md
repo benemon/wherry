@@ -74,8 +74,9 @@ defaults, `2h` and `10m`.
 - `transcript` returns the lines `wherry transcript` prints, from `offset`
   lines in. `attempt` is the run's highest attempt, 0 while no receiver has
   reported on the run. `total` counts the
-  transcript's lines on the feed so far, less those `wherry transcript`
-  drops, and `next_offset` is set while lines remain past the page.
+  transcript's lines on the transcript topic so far, less those `wherry
+  transcript` drops, and `next_offset` is set while lines remain past the
+  page.
 - Each line is `{seq, attempt, text}`, with `seq` its byte offset in the
   agent's output and `attempt` the attempt that published it. `text` is empty
   for an empty line, and for a line that is not UTF-8, which has `raw_bytes`,

@@ -188,9 +188,11 @@ type StatusBinding struct {
 	Kind      string `json:"kind"`
 	TaskHash  string `json:"task_hash"`
 	LogOffset *int64 `json:"log_offset,omitzero"`
+	// TranscriptChunks is the number of transcript chunks the attempt wrote, on a terminal status.
+	TranscriptChunks int64 `json:"transcript_chunks,omitzero"`
 }
 
-// Chunk is a transcript artifact update on the tenant feed.
+// Chunk is a transcript artifact update on the tenant transcript topic.
 type Chunk struct {
 	V              int                     `json:"v"`
 	ArtifactUpdate TaskArtifactUpdateEvent `json:"artifactUpdate"`
@@ -204,7 +206,7 @@ type ChunkBinding struct {
 	Seq      int64  `json:"seq"`
 }
 
-// Output is one chunk of an output file, as the A2A artifact the file names, on the tenant feed.
+// Output is one chunk of an output file, as the A2A artifact the file names, on the tenant transcript topic.
 type Output struct {
 	V              int                     `json:"v"`
 	ArtifactUpdate TaskArtifactUpdateEvent `json:"artifactUpdate"`
@@ -273,7 +275,7 @@ type StartFailure struct {
 	Class   string          `json:"class"`
 }
 
-// The JWS types of the tenant feed's records, which a reader of the feed routes each record by.
+// The JWS types of the tenant feed's and transcript topic's records, which a reader routes each record by.
 const (
 	StatusType = "application/vnd.wherry.status.v1+jws"
 	ChunkType  = "application/vnd.wherry.chunk.v1+jws"
@@ -493,7 +495,8 @@ func (value *RunStatus) validate() error {
 	if err := validateID(binding.EventID, "event_id"); err != nil {
 		return err
 	}
-	if update.TaskID != binding.Run || update.ContextID != binding.Run || !ValidHash(binding.TaskHash) {
+	if update.TaskID != binding.Run || update.ContextID != binding.Run || !ValidHash(binding.TaskHash) ||
+		binding.TranscriptChunks < 0 || binding.TranscriptChunks > 0 && binding.Kind != "terminal" {
 		return errors.New("invalid status")
 	}
 	if err := validateTaskStatus(&update.Status); err != nil {

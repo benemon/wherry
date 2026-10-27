@@ -203,6 +203,9 @@ func TestCheckReportsRetentionDrift(t *testing.T) {
 		{"feed below max queue deadline plus run time", func(t *testing.T, service *Service) {
 			setTopicRetention(t, service, TenantTopic("tenant-a"), 1231199999)
 		}, "wherry.tenant.tenant-a"},
+		{"transcript topic below max queue deadline plus run time", func(t *testing.T, service *Service) {
+			setTopicRetention(t, service, TenantTranscriptTopic("tenant-a"), 1231199999)
+		}, "wherry.tenant.tenant-a.transcript"},
 		{"events not stamped by the broker", func(t *testing.T, service *Service) {
 			setTopicConfig(t, service, PoolEventsTopic("pool-a"), "message.timestamp.type", "CreateTime")
 		}, "wherry.pool.pool-a.events message.timestamp.type"},

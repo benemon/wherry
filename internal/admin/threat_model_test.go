@@ -13,6 +13,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +103,34 @@ func TestTenantFeedACLIsIsolated(t *testing.T) {
 	}
 	if !hasACL(ACLs(state), TenantPrincipal("tenant-a", "host-a"), TenantTopic("tenant-a"), "READ") {
 		t.Fatal("own tenant feed read ACL missing")
+	}
+}
+
+// A tenant's transcript topic is written by the receivers of its entitled pools and read by its hosts, and by no one else.
+func TestTranscriptTopicACLsAreExactlyItsWritersAndReaders(t *testing.T) {
+	state := modelState(t)
+	grants := func(state State, topic string) map[string][]string {
+		got := map[string][]string{}
+		for _, acl := range ACLs(state) {
+			if acl.Resource == topic || acl.Prefix && strings.HasPrefix(topic, acl.Resource) {
+				got[acl.Principal] = append(got[acl.Principal], acl.Operations...)
+			}
+		}
+		return got
+	}
+	write, read := []string{"WRITE", "DESCRIBE"}, []string{"READ", "DESCRIBE"}
+	for topic, want := range map[string]map[string][]string{
+		TenantTranscriptTopic("tenant-a"): {ReceiverPrincipal("receiver-a"): write, ReceiverPrincipal("receiver-b"): write, TenantPrincipal("tenant-a", "host-a"): read},
+		TenantTranscriptTopic("tenant-b"): {ReceiverPrincipal("receiver-a"): write, TenantPrincipal("tenant-b", "host-b"): read},
+	} {
+		if got := grants(state, topic); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s grants %v, want %v", topic, got, want)
+		}
+	}
+	state.Ended[ReceiverPrincipal("receiver-b")] = true
+	state.Ended[TenantPrincipal("tenant-a", "host-a")] = true
+	if got, want := grants(state, TenantTranscriptTopic("tenant-a")), map[string][]string{ReceiverPrincipal("receiver-a"): write}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("after membership ends, grants %v, want %v", got, want)
 	}
 }
 

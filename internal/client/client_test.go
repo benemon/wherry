@@ -318,6 +318,12 @@ func (r *testReceiver) status(t *testing.T, task claimed, attempt int64, eventID
 	return r.sign(t, status)
 }
 
+// terminal is a terminal status counting its attempt's transcript chunks.
+func (r *testReceiver) terminal(t *testing.T, task claimed, attempt int64, state wire.TaskState, chunks int64) []byte {
+	t.Helper()
+	return r.status(t, task, attempt, fmt.Sprintf("terminal-%d", attempt), "terminal", state, func(status *wire.RunStatus) { status.Wherry.TranscriptChunks = chunks })
+}
+
 func (r *testReceiver) chunk(t *testing.T, task claimed, attempt, seq int64) []byte {
 	run := task.submission.Wherry.Run
 	return r.sign(t, &wire.Chunk{
@@ -341,7 +347,8 @@ func (r *testReceiver) result(t *testing.T, task claimed, attempt int64, state w
 	return r.sign(t, result)
 }
 
-// feed writes records to the tenant feed under the run's key in one transaction, as a receiver commits them.
+// feed writes records under the run's key in one transaction, as a receiver commits them: chunks and outputs to the
+// tenant's transcript topic, the others to its feed.
 func (r *testReceiver) feed(t *testing.T, ctx context.Context, runID string, values ...[]byte) {
 	t.Helper()
 	producer, err := kgo.NewClient(append(r.kafka.Opts(), kgo.TransactionalID(admin.TransactionalPrefix(r.pool)+runID))...)
@@ -353,7 +360,11 @@ func (r *testReceiver) feed(t *testing.T, ctx context.Context, runID string, val
 		t.Fatal(err)
 	}
 	for _, value := range values {
-		if err := producer.ProduceSync(ctx, &kgo.Record{Topic: admin.TenantTopic("tenant-a"), Key: []byte(runID), Value: value}).FirstErr(); err != nil {
+		topic := admin.TenantTopic("tenant-a")
+		if typ, _ := header(value); typ == wire.ChunkType || typ == wire.OutputType {
+			topic = admin.TenantTranscriptTopic("tenant-a")
+		}
+		if err := producer.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(runID), Value: value}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -404,7 +415,7 @@ func TestHostEndToEnd(t *testing.T) {
 	}
 	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, 0), receiver.chunk(t, task, 1, 1))
 	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 2, 0), receiver.result(t, task, 2, wire.TaskStateCompleted, nil),
-		receiver.status(t, task, 2, "terminal-2", "terminal", wire.TaskStateCompleted, nil))
+		receiver.terminal(t, task, 2, wire.TaskStateCompleted, 1))
 	awaited, err := f.host.Await(f.ctx, runID, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -1873,12 +1884,29 @@ func TestFailedKeyReadFailsTheLoad(t *testing.T) {
 	}
 }
 
-// traffic counts the connections that clients built from a client's options open and the requests of each key they
-// send.
+// traffic counts the connections that clients built from a client's options open, the requests of each key they
+// send and the records, transaction markers included, they fetch from each topic.
 type traffic struct {
 	connections atomic.Int64
 	mu          sync.Mutex
 	keys        map[int16]int64
+	fetched     map[string]int64
+}
+
+func (c *traffic) OnFetchBatchRead(_ kgo.BrokerMetadata, topic string, _ int32, metrics kgo.FetchBatchMetrics) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fetched == nil {
+		c.fetched = map[string]int64{}
+	}
+	c.fetched[topic] += int64(metrics.NumRecords)
+}
+
+// records returns the records fetched from topic.
+func (c *traffic) records(topic string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fetched[topic]
 }
 
 func (c *traffic) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ net.Conn, err error) {
@@ -1963,7 +1991,9 @@ func TestHostReadsBoundTheirConnectionsAndRequests(t *testing.T) {
 }
 
 // Await of a finished run reads it through the reader and the follower alone; the host's own client dials nothing. The
-// follower's consuming client opens a seed and a fetch connection, and one of either client's may reopen.
+// follower's consuming client opens a seed and a fetch connection, and one of either client's may reopen. Reading the
+// outputs lists the empty transcript topic's end, its offset after the echo's time twice, and its start and committed
+// offsets.
 func TestAwaitOfAFinishedRunBoundsItsConnectionsAndRequests(t *testing.T) {
 	f := newFixture(t, kfake.NumBrokers(1))
 	receiver, task := f.admitted(t)
@@ -1981,7 +2011,7 @@ func TestAwaitOfAFinishedRunBoundsItsConnectionsAndRequests(t *testing.T) {
 	if awaited.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("awaited %s, want COMPLETED", awaited.Status.State)
 	}
-	bound(t, "await", counted.counts(), counts{6, 0, 11, 0, nil})
+	bound(t, "await", counted.counts(), counts{6, 0, 16, 0, nil})
 }
 
 // readTopic reads topic from its start through a reader of its own.

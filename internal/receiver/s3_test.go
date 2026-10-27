@@ -138,7 +138,7 @@ func TestS3ObjectsTravelOnlyInTheSeal(t *testing.T) {
 		t.Fatalf("prompt %q; want the input's path and no URL", prompt)
 	}
 	// Every record on the feed and the pool's topics is free of the URLs, the signature and the endpoint's paths.
-	for _, topic := range []string{admin.TenantTopic(testTenant), admin.PoolTasksTopic(testPool), admin.PoolEventsTopic(testPool)} {
+	for _, topic := range []string{admin.TenantTopic(testTenant), admin.TenantTranscriptTopic(testTenant), admin.PoolTasksTopic(testPool), admin.PoolEventsTopic(testPool)} {
 		for _, record := range f.records(t, topic) {
 			for _, never := range []string{s3Signature, "X-Amz", s.endpoint()} {
 				if bytes.Contains(record.Value, []byte(never)) || bytes.Contains(decodedPayload(record.Value), []byte(never)) {
@@ -155,11 +155,8 @@ func TestS3ObjectsTravelOnlyInTheSeal(t *testing.T) {
 	if !slices.Equal(listed.S3Outputs, []wire.ReturnedOutput{{Name: "report.pdf", SHA256: sha([]byte("report")), Size: 6, Key: key}}) || len(listed.Outputs) != 0 {
 		t.Fatalf("result lists S3 outputs %+v and outputs %+v", listed.S3Outputs, listed.Outputs)
 	}
-	for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
-		var output wire.Output
-		if wire.ParseRecord(record.Value, f.keys(), &output) == nil {
-			t.Fatalf("an S3 output went on the feed as chunk %s", output.ArtifactUpdate.Artifact.ArtifactID)
-		}
+	for _, output := range f.outputChunks(t) {
+		t.Fatalf("an S3 output went on the transcript topic as chunk %s", output.ArtifactUpdate.Artifact.ArtifactID)
 	}
 }
 

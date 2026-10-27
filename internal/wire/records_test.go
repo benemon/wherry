@@ -128,6 +128,16 @@ func TestRecordValidation(t *testing.T) {
 			value.Wherry.Kind = "other"
 			return value
 		},
+		"status counting chunks before its terminal": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.TranscriptChunks = 1
+			return value
+		},
+		"terminal counting negative chunks": func(r map[string]Record) Record {
+			value := r["status"].(*RunStatus)
+			value.Wherry.Kind, value.Wherry.TranscriptChunks = "terminal", -1
+			return value
+		},
 		"status for another run": func(r map[string]Record) Record {
 			value := r["status"].(*RunStatus)
 			value.StatusUpdate.TaskID = "run-b"
