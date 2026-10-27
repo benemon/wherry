@@ -106,18 +106,20 @@ func TestTenantFeedACLIsIsolated(t *testing.T) {
 	}
 }
 
+// grants is the operations each principal holds on topic.
+func grants(state State, topic string) map[string][]string {
+	got := map[string][]string{}
+	for _, acl := range ACLs(state) {
+		if acl.Resource == topic || acl.Prefix && strings.HasPrefix(topic, acl.Resource) {
+			got[acl.Principal] = append(got[acl.Principal], acl.Operations...)
+		}
+	}
+	return got
+}
+
 // A tenant's transcript topic is written by the receivers of its entitled pools and read by its hosts, and by no one else.
 func TestTranscriptTopicACLsAreExactlyItsWritersAndReaders(t *testing.T) {
 	state := modelState(t)
-	grants := func(state State, topic string) map[string][]string {
-		got := map[string][]string{}
-		for _, acl := range ACLs(state) {
-			if acl.Resource == topic || acl.Prefix && strings.HasPrefix(topic, acl.Resource) {
-				got[acl.Principal] = append(got[acl.Principal], acl.Operations...)
-			}
-		}
-		return got
-	}
 	write, read := []string{"WRITE", "DESCRIBE"}, []string{"READ", "DESCRIBE"}
 	for topic, want := range map[string]map[string][]string{
 		TenantTranscriptTopic("tenant-a"): {ReceiverPrincipal("receiver-a"): write, ReceiverPrincipal("receiver-b"): write, TenantPrincipal("tenant-a", "host-a"): read},
@@ -131,6 +133,34 @@ func TestTranscriptTopicACLsAreExactlyItsWritersAndReaders(t *testing.T) {
 	state.Ended[TenantPrincipal("tenant-a", "host-a")] = true
 	if got, want := grants(state, TenantTranscriptTopic("tenant-a")), map[string][]string{ReceiverPrincipal("receiver-a"): write}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("after membership ends, grants %v, want %v", got, want)
+	}
+}
+
+// A receiver's progress topic is written by that receiver and read by the live receivers of its pool, and by no one else.
+func TestProgressTopicACLsAreExactlyItsWriterAndPoolPeers(t *testing.T) {
+	state := modelState(t)
+	config := modelConfig("receiver-c", "pool-a")
+	if err := apply(&state, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config, AtMS: 1}); err != nil {
+		t.Fatal(err)
+	}
+	own, read := []string{"READ", "WRITE", "DESCRIBE"}, []string{"READ", "DESCRIBE"}
+	for topic, want := range map[string]map[string][]string{
+		ReceiverProgressTopic("receiver-a"): {ReceiverPrincipal("receiver-a"): own, ReceiverPrincipal("receiver-c"): read},
+		ReceiverProgressTopic("receiver-c"): {ReceiverPrincipal("receiver-c"): own, ReceiverPrincipal("receiver-a"): read},
+		ReceiverProgressTopic("receiver-b"): {ReceiverPrincipal("receiver-b"): own},
+	} {
+		if got := grants(state, topic); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s grants %v, want %v", topic, got, want)
+		}
+	}
+	state.Ended[ReceiverPrincipal("receiver-c")] = true
+	for topic, want := range map[string]map[string][]string{
+		ReceiverProgressTopic("receiver-a"): {ReceiverPrincipal("receiver-a"): own},
+		ReceiverProgressTopic("receiver-c"): {},
+	} {
+		if got := grants(state, topic); !reflect.DeepEqual(got, want) {
+			t.Fatalf("after receiver-c ends, %s grants %v, want %v", topic, got, want)
+		}
 	}
 }
 

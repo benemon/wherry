@@ -48,9 +48,29 @@ func newBrokerPool(t *testing.T, ctx context.Context, address string) brokerPool
 	t.Cleanup(kafka.Close)
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	b := brokerPool{opts: opts, kafka: kafka, receiver: "receiver-" + suffix, pool: "pool-" + suffix, tenant: "tenant-" + suffix, host: "host-" + suffix}
-	topics := []string{admin.AdminTopic, admin.ReceiversTopic, admin.PoolTasksTopic(b.pool), admin.PoolEventsTopic(b.pool), admin.TenantTopic(b.tenant), admin.TenantTranscriptTopic(b.tenant), admin.HostTopic(b.tenant, b.host), admin.ReceiverTopic(b.receiver)}
+	topics := []string{admin.AdminTopic, admin.ReceiversTopic, admin.PoolTasksTopic(b.pool), admin.PoolEventsTopic(b.pool), admin.TenantTopic(b.tenant), admin.TenantTranscriptTopic(b.tenant), admin.HostTopic(b.tenant, b.host), admin.ReceiverTopic(b.receiver), admin.ReceiverProgressTopic(b.receiver)}
 	if _, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, -1, nil, topics...); err != nil {
 		t.Fatal(err)
+	}
+	// A topic answers NOT_LEADER_FOR_PARTITION until its partition has a leader, and not every write path retries it.
+	for {
+		metadata, err := kadm.NewClient(kafka).Metadata(ctx, topics...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		led := true
+		for _, topic := range topics {
+			partition, ok := metadata.Topics[topic].Partitions[0]
+			led = led && ok && partition.Err == nil && partition.Leader >= 0
+		}
+		if led {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 	terms := testTerms()
 	config := testConfig(b.receiver)

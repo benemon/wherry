@@ -192,21 +192,21 @@ func TestTaskMetadataRecordsPlacement(t *testing.T) {
 func TestTranscriptArtifactChunks(t *testing.T) {
 	oversized := `{"type":"assistant","message":"` + strings.Repeat("x", wire.MaxLine) + `"}`
 	for name, test := range map[string]struct {
-		stream    []string
-		heartbeat bool
-		pointer   int
-		raw       []int
+		stream   []string
+		progress bool
+		pointer  int
+		raw      []int
 	}{
 		"result after an oversized line": {[]string{`{"type":"system"}`, oversized, `{"type":"assistant"}`, resultStream[1]}, false, 1, nil},
-		// The stream outlives a heartbeat, which commits all but the newest line.
-		"no result after a heartbeat": {[]string{`{"type":"system"}`, `{"type":"assistant"}`}, true, -1, nil},
-		"empty and non-UTF-8 lines":   {[]string{`{"type":"system"}`, "", "\xff\xfe", resultStream[1]}, false, -1, []int{1, 2}},
+		// The stream outlives a progress tick, which commits all but the newest line.
+		"no result after a progress tick": {[]string{`{"type":"system"}`, `{"type":"assistant"}`}, true, -1, nil},
+		"empty and non-UTF-8 lines":       {[]string{`{"type":"system"}`, "", "\xff\xfe", resultStream[1]}, false, -1, []int{1, 2}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.answer(t, credentialName)
 			f.adapter.stream = test.stream
-			if test.heartbeat {
+			if test.progress {
 				f.adapter.endDelay = 3 * renewInterval
 			}
 			f.execute(t, f.submit(t, f.host, nil), 1)
@@ -246,18 +246,13 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 			if len(f.records(t, admin.PoolEventsTopic(testPool))) == 0 {
 				t.Fatal("nothing on the pool's events")
 			}
-			if !test.heartbeat {
+			if !test.progress {
 				return
 			}
-			var offsets []int64
-			for _, status := range f.eventStatuses(t) {
-				if status.Wherry.Kind == "heartbeat" {
-					offsets = append(offsets, *status.Wherry.LogOffset)
-				}
-			}
-			// Once both lines have arrived, a heartbeat commits the first and records where the held second starts.
-			if want := int64(len(test.stream[0]) + 1); len(offsets) == 0 || offsets[len(offsets)-1] != want {
-				t.Fatalf("heartbeat offsets %v, want the last at %d", offsets, want)
+			offsets := f.progress(t, testReceiver, "run-a")
+			// Once both lines have arrived, a tick commits the first and records where the held second starts.
+			if want := int64(len(test.stream[0]) + 1); len(offsets) < 2 || offsets[len(offsets)-2] != want {
+				t.Fatalf("progress offsets %v, want the last at %d before the tombstone", offsets, want)
 			}
 		})
 	}
@@ -286,32 +281,64 @@ func completedWith(text string) string {
 	return `{"state":"TASK_STATE_COMPLETED","message":{"role":"ROLE_AGENT","parts":[{"text":` + string(encoded) + `}]}}`
 }
 
-func TestHeartbeatsStayOffTheFeed(t *testing.T) {
+// Progress goes to the receiver's progress topic alone: after runs with progress, the pool's events an admission reads
+// hold each run's claimed, started and terminal statuses and nothing else.
+func TestProgressStaysOffTheStateTopics(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
-	// A second line moves the transcript, so a heartbeat commits.
+	// A second line moves the transcript, so a progress tick commits.
 	f.adapter.stream = append([]string{`{"type":"system"}`}, noResultStream...)
 	f.adapter.endDelay = 4 * renewInterval
-	f.execute(t, f.submit(t, f.host, nil), 1)
-	heartbeats := 0
-	for _, status := range f.eventStatuses(t) {
-		if status.Wherry.Kind == "heartbeat" {
-			heartbeats++
+	runs := []string{"run-a", "run-b", "run-c"}
+	for _, run := range runs {
+		f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
+			task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+		}), 1)
+	}
+	progress := f.progressByRun(t, testReceiver)
+	for _, run := range runs {
+		if offsets := progress[run]; len(offsets) < 2 || offsets[len(offsets)-1] != -1 || slices.Contains(offsets[:len(offsets)-1], -1) {
+			t.Fatalf("%s progress offsets %v, want progress then a tombstone", run, offsets)
 		}
 	}
-	if heartbeats == 0 {
-		t.Fatal("no heartbeat on the pool's events")
+	events, err := f.receiver.readEvents(f.ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, status := range f.feedStatuses(t) {
-		if status.Wherry.Kind == "heartbeat" {
-			t.Fatal("a heartbeat reached the tenant's feed")
+	want := []string{"claimed", "started", "terminal"}
+	for _, run := range runs {
+		var kinds []string
+		for _, status := range events.statuses[run] {
+			kinds = append(kinds, status.Wherry.Kind)
 		}
+		if !slices.Equal(kinds, want) || len(events.others[run]) != 0 {
+			t.Fatalf("%s pool events hold statuses %v and %d other records, want only %v", run, kinds, len(events.others[run]), want)
+		}
+	}
+	if records := f.records(t, admin.PoolEventsTopic(testPool)); len(records) != len(runs)*len(want) {
+		t.Fatalf("pool events hold %d records, want %d", len(records), len(runs)*len(want))
 	}
 }
 
-// A heartbeat commits only when the transcript has moved, so a silent job writes none, and each one still points at
-// the start of a committed line an adopter resumes from.
-func TestHeartbeatsOnlyWhenTheTranscriptMoves(t *testing.T) {
+// A progress record commits in the transaction of the chunks it covers: when the progress topic refuses it, those
+// chunks are not committed either.
+func TestProgressCommitsWithItsChunks(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.answer(t, credentialName)
+	f.adapter.stream = append([]string{`{"type":"system"}`}, noResultStream...)
+	f.adapter.endDelay = 4 * renewInterval
+	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.ReceiverProgressTopic(testReceiver)).Operations(kadm.OpAny))
+	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
+		t.Fatalf("status %v, want release when progress cannot be written; logs:\n%s", status, f.logs.String())
+	}
+	if chunks := f.chunks(t); len(chunks) != 0 {
+		t.Fatalf("%d chunks committed without their progress record", len(chunks))
+	}
+}
+
+// A progress record commits only when the transcript has moved, so a silent job writes none, and each one still points
+// at the start of a committed line an adopter resumes from. The terminal transaction writes the run's tombstone.
+func TestProgressOnlyWhenTheTranscriptMoves(t *testing.T) {
 	stream := []string{`{"type":"assistant","message":"one"}`, `{"type":"assistant","message":"two"}`, `{"type":"assistant","message":"three"}`, completedWith("answer")}
 	f := newFixture(t, stream)
 	f.answer(t, credentialName)
@@ -324,27 +351,26 @@ func TestHeartbeatsOnlyWhenTheTranscriptMoves(t *testing.T) {
 	for _, chunk := range f.chunks(t) {
 		starts[chunk.Wherry.Seq] = true
 	}
-	var offsets []int64
-	for _, status := range f.eventStatuses(t) {
-		if status.Wherry.Kind == "heartbeat" {
-			offsets = append(offsets, *status.Wherry.LogOffset)
-		}
+	offsets := f.progress(t, testReceiver, "run-a")
+	if len(offsets) == 0 || offsets[len(offsets)-1] != -1 {
+		t.Fatalf("progress offsets %v, want a tombstone last", offsets)
 	}
+	offsets = offsets[:len(offsets)-1]
 	// Two intervals move the transcript, the one before the silence and the one after it; a third can split the
 	// lines that end the silence. The silent intervals and those after the last line write none.
 	first, last := int64(len(stream[0])+1), int64(len(stream[0])+len(stream[1])+len(stream[2])+3)
 	if len(offsets) < 2 || len(offsets) > 3 || offsets[0] != first || offsets[len(offsets)-1] != last {
-		t.Fatalf("heartbeat offsets %v, want %d first, %d last, and one per interval with progress", offsets, first, last)
+		t.Fatalf("progress offsets %v, want %d first, %d last, and one per interval with progress", offsets, first, last)
 	}
 	for i, offset := range offsets {
 		if !starts[offset] || i > 0 && offset <= offsets[i-1] {
-			t.Fatalf("heartbeat offsets %v: %d is a repeat or no committed line's start", offsets, offset)
+			t.Fatalf("progress offsets %v: %d is a repeat or no committed line's start", offsets, offset)
 		}
 	}
 	if got, err := f.receiver.lastOffset(f.ctx, f.parse(t, record), wire.TaskHash(record.Value)); err != nil || got != last {
 		t.Fatalf("resume offset %d err %v, want %d", got, err, last)
 	}
-	// The terminal counts the chunks the heartbeats committed with those it commits.
+	// The terminal counts the chunks the progress ticks committed with those it commits.
 	statuses := f.feedStatuses(t)
 	if terminal := statuses[len(statuses)-1]; terminal.Wherry.Kind != "terminal" || terminal.Wherry.TranscriptChunks != int64(len(f.chunks(t))) {
 		t.Fatalf("last status %s counts %d chunks, want a terminal counting %d", terminal.Wherry.Kind, terminal.Wherry.TranscriptChunks, len(f.chunks(t)))
@@ -521,25 +547,65 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 	}
 }
 
-// heartbeat signs a heartbeat for task at offset as receiver with key.
-func (f fixture) heartbeat(t *testing.T, task *wire.Submission, hash, receiver string, key []byte, offset int64, mutate func(*wire.RunStatus)) []byte {
+// holding commits task's attempt 1 status of kind as receiver with key, at offset when it is not nil.
+func (f fixture) holding(t *testing.T, task *wire.Submission, hash, receiver string, key []byte, kind string, offset *int64) {
 	t.Helper()
-	status := f.receiver.status(task, hash, 1, "heartbeat", taskStatus(wire.TaskStateWorking, ""), &offset)
+	status := f.receiver.status(task, hash, 1, kind, taskStatus(wire.TaskStateWorking, ""), offset)
 	status.Wherry.Receiver = receiver
+	f.produce(t, admin.PoolEventsTopic(testPool), task.Wherry.Run, must(t)(wire.SignRecord(status, key)))
+}
+
+// progressRecord encodes attempt 1's progress of a testTenant run at offset; mutate edits it first.
+func progressRecord(t *testing.T, hash string, offset int64, mutate func(*wire.Progress)) []byte {
+	t.Helper()
+	progress := wire.Progress{Tenant: testTenant, TaskHash: hash, Attempt: 1, LogOffset: offset}
 	if mutate != nil {
-		mutate(status)
+		mutate(&progress)
 	}
-	return must(t)(wire.SignRecord(status, key))
+	return must(t)(wire.EncodeProgress(progress))
+}
+
+// progressByRun is the offsets on receiver's progress topic by run, -1 for a tombstone.
+func (f fixture) progressByRun(t *testing.T, receiver string) map[string][]int64 {
+	t.Helper()
+	offsets := map[string][]int64{}
+	for _, record := range f.records(t, admin.ReceiverProgressTopic(receiver)) {
+		run := string(record.Key)
+		if record.Value == nil {
+			offsets[run] = append(offsets[run], -1)
+			continue
+		}
+		progress, err := wire.DecodeProgress(record.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		offsets[run] = append(offsets[run], progress.LogOffset)
+	}
+	return offsets
+}
+
+// progress is the offsets on receiver's progress topic, which holds records of run alone.
+func (f fixture) progress(t *testing.T, receiver, run string) []int64 {
+	t.Helper()
+	offsets := f.progressByRun(t, receiver)
+	for key := range offsets {
+		if key != run {
+			t.Fatalf("progress record keyed %q, want %q", key, run)
+		}
+	}
+	return offsets[run]
 }
 
 func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	f := newFixture(t, resultStream)
 	task := testSubmission("run-adopt")
 	hash := strings.Repeat("a", 64)
+	started := int64(5)
+	f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &started)
 	for _, offset := range []int64{10, 42} {
-		f.produce(t, admin.PoolEventsTopic(testPool), "run-adopt", f.heartbeat(t, task, hash, testReceiver, f.receiver.signing, offset, nil))
+		f.produce(t, admin.ReceiverProgressTopic(testReceiver), "run-adopt", progressRecord(t, hash, offset, nil))
 	}
-	// A fenced holder's aborted heartbeat must not move the resume point.
+	// A fenced holder's aborted progress must not move the resume point.
 	aborted, err := f.receiver.newProducer("run-adopt")
 	if err != nil {
 		t.Fatal(err)
@@ -548,7 +614,7 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	if err := aborted.BeginTransaction(); err != nil {
 		t.Fatal(err)
 	}
-	if err := aborted.ProduceSync(f.ctx, &kgo.Record{Topic: admin.PoolEventsTopic(testPool), Key: []byte("run-adopt"), Value: f.heartbeat(t, task, hash, testReceiver, f.receiver.signing, 99, nil)}).FirstErr(); err != nil {
+	if err := aborted.ProduceSync(f.ctx, &kgo.Record{Topic: admin.ReceiverProgressTopic(testReceiver), Key: []byte("run-adopt"), Value: progressRecord(t, hash, 99, nil)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	if err := aborted.EndTransaction(f.ctx, kgo.TryAbort); err != nil {
@@ -559,8 +625,8 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	}
 }
 
-// An adopter follows from the last heartbeat, publishes each line from there once, through its own heartbeats, and ends
-// the run from the outcome file.
+// An adopter follows from the holder's last progress, publishes each line from there once, through its own progress,
+// and ends the run from the outcome file.
 func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
 	stream := []string{`{"type":"assistant","message":"one"}`, `{"type":"assistant","message":"two"}`, `{"type":"assistant","message":"three"}`, completedWith("adopted answer")}
 	f := newFixture(t, stream)
@@ -568,7 +634,8 @@ func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
 	f.adapter.job, f.adapter.endDelay = adapter.JobRunning, 4*renewInterval
 	record := f.submit(t, f.host, nil)
 	resume := int64(len(stream[0]) + 1)
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", f.heartbeat(t, f.parse(t, record), wire.TaskHash(record.Value), testReceiver, f.receiver.signing, resume, nil))
+	f.holding(t, f.parse(t, record), wire.TaskHash(record.Value), testReceiver, f.receiver.signing, "claimed", nil)
+	f.produce(t, admin.ReceiverProgressTopic(testReceiver), "run-a", progressRecord(t, wire.TaskHash(record.Value), resume, nil))
 	if status := f.execute(t, record, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
@@ -586,14 +653,14 @@ func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
 	if !slices.Equal(seqs, want) || !slices.Equal(froms, []int64{resume}) {
 		t.Fatalf("chunks at %v followed from %v, want each line from %d once: %v", seqs, froms, resume, want)
 	}
-	heartbeats := 0
-	for _, status := range f.eventStatuses(t) {
-		if status.Wherry.Kind == "heartbeat" && status.Wherry.Attempt == 2 {
-			heartbeats++
+	adopterProgress := 0
+	for _, record := range f.records(t, admin.ReceiverProgressTopic(testReceiver)) {
+		if progress, err := wire.DecodeProgress(record.Value); err == nil && progress.Attempt == 2 {
+			adopterProgress++
 		}
 	}
-	if heartbeats == 0 {
-		t.Fatal("the adopter wrote no heartbeat")
+	if adopterProgress == 0 {
+		t.Fatal("the adopter wrote no progress")
 	}
 }
 
@@ -607,13 +674,16 @@ func TestLastOffsetIgnoresMismatchedStatus(t *testing.T) {
 	}
 	task := testSubmission("run-offset-binding")
 	hash := strings.Repeat("b", 64)
+	f.holding(t, task, hash, testReceiver, f.receiver.signing, "claimed", nil)
 	for _, value := range [][]byte{
-		f.heartbeat(t, task, hash, testReceiver, f.receiver.signing, 42, nil),
-		f.heartbeat(t, task, strings.Repeat("c", 64), testReceiver, f.receiver.signing, 99, nil),
-		f.heartbeat(t, task, hash, testReceiver, f.receiver.signing, 99, func(status *wire.RunStatus) { status.Wherry.Tenant = "tenant-b" }),
+		progressRecord(t, hash, 42, nil),
+		progressRecord(t, strings.Repeat("c", 64), 99, nil),
+		progressRecord(t, hash, 99, func(progress *wire.Progress) { progress.Tenant = "tenant-b" }),
+		[]byte(`{"v":1,"tenant":"tenant-a","task_hash":"` + hash + `","attempt":1,"log_offset":99,"extra":1}`),
 	} {
-		f.produce(t, admin.PoolEventsTopic(testPool), "run-offset-binding", value)
+		f.produce(t, admin.ReceiverProgressTopic(testReceiver), "run-offset-binding", value)
 	}
+	f.produce(t, admin.ReceiverProgressTopic(testReceiver), "run-other", progressRecord(t, hash, 99, nil))
 	if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("resume offset %d err %v, want 42", got, err)
 	}
@@ -645,7 +715,7 @@ func TestAdoptionReadFailureReleases(t *testing.T) {
 	}
 }
 
-func TestAdoptionTrustsPeerHeartbeat(t *testing.T) {
+func TestAdoptionTrustsPeerProgress(t *testing.T) {
 	f := newFixture(t, resultStream)
 	peerSigning := f.addPeer(t, "receiver-peer", testPool)
 	if err := f.service.PoolCreate(f.ctx, "pool-b", testTerms()); err != nil {
@@ -654,10 +724,47 @@ func TestAdoptionTrustsPeerHeartbeat(t *testing.T) {
 	otherSigning := f.addPeer(t, "receiver-other-pool", "pool-b")
 	task := testSubmission("run-peer")
 	hash := strings.Repeat("a", 64)
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-peer", f.heartbeat(t, task, hash, "receiver-peer", peerSigning, 42, nil))
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-peer", f.heartbeat(t, task, hash, "receiver-other-pool", otherSigning, 99, nil))
+	f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
+	f.holding(t, task, hash, "receiver-other-pool", otherSigning, "claimed", nil)
+	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), "run-peer", progressRecord(t, hash, 42, nil))
+	f.produce(t, admin.ReceiverProgressTopic("receiver-other-pool"), "run-peer", progressRecord(t, hash, 99, nil))
 	if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
-		t.Fatalf("peer heartbeat offset %d err %v, want 42", got, err)
+		t.Fatalf("peer progress offset %d err %v, want 42", got, err)
+	}
+}
+
+// A holder whose progress topic the adopter cannot read contributes nothing: the adopter resumes from the run's
+// started offset.
+func TestAdoptionFallsBackToStartedWithoutTheHoldersProgress(t *testing.T) {
+	for _, cause := range []string{"ended", "no acl"} {
+		t.Run(cause, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			peerSigning := f.addPeer(t, "receiver-peer", testPool)
+			task := testSubmission("run-peer")
+			hash := strings.Repeat("a", 64)
+			started := int64(7)
+			f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &started)
+			f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
+			f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), "run-peer", progressRecord(t, hash, 42, nil))
+			if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
+				t.Fatalf("live peer's progress offset %d err %v, want 42", got, err)
+			}
+			switch cause {
+			case "ended":
+				result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return admin.ErrAuthorizationDenied })
+				if !result.Complete {
+					t.Fatalf("incomplete revocation: %+v", result)
+				}
+				if err := f.receiver.refresh(f.ctx); err != nil {
+					t.Fatal(err)
+				}
+			case "no acl":
+				f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.ReceiverProgressTopic("receiver-peer")).Operations(kadm.OpAny))
+			}
+			if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != started {
+				t.Fatalf("offset %d err %v without the peer's progress, want the started offset %d", got, err, started)
+			}
+		})
 	}
 }
 
@@ -674,17 +781,15 @@ func TestFencedProducerStopsRunWrites(t *testing.T) {
 	if err := adopter.commit(f.ctx, adopter.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...); err != nil {
 		t.Fatal(err)
 	}
-	err := zombie.commit(f.ctx, zombie.events(zombie.status("heartbeat", taskStatus(wire.TaskStateWorking, ""), nil, nil)))
+	err := zombie.commit(f.ctx, zombie.progress(42))
 	if err == nil {
 		t.Fatal("zombie write succeeded after adoption")
 	}
 	if status := zombie.abandon(err); status != 0 {
 		t.Fatalf("fenced run returned ack %v, want 0 (no acknowledgement)", status)
 	}
-	for _, status := range f.eventStatuses(t) {
-		if status.Wherry.Kind == "heartbeat" {
-			t.Fatal("zombie heartbeat is readable after fencing")
-		}
+	if offsets := f.progress(t, testReceiver, "run-fence"); len(offsets) != 0 {
+		t.Fatalf("zombie progress %v is readable after fencing", offsets)
 	}
 }
 
@@ -1145,7 +1250,8 @@ type shutdownAt struct {
 
 func (h shutdownAt) OnProduceRecordBuffered(record *kgo.Record) {
 	var status wire.RunStatus
-	if wire.ParseRecord(record.Value, h.f.keys(), &status) != nil || status.Wherry.Kind != h.kind {
+	progress := h.kind == "progress" && record.Topic == admin.ReceiverProgressTopic(testReceiver) && record.Value != nil
+	if !progress && (wire.ParseRecord(record.Value, h.f.keys(), &status) != nil || status.Wherry.Kind != h.kind) {
 		return
 	}
 	for h.f.adapter.deliveredCount() == 0 && h.f.ctx.Err() == nil {
@@ -1155,7 +1261,7 @@ func (h shutdownAt) OnProduceRecordBuffered(record *kgo.Record) {
 }
 
 func TestShutdownDuringACommitCommitsTheDeliveredLine(t *testing.T) {
-	for _, kind := range []string{"started", "heartbeat"} {
+	for _, kind := range []string{"started", "progress"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newFixture(t, noResultStream)
 			f.adapter.endDelay = 30 * time.Second
@@ -1345,7 +1451,7 @@ func TestAdmissionWritesDoNotFenceTheRunsHolder(t *testing.T) {
 	// A duplicate of the held turn is rejected while the holder runs.
 	duplicate := f.submit(t, f.host, func(task *wire.Submission) { task.Message.MessageID = "msg-duplicate" })
 	f.rejected(t, duplicate, "duplicate submission")
-	if err := holder.commit(f.ctx, holder.events(holder.status("heartbeat", taskStatus(wire.TaskStateWorking, ""), nil, nil))); err != nil {
+	if err := holder.commit(f.ctx, holder.progress(0)); err != nil {
 		t.Fatalf("the rejection fenced the run's holder: %v", err)
 	}
 }
@@ -1431,9 +1537,10 @@ func TestAdoptionTrustsRotatedPeerKey(t *testing.T) {
 	f.produce(t, admin.ReceiverTopic("receiver-peer"), "receiver-peer", must(t)(signed.RotateKey("receiver-peer", peerSigning, next)))
 	task := testSubmission("run-peer")
 	hash := strings.Repeat("a", 64)
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-peer", f.heartbeat(t, task, hash, "receiver-peer", next, 42, nil))
+	f.holding(t, task, hash, "receiver-peer", next, "claimed", nil)
+	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), "run-peer", progressRecord(t, hash, 42, nil))
 	if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
-		t.Fatalf("heartbeat under the peer's rotated key: offset %d err %v, want 42", got, err)
+		t.Fatalf("claim under the peer's rotated key: offset %d err %v, want 42", got, err)
 	}
 }
 

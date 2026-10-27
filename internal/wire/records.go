@@ -275,6 +275,47 @@ type StartFailure struct {
 	Class   string          `json:"class"`
 }
 
+// Progress is the latest transcript offset a receiver committed for a run it holds, keyed by the run on the receiver's
+// progress topic. It is unsigned: the topic has one writer, which Kafka authenticates.
+type Progress struct {
+	V         int    `json:"v"`
+	Tenant    string `json:"tenant"`
+	TaskHash  string `json:"task_hash"`
+	Attempt   int64  `json:"attempt"`
+	LogOffset int64  `json:"log_offset"`
+}
+
+// EncodeProgress encodes value at version 1.
+func EncodeProgress(value Progress) ([]byte, error) {
+	value.V = 1
+	if err := value.validate(); err != nil {
+		return nil, err
+	}
+	return json.Marshal(value, json.Deterministic(true))
+}
+
+// DecodeProgress decodes a progress record strictly.
+func DecodeProgress(encoded []byte) (Progress, error) {
+	var value Progress
+	if err := json.Unmarshal(encoded, &value, signed.Strict); err != nil {
+		return Progress{}, err
+	}
+	if value.V != 1 {
+		return Progress{}, errors.New("unknown record version")
+	}
+	return value, value.validate()
+}
+
+func (value Progress) validate() error {
+	if err := validateID(value.Tenant, "tenant"); err != nil {
+		return err
+	}
+	if !ValidHash(value.TaskHash) || value.Attempt < 1 || value.LogOffset < 0 {
+		return errors.New("invalid progress")
+	}
+	return nil
+}
+
 // The JWS types of the tenant feed's and transcript topic's records, which a reader routes each record by.
 const (
 	StatusType = "application/vnd.wherry.status.v1+jws"
@@ -506,7 +547,7 @@ func (value *RunStatus) validate() error {
 		return err
 	}
 	switch binding.Kind {
-	case "claimed", "started", "heartbeat", "rejected", "terminal":
+	case "claimed", "started", "rejected", "terminal":
 		return nil
 	default:
 		return errors.New("invalid status kind")

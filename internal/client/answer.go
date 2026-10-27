@@ -208,7 +208,7 @@ func (h *Host) active(ctx context.Context, request wire.SealRequest) string {
 		}
 	}
 	if current == nil || current.Wherry.ReceiverBinding != request.ReceiverBinding ||
-		current.Wherry.Kind != "claimed" && current.Wherry.Kind != "started" && current.Wherry.Kind != "heartbeat" {
+		current.Wherry.Kind != "claimed" && current.Wherry.Kind != "started" {
 		return fmt.Sprintf("attempt %d from %s is not the run's active attempt", request.Attempt, request.Receiver)
 	}
 	return ""

@@ -854,7 +854,7 @@ func (h *Host) Events(ctx context.Context, runID string) (EventsResult, error) {
 
 // Transcript returns the transcript of runID in seq order: the lines of the
 // highest attempt, and before the first of them, or in place of them while it has none, each line of the highest
-// earlier attempt that has it. An adopter resumes the job's output past the offset of the last heartbeat.
+// earlier attempt that has it. An adopter resumes the job's output past the run's latest committed offset.
 func (h *Host) Transcript(ctx context.Context, runID string) (TranscriptResult, error) {
 	r, err := h.history(ctx, runID)
 	if err != nil {

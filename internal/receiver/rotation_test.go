@@ -99,19 +99,20 @@ func TestHeldRunPastQueueDeadline(t *testing.T) {
 	}
 }
 
-// An adopter resumes from the offset of a heartbeat signed before the rotation.
+// An adopter resumes from the offset of a started status signed before the rotation.
 func TestLastOffsetAfterSelfRotation(t *testing.T) {
 	f := newFixture(t, resultStream)
 	task := testSubmission("run-adopt")
 	hash := strings.Repeat("a", 64)
-	f.produce(t, admin.PoolEventsTopic(testPool), "run-adopt", f.heartbeat(t, task, hash, testReceiver, f.receiver.signing, 42, nil))
+	offset := int64(42)
+	f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &offset)
 	rotateSelf(t, &f)
 	got, err := f.receiver.lastOffset(f.ctx, task, hash)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != 42 {
-		t.Errorf("pre-rotation heartbeat offset lost")
+		t.Errorf("pre-rotation started offset lost")
 	}
 }
 

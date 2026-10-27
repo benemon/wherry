@@ -244,8 +244,8 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 - `event_id` identifies the fact the status reports. Readers keep one
   status per event ID.
 - `log_offset` is the agent output offset an adopter follows from, on
-  `started` and `heartbeat`. The transcript is published up to at least
-  that offset.
+  `started` only. The transcript is published up to at least that offset.
+  Later offsets go to the receiver's [progress](#progress) topic.
 - `transcript_chunks` is the number of [chunks](#chunk) the attempt wrote,
   on `terminal` only, and absent when zero. It commits in the same
   transaction as the attempt's last chunks.
@@ -254,15 +254,15 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 | --- | --- | --- | --- |
 | `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | |
 | `started` | `TASK_STATE_WORKING` | the job has started | |
-| `heartbeat` | `TASK_STATE_WORKING` | the transcript has moved, checked every 10 seconds while the job runs | pool events only |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
 | `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `TASK_STATE_AUTH_REQUIRED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration.md#agent-contract), or the reason as message text |
 
-A receiver writes each status other than a heartbeat to the pool's events
-and the tenant feed, with identical bytes, in one Kafka transaction. A run's
-chunks and output chunks commit in the transaction of the status or result
-they belong to, so a transaction spans the tenant feed, the transcript topic
-and the pool's events. Readers read committed records only. A reader sees
+A receiver writes each status to the pool's events and the tenant feed,
+with identical bytes, in one Kafka transaction. A run's chunks and output
+chunks commit in the transaction of the status, result or
+[progress](#progress) record they belong to, so a transaction spans the
+tenant feed, the transcript topic, the pool's events and the receiver's
+progress topic. Readers read committed records only. A reader sees
 each topic's commit separately, so a `terminal` status can be visible before
 its attempt's last chunks. A host that reads a `terminal` status on the feed
 reads the transcript topic to its last stable offset, and waits until that
@@ -359,7 +359,8 @@ A chunk is one line of the agent's standard output, as the A2A artifact
   `size` in bytes. The line itself is then not stored. Readers require a
   `url` part's `sha256` to be lowercase hex SHA-256 and its `size` over 0.
 - `seq` is the line's byte offset in the agent's output and orders the
-  chunks. An adopter follows from the last heartbeat's log offset, so a
+  chunks. An adopter follows from the run's latest committed offset, as
+  [progress](#progress) records it, so a
   `seq` can repeat across attempts of a run. A reader takes the latest
   attempt's chunks, and the lines below that attempt's first `seq` from the
   highest earlier attempt that has them, so a run's transcript starts at
@@ -600,6 +601,41 @@ releases are exempt:
 
 A receiver whose write of the terminal fails releases the task.
 
+## Progress
+
+A progress record carries the latest transcript offset a receiver has
+committed for a run it holds. The receiver writes it to its own progress
+topic, `wherry.receiver.<receiver>.progress`, unsigned, keyed by run ID, as
+JSON:
+
+```json
+{"v": 1, "tenant": "alice", "task_hash": "9d2a...", "attempt": 1, "log_offset": 4096}
+```
+
+- Only that receiver writes its progress topic, so Kafka authenticates the
+  record, and no other principal can write a key that compaction would let
+  supersede it. The live members of its pool read it; hosts do not.
+  Readers decode it strictly.
+- `log_offset` is the agent output offset the run's transcript is committed
+  up to. The record commits in the transaction of the [chunks](#chunk) it
+  covers, on each renewal of the task's lock, every 10 seconds while the
+  job runs. A renewal with no new chunks and an unchanged offset writes
+  nothing.
+- The transaction that holds the run's `terminal` status writes a
+  tombstone, a null value, under the run's key.
+
+An adopter resumes the job's output from the highest of these offsets:
+
+- the `log_offset` of each `started` status of the run on the pool's
+  events with the run's tenant and task hash;
+- the `log_offset` of the run's progress record, with the run's tenant and
+  task hash, on the progress topic of each receiver that holds or held an
+  attempt of the run, as the run's statuses on the pool's events name them.
+
+A receiver whose progress topic the adopter cannot read, such as one whose
+membership has ended, contributes nothing, so for an ended holder the
+adopter resumes from the `started` offset.
+
 ## Key records
 
 Each host and receiver registers its keys on its own topic:
@@ -710,7 +746,7 @@ these hold:
 4. Every `claimed` status of the run comes from one receiver, and the
    request comes from it.
 5. The request names the receiver and attempt of the run's latest status,
-   which is `claimed`, `started` or `heartbeat`.
+   which is `claimed` or `started`.
 6. Every name in `credentials` is in the pool's terms for the run's agent,
    every name in `task_credentials` is a task credential the run declares,
    and the host's configuration gives every name a source.

@@ -421,8 +421,7 @@ attempt=<n> transcript_chunks=<n>
 ```
 
 `message` appears when the status has one, with each redaction marker shown
-as `wherry status` shows it. Heartbeats are not on the feed, so they do not
-appear.
+as `wherry status` shows it.
 
 ### `wherry transcript RUN_ID`
 
@@ -430,8 +429,8 @@ Prints a run's transcript: each line of the agent's standard output, in
 output order, as the receiver redacted it. The lines are those the run's
 highest delivery attempt published. Before that attempt's first line, or in
 place of its lines while it has none, each line comes from the highest earlier
-attempt that has it. An adopter resumes the job's output past the last
-heartbeat's offset, so an adopted run reads from offset 0.
+attempt that has it. An adopter resumes the job's output past the run's
+latest committed offset, so an adopted run reads from offset 0.
 
 `transcript` reads the lines from the tenant's transcript topic, from the
 first offset at or after the append time of the run's earliest echo on the
@@ -518,7 +517,9 @@ new receiver, and refuses the terms when a profile no longer fits, naming
 each receiver, plugin and profile and the reason. On new and
 existing topics it sets the tasks and events `retention.ms` to
 `max_queue_deadline` plus six hours plus one day, and their
-`message.timestamp.type` to `LogAppendTime`. It refuses a `max_queue_deadline` above
+`message.timestamp.type` to `LogAppendTime`, and creates the progress topic
+of each live receiver in the pool, or sets an existing one's configuration,
+with the same `retention.ms`. It refuses a `max_queue_deadline` above
 29 days and 18 hours, or one that with six hours added exceeds the
 `retention.ms` of the feed or transcript topic of a tenant entitled to the
 pool. See
@@ -549,8 +550,10 @@ wherry admin receiver add RECEIVER --pool POOL \
 
 Reads the [receiver configuration](configuration.md#receiver-configuration) from a
 directory or a single file, validates it against the pool's terms, records
-it, creates the receiver's principal and key topic,
-grants its ACLs, and writes its bundle. It refuses an existing receiver.
+it, creates the receiver's principal, key topic and progress topic,
+`wherry.receiver.<receiver>.progress`, grants its ACLs, and writes its
+bundle. On an existing progress topic it sets the
+[progress topic configuration](design.md#topics-1). It refuses an existing receiver.
 The bundle holds the receiver's Kafka identity alone; the receiver's [local
 configuration](configuration.md#receiver-local-configuration) gives the
 sources of its [platform credentials](configuration.md#platform-credentials).
@@ -639,7 +642,9 @@ a hash that does not match.
 Loads `wherry.admin`, checks that no two names collide, validates every
 receiver configuration against its pool's terms, checks that every pool's
 [records still fit the broker](configuration.md#record-limit), checks topic retention and
-timestamp type against the [bounds](design.md#topics-1), and checks that every ACL the
+timestamp type against the [bounds](design.md#topics-1), checks that each
+live receiver's progress topic keeps records at least as long as its pool's
+tasks topic, and checks that every ACL the
 state calls for is present. It does not report ACLs beyond those, and does not check a
 profile's plugin type or `config` section.
 

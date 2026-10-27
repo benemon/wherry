@@ -52,7 +52,7 @@ func validStatus() *RunStatus {
 			State: TaskStateWorking, Timestamp: "2026-10-17T10:00:00.000Z",
 			Message: &Message{MessageID: "status-1", Role: RoleAgent, Parts: []Part{{Text: "working"}}, Extensions: []string{ExtensionURI}},
 		}},
-		Wherry: StatusBinding{ReceiverBinding: receiverBinding(), EventID: "event-1", Kind: "heartbeat", TaskHash: wireHash},
+		Wherry: StatusBinding{ReceiverBinding: receiverBinding(), EventID: "event-1", Kind: "claimed", TaskHash: wireHash},
 	}
 }
 
