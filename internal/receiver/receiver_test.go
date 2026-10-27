@@ -1318,3 +1318,45 @@ func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Re
 	defer reader.Close()
 	return reader.ReadFrom(ctx, topic, 0)
 }
+
+// TestStopReleasesHeldTaskOnce stops a receiver with more slots than the pool's delivery limit while it holds a run:
+// the next member takes the task as its second delivery.
+func TestStopReleasesHeldTaskOnce(t *testing.T) {
+	for name, want := range map[string]error{"cancelled": context.Canceled, "configuration changed": ErrConfigChanged} {
+		t.Run(name, func(t *testing.T) {
+			terms, config := testTerms(), testConfig(testReceiver)
+			terms.DeliveryLimit, config.Capacity = 5, 6
+			f := newFixtureWith(t, noResultStream, terms, config, map[string]*fakeAdapter{"nomad": {stream: noResultStream, endDelay: time.Minute}})
+			f.answer(t, credentialName)
+			ctx, stop := context.WithCancel(f.ctx)
+			defer stop()
+			done := f.run(t, ctx)
+			f.submit(t, f.host, nil)
+			for {
+				if _, _, follows, _ := f.adapter.counts(); follows == 1 {
+					break
+				}
+				if f.ctx.Err() != nil {
+					t.Fatalf("run never started; logs:\n%s", f.logs.String())
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			if want == ErrConfigChanged {
+				config.Capacity = 7
+				f.appendConfig(t, config)
+			} else {
+				stop()
+			}
+			if err := <-done; !errors.Is(err, want) {
+				t.Fatalf("Run returned %v, want %v", err, want)
+			}
+			record, delivered := f.pollPool(t, "run-a", 10*time.Second)
+			if !delivered {
+				t.Fatal("task not delivered after the stop")
+			}
+			if count := record.DeliveryCount(); count != 2 {
+				t.Fatalf("task delivered with count %d after the stop, want its second delivery", count)
+			}
+		})
+	}
+}

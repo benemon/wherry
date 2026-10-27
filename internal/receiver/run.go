@@ -50,7 +50,7 @@ const (
 	maxOutcome = 512 << 10
 )
 
-// Intervals are variables so tests can shorten them; renew stays below the 30 s default lock.
+// Intervals are variables so tests can shorten them; renew stays below the 15 s default lock.
 var (
 	renewInterval     = 10 * time.Second
 	advertiseInterval = 30 * time.Second
@@ -76,26 +76,31 @@ var (
 
 // claimLoop holds one slot: a dedicated share client per claimed record,
 // because renews do not survive a poll and held records are tied to the connection.
-func (r *Receiver) claimLoop(ctx context.Context) {
-	for ctx.Err() == nil {
+// It claims until claiming ends and runs a held task until running ends. idle is called once the slot's
+// idle share client has closed, or once claiming ends while the slot holds a task.
+func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
+	defer idle()
+	for claiming.Err() == nil {
 		if r.blocked() {
-			sleep(ctx, time.Second)
+			sleep(claiming, time.Second)
 			continue
 		}
-		if err := r.claimOne(ctx); err != nil && ctx.Err() == nil {
+		if err := r.claimOne(claiming, running, idle); err != nil && claiming.Err() == nil {
 			r.deny(err, capClaim)
 			r.logger.Printf("claim: %v", err)
-			sleep(ctx, 2*time.Second)
+			sleep(claiming, 2*time.Second)
 		}
 	}
 }
 
-func (r *Receiver) claimOne(ctx context.Context) error {
+func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	share, err := r.newClient(
 		kgo.ConsumeTopics(admin.PoolTasksTopic(r.config.Pool)),
 		kgo.ShareGroup(admin.PoolGroup(r.config.Pool)),
 		kgo.ShareMaxRecords(1),
 		kgo.ShareMaxRecordsStrict(),
+		// Closing waits out a pending fetch for up to its MaxWait plus 5 s; this bounds the receiver's stop.
+		kgo.FetchMaxWait(time.Second),
 	)
 	if err != nil {
 		return err
@@ -109,7 +114,7 @@ func (r *Receiver) claimOne(ctx context.Context) error {
 	}
 	var record *kgo.Record
 	for record == nil {
-		pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		pollCtx, cancel := context.WithTimeout(claiming, 30*time.Second)
 		// A denied receiver must not acquire a task: each release raises its delivery count.
 		go func() {
 			for pollCtx.Err() == nil && !r.blocked() {
@@ -119,8 +124,9 @@ func (r *Receiver) claimOne(ctx context.Context) error {
 		}()
 		fetches := share.PollRecords(pollCtx, 1)
 		cancel()
-		if ctx.Err() != nil {
-			return ctx.Err()
+		// Closing the client releases a record this poll returned, before the slot counts as idle.
+		if claiming.Err() != nil {
+			return claiming.Err()
 		}
 		if r.blocked() && len(fetches.Records()) == 0 {
 			return nil
@@ -134,6 +140,8 @@ func (r *Receiver) claimOne(ctx context.Context) error {
 			record = records[0]
 		}
 	}
+	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.
+	defer context.AfterFunc(claiming, idle)()
 	if r.blocked() {
 		record.Ack(kgo.AckRelease)
 		return flush()

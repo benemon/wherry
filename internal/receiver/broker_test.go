@@ -24,7 +24,9 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // brokerPool is a pool of its own on the plaintext broker named by WHERRY_KAFKA_TEST_BROKER, with one receiver, one
@@ -88,81 +90,152 @@ func (b brokerPool) joined(t *testing.T, ctx context.Context, logs *syncBuffer) 
 }
 
 // TestShutdownReleasesClaimOnRealBroker runs a receiver in a broker pool; kfake does not model share-group
-// acquisition.
+// acquisition. The receiver has more slots than the pool's delivery limit, so a release its idle slots' closing
+// clients hand back and forth would archive the task before another member could take it.
 func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
 		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
 	}
-	shortIntervals(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	b := newBrokerPool(t, ctx, address)
-	opts, kafka, receiverID, pool, tenant, host := b.opts, b.kafka, b.receiver, b.pool, b.tenant, b.host
-	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
-	_, signing, _ := ed25519.GenerateKey(rand.Reader)
-	registration, err := signed.RegisterKey(signed.HostOwner(tenant, host), hostKey)
+	for name, stopping := range map[string]struct {
+		stop func(t *testing.T, ctx context.Context, b brokerPool, cancel context.CancelFunc)
+		want error
+	}{
+		"cancelled":             {func(_ *testing.T, _ context.Context, _ brokerPool, cancel context.CancelFunc) { cancel() }, context.Canceled},
+		"configuration changed": {func(t *testing.T, ctx context.Context, b brokerPool, _ context.CancelFunc) { b.configure(t, ctx, 7) }, ErrConfigChanged},
+	} {
+		t.Run(name, func(t *testing.T) {
+			shortIntervals(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			defer cancel()
+			b := newBrokerPool(t, ctx, address)
+			b.configure(t, ctx, 6)
+			b.deliveryLimit(t, ctx, 5)
+			opts, kafka, receiverID, pool, tenant, host := b.opts, b.kafka, b.receiver, b.pool, b.tenant, b.host
+			_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+			_, signing, _ := ed25519.GenerateKey(rand.Reader)
+			registration, err := signed.RegisterKey(signed.HostOwner(tenant, host), hostKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.HostTopic(tenant, host), Value: registration}).FirstErr(); err != nil {
+				t.Fatal(err)
+			}
+			answerSeals(t, ctx, kafka, signed.Keys{receiverID: {Current: signing.Public().(ed25519.PublicKey)}}, tenant, host, credentialName, testToken)
+			base, err := kgo.NewClient(opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			logs := &syncBuffer{}
+			adapter := &fakeAdapter{stream: noResultStream, endDelay: time.Minute}
+			r := &Receiver{id: receiverID, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+				factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
+					return Named{Name: settings.Name, Agent: settings.Agent, Adapter: adapter}, nil
+				}}
+			runCtx, stop := context.WithCancel(ctx)
+			done := make(chan error, 1)
+			go func() { done <- r.Run(runCtx) }()
+			defer func() { stop(); <-done }()
+			b.joined(t, ctx, logs)
+			submission := testSubmission("run-broker")
+			submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = tenant, host, pool
+			value, err := wire.SignRecord(submission, hostKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(pool), Key: []byte("run-broker"), Value: value}).FirstErr(); err != nil {
+				t.Fatal(err)
+			}
+			for {
+				if _, _, follows, _ := adapter.counts(); follows == 1 {
+					break
+				}
+				if ctx.Err() != nil {
+					t.Fatalf("run never started; logs:\n%s", logs.String())
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			stopping.stop(t, ctx, b, stop)
+			if err := <-done; !errors.Is(err, stopping.want) {
+				t.Fatalf("receiver stopped with %v, want %v; logs:\n%s", err, stopping.want, logs.String())
+			}
+			done <- nil
+			stopped := time.Now()
+			member, err := kgo.NewClient(append(append([]kgo.Opt(nil), opts...), kgo.ConsumeTopics(admin.PoolTasksTopic(pool)), kgo.ShareGroup(admin.PoolGroup(pool)), kgo.ShareMaxRecords(1))...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer member.Close()
+			var redelivered *kgo.Record
+			for redelivered == nil {
+				pollCtx, cancelPoll := context.WithTimeout(ctx, 2*time.Second)
+				for _, record := range member.PollRecords(pollCtx, 1).Records() {
+					if string(record.Key) == "run-broker" {
+						redelivered = record
+					}
+				}
+				cancelPoll()
+				if ctx.Err() != nil {
+					t.Fatalf("run-broker never delivered to another member; logs:\n%s", logs.String())
+				}
+			}
+			if waited := time.Since(stopped); waited > 10*time.Second {
+				t.Fatalf("task returned to the pool %s after shutdown, want at once (the acquisition lock expired instead)", waited)
+			}
+			if count := redelivered.DeliveryCount(); count != 2 {
+				t.Fatalf("redelivered with delivery count %d, want 2: the receiver's claim and this one", count)
+			}
+			offsets, err := kadm.NewClient(kafka).DescribeShareGroupOffsets(ctx, admin.PoolGroup(pool))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if offset, ok := offsets[admin.PoolGroup(pool)].Offsets.Lookup(admin.PoolTasksTopic(pool), redelivered.Partition); !ok || offset.Err != nil || offset.StartOffset > redelivered.Offset {
+				t.Fatalf("share group start offset %+v past the task at %d: the task was archived", offset, redelivered.Offset)
+			}
+		})
+	}
+}
+
+// configure writes the receiver's configuration record with capacity.
+func (b brokerPool) configure(t *testing.T, ctx context.Context, capacity int64) {
+	t.Helper()
+	config := testConfig(b.receiver)
+	config.Pool, config.Capacity = b.pool, capacity
+	encoded, err := admin.EncodeRecord(admin.Record{Kind: "receiver", Pool: b.pool, Receiver: b.receiver, Config: &config})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.HostTopic(tenant, host), Value: registration}).FirstErr(); err != nil {
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
-	answerSeals(t, ctx, kafka, signed.Keys{receiverID: {Current: signing.Public().(ed25519.PublicKey)}}, tenant, host, credentialName, testToken)
-	base, err := kgo.NewClient(opts...)
+}
+
+// deliveryLimit sets the pool's delivery limit in its terms and on its share group, as pool create does.
+func (b brokerPool) deliveryLimit(t *testing.T, ctx context.Context, limit int32) {
+	t.Helper()
+	terms := testTerms()
+	terms.DeliveryLimit = limit
+	encoded, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
 	if err != nil {
 		t.Fatal(err)
 	}
-	logs := &syncBuffer{}
-	adapter := &fakeAdapter{stream: noResultStream, endDelay: time.Minute}
-	r := &Receiver{id: receiverID, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Adapter: adapter}, nil
-		}}
-	runCtx, stop := context.WithCancel(ctx)
-	done := make(chan error, 1)
-	go func() { done <- r.Run(runCtx) }()
-	defer func() { stop(); <-done }()
-	b.joined(t, ctx, logs)
-	submission := testSubmission("run-broker")
-	submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = tenant, host, pool
-	value, err := wire.SignRecord(submission, hostKey)
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	value := fmt.Sprint(limit)
+	config := kmsg.NewIncrementalAlterConfigsRequestResourceConfig()
+	config.Name, config.Value, config.Op = "share.delivery.count.limit", &value, kmsg.IncrementalAlterConfigOpSet
+	resource := kmsg.NewIncrementalAlterConfigsRequestResource()
+	resource.ResourceType, resource.ResourceName = kmsg.ConfigResourceTypeGroupConfig, admin.PoolGroup(b.pool)
+	resource.Configs = []kmsg.IncrementalAlterConfigsRequestResourceConfig{config}
+	request := kmsg.NewPtrIncrementalAlterConfigsRequest()
+	request.Resources = []kmsg.IncrementalAlterConfigsRequestResource{resource}
+	response, err := request.RequestWith(ctx, b.kafka)
+	if err == nil {
+		err = kerr.ErrorForCode(response.Resources[0].ErrorCode)
+	}
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(pool), Key: []byte("run-broker"), Value: value}).FirstErr(); err != nil {
-		t.Fatal(err)
-	}
-	for {
-		if _, _, follows, _ := adapter.counts(); follows == 1 {
-			break
-		}
-		if ctx.Err() != nil {
-			t.Fatalf("run never started; logs:\n%s", logs.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	stop()
-	<-done
-	done <- nil
-	stopped := time.Now()
-	member, err := kgo.NewClient(append(append([]kgo.Opt(nil), opts...), kgo.ConsumeTopics(admin.PoolTasksTopic(pool)), kgo.ShareGroup(admin.PoolGroup(pool)), kgo.ShareMaxRecords(1))...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer member.Close()
-	for redelivered := false; !redelivered; {
-		pollCtx, cancelPoll := context.WithTimeout(ctx, 2*time.Second)
-		for _, record := range member.PollRecords(pollCtx, 1).Records() {
-			redelivered = redelivered || string(record.Key) == "run-broker"
-		}
-		cancelPoll()
-		if ctx.Err() != nil {
-			t.Fatal("run-broker never delivered to another member")
-		}
-	}
-	if waited := time.Since(stopped); waited > 10*time.Second {
-		t.Fatalf("task returned to the pool %s after shutdown, want at once (the acquisition lock expired instead)", waited)
+		t.Fatalf("set the share group's delivery limit: %v", err)
 	}
 }
 
