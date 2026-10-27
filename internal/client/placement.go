@@ -11,12 +11,9 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 )
 
-// resolvePlacement chooses, among live advertisements in the tenant's entitled pools, the member with the most spare
-// capacity, then the lowest receiver ID, that has a ready profile launching the agent with labels satisfying selector.
-// An empty agent takes the pool's default agent, then its declared order, and a member placing its pool's default
-// agent wins over any member placing another before spare capacity counts. Labels come from the operator's config
-// record, never the advertisement. When no member places the task and a pool's terms refuse its model, the error is
-// that refusal.
+// resolvePlacement chooses, among live advertisements in the tenant's entitled pools, a member with a ready profile
+// launching the agent with labels satisfying selector. Labels come from the operator's config record, never the
+// advertisement. When no member places the task and a pool's terms refuse its model, the error is that refusal.
 func resolvePlacement(state admin.State, tenant, agent, model string, selector []wire.Requirement, ads map[string]wire.Advertisement) (string, wire.Placement, error) {
 	var chosen *wire.Advertisement
 	var placement wire.Placement

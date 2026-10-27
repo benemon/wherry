@@ -1172,9 +1172,8 @@ func (run *activeRun) deliver(values map[string][]byte) {
 	r.liveMu.Unlock()
 }
 
-// HoldPlatformCredential has the receiver redact value, the platform credential name names, from the plugin output and
-// errors it logs, in the forms of a run credential, for as long as it runs. A platform credential has no run key, so
-// its marker is that of its name under no key.
+// HoldPlatformCredential redacts value, the platform credential name, from plugin output and errors the receiver logs.
+// A platform credential has no run key, so its marker is that of its name under no key.
 func (r *Receiver) HoldPlatformCredential(name string, value []byte) {
 	forms := redact.AddForms(nil, nil, map[string][]byte{name: value}, func(name string) {
 		r.logger.Printf("platform credential %s too short to redact", name)

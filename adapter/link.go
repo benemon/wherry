@@ -10,8 +10,8 @@ import (
 
 const pluginName = "adapter"
 
-// handshake is protocol version 9; a plugin of another version is refused at launch, so one that still names the
-// configured unit an adapter, or takes its credential from the bundle, never starts. The cookie only stops a plugin binary started by hand from serving.
+// handshake is protocol version 9; a plugin of another version is refused at launch. The cookie only stops a plugin
+// binary started by hand from serving.
 var handshake = plugin.HandshakeConfig{
 	ProtocolVersion:  9,
 	MagicCookieKey:   "WHERRY_ADAPTER_PLUGIN",

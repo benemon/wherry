@@ -140,7 +140,6 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[st
 			close(current.done)
 		}
 	}
-	// pending is a read of offsets' topics still in progress, nil when none is.
 	pending := func() *read {
 		for _, current := range reads {
 			select {

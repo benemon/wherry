@@ -674,8 +674,7 @@ func TestServeHandsTheAdapterItsLogger(t *testing.T) {
 	})
 }
 
-// A plugin built against protocol version 8 still names the configured unit an adapter and takes its credential from
-// the bundle, and is incompatible.
+// A plugin of another protocol version is refused.
 func TestVersionEightPluginIsRefused(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "wherry-plugin-old")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|8|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {

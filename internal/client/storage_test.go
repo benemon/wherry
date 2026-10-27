@@ -802,3 +802,45 @@ func TestASealOverItsLimitIsRefusedBeforeUploading(t *testing.T) {
 		t.Fatalf("%d tasks published", end)
 	}
 }
+
+// A storage key file padded with spaces and a tab is held for redaction as the key the host signs with, so an upload
+// error carrying that key is redacted.
+func TestPaddedStorageKeyIsRedacted(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if r.Method == http.MethodGet && r.URL.Query().Has("location") {
+			fmt.Fprint(w, "<LocationConstraint></LocationConstraint>")
+			return
+		}
+		_, signer, _ := strings.Cut(r.Header.Get("Authorization"), "Credential=")
+		access, _, _ := strings.Cut(signer, "/")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, "<Error><Code>InvalidAccessKeyId</Code><Message>no access key %s</Message></Error>", access)
+	}))
+	t.Cleanup(server.Close)
+	previous := storageTransport
+	storageTransport = server.Client().Transport
+	t.Cleanup(func() { storageTransport = previous })
+	access, secret := filepath.Join(t.TempDir(), "access"), filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(access, []byte("  padded-access-key\t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte("\tpadded-secret-key  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := &Host{storage: &StorageConfig{AccessKey: "padded-access", SecretKey: "padded-secret"},
+		credentials: map[string]credential.Source{"padded-access": {File: access}, "padded-secret": {File: secret}}}
+	ctx := context.Background()
+	store, err := h.bucket(ctx, "pool-s3", &admin.Storage{Endpoint: server.URL, Bucket: testBucket})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, _ := randomFile(t, "dataset.bin", 16)
+	_, err = uploadInputs(ctx, store, testBucket, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}})
+	if err == nil || !strings.Contains(err.Error(), "upload S3 input dataset.bin: no access key padded-access-key") {
+		t.Fatalf("upload = %v; want an error carrying the access key", err)
+	}
+	if got := Redact(err.Error()); strings.Contains(got, "padded-access-key") {
+		t.Fatalf("redacted error holds the access key: %s", got)
+	}
+}
