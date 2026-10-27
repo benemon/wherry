@@ -80,6 +80,17 @@ go test -p 1 -count=1 ./internal/admin/ ./internal/receiver/ ./internal/client/ 
 
 The packages share the broker's `wherry.admin`, so they run one at a time.
 
+`test/s3/up.sh DIR` starts [ceph-aio](https://github.com/benemon/ceph-aio), a
+single-node Ceph with RGW, creates a user with generated keys and writes the S3
+variables to `DIR/env`; CI runs the S3 tests against it:
+
+```sh
+test/s3/up.sh /tmp/wherry-s3 && . /tmp/wherry-s3/env
+go test -count=1 ./internal/client/ ./cmd/wherry/
+```
+
+Each S3 test deletes the objects it wrote.
+
 ## Documentation site
 
 The site is [VitePress](https://vitepress.dev/) in `docs-site`, built from

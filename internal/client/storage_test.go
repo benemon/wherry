@@ -38,7 +38,7 @@ import (
 const testBucket = "wherry-test"
 
 // oracle is the real S3 store the storage tests run against: the S3-compatible server WHERRY_S3_TEST_ENDPOINT names,
-// a local MinIO over http, fronted by a TLS proxy that keeps the Host header, so the client and the URLs it presigns
+// a local S3 store over http (test/s3/up.sh), fronted by a TLS proxy that keeps the Host header, so the client and the URLs it presigns
 // are https as production requires. store reaches the server directly, as an operator would.
 type oracle struct {
 	endpoint string
@@ -126,9 +126,14 @@ func newOracle(t *testing.T) *oracle {
 	}
 	var mu sync.Mutex
 	var requested []string
+	// written are the test bucket's keys this test PUT through the proxy, deleted when it ends.
+	written := map[string]bool{}
 	proxy := httptest.NewTLSServer(&httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) {
 		mu.Lock()
 		requested = append(requested, r.In.URL.String())
+		if key, ok := strings.CutPrefix(r.In.URL.Path, "/"+testBucket+"/"); ok && r.In.Method == http.MethodPut && key != "" {
+			written[key] = true
+		}
 		mu.Unlock()
 		r.SetURL(parsed)
 		r.Out.Host = r.In.Host
@@ -157,6 +162,15 @@ func newOracle(t *testing.T) *oracle {
 			t.Fatal(err)
 		}
 	}
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for key := range written {
+			if err := store.RemoveObject(context.Background(), testBucket, key, minio.RemoveObjectOptions{}); err != nil {
+				t.Errorf("remove %s: %v", key, err)
+			}
+		}
+	})
 	client := proxy.Client()
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &oracle{endpoint: proxy.URL, config: config, sources: sources, store: store, client: client, secret: secret}
@@ -186,6 +200,7 @@ func (o *oracle) put(t *testing.T, key string, data []byte) {
 	if _, err := o.store.PutObject(context.Background(), testBucket, key, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = o.store.RemoveObject(context.Background(), testBucket, key, minio.RemoveObjectOptions{}) })
 }
 
 // storageFixture adds pool-s3, whose terms name the oracle's endpoint and bucket, and a live receiver in it alone, and
@@ -731,7 +746,7 @@ func TestADownloadThatDoesNotVerifyKeepsThePrefix(t *testing.T) {
 		},
 		"size": func(listed wire.ReturnedOutput) wire.ReturnedOutput { listed.Size--; return listed },
 		"key": func(listed wire.ReturnedOutput) wire.ReturnedOutput {
-			listed.Key = strings.Replace(listed.Key, "/1/outputs/", "/2/outputs/", 1)
+			listed.Key = strings.Replace(listed.Key, "/outputs/", "/inputs/", 1)
 			return listed
 		},
 		"undeclared name": func(listed wire.ReturnedOutput) wire.ReturnedOutput {
@@ -744,7 +759,7 @@ func TestADownloadThatDoesNotVerifyKeepsThePrefix(t *testing.T) {
 			runID := task.submission.Wherry.Run
 			key := wire.S3OutputKey("tenant-a", runID, "out/report.pdf")
 			o.put(t, key, []byte("report"))
-			o.put(t, strings.Replace(key, "/1/outputs/", "/2/outputs/", 1), []byte("report"))
+			o.put(t, strings.Replace(key, "/outputs/", "/inputs/", 1), []byte("report"))
 			o.put(t, strings.Replace(key, "report.pdf", "other.pdf", 1), []byte("report"))
 			listed := tamper(wire.ReturnedOutput{Name: "out/report.pdf", SHA256: hexSum([]byte("report")), Size: 6, Key: key})
 			receiver.feed(t, f.ctx, runID, receiver.s3Result(t, task, []wire.ReturnedOutput{listed})...)
@@ -790,7 +805,7 @@ func TestASealOverItsLimitIsRefusedBeforeUploading(t *testing.T) {
 	f, _, _ := storageFixture(t)
 	var outputs []wire.ExpectedOutput
 	for i := range 100 {
-		outputs = append(outputs, wire.ExpectedOutput{Name: strings.Repeat("o", 300) + strconv.Itoa(i), Storage: wire.StorageS3})
+		outputs = append(outputs, wire.ExpectedOutput{Name: strings.Repeat("o", 200) + strconv.Itoa(i), Storage: wire.StorageS3})
 	}
 	file, _ := randomFile(t, "dataset.bin", 16)
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "x", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}}, Outputs: outputs,

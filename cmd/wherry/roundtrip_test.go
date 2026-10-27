@@ -519,7 +519,7 @@ func s3RoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host *buscl
 
 const s3Bucket = "wherry-test"
 
-// s3Store is the TLS S3 boundary used by the round trip; store is set for the optional real MinIO oracle.
+// s3Store is the TLS S3 boundary used by the round trip; store is set for the optional real S3 oracle.
 type s3Store struct {
 	endpoint string
 	config   *busclient.StorageConfig
@@ -550,7 +550,18 @@ func s3Oracle(t *testing.T) *s3Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxy := httptest.NewTLSServer(&httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) { r.SetURL(parsed); r.Out.Host = r.In.Host }})
+	// written are the bucket's keys this test PUT through the proxy, deleted when it ends.
+	var mu sync.Mutex
+	written := map[string]bool{}
+	proxy := httptest.NewTLSServer(&httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) {
+		if key, ok := strings.CutPrefix(r.In.URL.Path, "/"+s3Bucket+"/"); ok && r.In.Method == http.MethodPut && key != "" {
+			mu.Lock()
+			written[key] = true
+			mu.Unlock()
+		}
+		r.SetURL(parsed)
+		r.Out.Host = r.In.Host
+	}})
 	t.Cleanup(proxy.Close)
 	previous := http.DefaultTransport
 	http.DefaultTransport = proxy.Client().Transport
@@ -571,6 +582,15 @@ func s3Oracle(t *testing.T) *s3Store {
 			t.Fatal(err)
 		}
 	}
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for key := range written {
+			if err := store.RemoveObject(context.Background(), s3Bucket, key, minio.RemoveObjectOptions{}); err != nil {
+				t.Errorf("remove %s: %v", key, err)
+			}
+		}
+	})
 	return &s3Store{endpoint: proxy.URL, config: &busclient.StorageConfig{AccessKey: "s3-access", SecretKey: "s3-secret"}, sources: sources, store: store, client: proxy.Client()}
 }
 
