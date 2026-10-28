@@ -27,10 +27,7 @@ made when this host submits the run, `runs/<run>/outputs/` for the outputs
 it answered, with a `.lock` beside it that every process sharing the
 directory holds while it answers that attempt. `submit` writes the run's
 record before it publishes the task, and removes it when publishing
-fails. A seal is at most 64 KiB, which bounds the values one seal
-carries. The receiver redacts no credential value shorter than 8 bytes
-once its trailing CR and LF are removed, and logs
-`run <id>: credential <name> too short to redact`.
+fails.
 
 ### Client configuration example
 
@@ -415,9 +412,9 @@ rules:
 Here the plugin holds the cluster's address, its credential, a Docker
 runtime and a `platform` label. Plugin profile `claude` overrides only the
 image. Plugin profile `host` switches the driver to `exec` and deletes the
-inherited `image`, which the `exec` driver does not take. Nomad accepts a
-job whatever its driver configuration holds, and the client then refuses
-the task, so an inherited key the driver rejects fails every run.
+inherited `image`, which the `exec` driver does not take. The
+[Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
+describe `runtime` and its driver `config`.
 
 ```yaml
 plugins:
@@ -624,6 +621,9 @@ example](#receiver-configuration-example):
 ```
 profile container: credential "nomad-token" has no source in the receiver's configuration
 ```
+
+A plugin profile that names no credential leaves the plugin to its own
+default, such as the Nomad plugin's `NOMAD_TOKEN`.
 
 Sources stay on the receiver's host. `wherry.admin`, which every principal
 reads, records the credential's name alone, and the receiver's bundle holds

@@ -75,6 +75,8 @@ The operators are `In`, `NotIn`, `Exists` and `DoesNotExist`;
 isolation level. The operator declares them per plugin profile in the receiver's
 configuration record. Keys are arbitrary and may carry the operator's own
 prefix, such as `example.com/gpu`; the prefix `wherry.io/` is reserved.
+Two profiles can launch the same agent with different labels, such as one
+in containers and one on the host.
 The platform, runtime, node pool and datacenter a profile uses are part
 of its configuration, and are neither labels nor selectable.
 
@@ -97,7 +99,9 @@ plugins in the order of their names, the same order the client uses, and
 labels choose between plugins. An agent outside
 the pool's terms is rejected. A task no ready profile satisfies is a start
 failure: the receiver records it on the pool's events and returns the task
-to the pool.
+to the pool. The client places a task by one member's labels, but any
+member of the pool can claim it, so every member must honour the labels its
+profiles declare.
 
 ## Files in and out
 

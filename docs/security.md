@@ -13,20 +13,21 @@ that tenant's own credential. Every credential has a **source** on the
 host and a **target** in the agent. The pool's terms list each agent's
 credentials, each with its target: an environment variable or a file in
 the directory `WHERRY_CREDENTIALS_DIR` names, and whether the agent
-requires it. The host's configuration maps each credential name to one
-source: a file, an environment variable of the process answering the seal,
-or a command whose output is the value. A file source's file is refused
-when its group can write it or others can access it. A task can also declare **task
-credentials**: credentials of the host, such as a deploy key, that the
-agent gets at the target the task's parent chooses. The pool's terms do not
-govern them, and none may take the target of one of the agent's
-credentials.
+requires it. The host's [client configuration](configuration.md#client-configuration)
+maps each credential name to one [source](#credential-sources). A task can
+also declare **task credentials**: credentials of the host, such as a
+deploy key, that the agent gets at the target the task's parent chooses.
+The pool's terms do not govern them, and none may take the target of one of
+the agent's credentials or of another task credential.
 
-`wherry submit` refuses a task at once, with
-`auth required: credential <name> is not in this host's configuration`, when the host has no source
-for a required credential of the placed agent or for a task credential. An
-optional credential the host has no source for is not delivered; the
-prompt names it as not supplied.
+`wherry receivers` lists each agent's credential names, marking those this
+host has no source for, such as
+`credentials=openai-api-key,github-token(missing,optional)`. `wherry
+submit` refuses a task at once, with
+`auth required: credential <name> is not in this host's configuration`,
+when the host has no source for a required credential of the placed agent
+or for a task credential. An optional credential the host has no source for
+is not delivered, and the prompt names it as not supplied.
 
 A host seals nothing when it submits. The receiver that claims a run
 with credentials to deliver makes a P-256 key pair for that
@@ -37,11 +38,15 @@ await` or `wherry mcp` runs. It checks the request's signature against the
 receiver's registered key, that the receiver is a live member of the run's
 pool and holds the run's current attempt, that the pool's terms approve
 each agent credential for the run's agent, and that the run declares each
-task credential. It resolves each credential's source, then writes a **seal** to
+task credential. It resolves each credential's [source](#credential-sources),
+then writes a **seal** to
 its own topic: a compact JWE (`ECDH-ES+A256KW` with `A256GCM`, through
 [go-jose](https://github.com/go-jose/go-jose)) encrypted to the request's
 key and bound in its protected header to the tenant, pool, receiver, key
-thumbprint, run, attempt, credential names and expiry.
+thumbprint, run, attempt, credential names and expiry. A seal is at most
+64 KiB, which bounds the values one seal carries. The host logs each
+verified request of its own runs that it skips or refuses, by run,
+receiver and credential name, on standard error.
 
 A seal passes from the host to one attempt of one receiver in these steps.
 
@@ -50,28 +55,29 @@ A seal passes from the host to one attempt of one receiver in these steps.
 Only the requesting receiver can open a seal, and only for that attempt.
 The private key lives in the receiver's memory until the seal opens or the
 wait ends, so a seal on the host's topic opens for no later attempt and for
-no restarted receiver. A redelivered run asks again. Hosts cannot see the
-broker's claim, so a host seals only to the receiver that wrote the run's
-first `claimed` status, and refuses when a second receiver claims the same
-run; a run adopted by another receiver ends `TASK_STATE_FAILED` when its
-seal wait ends.
+no restarted receiver. A redelivered run asks again, and a receiver that
+adopts a running job publishes nothing of the job until its own seal opens.
+Hosts cannot see the broker's claim, so a host seals only to the receiver
+that wrote the run's first `claimed` status, and refuses when a second
+receiver claims the same run. A run adopted by another receiver gets no
+seal, so that receiver stops the job and the run ends `TASK_STATE_FAILED`
+when its seal wait ends.
+
 The receiver redacts each credential of 8 bytes or more that it delivered,
 with or without its trailing newline and as JSON escapes it, from
 everything it publishes for the attempt. Each marker is an HMAC of the
 credential's name under a key the host makes for the run and sends in every
-seal, so no marker maps to a name without that key. Seal requests and
+seal, so no marker maps to a name without that key. The receiver redacts
+no value shorter than 8 bytes once its trailing CR and LF are removed, and
+logs `run <id>: credential <name> too short to redact`. Seal requests and
 the failed status of an unanswered seal request carry credential names and
 no values.
 
 A run whose seal does not arrive within 5 minutes ends in
 `TASK_STATE_FAILED` with a message naming each credential the host did not
-answer. The tenant fixes the credential's source in `credentials` in its
-wherry configuration and submits a new run. An agent that finds a
-credential missing or refused during the run ends it in
-`TASK_STATE_AUTH_REQUIRED` naming the credential; that state is final, and
-the tenant submits a new run. A parent that submits a task needing
-credentials keeps `wherry await` or `wherry mcp` running until the task
-starts.
+answer. An agent that finds a credential missing or refused during the run
+ends it in `TASK_STATE_AUTH_REQUIRED` naming the credential. Both states
+are final.
 
 Everything else the agent needs comes from the platform or from the task:
 the image or host install, network access, CA bundles and SSH known hosts
@@ -79,66 +85,37 @@ from the platform, and files and task credentials from the task.
 
 ## Run credentialed tasks
 
-Every credential has a source on the host and a target in the agent. The
-host's [client configuration](configuration.md#client-configuration) maps each
-credential name to one source:
+Prerequisites: a host with its
+[client configuration](configuration.md#client-configuration), entitled to a
+pool whose terms list the agent's credentials.
 
-```yaml
-credentials:
-  openai-api-key:
-    file: ~/.config/wherry/credentials/openai
-  github-token:
-    env: GITHUB_TOKEN
-  vault-token:
-    command: [vault, print, token]
-```
+1. Map each credential the agent takes, and each task credential, to a
+   [source](#credential-sources) in `credentials` of the host's
+   configuration:
 
-The configuration lives at `~/.config/wherry/config.yaml`. A `file` source is
-read as it is, trailing newline included. Its file must be a regular file
-that its group cannot write and others cannot access: mode 0600 is the
-recommended mode, and mode 0640 is accepted for a secrets agent that
-templates the file for a service group. An `env`
-source is read from the environment of the process answering the seal,
-`wherry await` or `wherry mcp`. A `command` source runs without a shell,
-with the answerer's environment, for at most 60 seconds, which leaves time
-for an interactive unlock such as a password manager's; its standard output
-is the value, at most 64 KiB, and its standard error is discarded. The
-configuration holds no literal values.
+   ```yaml
+   credentials:
+     openai-api-key:
+       file: ~/.config/wherry/credentials/openai
+     github-token:
+       env: GITHUB_TOKEN
+     vault-token:
+       command: [vault, print, token]
+   ```
 
-`wherry receivers` lists each agent's credential names, marking those this
-host has no source for, such as
-`credentials=openai-api-key,github-token(missing,optional)`. `wherry
-submit` refuses a task with `auth required: credential <name> is not in
-this host's configuration` when the host has no source for a required
-credential of the placed agent, or for a task credential. An optional
-credential the host has no source for is not delivered, and the prompt
-names it as not supplied. A task credential takes a target with
-`--credential NAME:file=FILE` or `--credential NAME:env=VAR`; `submit`
-refuses one whose target is one of the agent's credentials' targets or
-another task credential's.
+2. Run `wherry receivers` and check that the agent lists no required
+   credential as `missing`.
 
-A receiver asks the submitting host for the run's credentials when it
-claims the task, and the host answers only while `wherry await` or
-`wherry mcp` runs on it. A parent that submits a task with credentials
-keeps one of them running until the task starts; without an answer within
-5 minutes, the run ends `TASK_STATE_FAILED` with a message that names each
-unanswered credential. The answerer resolves each source
-when it answers, before it takes the attempt's lock, so a slow command
-holds up no other answerer of the host. A source that fails to resolve, an
-unset or empty variable, a command that exits non-zero, times out or writes
-over 64 KiB, is logged as `run <id>: resolve credential <name>: <cause>`,
-by name and exit status alone. The answerer tries the request again each
-second until it expires, and 60 seconds after a command source fails.
+3. Submit the task. Give each task credential its target with
+   `--credential NAME:file=FILE` or `--credential NAME:env=VAR`.
 
-The host answers only for a credential the pool's terms approve for the
-run's agent, or a task credential the run declares, that its configuration
-has a source for, and only to the receiver that first claimed the run. It
-logs each verified request of its
-own runs that it skips or refuses, by run, receiver and credential name, on
-standard error. A receiver that adopts a running job asks for its own seal
-and publishes nothing of the job until it opens. A run adopted by a second
-receiver gets no seal, so that receiver stops the job and the run ends
-`TASK_STATE_FAILED` naming the credentials; submit a new run.
+4. Keep `wherry await RUN_ID` or `wherry mcp` running until the task
+   starts, so the host answers the receiver's
+   [seal request](#sealed-credentials) within 5 minutes.
+
+5. When the run ends `TASK_STATE_FAILED` naming unanswered credentials, or
+   `TASK_STATE_AUTH_REQUIRED` naming a credential, fix that credential's
+   source and submit a new run.
 
 ## Credential sources
 

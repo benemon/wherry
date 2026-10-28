@@ -468,8 +468,8 @@ echo on the tenant feed. They fail with `run not found` when there is neither.
 Serves the [MCP tools](mcp.md) over stdio. For as long as it runs it
 answers seal requests as `await` does, logging to standard error.
 The packaged MCP launch uses `["mcp"]` and the default configuration path.
-A server that runs `wherry mcp --config-file PATH` uses another; see the
-[Operations](operations.md#harness-integration).
+A server that runs `wherry mcp --config-file PATH` uses another, as
+[Harness integration](operations.md#harness-integration) shows.
 
 ### `wherry version`
 
@@ -608,6 +608,10 @@ A `credential` key shows the credential's name, which is all the record
 holds; neither `show` nor `--dry-run` prints a credential value.
 
 ### `wherry admin host revoke HOST --tenant TENANT`
+
+Runs the [revocation](concepts.md#revocation) steps for the host, as
+[`receiver revoke`](#wherry-admin-receiver-revoke-receiver) does for a
+receiver.
 
 ### `wherry admin receiver revoke RECEIVER`
 
