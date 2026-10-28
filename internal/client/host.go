@@ -507,10 +507,7 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, encoded
 		return err
 	}
 	// Listed before the write: a receiver that claims at once writes the run's first records after the submission.
-	ends, err := kadm.NewClient(h.kafka).ListCommittedOffsets(ctx, admin.TenantTopic(h.tenant))
-	if err == nil {
-		err = ends.Error()
-	}
+	ends, err := admin.ListOffsets(ctx, kadm.NewClient(h.kafka).ListCommittedOffsets, admin.TenantTopic(h.tenant))
 	if err != nil {
 		return err
 	}

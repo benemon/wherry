@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"weak"
@@ -17,7 +18,9 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // executing runs execute for record in the background under ctx and returns where its acknowledgement arrives.
@@ -429,5 +432,62 @@ func TestAnAdopterDropsTheOldestHeldLines(t *testing.T) {
 	first := int64(3 * (len(line) + 1))
 	if len(chunks) != 4 || chunks[0].Wherry.Seq != first || !strings.Contains(f.logs.String(), fmt.Sprintf("dropped 3 transcript lines held before the seal; the transcript resumes at offset %d", first)) {
 		t.Fatalf("%d chunks from seq %d; logs:\n%s", len(chunks), chunks[0].Wherry.Seq, f.logs.String())
+	}
+}
+
+// The listing of the host topic's end before a seal request lists again while its partition fails retriably, fails at
+// once on any other partition error, and fails with its context's error when the retriable error outlasts it.
+// OFFSET_NOT_AVAILABLE is a retriable error kgo never retries itself.
+func TestSealWaitListsAgainOnlyOnARetriablePartitionError(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		failures int32
+		code     int16
+		want     kgo.AckStatus
+		logged   string
+		// cancels ends the run's context once it has listed again.
+		cancels  bool
+		listings func(int32) bool
+	}{
+		{"retriable then listed", 3, kerr.OffsetNotAvailable.Code, kgo.AckAccept, "", false, func(n int32) bool { return n == 4 }},
+		{"non-retriable", -1, kerr.UnknownServerError.Code, kgo.AckRelease, "read host topic: " + kerr.UnknownServerError.Error(), false, func(n int32) bool { return n == 1 }},
+		{"retriable past the deadline", -1, kerr.OffsetNotAvailable.Code, kgo.AckRelease, "read host topic: " + context.Canceled.Error(), true, func(n int32) bool { return n > 2 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.answer(t, credentialName)
+			record := f.submit(t, f.host, nil)
+			topic := admin.HostTopic(testTenant, testHost)
+			seen := &atomic.Int32{}
+			f.cluster.ControlKey(int16(kmsg.ListOffsets), func(request kmsg.Request) (kmsg.Response, error, bool) {
+				f.cluster.KeepControl()
+				listed := request.(*kmsg.ListOffsetsRequest)
+				if listed.IsolationLevel != 0 || len(listed.Topics) != 1 || listed.Topics[0].Topic != topic {
+					return nil, nil, false
+				}
+				if n := seen.Add(1); test.failures >= 0 && n > test.failures {
+					return nil, nil, false
+				}
+				response := listed.ResponseKind().(*kmsg.ListOffsetsResponse)
+				failed := kmsg.ListOffsetsResponseTopic{Topic: topic}
+				for _, partition := range listed.Topics[0].Partitions {
+					failed.Partitions = append(failed.Partitions, kmsg.ListOffsetsResponseTopicPartition{Partition: partition.Partition, ErrorCode: test.code})
+				}
+				response.Topics = append(response.Topics, failed)
+				return response, nil, true
+			})
+			ctx, cancel := context.WithCancel(f.ctx)
+			defer cancel()
+			done := f.executing(t, ctx, record, 1)
+			if test.cancels {
+				for seen.Load() <= 2 && f.ctx.Err() == nil {
+					time.Sleep(10 * time.Millisecond)
+				}
+				cancel()
+			}
+			if status := <-done; status != test.want || !strings.Contains(f.logs.String(), test.logged) || !test.listings(seen.Load()) {
+				t.Fatalf("status %v after %d listings, want %v; logs:\n%s", status, seen.Load(), test.want, f.logs.String())
+			}
+		})
 	}
 }

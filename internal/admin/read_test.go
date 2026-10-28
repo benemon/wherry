@@ -16,6 +16,7 @@ import (
 
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -512,5 +513,33 @@ func TestReadKeysFailsWhenARetriablePartitionErrorOutlastsTheContext(t *testing.
 	keys, err := ReadKeys(ctx, unretried, map[string]string{"receiver-a": "keys-a"})
 	if !errors.Is(err, context.DeadlineExceeded) || keys != nil || seen.Load() <= 2 {
 		t.Fatalf("keys %v, %v after %d listings; want the context's error after listing again", keys, err, seen.Load())
+	}
+}
+
+// ListOffsets lists again while a partition fails retriably, fails at once on any other partition error, and fails
+// with its context's error when the retriable error outlasts it.
+func TestListOffsetsListsAgainOnlyOnARetriablePartitionError(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		failures int32
+		code     int16
+		timeout  time.Duration
+		want     error
+		listings func(int32) bool
+	}{
+		{"retriable then listed", 3, kerr.NotLeaderForPartition.Code, 10 * time.Second, nil, func(n int32) bool { return n == 4 }},
+		{"non-retriable", -1, kerr.UnknownServerError.Code, 5 * time.Second, kerr.UnknownServerError, func(n int32) bool { return n == 1 }},
+		{"retriable past the deadline", -1, kerr.NotLeaderForPartition.Code, 500 * time.Millisecond, context.DeadlineExceeded, func(n int32) bool { return n > 1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cluster, client := readerClusterOf(t, []kfake.Opt{kfake.NumBrokers(1)}, "keys-a")
+			unretried, seen := failListings(t, cluster, client, test.failures, test.code)
+			ctx, cancel := context.WithTimeout(context.Background(), test.timeout)
+			defer cancel()
+			listed, err := ListOffsets(ctx, kadm.NewClient(unretried).ListEndOffsets, "keys-a")
+			if !errors.Is(err, test.want) || !test.listings(seen.Load()) || err == nil && len(listed["keys-a"]) != 1 {
+				t.Fatalf("listed %v, %v after %d listings; want %v", listed, err, seen.Load(), test.want)
+			}
+		})
 	}
 }

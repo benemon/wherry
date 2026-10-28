@@ -237,6 +237,27 @@ func retriable(listed kadm.ListedOffsets) bool {
 	return retry
 }
 
+// ListOffsets lists topic's offsets with list, again after listBackoff while a listed partition carries a retriable
+// error, and returns the last listing with its first partition error.
+func ListOffsets(ctx context.Context, list func(context.Context, ...string) (kadm.ListedOffsets, error), topic string) (kadm.ListedOffsets, error) {
+	for {
+		listed, err := list(ctx, topic)
+		if err != nil {
+			return nil, err
+		}
+		// kgo retries a partition that is changing leader only while its listing evicts the topic's metadata, which a
+		// concurrent listing of the topic through the same client may already have done.
+		if !retriable(listed) {
+			return listed, listed.Error()
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(listBackoff):
+		}
+	}
+}
+
 // add starts consuming the partitions of the reads in progress among reads; the caller holds poll.
 func (r *Reader) add(reads map[string]*read) error {
 	if r.closed {
