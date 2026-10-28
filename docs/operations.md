@@ -141,16 +141,20 @@ file.
 4. Record the terms:
 
    ```sh
-   wherry admin pool create build --config-file build-terms.yaml
+   wherry admin pool update build --config-file build-terms.yaml
    ```
 
-   `pool create` checks every live receiver in the pool against the new
+   `pool update` checks every live receiver in the pool against the new
    terms first, and refuses terms that would strand one, naming each
    receiver, plugin and profile:
 
    ```
    wherry: pool terms would strand live receivers: receiver nomad-1 plugin nomad profile host: receiver agent is outside pool terms
    ```
+
+   `--dry-run` makes the same checks and writes nothing. Receivers apply
+   the new terms within 15 seconds, without a restart. A lowered
+   `delivery_limit` applies to a task in flight at its next release.
 
 ### Retention
 
@@ -199,7 +203,7 @@ base64-encoded inside a record that is itself base64url-encoded. wherry
 producers batch at most 1000012 bytes, which is the limit with brokers and
 topics at their defaults. Raising `message.max.bytes` or
 `max.message.bytes` leaves the limit there, and lowering either lowers it.
-Run `pool create` again after changing either, so the terms record the new
+Run `pool update` after changing either, so the terms record the new
 limit. An output chunk holds
 256 KiB whatever `output_limit` is, so `output_limit` spans as many records
 as it needs and the record limit does not bound it.
@@ -391,11 +395,11 @@ Prerequisites: the `wherry admin` environment and the receiver's new
 configuration.
 
 1. Check the configuration. `--dry-run` validates it against the pool's
-   terms as `configure` does, and prints each plugin profile as the record
+   terms as `update` does, and prints each plugin profile as the record
    would hold it, writing nothing:
 
    ```sh
-   wherry admin receiver configure nomad-1 --config-dir nomad-1 --dry-run
+   wherry admin receiver update nomad-1 --config-dir nomad-1 --dry-run
    ```
 
 2. Compare the output with what the receiver runs now, which
@@ -404,7 +408,7 @@ configuration.
 3. Record the configuration:
 
    ```sh
-   wherry admin receiver configure nomad-1 --config-dir nomad-1
+   wherry admin receiver update nomad-1 --config-dir nomad-1
    ```
 
 4. The receiver exits at its next configuration check, within 15 seconds,

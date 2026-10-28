@@ -99,7 +99,18 @@ func KafkaOpts(broker string, ca []byte, user, password string) ([]kgo.Opt, erro
 	}, nil
 }
 
+// PoolCreate records terms for a new pool and creates its topics and share group.
 func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms) error {
+	return service.poolTerms(ctx, pool, terms, false, false)
+}
+
+// PoolUpdate records new terms for an existing pool and re-applies its share group's delivery limit and lock
+// duration. With dryRun it makes the checks and writes nothing.
+func (service *Service) PoolUpdate(ctx context.Context, pool string, terms Terms, dryRun bool) error {
+	return service.poolTerms(ctx, pool, terms, true, dryRun)
+}
+
+func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms, update, dryRun bool) error {
 	effective := withDefaults(terms)
 	if err := validateTerms(effective); err != nil {
 		return err
@@ -118,14 +129,22 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 	if effective.DeliveryLimit > service.DeliveryCeiling {
 		return fmt.Errorf("delivery limit exceeds broker ceiling %d", service.DeliveryCeiling)
 	}
-	if err := service.createTopics(ctx, "-1", AdminTopic); err != nil {
-		return err
+	if !update {
+		if err := service.createTopics(ctx, "-1", AdminTopic); err != nil {
+			return err
+		}
 	}
 	current, err := service.LoadState(ctx)
 	if err != nil {
 		return err
 	}
-	if _, exists := current.Pools[pool]; exists {
+	_, exists := current.Pools[pool]
+	switch {
+	case exists && !update:
+		return errors.New("pool exists; change its terms with pool update")
+	case !exists && update:
+		return errors.New("no pool by that name")
+	case exists:
 		if err := strandedReceivers(current, pool, terms); err != nil {
 			return err
 		}
@@ -135,6 +154,9 @@ func (service *Service) PoolCreate(ctx context.Context, pool string, terms Terms
 	}
 	if err := service.checkPoolFeedsRetention(ctx, current, pool, retention.feed); err != nil {
 		return err
+	}
+	if dryRun {
+		return nil
 	}
 	record := Record{Kind: "pool", Pool: pool, Terms: &terms}
 	state, err := service.appendChecked(ctx, []byte("pool."+pool), record)
@@ -187,7 +209,7 @@ func (service *Service) ReceiverCheck(ctx context.Context, config ReceiverConfig
 		return ReceiverConfig{}, err
 	}
 	if _, exists := state.Receivers[config.Receiver]; exists {
-		return ReceiverConfig{}, errors.New("receiver exists; change its configuration with receiver configure")
+		return ReceiverConfig{}, errors.New("receiver exists; change its configuration with receiver update")
 	}
 	terms, ok := state.Pools[config.Pool]
 	if !ok {
@@ -229,12 +251,12 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(config.Receiver), password})
 }
 
-// ReceiverConfigure records a new configuration for an existing receiver in its
+// ReceiverUpdate records a new configuration for an existing receiver in its
 // pool and returns it as recorded. The principal, its password and the bundle
 // are untouched; the receiver exits on the new record and its platform restarts
 // it. With dryRun it writes nothing and returns the configuration as the record
 // would hold it.
-func (service *Service) ReceiverConfigure(ctx context.Context, config ReceiverConfig, dryRun bool) (ReceiverConfig, error) {
+func (service *Service) ReceiverUpdate(ctx context.Context, config ReceiverConfig, dryRun bool) (ReceiverConfig, error) {
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return ReceiverConfig{}, err

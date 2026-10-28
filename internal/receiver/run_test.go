@@ -1816,6 +1816,27 @@ func TestNeverStartedJobIsAPlatformStartFailure(t *testing.T) {
 	}
 }
 
+// A plugin's never-started class, whether a plugin reports it today or not, records a platform start failure; the
+// plugin's class reaches the log alone.
+func TestNeverStartedPluginClassIsAPlatformStartFailure(t *testing.T) {
+	for _, class := range []string{"image", "exec", "unheard-of"} {
+		t.Run(class, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.plugin.stream, f.plugin.neverStarted, f.plugin.neverClass = nil, true, class
+			f.answer(t, credentialName)
+			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
+				t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
+			}
+			if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != "platform" {
+				t.Fatalf("start failures %#v, want one platform start failure", failures)
+			}
+			if want := "job never started (" + class + ")"; !strings.Contains(f.logs.String(), want) {
+				t.Fatalf("logs lack %q:\n%s", want, f.logs.String())
+			}
+		})
+	}
+}
+
 // The platform's reason for a job that never started reaches the receiver's log with the run's delivered credential
 // redacted; without a reason the line is as it was.
 func TestNeverStartedReasonIsLoggedRedacted(t *testing.T) {

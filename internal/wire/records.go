@@ -266,6 +266,9 @@ type SealRequest struct {
 	ExpiryMS  int64    `json:"expiry_at_ms"`
 }
 
+// startFailureClasses are the classes a start failure carries.
+var startFailureClasses = []string{"dispatch", "platform", "input-too-large"}
+
 // StartFailure records that a receiver could not start a run's attempt.
 type StartFailure struct {
 	V        int             `json:"v"`
@@ -629,10 +632,10 @@ func (value *StartFailure) validate() error {
 	if err := value.Wherry.validate(); err != nil {
 		return err
 	}
-	if !ValidHash(value.TaskHash) {
+	if !ValidHash(value.TaskHash) || !slices.Contains(startFailureClasses, value.Class) {
 		return errors.New("invalid start failure")
 	}
-	return validateIDs(map[string]string{"profile": value.Profile, "agent": value.Agent, "class": value.Class})
+	return validateIDs(map[string]string{"profile": value.Profile, "agent": value.Agent})
 }
 
 func (value *SealRequest) validate() error {

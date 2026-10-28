@@ -771,7 +771,7 @@ func TestEchoAdvertisementAndSealRequestBindTheirPool(t *testing.T) {
 	}
 }
 
-func TestReceiverConfigureKeepsThePrincipal(t *testing.T) {
+func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
@@ -808,7 +808,7 @@ func TestReceiverConfigureKeepsThePrincipal(t *testing.T) {
 	}
 	changed := modelConfig("receiver-a", "pool-b")
 	changed.Capacity = 3
-	if _, err := service.ReceiverConfigure(ctx, changed, false); err != nil {
+	if _, err := service.ReceiverUpdate(ctx, changed, false); err != nil {
 		t.Fatal(err)
 	}
 	state, err := service.LoadState(ctx)
@@ -824,7 +824,7 @@ func TestReceiverConfigureKeepsThePrincipal(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "again.yaml")); err == nil {
 		t.Fatal("re-added an existing receiver, rotating its password")
 	}
-	if _, err := service.ReceiverConfigure(ctx, modelConfig("receiver-z", "pool-a"), false); err == nil {
+	if _, err := service.ReceiverUpdate(ctx, modelConfig("receiver-z", "pool-a"), false); err == nil {
 		t.Fatal("configured a receiver that was never added")
 	}
 }

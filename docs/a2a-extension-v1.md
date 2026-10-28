@@ -588,6 +588,11 @@ in a status.
 | `platform` | the platform ended the job before its agent task started, for example when the image cannot be pulled |
 | `input-too-large` | the plugin profile cannot deliver one of the run's inputs; the receiver then ends the run `TASK_STATE_FAILED` naming the input, and releases nothing |
 
+The set of classes is closed and stable in v1. A record of another class is
+invalid, and readers refuse it. A plugin's class for a job that never
+started is not a start failure class: the receiver records `platform` for
+every such class, including one this specification does not name.
+
 A `platform` start failure can follow the run's `started` status, when the
 job ended before its agent task started. The platform's reason for it goes to
 the receiver's log alone.

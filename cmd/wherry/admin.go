@@ -27,7 +27,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(pos) == 0 {
-		return errors.New("usage: wherry admin <pool create|pool entitle|receiver add|receiver configure|receiver show|receiver revoke|host add|host revoke|skip|check>")
+		return errors.New("usage: wherry admin <pool create|pool update|pool entitle|receiver add|receiver update|receiver show|receiver revoke|host add|host revoke|skip|check>")
 	}
 	broker, caPath := os.Getenv("WHERRY_TRUST_BROKER"), os.Getenv("WHERRY_TRUST_CA")
 	if broker == "" || caPath == "" {
@@ -67,6 +67,20 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		return service.PoolCreate(ctx, pos[2], terms)
+	case "pool update":
+		if len(pos) != 3 {
+			return errors.New("usage: wherry admin pool update NAME <--config-file FILE|--config-dir DIR> [--dry-run]")
+		}
+		path, directory, err := configInput(options)
+		if err != nil {
+			return err
+		}
+		terms, err := readPoolConfig(path, directory)
+		if err != nil {
+			return err
+		}
+		_, dryRun := options["dry-run"]
+		return service.PoolUpdate(ctx, pos[2], terms, dryRun)
 	case "receiver add":
 		_, dryRun := options["dry-run"]
 		if len(pos) != 3 || options["pool"] == "" || options["bundle-file"] == "" && !dryRun {
@@ -88,9 +102,9 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			return showReceiver(stdout, config)
 		}
 		return service.ReceiverAdd(ctx, config, options["bundle-file"])
-	case "receiver configure":
+	case "receiver update":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver configure ID <--config-file FILE|--config-dir DIR> [--dry-run]")
+			return errors.New("usage: wherry admin receiver update ID <--config-file FILE|--config-dir DIR> [--dry-run]")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -102,7 +116,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		}
 		config.Receiver = pos[2]
 		_, dryRun := options["dry-run"]
-		if config, err = service.ReceiverConfigure(ctx, config, dryRun); err != nil || !dryRun {
+		if config, err = service.ReceiverUpdate(ctx, config, dryRun); err != nil || !dryRun {
 			return err
 		}
 		return showReceiver(stdout, config)
@@ -249,16 +263,17 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 		command = "skip"
 	}
 	allowed := map[string]map[string]bool{
-		"pool create":        {"config-file": true, "config-dir": true},
-		"receiver add":       {"pool": true, "config-file": true, "config-dir": true, "bundle-file": true, "dry-run": true},
-		"receiver configure": {"config-file": true, "config-dir": true, "dry-run": true},
-		"receiver show":      {},
-		"pool entitle":       {"tenant": true},
-		"host add":           {"tenant": true, "bundle-file": true},
-		"host revoke":        {"tenant": true, "wait": true},
-		"receiver revoke":    {"wait": true},
-		"skip":               {"sha256": true},
-		"check":              {},
+		"pool create":     {"config-file": true, "config-dir": true},
+		"pool update":     {"config-file": true, "config-dir": true, "dry-run": true},
+		"receiver add":    {"pool": true, "config-file": true, "config-dir": true, "bundle-file": true, "dry-run": true},
+		"receiver update": {"config-file": true, "config-dir": true, "dry-run": true},
+		"receiver show":   {},
+		"pool entitle":    {"tenant": true},
+		"host add":        {"tenant": true, "bundle-file": true},
+		"host revoke":     {"tenant": true, "wait": true},
+		"receiver revoke": {"wait": true},
+		"skip":            {"sha256": true},
+		"check":           {},
 	}[command]
 	if allowed != nil {
 		for _, name := range optionNames {

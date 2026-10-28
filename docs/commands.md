@@ -509,7 +509,7 @@ other than `--dry-run` take a value, and options can appear anywhere after
 `admin`. An option without a value fails with
 `admin option requires a value`, one the command does not
 take with `unknown option --<name>`, and a repeated one with
-`option --<name> is given twice`. `pool create`,
+`option --<name> is given twice`. `pool create`, `pool update`,
 `pool entitle`, `host add` and `receiver add` then create every ACL the new
 state calls for, re-read them, and fail with `ACL plan incomplete` when one
 is missing.
@@ -527,12 +527,8 @@ terms' `delivery_limit` and `lock_duration`, 5 and `15s` when the terms omit
 them. It refuses, before it reads the broker, terms whose agent credentials
 break the [pool terms](configuration.md#pool-terms) rules, and a delivery limit above the lowest
 `group.share.max.delivery.count.limit` across the brokers, and terms whose
-[records do not fit the broker](configuration.md#record-limit). For an existing pool it
-records the new terms and sets the group configuration again. It first
-checks the recorded configuration of every receiver in the pool whose
-membership has not ended against the new terms, as `receiver add` checks a
-new receiver, and refuses the terms when a plugin profile no longer fits, naming
-each receiver, plugin and profile and the reason. On new and
+[records do not fit the broker](configuration.md#record-limit). It refuses an
+existing pool with `pool exists; change its terms with pool update`. On new and
 existing topics it sets the tasks and events `retention.ms` to
 `max_queue_deadline` plus six hours plus one day, and their
 `message.timestamp.type` to `LogAppendTime`, and creates the progress topic
@@ -542,6 +538,27 @@ with the same `retention.ms`. It refuses a `max_queue_deadline` above
 `retention.ms` of the feed or transcript topic of a tenant entitled to the
 pool. See
 [Topics](design.md#topics-1).
+
+### `wherry admin pool update POOL`
+
+```sh
+wherry admin pool update POOL <--config-file FILE|--config-dir DIR> [--dry-run]
+```
+
+Records new terms for an existing pool, makes the checks and settings of
+`pool create`, and sets the share group's `share.delivery.count.limit` and
+`share.record.lock.duration.ms` from the new terms. It refuses a pool that
+does not exist with `no pool by that name`. It first checks the recorded
+configuration of every receiver in the pool whose membership has not ended
+against the new terms, as `receiver add` checks a new receiver, and refuses
+the terms when a plugin profile no longer fits, naming each receiver, plugin
+and profile and the reason. Receivers apply the new terms at their next read
+of `wherry.admin`, within 15 seconds, without a restart. A lowered
+`delivery_limit` applies to a task in flight at its next release.
+
+With `--dry-run`, it makes the same checks, prints nothing, and writes
+nothing to Kafka. Terms it refuses fail in the same way with or without
+`--dry-run`.
 
 ### `wherry admin pool entitle POOL --tenant TENANT`
 
@@ -581,10 +598,10 @@ With `--dry-run`, it makes the same checks and prints each plugin profile as
 the record would hold it, in the format of `receiver show`, and creates and
 writes nothing; `--bundle-file` is then not needed.
 
-### `wherry admin receiver configure RECEIVER`
+### `wherry admin receiver update RECEIVER`
 
 ```sh
-wherry admin receiver configure RECEIVER <--config-file FILE|--config-dir DIR> [--dry-run]
+wherry admin receiver update RECEIVER <--config-file FILE|--config-dir DIR> [--dry-run]
 ```
 
 Records a new configuration for a live receiver in its pool. The
@@ -737,7 +754,7 @@ write, and a binary that is not a regular file; a symbolic link is refused. It
 checks again before every restart. A type with no binary in the directory is a
 configuration error, and the receiver exits with
 `profile <name>: no plugin for type <type>`. A plugin checks its profile's
-`config` section when the receiver configures it, and the receiver exits with
+`config` section when the receiver calls its `Configure`, and the receiver exits with
 `profile <name>: ...` on an error.
 
 A plugin inherits the receiver's environment. The receiver passes each

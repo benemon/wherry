@@ -407,11 +407,48 @@ func TestPoolGroupTakesTermDefaultsOnRealBroker(t *testing.T) {
 	if err := service.PoolCreate(ctx, pool, terms); err != nil {
 		t.Fatal(err)
 	}
+	if limit, lock := groupTerms(t, service, pool); limit != "5" || lock != "15000" {
+		t.Fatalf("share group delivery limit %q, lock %q; want the defaults 5 and 15000", limit, lock)
+	}
+}
+
+// pool update re-applies the share group's delivery limit and lock duration; its dry run leaves them.
+func TestPoolUpdateReappliesTheShareGroupOnRealBroker(t *testing.T) {
+	if os.Getenv("WHERRY_TRUST_BROKER") == "" {
+		t.Skip("WHERRY_TRUST_BROKER is not set")
+	}
+	service, closeService := realService(t)
+	defer closeService()
+	ctx := context.Background()
+	terms := modelTerms()
+	terms.DeliveryLimit, terms.LockDurationMS = 5, 15000
+	pool := fmt.Sprintf("update-%d", time.Now().UnixNano())
+	if err := service.PoolCreate(ctx, pool, terms); err != nil {
+		t.Fatal(err)
+	}
+	terms.DeliveryLimit, terms.LockDurationMS = 3, 30000
+	if err := service.PoolUpdate(ctx, pool, terms, true); err != nil {
+		t.Fatal(err)
+	}
+	if limit, lock := groupTerms(t, service, pool); limit != "5" || lock != "15000" {
+		t.Fatalf("after a dry run, share group delivery limit %q, lock %q; want 5 and 15000", limit, lock)
+	}
+	if err := service.PoolUpdate(ctx, pool, terms, false); err != nil {
+		t.Fatal(err)
+	}
+	if limit, lock := groupTerms(t, service, pool); limit != "3" || lock != "30000" {
+		t.Fatalf("after update, share group delivery limit %q, lock %q; want 3 and 30000", limit, lock)
+	}
+}
+
+// groupTerms is the delivery limit and lock duration DescribeConfigs reports for pool's share group.
+func groupTerms(t *testing.T, service *Service, pool string) (string, string) {
+	t.Helper()
 	request := kmsg.NewPtrDescribeConfigsRequest()
 	resource := kmsg.NewDescribeConfigsRequestResource()
 	resource.ResourceType, resource.ResourceName = kmsg.ConfigResourceTypeGroupConfig, PoolGroup(pool)
 	request.Resources = append(request.Resources, resource)
-	response, err := service.Admin.Request(ctx, request)
+	response, err := service.Admin.Request(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +458,5 @@ func TestPoolGroupTakesTermDefaultsOnRealBroker(t *testing.T) {
 			got[config.Name] = *config.Value
 		}
 	}
-	if got["share.delivery.count.limit"] != "5" || got["share.record.lock.duration.ms"] != "15000" {
-		t.Fatalf("share group delivery limit %q, lock %q; want the defaults 5 and 15000", got["share.delivery.count.limit"], got["share.record.lock.duration.ms"])
-	}
+	return got["share.delivery.count.limit"], got["share.record.lock.duration.ms"]
 }

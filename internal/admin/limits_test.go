@@ -100,7 +100,7 @@ func TestPoolCreateSetsDerivedRetentionOnNewAndExistingTopics(t *testing.T) {
 		setTopicRetention(t, service, topic, 1)
 		setTopicConfig(t, service, topic, "message.timestamp.type", "CreateTime")
 	}
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolUpdate(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	types, err := service.topicConfigs(ctx, "message.timestamp.type", topics...)
@@ -128,7 +128,7 @@ func TestPoolCreateRefusesMaxQueueDeadlinePastFeedRetention(t *testing.T) {
 	}
 }
 
-func TestPoolCreateRefusesMaxQueueDeadlinePastAnEntitledFeed(t *testing.T) {
+func TestPoolUpdateRefusesMaxQueueDeadlinePastAnEntitledFeed(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
@@ -139,13 +139,13 @@ func TestPoolCreateRefusesMaxQueueDeadlinePastAnEntitledFeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTopicRetention(t, service, TenantTopic("tenant-a"), 1231199999)
-	err := service.PoolCreate(ctx, "pool-a", modelTerms())
+	err := service.PoolUpdate(ctx, "pool-a", modelTerms(), false)
 	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 1231199999 is below required 1231200000" {
-		t.Fatalf("pool create = %v", err)
+		t.Fatalf("pool update = %v", err)
 	}
 }
 
-func TestPoolCreateRefusesTermsThatStrandALiveReceiver(t *testing.T) {
+func TestPoolUpdateRefusesTermsThatStrandALiveReceiver(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
@@ -158,17 +158,17 @@ func TestPoolCreateRefusesTermsThatStrandALiveReceiver(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, config, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	err := service.PoolCreate(ctx, "pool-a", modelTerms())
+	err := service.PoolUpdate(ctx, "pool-a", modelTerms(), false)
 	if err == nil || err.Error() != "pool terms would strand live receivers: receiver receiver-a plugin fake profile profile-codex: receiver agent is outside pool terms" {
-		t.Fatalf("pool create without codex = %v", err)
+		t.Fatalf("pool update without codex = %v", err)
 	}
 	if state, err := service.LoadState(ctx); err != nil || len(state.Pools["pool-a"].Agents) != 2 {
 		t.Fatalf("pool-a terms %v, %v; want the terms with codex kept", state.Pools["pool-a"], err)
 	}
 	terms.Agents = terms.Agents[1:]
 	terms.DefaultAgent = "codex"
-	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
-		t.Fatalf("pool create keeping codex = %v", err)
+	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err != nil {
+		t.Fatalf("pool update keeping codex = %v", err)
 	}
 }
 
@@ -252,9 +252,12 @@ func TestPoolCreateRecordsTheRecordLimit(t *testing.T) {
 	defer closeFixture()
 	ctx := context.Background()
 	terms := modelTerms()
+	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+		t.Fatal(err)
+	}
 	recorded := func() int64 {
 		t.Helper()
-		if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+		if err := service.PoolUpdate(ctx, "pool-a", terms, false); err != nil {
 			t.Fatal(err)
 		}
 		state, err := service.LoadState(ctx)
@@ -285,16 +288,16 @@ func TestPoolCreateRecordsTheRecordLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTopicLimit(t, service, TenantTopic("tenant-a"), "900000")
-	if err := service.PoolCreate(ctx, "pool-a", terms); err == nil || !strings.Contains(err.Error(), "a transcript chunk record is ") || !strings.Contains(err.Error(), "over the 900000-byte record limit") {
-		t.Fatalf("pool create = %v; want the transcript chunk refused against the tenant feed's limit", err)
+	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err == nil || !strings.Contains(err.Error(), "a transcript chunk record is ") || !strings.Contains(err.Error(), "over the 900000-byte record limit") {
+		t.Fatalf("pool update = %v; want the transcript chunk refused against the tenant feed's limit", err)
 	}
 	setTopicLimit(t, service, TenantTopic("tenant-a"), "700000")
-	if err := service.PoolCreate(ctx, "pool-a", terms); err == nil || !strings.Contains(err.Error(), "a result record is ") || !strings.Contains(err.Error(), "over the 700000-byte record limit") {
-		t.Fatalf("pool create = %v; want the result refused against the tenant feed's limit", err)
+	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err == nil || !strings.Contains(err.Error(), "a result record is ") || !strings.Contains(err.Error(), "over the 700000-byte record limit") {
+		t.Fatalf("pool update = %v; want the result refused against the tenant feed's limit", err)
 	}
 	setTopicLimit(t, service, TenantTopic("tenant-a"), "400000")
-	if err := service.PoolCreate(ctx, "pool-a", terms); err == nil || !strings.Contains(err.Error(), "an output chunk record is ") || !strings.Contains(err.Error(), "over the 400000-byte record limit") {
-		t.Fatalf("pool create = %v; want the output chunk refused against the tenant feed's limit", err)
+	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err == nil || !strings.Contains(err.Error(), "an output chunk record is ") || !strings.Contains(err.Error(), "over the 400000-byte record limit") {
+		t.Fatalf("pool update = %v; want the output chunk refused against the tenant feed's limit", err)
 	}
 }
 
@@ -656,7 +659,7 @@ func TestProgressTopicIsCompactedOnNewAndExistingTopics(t *testing.T) {
 	if err := service.Check(ctx); err == nil || !strings.Contains(err.Error(), topic) {
 		t.Fatalf("check of a progress topic below the pool's retention: %v", err)
 	}
-	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+	if err := service.PoolUpdate(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
 	if got := configs(); !reflect.DeepEqual(got, want) {
