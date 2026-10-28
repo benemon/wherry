@@ -22,11 +22,12 @@ import (
 
 func readerCluster(t *testing.T, topics ...string) *kgo.Client {
 	t.Helper()
-	return readerClusterOf(t, nil, topics...)
+	_, client := readerClusterOf(t, nil, topics...)
+	return client
 }
 
 // readerClusterOf is readerCluster with extra cluster options.
-func readerClusterOf(t *testing.T, opts []kfake.Opt, topics ...string) *kgo.Client {
+func readerClusterOf(t *testing.T, opts []kfake.Opt, topics ...string) (*kfake.Cluster, *kgo.Client) {
 	t.Helper()
 	cluster := kfake.MustCluster(append([]kfake.Opt{kfake.EnableSASL(), kfake.Superuser("SCRAM-SHA-512", "admin", "password")}, opts...)...)
 	t.Cleanup(cluster.Close)
@@ -40,7 +41,7 @@ func readerClusterOf(t *testing.T, opts []kfake.Opt, topics ...string) *kgo.Clie
 		t.Fatal(err)
 	}
 	t.Cleanup(client.Close)
-	return client
+	return cluster, client
 }
 
 // readTopic reads topic from its start through a reader of its own.
@@ -300,10 +301,11 @@ func (c *requests) count(key kmsg.Key) int {
 }
 
 // Several key topics are read in one listing of each kind and one fetch; kfake's one broker leads them all, as kadm
-// sends a listing to each leader.
+// sends a listing to each leader. kgo sends its next fetch once a poll takes the last, which can be before the reader
+// stops consuming partitions read to their end, so only fetches from below an end are counted.
 func TestReadKeysListsAndFetchesTheTopicsTogether(t *testing.T) {
 	topics := map[string]string{"receiver-a": "keys-a", "receiver-b": "keys-b", "receiver-c": "keys-c"}
-	client := readerClusterOf(t, []kfake.Opt{kfake.NumBrokers(1)}, slices.Collect(maps.Values(topics))...)
+	cluster, client := readerClusterOf(t, []kfake.Opt{kfake.NumBrokers(1)}, slices.Collect(maps.Values(topics))...)
 	ctx := context.Background()
 	for owner, topic := range topics {
 		_, key, _ := ed25519.GenerateKey(rand.Reader)
@@ -315,6 +317,26 @@ func TestReadKeysListsAndFetchesTheTopicsTogether(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// reads holds the number of partitions each fetch from below an end asks for; each topic ends at offset 1.
+	var mu sync.Mutex
+	var reads []int
+	cluster.ControlKey(int16(kmsg.Fetch), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		read := 0
+		for _, topic := range request.(*kmsg.FetchRequest).Topics {
+			for _, partition := range topic.Partitions {
+				if partition.FetchOffset < 1 {
+					read++
+				}
+			}
+		}
+		if read > 0 {
+			mu.Lock()
+			reads = append(reads, read)
+			mu.Unlock()
+		}
+		return nil, nil, false
+	})
 	counted := &requests{keys: map[int16]int{}}
 	hooked, err := kgo.NewClient(append(client.Opts(), kgo.WithHooks(counted))...)
 	if err != nil {
@@ -334,10 +356,12 @@ func TestReadKeysListsAndFetchesTheTopicsTogether(t *testing.T) {
 			t.Fatalf("keys %v; want each owner's key", keys)
 		}
 	}
-	listed, fetched := counted.count(kmsg.ListOffsets), counted.count(kmsg.Fetch)
-	t.Logf("%d list offsets and %d fetch requests", listed, fetched)
-	if listed != 2 || fetched != 1 {
-		t.Fatalf("sent %d list offsets and %d fetch requests, want 2 and 1", listed, fetched)
+	mu.Lock()
+	defer mu.Unlock()
+	listed := counted.count(kmsg.ListOffsets)
+	t.Logf("%d list offsets and %d fetch requests, of which %v partitions read", listed, counted.count(kmsg.Fetch), reads)
+	if listed != 2 || !slices.Equal(reads, []int{len(topics)}) {
+		t.Fatalf("sent %d list offsets and fetches reading %v partitions, want 2 and one reading %d", listed, reads, len(topics))
 	}
 }
 

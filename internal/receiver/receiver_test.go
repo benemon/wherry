@@ -116,10 +116,11 @@ type fakePlugin struct {
 	delivered int
 	// hang makes Sweep and Ready block until their context ends.
 	hang bool
-	// outputs are what Collect streams after the outcome file, unless collectErr fails it; collects counts the calls, stopsBefore the
-	// Stops each one followed and limits the last one's limits.
-	outputs    []pluginsdk.Output
-	collectErr error
+	// outputs are what Collect streams after the outcome file, unless collectErr fails it, or collectFailures fails that many
+	// Collects; collects counts the calls, stopsBefore the Stops each one followed and limits the last one's limits.
+	outputs         []pluginsdk.Output
+	collectErr      error
+	collectFailures int
 	// collectHangs makes Collect block until its context ends.
 	collectHangs bool
 	collects     int
@@ -248,6 +249,9 @@ func (f *fakePlugin) Collect(ctx context.Context, _ pluginsdk.Handle, limits plu
 	f.limits = limits
 	f.stopsBefore = append(f.stopsBefore, f.stops)
 	outputs, err, hangs := slices.Clone(f.outputs), f.collectErr, f.collectHangs
+	if f.collects <= f.collectFailures {
+		err = errors.New("collect failed")
+	}
 	// The job leaves as its outcome file the last line of its stream that holds a state, as an agent that prints its
 	// outcome too does.
 	for _, data := range slices.Backward(f.stream) {

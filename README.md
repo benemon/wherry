@@ -62,9 +62,12 @@ run when their variables are set and skip otherwise:
 - `WHERRY_KAFKA_TEST_BROKER`: a plaintext Kafka 4.3 broker with share
   groups, such as `127.0.0.1:9092`, for the receiver's claim tests.
 - `WHERRY_TRUST_BROKER` with the other `WHERRY_TRUST_*` variables of
-  `wherry admin`: a TLS broker with an authoriser, for the provisioning,
-  ACL and revocation tests. `WHERRY_TRUST_RECONCILE_WAIT` adds the check
-  that provisioning survives a Strimzi reconciliation.
+  `wherry admin`: the TLS broker `test/kafka/up.sh` starts, for the
+  provisioning, ACL and revocation tests. They write to the broker's
+  `wherry.admin`, so they fail on any broker whose cluster ID is not the
+  `WHERRY_TRUST_CLUSTER_ID` in up.sh's env file: never point them at a
+  shared cluster. `WHERRY_TRUST_RECONCILE_WAIT` adds the check that
+  provisioning survives a reconciliation.
 - `WHERRY_S3_TEST_ENDPOINT`, `WHERRY_S3_TEST_ACCESS_KEY_FILE` and
   `WHERRY_S3_TEST_SECRET_KEY_FILE`: an S3-compatible store, such as Ceph RGW,
   and the files holding its access key and secret key, for the host's storage

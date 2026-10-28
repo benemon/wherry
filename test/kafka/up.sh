@@ -22,6 +22,11 @@ cat "$dir/server.crt" "$dir/server.pk8" > "$dir/server.pem"
 head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$dir/admin-password"
 head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$dir/operator-password"
 chmod 0644 "$dir/server.pem" "$dir/ca.crt"
+# The trust-broker tests refuse a broker whose cluster ID is not this one. A leading '-' would read as an option.
+cluster_id=-
+while [[ $cluster_id == -* ]]; do
+  cluster_id=$(openssl rand 16 | base64 | tr '+/' '-_' | tr -d '=')
+done
 
 cat > "$dir/server.properties" <<EOF
 node.id=1
@@ -55,9 +60,9 @@ chmod 0644 "$dir/server.properties"
 "$container" rm -f wherry-kafka >/dev/null 2>&1 || true
 "$container" run -d --name wherry-kafka -p 127.0.0.1:9092:9092 -p 127.0.0.1:9093:9093 \
   -v "$dir/server.properties:/cfg/server.properties:ro" -v "$dir/server.pem:/certs/server.pem:ro" \
-  -e ADMIN_PASSWORD="$(cat "$dir/admin-password")" -e OPERATOR_PASSWORD="$(cat "$dir/operator-password")" \
+  -e CLUSTER_ID="$cluster_id" -e ADMIN_PASSWORD="$(cat "$dir/admin-password")" -e OPERATOR_PASSWORD="$(cat "$dir/operator-password")" \
   --entrypoint /bin/sh "$image" -c '
-    /opt/kafka/bin/kafka-storage.sh format --standalone -t "$(/opt/kafka/bin/kafka-storage.sh random-uuid)" \
+    /opt/kafka/bin/kafka-storage.sh format --standalone -t "$CLUSTER_ID" \
       -c /cfg/server.properties \
       --add-scram "SCRAM-SHA-512=[name=wherry-admin,password=$ADMIN_PASSWORD]" \
       --add-scram "SCRAM-SHA-512=[name=wherry.operator,password=$OPERATOR_PASSWORD]" >/dev/null &&
@@ -75,6 +80,7 @@ done
 cat > "$dir/env" <<EOF
 export WHERRY_KAFKA_TEST_BROKER=127.0.0.1:9092
 export WHERRY_TRUST_BROKER=127.0.0.1:9093
+export WHERRY_TRUST_CLUSTER_ID=$cluster_id
 export WHERRY_TRUST_CA=$dir/ca.crt
 export WHERRY_TRUST_ADMIN_USER=wherry-admin
 export WHERRY_TRUST_ADMIN_PASSWORD_FILE=$dir/admin-password
