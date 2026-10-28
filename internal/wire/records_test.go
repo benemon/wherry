@@ -42,7 +42,7 @@ func testRecords() map[string]Record {
 		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Placement: placement, TaskHash: testHash, MessageID: "message-a"},
 		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Profile: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
 		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 1},
-		"start failure":                &StartFailure{Wherry: testBinding(), Profile: "nomad", Agent: "claude", Class: "launch", TaskHash: testHash},
+		"start failure":                &StartFailure{Wherry: testBinding(), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: testHash},
 		"seal request": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
 			Credentials: []string{"model"}, ExpiryMS: 1},
 		"seal request for task credentials alone": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
@@ -390,6 +390,37 @@ func TestParseValidatesWhatItAccepts(t *testing.T) {
 	}
 	if err := ParseRecord(encoded, keys, &RunStatus{}); err == nil {
 		t.Fatal("accepted an invalid status signed outside SignRecord")
+	}
+}
+
+// The start failure classes are a closed set: a plugin's Terminal.Class is not one of them.
+func TestStartFailureClassesAreClosed(t *testing.T) {
+	keys, _, receiver := testKeys(t)
+	for _, class := range []string{"dispatch", "platform", "input-too-large"} {
+		failure := testRecords()["start failure"].(*StartFailure)
+		failure.Class = class
+		encoded, err := SignRecord(failure, receiver)
+		if err != nil {
+			t.Fatalf("%s: sign: %v", class, err)
+		}
+		if err := ParseRecord(encoded, keys, &StartFailure{}); err != nil {
+			t.Fatalf("%s: parse: %v", class, err)
+		}
+	}
+	for _, class := range []string{"launch", "fetch", "image", "offer-unavailable", "Platform"} {
+		failure := testRecords()["start failure"].(*StartFailure)
+		failure.Class = class
+		if _, err := SignRecord(failure, receiver); err == nil {
+			t.Fatalf("signed a start failure of class %q", class)
+		}
+		failure.V = 1
+		encoded, err := signed.Sign(failure.jwsType(), "receiver-a", failure, receiver)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ParseRecord(encoded, keys, &StartFailure{}); err == nil {
+			t.Fatalf("accepted a start failure of class %q", class)
+		}
 	}
 }
 
