@@ -86,7 +86,25 @@ flag and in every path.
 | `state_dir` | `state` in the bundle file's directory | the receiver's signing key |
 | `plugin_dir` | `/usr/local/libexec/wherry/plugins` | the directory holding the `wherry-plugin-<type>` binaries |
 | `metrics_addr` | none | `HOST:PORT` to serve [`/metrics`](operations.md#metrics) on; without it the receiver serves no metrics |
+| `drain_timeout` | `0s` | how long the runs the receiver holds may go on after `SIGINT` or `SIGTERM` before it releases their tasks for adoption, a duration such as `25s`; [set it with the platform's stop window](#drain-timeout-and-the-stop-window) |
 | `credentials` | none | [platform credential](#platform-credentials) name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]`, validated and resolved as the host's |
+
+### Drain timeout and the stop window
+
+`drain_timeout` and the platform's stop window are set together: Nomad's
+`kill_timeout`, Kubernetes' `terminationGracePeriodSeconds` or systemd's
+`TimeoutStopSec`. On `SIGINT` or `SIGTERM` the receiver stops claiming,
+closes its idle claims and lets the runs it holds go on for up to
+`drain_timeout`. It then commits the pending transcript of each run still
+held and releases its task for adoption, leaving the job running. The
+receiver cannot read the window, so `drain_timeout` stays a few seconds
+below it, such as `25s` under a 30-second window. At `0s` the receiver
+releases its held tasks at once. Nomad's default window is 5 seconds.
+
+Planned changes go through
+[`receiver update`](operations.md#change-a-receivers-configuration), which
+drains with no time limit. `receiver update --force` and
+[`receiver revoke`](operations.md#revoke-a-host-or-receiver) are hard stops.
 
 ### Receiver local configuration example
 
@@ -99,6 +117,7 @@ bundle: /etc/wherry/receiver.bundle
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
+drain_timeout: 25s
 credentials:
   nomad-token:
     file: /etc/wherry/nomad-token

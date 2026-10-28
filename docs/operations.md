@@ -369,13 +369,15 @@ bundle: /etc/wherry/receiver.bundle
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
+drain_timeout: 25s
 credentials:
   nomad-token:
     file: /etc/wherry/nomad-token
 ```
 
 Start the receiver under a supervisor that restarts it when it exits and
-allows it 30 seconds to stop, as in [Run a receiver](#run-a-receiver). A
+allows it 30 seconds to stop, with `drain_timeout: 25s`, as in
+[Run a receiver](#run-a-receiver). A
 platform credential with no source fails that plugin profile's
 configuration, and the receiver exits with:
 
@@ -411,14 +413,26 @@ configuration.
    wherry admin receiver update nomad-1 --config-dir nomad-1
    ```
 
-4. The receiver exits at its next configuration check, within 15 seconds,
-   and its supervisor restarts it with the new configuration. Check that
+4. At its next configuration check, within 15 seconds, the receiver stops
+   claiming and closes its idle claims. Each run it holds goes on to its end
+   and commits its result, with no time limit. The receiver then exits and
+   its supervisor restarts it with the new configuration. Check that
    `wherry receivers` shows it `live` with the new profiles.
 
-The bundle and password stay as they are. Runs in flight are adopted on
-redelivery. When the new configuration renames a run's profile or changes
-its agent, the run's job is stopped and purged, and the run is dispatched
-again.
+The bundle and password stay as they are. Planned changes go through
+`receiver update`, which drains with no window.
+
+`receiver update --force` is a hard stop. The receiver releases the tasks
+it holds at once and exits, leaving their jobs running, and the next
+delivery of each task adopts its job. When the new configuration renames a
+run's profile or changes its agent, the adopting receiver stops and purges
+the run's job and dispatches the run again:
+
+```sh
+wherry admin receiver update nomad-1 --config-dir nomad-1 --force
+```
+
+A `--force` update during a drain ends it.
 
 ## Run a receiver
 
@@ -436,7 +450,9 @@ again.
   plugin profiles name;
 - a supervisor that restarts the process when it exits, since a
   configuration change ends it, and that allows it 30 seconds to stop
-  after `SIGTERM` before a forced kill;
+  after `SIGTERM` before a forced kill, with `drain_timeout` in the local
+  configuration set below that window, such as `25s`
+  ([Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window));
 - for the Nomad plugin, a Nomad token with the
   [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy), from a platform credential or `NOMAD_TOKEN`
   in the receiver's environment.
@@ -644,6 +660,13 @@ the `wherry admin` environment.
 
 Receivers stop reading a revoked host's topic, so no seal it writes reaches
 them.
+
+Revoking a receiver is a hard stop of the runs it holds, during a drain
+too. Once its access is gone, the receiver gives up a run at its first
+failed write and leaves the job for an adopter. It stops the job of a run
+that writes nothing one lock duration after its first denial, since it
+cannot tell a revocation from a passing denial and no other member can
+take the task before the lock expires.
 
 A revoked name cannot be reused. Provision a returning host or receiver
 under a new name.
@@ -1059,12 +1082,13 @@ configuration, bundle and state directory.
    [plugin protocol version](commands.md#plugins).
 3. Restart each receiver with the same local configuration, bundle and
    state directory. On
-   `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its
-   tasks to the pool. The next delivery of each task adopts the running
+   `SIGINT` or `SIGTERM` it stops claiming, closes its idle claims and lets
+   the runs it holds go on for up to `drain_timeout`. It then exits without
+   stopping the jobs still running and releases their tasks to the pool.
+   The next delivery of each task adopts the running
    job, on the restarted receiver or another member, and resumes the
    transcript from the run's latest committed offset. Allow the receiver 30 seconds
-   to stop before a forced kill: it closes its idle claims before it
-   releases the tasks it holds.
+   to stop before a forced kill, with `drain_timeout` below that window.
 4. Restart the harness sessions that run `wherry mcp`.
 
 ## Harness integration

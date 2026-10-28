@@ -104,7 +104,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return service.ReceiverAdd(ctx, config, options["bundle-file"])
 	case "receiver update":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver update ID <--config-file FILE|--config-dir DIR> [--dry-run]")
+			return errors.New("usage: wherry admin receiver update ID <--config-file FILE|--config-dir DIR> [--force] [--dry-run]")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -115,6 +115,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		config.Receiver = pos[2]
+		_, config.Force = options["force"]
 		_, dryRun := options["dry-run"]
 		if config, err = service.ReceiverUpdate(ctx, config, dryRun); err != nil || !dryRun {
 			return err
@@ -246,8 +247,8 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 		if _, repeated := options[name]; repeated {
 			return nil, nil, fmt.Errorf("option --%s is given twice", name)
 		}
-		// --dry-run is the one option without a value.
-		if name == "dry-run" {
+		// --dry-run and --force are the options without a value.
+		if name == "dry-run" || name == "force" {
 			options[name], optionNames = "", append(optionNames, name)
 			continue
 		}
@@ -266,7 +267,7 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 		"pool create":     {"config-file": true, "config-dir": true},
 		"pool update":     {"config-file": true, "config-dir": true, "dry-run": true},
 		"receiver add":    {"pool": true, "config-file": true, "config-dir": true, "bundle-file": true, "dry-run": true},
-		"receiver update": {"config-file": true, "config-dir": true, "dry-run": true},
+		"receiver update": {"config-file": true, "config-dir": true, "force": true, "dry-run": true},
 		"receiver show":   {},
 		"pool entitle":    {"tenant": true},
 		"host add":        {"tenant": true, "bundle-file": true},

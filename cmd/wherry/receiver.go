@@ -38,13 +38,15 @@ const (
 )
 
 // receiverLocalConfig is the receiver's local configuration file. Credentials maps the name a profile's config gives
-// its platform credential to the source of its value.
+// its platform credential to the source of its value. DrainTimeout bounds how long held runs may finish after a stop
+// signal; it stays below the platform's stop window, which the receiver cannot read.
 type receiverLocalConfig struct {
-	Bundle      string                       `yaml:"bundle"`
-	StateDir    string                       `yaml:"state_dir"`
-	PluginDir   string                       `yaml:"plugin_dir"`
-	MetricsAddr string                       `yaml:"metrics_addr"`
-	Credentials map[string]credential.Source `yaml:"credentials"`
+	Bundle       string                       `yaml:"bundle"`
+	StateDir     string                       `yaml:"state_dir"`
+	PluginDir    string                       `yaml:"plugin_dir"`
+	MetricsAddr  string                       `yaml:"metrics_addr"`
+	DrainTimeout time.Duration                `yaml:"drain_timeout"`
+	Credentials  map[string]credential.Source `yaml:"credentials"`
 }
 
 // loadReceiverLocalConfig decodes the receiver's local configuration at path, defaulting state_dir and plugin_dir.
@@ -63,6 +65,9 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
 	}
 	if config.Bundle == "" {
 		return receiverLocalConfig{}, errors.New("config requires bundle")
+	}
+	if config.DrainTimeout < 0 {
+		return receiverLocalConfig{}, errors.New("config drain_timeout must not be negative")
 	}
 	for _, path := range []*string{&config.Bundle, &config.StateDir, &config.PluginDir} {
 		if *path, err = client.ExpandHome(*path); err != nil {
@@ -121,7 +126,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	}
 	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, registry: registry, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	r, err := receiver.New(bundle, config.StateDir, *rotateKey, plugins.profile, logger, registry)
+	r, err := receiver.New(bundle, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
 	if err != nil {
 		return err
 	}

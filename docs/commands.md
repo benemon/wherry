@@ -601,13 +601,18 @@ writes nothing; `--bundle-file` is then not needed.
 ### `wherry admin receiver update RECEIVER`
 
 ```sh
-wherry admin receiver update RECEIVER <--config-file FILE|--config-dir DIR> [--dry-run]
+wherry admin receiver update RECEIVER <--config-file FILE|--config-dir DIR> [--force] [--dry-run]
 ```
 
 Records a new configuration for a live receiver in its pool. The
-principal, password and bundle stay as they are. The receiver exits when it
-reads a record that differs from the configuration it runs, and its platform
-restarts it.
+principal, password and bundle stay as they are. When the receiver reads a
+record that differs from the configuration it runs, it stops claiming, lets
+each run it holds end and commit with no time limit, then exits, and its
+platform restarts it.
+
+With `--force`, the record has the receiver release the tasks it holds at
+once and exit, leaving their jobs for adoption. It ends a drain already
+under way.
 
 With `--dry-run`, it reads and validates the configuration as it does to
 record it, against the receiver's pool's terms, and prints the resolution
@@ -726,11 +731,16 @@ sweep and readiness errors carry the
 delivered to a run the receiver holds, and of each [platform
 credential](configuration.md#platform-credentials) value, in place of the
 value. On
-`SIGINT` or `SIGTERM` it commits each held run's pending transcript, closes
-its idle claims, releases the tasks it holds and exits, leaving its jobs
-running; allow it 30 seconds to stop before a forced kill. It fails with
-`receiver configuration changed` when a configuration record that differs
-from its own appears. A configuration record whose plugin is not a
+`SIGINT` or `SIGTERM` it stops claiming, closes its idle claims and lets
+each held run go on for up to the local configuration's
+[`drain_timeout`](configuration.md#drain-timeout-and-the-stop-window),
+default `0s`. It then commits the pending transcript of each run still
+held, releases their tasks and exits, leaving their jobs running; set the
+platform's stop window a few seconds above `drain_timeout`. When a
+configuration record that differs from its own appears, it stops claiming,
+lets each held run end with no time limit and fails with
+`receiver configuration changed`; after a record `receiver update --force`
+wrote, it releases the tasks it holds at once instead. A configuration record whose plugin is not a
 valid plugin name ends it with
 `configuration: profiles need unique valid names and a valid plugin`.
 It refuses to start after its membership end.
