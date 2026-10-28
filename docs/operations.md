@@ -76,12 +76,10 @@ as one file and as a `--config-dir` directory.
 
 - `delivery_limit` bounds how often the broker delivers one task. Each
   start failure, and each member with no matching plugin profile, returns a task
-  to the pool and uses a delivery, so set it to at least the number of
-  receivers in the pool, plus a margin. Size it as the pool's members times
-  the attempts each may make, plus a margin: a member handed back a task it
-  failed to start releases it again, and that release uses a delivery too.
-  From attempt
-  `delivery_limit` minus 1, a receiver ends a run it would return to the
+  to the pool and uses a delivery. A member handed back a task it failed to
+  start releases it again, and that release uses a delivery too. Size it as
+  the pool's members times the attempts each may make, plus a margin. From
+  attempt `delivery_limit` minus 1, a receiver ends a run it would return to the
   pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
   cases the [extension](a2a-extension-v1.md#delivery-budget) lists. `pool
   create` refuses a `delivery_limit` above the broker's
@@ -500,10 +498,10 @@ To check the install, start the receiver and find one line per plugin,
 logged when the receiver starts it:
 
 ```text
-receiver: plugin <type>: version <version> protocol <n>
+receiver: <date> <time> plugin <type>: version <version> protocol <n>
 ```
 
-A plugin built before it reported its version logs `version unreported`.
+A plugin that leaves `pluginsdk.Version` unset logs `version unreported`.
 
 ### As a Nomad job
 
@@ -663,7 +661,7 @@ wherry's series alone, so add these alerts to your own rule files:
 - [`absent_over_time`](https://prometheus.io/docs/prometheus/latest/querying/functions/#absent_over_time)
   returns a series when no `wherry-receiver` target is left:
   `absent_over_time(up{job="wherry-receiver"}[5m])`. It fires only once
-  every target of the job is gone, not for one receiver among several.
+  every target of the job is gone.
 - On Kubernetes,
   [kube-state-metrics](https://github.com/kubernetes/kube-state-metrics/blob/main/docs/metrics/workload/deployment-metrics.md)
   reports `kube_deployment_status_replicas_available` for the receiver's
