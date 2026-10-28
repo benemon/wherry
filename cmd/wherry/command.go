@@ -400,8 +400,9 @@ func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
 // defaultWatchTimeout covers a run at the default queue deadline and run deadline.
 const defaultWatchTimeout = busclient.DefaultQueueDeadline + busclient.DefaultDeadline
 
-// streamInterval separates the reads of a live run's transcript that watch streams.
-const streamInterval = time.Second
+// streamInterval separates the reads of a live run's transcript that watch streams, each reading only the transcript
+// records past the last; it matches the interval of the watch tool's progress notifications.
+const streamInterval = progressInterval
 
 func runWatch(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
 	const watchUsage = "usage: wherry watch RUN_ID [--result-only|-q] [--timeout 2h10m] [--outputs-dir DIR]"
@@ -456,11 +457,12 @@ func runWatch(ctx context.Context, client *busclient.Host, args []string, stdout
 	streamCtx, stopStream := context.WithCancel(ctx)
 	streamed := make(chan struct{})
 	if full {
+		stream := client.StreamTranscript(runID)
 		go func() {
 			defer close(streamed)
 			for {
 				// A failed read is retried; the transcript Collect writes holds every line.
-				if transcript, err := client.Transcript(streamCtx, runID); err == nil {
+				if transcript, err := stream.Next(streamCtx); err == nil {
 					printLines(busclient.ViewLines(transcript.Lines))
 				}
 				select {
