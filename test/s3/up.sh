@@ -5,7 +5,8 @@
 set -euo pipefail
 dir=${1:?usage: up.sh DIR}
 container=${CONTAINER:-docker}
-image=quay.io/benjamin_holmes/ceph-aio:v21@sha256:385e01bf9008be18eb791259768b0c82b8608e35cc8aa4820f2dc1501ca5f037
+# ceph-aio rebuilds weekly and its dated tags expire, so no digest stays pullable; the major tag follows the rebuilds.
+image=quay.io/benjamin_holmes/ceph-aio:v21
 mkdir -p "$dir"
 dir=$(cd "$dir" && pwd)
 umask 077

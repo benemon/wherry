@@ -819,8 +819,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		return run.abandon(err)
 	}
-	// retryUntil bounds following again over a lost plugin link to one lock duration from the loss, after
-	// which another member may hold the task; zero while the link holds, and reset by every line.
+	// retryUntil bounds following again after a failed Follow or Lookup to one lock duration from the failure, after
+	// which another member may hold the task; zero while the stream holds, and reset by every line.
 	var retryUntil time.Time
 	var retry <-chan time.Time
 
@@ -836,6 +836,56 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	for _, line := range held {
 		take(line)
 	}
+	budget := func() bool {
+		if retryUntil.IsZero() {
+			state, _, _ := r.snapshot()
+			retryUntil = time.Now().Add(state.Pools[r.config.Pool].LockDuration())
+		}
+		return time.Now().Before(retryUntil)
+	}
+	// lookupRetry makes the next retry a Lookup; final marks the Follow of an ended job, whose failure ends the run.
+	lookupRetry, final := false, false
+	recoveries := map[string]bool{}
+	recovering := func(class string) {
+		if !recoveries[class] {
+			recoveries[class] = true
+			r.logger.Printf("run %s: follow failed (%s); following again from offset %d", runID, class, position)
+		}
+	}
+	// recoverFollow asks Lookup for the job after a Follow that failed with err, and follows it again or ends the run.
+	recoverFollow := func(err error) (kgo.AckStatus, bool) {
+		if final {
+			r.logger.Printf("run %s: follow failed: %s", runID, logText(run.redactText, err))
+			return run.stopAndFail(ctx, handle, "log stream failed", pending), true
+		}
+		lookupCtx, cancel := context.WithTimeout(runCtx, readTimeout)
+		job, lookupErr := run.profile.Plugin.Lookup(lookupCtx, runID)
+		cancel()
+		switch {
+		case lookupErr != nil && budget():
+			recovering("lookup failed")
+			lookupRetry, retry = true, time.After(followRetryInterval)
+			return 0, false
+		case lookupErr != nil:
+			r.logger.Printf("run %s: lookup in profile %s: %s", runID, run.profile.Name, logText(run.redactText, lookupErr))
+		case job.State == pluginsdk.JobRunning && budget():
+			recovering("job running")
+			lookupRetry, retry = false, time.After(followRetryInterval)
+			return 0, false
+		case job.State == pluginsdk.JobEnded:
+			recovering("job ended")
+			final = true
+			follow(position)
+			return 0, false
+		case job.State == pluginsdk.JobNeverStarted:
+			r.logger.Printf("run %s: job never started", runID)
+			return run.startFailure(ctx, "platform", "job never started"), true
+		}
+		// A dropped stream does not mean the task ended; stop it rather than leave it running.
+		r.logger.Printf("run %s: follow failed: %s", runID, logText(run.redactText, err))
+		return run.stopAndFail(ctx, handle, "log stream failed", pending), true
+	}
+	var followErr error
 	// stopHeld ends the run when the receiver holds its cancel or a denial lasting one lock interval.
 	stopHeld := func() (kgo.AckStatus, bool) {
 		r.mu.Lock()
@@ -858,7 +908,16 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			take(line)
 		case <-retry:
 			retry = nil
-			follow(position)
+			switch {
+			case !lookupRetry:
+				follow(position)
+			case runCtx.Err() != nil && ctx.Err() == nil:
+				return run.stopAndFail(ctx, handle, "timeout", pending)
+			default:
+				if status, done := recoverFollow(followErr); done {
+					return status
+				}
+			}
 		case end := <-ended:
 			for drained := false; !drained; {
 				select {
@@ -881,9 +940,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				}
 				retry = time.After(followRetryInterval)
 			case end.err != nil:
-				// A dropped stream does not mean the task ended; stop it rather than leave it running.
-				r.logger.Printf("run %s: follow failed: %s", runID, logText(run.redactText, end.err))
-				return run.stopAndFail(ctx, handle, "log stream failed", pending)
+				followErr = end.err
+				if status, done := recoverFollow(end.err); done {
+					return status
+				}
 			case !end.terminal.Started && end.terminal.Class == pluginsdk.ClassFetch:
 				r.logger.Printf("run %s: job never started: an S3 input was not fetched%s", runID, run.startReason(end.terminal))
 				return run.stopAndFail(ctx, handle, "an S3 input was not fetched, or did not match its size and SHA-256", pending)

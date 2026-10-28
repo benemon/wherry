@@ -907,6 +907,111 @@ func TestFollowLinkLossFailsAfterOneLockDuration(t *testing.T) {
 	}
 }
 
+func TestFollowErrorResumesFromOffsetByJobState(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		state pluginsdk.JobState
+	}{
+		{"job running", pluginsdk.JobRunning},
+		{"job ended", pluginsdk.JobEnded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), test.state
+			f.answer(t, credentialName)
+			f.submit(t, f.host, nil)
+			if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
+				t.Fatal(err)
+			}
+			if task := f.lastTask(t); task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "done" {
+				t.Fatalf("task %#v after a failed follow; want the run completed; logs:\n%s", task.Status, f.logs.String())
+			}
+			f.plugin.mu.Lock()
+			froms, lookups := f.plugin.froms, f.plugin.lookups
+			f.plugin.mu.Unlock()
+			first := int64(len(resultStream[0]) + 1)
+			if !slices.Equal(froms, []int64{0, first}) || lookups != 1 {
+				t.Fatalf("follows from %v after %d lookups; want 0, then the offset after the line taken before the failure, after one", froms, lookups)
+			}
+			var transcript strings.Builder
+			for _, chunk := range f.chunks(t) {
+				transcript.WriteString(chunk.ArtifactUpdate.Artifact.Parts[0].Text)
+			}
+			if want := strings.Join(resultStream, ""); transcript.String() != want {
+				t.Fatalf("transcript %q, want %q", transcript.String(), want)
+			}
+			if want := fmt.Sprintf("run run-a: follow failed (%s); following again from offset %d\n", test.name, first); strings.Count(f.logs.String(), want) != 1 {
+				t.Fatalf("logs lack one %q:\n%s", want, f.logs.String())
+			}
+		})
+	}
+}
+
+func TestFollowErrorOnAnEndedJobFailsOnTheSecondFailure(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 2, errors.New("stream reset"), pluginsdk.JobEnded
+	task := runToTask(t, f)
+	if task.Status.State != wire.TaskStateFailed || task.Artifacts[0].Parts[0].Text != "log stream failed" {
+		t.Fatalf("task %#v; want FAILED log stream failed", task.Status)
+	}
+	if _, _, follows, _ := f.plugin.counts(); follows != 2 {
+		t.Fatalf("followed an ended job %d times; want once more after the failure", follows)
+	}
+}
+
+func TestFollowErrorFailsAfterOneLockDuration(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		lookupErr error
+	}{
+		{"job running", nil},
+		{"lookup failed", errors.New("lookup down")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, noResultStream)
+			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.lookupErr = 1<<20, errors.New("stream reset"), pluginsdk.JobRunning, test.lookupErr
+			shortLock(f, 2*time.Second)
+			f.answer(t, credentialName)
+			f.submit(t, f.host, nil)
+			done := make(chan error, 1)
+			started := time.Now()
+			go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, func() {}) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(15 * time.Second):
+				t.Fatalf("a run whose follow keeps failing kept recovering; logs:\n%s", f.logs.String())
+			}
+			if waited := time.Since(started); waited < 2*time.Second {
+				t.Fatalf("run failed %s after the failure, before one lock duration", waited)
+			}
+			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != "log stream failed" {
+				t.Fatalf("terminal %s %q; want FAILED log stream failed", state, reason)
+			}
+			if _, lookups, _, _ := f.plugin.counts(); lookups < 2 {
+				t.Fatalf("looked up %d times; want retries before failing", lookups)
+			}
+		})
+	}
+}
+
+func TestFollowErrorOnANeverStartedJobIsAStartFailure(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), pluginsdk.JobNeverStarted
+	f.answer(t, credentialName)
+	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
+		t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
+	}
+	if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != "platform" {
+		t.Fatalf("start failures %#v, want one platform start failure", failures)
+	}
+	if _, _, follows, _ := f.plugin.counts(); follows != 1 {
+		t.Fatalf("followed %d times; want no follow after the job never started", follows)
+	}
+}
+
 func TestOversizedDispatchIsLoggedByName(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
