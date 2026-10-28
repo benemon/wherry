@@ -41,9 +41,12 @@ import (
 )
 
 const (
-	readTimeout  = 30 * time.Second
-	maxHandle    = 4 << 10
-	budgetReason = "delivery budget exhausted"
+	readTimeout = 30 * time.Second
+	maxHandle   = 4 << 10
+	// budgetReason and exhaustedReason open the terminal messages of runs ended at the delivery budget and at pool
+	// exhaustion; hosts may match them.
+	budgetReason    = "delivery budget exhausted"
+	exhaustedReason = "no receiver in pool %s could start agent %s"
 	// heldLimit bounds the transcript an adopter holds while it waits for its seal.
 	heldLimit = 4 << 20
 	// maxOutcome bounds the outcome file read; message text past wire.MaxText becomes the over-size marker.
@@ -94,6 +97,24 @@ func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 }
 
 func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
+	// The check and the count share the lock, so a slot releasing a task for another member knows every session that
+	// could fetch it again.
+	r.mu.Lock()
+	wait := time.Until(r.backoffUntil)
+	if wait <= 0 {
+		r.fetching++
+	}
+	r.mu.Unlock()
+	if wait > 0 {
+		sleep(claiming, wait)
+		return nil
+	}
+	fetched := sync.OnceFunc(func() {
+		r.mu.Lock()
+		r.fetching--
+		r.mu.Unlock()
+	})
+	defer fetched()
 	share, err := r.newClient(
 		kgo.ConsumeTopics(admin.PoolTasksTopic(r.config.Pool)),
 		kgo.ShareGroup(admin.PoolGroup(r.config.Pool)),
@@ -117,7 +138,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		pollCtx, cancel := context.WithTimeout(claiming, 30*time.Second)
 		// A denied receiver must not acquire a task: each release raises its delivery count.
 		go func() {
-			for pollCtx.Err() == nil && !r.blocked() {
+			for pollCtx.Err() == nil && !r.blocked() && r.backoff() <= 0 {
 				sleep(pollCtx, 100*time.Millisecond)
 			}
 			cancel()
@@ -128,7 +149,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		if claiming.Err() != nil {
 			return claiming.Err()
 		}
-		if r.blocked() && len(fetches.Records()) == 0 {
+		if (r.blocked() || r.backoff() > 0) && len(fetches.Records()) == 0 {
 			return nil
 		}
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
@@ -140,6 +161,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 			record = records[0]
 		}
 	}
+	fetched()
 	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.
 	defer context.AfterFunc(claiming, idle)()
 	if r.blocked() {
@@ -148,6 +170,12 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	}
 	admitted, ack := r.admit(ctx, record)
 	if admitted == nil {
+		if ack == kgo.AckRelease && r.backoff() > 0 {
+			// Another slot's session open when the task goes back could be handed it at once.
+			for claiming.Err() == nil && r.sessions() > 0 {
+				sleep(claiming, 10*time.Millisecond)
+			}
+		}
 		record.Ack(ack)
 		return flush()
 	}
@@ -218,18 +246,26 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	}
 	reject := func(reason string) (*admission, kgo.AckStatus) { return rejectAs(reason, reason) }
 	// giveBack is returnTask for a task no run holds yet: the terminal goes out with the echo under the
-	// admission transactional ID.
-	giveBack := func() (*admission, kgo.AckStatus) {
-		if !r.budgetSpent(attempt) {
+	// admission transactional ID. An exhausted pool ends the task whatever the budget.
+	giveBack := func(exhausted bool) (*admission, kgo.AckStatus) {
+		if !exhausted && !r.budgetSpent(attempt) {
 			return nil, kgo.AckRelease
+		}
+		reason := budgetReason
+		if exhausted {
+			reason = fmt.Sprintf(exhaustedReason, r.config.Pool, task.Wherry.Placement.Agent)
 		}
 		held := &activeRun{receiver: r, task: &task, taskHash: hash, history: []wire.Message{task.Message}, attempt: attempt}
 		echo := &kgo.Record{Topic: admin.TenantTopic(task.Wherry.Tenant), Key: []byte(run), Value: r.sign(r.echo(&task, hash))}
-		if err := r.admissionCommit(ctx, append([]*kgo.Record{echo}, held.budgetRecords(nil)...)...); err != nil {
+		if err := r.admissionCommit(ctx, append([]*kgo.Record{echo}, held.budgetRecords(reason, nil)...)...); err != nil {
 			r.logger.Printf("publish terminal for %s: %v", run, err)
 			return nil, kgo.AckRelease
 		}
-		held.budgetEnded()
+		if exhausted {
+			held.ended(wire.TaskStateFailed)
+		} else {
+			held.budgetEnded()
+		}
 		return nil, kgo.AckReject
 	}
 	// Nothing is written under the run key before its owner is known; unreadable submissions leave it unknown.
@@ -251,11 +287,27 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if !modelInTerms(terms.Agents[agent], placement.Model) {
 		return reject("model not in the pool's terms")
 	}
+	// A member that failed to start the task does not try again, and fetches nothing for one lock duration so the
+	// broker can hand the task to another member.
+	if failures := events.startFailures[run]; failedHere(failures, r.id, hash) {
+		exhausted, err := r.poolExhausted(ctx, failures, hash, placement.Agent)
+		if err != nil {
+			r.logger.Printf("run %s: pool exhaustion: %v", run, err)
+		}
+		admitted, ack := giveBack(exhausted)
+		if ack == kgo.AckRelease {
+			r.logger.Printf("run %s: already failed here; releasing for another member", run)
+			r.mu.Lock()
+			r.backoffUntil = time.Now().Add(terms.LockDuration())
+			r.mu.Unlock()
+		}
+		return admitted, ack
+	}
 	profile, offered := r.offer(placement)
 	if !offered {
 		r.logger.Printf("run %s: no current offer for agent %s satisfying its selector", run, placement.Agent)
 		r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
-		return giveBack()
+		return giveBack(false)
 	}
 	cancelled := r.cancelledRun(ctx, events, run, task.Wherry.Tenant)
 	if len(all) == 0 || all[0].hash != hash {
@@ -473,8 +525,8 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 }
 
 // startFailure names the profile the task was routed to.
-func (r *Receiver) startFailure(task *wire.Submission, attempt int64, profile, class string) *kgo.Record {
-	failure := &wire.StartFailure{Wherry: r.binding(task, attempt), Profile: profile, Agent: task.Wherry.Placement.Agent, Class: class}
+func (r *Receiver) startFailure(task *wire.Submission, hash string, attempt int64, profile, class string) *kgo.Record {
+	failure := &wire.StartFailure{Wherry: r.binding(task, attempt), Profile: profile, Agent: task.Wherry.Placement.Agent, Class: class, TaskHash: hash}
 	return &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: r.sign(failure)}
 }
 
@@ -731,7 +783,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				name = "input " + tooLarge.Name
 			}
 			r.logger.Printf("run %s: profile %s cannot deliver %s", runID, named.Name, name)
-			if err := run.commit(ctx, r.startFailure(task, attempt, named.Name, "input-too-large")); err != nil {
+			if err := run.commit(ctx, r.startFailure(task, run.taskHash, attempt, named.Name, "input-too-large")); err != nil {
 				return run.abandon(err)
 			}
 			r.metrics.startFailures.WithLabelValues(named.Name, "input-too-large").Inc()
@@ -1462,11 +1514,12 @@ func unansweredReason(credentials []string, urls bool) string {
 	return subject + " " + verb + " not answered within " + strings.TrimSuffix(wire.SealWait.String(), "0s") + "; " + configure + " in the host's wherry configuration, keep wherry watch or wherry mcp running, and submit again"
 }
 
-// startFailure purges the run's job and returns the task to the pool for a member that can start it; cause is what the
-// run's terminal message names when the return spends the delivery budget.
+// startFailure purges the run's job and returns the task to the pool for a member that can start it, or ends the run
+// when every eligible member has failed to start it; cause is what the run's terminal message names when the return
+// spends the delivery budget or the pool is exhausted.
 func (run *activeRun) startFailure(ctx context.Context, class, cause string) kgo.AckStatus {
 	run.startCause = logText(run.receiver.redactLive, errors.New(cause))
-	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.attempt, run.profile.Name, class)); err != nil {
+	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.taskHash, run.attempt, run.profile.Name, class)); err != nil {
 		return run.abandon(err)
 	}
 	run.receiver.metrics.startFailures.WithLabelValues(run.profile.Name, class).Inc()
@@ -1478,7 +1531,23 @@ func (run *activeRun) startFailure(ctx context.Context, class, cause string) kgo
 		return run.fail(ctx, "start failed and the job could not be removed", nil)
 	}
 	run.release(ctx)
-	return run.returnTask(ctx, nil)
+	r, agent := run.receiver, run.task.Wherry.Placement.Agent
+	exhausted := false
+	events, err := r.readEvents(ctx)
+	if err == nil {
+		exhausted, err = r.poolExhausted(ctx, events.startFailures[run.task.Wherry.Run], run.taskHash, agent)
+	}
+	if err != nil {
+		r.logger.Printf("run %s: pool exhaustion: %v", run.task.Wherry.Run, err)
+	}
+	if !exhausted {
+		return run.returnTask(ctx, nil)
+	}
+	if err := run.commit(ctx, run.budgetRecords(fmt.Sprintf(exhaustedReason, r.config.Pool, agent), nil)...); err != nil {
+		return run.abandon(err)
+	}
+	run.ended(wire.TaskStateFailed)
+	return kgo.AckReject
 }
 
 // purge retries Purge every renew interval, while the renewer holds the claim, until purgeDeadline.
@@ -1526,17 +1595,18 @@ func (run *activeRun) returnTask(ctx context.Context, pending []pluginsdk.Line) 
 	if !run.receiver.budgetSpent(run.attempt) {
 		return kgo.AckRelease
 	}
-	if err := run.commit(ctx, run.budgetRecords(pending)...); err != nil {
+	if err := run.commit(ctx, run.budgetRecords(budgetReason, pending)...); err != nil {
 		return run.abandon(err)
 	}
 	run.budgetEnded()
 	return kgo.AckReject
 }
 
-func (run *activeRun) budgetRecords(pending []pluginsdk.Line) []*kgo.Record {
-	reason := budgetReason
+// budgetRecords end the run FAILED with reason, followed by the attempts and the cause of this attempt's start failure
+// when it had one.
+func (run *activeRun) budgetRecords(reason string, pending []pluginsdk.Line) []*kgo.Record {
 	if run.startCause != "" {
-		reason = fmt.Sprintf("%s after %d attempts; last: %s", budgetReason, run.attempt, run.startCause)
+		reason = fmt.Sprintf("%s after %d attempts; last: %s", reason, run.attempt, run.startCause)
 	}
 	status := taskStatus(wire.TaskStateFailed, reason)
 	return append(append(run.chunks(pending, true), run.result(status, reason)), run.terminal(status, pending)...)

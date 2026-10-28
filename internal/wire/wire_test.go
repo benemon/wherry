@@ -185,7 +185,7 @@ func TestAttemptRequired(t *testing.T) {
 		"status":        {validStatus(), []string{`"attempt":1`}},
 		"chunk":         {validChunk(), []string{`"attempt":1`}},
 		"result":        {validResult(), []string{`"attempt":1`}},
-		"start failure": {&StartFailure{V: 1, Wherry: receiverBinding(), Profile: "nomad", Agent: "claude", Class: "launch"}, []string{`"attempt":1`}},
+		"start failure": {&StartFailure{V: 1, Wherry: receiverBinding(), Profile: "nomad", Agent: "claude", Class: "launch", TaskHash: strings.Repeat("a", 64)}, []string{`"attempt":1`}},
 	} {
 		empty := func() Record { return reflect.New(reflect.TypeOf(test.value).Elem()).Interface().(Record) }
 		encoded := recordJSON(t, test.value)

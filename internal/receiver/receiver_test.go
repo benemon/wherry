@@ -93,6 +93,8 @@ type fakePlugin struct {
 	neverClass   string
 	neverReason  string
 	purges       int
+	// purgeCheck runs at each Purge.
+	purgeCheck func()
 	// purgeFailures fail that many Purges; purgeErr fails every one.
 	purgeFailures int
 	purgeErr      error
@@ -282,6 +284,12 @@ func (f *fakePlugin) Collect(ctx context.Context, _ pluginsdk.Handle, limits plu
 }
 
 func (f *fakePlugin) Purge(context.Context, string) error {
+	f.mu.Lock()
+	check := f.purgeCheck
+	f.mu.Unlock()
+	if check != nil {
+		check()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.purges++

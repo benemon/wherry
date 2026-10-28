@@ -80,7 +80,10 @@ as one file and as a `--config-dir` directory.
   receivers in the pool, plus a margin. From attempt
   `delivery_limit` minus 1, a receiver ends a run it would return to the
   pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
-  cases the [extension](a2a-extension-v1.md#delivery-budget) lists. `pool
+  cases the [extension](a2a-extension-v1.md#delivery-budget) lists. A run
+  every live member offering its agent has failed to start ends sooner, with
+  `no receiver in pool <pool> could start agent <agent>`
+  ([pool exhaustion](a2a-extension-v1.md#pool-exhaustion)). `pool
   create` refuses a `delivery_limit` above the broker's
   `group.share.max.delivery.count.limit`.
 - `lock_duration` is how long a claim survives without renewal, and how

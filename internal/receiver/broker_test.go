@@ -48,30 +48,7 @@ func newBrokerPool(t *testing.T, ctx context.Context, address string) brokerPool
 	t.Cleanup(kafka.Close)
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	b := brokerPool{opts: opts, kafka: kafka, receiver: "receiver-" + suffix, pool: "pool-" + suffix, tenant: "tenant-" + suffix, host: "host-" + suffix}
-	topics := []string{admin.AdminTopic, admin.ReceiversTopic, admin.PoolTasksTopic(b.pool), admin.PoolEventsTopic(b.pool), admin.TenantTopic(b.tenant), admin.TenantTranscriptTopic(b.tenant), admin.HostTopic(b.tenant, b.host), admin.ReceiverTopic(b.receiver), admin.ReceiverProgressTopic(b.receiver)}
-	if _, err := kadm.NewClient(kafka).CreateTopics(ctx, 1, -1, nil, topics...); err != nil {
-		t.Fatal(err)
-	}
-	// A topic answers NOT_LEADER_FOR_PARTITION until its partition has a leader, and not every write path retries it.
-	for {
-		metadata, err := kadm.NewClient(kafka).Metadata(ctx, topics...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		led := true
-		for _, topic := range topics {
-			partition, ok := metadata.Topics[topic].Partitions[0]
-			led = led && ok && partition.Err == nil && partition.Leader >= 0
-		}
-		if led {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
+	b.createTopics(t, ctx, admin.AdminTopic, admin.ReceiversTopic, admin.PoolTasksTopic(b.pool), admin.PoolEventsTopic(b.pool), admin.TenantTopic(b.tenant), admin.TenantTranscriptTopic(b.tenant), admin.HostTopic(b.tenant, b.host), admin.ReceiverTopic(b.receiver), admin.ReceiverProgressTopic(b.receiver))
 	terms := testTerms()
 	config := testConfig(b.receiver)
 	config.Pool = b.pool
@@ -90,6 +67,33 @@ func newBrokerPool(t *testing.T, ctx context.Context, address string) brokerPool
 		}
 	}
 	return b
+}
+
+func (b brokerPool) createTopics(t *testing.T, ctx context.Context, topics ...string) {
+	t.Helper()
+	if _, err := kadm.NewClient(b.kafka).CreateTopics(ctx, 1, -1, nil, topics...); err != nil {
+		t.Fatal(err)
+	}
+	// A topic answers NOT_LEADER_FOR_PARTITION until its partition has a leader, and not every write path retries it.
+	for {
+		metadata, err := kadm.NewClient(b.kafka).Metadata(ctx, topics...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		led := true
+		for _, topic := range topics {
+			partition, ok := metadata.Topics[topic].Partitions[0]
+			led = led && ok && partition.Err == nil && partition.Leader >= 0
+		}
+		if led {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // joined waits until the receiver holds a partition of its pool's share group, and for the first share fetch that
@@ -256,6 +260,143 @@ func (b brokerPool) deliveryLimit(t *testing.T, ctx context.Context, limit int32
 	}
 	if err != nil {
 		t.Fatalf("set the share group's delivery limit: %v", err)
+	}
+}
+
+// member adds receiver id to the pool with its topics and configuration record.
+func (b brokerPool) member(t *testing.T, ctx context.Context, id string) {
+	t.Helper()
+	b.createTopics(t, ctx, admin.ReceiverTopic(id), admin.ReceiverProgressTopic(id))
+	config := testConfig(id)
+	config.Pool = b.pool
+	encoded, err := admin.EncodeRecord(admin.Record{Kind: "receiver", Pool: b.pool, Receiver: id, Config: &config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPoolExhaustionOnRealBroker runs two receivers in one pool whose profiles create no job. The first fails the
+// task and releases it, releases its redelivery without a dispatch, and waits; the second takes the task, fails it and,
+// with every eligible member failed, ends the run FAILED in one terminal.
+func TestPoolExhaustionOnRealBroker(t *testing.T) {
+	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
+	if address == "" {
+		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
+	}
+	shortIntervals(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	b := newBrokerPool(t, ctx, address)
+	second := b.receiver + "-b"
+	b.member(t, ctx, second)
+	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+	registration, err := signed.RegisterKey(signed.HostOwner(b.tenant, b.host), hostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.HostTopic(b.tenant, b.host), Value: registration}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	keys := signed.Keys{}
+	member := func(id string) (*Receiver, *fakePlugin, *syncBuffer) {
+		base, err := kgo.NewClient(b.opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, signing, _ := ed25519.GenerateKey(rand.Reader)
+		keys[id] = signed.KeyState{Current: signing.Public().(ed25519.PublicKey)}
+		logs, plugin := &syncBuffer{}, &fakePlugin{outcome: pluginsdk.OutcomeNothingCreated}
+		return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+			factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
+				return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
+			}}, plugin, logs
+	}
+	first, firstPlugin, firstLogs := member(b.receiver)
+	later, laterPlugin, laterLogs := member(second)
+	answerSeals(t, ctx, b.kafka, keys, b.tenant, b.host, credentialName, testToken)
+	// The second member is live and offers the agent, but claims nothing until the first has failed the task.
+	for _, step := range []func(context.Context) error{later.register, later.configure, later.advertise} {
+		if err := step(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runMember := func(r *Receiver) {
+		runCtx, stop := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() { done <- r.Run(runCtx) }()
+		t.Cleanup(func() { stop(); <-done })
+	}
+	runMember(first)
+	b.joined(t, ctx, firstLogs)
+	submission := testSubmission("run-exhausted")
+	submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = b.tenant, b.host, b.pool
+	value, err := wire.SignRecord(submission, hostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(b.pool), Key: []byte("run-exhausted"), Value: value}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	for !strings.Contains(firstLogs.String(), "run run-exhausted: already failed here; releasing for another member") {
+		if ctx.Err() != nil {
+			t.Fatalf("the first member never released its redelivery; logs:\n%s", firstLogs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	runMember(later)
+	var terminals []wire.RunStatus
+	var failed []string
+	for len(terminals) == 0 {
+		if ctx.Err() != nil {
+			t.Fatalf("no terminal; first logs:\n%s\nsecond logs:\n%s", firstLogs.String(), laterLogs.String())
+		}
+		time.Sleep(200 * time.Millisecond)
+		records, err := readTopic(ctx, b.kafka, admin.PoolEventsTopic(b.pool))
+		if err != nil {
+			t.Fatal(err)
+		}
+		terminals, failed = nil, nil
+		for _, record := range records {
+			var status wire.RunStatus
+			var failure wire.StartFailure
+			switch {
+			case wire.ParseRecord(record.Value, keys, &status) == nil && status.Wherry.Kind == "terminal":
+				terminals = append(terminals, status)
+			case wire.ParseRecord(record.Value, keys, &failure) == nil:
+				failed = append(failed, failure.Wherry.Receiver)
+			}
+		}
+	}
+	// A further terminal could only follow a redelivery, which the member poll below rules out.
+	pollCtx, cancelPoll := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelPoll()
+	poller, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ConsumeTopics(admin.PoolTasksTopic(b.pool)), kgo.ShareGroup(admin.PoolGroup(b.pool)), kgo.ShareMaxRecords(1))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer poller.Close()
+	for _, record := range poller.PollRecords(pollCtx, 1).Records() {
+		if string(record.Key) == "run-exhausted" {
+			t.Fatal("the exhausted task was redelivered")
+		}
+	}
+	terminal := terminals[0]
+	reason := terminal.StatusUpdate.Status.Message.Parts[0].Text
+	if len(terminals) != 1 || terminal.StatusUpdate.Status.State != wire.TaskStateFailed || terminal.Wherry.Receiver != second ||
+		!strings.HasPrefix(reason, "no receiver in pool "+b.pool+" could start agent claude after ") || !strings.HasSuffix(reason, "; last: profile nomad created no job") {
+		t.Fatalf("terminals %d, first by %s: %s %q", len(terminals), terminal.Wherry.Receiver, terminal.StatusUpdate.Status.State, reason)
+	}
+	if !slices.Equal(failed, []string{b.receiver, second}) {
+		t.Fatalf("start failures by %v, want the first member's then the second's", failed)
+	}
+	if firstDispatches, _, _, _ := firstPlugin.counts(); firstDispatches != 1 {
+		t.Fatalf("the first member dispatched %d times, want once", firstDispatches)
+	}
+	if laterDispatches, _, _, _ := laterPlugin.counts(); laterDispatches != 1 {
+		t.Fatalf("the second member dispatched %d times, want once", laterDispatches)
 	}
 }
 
