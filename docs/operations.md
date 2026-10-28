@@ -77,13 +77,13 @@ as one file and as a `--config-dir` directory.
 - `delivery_limit` bounds how often the broker delivers one task. Each
   start failure, and each member with no matching plugin profile, returns a task
   to the pool and uses a delivery, so set it to at least the number of
-  receivers in the pool, plus a margin. From attempt
+  receivers in the pool, plus a margin. Size it as the pool's members times
+  the attempts each may make, plus a margin: a member handed back a task it
+  failed to start releases it again, and that release uses a delivery too.
+  From attempt
   `delivery_limit` minus 1, a receiver ends a run it would return to the
   pool `TASK_STATE_FAILED` with `delivery budget exhausted`, except in the
-  cases the [extension](a2a-extension-v1.md#delivery-budget) lists. A run
-  every live member offering its agent has failed to start ends sooner, with
-  `no receiver in pool <pool> could start agent <agent>`
-  ([pool exhaustion](a2a-extension-v1.md#pool-exhaustion)). `pool
+  cases the [extension](a2a-extension-v1.md#delivery-budget) lists. `pool
   create` refuses a `delivery_limit` above the broker's
   `group.share.max.delivery.count.limit`.
 - `lock_duration` is how long a claim survives without renewal, and how

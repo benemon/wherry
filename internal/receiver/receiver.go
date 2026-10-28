@@ -578,7 +578,7 @@ func (r *Receiver) offer(placement wire.Placement) (Named, bool) {
 type poolEvents struct {
 	// statuses holds, per run, the statuses from live pool members in log order, one per event ID.
 	statuses map[string][]wire.RunStatus
-	// startFailures holds, per run, the start failures from live pool members in log order.
+	// startFailures holds, per run, this receiver's start failures in log order.
 	startFailures map[string][]wire.StartFailure
 	// others holds, per run, every other record, such as cancels.
 	others map[string][][]byte
@@ -614,7 +614,7 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 		if err != nil && history(record.Value, peers, &failure) == nil {
 			// Like a status, a start failure binds its run's tenant through the task hash.
 			failure, err := admin.AuthorizeStartFailure(history, state, peers, record.Value, r.config.Pool, failure.Wherry.Tenant)
-			if err == nil && failure.Wherry.Run == run {
+			if err == nil && failure.Wherry.Run == run && failure.Wherry.Receiver == r.id {
 				events.startFailures[run] = append(events.startFailures[run], failure)
 			}
 			continue
@@ -642,53 +642,9 @@ func (events poolEvents) committedTerminal(run, taskHash string) bool {
 	})
 }
 
-// failedHere reports a start failure by receiver for the task record hash.
-func failedHere(failures []wire.StartFailure, receiver, hash string) bool {
-	return slices.ContainsFunc(failures, func(failure wire.StartFailure) bool {
-		return failure.Wherry.Receiver == receiver && failure.TaskHash == hash
-	})
-}
-
-// eligible names the pool's members whose live advertisements offer agent.
-func (r *Receiver) eligible(ctx context.Context, agent string) (map[string]bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, readTimeout)
-	defer cancel()
-	state, peers, _ := r.snapshot()
-	ads, err := r.reader.ReadAdvertisements(ctx, state, peers, time.Now(), admin.Liveness)
-	if err != nil {
-		r.deny(err, capRead)
-		return nil, err
-	}
-	members := map[string]bool{}
-	for receiver, ad := range ads {
-		if ad.Pool == r.config.Pool && slices.ContainsFunc(ad.Offers, func(offer wire.Offer) bool { return offer.Agent == agent }) {
-			members[receiver] = true
-		}
-	}
-	return members, nil
-}
-
-// exhausted reports that eligible is not empty and each of its members has a start failure for the task record hash.
-func exhausted(eligible map[string]bool, failures []wire.StartFailure, hash string) bool {
-	for member := range eligible {
-		if !failedHere(failures, member, hash) {
-			return false
-		}
-	}
-	return len(eligible) > 0
-}
-
-// poolExhausted reports that every eligible member of the pool has failed to start the task record hash of agent. This
-// receiver is eligible while it holds a failure for the task, whatever its own last advertisement says.
-func (r *Receiver) poolExhausted(ctx context.Context, failures []wire.StartFailure, hash, agent string) (bool, error) {
-	members, err := r.eligible(ctx, agent)
-	if err != nil {
-		return false, err
-	}
-	if failedHere(failures, r.id, hash) {
-		members[r.id] = true
-	}
-	return exhausted(members, failures, hash), nil
+// failedHere reports a start failure for the task record hash.
+func failedHere(failures []wire.StartFailure, hash string) bool {
+	return slices.ContainsFunc(failures, func(failure wire.StartFailure) bool { return failure.TaskHash == hash })
 }
 
 type runKey struct{ tenant, run string }

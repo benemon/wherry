@@ -43,6 +43,9 @@ var (
 // errUndecodable wraps a local state file that does not decode.
 var errUndecodable = errors.New("decode")
 
+// liveness is how old an advertisement may be for its receiver to count as live.
+const liveness = 120 * time.Second
+
 // SubmitInput is a root task's routing, prompt, inputs and requested outputs.
 type SubmitInput struct {
 	// Agent names what runs; empty takes the pool's default.
@@ -311,7 +314,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	ads := maps.Clone(declared)
 	maps.DeleteFunc(ads, func(_ string, ad wire.Advertisement) bool {
 		age := now.Sub(time.UnixMilli(ad.AtMS))
-		return age > admin.Liveness || age < -admin.Liveness
+		return age > liveness || age < -liveness
 	})
 	pool, placement, err := resolvePlacement(v.state, h.tenant, input.Agent, input.Model, input.Selector, ads)
 	if err != nil {
@@ -553,7 +556,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			receiver.Capacity, receiver.InFlight = ad.Capacity, ad.InFlight
 			receiver.HeartbeatAge = max(age, 0).Round(time.Second).String()
 			receiver.Status = "stale"
-			if age <= admin.Liveness && age >= -admin.Liveness {
+			if age <= liveness && age >= -liveness {
 				receiver.Status = "live"
 			}
 		}

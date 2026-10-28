@@ -278,10 +278,11 @@ func (b brokerPool) member(t *testing.T, ctx context.Context, id string) {
 	}
 }
 
-// TestPoolExhaustionOnRealBroker runs two receivers in one pool whose profiles create no job. The first fails the
-// task and releases it, releases its redelivery without a dispatch, and waits; the second takes the task, fails it and,
-// with every eligible member failed, ends the run FAILED in one terminal.
-func TestPoolExhaustionOnRealBroker(t *testing.T) {
+// TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker runs two receivers in one pool whose profiles create no job,
+// under a delivery limit of 4. The first fails the task at attempt 1 and releases it, releases its redelivery without a
+// dispatch, and backs off; the second takes the task at attempt 3, fails it and, with the budget spent, ends the run
+// FAILED in one terminal.
+func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {
 		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
@@ -290,6 +291,7 @@ func TestPoolExhaustionOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
+	b.deliveryLimit(t, ctx, 4)
 	second := b.receiver + "-b"
 	b.member(t, ctx, second)
 	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
@@ -317,12 +319,6 @@ func TestPoolExhaustionOnRealBroker(t *testing.T) {
 	first, firstPlugin, firstLogs := member(b.receiver)
 	later, laterPlugin, laterLogs := member(second)
 	answerSeals(t, ctx, b.kafka, keys, b.tenant, b.host, credentialName, testToken)
-	// The second member is live and offers the agent, but claims nothing until the first has failed the task.
-	for _, step := range []func(context.Context) error{later.register, later.configure, later.advertise} {
-		if err := step(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
 	runMember := func(r *Receiver) {
 		runCtx, stop := context.WithCancel(ctx)
 		done := make(chan error, 1)
@@ -331,21 +327,22 @@ func TestPoolExhaustionOnRealBroker(t *testing.T) {
 	}
 	runMember(first)
 	b.joined(t, ctx, firstLogs)
-	submission := testSubmission("run-exhausted")
+	submission := testSubmission("run-budget")
 	submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = b.tenant, b.host, b.pool
 	value, err := wire.SignRecord(submission, hostKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(b.pool), Key: []byte("run-exhausted"), Value: value}).FirstErr(); err != nil {
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(b.pool), Key: []byte("run-budget"), Value: value}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
-	for !strings.Contains(firstLogs.String(), "run run-exhausted: already failed here; releasing for another member") {
+	for !strings.Contains(firstLogs.String(), "run run-budget: already failed here; releasing for another member") {
 		if ctx.Err() != nil {
 			t.Fatalf("the first member never released its redelivery; logs:\n%s", firstLogs.String())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	// The second member starts only once the first has failed the task and backed off.
 	runMember(later)
 	var terminals []wire.RunStatus
 	var failed []string
@@ -379,14 +376,14 @@ func TestPoolExhaustionOnRealBroker(t *testing.T) {
 	}
 	defer poller.Close()
 	for _, record := range poller.PollRecords(pollCtx, 1).Records() {
-		if string(record.Key) == "run-exhausted" {
-			t.Fatal("the exhausted task was redelivered")
+		if string(record.Key) == "run-budget" {
+			t.Fatal("the ended task was redelivered")
 		}
 	}
 	terminal := terminals[0]
 	reason := terminal.StatusUpdate.Status.Message.Parts[0].Text
 	if len(terminals) != 1 || terminal.StatusUpdate.Status.State != wire.TaskStateFailed || terminal.Wherry.Receiver != second ||
-		!strings.HasPrefix(reason, "no receiver in pool "+b.pool+" could start agent claude after ") || !strings.HasSuffix(reason, "; last: profile nomad created no job") {
+		reason != "delivery budget exhausted after 3 attempts; last: profile nomad created no job" {
 		t.Fatalf("terminals %d, first by %s: %s %q", len(terminals), terminal.Wherry.Receiver, terminal.StatusUpdate.Status.State, reason)
 	}
 	if !slices.Equal(failed, []string{b.receiver, second}) {

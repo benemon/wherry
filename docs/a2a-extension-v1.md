@@ -311,7 +311,6 @@ base64 does. The fixed texts are:
   `the URL for S3 input <name> is not one of pool <pool>'s storage` (or
   `S3 output <name>`),
   `receiver denied`, `delivery budget exhausted`,
-  `no receiver in pool <pool> could start agent <agent>`,
   `start failed and the job could not be removed`,
   `input <name> takes the run's inputs over what profile <profile>
   delivers`, naming the input at which they pass the profile's limit (or
@@ -520,9 +519,9 @@ An echo tells every host of a tenant where a run was admitted.
 
 A receiver writes the echo in the transaction that holds the run's
 `claimed` or `rejected` status, or its `terminal` status when the receiver
-ends a run it has not claimed: at the [delivery budget](#delivery-budget), a
-run no ready plugin profile satisfies, or at
-[pool exhaustion](#pool-exhaustion), a run it failed to start. The echo's fields copy the submission's. A
+ends at the [delivery budget](#delivery-budget) a run no ready plugin profile
+satisfies or a run it already failed to start. The echo's fields copy the
+submission's. A
 host that has no record of the run takes the run's pool from its first
 valid echo, and ignores records of the run from any other pool. A status or
 chunk binds to the run when its `task_hash` equals the hash of the run's
@@ -564,8 +563,7 @@ An advertisement reports a receiver's liveness and capacity.
 A start failure records that a receiver could not start a run's attempt.
 The receiver writes it to the pool's events. For every class but
 `input-too-large`, it then removes the run's job from the platform and
-releases the task to the pool, unless the pool is
-[exhausted](#pool-exhaustion). When it cannot remove the job, it retries
+releases the task to the pool. When it cannot remove the job, it retries
 for 5 minutes, then ends the run `TASK_STATE_FAILED` with the message text
 `start failed and the job could not be removed`. An `input-too-large`
 start failure ends the run as its class describes.
@@ -596,32 +594,12 @@ the receiver's log alone.
 
 `profile` is the profile the receiver routed the task to.
 
-### Pool exhaustion
-
-A pool's eligible members for a task are the live members whose latest
-[advertisement](#advertisement), within 120 seconds of the reader's clock,
-offers the task's agent, together with the reader itself when it holds a
-start failure for the task. The pool is exhausted for a task when it has
-eligible members and each holds a start failure, from a live member of the
-pool, whose `task_hash` is the task's. A pool with no eligible member is
-never exhausted; the [delivery budget](#delivery-budget) ends the task.
-
-A receiver checks after its own start failure, once the job is removed, and
-when the pool delivers it a task for which it holds a start failure. When
-the pool is exhausted it ends the run `TASK_STATE_FAILED` with the message
-text `no receiver in pool <pool> could start agent <agent>`, whatever the
-attempt. After its own start failure, the text continues
-`after <attempt> attempts; last: <cause>` as at the delivery budget.
-
-When the pool is not exhausted, a receiver delivered a task for which it
-holds a start failure releases it without starting it, and fetches no task
-from the pool, in any of its slots, for the pool's lock duration, so the
-pool can deliver the task to another member.
-
-The texts `delivery budget exhausted` and
-`no receiver in pool <pool> could start agent <agent>` open the message
-of every run ended at the delivery budget and at pool exhaustion. They are
-stable, and a host may match them as prefixes.
+A receiver delivered a task for which it holds its own start failure, with
+the task's `task_hash`, releases it without starting it, and fetches no
+task from the pool, in any of its slots, for the pool's lock duration, so
+the pool can deliver the task to another member. The release uses a
+delivery; at the [delivery budget](#delivery-budget) the receiver ends the
+run instead.
 
 ### Delivery budget
 

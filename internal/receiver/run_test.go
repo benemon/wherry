@@ -150,7 +150,6 @@ func TestSealWaitExpiryFailsWithoutCredentialValue(t *testing.T) {
 // lab and cloud both launch claude; a task routed to cloud names cloud in its start failure.
 func TestStartFailureNamesTheRoutedProfile(t *testing.T) {
 	m := newMultiFixture(t)
-	m.livePeer(t, "receiver-b")
 	m.cloud.outcome = pluginsdk.OutcomeNothingCreated
 	if status := m.execute(t, "run-a", accelerated, 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
@@ -463,7 +462,6 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 	})
 	t.Run("dispatch error with no job", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		f.livePeer(t, "receiver-b")
 		f.answer(t, credentialName)
 		f.plugin.dispatchErr = errors.New("dispatch failed")
 		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
@@ -1001,7 +999,6 @@ func TestFollowErrorFailsAfterOneLockDuration(t *testing.T) {
 
 func TestFollowErrorOnANeverStartedJobIsAStartFailure(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.livePeer(t, "receiver-b")
 	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), pluginsdk.JobNeverStarted
 	f.answer(t, credentialName)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
@@ -1017,7 +1014,6 @@ func TestFollowErrorOnANeverStartedJobIsAStartFailure(t *testing.T) {
 
 func TestOversizedDispatchIsLoggedByName(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.livePeer(t, "receiver-b")
 	f.answer(t, credentialName)
 	f.plugin.dispatchErr = pluginsdk.ErrMessageTooLarge
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
@@ -1031,7 +1027,6 @@ func TestOversizedDispatchIsLoggedByName(t *testing.T) {
 func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 	const secret = "token=s3cr3t-dispatch-detail"
 	f := newFixture(t, resultStream)
-	f.livePeer(t, "receiver-b")
 	f.answer(t, credentialName)
 	f.plugin.dispatchErr = errors.New(secret)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
@@ -1051,7 +1046,6 @@ func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 
 func TestDispatchErrorIsLoggedRedacted(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.livePeer(t, "receiver-b")
 	f.answer(t, credentialName)
 	f.plugin.dispatchErr = &pluginsdk.Error{Op: "write variable nomad/jobs/agent-run-a-t1", Class: "denied", Err: errors.New("status 403: echoed " + testToken)}
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
@@ -1806,7 +1800,6 @@ func TestMismatchedJobIsPurgedNotAdopted(t *testing.T) {
 
 func TestNeverStartedJobIsAPlatformStartFailure(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.livePeer(t, "receiver-b")
 	f.answer(t, credentialName)
 	f.plugin.job = pluginsdk.JobNeverStarted
 	if status := f.execute(t, f.submit(t, f.host, nil), 2); status != kgo.AckRelease {
@@ -1832,7 +1825,6 @@ func TestNeverStartedReasonIsLoggedRedacted(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.livePeer(t, "receiver-b")
 			f.plugin.stream, f.plugin.neverStarted, f.plugin.neverReason = nil, true, test.reason
 			f.answer(t, credentialName)
 			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
@@ -1920,7 +1912,6 @@ func TestBudgetExhaustedByStartFailuresNamesTheLastCause(t *testing.T) {
 			terms := testTerms()
 			terms.DeliveryLimit = 5
 			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {}})
-			f.livePeer(t, "receiver-b")
 			testActiveRun(t, f, "run-b", 1).deliver(map[string][]byte{"github-token": []byte(otherToken)})
 			f.plugin.neverStarted, f.plugin.neverReason = true, test.reason
 			f.answer(t, credentialName)
@@ -1951,7 +1942,6 @@ func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.livePeer(t, "receiver-b")
 			test.setup(t, f)
 			f.answer(t, credentialName)
 			if status := f.execute(t, f.submit(t, f.host, nil), test.attempt); status != kgo.AckRelease {
@@ -1972,7 +1962,6 @@ func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 
 func TestPurgeRetriedUntilItSucceeds(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.livePeer(t, "receiver-b")
 	f.answer(t, credentialName)
 	f.plugin.outcome, f.plugin.purgeFailures = pluginsdk.OutcomeNothingCreated, 2
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
@@ -2016,7 +2005,6 @@ func TestStartFailureAtTheDeliveryBudgetFails(t *testing.T) {
 	} {
 		t.Run(fmt.Sprint(test.attempt), func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.livePeer(t, "receiver-b")
 			f.answer(t, credentialName)
 			f.plugin.outcome = pluginsdk.OutcomeNothingCreated
 			if status := f.execute(t, f.submit(t, f.host, nil), test.attempt); status != test.ack {
@@ -2197,7 +2185,6 @@ func TestJobOfAnotherProfileIsLeftToIt(t *testing.T) {
 
 func TestNothingCreatedSkipsReconcile(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.livePeer(t, "receiver-b")
 	f.answer(t, credentialName)
 	f.plugin.outcome = pluginsdk.OutcomeNothingCreated
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {

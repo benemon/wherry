@@ -411,9 +411,6 @@ func HostKeyTopics(state State, pool string) map[string]string {
 	return topics
 }
 
-// Liveness is how old an advertisement may be for its receiver to count as live.
-const Liveness = 120 * time.Second
-
 // ReadAdvertisements returns each receiver's latest authorised advertisement
 // that is no older than liveness at now and no later than liveness ahead of it.
 func (r *Reader) ReadAdvertisements(ctx context.Context, state State, keys signed.Keys, now time.Time, liveness time.Duration) (map[string]wire.Advertisement, error) {

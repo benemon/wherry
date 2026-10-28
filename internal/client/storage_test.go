@@ -474,7 +474,7 @@ func TestSubmitAppliesTheProfileLimitOfAStaleReceiver(t *testing.T) {
 	receiver.advertise(t, f.ctx, nil)
 	f.addReceiver(t, "receiver-b", "pool-inline").advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Offers[0].InlineLimit = 1000
-		ad.AtMS = time.Now().Add(-10 * admin.Liveness).UnixMilli()
+		ad.AtMS = time.Now().Add(-10 * liveness).UnixMilli()
 	})
 	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 2000), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
 	if err != nil {
