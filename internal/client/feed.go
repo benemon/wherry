@@ -1056,12 +1056,12 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	r := newRunView(h, v, runID, local)
 	r.read(waitCtx, records)
 	if r.pool == "" {
-		return AwaitResult{}, fmt.Errorf("await %s: %w", runID, ErrRunNotFound)
+		return AwaitResult{}, fmt.Errorf("watch %s: %w", runID, ErrRunNotFound)
 	}
 	rederive := func() error {
 		v, err := h.load(waitCtx)
 		if err != nil {
-			return fmt.Errorf("await %s: %w", runID, err)
+			return fmt.Errorf("watch %s: %w", runID, err)
 		}
 		r.v, r.reread = v, map[string]bool{}
 		r.derive()
@@ -1077,7 +1077,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			outcome.Skipped, outcome.Model = r.skipped, r.model()
 			if r.result != nil {
 				if err := r.readTranscript(waitCtx); err != nil {
-					return AwaitResult{}, fmt.Errorf("await %s: %w", runID, err)
+					return AwaitResult{}, fmt.Errorf("watch %s: %w", runID, err)
 				}
 				outcome.Skipped = r.skipped
 				outcome.Outputs, outcome.Stored, outcome.NotReturned, outcome.Rejected = r.verifiedOutputs(r.result)
@@ -1116,7 +1116,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		}
 		stopPoll()
 		if err := waitCtx.Err(); err != nil {
-			return AwaitResult{}, fmt.Errorf("await %s: %w", runID, err)
+			return AwaitResult{}, fmt.Errorf("watch %s: %w", runID, err)
 		}
 		if err != nil {
 			return AwaitResult{}, err
