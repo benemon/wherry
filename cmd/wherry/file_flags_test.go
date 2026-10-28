@@ -24,8 +24,9 @@ func TestConfigInputRequiresExactlyOne(t *testing.T) {
 	dir := t.TempDir()
 	commands := [][]string{
 		{"pool", "create", "pool-a"},
+		{"pool", "update", "pool-a"},
 		{"receiver", "add", "receiver-a"},
-		{"receiver", "configure", "receiver-a"},
+		{"receiver", "update", "receiver-a"},
 	}
 	for _, command := range commands {
 		name := strings.Join(command[:2], " ")
@@ -187,7 +188,7 @@ func TestPoolConfigDirectoryRejectsInvalidLayout(t *testing.T) {
 func TestAdminArgsRejectsUnknownOptions(t *testing.T) {
 	for _, args := range [][]string{
 		{"pool", "create", "pool-a", "--terms", "pool.yaml"},
-		{"receiver", "configure", "receiver-a", "--config", "receiver.yaml"},
+		{"receiver", "update", "receiver-a", "--config", "receiver.yaml"},
 		{"host", "add", "host-a", "--tenant", "tenant-a", "--bundle", "host.yaml"},
 		{"pool", "create", "pool-a", "--tenant", "tenant-a"},
 		{"receiver", "add", "receiver-a", "--pool", "pool-a", "--platform-credential-file", "nomad=token"},

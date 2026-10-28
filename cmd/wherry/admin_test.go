@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 func TestKafkaClientRejectsPlaintextListener(t *testing.T) {
@@ -99,6 +101,8 @@ func TestAdminCommandUsage(t *testing.T) {
 		{[]string{"tenant", "add", "tenant-a", "--pool", "build"}, "unknown admin command"},
 		{[]string{"revoke", "host", "tenant-a", "host-a"}, "unknown admin command"},
 		{[]string{"revoke", "receiver", "receiver-a"}, "unknown admin command"},
+		{[]string{"receiver", "configure", "receiver-a"}, "unknown admin command"},
+		{[]string{"pool", "update"}, "usage: wherry admin pool update NAME"},
 	} {
 		var stdout, stderr bytes.Buffer
 		if err := runAdmin(test.args, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), test.want) {
@@ -146,7 +150,7 @@ func TestRevokeRefusesAWaitThatIsNotPositive(t *testing.T) {
 	}
 }
 
-// receiver show prints the recorded configuration; configure --dry-run records nothing and prints what recording the
+// receiver show prints the recorded configuration; update --dry-run records nothing and prints what recording the
 // file would store, as show prints it once recorded.
 // The record decodes numbers as float64; show prints a whole one as an integer.
 func TestReceiverShowPrintsWholeNumbersAsIntegers(t *testing.T) {
@@ -204,9 +208,9 @@ profiles:
 	}
 	file := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": basePlugin + item("name: claude\nagent: claude\nlabels: {tier: batch}\nconfig: {runtime: {config: {image: claude:1}}}\n", "      ")}), "receiver.yaml")
 	before := records()
-	dryRun := wherry("receiver", "configure", "receiver-a", "--config-file", file, "--dry-run")
+	dryRun := wherry("receiver", "update", "receiver-a", "--config-file", file, "--dry-run")
 	if records() != before {
-		t.Fatal("configure --dry-run produced a record")
+		t.Fatal("update --dry-run produced a record")
 	}
 	const resolved = `capacity: 1
 profiles:
@@ -242,13 +246,86 @@ profiles:
 		t.Fatalf("after a dry run, show printed\n%s\nwant the recorded configuration", got)
 	}
 	outside := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": basePlugin + item("name: codex\nagent: codex\n", "      ")}), "receiver.yaml")
-	if err := runAdmin([]string{"receiver", "configure", "receiver-a", "--config-file", outside, "--dry-run"}, io.Discard, io.Discard); err == nil || err.Error() != "receiver agent is outside pool terms" {
+	if err := runAdmin([]string{"receiver", "update", "receiver-a", "--config-file", outside, "--dry-run"}, io.Discard, io.Discard); err == nil || err.Error() != "receiver agent is outside pool terms" {
 		t.Fatalf("dry run of an agent outside the pool's terms: %v; want it refused", err)
 	}
-	if got := wherry("receiver", "configure", "receiver-a", "--config-file", file); got != "" || records() != before+1 {
-		t.Fatalf("configure printed %q and left %d records; want nothing printed and one record more than %d", got, records(), before)
+	if got := wherry("receiver", "update", "receiver-a", "--config-file", file); got != "" || records() != before+1 {
+		t.Fatalf("update printed %q and left %d records; want nothing printed and one record more than %d", got, records(), before)
 	}
 	if got := wherry("receiver", "show", "receiver-a"); got != dryRun {
 		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", got, dryRun)
+	}
+}
+
+// pool update records new terms and re-applies the share group's delivery limit and lock duration; pool create refuses
+// an existing pool and --dry-run writes nothing.
+func TestPoolUpdate(t *testing.T) {
+	service := adminEnv(t)
+	ctx := context.Background()
+	// runAdmin reads the delivery ceiling from the broker, and kfake reports none until it is set.
+	ceiling := "10"
+	responses, err := kadm.NewClient(service.Admin).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "group.share.max.delivery.count.limit", Value: &ceiling}})
+	if err == nil {
+		err = responses[0].Err
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := func(limit int, lock string) string {
+		return filepath.Join(writeTree(t, map[string]string{"pool.yaml": fmt.Sprintf("agents:\n  - name: claude\ndefault_agent: claude\ndelivery_limit: %d\nlock_duration: %s\nproducer_byte_rate: 1048576\nrequest_percentage: 50\n", limit, lock)}), "pool.yaml")
+	}
+	records := func() int64 {
+		t.Helper()
+		offsets, err := kadm.NewClient(service.Admin).ListEndOffsets(ctx, admin.AdminTopic)
+		if err != nil || offsets.Error() != nil {
+			t.Fatal(err, offsets.Error())
+		}
+		offset, _ := offsets.Lookup(admin.AdminTopic, 0)
+		return offset.Offset
+	}
+	terms := func() (string, string, admin.Terms) {
+		t.Helper()
+		request := kmsg.NewPtrDescribeConfigsRequest()
+		resource := kmsg.NewDescribeConfigsRequestResource()
+		resource.ResourceType, resource.ResourceName = kmsg.ConfigResourceTypeGroupConfig, admin.PoolGroup("pool-a")
+		request.Resources = append(request.Resources, resource)
+		response, err := service.Admin.Request(ctx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		group := map[string]string{}
+		for _, config := range response.(*kmsg.DescribeConfigsResponse).Resources[0].Configs {
+			if config.Value != nil {
+				group[config.Name] = *config.Value
+			}
+		}
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return group["share.delivery.count.limit"], group["share.record.lock.duration.ms"], state.Pools["pool-a"]
+	}
+	if err := runAdmin([]string{"pool", "create", "pool-a", "--config-file", pool(5, "15s")}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := runAdmin([]string{"pool", "update", "pool-b", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err == nil || err.Error() != "no pool by that name" {
+		t.Fatalf("update of a missing pool = %v, want no pool by that name", err)
+	}
+	before := records()
+	if err := runAdmin([]string{"pool", "create", "pool-a", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err == nil || err.Error() != "pool exists; change its terms with pool update" {
+		t.Fatalf("create of an existing pool = %v, want it refused naming pool update", err)
+	}
+	var stdout bytes.Buffer
+	if err := runAdmin([]string{"pool", "update", "pool-a", "--config-file", pool(3, "30s"), "--dry-run"}, &stdout, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if limit, lock, recorded := terms(); records() != before || stdout.Len() != 0 || limit != "5" || lock != "15000" || recorded.DeliveryLimit != 5 || recorded.LockDurationMS != 15000 {
+		t.Fatalf("after create and dry run: %d records, output %q, share group %s/%s, terms %d/%d; want %d records, no output and 5/15000 throughout", records(), stdout.String(), limit, lock, recorded.DeliveryLimit, recorded.LockDurationMS, before)
+	}
+	if err := runAdmin([]string{"pool", "update", "pool-a", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if limit, lock, recorded := terms(); records() != before+1 || limit != "3" || lock != "30000" || recorded.DeliveryLimit != 3 || recorded.LockDurationMS != 30000 {
+		t.Fatalf("after update: %d records, share group %s/%s, terms %d/%d; want %d records and 3/30000 throughout", records(), limit, lock, recorded.DeliveryLimit, recorded.LockDurationMS, before+1)
 	}
 }

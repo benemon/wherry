@@ -121,7 +121,7 @@ and is not part of it, and a password of nothing else is refused.
 
 ## Pool terms
 
-The YAML file `pool create --config-file` reads. Unknown fields are errors.
+The YAML file `pool create --config-file` and `pool update --config-file` read. Unknown fields are errors.
 With `--config-dir`, `pool.yaml` holds every field except `agents`, and
 `agents/*.yaml` each hold one agent in file-name order. Hidden entries are
 ignored. Any other entry and a directory with no agent files are errors.
@@ -197,6 +197,10 @@ by a member with no matching profile. From attempt
 `delivery_limit` minus 1, a receiver ends a run `TASK_STATE_FAILED` with
 `delivery budget exhausted` where it would release it, except in the cases
 the [extension](a2a-extension-v1.md#delivery-budget) lists.
+
+[`pool update`](commands.md#wherry-admin-pool-update-pool) changes an existing
+pool's terms. A lowered `delivery_limit` applies to a task in flight at its
+next release.
 
 ### Pool terms example
 
@@ -332,7 +336,7 @@ An input file travels base64-encoded inside the signed record, which is itself
 base64url-encoded, so an inline input takes about 16/9 of its size in the
 submission record.
 
-`pool create` and `pool entitle` check against the broker at the time.
+`pool create`, `pool update` and `pool entitle` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.admin`, which they
 read every 15 seconds, so a changed limit takes effect within that
 window.
@@ -345,7 +349,7 @@ entitled to.
 
 ## Receiver configuration
 
-What `receiver add` and `receiver configure` read, recorded on
+What `receiver add` and `receiver update` read, recorded on
 `wherry.admin`: a [directory](#receiver-configuration-directory) named by
 `--config-dir`, or a single YAML file named by `--config-file` with the same
 entries in maps and lists. Exactly one is required. The receiver and pool
@@ -446,7 +450,7 @@ driver, the resources and the label `platform: nomad`, and the image
 same address, credential and resources, the `exec` driver with `command`
 alone in its driver configuration, and the labels `platform: nomad` and
 `isolation: host`.
-`wherry admin receiver configure ID --dry-run` prints what a file resolves
+`wherry admin receiver update ID --dry-run` prints what a file resolves
 to, and `wherry admin receiver show ID` prints what a receiver's record
 holds ([commands](commands.md#wherry-admin-receiver-show-receiver)).
 
