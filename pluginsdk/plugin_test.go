@@ -188,6 +188,17 @@ func TestConfigureCarriesInlineLimit(t *testing.T) {
 	}
 }
 
+func TestConfigureReportsVersion(t *testing.T) {
+	p, _, _ := launch(t)
+	if version, _ := p.Version(); version != "" {
+		t.Fatalf("version before Configure = %q, want none", version)
+	}
+	configured(t, p, "a", "{}")
+	if version, protocol := p.Version(); version != "v0.0.0-test" || protocol != 10 {
+		t.Fatalf("version = %q, protocol %d; want v0.0.0-test, 10", version, protocol)
+	}
+}
+
 func TestDispatchCarriesTheRun(t *testing.T) {
 	t.Setenv("WHERRY_TESTPLUGIN_ENV", "from-the-receiver")
 	p, record, _ := launch(t)

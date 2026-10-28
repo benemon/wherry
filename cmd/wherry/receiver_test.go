@@ -140,6 +140,8 @@ func TestPluginPathRefusesWritableOrIrregularFiles(t *testing.T) {
 	}
 }
 
+var discard = log.New(io.Discard, "", 0)
+
 // installPlugin copies the test plugin into a new directory as wherry-plugin-fake and returns the directory.
 func installPlugin(t *testing.T) string {
 	t.Helper()
@@ -163,7 +165,7 @@ func TestRelativePluginDirRunsTheCheckedBinary(t *testing.T) {
 	}
 	t.Setenv("PATH", decoys+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Chdir(dir)
-	plugins := &plugins{dir: ".", logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: ".", logs: io.Discard, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	_, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"})
 	if _, statErr := os.Stat(marker); statErr == nil {
@@ -178,7 +180,7 @@ func TestRestartChecksThePluginAgain(t *testing.T) {
 	read := recordPlugin(t)
 	dir := installPlugin(t)
 	logs := &syncBuffer{}
-	plugins := &plugins{dir: dir, logs: logs, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: dir, logs: logs, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	if _, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}); err != nil {
 		t.Fatal(err)
@@ -222,7 +224,8 @@ func TestOneProcessPerPlugin(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	plugins := &plugins{dir: dir, logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	logged := &syncBuffer{}
+	plugins := &plugins{dir: dir, logs: io.Discard, logger: log.New(logged, "receiver: ", 0), registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	for _, settings := range []admin.ProfileSettings{
 		{Name: "exec", Plugin: "fake", Agent: "claude"}, {Name: "podman", Plugin: "fake", Agent: "claude"}, {Name: "edge", Plugin: "other", Agent: "claude"},
@@ -238,6 +241,10 @@ func TestOneProcessPerPlugin(t *testing.T) {
 	}
 	if len(processes) != 3 || processes["exec"] != processes["podman"] || processes["exec"] == processes["edge"] {
 		t.Fatalf("profiles configured in processes %v; want exec and podman in one, edge in another", processes)
+	}
+	// Each plugin's identity is logged once, when it starts.
+	if want := "receiver: plugin fake: version v0.0.0-test protocol 10\nreceiver: plugin other: version v0.0.0-test protocol 10\n"; logged.String() != want {
+		t.Fatalf("logged %q, want %q", logged.String(), want)
 	}
 }
 
@@ -390,7 +397,7 @@ func TestProfileCredentialReachesThePluginInPlaceOfItsName(t *testing.T) {
 		t.Fatal(err)
 	}
 	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"nomad-token": {File: token}}, hold: func(string, []byte) {},
-		logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+		logs: io.Discard, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	settings := admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "nomad-token", "outputs": true}}
 	if _, err := plugins.profile("build", settings); err != nil {

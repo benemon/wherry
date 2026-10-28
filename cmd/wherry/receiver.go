@@ -119,7 +119,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 		}
 		defer serveMetrics(listener, registry, logger).Close()
 	}
-	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, registry: registry, running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, registry: registry, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	r, err := receiver.New(bundle, config.StateDir, *rotateKey, plugins.profile, logger, registry)
 	if err != nil {
@@ -170,6 +170,7 @@ type plugins struct {
 	credentials map[string]credential.Source
 	hold        func(name string, value []byte)
 	logs        io.Writer
+	logger      *log.Logger
 	registry    prometheus.Registerer
 	running     map[string]*pluginsdk.Process
 }
@@ -214,6 +215,13 @@ func (p *plugins) profile(pool string, settings admin.ProfileSettings) (receiver
 	})
 	if err != nil {
 		return receiver.Named{}, err
+	}
+	if !ok {
+		version, protocol := running.Version()
+		if version == "" {
+			version = "unreported"
+		}
+		p.logger.Printf("plugin %s: version %s protocol %d", settings.Plugin, version, protocol)
 	}
 	return receiver.Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: configured}, nil
 }

@@ -49,6 +49,8 @@ type Process struct {
 	rpc      pluginv1.PluginClient
 	closed   bool
 	restarts int64
+	// version is what the latest Configure reported of the plugin.
+	version string
 }
 
 // Launch starts the plugin binary resolve returns over mutual TLS, and calls resolve again before every
@@ -203,10 +205,19 @@ func (p *Process) Configure(settings Settings) (Plugin, error) {
 		return nil, err
 	}
 	p.settings = append(p.settings, settings)
+	p.version = resp.GetVersion()
 	directories := resp.GetDirectories()
 	return &remote{plugin: p, name: settings.Name, directories: Directories{
 		Input: directories.GetInput(), Output: directories.GetOutput(), Credentials: directories.GetCredentials(),
 	}, inlineLimit: resp.GetInlineLimit()}, nil
+}
+
+// Version is the plugin's version as the latest Configure reported it, empty from a plugin that reports none, and the
+// plugin protocol version.
+func (p *Process) Version() (string, int) {
+	p.configure.Lock()
+	defer p.configure.Unlock()
+	return p.version, int(handshake.ProtocolVersion)
 }
 
 // Close stops the process and its restarts.

@@ -275,7 +275,7 @@ func TestReceiverConfigNullDeletesAnInheritedKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"nomad-token": {File: token}}, hold: func(string, []byte) {},
-		logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+		logs: io.Discard, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	settings := config.Profiles[0]
 	settings.Plugin = "fake"

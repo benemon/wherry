@@ -872,8 +872,10 @@ any other job under the run's ID and dispatches the run again.
 The protocol is the Go module `github.com/benemon/wherry/pluginsdk` in this
 repository. [`plugin.proto`](https://github.com/benemon/wherry/blob/main/pluginsdk/proto/wherry/plugin/v1/plugin.proto)
 defines the service, `pluginsdk.Serve` runs a plugin and gives its factory
-the logger whose JSON lines the receiver relays at their level, and
-`pluginsdktest` is the conformance suite a plugin runs against its platform.
+the logger whose JSON lines the receiver relays at their level,
+`pluginsdk.Version`, set before `Serve`, is the version the receiver logs when
+it starts the plugin, and `pluginsdktest` is the conformance suite a plugin
+runs against its platform.
 
 ### Metrics
 

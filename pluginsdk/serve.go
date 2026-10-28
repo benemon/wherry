@@ -20,6 +20,9 @@ import (
 // record, which brokers cap at a few MiB; 64 MiB leaves room.
 const maxMessage = 64 << 20
 
+// Version is the plugin's version, which Configure reports to the receiver; a plugin sets it before Serve.
+var Version string
+
 // Serve runs a plugin process for the receiver that started it, building one profile with factory for
 // each Configure and routing every call to the profile it names. factory gets the logger whose lines the
 // receiver relays. It returns when the receiver ends the link.
@@ -136,7 +139,7 @@ func (s *server) Configure(_ context.Context, req *pluginv1.ConfigureRequest) (*
 	directories := profile.Directories()
 	return &pluginv1.ConfigureResponse{Directories: &pluginv1.Directories{
 		Input: directories.Input, Output: directories.Output, Credentials: directories.Credentials,
-	}, InlineLimit: profile.InlineLimit()}, nil
+	}, InlineLimit: profile.InlineLimit(), Version: Version}, nil
 }
 
 func (s *server) Ready(ctx context.Context, req *pluginv1.ReadyRequest) (*pluginv1.ReadyResponse, error) {

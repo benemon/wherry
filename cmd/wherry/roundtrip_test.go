@@ -308,7 +308,7 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("receiver without its plugin: %v; want a configuration error", err)
 	}
 	read := recordPlugin(t)
-	plugins := &plugins{dir: pluginDir, credentials: sources, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: pluginDir, credentials: sources, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	r := newReceiver(plugins)
 	runCtx, stop := context.WithCancel(ctx)
