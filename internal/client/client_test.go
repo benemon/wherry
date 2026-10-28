@@ -39,6 +39,7 @@ import (
 // fixture is a kfake cluster provisioned through admin.Service, with a host connected as its own principal.
 type fixture struct {
 	ctx       context.Context
+	cluster   *kfake.Cluster
 	service   *admin.Service
 	host      *Host
 	stateDir  string
@@ -106,7 +107,7 @@ func newFixtureNoHost(t *testing.T, opts ...kfake.Opt) *fixture {
 	t.Cleanup(operator.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	f := &fixture{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, receivers: map[string]*testReceiver{}, logs: &syncBuffer{}}
+	f := &fixture{ctx: ctx, cluster: cluster, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, receivers: map[string]*testReceiver{}, logs: &syncBuffer{}}
 	f.pool(t, "pool-a")
 	return f
 }

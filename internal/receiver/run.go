@@ -1026,10 +1026,7 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *pluginsdk.Hand
 	}
 	// Reading from the host topic's end before the request is committed sees every answer to it.
 	topic := admin.HostTopic(task.Wherry.Tenant, task.Wherry.Host)
-	ends, err := kadm.NewClient(r.base).ListEndOffsets(runCtx, topic)
-	if err == nil {
-		err = ends.Error()
-	}
+	ends, err := admin.ListOffsets(runCtx, kadm.NewClient(r.base).ListEndOffsets, topic)
 	if err != nil {
 		r.deny(err, capRead)
 		r.logger.Printf("run %s: read host topic: %v", runID, err)

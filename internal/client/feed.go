@@ -417,19 +417,15 @@ func (r *runView) readTranscript(ctx context.Context) error {
 	}
 	var end int64
 	if r.outcome != nil {
-		ends, err := listing.ListEndOffsets(ctx, topic)
-		if err == nil {
-			err = ends.Error()
-		}
+		ends, err := admin.ListOffsets(ctx, listing.ListEndOffsets, topic)
 		if err != nil {
 			return err
 		}
 		ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
 	}
-	starts, err := listing.ListOffsetsAfterMilli(ctx, echoed.Add(-transcriptSkew).UnixMilli(), topic)
-	if err == nil {
-		err = starts.Error()
-	}
+	starts, err := admin.ListOffsets(ctx, func(ctx context.Context, topics ...string) (kadm.ListedOffsets, error) {
+		return listing.ListOffsetsAfterMilli(ctx, echoed.Add(-transcriptSkew).UnixMilli(), topics...)
+	}, topic)
 	if err != nil {
 		return err
 	}
@@ -498,10 +494,7 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 	if err != nil {
 		return nil, err
 	}
-	ends, err := listing.ListCommittedOffsets(ctx, topic)
-	if err == nil {
-		err = ends.Error()
-	}
+	ends, err := admin.ListOffsets(ctx, listing.ListCommittedOffsets, topic)
 	if err != nil {
 		return nil, err
 	}
@@ -522,10 +515,7 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 			}
 		}
 	}
-	starts, err := listing.ListStartOffsets(ctx, topic)
-	if err == nil {
-		err = starts.Error()
-	}
+	starts, err := admin.ListOffsets(ctx, listing.ListStartOffsets, topic)
 	if err != nil {
 		return nil, err
 	}
@@ -589,10 +579,7 @@ func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.
 		if err != nil {
 			return nil, 0, err
 		}
-		ends, err := listing.ListCommittedOffsets(ctx, topic)
-		if err == nil {
-			err = ends.Error()
-		}
+		ends, err := admin.ListOffsets(ctx, listing.ListCommittedOffsets, topic)
 		if err != nil {
 			return nil, 0, err
 		}
