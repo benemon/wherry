@@ -932,8 +932,7 @@ func (r *runView) transcript(returned map[[2]int64]bool) TranscriptResult {
 	return result
 }
 
-// TranscriptStream follows a run's transcript with one consumer on the transcript topic, from the first offset
-// appended at or after the run's earliest echo, and updates the run's history from the host's follower of the feed.
+// TranscriptStream returns a run's transcript lines as they arrive, each line once.
 type TranscriptStream struct {
 	h   *Host
 	run string
@@ -1015,9 +1014,8 @@ func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
 	return s.r.transcript(s.returned), nil
 }
 
-// Wait returns once the stream's consumer reads past the records Next last took, before the run has an echo once the
-// feed's follower does, once that follower or consumer stops, or once ctx ends; at once before a Next has read the
-// run's history.
+// Wait blocks until there are records past those Next last took, the consumer it reads from stops, or ctx ends.
+// Before the run has an echo it reads the feed's follower. Before the first Next it returns at once.
 func (s *TranscriptStream) Wait(ctx context.Context) {
 	f, next := s.tail, s.next
 	if f == nil {

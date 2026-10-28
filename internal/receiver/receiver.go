@@ -612,7 +612,6 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 		}
 		var failure wire.StartFailure
 		if err != nil && history(record.Value, peers, &failure) == nil {
-			// Like a status, a start failure binds its run's tenant through the task hash.
 			failure, err := admin.AuthorizeStartFailure(history, state, peers, record.Value, r.config.Pool, failure.Wherry.Tenant)
 			if err == nil && failure.Wherry.Run == run && failure.Wherry.Receiver == r.id {
 				events.startFailures[run] = append(events.startFailures[run], failure)
@@ -642,7 +641,7 @@ func (events poolEvents) committedTerminal(run, taskHash string) bool {
 	})
 }
 
-// failedHere reports a start failure for the task record hash.
+// failedHere reports a start failure for the task record hash, which binds the failure to its run's tenant.
 func failedHere(failures []wire.StartFailure, hash string) bool {
 	return slices.ContainsFunc(failures, func(failure wire.StartFailure) bool { return failure.TaskHash == hash })
 }
