@@ -75,3 +75,29 @@ jobs:
       - name: Show ceph-aio's log
         if: failure()
         run: docker logs --tail 200 wherry-ceph-aio
+
+  # The broker job's suites on a three-node cluster (test/kafka/up-cluster.sh), where the multi-broker tests also run.
+  broker-cluster:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            pluginsdk/go.sum
+      - name: Start a three-broker Kafka cluster
+        run: test/kafka/up-cluster.sh "$RUNNER_TEMP/kafka"
+      # One package at a time: the packages share the cluster's wherry.admin and wherry.receivers.
+      - name: Run the real-broker tests
+        run: |
+          . "$RUNNER_TEMP/kafka/env"
+          go test -p 1 -count=1 -timeout 30m ./internal/admin/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
+      - name: Show the brokers' logs
+        if: failure()
+        run: for node in 1 2 3; do docker logs --tail 200 "wherry-kafka-$node"; done
