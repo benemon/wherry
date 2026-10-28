@@ -3,7 +3,6 @@ package admin
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -14,14 +13,12 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math"
 	"os"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -799,13 +796,9 @@ func (service *Service) checkLimits(ctx context.Context, state State, pool strin
 	if err != nil {
 		return 0, err
 	}
-	feed, err := largestRecords()
-	if err != nil {
-		return 0, err
-	}
-	for _, record := range feed {
-		if size := batchSize(record.value); size > feeds {
-			return 0, fmt.Errorf("%s record is %d bytes, over the %d-byte record limit", record.name, size, feeds)
+	for _, record := range feedRecords {
+		if record.batch > feeds {
+			return 0, fmt.Errorf("%s record is %d bytes, over the %d-byte record limit", record.name, record.batch, feeds)
 		}
 	}
 	return tasks, nil
@@ -857,100 +850,16 @@ func (service *Service) recordLimits(ctx context.Context, state State, pool stri
 	return tasks, feeds, nil
 }
 
-// largestKey is the longest run ID, which keys submissions and output chunks.
-var largestKey = strings.Repeat("r", 63)
-
-// batchSize is the size of a record batch holding value alone under largestKey: a v2 batch's 61-byte header and at
-// most 36 bytes of one record's varint framing.
-func batchSize(value []byte) int64 {
-	return int64(61 + 36 + len(largestKey) + len(value))
-}
-
-// feedRecord is a receiver record at its largest, as a refusal names it.
-type feedRecord struct {
+// feedRecords are the largest bounded records a receiver writes to a feed, as a refusal names them, each with the size
+// of a record batch holding it alone, signed. TestFeedRecordsArePinned builds and signs each record to pin these.
+var feedRecords = []struct {
 	name  string
-	value []byte
-}
-
-// largestRecords signs, with a throwaway key, the largest bounded records a receiver writes to a feed. Fields with no
-// bound are left empty.
-func largestRecords() ([]feedRecord, error) {
-	_, key, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		return nil, err
-	}
-	name, run, hash := strings.Repeat("n", 32), largestKey, strings.Repeat("0", 64)
-	pointers := make([]wire.Part, wire.MaxParts)
-	pointer, _ := json.Marshal(wire.PointerMetadata{SHA256: hash, Size: math.MaxInt64}) // a string and an integer always encode
-	for i := range pointers {
-		pointers[i] = wire.Part{URL: "unstored:input", Filename: fmt.Sprintf("%0255d", i), Metadata: pointer}
-	}
-	message := wire.Message{MessageID: "msg-" + strings.Repeat("0", 32), ContextID: run, TaskID: run, Role: wire.RoleUser, Extensions: []string{wire.ExtensionURI}}
-	binding := wire.ReceiverBinding{Receiver: name, Tenant: name, Pool: name, Run: run, Attempt: math.MaxInt64}
-	outputName := strings.Repeat("a/", 255) + "aa"
-	// A result lists at most 256 collected entries and the expected outputs missing among them. An S3 output is an
-	// expected one, listed with its key, so a result returning 256 of them misses none.
-	metadata, s3Metadata := wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name}, wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name}
-	for range wire.MaxOutputs {
-		metadata.Outputs = append(metadata.Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64})
-		metadata.NotReturned = append(metadata.NotReturned, wire.UnreturnedOutput{Name: outputName, Size: math.MaxInt64, Reason: "rejected: size changed while read"})
-		s3Metadata.S3Outputs = append(s3Metadata.S3Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64, Key: wire.S3OutputKey(name, run, outputName)})
-	}
-	encodedMetadata, err := json.Marshal(metadata)
-	if err != nil {
-		return nil, err
-	}
-	encodedS3Metadata, err := json.Marshal(s3Metadata)
-	if err != nil {
-		return nil, err
-	}
-	history := message
-	history.Parts = pointers
-	result := func(metadata []byte) *wire.Result {
-		return &wire.Result{
-			Task: wire.Task{
-				ID: run, ContextID: run, History: []wire.Message{history}, Metadata: metadata,
-				Status: wire.TaskStatus{State: wire.TaskStateAuthRequired, Timestamp: "2006-01-02T15:04:05.000Z", Message: &wire.Message{
-					MessageID: "msg-" + strings.Repeat("0", 32), Role: wire.RoleAgent, Extensions: []string{wire.ExtensionURI}, Parts: []wire.Part{
-						{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}, {Data: []byte(`{"credential":"` + name + `"}`), MediaType: "application/json"},
-					},
-				}},
-				Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}}, Extensions: []string{wire.ExtensionURI}}},
-			},
-			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
-		}
-	}
-	records := []struct {
-		name  string
-		value wire.Record
-	}{
-		{"an output chunk", &wire.Output{
-			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
-				TaskID: run, ContextID: run, Append: true, LastChunk: true, Metadata: []byte(`{"index":9223372036854775807}`),
-				Artifact: wire.Artifact{ArtifactID: outputName, Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.OutputChunk)}}, Extensions: []string{wire.ExtensionURI}},
-			},
-			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
-		}},
-		// Receiver texts are names and fixed words, which JSON does not escape; an agent's text that it would travels raw.
-		{"a result", result(encodedMetadata)},
-		{"a result returning S3 outputs", result(encodedS3Metadata)},
-		{"a transcript chunk", &wire.Chunk{
-			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
-				TaskID: run, ContextID: run, Append: true, LastChunk: true,
-				Artifact: wire.Artifact{ArtifactID: "transcript", Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.MaxLine), MediaType: "application/x-ndjson"}}, Extensions: []string{wire.ExtensionURI}},
-			},
-			Wherry: wire.ChunkBinding{ReceiverBinding: binding, TaskHash: hash, Seq: math.MaxInt64},
-		}},
-	}
-	feed := make([]feedRecord, len(records))
-	for i, record := range records {
-		value, err := wire.SignRecord(record.value, key)
-		if err != nil {
-			return nil, fmt.Errorf("sign %s: %w", record.name, err)
-		}
-		feed[i] = feedRecord{record.name, value}
-	}
-	return feed, nil
+	batch int64
+}{
+	{"an output chunk", 468119},
+	{"a result", 792953},
+	{"a result returning S3 outputs", 805563},
+	{"a transcript chunk", 933508},
 }
 
 func createBundle(path string) (*os.File, error) {
