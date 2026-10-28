@@ -1,7 +1,10 @@
 package client
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"log"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -251,5 +254,75 @@ func TestTranscriptStreamOfAnAdoptedRun(t *testing.T) {
 	}
 	if want := []line{{1, 0}, {1, 5}, {2, 10}, {2, 15}, {2, 20}}; !slices.Equal(view, want) {
 		t.Fatalf("transcript %v, want %v", view, want)
+	}
+}
+
+// A stream followed as watch follows it, Next after each Wait, from before the run's echo, fetches each transcript
+// record once and returns each line within one fetch wait of its commit.
+func TestTranscriptStreamTailsTheTopic(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	runID := f.submit(t, defaultSelector()).RunID
+	task := receiver.claim(t, f.ctx, runID)[0]
+	topic := admin.TenantTranscriptTopic("tenant-a")
+	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
+	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-tail", bundle); err != nil {
+		t.Fatal(err)
+	}
+	// Long enough that a line returned before it ends came from a fetch the commit woke.
+	const fetchWait = 2 * time.Second
+	var counted traffic
+	kafka, principal := f.connect(t, bundle, kgo.WithHooks(&counted), kgo.FetchMaxWait(fetchWait))
+	host, err := NewHost(kafka, f.host.key, principal, f.host.stateDir, nil, nil, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(host.Close)
+	ctx, cancel := context.WithCancel(f.ctx)
+	stream := host.StreamTranscript(runID)
+	if got, err := stream.Next(f.ctx); err != nil || len(got.Lines) != 0 {
+		t.Fatalf("before the echo the stream returned %+v, %v; want nothing", got.Lines, err)
+	}
+	lines := make(chan TranscriptLine, 16)
+	followed := make(chan struct{})
+	go func() {
+		defer close(followed)
+		for ctx.Err() == nil {
+			if got, err := stream.Next(ctx); err == nil {
+				for _, line := range got.Lines {
+					lines <- line
+				}
+			}
+			stream.Wait(ctx)
+		}
+	}()
+	receiver.feed(t, f.ctx, runID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+	const chunks = 8
+	var slowest time.Duration
+	for i := range int64(chunks) {
+		written := time.Now()
+		receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, i*5))
+		select {
+		case line := <-lines:
+			waited := time.Since(written)
+			slowest = max(slowest, waited)
+			if line.Seq != i*5 || waited >= fetchWait {
+				t.Fatalf("line %d at %d after %v; want the line at %d within %v", i, line.Seq, waited, i*5, fetchWait)
+			}
+		case <-time.After(5 * fetchWait):
+			t.Fatalf("line %d not returned", i)
+		}
+	}
+	cancel()
+	<-followed
+	end := f.endOffset(t, topic)
+	t.Logf("tail: %d chunks fetched %d of %d transcript records in %d fetch requests and %d listings; slowest line %v", chunks, counted.records(topic), end, counted.counts().fetches, counted.counts().listings, slowest)
+	if n := counted.records(topic); n != end {
+		t.Fatalf("%d chunks fetched %d transcript records; want each of the %d once", chunks, n, end)
+	}
+	// A Next lists the transcript topic's end once for each wake, a chunk and its commit marker at most two.
+	if n := counted.counts().listings; n > 4*chunks {
+		t.Fatalf("%d chunks took %d listings; want at most %d", chunks, n, 4*chunks)
 	}
 }

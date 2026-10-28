@@ -139,6 +139,8 @@ type runView struct {
 	unread int
 	// reread holds the kids whose owner's key topic has been re-read, which bounds re-reads to one per key.
 	reread map[string]bool
+	// fed is the feed offset past the records history read.
+	fed int64
 
 	binding  binding
 	statuses []*wire.RunStatus
@@ -371,13 +373,14 @@ func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
 	h.followMu.Unlock()
 	var v view
 	var records []*kgo.Record
+	var fed int64
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() (err error) {
 		v, err = h.load(groupCtx)
 		return err
 	})
 	group.Go(func() (err error) {
-		records, _, err = h.readFeed(groupCtx, f, local.feedOffset())
+		records, fed, err = h.readFeed(groupCtx, f, local.feedOffset())
 		return err
 	})
 	if err := group.Wait(); err != nil {
@@ -391,6 +394,7 @@ func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
 		}
 	}
 	r := newRunView(h, v, runID, local)
+	r.fed = fed
 	r.read(ctx, keyed)
 	return r, nil
 }
@@ -400,7 +404,7 @@ func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
 // once the run has an outcome it reads to a last stable offset at or past the topic's end, listed after the outcome was
 // seen.
 func (r *runView) readTranscript(ctx context.Context) error {
-	offset, echoed, err := r.transcriptStart(ctx)
+	_, offset, echoed, err := r.transcriptStart(ctx)
 	if err != nil || !echoed {
 		return err
 	}
@@ -439,9 +443,9 @@ func (r *runView) readTranscript(ctx context.Context) error {
 	return nil
 }
 
-// transcriptStart lists the first offset of the tenant's transcript topic appended at or after the run's earliest
-// echo, reporting false while the run has no echo.
-func (r *runView) transcriptStart(ctx context.Context) (int64, bool, error) {
+// transcriptStart lists the partition and first offset of the tenant's transcript topic appended at or after the run's
+// earliest echo, reporting false while the run has no echo.
+func (r *runView) transcriptStart(ctx context.Context) (int32, int64, bool, error) {
 	var echoed time.Time
 	for _, e := range r.entries {
 		if e.echo != nil && (echoed.IsZero() || e.at.Before(echoed)) {
@@ -450,21 +454,22 @@ func (r *runView) transcriptStart(ctx context.Context) (int64, bool, error) {
 	}
 	// No receiver writes a run's chunks before its echo.
 	if echoed.IsZero() {
-		return 0, false, nil
+		return 0, 0, false, nil
 	}
 	listing, err := r.h.reader.Admin()
 	if err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
 	starts, err := admin.ListOffsets(ctx, func(ctx context.Context, topics ...string) (kadm.ListedOffsets, error) {
 		return listing.ListOffsetsAfterMilli(ctx, echoed.Add(-transcriptSkew).UnixMilli(), topics...)
 	}, admin.TenantTranscriptTopic(r.h.tenant))
 	if err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
+	var partition int32
 	var offset int64
-	starts.Each(func(listed kadm.ListedOffset) { offset = listed.Offset })
-	return offset, true, nil
+	starts.Each(func(listed kadm.ListedOffset) { partition, offset = listed.Partition, listed.Offset })
+	return partition, offset, true, nil
 }
 
 // addTranscript keeps the run's records among records read from the transcript topic.
@@ -484,8 +489,8 @@ const transcriptRetry = 50 * time.Millisecond
 // topics can have different leaders, each with its own clock. A variable so tests can measure the window exactly.
 var transcriptSkew = time.Minute
 
-// follower reads the tenant feed from start until the context it was started with ends. Its records are unverified:
-// each reader verifies them against the state it loads.
+// follower reads a topic's one partition from start until the context it was started with ends. Its records are
+// unverified: each reader verifies them against the state it loads.
 type follower struct {
 	ctx     context.Context
 	start   int64
@@ -540,6 +545,16 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 	}
 	// Below the log start the follower's read position never reaches the committed end.
 	starts.Each(func(logStart kadm.ListedOffset) { start = max(start, logStart.Offset) })
+	f, err := h.tail(ctx, topic, partition, start)
+	if err != nil {
+		return nil, err
+	}
+	h.follower = f
+	return f, nil
+}
+
+// tail starts a follower of topic's partition from start under ctx.
+func (h *Host) tail(ctx context.Context, topic string, partition int32, start int64) (*follower, error) {
 	reader, err := kgo.NewClient(append(slices.Clone(h.kafka.Opts()), kgo.FetchIsolationLevel(kgo.ReadCommitted()), kgo.KeepControlRecords(), kgo.DisableClientMetrics(),
 		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: {partition: kgo.NewOffset().At(start)}}))...)
 	if err != nil {
@@ -557,7 +572,7 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 			err := fetches.Err()
 			if err != nil && err.Error() != logged {
 				logged = err.Error()
-				h.logger.Printf("follow the tenant feed: %v", err)
+				h.logger.Printf("follow %s: %v", topic, err)
 			}
 			f.mu.Lock()
 			read := f.read
@@ -575,7 +590,6 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 			f.mu.Unlock()
 		}
 	}()
-	h.follower = f
 	return f, nil
 }
 
@@ -588,11 +602,15 @@ func (f *follower) from(offset int64) ([]*kgo.Record, int64, <-chan struct{}, er
 	return f.records[i:], f.read, f.woken, f.err
 }
 
-// readFeed returns the tenant feed's records from offset up to at least its committed end, listed first, and the offset
-// that follows them. It takes them from f while f runs, if f started at or below offset, and reads them once otherwise
-// or when f's fetches fail.
+// readFeed returns the tenant feed's records from offset as readFollowed does.
 func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.Record, int64, error) {
-	topic := admin.TenantTopic(h.tenant)
+	return h.readFollowed(ctx, f, admin.TenantTopic(h.tenant), offset)
+}
+
+// readFollowed returns topic's records from offset up to at least its committed end, listed first, and the offset that
+// follows them. It takes them from f, a follower of topic, while f runs, if f started at or below offset, and reads them
+// once otherwise or when f's fetches fail.
+func (h *Host) readFollowed(ctx context.Context, f *follower, topic string, offset int64) ([]*kgo.Record, int64, error) {
 	if f != nil && f.start <= offset && f.ctx.Err() == nil {
 		listing, err := h.reader.Admin()
 		if err != nil {
@@ -914,17 +932,20 @@ func (r *runView) transcript(returned map[[2]int64]bool) TranscriptResult {
 	return result
 }
 
-// TranscriptStream follows a run's transcript, reading the transcript topic on from where its last read ended.
+// TranscriptStream follows a run's transcript with one consumer on the transcript topic, from the first offset
+// appended at or after the run's earliest echo, and updates the run's history from the host's follower of the feed.
 type TranscriptStream struct {
 	h   *Host
 	run string
-	// next is the transcript topic offset the next read starts at, once started.
-	next    int64
-	started bool
-	// entries are the run's records authorised from the transcript topic so far, and unread those it read keyed by
-	// the run that authorise as none of its records.
-	entries []entry
-	unread  int
+	// r is the run as derived once from its feed history and updated from the records taken since.
+	r *runView
+	// feed is the follower the run's feed records come from, and fed the feed offset past those taken.
+	feed *follower
+	fed  int64
+	// tail is the consumer on the transcript topic once the run has an echo, and next the offset past the records
+	// taken from it.
+	tail *follower
+	next int64
 	// returned holds the attempt and seq of each line Next has returned.
 	returned map[[2]int64]bool
 }
@@ -935,33 +956,83 @@ func (h *Host) StreamTranscript(runID string) *TranscriptStream {
 }
 
 // Next returns, in seq order, the lines of the run's transcript that Transcript would return now and no earlier Next
-// returned. It derives the run from its feed history again but reads only the transcript topic's records past the
-// last read, from the first offset after the run's echo, listed once. A line of an earlier attempt that a later
-// attempt has since superseded stays returned; Transcript's view drops it.
+// returned. The stream's consumer, and the host's follower when none runs, run under the ctx of the Next that starts
+// them. A line of an earlier attempt that a later attempt has since superseded stays returned; Transcript's view drops
+// it.
 func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
-	r, err := s.h.history(ctx, s.run)
-	if err != nil {
-		return TranscriptResult{}, err
+	if s.r == nil {
+		f, err := s.h.follow(ctx)
+		if err != nil {
+			return TranscriptResult{}, err
+		}
+		if s.r, err = s.h.history(ctx, s.run); err != nil {
+			return TranscriptResult{}, err
+		}
+		s.feed, s.fed = f, s.r.fed
+	} else {
+		records, read, _, _ := s.feed.from(s.fed)
+		if s.feed.ctx.Err() != nil {
+			// The follower's owner stopped it; another follower, perhaps from a later offset, takes over.
+			f, err := s.h.follow(ctx)
+			if err != nil {
+				return TranscriptResult{}, err
+			}
+			if records, read, err = s.h.readFeed(ctx, f, s.fed); err != nil {
+				return TranscriptResult{}, err
+			}
+			s.feed = f
+		}
+		var keyed []*kgo.Record
+		for _, record := range records {
+			if string(record.Key) == s.run {
+				keyed = append(keyed, record)
+			}
+		}
+		s.fed = max(s.fed, read)
+		s.r.read(ctx, keyed)
 	}
-	if r.pool == "" {
+	if s.r.pool == "" {
 		return TranscriptResult{}, fmt.Errorf("transcript %s: %w", s.run, ErrRunNotFound)
 	}
-	if !s.started {
-		if s.next, s.started, err = r.transcriptStart(ctx); err != nil || !s.started {
-			return TranscriptResult{Redacted: map[string]int{}, Skipped: r.skipped}, err
+	topic := admin.TenantTranscriptTopic(s.h.tenant)
+	if s.tail == nil {
+		partition, offset, echoed, err := s.r.transcriptStart(ctx)
+		if err != nil || !echoed {
+			return TranscriptResult{Redacted: map[string]int{}, Skipped: s.r.skipped}, err
 		}
+		if s.tail, err = s.h.tail(ctx, topic, partition, offset); err != nil {
+			return TranscriptResult{}, err
+		}
+		s.next = offset
 	}
-	records, stable, err := s.h.reader.ReadFromWithEnd(ctx, admin.TenantTranscriptTopic(s.h.tenant), s.next)
+	records, read, err := s.h.readFollowed(ctx, s.tail, topic, s.next)
 	if err != nil {
 		return TranscriptResult{}, err
 	}
-	kept, unread := len(r.entries), r.unread
-	r.entries, r.unread = append(r.entries, s.entries...), r.unread+s.unread
-	r.addTranscript(ctx, records)
-	s.entries, s.unread = slices.Clone(r.entries[kept:]), r.unread-unread
-	s.next = max(s.next, stable)
-	r.derive()
-	return r.transcript(s.returned), nil
+	s.next = max(s.next, read)
+	s.r.addTranscript(ctx, records)
+	s.r.derive()
+	return s.r.transcript(s.returned), nil
+}
+
+// Wait returns once the stream's consumer reads past the records Next last took, before the run has an echo once the
+// feed's follower does, once that follower or consumer stops, or once ctx ends; at once before a Next has read the
+// run's history.
+func (s *TranscriptStream) Wait(ctx context.Context) {
+	f, next := s.tail, s.next
+	if f == nil {
+		f, next = s.feed, s.fed
+	}
+	if f == nil {
+		return
+	}
+	if _, read, woken, _ := f.from(next); read <= next {
+		select {
+		case <-woken:
+		case <-f.ctx.Done():
+		case <-ctx.Done():
+		}
+	}
 }
 
 // Await follows the tenant feed until the run has an outcome, answering seal requests while it waits.
