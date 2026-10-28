@@ -169,6 +169,15 @@ func toolFailure(err error) error {
 	return &toolError{Code: "UNAVAILABLE", Message: "the wherry bus could not complete the request; the wherry CLI reports the cause"}
 }
 
+// collectFailure names the Collect step err failed in, without its cause, whose text can name local paths.
+func collectFailure(err error) error {
+	message := "the run's results could not be collected; the MCP server's log holds the cause"
+	if failed := (*busclient.CollectError)(nil); errors.As(err, &failed) {
+		message = failed.Step + ": " + message
+	}
+	return &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: message}
+}
+
 type receiversInput struct{}
 
 type receiversOutput struct {
@@ -458,10 +467,9 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		}
 		collected, err := client.Collect(ctx, input.ID, result, "")
 		if err != nil {
-			// The model sees the step Collect names first; the server's log keeps the cause.
+			// The model sees the step that failed; the server's log keeps the cause.
 			logger.Print("tool failed: " + busclient.Redact(err.Error()))
-			step, _, _ := strings.Cut(err.Error(), ": ")
-			return nil, watchReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: step + ": the run's results could not be collected; the MCP server's log holds the cause"}
+			return nil, watchReply{}, collectFailure(err)
 		}
 		for _, written := range collected.Outputs {
 			output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: written.Path, SHA256: written.SHA256, Size: written.Size})

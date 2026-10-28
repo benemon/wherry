@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
-	"fmt"
 	"slices"
 
 	"github.com/benemon/wherry/internal/wire"
@@ -24,8 +23,19 @@ type Collected struct {
 	Rejected []wire.UnreturnedOutput
 }
 
+// CollectError is the step of Collect that failed: "write outputs", "S3 outputs" or "write transcript".
+type CollectError struct {
+	Step string
+	Err  error
+}
+
+func (e *CollectError) Error() string { return e.Step + ": " + e.Err.Error() }
+
+func (e *CollectError) Unwrap() error { return e.Err }
+
 // Collect writes a run's verified outputs, S3 ones through DownloadOutputs, and its transcript.jsonl beneath dir, by
-// default <state_dir>/runs/<run>/outputs. A run whose queue deadline passed unclaimed has nothing collected.
+// default <state_dir>/runs/<run>/outputs. A run whose queue deadline passed unclaimed has nothing collected. Its error
+// is a *CollectError.
 func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, dir string) (Collected, error) {
 	var collected Collected
 	if result.Unclaimed != "" {
@@ -34,7 +44,7 @@ func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, di
 	if len(result.Outputs) > 0 {
 		paths, err := h.WriteOutputs(runID, dir, result.Outputs)
 		if err != nil {
-			return Collected{}, fmt.Errorf("write outputs: %w", err)
+			return Collected{}, &CollectError{Step: "write outputs", Err: err}
 		}
 		for i, output := range result.Outputs {
 			output.Path = paths[i]
@@ -43,12 +53,12 @@ func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, di
 	}
 	downloaded, rejected, err := h.DownloadOutputs(ctx, runID, result, dir)
 	if err != nil {
-		return Collected{}, fmt.Errorf("S3 outputs: %w", err)
+		return Collected{}, &CollectError{Step: "S3 outputs", Err: err}
 	}
 	collected.Outputs = append(collected.Outputs, downloaded...)
 	collected.Rejected = slices.Concat(result.Rejected, rejected)
 	if collected.Transcript, collected.Lines, err = h.writeTranscript(ctx, runID, dir); err != nil {
-		return Collected{}, fmt.Errorf("write transcript: %w", err)
+		return Collected{}, &CollectError{Step: "write transcript", Err: err}
 	}
 	return collected, nil
 }
