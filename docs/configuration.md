@@ -23,7 +23,7 @@ in every path.
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
 readable by its owner alone, with `redaction_key`, the run's redaction key,
 made when this host submits the run, `runs/<run>/outputs/` for the outputs
-`await` writes by default, and `answered/<run>.<attempt>` for each attempt
+`watch` writes by default, and `answered/<run>.<attempt>` for each attempt
 it answered, with a `.lock` beside it that every process sharing the
 directory holds while it answers that attempt. `submit` writes the run's
 record before it publishes the task, and removes it when publishing

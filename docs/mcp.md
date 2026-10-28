@@ -8,17 +8,18 @@ defaults, `2h` and `10m`.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline`, `queue_deadline` | `id`, `pool`, `await` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline`, `queue_deadline` | `id`, `pool`, `watch` |
 | `status` | `id`, optional | `runs`, `skipped` |
-| `await` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `transcript`, `redacted`, `skipped` |
+| `watch` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `transcript`, `redacted`, `skipped` |
 | `cancel` | `id` | `id`, `skipped` |
 | `events` | `id` | `id`, `events`, `transcripts`, `redacted`, `skipped` |
 | `transcript` | `id`, `offset`, `limit` | `id`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
 | `cleanup` | `id` | `id` |
 
-- `submit` returns `await`, the shell command that waits for
-  the run, `wherry await ID`, with `--config-file` and the server's absolute
-  configuration path when the server was started with one.
+- `submit` returns `watch`, the shell command that waits for
+  the run and prints its reply, `wherry watch ID --result-only`, with
+  `--config-file` and the server's absolute configuration path when the
+  server was started with one.
 - `submit` requires exactly one of `prompt` and `prompt_file`, a file path read
   as an input is; an empty file fails with `prompt_file is empty`.
   `model` is as `--model` takes it, and a model outside the agent's `models`
@@ -47,24 +48,26 @@ defaults, `2h` and `10m`.
   the RFC 3339 time of the latest status. While the run has none, it is this
   host's submission of the run when its record holds one, else the Kafka
   timestamp of the run's echo.
-- `await` waits up to 45 seconds. It returns the outcome with `message`, the
-  status message's parts as `wherry await` prints them, and `artifacts`, or, while the run is unfinished, its current `state` with
+- `watch` waits up to 45 seconds. It returns the outcome with `message`, the
+  status message's parts as `wherry watch --result-only` prints them, and `artifacts`, or, while the run is unfinished, its current `state` with
   `retry_after` set to 5. For a run whose queue deadline passes with no
   status from a receiver, it returns at once with `state`
   `TASK_STATE_SUBMITTED`, the `message` `status` gives, and no
   `retry_after`. With a progress token it sends a progress notification
   every 5 seconds. Each artifact is `{artifact_id, parts}`, and each part has
   one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which
-  is not included), with `media_type`. `await` writes the run's verified
-  outputs as `wherry await` does, to the default outputs directory, and returns
+  is not included), with `media_type`. `watch` writes the run's verified
+  outputs as `wherry watch` does, to the default outputs directory, and returns
   each in `outputs` as `{name, path, sha256, size}`, S3 outputs included, which
-  it downloads and verifies, then deletes the run's prefix, as `wherry await`
+  it downloads and verifies, then deletes the run's prefix, as `wherry watch`
   does. `not_returned` holds `{name, size, reason}` for each output the result
   lists as not returned and each one that fails verification. `transcript` is
-  the path of the `transcript.jsonl` it writes as `wherry await` does. `model`
-  is the run's placement's model.
-- `status`, `await`, `events` and `transcript` show each redaction marker as
-  `wherry status` and `wherry await` print it, and `redacted` maps each name
+  the path of the `transcript.jsonl` it writes as `wherry watch` does. For a
+  run whose queue deadline passed unclaimed it writes nothing. `model`
+  is the run's placement's model. The `watch` tool does not stream the
+  transcript; `transcript` pages it.
+- `status`, `watch`, `events` and `transcript` show each redaction marker as
+  `wherry status` and `wherry watch` print it, and `redacted` maps each name
   to the number of its markers in the messages, the artifacts, or every line
   of the transcript's attempt.
 - `submit` checks its arguments before it connects to the bus.
@@ -103,7 +106,7 @@ error text from the bus, the broker or the host key.
 | `INVALID_ARGUMENT` | an input is missing or malformed; the message names the rule it breaks |
 | `RUN_NOT_FOUND` | this host has not submitted the run and no receiver has admitted it |
 | `NO_MATCHING_RECEIVER` | no live receiver of an entitled pool can take the agent and selector |
-| `OUTPUTS_NOT_WRITTEN` | the run's verified outputs could not be written to the state directory, or its S3 outputs downloaded, or the run's prefix deleted |
+| `OUTPUTS_NOT_WRITTEN` | the run's verified outputs could not be written, its S3 outputs downloaded or the run's prefix deleted, or its transcript written; the message starts with the step, `write outputs`, `S3 outputs` or `write transcript`, and the server writes the cause to standard error |
 | `CANCELLED` | the request was cancelled |
 | `VERSION_SKEW` | `wherry.admin` holds records a later release wrote; upgrade `wherry` and restart the MCP server |
 | `UNAVAILABLE` | any other failure; the server writes its cause to standard error, which the harness keeps in its MCP server log, and the CLI reports it too |

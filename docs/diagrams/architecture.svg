@@ -45,7 +45,7 @@
     <text x="387" y="148" text-anchor="middle" font-weight="600">Harness integration</text>
     <text x="387" y="167" text-anchor="middle" font-size="10.5" fill="#2e4a35">tools and a skill</text>
     <text x="387" y="182" text-anchor="middle" font-size="10.5" fill="#2e4a35">in the agent's harness</text>
-    <text x="387" y="197" text-anchor="middle" font-size="10.5" fill="#2e4a35">submit, await, cancel</text>
+    <text x="387" y="197" text-anchor="middle" font-size="10.5" fill="#2e4a35">submit, watch, cancel</text>
 
     <rect x="502" y="124" width="170" height="84" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="587" y="148" text-anchor="middle" font-weight="600">Placement</text>
