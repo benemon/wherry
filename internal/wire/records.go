@@ -326,6 +326,9 @@ const (
 	EchoType   = "application/vnd.wherry.echo.v1+jws"
 )
 
+// StartFailureType is the JWS type of a start failure, which a pool events reader routes each record by.
+const StartFailureType = "application/vnd.wherry.start-failure.v1+jws"
+
 func (*Submission) jwsType() string    { return "application/vnd.wherry.submission.v1+jws" }
 func (*Cancel) jwsType() string        { return "application/vnd.wherry.cancel.v1+jws" }
 func (*RunStatus) jwsType() string     { return StatusType }
@@ -334,7 +337,7 @@ func (*Result) jwsType() string        { return ResultType }
 func (*Output) jwsType() string        { return OutputType }
 func (*Echo) jwsType() string          { return EchoType }
 func (*Advertisement) jwsType() string { return "application/vnd.wherry.advertisement.v1+jws" }
-func (*StartFailure) jwsType() string  { return "application/vnd.wherry.start-failure.v1+jws" }
+func (*StartFailure) jwsType() string  { return StartFailureType }
 func (*SealRequest) jwsType() string   { return SealRequestType }
 
 func (value *Submission) owner() string {

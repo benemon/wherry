@@ -24,10 +24,14 @@ import (
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
+
+// parseHistory is wire.ParseHistory, swapped by tests that count the verifications of a read.
+var parseHistory = wire.ParseHistory
 
 // ErrConfigChanged is returned by Run when wherry.admin holds a configuration other than the one it started with.
 var ErrConfigChanged = errors.New("receiver configuration changed")
@@ -506,6 +510,17 @@ func kid(encoded []byte) (string, string, bool) {
 	return strings.Cut(protected.KID, "/")
 }
 
+// recordType returns the record type encoded's JWS header names, unverified and empty when encoded is no
+// single-signature JWS.
+func recordType(encoded []byte) string {
+	jws, err := jose.ParseSignedCompact(string(encoded), []jose.SignatureAlgorithm{jose.EdDSA})
+	if err != nil || len(jws.Signatures) != 1 {
+		return ""
+	}
+	typ, _ := jws.Signatures[0].Protected.ExtraHeaders[jose.HeaderType].(string)
+	return typ
+}
+
 // advertise sweeps each profile, then publishes one offer per ready profile with its agent; with none ready it
 // publishes no offers and keeps its liveness and capacity visible. Each profile call has one advertise
 // interval, so a hung plugin delays the next advertisement by at most that much per call.
@@ -599,36 +614,53 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	seen := map[string]bool{}
 	for _, record := range records {
 		run := string(record.Key)
-		var named wire.RunStatus
-		history := wire.ParseHistory(record.Timestamp)
-		err := history(record.Value, peers, &named)
+		history := parseHistory(record.Timestamp)
+		// The JWS type picks the one parse a record gets; the parse checks the type again under the signature. parseErr
+		// tells a record that does not verify, kept for the cancel check, from one that verifies and is refused.
+		var status wire.RunStatus
+		var failure wire.StartFailure
+		var parseErr error
+		typ := recordType(record.Value)
+		authorize := func(peers signed.Keys) error {
+			parse := func(encoded []byte, keys signed.Keys, value wire.Record) error {
+				parseErr = history(encoded, keys, value)
+				return parseErr
+			}
+			var err error
+			switch typ {
+			case wire.StatusType:
+				status, err = admin.AuthorizePoolStatus(parse, state, peers, record.Value, r.config.Pool)
+			case wire.StartFailureType:
+				failure, err = admin.AuthorizePoolStartFailure(parse, state, peers, record.Value, r.config.Pool)
+			default:
+				parseErr = errors.New("record is neither a status nor a start failure")
+			}
+			return err
+		}
+		err := authorize(peers)
 		// A member that rotated its key since the last refresh is re-read once per read of the topic.
-		if owner, topic, stale := staleKey(record.Value, peers, peerTopics); err != nil && stale && !reread[owner] {
+		if owner, topic, stale := staleKey(record.Value, peers, peerTopics); parseErr != nil && stale && !reread[owner] {
 			reread[owner] = true
 			if peers, err = r.rereadKey(ctx, &r.peers, owner, topic); err != nil {
 				return poolEvents{}, err
 			}
-			err = history(record.Value, peers, &named)
+			err = authorize(peers)
 		}
-		var failure wire.StartFailure
-		if err != nil && history(record.Value, peers, &failure) == nil {
-			failure, err := admin.AuthorizeStartFailure(history, state, peers, record.Value, r.config.Pool, failure.Wherry.Tenant)
-			if err == nil && failure.Wherry.Run == run && failure.Wherry.Receiver == r.id {
+		switch {
+		case parseErr != nil:
+			events.others[run] = append(events.others[run], record.Value)
+		case err != nil:
+			// A status or start failure that verifies but is not authorised counts for nothing.
+		case typ == wire.StartFailureType:
+			// A start failure binds its run's tenant through the task hash, which failedHere matches.
+			if failure.Wherry.Run == run && failure.Wherry.Receiver == r.id {
 				events.startFailures[run] = append(events.startFailures[run], failure)
 			}
-			continue
+		case status.Wherry.Run == run && !seen[status.Wherry.EventID]:
+			// A status binds its run's tenant through the task hash; the pool, membership and entitlement are checked here.
+			seen[status.Wherry.EventID] = true
+			events.statuses[run] = append(events.statuses[run], status)
 		}
-		if err != nil {
-			events.others[run] = append(events.others[run], record.Value)
-			continue
-		}
-		// A status binds its run's tenant through the task hash; the pool and membership are checked here.
-		status, err := admin.AuthorizeStatus(history, state, peers, record.Value, r.config.Pool, named.Wherry.Tenant)
-		if err != nil || status.Wherry.Run != run || seen[status.Wherry.EventID] {
-			continue
-		}
-		seen[status.Wherry.EventID] = true
-		events.statuses[run] = append(events.statuses[run], status)
 	}
 	return events, nil
 }

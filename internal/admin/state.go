@@ -364,6 +364,22 @@ func (state State) receiverRecord(binding wire.ReceiverBinding, placedPool, runT
 	return nil
 }
 
+// poolRecord checks a receiver record read with no run tenant, such as on a pool's events: it names the reader's
+// pool, comes from a live member of it, and declares a tenant entitled to it. The record binds its run's tenant
+// through the task hash, which the reader matches downstream.
+func (state State) poolRecord(binding wire.ReceiverBinding, pool string) error {
+	if binding.Pool != pool {
+		return errors.New("record names another pool than its reader")
+	}
+	if err := state.liveMember(binding.Receiver, pool); err != nil {
+		return err
+	}
+	if !state.Entitlements[binding.Tenant][pool] {
+		return errors.New("tenant is not entitled to the pool")
+	}
+	return nil
+}
+
 // AuthorizeSubmission accepts a submission that verifies against its host's
 // own key topic, from a live host of a tenant entitled to the pool whose topic
 // it arrived on.
@@ -414,6 +430,19 @@ func AuthorizeStatus(parse func([]byte, signed.Keys, wire.Record) error, state S
 	return status, nil
 }
 
+// AuthorizePoolStatus accepts a status from a live member of pool for a tenant entitled to it, for a reader of the
+// pool's events with no run tenant; the status binds its run's tenant through its task hash.
+func AuthorizePoolStatus(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, pool string) (wire.RunStatus, error) {
+	var status wire.RunStatus
+	if err := parse(encoded, keys, &status); err != nil {
+		return wire.RunStatus{}, err
+	}
+	if err := state.poolRecord(status.Wherry.ReceiverBinding, pool); err != nil {
+		return wire.RunStatus{}, err
+	}
+	return status, nil
+}
+
 // AuthorizeChunk accepts a transcript chunk from a live member of the run's placed pool.
 func AuthorizeChunk(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.Chunk, error) {
 	var chunk wire.Chunk
@@ -450,13 +479,14 @@ func AuthorizeOutput(parse func([]byte, signed.Keys, wire.Record) error, state S
 	return output, nil
 }
 
-// AuthorizeStartFailure accepts a start failure from a live member of the run's placed pool.
-func AuthorizeStartFailure(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.StartFailure, error) {
+// AuthorizePoolStartFailure accepts a start failure from a live member of pool for a tenant entitled to it, for a
+// reader of the pool's events with no run tenant; the failure binds its run's tenant through its task hash.
+func AuthorizePoolStartFailure(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, pool string) (wire.StartFailure, error) {
 	var failure wire.StartFailure
 	if err := parse(encoded, keys, &failure); err != nil {
 		return wire.StartFailure{}, err
 	}
-	if err := state.receiverRecord(failure.Wherry, placedPool, runTenant); err != nil {
+	if err := state.poolRecord(failure.Wherry, pool); err != nil {
 		return wire.StartFailure{}, err
 	}
 	return failure, nil
