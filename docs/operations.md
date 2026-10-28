@@ -644,6 +644,41 @@ Each runbook states what its rule counts and the threshold it fires at.
 Adjust a threshold or window in your copy of the rules to suit a pool's
 volume.
 
+#### A receiver that is not running
+
+The shipped rules match series a receiver's scrape target returns. When
+service discovery drops the target because the platform no longer runs
+the receiver, Prometheus marks the target's series
+[stale](https://prometheus.io/docs/prometheus/latest/querying/basics/#staleness)
+and they disappear, so `WherryReceiverNotAdvertising` has nothing to
+match. A target in `static_configs` stays, and its `up` of 0 fires the
+rule.
+
+The platform reports an absent receiver. `wherry-alerts.yaml` names
+wherry's series alone, so add these alerts to your own rule files:
+
+- [`absent_over_time`](https://prometheus.io/docs/prometheus/latest/querying/functions/#absent_over_time)
+  returns a series when no `wherry-receiver` target is left:
+  `absent_over_time(up{job="wherry-receiver"}[5m])`. It fires only once
+  every target of the job is gone, not for one receiver among several.
+- On Kubernetes,
+  [kube-state-metrics](https://github.com/kubernetes/kube-state-metrics/blob/main/docs/metrics/workload/deployment-metrics.md)
+  reports `kube_deployment_status_replicas_available` for the receiver's
+  Deployment.
+- On Nomad, the servers'
+  [telemetry](https://developer.hashicorp.com/nomad/docs/operations/metrics-reference)
+  reports `nomad_nomad_job_summary_running` for the receiver's job and task
+  group.
+- Under systemd, node_exporter's
+  [systemd collector](https://github.com/prometheus/node_exporter#disabled-by-default),
+  which is off by default, reports `node_systemd_unit_state` for the
+  receiver's unit.
+
+Each tells one receiver from the others where each runs as its own
+Deployment, job or unit. Link these alerts to the
+[WherryReceiverNotAdvertising](runbooks.md#wherryreceivernotadvertising)
+runbook.
+
 ## Revoke a host or receiver
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and

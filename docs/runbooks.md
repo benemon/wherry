@@ -30,6 +30,12 @@ for 5 minutes:
 - The process runs but has not read its configuration: `wherry_build_info`
   is served and `wherry_advertised_timestamp_seconds` is not.
 
+The rule does not fire for a receiver whose scrape target service
+discovery has dropped: the target's series go stale and disappear. The
+platform's series report that the receiver is not running, as in
+[A receiver that is not running](operations.md#a-receiver-that-is-not-running).
+An alert on them follows this runbook.
+
 Confirm it:
 
 1. Run `wherry receivers`. The receiver's `status` is `stale` or `silent`,
@@ -49,8 +55,9 @@ Confirm it:
 
 Then:
 
-- For a stopped process, check the supervisor and restart the receiver,
-  as in [Run a receiver](operations.md#run-a-receiver).
+- For a stopped process, or a receiver the platform no longer runs, check
+  the supervisor and restart the receiver, as in
+  [Run a receiver](operations.md#run-a-receiver).
 - For `waiting for configuration`, record the configuration, as in
   [Add a receiver](operations.md#add-a-receiver).
 - For write errors, follow [WherryBrokerUnreachable](#wherrybrokerunreachable).
