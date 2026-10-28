@@ -1466,6 +1466,27 @@ func TestCancelStopsADrainingRun(t *testing.T) {
 	}
 }
 
+// TestForceEndsADrain writes a forced configuration record while the receiver drains for an earlier change: the held
+// task is released at once.
+func TestForceEndsADrain(t *testing.T) {
+	f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: time.Minute}})
+	done, _ := holdRun(t, f)
+	config := testConfig(testReceiver)
+	config.Capacity = 2
+	f.appendConfig(t, config)
+	for !strings.Contains(f.logs.String(), "configuration changed") {
+		time.Sleep(50 * time.Millisecond)
+	}
+	config.Capacity, config.Force = 3, true
+	f.appendConfig(t, config)
+	if err := f.stopped(t, done, 10*time.Second); !errors.Is(err, ErrConfigChanged) {
+		t.Fatalf("Run returned %v, want ErrConfigChanged", err)
+	}
+	if _, delivered := f.pollPool(t, "run-a", 10*time.Second); !delivered {
+		t.Fatal("task not released after the forced change")
+	}
+}
+
 // TestStopDrainsWithinTheDrainTimeout cancels Run, as SIGTERM does, while it holds a run: a job that ends inside the
 // drain timeout completes, and one that outlasts it is released at the timeout.
 func TestStopDrainsWithinTheDrainTimeout(t *testing.T) {
