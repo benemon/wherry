@@ -452,16 +452,18 @@ meanwhile.
 The receiver ships with no plugins. Each plugin has its own
 [wherry-plugins releases](https://github.com/benemon/wherry-plugins/releases),
 tagged `<plugin>/<version>`, such as `nomad/<version>`. Each carries
-`wherry-plugin-<plugin>_<version>_linux_<arch>.tar.gz` for `amd64` and
-`arm64`, `checksums.txt` and `checksums.txt.sigstore.json`. Download the
+`wherry-plugin-<plugin>_<version>_<os>_<arch>.tar.gz` for `amd64` and
+`arm64`, `checksums.txt` and `checksums.txt.sigstore.json`. The `os` is
+`linux` for every plugin, and also `darwin` for the Nomad and Kubernetes
+plugins, which a receiver on macOS runs on its host. Download the
 archive and the checksums, verify the checksums' signature with
 [cosign](https://docs.sigstore.dev/cosign/system_config/installation/), check
 the archive against them, and extract the plugin:
 
 ```sh
-plugin=nomad version=<version> arch=amd64
+plugin=nomad version=<version> os=linux arch=amd64
 base=https://github.com/benemon/wherry-plugins/releases/download/$plugin/$version
-archive=wherry-plugin-${plugin}_${version}_linux_${arch}.tar.gz
+archive=wherry-plugin-${plugin}_${version}_${os}_${arch}.tar.gz
 curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
 cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
   --certificate-identity-regexp "^https://github\.com/benemon/wherry-plugins/\.github/workflows/release\.yml@refs/tags/$plugin/v" \
@@ -469,6 +471,8 @@ cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
 grep "  $archive\$" checksums.txt | sha256sum -c -
 tar -xzf "$archive" --strip-components=1 "${archive%.tar.gz}/wherry-plugin-$plugin"
 ```
+
+On macOS, `shasum -a 256 -c -` takes the place of `sha256sum -c -`.
 
 `gh attestation verify "$archive" -R benemon/wherry-plugins` verifies the
 archive's provenance attestation in place of the signature and checksum steps.
