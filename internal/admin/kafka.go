@@ -522,27 +522,17 @@ func (service *Service) configureTopicRetention(ctx context.Context, value strin
 }
 
 func (service *Service) configureTopics(ctx context.Context, values map[string]string, topics ...string) error {
-	request := kmsg.NewPtrIncrementalAlterConfigsRequest()
-	for _, topic := range topics {
-		resource := kmsg.NewIncrementalAlterConfigsRequestResource()
-		resource.ResourceType = kmsg.ConfigResourceTypeTopic
-		resource.ResourceName = topic
-		for name, value := range values {
-			config := kmsg.NewIncrementalAlterConfigsRequestResourceConfig()
-			config.Name = name
-			config.Value = &value
-			config.Op = kmsg.IncrementalAlterConfigOpSet
-			resource.Configs = append(resource.Configs, config)
-		}
-		request.Resources = append(request.Resources, resource)
+	var configs []kadm.AlterConfig
+	for name, value := range values {
+		configs = append(configs, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
 	}
-	response, err := service.Admin.Request(ctx, request)
+	responses, err := kadm.NewClient(service.Admin).AlterTopicConfigs(ctx, configs, topics...)
 	if err != nil {
 		return err
 	}
-	for _, resource := range response.(*kmsg.IncrementalAlterConfigsResponse).Resources {
-		if resource.ErrorCode != 0 {
-			return fmt.Errorf("configure topic %s: %w", resource.ResourceName, kerr.ErrorForCode(resource.ErrorCode))
+	for _, response := range responses {
+		if response.Err != nil {
+			return fmt.Errorf("configure topic %s: %w", response.Name, response.Err)
 		}
 	}
 	return nil
