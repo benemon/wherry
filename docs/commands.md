@@ -873,7 +873,8 @@ pool's terms do not name is `other`. `model` is the placement's model when the
 agent's `models` in the terms hold it, `other` when they do not, and empty for
 an agent with no `models`. A `state` outside the A2A task states is `other`.
 A run ended without a plugin profile, one given back at the delivery budget
-before any profile took it, has `profile="none"`.
+before any profile took it, has `profile="none"` in `wherry_runs_total` and
+`wherry_delivery_budget_exhausted_total`.
 
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
@@ -881,12 +882,15 @@ before any profile took it, has `profile="none"`.
 | `wherry_admissions_total` | counter | `tenant`, `profile` | tasks admitted, by the profile they were routed to |
 | `wherry_rejections_total` | counter | `tenant`, `reason` | rejections, by reason |
 | `wherry_runs_total` | counter | `tenant`, `profile`, `agent`, `model`, `state` | runs ended `completed`, `failed` or `canceled` |
+| `wherry_delivery_budget_exhausted_total` | counter | `tenant`, `profile` | runs ended `failed` with `delivery budget exhausted` |
 | `wherry_run_duration_seconds` | histogram | `tenant`, `profile`, `agent`, `model`, `state` | time from this attempt's claim to the run's terminal state; an adopted run counts the adopting attempt only |
 | `wherry_queue_wait_seconds` | histogram | `tenant`, `profile` | time from submission to first claim |
 | `wherry_adoptions_total` | counter | `tenant`, `profile` | runs that adopted an earlier attempt's job |
 | `wherry_redeliveries_total` | counter | `tenant`, `profile` | runs executed on a redelivery |
 | `wherry_in_flight` | gauge | `profile` | tasks held |
 | `wherry_capacity` | gauge | none | the configured capacity |
+| `wherry_runs_past_deadline` | gauge | `profile` | tasks held past their run's deadline that have not ended |
+| `wherry_advertised_timestamp_seconds` | gauge | none | Unix time of the latest advertisement Kafka acknowledged, 0 before the first |
 | `wherry_start_failures_total` | counter | `profile`, `class` | start failures: `input-too-large`, `dispatch`, `platform`, and `offer-unavailable`, which counts a release by a member with no matching profile, has no start-failure record and carries `profile="none"` |
 | `wherry_dispatch_outcomes_total` | counter | `profile`, `outcome` | dispatches: `created`, `nothing`, `unknown` |
 | `wherry_stop_failures_total` | counter | `profile` | failed `Stop` calls |

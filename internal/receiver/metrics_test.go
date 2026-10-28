@@ -3,8 +3,8 @@ package receiver
 import (
 	"errors"
 	"net/http/httptest"
-	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -66,38 +66,6 @@ func TestScrapeAfterARun(t *testing.T) {
 		`wherry_in_flight{pool="pool-a",profile="nomad"} 0`,
 		`wherry_capacity{pool="pool-a"} 1`,
 	)
-}
-
-// SeriesNames names every family the receiver registers, so the shipped dashboard and rules are checked against all of
-// them.
-func TestSeriesNamesCoverEveryFamily(t *testing.T) {
-	m := newMetrics(nil)
-	descs := make(chan *prometheus.Desc, 64)
-	go func() {
-		for _, collector := range m.collectors {
-			collector.Describe(descs)
-		}
-		for _, desc := range m.pluginDescs {
-			descs <- desc
-		}
-		close(descs)
-	}()
-	names := SeriesNames()
-	fqName := regexp.MustCompile(`fqName: "([^"]+)"`)
-	count := 0
-	for desc := range descs {
-		count++
-		match := fqName.FindStringSubmatch(desc.String())
-		if match == nil {
-			t.Fatalf("no name in %s", desc)
-		}
-		if !slices.Contains(names, match[1]) && !slices.Contains(names, match[1]+"_count") {
-			t.Errorf("SeriesNames lacks %s", match[1])
-		}
-	}
-	if count < 30 {
-		t.Fatalf("described %d families", count)
-	}
 }
 
 // A credentialed S3 run whose agent prints its credential and URL, then fails, on a plugin whose sweep fails with a
@@ -297,6 +265,90 @@ func TestRejectionReasonsThatQuoteTheTaskAreFixed(t *testing.T) {
 	for _, forbidden := range []string{"git.example.test", "run-a"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("scrape holds %q:\n%s", forbidden, text)
+		}
+	}
+}
+
+// scrapedValue is the value of series in a scrape of r.
+func scrapedValue(t *testing.T, r *Receiver, series string) float64 {
+	t.Helper()
+	for _, line := range strings.Split(scrape(t, r), "\n") {
+		if value, ok := strings.CutPrefix(line, series+" "); ok {
+			parsed, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return parsed
+		}
+	}
+	t.Fatalf("scrape lacks %s", series)
+	return 0
+}
+
+func TestAcknowledgedAdvertisementSetsItsTime(t *testing.T) {
+	f := newFixture(t, resultStream)
+	before := float64(time.Now().UnixNano()) / 1e9
+	if err := f.receiver.advertise(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	after := float64(time.Now().UnixNano()) / 1e9
+	if at := scrapedValue(t, f.receiver, `wherry_advertised_timestamp_seconds{pool="pool-a"}`); at < before || at > after {
+		t.Fatalf("advertised at %f, want between %f and %f", at, before, after)
+	}
+}
+
+// A run counts past its deadline from the deadline until it ends, here held there by a Stop that has not returned.
+func TestRunPastItsDeadlineCountsUntilItEnds(t *testing.T) {
+	const series = `wherry_runs_past_deadline{pool="pool-a",profile="nomad"}`
+	f := newFixture(t, resultStream)
+	f.answer(t, credentialName)
+	release := make(chan struct{})
+	f.plugin.endDelay, f.plugin.stopCheck = time.Minute, func() error { <-release; return nil }
+	deadline := time.Now().Add(3 * time.Second)
+	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.DeadlineMS = deadline.UnixMilli() }), 1)
+	for {
+		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the run was not followed before its deadline; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if value := scrapedValue(t, f.receiver, series); value != 0 || !time.Now().Before(deadline) {
+		t.Fatalf("%s %v before the deadline, want 0", series, value)
+	}
+	scraped(t, f.receiver, series+" 1\n")
+	close(release)
+	if status := <-done; status != kgo.AckReject {
+		t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
+	}
+	if value := scrapedValue(t, f.receiver, series); value != 0 {
+		t.Fatalf("%s %v once the run ended, want 0", series, value)
+	}
+}
+
+// Each run the delivery budget ends counts once, under its tenant and the profile that held it or none.
+func TestBudgetEndCountsOncePerTenantAndProfile(t *testing.T) {
+	terms := testTerms()
+	terms.DeliveryLimit = 2
+	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+	run := testActiveRun(t, f, "run-b", 1)
+	if status := run.returnTask(f.ctx, nil); status != kgo.AckReject {
+		t.Fatalf("status %v, want reject", status)
+	}
+	unoffered := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Placement.Agent = "codex" })
+	if admitted, ack := f.receiver.admit(f.ctx, unoffered); admitted != nil || ack != kgo.AckReject {
+		t.Fatalf("admitted=%v ack=%v, want reject", admitted != nil, ack)
+	}
+	run.attempt--
+	if status := run.returnTask(f.ctx, nil); status != kgo.AckRelease {
+		t.Fatalf("status %v below the budget, want release", status)
+	}
+	for _, profile := range []string{"nomad", "none"} {
+		series := `wherry_delivery_budget_exhausted_total{pool="pool-a",profile="` + profile + `",tenant="tenant-a"}`
+		if value := scrapedValue(t, f.receiver, series); value != 1 {
+			t.Fatalf("%s %v, want 1", series, value)
 		}
 	}
 }

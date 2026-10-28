@@ -4,47 +4,41 @@
 groups:
   - name: wherry
     rules:
-      # A receiver advertises every 30 seconds, and hosts show it stale after 120 seconds without one. No metric
-      # counts advertisements; the rule fires when the receiver is not scraped, has not read its configuration,
-      # keeps failing Kafka writes (advertisements are writes), or has been ended.
+      # A receiver advertises every 30 seconds, and hosts show it stale after 120 seconds without one. A receiver
+      # that has not read its configuration exports no advertisement time.
       - alert: WherryReceiverNotAdvertising
         expr: |
           up{job="wherry-receiver"} == 0
-          or (wherry_build_info unless on (job, instance) wherry_capacity)
-          or sum by (job, instance, pool) (increase(wherry_bus_errors_total{op="write"}[5m])) >= 5
-          or sum by (job, instance, pool) (increase(wherry_denials_total{op="membership"}[5m])) > 0
+          or time() - wherry_advertised_timestamp_seconds > 120
+          or (wherry_build_info unless on (job, instance) wherry_advertised_timestamp_seconds)
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: Receiver {{ $labels.instance }} is down, unconfigured, failing Kafka writes or ended
+          summary: Receiver {{ $labels.instance }} has had no advertisement acknowledged for 120 seconds
           description: Hosts stop placing tasks on a receiver whose advertisement is older than 120 seconds.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherryreceivernotadvertising
 
-      # At a run's deadline the receiver stops its job and ends the run. A failed Stop returns the task to the pool
-      # with the job running and the run still TASK_STATE_WORKING.
+      # At a run's deadline the receiver stops its job and ends the run. A held run stays past its deadline while
+      # that stop or the run's terminal commit has not returned.
       - alert: WherryRunStuckPastDeadline
         expr: |
-          sum by (job, instance, pool, profile) (increase(wherry_stop_failures_total[15m])) > 0
-          or sum by (job, instance, pool, profile) (increase(wherry_collection_failures_total{reason="not_stopped"}[15m])) > 0
+          sum by (job, instance, pool, profile) (wherry_runs_past_deadline) > 0
+        for: 10m
         labels:
           severity: warning
         annotations:
-          summary: Receiver {{ $labels.instance }} cannot stop jobs of profile {{ $labels.profile }}
-          description: A run whose job the receiver cannot stop stays TASK_STATE_WORKING past its deadline until a receiver stops it or the delivery budget ends it.
+          summary: Receiver {{ $labels.instance }} holds runs of profile {{ $labels.profile }} past their deadline
+          description: A run held past its deadline stays TASK_STATE_WORKING until the receiver stops its job and ends it.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherryrunstuckpastdeadline
 
-      # No metric counts delivery-budget exhaustion as such. Runs given back at the budget before any profile took
-      # them carry profile="none"; runs that spend the budget on start failures carry their profile, and their start
-      # failures are counted.
       - alert: WherryDeliveryBudgetExhausted
         expr: |
-          sum by (pool) (increase(wherry_runs_total{profile="none", state="failed"}[1h])) >= 2
-          or sum by (pool, profile, class) (increase(wherry_start_failures_total{class!="offer-unavailable"}[1h])) >= 5
+          sum by (pool, tenant, profile) (increase(wherry_delivery_budget_exhausted_total[1h])) > 0
         labels:
           severity: warning
         annotations:
-          summary: Runs in pool {{ $labels.pool }} are spending their delivery budget
+          summary: Runs of tenant {{ $labels.tenant }} in pool {{ $labels.pool }} spent their delivery budget
           description: Runs end TASK_STATE_FAILED with "delivery budget exhausted" when no receiver can start them.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherrydeliverybudgetexhausted
 

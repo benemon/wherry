@@ -19,17 +19,16 @@ commands run on a host of a tenant entitled to the pool, with its
 
 A receiver advertises its offers on Kafka every 30 seconds, and hosts place
 tasks only on a receiver whose latest advertisement is under 120 seconds
-old. No metric counts advertisements. The alert fires when one of these
-holds for 5 minutes:
+old. `wherry_advertised_timestamp_seconds` holds the time of the latest
+advertisement Kafka acknowledged. The alert fires when one of these holds
+for 5 minutes:
 
+- That time is more than 120 seconds old: advertisements fail, or the
+  receiver has never advertised since it read its configuration.
 - Prometheus cannot scrape the receiver (`up` is 0): the process is down,
   or its `metrics_addr` is unreachable.
 - The process runs but has not read its configuration: `wherry_build_info`
-  is served and `wherry_capacity` is not.
-- Kafka writes fail, 5 or more in 5 minutes (`wherry_bus_errors_total` with
-  `op="write"`). An advertisement is a write.
-- The receiver's membership has ended (`wherry_denials_total` with
-  `op="membership"`).
+  is served and `wherry_advertised_timestamp_seconds` is not.
 
 Confirm it:
 
@@ -67,13 +66,14 @@ At a run's deadline the receiver stops the run's job and ends the run
 receiver returns the task to the pool instead, with the job still running
 and the run still `TASK_STATE_WORKING`. The next delivery looks the job up
 and stops it, until the delivery budget ends the run and leaves the job to
-the plugin's sweep. No metric shows a run's age against its deadline; the
-alert fires on failed `Stop` calls (`wherry_stop_failures_total`) and on
-runs whose outputs went uncollected because the job was not stopped
-(`wherry_collection_failures_total` with `reason="not_stopped"`). A
-receiver that is down stops nothing either; its runs are adopted on
-redelivery, and [WherryReceiverNotAdvertising](#wherryreceivernotadvertising)
-covers it.
+the plugin's sweep. `wherry_runs_past_deadline` counts, by profile, the
+tasks a receiver holds whose run's deadline has passed and that have not
+ended. The alert fires when it stays above 0 for 10 minutes: a receiver has
+held a run past its deadline that long, as when a `Stop` call or the run's
+terminal commit does not return. A task the receiver returns to the pool
+leaves the count until a receiver holds it again. A receiver that is down
+stops nothing either; its runs are adopted on redelivery, and
+[WherryReceiverNotAdvertising](#wherryreceivernotadvertising) covers it.
 
 Confirm it:
 
@@ -103,17 +103,17 @@ Then:
 Each start failure, and each member with no matching plugin profile, returns
 a task to the pool and spends one of its pool's `delivery_limit`
 deliveries. From attempt `delivery_limit` minus 1, a receiver ends the run
-`TASK_STATE_FAILED` with `delivery budget exhausted` instead. No metric
-counts this ending as such. The alert fires on the two series that lead to
-it:
+`TASK_STATE_FAILED` with `delivery budget exhausted` instead.
+`wherry_delivery_budget_exhausted_total` counts these runs by tenant and
+profile. The alert fires on any such run in the last hour, for each tenant
+and profile:
 
-- runs ended `failed` with `profile="none"` in `wherry_runs_total`, 2 or
-  more in an hour: runs given back at the budget before any profile took
+- `profile="none"`: runs given back at the budget before any profile took
   them, because no live receiver offered a profile matching their agent and
   selector;
-- start failures other than `offer-unavailable` in
-  `wherry_start_failures_total`, 5 or more in an hour for one profile and
-  class: runs the profile took and could not start.
+- any other profile: runs the profile took and could not start, or
+  returned to the pool after another failure, such as a failed job lookup
+  or `Stop` call.
 
 Confirm it:
 
