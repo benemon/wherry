@@ -160,7 +160,8 @@ type Terminal struct {
 	// Class is the platform's failure class for a job that never started.
 	Class string
 	Node  string
-	// Reason is the platform's account of why a job never started, which can quote the run's material; it may be empty.
+	// Reason is the platform's account of why a job never started or why a started job ended, which can quote the run's
+	// material; it may be empty.
 	Reason string
 }
 

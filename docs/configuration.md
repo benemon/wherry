@@ -682,7 +682,7 @@ outputs whatever its exit, and reads the outcome file:
 | Outcome file | Exit | The run ends |
 | --- | --- | --- |
 | valid | any | in its state, with its message as the status message and its text as the result |
-| missing or invalid | non-zero or a signal | `TASK_STATE_FAILED`, with `agent exited <code>` or `agent ended by <signal>` |
+| missing or invalid | non-zero or a signal | `TASK_STATE_FAILED`, with `agent exited <code>` or `agent ended by <signal>`, followed by the platform's reason in parentheses when the plugin gives one, as in `agent exited 137 (OOMKilled)` |
 | missing or invalid | 0 | `TASK_STATE_FAILED`, with `agent reported no outcome` |
 
 A file is invalid when it is over 512 KiB, does not decode as a
@@ -696,9 +696,11 @@ is redacted like any agent text and becomes
 supplies the credential and submits again. A required
 output that is not returned fails the run with
 `required output <name> not returned: <reason>` as the status message,
-whatever the file reports. When the outputs are not collected, the receiver
-asks the plugin for the file alone, within another 2 minutes, reading no
-other output.
+whatever the file reports; when the file is missing or invalid and the exit
+is non-zero or a signal, the message keeps that cause in front, as in
+`agent exited 137 (OOMKilled); required output report.md not returned: missing`.
+When the outputs are not collected, the receiver asks the plugin for the
+file alone, within another 2 minutes, reading no other output.
 
 `.wherry/` beneath the output directory is reserved: nothing in it is
 collected as an output, and no output name leads into it, since no segment

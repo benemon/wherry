@@ -304,7 +304,9 @@ base64 does. The fixed texts are:
   `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
 - failed: `timeout`, `log stream failed`, `agent exited <code>`,
-  `agent ended by <signal>`, `agent reported no outcome`,
+  `agent ended by <signal>` (each followed by the platform's reason,
+  redacted, in parentheses when the plugin gives one, as in
+  `agent exited 137 (OOMKilled)`), `agent reported no outcome`,
   `an S3 input was not fetched, or did not match its size and SHA-256`,
   `the URL for S3 input <name> is not one of pool <pool>'s storage` (or
   `S3 output <name>`),
@@ -315,7 +317,10 @@ base64 does. The fixed texts are:
   `an input takes the run's inputs over what profile <profile> delivers`
   when the plugin names no input of the run),
   `required output <name> not returned: <reason>` with a reason from
-  [Metadata](#metadata), and, when the [seal wait](#seal-request) expires,
+  [Metadata](#metadata), behind the agent's `agent exited <code>` or
+  `agent ended by <signal>` and `; ` when it left no valid outcome file
+  and ended by a signal or a non-zero exit, and, when the
+  [seal wait](#seal-request) expires,
   `credential <name> was not answered within 5m; add it to credentials in
   the host's wherry configuration, keep wherry await or wherry mcp running,
   and submit again`. For several credentials the text opens
@@ -1124,8 +1129,11 @@ The receiver checks every name, redacts every file, and publishes each
 returned file as [output chunks](#output-chunk) and in the result's
 [metadata](#metadata). A required output listed in `not_returned` ends
 the run `TASK_STATE_FAILED` with
-`required output <name> not returned: <reason>`; an optional one leaves
-the state as the agent's outcome file set it.
+`required output <name> not returned: <reason>`, behind the agent's
+`agent exited <code>` or `agent ended by <signal>` and `; ` when it left no
+valid outcome file and ended by a signal or a non-zero exit, as in
+`agent exited 137 (OOMKilled); required output report.md not returned: missing`;
+an optional one leaves the state as the agent's outcome file set it.
 
 A host takes a run's outputs from the attempt and receiver of the result
 that ended it, ignoring every other attempt's chunks. For each output the
