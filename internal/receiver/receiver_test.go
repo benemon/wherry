@@ -108,9 +108,10 @@ type fakePlugin struct {
 	pauses   map[int]time.Duration
 	// ended makes Follow end with that terminal after the stream, rather than an exit of 0.
 	ended *pluginsdk.Terminal
-	// linkLost makes that many Follows end with pluginsdk.ErrLinkLost after at most one line; froms
+	// linkLost makes that many Follows end with lostErr, or else pluginsdk.ErrLinkLost, after at most one line; froms
 	// records the offset of every Follow and delivered the lines Follows put on the receiver's channel.
 	linkLost  int
+	lostErr   error
 	froms     []int64
 	delivered int
 	// hang makes Sweep and Ready block until their context ends.
@@ -184,7 +185,7 @@ func (f *fakePlugin) Follow(ctx context.Context, _ pluginsdk.Handle, from int64,
 	f.mu.Lock()
 	f.follows++
 	f.froms = append(f.froms, from)
-	lost := f.follows <= f.linkLost
+	lost, lostErr := f.follows <= f.linkLost, cmp.Or(f.lostErr, pluginsdk.ErrLinkLost)
 	stream, followErr, endDelay, pauses, neverStarted, neverClass, neverReason, ended := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.pauses, f.neverStarted, f.neverClass, f.neverReason, f.ended
 	f.mu.Unlock()
 	var offset int64
@@ -205,13 +206,13 @@ func (f *fakePlugin) Follow(ctx context.Context, _ pluginsdk.Handle, from int64,
 				return pluginsdk.Terminal{}, ctx.Err()
 			}
 			if lost {
-				return pluginsdk.Terminal{}, pluginsdk.ErrLinkLost
+				return pluginsdk.Terminal{}, lostErr
 			}
 		}
 		offset = next
 	}
 	if lost {
-		return pluginsdk.Terminal{}, pluginsdk.ErrLinkLost
+		return pluginsdk.Terminal{}, lostErr
 	}
 	if followErr != nil {
 		return pluginsdk.Terminal{}, followErr
