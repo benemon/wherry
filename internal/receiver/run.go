@@ -1535,7 +1535,9 @@ func (run *activeRun) startFailure(ctx context.Context, class, cause string) kgo
 	exhausted := false
 	events, err := r.readEvents(ctx)
 	if err == nil {
-		exhausted, err = r.poolExhausted(ctx, events.startFailures[run.task.Wherry.Run], run.taskHash, agent)
+		// A read just after the commit can trail it, so this receiver's own failure counts from what it knows.
+		own := wire.StartFailure{Wherry: r.binding(run.task, run.attempt), TaskHash: run.taskHash}
+		exhausted, err = r.poolExhausted(ctx, append(slices.Clone(events.startFailures[run.task.Wherry.Run]), own), run.taskHash, agent)
 	}
 	if err != nil {
 		r.logger.Printf("run %s: pool exhaustion: %v", run.task.Wherry.Run, err)

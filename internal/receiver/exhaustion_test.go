@@ -109,6 +109,57 @@ func TestExhaustionReasonNamesAttemptsAndCause(t *testing.T) {
 	}
 }
 
+// hideOwnFailureFromNextRead makes the next listing of the pool events' end offset stop before this receiver's start
+// failure, as a read-committed read just after its commit can.
+func (f fixture) hideOwnFailureFromNextRead(t *testing.T) {
+	t.Helper()
+	topic := admin.PoolEventsTopic(testPool)
+	end := int64(-1)
+	for _, record := range f.records(t, topic) {
+		var failure wire.StartFailure
+		if wire.ParseRecord(record.Value, f.keys(), &failure) == nil && failure.Wherry.Receiver == testReceiver {
+			end = record.Offset
+		}
+	}
+	if end < 0 {
+		t.Fatal("no own start failure committed before the purge")
+	}
+	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		list := request.(*kmsg.ListOffsetsRequest)
+		if len(list.Topics) != 1 || list.Topics[0].Topic != topic || slices.ContainsFunc(list.Topics[0].Partitions, func(p kmsg.ListOffsetsRequestTopicPartition) bool { return p.Timestamp != -1 }) {
+			f.cluster.KeepControl()
+			return nil, nil, false
+		}
+		response := list.ResponseKind().(*kmsg.ListOffsetsResponse)
+		listed := kmsg.NewListOffsetsResponseTopic()
+		listed.Topic = topic
+		for _, partition := range list.Topics[0].Partitions {
+			offset := kmsg.NewListOffsetsResponseTopicPartition()
+			offset.Partition, offset.Offset = partition.Partition, end
+			listed.Partitions = append(listed.Partitions, offset)
+		}
+		response.Topics = append(response.Topics, listed)
+		return response, nil, true
+	})
+}
+
+func TestOwnStartFailureCountsWhenTheReadTrailsItsCommit(t *testing.T) {
+	f := newFixture(t, resultStream)
+	peer := f.livePeer(t, "receiver-b")
+	record := f.submit(t, f.host, nil)
+	f.startFailed(t, record, "receiver-b", peer, nil)
+	f.answer(t, credentialName)
+	f.plugin.outcome = pluginsdk.OutcomeNothingCreated
+	f.plugin.purgeCheck = func() { f.hideOwnFailureFromNextRead(t) }
+	if status := f.execute(t, record, 2); status != kgo.AckReject {
+		t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
+	}
+	want := "no receiver in pool pool-a could start agent claude after 2 attempts; last: profile nomad created no job"
+	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != want {
+		t.Fatalf("terminal %s %q, want %q", state, reason, want)
+	}
+}
+
 func TestPoolExhaustionCountsLiveMembersOfferingTheAgent(t *testing.T) {
 	for _, test := range []struct {
 		name   string
