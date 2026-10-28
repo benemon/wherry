@@ -6,6 +6,15 @@ URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 is retired in favour of plugin, and the output reason `not streamed by the
 adapter` is renamed `not streamed by the plugin`.
 
+**Change note, 2026-10-27:** edited in place at version 1. Chunks and
+output chunks move from the tenant feed to the tenant's transcript topic,
+`wherry.tenant.<tenant>.transcript`, and a `terminal` status carries
+`transcript_chunks`. The `heartbeat` status kind is removed: a receiver
+records each held run's committed transcript offset as a
+[progress](#progress) record on its own progress topic,
+`wherry.receiver.<receiver>.progress`, and an adopter resumes from the
+highest of the run's `started` offsets and progress records.
+
 **Change note, 2026-10-25:** edited in place at version 1. The configured
 unit a run is routed to is a plugin profile, a named, configured use of a plugin.
 The member `adapter` of advertisement offers, start failures and result
@@ -21,8 +30,8 @@ objects: submissions, statuses, transcript chunks, output chunks and
 results hold one under its A2A field name, beside a `wherry` object of
 bindings. Every `Message` and `Artifact` wherry writes
 lists the URI above in its `extensions`, and readers reject one that does
-not. [Key concepts](concepts.md) explains the roles and topics this document
-names.
+not. [Key concepts](concepts.md) explains the roles this document names, and
+[Topics](design.md#topics) lists the topics.
 
 ## Encoding
 
@@ -272,8 +281,10 @@ its attempt's last chunks. A host that reads a `terminal` status on the feed
 reads the transcript topic to its last stable offset, and waits until that
 reaches the high watermark it lists after it reads the terminal, before it
 reports the run's transcript or outputs complete. A host reads a run's
-chunks from the first transcript-topic offset at or after the append time of
-the run's earliest echo on the feed, found by `ListOffsets` by timestamp.
+chunks from the first transcript-topic offset at or after one minute before
+the append time of the run's earliest echo on the feed, found by
+`ListOffsets` by timestamp. The minute allows for the clocks of the two
+topics' leaders to differ.
 Readers order a run's statuses and results by `attempt`, and records of an
 earlier attempt do not change the outcome of a later one.
 
@@ -363,8 +374,8 @@ A chunk is one line of the agent's standard output, as the A2A artifact
   `size` in bytes. The line itself is then not stored. Readers require a
   `url` part's `sha256` to be lowercase hex SHA-256 and its `size` over 0.
 - `seq` is the line's byte offset in the agent's output and orders the
-  chunks. An adopter follows from the run's latest committed offset, as
-  [progress](#progress) records it, so a
+  chunks. An adopter follows from the highest offset of the run's
+  `started` statuses and [progress](#progress) records, so a
   `seq` can repeat across attempts of a run. A reader takes the latest
   attempt's chunks, and the lines below that attempt's first `seq` from the
   highest earlier attempt that has them, so a run's transcript starts at
@@ -622,9 +633,8 @@ JSON:
   Readers decode it strictly.
 - `log_offset` is the agent output offset the run's transcript is committed
   up to. The record commits in the transaction of the [chunks](#chunk) it
-  covers, on each renewal of the task's lock, every 10 seconds while the
-  job runs. A renewal with no new chunks and an unchanged offset writes
-  nothing.
+  covers, every 10 seconds while the job runs. An interval with no new
+  chunks and an unchanged offset writes nothing.
 - The transaction that holds the run's `terminal` status writes a
   tombstone, a null value, under the run's key.
 

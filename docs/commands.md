@@ -7,11 +7,11 @@
 
 ## Conventions
 
-- `wherry admin` and `wherry receiver run` read no client configuration. Every
-  other command reads it first, and every command except `key` and `mcp`
+- `wherry admin`, `wherry receiver run` and `wherry version` read no client
+  configuration. Every other command reads it first, and every command except `key` and `mcp`
   then connects to Kafka. `key` connects only to settle a
   [leftover next key](#wherry-key-rotate).
-- Every host command takes `--config-file FILE`. It defaults to
+- Every host command other than `version` takes `--config-file FILE`. It defaults to
   `~/.config/wherry/config.yaml`. A leading `~/` is expanded.
 - A command's flags may come before or after its `RUN_ID`.
 - A failed command prints `wherry: <error>` on standard error and exits
@@ -331,8 +331,8 @@ expected output takes the name `transcript.jsonl`.
 
 `await` reads the run's statuses and result from the tenant feed, and its
 output and transcript chunks from the tenant's transcript topic, from the
-first offset at or after the append time of the run's earliest echo on the
-feed. Once it sees a terminal status, it reads the transcript topic to its
+first offset at or after one minute before the append time of the run's
+earliest echo on the feed. Once it sees a terminal status, it reads the transcript topic to its
 last stable offset, and waits until that reaches the high watermark it
 lists after it sees the terminal, before it writes the outputs and the
 transcript.
@@ -433,8 +433,8 @@ attempt that has it. An adopter resumes the job's output past the run's
 latest committed offset, so an adopted run reads from offset 0.
 
 `transcript` reads the lines from the tenant's transcript topic, from the
-first offset at or after the append time of the run's earliest echo on the
-tenant feed. Once the feed holds the run's terminal status, it reads the
+first offset at or after one minute before the append time of the run's
+earliest echo on the tenant feed. Once the feed holds the run's terminal status, it reads the
 transcript topic to its last stable offset, and waits until that reaches the
 high watermark it lists after it sees the terminal, before it prints.
 
@@ -486,7 +486,8 @@ empty revision. A build from a working tree with uncommitted changes adds
 `wherry admin` connects twice, as the Kafka super user and as
 `wherry.operator`, with the [environment](configuration.md#environment-variables) set.
 It writes every `wherry.admin` record as `wherry.operator`, creating
-`wherry.admin` and `wherry.receivers` first if they are missing. Options
+`wherry.admin` and `wherry.receivers` first if they are missing and setting the
+[configuration](design.md#topics-1) of an existing `wherry.receivers`. Options
 other than `--dry-run` take a value, and options can appear anywhere after
 `admin`. An option without a value fails with
 `admin option requires a value`, one the command does not
@@ -552,8 +553,10 @@ Reads the [receiver configuration](configuration.md#receiver-configuration) from
 directory or a single file, validates it against the pool's terms, records
 it, creates the receiver's principal, key topic and progress topic,
 `wherry.receiver.<receiver>.progress`, grants its ACLs, and writes its
-bundle. On an existing progress topic it sets the
-[progress topic configuration](design.md#topics-1). It refuses an existing receiver.
+bundle. It creates the progress topic of every other live receiver in the
+pool that lacks one, and sets the
+[progress topic configuration](design.md#topics-1) on each existing one. It
+refuses an existing receiver.
 The bundle holds the receiver's Kafka identity alone; the receiver's [local
 configuration](configuration.md#receiver-local-configuration) gives the
 sources of its [platform credentials](configuration.md#platform-credentials).
@@ -671,11 +674,11 @@ On start it:
    `signing.key.next`, and logs `rotated key: old=<id> new=<id>`;
 4. waits for its configuration record on `wherry.admin` and validates it
    against the pool's terms;
-5. starts the [plugins](#plugins) its configuration names from
-   `plugin_dir`, resolves each plugin profile's [platform
-   credential](configuration.md#platform-credentials) and configures each
-   profile, reads its pool's events once, and starts advertising and
-   claiming.
+5. for each plugin profile in turn, resolves its [platform
+   credential](configuration.md#platform-credentials), starts its
+   [plugin](#plugins) from `plugin_dir` when no earlier profile has, and
+   configures the profile;
+6. reads its pool's events once, and starts advertising and claiming.
 
 It logs its own lines to standard output with the prefix `receiver: `;
 plugin and link lines are hclog lines named `plugin`. Plugin lines, the
@@ -684,8 +687,10 @@ sweep and readiness errors carry the
 [marker](a2a-extension-v1.md#seal) of each credential value
 delivered to a run the receiver holds, and of each [platform
 credential](configuration.md#platform-credentials) value, in place of the
-value. It exits on
-`SIGINT` or `SIGTERM` without stopping its jobs, and fails with
+value. On
+`SIGINT` or `SIGTERM` it commits each held run's pending transcript, closes
+its idle claims, releases the tasks it holds and exits, leaving its jobs
+running; allow it 30 seconds to stop before a forced kill. It fails with
 `receiver configuration changed` when a configuration record that differs
 from its own appears. A configuration record whose plugin is not a
 valid plugin name ends it with
@@ -787,7 +792,10 @@ answered for, so a plugin cannot report for another profile. A call that fails
 or runs out is counted as `error` or `timeout`, and the scrape serves that
 profile's samples from its last answer.
 
-When a plugin exits, the receiver logs `plugin exited; restarting` as a
+The receiver pings each plugin every 10 seconds and kills one that fails
+the ping or does not answer within 5 seconds, logging
+`plugin did not answer a ping; killing it`. Each Configure call has 30
+seconds. When a plugin exits, the receiver logs `plugin exited; restarting` as a
 `plugin` line, starts it again after one second, waiting twice as long after each failed start up to 30
 seconds, and configures every profile of the plugin again. Until then those
 profiles are not ready and the next advertisement withdraws their offers. A run

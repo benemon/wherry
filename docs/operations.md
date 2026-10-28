@@ -119,7 +119,10 @@ as one file and as a `--config-dir` directory.
   [Add a receiver](#add-a-receiver). Without `models` a task names no model
   and the profile's command sets it.
 
-Running `pool create` again for an existing pool records the new terms.
+Running `pool create` again for an existing pool records the new terms. It
+first checks every live receiver in the pool against them, and refuses
+terms that a receiver's plugin profile no longer fits, naming the
+receiver, plugin and profile.
 Adding or removing an agent's `models` rejects that agent's queued and
 redelivered runs at their next claim, so drain the agent first.
 
@@ -445,7 +448,8 @@ change.
 - a source for each [platform credential](#platform-credentials) its
   plugin profiles name;
 - a supervisor that restarts the process when it exits, since a
-  configuration change ends it;
+  configuration change ends it, and that allows it 30 seconds to stop
+  after `SIGTERM` before a forced kill;
 - for the Nomad plugin, a Nomad token with the
   [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy), from a platform credential or `NOMAD_TOKEN`
   in the receiver's environment.
@@ -524,7 +528,8 @@ job "wherry-receiver" {
     }
 
     task "receiver" {
-      driver = "exec"
+      driver       = "exec"
+      kill_timeout = "30s"
 
       config {
         command = "/usr/local/bin/wherry"
@@ -623,7 +628,7 @@ the `wherry admin` environment.
    When it ends, the command prints one line per
    [revocation step](concepts.md#revocation) it ran,
    `step=<n> complete=<bool> name=<name>`. The wait in step 5 is usually the
-   longest; `--wait DURATION` replaces it.
+   longest; `--wait DURATION` replaces it and must be positive.
 
 2. If it fails with `revocation incomplete`, the line of the failed step
    ends in ` error=<cause>`. Check what that step depends on (the broker

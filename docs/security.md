@@ -127,8 +127,8 @@ when it answers, before it takes the attempt's lock, so a slow command
 holds up no other answerer of the host. A source that fails to resolve, an
 unset or empty variable, a command that exits non-zero, times out or writes
 over 64 KiB, is logged as `run <id>: resolve credential <name>: <cause>`,
-by name and exit status alone, and the answerer tries the request again
-each second until it expires.
+by name and exit status alone. The answerer tries the request again each
+second until it expires, and 60 seconds after a command source fails.
 
 The host answers only for a credential the pool's terms approve for the
 run's agent, or a task credential the run declares, that its configuration
@@ -156,8 +156,11 @@ host. The configuration holds no value and no source prompts.
 A command has 60 seconds, time for an interactive unlock such as a password
 manager's, and at most 64 KiB of output. A command that exits non-zero, runs
 out of time or writes more fails the answer. A failed source leaves the
-request unanswered, logged by credential name and cause alone, and the
-answerer tries it again each second until the request expires:
+request unanswered, logged by credential name and cause alone. The
+answerer tries it again each second until the request expires; after a
+command source fails, it waits 60 seconds before it resolves the request's
+sources again, so an interactive unlock prompts no more often than it can
+be answered:
 
 ```
 run <id>: resolve credential <name>: its command exited with status 1

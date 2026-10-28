@@ -333,10 +333,7 @@ naming its size and the limit.
 
 An input file travels base64-encoded inside the signed record, which is itself
 base64url-encoded, so an inline input takes about 16/9 of its size in the
-submission record. As `pool create`'s check measures them on a broker at its
-defaults, the output chunk is 468119 bytes, the results 791017 and 803627
-bytes (with S3 outputs) and the transcript chunk 933508 bytes, so a feed's
-or transcript topic's `max.message.bytes` below 933508 refuses every pool.
+submission record.
 
 `pool create` and `pool entitle` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.admin`, which they

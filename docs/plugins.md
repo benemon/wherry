@@ -53,10 +53,14 @@ instructions.
 
 ### systemd
 
-A service unit for the receiver, a slice for the agents' units, and a tmpfiles
-entry for the credential mount point. The
+A local configuration and a service unit for the receiver, a slice for the
+agents' units, and a tmpfiles entry for the credential mount point. The
 [systemd plugin's README](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service)
 covers installing them.
+
+`config.yaml`:
+
+<<< @/examples/systemd/config.yaml{yaml}
 
 `wherry-receiver.service`:
 
@@ -72,11 +76,15 @@ covers installing them.
 
 ### Kubernetes
 
-A receiver image, a manifest with the Deployment, service account, state claim
-and metrics Service, and a script that applies them, on Kubernetes and
+A receiver image, its local configuration, a manifest with the Deployment,
+service account, state claim and metrics Service, and a script that applies them, on Kubernetes and
 OpenShift alike. The
 [Kubernetes plugin's README](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#run-the-receiver-in-the-cluster)
 covers building the image and deploying it.
+
+`config.yaml`:
+
+<<< @/examples/kubernetes/config.yaml{yaml}
 
 `Containerfile`:
 
@@ -92,9 +100,13 @@ covers building the image and deploying it.
 
 ### Nomad
 
-A receiver image with the Nomad plugin. The
+A receiver image with the Nomad plugin, and its local configuration. The
 [Nomad plugin's README](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-a-container)
 covers building and running it.
+
+`config.yaml`:
+
+<<< @/examples/nomad/config.yaml{yaml}
 
 `Containerfile`:
 

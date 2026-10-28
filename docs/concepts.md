@@ -179,7 +179,7 @@ go to the tenant feed, and transcript and output chunks go to the tenant's
 transcript topic, `wherry.tenant.<tenant>.transcript`, in the same
 transaction as the status, result or progress record they belong to. While
 the job runs, the receiver records the run's latest committed transcript
-offset on its progress topic with each renewal. A terminal status carries
+offset on its progress topic every 10 seconds. A terminal status carries
 the number of transcript chunks its attempt wrote. The echo, written when a
 receiver claims or rejects a run, names the pool and placement the run was
 admitted to, so any host of the tenant can follow or cancel the run. The submitting

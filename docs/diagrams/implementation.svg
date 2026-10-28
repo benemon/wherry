@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 890" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
   <title id="title">wherry implementation view</title>
-  <desc id="desc">The host laptop of tenant alice runs a coding agent harness with the wherry skill and the wherry mcp server, both using the wherry client, beside its signing key, bundle, credential sources, storage credential and state directory. The operator's wherry admin writes wherry.admin. Eight Kafka topics sit between host and receiver: the host reads wherry.admin, wherry.receivers, receiver key topics, its tenant feed and its tenant transcript topic, writes the pool's tasks and events, and reads and writes its own host topic. The receiver nomad-1 reads wherry.admin and the pool's tasks through the share group p-pool, reads and writes wherry.receivers, its own key topic and the pool's events, writes the tenant feed and transcript topic and reads the host topic. The receiver runs plugins over mutual TLS, which run the unmodified agent as a Nomad job or Kubernetes pod. Optional paths: the host and the receiver reach an S3-compatible bucket, the host with its own credential and the receiver and plugin with presigned URLs from the seal, and the agent clones a git remote on one of the pool's VCS hosts.</desc>
+  <desc id="desc">The host laptop of tenant alice runs a coding agent harness with the wherry skill and the wherry mcp server, both using the wherry client, beside its signing key, bundle, credential sources, storage credential and state directory. The operator's wherry admin writes wherry.admin. Nine Kafka topics sit between host and receiver: the host reads wherry.admin, wherry.receivers, receiver key topics, its tenant feed and its tenant transcript topic, writes the pool's tasks and events, and reads and writes its own host topic. The receiver nomad-1 reads wherry.admin and the pool's tasks through the share group p-pool, reads and writes wherry.receivers, its own key topic, its own progress topic and the pool's events, reads the progress topics of the pool's other live receivers, writes the tenant feed and transcript topic and reads the host topic. The receiver runs plugins over mutual TLS, which run the unmodified agent as a Nomad job, a Kubernetes pod or a transient systemd service. Optional paths: the host and the receiver reach an S3-compatible bucket, the host with its own credential and the receiver and plugin with presigned URLs from the seal, and the agent clones a git remote on one of the pool's VCS hosts.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e4a35"/>
@@ -66,8 +66,9 @@
     <text x="472" y="290">advertisements: liveness, capacity, offers</text>
 
     <rect x="456" y="322" width="348" height="60" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
-    <text x="472" y="344" font-size="12" font-weight="600" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#00290b">wherry.receiver.&lt;receiver&gt;</text>
-    <text x="472" y="362">the receiver's signing keys</text>
+    <text x="472" y="344" font-size="12" font-weight="600" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#00290b">wherry.receiver.&lt;receiver&gt;[.progress]</text>
+    <text x="472" y="360">the receiver's signing keys;</text>
+    <text x="472" y="374">.progress: runs' committed transcript offsets</text>
 
     <rect x="456" y="394" width="348" height="60" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="472" y="416" font-size="12" font-weight="600" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#00290b">wherry.pool.&lt;pool&gt;.tasks</text>
@@ -120,7 +121,8 @@
   <g font-size="10" fill="#2e4a35" text-anchor="middle">
     <text x="857" y="201">configuration</text>
     <text x="857" y="273">advertise</text>
-    <text x="857" y="345">own key</text>
+    <text x="857" y="333">own key,</text>
+    <text x="857" y="345">progress</text>
     <text x="857" y="417">claim</text>
     <text x="857" y="482">statuses,</text>
     <text x="857" y="494">cancels</text>
@@ -149,7 +151,7 @@
     <text x="1030" y="440" text-anchor="middle" font-size="10.5" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">wherry-plugin-&lt;type&gt;</text>
     <text x="1030" y="459" text-anchor="middle" font-size="10.5" fill="#2e4a35">one process per plugin</text>
     <text x="1030" y="474" text-anchor="middle" font-size="10.5" fill="#2e4a35">linked by mutual TLS</text>
-    <text x="1030" y="489" text-anchor="middle" font-size="10.5" fill="#2e4a35">Nomad and Kubernetes plugins</text>
+    <text x="1030" y="489" text-anchor="middle" font-size="10.5" fill="#2e4a35">Nomad, Kubernetes, systemd</text>
   </g>
   <path d="M 1030 328 V 394" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
   <text x="1038" y="366" font-size="10" fill="#2e4a35">plugin protocol</text>
@@ -157,7 +159,7 @@
   <!-- ======================= Platform ======================= -->
   <rect x="1190" y="118" width="190" height="576" rx="8" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
   <text x="1206" y="146" font-size="14" font-weight="700" fill="#00290b">Platform</text>
-  <text x="1206" y="163" font-size="10.5" fill="#2e4a35">Nomad job or Kubernetes pod</text>
+  <text x="1206" y="163" font-size="10.5" fill="#2e4a35">Nomad, Kubernetes or systemd</text>
 
   <rect x="1206" y="400" width="158" height="160" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
   <text x="1285" y="422" text-anchor="middle" font-size="12.5" font-weight="600" fill="#00290b">Job</text>

@@ -41,7 +41,7 @@ source on the machine that resolves it.
 
 Each [release](https://github.com/benemon/wherry/releases) carries
 `wherry_<version>_<os>_<arch>.tar.gz` for `linux` and `darwin` on `amd64` and
-`arm64`, `checksums.txt` with each archive's SHA-256, and
+`arm64`, `checksums.txt` with each archive's SHA-256,
 `checksums.txt.sigstore.json`, the keyless signature over it, and
 `wherry.cdx.json`, a CycloneDX SBOM. `<version>` is a release tag. Download the archive and the checksums, verify the checksums'
 signature with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/),

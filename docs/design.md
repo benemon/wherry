@@ -130,7 +130,8 @@ default requirement of `1231200000`. Identity and configuration topics stay
 at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 
 `wherry admin` leaves an existing topic's configuration as it is, except
-that `pool create` sets the retention and timestamp type of the pool's tasks
+that every recording command sets the configuration above on
+`wherry.receivers`, `pool create` sets the retention and timestamp type of the pool's tasks
 and events topics, and `receiver add` and `pool create` set every
 configuration above on the progress topics of the pool's live receivers. A
 tenant feed's or transcript topic's retention can be changed with Kafka's
