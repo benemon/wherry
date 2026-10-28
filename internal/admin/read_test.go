@@ -5,15 +5,18 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"maps"
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -426,5 +429,88 @@ func TestReadFromReadsOverCompactedGaps(t *testing.T) {
 	}
 	if !slices.Equal(offsets, []int64{0, 2, 3}) {
 		t.Fatalf("read offsets %v, want 0, 2 and 3 around the compacted 1", offsets)
+	}
+}
+
+// failListings has cluster answer the first failures ListOffsets requests, or every one if failures is negative, with
+// code for each partition, and returns the number of requests it has seen. client is rebuilt without kgo's own retries,
+// which it takes only for some listings.
+func failListings(t *testing.T, cluster *kfake.Cluster, client *kgo.Client, failures int32, code int16) (*kgo.Client, *atomic.Int32) {
+	t.Helper()
+	seen := &atomic.Int32{}
+	cluster.ControlKey(int16(kmsg.ListOffsets), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		if n := seen.Add(1); failures >= 0 && n > failures {
+			return nil, nil, false
+		}
+		listing := request.(*kmsg.ListOffsetsRequest)
+		response := listing.ResponseKind().(*kmsg.ListOffsetsResponse)
+		for _, topic := range listing.Topics {
+			listed := kmsg.NewListOffsetsResponseTopic()
+			listed.Topic = topic.Topic
+			for _, partition := range topic.Partitions {
+				failed := kmsg.NewListOffsetsResponseTopicPartition()
+				failed.Partition = partition.Partition
+				failed.ErrorCode = code
+				listed.Partitions = append(listed.Partitions, failed)
+			}
+			response.Topics = append(response.Topics, listed)
+		}
+		return response, nil, true
+	})
+	unretried, err := kgo.NewClient(append(client.Opts(), kgo.RequestRetries(0))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(unretried.Close)
+	return unretried, seen
+}
+
+// A partition whose leader is moving fails its listing retriably until it has one; ReadKeys lists again until then.
+func TestReadKeysListsAgainOnARetriablePartitionError(t *testing.T) {
+	cluster, client := readerClusterOf(t, []kfake.Opt{kfake.NumBrokers(1)}, "keys-a")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	registration, err := signed.RegisterKey("receiver-a", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ProduceSync(ctx, &kgo.Record{Topic: "keys-a", Value: registration}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	unretried, _ := failListings(t, cluster, client, 3, kerr.NotLeaderForPartition.Code)
+	keys, err := ReadKeys(ctx, unretried, map[string]string{"receiver-a": "keys-a"})
+	if err != nil || keys["receiver-a"].Current == nil {
+		t.Fatalf("keys %v, %v; want receiver-a's key", keys, err)
+	}
+}
+
+// A non-retriable partition error fails the read with the first listing; kadm fails the listing itself on an
+// authorization error, and keeps any other as the partition's.
+func TestReadKeysFailsAtOnceOnANonRetriablePartitionError(t *testing.T) {
+	for _, failure := range []*kerr.Error{kerr.TopicAuthorizationFailed, kerr.UnknownServerError} {
+		t.Run(failure.Message, func(t *testing.T) {
+			cluster, client := readerClusterOf(t, []kfake.Opt{kfake.NumBrokers(1)}, "keys-a")
+			unretried, seen := failListings(t, cluster, client, -1, failure.Code)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			keys, err := ReadKeys(ctx, unretried, map[string]string{"receiver-a": "keys-a"})
+			if !errors.Is(err, failure) || keys != nil || seen.Load() != 2 {
+				t.Fatalf("keys %v, %v after %d listings; want %v after 2", keys, err, seen.Load(), failure)
+			}
+		})
+	}
+}
+
+// A partition that never recovers fails the read when its context ends.
+func TestReadKeysFailsWhenARetriablePartitionErrorOutlastsTheContext(t *testing.T) {
+	cluster, client := readerClusterOf(t, []kfake.Opt{kfake.NumBrokers(1)}, "keys-a")
+	unretried, seen := failListings(t, cluster, client, -1, kerr.NotLeaderForPartition.Code)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	keys, err := ReadKeys(ctx, unretried, map[string]string{"receiver-a": "keys-a"})
+	if !errors.Is(err, context.DeadlineExceeded) || keys != nil || seen.Load() <= 2 {
+		t.Fatalf("keys %v, %v after %d listings; want the context's error after listing again", keys, err, seen.Load())
 	}
 }

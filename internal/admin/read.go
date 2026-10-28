@@ -13,6 +13,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"golang.org/x/sync/errgroup"
 )
@@ -110,17 +111,29 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[st
 	}
 	topics := slices.Collect(maps.Keys(offsets))
 	var starts, ends kadm.ListedOffsets
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.Go(func() (err error) {
-		starts, err = admin.ListStartOffsets(groupCtx, topics...)
-		return err
-	})
-	group.Go(func() (err error) {
-		ends, err = admin.ListCommittedOffsets(groupCtx, topics...)
-		return err
-	})
-	if err := group.Wait(); err != nil {
-		return nil, err
+	for {
+		group, groupCtx := errgroup.WithContext(ctx)
+		group.Go(func() (err error) {
+			starts, err = admin.ListStartOffsets(groupCtx, topics...)
+			return err
+		})
+		group.Go(func() (err error) {
+			ends, err = admin.ListCommittedOffsets(groupCtx, topics...)
+			return err
+		})
+		if err := group.Wait(); err != nil {
+			return nil, err
+		}
+		// kgo retries a partition that is changing leader only while its listing evicts the topic's metadata, which the
+		// concurrent listing may already have done.
+		if !retriable(starts) && !retriable(ends) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(listBackoff):
+		}
 	}
 	for topic, offset := range offsets {
 		current := &read{remaining: map[int32]int64{}, partitions: map[int32]kgo.Offset{}, done: make(chan struct{})}
@@ -209,6 +222,19 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[st
 		}
 		<-r.poll
 	}
+}
+
+// listBackoff is the wait before listing offsets again after a retriable partition error.
+const listBackoff = 100 * time.Millisecond
+
+// retriable reports whether a listed partition failed with a retriable error; kadm's partition -1 stands for a topic it
+// could not describe, which is not retried.
+func retriable(listed kadm.ListedOffsets) bool {
+	retry := false
+	listed.Each(func(offset kadm.ListedOffset) {
+		retry = retry || offset.Partition >= 0 && kerr.IsRetriable(offset.Err)
+	})
+	return retry
 }
 
 // add starts consuming the partitions of the reads in progress among reads; the caller holds poll.
