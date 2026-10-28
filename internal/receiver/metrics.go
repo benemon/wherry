@@ -39,8 +39,6 @@ type metrics struct {
 	renewalFailures, transactionAborts, ambiguousCommits, fenced  prometheus.Counter
 
 	pluginDescs map[string]*prometheus.Desc
-	// series names every series the core families export.
-	series []string
 	// lastGood holds, by profile, the samples of its latest Metrics call that answered.
 	mu       sync.Mutex
 	lastGood map[string][]prometheus.Metric
@@ -50,17 +48,17 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m := &metrics{registry: registry, pluginDescs: map[string]*prometheus.Desc{}, lastGood: map[string][]prometheus.Metric{}}
 	counters := func(name, help string, labels ...string) *prometheus.CounterVec {
 		vec := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "wherry_" + name, Help: help}, labels)
-		m.collectors, m.series = append(m.collectors, vec), append(m.series, "wherry_"+name)
+		m.collectors = append(m.collectors, vec)
 		return vec
 	}
 	counter := func(name, help string) prometheus.Counter {
 		c := prometheus.NewCounter(prometheus.CounterOpts{Name: "wherry_" + name, Help: help})
-		m.collectors, m.series = append(m.collectors, c), append(m.series, "wherry_"+name)
+		m.collectors = append(m.collectors, c)
 		return c
 	}
 	histograms := func(name, help string, labels ...string) *prometheus.HistogramVec {
 		vec := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "wherry_" + name, Help: help, Buckets: durationBuckets}, labels)
-		m.collectors, m.series = append(m.collectors, vec), append(m.series, histogramSeries("wherry_"+name)...)
+		m.collectors = append(m.collectors, vec)
 		return vec
 	}
 	m.claims = counters("claims_total", "Tasks claimed and authorised.", "tenant")
@@ -74,7 +72,6 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.inFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_in_flight", Help: "Tasks held, by the profile they were routed to."}, []string{"profile"})
 	m.capacity = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_capacity", Help: "Tasks the receiver holds at once."})
 	m.collectors = append(m.collectors, m.inFlight, m.capacity)
-	m.series = append(m.series, "wherry_in_flight", "wherry_capacity")
 	m.startFailures = counters("start_failures_total", "Start failures, by class.", "profile", "class")
 	m.dispatchOutcomes = counters("dispatch_outcomes_total", "Dispatch outcomes.", "profile", "outcome")
 	m.stopFailures = counters("stop_failures_total", "Failed plugin Stop calls.", "profile")
@@ -99,24 +96,6 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 		m.pluginDescs[family.name] = prometheus.NewDesc(family.name, family.help, labels, nil)
 	}
 	return m
-}
-
-// SeriesNames returns the name of every series a receiver's core and plugin families export, a histogram's being its
-// _bucket, _sum and _count series. The shipped dashboard and alert rules name no other wherry_ series.
-func SeriesNames() []string {
-	names := newMetrics(nil).series
-	for _, family := range pluginFamilies {
-		if family.kind == pluginsdk.KindHistogram {
-			names = append(names, histogramSeries(family.name)...)
-		} else {
-			names = append(names, family.name)
-		}
-	}
-	return names
-}
-
-func histogramSeries(family string) []string {
-	return []string{family + "_bucket", family + "_sum", family + "_count"}
 }
 
 // pluginFamily is a metric family the core declares for plugins: its one label besides profile, if any, takes only

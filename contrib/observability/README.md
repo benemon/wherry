@@ -10,4 +10,4 @@ A Grafana dashboard and Prometheus alert rules for wherry receivers, built from 
 
 [Metrics](https://benemon.github.io/wherry/operations#metrics) in the operator guide says how to scrape a receiver and
 load both files, and [Runbooks](https://benemon.github.io/wherry/runbooks) has a section for each rule.
-`TestObservabilityNamesShippedSeries` in `cmd/wherry` fails when either file names a series no receiver exports.
+`TestObservabilityNamesShippedSeries` in `internal/receiver` fails when either file names a series no receiver exports.

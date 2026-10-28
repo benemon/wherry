@@ -3,7 +3,6 @@ package receiver
 import (
 	"errors"
 	"net/http/httptest"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -66,38 +65,6 @@ func TestScrapeAfterARun(t *testing.T) {
 		`wherry_in_flight{pool="pool-a",profile="nomad"} 0`,
 		`wherry_capacity{pool="pool-a"} 1`,
 	)
-}
-
-// SeriesNames names every family the receiver registers, so the shipped dashboard and rules are checked against all of
-// them.
-func TestSeriesNamesCoverEveryFamily(t *testing.T) {
-	m := newMetrics(nil)
-	descs := make(chan *prometheus.Desc, 64)
-	go func() {
-		for _, collector := range m.collectors {
-			collector.Describe(descs)
-		}
-		for _, desc := range m.pluginDescs {
-			descs <- desc
-		}
-		close(descs)
-	}()
-	names := SeriesNames()
-	fqName := regexp.MustCompile(`fqName: "([^"]+)"`)
-	count := 0
-	for desc := range descs {
-		count++
-		match := fqName.FindStringSubmatch(desc.String())
-		if match == nil {
-			t.Fatalf("no name in %s", desc)
-		}
-		if !slices.Contains(names, match[1]) && !slices.Contains(names, match[1]+"_count") {
-			t.Errorf("SeriesNames lacks %s", match[1])
-		}
-	}
-	if count < 30 {
-		t.Fatalf("described %d families", count)
-	}
 }
 
 // A credentialed S3 run whose agent prints its credential and URL, then fails, on a plugin whose sweep fails with a
@@ -300,3 +267,4 @@ func TestRejectionReasonsThatQuoteTheTaskAreFixed(t *testing.T) {
 		}
 	}
 }
+
