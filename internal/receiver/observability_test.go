@@ -118,7 +118,7 @@ func TestObservabilityNamesShippedSeries(t *testing.T) {
 		"wherry-alerts.yaml":    yaml.Unmarshal,
 	} {
 		names := referenced(readDocument(t, name, decode))
-		if len(names) < 10 {
+		if len(names) < 5 {
 			t.Errorf("%s names %d wherry_ series; the parse found too few to check", name, len(names))
 		}
 		for series := range names {

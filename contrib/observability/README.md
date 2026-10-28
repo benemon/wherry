@@ -5,7 +5,7 @@ A Grafana dashboard and Prometheus alert rules for wherry receivers, built from 
 
 | File | Content |
 | --- | --- |
-| `wherry-dashboard.json` | Grafana dashboard: receivers and capacity in use, admissions, rejections and start failures, run durations and queue wait, seal waits, plugin restarts, platform errors and cleanup, and Kafka errors, with `datasource`, `pool` and `instance` variables |
+| `wherry-dashboard.json` | Grafana dashboard: receivers, capacity in use, runs past their deadline and advertisement age, admissions, rejections, start failures and runs ended at the delivery budget, run durations and queue wait, seal waits, plugin restarts, platform errors and cleanup, and Kafka errors, with `datasource`, `pool` and `instance` variables |
 | `wherry-alerts.yaml` | Prometheus alerting rules, each with a `runbook_url` |
 
 [Metrics](https://benemon.github.io/wherry/operations#metrics) in the operator guide says how to scrape a receiver and

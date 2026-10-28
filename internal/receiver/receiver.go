@@ -537,6 +537,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 		r.deny(err, capWrite)
 		return err
 	}
+	r.metrics.advertised.SetToCurrentTime()
 	return nil
 }
 

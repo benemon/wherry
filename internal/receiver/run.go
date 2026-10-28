@@ -229,7 +229,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 			r.logger.Printf("publish terminal for %s: %v", run, err)
 			return nil, kgo.AckRelease
 		}
-		held.ended(wire.TaskStateFailed)
+		held.budgetEnded()
 		return nil, kgo.AckReject
 	}
 	// Nothing is written under the run key before its owner is known; unreadable submissions leave it unknown.
@@ -570,6 +570,27 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		r.liveMu.Lock()
 		delete(r.live, run)
 		r.liveMu.Unlock()
+	}()
+	pastDeadline := r.metrics.pastDeadline.WithLabelValues(admitted.profile.Name)
+	// A timer firing as the run ends must not count it after its decrement.
+	var overdueMu sync.Mutex
+	var counted, finished bool
+	overdue := time.AfterFunc(time.Until(deadline), func() {
+		overdueMu.Lock()
+		defer overdueMu.Unlock()
+		if !finished {
+			counted = true
+			pastDeadline.Inc()
+		}
+	})
+	defer func() {
+		overdue.Stop()
+		overdueMu.Lock()
+		defer overdueMu.Unlock()
+		finished = true
+		if counted {
+			pastDeadline.Dec()
+		}
 	}()
 
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
@@ -1508,7 +1529,7 @@ func (run *activeRun) returnTask(ctx context.Context, pending []pluginsdk.Line) 
 	if err := run.commit(ctx, run.budgetRecords(pending)...); err != nil {
 		return run.abandon(err)
 	}
-	run.ended(wire.TaskStateFailed)
+	run.budgetEnded()
 	return kgo.AckReject
 }
 
@@ -1519,6 +1540,12 @@ func (run *activeRun) budgetRecords(pending []pluginsdk.Line) []*kgo.Record {
 	}
 	status := taskStatus(wire.TaskStateFailed, reason)
 	return append(append(run.chunks(pending, true), run.result(status, reason)), run.terminal(status, pending)...)
+}
+
+// budgetEnded counts a run whose committed terminal ended it at the delivery budget.
+func (run *activeRun) budgetEnded() {
+	run.receiver.metrics.budgetExhausted.WithLabelValues(run.task.Wherry.Tenant, cmp.Or(run.profile.Name, "none")).Inc()
+	run.ended(wire.TaskStateFailed)
 }
 
 // conclude ends the run whose job ended as terminal says: with the status its outcome file reports, or failed for how

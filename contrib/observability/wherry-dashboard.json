@@ -237,7 +237,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 6,
         "x": 0,
         "y": 9
       },
@@ -273,6 +273,98 @@
       ]
     },
     {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Runs past their deadline",
+      "description": "Tasks held past their run's deadline that have not ended, by the plugin profile they were routed to. WherryRunStuckPastDeadline fires when one stays above 0 for 10 minutes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "expr": "sum by (pool, profile) (wherry_runs_past_deadline{pool=~\"$pool\", instance=~\"$instance\"})",
+          "legendFormat": "{{pool}} {{profile}}"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Advertisement age",
+      "description": "Seconds since each receiver's latest advertisement Kafka acknowledged. Hosts place tasks only on a receiver whose advertisement is under 120 seconds old.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "expr": "time() - max by (pool, instance) (wherry_advertised_timestamp_seconds{pool=~\"$pool\", instance=~\"$instance\"})",
+          "legendFormat": "{{pool}} {{instance}}"
+        }
+      ]
+    },
+    {
       "id": 6,
       "type": "table",
       "title": "Versions",
@@ -283,8 +375,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 6,
+        "x": 18,
         "y": 9
       },
       "fieldConfig": {
@@ -507,8 +599,8 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "Runs failed at the delivery budget with no profile",
-      "description": "Runs a receiver ended TASK_STATE_FAILED with \"delivery budget exhausted\" before any plugin profile took them (profile=\"none\"). A run that spends its budget on start failures ends with its profile and counts under Runs ended by state.",
+      "title": "Runs ended at the delivery budget",
+      "description": "Runs a receiver ended TASK_STATE_FAILED with \"delivery budget exhausted\", by tenant and the plugin profile that held them, profile=\"none\" where none did.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -545,8 +637,8 @@
             "uid": "${datasource}"
           },
           "refId": "A",
-          "expr": "sum by (pool) (increase(wherry_runs_total{pool=~\"$pool\", instance=~\"$instance\", profile=\"none\", state=\"failed\"}[$__rate_interval]))",
-          "legendFormat": "{{pool}}"
+          "expr": "sum by (pool, tenant, profile) (increase(wherry_delivery_budget_exhausted_total{pool=~\"$pool\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{pool}} {{tenant}} {{profile}}"
         }
       ]
     },
