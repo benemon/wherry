@@ -181,7 +181,7 @@ func mustRead(t *testing.T, f *fixture, topic string) []*kgo.Record {
 }
 
 // A stream of ticks over a live run fetches each of its transcript records once, where a Transcript each tick fetches
-// the transcript topic from the run's echo again, and each tick returns only the lines committed since the last.
+// the transcript topic from the run's echo again, and each tick returns the transcript as it stands.
 func TestTranscriptStreamFetchesEachChunkOnce(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
@@ -196,12 +196,12 @@ func TestTranscriptStreamFetchesEachChunkOnce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got.Lines) != 1 || got.Lines[0].Seq != tick*5 {
-			t.Fatalf("tick %d returned %+v; want the line at %d alone", tick, got.Lines, tick*5)
+		if len(got.Lines) != int(tick)+1 || got.Lines[tick].Seq != tick*5 {
+			t.Fatalf("tick %d returned %+v; want %d lines ending at %d", tick, got.Lines, tick+1, tick*5)
 		}
 	}
-	if got, err := stream.Next(f.ctx); err != nil || len(got.Lines) != 0 {
-		t.Fatalf("a tick past the last chunk returned %+v, %v; want nothing", got.Lines, err)
+	if got, err := stream.Next(f.ctx); err != nil || len(got.Lines) != ticks {
+		t.Fatalf("a tick past the last chunk returned %+v, %v; want the %d lines", got.Lines, err, ticks)
 	}
 	// Each transaction appends its chunk and a commit marker.
 	end := f.endOffset(t, topic)
@@ -211,9 +211,9 @@ func TestTranscriptStreamFetchesEachChunkOnce(t *testing.T) {
 	}
 }
 
-// A stream over an adopted run returns the second attempt's lines as they commit. A line the first attempt wrote at a
-// seq the adopter writes again stays returned, while Transcript's view, as transcript.jsonl holds it, takes the
-// adopter's.
+// A stream over an adopted run returns, as the second attempt's lines commit, the view Transcript returns, which takes
+// the adopter's line at a seq the first attempt also wrote and drops the first attempt's lines past the adopter's
+// first.
 func TestTranscriptStreamOfAnAdoptedRun(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
@@ -237,12 +237,13 @@ func TestTranscriptStreamOfAnAdoptedRun(t *testing.T) {
 		t.Fatalf("first attempt streamed %v, want %v", got, want)
 	}
 	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "claimed-2", "claimed", wire.TaskStateWorking, nil), receiver.chunk(t, task, 2, 10), receiver.chunk(t, task, 2, 15))
-	if got, want := next(), []line{{2, 10}, {2, 15}}; !slices.Equal(got, want) {
+	if got, want := next(), []line{{1, 0}, {1, 5}, {2, 10}, {2, 15}}; !slices.Equal(got, want) {
 		t.Fatalf("second attempt streamed %v, want %v", got, want)
 	}
 	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 2, 20), receiver.chunk(t, task, 1, 25))
-	if got, want := next(), []line{{2, 20}}; !slices.Equal(got, want) {
-		t.Fatalf("after adoption streamed %v, want %v without the first attempt's later line", got, want)
+	streamed := next()
+	if want := []line{{1, 0}, {1, 5}, {2, 10}, {2, 15}, {2, 20}}; !slices.Equal(streamed, want) {
+		t.Fatalf("after adoption streamed %v, want %v without the first attempt's later line", streamed, want)
 	}
 	transcript, err := f.host.Transcript(f.ctx, runID)
 	if err != nil {
@@ -252,8 +253,8 @@ func TestTranscriptStreamOfAnAdoptedRun(t *testing.T) {
 	for _, l := range transcript.Lines {
 		view = append(view, line{l.Attempt, l.Seq})
 	}
-	if want := []line{{1, 0}, {1, 5}, {2, 10}, {2, 15}, {2, 20}}; !slices.Equal(view, want) {
-		t.Fatalf("transcript %v, want %v", view, want)
+	if !slices.Equal(view, streamed) {
+		t.Fatalf("transcript %v, want the streamed %v", view, streamed)
 	}
 }
 
@@ -288,10 +289,14 @@ func TestTranscriptStreamTailsTheTopic(t *testing.T) {
 	followed := make(chan struct{})
 	go func() {
 		defer close(followed)
+		sent := int64(-1)
 		for ctx.Err() == nil {
 			if got, err := stream.Next(ctx); err == nil {
 				for _, line := range got.Lines {
-					lines <- line
+					if line.Seq > sent {
+						lines <- line
+						sent = line.Seq
+					}
 				}
 			}
 			stream.Wait(ctx)
