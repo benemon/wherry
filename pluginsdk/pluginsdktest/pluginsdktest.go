@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"reflect"
 	"testing"
 	"time"
 
@@ -65,10 +66,14 @@ func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk
 		if err != nil || job.State != pluginsdk.JobRunning {
 			t.Fatalf("lookup while running = %+v, %v; want running", job, err)
 		}
+		if again, err := running.Lookup(ctx, run.ID); err != nil || !reflect.DeepEqual(again, job) {
+			t.Fatalf("second lookup while running = %+v, %v; want %+v", again, err, job)
+		}
 		if job.Attempt != run.Attempt || job.Profile != run.Profile || job.Agent != run.Agent || job.Handle.Name != handle.Name {
 			t.Fatalf("lookup metadata %+v; want attempt %d, profile %s, agent %s, job %s", job, run.Attempt, run.Profile, run.Agent, handle.Name)
 		}
-		if terminal := follow(t, ctx, running, handle); !terminal.Started || terminal.ExitCode != 0 {
+		terminal, end := follow(t, ctx, running, handle, 0)
+		if !terminal.Started || terminal.ExitCode != 0 {
 			t.Fatalf("terminal %+v; want started with exit code 0", terminal)
 		}
 		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobEnded {
@@ -77,6 +82,15 @@ func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk
 		outputs := make(chan pluginsdk.Output, 1)
 		if err := running.Collect(ctx, handle, pluginsdk.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || len(outputs) != 0 {
 			t.Fatalf("collect from a job that wrote no outputs = %d outputs, %v; want none", len(outputs), err)
+		}
+		if replay, _ := follow(t, ctx, running, handle, end); replay != terminal {
+			t.Fatalf("follow from offset %d after the end = %+v; want the terminal %+v", end, replay, terminal)
+		}
+		if _, again := dispatchOutcome(t, ctx, running, run); again.Name != handle.Name {
+			t.Fatalf("dispatch after the job ended returned job %q, first %q", again.Name, handle.Name)
+		}
+		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobEnded {
+			t.Fatalf("lookup after dispatching the ended run = %+v, %v; want ended", job, err)
 		}
 		idempotent(t, ctx, running, run.ID, handle)
 		if job, err := running.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobAbsent {
@@ -105,7 +119,7 @@ func Run(t *testing.T, factory func(pluginsdk.Settings, hclog.Logger) (pluginsdk
 		if job, err := failing.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobNeverStarted {
 			t.Fatalf("lookup = %+v, %v; want never started", job, err)
 		}
-		if terminal := follow(t, ctx, failing, handle); terminal.Started {
+		if terminal, _ := follow(t, ctx, failing, handle, 0); terminal.Started {
 			t.Fatalf("terminal %+v; want not started", terminal)
 		}
 		idempotent(t, ctx, failing, run.ID, handle)
@@ -152,7 +166,8 @@ func dispatch(t *testing.T, ctx context.Context, a pluginsdk.Plugin, run plugins
 	return handle
 }
 
-func follow(t *testing.T, ctx context.Context, a pluginsdk.Plugin, handle pluginsdk.Handle) pluginsdk.Terminal {
+// follow returns the job's terminal and the offset after the last line it took.
+func follow(t *testing.T, ctx context.Context, a pluginsdk.Plugin, handle pluginsdk.Handle, from int64) (pluginsdk.Terminal, int64) {
 	t.Helper()
 	lines := make(chan pluginsdk.Line, 64)
 	type followed struct {
@@ -161,17 +176,21 @@ func follow(t *testing.T, ctx context.Context, a pluginsdk.Plugin, handle plugin
 	}
 	ended := make(chan followed, 1)
 	go func() {
-		terminal, err := a.Follow(ctx, handle, 0, lines)
+		terminal, err := a.Follow(ctx, handle, from, lines)
 		ended <- followed{terminal, err}
 	}()
 	for {
 		select {
-		case <-lines:
+		case line := <-lines:
+			from = line.Next
 		case end := <-ended:
+			for len(lines) > 0 {
+				from = (<-lines).Next
+			}
 			if end.err != nil {
 				t.Fatalf("follow: %v", end.err)
 			}
-			return end.terminal
+			return end.terminal, from
 		}
 	}
 }
