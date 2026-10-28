@@ -49,54 +49,17 @@ func AddForms(forms []Form, key []byte, values map[string][]byte, short func(nam
 	return forms
 }
 
-// To writes data to out with each of forms, longest first, replaced by its marker, and returns how many it replaced.
-// The data passes through in pieces of Piece bytes, so no write, and nothing a form's replacer holds, is larger than a
-// piece and the forms.
+// To writes data to out with each of forms, longest first, replaced by its marker, and returns how many it replaced. No
+// write is larger than Piece bytes.
 func To(out io.Writer, data []byte, forms []Form) int {
-	w, replaced := out, 0
-	for i := len(forms) - 1; i >= 0; i-- {
-		w = &replacer{value: forms[i].Value, marker: forms[i].Marker, next: w, replaced: &replaced}
+	replaced := 0
+	for _, form := range forms {
+		if n := bytes.Count(data, form.Value); n > 0 {
+			data, replaced = bytes.ReplaceAll(data, form.Value, form.Marker), replaced+n
+		}
 	}
 	for piece := range slices.Chunk(data, Piece) {
-		w.Write(piece)
-	}
-	if first, ok := w.(*replacer); ok {
-		first.flush()
+		out.Write(piece)
 	}
 	return replaced
-}
-
-// replacer writes on to next what it is written with each occurrence of value replaced by marker, holding back only
-// the bytes a match could still begin in.
-type replacer struct {
-	value, marker []byte
-	next          io.Writer
-	held          []byte
-	replaced      *int
-}
-
-func (w *replacer) Write(p []byte) (int, error) {
-	w.held = append(w.held, p...)
-	for {
-		i := bytes.Index(w.held, w.value)
-		if i < 0 {
-			break
-		}
-		w.next.Write(w.held[:i])
-		w.next.Write(w.marker)
-		w.held = w.held[i+len(w.value):]
-		*w.replaced++
-	}
-	cut := max(len(w.held)-len(w.value)+1, 0)
-	w.next.Write(w.held[:cut])
-	w.held = slices.Clone(w.held[cut:])
-	return len(p), nil
-}
-
-func (w *replacer) flush() {
-	w.next.Write(w.held)
-	w.held = nil
-	if next, ok := w.next.(*replacer); ok {
-		next.flush()
-	}
 }
