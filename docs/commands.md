@@ -308,9 +308,9 @@ Waits for a run to finish and collects it. `--timeout` sets the wait,
 
 - By default everything goes to standard output, so `wherry watch ID >
   run.log` keeps a full record. While the run is live, `watch` streams the
-  run's redacted transcript lines as the agent printed them, reading them
-  from the tenant's transcript topic as `wherry transcript` pages them. Each
-  line prints once, in order. After the last line come the state, each part
+  run's redacted transcript lines as the agent printed them, following the
+  tenant's transcript topic with one consumer from the run's echo, so each
+  line prints as it is written. Each line prints once, in order. After the last line come the state, each part
   of the status message on its own line, and the `output=` lines.
 - `--result-only` prints the status message's parts alone.
 - `-q` or `--quiet` prints nothing on standard output. On standard error it
