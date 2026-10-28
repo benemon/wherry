@@ -3,9 +3,13 @@
 # 127.0.0.1:9093 with SCRAM-SHA-512 and the StandardAuthorizer (super user wherry-admin, operator wherry.operator
 # with the operator's ACLs on wherry.admin), and a plaintext listener on 127.0.0.1:9092 whose anonymous principal is
 # a super user. Usage: up.sh DIR. CONTAINER (docker by default) runs it; down: $CONTAINER rm -f wherry-kafka.
+# ADVERTISED_IP (127.0.0.1 by default) replaces 127.0.0.1 in the listeners, the published ports and the certificate,
+# so a client in another network namespace, such as a Nomad bridge-mode task, can reach the broker. The plaintext
+# listener then accepts anyone who can reach that address as a super user: use it on a disposable CI runner only.
 set -euo pipefail
 dir=${1:?usage: up.sh DIR}
 container=${CONTAINER:-docker}
+ip=${ADVERTISED_IP:-127.0.0.1}
 image=docker.io/apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
 mkdir -p "$dir"
 dir=$(cd "$dir" && pwd)
@@ -16,7 +20,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -su
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=localhost \
   -keyout "$dir/server.key" -out "$dir/server.csr" 2>/dev/null
 openssl x509 -req -in "$dir/server.csr" -CA "$dir/ca.crt" -CAkey "$dir/ca.key" -CAcreateserial -days 2 \
-  -extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1') -out "$dir/server.crt" 2>/dev/null
+  -extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1,IP:%s' "$ip") -out "$dir/server.crt" 2>/dev/null
 openssl pkcs8 -topk8 -nocrypt -in "$dir/server.key" -out "$dir/server.pk8"
 cat "$dir/server.crt" "$dir/server.pk8" > "$dir/server.pem"
 head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$dir/admin-password"
@@ -33,7 +37,7 @@ node.id=1
 process.roles=broker,controller
 controller.quorum.bootstrap.servers=localhost:9094
 listeners=PLAIN://0.0.0.0:9092,TLS://0.0.0.0:9093,CONTROLLER://localhost:9094
-advertised.listeners=PLAIN://127.0.0.1:9092,TLS://127.0.0.1:9093
+advertised.listeners=PLAIN://$ip:9092,TLS://$ip:9093
 listener.security.protocol.map=PLAIN:PLAINTEXT,TLS:SASL_SSL,CONTROLLER:PLAINTEXT
 controller.listener.names=CONTROLLER
 inter.broker.listener.name=PLAIN
@@ -58,7 +62,7 @@ EOF
 chmod 0644 "$dir/server.properties"
 
 "$container" rm -f wherry-kafka >/dev/null 2>&1 || true
-"$container" run -d --name wherry-kafka -p 127.0.0.1:9092:9092 -p 127.0.0.1:9093:9093 \
+"$container" run -d --name wherry-kafka -p "$ip:9092:9092" -p "$ip:9093:9093" \
   -v "$dir/server.properties:/cfg/server.properties:ro" -v "$dir/server.pem:/certs/server.pem:ro" \
   -e CLUSTER_ID="$cluster_id" -e ADMIN_PASSWORD="$(cat "$dir/admin-password")" -e OPERATOR_PASSWORD="$(cat "$dir/operator-password")" \
   --entrypoint /bin/sh "$image" -c '
@@ -78,8 +82,8 @@ done
   --topic wherry.admin >/dev/null
 
 cat > "$dir/env" <<EOF
-export WHERRY_KAFKA_TEST_BROKER=127.0.0.1:9092
-export WHERRY_TRUST_BROKER=127.0.0.1:9093
+export WHERRY_KAFKA_TEST_BROKER=$ip:9092
+export WHERRY_TRUST_BROKER=$ip:9093
 export WHERRY_TRUST_CLUSTER_ID=$cluster_id
 export WHERRY_TRUST_CA=$dir/ca.crt
 export WHERRY_TRUST_ADMIN_USER=wherry-admin
