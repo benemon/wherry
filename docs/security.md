@@ -117,6 +117,101 @@ pool whose terms list the agent's credentials.
    `TASK_STATE_AUTH_REQUIRED` naming a credential, fix that credential's
    source and submit a new run.
 
+## A model credential per pool
+
+An agent runs commands, and holds every credential its run delivers while
+it runs; a hostile or prompt-injected agent can send a credential anywhere
+its network allows. A model credential issued for one pool's agents and
+used nowhere else bounds that exposure: a leaked key reaches only that
+pool's model usage, the provider's usage and limits for the key show that
+pool's runs alone, and revoking it stops that pool's agents without
+touching another pool or the tenant's own use of the model. A dedicated,
+revocable credential per pool is an operator choice. wherry does not check
+it: it delivers whatever value the host's source for the credential's name
+resolves, and does not know which key that is.
+
+The pool's terms name each agent's credentials, and a host's
+[client configuration](configuration.md#client-configuration) maps each
+name to one source for every pool. A credential name used by one pool alone
+gives that pool its own source on every host. Each tenant's runs use that
+tenant's credential, so each tenant entitled to the pool holds its own key
+for it.
+
+### Give a pool's agents a dedicated credential
+
+Prerequisites: the [`wherry admin` environment](operations.md#set-up-wherry-admin),
+the pool's terms file, and, for each tenant entitled to the pool, a model
+provider account that issues and revokes API keys, such as per-project or
+per-workspace keys.
+
+1. Choose a credential name for the pool alone, such as
+   `build-anthropic-api-key` for pool `build`.
+
+2. For each tenant entitled to the pool, issue a key at the model provider
+   for the pool's agents, scoped to the models and limits the pool's runs
+   need.
+
+3. On each of the tenant's hosts, map the name to a
+   [source](#credential-sources) holding that key:
+
+   ```yaml
+   credentials:
+     build-anthropic-api-key:
+       command: [op, read, "op://wherry/build-anthropic/credential"]
+   ```
+
+4. Name the credential in the pool's terms, at the target the agent reads
+   it from, and record the terms as in
+   [Change a pool's terms](operations.md#change-a-pool-s-terms):
+
+   ```yaml
+   agents:
+     - name: claude
+       credentials:
+         - {name: build-anthropic-api-key, env: ANTHROPIC_API_KEY}
+   ```
+
+   ```sh
+   wherry admin pool create build --config-file build-terms.yaml
+   ```
+
+   The credential is required unless the entry sets `required: false`, so
+   `wherry submit` refuses a task for the agent from a host with no source
+   for it.
+
+5. On each host, run `wherry receivers` and check that the agent lists
+   `build-anthropic-api-key` without `missing`.
+
+### Rotate a pool's credential
+
+Prerequisites: a host of the tenant whose key rotates, and the tenant's
+account at the model provider.
+
+1. Issue a new key at the model provider for the pool's agents.
+2. Replace the value at the credential's source on each of the tenant's
+   hosts. The answering process resolves the source each time it answers a
+   seal request, so runs that start afterwards get the new key with no
+   restart.
+3. Wait for the runs that started with the old key to end. `wherry status`
+   lists each run and its state.
+4. Revoke the old key at the model provider.
+
+### Revoke a pool's credential
+
+Prerequisites: the tenant's account at the model provider.
+
+1. Revoke the key at the model provider. Agents still running with it get
+   refused calls; an agent that reports the refusal ends its run
+   `TASK_STATE_AUTH_REQUIRED` naming the credential.
+2. Remove the value from the credential's source on each of the tenant's
+   hosts, or replace it with a new key as in
+   [Rotate a pool's credential](#rotate-a-pool-s-credential). Until a source
+   resolves, seal requests for the credential go unanswered and those runs
+   end `TASK_STATE_FAILED`.
+
+When a receiver is revoked, rotate each credential sealed to it, as in
+[Revoke a host or receiver](operations.md#revoke-a-host-or-receiver).
+
 ## Credential sources
 
 The answering process, `wherry await` or `wherry mcp`, resolves each source

@@ -595,6 +595,42 @@ see all of the pool's tenants. No label or value carries a prompt, output,
 run ID, error text, URL, image, path, node or credential name.
 [Metrics](commands.md#metrics) lists the families.
 
+[`contrib/observability`](https://github.com/benemon/wherry/tree/main/contrib/observability)
+holds a Grafana dashboard, `wherry-dashboard.json`, and Prometheus alert
+rules, `wherry-alerts.yaml`, built from these families. Each release archive
+carries them under `contrib/observability/`. The dashboard shows receivers
+and capacity in use, admissions, rejections and start failures, run
+durations and queue wait, seal waits, plugin restarts, platform errors and
+cleanup, and Kafka errors, for the pools and receivers its `pool` and
+`instance` variables select. [Runbooks](runbooks.md) has a section for each
+rule, which its `runbook_url` links.
+
+Prerequisites: Prometheus scraping each receiver under the job name
+`wherry-receiver`, as above, and Grafana with that Prometheus as a data
+source.
+
+1. Copy `wherry-alerts.yaml` to the Prometheus server, name it in
+   `rule_files`, and reload Prometheus:
+
+   ```yaml
+   rule_files:
+     - /etc/prometheus/rules/wherry-alerts.yaml
+   ```
+
+   With another job name, change `job="wherry-receiver"` in the rule
+   `WherryReceiverNotAdvertising`.
+
+2. Import `wherry-dashboard.json` in Grafana, under Dashboards, New,
+   Import, and choose the Prometheus data source for its `datasource`
+   variable.
+
+3. Route the rules' `severity` label, `critical` or `warning`, in
+   Alertmanager.
+
+Each runbook states what its rule counts and the threshold it fires at.
+Adjust a threshold or window in your copy of the rules to suit a pool's
+volume.
+
 ## Revoke a host or receiver
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
@@ -988,8 +1024,28 @@ out of the agent's reach, as the Nomad plugin's README below says.
 Each plugin's README says how its agent jobs reach the network and how to
 confine them:
 [Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-network-reach),
-[Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#agent-network-reach)
-and [systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd#agent-network-reach).
+through the task driver's network mode, a node pool for agents and host
+firewall rules;
+[Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#agent-network-reach),
+through a default-deny egress NetworkPolicy; and
+[systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd#agent-network-reach),
+through `IPAddressDeny=` and `IPAddressAllow=` on `wherry.slice` or nftables
+rules.
+
+wherry enforces none of this policy. Restricting agent egress is the
+operator's choice, made on the platform. What each party of a deployment
+connects to:
+
+| Party | Connects to |
+| --- | --- |
+| Hosts: `wherry` and `wherry mcp` | the Kafka brokers' TLS listener; the pool's storage endpoint when the host's configuration has `storage` |
+| Receiver hosts: the receiver and its plugins | the Kafka brokers' TLS listener; the platform's API (the Nomad or Kubernetes API, or the local systemd bus); the storage endpoint, to upload S3 outputs and, for the Kubernetes and systemd plugins, fetch S3 inputs |
+| Nomad clients | the storage endpoint, to fetch S3 inputs |
+| Agent jobs | DNS; the model API the agent's harness calls; the hosts in the pool's `vcs`, for git inputs; and whatever else the task's own work needs |
+| Prometheus | each receiver's `metrics_addr` |
+
+Kafka is the hosts' and receivers' alone; agent jobs need no route to the
+brokers or to the storage endpoint.
 
 ## Upgrade wherry
 
