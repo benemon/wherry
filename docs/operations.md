@@ -595,6 +595,42 @@ see all of the pool's tenants. No label or value carries a prompt, output,
 run ID, error text, URL, image, path, node or credential name.
 [Metrics](commands.md#metrics) lists the families.
 
+[`contrib/observability`](https://github.com/benemon/wherry/tree/main/contrib/observability)
+holds a Grafana dashboard, `wherry-dashboard.json`, and Prometheus alert
+rules, `wherry-alerts.yaml`, built from these families. Each release archive
+carries them under `contrib/observability/`. The dashboard shows receivers
+and capacity in use, admissions, rejections and start failures, run
+durations and queue wait, seal waits, plugin restarts, platform errors and
+cleanup, and Kafka errors, for the pools and receivers its `pool` and
+`instance` variables select. [Runbooks](runbooks.md) has a section for each
+rule, which its `runbook_url` links.
+
+Prerequisites: Prometheus scraping each receiver under the job name
+`wherry-receiver`, as above, and Grafana with that Prometheus as a data
+source.
+
+1. Copy `wherry-alerts.yaml` to the Prometheus server, name it in
+   `rule_files`, and reload Prometheus:
+
+   ```yaml
+   rule_files:
+     - /etc/prometheus/rules/wherry-alerts.yaml
+   ```
+
+   With another job name, change `job="wherry-receiver"` in the rule
+   `WherryReceiverNotAdvertising`.
+
+2. Import `wherry-dashboard.json` in Grafana, under Dashboards, New,
+   Import, and choose the Prometheus data source for its `datasource`
+   variable.
+
+3. Route the rules' `severity` label, `critical` or `warning`, in
+   Alertmanager.
+
+Each runbook states what its rule counts and the threshold it fires at.
+Adjust a threshold or window in your copy of the rules to suit a pool's
+volume.
+
 ## Revoke a host or receiver
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and

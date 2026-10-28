@@ -1,0 +1,94 @@
+# Prometheus alerting rules for wherry receivers. Each rule's runbook_url names its section of
+# https://benemon.github.io/wherry/runbooks. The rules match the scrape job `wherry-receiver` of the operator guide's
+# Metrics section; change `job` in WherryReceiverNotAdvertising when your scrape job has another name.
+groups:
+  - name: wherry
+    rules:
+      # A receiver advertises every 30 seconds, and hosts show it stale after 120 seconds without one. No metric
+      # counts advertisements; the rule fires when the receiver is not scraped, has not read its configuration,
+      # keeps failing Kafka writes (advertisements are writes), or has been ended.
+      - alert: WherryReceiverNotAdvertising
+        expr: |
+          up{job="wherry-receiver"} == 0
+          or (wherry_build_info unless on (job, instance) wherry_capacity)
+          or sum by (job, instance, pool) (increase(wherry_bus_errors_total{op="write"}[5m])) >= 5
+          or sum by (job, instance, pool) (increase(wherry_denials_total{op="membership"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Receiver {{ $labels.instance }} is down, unconfigured, failing Kafka writes or ended
+          description: Hosts stop placing tasks on a receiver whose advertisement is older than 120 seconds.
+          runbook_url: https://benemon.github.io/wherry/runbooks#wherryreceivernotadvertising
+
+      # At a run's deadline the receiver stops its job and ends the run. A failed Stop returns the task to the pool
+      # with the job running and the run still TASK_STATE_WORKING.
+      - alert: WherryRunStuckPastDeadline
+        expr: |
+          sum by (job, instance, pool, profile) (increase(wherry_stop_failures_total[15m])) > 0
+          or sum by (job, instance, pool, profile) (increase(wherry_collection_failures_total{reason="not_stopped"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Receiver {{ $labels.instance }} cannot stop jobs of profile {{ $labels.profile }}
+          description: A run whose job the receiver cannot stop stays TASK_STATE_WORKING past its deadline until a receiver stops it or the delivery budget ends it.
+          runbook_url: https://benemon.github.io/wherry/runbooks#wherryrunstuckpastdeadline
+
+      # No metric counts delivery-budget exhaustion as such. Runs given back at the budget before any profile took
+      # them carry profile="none"; runs that spend the budget on start failures carry their profile, and their start
+      # failures are counted.
+      - alert: WherryDeliveryBudgetExhausted
+        expr: |
+          sum by (pool) (increase(wherry_runs_total{profile="none", state="failed"}[1h])) >= 2
+          or sum by (pool, profile, class) (increase(wherry_start_failures_total{class!="offer-unavailable"}[1h])) >= 5
+        labels:
+          severity: warning
+        annotations:
+          summary: Runs in pool {{ $labels.pool }} are spending their delivery budget
+          description: Runs end TASK_STATE_FAILED with "delivery budget exhausted" when no receiver can start them.
+          runbook_url: https://benemon.github.io/wherry/runbooks#wherrydeliverybudgetexhausted
+
+      - alert: WherryCredentialRequestsUnanswered
+        expr: |
+          sum by (pool, tenant) (increase(wherry_seal_waits_total{outcome="unanswered"}[1h])) >= 2
+        labels:
+          severity: warning
+        annotations:
+          summary: Tenant {{ $labels.tenant }} left seal requests in pool {{ $labels.pool }} unanswered
+          description: A run whose seal request no host answers within 5 minutes ends TASK_STATE_FAILED.
+          runbook_url: https://benemon.github.io/wherry/runbooks#wherrycredentialrequestsunanswered
+
+      # The receiver restarts an exited plugin after one second, doubling the wait after each failed start up to
+      # 30 seconds.
+      - alert: WherryPluginRestartLoop
+        expr: |
+          sum by (job, instance, pool, type) (increase(wherry_plugin_restarts_total[15m])) >= 3
+        labels:
+          severity: critical
+        annotations:
+          summary: Plugin {{ $labels.type }} on receiver {{ $labels.instance }} keeps restarting
+          description: While a plugin is down its profiles are not ready and the receiver withdraws their offers.
+          runbook_url: https://benemon.github.io/wherry/runbooks#wherrypluginrestartloop
+
+      - alert: WherryPlatformErrorsRising
+        expr: |
+          sum by (job, instance, pool, profile, class) (increase(wherry_plugin_platform_errors_total[10m])) >= 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Profile {{ $labels.profile }} on receiver {{ $labels.instance }} is getting {{ $labels.class }} platform errors
+          description: The plugin's platform API calls keep failing, which fails dispatches, stops, purges and sweeps.
+          runbook_url: https://benemon.github.io/wherry/runbooks#wherryplatformerrorsrising
+
+      - alert: WherryBrokerUnreachable
+        expr: |
+          sum by (job, instance, pool) (increase(wherry_bus_errors_total{op=~"read|share group"}[5m])) >= 3
+          or sum by (job, instance, pool) (increase(wherry_renewal_failures_total[5m])) >= 3
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Receiver {{ $labels.instance }} cannot reach the Kafka brokers
+          description: A receiver that cannot read or renew its claims loses them after the pool's lock duration.
+          runbook_url: https://benemon.github.io/wherry/runbooks#wherrybrokerunreachable

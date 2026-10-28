@@ -84,6 +84,7 @@ dist: ## Cross-compile release archives and checksums.txt into DIST
 		mkdir -p $(DIST)/$$name; \
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -o $(DIST)/$$name/wherry ./cmd/wherry; \
 		cp LICENSE README.md $(DIST)/$$name/; \
+		mkdir -p $(DIST)/$$name/contrib && cp -R contrib/observability $(DIST)/$$name/contrib/; \
 		tar -C $(DIST) -czf $(DIST)/$$name.tar.gz $$name; \
 		rm -rf $(DIST)/$$name; \
 	done

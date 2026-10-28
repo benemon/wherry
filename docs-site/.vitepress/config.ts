@@ -24,6 +24,7 @@ const sidebar = [
       },
       { text: 'Configuration', link: '/configuration' },
       { text: 'Operations', link: '/operations' },
+      { text: 'Runbooks', link: '/runbooks' },
       { text: 'Plugins', link: '/plugins' },
       {
         text: 'APIs',
