@@ -212,11 +212,13 @@ func (p *Process) Configure(settings Settings) (Plugin, error) {
 }
 
 // Version is the plugin's version as the latest Configure reported it, empty from a plugin that reports none, and the
-// plugin protocol version.
+// plugin protocol version the latest start negotiated.
 func (p *Process) Version() (string, int) {
 	p.configure.Lock()
 	defer p.configure.Unlock()
-	return p.version, int(handshake.ProtocolVersion)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.version, p.client.NegotiatedVersion()
 }
 
 // Close stops the process and its restarts.

@@ -928,6 +928,17 @@ func TestToolFailureCodes(t *testing.T) {
 	}
 }
 
+// A failed Collect reaches the model as its step alone.
+func TestCollectFailureNamesTheStep(t *testing.T) {
+	for _, step := range []string{"write outputs", "S3 outputs", "write transcript"} {
+		err := fmt.Errorf("watch: %w", &busclient.CollectError{Step: step, Err: errors.New("open /home/user/state: is a directory")})
+		want := toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: step + ": the run's results could not be collected; the MCP server's log holds the cause"}
+		if failure := collectFailure(err).(*toolError); *failure != want {
+			t.Errorf("%s: %+v, want %+v", step, failure, want)
+		}
+	}
+}
+
 // An UNAVAILABLE reaches the model by class alone; the server's log keeps the cause.
 func TestMCPUnavailableLogsItsCause(t *testing.T) {
 	ctx := context.Background()

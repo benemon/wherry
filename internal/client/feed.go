@@ -890,12 +890,11 @@ func (h *Host) Transcript(ctx context.Context, runID string) (TranscriptResult, 
 	if err := r.readTranscript(ctx); err != nil {
 		return TranscriptResult{}, err
 	}
-	return r.transcript(nil), nil
+	return r.transcript(), nil
 }
 
-// transcript is the run's transcript as Transcript returns it, from the chunks derived so far, without the lines whose
-// attempt and seq returned holds; it adds the attempt and seq of each line it returns to a non-nil returned.
-func (r *runView) transcript(returned map[[2]int64]bool) TranscriptResult {
+// transcript is the run's transcript as Transcript returns it, from the chunks derived so far.
+func (r *runView) transcript() TranscriptResult {
 	result := TranscriptResult{Redacted: map[string]int{}, Skipped: r.skipped}
 	for _, status := range r.statuses {
 		result.Attempt = max(result.Attempt, status.Wherry.Attempt)
@@ -919,12 +918,6 @@ func (r *runView) transcript(returned map[[2]int64]bool) TranscriptResult {
 			continue
 		}
 		seen[chunk.Wherry.Seq] = true
-		if key := [2]int64{chunk.Wherry.Attempt, chunk.Wherry.Seq}; returned != nil {
-			if returned[key] {
-				continue
-			}
-			returned[key] = true
-		}
 		parts := unredactParts(chunk.ArtifactUpdate.Artifact.Parts, markers, result.Redacted)
 		result.Lines = append(result.Lines, TranscriptLine{Seq: chunk.Wherry.Seq, Attempt: chunk.Wherry.Attempt, Part: parts[0]})
 	}
@@ -932,7 +925,7 @@ func (r *runView) transcript(returned map[[2]int64]bool) TranscriptResult {
 	return result
 }
 
-// TranscriptStream returns a run's transcript lines as they arrive, each line once.
+// TranscriptStream returns a run's transcript as its lines arrive.
 type TranscriptStream struct {
 	h   *Host
 	run string
@@ -945,19 +938,16 @@ type TranscriptStream struct {
 	// taken from it.
 	tail *follower
 	next int64
-	// returned holds the attempt and seq of each line Next has returned.
-	returned map[[2]int64]bool
 }
 
 // StreamTranscript returns a stream of runID's transcript.
 func (h *Host) StreamTranscript(runID string) *TranscriptStream {
-	return &TranscriptStream{h: h, run: runID, returned: map[[2]int64]bool{}}
+	return &TranscriptStream{h: h, run: runID}
 }
 
-// Next returns, in seq order, the lines of the run's transcript that Transcript would return now and no earlier Next
-// returned. The stream's consumer, and the host's follower when none runs, run under the ctx of the Next that starts
-// them. A line of an earlier attempt that a later attempt has since superseded stays returned; Transcript's view drops
-// it.
+// Next returns the run's transcript as Transcript would return it now; a caller printing it as it grows skips the
+// lines it has printed. The stream's consumer, and the host's follower when none runs, run under the ctx of the Next
+// that starts them.
 func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
 	if s.r == nil {
 		f, err := s.h.follow(ctx)
@@ -1011,7 +1001,7 @@ func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
 	s.next = max(s.next, read)
 	s.r.addTranscript(ctx, records)
 	s.r.derive()
-	return s.r.transcript(s.returned), nil
+	return s.r.transcript(), nil
 }
 
 // Wait blocks until there are records past those Next last took, the consumer it reads from stops, or ctx ends.
@@ -1066,12 +1056,12 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	r := newRunView(h, v, runID, local)
 	r.read(waitCtx, records)
 	if r.pool == "" {
-		return AwaitResult{}, fmt.Errorf("await %s: %w", runID, ErrRunNotFound)
+		return AwaitResult{}, fmt.Errorf("watch %s: %w", runID, ErrRunNotFound)
 	}
 	rederive := func() error {
 		v, err := h.load(waitCtx)
 		if err != nil {
-			return fmt.Errorf("await %s: %w", runID, err)
+			return fmt.Errorf("watch %s: %w", runID, err)
 		}
 		r.v, r.reread = v, map[string]bool{}
 		r.derive()
@@ -1087,7 +1077,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			outcome.Skipped, outcome.Model = r.skipped, r.model()
 			if r.result != nil {
 				if err := r.readTranscript(waitCtx); err != nil {
-					return AwaitResult{}, fmt.Errorf("await %s: %w", runID, err)
+					return AwaitResult{}, fmt.Errorf("watch %s: %w", runID, err)
 				}
 				outcome.Skipped = r.skipped
 				outcome.Outputs, outcome.Stored, outcome.NotReturned, outcome.Rejected = r.verifiedOutputs(r.result)
@@ -1126,7 +1116,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		}
 		stopPoll()
 		if err := waitCtx.Err(); err != nil {
-			return AwaitResult{}, fmt.Errorf("await %s: %w", runID, err)
+			return AwaitResult{}, fmt.Errorf("watch %s: %w", runID, err)
 		}
 		if err != nil {
 			return AwaitResult{}, err

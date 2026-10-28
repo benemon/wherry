@@ -147,14 +147,16 @@ func TestCollectNamesTheStepThatFailed(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(dir, "report.md"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := f.host.Collect(f.ctx, runID, result, dir); err == nil || !strings.HasPrefix(err.Error(), "write outputs: ") {
+		_, err = f.host.Collect(f.ctx, runID, result, dir)
+		if failed := (*CollectError)(nil); !errors.As(err, &failed) || failed.Step != "write outputs" || err.Error() != "write outputs: "+failed.Err.Error() {
 			t.Fatalf("collect = %v, want the outputs' write named", err)
 		}
 	})
 	t.Run("S3 outputs", func(t *testing.T) {
 		f, _, runID, result := s3Run(t, "")
 		f.host.storage = nil
-		if _, err := f.host.Collect(f.ctx, runID, result, t.TempDir()); err == nil || !strings.HasPrefix(err.Error(), "S3 outputs: ") {
+		_, err := f.host.Collect(f.ctx, runID, result, t.TempDir())
+		if failed := (*CollectError)(nil); !errors.As(err, &failed) || failed.Step != "S3 outputs" || err.Error() != "S3 outputs: "+failed.Err.Error() {
 			t.Fatalf("collect = %v, want the S3 outputs named", err)
 		}
 	})
@@ -170,7 +172,8 @@ func TestCollectNamesTheStepThatFailed(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(dir, wire.TranscriptFile), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := f.host.Collect(f.ctx, runID, result, dir); err == nil || !strings.HasPrefix(err.Error(), "write transcript: ") {
+		_, err = f.host.Collect(f.ctx, runID, result, dir)
+		if failed := (*CollectError)(nil); !errors.As(err, &failed) || failed.Step != "write transcript" || err.Error() != "write transcript: "+failed.Err.Error() {
 			t.Fatalf("collect = %v, want the transcript's write named", err)
 		}
 	})
