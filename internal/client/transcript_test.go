@@ -176,3 +176,80 @@ func mustRead(t *testing.T, f *fixture, topic string) []*kgo.Record {
 	}
 	return records
 }
+
+// A stream of ticks over a live run fetches each of its transcript records once, where a Transcript each tick fetches
+// the transcript topic from the run's echo again, and each tick returns only the lines committed since the last.
+func TestTranscriptStreamFetchesEachChunkOnce(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	topic := admin.TenantTranscriptTopic("tenant-a")
+	var counted traffic
+	stream := f.countedReader(t, &counted).StreamTranscript(runID)
+	const ticks = 8
+	for tick := range int64(ticks) {
+		receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, tick*5))
+		got, err := stream.Next(f.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Lines) != 1 || got.Lines[0].Seq != tick*5 {
+			t.Fatalf("tick %d returned %+v; want the line at %d alone", tick, got.Lines, tick*5)
+		}
+	}
+	if got, err := stream.Next(f.ctx); err != nil || len(got.Lines) != 0 {
+		t.Fatalf("a tick past the last chunk returned %+v, %v; want nothing", got.Lines, err)
+	}
+	// Each transaction appends its chunk and a commit marker.
+	end := f.endOffset(t, topic)
+	t.Logf("stream: %d ticks over %d chunks fetched %d of %d transcript records in %d fetch requests and %d listings", ticks+1, ticks, counted.records(topic), end, counted.counts().fetches, counted.counts().listings)
+	if n := counted.records(topic); n != end {
+		t.Fatalf("%d ticks fetched %d transcript records; want each of the %d once", ticks+1, n, end)
+	}
+}
+
+// A stream over an adopted run returns the second attempt's lines as they commit. A line the first attempt wrote at a
+// seq the adopter writes again stays returned, while Transcript's view, as transcript.jsonl holds it, takes the
+// adopter's.
+func TestTranscriptStreamOfAnAdoptedRun(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	stream := f.host.StreamTranscript(runID)
+	type line struct{ attempt, seq int64 }
+	next := func() []line {
+		t.Helper()
+		got, err := stream.Next(f.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var lines []line
+		for _, l := range got.Lines {
+			lines = append(lines, line{l.Attempt, l.Seq})
+		}
+		return lines
+	}
+	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, 0), receiver.chunk(t, task, 1, 5), receiver.chunk(t, task, 1, 10))
+	if got, want := next(), []line{{1, 0}, {1, 5}, {1, 10}}; !slices.Equal(got, want) {
+		t.Fatalf("first attempt streamed %v, want %v", got, want)
+	}
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "claimed-2", "claimed", wire.TaskStateWorking, nil), receiver.chunk(t, task, 2, 10), receiver.chunk(t, task, 2, 15))
+	if got, want := next(), []line{{2, 10}, {2, 15}}; !slices.Equal(got, want) {
+		t.Fatalf("second attempt streamed %v, want %v", got, want)
+	}
+	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 2, 20), receiver.chunk(t, task, 1, 25))
+	if got, want := next(), []line{{2, 20}}; !slices.Equal(got, want) {
+		t.Fatalf("after adoption streamed %v, want %v without the first attempt's later line", got, want)
+	}
+	transcript, err := f.host.Transcript(f.ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view []line
+	for _, l := range transcript.Lines {
+		view = append(view, line{l.Attempt, l.Seq})
+	}
+	if want := []line{{1, 0}, {1, 5}, {2, 10}, {2, 15}, {2, 20}}; !slices.Equal(view, want) {
+		t.Fatalf("transcript %v, want %v", view, want)
+	}
+}

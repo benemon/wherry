@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
-	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"flag"
@@ -18,6 +15,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"time"
 
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/signed"
@@ -27,7 +25,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|key rotate|receivers|submit|cancel|await|status|events|transcript|cleanup|receiver run|admin|mcp|version>")
+		return errors.New("usage: wherry <init|key|key rotate|receivers|submit|cancel|watch|status|events|transcript|cleanup|receiver run|admin|mcp|version>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -124,7 +122,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	command, ok := map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
 		"receivers": runReceivers, "submit": runSubmit,
-		"cancel": runCancel, "await": runAwait, "status": runStatus, "events": runEvents, "transcript": runTranscript, "cleanup": runCleanup,
+		"cancel": runCancel, "watch": runWatch, "status": runStatus, "events": runEvents, "transcript": runTranscript, "cleanup": runCleanup,
 	}[args[0]]
 	if !ok {
 		return fmt.Errorf("unknown command %q", args[0])
@@ -399,22 +397,38 @@ func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
 	}
 }
 
-// defaultAwaitTimeout covers a run at the default queue deadline and run deadline.
-const defaultAwaitTimeout = busclient.DefaultQueueDeadline + busclient.DefaultDeadline
+// defaultWatchTimeout covers a run at the default queue deadline and run deadline.
+const defaultWatchTimeout = busclient.DefaultQueueDeadline + busclient.DefaultDeadline
 
-func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const awaitUsage = "usage: wherry await RUN_ID [--timeout 2h10m] [--outputs-dir DIR]"
-	flags := flag.NewFlagSet("await", flag.ContinueOnError)
+// streamInterval separates the reads of a live run's transcript that watch streams, each reading only the transcript
+// records past the last; it matches the interval of the watch tool's progress notifications.
+const streamInterval = progressInterval
+
+func runWatch(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
+	const watchUsage = "usage: wherry watch RUN_ID [--result-only|-q] [--timeout 2h10m] [--outputs-dir DIR]"
+	flags := flag.NewFlagSet("watch", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	flags.Usage = func() {
+		fmt.Fprintln(stderr, watchUsage)
+		fmt.Fprintln(stderr, "Stopping watch can leave a credential request unanswered, ending the run FAILED after the seal wait.")
+		flags.PrintDefaults()
+	}
 	configFile := flags.String("config-file", "", "host configuration file")
-	timeout := flags.Duration("timeout", defaultAwaitTimeout, "wait timeout")
+	timeout := flags.Duration("timeout", defaultWatchTimeout, "wait timeout")
 	outputsDir := flags.String("outputs-dir", "", "directory for the run's outputs (default: <state_dir>/runs/RUN_ID/outputs)")
+	resultOnly := flags.Bool("result-only", false, "print the run's reply alone")
+	var quiet bool
+	flags.BoolVar(&quiet, "q", false, "print nothing but errors; the exit status tells the outcome")
+	flags.BoolVar(&quiet, "quiet", false, "print nothing but errors; the exit status tells the outcome")
 	positional, err := parseAnywhere(flags, args)
 	if err != nil {
 		return err
 	}
 	if len(positional) != 1 {
-		return errors.New(awaitUsage)
+		return errors.New(watchUsage)
+	}
+	if *resultOnly && quiet {
+		return errors.New("--result-only and --quiet are mutually exclusive")
 	}
 	runID := positional[0]
 	if *timeout <= 0 {
@@ -425,60 +439,88 @@ func runAwait(ctx context.Context, client *busclient.Host, args []string, stdout
 		return err
 	}
 	defer closeClient()
+	full := !*resultOnly && !quiet
+	diagnostics := stderr
+	if quiet {
+		diagnostics = io.Discard
+	}
+	// printed is the seq past which transcript lines are yet to print; lines print in seq order and once each.
+	printed := int64(-1)
+	printLines := func(lines []busclient.TranscriptLine) {
+		for _, line := range lines {
+			if line.Seq > printed {
+				stdout.Write(busclient.AppendLine(nil, line))
+				printed = line.Seq
+			}
+		}
+	}
+	streamCtx, stopStream := context.WithCancel(ctx)
+	streamed := make(chan struct{})
+	if full {
+		stream := client.StreamTranscript(runID)
+		go func() {
+			defer close(streamed)
+			for {
+				// A failed read is retried; the transcript Collect writes holds every line.
+				if transcript, err := stream.Next(streamCtx); err == nil {
+					printLines(busclient.ViewLines(transcript.Lines))
+				}
+				select {
+				case <-streamCtx.Done():
+					return
+				case <-time.After(streamInterval):
+				}
+			}
+		}()
+	} else {
+		close(streamed)
+	}
 	result, err := client.Await(ctx, runID, *timeout)
+	stopStream()
+	<-streamed
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, result.Status.State)
+	collected, collectErr := client.Collect(ctx, runID, result, *outputsDir)
+	if full {
+		printLines(collected.Lines)
+		fmt.Fprintln(stdout, result.Status.State)
+	}
 	if result.Unclaimed != "" {
 		return errors.New(result.Unclaimed)
 	}
 	if result.Model != "" {
-		fmt.Fprintf(stderr, "model=%s\n", result.Model)
+		fmt.Fprintf(diagnostics, "model=%s\n", result.Model)
 	}
-	if result.Status.Message != nil {
+	if result.Status.Message != nil && !quiet {
 		for _, part := range result.Status.Message.Parts {
 			fmt.Fprintln(stdout, partText(part))
 		}
 	}
-	var paths []string
-	if len(result.Outputs) > 0 {
-		if paths, err = client.WriteOutputs(runID, *outputsDir, result.Outputs); err != nil {
-			return fmt.Errorf("write outputs: %w", err)
+	if collectErr != nil {
+		return collectErr
+	}
+	for _, output := range append(collected.Outputs, collected.Transcript) {
+		if full {
+			fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, output.Path, output.SHA256, output.Size)
 		}
-	}
-	downloaded, rejected, err := client.DownloadOutputs(ctx, runID, result, *outputsDir)
-	if err != nil {
-		return fmt.Errorf("S3 outputs: %w", err)
-	}
-	result.Rejected = append(result.Rejected, rejected...)
-	for _, output := range downloaded {
-		paths = append(paths, output.Path)
-	}
-	transcript, transcriptPath, err := writeTranscript(ctx, client, runID, *outputsDir)
-	if err != nil {
-		return fmt.Errorf("write transcript: %w", err)
-	}
-	paths = append(paths, transcriptPath)
-	for i, output := range append(append(result.Outputs, downloaded...), transcript) {
-		fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, paths[i], output.SHA256, output.Size)
 		switch output.Name {
 		case wire.GitPatch:
-			fmt.Fprintf(stderr, "apply with: git am %s\n", paths[i])
+			fmt.Fprintf(diagnostics, "apply with: git am %s\n", output.Path)
 		case wire.GitBundle:
-			fmt.Fprintf(stderr, "fetch with: git fetch %s HEAD\n", paths[i])
+			fmt.Fprintf(diagnostics, "fetch with: git fetch %s HEAD\n", output.Path)
 		}
 	}
-	for _, output := range append(result.NotReturned, result.Rejected...) {
-		fmt.Fprintf(stderr, "output %s not returned: %s\n", output.Name, output.Reason)
+	for _, output := range append(result.NotReturned, collected.Rejected...) {
+		fmt.Fprintf(diagnostics, "output %s not returned: %s\n", output.Name, output.Reason)
 	}
-	warnRedacted(stderr, result.Redacted)
-	warnSkipped(stderr, result.Skipped)
+	warnRedacted(diagnostics, result.Redacted)
+	warnSkipped(diagnostics, result.Skipped)
 	if result.Status.State != wire.TaskStateCompleted {
 		return fmt.Errorf("run ended in %s", result.Status.State)
 	}
-	if len(result.Rejected) > 0 {
-		return fmt.Errorf("%d outputs failed verification", len(result.Rejected))
+	if len(collected.Rejected) > 0 {
+		return fmt.Errorf("%d outputs failed verification", len(collected.Rejected))
 	}
 	return nil
 }
@@ -644,7 +686,7 @@ func runTranscript(ctx context.Context, client *busclient.Host, args []string, s
 	if err != nil {
 		return err
 	}
-	result.Lines = viewLines(result.Lines)
+	result.Lines = busclient.ViewLines(result.Lines)
 	lines := result.Lines[min(*offset, len(result.Lines)):]
 	if *limit > 0 {
 		lines = lines[:min(*limit, len(lines))]
@@ -664,32 +706,6 @@ func runTranscript(ctx context.Context, client *busclient.Host, args []string, s
 	warnRedacted(stderr, result.Redacted)
 	warnSkipped(stderr, result.Skipped)
 	return nil
-}
-
-// writeTranscript writes runID's transcript, as transcript prints it, to dir or else the run's outputs directory, and
-// returns it as an output with the path it was written to.
-func writeTranscript(ctx context.Context, client *busclient.Host, runID, dir string) (busclient.Output, string, error) {
-	result, err := client.Transcript(ctx, runID)
-	if err != nil {
-		return busclient.Output{}, "", err
-	}
-	var data bytes.Buffer
-	for _, line := range viewLines(result.Lines) {
-		switch part := line.Part; {
-		case part.URL != "":
-		case part.Raw != nil:
-			fmt.Fprintf(&data, "%s\n", part.Raw)
-		default:
-			fmt.Fprintln(&data, part.Text)
-		}
-	}
-	sum := sha256.Sum256(data.Bytes())
-	transcript := busclient.Output{Name: wire.TranscriptFile, SHA256: hex.EncodeToString(sum[:]), Size: int64(data.Len()), Data: data.Bytes()}
-	paths, err := client.WriteOutputs(runID, dir, []busclient.Output{transcript})
-	if err != nil {
-		return busclient.Output{}, "", err
-	}
-	return transcript, paths[0], nil
 }
 
 // parseRequirements reads key=v|v (In), key!=v|v (NotIn), key (Exists) and !key (DoesNotExist), comma-separated.

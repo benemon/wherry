@@ -242,7 +242,7 @@ func TestHostCommandsReadConfigFile(t *testing.T) {
 		"receivers": {"receivers", "--config-file", missing},
 		"submit":    {"submit", "--config-file", missing, "--prompt", "work"},
 		"cancel":    {"cancel", "--config-file", missing, "run-a"},
-		"await":     {"await", "run-a", "--config-file", missing},
+		"watch":     {"watch", "run-a", "--config-file", missing},
 		"status":    {"status", "--config-file", missing, "run-a"},
 		"events":    {"events", "--config-file", missing, "run-a"},
 		"cleanup":   {"cleanup", "--config-file", missing, "run-a"},

@@ -50,7 +50,7 @@ func mcpSessionReading(t *testing.T, connect func() (*busclient.Host, error), pr
 	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(openInput), openInput, func(id string) string { return "wherry await " + id }, log.New(testLog{t}, "mcp server: ", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, inputReader(openInput), openInput, func(id string) string { return "wherry watch " + id + " --result-only" }, log.New(testLog{t}, "mcp server: ", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,11 +140,11 @@ func TestMCPToolsList(t *testing.T) {
 			}
 		}
 	})
-	if want := []string{"await", "cancel", "cleanup", "events", "receivers", "status", "submit", "transcript"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"cancel", "cleanup", "events", "receivers", "status", "submit", "transcript", "watch"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools %v, want %v", names, want)
 	}
 	required := map[string][]string{
-		"await": {"id"}, "cancel": {"id"}, "cleanup": {"id"}, "events": {"id"}, "receivers": nil, "status": nil,
+		"watch": {"id"}, "cancel": {"id"}, "cleanup": {"id"}, "events": {"id"}, "receivers": nil, "status": nil,
 		"submit": nil, "transcript": {"id"},
 	}
 	for name, tool := range schemas {
@@ -185,16 +185,16 @@ func TestMCPToolsList(t *testing.T) {
 			}
 		}
 	}
-	var await struct {
+	var watch struct {
 		Properties map[string]any `json:"properties"`
 	}
-	encoded, _ := json.Marshal(schemas["await"].OutputSchema)
-	if err := json.Unmarshal(encoded, &await); err != nil {
+	encoded, _ := json.Marshal(schemas["watch"].OutputSchema)
+	if err := json.Unmarshal(encoded, &watch); err != nil {
 		t.Fatal(err)
 	}
 	for _, field := range []string{"id", "state", "retry_after", "message", "artifacts"} {
-		if _, ok := await.Properties[field]; !ok {
-			t.Errorf("await output schema lacks %s", field)
+		if _, ok := watch.Properties[field]; !ok {
+			t.Errorf("watch output schema lacks %s", field)
 		}
 	}
 }
@@ -247,7 +247,7 @@ func TestDeadlineDefaultsAreTwoHours(t *testing.T) {
 	}
 }
 
-func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
+func TestMCPSubmitWatchRoundTrip(t *testing.T) {
 	b := newBus(t)
 	ctx := b.ctx
 	session := mcpSession(t, b.connect(t), nil)
@@ -273,15 +273,15 @@ func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 		t.Fatalf("updated %q: %v", status.Runs[0].Updated, err)
 	}
 
-	awaited := make(chan awaitReply, 1)
+	watched := make(chan watchReply, 1)
 	go func() {
-		var reply awaitReply
-		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "await", Arguments: map[string]any{"id": submitted.ID}})
+		var reply watchReply
+		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "watch", Arguments: map[string]any{"id": submitted.ID}})
 		if err == nil && !result.IsError {
 			encoded, _ := json.Marshal(result.StructuredContent)
 			json.Unmarshal(encoded, &reply)
 		}
-		awaited <- reply
+		watched <- reply
 	}()
 
 	// The receiver's side: claim the authorised task, then commit what admission and completion commit.
@@ -299,11 +299,11 @@ func TestMCPSubmitAwaitRoundTrip(t *testing.T) {
 	b.feed(t, submitted.ID, b.result(t, admitted, []wire.Part{{Data: jsontext.Value(`{"answer":42}`), MediaType: "application/json"}}),
 		b.status(t, admitted, "terminal-1", "terminal", now(wire.TaskStateCompleted)))
 
-	reply := <-awaited
+	reply := <-watched
 	if reply.ID != submitted.ID || reply.State != string(wire.TaskStateCompleted) || reply.RetryAfter != 0 || len(reply.Artifacts) != 1 ||
 		reply.Artifacts[0].ArtifactID != "result" || len(reply.Artifacts[0].Parts) != 1 ||
 		!reflect.DeepEqual(reply.Artifacts[0].Parts[0].Data, map[string]any{"answer": float64(42)}) {
-		t.Fatalf("await %#v", reply)
+		t.Fatalf("watch %#v", reply)
 	}
 	var events eventsOutput
 	callTool(t, ctx, session, "events", map[string]any{"id": submitted.ID}, &events)
@@ -339,17 +339,17 @@ func TestMCPToolCallsShareOneHost(t *testing.T) {
 	callTool(t, ctx, session, "receivers", map[string]any{}, &receivers)
 	var submitted submitOutput
 	callTool(t, ctx, session, "submit", submitArguments, &submitted)
-	awaited := make(chan string, 1)
+	watched := make(chan string, 1)
 	go func() {
-		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "await", Arguments: map[string]any{"id": submitted.ID}})
+		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "watch", Arguments: map[string]any{"id": submitted.ID}})
 		if err != nil || result.IsError {
-			awaited <- fmt.Sprint(err, result)
+			watched <- fmt.Sprint(err, result)
 			return
 		}
-		var reply awaitReply
+		var reply watchReply
 		encoded, _ := json.Marshal(result.StructuredContent)
 		json.Unmarshal(encoded, &reply)
-		awaited <- reply.State
+		watched <- reply.State
 	}()
 	admitted := b.tasks(t, submitted.ID)[0]
 	b.feed(t, submitted.ID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
@@ -357,8 +357,8 @@ func TestMCPToolCallsShareOneHost(t *testing.T) {
 	callTool(t, ctx, session, "status", map[string]any{"id": submitted.ID}, &status)
 	callTool(t, ctx, session, "status", map[string]any{}, &status)
 	b.feed(t, submitted.ID, b.result(t, admitted, []wire.Part{{Text: "done"}}), b.status(t, admitted, "terminal-1", "terminal", now(wire.TaskStateCompleted)))
-	if state := <-awaited; state != string(wire.TaskStateCompleted) {
-		t.Fatalf("await %s", state)
+	if state := <-watched; state != string(wire.TaskStateCompleted) {
+		t.Fatalf("watch %s", state)
 	}
 	var events eventsOutput
 	callTool(t, ctx, session, "events", map[string]any{"id": submitted.ID}, &events)
@@ -391,7 +391,7 @@ func TestMCPStatusWithoutIDListsRuns(t *testing.T) {
 	}
 }
 
-func TestMCPAwaitBoundedRetry(t *testing.T) {
+func TestMCPWatchBoundedRetry(t *testing.T) {
 	t.Parallel()
 	b := newBus(t)
 	ctx := b.ctx
@@ -400,36 +400,36 @@ func TestMCPAwaitBoundedRetry(t *testing.T) {
 	var submitted submitOutput
 	callTool(t, ctx, session, "submit", submitArguments, &submitted)
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), awaitBound+15*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), watchBound+15*time.Second)
 	defer cancel()
 	start := time.Now()
-	params := &mcp.CallToolParams{Name: "await", Arguments: map[string]any{"id": submitted.ID}}
-	params.SetProgressToken("await-1")
+	params := &mcp.CallToolParams{Name: "watch", Arguments: map[string]any{"id": submitted.ID}}
+	params.SetProgressToken("watch-1")
 	result, err := session.CallTool(waitCtx, params)
 	elapsed := time.Since(start)
 	if err != nil {
-		t.Fatalf("await after %s: %v", elapsed, err)
+		t.Fatalf("watch after %s: %v", elapsed, err)
 	}
 	if result.IsError {
-		t.Fatalf("await error %s", toolText(result))
+		t.Fatalf("watch error %s", toolText(result))
 	}
 	var reply map[string]any
 	encoded, _ := json.Marshal(result.StructuredContent)
 	if err := json.Unmarshal(encoded, &reply); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed < awaitBound || elapsed > awaitBound+10*time.Second {
-		t.Fatalf("await returned after %s, want the %s bound", elapsed, awaitBound)
+	if elapsed < watchBound || elapsed > watchBound+10*time.Second {
+		t.Fatalf("watch returned after %s, want the %s bound", elapsed, watchBound)
 	}
 	if !reflect.DeepEqual(reply, map[string]any{"id": submitted.ID, "state": string(wire.TaskStateSubmitted), "retry_after": float64(retryAfter)}) {
-		t.Fatalf("await %s", encoded)
+		t.Fatalf("watch %s", encoded)
 	}
 	if progress.Load() == 0 {
-		t.Fatal("no progress notification during await")
+		t.Fatal("no progress notification during watch")
 	}
 }
 
-func TestMCPAwaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
+func TestMCPWatchAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
 	b := newBus(t)
 	ctx := b.ctx
 	session := mcpSession(t, b.connect(t), nil)
@@ -437,14 +437,14 @@ func TestMCPAwaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T)
 	callTool(t, ctx, session, "submit", map[string]any{"prompt": "fix the bug", "queue_deadline": "2s"}, &submitted)
 	start := time.Now()
 	var reply map[string]any
-	callTool(t, ctx, session, "await", map[string]any{"id": submitted.ID}, &reply)
+	callTool(t, ctx, session, "watch", map[string]any{"id": submitted.ID}, &reply)
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("await returned after %s, want soon after the 2s queue deadline", elapsed)
+		t.Fatalf("watch returned after %s, want soon after the 2s queue deadline", elapsed)
 	}
 	message, _ := reply["message"].(string)
 	if !strings.HasPrefix(message, "queue deadline passed at ") || !strings.HasSuffix(message, " and no receiver claimed the run") ||
 		!reflect.DeepEqual(reply, map[string]any{"id": submitted.ID, "state": string(wire.TaskStateSubmitted), "message": message}) {
-		t.Fatalf("await %#v, want the passed queue deadline without retry_after", reply)
+		t.Fatalf("watch %#v, want the passed queue deadline without retry_after", reply)
 	}
 	var status statusOutput
 	callTool(t, ctx, session, "status", map[string]any{"id": submitted.ID}, &status)
@@ -465,10 +465,10 @@ func TestMCPCancel(t *testing.T) {
 			t.Fatalf("cancel %#v", cancelled)
 		}
 		b.cancelRun(t, admitted)
-		var reply awaitReply
-		callTool(t, ctx, session, "await", map[string]any{"id": runID}, &reply)
+		var reply watchReply
+		callTool(t, ctx, session, "watch", map[string]any{"id": runID}, &reply)
 		if reply.State != string(wire.TaskStateCanceled) {
-			t.Fatalf("await after cancel %#v", reply)
+			t.Fatalf("watch after cancel %#v", reply)
 		}
 		var status statusOutput
 		callTool(t, ctx, session, "status", map[string]any{"id": runID}, &status)
@@ -671,9 +671,9 @@ func transcriptRun(t *testing.T) (*bus, string) {
 	return b, runID
 }
 
-// await writes the run's transcript beside its outputs as transcript prints it, prints its path like an output's, and MCP
-// await returns the path.
-func TestAwaitWritesTheTranscript(t *testing.T) {
+// watch writes the run's transcript beside its outputs as transcript prints it, prints its path like an output's, and MCP
+// watch returns the path.
+func TestWatchWritesTheTranscript(t *testing.T) {
 	b, runID := transcriptRun(t)
 	var printed bytes.Buffer
 	if err := runTranscript(b.ctx, b.client, []string{runID}, &printed, io.Discard); err != nil {
@@ -681,8 +681,8 @@ func TestAwaitWritesTheTranscript(t *testing.T) {
 	}
 	path := filepath.Join(b.stateDir, "runs", runID, "outputs", "transcript.jsonl")
 	var stdout, stderr bytes.Buffer
-	if err := runAwait(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr); err == nil || err.Error() != "run ended in TASK_STATE_CANCELED" {
-		t.Fatalf("await: %v", err)
+	if err := runWatch(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr); err == nil || err.Error() != "run ended in TASK_STATE_CANCELED" {
+		t.Fatalf("watch: %v", err)
 	}
 	want := fmt.Sprintf("output=transcript.jsonl path=%s sha256=%s size=%d\n", path, hashOf(printed.String()), printed.Len())
 	if written, err := os.ReadFile(path); err != nil || printed.Len() == 0 || string(written) != printed.String() || !strings.HasSuffix(stdout.String(), want) {
@@ -691,10 +691,21 @@ func TestAwaitWritesTheTranscript(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	var reply awaitReply
-	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "await", map[string]any{"id": runID}, &reply)
+	var reply watchReply
+	callTool(t, b.ctx, mcpSession(t, b.connect(t), nil), "watch", map[string]any{"id": runID}, &reply)
 	if written, err := os.ReadFile(path); err != nil || reply.Transcript != path || string(written) != printed.String() {
-		t.Fatalf("MCP await transcript %q, written %q, %v; want %s holding %q", reply.Transcript, written, err, path, printed.String())
+		t.Fatalf("MCP watch transcript %q, written %q, %v; want %s holding %q", reply.Transcript, written, err, path, printed.String())
+	}
+	// A failed step is named without the cause, whose text names local paths.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	failure := callToolError(t, b.ctx, mcpSession(t, b.connect(t), nil), "watch", map[string]any{"id": runID})
+	if failure.Code != "OUTPUTS_NOT_WRITTEN" || !strings.HasPrefix(failure.Message, "write transcript: ") || strings.Contains(failure.Message, b.stateDir) {
+		t.Fatalf("MCP watch onto a directory: %+v, want the transcript's write named alone", failure)
 	}
 }
 
@@ -850,8 +861,8 @@ func TestMCPPromptFile(t *testing.T) {
 		if text := b.tasks(t, submitted.ID)[0].submission.Message.Parts[0].Text; !strings.Contains(text, "the brief") {
 			t.Fatalf("prompt %q, want the file's", text)
 		}
-		if submitted.Await != "wherry await "+submitted.ID {
-			t.Errorf("submit await %q, want the command that waits for %s", submitted.Await, submitted.ID)
+		if submitted.Watch != "wherry watch "+submitted.ID+" --result-only" {
+			t.Errorf("submit watch %q, want the command that waits for %s", submitted.Watch, submitted.ID)
 		}
 		for name, arguments := range map[string]map[string]any{
 			"both":    {"prompt": "x", "prompt_file": "brief.md"},
@@ -887,19 +898,19 @@ func TestMCPCleanup(t *testing.T) {
 	}
 }
 
-func TestAwaitCommand(t *testing.T) {
-	plain, err := awaitCommand("")
-	if err != nil || plain("run-1") != "wherry await run-1" {
+func TestWatchCommand(t *testing.T) {
+	plain, err := watchCommand("")
+	if err != nil || plain("run-1") != "wherry watch run-1 --result-only" {
 		t.Fatalf("no config file: %v", err)
 	}
 	dir := t.TempDir()
 	t.Chdir(dir)
-	named, err := awaitCommand("it's.yaml")
-	want := "wherry await run-1 --config-file '" + strings.ReplaceAll(filepath.Join(dir, "it's.yaml"), "'", `'\''`) + "'"
+	named, err := watchCommand("it's.yaml")
+	want := "wherry watch run-1 --result-only --config-file '" + strings.ReplaceAll(filepath.Join(dir, "it's.yaml"), "'", `'\''`) + "'"
 	if err != nil || named("run-1") != want {
 		t.Fatalf("config file: %q, %v; want %q", named("run-1"), err, want)
 	}
-	out, err := exec.Command("sh", "-c", "printf %s "+strings.TrimPrefix(named("run-1"), "wherry await run-1 --config-file ")).Output()
+	out, err := exec.Command("sh", "-c", "printf %s "+strings.TrimPrefix(named("run-1"), "wherry watch run-1 --result-only --config-file ")).Output()
 	if err != nil || string(out) != filepath.Join(dir, "it's.yaml") {
 		t.Fatalf("the shell reads the path as %q, %v", out, err)
 	}
@@ -926,7 +937,7 @@ func TestMCPUnavailableLogsItsCause(t *testing.T) {
 	}
 	open := inputOpener(t.TempDir(), busclient.Config{})
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry await " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry watch " + id + " --result-only" }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -958,7 +969,7 @@ func TestMCPUnavailableLogRedactsResolvedCredentials(t *testing.T) {
 	}
 	open := inputOpener(t.TempDir(), busclient.Config{})
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry await " + id }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
+	serverSession, err := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry watch " + id + " --result-only" }, log.New(&logged, "", 0)).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

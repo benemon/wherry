@@ -135,7 +135,7 @@ func TestSealWaitExpiryFailsWithoutCredentialValue(t *testing.T) {
 	if terminal.Wherry.Kind != "terminal" || got.State != wire.TaskStateFailed {
 		t.Fatalf("terminal status %#v, want FAILED", terminal)
 	}
-	want := "credential " + credentialName + " was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
+	want := "credential " + credentialName + " was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry watch or wherry mcp running, and submit again"
 	if got.Message == nil || got.Message.Role != wire.RoleAgent || len(got.Message.Parts) != 1 || got.Message.Parts[0].Text != want || strings.Contains(got.Message.Parts[0].Text, testToken) {
 		t.Fatalf("status message %#v, want credential name and no value", got.Message)
 	}

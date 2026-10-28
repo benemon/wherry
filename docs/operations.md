@@ -678,7 +678,7 @@ For a host:
 
 1. Wait for the runs the host submitted to end. `wherry status` lists them.
 2. Stop every other wherry process of the host, such as the MCP server and
-   any `wherry await`. They hold the old key.
+   any `wherry watch`. They hold the old key.
 3. Run the rotation:
 
    ```sh
@@ -985,7 +985,7 @@ credential as a file and checks the host:
 - A public repository needs no credential.
 
 With `--git-changes`, the agent returns its commits as `changes.patch` or
-`changes.bundle`, which `await` writes like any output, and the parent
+`changes.bundle`, which `watch` writes like any output, and the parent
 applies them with its own credentials:
 
 ```
@@ -1091,7 +1091,7 @@ configuration, bundle and state directory.
 `wherry mcp` serves the host operations as MCP tools over stdio. It reads
 the client configuration and connects to Kafka as one host when it starts.
 Every tool call and seal answer reuses that host and its one tenant-feed
-follower, and `await`, `events` and `transcript` also read the tenant's
+follower, and `watch`, `events` and `transcript` also read the tenant's
 transcript topic. While the connection fails, the server retries it on each
 tool call and every five seconds.
 [MCP tools](mcp.md) lists the tools.

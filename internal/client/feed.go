@@ -400,15 +400,9 @@ func (h *Host) history(ctx context.Context, runID string) (*runView, error) {
 // once the run has an outcome it reads to a last stable offset at or past the topic's end, listed after the outcome was
 // seen.
 func (r *runView) readTranscript(ctx context.Context) error {
-	var echoed time.Time
-	for _, e := range r.entries {
-		if e.echo != nil && (echoed.IsZero() || e.at.Before(echoed)) {
-			echoed = e.at
-		}
-	}
-	// No receiver writes a run's chunks before its echo.
-	if echoed.IsZero() {
-		return nil
+	offset, echoed, err := r.transcriptStart(ctx)
+	if err != nil || !echoed {
+		return err
 	}
 	topic := admin.TenantTranscriptTopic(r.h.tenant)
 	listing, err := r.h.reader.Admin()
@@ -423,14 +417,6 @@ func (r *runView) readTranscript(ctx context.Context) error {
 		}
 		ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
 	}
-	starts, err := admin.ListOffsets(ctx, func(ctx context.Context, topics ...string) (kadm.ListedOffsets, error) {
-		return listing.ListOffsetsAfterMilli(ctx, echoed.Add(-transcriptSkew).UnixMilli(), topics...)
-	}, topic)
-	if err != nil {
-		return err
-	}
-	var offset int64
-	starts.Each(func(listed kadm.ListedOffset) { offset = listed.Offset })
 	var records []*kgo.Record
 	for {
 		read, stable, err := r.h.reader.ReadFromWithEnd(ctx, topic, offset)
@@ -448,14 +434,47 @@ func (r *runView) readTranscript(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+	r.addTranscript(ctx, records)
+	r.derive()
+	return nil
+}
+
+// transcriptStart lists the first offset of the tenant's transcript topic appended at or after the run's earliest
+// echo, reporting false while the run has no echo.
+func (r *runView) transcriptStart(ctx context.Context) (int64, bool, error) {
+	var echoed time.Time
+	for _, e := range r.entries {
+		if e.echo != nil && (echoed.IsZero() || e.at.Before(echoed)) {
+			echoed = e.at
+		}
+	}
+	// No receiver writes a run's chunks before its echo.
+	if echoed.IsZero() {
+		return 0, false, nil
+	}
+	listing, err := r.h.reader.Admin()
+	if err != nil {
+		return 0, false, err
+	}
+	starts, err := admin.ListOffsets(ctx, func(ctx context.Context, topics ...string) (kadm.ListedOffsets, error) {
+		return listing.ListOffsetsAfterMilli(ctx, echoed.Add(-transcriptSkew).UnixMilli(), topics...)
+	}, admin.TenantTranscriptTopic(r.h.tenant))
+	if err != nil {
+		return 0, false, err
+	}
+	var offset int64
+	starts.Each(func(listed kadm.ListedOffset) { offset = listed.Offset })
+	return offset, true, nil
+}
+
+// addTranscript keeps the run's records among records read from the transcript topic.
+func (r *runView) addTranscript(ctx context.Context, records []*kgo.Record) {
 	for _, record := range records {
 		if string(record.Key) == r.run {
 			typ, kid := header(record.Value)
 			r.add(ctx, record, typ, kid)
 		}
 	}
-	r.derive()
-	return nil
 }
 
 // transcriptRetry separates reads of the transcript topic waiting for its last stable offset to pass a run's last chunks.
@@ -853,6 +872,12 @@ func (h *Host) Transcript(ctx context.Context, runID string) (TranscriptResult, 
 	if err := r.readTranscript(ctx); err != nil {
 		return TranscriptResult{}, err
 	}
+	return r.transcript(nil), nil
+}
+
+// transcript is the run's transcript as Transcript returns it, from the chunks derived so far, without the lines whose
+// attempt and seq returned holds; it adds the attempt and seq of each line it returns to a non-nil returned.
+func (r *runView) transcript(returned map[[2]int64]bool) TranscriptResult {
 	result := TranscriptResult{Redacted: map[string]int{}, Skipped: r.skipped}
 	for _, status := range r.statuses {
 		result.Attempt = max(result.Attempt, status.Wherry.Attempt)
@@ -869,18 +894,74 @@ func (h *Host) Transcript(ctx context.Context, runID string) (TranscriptResult, 
 		}
 	}
 	sort.SliceStable(chunks, func(i, j int) bool { return chunks[i].Wherry.Attempt > chunks[j].Wherry.Attempt })
-	markers := h.markers(r.local)
+	markers := r.h.markers(r.local)
 	seen := map[int64]bool{}
 	for _, chunk := range chunks {
 		if seen[chunk.Wherry.Seq] || chunk.Wherry.Attempt != result.Attempt && chunk.Wherry.Seq >= first {
 			continue
 		}
 		seen[chunk.Wherry.Seq] = true
+		if key := [2]int64{chunk.Wherry.Attempt, chunk.Wherry.Seq}; returned != nil {
+			if returned[key] {
+				continue
+			}
+			returned[key] = true
+		}
 		parts := unredactParts(chunk.ArtifactUpdate.Artifact.Parts, markers, result.Redacted)
 		result.Lines = append(result.Lines, TranscriptLine{Seq: chunk.Wherry.Seq, Attempt: chunk.Wherry.Attempt, Part: parts[0]})
 	}
 	sort.Slice(result.Lines, func(i, j int) bool { return result.Lines[i].Seq < result.Lines[j].Seq })
-	return result, nil
+	return result
+}
+
+// TranscriptStream follows a run's transcript, reading the transcript topic on from where its last read ended.
+type TranscriptStream struct {
+	h   *Host
+	run string
+	// next is the transcript topic offset the next read starts at, once started.
+	next    int64
+	started bool
+	// entries are the run's records authorised from the transcript topic so far, and unread those it read keyed by
+	// the run that authorise as none of its records.
+	entries []entry
+	unread  int
+	// returned holds the attempt and seq of each line Next has returned.
+	returned map[[2]int64]bool
+}
+
+// StreamTranscript returns a stream of runID's transcript.
+func (h *Host) StreamTranscript(runID string) *TranscriptStream {
+	return &TranscriptStream{h: h, run: runID, returned: map[[2]int64]bool{}}
+}
+
+// Next returns, in seq order, the lines of the run's transcript that Transcript would return now and no earlier Next
+// returned. It derives the run from its feed history again but reads only the transcript topic's records past the
+// last read, from the first offset after the run's echo, listed once. A line of an earlier attempt that a later
+// attempt has since superseded stays returned; Transcript's view drops it.
+func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
+	r, err := s.h.history(ctx, s.run)
+	if err != nil {
+		return TranscriptResult{}, err
+	}
+	if r.pool == "" {
+		return TranscriptResult{}, fmt.Errorf("transcript %s: %w", s.run, ErrRunNotFound)
+	}
+	if !s.started {
+		if s.next, s.started, err = r.transcriptStart(ctx); err != nil || !s.started {
+			return TranscriptResult{Redacted: map[string]int{}, Skipped: r.skipped}, err
+		}
+	}
+	records, stable, err := s.h.reader.ReadFromWithEnd(ctx, admin.TenantTranscriptTopic(s.h.tenant), s.next)
+	if err != nil {
+		return TranscriptResult{}, err
+	}
+	kept, unread := len(r.entries), r.unread
+	r.entries, r.unread = append(r.entries, s.entries...), r.unread+s.unread
+	r.addTranscript(ctx, records)
+	s.entries, s.unread = slices.Clone(r.entries[kept:]), r.unread-unread
+	s.next = max(s.next, stable)
+	r.derive()
+	return r.transcript(s.returned), nil
 }
 
 // Await follows the tenant feed until the run has an outcome, answering seal requests while it waits.

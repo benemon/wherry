@@ -35,9 +35,9 @@ declares two profiles with different isolation.
 ## Fan out independent tasks
 
 A harness splits work into independent tasks, submits each as its own run
-and awaits each one. The pool's receivers claim them as their capacity
+and watches each one. The pool's receivers claim them as their capacity
 allows, so the tasks run side by side. The harness does the splitting and
-combines the results. [MCP tools](mcp.md) lists the `submit` and `await`
+combines the results. [MCP tools](mcp.md) lists the `submit` and `watch`
 tools a harness calls.
 
 ## Follow delegated work across machines

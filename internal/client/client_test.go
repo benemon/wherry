@@ -2012,7 +2012,7 @@ func TestAwaitOfAFinishedRunBoundsItsConnectionsAndRequests(t *testing.T) {
 	if awaited.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("awaited %s, want COMPLETED", awaited.Status.State)
 	}
-	bound(t, "await", counted.counts(), counts{6, 0, 16, 0, nil})
+	bound(t, "Await", counted.counts(), counts{6, 0, 16, 0, nil})
 }
 
 // readTopic reads topic from its start through a reader of its own.

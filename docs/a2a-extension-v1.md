@@ -322,7 +322,7 @@ base64 does. The fixed texts are:
   and ended by a signal or a non-zero exit, and, when the
   [seal wait](#seal-request) expires,
   `credential <name> was not answered within 5m; add it to credentials in
-  the host's wherry configuration, keep wherry await or wherry mcp running,
+  the host's wherry configuration, keep wherry watch or wherry mcp running,
   and submit again`. For several credentials the text opens
   `credentials <name>, <name> were not answered within 5m; add them to
   credentials`. When the request also asked for presigned URLs, the subject
@@ -755,7 +755,7 @@ run's `claimed` status.
   wait ends. A redelivered or adopted attempt makes a new key and a new
   request; a seal answering an earlier request does not open for it.
 
-The host that submitted the run answers while `wherry await` or `wherry
+The host that submitted the run answers while `wherry watch` or `wherry
 mcp` runs, at most once per run and attempt. It answers only when all of
 these hold:
 

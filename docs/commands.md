@@ -20,10 +20,10 @@
   positive. `host revoke` and `receiver revoke` refuse a `--wait` of zero or
   less before they revoke anything; without `--wait` they compute the wait
   from the broker's timeouts.
-- `cancel`, `await`, `status`, `events` and `transcript` print
+- `cancel`, `watch`, `status`, `events` and `transcript` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
-- `await` and `status` print each redaction marker of a run this host
+- `watch` and `status` print each redaction marker of a run this host
   submitted as `[redacted:<name>]`, naming the credential or S3 object,
   and `<name> redacted N times` on standard error for each name whose
   markers they printed. A host maps a marker with the run's redaction key
@@ -112,7 +112,7 @@ Replaces the host key with a new one:
    `old_key_id=<id> new_key_id=<id>`.
 
 Stop every other wherry process of the host first, such as the MCP server
-and any `wherry await`; they hold the old key.
+and any `wherry watch`; they hold the old key.
 
 Every host command that finds `<host_key>.next` folds the host's key topic
 before anything else. When the current key is the next key's, it renames
@@ -282,14 +282,14 @@ carries about 75.
 
 `submit` seals nothing. The receiver that claims the task asks for the
 agent's credentials the host supplies, the task's credentials and presigned URLs
-for its S3 inputs and outputs, and `wherry await` or `wherry mcp` answers
+for its S3 inputs and outputs, and `wherry watch` or `wherry mcp` answers
 ([sealed credentials](security.md#sealed-credentials)). When no seal
 answers the request within 5 minutes, the run ends `TASK_STATE_FAILED` with a message
 that names the credentials, and the presigned URLs when the run has S3
 inputs or outputs:
 
 ```
-credential <name> was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again
+credential <name> was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry watch or wherry mcp running, and submit again
 ```
 
 ### `wherry cancel RUN_ID`
@@ -297,25 +297,41 @@ credential <name> was not answered within 5m; add it to credentials in the host'
 Publishes a signed cancel of the run to its pool's events and prints
 `run_id=<id>`.
 
-### `wherry await RUN_ID`
+### `wherry watch RUN_ID`
 
-Waits for a run to finish. `--timeout` sets the wait, `2h10m` by default:
-the default queue deadline and run deadline together.
+Waits for a run to finish and collects it. `--timeout` sets the wait,
+`2h10m` by default: the default queue deadline and run deadline together.
 `--outputs-dir DIR` sets where the run's outputs go, by default
 `<state_dir>/runs/<run>/outputs/`.
 
-It prints the state on the first line, and each part of the status message
-on a line after it, for every state: the agent's answer or what went wrong,
-as its [outcome file](configuration.md#agent-contract) reports it, or the
-receiver's reason. A part prints as its text, its JSON data,
-`[url <url>]`, or `[raw <media type> <n> bytes]`.
+`watch` has three output modes. `--result-only` and `-q` refuse each other.
 
-For a run whose placement names a model, `await` prints `model=<model>` on
+- By default everything goes to standard output, so `wherry watch ID >
+  run.log` keeps a full record. While the run is live, `watch` streams the
+  run's redacted transcript lines as the agent printed them, reading them
+  from the tenant's transcript topic as `wherry transcript` pages them. Each
+  line prints once, in order. After the last line come the state, each part
+  of the status message on its own line, and the `output=` lines.
+- `--result-only` prints the status message's parts alone.
+- `-q` or `--quiet` prints nothing on standard output. On standard error it
+  prints errors and the log of the seal requests it answers. The exit status
+  tells the outcome.
+
+The status message's parts are the agent's answer or what went wrong, as its
+[outcome file](configuration.md#agent-contract) reports it, or the
+receiver's reason, for every state. A part prints as its text, its JSON
+data, `[url <url>]`, or `[raw <media type> <n> bytes]`.
+
+Every mode writes the outputs and `transcript.jsonl`, deletes the run's S3
+objects once they verify, answers seal requests, and exits as below. The
+diagnostics below that go to standard error print in every mode but `-q`.
+
+For a run whose placement names a model, `watch` prints `model=<model>` on
 standard error.
 
-`await` writes each output that [verifies](a2a-extension-v1.md#inputs-and-outputs)
+`watch` writes each output that [verifies](a2a-extension-v1.md#inputs-and-outputs)
 against the result, at its relative path beneath the outputs directory, and
-prints a line for it:
+by default prints a line for it:
 
 ```
 output=<name> path=<path> sha256=<hex> size=<bytes>
@@ -324,12 +340,12 @@ output=<name> path=<path> sha256=<hex> size=<bytes>
 For `changes.patch` it also prints `apply with: git am <path>`, and for
 `changes.bundle` `fetch with: git fetch <path> HEAD`, on standard error.
 
-`await` writes the run's redacted transcript to `transcript.jsonl` in the
+`watch` writes the run's redacted transcript to `transcript.jsonl` in the
 outputs directory, one line per transcript line as `wherry transcript`
-prints them, and prints its line as it prints an output's, last. No
-expected output takes the name `transcript.jsonl`.
+prints them, and by default prints its line as it prints an output's, last.
+No expected output takes the name `transcript.jsonl`.
 
-`await` reads the run's statuses and result from the tenant feed, and its
+`watch` reads the run's statuses and result from the tenant feed, and its
 output and transcript chunks from the tenant's transcript topic, from the
 first offset at or after one minute before the append time of the run's
 earliest echo on the feed. Once it sees a terminal status, it reads the transcript topic to its
@@ -342,32 +358,34 @@ output the result lists as not returned and each one that fails
 verification. A write never leaves the outputs directory, whatever links
 it holds.
 
-`await` downloads each S3 output the result lists with the host's storage
+`watch` downloads each S3 output the result lists with the host's storage
 credential, to the same place, and prints it as it prints any output. It
 downloads only an S3 output the run declares, at its key
 `wherry/<tenant>/<run>/outputs/<name>`, and writes it only when its bytes
 match the listed size and SHA-256; a file already there that matches is
 kept. Once the run is terminal and every listed S3 output has verified,
-`await` deletes every object under `wherry/<tenant>/<run>/` in the pool's
-bucket, inputs included. A run that ends while no `await` runs keeps them
+`watch` deletes every object under `wherry/<tenant>/<run>/` in the pool's
+bucket, inputs included. A run that ends while no `watch` runs keeps them
 until `wherry cleanup` or the bucket's lifecycle rule removes them.
 
 A run this host submitted whose queue deadline passes with no status from
-a receiver can never start. `await` then prints `TASK_STATE_SUBMITTED` and
-exits at once with status 1 and
+a receiver can never start. `watch` then collects nothing, prints
+`TASK_STATE_SUBMITTED` by default, and exits at once with status 1 and
 `queue deadline passed at <RFC 3339 time> and no receiver claimed the run`.
 The queue deadline comes from this host's record of the submission, so
-`await` on another host of the tenant waits for its timeout.
+`watch` on another host of the tenant waits for its timeout.
 
-`await` exits with status 1, `run ended in <state>`, for any state other
+`watch` exits with status 1, `run ended in <state>`, for any state other
 than `TASK_STATE_COMPLETED`, with status 1 when an output fails
 verification, and with status 1 when the timeout passes.
 
-While it waits, `await` answers the seal requests on the tenant feed for
+While it waits, `watch` answers the seal requests on the tenant feed for
 every run this host submitted that has not ended, once per attempt, and logs on standard error
 each answer and each verified request of its own runs that it skips or
 refuses, by run, receiver and credential names. It resolves each credential's
-[source](security.md#credential-sources) at the answer.
+[source](security.md#credential-sources) at the answer. Stopping `watch`
+can leave a credential request unanswered, and the run then ends
+`TASK_STATE_FAILED` after the 5-minute seal wait.
 
 ### `wherry cleanup RUN_ID`
 
@@ -459,14 +477,14 @@ sha256=<hex> size=<bytes>` on standard error. Each redaction marker reads
 the markers in every line of the transcript. The transcript grows while the agent
 runs.
 
-`await`, `status`, `events`, `transcript`, `cleanup` and `cancel`
+`watch`, `status`, `events`, `transcript`, `cleanup` and `cancel`
 find a run from this host's record of it in `state_dir`, or from a receiver's
 echo on the tenant feed. They fail with `run not found` when there is neither.
 
 ### `wherry mcp`
 
 Serves the [MCP tools](mcp.md) over stdio. For as long as it runs it
-answers seal requests as `await` does, logging to standard error.
+answers seal requests as `watch` does, logging to standard error.
 The packaged MCP launch uses `["mcp"]` and the default configuration path.
 A server that runs `wherry mcp --config-file PATH` uses another, as
 [Harness integration](operations.md#harness-integration) shows.

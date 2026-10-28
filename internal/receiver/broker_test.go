@@ -373,7 +373,7 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "credential " + credentialName + " was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
+	want := "credential " + credentialName + " was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry watch or wherry mcp running, and submit again"
 	for {
 		status, statusErr := host.Status(ctx, submitted.RunID)
 		if statusErr == nil && status.Status.State == wire.TaskStateFailed {

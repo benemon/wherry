@@ -25,13 +25,17 @@ clones itself.
    pool has storage and your configuration a storage credential,
    `--s3-input FILE` sends a larger file (5 GiB at most) through the pool's
    bucket, and `--output NAME:s3` returns one that way. Keep working.
-3. `wherry await RUN_ID` blocks until the run ends (2 hours 10 minutes
-   at most by default), then prints the state and the result, and writes each returned
-   output, S3 outputs included, printing an `output=<name> path=<path>` line for
-   it. It also answers the receiver's request for the run's credentials, so
-   start it within 5 minutes of submitting. Start it in the background right
-   after submitting, where your harness reports background command
-   completion: its completion is how you learn the run ended.
+3. `wherry watch RUN_ID --result-only` blocks until the run ends (2 hours 10
+   minutes at most by default), then prints the agent's reply, and writes each
+   returned output, S3 outputs included, and `transcript.jsonl`. Without
+   `--result-only` it prints the transcript as the agent runs, then the state,
+   the reply and an `output=<name> path=<path>` line for each output; `-q`
+   prints nothing and leaves the exit status. It also answers the receiver's
+   request for the run's credentials, so start it within 5 minutes of
+   submitting, and do not stop it while that request is open: unanswered, the
+   run ends `TASK_STATE_FAILED`. Start it in the background right after
+   submitting, where your harness reports background command completion: its
+   completion is how you learn the run ended.
 4. `submit` refuses with `auth required: credential NAME is not in this
    host's configuration` when the host has no source for a credential the
    agent requires or the task names. A run whose credential request goes
@@ -40,18 +44,18 @@ clones itself.
    names the credential. Tell the user which credential it names, and to add
    a source for it (a file, an environment variable or a command) under
    `credentials` in their wherry configuration. Never handle the value
-   yourself. Then submit the task again and await the new run.
+   yourself. Then submit the task again and watch the new run.
 5. `wherry cancel RUN_ID` when the result is no longer needed.
 6. `wherry status RUN_ID` prints a run's state without waiting.
    `wherry status` alone lists every run this host can see, latest update
    first. `wherry transcript RUN_ID` prints the agent's output lines;
    `--offset` and `--limit` page through them.
 7. `wherry cleanup RUN_ID` deletes the S3 objects of a run that ended while
-   no `await` ran.
+   no `watch` ran.
 
 Where the `wherry` MCP server (`wherry mcp`) is configured, its tools do the
-same: `receivers`, `submit`, `status`, `await`, `cancel`, `events`,
-`transcript` and `cleanup`. Its `submit` returns `await`,
-the `wherry await` command to start in the background. Its `await` tool
+same: `receivers`, `submit`, `status`, `watch`, `cancel`, `events`,
+`transcript` and `cleanup`. Its `submit` returns `watch`,
+the `wherry watch` command to start in the background. Its `watch` tool
 waits up to 45 seconds; call it again while the reply carries `retry_after`. Its `transcript`
 returns a page of lines; call it again with `next_offset` while it is set.
