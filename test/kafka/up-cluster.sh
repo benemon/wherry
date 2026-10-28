@@ -74,7 +74,11 @@ done
 "$container" network create "$network" >/dev/null
 
 "$container" pull "$image" >/dev/null
-cluster=$("$container" run --rm --entrypoint /opt/kafka/bin/kafka-storage.sh "$image" random-uuid | tail -n 1)
+# The trust-broker tests refuse a broker whose cluster ID is not this one. A leading '-' would read as an option.
+cluster=-
+while [[ $cluster == -* ]]; do
+  cluster=$(openssl rand 16 | base64 | tr '+/' '-_' | tr -d '=')
+done
 for node in "${nodes[@]}"; do
   offset=$(( (node - 1) * 10000 ))
   # Every node formats with the same cluster ID and SCRAM credentials; the static quorum needs no initial controllers.
@@ -117,6 +121,7 @@ cat > "$dir/env" <<EOF
 export WHERRY_KAFKA_TEST_BROKER=127.0.0.1:9092
 export WHERRY_KAFKA_TEST_BROKERS=${#nodes[@]}
 export WHERRY_TRUST_BROKER=127.0.0.1:9093
+export WHERRY_TRUST_CLUSTER_ID=$cluster
 export WHERRY_TRUST_CA=$dir/ca.crt
 export WHERRY_TRUST_ADMIN_USER=wherry-admin
 export WHERRY_TRUST_ADMIN_PASSWORD_FILE=$dir/admin-password

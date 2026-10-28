@@ -508,19 +508,19 @@ func realService(t *testing.T) (*Service, func()) {
 	return &Service{Admin: root, Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: string(ca)}, func() { operator.Close(); root.Close() }
 }
 
-// disposableBroker refuses any broker but the disposable one test/kafka/up.sh starts, whose cluster ID is the
-// WHERRY_TRUST_CLUSTER_ID its env file names: the trust-broker tests write to the broker's wherry.admin.
+// disposableBroker refuses any broker but the disposable one test/kafka/up.sh or up-cluster.sh starts, whose cluster
+// ID is the WHERRY_TRUST_CLUSTER_ID its env file names: the trust-broker tests write to the broker's wherry.admin.
 func disposableBroker(ctx context.Context, client *kgo.Client) error {
 	want := os.Getenv("WHERRY_TRUST_CLUSTER_ID")
 	if want == "" {
-		return errors.New("WHERRY_TRUST_CLUSTER_ID is not set: the WHERRY_TRUST_BROKER tests run only against the broker test/kafka/up.sh starts, with its env file sourced")
+		return errors.New("WHERRY_TRUST_CLUSTER_ID is not set: the WHERRY_TRUST_BROKER tests run only against a broker test/kafka/up.sh or up-cluster.sh starts, with its env file sourced")
 	}
 	metadata, err := kadm.NewClient(client).BrokerMetadata(ctx)
 	if err != nil {
 		return err
 	}
 	if metadata.Cluster != want {
-		return fmt.Errorf("broker cluster ID %q is not WHERRY_TRUST_CLUSTER_ID %q: the WHERRY_TRUST_BROKER tests run only against the broker test/kafka/up.sh starts", metadata.Cluster, want)
+		return fmt.Errorf("broker cluster ID %q is not WHERRY_TRUST_CLUSTER_ID %q: the WHERRY_TRUST_BROKER tests run only against a broker test/kafka/up.sh or up-cluster.sh starts", metadata.Cluster, want)
 	}
 	return nil
 }
