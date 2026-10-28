@@ -402,22 +402,22 @@ func TestSubmitModelOutsideTheTerms(t *testing.T) {
 	}
 }
 
-// awaitOutput publishes a completed result with parts for an admitted run and returns what await prints before the
+// watchOutput publishes a completed result with parts for an admitted run and returns what watch prints before the
 // transcript's line.
-func awaitOutput(t *testing.T, parts []wire.Part) string {
+func watchOutput(t *testing.T, parts []wire.Part) string {
 	t.Helper()
 	b := newBus(t)
 	admitted := b.admitted(t)
 	runID := admitted.submission.Wherry.Run
 	b.feed(t, runID, b.result(t, admitted, parts), b.status(t, admitted, "terminal-1", "terminal", now(wire.TaskStateCompleted)))
 	var stdout, stderr bytes.Buffer
-	if err := runAwait(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr); err != nil {
+	if err := runWatch(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	return withoutTranscript(t, stdout.String())
 }
 
-// withoutTranscript is await's stdout without its last line, which must name the run's empty transcript.
+// withoutTranscript is watch's stdout without its last line, which must name the run's empty transcript.
 func withoutTranscript(t *testing.T, stdout string) string {
 	t.Helper()
 	printed, last, _ := strings.Cut(strings.TrimSuffix(stdout, "\n"), "\noutput=transcript.jsonl path=")
@@ -427,8 +427,8 @@ func withoutTranscript(t *testing.T, stdout string) string {
 	return printed + "\n"
 }
 
-func TestAwaitPrintsNonTextPartPlaceholders(t *testing.T) {
-	got := awaitOutput(t, []wire.Part{
+func TestWatchPrintsNonTextPartPlaceholders(t *testing.T) {
+	got := watchOutput(t, []wire.Part{
 		{Text: "done"},
 		{Raw: wire.StdBytes("hello"), MediaType: "text/plain"},
 		{URL: "https://example.test/report.pdf"},
@@ -438,8 +438,8 @@ func TestAwaitPrintsNonTextPartPlaceholders(t *testing.T) {
 	}
 }
 
-func TestAwaitPrintsDataPart(t *testing.T) {
-	got := awaitOutput(t, []wire.Part{{Data: jsontext.Value(`{"answer":42,"items":["a","b"]}`), MediaType: "application/json"}})
+func TestWatchPrintsDataPart(t *testing.T) {
+	got := watchOutput(t, []wire.Part{{Data: jsontext.Value(`{"answer":42,"items":["a","b"]}`), MediaType: "application/json"}})
 	if want := "TASK_STATE_COMPLETED\n{\"answer\":42,\"items\":[\"a\",\"b\"]}\n"; got != want {
 		t.Fatalf("stdout %q, want %q", got, want)
 	}
@@ -481,11 +481,11 @@ func (b *bus) cancelRun(t *testing.T, admitted task) {
 	b.feed(t, runID, b.status(t, admitted, runID+"/1/canceled", "terminal", now(wire.TaskStateCanceled)))
 }
 
-func TestAwaitPrintsFailed(t *testing.T) {
+func TestWatchPrintsFailed(t *testing.T) {
 	b, admitted := publishFailedRun(t)
 	runID := admitted.submission.Wherry.Run
 	var stdout, stderr bytes.Buffer
-	err := runAwait(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr)
+	err := runWatch(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr)
 	if err == nil || err.Error() != "run ended in TASK_STATE_FAILED" {
 		t.Fatalf("error %v", err)
 	}
@@ -508,12 +508,12 @@ func TestCancelCLI(t *testing.T) {
 	}
 	b.cancelRun(t, admitted)
 	stdout.Reset()
-	err := runAwait(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr)
+	err := runWatch(b.ctx, b.client, []string{runID, "--timeout", "5s"}, &stdout, &stderr)
 	if err == nil || err.Error() != "run ended in TASK_STATE_CANCELED" {
-		t.Fatalf("await error %v", err)
+		t.Fatalf("watch error %v", err)
 	}
 	if withoutTranscript(t, stdout.String()) != "TASK_STATE_CANCELED\n" || stderr.Len() != 0 {
-		t.Fatalf("await stdout %q stderr %q", stdout.String(), stderr.String())
+		t.Fatalf("watch stdout %q stderr %q", stdout.String(), stderr.String())
 	}
 	stdout.Reset()
 	if err := runEvents(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
@@ -553,7 +553,7 @@ func TestStatusPrintsFailed(t *testing.T) {
 	}
 }
 
-func TestAwaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
+func TestWatchAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
 	b := newBus(t)
 	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", Deadline: time.Minute, QueueDeadline: 2 * time.Second})
 	if err != nil {
@@ -561,15 +561,15 @@ func TestAwaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
-	err = runAwait(b.ctx, b.client, []string{submitted.RunID, "--timeout", "20s"}, &stdout, &stderr)
+	err = runWatch(b.ctx, b.client, []string{submitted.RunID, "--timeout", "20s"}, &stdout, &stderr)
 	if elapsed := time.Since(start); elapsed > 6*time.Second {
-		t.Fatalf("await returned after %s, want soon after the 2s queue deadline", elapsed)
+		t.Fatalf("watch returned after %s, want soon after the 2s queue deadline", elapsed)
 	}
 	if err == nil || !strings.HasPrefix(err.Error(), "queue deadline passed at ") || !strings.HasSuffix(err.Error(), " and no receiver claimed the run") {
-		t.Fatalf("await error %v", err)
+		t.Fatalf("watch error %v", err)
 	}
 	if want := "TASK_STATE_SUBMITTED\n"; stdout.String() != want || stderr.Len() != 0 {
-		t.Fatalf("await stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+		t.Fatalf("watch stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
 	}
 	unclaimed := err.Error()
 	stdout.Reset()
@@ -708,9 +708,15 @@ func TestUsageErrors(t *testing.T) {
 		{"cancel argument", func(stderr *bytes.Buffer) error {
 			return runCancel(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
 		}, "usage: wherry cancel"},
-		{"await argument", func(stderr *bytes.Buffer) error {
-			return runAwait(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
-		}, "usage: wherry await"},
+		{"watch argument", func(stderr *bytes.Buffer) error {
+			return runWatch(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
+		}, "usage: wherry watch"},
+		{"watch modes", func(stderr *bytes.Buffer) error {
+			return runWatch(context.Background(), nil, []string{"run-a", "--result-only", "-q"}, stderr, stderr)
+		}, "--result-only and --quiet are mutually exclusive"},
+		{"watch long modes", func(stderr *bytes.Buffer) error {
+			return runWatch(context.Background(), nil, []string{"--quiet", "run-a", "--result-only"}, stderr, stderr)
+		}, "--result-only and --quiet are mutually exclusive"},
 		{"status argument", func(stderr *bytes.Buffer) error {
 			return runStatus(context.Background(), nil, []string{"run-a", "extra"}, stderr, stderr)
 		}, "usage: wherry status"},
@@ -720,8 +726,8 @@ func TestUsageErrors(t *testing.T) {
 		{"submit deadline", func(stderr *bytes.Buffer) error {
 			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--prompt", "p", "--deadline", "0s"}, stderr, stderr)
 		}, "deadlines must be positive"},
-		{"await timeout", func(stderr *bytes.Buffer) error {
-			return runAwait(context.Background(), nil, []string{"run-a", "--timeout", "0s"}, stderr, stderr)
+		{"watch timeout", func(stderr *bytes.Buffer) error {
+			return runWatch(context.Background(), nil, []string{"run-a", "--timeout", "0s"}, stderr, stderr)
 		}, "timeout must be positive"},
 		{"receiver without run", func(stderr *bytes.Buffer) error {
 			return run([]string{"receiver", "--bundle-file", "x"}, stderr, stderr)
@@ -735,6 +741,9 @@ func TestUsageErrors(t *testing.T) {
 		{"removed secret", func(stderr *bytes.Buffer) error {
 			return run([]string{"secret", "put", "token"}, stderr, stderr)
 		}, "unknown command \"secret\""},
+		{"removed await", func(stderr *bytes.Buffer) error {
+			return run(strings.Fields("await run-a"), stderr, stderr)
+		}, "unknown command \"await\""},
 		{"removed resume", func(stderr *bytes.Buffer) error {
 			return run([]string{"resume", "run-a"}, stderr, stderr)
 		}, "unknown command \"resume\""},

@@ -1459,7 +1459,7 @@ func unansweredReason(credentials []string, urls bool) string {
 	} else if len(credentials) > 0 {
 		configure = "add the credentials and storage"
 	}
-	return subject + " " + verb + " not answered within " + strings.TrimSuffix(wire.SealWait.String(), "0s") + "; " + configure + " in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again"
+	return subject + " " + verb + " not answered within " + strings.TrimSuffix(wire.SealWait.String(), "0s") + "; " + configure + " in the host's wherry configuration, keep wherry watch or wherry mcp running, and submit again"
 }
 
 // startFailure purges the run's job and returns the task to the pool for a member that can start it; cause is what the

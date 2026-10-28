@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	json "encoding/json/v2"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -49,37 +50,79 @@ type oracle struct {
 	secret   string
 }
 
+// uploadOracle is a fake S3 store keeping objects by path, /bucket/key. ops logs its object requests in order: PUT, GET
+// and DELETE with the path.
 type uploadOracle struct {
 	endpoint string
 	config   *StorageConfig
 	sources  map[string]credential.Source
 	mu       sync.Mutex
 	objects  map[string][]byte
+	ops      []string
 }
 
 func newUploadOracle(t *testing.T) *uploadOracle {
 	t.Helper()
 	o := &uploadOracle{objects: map[string][]byte{}}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Query().Has("location") {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		query, bucket := r.URL.Query(), strings.TrimSuffix(r.URL.Path, "/")
+		switch {
+		case r.Method == http.MethodGet && query.Has("location"):
 			w.Header().Set("Content-Type", "application/xml")
 			fmt.Fprint(w, "<LocationConstraint></LocationConstraint>")
-			return
-		}
-		if r.Method != http.MethodPut {
+		case r.Method == http.MethodPut:
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "body", http.StatusBadRequest)
+				return
+			}
+			o.objects[r.URL.Path] = data
+			o.ops = append(o.ops, "PUT "+r.URL.Path)
+			w.Header().Set("ETag", `"test"`)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && query.Has("list-type"):
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, "<ListBucketResult><IsTruncated>false</IsTruncated>")
+			for _, path := range slices.Sorted(maps.Keys(o.objects)) {
+				if key, ok := strings.CutPrefix(path, bucket+"/"); ok && strings.HasPrefix(key, query.Get("prefix")) {
+					fmt.Fprintf(w, "<Contents><Key>%s</Key><Size>%d</Size></Contents>", key, len(o.objects[path]))
+				}
+			}
+			fmt.Fprint(w, "</ListBucketResult>")
+		case r.Method == http.MethodGet:
+			data, ok := o.objects[r.URL.Path]
+			o.ops = append(o.ops, "GET "+r.URL.Path)
+			if !ok {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, "<Error><Code>NoSuchKey</Code></Error>")
+				return
+			}
+			w.Header().Set("ETag", `"test"`)
+			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			w.Write(data)
+		case r.Method == http.MethodPost && query.Has("delete"):
+			var request struct {
+				Objects []struct {
+					Key string
+				} `xml:"Object"`
+			}
+			if err := xml.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, "body", http.StatusBadRequest)
+				return
+			}
+			for _, object := range request.Objects {
+				delete(o.objects, bucket+"/"+object.Key)
+				o.ops = append(o.ops, "DELETE "+bucket+"/"+object.Key)
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, "<DeleteResult></DeleteResult>")
+		default:
 			http.Error(w, "method", http.StatusMethodNotAllowed)
-			return
 		}
-		data, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "body", http.StatusBadRequest)
-			return
-		}
-		o.mu.Lock()
-		o.objects[r.URL.Path] = data
-		o.mu.Unlock()
-		w.Header().Set("ETag", `"test"`)
-		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(server.Close)
 	previous := storageTransport

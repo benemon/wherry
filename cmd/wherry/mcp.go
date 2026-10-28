@@ -28,10 +28,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// awaitBound stays below the shortest common harness tool-call timeout, so every model can loop on await.
-const awaitBound = 45 * time.Second
+// watchBound stays below the shortest common harness tool-call timeout, so every model can loop on watch.
+const watchBound = 45 * time.Second
 
-// retryAfter is the pause, in seconds, that await suggests before the next call while a run is unfinished.
+// retryAfter is the pause, in seconds, that watch suggests before the next call while a run is unfinished.
 const retryAfter = 5
 
 const progressInterval = 5 * time.Second
@@ -69,25 +69,25 @@ func runMCP(ctx context.Context, args []string) error {
 	defer stop()
 	go answer(ctx, connect, logger)
 	open := inputOpener(dir, config)
-	await, err := awaitCommand(*configFile)
+	watch, err := watchCommand(*configFile)
 	if err != nil {
 		return err
 	}
-	return newMCPServer(connect, inputReader(open), open, await, logger).Run(ctx, &mcp.StdioTransport{})
+	return newMCPServer(connect, inputReader(open), open, watch, logger).Run(ctx, &mcp.StdioTransport{})
 }
 
-// awaitCommand returns the shell command that waits for a run, naming configFile, made absolute and quoted, when
-// it is set.
-func awaitCommand(configFile string) (func(id string) string, error) {
+// watchCommand returns the shell command that waits for a run and prints its reply alone, naming configFile, made
+// absolute and quoted, when it is set.
+func watchCommand(configFile string) (func(id string) string, error) {
 	if configFile == "" {
-		return func(id string) string { return "wherry await " + id }, nil
+		return func(id string) string { return "wherry watch " + id + " --result-only" }, nil
 	}
 	path, err := filepath.Abs(configFile)
 	if err != nil {
 		return nil, err
 	}
 	quoted := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
-	return func(id string) string { return "wherry await " + id + " --config-file " + quoted }, nil
+	return func(id string) string { return "wherry watch " + id + " --result-only --config-file " + quoted }, nil
 }
 
 // sharedHost returns a connect that opens one host on its first successful call and returns it to every later call, and
@@ -117,7 +117,7 @@ func sharedHost(open func() (*busclient.Host, error)) (func() (*busclient.Host, 
 }
 
 // answer answers seal requests for as long as the server runs, so a credentialed task is sealed while the harness
-// is between await calls.
+// is between watch calls.
 func answer(ctx context.Context, connect func() (*busclient.Host, error), logger *log.Logger) {
 	for ctx.Err() == nil {
 		host, err := connect()
@@ -204,7 +204,7 @@ type submitInput struct {
 	Inputs        []string           `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names; over the broker's record limit or a profile's declared limit they go through the pool's bucket when the pool has storage and the host a storage credential, else submit refuses"`
 	S3Inputs      []string           `json:"s3_inputs,omitempty" jsonschema:"local files of up to 5 GiB each uploaded to the pool's bucket and fetched into the agent's WHERRY_INPUT_DIR under their base names"`
 	Credentials   []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent, each as a file in WHERRY_CREDENTIALS_DIR or in an environment variable; no two share a target, and none takes the target of one of the agent's own credentials"`
-	Outputs       []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; await writes the returned ones locally"`
+	Outputs       []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; watch writes the returned ones locally"`
 	Deadline      string             `json:"deadline,omitempty" jsonschema:"task deadline, a Go duration such as 90m; default 2h"`
 	QueueDeadline string             `json:"queue_deadline,omitempty" jsonschema:"queue deadline, a Go duration such as 30m; default 10m"`
 }
@@ -212,7 +212,7 @@ type submitInput struct {
 type submitOutput struct {
 	ID    string `json:"id" jsonschema:"run id"`
 	Pool  string `json:"pool" jsonschema:"pool the task was placed in"`
-	Await string `json:"await" jsonschema:"shell command that waits for the run to end; run it in the background"`
+	Watch string `json:"watch" jsonschema:"shell command that waits for the run to end and prints its reply; run it in the background"`
 }
 
 type runInput struct {
@@ -258,11 +258,11 @@ type outputReply struct {
 	Size   int64  `json:"size"`
 }
 
-type awaitReply struct {
+type watchReply struct {
 	ID          string                  `json:"id"`
 	State       string                  `json:"state"`
 	Model       string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
-	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling await again"`
+	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling watch again"`
 	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, or this host's note that the queue deadline passed and no receiver claimed the run"`
 	Transcript  string                  `json:"transcript,omitempty" jsonschema:"path of the run's redacted transcript, one JSON line per transcript line, written locally"`
 	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
@@ -331,7 +331,7 @@ type transcriptReply struct {
 
 // newMCPServer serves the wherry tools. Every call uses the host connect returns, which the server's seal-request
 // answering shares, so the process runs one tenant-feed follower.
-func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), awaitCommand func(id string) string, logger *log.Logger) *mcp.Server {
+func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), watchCommand func(id string) string, logger *log.Logger) *mcp.Server {
 	// The model sees an UNAVAILABLE's class alone; the server's log, which only the host's user reads, keeps its cause
 	// with every credential value the host resolved redacted.
 	failure := func(err error) error {
@@ -366,7 +366,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with await, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which await writes locally. While this server runs, it seals the agent's and the task's configured credentials to the receiver that claims the task when that receiver asks for them. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
+		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with watch, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which watch writes locally. While this server runs, it seals the agent's and the task's configured credentials to the receiver that claims the task when that receiver asks for them. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		submission, err := submitFromInput(input, readInput, openInput)
 		if err != nil {
@@ -387,7 +387,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, submitOutput{}, failure(err)
 		}
-		return nil, submitOutput{ID: result.RunID, Pool: result.Pool, Await: awaitCommand(result.RunID)}, nil
+		return nil, submitOutput{ID: result.RunID, Pool: result.Pool, Watch: watchCommand(result.RunID)}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -421,33 +421,33 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "await",
+		Name: "watch",
 		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish. Returns the result, a failed, canceled or rejected state "+
-			"with its message, or {id, state, retry_after} while the run is unfinished: call await again. "+
+			"with its message, or {id, state, retry_after} while the run is unfinished: call watch again. "+
 			"A run whose queue deadline passed with no receiver claiming it returns its state and a message saying so, without retry_after. "+
 			"A finished run's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
-			"Use status to check a run without waiting.", int(awaitBound.Seconds())),
-	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, awaitReply, error) {
+			"Use status to check a run without waiting.", int(watchBound.Seconds())),
+	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, watchReply, error) {
 		client, err := connect()
 		if err != nil {
-			return nil, awaitReply{}, failure(err)
+			return nil, watchReply{}, failure(err)
 		}
 		if token := request.Params.GetProgressToken(); token != nil {
 			stop := notifyProgress(ctx, request.Session, token, input.ID)
 			defer stop()
 		}
-		result, err := client.Await(ctx, input.ID, awaitBound)
+		result, err := client.Await(ctx, input.ID, watchBound)
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			status, err := client.Status(ctx, input.ID)
 			if err != nil {
-				return nil, awaitReply{}, failure(err)
+				return nil, watchReply{}, failure(err)
 			}
-			return nil, awaitReply{ID: input.ID, State: string(status.Status.State), Model: status.Model, RetryAfter: retryAfter, Skipped: status.Skipped}, nil
+			return nil, watchReply{ID: input.ID, State: string(status.Status.State), Model: status.Model, RetryAfter: retryAfter, Skipped: status.Skipped}, nil
 		}
 		if err != nil {
-			return nil, awaitReply{}, failure(err)
+			return nil, watchReply{}, failure(err)
 		}
-		output := awaitReply{
+		output := watchReply{
 			ID: input.ID, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
 			Redacted: result.Redacted, Skipped: result.Skipped,
 		}
@@ -456,29 +456,18 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 				output.Artifacts = append(output.Artifacts, resultArtifact{ArtifactID: artifact.ArtifactID, Parts: resultParts(artifact.Parts)})
 			}
 		}
-		if len(result.Outputs) > 0 {
-			paths, err := client.WriteOutputs(input.ID, "", result.Outputs)
-			if err != nil {
-				return nil, awaitReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: "the run's outputs could not be written to the state directory"}
-			}
-			for i, written := range result.Outputs {
-				output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: paths[i], SHA256: written.SHA256, Size: written.Size})
-			}
-		}
-		downloaded, rejected, err := client.DownloadOutputs(ctx, input.ID, result, "")
+		collected, err := client.Collect(ctx, input.ID, result, "")
 		if err != nil {
-			return nil, awaitReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: "the run's S3 outputs could not be downloaded, or the run's prefix deleted; the wherry CLI's await reports the cause"}
+			// The model sees the step Collect names first; the server's log keeps the cause.
+			logger.Print("tool failed: " + busclient.Redact(err.Error()))
+			step, _, _ := strings.Cut(err.Error(), ": ")
+			return nil, watchReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: step + ": the run's results could not be collected; the MCP server's log holds the cause"}
 		}
-		for _, written := range downloaded {
+		for _, written := range collected.Outputs {
 			output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: written.Path, SHA256: written.SHA256, Size: written.Size})
 		}
-		output.NotReturned = append(append(result.NotReturned, result.Rejected...), rejected...)
-		if result.Unclaimed != "" {
-			return nil, output, nil
-		}
-		if _, output.Transcript, err = writeTranscript(ctx, client, input.ID, ""); err != nil {
-			return nil, awaitReply{}, &toolError{Code: "OUTPUTS_NOT_WRITTEN", Message: "the run's transcript could not be written to the state directory"}
-		}
+		output.NotReturned = append(result.NotReturned, collected.Rejected...)
+		output.Transcript = collected.Transcript.Path
 		return nil, output, nil
 	})
 
@@ -552,7 +541,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, transcriptReply{}, failure(err)
 		}
-		result.Lines = viewLines(result.Lines)
+		result.Lines = busclient.ViewLines(result.Lines)
 		output := transcriptReply{ID: input.ID, Attempt: result.Attempt, Total: len(result.Lines), Lines: []transcriptLine{},
 			Redacted: result.Redacted, Skipped: result.Skipped}
 		size := func(value any) int {
@@ -594,8 +583,8 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "cleanup",
-		Description: "Delete every object under a run's prefix in its pool's bucket: its S3 inputs and outputs. await does this once a " +
-			"run is terminal and its S3 outputs verify; use cleanup for a run that ended while nothing awaited it.",
+		Description: "Delete every object under a run's prefix in its pool's bucket: its S3 inputs and outputs. watch does this once a " +
+			"run is terminal and its S3 outputs verify; use cleanup for a run that ended while nothing watched it.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, cleanupOutput, error) {
 		client, err := connect()
@@ -608,57 +597,6 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		return nil, cleanupOutput{ID: input.ID}, nil
 	})
 	return server
-}
-
-// viewLines drops what a reader of a Claude stream-json transcript gets nothing from: each thinking block's signature,
-// and system thinking_tokens lines. The feed keeps both.
-func viewLines(lines []busclient.TranscriptLine) []busclient.TranscriptLine {
-	kept := make([]busclient.TranscriptLine, 0, len(lines))
-	for _, line := range lines {
-		data := line.Part.Raw
-		if data == nil {
-			data = []byte(line.Part.Text)
-		}
-		var event struct {
-			Type    string `json:"type"`
-			Subtype string `json:"subtype"`
-		}
-		if line.Part.URL == "" && json.Unmarshal(data, &event) == nil {
-			if event.Type == "system" && event.Subtype == "thinking_tokens" {
-				continue
-			}
-			if unsigned, ok := withoutSignatures(data); ok {
-				line.Part.Raw, line.Part.Text = unsigned, ""
-			}
-		}
-		kept = append(kept, line)
-	}
-	return kept
-}
-
-// withoutSignatures returns an assistant event with the signature of each thinking block in its message's content
-// removed, and false when it has none.
-func withoutSignatures(data []byte) ([]byte, bool) {
-	var event, message map[string]jsontext.Value
-	var content []map[string]jsontext.Value
-	var kind string
-	if json.Unmarshal(data, &event) != nil || json.Unmarshal(event["type"], &kind) != nil || kind != "assistant" || json.Unmarshal(event["message"], &message) != nil || json.Unmarshal(message["content"], &content) != nil {
-		return nil, false
-	}
-	removed := false
-	for _, block := range content {
-		if _, signed := block["signature"]; signed && json.Unmarshal(block["type"], &kind) == nil && kind == "thinking" {
-			delete(block, "signature")
-			removed = true
-		}
-	}
-	if !removed {
-		return nil, false
-	}
-	message["content"], _ = json.Marshal(content, json.Deterministic(true)) // values decoded from valid JSON always encode
-	event["message"], _ = json.Marshal(message, json.Deterministic(true))
-	unsigned, _ := json.Marshal(event, json.Deterministic(true))
-	return unsigned, true
 }
 
 func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error)) (busclient.SubmitInput, error) {
@@ -753,7 +691,7 @@ func notifyProgress(ctx context.Context, session *mcp.ServerSession, token any, 
 				return
 			case <-ticker.C:
 				_ = session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
-					ProgressToken: token, Progress: time.Since(start).Seconds(), Total: awaitBound.Seconds(),
+					ProgressToken: token, Progress: time.Since(start).Seconds(), Total: watchBound.Seconds(),
 					Message: "waiting for " + runID,
 				}) // a lost notification only delays the client's keep-alive
 			}

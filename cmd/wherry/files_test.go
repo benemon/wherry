@@ -96,7 +96,9 @@ func (b *bus) outputResult(t *testing.T, admitted task, name, data, listedHash s
 	manifest, _ := json.Marshal(map[string]any{"receiver_id": "receiver-a", "pool": "pool-a",
 		"outputs":      []wire.ReturnedOutput{{Name: name, SHA256: listedHash, Size: int64(len(data))}},
 		"not_returned": []wire.UnreturnedOutput{{Name: "notes.md", Reason: "missing"}}})
-	result := &wire.Result{Task: wire.Task{ID: run, ContextID: run, History: []wire.Message{admitted.submission.Message}, Status: now(wire.TaskStateCompleted),
+	status := now(wire.TaskStateCompleted)
+	status.Message = &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "done"}}, Extensions: []string{wire.ExtensionURI}}
+	result := &wire.Result{Task: wire.Task{ID: run, ContextID: run, History: []wire.Message{admitted.submission.Message}, Status: status,
 		Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{{Text: "done"}}, Extensions: []string{wire.ExtensionURI}}}, Metadata: manifest},
 		Wherry: wire.ResultBinding{ReceiverBinding: b.binding(admitted), TaskHash: admitted.hash}}
 	b.feed(t, run, chunk, b.sign(t, result), b.status(t, admitted, "terminal-1", "terminal", now(wire.TaskStateCompleted)))
@@ -107,15 +109,15 @@ func hashOf(data string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func TestAwaitWritesVerifiedOutputs(t *testing.T) {
+func TestWatchWritesVerifiedOutputs(t *testing.T) {
 	b := newBus(t)
 	admitted := b.admitted(t)
 	runID := admitted.submission.Wherry.Run
 	b.outputResult(t, admitted, "sub/report.md", "# Report\n", hashOf("# Report\n"))
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	if err := runAwait(b.ctx, b.client, []string{runID, "--outputs-dir", dir}, &stdout, &stderr); err != nil {
-		t.Fatalf("await: %v; stderr %s", err, stderr.String())
+	if err := runWatch(b.ctx, b.client, []string{runID, "--outputs-dir", dir}, &stdout, &stderr); err != nil {
+		t.Fatalf("watch: %v; stderr %s", err, stderr.String())
 	}
 	path := filepath.Join(dir, "sub", "report.md")
 	if want := "output=sub/report.md path=" + path + " sha256=" + hashOf("# Report\n") + " size=9\n"; !strings.Contains(stdout.String(), want) {
@@ -129,22 +131,22 @@ func TestAwaitWritesVerifiedOutputs(t *testing.T) {
 	}
 }
 
-func TestAwaitFailsOnAnOutputItCannotVerify(t *testing.T) {
+func TestWatchFailsOnAnOutputItCannotVerify(t *testing.T) {
 	b := newBus(t)
 	admitted := b.admitted(t)
 	runID := admitted.submission.Wherry.Run
 	b.outputResult(t, admitted, "report.md", "# Report\n", hashOf("# Forged\n"))
 	var stdout, stderr bytes.Buffer
-	err := runAwait(b.ctx, b.client, []string{runID}, &stdout, &stderr)
+	err := runWatch(b.ctx, b.client, []string{runID}, &stdout, &stderr)
 	if err == nil || !strings.Contains(stderr.String(), "output report.md not returned: rejected by this host: size or hash mismatch") {
-		t.Fatalf("await = %v, stderr %q; want the output refused", err, stderr.String())
+		t.Fatalf("watch = %v, stderr %q; want the output refused", err, stderr.String())
 	}
 	if _, statErr := os.Stat(filepath.Join(b.stateDir, "runs", runID, "outputs", "report.md")); statErr == nil {
 		t.Fatal("wrote an output that failed verification")
 	}
 }
 
-func TestMCPSubmitCarriesFilesAndAwaitWritesOutputs(t *testing.T) {
+func TestMCPSubmitCarriesFilesAndWatchWritesOutputs(t *testing.T) {
 	b := newBus(t)
 	b.credentials["deploy-key"] = b.credentials["model"]
 	work := t.TempDir()
@@ -167,12 +169,12 @@ func TestMCPSubmitCarriesFilesAndAwaitWritesOutputs(t *testing.T) {
 	}
 	b.feed(t, submitted.ID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
 	b.outputResult(t, admitted, "report.md", "# Report\n", hashOf("# Report\n"))
-	var reply awaitReply
-	callTool(t, b.ctx, session, "await", map[string]any{"id": submitted.ID}, &reply)
+	var reply watchReply
+	callTool(t, b.ctx, session, "watch", map[string]any{"id": submitted.ID}, &reply)
 	path := filepath.Join(b.stateDir, "runs", submitted.ID, "outputs", "report.md")
 	if !slices.Equal(reply.Outputs, []outputReply{{Name: "report.md", Path: path, SHA256: hashOf("# Report\n"), Size: 9}}) ||
 		!slices.Equal(reply.NotReturned, []wire.UnreturnedOutput{{Name: "notes.md", Reason: "missing"}}) {
-		t.Fatalf("await outputs %+v, not returned %+v", reply.Outputs, reply.NotReturned)
+		t.Fatalf("watch outputs %+v, not returned %+v", reply.Outputs, reply.NotReturned)
 	}
 	if written, err := os.ReadFile(path); err != nil || string(written) != "# Report\n" {
 		t.Fatalf("written %q, %v", written, err)
@@ -318,7 +320,7 @@ func TestMCPInputsStayInTheInputRoots(t *testing.T) {
 	}
 }
 
-func TestAwaitSaysHowToApplyGitChanges(t *testing.T) {
+func TestWatchSaysHowToApplyGitChanges(t *testing.T) {
 	for name, command := range map[string]string{wire.GitPatch: "apply with: git am %s\n", wire.GitBundle: "fetch with: git fetch %s HEAD\n"} {
 		t.Run(name, func(t *testing.T) {
 			b := newBus(t)
@@ -326,8 +328,8 @@ func TestAwaitSaysHowToApplyGitChanges(t *testing.T) {
 			b.outputResult(t, admitted, name, "changes\n", hashOf("changes\n"))
 			dir := t.TempDir()
 			var stdout, stderr bytes.Buffer
-			if err := runAwait(b.ctx, b.client, []string{admitted.submission.Wherry.Run, "--outputs-dir", dir}, &stdout, &stderr); err != nil {
-				t.Fatalf("await: %v; stderr %s", err, stderr.String())
+			if err := runWatch(b.ctx, b.client, []string{admitted.submission.Wherry.Run, "--outputs-dir", dir}, &stdout, &stderr); err != nil {
+				t.Fatalf("watch: %v; stderr %s", err, stderr.String())
 			}
 			if want := fmt.Sprintf(command, filepath.Join(dir, name)); !strings.Contains(stderr.String(), want) {
 				t.Fatalf("stderr %q, want %q", stderr.String(), want)
