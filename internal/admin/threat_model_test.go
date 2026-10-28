@@ -207,6 +207,68 @@ func TestStatusBindsPlacedPool(t *testing.T) {
 	}
 }
 
+// A pool events reader has no run tenant: a status or start failure counts only from a live member of the reader's
+// pool for a tenant entitled to it.
+func TestPoolRecordsBindPoolMemberAndEntitlement(t *testing.T) {
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	public := key.Public().(ed25519.PublicKey)
+	keys := signed.Keys{"receiver-a": {Current: public}, "receiver-b": {Current: public}, "receiver-c": {Current: public}}
+	status := func(receiver, tenant, pool string) []byte {
+		return sign(t, testStatus(receiver, tenant, pool, "run-a"), key)
+	}
+	failure := func(receiver, tenant, pool string) []byte {
+		return sign(t, &wire.StartFailure{Wherry: wire.ReceiverBinding{Receiver: receiver, Tenant: tenant, Pool: pool, Run: "run-a", Attempt: 1},
+			Profile: "profile-a", Agent: "agent-a", Class: "dispatch", TaskHash: strings.Repeat("a", 64)}, key)
+	}
+	authorize := map[string]func(state State, encoded []byte, pool string) error{
+		"status": func(state State, encoded []byte, pool string) error {
+			_, err := AuthorizePoolStatus(wire.ParseRecord, state, keys, encoded, pool)
+			return err
+		},
+		"start failure": func(state State, encoded []byte, pool string) error {
+			_, err := AuthorizePoolStartFailure(wire.ParseRecord, state, keys, encoded, pool)
+			return err
+		},
+	}
+	records := map[string]func(receiver, tenant, pool string) []byte{"status": status, "start failure": failure}
+	for kind, check := range authorize {
+		t.Run(kind, func(t *testing.T) {
+			record := records[kind]
+			state := modelState(t)
+			for _, tenant := range []string{"tenant-a", "tenant-b"} {
+				if err := check(state, record("receiver-a", tenant, "pool-a"), "pool-a"); err != nil {
+					t.Fatalf("%s: %v", tenant, err)
+				}
+			}
+			if check(state, record("receiver-a", "tenant-a", "pool-b"), "pool-a") == nil {
+				t.Fatal("accepted a record naming another pool than its reader's")
+			}
+			if check(state, record("receiver-a", "tenant-a", "pool-a"), "pool-b") == nil {
+				t.Fatal("accepted a record on another pool's events")
+			}
+			if check(state, record("receiver-b", "tenant-a", "pool-a"), "pool-a") == nil {
+				t.Fatal("accepted a record from a member of another pool")
+			}
+			if check(state, record("receiver-c", "tenant-a", "pool-a"), "pool-a") == nil {
+				t.Fatal("accepted a record from a receiver that is no member")
+			}
+			if check(state, record("receiver-b", "tenant-b", "pool-b"), "pool-b") == nil {
+				t.Fatal("accepted a record declaring a tenant not entitled to the pool")
+			}
+			if check(state, record("receiver-a", "tenant-c", "pool-a"), "pool-a") == nil {
+				t.Fatal("accepted a record declaring an unknown tenant")
+			}
+			if check(state, sign(t, testStatus("receiver-a", "tenant-a", "pool-a", "run-a"), key)[1:], "pool-a") == nil {
+				t.Fatal("accepted a record that does not verify")
+			}
+			state.Ended[ReceiverPrincipal("receiver-a")] = true
+			if check(state, record("receiver-a", "tenant-a", "pool-a"), "pool-a") == nil {
+				t.Fatal("accepted a record after its writer's membership end")
+			}
+		})
+	}
+}
+
 func TestReceiverACLIsLimitedToItsPool(t *testing.T) {
 	acls := ACLs(modelState(t))
 	if hasACL(acls, ReceiverPrincipal("receiver-a"), PoolEventsTopic("pool-b"), "WRITE") {
