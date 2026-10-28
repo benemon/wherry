@@ -1173,6 +1173,45 @@ func TestOutcomeFileEndsTheRun(t *testing.T) {
 	}
 }
 
+// An agent that ended abnormally without an outcome file is named with the platform's redacted reason, and keeps that
+// cause in front of a missing required output.
+func TestEndedAgentNamesItsReason(t *testing.T) {
+	oom := &pluginsdk.Terminal{Started: true, ExitCode: 137, Reason: "OOMKilled"}
+	outcome := outcomeOutput(`{"state":"TASK_STATE_COMPLETED","message":{"role":"ROLE_AGENT","parts":[{"text":"the answer"}]}}`)
+	for _, test := range []struct {
+		name     string
+		terminal *pluginsdk.Terminal
+		outputs  []pluginsdk.Output
+		message  string
+	}{
+		{"exit with a missing output", oom, nil, "agent exited 137 (OOMKilled); required output report.md not returned: missing"},
+		{"exit with its outputs", oom, []pluginsdk.Output{file("report.md", "r")}, "agent exited 137 (OOMKilled)"},
+		{"signal", &pluginsdk.Terminal{Started: true, ExitCode: 137, Signal: "9", Reason: "OOMKilled"}, []pluginsdk.Output{file("report.md", "r")}, "agent ended by 9 (OOMKilled)"},
+		{"exit without a reason", &pluginsdk.Terminal{Started: true, ExitCode: 137}, nil, "agent exited 137; required output report.md not returned: missing"},
+		{"exit 0", &pluginsdk.Terminal{Started: true, Reason: "Completed"}, nil, "required output report.md not returned: missing"},
+		{"outcome file", oom, []pluginsdk.Output{outcome}, "required output report.md not returned: missing"},
+		{"credential", &pluginsdk.Terminal{Started: true, ExitCode: 1, Reason: "Error: " + testToken}, []pluginsdk.Output{file("report.md", "r")},
+			"agent exited 1 (Error: " + signed.RedactionMarker(testRedactionKey, credentialName) + ")"},
+		{"url and newline", &pluginsdk.Terminal{Started: true, ExitCode: 1, Reason: "Error: GET https://registry.example/x?token=abc\nfailed"}, []pluginsdk.Output{file("report.md", "r")},
+			"agent exited 1 (Error: GET [redacted-url] failed)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakePlugin{stream: noResultStream, ended: test.terminal, outputs: test.outputs}
+			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
+			f.answer(t, credentialName)
+			if ack := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
+				task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md", Required: true}}
+			}), 1); ack != kgo.AckReject {
+				t.Fatalf("ack %v, want reject", ack)
+			}
+			status := f.lastTask(t).Status
+			if status.State != wire.TaskStateFailed || status.Message.Parts[0].Text != test.message {
+				t.Fatalf("status %s with %q, want FAILED with %q", status.State, status.Message.Parts[0].Text, test.message)
+			}
+		})
+	}
+}
+
 func TestOutcomeFileIsNotAnOutput(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, outputs: []pluginsdk.Output{
 		{Name: wire.OutcomeDir + "/notes.md", Size: 5, Data: []byte("notes")}, {Name: "report.md", Size: 6, Data: []byte("report")},

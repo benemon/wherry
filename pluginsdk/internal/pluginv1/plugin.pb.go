@@ -613,7 +613,7 @@ type Terminal struct {
 	Signal   string                 `protobuf:"bytes,3,opt,name=signal,proto3" json:"signal,omitempty"`
 	Class    string                 `protobuf:"bytes,4,opt,name=class,proto3" json:"class,omitempty"`
 	Node     string                 `protobuf:"bytes,5,opt,name=node,proto3" json:"node,omitempty"`
-	// reason is the platform's account of why the task never started; it may be empty.
+	// reason is the platform's account of why the task never started or why a started task ended; it may be empty.
 	Reason        string `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

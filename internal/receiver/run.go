@@ -1539,16 +1539,23 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 		stopped = false
 	}
 	run.collect(ctx, handle, stopped)
+	cause, reason := "", ""
+	if terminal.Reason != "" {
+		reason = " (" + logText(run.redactText, errors.New(terminal.Reason)) + ")"
+	}
 	var status wire.TaskStatus
 	switch {
 	case run.outcome != nil:
 		status = *run.outcome
 	case terminal.Signal != "":
-		status = taskStatus(wire.TaskStateFailed, "agent ended by "+terminal.Signal)
+		cause = "agent ended by " + terminal.Signal + reason
 	case terminal.ExitCode != 0:
-		status = taskStatus(wire.TaskStateFailed, "agent exited "+strconv.Itoa(terminal.ExitCode))
+		cause = "agent exited " + strconv.Itoa(terminal.ExitCode) + reason
 	default:
 		status = taskStatus(wire.TaskStateFailed, "agent reported no outcome")
+	}
+	if cause != "" {
+		status = taskStatus(wire.TaskStateFailed, cause)
 	}
 	result := ""
 	if status.Message != nil {
@@ -1556,7 +1563,11 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 	}
 	for _, output := range run.unreturned {
 		if slices.ContainsFunc(run.expected, func(expected wire.ExpectedOutput) bool { return expected.Name == output.Name && expected.Required }) {
-			status = taskStatus(wire.TaskStateFailed, "required output "+output.Name+" not returned: "+output.Reason)
+			missing := "required output " + output.Name + " not returned: " + output.Reason
+			if cause != "" {
+				missing = cause + "; " + missing
+			}
+			status = taskStatus(wire.TaskStateFailed, missing)
 			break
 		}
 	}
