@@ -169,12 +169,12 @@ a transcript chunk record is 933508 bytes, over the 900000-byte record limit
 
 `wherry submit` measures each signed submission against the recorded
 record limit. Input files grow by about 16/9 on the wire, since they are
-base64-encoded inside a record that is itself base64url-encoded. With
-brokers and topics at their defaults the 1000012-byte producer batch is the
-limit. wherry producers batch at most 1000012 bytes, so raising
-`message.max.bytes` and `max.message.bytes` does not take it further;
-lowering them brings it down. Run `pool create` again after changing either,
-so the terms record the new limit. An output chunk holds
+base64-encoded inside a record that is itself base64url-encoded. wherry
+producers batch at most 1000012 bytes, which is the limit with brokers and
+topics at their defaults. Raising `message.max.bytes` or
+`max.message.bytes` leaves the limit there, and lowering either lowers it.
+Run `pool create` again after changing either, so the terms record the new
+limit. An output chunk holds
 256 KiB whatever `output_limit` is, so `output_limit` spans as many records
 as it needs and the record limit does not bound it.
 
@@ -345,8 +345,7 @@ the harness accepts, such as `haiku` for Claude Code, then passes
 `--model "$WHERRY_MODEL"` to Claude Code or `-m "$WHERRY_MODEL"` to Codex.
 Nomad reads `${...}` in driver configuration as its own interpolation and
 fails the task on `${WHERRY_MODEL:-<model>}`, so the fallback avoids braces.
-The value reaches the command through the environment, never pasted into its
-arguments.
+The value reaches the command through the environment.
 
 1. Write the configuration and check it. `--dry-run` validates it against
    the pool's terms and prints each plugin profile as the record would hold
@@ -401,8 +400,8 @@ profile container: credential "nomad-token" has no source in the receiver's conf
 
 The source is a file readable by the receiver's user and its group alone,
 an environment variable, or a command such as a vault client's, resolved
-when the receiver configures the plugin profile. It never reaches
-`wherry.admin` or the bundle. To rotate the token, replace the value at its
+when the receiver configures the plugin profile, as
+[Platform credentials](configuration.md#platform-credentials) describes. To rotate the token, replace the value at its
 source and restart the receiver; the bundle stays as it is. A plugin profile
 that names no credential leaves the plugin to its own default, such as the
 Nomad plugin's `NOMAD_TOKEN`.
@@ -875,9 +874,8 @@ rules and the commands. For the agent to follow them:
 - The agent may run `git` commands. Every command the prompt gives starts with
   `git`, so for Claude Code
   [`Bash(git:*)`](https://docs.anthropic.com/en/docs/claude-code/iam) in its
-  allowed tools covers them, along with whatever else the task runs. The rule
-  lets the agent run the commands; it is not a sandbox, since `git` can run any
-  command.
+  allowed tools covers them, along with whatever else the task runs. Since
+  `git` can run any command, the rule lets the agent run any command.
 
 Allow the hosts a pool's tasks may clone from with `vcs` in its
 [terms](configuration.md#pool-terms):
@@ -930,8 +928,7 @@ agent images.
 The CA and proxy settings stay yours: `GIT_SSL_CAINFO`, `SSL_CERT_FILE`,
 `HTTPS_PROXY` and the like reach `git` as the image or platform sets them.
 
-Start the agent's harness in a directory above the checkout, never inside
-it. Claude Code in print mode skips the workspace trust prompt and runs the
+Start the agent's harness in a directory above the checkout. Claude Code in print mode skips the workspace trust prompt and runs the
 hooks and MCP servers of the project it starts in, so a harness started in a
 cloned repository runs that repository's hooks with the agent's credential in
 reach. Started above the checkout, it reads the repository's files without
@@ -940,8 +937,8 @@ a shell. The start directory is the plugin profile's to set: on Nomad, a runtime
 command such as `cd /local && exec claude ...` starts the harness in the task
 directory, and the clone lands below it.
 
-The isolation protects a cooperative agent from the configuration around it. It
-is not a boundary against the agent: an agent that runs commands, including
+The isolation protects a cooperative agent from the configuration around it.
+An agent that runs commands, including
 through an allow rule such as
 [`Bash(git:*)`](https://docs.anthropic.com/en/docs/claude-code/iam)
 (`git -c alias.x='!cmd'` runs any command), can undo every one of these
@@ -951,7 +948,7 @@ lifetime, the platform's egress policy, and the receiver's redaction of what it
 returns.
 
 The host's configuration supplies least privilege; wherry passes the
-credential as a file and checks the host, nothing more:
+credential as a file and checks the host:
 
 - For `https`, a short-lived token for one repository, such as a GitHub App
   installation token. The credential helper answers with the user name
@@ -1036,20 +1033,9 @@ reports such records as written by a later release; do not skip them, upgrade
 it. A harness does not restart a running `wherry mcp` when its binary
 changes, so restart the MCP server after upgrading.
 
-This release is a clean break. It renames the configured unit a task is
-placed on from adapter to plugin profile, replaces the receiver configuration's
-`platforms` and `adapters` with `plugins` and their `profiles`, moves the
-receiver's settings from flags to its [local
-configuration](configuration.md#receiver-local-configuration), takes platform
-credentials from local sources in place of the bundle, and moves the plugin
-protocol to version 10, in the Go module
-`github.com/benemon/wherry/pluginsdk`. Hosts, receivers and plugins
-upgrade together, and an existing cluster is reset rather than migrated: rewrite each receiver
-configuration in the new form, add the receivers again, and write each
-receiver's local configuration with a source for every platform credential
-it names. Update dashboards and alerts keyed on the receiver metrics'
-`adapter` label to `profile`, and on the `wherry_adapter_` metrics to
-`wherry_plugin_`.
+The [release notes](https://github.com/benemon/wherry/releases) mark a
+release that changes the record formats or the plugin protocol, and give
+its upgrade steps.
 
 Between releases that keep the record formats, upgrade in place.
 Prerequisites: the new `wherry` binary, and each receiver's local
@@ -1058,9 +1044,8 @@ configuration, bundle and state directory.
 1. Replace the binary on every host and receiver host with the new
    release's, verified as in [Install wherry](quickstart.md#install-wherry).
 2. Replace the plugins in each receiver's plugin directory together with the
-   receiver binary, verified as in [Install plugins](#install-plugins); a receiver refuses a plugin of another plugin protocol
-   version. This release speaks plugin protocol version 10 and refuses a
-   version 9 plugin.
+   receiver binary, verified as in [Install plugins](#install-plugins); a receiver refuses a plugin of another
+   [plugin protocol version](commands.md#plugins).
 3. Restart each receiver with the same local configuration, bundle and
    state directory. On
    `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its

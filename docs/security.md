@@ -60,8 +60,8 @@ with or without its trailing newline and as JSON escapes it, from
 everything it publishes for the attempt. Each marker is an HMAC of the
 credential's name under a key the host makes for the run and sends in every
 seal, so no marker maps to a name without that key. Seal requests and
-the failed status of an unanswered seal request name credentials, never
-their values, by design.
+the failed status of an unanswered seal request carry credential names and
+no values.
 
 A run whose seal does not arrive within 5 minutes ends in
 `TASK_STATE_FAILED` with a message naming each credential the host did not
@@ -122,7 +122,7 @@ claims the task, and the host answers only while `wherry await` or
 `wherry mcp` runs on it. A parent that submits a task with credentials
 keeps one of them running until the task starts; without an answer within
 5 minutes, the run ends `TASK_STATE_FAILED` with a message that names each
-unanswered credential, never its value. The answerer resolves each source
+unanswered credential. The answerer resolves each source
 when it answers, before it takes the attempt's lock, so a slow command
 holds up no other answerer of the host. A source that fails to resolve, an
 unset or empty variable, a command that exits non-zero, times out or writes
@@ -193,10 +193,9 @@ receiver's environment. The receiver trims a trailing CR and LF from the
 value and passes it to the plugin when it configures the profile, at start
 and after a configuration change.
 
-The source never leaves the receiver's host: `wherry.admin`, which every
-principal reads, records only the credential's name, and the receiver's
-bundle holds its Kafka identity alone. A rotated platform token takes effect
-on the receiver's next start without a new bundle.
+[Platform credentials](configuration.md#platform-credentials) states what
+`wherry.admin` and the bundle hold of it. A rotated platform token takes
+effect on the receiver's next start without a new bundle.
 
 ## Git credentials
 

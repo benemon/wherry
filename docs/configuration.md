@@ -386,8 +386,7 @@ credential](#platform-credentials), and its value is a string.
 The receiver routes a run to the first ready profile, in order within its
 plugin, whose agent and labels satisfy the task. It visits the plugins in
 the order of their names, so the host and the receiver compute the same
-match, but labels choose between plugins and no configuration relies on an
-order between them. The record on `wherry.admin` holds each profile with
+match. Labels choose between plugins. The record on `wherry.admin` holds each profile with
 its name, plugin, agent, labels and merged `config`.
 
 ### Plugin profile merge
@@ -413,13 +412,12 @@ rules:
   on a plugin profile.
 - `agent` belongs to the plugin profile alone.
 
-No plugin receives a null. Here the plugin holds the cluster's address, its
-credential, a Docker runtime and a `platform` label. Plugin profile `claude`
-overrides only the image. Plugin profile `host` switches the driver to
-`exec` and deletes the inherited `image`, which the `exec` driver does not
-take: Nomad accepts a job whatever its driver configuration holds, and the
-client then refuses the task, so an inherited key the driver rejects fails
-every run.
+Here the plugin holds the cluster's address, its credential, a Docker
+runtime and a `platform` label. Plugin profile `claude` overrides only the
+image. Plugin profile `host` switches the driver to `exec` and deletes the
+inherited `image`, which the `exec` driver does not take. Nomad accepts a
+job whatever its driver configuration holds, and the client then refuses
+the task, so an inherited key the driver rejects fails every run.
 
 ```yaml
 plugins:
@@ -627,8 +625,9 @@ example](#receiver-configuration-example):
 profile container: credential "nomad-token" has no source in the receiver's configuration
 ```
 
-Sources stay on the receiver's host and are never recorded on
-`wherry.admin`. The [Quickstart](quickstart.md#_7-write-the-receiver-s-local-configuration)
+Sources stay on the receiver's host. `wherry.admin`, which every principal
+reads, records the credential's name alone, and the receiver's bundle holds
+its Kafka identity alone. The [Quickstart](quickstart.md#_7-write-the-receiver-s-local-configuration)
 writes a local configuration with a source for each platform credential its
 receiver configuration names.
 

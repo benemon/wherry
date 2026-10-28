@@ -324,7 +324,7 @@ base64 does. The fixed texts are:
   adds `and presigned URLs for the S3 inputs and outputs` and the
   instruction is `add the credentials and storage`; for URLs alone it is
   `presigned URLs for the S3 inputs and outputs were not answered within
-  5m; configure them`. The text names credentials, never their values;
+  5m; configure them`. The text carries credential names and no values;
 - canceled: `canceled by user`.
 
 The `wherry` CLI and MCP server pass the message text through and do not
@@ -383,8 +383,7 @@ A chunk is one line of the agent's standard output, as the A2A artifact
 - `append` is false for the line at offset 0 and true after it. `lastChunk`
   is true on the run's final chunk, written with its terminal status.
 
-A run's transcript starts at offset 0. A receiver writes chunks to
-`wherry.tenant.<tenant>.transcript`.
+A receiver writes chunks to `wherry.tenant.<tenant>.transcript`.
 
 ## Output chunk
 
@@ -581,7 +580,7 @@ start failure ends the run as its class describes.
 
 A `platform` start failure can follow the run's `started` status, when the
 job ended before its agent task started. The platform's reason for it goes to
-the receiver's log, not to the start failure.
+the receiver's log alone.
 
 `profile` is the profile the receiver routed the task to.
 
@@ -589,20 +588,24 @@ the receiver's log, not to the start failure.
 
 From an attempt of the pool's `delivery_limit` minus 1, a receiver that
 would release a task to the pool ends the run `TASK_STATE_FAILED` with the
-message text `delivery budget exhausted` instead. When the attempt's own
-start failure spends the budget, the text continues
-`after <attempt> attempts; last: <cause>`, where the cause is
+message text `delivery budget exhausted`. The releases this covers are
+start failures, a dispatch whose outcome the receiver cannot resolve, a
+failed read of the pool's events or of the host's topic once the run is
+claimed, and a failure to find, stop or remove the run's job.
+
+When the attempt's own start failure spends the budget, the text continues
+`after <attempt> attempts; last: <cause>`. The cause is
 `job never started (<class>): <reason>` with the platform's class and
-reason, `job never started`, or `profile <profile> created no job`. The
-cause carries the marker of each credential value delivered to a run the
+reason, `job never started`, or `profile <profile> created no job`. It
+carries the marker of each credential value delivered to a run the
 receiver holds in place of the value, has no URLs, and is one line of at
-most 512 bytes. This covers start
-failures, a dispatch whose outcome the receiver cannot resolve, a failed
-read of the pool's events or of the host's topic once the run is claimed,
-and a failure to find, stop or remove the run's job. When only stopping the
-job fails at the budget, the run ends from the agent's exit status without
-its outputs or outcome file, and the plugin's sweep removes the job. These
-releases are exempt:
+most 512 bytes.
+
+When only stopping the job fails at the budget, the run ends from the
+agent's exit status without its outputs or outcome file, and the plugin's
+sweep removes the job.
+
+These releases are exempt:
 
 - a receiver that cannot read the pool's events at admission releases the
   task, since it cannot check for a committed terminal;
@@ -726,7 +729,7 @@ run's `claimed` status.
 - `s3_inputs` and `s3_outputs` name the run's S3 inputs and S3 outputs, for which the seal is to carry presigned URLs; each is absent
   when empty, and each name appears once in its list. An attempt that
   adopts an earlier attempt's job asks for the credentials and the S3
-  outputs, not the S3 inputs, which the job has fetched. A GET presigned
+  outputs alone, since the job has fetched its S3 inputs. A GET presigned
   again differs from the first attempt's, so an adopter cannot redact the
   first attempt's S3 input URLs, and a plugin never exposes its fetch URLs
   to the job.
@@ -736,7 +739,7 @@ run's `claimed` status.
 - `expiry_at_ms` is 5 minutes after the request. The receiver holds the claim
   until a seal opens, a cancel of the run arrives, or `expiry_at_ms` passes.
   At expiry it ends the run `TASK_STATE_FAILED` with a message naming the
-  credentials it asked for, never their values ([Status](#status)), and
+  credentials it asked for ([Status](#status)), and
   the task is not returned to the pool.
 - An adopter publishes nothing of the job until its seal opens. It holds
   the job's lines, at most 4 MiB, dropping the oldest, and logs how many it
@@ -786,14 +789,10 @@ A host records a run locally before it publishes the run's submission, so a
 request can follow the task at once; a request read while the record is
 absent is checked again on each later pass until it expires. Once the
 request passes checks 1 to 3 and 6, the host resolves each credential's
-source, before it takes the attempt's lock, so a slow command holds up no
-other answerer: a `file` source reads the file, an `env` source the
-answering process's environment variable, and a `command` source runs its
-argv without a shell for at most 60 seconds, its stdout, at most 64 KiB,
-the value. A source that fails to resolve, an unset or empty variable, a
-command that exits non-zero, times out or writes too much, leaves the
-request for a later pass, logged by credential name and cause alone; the
-host discards a command's stderr. The host holds
+[source](security.md#credential-sources) before it takes the attempt's
+lock, so a slow command holds up no other answerer. A source that fails to
+resolve leaves the request for a later pass, logged by credential name and
+cause alone. The host holds
 an exclusive lock on the attempt, shared by every process using its state
 directory, from these checks to the record of its answer, and gives up
 waiting for the lock when its own work ends.
@@ -807,7 +806,7 @@ the first seal that opens. Each start removes the records of attempts whose
 request has expired or whose run has ended.
 
 A host logs a skipped request that verifies and belongs to a run it
-submitted, by run, receiver and credential names, never a value. It logs
+submitted, by run, receiver and credential names, with no value. It logs
 nothing for a request for a run it did not submit, nor, apart from a failure
 to read its own run, for a request it cannot verify.
 
@@ -855,7 +854,7 @@ exactly the named credentials and URLs, and `redaction_key` is 32 bytes.
 It checks for a cancel, its shutdown, the run deadline and the request's
 expiry before it takes a seal, so a run stopped while its seal arrives is
 never dispatched. It passes the values to the plugin in Dispatch. It logs
-a seal that does not open by run and attempt, never the reason.
+a seal that does not open by run and attempt alone.
 
 Before it uses a URL, the receiver checks it against the pool's
 `storage`: its scheme is `https`, its host and port, 443 when absent, are
@@ -877,7 +876,7 @@ are the first 96 bits of the HMAC-SHA256, under the run's redaction key, of
 form of a value takes the same marker, and every attempt of the run the same
 markers. No marker maps to a credential name without the run's redaction key.
 Seal requests and the failure that ends an unanswered seal wait name
-credentials, by design. When
+credentials. When
 a form of any delivered value occurs within a marker, that marker is `[*]`
 instead, so a replacement cannot publish another value. The data passes through
 the replacement in pieces of 64 KiB. It replaces two forms of each value: its
@@ -1053,9 +1052,8 @@ Then `git checkout <ref>`, and `refs/wherry/start` set to the commit
 checked out.
 
 Every command starts with `git`, with no environment assignment or
-redirect, so a harness rule that allows `git` commands allows them all.
-Such a rule grants the commands; it confines nothing, since `git` can run
-any command.
+redirect, so a harness rule that allows `git` commands allows them all,
+and `git` can run any command.
 The commands read the credential from its file, so its value is on no
 command line and in no environment variable or prompt. When the run
 expects the output `changes.patch`, the lines give the
@@ -1069,10 +1067,8 @@ global or environment configuration, uses no template, never prompts and
 traces nothing (`pluginsdk.AgentEnvironment`), and removes from the
 environment it configures the variables no value switches off
 (`pluginsdk.AgentUnset`), so the platform's configuration does not rewrite,
-redirect, record or trace the clone. The platform's own environment and an
-image's are the operator's to keep clear of them. The pool's VCS hosts
-bound what a receiver accepts; the platform's egress policy bounds where
-the agent connects.
+redirect, record or trace the clone. The operator keeps the platform's own
+environment and the image's free of them.
 
 [Operations](operations.md#git-repositories) states the limits
 of these settings against an agent that runs commands.
@@ -1103,7 +1099,7 @@ finds them, the environment variables that hold credentials, the commands of
 the [git input](#git-input), and the
 [outcome contract](configuration.md#agent-contract) with the run's credential
 names, an optional credential its host did not supply marked
-`(not supplied)`. The lines name S3 inputs by path, never by URL. The plugin reports the
+`(not supplied)`. The lines name S3 inputs by path and carry no URL. The plugin reports the
 directories' paths as its agent sees them; a directory it does not report
 appears as its variable. The lines hold no credential value.
 

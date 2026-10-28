@@ -18,8 +18,8 @@ Two pairs of files name the same credentials:
   the Nomad token the receiver authenticates with. The receiver's local
   configuration maps that name to a source on the receiver host.
 
-The configuration on `wherry.admin` holds names alone; each value stays at its
-source on the machine that resolves it.
+The configuration on `wherry.admin` holds the names. Each value is read from
+its source on the machine that resolves it.
 
 ## Prerequisites
 
@@ -384,7 +384,8 @@ profile container: credential "nomad-token" has no source in the receiver's conf
 ```
 
 `state_dir` keeps the receiver's signing key and survives restarts. The
-token stays on this host; `wherry.admin` and the bundle never hold it.
+receiver reads the token on this host, and neither `wherry.admin` nor the
+bundle holds it.
 
 ### 8. Start the receiver
 

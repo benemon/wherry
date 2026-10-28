@@ -33,8 +33,8 @@ them for the pool's maximum queue deadline plus a day and six hours, 15 days
 receiver's progress topic holds the latest transcript offset of each run it
 holds, and compaction removes a run's record after its terminal status.
 [`wherry events`](commands.md#wherry-events-run-id) prints a run's status history.
-Retention bounds this history. It holds what wherry carried; what an agent
-did inside its job stays in that job's platform logs.
+Retention bounds this history, which holds the records wherry carried. The
+platform's logs hold what an agent did inside its job.
 
 ## Where your data goes
 

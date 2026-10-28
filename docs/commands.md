@@ -286,7 +286,7 @@ for its S3 inputs and outputs, and `wherry await` or `wherry mcp` answers
 ([sealed credentials](security.md#sealed-credentials)). When no seal
 answers the request within 5 minutes, the run ends `TASK_STATE_FAILED` with a message
 that names the credentials, and the presigned URLs when the run has S3
-inputs or outputs, but never a value:
+inputs or outputs:
 
 ```
 credential <name> was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry await or wherry mcp running, and submit again
@@ -427,10 +427,9 @@ as `wherry status` shows it.
 
 Prints a run's transcript: each line of the agent's standard output, in
 output order, as the receiver redacted it. The lines are those the run's
-highest delivery attempt published. Before that attempt's first line, or in
-place of its lines while it has none, each line comes from the highest earlier
-attempt that has it. An adopter resumes the job's output past the run's
-latest committed offset, so an adopted run reads from offset 0.
+highest delivery attempt published, and, before its first line, those of
+the highest earlier attempt that has them, as
+[Chunk](a2a-extension-v1.md#chunk) specifies.
 
 `transcript` reads the lines from the tenant's transcript topic, from the
 first offset at or after one minute before the append time of the run's
@@ -701,9 +700,6 @@ With `metrics_addr` set it serves its [metrics](#metrics) at `/metrics` on
 that address, and fails at start when it cannot listen there. Without it
 it serves none.
 
-`--rotate-key` rotates the key at that start only. A start without it never
-rotates the key.
-
 ### Plugins
 
 The receiver ships with no plugins. For each plugin in its configuration
@@ -744,13 +740,10 @@ stops it and asks the plugin to collect its outputs, which arrive over
 the link in pieces of at most 1 MiB. The outputs the receiver names for
 streaming, its S3 outputs, the plugin streams as the receiver reads them.
 
-A plugin gives each agent the variables of `pluginsdk.AgentEnvironment` over
-the environment it configures, and removes those of `pluginsdk.AgentUnset`
-from that environment, so the platform's `git` configuration does not reach
-a [git input](a2a-extension-v1.md#git-input)'s clone. It cannot remove
-what the platform or the image sets. This protects a cooperative agent,
-not against one that runs commands of its own
-([Operations](operations.md#git-repositories)).
+A plugin gives each agent the `git` environment that
+[Git input](a2a-extension-v1.md#git-input) specifies, through
+`pluginsdk.AgentEnvironment` and `pluginsdk.AgentUnset`.
+[Git repositories](operations.md#git-repositories) states its limits.
 
 The receiver and a plugin talk gRPC over
 [go-plugin](https://github.com/hashicorp/go-plugin) with mutual TLS on a
