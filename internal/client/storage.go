@@ -285,21 +285,23 @@ func (h *Host) Cleanup(ctx context.Context, runID string) error {
 // removePrefix deletes every object a listing of the run's prefix returns that lies under the prefix.
 func (h *Host) removePrefix(ctx context.Context, store *minio.Client, bucket, runID string) error {
 	prefix := wire.S3Prefix(h.tenant, runID)
-	objects := make(chan minio.ObjectInfo)
 	var listErr error
-	go func() {
-		defer close(objects)
-		for object := range store.ListObjects(ctx, bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+	objects := func(yield func(minio.ObjectInfo) bool) {
+		for object := range store.ListObjectsIter(ctx, bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
 			switch {
 			case object.Err != nil:
 				listErr = object.Err
-			case strings.HasPrefix(object.Key, prefix):
-				objects <- object
+			case strings.HasPrefix(object.Key, prefix) && !yield(object):
+				return
 			}
 		}
-	}()
+	}
+	results, err := store.RemoveObjectsWithIter(ctx, bucket, objects, minio.RemoveObjectsOptions{})
+	if err != nil {
+		return err
+	}
 	var removeErr error
-	for removed := range store.RemoveObjects(ctx, bucket, objects, minio.RemoveObjectsOptions{}) {
+	for removed := range results {
 		if removed.Err != nil && removeErr == nil {
 			removeErr = fmt.Errorf("delete %s: %w", removed.ObjectName, removed.Err)
 		}

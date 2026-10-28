@@ -693,17 +693,3 @@ func (r *Receiver) readCancels(ctx context.Context) error {
 	r.mu.Unlock()
 	return nil
 }
-
-// latestStatus is the run's latest status of tenant, superseded attempts and rejections dropped.
-func latestStatus(statuses []wire.RunStatus, tenant string) *wire.RunStatus {
-	var latest *wire.RunStatus
-	var order wire.AttemptFilter
-	for i := range statuses {
-		status := &statuses[i]
-		if status.Wherry.Tenant != tenant || status.Wherry.Kind == "rejected" || !order.Admit(status.Wherry.Run, status.Wherry.Attempt) {
-			continue
-		}
-		latest = status
-	}
-	return latest
-}
