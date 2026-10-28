@@ -117,6 +117,8 @@ message ConfigureResponse {
   reserved 1;
   Directories directories = 2;
   int64 inline_limit = 3;
+  // version is the plugin's own version, for the receiver's log; a plugin built before it reports none.
+  string version = 4;
 }
 
 // Directories are the paths of a job's input, output and credentials directories as its agent's prompt shows them.

@@ -493,6 +493,15 @@ plugin. It exits with
 missing. Install a new plugin version while the receiver is stopped, or
 restart the receiver after replacing it.
 
+To check the install, start the receiver and find one line per plugin,
+logged when the receiver starts it:
+
+```text
+receiver: plugin <type>: version <version> protocol <n>
+```
+
+A plugin built before it reported its version logs `version unreported`.
+
 ### As a Nomad job
 
 On Nomad, the receiver can run as a service job whose

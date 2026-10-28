@@ -247,6 +247,7 @@ func main() {
 	if os.Getenv("WHERRY_TESTPLUGIN_PLAINTEXT") == "1" {
 		os.Unsetenv("PLUGIN_CLIENT_CERT")
 	}
+	pluginsdk.Version = "v0.0.0-test"
 	pluginsdk.Serve(func(settings pluginsdk.Settings, logger hclog.Logger) (pluginsdk.Plugin, error) {
 		write(record{Call: "configure", Settings: settings})
 		logger.Info("configuring profile", "profile", settings.Name)

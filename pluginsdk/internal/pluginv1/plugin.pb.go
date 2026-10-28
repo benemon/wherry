@@ -828,9 +828,11 @@ func (x *ConfigureRequest) GetCredential() string {
 }
 
 type ConfigureResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Directories   *Directories           `protobuf:"bytes,2,opt,name=directories,proto3" json:"directories,omitempty"`
-	InlineLimit   int64                  `protobuf:"varint,3,opt,name=inline_limit,json=inlineLimit,proto3" json:"inline_limit,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Directories *Directories           `protobuf:"bytes,2,opt,name=directories,proto3" json:"directories,omitempty"`
+	InlineLimit int64                  `protobuf:"varint,3,opt,name=inline_limit,json=inlineLimit,proto3" json:"inline_limit,omitempty"`
+	// version is the plugin's own version, for the receiver's log; a plugin built before it reports none.
+	Version       string `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -877,6 +879,13 @@ func (x *ConfigureResponse) GetInlineLimit() int64 {
 		return x.InlineLimit
 	}
 	return 0
+}
+
+func (x *ConfigureResponse) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
 }
 
 // Directories are the paths of a job's input, output and credentials directories as its agent's prompt shows them.
@@ -2273,10 +2282,11 @@ const file_wherry_plugin_v1_plugin_proto_rawDesc = "" +
 	"\x06config\x18\x05 \x01(\fR\x06config\x12\x1e\n" +
 	"\n" +
 	"credential\x18\x06 \x01(\tR\n" +
-	"credentialJ\x04\b\x04\x10\x05\"}\n" +
+	"credentialJ\x04\b\x04\x10\x05\"\x97\x01\n" +
 	"\x11ConfigureResponse\x12?\n" +
 	"\vdirectories\x18\x02 \x01(\v2\x1d.wherry.plugin.v1.DirectoriesR\vdirectories\x12!\n" +
-	"\finline_limit\x18\x03 \x01(\x03R\vinlineLimitJ\x04\b\x01\x10\x02\"]\n" +
+	"\finline_limit\x18\x03 \x01(\x03R\vinlineLimit\x12\x18\n" +
+	"\aversion\x18\x04 \x01(\tR\aversionJ\x04\b\x01\x10\x02\"]\n" +
 	"\vDirectories\x12\x14\n" +
 	"\x05input\x18\x01 \x01(\tR\x05input\x12\x16\n" +
 	"\x06output\x18\x02 \x01(\tR\x06output\x12 \n" +

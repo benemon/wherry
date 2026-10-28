@@ -14,7 +14,7 @@ import (
 // internal/receiver's observability test lists the same names.
 func TestHostSeries(t *testing.T) {
 	registry := newRegistry()
-	plugins := &plugins{dir: installPlugin(t), logs: io.Discard, registry: registry, running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: installPlugin(t), logs: io.Discard, logger: discard, registry: registry, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	if _, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}); err != nil {
 		t.Fatal(err)
