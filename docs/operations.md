@@ -505,80 +505,12 @@ A plugin that leaves `pluginsdk.Version` unset logs `version unreported`.
 
 ### As a Nomad job
 
-On Nomad, the receiver can run as a service job whose
+On Nomad, the receiver runs as a service job whose
 [workload identity](https://developer.hashicorp.com/nomad/docs/concepts/workload-identity)
-supplies `NOMAD_TOKEN`, with the bundle in a
-[Nomad variable](https://developer.hashicorp.com/nomad/docs/concepts/variables)
-and a local configuration that names no credential source, so the plugin
-takes the workload identity's token:
-
-```hcl
-job "wherry-receiver" {
-  namespace = "agents"
-  type      = "service"
-
-  group "receiver" {
-    ephemeral_disk {
-      sticky  = true
-      migrate = true
-    }
-
-    task "receiver" {
-      driver       = "exec"
-      kill_timeout = "30s"
-
-      config {
-        command = "/usr/local/bin/wherry"
-        args    = ["receiver", "run", "--config-file", "${NOMAD_TASK_DIR}/config.yaml"]
-      }
-
-      identity {
-        env = true
-      }
-
-      template {
-        destination = "${NOMAD_TASK_DIR}/config.yaml"
-        data        = <<EOF
-bundle: {{ env "NOMAD_SECRETS_DIR" }}/bundle.yaml
-state_dir: {{ env "NOMAD_ALLOC_DIR" }}/data
-plugin_dir: /usr/local/libexec/wherry/plugins
-EOF
-      }
-
-      template {
-        destination = "${NOMAD_SECRETS_DIR}/bundle.yaml"
-        data        = "{{ with nomadVar \"nomad/jobs/wherry-receiver\" }}{{ .bundle }}{{ end }}"
-      }
-
-      template {
-        destination = "${NOMAD_SECRETS_DIR}/nomad-ca.pem"
-        data        = "{{ with nomadVar \"nomad/jobs/wherry-receiver\" }}{{ .nomad_ca }}{{ end }}"
-      }
-    }
-  }
-}
-```
-
-The plugin directory is the one installed on the node, as in
-[Install plugins](#install-plugins). As the task sees them, root
-or the receiver's user must own the directory and the binary, neither group nor
-others may write them, and the binary must be a regular file. The plugin runs in
-the receiver's task with its environment, so the workload identity's
-`NOMAD_TOKEN` reaches it.
-
-Nomad treats a sticky, migrating ephemeral disk as best effort. If the node
-is lost, the keys go with it and the receiver is re-provisioned under a new
-name; a host volume avoids that.
-
-Attach the [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy) to the job:
-
-```sh
-nomad acl policy apply -namespace agents -job wherry-receiver \
-  wherry-receiver receiver-policy.hcl
-```
-
-The plugin's `ca_file` is then `/secrets/nomad-ca.pem`, the path inside
-the task.
+gives the Nomad plugin its token. The Nomad plugin owns those jobs:
+[Run the receiver in Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad#run-the-receiver-in-nomad)
+has the receiver container under the docker driver and the exec driver job
+on versioned host paths, each with its steps, and CI validates both.
 
 ### Metrics
 
