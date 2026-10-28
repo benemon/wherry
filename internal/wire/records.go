@@ -268,11 +268,12 @@ type SealRequest struct {
 
 // StartFailure records that a receiver could not start a run's attempt.
 type StartFailure struct {
-	V       int             `json:"v"`
-	Wherry  ReceiverBinding `json:"wherry"`
-	Profile string          `json:"profile"`
-	Agent   string          `json:"agent"`
-	Class   string          `json:"class"`
+	V        int             `json:"v"`
+	Wherry   ReceiverBinding `json:"wherry"`
+	Profile  string          `json:"profile"`
+	Agent    string          `json:"agent"`
+	Class    string          `json:"class"`
+	TaskHash string          `json:"task_hash"`
 }
 
 // Progress is the latest transcript offset a receiver committed for a run it holds, keyed by the run on the receiver's
@@ -624,6 +625,9 @@ func (value *Advertisement) validate() error {
 func (value *StartFailure) validate() error {
 	if err := value.Wherry.validate(); err != nil {
 		return err
+	}
+	if !ValidHash(value.TaskHash) {
+		return errors.New("invalid start failure")
 	}
 	return validateIDs(map[string]string{"profile": value.Profile, "agent": value.Agent, "class": value.Class})
 }

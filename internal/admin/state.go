@@ -451,9 +451,9 @@ func AuthorizeOutput(parse func([]byte, signed.Keys, wire.Record) error, state S
 }
 
 // AuthorizeStartFailure accepts a start failure from a live member of the run's placed pool.
-func AuthorizeStartFailure(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.StartFailure, error) {
+func AuthorizeStartFailure(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.StartFailure, error) {
 	var failure wire.StartFailure
-	if err := wire.ParseRecord(encoded, keys, &failure); err != nil {
+	if err := parse(encoded, keys, &failure); err != nil {
 		return wire.StartFailure{}, err
 	}
 	if err := state.receiverRecord(failure.Wherry, placedPool, runTenant); err != nil {

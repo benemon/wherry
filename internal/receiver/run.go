@@ -94,6 +94,24 @@ func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 }
 
 func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
+	// The check and the count share the lock, so a slot releasing a task for another member knows every session that
+	// could fetch it again.
+	r.mu.Lock()
+	wait := time.Until(r.backoffUntil)
+	if wait <= 0 {
+		r.fetching++
+	}
+	r.mu.Unlock()
+	if wait > 0 {
+		sleep(claiming, wait)
+		return nil
+	}
+	fetched := sync.OnceFunc(func() {
+		r.mu.Lock()
+		r.fetching--
+		r.mu.Unlock()
+	})
+	defer fetched()
 	share, err := r.newClient(
 		kgo.ConsumeTopics(admin.PoolTasksTopic(r.config.Pool)),
 		kgo.ShareGroup(admin.PoolGroup(r.config.Pool)),
@@ -117,7 +135,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		pollCtx, cancel := context.WithTimeout(claiming, 30*time.Second)
 		// A denied receiver must not acquire a task: each release raises its delivery count.
 		go func() {
-			for pollCtx.Err() == nil && !r.blocked() {
+			for pollCtx.Err() == nil && !r.blocked() && r.backoff() <= 0 {
 				sleep(pollCtx, 100*time.Millisecond)
 			}
 			cancel()
@@ -128,7 +146,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		if claiming.Err() != nil {
 			return claiming.Err()
 		}
-		if r.blocked() && len(fetches.Records()) == 0 {
+		if (r.blocked() || r.backoff() > 0) && len(fetches.Records()) == 0 {
 			return nil
 		}
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
@@ -140,6 +158,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 			record = records[0]
 		}
 	}
+	fetched()
 	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.
 	defer context.AfterFunc(claiming, idle)()
 	if r.blocked() {
@@ -148,6 +167,12 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	}
 	admitted, ack := r.admit(ctx, record)
 	if admitted == nil {
+		if ack == kgo.AckRelease && r.backoff() > 0 {
+			// Another slot's session open when the task goes back could be handed it at once.
+			for claiming.Err() == nil && r.sessions() > 0 {
+				sleep(claiming, 10*time.Millisecond)
+			}
+		}
 		record.Ack(ack)
 		return flush()
 	}
@@ -250,6 +275,18 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	}
 	if !modelInTerms(terms.Agents[agent], placement.Model) {
 		return reject("model not in the pool's terms")
+	}
+	// A member that failed to start the task does not try again, and fetches nothing for one lock duration so the
+	// broker can hand the task to another member.
+	if failedHere(events.startFailures[run], hash) {
+		admitted, ack := giveBack()
+		if ack == kgo.AckRelease {
+			r.logger.Printf("run %s: already failed here; releasing for another member", run)
+			r.mu.Lock()
+			r.backoffUntil = time.Now().Add(terms.LockDuration())
+			r.mu.Unlock()
+		}
+		return admitted, ack
 	}
 	profile, offered := r.offer(placement)
 	if !offered {
@@ -473,8 +510,8 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 }
 
 // startFailure names the profile the task was routed to.
-func (r *Receiver) startFailure(task *wire.Submission, attempt int64, profile, class string) *kgo.Record {
-	failure := &wire.StartFailure{Wherry: r.binding(task, attempt), Profile: profile, Agent: task.Wherry.Placement.Agent, Class: class}
+func (r *Receiver) startFailure(task *wire.Submission, hash string, attempt int64, profile, class string) *kgo.Record {
+	failure := &wire.StartFailure{Wherry: r.binding(task, attempt), Profile: profile, Agent: task.Wherry.Placement.Agent, Class: class, TaskHash: hash}
 	return &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: r.sign(failure)}
 }
 
@@ -731,7 +768,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				name = "input " + tooLarge.Name
 			}
 			r.logger.Printf("run %s: profile %s cannot deliver %s", runID, named.Name, name)
-			if err := run.commit(ctx, r.startFailure(task, attempt, named.Name, "input-too-large")); err != nil {
+			if err := run.commit(ctx, r.startFailure(task, run.taskHash, attempt, named.Name, "input-too-large")); err != nil {
 				return run.abandon(err)
 			}
 			r.metrics.startFailures.WithLabelValues(named.Name, "input-too-large").Inc()
@@ -1466,7 +1503,7 @@ func unansweredReason(credentials []string, urls bool) string {
 // run's terminal message names when the return spends the delivery budget.
 func (run *activeRun) startFailure(ctx context.Context, class, cause string) kgo.AckStatus {
 	run.startCause = logText(run.receiver.redactLive, errors.New(cause))
-	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.attempt, run.profile.Name, class)); err != nil {
+	if err := run.commit(ctx, run.receiver.startFailure(run.task, run.taskHash, run.attempt, run.profile.Name, class)); err != nil {
 		return run.abandon(err)
 	}
 	run.receiver.metrics.startFailures.WithLabelValues(run.profile.Name, class).Inc()

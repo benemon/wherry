@@ -1915,15 +1915,8 @@ func TestBudgetExhaustedByStartFailuresNamesTheLastCause(t *testing.T) {
 			testActiveRun(t, f, "run-b", 1).deliver(map[string][]byte{"github-token": []byte(otherToken)})
 			f.plugin.neverStarted, f.plugin.neverReason = true, test.reason
 			f.answer(t, credentialName)
-			record := f.submit(t, f.host, nil)
-			for attempt := int64(1); attempt <= 4; attempt++ {
-				want := kgo.AckRelease
-				if attempt == 4 {
-					want = kgo.AckReject
-				}
-				if status := f.execute(t, record, attempt); status != want {
-					t.Fatalf("attempt %d status %v, want %v; logs:\n%s", attempt, status, want, f.logs.String())
-				}
+			if status := f.execute(t, f.submit(t, f.host, nil), 4); status != kgo.AckReject {
+				t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
 			}
 			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != test.want {
 				t.Fatalf("terminal %s %q, want %q", state, reason, test.want)

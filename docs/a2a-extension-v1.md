@@ -520,7 +520,8 @@ An echo tells every host of a tenant where a run was admitted.
 A receiver writes the echo in the transaction that holds the run's
 `claimed` or `rejected` status, or its `terminal` status when the receiver
 ends at the [delivery budget](#delivery-budget) a run no ready plugin profile
-satisfies. The echo's fields copy the submission's. A
+satisfies or a run it already failed to start. The echo's fields copy the
+submission's. A
 host that has no record of the run takes the run's pool from its first
 valid echo, and ignores records of the run from any other pool. A status or
 chunk binds to the run when its `task_hash` equals the hash of the run's
@@ -573,9 +574,13 @@ start failure ends the run as its class describes.
   "wherry": {"receiver": "nomad-1", "tenant": "alice", "pool": "build", "run": "run-0f3c...", "attempt": 2},
   "profile": "container",
   "agent": "coder",
-  "class": "dispatch"
+  "class": "dispatch",
+  "task_hash": "9d2a..."
 }
 ```
+
+`task_hash` is the hash of the task record the receiver could not start, as
+in a status.
 
 | `class` | Meaning |
 | --- | --- |
@@ -588,6 +593,13 @@ job ended before its agent task started. The platform's reason for it goes to
 the receiver's log alone.
 
 `profile` is the profile the receiver routed the task to.
+
+A receiver delivered a task for which it holds its own start failure, with
+the task's `task_hash`, releases it without starting it, and fetches no
+task from the pool, in any of its slots, for the pool's lock duration, so
+the pool can deliver the task to another member. The release uses a
+delivery; at the [delivery budget](#delivery-budget) the receiver ends the
+run instead.
 
 ### Delivery budget
 

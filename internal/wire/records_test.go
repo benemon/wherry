@@ -42,7 +42,7 @@ func testRecords() map[string]Record {
 		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Placement: placement, TaskHash: testHash, MessageID: "message-a"},
 		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Profile: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
 		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 1},
-		"start failure":                &StartFailure{Wherry: testBinding(), Profile: "nomad", Agent: "claude", Class: "launch"},
+		"start failure":                &StartFailure{Wherry: testBinding(), Profile: "nomad", Agent: "claude", Class: "launch", TaskHash: testHash},
 		"seal request": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
 			Credentials: []string{"model"}, ExpiryMS: 1},
 		"seal request for task credentials alone": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
@@ -276,6 +276,11 @@ func TestRecordValidation(t *testing.T) {
 		"start failure without class": func(r map[string]Record) Record {
 			value := r["start failure"].(*StartFailure)
 			value.Class = ""
+			return value
+		},
+		"start failure without task hash": func(r map[string]Record) Record {
+			value := r["start failure"].(*StartFailure)
+			value.TaskHash = ""
 			return value
 		},
 	}

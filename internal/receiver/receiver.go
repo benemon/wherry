@@ -72,6 +72,10 @@ type Receiver struct {
 	// lost, zero while access holds.
 	denials     map[capability]bool
 	deniedSince time.Time
+	// backoffUntil is when the receiver may fetch from its pool again after releasing a task it failed to start, and
+	// fetching counts the share sessions polling the pool for a task.
+	backoffUntil time.Time
+	fetching     int
 	// admissionMu serialises the admission transactional ID, which one producer at a time may hold.
 	admissionMu sync.Mutex
 	// cancelled holds the runs cancelled by a host of their tenant.
@@ -410,6 +414,20 @@ func (r *Receiver) blocked() bool {
 	return len(r.denials) > 1 || len(r.denials) == 1 && !r.denials[capClaim]
 }
 
+// backoff is how long the receiver waits before it fetches from its pool again.
+func (r *Receiver) backoff() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return time.Until(r.backoffUntil)
+}
+
+// sessions counts the share sessions polling the pool for a task.
+func (r *Receiver) sessions() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.fetching
+}
+
 // stopForDenial reports whether denial has lasted one lock interval, after which the broker
 // can hand this receiver's held tasks to another member.
 func (r *Receiver) stopForDenial() bool {
@@ -560,6 +578,8 @@ func (r *Receiver) offer(placement wire.Placement) (Named, bool) {
 type poolEvents struct {
 	// statuses holds, per run, the statuses from live pool members in log order, one per event ID.
 	statuses map[string][]wire.RunStatus
+	// startFailures holds, per run, this receiver's start failures in log order.
+	startFailures map[string][]wire.StartFailure
 	// others holds, per run, every other record, such as cancels.
 	others map[string][][]byte
 }
@@ -575,7 +595,7 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	state, peers, _ := r.snapshot()
 	peerTopics := admin.PoolKeyTopics(state, r.config.Pool)
 	reread := map[string]bool{}
-	events := poolEvents{statuses: map[string][]wire.RunStatus{}, others: map[string][][]byte{}}
+	events := poolEvents{statuses: map[string][]wire.RunStatus{}, startFailures: map[string][]wire.StartFailure{}, others: map[string][][]byte{}}
 	seen := map[string]bool{}
 	for _, record := range records {
 		run := string(record.Key)
@@ -589,6 +609,15 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 				return poolEvents{}, err
 			}
 			err = history(record.Value, peers, &named)
+		}
+		var failure wire.StartFailure
+		if err != nil && history(record.Value, peers, &failure) == nil {
+			// Like a status, a start failure binds its run's tenant through the task hash.
+			failure, err := admin.AuthorizeStartFailure(history, state, peers, record.Value, r.config.Pool, failure.Wherry.Tenant)
+			if err == nil && failure.Wherry.Run == run && failure.Wherry.Receiver == r.id {
+				events.startFailures[run] = append(events.startFailures[run], failure)
+			}
+			continue
 		}
 		if err != nil {
 			events.others[run] = append(events.others[run], record.Value)
@@ -611,6 +640,11 @@ func (events poolEvents) committedTerminal(run, taskHash string) bool {
 	return slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
 		return wire.Terminal(status.StatusUpdate.Status.State) && status.Wherry.TaskHash == taskHash
 	})
+}
+
+// failedHere reports a start failure for the task record hash.
+func failedHere(failures []wire.StartFailure, hash string) bool {
+	return slices.ContainsFunc(failures, func(failure wire.StartFailure) bool { return failure.TaskHash == hash })
 }
 
 type runKey struct{ tenant, run string }
