@@ -21,8 +21,7 @@ Kafka already meets:
 The cost is a Kafka cluster to operate: version 4.3, with share groups, a
 SCRAM listener and an authoriser, as
 [Prepare Kafka](operations.md#prepare-kafka) lists. An organisation that
-already runs Kafka adds topics and principals to it. One that does not
-takes on a cluster to run.
+already runs Kafka adds topics and principals to it.
 
 ## Topics
 
@@ -64,18 +63,19 @@ pool the run was placed in, on behalf of a tenant entitled to it.
 [The wherry A2A extension](a2a-extension-v1.md) specifies every record.
 
 Every topic has one partition and `LogAppendTime` timestamps, and no topic
-is deleted. A topic is compacted only when its readers need the latest
-record per key and nothing else, and no principal but the record's owner can
-write that key, or a superseded record costs nothing: `wherry.receivers` and
-the progress topics have `cleanup.policy=compact,delete`, every other topic
-`cleanup.policy=delete`. A pool's task and event topics and its receivers'
-progress topics keep records for its maximum queue deadline plus six hours
-plus a day, 15 days 6 hours by default, the tenant feed and transcript
-topic for 30 days and `wherry.receivers` for 7; the identity and
-configuration topics keep them forever.
+is deleted. `wherry.receivers` and the progress topics have
+`cleanup.policy=compact,delete`: their readers need only the latest record
+per key, and only the record's owner can write that key. Every other topic
+has `cleanup.policy=delete`.
+
+A pool's task and event topics and its receivers' progress topics keep
+records for its maximum queue deadline plus six hours plus a day, 15 days
+6 hours by default. The tenant feed and transcript topic keep them for 30
+days and `wherry.receivers` for 7. The identity and configuration topics
+keep them forever.
 
 A deployment has 2 + 2R + 2P + 2T + H topics for R receivers, P pools, T
-tenants and H hosts. The count grows with configuration, never with runs.
+tenants and H hosts. The count depends on configuration alone.
 
 Every principal reads all of `wherry.admin`, so tenants see each other's
 names, hosts, entitlements and pools.
@@ -130,7 +130,8 @@ default requirement of `1231200000`. Identity and configuration topics stay
 at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 
 `wherry admin` leaves an existing topic's configuration as it is, except
-that `pool create` sets the retention and timestamp type of the pool's tasks
+that every recording command sets the configuration above on
+`wherry.receivers`, `pool create` sets the retention and timestamp type of the pool's tasks
 and events topics, and `receiver add` and `pool create` set every
 configuration above on the progress topics of the pool's live receivers. A
 tenant feed's or transcript topic's retention can be changed with Kafka's

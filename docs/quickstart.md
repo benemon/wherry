@@ -18,8 +18,8 @@ Two pairs of files name the same credentials:
   the Nomad token the receiver authenticates with. The receiver's local
   configuration maps that name to a source on the receiver host.
 
-The configuration on `wherry.admin` holds names alone; each value stays at its
-source on the machine that resolves it.
+The configuration on `wherry.admin` holds the names. Each value is read from
+its source on the machine that resolves it.
 
 ## Prerequisites
 
@@ -41,7 +41,7 @@ source on the machine that resolves it.
 
 Each [release](https://github.com/benemon/wherry/releases) carries
 `wherry_<version>_<os>_<arch>.tar.gz` for `linux` and `darwin` on `amd64` and
-`arm64`, `checksums.txt` with each archive's SHA-256, and
+`arm64`, `checksums.txt` with each archive's SHA-256,
 `checksums.txt.sigstore.json`, the keyless signature over it, and
 `wherry.cdx.json`, a CycloneDX SBOM. `<version>` is a release tag. Download the archive and the checksums, verify the checksums'
 signature with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/),
@@ -384,7 +384,8 @@ profile container: credential "nomad-token" has no source in the receiver's conf
 ```
 
 `state_dir` keeps the receiver's signing key and survives restarts. The
-token stays on this host; `wherry.admin` and the bundle never hold it.
+receiver reads the token on this host, and neither `wherry.admin` nor the
+bundle holds it.
 
 ### 8. Start the receiver
 

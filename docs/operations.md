@@ -114,14 +114,42 @@ as one file and as a `--config-dir` directory.
 - An agent's `models` lists the models a task may name for it, and its
   optional `default_model`, one of them, the one a task naming none runs.
   An agent with one model defaults to it; with two or more `models` and no
-  `default_model`, every task for the agent names a model. wherry does not interpret the names. The agent's profiles read the task's
-  model from `WHERRY_MODEL`, as in
-  [Add a receiver](#add-a-receiver). Without `models` a task names no model
-  and the profile's command sets it.
+  `default_model`, every task for the agent names a model. wherry does not
+  interpret the names. The agent's profiles read the task's model from
+  `WHERRY_MODEL`, as the [agent contract](configuration.md#agent-contract)
+  describes. Without `models` a task names no model and the profile's
+  command sets it.
 
-Running `pool create` again for an existing pool records the new terms.
-Adding or removing an agent's `models` rejects that agent's queued and
-redelivered runs at their next claim, so drain the agent first.
+### Change a pool's terms
+
+Prerequisites: the `wherry admin` environment and the pool's new terms
+file.
+
+1. Find the receivers the new terms would strand: a live receiver in the
+   pool with a plugin profile whose agent the new terms drop.
+   `wherry admin receiver show RECEIVER` prints each profile's `agent`.
+
+2. Reconfigure each of those receivers without the profile, as in
+   [Change a receiver's configuration](#change-a-receiver-s-configuration),
+   or revoke it, as in [Revoke a host or receiver](#revoke-a-host-or-receiver).
+
+3. When the change adds or removes an agent's `models`, drain the agent's
+   runs first: the change rejects its queued and redelivered runs at their
+   next claim.
+
+4. Record the terms:
+
+   ```sh
+   wherry admin pool create build --config-file build-terms.yaml
+   ```
+
+   `pool create` checks every live receiver in the pool against the new
+   terms first, and refuses terms that would strand one, naming each
+   receiver, plugin and profile:
+
+   ```
+   wherry: pool terms would strand live receivers: receiver nomad-1 plugin nomad profile host: receiver agent is outside pool terms
+   ```
 
 ### Retention
 
@@ -166,12 +194,12 @@ a transcript chunk record is 933508 bytes, over the 900000-byte record limit
 
 `wherry submit` measures each signed submission against the recorded
 record limit. Input files grow by about 16/9 on the wire, since they are
-base64-encoded inside a record that is itself base64url-encoded. With
-brokers and topics at their defaults the 1000012-byte producer batch is the
-limit. wherry producers batch at most 1000012 bytes, so raising
-`message.max.bytes` and `max.message.bytes` does not take it further;
-lowering them brings it down. Run `pool create` again after changing either,
-so the terms record the new limit. An output chunk holds
+base64-encoded inside a record that is itself base64url-encoded. wherry
+producers batch at most 1000012 bytes, which is the limit with brokers and
+topics at their defaults. Raising `message.max.bytes` or
+`max.message.bytes` leaves the limit there, and lowering either lowers it.
+Run `pool create` again after changing either, so the terms record the new
+limit. An output chunk holds
 256 KiB whatever `output_limit` is, so `output_limit` spans as many records
 as it needs and the record limit does not bound it.
 
@@ -213,39 +241,41 @@ A tenant can be entitled to several pools; run `pool entitle` once per pool.
 
 ## Add a receiver
 
-A receiver's configuration lists the plugins it runs, keyed by plugin,
-and each plugin's profiles in routing order. Each plugin profile
-launches one agent through its plugin and carries the labels tasks select
-on. It delivers the agent's credentials at the targets the pool's terms give
-them, so no plugin profile names an agent credential. Two plugin profiles
-can launch the same agent with different labels, such as one running in
-containers and one on the host. [Quickstart: Receiver](quickstart.md#receiver)
-walks through adding and starting receiver `nomad-1`, with every file it
-writes.
+A receiver runs a pool's tasks on the plugin profiles of its
+[receiver configuration](configuration.md#receiver-configuration);
+[Placement](concepts.md#placement) says how a task reaches one.
+[Quickstart: Receiver](quickstart.md#receiver) walks through adding and
+starting receiver `nomad-1`, with every file it writes.
 
-This configuration of receiver `nomad-1`, against the
-[pool terms example](configuration.md#pool-terms-example), is a directory:
+Prerequisites: the `wherry admin` environment
+([Set up `wherry admin`](#set-up-wherry-admin)), the pool, and a receiver
+host that meets [Run a receiver](#run-a-receiver).
 
-```
-nomad-1/
-  receiver.yaml
-  plugins/
-    nomad/
-      plugin.yaml
-      profiles/
-        10-container.yaml
-        20-host.yaml
-```
+1. Write the configuration directory. This configuration of receiver
+   `nomad-1`, against the
+   [pool terms example](configuration.md#pool-terms-example), runs `claude`
+   in a container and `codex` under the `exec` driver:
 
-`receiver.yaml` holds the receiver's `capacity`:
+   ```
+   nomad-1/
+     receiver.yaml
+     plugins/
+       nomad/
+         plugin.yaml
+         profiles/
+           10-container.yaml
+           20-host.yaml
+   ```
+
+`receiver.yaml`:
 
 ```yaml
 capacity: 3
 ```
 
-`plugins/nomad/plugin.yaml` holds the `config` every plugin profile of the
-Nomad plugin inherits, here the cluster's connection settings and the name of the
-[platform credential](#platform-credentials) that authenticates to it:
+`plugins/nomad/plugin.yaml`, the `config` every profile inherits, with the
+name of the [platform credential](configuration.md#platform-credentials)
+that authenticates to the cluster:
 
 ```yaml
 # Every plugin profile of this plugin inherits these keys and can override them.
@@ -256,8 +286,7 @@ config:
   credential: nomad-token
 ```
 
-Each file in `plugins/nomad/profiles/` is one plugin profile, with the
-settings particular to it. `10-container.yaml` runs `claude` in a container:
+`plugins/nomad/profiles/10-container.yaml`:
 
 ```yaml
 name: container
@@ -271,8 +300,8 @@ config:
       image: registry.example.com/claude-agent:1.0
 ```
 
-`20-host.yaml` runs `codex` under the `exec` driver, on a node pool whose
-nodes have Codex installed:
+`plugins/nomad/profiles/20-host.yaml`, on a node pool whose nodes have
+Codex installed:
 
 ```yaml
 name: host
@@ -292,92 +321,43 @@ config:
           --sandbox workspace-write - < "$NOMAD_TASK_DIR/prompt.txt"
 ```
 
-The plugin profile files' names set routing order within the plugin, lowest
-first, so a numeric prefix orders them. A plugin profile's `config` is its
-plugin's `config` merged with its own: maps merge key by key, the plugin
-profile's value wins, a list replaces the plugin's whole, and `key: null`
-removes an inherited key. A plugin's `labels`, in `plugin.yaml`, merge into
-each plugin profile's `labels` in the same way.
-[Plugin profile merge](configuration.md#plugin-profile-merge) gives every
-rule, and the
-[directory layout](configuration.md#receiver-configuration-directory) the
-files.
+[Receiver configuration directory](configuration.md#receiver-configuration-directory)
+gives the layout and routing order, and
+[Plugin profile merge](configuration.md#plugin-profile-merge) how a
+profile inherits its plugin's `config` and `labels`. The
+[Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
+cover the `config` section, and its
+[agent jobs](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-jobs)
+how a command reads `WHERRY_MODEL`.
+[Codex's non-interactive mode](https://developers.openai.com/codex/noninteractive)
+covers the `codex exec` flags and the API key variable the pool's terms
+target.
 
-A single YAML file holding the whole
-[receiver configuration](configuration.md#receiver-configuration) also works in
-place of the directory.
-The [receiver configuration example](configuration.md#receiver-configuration-example)
-gives this configuration in both forms.
-
-A task runs on the first ready plugin profile, in routing order, whose agent
-and labels satisfy it. A task for `claude`, the pool's default agent, runs
-on `container`, and a task with `--agent codex` runs on `host`. A receiver
-running several plugins visits them in a fixed order, so give plugin
-profiles of different plugins labels that tell them apart. Every member of a
-pool must honour the labels its plugin profiles declare. The client places a
-task by one member's labels, but any member can claim it. A member with no
-matching plugin profile returns the task.
-
-The [Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
-cover the `config` section.
-
-Every plugin profile runs its harness unchanged: the receiver reads no
-harness's output format, and the run ends when the job ends, with the
-outcome the agent writes as the prompt asks
-([agent contract](configuration.md#agent-contract)).
-
-`codex exec` reads its API key from
-`CODEX_API_KEY` and ignores `OPENAI_API_KEY`, so the pool's terms give the
-`codex` agent's credential the target `env: CODEX_API_KEY`, as in
-[Create a pool](#create-a-pool). Plugin profile `host` sends the prompt file
-to `codex exec` on standard input, and `--sandbox` takes a mode the platform
-allows. Without `--ephemeral`, Codex writes session files under
-`CODEX_HOME` (default `~/.codex`), which the task must be able to write.
-
-A plugin profile whose agent has `models` in the pool's terms reads the task's
-model from `WHERRY_MODEL`, which the plugin sets only when the task has a
-model, and falls back to a model of its own. The shell command sets the
-fallback first, `test -n "$WHERRY_MODEL" || WHERRY_MODEL=<model>;`, with a model
-the harness accepts, such as `haiku` for Claude Code, then passes
-`--model "$WHERRY_MODEL"` to Claude Code or `-m "$WHERRY_MODEL"` to Codex.
-Nomad reads `${...}` in driver configuration as its own interpolation and
-fails the task on `${WHERRY_MODEL:-<model>}`, so the fallback avoids braces.
-The value reaches the command through the environment, never pasted into its
-arguments.
-
-1. Write the configuration and check it. `--dry-run` validates it against
-   the pool's terms and prints each plugin profile as the record would hold
-   it, writing nothing:
+2. Check the configuration. `--dry-run` validates it against the pool's
+   terms and prints each plugin profile as the record would hold it,
+   writing nothing:
 
    ```sh
    wherry admin receiver add nomad-1 --pool build --config-dir nomad-1 --dry-run
    ```
 
-   Then add the receiver:
+3. Add the receiver:
 
    ```sh
    wherry admin receiver add nomad-1 --pool build \
      --config-dir nomad-1 --bundle-file nomad-1.bundle
    ```
 
-2. Deliver the bundle to the receiver through the platform's secret
-   mechanism, and write the receiver's [local
+4. Deliver the bundle to the receiver host over a channel you trust, such
+   as the platform's secret mechanism. It holds the receiver's Kafka
+   password.
+
+5. Install wherry and the receiver's plugins, as in
+   [Install plugins](#install-plugins), and write the receiver's [local
    configuration](configuration.md#receiver-local-configuration) with a
-   source for each [platform credential](#platform-credentials) its
-   plugin profiles name.
-
-3. Start the receiver, as in [Run a receiver](#run-a-receiver).
-
-### Platform credentials
-
-A plugin that authenticates to its platform with a token takes it as a
-platform credential. The receiver configuration names the credential with
-`credential: <name>` beside the address it authenticates, normally in the
-plugin's `config`, and the receiver's [local
-configuration](configuration.md#receiver-local-configuration) maps the name
-to a [source](security.md#credential-sources) on the receiver's host, as a
-host's configuration maps its agent credentials. This local configuration
-gives `nomad-token` a file source:
+   [source](security.md#credential-sources) for each platform credential its
+   plugin profiles name. This local configuration gives `nomad-token` a
+   file source:
 
 ```yaml
 bundle: /etc/wherry/receiver.bundle
@@ -389,46 +369,51 @@ credentials:
     file: /etc/wherry/nomad-token
 ```
 
-A name with no source fails that plugin profile's configuration, and the
-receiver exits with:
+Start the receiver under a supervisor that restarts it when it exits and
+allows it 30 seconds to stop, as in [Run a receiver](#run-a-receiver). A
+platform credential with no source fails that plugin profile's
+configuration, and the receiver exits with:
 
 ```
 profile container: credential "nomad-token" has no source in the receiver's configuration
 ```
 
-The source is a file readable by the receiver's user and its group alone,
-an environment variable, or a command such as a vault client's, resolved
-when the receiver configures the plugin profile. It never reaches
-`wherry.admin` or the bundle. To rotate the token, replace the value at its
-source and restart the receiver; the bundle stays as it is. A plugin profile
-that names no credential leaves the plugin to its own default, such as the
-Nomad plugin's `NOMAD_TOKEN`.
+6. On a host of an entitled tenant, check that `wherry receivers` shows the
+   receiver `live` with each profile `ready=true`.
+
+To rotate a platform credential, replace the value at its source and
+restart the receiver; the bundle stays as it is.
 
 ### Change a receiver's configuration
 
-Check the configuration first. `--dry-run` reads and validates it against
-the pool's terms as `configure` does, and prints each plugin profile as the
-record would hold it, with its plugin's `config` and `labels` merged in,
-writing nothing:
+Prerequisites: the `wherry admin` environment and the receiver's new
+configuration.
 
-```sh
-wherry admin receiver configure nomad-1 --config-dir nomad-1 --dry-run
-```
+1. Check the configuration. `--dry-run` validates it against the pool's
+   terms as `configure` does, and prints each plugin profile as the record
+   would hold it, writing nothing:
 
-Compare the output with what the receiver runs now, which
-`wherry admin receiver show nomad-1` prints in the same format, then record
-the configuration:
+   ```sh
+   wherry admin receiver configure nomad-1 --config-dir nomad-1 --dry-run
+   ```
 
-```sh
-wherry admin receiver configure nomad-1 --config-dir nomad-1
-```
+2. Compare the output with what the receiver runs now, which
+   `wherry admin receiver show nomad-1` prints in the same format.
 
-The receiver exits when it reads the new record at its next configuration check,
-which runs every 15 seconds, and its platform restarts it with the new
-configuration. Runs in flight are adopted on redelivery. When the new
-configuration renames the profile or changes its agent, the run's job is stopped
-and purged, and the run is dispatched again. The bundle and password do not
-change.
+3. Record the configuration:
+
+   ```sh
+   wherry admin receiver configure nomad-1 --config-dir nomad-1
+   ```
+
+4. The receiver exits at its next configuration check, within 15 seconds,
+   and its supervisor restarts it with the new configuration. Check that
+   `wherry receivers` shows it `live` with the new profiles.
+
+The bundle and password stay as they are. Runs in flight are adopted on
+redelivery. When the new configuration renames a run's profile or changes
+its agent, the run's job is stopped and purged, and the run is dispatched
+again.
 
 ## Run a receiver
 
@@ -442,10 +427,11 @@ change.
   name again;
 - a plugin directory holding every plugin in its
   configuration, as in [Install plugins](#install-plugins);
-- a source for each [platform credential](#platform-credentials) its
+- a source for each [platform credential](configuration.md#platform-credentials) its
   plugin profiles name;
 - a supervisor that restarts the process when it exits, since a
-  configuration change ends it;
+  configuration change ends it, and that allows it 30 seconds to stop
+  after `SIGTERM` before a forced kill;
 - for the Nomad plugin, a Nomad token with the
   [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy), from a platform credential or `NOMAD_TOKEN`
   in the receiver's environment.
@@ -524,7 +510,8 @@ job "wherry-receiver" {
     }
 
     task "receiver" {
-      driver = "exec"
+      driver       = "exec"
+      kill_timeout = "30s"
 
       config {
         command = "/usr/local/bin/wherry"
@@ -623,7 +610,7 @@ the `wherry admin` environment.
    When it ends, the command prints one line per
    [revocation step](concepts.md#revocation) it ran,
    `step=<n> complete=<bool> name=<name>`. The wait in step 5 is usually the
-   longest; `--wait DURATION` replaces it.
+   longest; `--wait DURATION` replaces it and must be positive.
 
 2. If it fails with `revocation incomplete`, the line of the failed step
    ends in ` error=<cause>`. Check what that step depends on (the broker
@@ -870,9 +857,8 @@ rules and the commands. For the agent to follow them:
 - The agent may run `git` commands. Every command the prompt gives starts with
   `git`, so for Claude Code
   [`Bash(git:*)`](https://docs.anthropic.com/en/docs/claude-code/iam) in its
-  allowed tools covers them, along with whatever else the task runs. The rule
-  lets the agent run the commands; it is not a sandbox, since `git` can run any
-  command.
+  allowed tools covers them, along with whatever else the task runs. Since
+  `git` can run any command, the rule lets the agent run any command.
 
 Allow the hosts a pool's tasks may clone from with `vcs` in its
 [terms](configuration.md#pool-terms):
@@ -916,17 +902,16 @@ works on,
 `GIT_EXEC_PATH` chooses the programs `git` runs, `GIT_SSL_NO_VERIFY`
 disables certificate checks, and `GIT_CURL_VERBOSE` traces requests, with
 the Authorization header redacted. A plugin removes them only from the
-environment it configures, such as the Nomad runtime's `env`. It cannot
-remove what the platform or the image sets: a Nomad `raw_exec` task
-inherits the client's environment, and a container keeps its image's
-`ENV`. Add them to the Nomad client's `env.denylist`, and keep them out of
-agent images.
+environment it configures, and cannot remove what the platform or the image
+sets. Each plugin's agent environment section says how to keep them out:
+[Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-environment),
+[Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#agent-environment)
+and [systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd#agent-environment).
 
 The CA and proxy settings stay yours: `GIT_SSL_CAINFO`, `SSL_CERT_FILE`,
 `HTTPS_PROXY` and the like reach `git` as the image or platform sets them.
 
-Start the agent's harness in a directory above the checkout, never inside
-it. Claude Code in print mode skips the workspace trust prompt and runs the
+Start the agent's harness in a directory above the checkout. Claude Code in print mode skips the workspace trust prompt and runs the
 hooks and MCP servers of the project it starts in, so a harness started in a
 cloned repository runs that repository's hooks with the agent's credential in
 reach. Started above the checkout, it reads the repository's files without
@@ -935,8 +920,8 @@ a shell. The start directory is the plugin profile's to set: on Nomad, a runtime
 command such as `cd /local && exec claude ...` starts the harness in the task
 directory, and the clone lands below it.
 
-The isolation protects a cooperative agent from the configuration around it. It
-is not a boundary against the agent: an agent that runs commands, including
+The isolation protects a cooperative agent from the configuration around it.
+An agent that runs commands, including
 through an allow rule such as
 [`Bash(git:*)`](https://docs.anthropic.com/en/docs/claude-code/iam)
 (`git -c alias.x='!cmd'` runs any command), can undo every one of these
@@ -946,7 +931,7 @@ lifetime, the platform's egress policy, and the receiver's redaction of what it
 returns.
 
 The host's configuration supplies least privilege; wherry passes the
-credential as a file and checks the host, nothing more:
+credential as a file and checks the host:
 
 - For `https`, a short-lived token for one repository, such as a GitHub App
   installation token. The credential helper answers with the user name
@@ -998,26 +983,13 @@ task starts, and the receiver uploads S3 outputs after the task stops. The
 Nomad clients and the receiver hosts need the storage endpoint; agent jobs
 do not. The presigned GET is the source of an `artifact` in the agent job,
 so an agent that can read its own job can read the URL: keep the Nomad API
-out of the agent's reach, as below.
+out of the agent's reach, as the Nomad plugin's README below says.
 
-### On Nomad
-
-The [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-network-reach)
-says how its agent jobs reach the network and how to confine them.
-
-### On Kubernetes
-
-Run agent pods under a service account with
-`automountServiceAccountToken: false`, so no API credential is mounted beside
-the agent. Apply a default-deny egress NetworkPolicy to the agent pods'
-namespace, with rules that allow DNS and the allowed hosts. Policies take effect
-only under a CNI that enforces them, and they are additive: check that no other
-policy in the namespace allows the control plane or metadata addresses.
-NetworkPolicy matches addresses only. To allow by host name, use the cluster's
-DNS-aware egress rules, such as an OpenShift `EgressFirewall` with `dnsName` or
-a Cilium FQDN policy. These authorise the addresses a name resolves to, so a
-name on a shared or CDN address admits its neighbours too; restrict ports and
-the DNS resolvers as well.
+Each plugin's README says how its agent jobs reach the network and how to
+confine them:
+[Nomad](https://github.com/benemon/wherry-plugins/tree/main/nomad#agent-network-reach),
+[Kubernetes](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#agent-network-reach)
+and [systemd](https://github.com/benemon/wherry-plugins/tree/main/systemd#agent-network-reach).
 
 ## Upgrade wherry
 
@@ -1031,20 +1003,9 @@ reports such records as written by a later release; do not skip them, upgrade
 it. A harness does not restart a running `wherry mcp` when its binary
 changes, so restart the MCP server after upgrading.
 
-This release is a clean break. It renames the configured unit a task is
-placed on from adapter to plugin profile, replaces the receiver configuration's
-`platforms` and `adapters` with `plugins` and their `profiles`, moves the
-receiver's settings from flags to its [local
-configuration](configuration.md#receiver-local-configuration), takes platform
-credentials from local sources in place of the bundle, and moves the plugin
-protocol to version 10, in the Go module
-`github.com/benemon/wherry/pluginsdk`. Hosts, receivers and plugins
-upgrade together, and an existing cluster is reset rather than migrated: rewrite each receiver
-configuration in the new form, add the receivers again, and write each
-receiver's local configuration with a source for every platform credential
-it names. Update dashboards and alerts keyed on the receiver metrics'
-`adapter` label to `profile`, and on the `wherry_adapter_` metrics to
-`wherry_plugin_`.
+The [release notes](https://github.com/benemon/wherry/releases) mark a
+release that changes the record formats or the plugin protocol, and give
+its upgrade steps.
 
 Between releases that keep the record formats, upgrade in place.
 Prerequisites: the new `wherry` binary, and each receiver's local
@@ -1053,9 +1014,8 @@ configuration, bundle and state directory.
 1. Replace the binary on every host and receiver host with the new
    release's, verified as in [Install wherry](quickstart.md#install-wherry).
 2. Replace the plugins in each receiver's plugin directory together with the
-   receiver binary, verified as in [Install plugins](#install-plugins); a receiver refuses a plugin of another plugin protocol
-   version. This release speaks plugin protocol version 10 and refuses a
-   version 9 plugin.
+   receiver binary, verified as in [Install plugins](#install-plugins); a receiver refuses a plugin of another
+   [plugin protocol version](commands.md#plugins).
 3. Restart each receiver with the same local configuration, bundle and
    state directory. On
    `SIGINT` or `SIGTERM` it exits without stopping its jobs and releases its

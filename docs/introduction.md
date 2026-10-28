@@ -1,10 +1,9 @@
 # Introduction
 
-Running an agent has well-known answers: containers, sandboxes, clusters.
-Handing a coding agent's work to that infrastructure, across machines,
-tenants and trust boundaries, and getting the result back, has no standard
-answer. wherry is an execution fabric for delegated agent work, built on
-Kafka.
+wherry is an execution fabric for delegated agent work, built on Kafka. It
+hands a coding agent's work to the containers, sandboxes and clusters that
+run agents, across machines, tenants and trust boundaries, and returns the
+result.
 [Why wherry](index.md#why-wherry) sets out what it gives, and
 [Key concepts](concepts.md) explains the model.
 

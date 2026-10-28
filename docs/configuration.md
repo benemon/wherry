@@ -27,10 +27,7 @@ made when this host submits the run, `runs/<run>/outputs/` for the outputs
 it answered, with a `.lock` beside it that every process sharing the
 directory holds while it answers that attempt. `submit` writes the run's
 record before it publishes the task, and removes it when publishing
-fails. A seal is at most 64 KiB, which bounds the values one seal
-carries. The receiver redacts no credential value shorter than 8 bytes
-once its trailing CR and LF are removed, and logs
-`run <id>: credential <name> too short to redact`.
+fails.
 
 ### Client configuration example
 
@@ -333,10 +330,7 @@ naming its size and the limit.
 
 An input file travels base64-encoded inside the signed record, which is itself
 base64url-encoded, so an inline input takes about 16/9 of its size in the
-submission record. As `pool create`'s check measures them on a broker at its
-defaults, the output chunk is 468119 bytes, the results 791017 and 803627
-bytes (with S3 outputs) and the transcript chunk 933508 bytes, so a feed's
-or transcript topic's `max.message.bytes` below 933508 refuses every pool.
+submission record.
 
 `pool create` and `pool entitle` check against the broker at the time.
 Receivers apply the limits from their view of `wherry.admin`, which they
@@ -389,8 +383,7 @@ credential](#platform-credentials), and its value is a string.
 The receiver routes a run to the first ready profile, in order within its
 plugin, whose agent and labels satisfy the task. It visits the plugins in
 the order of their names, so the host and the receiver compute the same
-match, but labels choose between plugins and no configuration relies on an
-order between them. The record on `wherry.admin` holds each profile with
+match. Labels choose between plugins. The record on `wherry.admin` holds each profile with
 its name, plugin, agent, labels and merged `config`.
 
 ### Plugin profile merge
@@ -416,13 +409,12 @@ rules:
   on a plugin profile.
 - `agent` belongs to the plugin profile alone.
 
-No plugin receives a null. Here the plugin holds the cluster's address, its
-credential, a Docker runtime and a `platform` label. Plugin profile `claude`
-overrides only the image. Plugin profile `host` switches the driver to
-`exec` and deletes the inherited `image`, which the `exec` driver does not
-take: Nomad accepts a job whatever its driver configuration holds, and the
-client then refuses the task, so an inherited key the driver rejects fails
-every run.
+Here the plugin holds the cluster's address, its credential, a Docker
+runtime and a `platform` label. Plugin profile `claude` overrides only the
+image. Plugin profile `host` switches the driver to `exec` and deletes the
+inherited `image`, which the `exec` driver does not take. The
+[Nomad plugin's settings](https://github.com/benemon/wherry-plugins/tree/main/nomad#settings)
+describe `runtime` and its driver `config`.
 
 ```yaml
 plugins:
@@ -630,8 +622,12 @@ example](#receiver-configuration-example):
 profile container: credential "nomad-token" has no source in the receiver's configuration
 ```
 
-Sources stay on the receiver's host and are never recorded on
-`wherry.admin`. The [Quickstart](quickstart.md#_7-write-the-receiver-s-local-configuration)
+A plugin profile that names no credential leaves the plugin to its own
+default, such as the Nomad plugin's `NOMAD_TOKEN`.
+
+Sources stay on the receiver's host. `wherry.admin`, which every principal
+reads, records the credential's name alone, and the receiver's bundle holds
+its Kafka identity alone. The [Quickstart](quickstart.md#_7-write-the-receiver-s-local-configuration)
 writes a local configuration with a source for each platform credential its
 receiver configuration names.
 

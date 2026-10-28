@@ -70,8 +70,7 @@ followed from the CLI or from the agent's own harness.
 
 A coding agent delegates through the same tools whatever runs the work.
 The MCP server fits any harness, the agent that runs the task is
-unmodified, and everything platform-specific stays in a plugin,
-so changing where work runs leaves the workflow as it is.
+unmodified, and everything platform-specific stays in a plugin.
 [Harness integration](operations.md#harness-integration) shows the setup.
 
 ### Trace every run from request to result

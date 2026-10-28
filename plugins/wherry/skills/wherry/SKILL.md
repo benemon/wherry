@@ -41,7 +41,9 @@ Call `receivers` first. For each receiver it returns:
 - `status` (`live`, `stale`, `silent` or `ended`), `capacity` and
   `in_flight`: whether it is live and has room.
 
-Pick an `agent` from the profiles, or omit it to take the pool's default.
+Pick an `agent` from the profiles, or omit it to take the pool's default
+agent, or the first other agent in the pool's terms that a ready profile
+runs when none runs the default.
 Build `selector` from the labels of the profiles you want: a list of
 `{key, operator, values}` where `operator` is `In` or `NotIn` (with
 `values`), or `Exists` or `DoesNotExist` (without). Every requirement must
