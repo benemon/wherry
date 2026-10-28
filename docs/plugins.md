@@ -77,8 +77,11 @@ covers installing them.
 ### Kubernetes
 
 A receiver image, its local configuration, a manifest with the Deployment,
-service account, state claim and metrics Service, and a script that applies them, on Kubernetes and
-OpenShift alike. The
+service account, Role, state claim, runs claim and metrics Service, and a script that applies them, on Kubernetes and
+OpenShift alike. The receiver pod and every agent pod mount the runs claim, so the
+cluster needs a storage class that provisions ReadWriteMany claims, such as
+CephFS, NFS, EFS or Azure Files. An agent pod runs the agent's image alone, the
+plugin's config has no `helper_image`, and an upgrade is an image change. The
 [Kubernetes plugin's README](https://github.com/benemon/wherry-plugins/tree/main/kubernetes#run-the-receiver-in-the-cluster)
 covers building the image and deploying it.
 
