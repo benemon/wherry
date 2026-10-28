@@ -185,7 +185,8 @@ type Plugin interface {
 	// Lookup finds a run's job without creating one, and waits for it as Dispatch does.
 	Lookup(ctx context.Context, runID string) (Job, error)
 	// Follow streams stdout lines from a byte offset and returns the Terminal once the job has ended;
-	// a Follow cut short returns an error and a zero Terminal.
+	// a Follow cut short returns an error and a zero Terminal. Follow may fail at any time, and the core calls it
+	// again from the end of the last line it took. On an ended job it reads the rest of the log and returns the Terminal.
 	Follow(ctx context.Context, handle Handle, from int64, lines chan<- Line) (Terminal, error)
 	Stop(ctx context.Context, handle Handle) error
 	// Collect streams every entry beneath a stopped job's outputs directory but the directories it descends, in name

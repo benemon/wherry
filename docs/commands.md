@@ -795,6 +795,18 @@ whose job the receiver is following reads again from its last offset once the
 plugin is back; when the plugin stays down for one lock duration, the run fails
 with `log stream failed`.
 
+A plugin's `Follow` may fail at any time; the receiver recovers the stream,
+so a plugin need not. When `Follow` fails otherwise, the receiver asks
+`Lookup` for the run's job and logs
+`run <id>: follow failed (<class>); following again from offset <offset>`
+once per run for each class. A running job (`job running`) it follows
+again from the end of the last line it took, as it does a failed `Lookup`
+(`lookup failed`) it retries, within one lock duration from the first
+failure, which link losses share. An ended job (`job ended`) it follows once
+more from that line end: a plugin's `Follow` on an ended job reads the rest of
+the log and returns its `Terminal`. A job that never started is a `platform`
+start failure. Otherwise the run fails with `log stream failed`.
+
 A receiver with no ready profile advertises with no offers, so it stays
 `live` with every profile `ready=false`, and placement passes over it. A
 job its plugin reports never started is a `platform` start failure: the
