@@ -147,37 +147,84 @@ func (c *clusterRig) committed(t *testing.T, ctx context.Context, topic, key str
 	return values
 }
 
-// TestLeaderMovesDuringReadAndAdmissionOnCluster moves partition leaders under a receiver while it reads and admits a
-// task. After the receiver joins its pool's share group the pool tasks topic's leader moves, so the receiver's share
-// fetch has to find the new leader, which takes over the share partition's state, before the task is even published.
-// While the run is in flight the leaders of the host's key topic, wherry.admin and the tenant's transcript topic,
-// which the receiver and host read, rotate continually; and every transaction the receiver commits, the admission
-// first, has the leaders of the pool's events and the tenant feed it has just written to moved before it commits, so
-// its commit markers go to brokers other than the ones that took its records. The run must still complete once.
+// move rotates the leader of partition 0 of topic to its next replica and confirms from a fresh metadata read that the
+// new leader leads it before returning.
+func (c *clusterRig) move(ctx context.Context, topic string) error {
+	before, err := kafkatest.Partition(ctx, c.adm, topic, 0)
+	if err != nil {
+		return err
+	}
+	to, err := kafkatest.Rotate(ctx, c.adm, topic, 0)
+	if err != nil {
+		return err
+	}
+	after, err := kafkatest.Partition(ctx, c.adm, topic, 0)
+	if err != nil {
+		return err
+	}
+	if after.Leader != to || after.Leader == before.Leader {
+		return fmt.Errorf("%s led by broker %d after moving from %d to %d", topic, after.Leader, before.Leader, to)
+	}
+	return nil
+}
+
+// TestLeaderMovesDuringReadAndAdmissionOnCluster moves partition leaders under a receiver at points the test defines
+// while it reads and admits a task. After the receiver joins its pool's share group the pool tasks topic's leader
+// moves, so the receiver's share fetch has to find the new leader, which takes over the share partition's state,
+// before the task is even published. Every transaction the receiver commits has the leaders of the pool's events and
+// the tenant feed it has just written to moved before it commits, so its commit markers go to brokers other than the
+// ones that took its records. The first of them, the run's claim, which follows the receiver's read of wherry.admin,
+// also moves the leaders of wherry.admin, the host's key topic and the tenant's transcript topic, which the receiver
+// and host read once the run is claimed; only then do those leaders start to rotate in the background as well. Each
+// move is confirmed from metadata before the commit goes ahead, and the run must still complete once. The background
+// rotation is extra pressure only: no assertion depends on when it moves anything.
 func TestLeaderMovesDuringReadAndAdmissionOnCluster(t *testing.T) {
 	shortIntervals(t)
 	sealWait = 60 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	c := newClusterRig(t, ctx)
+	events, feed := admin.PoolEventsTopic(c.pool), admin.TenantTopic(c.tenant)
+	read := []string{admin.HostTopic(c.tenant, c.host), admin.AdminTopic, admin.TenantTranscriptTopic(c.tenant)}
+	churnCtx, stopChurn := context.WithCancel(ctx)
+	defer stopChurn()
 	var mu sync.Mutex
-	var commits, moved int
+	var churn *kafkatest.Churn
+	// moved is the topics whose leaders moved before each commit, by commit; once the test has checked them, commits
+	// the receiver makes while it stops move nothing.
+	var moved [][]string
+	var checked bool
 	previous := commitTransaction
 	t.Cleanup(func() { commitTransaction = previous })
 	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
 		mu.Lock()
-		commits++
+		if checked {
+			mu.Unlock()
+			return previous(ctx, producer)
+		}
+		first := len(moved) == 0
+		moved = append(moved, nil)
+		commit := len(moved) - 1
 		mu.Unlock()
-		for _, topic := range []string{admin.PoolEventsTopic(c.pool), admin.TenantTopic(c.tenant)} {
+		topics := []string{events, feed}
+		if first {
+			topics = append(topics, read...)
+		}
+		for _, topic := range topics {
 			moveCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			_, err := kafkatest.Rotate(moveCtx, c.adm, topic, 0)
+			err := c.move(moveCtx, topic)
 			cancel()
 			if err != nil {
-				t.Errorf("move %s's leader before a commit: %v", topic, err)
+				t.Errorf("move %s's leader before commit %d: %v", topic, commit+1, err)
 				continue
 			}
 			mu.Lock()
-			moved++
+			moved[commit] = append(moved[commit], topic)
+			mu.Unlock()
+		}
+		if first {
+			mu.Lock()
+			churn = kafkatest.StartChurn(churnCtx, c.adm, 500*time.Millisecond, read...)
 			mu.Unlock()
 		}
 		return previous(ctx, producer)
@@ -185,26 +232,30 @@ func TestLeaderMovesDuringReadAndAdmissionOnCluster(t *testing.T) {
 	c.start(t, ctx)
 
 	tasks := admin.PoolTasksTopic(c.pool)
-	before := c.leaders(t, ctx, tasks)[tasks]
-	if _, err := kafkatest.Rotate(ctx, c.adm, tasks, 0); err != nil {
+	if err := c.move(ctx, tasks); err != nil {
 		t.Fatal(err)
-	}
-	if after := c.leaders(t, ctx, tasks)[tasks]; after == before {
-		t.Fatalf("%s's leader stayed on broker %d", tasks, before)
 	}
 	c.joined(t, ctx, c.logs)
 
-	churnCtx, stopChurn := context.WithCancel(ctx)
-	churn := kafkatest.StartChurn(churnCtx, c.adm, 500*time.Millisecond, admin.HostTopic(c.tenant, c.host), admin.AdminTopic, admin.TenantTranscriptTopic(c.tenant))
 	c.run(t, ctx)
 	stopChurn()
-	if moves := churn.Moves(); moves == 0 {
-		t.Fatal("no leader moved while the run was in flight")
-	}
 	mu.Lock()
 	defer mu.Unlock()
-	if commits == 0 || moved < 2 {
-		t.Fatalf("%d commits with %d leader moves before them, want the admission's at least", commits, moved)
+	checked = true
+	if churn != nil {
+		t.Logf("background churn made %d leader moves", churn.Moves())
+	}
+	if len(moved) == 0 {
+		t.Fatal("the run completed without a commit")
+	}
+	for commit, topics := range moved {
+		want := []string{events, feed}
+		if commit == 0 {
+			want = append(want, read...)
+		}
+		if !slices.Equal(topics, want) {
+			t.Errorf("commit %d moved the leaders of %v, want %v", commit+1, topics, want)
+		}
 	}
 }
 

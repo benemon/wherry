@@ -11,6 +11,7 @@ import (
 
 	"github.com/benemon/wherry/internal/kafkatest"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -49,27 +50,32 @@ func TestCompactionAcrossReplicasOnCluster(t *testing.T) {
 		{Op: kadm.SetConfig, Name: "max.compaction.lag.ms", Value: kadm.StringPtr("5000")},
 		{Op: kadm.SetConfig, Name: "min.cleanable.dirty.ratio", Value: kadm.StringPtr("0.01")},
 	}
-	alter := func(configs []kadm.AlterConfig, topics ...string) error {
-		responses, err := adm.AlterTopicConfigs(context.Background(), configs, topics...)
-		if err != nil {
-			return err
-		}
-		for _, response := range responses {
-			if response.Err != nil {
-				return fmt.Errorf("configure topic %s: %w (%s)", response.Name, response.Err, response.ErrMessage)
-			}
-		}
-		return nil
-	}
+	// The cleanup restores wherry.receivers on a client of its own: the test's client is closed by then, its deferred
+	// Close running before any cleanup, and a closed client fails every request as a dead broker connection. Each
+	// restoring request is retried briefly on a retriable error or a lost connection, which a leader election the
+	// test made may still cause.
 	t.Cleanup(func() {
-		if err := alter([]kadm.AlterConfig{{Op: kadm.DeleteConfig, Name: "min.cleanable.dirty.ratio"}}, ReceiversTopic); err != nil {
+		restoring, err := kgo.NewClient(kgo.SeedBrokers(address))
+		if err != nil {
+			t.Errorf("restore wherry.receivers: %v", err)
+			return
+		}
+		defer restoring.Close()
+		restoreCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		restoreAdm, restoreService := kadm.NewClient(restoring), &Service{Admin: restoring, Operator: restoring}
+		if err := retried(restoreCtx, func() error {
+			return alterTopicConfigs(restoreCtx, restoreAdm, []kadm.AlterConfig{{Op: kadm.DeleteConfig, Name: "min.cleanable.dirty.ratio"}}, ReceiversTopic)
+		}); err != nil {
 			t.Errorf("restore wherry.receivers: %v", err)
 		}
-		if err := service.configureTopics(context.Background(), receiversConfigs, ReceiversTopic); err != nil {
+		if err := retried(restoreCtx, func() error {
+			return restoreService.configureTopics(restoreCtx, receiversConfigs, ReceiversTopic)
+		}); err != nil {
 			t.Errorf("restore wherry.receivers: %v", err)
 		}
 	})
-	if err := alter(fast, ReceiversTopic, progress); err != nil {
+	if err := alterTopicConfigs(ctx, adm, fast, ReceiversTopic, progress); err != nil {
 		t.Fatal(err)
 	}
 	for _, topic := range []string{ReceiversTopic, progress} {
@@ -141,6 +147,39 @@ func TestCompactionAcrossReplicasOnCluster(t *testing.T) {
 				time.Sleep(2 * time.Second)
 			}
 		}
+	}
+}
+
+// alterTopicConfigs applies configs to topics, failing on the request's error or any topic's.
+func alterTopicConfigs(ctx context.Context, adm *kadm.Client, configs []kadm.AlterConfig, topics ...string) error {
+	responses, err := adm.AlterTopicConfigs(ctx, configs, topics...)
+	if err != nil {
+		return err
+	}
+	for _, response := range responses {
+		if response.Err != nil {
+			return fmt.Errorf("configure topic %s: %w (%s)", response.Name, response.Err, response.ErrMessage)
+		}
+	}
+	return nil
+}
+
+// retried calls fn until it succeeds, fails with an error that is neither a retriable Kafka error nor a lost or
+// failed broker connection, has failed five times, or ctx ends. It waits 250ms after the first failure, doubling
+// each time.
+func retried(ctx context.Context, fn func() error) error {
+	backoff := 250 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		err := fn()
+		if err == nil || attempt == 5 || !(kerr.IsRetriable(err) || kgo.IsRetryableBrokerErr(err)) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w (%w)", err, ctx.Err())
+		case <-time.After(backoff):
+		}
+		backoff *= 2
 	}
 }
 
