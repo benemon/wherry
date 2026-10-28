@@ -113,8 +113,9 @@ type pluginFamily struct {
 var pluginFamilies = []pluginFamily{
 	{"wherry_plugin_platform_errors_total", "Platform API errors, by class.", pluginsdk.KindCounter, "class", []string{"unavailable", "denied", "conflict", "timeout", "other"}},
 	{"wherry_plugin_cleanup_pending", "Ended jobs awaiting cleanup.", pluginsdk.KindGauge, "", nil},
-	{"wherry_plugin_sweep_deletions_total", "Material a sweep deleted, by kind.", pluginsdk.KindCounter, "kind", []string{"job", "variable"}},
+	{"wherry_plugin_sweep_deletions_total", "Material a sweep deleted, by kind.", pluginsdk.KindCounter, "kind", []string{"job", "variable", "directory"}},
 	{"wherry_plugin_placement_seconds", "Time from dispatch to the agent task starting.", pluginsdk.KindHistogram, "", nil},
+	{"wherry_plugin_storage_free_bytes", "Free bytes of the storage the profile's runs share.", pluginsdk.KindGauge, "", nil},
 }
 
 // registerFor registers the receiver's families on its registry, each labelled with pool, once per process.
