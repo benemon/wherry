@@ -49,8 +49,7 @@ type Process struct {
 	rpc      pluginv1.PluginClient
 	closed   bool
 	restarts int64
-	// version is what the latest Configure reported of the plugin.
-	version string
+	version  string
 }
 
 // Launch starts the plugin binary resolve returns over mutual TLS, and calls resolve again before every

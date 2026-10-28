@@ -70,7 +70,7 @@ var (
 	// collectTimeout bounds a plugin's collection of a run's outputs, during which the claim is renewed.
 	collectTimeout = 2 * time.Minute
 	// sealWait bounds how long a claimed run waits for its host's seal, which comes only while the parent runs
-	// await or the MCP server; beyond it the run ends failed.
+	// watch or the MCP server; beyond it the run ends failed.
 	sealWait = wire.SealWait
 )
 

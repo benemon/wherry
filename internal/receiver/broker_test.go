@@ -278,10 +278,8 @@ func (b brokerPool) member(t *testing.T, ctx context.Context, id string) {
 	}
 }
 
-// TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker runs two receivers in one pool whose profiles create no job,
-// under a delivery limit of 4. The first fails the task at attempt 1 and releases it, releases its redelivery without a
-// dispatch, and backs off; the second takes the task at attempt 3, fails it and, with the budget spent, ends the run
-// FAILED in one terminal.
+// TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker checks that a task each pool member fails to start once ends
+// FAILED in one terminal when the delivery budget is spent, with no member dispatching it twice.
 func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
 	if address == "" {

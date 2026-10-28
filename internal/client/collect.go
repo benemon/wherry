@@ -24,9 +24,8 @@ type Collected struct {
 	Rejected []wire.UnreturnedOutput
 }
 
-// Collect writes a run's verified outputs beneath dir, by default <state_dir>/runs/<run>/outputs, downloads and
-// verifies its S3 outputs there, deleting the run's prefix only once the run is terminal and every one verified, and
-// writes its transcript there as transcript.jsonl. A run whose queue deadline passed unclaimed has nothing collected.
+// Collect writes a run's verified outputs, S3 ones through DownloadOutputs, and its transcript.jsonl beneath dir, by
+// default <state_dir>/runs/<run>/outputs. A run whose queue deadline passed unclaimed has nothing collected.
 func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, dir string) (Collected, error) {
 	var collected Collected
 	if result.Unclaimed != "" {

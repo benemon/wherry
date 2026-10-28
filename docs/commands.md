@@ -22,13 +22,13 @@
   from the broker's timeouts.
 - `cancel`, `watch`, `status`, `events` and `transcript` print
   `skipped N unverifiable records` on standard error when N records of the
-  run fail verification.
+  run fail verification. `watch -q` discards it.
 - `watch` and `status` print each redaction marker of a run this host
   submitted as `[redacted:<name>]`, naming the credential or S3 object,
   and `<name> redacted N times` on standard error for each name whose
   markers they printed. A host maps a marker with the run's redaction key
   in `state_dir`, and prints a marker as it is when the run's record holds
-  no 32-byte key.
+  no 32-byte key. `watch -q` discards the counts.
 
 ### Names
 
@@ -871,11 +871,11 @@ any other job under the run's ID and dispatches the run again.
 
 The protocol is the Go module `github.com/benemon/wherry/pluginsdk` in this
 repository. [`plugin.proto`](https://github.com/benemon/wherry/blob/main/pluginsdk/proto/wherry/plugin/v1/plugin.proto)
-defines the service, `pluginsdk.Serve` runs a plugin and gives its factory
-the logger whose JSON lines the receiver relays at their level,
-`pluginsdk.Version`, set before `Serve`, is the version the receiver logs when
-it starts the plugin, and `pluginsdktest` is the conformance suite a plugin
-runs against its platform.
+defines the service. `pluginsdk.Serve` runs a plugin and gives its factory
+the logger whose JSON lines the receiver relays at their level. A plugin sets
+`pluginsdk.Version` before `Serve`, and the receiver logs it when it starts
+the plugin. `pluginsdktest` is the conformance suite a plugin runs against its
+platform.
 
 ### Metrics
 

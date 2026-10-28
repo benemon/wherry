@@ -30,11 +30,9 @@ for 5 minutes:
 - The process runs but has not read its configuration: `wherry_build_info`
   is served and `wherry_advertised_timestamp_seconds` is not.
 
-The rule does not fire for a receiver whose scrape target service
-discovery has dropped: the target's series go stale and disappear. The
-platform's series report that the receiver is not running, as in
-[A receiver that is not running](operations.md#a-receiver-that-is-not-running).
-An alert on them follows this runbook.
+[A receiver that is not running](operations.md#a-receiver-that-is-not-running)
+covers a receiver whose scrape target service discovery has dropped. An
+alert on the platform's series it lists follows this runbook.
 
 Confirm it:
 
