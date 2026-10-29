@@ -67,7 +67,7 @@ func ViewLines(lines []TranscriptLine) []TranscriptLine {
 			Type    string `json:"type"`
 			Subtype string `json:"subtype"`
 		}
-		if line.Part.URL == "" && json.Unmarshal(data, &event) == nil {
+		if line.Part.Data == nil && json.Unmarshal(data, &event) == nil {
 			if event.Type == "system" && event.Subtype == "thinking_tokens" {
 				continue
 			}

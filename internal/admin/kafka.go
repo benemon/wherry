@@ -908,9 +908,9 @@ var feedRecords = []struct {
 	name  string
 	batch int64
 }{
-	{"an output chunk", 468119},
-	{"a result", 793118},
-	{"a result returning S3 outputs", 805729},
+	{"an output chunk", 468889},
+	{"a result", 809151},
+	{"a result returning S3 outputs", 821762},
 	{"a transcript chunk", 933508},
 }
 

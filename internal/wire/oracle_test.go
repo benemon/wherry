@@ -79,6 +79,7 @@ func TestRecordsAreA2AObjects(t *testing.T) {
 		"submission": {validSubmission(), "message", "Message", "taskId", "contextId"},
 		"status":     {validStatus(), "statusUpdate", "TaskStatusUpdateEvent", "taskId", "contextId"},
 		"chunk":      {validChunk(), "artifactUpdate", "TaskArtifactUpdateEvent", "taskId", "contextId"},
+		"output":     {validOutput(), "artifactUpdate", "TaskArtifactUpdateEvent", "taskId", "contextId"},
 		"result":     {validResult(), "task", "Task", "id", "contextId"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -117,6 +118,18 @@ func TestSubmissionIDsMustBeRunID(t *testing.T) {
 				t.Fatal("submission whose message ids are not the run ID accepted")
 			}
 		})
+	}
+}
+
+// A submission is a client's message to the agent.
+func TestSubmissionRoleMustBeUser(t *testing.T) {
+	submission := validSubmission()
+	submission.Message.Role = RoleAgent
+	if err := submission.validate(); err == nil {
+		t.Fatal("ROLE_AGENT submission accepted")
+	}
+	if _, err := SignRecord(submission, wireKey); err == nil {
+		t.Fatal("ROLE_AGENT submission signed")
 	}
 }
 

@@ -46,6 +46,49 @@ func testActiveRun(t *testing.T, f fixture, run string, attempt int64) *activeRu
 	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, profile: f.receiver.profiles[0], redactionKey: testRedactionKey}
 }
 
+// A transcript flushed whole before the run ends still ends with a lastChunk chunk: one with no part, past the last line.
+func TestFlushedTranscriptEndsWithAnEmptyLastChunk(t *testing.T) {
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-l", 1)
+	parse := func(records []*kgo.Record) []wire.Chunk {
+		t.Helper()
+		chunks := make([]wire.Chunk, len(records))
+		for i, record := range records {
+			if err := wire.ParseRecord(record.Value, f.keys(), &chunks[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return chunks
+	}
+	if flushed := parse(run.chunks([]pluginsdk.Line{{Offset: 0, Next: 5, Data: []byte("line")}}, false)); len(flushed) != 1 || flushed[0].ArtifactUpdate.LastChunk {
+		t.Fatalf("flushed chunks %+v, want the line alone, not last", flushed)
+	}
+	last := parse(run.chunks(nil, true))
+	if len(last) != 1 || !last[0].ArtifactUpdate.LastChunk || len(last[0].ArtifactUpdate.Artifact.Parts) != 0 || !last[0].ArtifactUpdate.Append || last[0].Wherry.Seq != 5 {
+		t.Fatalf("last chunks %+v, want one empty lastChunk chunk at offset 5", last)
+	}
+	if lines := parse(run.chunks([]pluginsdk.Line{{Offset: 5, Next: 9, Data: []byte("end")}}, true)); len(lines) != 1 || !lines[0].ArtifactUpdate.LastChunk || len(lines[0].ArtifactUpdate.Artifact.Parts) != 1 {
+		t.Fatalf("last chunks %+v, want the pending line marked last and no empty chunk", lines)
+	}
+}
+
+// A run that writes no line ends with the empty lastChunk chunk, which its terminal status counts.
+func TestRunWithoutLinesEndsWithALastChunk(t *testing.T) {
+	fake := &fakePlugin{stream: []string{}, outputs: []pluginsdk.Output{outcomeOutput(doneOutcome)}}
+	f := newFixtureWith(t, nil, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
+	f.answer(t, credentialName)
+	if ack := f.execute(t, f.submit(t, f.host, nil), 1); ack != kgo.AckAccept {
+		t.Fatalf("ack %v; logs:\n%s", ack, f.logs.String())
+	}
+	chunks := f.chunks(t)
+	if len(chunks) != 1 || !chunks[0].ArtifactUpdate.LastChunk || len(chunks[0].ArtifactUpdate.Artifact.Parts) != 0 || chunks[0].ArtifactUpdate.Append || chunks[0].Wherry.Seq != 0 {
+		t.Fatalf("chunks %+v, want one empty lastChunk chunk", chunks)
+	}
+	if statuses := f.feedStatuses(t); statuses[len(statuses)-1].Wherry.TranscriptChunks != 1 {
+		t.Fatalf("terminal counts %d chunks, want the empty last one", statuses[len(statuses)-1].Wherry.TranscriptChunks)
+	}
+}
+
 func TestStatusesAreDualWritten(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
@@ -140,8 +183,9 @@ func TestSealWaitExpiryFailsWithoutCredentialValue(t *testing.T) {
 		t.Fatalf("terminal status %#v, want FAILED", terminal)
 	}
 	want := "credential " + credentialName + " was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again"
-	if got.Message == nil || got.Message.Role != wire.RoleAgent || len(got.Message.Parts) != 1 || got.Message.Parts[0].Text != want || strings.Contains(got.Message.Parts[0].Text, testToken) {
-		t.Fatalf("status message %#v, want credential name and no value", got.Message)
+	if got.Message == nil || got.Message.Role != wire.RoleAgent || len(got.Message.Parts) != 2 || got.Message.Parts[0].Text != want || strings.Contains(got.Message.Parts[0].Text, testToken) ||
+		string(got.Message.Parts[1].Data) != `{"credential":"`+credentialName+`"}` {
+		t.Fatalf("status message %#v, want credential name and no value, and the credential part", got.Message)
 	}
 	if at, err := time.Parse(time.RFC3339, got.Timestamp); err != nil || at.Before(before) || at.After(time.Now()) {
 		t.Fatalf("status timestamp %q is not the time of the status: %v", got.Timestamp, err)
@@ -222,7 +266,11 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 			var offset int64
 			for i, chunk := range chunks {
 				update, part := chunk.ArtifactUpdate, chunk.ArtifactUpdate.Artifact.Parts[0]
-				if update.TaskID != "run-a" || update.ContextID != "run-a" || update.Artifact.ArtifactID != "transcript" || chunk.Wherry.Seq != offset || part.MediaType != "application/x-ndjson" ||
+				mediaType := "application/x-ndjson"
+				if i == test.pointer {
+					mediaType = wire.ReferenceMediaType
+				}
+				if update.TaskID != "run-a" || update.ContextID != "run-a" || update.Artifact.ArtifactID != "transcript" || chunk.Wherry.Seq != offset || part.MediaType != mediaType ||
 					chunk.Wherry.Tenant != testTenant || chunk.Wherry.Pool != testPool {
 					t.Fatalf("chunk %d: %#v", i, chunk)
 				}
@@ -231,11 +279,11 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 				}
 				line := test.stream[i]
 				if i == test.pointer {
-					var pointer wire.PointerMetadata
-					if err := json.Unmarshal(part.Metadata, &pointer); err != nil {
+					var pointer wire.Reference
+					if err := json.Unmarshal(part.Data, &pointer); err != nil {
 						t.Fatal(err)
 					}
-					if part.URL != "unstored:oversize" || part.Text != "" || pointer.SHA256 != wire.TaskHash([]byte(line)) || pointer.Size != int64(len(line)) {
+					if part.URL != "" || part.Text != "" || pointer.Unstored != wire.UnstoredOversize || pointer.SHA256 != wire.TaskHash([]byte(line)) || pointer.Size != int64(len(line)) {
 						t.Fatalf("oversized line became %#v with %#v", part, pointer)
 					}
 				} else if slices.Contains(test.raw, i) {
@@ -274,7 +322,7 @@ func TestOversizedAgentOutputIsBounded(t *testing.T) {
 	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != strings.Repeat("x", wire.MaxText) {
 		t.Fatalf("task ended %s with result %#v", task.Status.State, task.Artifacts[0].Parts[0])
 	}
-	if part := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0]; part.URL != "unstored:oversize" || part.Text != "" {
+	if part := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0]; part.MediaType != wire.ReferenceMediaType || part.Data == nil || part.Text != "" {
 		t.Fatalf("chunk part %#v, want an oversized pointer", part)
 	}
 }
@@ -381,25 +429,28 @@ func TestProgressOnlyWhenTheTranscriptMoves(t *testing.T) {
 	}
 }
 
-func TestTaskResultDataPartWhenJSON(t *testing.T) {
+// An agent's data part stays a data part in the result, and its status message carries it as text.
+func TestTaskResultDataPartFromADataPart(t *testing.T) {
 	for _, result := range []string{`{"answer":42,"items":[1,2]}`, `[true,null]`, `42`} {
 		t.Run(result, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.plugin.stream = []string{completedWith(result)}
+			f.plugin.stream = []string{`{"state":"TASK_STATE_COMPLETED","message":{"role":"ROLE_AGENT","parts":[{"data":` + result + `}]}}`}
 			run := testActiveRun(t, f, "run-json", 1)
 			if status := run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true}); status != kgo.AckAccept {
 				t.Fatalf("status %v", status)
 			}
-			part := f.lastTask(t).Artifacts[0].Parts[0]
-			if part.Text != "" || part.MediaType != "application/json" || string(part.Data) != result {
-				t.Fatalf("result part %#v, want data %s", part, result)
+			task := f.lastTask(t)
+			part := task.Artifacts[0].Parts[0]
+			if part.Text != "" || part.MediaType != "application/json" || string(part.Data) != result || task.Status.Message.Parts[0].Text != result {
+				t.Fatalf("result part %#v, status %+v, want data %s", part, task.Status.Message, result)
 			}
 		})
 	}
 }
 
+// An agent's text stays text, JSON or not.
 func TestTaskResultTextPartOtherwise(t *testing.T) {
-	for _, result := range []string{"done", `{"answer":`, `{"k":1,"k":2}`, "42 is the answer"} {
+	for _, result := range []string{"done", `{"answer":`, `{"k":1,"k":2}`, "42 is the answer", `{"answer":42,"items":[1,2]}`, `42`} {
 		t.Run(result, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.plugin.stream = []string{completedWith(result)}
@@ -1135,7 +1186,7 @@ func TestOutcomeFileEndsTheRun(t *testing.T) {
 		{name: "completed after an exit", terminal: exited, outcome: outcome("TASK_STATE_COMPLETED", "ROLE_AGENT", `{"text":"the answer"}`), state: wire.TaskStateCompleted, message: "the answer", ack: kgo.AckAccept},
 		{name: "failed", outcome: outcome("TASK_STATE_FAILED", "ROLE_AGENT", `{"text":"the tests fail"}`), state: wire.TaskStateFailed, message: "the tests fail", ack: kgo.AckReject},
 		{name: "auth required", terminal: exited, outcome: outcome("TASK_STATE_AUTH_REQUIRED", "ROLE_AGENT", `{"text":"the token expired"},{"data":{"credential":"github-token"}}`),
-			state: wire.TaskStateAuthRequired, message: "the token expired\n{\"credential\":\"github-token\"}", ack: kgo.AckReject},
+			state: wire.TaskStateFailed, message: "the token expired\n{\"credential\":\"github-token\"}", ack: kgo.AckReject},
 		{name: "missing after an exit", terminal: exited, state: wire.TaskStateFailed, message: "agent exited 3", ack: kgo.AckReject},
 		{name: "missing after a signal", terminal: killed, state: wire.TaskStateFailed, message: "agent ended by SIGKILL", ack: kgo.AckReject},
 		{name: "missing", state: wire.TaskStateFailed, message: "agent reported no outcome", ack: kgo.AckReject},
@@ -1210,7 +1261,7 @@ func TestCapturedOutcomes(t *testing.T) {
 	}{
 		"completed.json":     {wire.TaskStateCompleted, "fixture: completed"},
 		"failed.json":        {wire.TaskStateFailed, "fixture: failed"},
-		"auth_required.json": {wire.TaskStateAuthRequired, "fixture: auth_required\n{\"credential\":\"fixture-token\"}"},
+		"auth_required.json": {wire.TaskStateFailed, "fixture: auth_required\n{\"credential\":\"fixture-token\"}"},
 		"malformed.json":     {wire.TaskStateFailed, "agent reported no outcome"},
 		"no_state.json":      {wire.TaskStateFailed, "agent reported no outcome"},
 	}
@@ -1344,8 +1395,8 @@ func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
 			task := f.lastTask(t)
 			terminal := f.feedStatuses(t)[len(f.feedStatuses(t))-1].StatusUpdate.Status
 			for _, status := range []wire.TaskStatus{task.Status, terminal} {
-				if status.State != wire.TaskStateAuthRequired || status.Message.Parts[0].Text != test.want {
-					t.Fatalf("status %s with %.80q, want %s with %.80q", status.State, status.Message.Parts[0].Text, wire.TaskStateAuthRequired, test.want)
+				if status.State != wire.TaskStateFailed || status.Message.Parts[0].Text != test.want {
+					t.Fatalf("status %s with %.80q, want %s with %.80q", status.State, status.Message.Parts[0].Text, wire.TaskStateFailed, test.want)
 				}
 			}
 			if result := task.Artifacts[0].Parts[0].Text; result != test.want {

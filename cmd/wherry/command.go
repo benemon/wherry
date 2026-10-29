@@ -436,7 +436,7 @@ func (e *exitError) Unwrap() error { return e.err }
 // stateCodes are wait's exit codes for a run that ends in a state other than COMPLETED, and timeoutCode for its
 // timeout passing with the run still going.
 var stateCodes = map[wire.TaskState]int{
-	wire.TaskStateFailed: 2, wire.TaskStateCanceled: 3, wire.TaskStateRejected: 4, wire.TaskStateAuthRequired: 5,
+	wire.TaskStateFailed: 2, wire.TaskStateCanceled: 3, wire.TaskStateRejected: 4,
 }
 
 const timeoutCode = 6
@@ -701,9 +701,9 @@ func runLogs(ctx context.Context, client *busclient.Host, args []string, stdout,
 			}
 			printed = line.Seq
 			switch part := line.Part; {
-			case part.URL != "":
-				var pointer wire.PointerMetadata
-				json.Unmarshal(part.Metadata, &pointer) // validation decoded it
+			case part.MediaType == wire.ReferenceMediaType:
+				var pointer wire.Reference
+				json.Unmarshal(part.Data, &pointer) // validation decoded it
 				fmt.Fprintf(stderr, "line at offset %d not stored: sha256=%s size=%d\n", line.Seq, pointer.SHA256, pointer.Size)
 			case part.Raw != nil:
 				fmt.Fprintf(stdout, "%s\n", part.Raw)

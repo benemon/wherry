@@ -923,6 +923,10 @@ func (r *runView) transcript() TranscriptResult {
 	var chunks []*wire.Chunk
 	first := int64(math.MaxInt64)
 	for _, chunk := range r.chunks {
+		// The empty last chunk holds no line.
+		if len(chunk.ArtifactUpdate.Artifact.Parts) == 0 {
+			continue
+		}
 		chunks = append(chunks, chunk)
 		if chunk.Wherry.Attempt == result.Attempt {
 			first = min(first, chunk.Wherry.Seq)

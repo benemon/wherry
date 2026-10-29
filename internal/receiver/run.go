@@ -21,6 +21,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -649,6 +650,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.logger.Printf("run %s: read events: %v", runID, err)
 			return run.returnTask(ctx, nil)
 		}
+		run.next = offset
 	}
 	var handle pluginsdk.Handle
 	adopted, neverStarted := false, false
@@ -1158,10 +1160,10 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *pluginsdk.Hand
 				r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 				return signed.SealValues{}, run.returnTask(ctx, nil), false
 			}
-			return signed.SealValues{}, run.fail(ctx, unansweredReason(append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), nil), false
+			return signed.SealValues{}, run.unanswered(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
 		case waitCtx.Err() != nil:
 			waited("unanswered")
-			return signed.SealValues{}, run.fail(ctx, unansweredReason(append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), nil), false
+			return signed.SealValues{}, run.unanswered(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
 		case values != nil:
 			waited("sealed")
 			return *values, 0, true
@@ -1272,12 +1274,16 @@ type activeRun struct {
 	outcome *wire.TaskStatus
 	// replied lists the reply chunks among outputs for the result, nil when the result carries the whole reply.
 	replied *wire.ReturnedReply
+	// dataReply marks a reply the agent gave as a data part.
+	dataReply bool
 	// claimed is when this attempt began executing the run, zero for a run ended without executing it.
 	claimed time.Time
 	// startCause is the redacted cause of this attempt's start failure, empty without one.
 	startCause string
 	// chunked counts the transcript chunks this attempt has committed.
 	chunked int64
+	// next is the log offset past the last line this attempt has made a chunk of, or that it resumed from.
+	next int64
 }
 
 // deliver keeps the forms of each credential value delivered to the run, each with the marker of the value's name under
@@ -1489,6 +1495,12 @@ func (run *activeRun) cancel(ctx context.Context, pending []pluginsdk.Line) kgo.
 }
 
 const cancelReason = "canceled by user"
+
+// unanswered ends the run FAILED for a seal its host did not answer, naming each credential in a credential data part.
+func (run *activeRun) unanswered(ctx context.Context, credentials []string, urls bool) kgo.AckStatus {
+	reason := unansweredReason(credentials, urls)
+	return run.end(ctx, withCredentials(taskStatus(wire.TaskStateFailed, reason), credentials), reason, nil, kgo.AckReject)
+}
 
 // unansweredReason names only the credential names and storage URLs the host did not answer.
 func unansweredReason(credentials []string, urls bool) string {
@@ -1881,7 +1893,8 @@ func (run *activeRun) store(ctx context.Context, output pluginsdk.Output) stored
 
 // readOutcome reads and decodes an outcome file of at most the pool's output limit. Any outcome but a TaskStatus of a state an
 // agent may report, with a ROLE_AGENT message and for TASK_STATE_AUTH_REQUIRED the credential it needs, is nil. The
-// status keeps the message's text and that credential's name, redacted.
+// status keeps the reply, the message's text or else its first other data part, and that credential's name, redacted;
+// TASK_STATE_AUTH_REQUIRED ends the run FAILED.
 func (run *activeRun) readOutcome(output pluginsdk.Output, limit int64) *wire.TaskStatus {
 	if output.Size > limit {
 		return nil
@@ -1895,27 +1908,44 @@ func (run *activeRun) readOutcome(output pluginsdk.Output, limit int64) *wire.Ta
 		len(reported.Message.Parts) > wire.MaxParts {
 		return nil
 	}
-	status := taskStatus(reported.State, text(*reported.Message))
+	parts := reported.Message.Parts
+	credential := -1
 	switch reported.State {
 	case wire.TaskStateCompleted, wire.TaskStateFailed:
-		return &status
 	case wire.TaskStateAuthRequired:
-		for _, part := range reported.Message.Parts {
-			var needed struct {
-				Credential string `json:"credential"`
+		if credential = slices.IndexFunc(parts, func(part wire.Part) bool { return neededCredential(part) != "" }); credential < 0 {
+			return nil
+		}
+	default:
+		return nil
+	}
+	reply, fromData := text(*reported.Message), false
+	if reply == "" {
+		for i, part := range parts {
+			if part.Data != nil && i != credential {
+				reply, fromData = string(part.Data), true
+				break
 			}
-			if part.Data == nil || json.Unmarshal(part.Data, &needed) != nil || !wire.ValidName(needed.Credential) {
-				continue
-			}
-			data, _ := json.Marshal(map[string]string{"credential": run.redactText(needed.Credential)}) // strings always encode
-			if status.Message == nil {
-				status.Message = &wire.Message{MessageID: wire.RandomID("msg-"), Role: wire.RoleAgent, Extensions: []string{wire.ExtensionURI}}
-			}
-			status.Message.Parts = append(status.Message.Parts, wire.Part{Data: data, MediaType: "application/json"})
-			return &status
 		}
 	}
-	return nil
+	run.dataReply = fromData
+	if credential < 0 {
+		status := taskStatus(reported.State, reply)
+		return &status
+	}
+	status := withCredentials(taskStatus(wire.TaskStateFailed, reply), []string{run.redactText(neededCredential(parts[credential]))})
+	return &status
+}
+
+// neededCredential is the credential a credential data part names, empty for any other part.
+func neededCredential(part wire.Part) string {
+	var needed struct {
+		Credential string `json:"credential"`
+	}
+	if part.Data == nil || json.Unmarshal(part.Data, &needed) != nil || !wire.ValidName(needed.Credential) {
+		return ""
+	}
+	return needed.Credential
 }
 
 // fileType names the type of a collected entry that is not a regular file.
@@ -1940,10 +1970,14 @@ func (run *activeRun) outputChunks(name string, data []byte) []*kgo.Record {
 		piece := data[:min(len(data), wire.OutputChunk)]
 		data = data[len(piece):]
 		metadata, _ := json.Marshal(wire.OutputMetadata{Index: index}) // an integer always encodes
+		artifact := wire.Artifact{ArtifactID: name, Parts: []wire.Part{{Raw: append(wire.StdBytes{}, piece...)}}, Extensions: []string{wire.ExtensionURI}}
+		if name != wire.ReplyArtifact {
+			artifact.Name, artifact.Parts[0].Filename, artifact.Parts[0].MediaType = name, path.Base(name), wire.OutputMediaType
+		}
 		records = append(records, run.transcript(&wire.Output{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
 				TaskID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run,
-				Artifact: wire.Artifact{ArtifactID: name, Parts: []wire.Part{{Raw: append(wire.StdBytes{}, piece...)}}, Extensions: []string{wire.ExtensionURI}},
+				Artifact: artifact,
 				Append:   index > 0, LastChunk: len(data) == 0, Metadata: metadata,
 			},
 			Wherry: wire.ResultBinding{ReceiverBinding: run.receiver.binding(run.task, run.attempt), TaskHash: run.taskHash},
@@ -2026,11 +2060,11 @@ func (run *activeRun) statusRecords(kind string, status wire.TaskStatus, offset 
 	return run.receiver.statusRecords(run.task, run.status(kind, status, offset, metadata))
 }
 
-// terminal is the terminal status records, counting the attempt's committed chunks and pending's, and the tombstone of
-// the run's progress.
+// terminal is the terminal status records, counting the attempt's committed chunks and pending's, or the empty last
+// chunk when nothing is pending, and the tombstone of the run's progress.
 func (run *activeRun) terminal(status wire.TaskStatus, pending []pluginsdk.Line) []*kgo.Record {
 	value := run.status("terminal", status, nil, nil)
-	value.Wherry.TranscriptChunks = run.chunked + int64(len(pending))
+	value.Wherry.TranscriptChunks = run.chunked + int64(max(len(pending), 1))
 	tombstone := &kgo.Record{Topic: admin.ReceiverProgressTopic(run.receiver.id), Key: []byte(run.task.Wherry.Run)}
 	return append(run.receiver.statusRecords(run.task, value), tombstone)
 }
@@ -2081,6 +2115,21 @@ func (r *Receiver) sign(value wire.Record) []byte {
 	return encoded
 }
 
+// withCredentials adds to status's message a credential data part for each of names.
+func withCredentials(status wire.TaskStatus, names []string) wire.TaskStatus {
+	if len(names) == 0 {
+		return status
+	}
+	if status.Message == nil {
+		status.Message = &wire.Message{MessageID: wire.RandomID("msg-"), Role: wire.RoleAgent, Parts: []wire.Part{}, Extensions: []string{wire.ExtensionURI}}
+	}
+	for _, name := range names {
+		data, _ := json.Marshal(map[string]string{"credential": name}) // strings always encode
+		status.Message.Parts = append(status.Message.Parts, wire.Part{Data: data, MediaType: "application/json"})
+	}
+	return status
+}
+
 // taskStatus stamps state with the current time; a reason becomes the status message.
 func taskStatus(state wire.TaskState, reason string) wire.TaskStatus {
 	status := wire.TaskStatus{State: state, Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
@@ -2093,17 +2142,29 @@ func taskStatus(state wire.TaskState, reason string) wire.TaskStatus {
 	return status
 }
 
-// chunks are the transcript lines as artifact updates on the tenant's transcript topic.
+// chunks are the transcript lines as artifact updates on the tenant's transcript topic. The last chunks end with one
+// marked lastChunk, a chunk with no part when no line is left.
 func (run *activeRun) chunks(lines []pluginsdk.Line, last bool) []*kgo.Record {
-	records := make([]*kgo.Record, 0, len(lines))
+	records := make([]*kgo.Record, 0, len(lines)+1)
+	if last && len(lines) == 0 {
+		records = append(records, run.transcript(&wire.Chunk{
+			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
+				TaskID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run,
+				Artifact: wire.Artifact{ArtifactID: "transcript", Parts: []wire.Part{}, Extensions: []string{wire.ExtensionURI}},
+				Append:   run.next > 0, LastChunk: true,
+			},
+			Wherry: wire.ChunkBinding{ReceiverBinding: run.receiver.binding(run.task, run.attempt), TaskHash: run.taskHash, Seq: run.next},
+		}))
+	}
 	for i, line := range lines {
+		run.next = line.Next
 		form := run.redact(line.Data, wire.MaxLine)
 		line.Data = form.data
 		part := wire.Part{Text: string(line.Data), MediaType: "application/x-ndjson"}
 		switch {
 		case form.over():
-			metadata, _ := json.Marshal(wire.PointerMetadata{SHA256: form.hash(), Size: form.size}) // a string and an integer always encode
-			part = wire.Part{URL: "unstored:oversize", MediaType: part.MediaType, Metadata: metadata}
+			data, _ := json.Marshal(wire.Reference{SHA256: form.hash(), Size: form.size, Unstored: wire.UnstoredOversize}) // strings and an integer always encode
+			part = wire.Part{Data: data, MediaType: wire.ReferenceMediaType}
 		case len(line.Data) == 0 || !utf8.Valid(line.Data) || escapedLength(line.Data) > base64.StdEncoding.EncodedLen(len(line.Data)):
 			// A text part holds only non-empty UTF-8, and no more than a raw part would once JSON-escaped, so a chunk
 			// stays within the record a line of wire.MaxLine raw bytes makes; other lines travel as exact bytes.
@@ -2130,15 +2191,15 @@ func escapedLength(text []byte) int {
 	return len(quoted) - 2
 }
 
-// result builds the run's final task for the feed; a whole reply that is JSON travels as a data part. The agent's
-// text reaches it redacted and within wire.MaxText.
+// result builds the run's final task for the feed; a whole reply the agent gave as a data part travels as one while
+// it stays JSON once redacted. The agent's text reaches it redacted and within wire.MaxText.
 func (run *activeRun) result(status wire.TaskStatus, result string) *kgo.Record {
 	result = string(run.redact([]byte(result), math.MaxInt64).data)
 	part := wire.Part{Text: result}
 	switch {
 	case result == "":
 		part.Text = string(status.State)
-	case run.replied == nil && jsontext.Value(result).IsValid():
+	case run.dataReply && run.replied == nil && jsontext.Value(result).IsValid():
 		part = wire.Part{Data: jsontext.Value(result), MediaType: "application/json"}
 	case !utf8.ValidString(result) || escapedLength([]byte(result)) > base64.StdEncoding.EncodedLen(len(result)):
 		// As for a transcript line, text travels raw when escaping it would make it longer than base64 does.
@@ -2159,9 +2220,8 @@ func (run *activeRun) result(status wire.TaskStatus, result string) *kgo.Record 
 	})
 }
 
-// inputPointers is history with each raw and data part replaced by an unstored:input part with its filename, media
-// type, size and SHA-256: the inputs already travelled once, and carrying them again could put the result past the
-// record limit.
+// inputPointers is history with each raw and data part replaced by a reference to it with its filename, size and
+// SHA-256: the inputs already travelled once, and carrying them again could put the result past the record limit.
 func inputPointers(history []wire.Message) []wire.Message {
 	stripped := slices.Clone(history)
 	for i := range stripped {
@@ -2174,8 +2234,8 @@ func inputPointers(history []wire.Message) []wire.Message {
 			if content == nil {
 				continue
 			}
-			metadata, _ := json.Marshal(wire.PointerMetadata{SHA256: wire.TaskHash(content), Size: int64(len(content))}) // a string and an integer always encode
-			stripped[i].Parts[j] = wire.Part{URL: "unstored:input", Filename: part.Filename, MediaType: part.MediaType, Metadata: metadata}
+			data, _ := json.Marshal(wire.Reference{SHA256: wire.TaskHash(content), Size: int64(len(content)), Unstored: wire.UnstoredInput}) // strings and an integer always encode
+			stripped[i].Parts[j] = wire.Part{Data: data, Filename: part.Filename, MediaType: wire.ReferenceMediaType}
 		}
 	}
 	return stripped

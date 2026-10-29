@@ -3,6 +3,7 @@ package wire
 import (
 	"encoding/hex"
 	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/benemon/wherry/internal/signed"
 )
 
 // Role is an A2A Message role name.
@@ -50,13 +53,11 @@ var taskStates = map[TaskState]bool{
 	TaskStateAuthRequired:  true,
 }
 
-// A run that needs a credential ends: it is not resumed.
 var terminalStates = map[TaskState]bool{
-	TaskStateCompleted:    true,
-	TaskStateFailed:       true,
-	TaskStateCanceled:     true,
-	TaskStateRejected:     true,
-	TaskStateAuthRequired: true,
+	TaskStateCompleted: true,
+	TaskStateFailed:    true,
+	TaskStateCanceled:  true,
+	TaskStateRejected:  true,
 }
 
 // ValidTaskState reports whether state is an A2A task state.
@@ -144,11 +145,22 @@ type TaskArtifactUpdateEvent struct {
 	Metadata  jsontext.Value `json:"metadata,omitzero"`
 }
 
-// PointerMetadata is the metadata of a url part that stands in for content not carried inline.
-type PointerMetadata struct {
-	SHA256 string `json:"sha256"`
-	Size   int64  `json:"size"`
+// ReferenceMediaType is the media type of a data part that stands in for content a record does not carry.
+const ReferenceMediaType = "application/vnd.wherry.reference.v1+json"
+
+// Reference is the data of a ReferenceMediaType part: the SHA-256 and size of the content, and why it is not stored.
+type Reference struct {
+	SHA256   string `json:"sha256"`
+	Size     int64  `json:"size"`
+	Unstored string `json:"unstored"`
 }
+
+// The reasons a Reference gives for content not stored: an input already carried by the submission, or a transcript
+// line over MaxLine.
+const (
+	UnstoredInput    = "input"
+	UnstoredOversize = "oversize"
+)
 
 // OutputMetadata is the metadata of an output chunk's artifact update.
 type OutputMetadata struct {
@@ -170,6 +182,9 @@ type UnreturnedOutput struct {
 	Size   int64  `json:"size,omitzero"`
 	Reason string `json:"reason"`
 }
+
+// OutputMediaType is the media type of an output chunk's part.
+const OutputMediaType = "application/octet-stream"
 
 // OutputChunk bounds the data of one output chunk, below a record's limit.
 const OutputChunk = 256 << 10
@@ -559,6 +574,13 @@ func validateParts(parts []Part) error {
 		}
 		if part.Data != nil && !part.Data.IsValid() {
 			return errors.New("part data must be valid JSON")
+		}
+		if part.MediaType == ReferenceMediaType {
+			var reference Reference
+			if part.Data == nil || json.Unmarshal(part.Data, &reference, signed.Tolerant) != nil || !ValidHash(reference.SHA256) || reference.Size < 0 ||
+				reference.Unstored != UnstoredInput && reference.Unstored != UnstoredOversize {
+				return errors.New("a reference part's data requires sha256, a size of 0 or more, and unstored input or oversize")
+			}
 		}
 		if err := validateMetadata(part.Metadata); err != nil {
 			return err

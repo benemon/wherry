@@ -90,11 +90,40 @@ func TestInputPartsLandAsNamedFiles(t *testing.T) {
 		if content == nil {
 			continue
 		}
-		pointer, _ := json.Marshal(wire.PointerMetadata{SHA256: fmt.Sprintf("%x", sha256.Sum256(content)), Size: int64(len(content))})
-		want := wire.Part{URL: "unstored:input", Filename: submitted[i].Filename, MediaType: submitted[i].MediaType}
-		if got := history[i]; got.URL != want.URL || got.Filename != want.Filename || got.MediaType != want.MediaType || got.Raw != nil || got.Data != nil || string(got.Metadata) != string(pointer) {
-			t.Fatalf("history part %d is %+v, want %+v with metadata %s", i, got, want, pointer)
+		reference, _ := json.Marshal(wire.Reference{SHA256: fmt.Sprintf("%x", sha256.Sum256(content)), Size: int64(len(content)), Unstored: wire.UnstoredInput})
+		want := wire.Part{Data: reference, Filename: submitted[i].Filename, MediaType: wire.ReferenceMediaType}
+		if got := history[i]; got.URL != "" || got.Filename != want.Filename || got.MediaType != want.MediaType || got.Raw != nil || string(got.Data) != string(want.Data) || got.Metadata != nil {
+			t.Fatalf("history part %d is %+v, want %+v", i, got, want)
 		}
+	}
+}
+
+// Content a record does not carry, the run's inputs in its result's history and a transcript line over 512 KiB, is a
+// reference data part, never a url part.
+func TestNoPartIsAnUnstoredURL(t *testing.T) {
+	f := newFixture(t, []string{strings.Repeat("x", wire.MaxLine+1), doneOutcome})
+	f.answer(t, credentialName)
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Message.Parts = append(task.Message.Parts, wire.Part{Raw: wire.StdBytes("a,b\n"), Filename: "data.csv"}, wire.Part{Data: jsontext.Value(`{"k":1}`), Filename: "config"})
+	})
+	if status := f.execute(t, record, 1); status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	references := 0
+	for _, topic := range []string{admin.TenantTopic(testTenant), admin.TenantTranscriptTopic(testTenant)} {
+		for _, record := range f.records(t, topic) {
+			payload, err := base64.RawURLEncoding.DecodeString(strings.Split(string(record.Value), ".")[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(payload, []byte(`"url":"unstored:`)) {
+				t.Fatalf("record %s holds an unstored url part", payload[:min(len(payload), 200)])
+			}
+			references += bytes.Count(payload, []byte(`"mediaType":"`+wire.ReferenceMediaType+`"`))
+		}
+	}
+	if references != 3 {
+		t.Fatalf("%d reference parts, want the two inputs' and the long line's", references)
 	}
 }
 
@@ -211,7 +240,7 @@ func optionalTerms() admin.Terms {
 }
 
 // A run whose host has no source for an optional credential goes without it, its preamble naming it not supplied, and
-// an agent that needs it ends the run in AUTH_REQUIRED naming it.
+// an agent that reports AUTH_REQUIRED for it ends the run FAILED naming it.
 func TestAnUnsuppliedOptionalCredentialIsNamedInThePreamble(t *testing.T) {
 	outcome := `{"state":"TASK_STATE_AUTH_REQUIRED","message":{"role":"ROLE_AGENT","parts":[{"text":"gh needs a token"},{"data":{"credential":"github-token"}}]}}`
 	fake := &fakePlugin{stream: noResultStream, outputs: []pluginsdk.Output{outcomeOutput(outcome)}}
@@ -229,8 +258,8 @@ func TestAnUnsuppliedOptionalCredentialIsNamedInThePreamble(t *testing.T) {
 		t.Fatalf("prompt %q; want the unsupplied credential named, its target not", prompt)
 	}
 	status := f.lastTask(t).Status
-	if status.State != wire.TaskStateAuthRequired || len(status.Message.Parts) != 2 || string(status.Message.Parts[1].Data) != `{"credential":"github-token"}` {
-		t.Fatalf("ended %s with %+v, want AUTH_REQUIRED naming github-token", status.State, status.Message)
+	if status.State != wire.TaskStateFailed || len(status.Message.Parts) != 2 || string(status.Message.Parts[1].Data) != `{"credential":"github-token"}` {
+		t.Fatalf("ended %s with %+v, want FAILED naming github-token", status.State, status.Message)
 	}
 }
 
@@ -257,8 +286,10 @@ func TestMissingTaskCredentialFailsNamingIt(t *testing.T) {
 	}
 	task := f.lastTask(t)
 	want := "credentials " + credentialName + ", deploy-key were not answered within 5m; add them to credentials in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again"
-	if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != want {
-		t.Fatalf("ended %s with %q, want FAILED naming both credentials", task.Status.State, task.Status.Message.Parts[0].Text)
+	parts := task.Status.Message.Parts
+	if task.Status.State != wire.TaskStateFailed || len(parts) != 3 || parts[0].Text != want ||
+		string(parts[1].Data) != `{"credential":"`+credentialName+`"}` || string(parts[2].Data) != `{"credential":"deploy-key"}` {
+		t.Fatalf("ended %s with %+v, want FAILED naming both credentials, each in a credential part", task.Status.State, parts)
 	}
 }
 
@@ -355,6 +386,19 @@ func runWithOutputsUnder(t *testing.T, terms admin.Terms, expected []wire.Expect
 
 func file(name, data string) pluginsdk.Output {
 	return pluginsdk.Output{Name: name, Size: int64(len(data)), Data: []byte(data)}
+}
+
+// An output's chunks name it, and their part carries its last path segment as filename and the octet-stream media type.
+func TestOutputArtifactNamesItsFile(t *testing.T) {
+	f, _, status := runWithOutputs(t, nil, []pluginsdk.Output{file("notes/extra.txt", "extra\n")}, nil)
+	outputs := f.outputChunks(t)
+	if status != kgo.AckAccept || len(outputs) != 1 {
+		t.Fatalf("ended %v with %d output chunks, want one", status, len(outputs))
+	}
+	artifact := outputs[0].ArtifactUpdate.Artifact
+	if part := artifact.Parts[0]; artifact.ArtifactID != "notes/extra.txt" || artifact.Name != "notes/extra.txt" || part.Filename != "extra.txt" || part.MediaType != "application/octet-stream" {
+		t.Fatalf("artifact %q name %q, part filename %q media type %q", artifact.ArtifactID, artifact.Name, part.Filename, part.MediaType)
+	}
 }
 
 func TestCollectionRejectsWhatIsNotARegularFile(t *testing.T) {
@@ -473,8 +517,8 @@ func TestRedactionCannotExpandPastTheLimits(t *testing.T) {
 	if err := wire.ParseRecord(run.chunks([]pluginsdk.Line{{Data: line}}, false)[0].Value, f.keys(), &chunk); err != nil {
 		t.Fatal(err)
 	}
-	var pointer wire.PointerMetadata
-	if part := chunk.ArtifactUpdate.Artifact.Parts[0]; part.URL != "unstored:oversize" || json.Unmarshal(part.Metadata, &pointer) != nil ||
+	var pointer wire.Reference
+	if part := chunk.ArtifactUpdate.Artifact.Parts[0]; part.MediaType != wire.ReferenceMediaType || json.Unmarshal(part.Data, &pointer) != nil || pointer.Unstored != wire.UnstoredOversize ||
 		pointer.Size != int64(len(redacted)) || pointer.SHA256 != fmt.Sprintf("%x", sha256.Sum256(redacted)) {
 		t.Fatalf("transcript part %+v, want a pointer to the %d-byte redacted line", chunk.ArtifactUpdate.Artifact.Parts[0], len(redacted))
 	}
@@ -573,7 +617,7 @@ func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 		run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: name, Size: 1 << 62, Reason: "rejected: size changed while read"})
 	}
 	text := strings.Repeat("\x01", wire.MaxText)
-	status := taskStatus(wire.TaskStateAuthRequired, text)
+	status := taskStatus(wire.TaskStateFailed, text)
 	status.Message.Parts = append(status.Message.Parts, wire.Part{Data: []byte(`{"credential":"` + strings.Repeat("c", 32) + `"}`), MediaType: "application/json"})
 	record := run.result(status, text)
 	size := len(record.Key) + len(record.Value) + 97

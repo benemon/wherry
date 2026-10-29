@@ -137,10 +137,10 @@ func TestOutcomeFileIsBoundedByTheOutputLimit(t *testing.T) {
 }
 
 // A reply of wire.MaxText bytes travels whole in the result and the terminal, as before reply chunks: no chunks, no
-// entry, and a data part when it is JSON.
+// entry, and a data part when the agent gave a data part.
 func TestReplyAtTheBoundIsWhole(t *testing.T) {
 	text := `{"a":"` + strings.Repeat("j", wire.MaxText-8) + `"}`
-	f, task := replyRun(t, testTerms(), outcomeWith(wire.TaskStateCompleted, textPart(text)))
+	f, task := replyRun(t, testTerms(), outcomeWith(wire.TaskStateCompleted, map[string]any{"data": json.RawMessage(text)}))
 	chunks, _ := f.replyChunks(t)
 	part := task.Artifacts[0].Parts[0]
 	if len(text) != wire.MaxText || len(chunks) != 0 || manifest(t, task).Reply != nil {
@@ -182,6 +182,15 @@ func TestReplyStatusHasOneTextPart(t *testing.T) {
 		if len(got) != 2 || got[0].Text != whole[:wire.MaxText] || string(got[1].Data) != `{"credential":"github-token"}` {
 			t.Fatalf("status has %d parts, the first of %d bytes; want the preview and the credential", len(got), len(got[0].Text))
 		}
+	}
+}
+
+// The credential part is no reply: an agent that reports AUTH_REQUIRED with it alone leaves the result no text.
+func TestCredentialPartIsNoReply(t *testing.T) {
+	_, task := replyRun(t, testTerms(), outcomeWith(wire.TaskStateAuthRequired, map[string]any{"data": map[string]string{"credential": "github-token"}}))
+	parts := task.Status.Message.Parts
+	if task.Status.State != wire.TaskStateFailed || len(parts) != 1 || string(parts[0].Data) != `{"credential":"github-token"}` || task.Artifacts[0].Parts[0].Text != string(wire.TaskStateFailed) {
+		t.Fatalf("ended %s with %+v and result %+v, want FAILED with the credential part alone", task.Status.State, parts, task.Artifacts[0].Parts[0])
 	}
 }
 

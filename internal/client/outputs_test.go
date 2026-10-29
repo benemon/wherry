@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -26,10 +27,14 @@ func (r *testReceiver) outputChunk(t *testing.T, task claimed, attempt int64, na
 	if err != nil {
 		t.Fatal(err)
 	}
+	artifact := wire.Artifact{ArtifactID: name, Parts: []wire.Part{{Raw: wire.StdBytes(data)}}, Extensions: []string{wire.ExtensionURI}}
+	if name != wire.ReplyArtifact {
+		artifact.Name, artifact.Parts[0].Filename, artifact.Parts[0].MediaType = name, path.Base(name), wire.OutputMediaType
+	}
 	return r.sign(t, &wire.Output{
 		ArtifactUpdate: wire.TaskArtifactUpdateEvent{
 			TaskID: run, ContextID: run,
-			Artifact: wire.Artifact{ArtifactID: name, Parts: []wire.Part{{Raw: wire.StdBytes(data)}}, Extensions: []string{wire.ExtensionURI}},
+			Artifact: artifact,
 			Append:   index > 0, LastChunk: last, Metadata: metadata,
 		},
 		Wherry: wire.ResultBinding{ReceiverBinding: r.binding(task, attempt), TaskHash: task.hash},

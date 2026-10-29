@@ -331,13 +331,19 @@ type logsInput struct {
 }
 
 type logsLine struct {
-	Seq       int64                 `json:"seq" jsonschema:"the line's byte offset in the agent's output"`
-	Attempt   int64                 `json:"attempt" jsonschema:"the delivery attempt that published the line"`
-	Text      string                `json:"text" jsonschema:"the line of the agent's standard output, without its newline; empty for a line with raw_bytes or unstored"`
-	Truncated bool                  `json:"truncated,omitempty" jsonschema:"set when text holds only the start of a line too long for a page"`
-	Bytes     int                   `json:"bytes,omitempty" jsonschema:"size of a truncated line"`
-	RawBytes  int                   `json:"raw_bytes,omitempty" jsonschema:"size of a line that is not UTF-8, which is not included"`
-	Unstored  *wire.PointerMetadata `json:"unstored,omitempty" jsonschema:"sha256 and size of a line over 512 KiB, which the receiver did not store"`
+	Seq       int64         `json:"seq" jsonschema:"the line's byte offset in the agent's output"`
+	Attempt   int64         `json:"attempt" jsonschema:"the delivery attempt that published the line"`
+	Text      string        `json:"text" jsonschema:"the line of the agent's standard output, without its newline; empty for a line with raw_bytes or unstored"`
+	Truncated bool          `json:"truncated,omitempty" jsonschema:"set when text holds only the start of a line too long for a page"`
+	Bytes     int           `json:"bytes,omitempty" jsonschema:"size of a truncated line"`
+	RawBytes  int           `json:"raw_bytes,omitempty" jsonschema:"size of a line that is not UTF-8, which is not included"`
+	Unstored  *unstoredLine `json:"unstored,omitempty" jsonschema:"sha256 and size of a line over 512 KiB, which the receiver did not store"`
+}
+
+// unstoredLine is the SHA-256 and size of a line the receiver did not store.
+type unstoredLine struct {
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
 }
 
 type logsReply struct {
@@ -584,9 +590,10 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		for i := min(input.Offset, len(result.Lines)); i < len(result.Lines); i++ {
 			line := logsLine{Seq: result.Lines[i].Seq, Attempt: result.Lines[i].Attempt}
 			switch part := result.Lines[i].Part; {
-			case part.URL != "":
-				line.Unstored = &wire.PointerMetadata{}
-				json.Unmarshal(part.Metadata, line.Unstored) // validation decoded it
+			case part.MediaType == wire.ReferenceMediaType:
+				var reference wire.Reference
+				json.Unmarshal(part.Data, &reference) // validation decoded it
+				line.Unstored = &unstoredLine{SHA256: reference.SHA256, Size: reference.Size}
 			case part.Raw != nil && !utf8.Valid(part.Raw):
 				line.RawBytes = len(part.Raw)
 			case part.Raw != nil:

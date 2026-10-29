@@ -67,6 +67,17 @@ func validChunk() *Chunk {
 	}
 }
 
+func validOutput() *Output {
+	return &Output{
+		V: 1,
+		ArtifactUpdate: TaskArtifactUpdateEvent{
+			TaskID: "run-1", ContextID: "run-1", LastChunk: true, Metadata: jsontext.Value(`{"index":0}`),
+			Artifact: Artifact{ArtifactID: "out/report.md", Name: "out/report.md", Parts: []Part{{Raw: StdBytes("x"), Filename: "report.md", MediaType: OutputMediaType}}, Extensions: []string{ExtensionURI}},
+		},
+		Wherry: ResultBinding{ReceiverBinding: receiverBinding(), TaskHash: wireHash},
+	}
+}
+
 func validResult() *Result {
 	return &Result{
 		V: 1,
@@ -217,7 +228,7 @@ func TestAttemptFilterOrdersByAttempt(t *testing.T) {
 }
 
 func TestTerminalStates(t *testing.T) {
-	terminal := map[TaskState]bool{TaskStateCompleted: true, TaskStateFailed: true, TaskStateCanceled: true, TaskStateRejected: true, TaskStateAuthRequired: true}
+	terminal := map[TaskState]bool{TaskStateCompleted: true, TaskStateFailed: true, TaskStateCanceled: true, TaskStateRejected: true}
 	for _, state := range []TaskState{
 		TaskStateUnspecified, TaskStateSubmitted, TaskStateWorking, TaskStateCompleted, TaskStateFailed,
 		TaskStateCanceled, TaskStateInputRequired, TaskStateRejected, TaskStateAuthRequired,
@@ -229,22 +240,26 @@ func TestTerminalStates(t *testing.T) {
 }
 
 func TestArtifactUpdateRequiresOnePart(t *testing.T) {
-	pointer := Part{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + wireHash + `","size":4}`)}
+	reference := func(data string) Part { return Part{Data: jsontext.Value(data), MediaType: ReferenceMediaType} }
+	pointer := reference(`{"sha256":"` + wireHash + `","size":4,"unstored":"oversize"}`)
 	for name, test := range map[string]struct {
 		parts []Part
 		ok    bool
 	}{
-		"text":                {[]Part{{Text: "line"}}, true},
-		"pointer":             {[]Part{pointer}, true},
-		"line and pointer":    {[]Part{{Text: "line"}, pointer}, false},
-		"neither":             {[]Part{}, false},
-		"pointer no metadata": {[]Part{{URL: "unstored:oversize"}}, false},
-		"pointer bad hash":    {[]Part{{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"x","size":4}`)}}, false},
-		"pointer zero size":   {[]Part{{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + wireHash + `","size":0}`)}}, false},
+		"text":              {[]Part{{Text: "line"}}, true},
+		"pointer":           {[]Part{pointer}, true},
+		"line and pointer":  {[]Part{{Text: "line"}, pointer}, false},
+		"neither":           {[]Part{}, false},
+		"neither, last":     {[]Part{}, true},
+		"pointer not data":  {[]Part{{Text: "line", MediaType: ReferenceMediaType}}, false},
+		"pointer bad hash":  {[]Part{reference(`{"sha256":"x","size":4,"unstored":"oversize"}`)}, false},
+		"pointer negative":  {[]Part{reference(`{"sha256":"` + wireHash + `","size":-1,"unstored":"oversize"}`)}, false},
+		"pointer no reason": {[]Part{reference(`{"sha256":"` + wireHash + `","size":4}`)}, false},
+		"pointer other":     {[]Part{reference(`{"sha256":"` + wireHash + `","size":4,"unstored":"lost"}`)}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			chunk := validChunk()
-			chunk.ArtifactUpdate.Artifact.Parts = test.parts
+			chunk.ArtifactUpdate.Artifact.Parts, chunk.ArtifactUpdate.LastChunk = test.parts, name == "neither, last"
 			if err := chunk.validate(); (err == nil) != test.ok {
 				t.Fatalf("validate error %v, want ok=%v", err, test.ok)
 			}
