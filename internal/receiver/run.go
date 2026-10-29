@@ -1956,11 +1956,12 @@ func (run *activeRun) reply(text string) string {
 	if form.size <= wire.MaxText {
 		return string(form.data)
 	}
-	whole := wire.CutUTF8(string(form.data), int(run.terms().ReplyLimit))
+	redacted := string(form.data)
+	whole := wire.CutUTF8(redacted, int(run.terms().ReplyLimit))
 	sum := sha256.Sum256([]byte(whole))
 	run.replied = &wire.ReturnedReply{SHA256: hex.EncodeToString(sum[:]), Size: int64(len(whole)), Cut: int64(len(whole)) < form.size}
 	run.outputs = append(run.outputs, run.outputChunks(wire.ReplyArtifact, []byte(whole))...)
-	return wire.CutUTF8(string(form.data), wire.MaxText)
+	return wire.CutUTF8(redacted, wire.MaxText)
 }
 
 // replyMessage is message with its text parts replaced by one holding text, ahead of its other parts.

@@ -1326,14 +1326,15 @@ func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
 			if result := task.Artifacts[0].Parts[0].Text; result != test.want {
 				t.Fatalf("result %.80q, want %.80q", result, test.want)
 			}
+			chunks := f.outputChunks(t)
 			var joined []byte
-			for _, chunk := range f.outputChunks(t) {
+			for _, chunk := range chunks {
 				joined = append(joined, chunk.ArtifactUpdate.Artifact.Parts[0].Raw...)
 			}
 			if string(joined) != test.chunks {
 				t.Fatalf("reply chunks hold %d bytes, want the %d of the redacted reply", len(joined), len(test.chunks))
 			}
-			if chunks := f.outputChunks(t); test.chunks == straddled && (len(chunks) != 2 || !strings.HasSuffix(string(chunks[0].ArtifactUpdate.Artifact.Parts[0].Raw), marker[:13])) {
+			if test.chunks == straddled && (len(chunks) != 2 || !strings.HasSuffix(string(chunks[0].ArtifactUpdate.Artifact.Parts[0].Raw), marker[:13])) {
 				t.Fatal("the chunk seam does not split the second marker")
 			}
 			for _, record := range append(f.records(t, admin.TenantTopic(testTenant)), f.records(t, admin.TenantTranscriptTopic(testTenant))...) {
