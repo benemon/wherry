@@ -533,13 +533,18 @@ func TestLargestRecordsFitTheBrokerOnRealBroker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	// Uncompressed, the records' zeros weigh what incompressible outputs would.
-	client, err := kgo.NewClient(kgo.SeedBrokers(address), kgo.ProducerBatchCompression(kgo.NoCompression()), kgo.RecordRetries(0))
+	client, err := kgo.NewClient(kgo.SeedBrokers(address), kgo.ProducerBatchCompression(kgo.NoCompression()), kgo.RecordRetries(0), kgo.ProducerBatchMaxBytes(FeedRecordLimit))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Close()
 	feed := PoolEventsTopic(strings.ReplaceAll("limits-"+time.Now().Format("150405.000000"), ".", ""))
-	if _, err := kadm.NewClient(client).CreateTopics(ctx, 1, -1, nil, feed); err != nil {
+	configs := map[string]*string{}
+	for name, value := range feedConfigs {
+		configs[name] = kadm.StringPtr(value)
+	}
+	// The topic takes a tenant feed's own configuration, so the records are measured against the limit feeds have.
+	if _, err := kadm.NewClient(client).CreateTopics(ctx, 1, -1, configs, feed); err != nil {
 		t.Fatal(err)
 	}
 	if err := kafkatest.Led(ctx, client, feed); err != nil {
