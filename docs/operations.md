@@ -1203,11 +1203,11 @@ is connected. A harness submits a task, disconnects once `submit` returns,
 and reconnects later to `wait` and read the outputs. One process serves each
 host identity.
 
-Prerequisites: a machine that stays up, such as the rhel9 VM, with `wherry`
+Prerequisites: a machine that stays up, with `wherry`
 installed as in [Install wherry](quickstart.md#install-wherry); the host's
 client configuration, bundle, host key and credential files; and a route
 from the harness to the listener, a Boundary TCP target to the machine's
-loopback or a certificate from the lab CA.
+loopback or a TLS certificate the harness trusts.
 
 1. Create the token, 32 random bytes, readable by root alone:
 
@@ -1288,8 +1288,8 @@ loopback or a certificate from the lab CA.
    one server alone.
 6. Check the connection with the `receivers` tool.
 
-To serve off loopback without Boundary, give the unit a certificate from the
-lab CA, `--listen 0.0.0.0:7443 --tls-cert FILE --tls-key FILE`, and the
+To serve off loopback without Boundary, give the unit a certificate the harness
+trusts, `--listen 0.0.0.0:7443 --tls-cert FILE --tls-key FILE`, and the
 harness `https://HOST:7443/mcp`. `wherry mcp` refuses a listener off
 loopback without a certificate, and any listener without a token.
 

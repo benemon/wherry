@@ -48,6 +48,10 @@ const logsLimit, logsMaxLimit = 100, 500
 // logsBytes bounds a transcript page's JSON, within the 25,000-token default of Claude Code's MAX_MCP_OUTPUT_TOKENS.
 const logsBytes = 24 << 10
 
+// sessionTimeout closes an MCP session that sends no request for this long; a waiting client calls wait at least every
+// waitBound, and a client whose session closed starts another.
+const sessionTimeout = time.Hour
+
 // answerRetry separates the server's attempts to answer seal requests after a failure.
 const answerRetry = 5 * time.Second
 
@@ -59,7 +63,7 @@ func runMCP(ctx context.Context, args []string) error {
 	tlsCert := flags.String("tls-cert", "", "TLS certificate file; with --tls-key, serves HTTPS")
 	tlsKey := flags.String("tls-key", "", "TLS private key file")
 	urlLifetime := flags.Duration("url-lifetime", time.Hour, "lifetime of the presigned URLs upload and wait return over HTTP")
-	outputBound := flags.Int64("output-bound", 1<<20, "largest output wait returns over HTTP as an MCP resource; a larger one, or one returned through S3, is a presigned GET URL")
+	outputBound := flags.Int64("output-bound", logsBytes, "largest output wait returns over HTTP as an MCP resource, within a harness's tool output limit; a larger one, or one returned through S3, is a presigned GET URL")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -161,7 +165,7 @@ func listenToken(listen, tokenFile, tlsCert, tlsKey string) ([]byte, error) {
 // serveHTTP serves server's Streamable HTTP at /mcp on listener until ctx ends, to requests that carry the token.
 func serveHTTP(ctx context.Context, listener net.Listener, server *mcp.Server, token []byte, tlsCert, tlsKey string, logger *log.Logger) error {
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{SessionTimeout: sessionTimeout}))
 	httpServer := &http.Server{Handler: bearer(token, mux, logger), ErrorLog: logger, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()

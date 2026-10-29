@@ -152,7 +152,7 @@ Every other tool and result is as over stdio.
   storage credential, `upload` fails as an S3 input does.
 - `wait` returns each output as `{name, sha256, size, uri}`, with `uri`
   `wherry://runs/<run>/outputs/<name>`, and adds a resource link for each
-  after the JSON text. An output over `--output-bound`, 1 MiB by default, or
+  after the JSON text. An output over `--output-bound`, 24 KiB by default, or
   returned through S3 is `{name, sha256, size, url, expires}` instead: the
   host puts the verified file at `wherry/<tenant>/<run>/host/<name>` in the
   run's pool's bucket, a key no receiver's PUT URL names, and presigns a GET

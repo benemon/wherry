@@ -533,7 +533,7 @@ token file that group or others can read or write, with a token shorter than
 | `--listen ADDR` | | `HOST:PORT` to serve Streamable HTTP on; without it, stdio |
 | `--token-file FILE` | | file holding the bearer token, mode `0600`; required with `--listen` |
 | `--tls-cert FILE`, `--tls-key FILE` | | PEM certificate and key to serve HTTPS with; required off loopback |
-| `--output-bound BYTES` | `1048576` | largest output `wait` returns over HTTP as an MCP resource; a larger one is a presigned GET URL |
+| `--output-bound BYTES` | `24576` | largest output `wait` returns over HTTP as an MCP resource; a larger one is a presigned GET URL |
 | `--url-lifetime` | `1h` | lifetime of the presigned URLs `upload` and `wait` return over HTTP, from `1s` to `168h`; a longer one is cut to `168h` |
 
 ### `wherry version`
