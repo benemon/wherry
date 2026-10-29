@@ -1339,6 +1339,52 @@
       ]
     },
     {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Storage free",
+      "description": "Free bytes of the storage a profile's runs share, by profile.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 68
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "expr": "min by (pool, profile) (wherry_plugin_storage_free_bytes{pool=~\"$pool\", instance=~\"$instance\"})",
+          "legendFormat": "{{pool}} {{profile}}"
+        }
+      ]
+    },
+    {
       "id": 28,
       "type": "row",
       "title": "Kafka",
@@ -1347,7 +1393,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 68
+        "y": 76
       },
       "panels": []
     },
@@ -1364,7 +1410,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 69
+        "y": 77
       },
       "fieldConfig": {
         "defaults": {
@@ -1410,7 +1456,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 69
+        "y": 77
       },
       "fieldConfig": {
         "defaults": {
@@ -1456,7 +1502,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 69
+        "y": 77
       },
       "fieldConfig": {
         "defaults": {

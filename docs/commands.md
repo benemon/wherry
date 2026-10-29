@@ -957,8 +957,9 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_metrics_dropped_total` | counter | `profile`, `reason` | plugin samples dropped and `Metrics` calls that failed |
 | `wherry_plugin_platform_errors_total` | counter | `profile`, `class` | platform API errors: `unavailable`, `denied`, `conflict`, `timeout`, `other` |
 | `wherry_plugin_cleanup_pending` | gauge | `profile` | the profile's ended jobs awaiting cleanup |
-| `wherry_plugin_sweep_deletions_total` | counter | `profile`, `kind` | material a sweep deleted: `job`, `variable` |
+| `wherry_plugin_sweep_deletions_total` | counter | `profile`, `kind` | material a sweep deleted: `job`, `variable`, `directory` |
 | `wherry_plugin_placement_seconds` | histogram | `profile` | time from dispatch to the agent task starting |
+| `wherry_plugin_storage_free_bytes` | gauge | `profile` | free bytes of the storage the profile's runs share |
 
 A rejection's `reason` is its fixed text, such as `run expired`. A reason that
 quotes the task counts as `git remote host outside the pool's vcs hosts` or
