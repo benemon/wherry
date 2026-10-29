@@ -42,6 +42,8 @@ type AwaitResult struct {
 	NotReturned []wire.UnreturnedOutput
 	// Rejected are the outputs this host could not verify.
 	Rejected []wire.UnreturnedOutput
+	// Reply is the reply the result's reply chunks carry, nil when Task's result artifact and Status hold all of it.
+	Reply *Reply
 	// Redacted counts, by name, the redaction markers of the run's values in Task's artifacts and Status, where each
 	// marker reads [redacted:<name>] instead.
 	Redacted map[string]int
@@ -58,6 +60,18 @@ type Output struct {
 	Size   int64
 	Data   []byte
 	Path   string
+}
+
+// Reply is a run's reply over wire.MaxText, joined from its reply chunks and verified against the size and SHA-256
+// its result lists, with each marker reading [redacted:<name>]. SHA256 and Size are of Data.
+type Reply struct {
+	Data   []byte
+	SHA256 string
+	Size   int64
+	// Cut is set when the reply was longer than its pool's reply limit and the chunks carry its first bytes.
+	Cut bool
+	// Rejected is why this host could not verify the chunks, which leaves Data empty.
+	Rejected string
 }
 
 // StatusResult is the latest verified status of a run.
@@ -1080,10 +1094,16 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 					return AwaitResult{}, fmt.Errorf("watch %s: %w", runID, err)
 				}
 				outcome.Skipped = r.skipped
-				outcome.Outputs, outcome.Stored, outcome.NotReturned, outcome.Rejected = r.verifiedOutputs(r.result)
+				outcome.Outputs, outcome.Stored, outcome.NotReturned, outcome.Rejected, outcome.Reply = r.verifiedOutputs(r.result)
 			}
 			markers := h.markers(local)
 			outcome.Redacted = map[string]int{}
+			if outcome.Reply != nil && outcome.Reply.Rejected == "" {
+				// A marker split across chunks is whole once they are joined.
+				outcome.Reply.Data = unredact(outcome.Reply.Data, markers, outcome.Redacted)
+				sum := sha256.Sum256(outcome.Reply.Data)
+				outcome.Reply.SHA256, outcome.Reply.Size = hex.EncodeToString(sum[:]), int64(len(outcome.Reply.Data))
+			}
 			outcome.Status = unredactStatus(outcome.Status, markers, outcome.Redacted)
 			if outcome.Task != nil {
 				task := *outcome.Task
@@ -1137,18 +1157,26 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	}
 }
 
-// verifiedOutputs joins, for each output the result lists, the chunks its own attempt wrote, and verifies them against
-// the listed size and SHA-256. An output whose chunks have a gap, an overlap or a duplicate index, or whose bytes do
-// not match, is rejected. It also returns the S3 outputs the result lists, and the outputs it lists as not returned.
-func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.ReturnedOutput, []wire.UnreturnedOutput, []wire.UnreturnedOutput) {
+// verifiedOutputs joins, for each output the result lists and for its reply, the chunks its own attempt wrote, and
+// verifies them against the listed size and SHA-256. An output or reply whose chunks have a gap, an overlap or a
+// duplicate index, or whose bytes do not match, is rejected. It also returns the S3 outputs the result lists, and the
+// outputs it lists as not returned.
+func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.ReturnedOutput, []wire.UnreturnedOutput, []wire.UnreturnedOutput, *Reply) {
 	var manifest struct {
 		Outputs     []wire.ReturnedOutput   `json:"outputs"`
 		S3Outputs   []wire.ReturnedOutput   `json:"s3_outputs"`
 		NotReturned []wire.UnreturnedOutput `json:"not_returned"`
+		Reply       *wire.ReturnedReply     `json:"reply"`
 	}
 	// The metadata also holds the placement members; a manifest that does not decode lists nothing.
 	if json.Unmarshal(result.Task.Metadata, &manifest) != nil {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
+	}
+	joined := slices.DeleteFunc(slices.Clone(manifest.Outputs), func(output wire.ReturnedOutput) bool { return output.Name == wire.ReplyArtifact })
+	var reply *Reply
+	if manifest.Reply != nil {
+		reply = &Reply{Cut: manifest.Reply.Cut}
+		joined = append(joined, wire.ReturnedOutput{Name: wire.ReplyArtifact, SHA256: manifest.Reply.SHA256, Size: manifest.Reply.Size})
 	}
 	chunks := map[string]map[int64]*wire.Output{}
 	duplicated := map[string]bool{}
@@ -1169,7 +1197,7 @@ func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.Returne
 	}
 	var verified []Output
 	var rejected []wire.UnreturnedOutput
-	for _, listed := range manifest.Outputs {
+	for _, listed := range joined {
 		reason, data := "", []byte{}
 		if duplicated[listed.Name] {
 			reason = "duplicate chunk"
@@ -1192,13 +1220,18 @@ func (r *runView) verifiedOutputs(result *wire.Result) ([]Output, []wire.Returne
 		if reason == "" && (int64(len(data)) != listed.Size || hex.EncodeToString(sum[:]) != listed.SHA256) {
 			reason = "size or hash mismatch"
 		}
-		if reason != "" {
+		switch {
+		case listed.Name == wire.ReplyArtifact && reason != "":
+			reply.Rejected = reason
+		case listed.Name == wire.ReplyArtifact:
+			reply.Data = data
+		case reason != "":
 			rejected = append(rejected, wire.UnreturnedOutput{Name: listed.Name, Size: max(listed.Size, 0), Reason: "rejected by this host: " + reason})
-			continue
+		default:
+			verified = append(verified, Output{Name: listed.Name, SHA256: listed.SHA256, Size: listed.Size, Data: data})
 		}
-		verified = append(verified, Output{Name: listed.Name, SHA256: listed.SHA256, Size: listed.Size, Data: data})
 	}
-	return verified, manifest.S3Outputs, manifest.NotReturned, rejected
+	return verified, manifest.S3Outputs, manifest.NotReturned, rejected, reply
 }
 
 // WriteOutputs writes a run's verified outputs beneath dir, by default <state_dir>/runs/<run>/outputs, and

@@ -51,6 +51,9 @@ func testRecords() map[string]Record {
 		"output": &Output{ArtifactUpdate: TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", Append: true, LastChunk: true, Metadata: []byte(`{"index":1}`),
 			Artifact: Artifact{ArtifactID: "sub/Report.md", Parts: []Part{{Raw: StdBytes("x")}}, Extensions: []string{ExtensionURI}}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
+		"reply output": &Output{ArtifactUpdate: TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", LastChunk: true, Metadata: []byte(`{"index":0}`),
+			Artifact: Artifact{ArtifactID: ReplyArtifact, Parts: []Part{{Raw: StdBytes("x")}}, Extensions: []string{ExtensionURI}}},
+			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
 		"submission with credentials and outputs": &Submission{Message: testMessage("run-a"), Wherry: SubmissionBinding{Tenant: "tenant-a", Host: "host-a", Pool: "pool-a", Run: "run-a", Placement: placement,
 			Credentials: []TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []ExpectedOutput{{Name: "out/report.md", Required: true}}}},
 	}
@@ -289,6 +292,26 @@ func TestRecordValidation(t *testing.T) {
 		"output named with a dot segment": func(r map[string]Record) Record {
 			value := r["output"].(*Output)
 			value.ArtifactUpdate.Artifact.ArtifactID = "sub/../x"
+			return value
+		},
+		"output named with a leading dot": func(r map[string]Record) Record {
+			value := r["reply output"].(*Output)
+			value.ArtifactUpdate.Artifact.ArtifactID = ".other"
+			return value
+		},
+		"output named beside the reply in the reserved directory": func(r map[string]Record) Record {
+			value := r["reply output"].(*Output)
+			value.ArtifactUpdate.Artifact.ArtifactID = OutcomeDir + "/other"
+			return value
+		},
+		"output without a name": func(r map[string]Record) Record {
+			value := r["reply output"].(*Output)
+			value.ArtifactUpdate.Artifact.ArtifactID = ""
+			return value
+		},
+		"submission output reply.txt": func(r map[string]Record) Record {
+			value := r["submission with credentials and outputs"].(*Submission)
+			value.Wherry.Outputs[0].Name = ReplyFile
 			return value
 		},
 		"output appending at index 0": func(r map[string]Record) Record {

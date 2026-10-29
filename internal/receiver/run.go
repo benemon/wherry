@@ -18,6 +18,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -46,8 +47,6 @@ const (
 	budgetReason = "delivery budget exhausted"
 	// heldLimit bounds the transcript an adopter holds while it waits for its seal.
 	heldLimit = 4 << 20
-	// maxOutcome bounds the outcome file read; message text past wire.MaxText becomes the over-size marker.
-	maxOutcome = 512 << 10
 )
 
 // Intervals are variables so tests can shorten them; renew stays below the 15 s default lock.
@@ -751,8 +750,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		dispatched, dispatchedHandle, err := named.Plugin.Dispatch(runCtx, pluginsdk.Run{
 			ID: runID, Profile: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Attempt: attempt,
-			Prompt: []byte(preamble(named.Plugin.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID) +
-				prompt(admitted.history)),
+			Prompt: []byte(preamble(named.Plugin.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID,
+				run.terms().ReplyLimit) + prompt(admitted.history)),
 			Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
 		var tooLarge *pluginsdk.InputTooLargeError
@@ -1264,6 +1263,8 @@ type activeRun struct {
 	unreturned []wire.UnreturnedOutput
 	// outcome is the status the agent's outcome file reports, nil when the job left no valid one.
 	outcome *wire.TaskStatus
+	// replied lists the reply chunks among outputs for the result, nil when the result carries the whole reply.
+	replied *wire.ReturnedReply
 	// claimed is when this attempt began executing the run, zero for a run ended without executing it.
 	claimed time.Time
 	// startCause is the redacted cause of this attempt's start failure, empty without one.
@@ -1411,6 +1412,12 @@ func (r *redactedForm) Write(p []byte) (int, error) {
 func (r *redactedForm) over() bool { return r.size > r.limit }
 
 func (r *redactedForm) hash() string { return hex.EncodeToString(r.sum.Sum(nil)) }
+
+// terms are the run's pool's terms as the receiver holds them now.
+func (run *activeRun) terms() admin.Terms {
+	state, _, _ := run.receiver.snapshot()
+	return state.Pools[run.receiver.config.Pool]
+}
 
 func (run *activeRun) commit(ctx context.Context, records ...*kgo.Record) error {
 	return run.receiver.transact(ctx, run.producer, records...)
@@ -1623,7 +1630,8 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 	}
 	result := ""
 	if status.Message != nil {
-		result = text(*status.Message)
+		result = run.reply(text(*status.Message))
+		status.Message = replyMessage(*status.Message, result)
 	}
 	for _, output := range run.unreturned {
 		if slices.ContainsFunc(run.expected, func(expected wire.ExpectedOutput) bool { return expected.Name == output.Name && expected.Required }) {
@@ -1646,8 +1654,7 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 // run returned and did not. S3 outputs are uploaded as Collect streams them, unredacted, since they go to the host's own
 // bucket and never to the feed. Every expected output is listed as one or the other.
 func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stopped bool) {
-	state, _, _ := run.receiver.snapshot()
-	limit := state.Pools[run.receiver.config.Pool].OutputLimit
+	limit := run.terms().OutputLimit
 	stored := map[string]storedOutput{}
 	collected, err := run.collected(ctx, handle, stopped, limit, stored)
 	if err != nil {
@@ -1796,7 +1803,7 @@ func (run *activeRun) collectOutcome(ctx context.Context, handle pluginsdk.Handl
 	outputs := make(chan pluginsdk.Output)
 	go func() {
 		defer close(outputs)
-		run.profile.Plugin.Collect(ctx, handle, pluginsdk.Limits{Files: wire.MaxOutputs, Stream: []string{wire.OutcomeFile}, StreamBytes: maxOutcome}, outputs)
+		run.profile.Plugin.Collect(ctx, handle, pluginsdk.Limits{Files: wire.MaxOutputs, Stream: []string{wire.OutcomeFile}, StreamBytes: run.terms().OutputLimit}, outputs)
 	}()
 	for output := range outputs {
 		if output.Name == wire.OutcomeFile && output.Mode.Type() == 0 {
@@ -1862,16 +1869,17 @@ func (run *activeRun) store(ctx context.Context, output pluginsdk.Output) stored
 	}}
 }
 
-// readOutcome reads and decodes an outcome file of at most maxOutcome bytes. Any outcome but a TaskStatus of a state an
+// readOutcome reads and decodes an outcome file of at most the pool's output limit. Any outcome but a TaskStatus of a state an
 // agent may report, with a ROLE_AGENT message and for TASK_STATE_AUTH_REQUIRED the credential it needs, is nil. The
 // status keeps the message's text and that credential's name, redacted.
 func (run *activeRun) readOutcome(output pluginsdk.Output) *wire.TaskStatus {
-	if output.Size > maxOutcome {
+	limit := run.terms().OutputLimit
+	if output.Size > limit {
 		return nil
 	}
 	data := output.Data
 	if output.Body != nil {
-		data, _ = io.ReadAll(io.LimitReader(output.Body, maxOutcome))
+		data, _ = io.ReadAll(io.LimitReader(output.Body, limit))
 	}
 	var reported wire.TaskStatus
 	if int64(len(data)) != output.Size || json.Unmarshal(data, &reported) != nil || reported.Message == nil || reported.Message.Role != wire.RoleAgent ||
@@ -1935,7 +1943,33 @@ func (run *activeRun) outputChunks(name string, data []byte) []*kgo.Record {
 	return records
 }
 
-// end commits the remaining transcript, the outputs, the result and the terminal status in one transaction.
+// reply is text redacted whole as the result and terminal status carry it: all of it within wire.MaxText, else its
+// first wire.MaxText bytes. A longer reply, cut to the pool's reply limit, joins the outputs as reply chunks. Both cuts
+// are of the redacted bytes, so no part of a value reaches the feed.
+func (run *activeRun) reply(text string) string {
+	form := run.redact([]byte(text), math.MaxInt64)
+	if form.size <= wire.MaxText {
+		return string(form.data)
+	}
+	whole := wire.CutUTF8(string(form.data), int(run.terms().ReplyLimit))
+	sum := sha256.Sum256([]byte(whole))
+	run.replied = &wire.ReturnedReply{SHA256: hex.EncodeToString(sum[:]), Size: int64(len(whole)), Cut: int64(len(whole)) < form.size}
+	run.outputs = append(run.outputs, run.outputChunks(wire.ReplyArtifact, []byte(whole))...)
+	return wire.CutUTF8(string(form.data), wire.MaxText)
+}
+
+// replyMessage is message with its text parts replaced by one holding text, ahead of its other parts.
+func replyMessage(message wire.Message, text string) *wire.Message {
+	parts := slices.DeleteFunc(slices.Clone(message.Parts), func(part wire.Part) bool { return part.Text != "" })
+	if text != "" {
+		parts = slices.Insert(parts, 0, wire.Part{Text: text})
+	}
+	message.Parts = parts
+	return &message
+}
+
+// end commits the remaining transcript, the outputs and reply chunks, the result and the terminal status in one
+// transaction.
 func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result string, pending []pluginsdk.Line, ack kgo.AckStatus) kgo.AckStatus {
 	records := append(append(append(run.chunks(pending, true), run.outputs...), run.result(status, result)), run.terminal(status, pending)...)
 	if err := run.commit(ctx, records...); err != nil {
@@ -1958,13 +1992,14 @@ func (run *activeRun) status(kind string, status wire.TaskStatus, offset *int64,
 	return value
 }
 
-// redactStatus redacts the text of status's message, each text part within wire.MaxText.
+// redactStatus redacts the text of status's message, each text part whole. The agent's text reaches it redacted and
+// within wire.MaxText.
 func (run *activeRun) redactStatus(status wire.TaskStatus) wire.TaskStatus {
 	if status.Message != nil {
 		message := *status.Message
 		message.Parts = slices.Clone(message.Parts)
 		for i := range message.Parts {
-			text := run.redactText(message.Parts[i].Text)
+			text := string(run.redact([]byte(message.Parts[i].Text), math.MaxInt64).data)
 			message.Parts[i].Text = text
 			if escapedLength([]byte(text)) > base64.StdEncoding.EncodedLen(len(text)) {
 				// As in a result, an agent's text travels raw when escaping it would make it longer than base64 does.
@@ -2085,14 +2120,15 @@ func escapedLength(text []byte) int {
 	return len(quoted) - 2
 }
 
-// result builds the run's final task for the feed; a result that is JSON travels as a data part.
+// result builds the run's final task for the feed; a whole reply that is JSON travels as a data part. The agent's
+// text reaches it redacted and within wire.MaxText.
 func (run *activeRun) result(status wire.TaskStatus, result string) *kgo.Record {
-	result = run.redactText(result)
+	result = string(run.redact([]byte(result), math.MaxInt64).data)
 	part := wire.Part{Text: result}
 	switch {
 	case result == "":
 		part.Text = string(status.State)
-	case jsontext.Value(result).IsValid():
+	case run.replied == nil && jsontext.Value(result).IsValid():
 		part = wire.Part{Data: jsontext.Value(result), MediaType: "application/json"}
 	case !utf8.ValidString(result) || escapedLength([]byte(result)) > base64.StdEncoding.EncodedLen(len(result)):
 		// As for a transcript line, text travels raw when escaping it would make it longer than base64 does.
@@ -2100,7 +2136,7 @@ func (run *activeRun) result(status wire.TaskStatus, result string) *kgo.Record 
 	}
 	metadata, _ := json.Marshal(wire.ResultMetadata{ // strings, numbers and a string map always encode
 		ReceiverID: run.receiver.id, Pool: run.receiver.config.Pool, Profile: run.profile.Name, Labels: run.labels, Job: run.job,
-		Outputs: run.returned, S3Outputs: run.s3Returned, NotReturned: run.unreturned,
+		Outputs: run.returned, S3Outputs: run.s3Returned, NotReturned: run.unreturned, Reply: run.replied,
 	})
 	return run.feed(&wire.Result{
 		Task: wire.Task{
@@ -2186,7 +2222,7 @@ func attemptOf(record *kgo.Record) int64 {
 // preamble is the agent's instructions for the run. It names credentials and their targets, never their values, and
 // gives full paths, so an agent without a shell finds its files. A directory the plugin does not report is named by
 // its environment variable.
-func preamble(directories pluginsdk.Directories, inputs []string, credentials []wire.TaskCredential, unsupplied []string, outputs []wire.ExpectedOutput, git *wire.GitInput, run string) string {
+func preamble(directories pluginsdk.Directories, inputs []string, credentials []wire.TaskCredential, unsupplied []string, outputs []wire.ExpectedOutput, git *wire.GitInput, run string, replyLimit int64) string {
 	input, output, credential := cmp.Or(directories.Input, "$WHERRY_INPUT_DIR"), cmp.Or(directories.Output, "$WHERRY_OUTPUT_DIR"),
 		cmp.Or(directories.Credentials, "$WHERRY_CREDENTIALS_DIR")
 	lines := []string{"Your input directory is " + input + ", your credentials directory " + credential + " and your output directory " + output +
@@ -2238,7 +2274,8 @@ func preamble(directories pluginsdk.Directories, inputs []string, credentials []
 	}
 	lines = append(lines, "When you finish, whatever happened, write an A2A TaskStatus JSON object to "+output+"/"+wire.OutcomeFile+", creating its directory: "+
 		`{"state": "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_AUTH_REQUIRED", "message": {"role": "ROLE_AGENT", "parts": [{"text": "<the answer, or what went wrong>"}]}}. `+
-		`For TASK_STATE_AUTH_REQUIRED, add the part {"data": {"credential": "<name>"}} naming the credential you need. `+listed)
+		`For TASK_STATE_AUTH_REQUIRED, add the part {"data": {"credential": "<name>"}} naming the credential you need. `+listed,
+		"The answer goes in the message text; long or structured content belongs in files in "+output+". A reply over "+strconv.FormatInt(replyLimit, 10)+" bytes is cut.")
 	return strings.Join(lines, "\n") + "\n\n"
 }
 

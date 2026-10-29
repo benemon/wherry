@@ -53,6 +53,8 @@ type Terms struct {
 	ProducerByteRate   int64        `json:"producer_byte_rate" yaml:"producer_byte_rate"`
 	RequestPercentage  float64      `json:"request_percentage" yaml:"request_percentage"`
 	OutputLimit        int64        `json:"output_limit,omitzero" yaml:"output_limit"`
+	// ReplyLimit bounds the redacted reply a result returns; a longer one is cut to it.
+	ReplyLimit int64 `json:"reply_limit,omitzero" yaml:"reply_limit"`
 	// VCS holds the hosts, as wire.GitInput.VCSHost names them, a git input may clone from; none allows no git input.
 	VCS []string `json:"vcs,omitzero" yaml:"vcs"`
 	// Storage is the pool's S3 lane; nil allows no S3 input or output.
@@ -123,6 +125,7 @@ const (
 	DefaultDeliveryLimit      = 5
 	DefaultLockDurationMS     = 15000
 	DefaultOutputLimit        = 8 << 20
+	DefaultReplyLimit         = 1 << 20
 	DefaultMaxQueueDeadlineMS = 14 * 24 * 60 * 60 * 1000
 	MaxRunDurationMS          = 6 * 60 * 60 * 1000
 )
@@ -148,6 +151,10 @@ func withDefaults(terms Terms) Terms {
 	}
 	if terms.OutputLimit == 0 {
 		terms.OutputLimit = DefaultOutputLimit
+	}
+	// A pool whose output limit is below the default reply limit takes its output limit.
+	if terms.ReplyLimit == 0 {
+		terms.ReplyLimit = min(DefaultReplyLimit, terms.OutputLimit)
 	}
 	return terms
 }
@@ -643,8 +650,12 @@ func load(raw []rawRecord) (State, error) {
 
 func validateTerms(terms Terms) error {
 	if len(terms.Agents) == 0 || terms.DeliveryLimit <= 0 || terms.LockDurationMS <= 0 || terms.ProducerByteRate <= 0 || terms.RequestPercentage <= 0 ||
-		terms.MaxQueueDeadlineMS < 0 || terms.RecordLimit < 0 || terms.OutputLimit < 0 {
+		terms.MaxQueueDeadlineMS < 0 || terms.RecordLimit < 0 || terms.OutputLimit < 0 || terms.ReplyLimit < 0 {
 		return errors.New("invalid pool terms")
+	}
+	// The outcome file is bounded by the output limit, so it can hold a reply at the reply limit.
+	if terms.ReplyLimit > terms.OutputLimit {
+		return errors.New("reply limit exceeds output limit")
 	}
 	if !slices.ContainsFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == terms.DefaultAgent }) {
 		return errors.New("default agent is outside pool terms")

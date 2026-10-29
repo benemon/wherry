@@ -267,12 +267,21 @@ type outputReply struct {
 	Size   int64  `json:"size"`
 }
 
+type replyFile struct {
+	Path     string `json:"path,omitempty" jsonschema:"where this host wrote the whole reply"`
+	SHA256   string `json:"sha256,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+	Cut      bool   `json:"cut,omitempty" jsonschema:"set when the reply was longer than the pool's reply limit and the file holds its first bytes"`
+	Rejected string `json:"rejected,omitempty" jsonschema:"why this host could not verify the reply, of which message holds the first 64 KiB"`
+}
+
 type watchReply struct {
 	ID          string                  `json:"id"`
 	State       string                  `json:"state"`
 	Model       string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
 	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling watch again"`
-	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, or this host's note that the queue deadline passed and no receiver claimed the run"`
+	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, or this host's note that the queue deadline passed and no receiver claimed the run; an answer over 64 KiB is cut to its first 64 KiB, and reply names the whole"`
+	Reply       *replyFile              `json:"reply,omitempty" jsonschema:"set when the agent's answer is over 64 KiB"`
 	Transcript  string                  `json:"transcript,omitempty" jsonschema:"path of the run's redacted transcript, one JSON line per transcript line, written locally"`
 	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
 	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
@@ -476,6 +485,17 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		}
 		output.NotReturned = append(result.NotReturned, collected.Rejected...)
 		output.Transcript = collected.Transcript.Path
+		if reply := result.Reply; reply != nil {
+			output.Reply = &replyFile{Rejected: reply.Rejected}
+			if reply.Rejected == "" {
+				paths, err := client.WriteOutputs(input.ID, "", []busclient.Output{{Name: wire.ReplyFile, SHA256: reply.SHA256, Size: reply.Size, Data: reply.Data}})
+				if err != nil {
+					logger.Print("tool failed: " + busclient.Redact(err.Error()))
+					return nil, watchReply{}, collectFailure(err)
+				}
+				output.Reply = &replyFile{Path: paths[0], SHA256: reply.SHA256, Size: reply.Size, Cut: reply.Cut}
+			}
+		}
 		return nil, output, nil
 	})
 

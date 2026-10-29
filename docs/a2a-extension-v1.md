@@ -2,6 +2,14 @@
 
 URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
+**Change note, 2026-10-29:** edited in place at version 1. A reply over
+64 KiB once redacted travels as [reply chunks](#the-reply), output chunks with
+`artifactId` `.wherry/reply`, up to the pool's `reply_limit`. The result text
+and the status text carry its first 64 KiB, the result's metadata lists it as
+`reply`, and `[redacted text over 65536 bytes]` no longer replaces either. The
+outcome file is bounded by the pool's `output_limit`. A host reserves
+`reply.txt` among a run's outputs.
+
 **Change note, 2026-10-27:** edited in place at version 1. The term adapter
 is retired in favour of plugin, and the output reason `not streamed by the
 adapter` is renamed `not streamed by the plugin`.
@@ -292,8 +300,8 @@ earlier attempt do not change the outcome of a later one.
 A status message is an A2A `Message` with `role` `ROLE_AGENT` and one text
 part. The message of a `TASK_STATE_AUTH_REQUIRED` status adds the
 [`credential` data part](#the-credential-data-part). The agent's text is
-redacted, replaced by `[redacted text over 65536 bytes]` when it passes
-64 KiB once redacted, and travels as a `raw` part with media type
+its [reply](#the-reply): all of it when it fits 64 KiB once redacted, and
+otherwise its preview. It travels as a `raw` part with media type
 `text/plain` when escaping it as a JSON string would make it longer than
 base64 does. The fixed texts are:
 
@@ -409,7 +417,8 @@ names.
 ```
 
 - The artifact's `artifactId` is the output's name, a relative path of
-  file names joined by `/` that follows the `outputs` name rules. It has
+  file names joined by `/` that follows the `outputs` name rules, or
+  `.wherry/reply` for a chunk of the run's [reply](#the-reply). It has
   exactly one `raw` part holding at most 256 KiB of the file.
 - `artifactUpdate.metadata` is exactly `{"index": <n>}`, with `n` 0 or
   more. A file's chunks have
@@ -418,7 +427,7 @@ names.
   empty file is one chunk with an empty part.
 - A chunk's identity is its attempt, artifact and index.
 
-A receiver writes a run's output chunks to
+A receiver writes a run's output chunks and reply chunks to
 `wherry.tenant.<tenant>.transcript` in the transaction that holds its
 result, before the result.
 
@@ -446,18 +455,47 @@ A result is the A2A `Task` a run ends with.
   `sha256` and `size` in bytes of its `raw` bytes or its `data` JSON. A
   reader requires `history[0].messageId` to equal the `message_id` of the
   run's echo.
-- `task.artifacts` holds the artifact `result`, with one part: the text of
-  the agent's message, or the receiver's reason, as a `data` part with media type `application/json` when it is
+- `task.artifacts` holds the artifact `result`, with one part: the agent's
+  [reply](#the-reply) or its preview, or the receiver's reason, as a `data`
+  part with media type `application/json` when it is a whole reply that is
   JSON, a `raw` part with media type `text/plain` when it is not valid
   UTF-8 or escaping it as a JSON string would make it longer than base64
   does, and otherwise a text
-  part. With no result text, the part's text is the state's name. Result
-  text over 64 KiB once redacted is replaced by
-  `[redacted text over 65536 bytes]`.
+  part. With no result text, the part's text is the state's name.
 - [Metadata](#metadata) says where the run executed.
 
 A receiver writes the result in the same transaction as the run's
 `terminal` status, after the run's last chunks.
+
+### The reply
+
+The reply is the text parts of the agent's outcome message, joined by
+newlines and redacted whole. Its redacted form is `R`.
+
+| Size of `R` | Result text and status text | Reply chunks | `reply` in the metadata |
+| --- | --- | --- | --- |
+| at most 64 KiB | `R` | none | absent |
+| over 64 KiB, at most the pool's `reply_limit` | the preview | `R` | `{sha256, size}` |
+| over the pool's `reply_limit` | the preview | the first `reply_limit` bytes of `R` | `{sha256, size, cut: true}` |
+
+- The preview is the first 64 KiB of `R`. Both cuts fall at a rune boundary
+  of the redacted bytes, so no part of a value reaches the feed. A marker
+  either cut splits leaves a partial `[redacted:` prefix, which holds no
+  value.
+- Reply chunks are [output chunks](#output-chunk) with `artifactId`
+  `.wherry/reply`, in the transaction that holds the result. `sha256` and
+  `size` are of the bytes they carry. `cut` says the redacted reply was
+  longer. The run ends in the state its outcome file reports.
+- A whole reply that is JSON travels as a `data` part. A preview, cut,
+  travels as text or `raw`.
+
+A host verifies the reply chunks as it verifies an output's, from the
+result's own attempt and receiver, and names each marker in the joined
+bytes, so a marker split across a chunk seam counts once. A rejected reply
+leaves the preview. The chunks live under the transcript topic's
+retention: a transcript retention shorter than the feed's loses an old
+run's reply, and its transcript, before its result, which then reads
+`rejected: gap` for the reply.
 
 ### Metadata
 
@@ -483,6 +521,9 @@ The `metadata` of a result's `Task` says where the run executed:
   key in the pool's bucket.
 - `not_returned` (array): each output the run did not return, as
   `{name, size, reason}`. `size` is present when the receiver knows it.
+- `reply` (object): the [reply chunks](#the-reply), as `{sha256, size}`,
+  with `cut: true` when the reply was over the pool's `reply_limit`. It is
+  absent when the result text holds the whole reply.
 
 | `reason` | Meaning |
 | --- | --- |
@@ -912,9 +953,10 @@ stays valid. The marker can be longer than a value, so the limits hold for the
 redacted bytes: an output whose redacted form is over the pool's `output_limit`,
 or would take the run's outputs over it, is listed as `exceeds output limit`; a
 transcript line whose redacted form is over 512 KiB becomes an
-`unstored:oversize` part with that form's hash and size; and a result text,
-metadata string or status text whose redacted form is over 64 KiB is replaced by
-`[redacted text over 65536 bytes]`. A result whose agent fields are 16 KiB of
+`unstored:oversize` part with that form's hash and size; a reply whose redacted
+form is over 64 KiB travels as its preview and [reply chunks](#the-reply), both
+cut from the redacted form; and a metadata string or credential name whose
+redacted form is over 64 KiB is replaced by `[redacted text over 65536 bytes]`. A result whose agent fields are 16 KiB of
 8-byte values, each replaced by its 27-byte marker, still fits a default
 producer batch. A value shorter than 8 bytes once trimmed is not redacted; the
 receiver logs `credential <name> too short to redact` once for the attempt. A
@@ -1129,7 +1171,8 @@ appears as its variable. The lines hold no credential value.
 `.wherry/` beneath the outputs directory is reserved for the outcome file. No
 output name leads into it, and the receiver collects nothing in it as an
 output. A host writes the run's transcript among its outputs as
-`transcript.jsonl`, so a submission expecting an output of that name is
+`transcript.jsonl`, and an MCP host writes a reply over 64 KiB as
+`reply.txt`, so a submission expecting an output of either name is
 invalid.
 
 When the job ends, the receiver stops it, then asks the plugin to collect the
@@ -1141,7 +1184,8 @@ most that, which the receiver checks again. Every other entry is listed with its
 type and left unread. The receiver gives up on a collection that takes over 2
 minutes. A plugin that cannot collect, or a job that could not be stopped,
 leaves the outputs `not collected`; the receiver then asks the plugin for the
-outcome file alone, within another 2 minutes.
+outcome file alone, within another 2 minutes. The outcome file counts against
+neither output limit, and is invalid over the pool's `output_limit`.
 
 The receiver checks every name, redacts every file, and publishes each
 returned file as [output chunks](#output-chunk) and in the result's

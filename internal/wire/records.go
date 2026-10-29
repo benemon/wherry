@@ -449,6 +449,9 @@ func (value *Submission) validate() error {
 		if output.Name == TranscriptFile {
 			return errors.New("expected output " + TranscriptFile + " is reserved for the run's transcript")
 		}
+		if output.Name == ReplyFile {
+			return errors.New("expected output " + ReplyFile + " is reserved for the run's reply")
+		}
 		if output.Storage != "" && output.Storage != StorageS3 {
 			return errors.New("an expected output's storage is s3 or absent")
 		}
@@ -581,9 +584,9 @@ func (value *Output) validate() error {
 		return errors.New("invalid output")
 	}
 	artifact := &update.Artifact
-	if !ValidOutputName(artifact.ArtifactID) || !slices.Contains(artifact.Extensions, ExtensionURI) || len(artifact.Parts) != 1 || artifact.Parts[0].Raw == nil ||
+	if !(ValidOutputName(artifact.ArtifactID) || artifact.ArtifactID == ReplyArtifact) || !slices.Contains(artifact.Extensions, ExtensionURI) || len(artifact.Parts) != 1 || artifact.Parts[0].Raw == nil ||
 		len(artifact.Parts[0].Raw) > OutputChunk {
-		return errors.New("an output chunk is one raw part of at most 256 KiB of the artifact its output names")
+		return errors.New("an output chunk is one raw part of at most 256 KiB of the artifact its output or the reply names")
 	}
 	if err := validateParts(artifact.Parts); err != nil {
 		return err

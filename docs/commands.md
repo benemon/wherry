@@ -312,7 +312,8 @@ Waits for a run to finish and collects it. `--timeout` sets the wait,
   tenant's transcript topic with one consumer from the run's echo, so each
   line prints as it is written. Each line prints once, in order. After the last line come the state, each part
   of the status message on its own line, and the `output=` lines.
-- `--result-only` prints the status message's parts alone.
+- `--result-only` prints the status message's parts alone, so standard output
+  is the reply.
 - `-q` or `--quiet` prints nothing on standard output. On standard error it
   prints errors and the log of the seal requests it answers. The exit status
   tells the outcome.
@@ -320,7 +321,14 @@ Waits for a run to finish and collects it. `--timeout` sets the wait,
 The status message's parts are the agent's answer or what went wrong, as its
 [outcome file](configuration.md#agent-contract) reports it, or the
 receiver's reason, for every state. A part prints as its text, its JSON
-data, `[url <url>]`, or `[raw <media type> <n> bytes]`.
+data, `[url <url>]`, or `[raw <media type> <n> bytes]`. For a
+[reply](a2a-extension-v1.md#the-reply) over 64 KiB, the reply chunks'
+verified bytes print whole in place of the preview the message carries, and
+`watch` writes no file of it. Standard error then says
+`reply cut at the pool's reply limit` when the reply was longer than the
+pool's `reply_limit`, or
+`reply rejected by this host: <reason>; printed its preview` when the chunks
+do not verify, with a reason as for an output.
 
 Every mode writes the outputs and `transcript.jsonl`, deletes the run's S3
 objects once they verify, answers seal requests, and exits as below. The
@@ -343,7 +351,7 @@ For `changes.patch` it also prints `apply with: git am <path>`, and for
 `watch` writes the run's redacted transcript to `transcript.jsonl` in the
 outputs directory, one line per transcript line as `wherry transcript`
 prints them, and by default prints its line as it prints an output's, last.
-No expected output takes the name `transcript.jsonl`.
+No expected output takes the name `transcript.jsonl` or `reply.txt`.
 
 `watch` reads the run's statuses and result from the tenant feed, and its
 output and transcript chunks from the tenant's transcript topic, from the

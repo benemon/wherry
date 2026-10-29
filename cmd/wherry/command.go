@@ -494,8 +494,19 @@ func runWatch(ctx context.Context, client *busclient.Host, args []string, stdout
 	}
 	if result.Status.Message != nil && !quiet {
 		for _, part := range result.Status.Message.Parts {
+			if replyPreview(result, part) {
+				fmt.Fprintln(stdout, string(result.Reply.Data))
+				continue
+			}
 			fmt.Fprintln(stdout, partText(part))
 		}
+	}
+	switch {
+	case result.Reply == nil:
+	case result.Reply.Rejected != "":
+		fmt.Fprintf(diagnostics, "reply rejected by this host: %s; printed its preview\n", result.Reply.Rejected)
+	case result.Reply.Cut:
+		fmt.Fprintln(diagnostics, "reply cut at the pool's reply limit")
 	}
 	if collectErr != nil {
 		return collectErr
@@ -602,6 +613,14 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		return nil
 	}
 	return errors.New("usage: wherry status [RUN_ID]")
+}
+
+// replyPreview reports whether part is the preview of result's verified reply, which prints whole in its place.
+func replyPreview(result busclient.AwaitResult, part wire.Part) bool {
+	if result.Reply == nil || result.Reply.Rejected != "" || result.Task == nil || len(result.Task.Artifacts) == 0 || len(result.Task.Artifacts[0].Parts) == 0 {
+		return false
+	}
+	return part.Data == nil && partText(part) == partText(result.Task.Artifacts[0].Parts[0])
 }
 
 func partText(part wire.Part) string {

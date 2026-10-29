@@ -59,6 +59,68 @@ func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 	}
 }
 
+func TestReplyLimit(t *testing.T) {
+	record, err := DecodeRecord([]byte(poolRecordWithoutLimits))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := Fold([]Record{record})
+	if got := state.Pools["pool-a"].ReplyLimit; err != nil || got != 1<<20 || DefaultReplyLimit != 1<<20 {
+		t.Fatalf("reply limit %d, %v; want the 1 MiB default", got, err)
+	}
+	terms := modelTerms()
+	terms.OutputLimit, terms.ReplyLimit = 4<<20, 2<<20
+	encoded, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1})
+	if err != nil || !bytes.Contains(encoded, []byte(`"reply_limit":2097152`)) {
+		t.Fatalf("encoded %s, %v; want the terms' reply_limit", encoded, err)
+	}
+	var parsed Terms
+	if err := yaml.Unmarshal([]byte("reply_limit: 3000\n"), &parsed); err != nil || parsed.ReplyLimit != 3000 {
+		t.Fatalf("YAML reply_limit %d, %v", parsed.ReplyLimit, err)
+	}
+	terms.OutputLimit = 1000
+	state, err = Fold([]Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &Terms{Agents: terms.Agents, DefaultAgent: terms.DefaultAgent,
+		DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1, RequestPercentage: 1, OutputLimit: 1000}, AtMS: 1}})
+	if got := state.Pools["pool-a"].ReplyLimit; err != nil || got != 1000 {
+		t.Fatalf("reply limit %d, %v; want an output limit under the default", got, err)
+	}
+	for name, limit := range map[string]int64{"negative": -1, "over the output limit": 1001} {
+		terms.ReplyLimit = limit
+		if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms}); err == nil {
+			t.Errorf("encoded a reply limit %s", name)
+		}
+	}
+	terms.ReplyLimit = 1000
+	if _, err := EncodeRecord(Record{Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}); err != nil {
+		t.Fatalf("a reply limit at the output limit: %v", err)
+	}
+}
+
+// The largest results carry a reply entry, so the measured result stays the largest a receiver writes.
+func TestLargestResultsCarryAReply(t *testing.T) {
+	feed, err := largestRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range feed {
+		if !strings.HasPrefix(record.name, "a result") {
+			continue
+		}
+		payload, err := base64.RawURLEncoding.DecodeString(string(bytes.Split(record.value, []byte("."))[1]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result wire.Result
+		var metadata wire.ResultMetadata
+		if json.Unmarshal(payload, &result) != nil || json.Unmarshal(result.Task.Metadata, &metadata) != nil {
+			t.Fatalf("%s does not decode", record.name)
+		}
+		if metadata.Reply == nil || !metadata.Reply.Cut || metadata.Reply.Size != math.MaxInt64 {
+			t.Errorf("%s carries reply %+v; want one at its bounds", record.name, metadata.Reply)
+		}
+	}
+}
+
 func topicRetention(t *testing.T, service *Service, topic string) int64 {
 	t.Helper()
 	values, err := service.topicRetentions(context.Background(), topic)
@@ -769,7 +831,9 @@ func largestRecords() ([]feedRecord, error) {
 	outputName := strings.Repeat("a/", 255) + "aa"
 	// A result lists at most 256 collected entries and the expected outputs missing among them. An S3 output is an
 	// expected one, listed with its key, so a result returning 256 of them misses none.
-	metadata, s3Metadata := wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name}, wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name}
+	// A reply over wire.MaxText adds its entry to either result.
+	reply := &wire.ReturnedReply{SHA256: hash, Size: math.MaxInt64, Cut: true}
+	metadata, s3Metadata := wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name, Reply: reply}, wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name, Reply: reply}
 	for range wire.MaxOutputs {
 		metadata.Outputs = append(metadata.Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64})
 		metadata.NotReturned = append(metadata.NotReturned, wire.UnreturnedOutput{Name: outputName, Size: math.MaxInt64, Reason: "rejected: size changed while read"})
