@@ -14,7 +14,8 @@ result's history or a transcript line over 512 KiB, is a
 [reference part](#reference-parts) in place of a `url` part
 `unstored:input` or `unstored:oversize`. Every run's transcript ends with a
 `lastChunk` chunk, an empty one when no line is left for the terminal
-transaction.
+transaction. The result's reply keeps the part type of the agent's outcome
+message, `data` or text, with no test for JSON.
 
 **Change note, 2026-10-29:** edited in place at version 1. A reply over
 64 KiB once redacted travels as [reply chunks](#the-reply), output chunks with
@@ -501,8 +502,8 @@ A result is the A2A `Task` a run ends with.
   run's echo.
 - `task.artifacts` holds the artifact `result`, with one part: the agent's
   [reply](#the-reply) or its preview, or the receiver's reason, as a `data`
-  part with media type `application/json` when it is a whole reply that is
-  JSON, a `raw` part with media type `text/plain` when it is not valid
+  part with media type `application/json` when it is a whole reply the agent
+  gave as a `data` part and it is still JSON once redacted, a `raw` part with media type `text/plain` when it is not valid
   UTF-8 or escaping it as a JSON string would make it longer than base64
   does, and otherwise a text
   part. With no result text, the part's text is the state's name.
@@ -514,7 +515,10 @@ A receiver writes the result in the same transaction as the run's
 ### The reply
 
 The reply is the text parts of the agent's outcome message, joined by
-newlines and redacted whole. Its redacted form is `R`.
+newlines, or, in a message with no text part, the JSON of its first `data`
+part other than the [`credential` part](#the-credential-data-part). The
+receiver drops the message's other parts: `raw` and `url` parts, and further
+`data` parts. The reply is redacted whole. Its redacted form is `R`.
 
 | Size of `R` | Result text and status text | Reply chunks | `reply` in the metadata |
 | --- | --- | --- | --- |
@@ -530,8 +534,10 @@ newlines and redacted whole. Its redacted form is `R`.
   `.wherry/reply`, in the transaction that holds the result. `sha256` and
   `size` are of the bytes they carry. `cut` says the redacted reply was
   longer. The run ends in the state its outcome file reports.
-- A whole reply that is JSON travels as a `data` part. A preview, cut,
-  travels as text or `raw`.
+- The result forwards the part type the agent used. A whole reply from a
+  `data` part travels as a `data` part, and a reply from text parts as text
+  or `raw`, whatever it holds. The status text and a preview, cut, travel as
+  text or `raw`.
 
 A host verifies the reply chunks as it verifies an output's, from the
 result's own attempt and receiver, and names each marker in the joined

@@ -727,8 +727,12 @@ A file is invalid when it is over the pool's `output_limit`, does not decode
 as a `TaskStatus`, names another state, has no message or a message whose role
 is not `ROLE_AGENT`, or reports `TASK_STATE_AUTH_REQUIRED` without a
 `credential` part holding a credential name. The status message has one text
-part, the message's text parts joined by newlines, and the `credential` part.
-That text is the [reply](a2a-extension-v1.md#the-reply), redacted whole: over
+part, the message's text parts joined by newlines, or, when it has no text
+part, the JSON of its first `data` part other than the `credential` part, and
+the `credential` part. The receiver drops every other part of the message:
+`raw` and `url` parts and further `data` parts. The result carries a reply
+from a `data` part as a `data` part. That text is the
+[reply](a2a-extension-v1.md#the-reply), redacted whole: over
 64 KiB once redacted, the status message and the result carry its first
 64 KiB, and the result's reply chunks carry it up to the pool's `reply_limit`.
 An outcome file reporting `TASK_STATE_AUTH_REQUIRED` ends the run

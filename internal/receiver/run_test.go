@@ -429,25 +429,28 @@ func TestProgressOnlyWhenTheTranscriptMoves(t *testing.T) {
 	}
 }
 
-func TestTaskResultDataPartWhenJSON(t *testing.T) {
+// An agent's data part stays a data part in the result, and its status message carries it as text.
+func TestTaskResultDataPartFromADataPart(t *testing.T) {
 	for _, result := range []string{`{"answer":42,"items":[1,2]}`, `[true,null]`, `42`} {
 		t.Run(result, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.plugin.stream = []string{completedWith(result)}
+			f.plugin.stream = []string{`{"state":"TASK_STATE_COMPLETED","message":{"role":"ROLE_AGENT","parts":[{"data":` + result + `}]}}`}
 			run := testActiveRun(t, f, "run-json", 1)
 			if status := run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true}); status != kgo.AckAccept {
 				t.Fatalf("status %v", status)
 			}
-			part := f.lastTask(t).Artifacts[0].Parts[0]
-			if part.Text != "" || part.MediaType != "application/json" || string(part.Data) != result {
-				t.Fatalf("result part %#v, want data %s", part, result)
+			task := f.lastTask(t)
+			part := task.Artifacts[0].Parts[0]
+			if part.Text != "" || part.MediaType != "application/json" || string(part.Data) != result || task.Status.Message.Parts[0].Text != result {
+				t.Fatalf("result part %#v, status %+v, want data %s", part, task.Status.Message, result)
 			}
 		})
 	}
 }
 
+// An agent's text stays text, JSON or not.
 func TestTaskResultTextPartOtherwise(t *testing.T) {
-	for _, result := range []string{"done", `{"answer":`, `{"k":1,"k":2}`, "42 is the answer"} {
+	for _, result := range []string{"done", `{"answer":`, `{"k":1,"k":2}`, "42 is the answer", `{"answer":42,"items":[1,2]}`, `42`} {
 		t.Run(result, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.plugin.stream = []string{completedWith(result)}

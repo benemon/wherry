@@ -1274,6 +1274,8 @@ type activeRun struct {
 	outcome *wire.TaskStatus
 	// replied lists the reply chunks among outputs for the result, nil when the result carries the whole reply.
 	replied *wire.ReturnedReply
+	// dataReply marks a reply the agent gave as a data part.
+	dataReply bool
 	// claimed is when this attempt began executing the run, zero for a run ended without executing it.
 	claimed time.Time
 	// startCause is the redacted cause of this attempt's start failure, empty without one.
@@ -1891,7 +1893,8 @@ func (run *activeRun) store(ctx context.Context, output pluginsdk.Output) stored
 
 // readOutcome reads and decodes an outcome file of at most the pool's output limit. Any outcome but a TaskStatus of a state an
 // agent may report, with a ROLE_AGENT message and for TASK_STATE_AUTH_REQUIRED the credential it needs, is nil. The
-// status keeps the message's text and that credential's name, redacted; TASK_STATE_AUTH_REQUIRED ends the run FAILED.
+// status keeps the reply, the message's text or else its first other data part, and that credential's name, redacted;
+// TASK_STATE_AUTH_REQUIRED ends the run FAILED.
 func (run *activeRun) readOutcome(output pluginsdk.Output, limit int64) *wire.TaskStatus {
 	if output.Size > limit {
 		return nil
@@ -1905,23 +1908,44 @@ func (run *activeRun) readOutcome(output pluginsdk.Output, limit int64) *wire.Ta
 		len(reported.Message.Parts) > wire.MaxParts {
 		return nil
 	}
-	status := taskStatus(reported.State, text(*reported.Message))
+	parts := reported.Message.Parts
+	credential := -1
 	switch reported.State {
 	case wire.TaskStateCompleted, wire.TaskStateFailed:
-		return &status
 	case wire.TaskStateAuthRequired:
-		for _, part := range reported.Message.Parts {
-			var needed struct {
-				Credential string `json:"credential"`
+		if credential = slices.IndexFunc(parts, func(part wire.Part) bool { return neededCredential(part) != "" }); credential < 0 {
+			return nil
+		}
+	default:
+		return nil
+	}
+	reply, fromData := text(*reported.Message), false
+	if reply == "" {
+		for i, part := range parts {
+			if part.Data != nil && i != credential {
+				reply, fromData = string(part.Data), true
+				break
 			}
-			if part.Data == nil || json.Unmarshal(part.Data, &needed) != nil || !wire.ValidName(needed.Credential) {
-				continue
-			}
-			status = withCredentials(taskStatus(wire.TaskStateFailed, text(*reported.Message)), []string{run.redactText(needed.Credential)})
-			return &status
 		}
 	}
-	return nil
+	run.dataReply = fromData
+	if credential < 0 {
+		status := taskStatus(reported.State, reply)
+		return &status
+	}
+	status := withCredentials(taskStatus(wire.TaskStateFailed, reply), []string{run.redactText(neededCredential(parts[credential]))})
+	return &status
+}
+
+// neededCredential is the credential a credential data part names, empty for any other part.
+func neededCredential(part wire.Part) string {
+	var needed struct {
+		Credential string `json:"credential"`
+	}
+	if part.Data == nil || json.Unmarshal(part.Data, &needed) != nil || !wire.ValidName(needed.Credential) {
+		return ""
+	}
+	return needed.Credential
 }
 
 // fileType names the type of a collected entry that is not a regular file.
@@ -2167,15 +2191,15 @@ func escapedLength(text []byte) int {
 	return len(quoted) - 2
 }
 
-// result builds the run's final task for the feed; a whole reply that is JSON travels as a data part. The agent's
-// text reaches it redacted and within wire.MaxText.
+// result builds the run's final task for the feed; a whole reply the agent gave as a data part travels as one while
+// it stays JSON once redacted. The agent's text reaches it redacted and within wire.MaxText.
 func (run *activeRun) result(status wire.TaskStatus, result string) *kgo.Record {
 	result = string(run.redact([]byte(result), math.MaxInt64).data)
 	part := wire.Part{Text: result}
 	switch {
 	case result == "":
 		part.Text = string(status.State)
-	case run.replied == nil && jsontext.Value(result).IsValid():
+	case run.dataReply && run.replied == nil && jsontext.Value(result).IsValid():
 		part = wire.Part{Data: jsontext.Value(result), MediaType: "application/json"}
 	case !utf8.ValidString(result) || escapedLength([]byte(result)) > base64.StdEncoding.EncodedLen(len(result)):
 		// As for a transcript line, text travels raw when escaping it would make it longer than base64 does.
