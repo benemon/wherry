@@ -1158,10 +1158,10 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *pluginsdk.Hand
 				r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
 				return signed.SealValues{}, run.returnTask(ctx, nil), false
 			}
-			return signed.SealValues{}, run.fail(ctx, unansweredReason(append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), nil), false
+			return signed.SealValues{}, run.unanswered(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
 		case waitCtx.Err() != nil:
 			waited("unanswered")
-			return signed.SealValues{}, run.fail(ctx, unansweredReason(append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), nil), false
+			return signed.SealValues{}, run.unanswered(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
 		case values != nil:
 			waited("sealed")
 			return *values, 0, true
@@ -1489,6 +1489,12 @@ func (run *activeRun) cancel(ctx context.Context, pending []pluginsdk.Line) kgo.
 }
 
 const cancelReason = "canceled by user"
+
+// unanswered ends the run FAILED for a seal its host did not answer, naming each credential in a credential data part.
+func (run *activeRun) unanswered(ctx context.Context, credentials []string, urls bool) kgo.AckStatus {
+	reason := unansweredReason(credentials, urls)
+	return run.end(ctx, withCredentials(taskStatus(wire.TaskStateFailed, reason), credentials), reason, nil, kgo.AckReject)
+}
 
 // unansweredReason names only the credential names and storage URLs the host did not answer.
 func unansweredReason(credentials []string, urls bool) string {
@@ -1881,7 +1887,7 @@ func (run *activeRun) store(ctx context.Context, output pluginsdk.Output) stored
 
 // readOutcome reads and decodes an outcome file of at most the pool's output limit. Any outcome but a TaskStatus of a state an
 // agent may report, with a ROLE_AGENT message and for TASK_STATE_AUTH_REQUIRED the credential it needs, is nil. The
-// status keeps the message's text and that credential's name, redacted.
+// status keeps the message's text and that credential's name, redacted; TASK_STATE_AUTH_REQUIRED ends the run FAILED.
 func (run *activeRun) readOutcome(output pluginsdk.Output, limit int64) *wire.TaskStatus {
 	if output.Size > limit {
 		return nil
@@ -1907,11 +1913,7 @@ func (run *activeRun) readOutcome(output pluginsdk.Output, limit int64) *wire.Ta
 			if part.Data == nil || json.Unmarshal(part.Data, &needed) != nil || !wire.ValidName(needed.Credential) {
 				continue
 			}
-			data, _ := json.Marshal(map[string]string{"credential": run.redactText(needed.Credential)}) // strings always encode
-			if status.Message == nil {
-				status.Message = &wire.Message{MessageID: wire.RandomID("msg-"), Role: wire.RoleAgent, Extensions: []string{wire.ExtensionURI}}
-			}
-			status.Message.Parts = append(status.Message.Parts, wire.Part{Data: data, MediaType: "application/json"})
+			status = withCredentials(taskStatus(wire.TaskStateFailed, text(*reported.Message)), []string{run.redactText(needed.Credential)})
 			return &status
 		}
 	}
@@ -2079,6 +2081,21 @@ func (r *Receiver) sign(value wire.Record) []byte {
 		panic(fmt.Sprintf("sign %T: %v", value, err)) // records are built here; invalid ones are programming errors
 	}
 	return encoded
+}
+
+// withCredentials adds to status's message a credential data part for each of names.
+func withCredentials(status wire.TaskStatus, names []string) wire.TaskStatus {
+	if len(names) == 0 {
+		return status
+	}
+	if status.Message == nil {
+		status.Message = &wire.Message{MessageID: wire.RandomID("msg-"), Role: wire.RoleAgent, Parts: []wire.Part{}, Extensions: []string{wire.ExtensionURI}}
+	}
+	for _, name := range names {
+		data, _ := json.Marshal(map[string]string{"credential": name}) // strings always encode
+		status.Message.Parts = append(status.Message.Parts, wire.Part{Data: data, MediaType: "application/json"})
+	}
+	return status
 }
 
 // taskStatus stamps state with the current time; a reason becomes the status message.

@@ -217,7 +217,7 @@ func TestAttemptFilterOrdersByAttempt(t *testing.T) {
 }
 
 func TestTerminalStates(t *testing.T) {
-	terminal := map[TaskState]bool{TaskStateCompleted: true, TaskStateFailed: true, TaskStateCanceled: true, TaskStateRejected: true, TaskStateAuthRequired: true}
+	terminal := map[TaskState]bool{TaskStateCompleted: true, TaskStateFailed: true, TaskStateCanceled: true, TaskStateRejected: true}
 	for _, state := range []TaskState{
 		TaskStateUnspecified, TaskStateSubmitted, TaskStateWorking, TaskStateCompleted, TaskStateFailed,
 		TaskStateCanceled, TaskStateInputRequired, TaskStateRejected, TaskStateAuthRequired,

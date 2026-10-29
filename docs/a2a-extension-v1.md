@@ -2,6 +2,13 @@
 
 URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
+**Change note, 2026-10-29 (A2A conformance):** edited in place at version 1.
+A run that ends for want of a credential ends `TASK_STATE_FAILED` with a
+[`credential` data part](#the-credential-data-part) for each credential,
+when its seal goes unanswered and when its agent reports
+`TASK_STATE_AUTH_REQUIRED`. wherry no longer treats
+`TASK_STATE_AUTH_REQUIRED` as terminal.
+
 **Change note, 2026-10-29:** edited in place at version 1. A reply over
 64 KiB once redacted travels as [reply chunks](#the-reply), output chunks with
 `artifactId` `.wherry/reply`, up to the pool's `reply_limit`. The result text
@@ -277,7 +284,7 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 | `claimed` | `TASK_STATE_WORKING` | the receiver admits the run | |
 | `started` | `TASK_STATE_WORKING` | the job has started | |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
-| `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `TASK_STATE_AUTH_REQUIRED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration.md#agent-contract), or the reason as message text |
+| `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration.md#agent-contract), or the reason as message text |
 
 A receiver writes each status to the pool's events and the tenant feed,
 with identical bytes, in one Kafka transaction. A run's chunks and output
@@ -298,8 +305,8 @@ Readers order a run's statuses and results by `attempt`, and records of an
 earlier attempt do not change the outcome of a later one.
 
 A status message is an A2A `Message` with `role` `ROLE_AGENT` and one text
-part. The message of a `TASK_STATE_AUTH_REQUIRED` status adds the
-[`credential` data part](#the-credential-data-part). The agent's text is
+part. The message of a run that ends for want of a credential adds a
+[`credential` data part](#the-credential-data-part) for each credential. The agent's text is
 its [reply](#the-reply): all of it when it fits 64 KiB once redacted, and
 otherwise its preview. It travels as a `raw` part with media type
 `text/plain` when escaping it as a JSON string would make it longer than
@@ -346,21 +353,24 @@ read it.
 
 ### The credential data part
 
-An agent that needs a credential it lacks ends its run
-`TASK_STATE_AUTH_REQUIRED` and names the credential in a data part of its
-message:
+A run that ends for want of a credential ends `TASK_STATE_FAILED`, and its
+status message names each credential in a data part:
 
 ```json
 {"data": {"credential": "deploy-key"}, "mediaType": "application/json"}
 ```
 
 `credential` is a credential name: at most 32 lowercase letters, digits and
-hyphens, redacted like any agent text. It names one of the credentials the
-prompt lists, including an optional one the prompt marks `(not supplied)`,
-or another the run needs and was not given. A run in
-`TASK_STATE_AUTH_REQUIRED` has ended: wherry treats the state as terminal
-and does not resume the run. The host submits a new run once it holds the
-credential.
+hyphens. The receiver writes one part for each credential a
+[seal request](#seal-request) asked for when the seal wait expires, and one
+part for the credential an agent names when its
+[outcome file](configuration.md#agent-contract) reports
+`TASK_STATE_AUTH_REQUIRED`. The agent's credential name is redacted like any
+agent text. It names one of the credentials the prompt lists, including an
+optional one the prompt marks `(not supplied)`, or another the run needs and
+was not given. The run has ended and is not resumed. `TASK_STATE_AUTH_REQUIRED`
+is not a terminal state in wherry, and no record a receiver writes holds it.
+The host submits a new run once it holds the credential.
 
 ## Chunk
 
@@ -802,7 +812,8 @@ run's `claimed` status.
 - `expiry_at_ms` is 5 minutes after the request. The receiver holds the claim
   until a seal opens, a cancel of the run arrives, or `expiry_at_ms` passes.
   At expiry it ends the run `TASK_STATE_FAILED` with a message naming the
-  credentials it asked for ([Status](#status)), and
+  credentials it asked for ([Status](#status)), each also in a
+  [`credential` data part](#the-credential-data-part), and
   the task is not returned to the pool.
 - An adopter publishes nothing of the job until its seal opens. It holds
   the job's lines, at most 4 MiB, dropping the oldest, and logs how many it

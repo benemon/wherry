@@ -72,7 +72,7 @@ in the background now, before anything else: it blocks until the run ends (or
 for 2 hours 10 minutes; `--timeout` changes that), prints the agent's reply
 and a line for each returned output, writes the outputs, answers the
 receiver's credential request, and exits 0 for `TASK_STATE_COMPLETED`, 2
-failed, 3 canceled, 4 rejected, 5 auth required, 6 timed out, and 1 when it
+failed, 3 canceled, 4 rejected, 6 timed out, and 1 when it
 could not wait or collect, at once when the queue deadline passes with no
 receiver claiming the run. Its completion is how you learn the run ended, so
 you skip the `wait` tool loop below. Then carry on with other work. Do not stop
@@ -133,11 +133,9 @@ seconds and returns one of:
   lists each expected file that did not come back, with the reason.
 - `TASK_STATE_FAILED` with a `message`: what went wrong as the agent
   reported it, or why the receiver could not run it, a required output did
-  not come back, or a credential went unanswered (see the next section).
-- `TASK_STATE_AUTH_REQUIRED` with a `message` from the agent naming the
-  credential it needs, often an optional one the host has no source for. The
-  run has ended; add a source for the credential to the host's
-  configuration and submit again.
+  not come back, or a credential went unanswered or the agent needs one it
+  lacks, often an optional one the host has no source for. A `credential`
+  data part names each such credential (see the next section).
 - `TASK_STATE_REJECTED` or `TASK_STATE_CANCELED` with a `message` that
   says why.
 - `TASK_STATE_SUBMITTED` with the `message`
@@ -173,7 +171,8 @@ The receiver that claims a task asks this host for the run's credentials, and
 the wherry MCP server answers while it runs, as `wherry wait` does. When no
 answer arrives within 5 minutes, usually because a credential's source failed
 to resolve, the run ends `TASK_STATE_FAILED` with a `message` that names the
-credentials and never holds their values. Tell the user to add a source for
+credentials and never holds their values. A run whose agent needs a
+credential it lacks ends `TASK_STATE_FAILED` the same way. Tell the user to add a source for
 the credential under that name to `credentials` in their wherry configuration:
 a file, an environment variable of the process answering, or a command. Never ask for the value or handle it
 yourself. When the user says it is in place, call `submit` again with the

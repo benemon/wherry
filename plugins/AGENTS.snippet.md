@@ -29,7 +29,7 @@ clones itself.
    most by default), then prints the agent's reply and an
    `output=<name> path=<path>` line for each output, and writes each returned
    output, S3 outputs included. Its exit status is 0 for
-   `TASK_STATE_COMPLETED`, 2 failed, 3 canceled, 4 rejected, 5 auth required,
+   `TASK_STATE_COMPLETED`, 2 failed, 3 canceled, 4 rejected,
    6 timed out and 1 when it could not wait or collect. It also answers the receiver's
    request for the run's credentials, so start it within 5 minutes of
    submitting, and do not stop it while that request is open: unanswered, the
@@ -40,7 +40,7 @@ clones itself.
    host's configuration` when the host has no source for a credential the
    agent requires or the task names. A run whose credential request goes
    unanswered for 5 minutes ends `TASK_STATE_FAILED`, and a run whose agent
-   needs a credential it lacks ends `TASK_STATE_AUTH_REQUIRED`; each message
+   needs a credential it lacks ends `TASK_STATE_FAILED` too; each message
    names the credential. Tell the user which credential it names, and to add
    a source for it (a file, an environment variable or a command) under
    `credentials` in their wherry configuration. Never handle the value

@@ -50,13 +50,11 @@ var taskStates = map[TaskState]bool{
 	TaskStateAuthRequired:  true,
 }
 
-// A run that needs a credential ends: it is not resumed.
 var terminalStates = map[TaskState]bool{
-	TaskStateCompleted:    true,
-	TaskStateFailed:       true,
-	TaskStateCanceled:     true,
-	TaskStateRejected:     true,
-	TaskStateAuthRequired: true,
+	TaskStateCompleted: true,
+	TaskStateFailed:    true,
+	TaskStateCanceled:  true,
+	TaskStateRejected:  true,
 }
 
 // ValidTaskState reports whether state is an A2A task state.

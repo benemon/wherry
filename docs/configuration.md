@@ -352,8 +352,8 @@ them as record batches: the largest output chunk, of 256 KiB, two largest
 results, and the largest transcript chunk, a line of 512 KiB. Each result
 has the run's message with its 256 input files named but not carried, and a
 status message and a result text of 64 KiB each, both raw, as an agent's text
-that JSON escaping would lengthen travels, with a `TASK_STATE_AUTH_REQUIRED`
-status's `credential` part and a `reply` entry. A reply chunk is an output
+that JSON escaping would lengthen travels, with a `credential` part and a
+`reply` entry. A reply chunk is an output
 chunk, so `reply_limit` has no record-limit check. One result lists
 256 returned and 256 unreturned outputs with 512-byte names, the other 256 S3
 outputs with their keys. A receiver's labels and a plugin's job name have
@@ -719,7 +719,7 @@ outputs whatever its exit, and reads the outcome file:
 
 | Outcome file | Exit | The run ends |
 | --- | --- | --- |
-| valid | any | in its state, with its message as the status message and its text as the result |
+| valid | any | in its state, `TASK_STATE_FAILED` for `TASK_STATE_AUTH_REQUIRED`, with its message as the status message and its text as the result |
 | missing or invalid | non-zero or a signal | `TASK_STATE_FAILED`, with `agent exited <code>` or `agent ended by <signal>`, followed by the platform's reason in parentheses when the plugin gives one, as in `agent exited 137 (OOMKilled)` |
 | missing or invalid | 0 | `TASK_STATE_FAILED`, with `agent reported no outcome` |
 
@@ -731,8 +731,9 @@ part, the message's text parts joined by newlines, and the `credential` part.
 That text is the [reply](a2a-extension-v1.md#the-reply), redacted whole: over
 64 KiB once redacted, the status message and the result carry its first
 64 KiB, and the result's reply chunks carry it up to the pool's `reply_limit`.
-`TASK_STATE_AUTH_REQUIRED` ends the run, which is not resumed; the tenant
-supplies the credential and submits again. A required
+An outcome file reporting `TASK_STATE_AUTH_REQUIRED` ends the run
+`TASK_STATE_FAILED` with the `credential` part. The run is not resumed; the
+tenant supplies the credential and submits again. A required
 output that is not returned fails the run with
 `required output <name> not returned: <reason>` as the status message,
 whatever the file reports; when the file is missing or invalid and the exit

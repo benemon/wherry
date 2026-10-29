@@ -78,8 +78,9 @@ no values.
 A run whose seal does not arrive within 5 minutes ends in
 `TASK_STATE_FAILED` with a message naming each credential the host did not
 answer. An agent that finds a credential missing or refused during the run
-ends it in `TASK_STATE_AUTH_REQUIRED` naming the credential. Both states
-are final.
+reports `TASK_STATE_AUTH_REQUIRED` naming the credential, and the run ends
+`TASK_STATE_FAILED`. Each message names its credentials in `credential` data
+parts, and neither run is resumed.
 
 Everything else the agent needs comes from the platform or from the task:
 the image or host install, network access, CA bundles and SSH known hosts
@@ -115,9 +116,8 @@ pool whose terms list the agent's credentials.
    starts, so the host answers the receiver's
    [seal request](#sealed-credentials) within 5 minutes.
 
-5. When the run ends `TASK_STATE_FAILED` naming unanswered credentials, or
-   `TASK_STATE_AUTH_REQUIRED` naming a credential, fix that credential's
-   source and submit a new run.
+5. When the run ends `TASK_STATE_FAILED` naming a credential, fix that
+   credential's source and submit a new run.
 
 ## A model credential per pool
 
@@ -204,7 +204,7 @@ Prerequisites: the tenant's account at the model provider.
 
 1. Revoke the key at the model provider. Agents still running with it get
    refused calls; an agent that reports the refusal ends its run
-   `TASK_STATE_AUTH_REQUIRED` naming the credential.
+   `TASK_STATE_FAILED` naming the credential.
 2. Remove the value from the credential's source on each of the tenant's
    hosts, or replace it with a new key as in
    [Rotate a pool's credential](#rotate-a-pool-s-credential). Until a source

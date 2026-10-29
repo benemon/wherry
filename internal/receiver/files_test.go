@@ -211,7 +211,7 @@ func optionalTerms() admin.Terms {
 }
 
 // A run whose host has no source for an optional credential goes without it, its preamble naming it not supplied, and
-// an agent that needs it ends the run in AUTH_REQUIRED naming it.
+// an agent that reports AUTH_REQUIRED for it ends the run FAILED naming it.
 func TestAnUnsuppliedOptionalCredentialIsNamedInThePreamble(t *testing.T) {
 	outcome := `{"state":"TASK_STATE_AUTH_REQUIRED","message":{"role":"ROLE_AGENT","parts":[{"text":"gh needs a token"},{"data":{"credential":"github-token"}}]}}`
 	fake := &fakePlugin{stream: noResultStream, outputs: []pluginsdk.Output{outcomeOutput(outcome)}}
@@ -229,8 +229,8 @@ func TestAnUnsuppliedOptionalCredentialIsNamedInThePreamble(t *testing.T) {
 		t.Fatalf("prompt %q; want the unsupplied credential named, its target not", prompt)
 	}
 	status := f.lastTask(t).Status
-	if status.State != wire.TaskStateAuthRequired || len(status.Message.Parts) != 2 || string(status.Message.Parts[1].Data) != `{"credential":"github-token"}` {
-		t.Fatalf("ended %s with %+v, want AUTH_REQUIRED naming github-token", status.State, status.Message)
+	if status.State != wire.TaskStateFailed || len(status.Message.Parts) != 2 || string(status.Message.Parts[1].Data) != `{"credential":"github-token"}` {
+		t.Fatalf("ended %s with %+v, want FAILED naming github-token", status.State, status.Message)
 	}
 }
 
@@ -257,8 +257,10 @@ func TestMissingTaskCredentialFailsNamingIt(t *testing.T) {
 	}
 	task := f.lastTask(t)
 	want := "credentials " + credentialName + ", deploy-key were not answered within 5m; add them to credentials in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again"
-	if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != want {
-		t.Fatalf("ended %s with %q, want FAILED naming both credentials", task.Status.State, task.Status.Message.Parts[0].Text)
+	parts := task.Status.Message.Parts
+	if task.Status.State != wire.TaskStateFailed || len(parts) != 3 || parts[0].Text != want ||
+		string(parts[1].Data) != `{"credential":"`+credentialName+`"}` || string(parts[2].Data) != `{"credential":"deploy-key"}` {
+		t.Fatalf("ended %s with %+v, want FAILED naming both credentials, each in a credential part", task.Status.State, parts)
 	}
 }
 
@@ -573,7 +575,7 @@ func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 		run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: name, Size: 1 << 62, Reason: "rejected: size changed while read"})
 	}
 	text := strings.Repeat("\x01", wire.MaxText)
-	status := taskStatus(wire.TaskStateAuthRequired, text)
+	status := taskStatus(wire.TaskStateFailed, text)
 	status.Message.Parts = append(status.Message.Parts, wire.Part{Data: []byte(`{"credential":"` + strings.Repeat("c", 32) + `"}`), MediaType: "application/json"})
 	record := run.result(status, text)
 	size := len(record.Key) + len(record.Value) + 97

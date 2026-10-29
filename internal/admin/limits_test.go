@@ -887,7 +887,7 @@ func largestRecords() ([]feedRecord, error) {
 		return &wire.Result{
 			Task: wire.Task{
 				ID: run, ContextID: run, History: []wire.Message{history}, Metadata: metadata,
-				Status: wire.TaskStatus{State: wire.TaskStateAuthRequired, Timestamp: "2006-01-02T15:04:05.000Z", Message: &wire.Message{
+				Status: wire.TaskStatus{State: wire.TaskStateFailed, Timestamp: "2006-01-02T15:04:05.000Z", Message: &wire.Message{
 					MessageID: "msg-" + strings.Repeat("0", 32), Role: wire.RoleAgent, Extensions: []string{wire.ExtensionURI}, Parts: []wire.Part{
 						{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}, {Data: []byte(`{"credential":"` + name + `"}`), MediaType: "application/json"},
 					},

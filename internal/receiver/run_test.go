@@ -140,8 +140,9 @@ func TestSealWaitExpiryFailsWithoutCredentialValue(t *testing.T) {
 		t.Fatalf("terminal status %#v, want FAILED", terminal)
 	}
 	want := "credential " + credentialName + " was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again"
-	if got.Message == nil || got.Message.Role != wire.RoleAgent || len(got.Message.Parts) != 1 || got.Message.Parts[0].Text != want || strings.Contains(got.Message.Parts[0].Text, testToken) {
-		t.Fatalf("status message %#v, want credential name and no value", got.Message)
+	if got.Message == nil || got.Message.Role != wire.RoleAgent || len(got.Message.Parts) != 2 || got.Message.Parts[0].Text != want || strings.Contains(got.Message.Parts[0].Text, testToken) ||
+		string(got.Message.Parts[1].Data) != `{"credential":"`+credentialName+`"}` {
+		t.Fatalf("status message %#v, want credential name and no value, and the credential part", got.Message)
 	}
 	if at, err := time.Parse(time.RFC3339, got.Timestamp); err != nil || at.Before(before) || at.After(time.Now()) {
 		t.Fatalf("status timestamp %q is not the time of the status: %v", got.Timestamp, err)
@@ -1135,7 +1136,7 @@ func TestOutcomeFileEndsTheRun(t *testing.T) {
 		{name: "completed after an exit", terminal: exited, outcome: outcome("TASK_STATE_COMPLETED", "ROLE_AGENT", `{"text":"the answer"}`), state: wire.TaskStateCompleted, message: "the answer", ack: kgo.AckAccept},
 		{name: "failed", outcome: outcome("TASK_STATE_FAILED", "ROLE_AGENT", `{"text":"the tests fail"}`), state: wire.TaskStateFailed, message: "the tests fail", ack: kgo.AckReject},
 		{name: "auth required", terminal: exited, outcome: outcome("TASK_STATE_AUTH_REQUIRED", "ROLE_AGENT", `{"text":"the token expired"},{"data":{"credential":"github-token"}}`),
-			state: wire.TaskStateAuthRequired, message: "the token expired\n{\"credential\":\"github-token\"}", ack: kgo.AckReject},
+			state: wire.TaskStateFailed, message: "the token expired\n{\"credential\":\"github-token\"}", ack: kgo.AckReject},
 		{name: "missing after an exit", terminal: exited, state: wire.TaskStateFailed, message: "agent exited 3", ack: kgo.AckReject},
 		{name: "missing after a signal", terminal: killed, state: wire.TaskStateFailed, message: "agent ended by SIGKILL", ack: kgo.AckReject},
 		{name: "missing", state: wire.TaskStateFailed, message: "agent reported no outcome", ack: kgo.AckReject},
@@ -1210,7 +1211,7 @@ func TestCapturedOutcomes(t *testing.T) {
 	}{
 		"completed.json":     {wire.TaskStateCompleted, "fixture: completed"},
 		"failed.json":        {wire.TaskStateFailed, "fixture: failed"},
-		"auth_required.json": {wire.TaskStateAuthRequired, "fixture: auth_required\n{\"credential\":\"fixture-token\"}"},
+		"auth_required.json": {wire.TaskStateFailed, "fixture: auth_required\n{\"credential\":\"fixture-token\"}"},
 		"malformed.json":     {wire.TaskStateFailed, "agent reported no outcome"},
 		"no_state.json":      {wire.TaskStateFailed, "agent reported no outcome"},
 	}
@@ -1344,8 +1345,8 @@ func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
 			task := f.lastTask(t)
 			terminal := f.feedStatuses(t)[len(f.feedStatuses(t))-1].StatusUpdate.Status
 			for _, status := range []wire.TaskStatus{task.Status, terminal} {
-				if status.State != wire.TaskStateAuthRequired || status.Message.Parts[0].Text != test.want {
-					t.Fatalf("status %s with %.80q, want %s with %.80q", status.State, status.Message.Parts[0].Text, wire.TaskStateAuthRequired, test.want)
+				if status.State != wire.TaskStateFailed || status.Message.Parts[0].Text != test.want {
+					t.Fatalf("status %s with %.80q, want %s with %.80q", status.State, status.Message.Parts[0].Text, wire.TaskStateFailed, test.want)
 				}
 			}
 			if result := task.Artifacts[0].Parts[0].Text; result != test.want {

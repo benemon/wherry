@@ -42,7 +42,7 @@ func TestWaitPrintsTheReplyAndOutputs(t *testing.T) {
 // Each terminal state other than COMPLETED has its own exit code, as do a passed timeout and a run wait cannot find.
 func TestWaitExitCodes(t *testing.T) {
 	for state, want := range map[wire.TaskState]int{
-		wire.TaskStateCompleted: 0, wire.TaskStateFailed: 2, wire.TaskStateCanceled: 3, wire.TaskStateRejected: 4, wire.TaskStateAuthRequired: 5,
+		wire.TaskStateCompleted: 0, wire.TaskStateFailed: 2, wire.TaskStateCanceled: 3, wire.TaskStateRejected: 4,
 	} {
 		t.Run(string(state), func(t *testing.T) {
 			b := newBus(t)

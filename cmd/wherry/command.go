@@ -436,7 +436,7 @@ func (e *exitError) Unwrap() error { return e.err }
 // stateCodes are wait's exit codes for a run that ends in a state other than COMPLETED, and timeoutCode for its
 // timeout passing with the run still going.
 var stateCodes = map[wire.TaskState]int{
-	wire.TaskStateFailed: 2, wire.TaskStateCanceled: 3, wire.TaskStateRejected: 4, wire.TaskStateAuthRequired: 5,
+	wire.TaskStateFailed: 2, wire.TaskStateCanceled: 3, wire.TaskStateRejected: 4,
 }
 
 const timeoutCode = 6

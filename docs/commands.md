@@ -390,10 +390,9 @@ The queue deadline comes from this host's record of the submission, so
 | 2 | the run ended `TASK_STATE_FAILED` |
 | 3 | the run ended `TASK_STATE_CANCELED` |
 | 4 | the run ended `TASK_STATE_REJECTED` |
-| 5 | the run ended `TASK_STATE_AUTH_REQUIRED` |
 | 6 | `--timeout` passed with the run still going |
 
-For codes 2 to 5 the error is `run ended in <state>`.
+For codes 2 to 4 the error is `run ended in <state>`.
 
 While it waits, `wait` answers the seal requests on the tenant feed for
 every run this host submitted that has not ended, once per attempt, and logs on standard error
