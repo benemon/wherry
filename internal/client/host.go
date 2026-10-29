@@ -38,6 +38,8 @@ var (
 	ErrQueueDeadlinePastMaximum = errors.New("queue deadline exceeds the pool's max queue deadline")
 	// ErrInvalidInput wraps a submission the wire format rejects; its message names the rule, never the value.
 	ErrInvalidInput = errors.New("invalid input")
+	// ErrNoStorage is the ErrInvalidInput of a pool without storage or a host without a storage credential.
+	ErrNoStorage = fmt.Errorf("%w", ErrInvalidInput)
 )
 
 // errUndecodable wraps a local state file that does not decode.
