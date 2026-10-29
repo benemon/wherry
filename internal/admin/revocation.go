@@ -18,6 +18,9 @@ var ErrStillAuthorised = errors.New("broker still authorises the principal")
 // ACL deletion reaches each broker on its own schedule, so step 3 retries a broker that still authorises.
 var probeWindow, probeInterval = 2 * time.Minute, time.Second
 
+// errLoginRefused is a probe whose login a broker refused.
+var errLoginRefused = errors.New("authentication failure")
+
 type RevocationStep struct {
 	Number   int
 	Name     string
@@ -61,7 +64,9 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 			if errors.Is(err, ErrAuthorizationDenied) {
 				return nil
 			}
-			if !errors.Is(err, ErrStillAuthorised) || time.Now().After(deadline) {
+			// A broker that has not yet applied the rotated SCRAM credential refuses its password, as one that has not
+			// yet dropped the ACLs still authorises it; both settle within the window.
+			if !errors.Is(err, ErrStillAuthorised) && !errors.Is(err, errLoginRefused) || time.Now().After(deadline) {
 				return fmt.Errorf("probe incomplete: %w", err)
 			}
 			select {
@@ -139,7 +144,7 @@ func (service *Service) Probe(topic string) func(context.Context, string, string
 			request.Topics = append(request.Topics, requestTopic)
 			response, err := client.Broker(int(id)).Request(ctx, request)
 			if errors.Is(err, kerr.SaslAuthenticationFailed) {
-				return errors.New("authentication failure")
+				return fmt.Errorf("broker %d: %w", id, errLoginRefused)
 			}
 			if err != nil {
 				return err

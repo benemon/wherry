@@ -829,7 +829,7 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 	}
 }
 
-func TestRevocationProbeRetriesOnlyWhileABrokerAuthorises(t *testing.T) {
+func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
@@ -864,15 +864,23 @@ func TestRevocationProbeRetriesOnlyWhileABrokerAuthorises(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	login, calls, password := probe(errors.New("authentication failure"))
-	step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, login))
-	if step.Complete || *calls != 1 {
-		t.Fatalf("failed login: step %+v after %d probes; want one failed probe", step, *calls)
+	settling, calls, _ := probe(errLoginRefused, ErrAuthorizationDenied)
+	if step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, settling)); !step.Complete || *calls != 2 {
+		t.Fatalf("broker without the rotated credential yet: step %+v after %d probes; want complete after 2", step, *calls)
+	}
+	failed, calls, _ := probe(errors.New("broker down"))
+	if step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, failed)); step.Complete || *calls != 1 {
+		t.Fatalf("failed probe: step %+v after %d probes; want one failed probe", step, *calls)
+	}
+	probeWindow = 5 * time.Millisecond
+	refused, _, password := probe(errLoginRefused)
+	step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, refused))
+	if step.Complete || !errors.Is(step.Err, errLoginRefused) {
+		t.Fatalf("login never accepted: step %+v; want failure after the probe window", step)
 	}
 	if *password == "" || strings.Contains(step.Err.Error(), *password) {
 		t.Fatal("a revocation step error carries the rotated password")
 	}
-	probeWindow = 5 * time.Millisecond
 	stuck, _, _ := probe(ErrStillAuthorised)
 	if step := stepThree(service.RevokeReceiver(ctx, "receiver-b", time.Millisecond, stuck)); step.Complete || !errors.Is(step.Err, ErrStillAuthorised) {
 		t.Fatalf("broker never denies: step %+v; want failure after the probe window", step)
