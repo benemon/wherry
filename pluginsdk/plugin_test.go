@@ -685,26 +685,56 @@ func TestServeHandsTheProfileItsLogger(t *testing.T) {
 	})
 }
 
-// A plugin of protocol version 9, the one before this, is refused.
-func TestVersionNinePluginIsRefused(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "wherry-plugin-old")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '1|9|tcp|127.0.0.1:1|grpc'\nsleep 5\n"), 0o700); err != nil {
-		t.Fatal(err)
+// A plugin serving only protocol version 9, the one before this, or only 11, the one after, is refused.
+func TestOtherProtocolVersionsAreRefused(t *testing.T) {
+	for _, version := range []int{9, 11} {
+		script := filepath.Join(t.TempDir(), "wherry-plugin-other")
+		if err := os.WriteFile(script, fmt.Appendf(nil, "#!/bin/sh\necho '1|%d|tcp|127.0.0.1:1|grpc'\nsleep 5\n", version), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		p, err := Launch(fixed(script), &syncBuffer{})
+		if err == nil {
+			p.Close()
+			t.Fatalf("launched a version %d plugin", version)
+		}
+		if want := fmt.Sprintf("incompatible API version with plugin. Plugin version: %d, Client versions: [10]", version); !strings.Contains(err.Error(), want) {
+			t.Fatalf("launch error %v; want %q", err, want)
+		}
 	}
-	p, err := Launch(fixed(script), &syncBuffer{})
-	if err == nil {
-		p.Close()
-		t.Fatal("launched a version 9 plugin")
+}
+
+// A plugin and a receiver built before VersionedPlugins, naming protocol version 10 through
+// HandshakeConfig.ProtocolVersion, run with this SDK's.
+func TestProtocolTenBeforeVersionedPlugins(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "wherry-plugin-protocol10")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	build.Dir = filepath.Join("testdata", "protocol10")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build the protocol 10 fixture: %v\n%s", err, output)
 	}
-	if !strings.Contains(err.Error(), "incompatible API version with plugin. Plugin version: 9, Client versions: [10]") {
-		t.Fatalf("launch error %v; want the version named", err)
-	}
+	t.Run("its plugin under this Launch", func(t *testing.T) {
+		p, err := Launch(fixed(binary), &syncBuffer{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer p.Close()
+		configured(t, p, "a", "{}")
+		if version, protocol := p.Version(); version != "v0.0.0-protocol10" || protocol != 10 {
+			t.Fatalf("version = %q, protocol %d; want v0.0.0-protocol10, 10", version, protocol)
+		}
+	})
+	t.Run("this Serve under its Launch", func(t *testing.T) {
+		t.Setenv("WHERRY_TESTPLUGIN_RECORD", filepath.Join(t.TempDir(), "record.jsonl"))
+		if output, err := exec.Command(binary, testPlugin).Output(); err != nil || string(output) != "v0.0.0-test 10\n" {
+			t.Fatalf("launch = %q, %v; want version v0.0.0-test and protocol 10", output, err)
+		}
+	})
 }
 
 // A plugin serves protocol version 10 only under the WHERRY_PLUGIN cookie, and refuses to serve without it.
 func TestServeHandshakeUsesThePluginCookie(t *testing.T) {
-	if handshake.MagicCookieKey != "WHERRY_PLUGIN" || handshake.ProtocolVersion != 10 {
-		t.Fatalf("handshake %+v; want cookie key WHERRY_PLUGIN and protocol version 10", handshake)
+	if handshake.MagicCookieKey != "WHERRY_PLUGIN" {
+		t.Fatalf("handshake %+v; want cookie key WHERRY_PLUGIN", handshake)
 	}
 	serve := func(env ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -10,12 +10,17 @@ import (
 
 const pluginName = "plugin"
 
-// handshake is plugin protocol version 10; a plugin of another version is refused at launch. The cookie only stops a
-// plugin binary started by hand from serving.
+// handshake names no protocol version, since versionedPlugins does. The cookie only stops a plugin binary started by
+// hand from serving.
 var handshake = plugin.HandshakeConfig{
-	ProtocolVersion:  10,
 	MagicCookieKey:   "WHERRY_PLUGIN",
 	MagicCookieValue: "b6f1c3e2-9d4a-4e7b-8c5f-2a1d0e9f7b63",
+}
+
+// versionedPlugins is every plugin protocol version Serve serves and Launch accepts, each with its plugin set. go-plugin
+// runs the newest version both sides list and refuses a plugin that lists none of Launch's.
+func versionedPlugins(p *grpcPlugin) map[int]plugin.PluginSet {
+	return map[int]plugin.PluginSet{10: {pluginName: p}}
 }
 
 type grpcPlugin struct {
