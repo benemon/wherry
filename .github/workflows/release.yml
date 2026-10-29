@@ -110,3 +110,72 @@ jobs:
             git -C "$tap" push origin HEAD:main
           fi
           rm -f "$key"
+
+  # Checks the published release as a user receives it, from the release alone: the assets against
+  # .github/release-contents.txt, the checksums' signature, the checksums, and each archive's provenance.
+  verify:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install cosign
+        run: |
+          .github/release-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Download the release's assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          case "$RELEASE_TAG" in (*[!A-Za-z0-9._-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -D "$RUNNER_TEMP/assets"
+      # Each archive in .github/release-contents.txt, its SBOM, and the signed checksums, and nothing else.
+      - name: Compare the assets with the expected list
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          export LC_ALL=C
+          grep -v '^ ' .github/release-contents.txt | sed "s/_VERSION_/_${RELEASE_TAG}_/" |
+            while read -r archive; do printf '%s\n%s.sbom.json\n' "$archive" "$archive"; done |
+            { cat; printf 'checksums.txt\nchecksums.txt.sigstore.json\n'; } | sort > "$RUNNER_TEMP/assets-expected.txt"
+          find "$RUNNER_TEMP/assets" -type f -printf '%f\n' | sort > "$RUNNER_TEMP/assets-actual.txt"
+          diff -u "$RUNNER_TEMP/assets-expected.txt" "$RUNNER_TEMP/assets-actual.txt"
+          .github/release-contents.sh "$RUNNER_TEMP/assets" | diff -u .github/release-contents.txt -
+      # The identity docs/quickstart.md gives users.
+      - name: Verify the checksums' signature and the checksums
+        working-directory: ${{ runner.temp }}/assets
+        run: |
+          cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+            --certificate-identity-regexp '^https://github\.com/benemon/wherry/\.github/workflows/release\.yml@refs/tags/v' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          sha256sum --strict -c checksums.txt
+      - name: Verify each archive's provenance
+        working-directory: ${{ runner.temp }}/assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: for archive in wherry_*.tar.gz; do gh attestation verify "$archive" -R benemon/wherry; done
+
+  # Installs the release from the tap as the README does, on Apple silicon, and runs the formula's test, which checks
+  # the installed binary's version.
+  verify-brew:
+    needs: publish
+    runs-on: macos-latest
+    steps:
+      - name: Install wherry from benemon/tap and test it
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          case "$RELEASE_TAG" in (*[!A-Za-z0-9._-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
+          brew install benemon/tap/wherry
+          installed=$(brew list --versions wherry)
+          if [ "$installed" != "wherry ${RELEASE_TAG#v}" ]; then
+            echo "benemon/tap installed $installed, not $RELEASE_TAG" >&2
+            exit 1
+          fi
+          brew test wherry
