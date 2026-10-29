@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	json "encoding/json/v2"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -362,8 +363,20 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if awaited.Status.State != wire.TaskStateCompleted || awaited.Task == nil || len(awaited.Task.Artifacts) != 1 || awaited.Task.Artifacts[0].Parts[0].Text != "done" {
+	if awaited.Status.State != wire.TaskStateCompleted || awaited.Task == nil || len(awaited.Task.Artifacts) != 4 || awaited.Task.Artifacts[0].Parts[0].Text != "done" {
 		t.Fatalf("await = %+v; want the receiver's completed result", awaited)
+	}
+	// The result references each output it returned with the sha256 and size the host verified, then the transcript.
+	for i, output := range awaited.Outputs {
+		artifact := awaited.Task.Artifacts[1+i]
+		var reference wire.StreamedReference
+		if artifact.ArtifactID != output.Name || artifact.Name != output.Name || len(artifact.Parts) != 1 || artifact.Parts[0].MediaType != wire.ReferenceMediaType ||
+			json.Unmarshal(artifact.Parts[0].Data, &reference) != nil || reference != (wire.StreamedReference{SHA256: output.SHA256, Size: output.Size}) {
+			t.Fatalf("artifact %d is %+v; want a reference to %s with its sha256 and size", 1+i, artifact, output.Name)
+		}
+	}
+	if transcript := awaited.Task.Artifacts[3]; transcript.ArtifactID != wire.TranscriptArtifact || string(transcript.Parts[0].Data) != "{}" {
+		t.Fatalf("last artifact %+v; want the transcript's reference", transcript)
 	}
 	// The plugin's outputs cross the link in pieces and the feed in chunks the receiver signs; the host joins and verifies them.
 	if len(awaited.Outputs) != 2 || awaited.Outputs[0].Name != "big.bin" || !bytes.Equal(awaited.Outputs[0].Data, bytes.Repeat([]byte("b"), 2<<20+1)) ||

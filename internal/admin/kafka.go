@@ -149,7 +149,13 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 			return err
 		}
 	}
-	if terms.RecordLimit, err = service.checkLimits(ctx, current, pool); err != nil {
+	if !dryRun {
+		if err := service.configureTopics(ctx, feedConfigs, tenantFeeds(current)...); err != nil {
+			return err
+		}
+	}
+	// A dry run measures each feed at the limit the update would raise it to.
+	if terms.RecordLimit, err = service.checkLimits(ctx, current, pool, dryRun); err != nil {
 		return err
 	}
 	if err := service.checkPoolFeedsRetention(ctx, current, pool, retention.feed); err != nil {
@@ -309,7 +315,7 @@ func (service *Service) HostAdd(ctx context.Context, tenant, host, bundlePath st
 	if err := service.createTopics(ctx, "-1", HostTopic(tenant, host)); err != nil {
 		return err
 	}
-	if err := service.createTopics(ctx, strconv.Itoa(tenantRetentionMS), TenantTopic(tenant), TenantTranscriptTopic(tenant)); err != nil {
+	if err := service.tenantTopics(ctx, tenant); err != nil {
 		return err
 	}
 	if err := service.reconcileACLs(ctx, state); err != nil {
@@ -330,15 +336,15 @@ func (service *Service) TenantAdd(ctx context.Context, tenant, pool string) erro
 	if !ok {
 		return errors.New("entitlement names unknown pool")
 	}
-	// The pool's records must fit the tenant's feed, so it exists before the entitlement does.
-	if err := service.createTopics(ctx, strconv.Itoa(tenantRetentionMS), TenantTopic(tenant), TenantTranscriptTopic(tenant)); err != nil {
+	// The pool's records must fit the tenant's feed, so it exists, at FeedRecordLimit, before the entitlement does.
+	if err := service.tenantTopics(ctx, tenant); err != nil {
 		return err
 	}
 	if current.Entitlements[tenant] == nil {
 		current.Entitlements[tenant] = map[string]bool{}
 	}
 	current.Entitlements[tenant][pool] = true
-	if _, err := service.checkLimits(ctx, current, pool); err != nil {
+	if _, err := service.checkLimits(ctx, current, pool, false); err != nil {
 		return err
 	}
 	retention, err := poolRetention(terms)
@@ -380,11 +386,14 @@ func (service *Service) Check(ctx context.Context) error {
 		}
 	}
 	for pool := range state.Pools {
-		if _, err := service.checkLimits(ctx, state, pool); err != nil {
+		if _, err := service.checkLimits(ctx, state, pool, false); err != nil {
 			return fmt.Errorf("pool %s: %w", pool, err)
 		}
 	}
 	if err := service.checkRetention(ctx, state); err != nil {
+		return err
+	}
+	if err := service.checkFeedLimits(ctx, state); err != nil {
 		return err
 	}
 	return service.verifyACLs(ctx, state)
@@ -424,6 +433,39 @@ func (service *Service) Skip(ctx context.Context, offset int64, hash string) err
 		return service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Key: []byte("skip." + strconv.FormatInt(offset, 10)), Value: encoded}).FirstErr()
 	}
 	return fmt.Errorf("wherry.admin has no record at offset %d", offset)
+}
+
+// FeedRecordLimit is the largest record batch a tenant's feed and transcript topic take, their max.message.bytes, and
+// the most a receiver's producer batches: a result lists a reference artifact for each output it returns.
+const FeedRecordLimit = 2 << 20
+
+// feedConfigs are the configs host add, pool entitle, pool create and pool update set on tenant feeds beyond the
+// retention they are created with.
+var feedConfigs = map[string]string{"max.message.bytes": strconv.Itoa(FeedRecordLimit)}
+
+// tenantTopics creates tenant's feed and transcript topic, then sets feedConfigs on them, new or existing.
+func (service *Service) tenantTopics(ctx context.Context, tenant string) error {
+	topics := []string{TenantTopic(tenant), TenantTranscriptTopic(tenant)}
+	if err := service.createTopics(ctx, strconv.Itoa(tenantRetentionMS), topics...); err != nil {
+		return err
+	}
+	return service.configureTopics(ctx, feedConfigs, topics...)
+}
+
+// tenantFeeds are the feeds and transcript topics of every tenant with a host or an entitlement.
+func tenantFeeds(state State) []string {
+	tenants := map[string]bool{}
+	for _, host := range state.Hosts {
+		tenants[host.Tenant] = true
+	}
+	for tenant := range state.Entitlements {
+		tenants[tenant] = true
+	}
+	var topics []string
+	for _, tenant := range slices.Sorted(maps.Keys(tenants)) {
+		topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
+	}
+	return topics
 }
 
 // tenantRetentionMS is the tenant feed's and transcript topic's default: the transcript topic carries transcripts, which
@@ -584,6 +626,9 @@ func (service *Service) configureTopicRetention(ctx context.Context, value strin
 }
 
 func (service *Service) configureTopics(ctx context.Context, values map[string]string, topics ...string) error {
+	if len(topics) == 0 {
+		return nil
+	}
 	var configs []kadm.AlterConfig
 	for name, value := range values {
 		configs = append(configs, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
@@ -802,6 +847,28 @@ func (service *Service) applyQuota(ctx context.Context, state State, tenant, pri
 	return nil
 }
 
+// checkFeedLimits reports a tenant feed or transcript topic whose max.message.bytes is below FeedRecordLimit.
+func (service *Service) checkFeedLimits(ctx context.Context, state State) error {
+	feeds := tenantFeeds(state)
+	if len(feeds) == 0 {
+		return nil
+	}
+	values, err := service.topicConfigs(ctx, "max.message.bytes", feeds...)
+	if err != nil {
+		return err
+	}
+	for _, feed := range feeds {
+		limit, err := strconv.ParseInt(values[feed], 10, 64)
+		if err != nil {
+			return fmt.Errorf("topic %s max.message.bytes: %w", feed, err)
+		}
+		if limit < FeedRecordLimit {
+			return fmt.Errorf("topic %s max.message.bytes %d is below required %d", feed, limit, FeedRecordLimit)
+		}
+	}
+	return nil
+}
+
 // brokerSetting reads a numeric setting from every broker, combining values with pick.
 func (service *Service) brokerSetting(ctx context.Context, name string, pick func(a, b int64) int64) (int64, error) {
 	client := kadm.NewClient(service.Admin)
@@ -842,9 +909,9 @@ func (service *Service) brokerSetting(ctx context.Context, name string, pick fun
 }
 
 // checkLimits refuses a pool whose largest receiver records the broker or a producer would refuse, and returns the
-// record limit of its tasks topic.
-func (service *Service) checkLimits(ctx context.Context, state State, pool string) (int64, error) {
-	tasks, feeds, err := service.recordLimits(ctx, state, pool)
+// record limit of its tasks topic. With raised, a feed below FeedRecordLimit counts as raised to it.
+func (service *Service) checkLimits(ctx context.Context, state State, pool string, raised bool) (int64, error) {
+	tasks, feeds, err := service.recordLimits(ctx, state, pool, raised)
 	if err != nil {
 		return 0, err
 	}
@@ -856,15 +923,14 @@ func (service *Service) checkLimits(ctx context.Context, state State, pool strin
 	return tasks, nil
 }
 
-// recordLimits are the largest record batches that every broker and franz-go's producers accept, and with them the
-// pool's task topic, for submissions, and the feeds of its tenants, for receiver records.
-func (service *Service) recordLimits(ctx context.Context, state State, pool string) (int64, int64, error) {
+// recordLimits are the largest record batches that the pool's task topic, for submissions, and the feeds of its
+// tenants, for receiver records, accept, each within what its producers batch. A topic's max.message.bytes overrides
+// the brokers' message.max.bytes, which bounds a topic that does not describe its own.
+func (service *Service) recordLimits(ctx context.Context, state State, pool string, raised bool) (int64, int64, error) {
 	limit, err := service.brokerSetting(ctx, "message.max.bytes", func(a, b int64) int64 { return min(a, b) })
 	if err != nil {
 		return 0, 0, err
 	}
-	// Hosts and receivers, like the admin client, produce with franz-go's default batch maximum.
-	limit = min(limit, int64(service.Admin.OptValue(kgo.ProducerBatchMaxBytes).(int32)))
 	topics := []string{PoolTasksTopic(pool)}
 	for tenant, pools := range state.Entitlements {
 		if pools[pool] {
@@ -875,28 +941,38 @@ func (service *Service) recordLimits(ctx context.Context, state State, pool stri
 	if err != nil {
 		return 0, 0, err
 	}
-	tasks, feeds := limit, limit
+	// Hosts, like the admin client, produce with franz-go's default batch maximum, and receivers with FeedRecordLimit.
+	tasks, feeds := int64(service.Admin.OptValue(kgo.ProducerBatchMaxBytes).(int32)), int64(FeedRecordLimit)
 	for _, resource := range resources {
-		// A pool's task topic does not exist before its first create.
-		if errors.Is(resource.Err, kerr.UnknownTopicOrPartition) && resource.Name == PoolTasksTopic(pool) {
-			continue
+		// A topic without its own max.message.bytes, as a pool's task topic before its first create, takes each
+		// broker's message.max.bytes; one set on the topic overrides them.
+		topic := limit
+		if !errors.Is(resource.Err, kerr.UnknownTopicOrPartition) || resource.Name != PoolTasksTopic(pool) {
+			if resource.Err != nil {
+				return 0, 0, fmt.Errorf("describe topic %s: %w", resource.Name, resource.Err)
+			}
+			for _, config := range resource.Configs {
+				if config.Key != "max.message.bytes" || config.Value == nil {
+					continue
+				}
+				parsed, err := strconv.ParseInt(*config.Value, 10, 64)
+				if err != nil {
+					return 0, 0, err
+				}
+				if config.Source == kmsg.ConfigSourceDynamicTopicConfig {
+					topic = parsed
+				} else {
+					topic = min(topic, parsed)
+				}
+			}
 		}
-		if resource.Err != nil {
-			return 0, 0, fmt.Errorf("describe topic %s: %w", resource.Name, resource.Err)
-		}
-		for _, config := range resource.Configs {
-			if config.Key != "max.message.bytes" || config.Value == nil {
-				continue
-			}
-			parsed, err := strconv.ParseInt(*config.Value, 10, 64)
-			if err != nil {
-				return 0, 0, err
-			}
-			if resource.Name == PoolTasksTopic(pool) {
-				tasks = min(tasks, parsed)
-			} else {
-				feeds = min(feeds, parsed)
-			}
+		switch {
+		case resource.Name == PoolTasksTopic(pool):
+			tasks = min(tasks, topic)
+		case raised:
+			feeds = min(feeds, max(topic, FeedRecordLimit))
+		default:
+			feeds = min(feeds, topic)
 		}
 	}
 	return tasks, feeds, nil
@@ -909,8 +985,8 @@ var feedRecords = []struct {
 	batch int64
 }{
 	{"an output chunk", 468889},
-	{"a result", 809151},
-	{"a result returning S3 outputs", 821762},
+	{"a result", 1259337},
+	{"a result returning S3 outputs", 822411},
 	{"a transcript chunk", 933508},
 }
 

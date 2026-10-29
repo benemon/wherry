@@ -195,27 +195,37 @@ difference.
 ### Size a pool against the broker
 
 Every task and every output or transcript chunk is one Kafka record, so
-the broker's record limit bounds what a pool can carry. `pool create` reads
+the broker's record limit bounds what a pool can carry. The Kafka cluster
+must allow a topic `max.message.bytes` of 2 MiB (2097152): every tenant
+feed and transcript topic has it, and receivers batch up to it. A result
+names each output the run returned, so the largest result is a
+1259337-byte record batch, over a broker's default limit. `host add` and
+`pool entitle` create a tenant's feed and transcript topic at 2 MiB, and
+`pool entitle`, `pool create` and `pool update` set existing ones to it. A
+cluster policy that refuses the setting fails the command, and
+`wherry admin check` reports a tenant topic below 2 MiB.
+
+`pool create` reads
 `message.max.bytes` from every broker and `max.message.bytes` from the
 pool's tasks topic and its tenants' feeds and transcript topics, records the
 tasks topic's record limit in the pool's terms, signs the largest output and
 transcript chunks and results, and refuses the terms when one is over the
-limit of those tenant topics. A transcript chunk can be 933508 bytes, so keep
-each tenant feed's and transcript topic's `max.message.bytes` at or above
-that:
+limit of those tenant topics. A topic's own `max.message.bytes` overrides
+the brokers' `message.max.bytes`. `wherry admin check` measures the tenant
+topics as they stand, so a feed lowered to a broker's default since reads:
 
 ```
-a transcript chunk record is 933508 bytes, over the 900000-byte record limit
+a result record is 1259337 bytes, over the 1048588-byte record limit
 ```
 
 `wherry submit` measures each signed submission against the recorded
 record limit. Input files grow by about 16/9 on the wire, since they are
-base64-encoded inside a record that is itself base64url-encoded. wherry
-producers batch at most 1000012 bytes, which is the limit with brokers and
-topics at their defaults. Raising `message.max.bytes` or
-`max.message.bytes` leaves the limit there, and lowering either lowers it.
-Run `pool update` after changing either, so the terms record the new
-limit. An output chunk holds
+base64-encoded inside a record that is itself base64url-encoded. A host
+batches at most 1000012 bytes, which is the tasks topic's limit with brokers
+and the topic at their defaults. Raising `message.max.bytes` or the tasks
+topic's `max.message.bytes` leaves the limit there, and lowering either
+lowers it. Run `pool update` after changing either, so the terms record the
+new limit. An output chunk holds
 256 KiB whatever `output_limit` is, so `output_limit` spans as many records
 as it needs and the record limit does not bound it. A reply chunk is an
 output chunk, so the same holds for `reply_limit`.
@@ -765,7 +775,8 @@ wherry admin check
 
 It loads `wherry.admin`, validates every receiver configuration against its
 pool's current terms, checks that every pool's largest records still fit the
-broker's record limit, reports topic retention below the pool's required
+broker's record limit, reports a tenant feed or transcript topic whose
+`max.message.bytes` is below 2 MiB, reports topic retention below the pool's required
 bounds, including a receiver's progress topic that keeps less than its
 pool's tasks topic, and confirms that every ACL the state calls for exists. It does not
 check a plugin profile's plugin or `config` section; at start the receiver

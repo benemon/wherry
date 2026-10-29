@@ -338,11 +338,15 @@ both forms.
 
 ### Record limit
 
-A record limit is the lowest of `message.max.bytes` across the brokers,
-1000012 bytes, the most a wherry producer batches, and `max.message.bytes`
-on the topic the record goes to: the pool's tasks topic for submissions,
-and the feeds and transcript topics of the tenants entitled to the pool
-for receiver records.
+A record limit is the lower of what the record's producer batches and what
+the topic the record goes to takes: its `max.message.bytes` when the topic
+sets one, and otherwise the lowest `message.max.bytes` across the brokers.
+Submissions go to the pool's tasks topic, from a host that batches at most
+1000012 bytes. Receiver records go to the feeds and transcript topics of
+the tenants entitled to the pool, from a receiver that batches at most
+2 MiB (2097152 bytes), the `max.message.bytes` wherry sets on every tenant
+feed and transcript topic. The Kafka cluster must allow a topic
+`max.message.bytes` of 2 MiB.
 `pool create` records the tasks topic's record limit in the pool's terms,
 and [`submit`](commands.md#wherry-submit) measures each submission against it. A pool file
 does not set it.
@@ -352,11 +356,12 @@ them as record batches: the largest output chunk, of 256 KiB, two largest
 results, and the largest transcript chunk, a line of 512 KiB. Each result
 has the run's message with its 256 input files named but not carried, and a
 status message and a result text of 64 KiB each, both raw, as an agent's text
-that JSON escaping would lengthen travels, with a `credential` part and a
-`reply` entry. A reply chunk is an output
+that JSON escaping would lengthen travels, with a `credential` part, a
+`reply` entry, and reference artifacts for the reply and the transcript. A reply chunk is an output
 chunk, so `reply_limit` has no record-limit check. One result lists
-256 returned and 256 unreturned outputs with 512-byte names, the other 256 S3
-outputs with their keys. A receiver's labels and a plugin's job name have
+256 returned and 256 unreturned outputs with 512-byte names, each returned
+one also a reference artifact, and is the largest record, a 1259337-byte
+batch; the other lists 256 S3 outputs with their keys. A receiver's labels and a plugin's job name have
 no bound and are left empty. Any one over its record limit refuses the terms,
 naming its size and the limit.
 

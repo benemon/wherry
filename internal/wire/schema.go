@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"cmp"
 	"encoding/hex"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
@@ -318,6 +319,28 @@ const ReplyArtifact = OutcomeDir + "/reply"
 // ReplyFile is where an MCP host writes a run's reply among its outputs, so no output takes its name.
 const ReplyFile = "reply.txt"
 
+// ResultArtifact and TranscriptArtifact are the artifact IDs of a result's text and of a run's transcript. A result's
+// reference artifacts take each output's name as its ID, and A2A requires a task's artifact IDs unique, so no output
+// takes either name.
+const (
+	ResultArtifact     = "result"
+	TranscriptArtifact = "transcript"
+)
+
+// ReservedArtifact reports whether name is an artifact ID a result takes for itself, which no expected output names
+// and no receiver collects.
+func ReservedArtifact(name string) bool {
+	return name == ResultArtifact || name == TranscriptArtifact
+}
+
+// StreamedReference is the data of the reference part in a result's reference artifact for an output or the reply: the
+// SHA-256 and size of the bytes its chunks carry. The transcript's reference artifact has an empty object: an adopter
+// cannot hash or count an earlier attempt's lines, and a reader reads the transcript to its lastChunk chunk.
+type StreamedReference struct {
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
 // GitPatch and GitBundle are the outputs a run asking for its git changes back expects: a patch series, or a bundle.
 const (
 	GitPatch  = "changes.patch"
@@ -559,6 +582,39 @@ func validateArtifact(value *Artifact) error {
 		return err
 	}
 	return validateMetadata(value.Metadata)
+}
+
+// validateReferenceArtifact checks an artifact a result lists after its text: one reference part standing in for a
+// streamed artifact of the same ID. An output's has the output's name and the reply's none, each with the sha256 and
+// size of its bytes; the transcript's has no name and an object naming nothing more.
+func validateReferenceArtifact(value *Artifact) error {
+	if !slices.Contains(value.Extensions, ExtensionURI) {
+		return errors.New("artifact must declare the wherry extension")
+	}
+	if len(value.Parts) != 1 {
+		return errors.New("a reference artifact has exactly one part")
+	}
+	part := value.Parts[0]
+	if part.MediaType != ReferenceMediaType || part.Data == nil || part.Text != "" || part.Raw != nil || part.URL != "" || part.Filename != "" ||
+		!part.Data.IsValid() || part.Data.Kind() != '{' {
+		return errors.New("a reference artifact's part is a reference data part with no filename")
+	}
+	switch {
+	case value.ArtifactID == TranscriptArtifact && value.Name == "":
+		return cmp.Or(validateMetadata(part.Metadata), validateMetadata(value.Metadata))
+	case value.ArtifactID == ReplyArtifact && value.Name == "",
+		ValidOutputName(value.ArtifactID) && !ReservedArtifact(value.ArtifactID) && value.Name == value.ArtifactID:
+	default:
+		return errors.New("a reference artifact names an output by its name, the reply or the transcript")
+	}
+	var reference struct {
+		SHA256 string `json:"sha256"`
+		Size   *int64 `json:"size"`
+	}
+	if json.Unmarshal(part.Data, &reference, signed.Tolerant) != nil || !ValidHash(reference.SHA256) || reference.Size == nil || *reference.Size < 0 {
+		return errors.New("an output's or the reply's reference data requires sha256 and a size of 0 or more")
+	}
+	return cmp.Or(validateMetadata(part.Metadata), validateMetadata(value.Metadata))
 }
 
 func validateParts(parts []Part) error {

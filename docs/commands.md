@@ -725,7 +725,9 @@ of each live receiver in the pool, or sets an existing one's configuration,
 with the same `retention.ms`. It refuses a `max_queue_deadline` above
 29 days and 18 hours, or one that with six hours added exceeds the
 `retention.ms` of the feed or transcript topic of a tenant entitled to the
-pool. See
+pool. Before it measures the records, it sets `max.message.bytes` to 2 MiB
+(2097152) on the feed and transcript topic of every tenant with a host or an
+entitlement. See
 [Topics](design.md#topics-1).
 
 ### `wherry admin pool update POOL`
@@ -746,13 +748,15 @@ of `wherry.admin`, within 15 seconds, without a restart. A lowered
 `delivery_limit` applies to a task in flight at its next release.
 
 With `--dry-run`, it makes the same checks, prints nothing, and writes
-nothing to Kafka. Terms it refuses fail in the same way with or without
+nothing to Kafka; it measures a tenant topic below 2 MiB as the update would
+set it. Terms it refuses fail in the same way with or without
 `--dry-run`.
 
 ### `wherry admin pool entitle POOL --tenant TENANT`
 
 Entitles the tenant to an existing pool, creates the tenant feed and
-transcript topic, and grants the tenant's hosts and the pool's receivers
+transcript topic with `max.message.bytes` 2 MiB, or sets existing ones to
+it, and grants the tenant's hosts and the pool's receivers
 their ACLs. It refuses when the pool's records do not fit the
 [record limit](configuration.md#record-limit) with the tenant's feed and
 transcript topic counted, or when the `retention.ms` of either is below the
@@ -762,7 +766,7 @@ each host's [quotas](configuration.md#quotas).
 ### `wherry admin host add HOST --tenant TENANT --bundle-file FILE`
 
 Records the host, creates its principal, its key topic and the tenant
-feed and transcript topic, grants its ACLs, applies its quotas, and writes
+feed and transcript topic, the latter two with `max.message.bytes` 2 MiB, grants its ACLs, applies its quotas, and writes
 its bundle.
 
 ### `wherry admin receiver add RECEIVER`
@@ -888,7 +892,8 @@ not match.
 
 Loads `wherry.admin`, checks that no two names collide, validates every
 receiver configuration against its pool's terms, checks that every pool's
-[records still fit the broker](configuration.md#record-limit), checks topic retention and
+[records still fit the broker](configuration.md#record-limit), checks that every
+tenant feed and transcript topic has a `max.message.bytes` of at least 2 MiB, checks topic retention and
 timestamp type against the [bounds](design.md#topics-1), checks that each
 live receiver's progress topic keeps records at least as long as its pool's
 tasks topic, and checks that every ACL the
