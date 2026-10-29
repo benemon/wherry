@@ -753,7 +753,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}
 		dispatched, dispatchedHandle, err := named.Plugin.Dispatch(runCtx, pluginsdk.Run{
 			ID: runID, Profile: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Attempt: attempt,
-			Prompt: []byte(preamble(named.Plugin.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID,
+			Prompt: []byte(Preamble(named.Plugin.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID,
 				run.terms().ReplyLimit) + prompt(admitted.history)),
 			Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
@@ -2225,10 +2225,10 @@ func attemptOf(record *kgo.Record) int64 {
 	return max(1, int64(record.DeliveryCount()))
 }
 
-// preamble is the agent's instructions for the run. It names credentials and their targets, never their values, and
+// Preamble is the agent's instructions for the run. It names credentials and their targets, never their values, and
 // gives full paths, so an agent without a shell finds its files. A directory the plugin does not report is named by
 // its environment variable.
-func preamble(directories pluginsdk.Directories, inputs []string, credentials []wire.TaskCredential, unsupplied []string, outputs []wire.ExpectedOutput, git *wire.GitInput, run string, replyLimit int64) string {
+func Preamble(directories pluginsdk.Directories, inputs []string, credentials []wire.TaskCredential, unsupplied []string, outputs []wire.ExpectedOutput, git *wire.GitInput, run string, replyLimit int64) string {
 	input, output, credential := cmp.Or(directories.Input, "$WHERRY_INPUT_DIR"), cmp.Or(directories.Output, "$WHERRY_OUTPUT_DIR"),
 		cmp.Or(directories.Credentials, "$WHERRY_CREDENTIALS_DIR")
 	lines := []string{"Your input directory is " + input + ", your credentials directory " + credential + " and your output directory " + output +

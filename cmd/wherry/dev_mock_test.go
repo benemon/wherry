@@ -13,6 +13,11 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/receiver"
+	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 )
 
 // mockTask makes a task directory as the nomad plugin lays one out under raw_exec, with prompt.txt holding a preamble
@@ -157,4 +162,24 @@ func (l *lockedBuffer) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.b.String()
+}
+
+// TestDevMockReadsTheReceiversPreamble pins the mock's rule, the prompt after the preamble's first blank line, against
+// the preamble the receiver writes with every section present.
+func TestDevMockReadsTheReceiversPreamble(t *testing.T) {
+	dir := mockTask(t, "")
+	const prompt = "first paragraph\n\nsecond paragraph\n"
+	text := receiver.Preamble(pluginsdk.Directories{Input: dir + "/inputs", Output: dir + "/outputs", Credentials: dir + "/secrets/credentials"},
+		[]string{"data.txt"}, []wire.TaskCredential{{Name: "forge-token", File: "forge-token"}, {Name: "mock-token", Env: "MOCK_TOKEN"}}, []string{"vault-token"},
+		[]wire.ExpectedOutput{{Name: "echo.txt", Required: true}}, &wire.GitInput{Remote: "https://forge.example/org/repo.git", Ref: "main", Credential: "forge-token"},
+		"run-a", admin.DefaultReplyLimit)
+	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), []byte(text+prompt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"dev", "mock"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if echoed, err := os.ReadFile(filepath.Join(dir, "outputs", "echo.txt")); err != nil || string(echoed) != prompt {
+		t.Fatalf("echo.txt %q, %v; want the prompt after the preamble\n%s", echoed, err, text)
+	}
 }
