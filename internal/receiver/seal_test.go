@@ -408,8 +408,9 @@ func TestAnAdopterWithoutASealFails(t *testing.T) {
 	f.plugin.mu.Lock()
 	stops, releases := f.plugin.stops, f.plugin.releases
 	f.plugin.mu.Unlock()
-	if stops != 1 || releases != 1 || len(f.chunks(t)) != 0 {
-		t.Fatalf("stops=%d releases=%d chunks=%d, want the job stopped and released with nothing published", stops, releases, len(f.chunks(t)))
+	chunks := f.chunks(t)
+	if stops != 1 || releases != 1 || len(chunks) != 1 || len(chunks[0].ArtifactUpdate.Artifact.Parts) != 0 || !chunks[0].ArtifactUpdate.LastChunk {
+		t.Fatalf("stops=%d releases=%d chunks=%+v, want the job stopped and released with no line published, the empty last chunk alone", stops, releases, chunks)
 	}
 	if kinds := f.kinds(t); !slices.Equal(kinds, []string{"claimed", "terminal"}) {
 		t.Fatalf("statuses %v, want claimed then terminal", kinds)

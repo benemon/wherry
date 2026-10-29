@@ -650,6 +650,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.logger.Printf("run %s: read events: %v", runID, err)
 			return run.returnTask(ctx, nil)
 		}
+		run.next = offset
 	}
 	var handle pluginsdk.Handle
 	adopted, neverStarted := false, false
@@ -1279,6 +1280,8 @@ type activeRun struct {
 	startCause string
 	// chunked counts the transcript chunks this attempt has committed.
 	chunked int64
+	// next is the log offset past the last line this attempt has made a chunk of, or that it resumed from.
+	next int64
 }
 
 // deliver keeps the forms of each credential value delivered to the run, each with the marker of the value's name under
@@ -2033,11 +2036,11 @@ func (run *activeRun) statusRecords(kind string, status wire.TaskStatus, offset 
 	return run.receiver.statusRecords(run.task, run.status(kind, status, offset, metadata))
 }
 
-// terminal is the terminal status records, counting the attempt's committed chunks and pending's, and the tombstone of
-// the run's progress.
+// terminal is the terminal status records, counting the attempt's committed chunks and pending's, or the empty last
+// chunk when nothing is pending, and the tombstone of the run's progress.
 func (run *activeRun) terminal(status wire.TaskStatus, pending []pluginsdk.Line) []*kgo.Record {
 	value := run.status("terminal", status, nil, nil)
-	value.Wherry.TranscriptChunks = run.chunked + int64(len(pending))
+	value.Wherry.TranscriptChunks = run.chunked + int64(max(len(pending), 1))
 	tombstone := &kgo.Record{Topic: admin.ReceiverProgressTopic(run.receiver.id), Key: []byte(run.task.Wherry.Run)}
 	return append(run.receiver.statusRecords(run.task, value), tombstone)
 }
@@ -2115,10 +2118,22 @@ func taskStatus(state wire.TaskState, reason string) wire.TaskStatus {
 	return status
 }
 
-// chunks are the transcript lines as artifact updates on the tenant's transcript topic.
+// chunks are the transcript lines as artifact updates on the tenant's transcript topic. The last chunks end with one
+// marked lastChunk, a chunk with no part when no line is left.
 func (run *activeRun) chunks(lines []pluginsdk.Line, last bool) []*kgo.Record {
-	records := make([]*kgo.Record, 0, len(lines))
+	records := make([]*kgo.Record, 0, len(lines)+1)
+	if last && len(lines) == 0 {
+		records = append(records, run.transcript(&wire.Chunk{
+			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
+				TaskID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run,
+				Artifact: wire.Artifact{ArtifactID: "transcript", Parts: []wire.Part{}, Extensions: []string{wire.ExtensionURI}},
+				Append:   run.next > 0, LastChunk: true,
+			},
+			Wherry: wire.ChunkBinding{ReceiverBinding: run.receiver.binding(run.task, run.attempt), TaskHash: run.taskHash, Seq: run.next},
+		}))
+	}
 	for i, line := range lines {
+		run.next = line.Next
 		form := run.redact(line.Data, wire.MaxLine)
 		line.Data = form.data
 		part := wire.Part{Text: string(line.Data), MediaType: "application/x-ndjson"}

@@ -31,6 +31,26 @@ func (f *fixture) endedRun(t *testing.T, lines int) claimed {
 	return task
 }
 
+// The empty last chunk holds no line: an adopter's, at its resume offset, hides none of the earlier attempt's lines.
+func TestEmptyLastChunkIsNoLine(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	last := receiver.sign(t, &wire.Chunk{
+		ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: runID, ContextID: runID, LastChunk: true,
+			Artifact: wire.Artifact{ArtifactID: "transcript", Parts: []wire.Part{}, Extensions: []string{wire.ExtensionURI}}},
+		Wherry: wire.ChunkBinding{ReceiverBinding: receiver.binding(task, 2), TaskHash: task.hash, Seq: 0},
+	})
+	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, 0), receiver.chunk(t, task, 1, 5), last)
+	transcript, err := f.host.Transcript(f.ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transcript.Lines) != 2 || transcript.Lines[0].Seq != 0 || transcript.Lines[1].Seq != 5 || transcript.Attempt != 2 {
+		t.Fatalf("transcript %+v, want attempt 1's two lines under attempt 2", transcript)
+	}
+}
+
 // end lists topic's end offset.
 func (f *fixture) endOffset(t *testing.T, topic string) int64 {
 	t.Helper()

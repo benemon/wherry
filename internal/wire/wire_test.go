@@ -250,6 +250,7 @@ func TestArtifactUpdateRequiresOnePart(t *testing.T) {
 		"pointer":           {[]Part{pointer}, true},
 		"line and pointer":  {[]Part{{Text: "line"}, pointer}, false},
 		"neither":           {[]Part{}, false},
+		"neither, last":     {[]Part{}, true},
 		"pointer not data":  {[]Part{{Text: "line", MediaType: ReferenceMediaType}}, false},
 		"pointer bad hash":  {[]Part{reference(`{"sha256":"x","size":4,"unstored":"oversize"}`)}, false},
 		"pointer negative":  {[]Part{reference(`{"sha256":"` + wireHash + `","size":-1,"unstored":"oversize"}`)}, false},
@@ -258,7 +259,7 @@ func TestArtifactUpdateRequiresOnePart(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			chunk := validChunk()
-			chunk.ArtifactUpdate.Artifact.Parts = test.parts
+			chunk.ArtifactUpdate.Artifact.Parts, chunk.ArtifactUpdate.LastChunk = test.parts, name == "neither, last"
 			if err := chunk.validate(); (err == nil) != test.ok {
 				t.Fatalf("validate error %v, want ok=%v", err, test.ok)
 			}

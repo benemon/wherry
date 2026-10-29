@@ -141,8 +141,8 @@ func validateArtifactUpdate(update *TaskArtifactUpdateEvent) error {
 	if err := validateArtifact(&update.Artifact); err != nil {
 		return err
 	}
-	if len(update.Artifact.Parts) != 1 {
-		return errors.New("artifact_update requires exactly one part")
+	if len(update.Artifact.Parts) != 1 && (len(update.Artifact.Parts) != 0 || !update.LastChunk) {
+		return errors.New("artifact_update requires exactly one part, or none on the last chunk")
 	}
 	return validateMetadata(update.Metadata)
 }

@@ -12,7 +12,9 @@ when its seal goes unanswered and when its agent reports
 `filename` and `mediaType`. Content a record does not carry, an input in a
 result's history or a transcript line over 512 KiB, is a
 [reference part](#reference-parts) in place of a `url` part
-`unstored:input` or `unstored:oversize`.
+`unstored:input` or `unstored:oversize`. Every run's transcript ends with a
+`lastChunk` chunk, an empty one when no line is left for the terminal
+transaction.
 
 **Change note, 2026-10-29:** edited in place at version 1. A reply over
 64 KiB once redacted travels as [reply chunks](#the-reply), output chunks with
@@ -301,7 +303,7 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
   `started` only. The transcript is published up to at least that offset.
   Later offsets go to the receiver's [progress](#progress) topic.
 - `transcript_chunks` is the number of [chunks](#chunk) the attempt wrote,
-  on `terminal` only, and absent when zero. It commits in the same
+  the empty final chunk included, on `terminal` only, and absent when zero. It commits in the same
   transaction as the attempt's last chunks.
 
 | `kind` | State | Written when | Extra |
@@ -415,7 +417,7 @@ A chunk is one line of the agent's standard output, as the A2A artifact
 }
 ```
 
-- The artifact has `artifactId` `transcript` and exactly one part: with media
+- The artifact has `artifactId` `transcript` and exactly one part, or none on an empty final chunk: with media
   type `application/x-ndjson`, a text part holding the line, or a `raw` part
   for an empty line, one that is not UTF-8, or one longer escaped as a JSON
   string than base64-encoded; for a line over 512 KiB, a
@@ -429,7 +431,11 @@ A chunk is one line of the agent's standard output, as the A2A artifact
   highest earlier attempt that has them, so a run's transcript starts at
   offset 0.
 - `append` is false for the line at offset 0 and true after it. `lastChunk`
-  is true on the run's final chunk, written with its terminal status.
+  is true on the run's final chunk, written with its terminal status. When
+  that transaction has no line left to write, the final chunk has an empty
+  `parts`, `seq` the offset past the attempt's last line, or the offset it
+  resumed from, and readers take no line from it. Every run's transcript
+  ends with a `lastChunk` chunk.
 
 A receiver writes chunks to `wherry.tenant.<tenant>.transcript`.
 

@@ -46,6 +46,49 @@ func testActiveRun(t *testing.T, f fixture, run string, attempt int64) *activeRu
 	return &activeRun{receiver: f.receiver, producer: producer, task: task, taskHash: wire.TaskHash(record.Value), history: []wire.Message{task.Message}, attempt: attempt, profile: f.receiver.profiles[0], redactionKey: testRedactionKey}
 }
 
+// A transcript flushed whole before the run ends still ends with a lastChunk chunk: one with no part, past the last line.
+func TestFlushedTranscriptEndsWithAnEmptyLastChunk(t *testing.T) {
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-l", 1)
+	parse := func(records []*kgo.Record) []wire.Chunk {
+		t.Helper()
+		chunks := make([]wire.Chunk, len(records))
+		for i, record := range records {
+			if err := wire.ParseRecord(record.Value, f.keys(), &chunks[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return chunks
+	}
+	if flushed := parse(run.chunks([]pluginsdk.Line{{Offset: 0, Next: 5, Data: []byte("line")}}, false)); len(flushed) != 1 || flushed[0].ArtifactUpdate.LastChunk {
+		t.Fatalf("flushed chunks %+v, want the line alone, not last", flushed)
+	}
+	last := parse(run.chunks(nil, true))
+	if len(last) != 1 || !last[0].ArtifactUpdate.LastChunk || len(last[0].ArtifactUpdate.Artifact.Parts) != 0 || !last[0].ArtifactUpdate.Append || last[0].Wherry.Seq != 5 {
+		t.Fatalf("last chunks %+v, want one empty lastChunk chunk at offset 5", last)
+	}
+	if lines := parse(run.chunks([]pluginsdk.Line{{Offset: 5, Next: 9, Data: []byte("end")}}, true)); len(lines) != 1 || !lines[0].ArtifactUpdate.LastChunk || len(lines[0].ArtifactUpdate.Artifact.Parts) != 1 {
+		t.Fatalf("last chunks %+v, want the pending line marked last and no empty chunk", lines)
+	}
+}
+
+// A run that writes no line ends with the empty lastChunk chunk, which its terminal status counts.
+func TestRunWithoutLinesEndsWithALastChunk(t *testing.T) {
+	fake := &fakePlugin{stream: []string{}, outputs: []pluginsdk.Output{outcomeOutput(doneOutcome)}}
+	f := newFixtureWith(t, nil, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
+	f.answer(t, credentialName)
+	if ack := f.execute(t, f.submit(t, f.host, nil), 1); ack != kgo.AckAccept {
+		t.Fatalf("ack %v; logs:\n%s", ack, f.logs.String())
+	}
+	chunks := f.chunks(t)
+	if len(chunks) != 1 || !chunks[0].ArtifactUpdate.LastChunk || len(chunks[0].ArtifactUpdate.Artifact.Parts) != 0 || chunks[0].ArtifactUpdate.Append || chunks[0].Wherry.Seq != 0 {
+		t.Fatalf("chunks %+v, want one empty lastChunk chunk", chunks)
+	}
+	if statuses := f.feedStatuses(t); statuses[len(statuses)-1].Wherry.TranscriptChunks != 1 {
+		t.Fatalf("terminal counts %d chunks, want the empty last one", statuses[len(statuses)-1].Wherry.TranscriptChunks)
+	}
+}
+
 func TestStatusesAreDualWritten(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
