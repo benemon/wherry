@@ -757,6 +757,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
 		var tooLarge *pluginsdk.InputTooLargeError
+		var failure *pluginsdk.Error
 		switch {
 		case err != nil && runCtx.Err() != nil && ctx.Err() == nil:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
@@ -774,6 +775,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 			r.metrics.startFailures.WithLabelValues(named.Name, "input-too-large").Inc()
 			return run.fail(ctx, name+" takes the run's inputs over what profile "+named.Name+" delivers", nil)
+		case errors.As(err, &failure) && failure.Class == pluginsdk.ClassFetch && dispatched == pluginsdk.OutcomeNothingCreated:
+			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
+			r.logger.Printf("run %s: dispatch failed: an S3 input was not fetched", runID)
+			return run.fail(ctx, "an S3 input was not fetched, or did not match its size and SHA-256", nil)
 		case errors.Is(err, pluginsdk.ErrMessageTooLarge):
 			r.logger.Printf("run %s: dispatch rejected: message too large", runID)
 			dispatched = pluginsdk.OutcomeUnknown

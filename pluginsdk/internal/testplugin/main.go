@@ -41,6 +41,8 @@ type config struct {
 	InlineLimit int64 `json:"inline_limit"`
 	// TooLarge names the input Dispatch refuses.
 	TooLarge string `json:"too_large"`
+	// FetchFails names the S3 input whose fetch fails in Dispatch.
+	FetchFails string `json:"fetch_fails"`
 	// NeverStarted is the reason Follow ends the job with, as one that never started.
 	NeverStarted string `json:"never_started"`
 	// SweepError is the text of the pluginsdk.Error Sweep returns.
@@ -128,6 +130,9 @@ func (f *fake) Dispatch(_ context.Context, run pluginsdk.Run) (pluginsdk.Outcome
 	write(record{Call: "dispatch", Settings: pluginsdk.Settings{Name: f.settings.Name}, Run: &run})
 	if f.config.TooLarge != "" {
 		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, &pluginsdk.InputTooLargeError{Name: f.config.TooLarge}
+	}
+	if f.config.FetchFails != "" {
+		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, &pluginsdk.Error{Op: "fetch " + f.config.FetchFails, Class: pluginsdk.ClassFetch, Err: errors.New("403")}
 	}
 	handle := pluginsdk.Handle{Data: []byte(run.ID), Name: f.settings.Name + "/" + run.ID}
 	if f.config.Jobs {

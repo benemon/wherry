@@ -557,6 +557,16 @@ func TestInputTooLargeCrossesTheLink(t *testing.T) {
 	}
 }
 
+func TestFetchFailureCrossesTheLink(t *testing.T) {
+	p, _, _ := launch(t)
+	a := configured(t, p, "a", `{"fetch_fails":"data.csv"}`)
+	outcome, _, err := a.Dispatch(context.Background(), Run{ID: "run-a", Fetches: []Fetch{{Name: "data.csv", URL: "https://store.example/data.csv"}}})
+	var failure *Error
+	if outcome != OutcomeNothingCreated || !errors.As(err, &failure) || failure.Class != ClassFetch || failure.Op != "fetch data.csv" {
+		t.Fatalf("dispatch = %v, %v; want nothing created and a fetch failure", outcome, err)
+	}
+}
+
 func collected(t *testing.T, a Plugin, limits Limits) ([]Output, error) {
 	t.Helper()
 	outputs := make(chan Output, 8)

@@ -1150,7 +1150,8 @@ their paths:
   agent's and the task's, each as the file its `file` names. A credential
   with an `env` target is in that environment variable instead. The plugin
   delivers credential values only at their targets, and never into the
-  input directory.
+  input directory. Only the agent's run can read its credentials, and the
+  platform's boundary enforces it, as each plugin's README states.
 - `WHERRY_OUTPUT_DIR`: where the agent leaves its outputs. The agent
   creates the directory when it does not exist.
 

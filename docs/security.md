@@ -18,7 +18,9 @@ maps each credential name to one [source](#credential-sources). A task can
 also declare **task credentials**: credentials of the host, such as a
 deploy key, that the agent gets at the target the task's parent chooses.
 The pool's terms do not govern them, and none may take the target of one of
-the agent's credentials or of another task credential.
+the agent's credentials or of another task credential. Only the agent's run
+can read its credentials, and the platform's boundary enforces it, as each
+[plugin](plugins.md)'s README states.
 
 `wherry receivers` lists each agent's credential names, marking those this
 host has no source for, such as

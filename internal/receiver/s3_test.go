@@ -449,6 +449,21 @@ func TestS3FetchFailureFailsTheTurn(t *testing.T) {
 	}
 }
 
+func TestS3FetchFailureInDispatchFailsTheTurn(t *testing.T) {
+	s := newStore(t)
+	f := newFixtureWith(t, noResultStream, s3Terms(s.endpoint()), testConfig(testReceiver), map[string]*fakePlugin{
+		"nomad": {stream: noResultStream, dispatchErr: &pluginsdk.Error{Op: "fetch dataset.bin", Class: pluginsdk.ClassFetch, Err: errors.New("403")}, outcome: pluginsdk.OutcomeNothingCreated},
+	})
+	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
+	f.sealS3(t, validURLs(s.endpoint()))
+	if status := <-done; status != kgo.AckReject || f.plugin.dispatches != 1 {
+		t.Fatalf("status %v after %d dispatches; want the turn failed at its one dispatch and the task not returned to the pool", status, f.plugin.dispatches)
+	}
+	if status := f.lastTask(t).Status; status.State != wire.TaskStateFailed || status.Message.Parts[0].Text != "an S3 input was not fetched, or did not match its size and SHA-256" {
+		t.Fatalf("status %+v", status)
+	}
+}
+
 // An adopter's seal carries fresh PUT URLs for the turn's S3 outputs and none for its inputs, which the job fetched.
 func TestAnAdoptedRunReturnsAnS3Output(t *testing.T) {
 	s := newStore(t)
