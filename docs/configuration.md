@@ -92,14 +92,15 @@ flag and in every path.
 ### Drain timeout and the stop window
 
 `drain_timeout` and the platform's stop window are set together: Nomad's
-`kill_timeout`, Kubernetes' `terminationGracePeriodSeconds` or systemd's
-`TimeoutStopSec`. On `SIGINT` or `SIGTERM` the receiver stops claiming,
-closes its idle claims and lets the runs it holds go on for up to
-`drain_timeout`. It then commits the pending transcript of each run still
-held and releases its task for adoption, leaving the job running. The
-receiver cannot read the window, so `drain_timeout` stays a few seconds
-below it, such as `25s` under a 30-second window. At `0s` the receiver
-releases its held tasks at once. Nomad's default window is 5 seconds.
+[`kill_timeout`](https://developer.hashicorp.com/nomad/docs/job-specification/task#kill_timeout),
+Kubernetes' [`terminationGracePeriodSeconds`](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination)
+or systemd's [`TimeoutStopSec`](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html#TimeoutStopSec=).
+On `SIGINT` or `SIGTERM` the receiver stops claiming, closes its idle claims
+and lets the runs it holds go on for up to `drain_timeout`. It then commits
+the pending transcript of each run still held and releases its task for
+adoption, leaving the job running. The receiver cannot read the window, so
+`drain_timeout` stays a few seconds below it, such as `25s` under a 30-second
+window. At `0s` the receiver releases its held tasks at once.
 
 Planned changes go through
 [`receiver update`](operations.md#change-a-receivers-configuration), which

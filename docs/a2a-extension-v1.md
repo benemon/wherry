@@ -955,7 +955,7 @@ or would take the run's outputs over it, is listed as `exceeds output limit`; a
 transcript line whose redacted form is over 512 KiB becomes an
 `unstored:oversize` part with that form's hash and size; a reply whose redacted
 form is over 64 KiB travels as its preview and [reply chunks](#the-reply), both
-cut from the redacted form; and a metadata string or credential name whose
+cut from the redacted form; and a credential name whose
 redacted form is over 64 KiB is replaced by `[redacted text over 65536 bytes]`. A result whose agent fields are 16 KiB of
 8-byte values, each replaced by its 27-byte marker, still fits a default
 producer batch. A value shorter than 8 bytes once trimmed is not redacted; the
