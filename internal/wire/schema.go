@@ -183,7 +183,7 @@ const MaxLine = 512 << 10
 // MaxOutputs bounds the outputs a submission expects and the entries a receiver collects.
 const MaxOutputs = 256
 
-// MaxText bounds a result's text, and each status text and result metadata string, once redacted.
+// MaxText bounds a result's text and a status's text, once redacted; a longer reply travels as reply chunks.
 const MaxText = 64 << 10
 
 // CutUTF8 is s cut to at most n bytes, at a rune boundary.
@@ -197,7 +197,8 @@ func CutUTF8(s string, n int) string {
 	return s[:n]
 }
 
-// ResultMetadata is a result's task metadata: where its run ran, and the outputs it returned and did not.
+// ResultMetadata is a result's task metadata: where its run ran, the outputs it returned and did not, and its reply
+// chunks.
 type ResultMetadata struct {
 	ReceiverID  string             `json:"receiver_id"`
 	Pool        string             `json:"pool"`
@@ -207,6 +208,15 @@ type ResultMetadata struct {
 	Outputs     []ReturnedOutput   `json:"outputs,omitempty"`
 	S3Outputs   []ReturnedOutput   `json:"s3_outputs,omitempty"`
 	NotReturned []UnreturnedOutput `json:"not_returned,omitempty"`
+	Reply       *ReturnedReply     `json:"reply,omitzero"`
+}
+
+// ReturnedReply is a reply over MaxText that a turn returned as reply chunks; SHA256 and Size are of the bytes the
+// chunks carry, and Cut is set when the redacted reply was longer than its pool's reply limit.
+type ReturnedReply struct {
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+	Cut    bool   `json:"cut,omitzero"`
 }
 
 // fileName is a portable file name: no separator, no leading dot, nothing a shell or a template interprets.
@@ -287,8 +297,14 @@ const (
 	OutcomeFile = OutcomeDir + "/outcome.json"
 )
 
+// ReplyArtifact is the artifact ID of a reply's chunks. It lies beneath OutcomeDir, so no collected output takes it.
+const ReplyArtifact = OutcomeDir + "/reply"
+
 // TranscriptFile is where a host writes a run's transcript among its outputs, so no output takes its name.
 const TranscriptFile = "transcript.jsonl"
+
+// ReplyFile is where an MCP host writes a run's reply among its outputs, so no output takes its name.
+const ReplyFile = "reply.txt"
 
 // GitPatch and GitBundle are the outputs a run asking for its git changes back expects: a patch series, or a bundle.
 const (

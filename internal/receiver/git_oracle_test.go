@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 )
@@ -223,7 +224,7 @@ func (o *oracle) leaks(t *testing.T, output string) {
 func (o *oracle) preamble(input *wire.GitInput) []string {
 	credentials := []wire.TaskCredential{{Name: "forge-token", File: "token"}}
 	outputs := []wire.ExpectedOutput{{Name: wire.GitPatch}, {Name: wire.GitBundle}}
-	return commands(preamble(o.directories, nil, credentials, nil, outputs, input, "run-git"))
+	return commands(preamble(o.directories, nil, credentials, nil, outputs, input, "run-git", admin.DefaultReplyLimit))
 }
 
 // The preamble's commands are the oracle's input. Run as an agent runs them, against a real git over TLS, on a
@@ -485,7 +486,7 @@ func TestGitSSHCloneTrustsOnlyTheHostKey(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(o.directories.Input, wire.KnownHostsFile), []byte(test.hostKey), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			lines := commands(preamble(o.directories, nil, credentials, nil, nil, input, "run-ssh"))
+			lines := commands(preamble(o.directories, nil, credentials, nil, nil, input, "run-ssh", admin.DefaultReplyLimit))
 			ssh := sshCommand(t, lines[0])
 			resolved, err := o.run(t, o.agentEnvironment(), ssh+" -G -p "+port+" "+current.Username+"@127.0.0.1")
 			if err != nil {

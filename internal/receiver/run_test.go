@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/ed25519"
@@ -267,7 +268,7 @@ func TestOversizedAgentOutputIsBounded(t *testing.T) {
 		t.Fatalf("status %v, want accept", status)
 	}
 	task := f.lastTask(t)
-	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != "[redacted text over 65536 bytes]" {
+	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != strings.Repeat("x", wire.MaxText) {
 		t.Fatalf("task ended %s with result %#v", task.Status.State, task.Artifacts[0].Parts[0])
 	}
 	if part := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0]; part.URL != "unstored:oversize" || part.Text != "" {
@@ -1237,17 +1238,25 @@ func TestOutcomeFileIsNotAnOutput(t *testing.T) {
 	}
 }
 
+// The reply is redacted whole before either cut and before it is chunked, so a value straddling the preview's end or
+// a chunk seam reaches neither topic, even in part; its marker is cut in the preview and split across the seam.
 func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
 	marker := signed.RedactionMarker(testRedactionKey, credentialName)
+	// The token's first 13 bytes fall before offset 65536 of the raw text, and the marker straddles it in the redacted.
+	before, between := strings.Repeat("x", wire.MaxText-13), strings.Repeat("y", wire.OutputChunk-wire.MaxText-len(marker))
+	straddled := before + marker + between + marker + "zzz"
 	for _, test := range []struct {
-		name, text, want string
+		name, text, want, chunks string
 	}{
 		{name: "credential", text: "used " + testToken, want: "used " + marker},
-		{name: "over", text: strings.Repeat("x", wire.MaxText+1), want: overText},
+		{name: "over", text: strings.Repeat("x", wire.MaxText+1), want: strings.Repeat("x", wire.MaxText), chunks: strings.Repeat("x", wire.MaxText+1)},
+		{name: "straddling both cuts", text: before + testToken + between + testToken + "zzz", want: straddled[:wire.MaxText], chunks: straddled},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			outcome := `{"state":"TASK_STATE_AUTH_REQUIRED","message":{"role":"ROLE_AGENT","parts":[{"text":"` + test.text + `"},{"data":{"credential":"cred-lab"}}]}}`
-			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, outputs: []pluginsdk.Output{outcomeOutput(outcome)}}})
+			outcome, _ := json.Marshal(map[string]any{"state": "TASK_STATE_AUTH_REQUIRED", "message": map[string]any{"role": "ROLE_AGENT", "parts": []any{
+				map[string]string{"text": test.text}, map[string]any{"data": map[string]string{"credential": "cred-lab"}},
+			}}})
+			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, outputs: []pluginsdk.Output{outcomeOutput(string(outcome))}}})
 			f.answer(t, credentialName)
 			f.execute(t, f.submit(t, f.host, nil), 1)
 			task := f.lastTask(t)
@@ -1260,10 +1269,23 @@ func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
 			if result := task.Artifacts[0].Parts[0].Text; result != test.want {
 				t.Fatalf("result %.80q, want %.80q", result, test.want)
 			}
+			var joined []byte
+			for _, chunk := range f.outputChunks(t) {
+				joined = append(joined, chunk.ArtifactUpdate.Artifact.Parts[0].Raw...)
+			}
+			if string(joined) != test.chunks {
+				t.Fatalf("reply chunks hold %d bytes, want the %d of the redacted reply", len(joined), len(test.chunks))
+			}
+			if chunks := f.outputChunks(t); test.chunks == straddled && (len(chunks) != 2 || !strings.HasSuffix(string(chunks[0].ArtifactUpdate.Artifact.Parts[0].Raw), marker[:13])) {
+				t.Fatal("the chunk seam does not split the second marker")
+			}
 			for _, record := range append(f.records(t, admin.TenantTopic(testTenant)), f.records(t, admin.TenantTranscriptTopic(testTenant))...) {
-				if strings.Contains(string(decodedPayload(record.Value)), testToken) {
-					t.Fatal("the credential value reached the feed")
+				if strings.Contains(string(decodedPayload(record.Value)), testToken[:13]) {
+					t.Fatal("part of the credential value reached the feed")
 				}
+			}
+			if bytes.Contains(joined, []byte(testToken[:13])) {
+				t.Fatal("part of the credential value reached the reply chunks")
 			}
 		})
 	}

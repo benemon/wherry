@@ -317,7 +317,7 @@ func TestPreambleNamesFilesAndTheOutcomeContract(t *testing.T) {
 	inputs := []string{"data.csv"}
 	credentials := []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}, {Name: "github-token", Env: "GH_TOKEN"}}
 	outputs := []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes/extra.txt"}}
-	got := preamble(directories, inputs, credentials, []string{"vault-token"}, outputs, nil, "run-a")
+	got := preamble(directories, inputs, credentials, []string{"vault-token"}, outputs, nil, "run-a", admin.DefaultReplyLimit)
 	for _, want := range []string{"input directory is /local/inputs", "credentials directory /secrets/credentials", "output directory /local/outputs",
 		"WHERRY_INPUT_DIR", "Input files: /local/inputs/data.csv.", "Credential files: /secrets/credentials/id_ed25519. Never print or copy their contents.",
 		"Credential environment variables: GH_TOKEN. Never print or copy their values.",
@@ -328,10 +328,10 @@ func TestPreambleNamesFilesAndTheOutcomeContract(t *testing.T) {
 			t.Errorf("preamble %q lacks %q", got, want)
 		}
 	}
-	if unreported := preamble(pluginsdk.Directories{}, inputs, nil, nil, nil, nil, "run-a"); !strings.Contains(unreported, "Input files: $WHERRY_INPUT_DIR/data.csv.") {
+	if unreported := preamble(pluginsdk.Directories{}, inputs, nil, nil, nil, nil, "run-a", admin.DefaultReplyLimit); !strings.Contains(unreported, "Input files: $WHERRY_INPUT_DIR/data.csv.") {
 		t.Errorf("preamble %q, want the variable for a directory the plugin does not report", unreported)
 	}
-	if bare := preamble(directories, nil, nil, nil, nil, nil, "run-a"); !strings.Contains(bare, "/local/outputs/.wherry/outcome.json") || !strings.Contains(bare, "This run has no credentials.") {
+	if bare := preamble(directories, nil, nil, nil, nil, nil, "run-a", admin.DefaultReplyLimit); !strings.Contains(bare, "/local/outputs/.wherry/outcome.json") || !strings.Contains(bare, "This run has no credentials.") {
 		t.Errorf("preamble %q, want the outcome contract for a run that declares no files", bare)
 	}
 }
@@ -533,7 +533,7 @@ func TestOutputNameOver512BytesIsRejected(t *testing.T) {
 	}
 }
 
-// The result travels within its record limit: its text is capped once redacted, and text that JSON escaping would
+// The result travels within its record limit: its text is the reply's preview, and text that JSON escaping would
 // lengthen past base64 travels raw.
 func TestResultTextIsBounded(t *testing.T) {
 	f := newFixture(t, resultStream)
@@ -545,7 +545,7 @@ func TestResultTextIsBounded(t *testing.T) {
 		}
 		return result.Task.Artifacts[0].Parts[0]
 	}
-	if got := part(strings.Repeat("x", wire.MaxText+1)); got.Text != "[redacted text over 65536 bytes]" {
+	if got := part(run.reply(strings.Repeat("x", wire.MaxText+1))); got.Text != strings.Repeat("x", wire.MaxText) {
 		t.Fatalf("result over the cap is %d bytes of text", len(got.Text))
 	}
 	escapes := strings.Repeat("\x01", 1000)

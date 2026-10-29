@@ -90,6 +90,11 @@ as one file and as a `--config-dir` directory.
 - `max_queue_deadline` is the longest queue deadline a task may ask for,
   and bounds how long after its submission a run's task is admitted. It
   defaults to 14 days. See [Retention](#retention).
+- `reply_limit` bounds the redacted reply a result returns beyond the 64 KiB
+  its text carries; it defaults to 1 MiB, or to `output_limit` when that is
+  lower, and `pool create` and `pool update` refuse one over `output_limit`,
+  which also bounds the outcome file. A longer reply is cut to it, and the
+  result says so.
 - `output_limit` bounds a run's outputs; it defaults to 8 MiB. The
   broker's record limit bounds a task's inline input files, and
   `pool create` records it in the terms. See
@@ -173,13 +178,19 @@ one-day margin, and their timestamp type to `LogAppendTime`, since a run's age
 runs from the broker's time. It sets the same retention on the progress
 topics of the pool's live receivers. With the 14-day default that is `1317600000` ms, 15 days
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
-statuses and results, and tenant transcript topics transcripts and outputs, for
-30 days, and both must keep them for at least `max_queue_deadline` plus six
+statuses and results, and tenant transcript topics transcripts, outputs and
+replies over 64 KiB, for 30 days, and both must keep them for at least `max_queue_deadline` plus six
 hours, so `pool create` refuses a maximum above 29 days and 18 hours, and
 `pool entitle` refuses a feed or transcript topic that keeps less. Identity and
 configuration topics stay forever. `wherry admin check` reports a topic whose
 retention drops below its bound, and a pool topic whose timestamp type is not
 `LogAppendTime`.
+
+A tenant transcript topic whose retention is shorter than its feed's loses an
+old run's reply and transcript before its result: the result then keeps the
+reply's first 64 KiB, and `wherry watch` reports the rest
+`rejected by this host: gap`. `wherry admin check` does not report the
+difference.
 
 ### Size a pool against the broker
 
@@ -206,7 +217,8 @@ topics at their defaults. Raising `message.max.bytes` or
 Run `pool update` after changing either, so the terms record the new
 limit. An output chunk holds
 256 KiB whatever `output_limit` is, so `output_limit` spans as many records
-as it needs and the record limit does not bound it.
+as it needs and the record limit does not bound it. A reply chunk is an
+output chunk, so the same holds for `reply_limit`.
 
 `pool entitle` makes the same check with the new tenant's feed and
 transcript topic counted.

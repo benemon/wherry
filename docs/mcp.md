@@ -10,7 +10,7 @@ defaults, `2h` and `10m`.
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
 | `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline`, `queue_deadline` | `id`, `pool`, `watch` |
 | `status` | `id`, optional | `runs`, `skipped` |
-| `watch` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `artifacts`, `outputs`, `not_returned`, `transcript`, `redacted`, `skipped` |
+| `watch` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `transcript`, `redacted`, `skipped` |
 | `cancel` | `id` | `id`, `skipped` |
 | `events` | `id` | `id`, `events`, `transcripts`, `redacted`, `skipped` |
 | `transcript` | `id`, `offset`, `limit` | `id`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
@@ -49,7 +49,7 @@ defaults, `2h` and `10m`.
   host's submission of the run when its record holds one, else the Kafka
   timestamp of the run's echo.
 - `watch` waits up to 45 seconds. It returns the outcome with `message`, the
-  status message's parts as `wherry watch --result-only` prints them, and `artifacts`, or, while the run is unfinished, its current `state` with
+  status message's parts, and `artifacts`, or, while the run is unfinished, its current `state` with
   `retry_after` set to 5. For a run whose queue deadline passes with no
   status from a receiver, it returns at once with `state`
   `TASK_STATE_SUBMITTED`, the `message` `status` gives, and no
@@ -63,6 +63,13 @@ defaults, `2h` and `10m`.
   does. `not_returned` holds `{name, size, reason}` for each output the result
   lists as not returned and each one that fails verification. `transcript` is
   the path of the `transcript.jsonl` it writes as `wherry watch` does. For a
+  [reply](a2a-extension-v1.md#the-reply) over 64 KiB, `message` holds its
+  first 64 KiB, and `watch` writes the verified reply to `reply.txt` among the
+  run's outputs and returns `reply` as `{path, sha256, size, cut}`, with
+  `sha256` and `size` of the file and `cut` set when the reply was longer than
+  the pool's `reply_limit`; when the chunks do not verify, `reply` is
+  `{rejected}` with the reason. A reply within 64 KiB is `message` whole, with
+  no `reply`. No expected output takes the name `reply.txt`. For a
   run whose queue deadline passed unclaimed it writes nothing. `model`
   is the run's placement's model. The `watch` tool does not stream the
   transcript; `transcript` pages it.

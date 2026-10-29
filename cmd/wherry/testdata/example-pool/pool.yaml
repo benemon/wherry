@@ -7,6 +7,7 @@ lock_duration: 30s
 producer_byte_rate: 1048576
 request_percentage: 10
 output_limit: 16777216
+reply_limit: 2097152
 vcs:
   - github.com
   # A port appears only when it is not the scheme's default.

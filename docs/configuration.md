@@ -154,7 +154,8 @@ ignored. Any other entry and a directory with no agent files are errors.
 | `lock_duration` | optional duration, default `15s`: the share group's `share.record.lock.duration.ms` |
 | `producer_byte_rate` | host quota, bytes per second |
 | `request_percentage` | host quota, percentage of broker request time |
-| `output_limit` | optional, default 8388608 (8 MiB): bytes of one output, and of a run's outputs together |
+| `output_limit` | optional, default 8388608 (8 MiB): bytes of one output, and of a run's outputs together, and of the outcome file |
+| `reply_limit` | optional, default 1048576 (1 MiB), or `output_limit` when that is lower: bytes of the redacted [reply](a2a-extension-v1.md#the-reply) a result returns; a longer reply is cut to it. At most `output_limit` |
 | `vcs` | optional, default none: the hosts a [git input](a2a-extension-v1.md#git-input) may clone from |
 | `storage` | optional, default none: `{endpoint, bucket}`, the S3-compatible store of the pool's [S3 inputs and outputs](a2a-extension-v1.md#s3-inputs-and-outputs) |
 
@@ -253,6 +254,7 @@ lock_duration: 30s
 producer_byte_rate: 1048576
 request_percentage: 10
 output_limit: 16777216
+reply_limit: 2097152
 vcs:
   - github.com
   # A port appears only when it is not the scheme's default.
@@ -285,6 +287,7 @@ lock_duration: 30s
 producer_byte_rate: 1048576
 request_percentage: 10
 output_limit: 16777216
+reply_limit: 2097152
 vcs:
   - github.com
   # A port appears only when it is not the scheme's default.
@@ -345,7 +348,8 @@ results, and the largest transcript chunk, a line of 512 KiB. Each result
 has the run's message with its 256 input files named but not carried, and a
 status message and a result text of 64 KiB each, both raw, as an agent's text
 that JSON escaping would lengthen travels, with a `TASK_STATE_AUTH_REQUIRED`
-status's `credential` part. One result lists
+status's `credential` part and a `reply` entry. A reply chunk is an output
+chunk, so `reply_limit` has no record-limit check. One result lists
 256 returned and 256 unreturned outputs with 512-byte names, the other 256 S3
 outputs with their keys. A receiver's labels and a plugin's job name have
 no bound and are left empty. Any one over its record limit refuses the terms,
@@ -687,7 +691,10 @@ an A2A `TaskStatus` JSON object to `$WHERRY_OUTPUT_DIR/.wherry/outcome.json`.
 It names each credential file's path and each credential environment variable,
 and lists the run's credential names, marking each optional credential the
 host did not supply, as in
-`This run's credentials are openai-api-key, github-token (not supplied).`:
+`This run's credentials are openai-api-key, github-token (not supplied).`
+It then says that the answer goes in the message text, that long or
+structured content belongs in files in the output directory, and that a reply
+over the pool's `reply_limit` bytes is cut:
 
 ```json
 {"state": "TASK_STATE_COMPLETED", "message": {"role": "ROLE_AGENT", "parts": [{"text": "<the answer, or what went wrong>"}]}}
@@ -708,13 +715,14 @@ outputs whatever its exit, and reads the outcome file:
 | missing or invalid | non-zero or a signal | `TASK_STATE_FAILED`, with `agent exited <code>` or `agent ended by <signal>`, followed by the platform's reason in parentheses when the plugin gives one, as in `agent exited 137 (OOMKilled)` |
 | missing or invalid | 0 | `TASK_STATE_FAILED`, with `agent reported no outcome` |
 
-A file is invalid when it is over 512 KiB, does not decode as a
-`TaskStatus`, names another state, has no message or a message whose role is
-not `ROLE_AGENT`, or reports `TASK_STATE_AUTH_REQUIRED` without a
-`credential` part holding a credential name. The status message keeps the
-message's text parts, joined by newlines, and the `credential` part. Its text
-is redacted like any agent text and becomes
-`[redacted text over 65536 bytes]` when it passes 64 KiB once redacted.
+A file is invalid when it is over the pool's `output_limit`, does not decode
+as a `TaskStatus`, names another state, has no message or a message whose role
+is not `ROLE_AGENT`, or reports `TASK_STATE_AUTH_REQUIRED` without a
+`credential` part holding a credential name. The status message has one text
+part, the message's text parts joined by newlines, and the `credential` part.
+That text is the [reply](a2a-extension-v1.md#the-reply), redacted whole: over
+64 KiB once redacted, the status message and the result carry its first
+64 KiB, and the result's reply chunks carry it up to the pool's `reply_limit`.
 `TASK_STATE_AUTH_REQUIRED` ends the run, which is not resumed; the tenant
 supplies the credential and submits again. A required
 output that is not returned fails the run with
