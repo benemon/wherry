@@ -1965,7 +1965,9 @@ func bound(t *testing.T, name string, got, want counts) {
 
 // A host that only reads dials one client: a seed connection, then a request and a fetch connection to the one broker.
 // Each read lists start and committed offsets once; the tenant feed's committed end is listed apart only to wait for
-// a follower.
+// a follower. Each of the three reads fetches once; removing a read's partitions cancels any fetch kgo has sent after
+// it, and kgo closes a fetch connection whose request is canceled, so each of the first two reads may cost the next a
+// fetch connection, its four handshake requests and the fetch again.
 func TestHostReadsBoundTheirConnectionsAndRequests(t *testing.T) {
 	f := newFixture(t, kfake.NumBrokers(1))
 	_, task := f.admitted(t)
@@ -1978,8 +1980,8 @@ func TestHostReadsBoundTheirConnectionsAndRequests(t *testing.T) {
 		want counts
 		read func(*Host) error
 	}{
-		{"receivers", counts{3, 31, 6, 4, nil}, func(h *Host) error { _, err := h.Receivers(f.ctx); return err }},
-		{"status", counts{3, 31, 6, 4, nil}, func(h *Host) error { _, err := h.Status(f.ctx, task.submission.Wherry.Run); return err }},
+		{"receivers", counts{5, 41, 6, 6, nil}, func(h *Host) error { _, err := h.Receivers(f.ctx); return err }},
+		{"status", counts{5, 41, 6, 6, nil}, func(h *Host) error { _, err := h.Status(f.ctx, task.submission.Wherry.Run); return err }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var counted traffic
