@@ -25,7 +25,9 @@ import (
 
 	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -427,4 +429,62 @@ func TestRemoteForm(t *testing.T) {
 	}); err == nil {
 		t.Error("a failed presign gave a form")
 	}
+}
+
+// The HTTP host answers a seal request for a run whose client submitted it and disconnected.
+func TestHTTPHostAnswersWithNoClientConnected(t *testing.T) {
+	b := newBus(t)
+	connect, closeHost := sharedHost(b.connect(t))
+	defer closeHost()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := log.New(testLog{t}, "", 0)
+	open := inputOpener(t.TempDir(), busclient.Config{})
+	server := newMCPServer(connect, inputReader(open), open, func(string) string { return "" }, logger, &remoteForms{urlLifetime: time.Hour, outputBound: 1 << 20})
+	ctx, stop := context.WithCancel(b.ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveMCP(ctx, connect, logger, func(ctx context.Context) error {
+			return serveHTTP(ctx, listener, server, []byte(httpToken), "", "", logger)
+		})
+	}()
+	defer func() { stop(); <-done }()
+	session, err := httpSession(t, "http://"+listener.Addr().String()+"/mcp", httpToken, http.DefaultTransport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var submitted submitOutput
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work"}, &submitted)
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	admitted := b.tasks(t, submitted.ID)[0]
+	b.feed(t, submitted.ID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := wire.SealRequest{ReceiverBinding: b.binding(admitted), Key: jose.JSONWebKey{Key: &key.PublicKey}, KeyID: signed.SealKeyID(&key.PublicKey),
+		Credentials: []string{"model"}, ExpiryMS: time.Now().Add(time.Minute).UnixMilli()}
+	b.feed(t, submitted.ID, b.sign(t, &request))
+	binding := signed.SealBinding{Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
+		Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS}
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		records, err := readTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range records {
+			if values, err := signed.OpenSeal(record.Value, binding, key, time.Now()); err == nil {
+				if string(values.Values["model"]) != credentialText {
+					t.Fatalf("sealed %q", values.Values["model"])
+				}
+				return
+			}
+		}
+	}
+	t.Fatalf("no seal answered with no client connected; logs:\n%s", b.logs.String())
 }

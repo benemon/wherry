@@ -81,23 +81,33 @@ func runMCP(ctx context.Context, args []string) error {
 	}
 	connect, closeHost := sharedHost(func() (*busclient.Host, error) { return busclient.Connect(config, logger) })
 	defer closeHost()
-	ctx, stop := context.WithCancel(ctx)
-	defer stop()
-	go answer(ctx, connect, logger)
 	open := inputOpener(dir, config)
 	wait, err := waitCommand(*configFile)
 	if err != nil {
 		return err
 	}
 	if *listen == "" {
-		return newMCPServer(connect, inputReader(open), open, wait, logger, nil).Run(ctx, &mcp.StdioTransport{})
+		return serveMCP(ctx, connect, logger, func(ctx context.Context) error {
+			return newMCPServer(connect, inputReader(open), open, wait, logger, nil).Run(ctx, &mcp.StdioTransport{})
+		})
 	}
-	server := newMCPServer(connect, inputReader(open), open, wait, logger, &remoteForms{urlLifetime: *urlLifetime, outputBound: *outputBound})
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return err
 	}
-	return serveHTTP(ctx, listener, server, token, *tlsCert, *tlsKey, logger)
+	server := newMCPServer(connect, inputReader(open), open, wait, logger, &remoteForms{urlLifetime: *urlLifetime, outputBound: *outputBound})
+	return serveMCP(ctx, connect, logger, func(ctx context.Context) error {
+		return serveHTTP(ctx, listener, server, token, *tlsCert, *tlsKey, logger)
+	})
+}
+
+// serveMCP runs serve while it answers seal requests for the host's runs, so a run is sealed whether or not a client
+// is connected.
+func serveMCP(ctx context.Context, connect func() (*busclient.Host, error), logger *log.Logger, serve func(context.Context) error) error {
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	go answer(ctx, connect, logger)
+	return serve(ctx)
 }
 
 // listenToken checks the HTTP flags and returns the token, nil for stdio. Every listener takes a token; one off
