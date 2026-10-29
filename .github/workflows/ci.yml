@@ -153,6 +153,8 @@ jobs:
         run: |
           if out=$(goreleaser check 2>&1); then printf '%s\n' "$out"; exit 0; fi
           printf '%s\n' "$out"
+          # goreleaser colours its output on the runner; the matches below read the plain text.
+          out=$(printf '%s\n' "$out" | sed 's/\x1b\[[0-9;]*m//g')
           printf '%s\n' "$out" | grep -q 'configuration is valid, but uses deprecated properties' || exit 1
           if printf '%s\n' "$out" | grep 'DEPRECATED:' | grep -v -q 'DEPRECATED: *brews '; then exit 1; fi
           echo "valid; brews is the only deprecated property"
