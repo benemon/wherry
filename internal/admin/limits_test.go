@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/kafkatest"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -441,6 +442,9 @@ func TestLargestRecordsFitTheBrokerOnRealBroker(t *testing.T) {
 	defer client.Close()
 	feed := PoolEventsTopic(strings.ReplaceAll("limits-"+time.Now().Format("150405.000000"), ".", ""))
 	if _, err := kadm.NewClient(client).CreateTopics(ctx, 1, -1, nil, feed); err != nil {
+		t.Fatal(err)
+	}
+	if err := kafkatest.Led(ctx, client, feed); err != nil {
 		t.Fatal(err)
 	}
 	records, err := largestRecords()

@@ -20,6 +20,7 @@ import (
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/kafkatest"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
@@ -74,25 +75,8 @@ func (b brokerPool) createTopics(t *testing.T, ctx context.Context, topics ...st
 	if _, err := kadm.NewClient(b.kafka).CreateTopics(ctx, 1, -1, nil, topics...); err != nil {
 		t.Fatal(err)
 	}
-	// A topic answers NOT_LEADER_FOR_PARTITION until its partition has a leader, and not every write path retries it.
-	for {
-		metadata, err := kadm.NewClient(b.kafka).Metadata(ctx, topics...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		led := true
-		for _, topic := range topics {
-			partition, ok := metadata.Topics[topic].Partitions[0]
-			led = led && ok && partition.Err == nil && partition.Leader >= 0
-		}
-		if led {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		case <-time.After(50 * time.Millisecond):
-		}
+	if err := kafkatest.Led(ctx, b.kafka, topics...); err != nil {
+		t.Fatal(err)
 	}
 }
 

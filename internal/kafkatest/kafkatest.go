@@ -1,5 +1,5 @@
-// Package kafkatest moves partition leaders on the multi-broker real-broker cluster test/kafka/up-cluster.sh starts,
-// for the tests that only make sense with several brokers.
+// Package kafkatest waits for new topics on every real-broker test broker, and moves partition leaders on the
+// multi-broker cluster test/kafka/up-cluster.sh starts, for the tests that only make sense with several brokers.
 package kafkatest
 
 import (
@@ -14,6 +14,8 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // Brokers skips t unless WHERRY_KAFKA_TEST_BROKERS names a cluster of at least two brokers, and fails it unless the
@@ -34,6 +36,60 @@ func Brokers(t testing.TB, ctx context.Context, adm *kadm.Client) []int32 {
 		t.Fatalf("cluster has brokers %v, want %d", ids, want)
 	}
 	return ids
+}
+
+// Led waits up to 30 seconds until every broker's own metadata gives each partition of topics a leader: a broker the
+// new topic's metadata has not reached answers UNKNOWN_TOPIC_OR_PARTITION, and not every read path retries it.
+func Led(ctx context.Context, kafka *kgo.Client, topics ...string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for {
+		err := led(ctx, kafka, topics)
+		if err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("topics %v never led on every broker: %w (%w)", topics, err, ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+func led(ctx context.Context, kafka *kgo.Client, topics []string) error {
+	metadata, err := kadm.NewClient(kafka).BrokerMetadata(ctx)
+	if err != nil {
+		return err
+	}
+	request := kmsg.NewPtrMetadataRequest()
+	for _, topic := range topics {
+		requested := kmsg.NewMetadataRequestTopic()
+		requested.Topic = kmsg.StringPtr(topic)
+		request.Topics = append(request.Topics, requested)
+	}
+	for _, broker := range metadata.Brokers {
+		response, err := request.RequestWith(ctx, kafka.Broker(int(broker.NodeID)))
+		if err != nil {
+			return fmt.Errorf("broker %d: %w", broker.NodeID, err)
+		}
+		for _, topic := range response.Topics {
+			if err := kerr.ErrorForCode(topic.ErrorCode); err != nil {
+				return fmt.Errorf("broker %d: %s: %w", broker.NodeID, *topic.Topic, err)
+			}
+			if len(topic.Partitions) == 0 {
+				return fmt.Errorf("broker %d: %s has no partitions", broker.NodeID, *topic.Topic)
+			}
+			for _, partition := range topic.Partitions {
+				if err := kerr.ErrorForCode(partition.ErrorCode); err != nil {
+					return fmt.Errorf("broker %d: %s/%d: %w", broker.NodeID, *topic.Topic, partition.Partition, err)
+				}
+				if partition.Leader < 0 {
+					return fmt.Errorf("broker %d: %s/%d has no leader", broker.NodeID, *topic.Topic, partition.Partition)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // Partition is topic's partition's current leader and replicas.
