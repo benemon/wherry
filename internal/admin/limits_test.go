@@ -15,12 +15,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/benemon/wherry/internal/kafkatest"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 	"gopkg.in/yaml.v3"
@@ -898,4 +900,75 @@ func largestRecords() ([]feedRecord, error) {
 		feed[i] = feedRecord{record.name, value}
 	}
 	return feed, nil
+}
+
+// A broker a tenant's new feeds have not reached describes them UNKNOWN_TOPIC_OR_PARTITION; TenantAdd waits up to
+// topicWait for every broker's metadata to carry them, and past it reports the describe's failure.
+func TestTenantAddWaitsForItsFeedsToReachEveryBroker(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		misses int32
+		want   string
+	}{
+		{"reached after one miss", 1, ""},
+		{"never reached", -1, "describe topic wherry.tenant.tenant-a: UNKNOWN_TOPIC_OR_PARTITION"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cluster, service, closeFixture := kfakeService(t)
+			defer closeFixture()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*topicWait)
+			defer cancel()
+			if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+				t.Fatal(err)
+			}
+			feed := func(topic string) bool {
+				return topic == TenantTopic("tenant-a") || topic == TenantTranscriptTopic("tenant-a")
+			}
+			var misses atomic.Int32
+			var reached atomic.Bool
+			cluster.ControlKey(int16(kmsg.Metadata), func(request kmsg.Request) (kmsg.Response, error, bool) {
+				cluster.KeepControl()
+				metadata := request.(*kmsg.MetadataRequest)
+				if !slices.ContainsFunc(metadata.Topics, func(topic kmsg.MetadataRequestTopic) bool { return topic.Topic != nil && feed(*topic.Topic) }) {
+					return nil, nil, false
+				}
+				if test.misses >= 0 && misses.Add(1) > test.misses {
+					reached.Store(true)
+					return nil, nil, false
+				}
+				response := metadata.ResponseKind().(*kmsg.MetadataResponse)
+				for _, topic := range metadata.Topics {
+					missing := kmsg.NewMetadataResponseTopic()
+					missing.Topic = topic.Topic
+					missing.ErrorCode = kerr.UnknownTopicOrPartition.Code
+					response.Topics = append(response.Topics, missing)
+				}
+				return response, nil, true
+			})
+			cluster.ControlKey(int16(kmsg.DescribeConfigs), func(request kmsg.Request) (kmsg.Response, error, bool) {
+				cluster.KeepControl()
+				describe := request.(*kmsg.DescribeConfigsRequest)
+				if reached.Load() || !slices.ContainsFunc(describe.Resources, func(resource kmsg.DescribeConfigsRequestResource) bool { return feed(resource.ResourceName) }) {
+					return nil, nil, false
+				}
+				response := describe.ResponseKind().(*kmsg.DescribeConfigsResponse)
+				for _, resource := range describe.Resources {
+					described := kmsg.NewDescribeConfigsResponseResource()
+					described.ResourceType = resource.ResourceType
+					described.ResourceName = resource.ResourceName
+					if feed(resource.ResourceName) {
+						described.ErrorCode = kerr.UnknownTopicOrPartition.Code
+					}
+					response.Resources = append(response.Resources, described)
+				}
+				return response, nil, true
+			})
+			start := time.Now()
+			err := service.TenantAdd(ctx, "tenant-a", "pool-a")
+			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.HasPrefix(err.Error(), test.want) || time.Since(start) < topicWait) {
+				t.Fatalf("tenant add = %v after %v; want %q", err, time.Since(start), test.want)
+			}
+		})
+	}
 }

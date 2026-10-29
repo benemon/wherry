@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	json "encoding/json/v2"
+	"errors"
 	"maps"
 	"slices"
 	"sync"
@@ -111,6 +112,7 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[st
 	}
 	topics := slices.Collect(maps.Keys(offsets))
 	var starts, ends kadm.ListedOffsets
+	deadline := time.Now().Add(topicWait)
 	for {
 		group, groupCtx := errgroup.WithContext(ctx)
 		group.Go(func() (err error) {
@@ -121,12 +123,13 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[st
 			ends, err = admin.ListCommittedOffsets(groupCtx, topics...)
 			return err
 		})
-		if err := group.Wait(); err != nil {
+		err := group.Wait()
+		if err != nil && !missing(err, deadline) {
 			return nil, err
 		}
 		// kgo retries a partition that is changing leader only while its listing evicts the topic's metadata, which the
 		// concurrent listing may already have done.
-		if !retriable(starts) && !retriable(ends) {
+		if err == nil && !retriable(starts, deadline) && !retriable(ends, deadline) {
 			break
 		}
 		select {
@@ -227,27 +230,48 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[st
 // listBackoff is the wait before listing offsets again after a retriable partition error.
 const listBackoff = 100 * time.Millisecond
 
-// retriable reports whether a listed partition failed with a retriable error; kadm's partition -1 stands for a topic it
-// could not describe, which is not retried.
-func retriable(listed kadm.ListedOffsets) bool {
+// topicWait bounds the wait for a created topic's metadata to reach every broker; one it has not reached answers
+// UNKNOWN_TOPIC_OR_PARTITION. A topic still missing after it is reported as missing.
+const topicWait = 10 * time.Second
+
+// retriable reports whether a listed partition failed with a retriable error, or, before deadline, a listed topic was
+// missing from the metadata it was listed from, which kadm reports as its partition -1.
+func retriable(listed kadm.ListedOffsets, deadline time.Time) bool {
 	retry := false
 	listed.Each(func(offset kadm.ListedOffset) {
-		retry = retry || offset.Partition >= 0 && kerr.IsRetriable(offset.Err)
+		retry = retry || offset.Partition >= 0 && kerr.IsRetriable(offset.Err) ||
+			errors.Is(offset.Err, kerr.UnknownTopicOrPartition) && time.Now().Before(deadline)
 	})
 	return retry
 }
 
+// missing reports whether, before deadline, every shard of a failed request failed because a broker did not yet know
+// the topic: kadm reports a broker answering UNKNOWN_TOPIC_OR_PARTITION for the whole request as a shard error.
+func missing(err error, deadline time.Time) bool {
+	var shards *kadm.ShardErrors
+	if !errors.As(err, &shards) || len(shards.Errs) == 0 || !time.Now().Before(deadline) {
+		return false
+	}
+	for _, shard := range shards.Errs {
+		if !errors.Is(shard.Err, kerr.UnknownTopicOrPartition) {
+			return false
+		}
+	}
+	return true
+}
+
 // ListOffsets lists topic's offsets with list, again after listBackoff while a listed partition carries a retriable
-// error, and returns the last listing with its first partition error.
+// error or, up to topicWait, the topic is missing, and returns the last listing with its first partition error.
 func ListOffsets(ctx context.Context, list func(context.Context, ...string) (kadm.ListedOffsets, error), topic string) (kadm.ListedOffsets, error) {
+	deadline := time.Now().Add(topicWait)
 	for {
 		listed, err := list(ctx, topic)
-		if err != nil {
+		if err != nil && !missing(err, deadline) {
 			return nil, err
 		}
 		// kgo retries a partition that is changing leader only while its listing evicts the topic's metadata, which a
 		// concurrent listing of the topic through the same client may already have done.
-		if !retriable(listed) {
+		if err == nil && !retriable(listed, deadline) {
 			return listed, listed.Error()
 		}
 		select {

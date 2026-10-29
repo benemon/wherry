@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
@@ -535,7 +536,47 @@ func (service *Service) createTopicsWith(ctx context.Context, values map[string]
 			return fmt.Errorf("create topic %s: %w", response.Topic, response.Err)
 		}
 	}
+	deadline := time.Now().Add(topicWait)
+	for service.propagating(ctx, topics) && time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(listBackoff):
+		}
+	}
 	return nil
+}
+
+// propagating reports whether a broker's own metadata lacks one of topics or a leader for one of their partitions, as
+// it does until a created topic's metadata reaches it; describes and config changes it answers fail until then.
+func (service *Service) propagating(ctx context.Context, topics []string) bool {
+	metadata, err := kadm.NewClient(service.Admin).BrokerMetadata(ctx)
+	if err != nil {
+		return false
+	}
+	request := kmsg.NewPtrMetadataRequest()
+	for _, topic := range topics {
+		requested := kmsg.NewMetadataRequestTopic()
+		requested.Topic = kmsg.StringPtr(topic)
+		request.Topics = append(request.Topics, requested)
+	}
+	for _, broker := range metadata.Brokers {
+		response, err := request.RequestWith(ctx, service.Admin.Broker(int(broker.NodeID)))
+		if err != nil {
+			return false
+		}
+		for _, topic := range response.Topics {
+			if kerr.IsRetriable(kerr.ErrorForCode(topic.ErrorCode)) || len(topic.Partitions) == 0 {
+				return true
+			}
+			for _, partition := range topic.Partitions {
+				if kerr.IsRetriable(kerr.ErrorForCode(partition.ErrorCode)) || partition.Leader < 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (service *Service) configureTopicRetention(ctx context.Context, value string, topics ...string) error {
