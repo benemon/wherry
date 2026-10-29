@@ -6,14 +6,14 @@ import (
 	"os"
 )
 
-// exitCode is an error that ends wherry with its value as the exit status and prints nothing.
-type exitCode int
+// quietExit is an error that ends wherry with its value as the exit status and prints nothing.
+type quietExit int
 
-func (code exitCode) Error() string { return fmt.Sprintf("exit status %d", int(code)) }
+func (code quietExit) Error() string { return fmt.Sprintf("exit status %d", int(code)) }
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		var code exitCode
+		var code quietExit
 		if errors.As(err, &code) {
 			os.Exit(int(code))
 		}

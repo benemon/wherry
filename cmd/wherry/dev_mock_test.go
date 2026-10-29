@@ -103,7 +103,7 @@ func TestDevMock(t *testing.T) {
 	})
 	t.Run("exit", func(t *testing.T) {
 		dir := mockTask(t, "mock: exit 3")
-		var code exitCode
+		var code quietExit
 		if err := run([]string{"dev", "mock"}, &bytes.Buffer{}, &bytes.Buffer{}); !errors.As(err, &code) || code != 3 {
 			t.Fatalf("err %v; want exit code 3", err)
 		}

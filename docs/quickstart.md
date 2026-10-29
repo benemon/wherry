@@ -118,7 +118,7 @@ default model.
 ### 4. Wait
 
 ```sh
-wherry watch run-<id> --config-file "$config"
+wherry wait run-<id> --config-file "$config"
 ```
 
 `watch` prints the agent's transcript as it runs, then the final state and

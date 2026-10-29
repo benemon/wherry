@@ -53,7 +53,7 @@ func runDevMock(args []string, stdout io.Writer) error {
 		if err != nil || code < 0 || code > 255 {
 			return fmt.Errorf("mock: exit takes a code of 0 to 255, not %q", strings.TrimPrefix(first, "mock: exit "))
 		}
-		return exitCode(code)
+		return quietExit(code)
 	case strings.HasPrefix(first, "mock: auth-required "):
 		name := strings.TrimPrefix(first, "mock: auth-required ")
 		return mockOutcome(output, wire.TaskStateAuthRequired, "mock needs credential "+name, name)
