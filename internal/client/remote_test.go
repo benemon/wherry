@@ -140,3 +140,94 @@ func TestUploadNeedsStorage(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 }
+
+// An output's presigned GET returns its bytes from a key under the run's prefix that no receiver's PUT URL names.
+func TestPresignOutput(t *testing.T) {
+	remoteStores(t, func(t *testing.T, s remoteStore) {
+		f := s.f
+		result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := bytes.Repeat([]byte{0xff, 'o'}, 3000)
+		if _, err := f.host.WriteOutputs(result.RunID, "", []Output{{Name: "out/big.bin", Data: data}}); err != nil {
+			t.Fatal(err)
+		}
+		url, expires, err := f.host.PresignOutput(f.ctx, result.RunID, "out/big.bin", 2*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := wire.S3Prefix("tenant-a", result.RunID) + "host/out/big.bin"
+		if !strings.Contains(url, key) || !strings.Contains(url, "X-Amz-Expires=7200") || time.Until(expires) < 119*time.Minute {
+			t.Fatalf("url %s expiring %v; want the host key for two hours", url, expires)
+		}
+		response, err := (&http.Client{Transport: storageTransport}).Get(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil || !bytes.Equal(got, data) {
+			t.Fatalf("GET: %d bytes, %v", len(got), err)
+		}
+		if _, _, err := f.host.PresignOutput(f.ctx, result.RunID, "missing.bin", time.Hour); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("a missing output: %v", err)
+		}
+	})
+}
+
+func TestPresignOutputWithoutStorage(t *testing.T) {
+	f := newFixture(t)
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.host.WriteOutputs(result.RunID, "", []Output{{Name: "big.bin", Data: []byte("big")}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.host.PresignOutput(f.ctx, result.RunID, "big.bin", time.Hour); !errors.Is(err, ErrNoStorage) || !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("presign without storage: %v", err)
+	}
+}
+
+// OpenOutput opens files beneath the run's output directory alone; RemoveOutputs deletes them.
+func TestOpenAndRemoveOutputs(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.host.WriteOutputs("run-a", "", []Output{{Name: "report.md", Data: []byte("report")}}); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(f.stateDir, "runs", "run-a", "outputs", "link")); err != nil {
+		t.Fatal(err)
+	}
+	file, err := f.host.OpenOutput("run-a", "report.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err := io.ReadAll(file); err != nil || string(data) != "report" {
+		t.Fatalf("read %q, %v", data, err)
+	}
+	file.Close()
+	for _, args := range [][2]string{{"run-a", "link"}, {"run-a", "../run-a.json"}, {"run-a", "."}, {"../runs/run-a", "report.md"}, {"run-a", "missing"}} {
+		if file, err := f.host.OpenOutput(args[0], args[1]); err == nil {
+			file.Close()
+			t.Errorf("%v: opened", args)
+		}
+	}
+	if err := f.host.RemoveOutputs("run-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(f.stateDir, "runs", "run-a", "outputs")); !os.IsNotExist(err) {
+		t.Fatalf("outputs survived: %v", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("the link's target: %v", err)
+	}
+	if err := f.host.RemoveOutputs("../runs"); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("remove outside the runs: %v", err)
+	}
+}

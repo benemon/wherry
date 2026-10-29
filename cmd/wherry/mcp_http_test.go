@@ -9,7 +9,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	json "encoding/json/v2"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"net"
@@ -22,6 +25,7 @@ import (
 
 	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -34,7 +38,7 @@ func httpHost(t *testing.T, connect func() (*busclient.Host, error)) (string, *s
 	logs := &syncBuffer{}
 	logger := log.New(logs, "", 0)
 	open := inputOpener(t.TempDir(), busclient.Config{})
-	server := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry wait " + id }, logger, &remoteForms{urlLifetime: time.Hour})
+	server := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry wait " + id }, logger, &remoteForms{urlLifetime: time.Hour, outputBound: 1 << 20})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -221,7 +225,7 @@ func TestHTTPServesTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	open := inputOpener(t.TempDir(), busclient.Config{})
-	server := newMCPServer(b.connect(t), inputReader(open), open, func(id string) string { return "wherry wait " + id }, log.New(testLog{t}, "", 0), &remoteForms{urlLifetime: time.Hour})
+	server := newMCPServer(b.connect(t), inputReader(open), open, func(id string) string { return "wherry wait " + id }, log.New(testLog{t}, "", 0), &remoteForms{urlLifetime: time.Hour, outputBound: 1 << 20})
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -325,5 +329,102 @@ func TestHTTPInputsCarryTheirContent(t *testing.T) {
 		if tool.Name == "upload" {
 			t.Error("stdio serves upload")
 		}
+	}
+}
+
+// Over HTTP, wait lists outputs and the reply file as resources that resources/read returns, and cleanup deletes them.
+func TestHTTPWaitListsOutputsAsResources(t *testing.T) {
+	b := newBus(t)
+	admitted := b.admitted(t)
+	runID := admitted.submission.Wherry.Run
+	b.outputResult(t, admitted, "sub/report.md", "# Report\n", hashOf("# Report\n"))
+	endpoint, _ := httpHost(t, b.connect(t))
+	session, err := httpSession(t, endpoint, httpToken, http.DefaultTransport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := session.CallTool(b.ctx, &mcp.CallToolParams{Name: "wait", Arguments: map[string]any{"id": runID}})
+	if err != nil || result.IsError {
+		t.Fatalf("wait: %v %s", err, toolText(result))
+	}
+	uri := "wherry://runs/" + runID + "/outputs/sub/report.md"
+	var waited waitReply
+	if err := json.Unmarshal([]byte(toolText(result)), &waited); err != nil {
+		t.Fatal(err)
+	}
+	if len(waited.Outputs) != 1 || waited.Outputs[0].URI != uri || waited.Outputs[0].Path != "" || waited.Outputs[0].URL != "" || waited.Outputs[0].Size != 9 {
+		t.Fatalf("outputs %+v; want the resource alone", waited.Outputs)
+	}
+	var links []string
+	for _, content := range result.Content {
+		if link, ok := content.(*mcp.ResourceLink); ok {
+			links = append(links, link.URI)
+		}
+	}
+	if len(links) != 1 || links[0] != uri {
+		t.Fatalf("resource links %v, want %s", links, uri)
+	}
+	read, err := session.ReadResource(b.ctx, &mcp.ReadResourceParams{URI: uri})
+	if err != nil || len(read.Contents) != 1 || read.Contents[0].Text != "# Report\n" {
+		t.Fatalf("read %+v, %v", read, err)
+	}
+	for _, escape := range []string{"wherry://runs/" + runID + "/outputs/../../" + runID + ".json", "wherry://runs/../outputs/state.json", "wherry://runs/" + runID + "/outputs/missing"} {
+		if _, err := session.ReadResource(b.ctx, &mcp.ReadResourceParams{URI: escape}); err == nil {
+			t.Errorf("read %s", escape)
+		}
+	}
+	var cleaned cleanupOutput
+	callTool(t, b.ctx, session, "cleanup", map[string]any{"id": runID}, &cleaned)
+	if _, err := os.Stat(filepath.Join(b.stateDir, "runs", runID, "outputs")); !os.IsNotExist(err) {
+		t.Fatalf("cleanup left the outputs: %v", err)
+	}
+	if _, err := session.ReadResource(b.ctx, &mcp.ReadResourceParams{URI: uri}); err == nil {
+		t.Fatal("read a cleaned output")
+	}
+
+	reply := strings.Repeat("r", wire.OutputChunk) + "\xff"
+	b, runID = replyRun(t, reply, reply, reply, false)
+	endpoint, _ = httpHost(t, b.connect(t))
+	if session, err = httpSession(t, endpoint, httpToken, http.DefaultTransport); err != nil {
+		t.Fatal(err)
+	}
+	waited = waitReply{}
+	callTool(t, b.ctx, session, "wait", map[string]any{"id": runID}, &waited)
+	if uri := "wherry://runs/" + runID + "/outputs/" + wire.ReplyFile; waited.Reply == nil || waited.Reply.URI != uri || waited.Reply.Path != "" {
+		t.Fatalf("reply %+v; want %s", waited.Reply, uri)
+	}
+	read, err = session.ReadResource(b.ctx, &mcp.ReadResourceParams{URI: waited.Reply.URI})
+	if err != nil || len(read.Contents) != 1 || string(read.Contents[0].Blob) != reply || read.Contents[0].MIMEType != "application/octet-stream" {
+		t.Fatalf("read the reply: %v", err)
+	}
+}
+
+// A file over the bound or stored in S3 is a presigned GET; one within it, or any without storage, a resource.
+func TestRemoteForm(t *testing.T) {
+	presigned := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name    string
+		size    int64
+		stored  bool
+		presign error
+		want    remoteFile
+	}{
+		{name: "within", size: 10, want: remoteFile{URI: "wherry://runs/run-a/outputs/out.bin"}},
+		{name: "at the bound", size: 100, want: remoteFile{URI: "wherry://runs/run-a/outputs/out.bin"}},
+		{name: "over", size: 101, want: remoteFile{URL: "https://s3.example/out.bin", Expires: "2026-10-29T12:00:00Z"}},
+		{name: "stored", size: 1, stored: true, want: remoteFile{URL: "https://s3.example/out.bin", Expires: "2026-10-29T12:00:00Z"}},
+		{name: "over, no storage", size: 101, presign: fmt.Errorf("%w: no storage", busclient.ErrNoStorage), want: remoteFile{URI: "wherry://runs/run-a/outputs/out.bin"}},
+	} {
+		got, err := remoteForm("run-a", "out.bin", test.size, test.stored, 100, func(name string) (string, time.Time, error) {
+			return "https://s3.example/" + name, presigned, test.presign
+		})
+		if err != nil || got != test.want {
+			t.Errorf("%s: %+v, %v; want %+v", test.name, got, err, test.want)
+		}
+	}
+	if _, err := remoteForm("run-a", "out.bin", 101, false, 100, func(string) (string, time.Time, error) {
+		return "", time.Time{}, errors.New("S3 down")
+	}); err == nil {
+		t.Error("a failed presign gave a form")
 	}
 }

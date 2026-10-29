@@ -59,6 +59,7 @@ func runMCP(ctx context.Context, args []string) error {
 	tlsCert := flags.String("tls-cert", "", "TLS certificate file; with --tls-key, serves HTTPS")
 	tlsKey := flags.String("tls-key", "", "TLS private key file")
 	urlLifetime := flags.Duration("url-lifetime", time.Hour, "lifetime of the presigned URLs upload and wait return over HTTP")
+	outputBound := flags.Int64("output-bound", 1<<20, "largest output wait returns over HTTP as an MCP resource; a larger one, or one returned through S3, is a presigned GET URL")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -91,7 +92,7 @@ func runMCP(ctx context.Context, args []string) error {
 	if *listen == "" {
 		return newMCPServer(connect, inputReader(open), open, wait, logger, nil).Run(ctx, &mcp.StdioTransport{})
 	}
-	server := newMCPServer(connect, inputReader(open), open, wait, logger, &remoteForms{urlLifetime: *urlLifetime})
+	server := newMCPServer(connect, inputReader(open), open, wait, logger, &remoteForms{urlLifetime: *urlLifetime, outputBound: *outputBound})
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return err
@@ -385,9 +386,17 @@ type resultArtifact struct {
 
 type outputReply struct {
 	Name   string `json:"name"`
-	Path   string `json:"path" jsonschema:"where this host wrote the output"`
+	Path   string `json:"path,omitempty" jsonschema:"where this host wrote the output; absent over HTTP"`
 	SHA256 string `json:"sha256"`
 	Size   int64  `json:"size"`
+	remoteFile
+}
+
+// remoteFile is where a client over HTTP reads a file the host wrote.
+type remoteFile struct {
+	URI     string `json:"uri,omitempty" jsonschema:"over HTTP: the MCP resource resources/read returns the file's bytes from"`
+	URL     string `json:"url,omitempty" jsonschema:"over HTTP, in place of uri for a file over the host's output bound or returned through S3: a presigned URL to GET the file from"`
+	Expires string `json:"expires,omitempty" jsonschema:"RFC 3339 time url expires"`
 }
 
 type replyFile struct {
@@ -396,6 +405,27 @@ type replyFile struct {
 	Size     int64  `json:"size,omitempty"`
 	Cut      bool   `json:"cut,omitempty" jsonschema:"set when the reply was longer than the pool's reply limit and the file holds its first bytes"`
 	Rejected string `json:"rejected,omitempty" jsonschema:"why this host could not verify the reply, of which message holds the first 64 KiB"`
+	remoteFile
+}
+
+// outputURI is the MCP resource of a file the host wrote for a run.
+func outputURI(runID, name string) string {
+	return "wherry://runs/" + runID + "/outputs/" + name
+}
+
+// remoteForm is a file's HTTP form: a presigned GET URL for one over bound or stored in S3, else its resource URI. A
+// host or pool without storage leaves every file a resource.
+func remoteForm(runID, name string, size int64, stored bool, bound int64, presign func(name string) (string, time.Time, error)) (remoteFile, error) {
+	if stored || size > bound {
+		url, expires, err := presign(name)
+		if err == nil {
+			return remoteFile{URL: url, Expires: expires.UTC().Format(time.RFC3339)}, nil
+		}
+		if !errors.Is(err, busclient.ErrNoStorage) {
+			return remoteFile{}, err
+		}
+	}
+	return remoteFile{URI: outputURI(runID, name)}, nil
 }
 
 type waitReply struct {
@@ -478,6 +508,7 @@ type logsReply struct {
 // remoteForms are the settings of the HTTP forms of the tools.
 type remoteForms struct {
 	urlLifetime time.Duration
+	outputBound int64
 }
 
 // newMCPServer serves the wherry tools, in their HTTP forms when remote is set. Every call uses the host connect
@@ -633,6 +664,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			"with its message, or {id, state, retry_after} while the run is unfinished: call wait again. "+
 			"A run whose queue deadline passed with no receiver claiming it returns its state and a message saying so, without retry_after. "+
 			"A finished run's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
+			"Over HTTP each output, and the reply file, has a uri that resources/read returns, or, over the host's output bound or returned through S3, a presigned url to GET. "+
 			"Use status to check a run without waiting.", int(waitBound.Seconds())),
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, waitReply, error) {
 		client, err := connect()
@@ -684,7 +716,42 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 				output.Reply = &replyFile{Path: paths[0], SHA256: reply.SHA256, Size: reply.Size, Cut: reply.Cut}
 			}
 		}
-		return nil, output, nil
+		if remote == nil {
+			return nil, output, nil
+		}
+		presign := func(name string) (string, time.Time, error) {
+			return client.PresignOutput(ctx, input.ID, name, remote.urlLifetime)
+		}
+		var links []mcp.Content
+		form := func(name string, size int64, stored bool) (remoteFile, error) {
+			file, err := remoteForm(input.ID, name, size, stored, remote.outputBound, presign)
+			if err != nil {
+				logger.Print("tool failed: " + busclient.Redact(err.Error()))
+				return file, collectFailure(&busclient.CollectError{Step: "presign outputs", Err: err})
+			}
+			if file.URI != "" {
+				links = append(links, &mcp.ResourceLink{URI: file.URI, Name: name, Size: &size})
+			}
+			return file, nil
+		}
+		for i, written := range output.Outputs {
+			stored := slices.ContainsFunc(result.Stored, func(listed wire.ReturnedOutput) bool { return listed.Name == written.Name })
+			if output.Outputs[i].remoteFile, err = form(written.Name, written.Size, stored); err != nil {
+				return nil, waitReply{}, err
+			}
+			output.Outputs[i].Path = ""
+		}
+		if output.Reply != nil && output.Reply.Path != "" {
+			if output.Reply.remoteFile, err = form(wire.ReplyFile, output.Reply.Size, false); err != nil {
+				return nil, waitReply{}, err
+			}
+			output.Reply.Path = ""
+		}
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			return nil, waitReply{}, err
+		}
+		return &mcp.CallToolResult{Content: append([]mcp.Content{&mcp.TextContent{Text: string(encoded)}}, links...)}, output, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -801,18 +868,55 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "cleanup",
 		Description: "Delete every object under a run's prefix in its pool's bucket: its S3 inputs and outputs. wait does this once a " +
-			"run is terminal and its S3 outputs verify; use cleanup for a run that ended while nothing waited for it.",
+			"run is terminal and its S3 outputs verify; use cleanup for a run that ended while nothing waited for it. Over HTTP it also deletes the outputs wait wrote on the host.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, cleanupOutput, error) {
 		client, err := connect()
 		if err != nil {
 			return nil, cleanupOutput{}, failure(err)
 		}
-		if err := client.Cleanup(ctx, input.ID); err != nil {
+		// Over HTTP a run whose pool or host has no storage has nothing in S3 and its local outputs to delete.
+		if err := client.Cleanup(ctx, input.ID); err != nil && (remote == nil || !errors.Is(err, busclient.ErrNoStorage)) {
 			return nil, cleanupOutput{}, failure(err)
+		}
+		if remote != nil {
+			if err := client.RemoveOutputs(input.ID); err != nil {
+				return nil, cleanupOutput{}, failure(err)
+			}
 		}
 		return nil, cleanupOutput{ID: input.ID}, nil
 	})
+
+	if remote != nil {
+		server.AddResourceTemplate(&mcp.ResourceTemplate{
+			Name: "output", URITemplate: "wherry://runs/{run}/outputs/{+name}",
+			Description: "A file wait wrote for a run on this host: one of its outputs, or reply.txt; text or a base64 blob.",
+		}, func(ctx context.Context, request *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			uri := request.Params.URI
+			runID, name, ok := strings.Cut(strings.TrimPrefix(uri, "wherry://runs/"), "/outputs/")
+			if !ok || !strings.HasPrefix(uri, "wherry://runs/") {
+				return nil, mcp.ResourceNotFoundError(uri)
+			}
+			client, err := connect()
+			if err != nil {
+				return nil, failure(err)
+			}
+			file, err := client.OpenOutput(runID, name)
+			if err != nil {
+				return nil, mcp.ResourceNotFoundError(uri)
+			}
+			defer file.Close()
+			data, err := io.ReadAll(file)
+			if err != nil {
+				return nil, mcp.ResourceNotFoundError(uri)
+			}
+			contents := &mcp.ResourceContents{URI: uri, MIMEType: "application/octet-stream", Blob: data}
+			if utf8.Valid(data) {
+				contents.MIMEType, contents.Text, contents.Blob = "text/plain; charset=utf-8", string(data), nil
+			}
+			return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{contents}}, nil
+		})
+	}
 	return server
 }
 

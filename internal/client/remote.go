@@ -148,3 +148,71 @@ func (h *Host) DeleteUpload(ctx context.Context, id string) error {
 	}
 	return os.Remove(path)
 }
+
+// OpenOutput opens an output this host wrote for a run under its state directory, wait's reply file among them.
+func (h *Host) OpenOutput(runID, name string) (*os.File, error) {
+	if _, ok := h.runPath(runID); !ok {
+		return nil, fmt.Errorf("output %s of run %s: %w", name, runID, os.ErrNotExist)
+	}
+	root, err := os.OpenRoot(h.outputDir(runID))
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
+		file.Close()
+		return nil, fmt.Errorf("output %s of run %s: %w", name, runID, os.ErrNotExist)
+	}
+	return file, nil
+}
+
+// PresignOutput returns a GET URL, valid for lifetime, and its expiry, for an output OpenOutput opens. The bytes are
+// put first under the run's prefix at a key no receiver's PUT URL names, since wait deletes the run's prefix once its
+// S3 outputs verify; cleanup deletes them with the prefix. An error wraps ErrNoStorage without storage.
+func (h *Host) PresignOutput(ctx context.Context, runID, name string, lifetime time.Duration) (string, time.Time, error) {
+	file, err := h.OpenOutput(runID, name)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	r, err := h.history(ctx, runID)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if r.pool == "" {
+		return "", time.Time{}, fmt.Errorf("presign %s: %w", runID, ErrRunNotFound)
+	}
+	storage := r.v.state.Pools[r.pool].Storage
+	store, err := h.bucket(ctx, r.pool, storage)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	key := wire.S3Prefix(h.tenant, runID) + "host/" + name
+	if object, err := store.StatObject(ctx, storage.Bucket, key, minio.StatObjectOptions{}); err != nil || object.Size != info.Size() {
+		if _, err := store.PutObject(ctx, storage.Bucket, key, file, info.Size(), minio.PutObjectOptions{DisableMultipart: true, ContentType: "application/octet-stream"}); err != nil {
+			return "", time.Time{}, fmt.Errorf("put output %s: %w", name, err)
+		}
+	}
+	lifetime = min(lifetime, maxPresign)
+	get, err := store.PresignedGetObject(ctx, storage.Bucket, key, lifetime, nil)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return get.String(), time.Now().Add(lifetime), nil
+}
+
+// RemoveOutputs deletes the outputs this host wrote for a run under its state directory.
+func (h *Host) RemoveOutputs(runID string) error {
+	if _, ok := h.runPath(runID); !ok {
+		return fmt.Errorf("remove outputs %s: %w", runID, ErrRunNotFound)
+	}
+	return os.RemoveAll(h.outputDir(runID))
+}
