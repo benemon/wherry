@@ -301,8 +301,8 @@ func refuseAnyUp(instance devInstance) error {
 
 // devSources are init's resolvers and fetchers; a variable so tests can stub them.
 var devSources = struct {
-	hashicorp func(ctx context.Context, product, file string, prev *devArtefact, progress io.Writer) (*devArtefact, error)
-	plugin    func(ctx context.Context, file string, prev *devPlugin, progress io.Writer) (*devPlugin, error)
+	hashicorp func(ctx context.Context, product, cache, name string, prev *devArtefact, progress io.Writer) (*devArtefact, error)
+	plugin    func(ctx context.Context, cache, name string, prev *devPlugin, progress io.Writer) (*devPlugin, error)
 	image     func(ctx context.Context, runtime, reference, repository string, prev *devImage, output io.Writer) (*devImage, error)
 	runtimeOK func(runtime string) bool
 	lookPath  func(file string) (string, error)
@@ -357,7 +357,7 @@ func devInit(ctx context.Context, instance devInstance, runtimeName string, stor
 			detected = append(detected, harness)
 		}
 	}
-	defaultAgent, err := chooseAgent(detected, agent)
+	defaultAgent, err := chooseAgent(detected, agent, stderr)
 	if err != nil {
 		return fail("harnesses", err)
 	}
@@ -381,9 +381,8 @@ func devInit(ctx context.Context, instance devInstance, runtimeName string, stor
 		Agents: append([]string{}, detected...), DefaultAgent: defaultAgent, Images: map[string]devImage{},
 		EnvDenylist: credentialNames(os.Environ()),
 	}
-	progress := stderr
 	step("nomad")
-	if next.Nomad, err = devSources.hashicorp(ctx, "nomad", instance.cache("nomad"), prev.Nomad, progress); err != nil {
+	if next.Nomad, err = devSources.hashicorp(ctx, "nomad", instance.cache(), "nomad", prev.Nomad, stderr); err != nil {
 		return fail("nomad", err)
 	}
 	if runtime.GOOS == "linux" && runtimeName == "podman" {
@@ -391,12 +390,12 @@ func devInit(ctx context.Context, instance devInstance, runtimeName string, stor
 		if err := os.MkdirAll(instance.cache("nomad-plugins"), 0o700); err != nil {
 			return err
 		}
-		if next.PodmanDriver, err = devSources.hashicorp(ctx, "nomad-driver-podman", instance.cache("nomad-plugins", "nomad-driver-podman"), prev.PodmanDriver, progress); err != nil {
+		if next.PodmanDriver, err = devSources.hashicorp(ctx, "nomad-driver-podman", instance.cache(), filepath.Join("nomad-plugins", "nomad-driver-podman"), prev.PodmanDriver, stderr); err != nil {
 			return fail("podman-driver", err)
 		}
 	}
 	step("plugin")
-	if next.Plugin, err = devSources.plugin(ctx, instance.cache("plugins", "wherry-plugin-nomad"), prev.Plugin, progress); err != nil {
+	if next.Plugin, err = devSources.plugin(ctx, instance.cache(), filepath.Join("plugins", "wherry-plugin-nomad"), prev.Plugin, stderr); err != nil {
 		return fail("plugin", err)
 	}
 	step("image")
@@ -443,7 +442,7 @@ func devInit(ctx context.Context, instance devInstance, runtimeName string, stor
 var devStdin = os.Stdin
 
 // chooseAgent is the default agent from given, the detected harnesses or a terminal's answer.
-func chooseAgent(detected []string, given string) (string, error) {
+func chooseAgent(detected []string, given string, stderr io.Writer) (string, error) {
 	if given != "" {
 		if given != "mock" && !slices.Contains(detected, given) {
 			return "", fmt.Errorf("--agent %s is neither a detected harness (%s) nor mock", given, orNone(detected))
@@ -460,13 +459,13 @@ func chooseAgent(detected []string, given string) (string, error) {
 	if !isTerminal(devStdin) {
 		return "", fmt.Errorf("found %s; choose the default with --agent", found)
 	}
-	fmt.Fprintf(os.Stderr, "found %s; default agent [%s]: ", found, detected[0])
+	fmt.Fprintf(stderr, "found %s; default agent [%s]: ", found, detected[0])
 	answer, _ := bufio.NewReader(devStdin).ReadString('\n')
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
 		return detected[0], nil
 	}
-	return chooseAgent(detected, answer)
+	return chooseAgent(detected, answer, stderr)
 }
 
 func orNone(names []string) string {

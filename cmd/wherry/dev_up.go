@@ -211,7 +211,11 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	}
 
 	step("image")
-	for _, image := range devImages(*manifest) {
+	pulled := []devImage{manifest.Images["kafka"]}
+	if manifest.Storage != nil {
+		pulled = append(pulled, *manifest.Storage)
+	}
+	for _, image := range pulled {
 		id, err := runtimeOutput(ctx, manifest.Runtime, "image", "inspect", "--format", "{{.Id}}", image.Tag)
 		if err != nil || "sha256:"+strings.TrimPrefix(strings.TrimSpace(id), "sha256:") != image.ID {
 			return fmt.Errorf("image %s is no longer in the runtime; run wherry dev init", image.Tag)
@@ -232,7 +236,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 
 	step("kafka")
 	stopWait = waiting(stderr, "kafka")
-	kafkaAlloc, err := startKafka(ctx, nomad, env)
+	kafkaAlloc, err := startKafka(ctx, nomad, env, ca, passwords["admin"])
 	stopWait()
 	if err != nil {
 		return err
@@ -265,20 +269,20 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	}
 
 	step("operator-acl")
-	root, operator, err := devAdminClients(instance, passwords)
+	root, operator, err := devAdminClients(ca, passwords)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
 	defer operator.Close()
 	results, err := kadm.NewClient(root).CreateACLs(ctx, operatorACL())
-	if err == nil {
-		for _, result := range results {
-			err = cmpError(err, result.Err)
-		}
-	}
 	if err != nil {
 		return err
+	}
+	for _, result := range results {
+		if result.Err != nil {
+			return result.Err
+		}
 	}
 
 	step("bootstrap")
@@ -390,14 +394,6 @@ func denylist(fromInit, copied []string) []string {
 	return slices.Compact(names)
 }
 
-func devImages(manifest devManifest) []devImage {
-	images := []devImage{manifest.Images["kafka"]}
-	if manifest.Storage != nil {
-		images = append(images, *manifest.Storage)
-	}
-	return images
-}
-
 // waiting rewrites one terminal line with name and the seconds waited, until the returned func is called.
 func waiting(stderr io.Writer, name string) func() {
 	terminal, ok := stderr.(*os.File)
@@ -419,13 +415,6 @@ func waiting(stderr io.Writer, name string) func() {
 		}
 	}()
 	return func() { close(done); <-finished }
-}
-
-func cmpError(first, next error) error {
-	if first != nil {
-		return first
-	}
-	return next
 }
 
 // devTLS writes the instance CA and the broker's certificate, returning the CA certificate's PEM.
@@ -730,7 +719,7 @@ func poll(ctx context.Context, bound time.Duration, check func() error) error {
 
 // startKafka waits for an authenticated metadata request, since rootless podman's port forwarder accepts connections
 // while the container is down.
-func startKafka(ctx context.Context, nomad *api.Client, env devEnv) (string, error) {
+func startKafka(ctx context.Context, nomad *api.Client, env devEnv, ca []byte, adminPassword string) (string, error) {
 	raw := make([]byte, 16)
 	clusterID := "-"
 	for strings.HasPrefix(clusterID, "-") {
@@ -744,15 +733,7 @@ func startKafka(ctx context.Context, nomad *api.Client, env devEnv) (string, err
 	if err != nil {
 		return "", err
 	}
-	ca, err := os.ReadFile(env.instance.env("admin", "ca.pem"))
-	if err != nil {
-		return alloc, err
-	}
-	password, err := os.ReadFile(env.instance.env("admin", "admin-password"))
-	if err != nil {
-		return alloc, err
-	}
-	opts, err := admin.KafkaOpts(devBroker, ca, devAdminUser, string(password))
+	opts, err := admin.KafkaOpts(devBroker, ca, devAdminUser, adminPassword)
 	if err != nil {
 		return alloc, err
 	}
@@ -880,11 +861,7 @@ func createBucket(ctx context.Context, keys [2]string) error {
 }
 
 // devAdminClients connect to the broker as wherry-admin and as the operator.
-func devAdminClients(instance devInstance, passwords map[string]string) (*kgo.Client, *kgo.Client, error) {
-	ca, err := os.ReadFile(instance.env("admin", "ca.pem"))
-	if err != nil {
-		return nil, nil, err
-	}
+func devAdminClients(ca []byte, passwords map[string]string) (*kgo.Client, *kgo.Client, error) {
 	var clients []*kgo.Client
 	for _, user := range [][2]string{{devAdminUser, passwords["admin"]}, {admin.OperatorPrincipal, passwords["operator"]}} {
 		opts, err := admin.KafkaOpts(devBroker, ca, user[0], user[1])

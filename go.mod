@@ -11,6 +11,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/sigstore/sigstore-go v1.3.0
+	github.com/theupdateframework/go-tuf/v2 v2.4.2
 	github.com/twmb/franz-go v1.22.2
 	github.com/twmb/franz-go/pkg/kadm v1.19.0
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261013022759-7b6cac30a57a
@@ -101,7 +102,6 @@ require (
 	github.com/sigstore/rekor-tiles/v2 v2.3.0 // indirect
 	github.com/sigstore/sigstore v1.10.8 // indirect
 	github.com/sigstore/timestamp-authority/v2 v2.1.3 // indirect
-	github.com/theupdateframework/go-tuf/v2 v2.4.2 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/transparency-dev/formats v0.1.1 // indirect
 	github.com/transparency-dev/merkle v0.0.2 // indirect

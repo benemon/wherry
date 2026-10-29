@@ -222,11 +222,11 @@ func stubSources(t *testing.T, harnesses ...string) *[]string {
 	previous := devSources
 	t.Cleanup(func() { devSources = previous })
 	var calls []string
-	devSources.hashicorp = func(_ context.Context, product, _ string, prev *devArtefact, _ io.Writer) (*devArtefact, error) {
+	devSources.hashicorp = func(_ context.Context, product, _, _ string, prev *devArtefact, _ io.Writer) (*devArtefact, error) {
 		calls = append(calls, product)
 		return prev, nil
 	}
-	devSources.plugin = func(_ context.Context, _ string, prev *devPlugin, _ io.Writer) (*devPlugin, error) {
+	devSources.plugin = func(_ context.Context, _, _ string, prev *devPlugin, _ io.Writer) (*devPlugin, error) {
 		calls = append(calls, "plugin")
 		return prev, nil
 	}
@@ -337,7 +337,7 @@ func TestDevInitChoosesTheDefaultAgent(t *testing.T) {
 		agent     string
 		want      string
 	}{{[]string{"claude"}, "", "claude"}, {nil, "mock", "mock"}, {[]string{"claude", "codex"}, "codex", "codex"}} {
-		if got, err := chooseAgent(c.harnesses, c.agent); err != nil || got != c.want {
+		if got, err := chooseAgent(c.harnesses, c.agent, io.Discard); err != nil || got != c.want {
 			t.Errorf("chooseAgent(%v, %q) = %q, %v; want %q", c.harnesses, c.agent, got, err, c.want)
 		}
 	}
@@ -625,7 +625,7 @@ func TestAcquireNomadTakesThePin(t *testing.T) {
 	}
 	fake := fakeHTTP(t, bodies)
 	zip := fmt.Sprintf("%s2.0.7/nomad_2.0.7_%s_%s.zip", base, runtime.GOOS, runtime.GOARCH)
-	if _, err := acquireHashiCorp(context.Background(), "nomad", filepath.Join(t.TempDir(), "nomad"), nil, io.Discard); err == nil || !strings.Contains(err.Error(), zip+": 404") {
+	if _, err := acquireHashiCorp(context.Background(), "nomad", t.TempDir(), "nomad", nil, io.Discard); err == nil || !strings.Contains(err.Error(), zip+": 404") {
 		t.Fatalf("acquire: %v; want the pinned zip fetched", err)
 	}
 	for _, url := range fake.requested {
@@ -639,7 +639,7 @@ func TestAcquireNomadTakesThePin(t *testing.T) {
 	t.Cleanup(func() { hashicorpPins["nomad"] = previous })
 	hashicorpPins["nomad"] = struct{ version, linuxAMD64 string }{"2.0.7", strings.Repeat("0", 64)}
 	fake = fakeHTTP(t, bodies)
-	if _, err := acquireHashiCorp(context.Background(), "nomad", filepath.Join(t.TempDir(), "nomad"), nil, io.Discard); err == nil || !strings.Contains(err.Error(), "pinned SHA-256") {
+	if _, err := acquireHashiCorp(context.Background(), "nomad", t.TempDir(), "nomad", nil, io.Discard); err == nil || !strings.Contains(err.Error(), "pinned SHA-256") {
 		t.Fatalf("acquire with another pinned SHA-256: %v", err)
 	}
 	if slices.Contains(fake.requested, zip) {

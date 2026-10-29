@@ -44,12 +44,6 @@ func newStore(t *testing.T) *store {
 	return startStore(t, httptest.NewTLSServer)
 }
 
-// newHTTPStore is a store over plain http on 127.0.0.1, as wherry dev serves its storage.
-func newHTTPStore(t *testing.T) *store {
-	t.Helper()
-	return startStore(t, httptest.NewServer)
-}
-
 func startStore(t *testing.T, start func(http.Handler) *httptest.Server) *store {
 	t.Helper()
 	s := &store{puts: map[string][]byte{}}
@@ -234,7 +228,7 @@ func TestS3URLsAreCheckedAgainstPoolStorage(t *testing.T) {
 
 // A pool whose storage is plain http on 127.0.0.1 takes http URLs for it, and refuses https ones.
 func TestS3OverLoopbackHTTP(t *testing.T) {
-	s := newHTTPStore(t)
+	s := startStore(t, httptest.NewServer)
 	if !strings.HasPrefix(s.endpoint(), "http://127.0.0.1:") {
 		t.Fatalf("endpoint %s", s.endpoint())
 	}

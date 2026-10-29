@@ -32,6 +32,7 @@ import (
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/tuf"
 	"github.com/sigstore/sigstore-go/pkg/verify"
+	"github.com/theupdateframework/go-tuf/v2/metadata/fetcher"
 )
 
 // hashicorpKey is HashiCorp's release signing key, from https://www.hashicorp.com/.well-known/pgp-key.txt.
@@ -80,9 +81,11 @@ func newestRelease(versions []string) (string, bool) {
 	return best, bestParts != nil
 }
 
-// acquireHashiCorp fetches product's pinned or newest release binary for this OS and architecture into file, verifying
-// SHA256SUMS against HashiCorp's key and the zip against SHA256SUMS. It returns prev when that version is in file.
-func acquireHashiCorp(ctx context.Context, product, file string, prev *devArtefact, progress io.Writer) (*devArtefact, error) {
+// acquireHashiCorp fetches product's pinned or newest release binary for this OS and architecture into name under
+// cache, verifying SHA256SUMS against HashiCorp's key and the zip against SHA256SUMS. It returns prev when that version
+// is in the file.
+func acquireHashiCorp(ctx context.Context, product, cache, name string, prev *devArtefact, progress io.Writer) (*devArtefact, error) {
+	file := filepath.Join(cache, name)
 	var index struct {
 		Versions map[string]struct {
 			Shasums          string `json:"shasums"`
@@ -162,7 +165,7 @@ func acquireHashiCorp(ctx context.Context, product, file string, prev *devArtefa
 	if err != nil {
 		return nil, err
 	}
-	return &devArtefact{Version: version, File: relativeToCache(file), SHA256: sum, Verified: "SHA256SUMS+pgp"}, nil
+	return &devArtefact{Version: version, File: name, SHA256: sum, Verified: "SHA256SUMS+pgp"}, nil
 }
 
 // verifyHashiCorp checks signature, a detached binary OpenPGP signature, over sums against HashiCorp's key.
@@ -211,9 +214,10 @@ func (release githubRelease) asset(name string) string {
 	return ""
 }
 
-// acquirePlugin fetches the newest nomad plugin release whose protocol this wherry speaks into file. It returns prev
-// when the newest release is in file.
-func acquirePlugin(ctx context.Context, file string, prev *devPlugin, progress io.Writer) (*devPlugin, error) {
+// acquirePlugin fetches the newest nomad plugin release whose protocol this wherry speaks into name under cache. It
+// returns prev when the newest release is in the file.
+func acquirePlugin(ctx context.Context, cache, name string, prev *devPlugin, progress io.Writer) (*devPlugin, error) {
+	file := filepath.Join(cache, name)
 	encoded, err := get(ctx, pluginReleases)
 	if err != nil {
 		return nil, err
@@ -235,7 +239,7 @@ func acquirePlugin(ctx context.Context, file string, prev *devPlugin, progress i
 			return prev, nil
 		}
 	}
-	tufCache := filepath.Join(filepath.Dir(filepath.Dir(file)), "tuf")
+	tufCache := filepath.Join(cache, "tuf")
 	for _, release := range releases {
 		archive := fmt.Sprintf("wherry-plugin-nomad_%s_%s_%s.tar.gz", strings.TrimPrefix(release.Tag, "nomad/"), runtime.GOOS, runtime.GOARCH)
 		urls := []string{release.asset("checksums.txt"), release.asset("checksums.txt.sigstore.json"), release.asset(archive)}
@@ -285,7 +289,7 @@ func acquirePlugin(ctx context.Context, file string, prev *devPlugin, progress i
 		if err := os.Rename(binary, file); err != nil {
 			return nil, err
 		}
-		return &devPlugin{Tag: release.Tag, Protocol: protocol, File: relativeToCache(file), SHA256: sum, Verified: "checksums.txt+sigstore"}, nil
+		return &devPlugin{Tag: release.Tag, Protocol: protocol, File: name, SHA256: sum, Verified: "checksums.txt+sigstore"}, nil
 	}
 	return nil, errors.New("no nomad plugin release speaks this wherry's plugin protocol; a plugin release must follow the protocol change")
 }
@@ -304,7 +308,9 @@ func handshake(path string) (int, error) {
 // verifySigstore checks a keyless sigstore bundle over artifact against the plugin release workflow's identity, with
 // the public-good trusted root fetched through TUF into tufCache.
 func verifySigstore(artifact, bundleJSON []byte, tufCache string) error {
-	trusted, err := root.FetchTrustedRootWithOptions(tuf.DefaultOptions().WithCachePath(tufCache))
+	tufFetcher := fetcher.NewDefaultFetcher()
+	tufFetcher.SetHTTPClient(devHTTP)
+	trusted, err := root.FetchTrustedRootWithOptions(tuf.DefaultOptions().WithCachePath(tufCache).WithFetcher(tufFetcher))
 	if err != nil {
 		return fmt.Errorf("sigstore trusted root: %w", err)
 	}
@@ -347,12 +353,13 @@ func acquireImage(ctx context.Context, runtime, reference, repository string, pr
 	if !ok || id == "" {
 		return nil, fmt.Errorf("%s image inspect %s gave %q, not an ID and a repository digest", runtime, reference, inspected)
 	}
-	id = "sha256:" + strings.TrimPrefix(id, "sha256:")
+	bare := strings.TrimPrefix(id, "sha256:")
+	id = "sha256:" + bare
 	// Podman stores an unqualified repository under localhost/, the name its driver resolves locally.
 	if runtime == "podman" {
 		repository = "localhost/" + repository
 	}
-	tag := repository + ":" + strings.TrimPrefix(id, "sha256:")[:12]
+	tag := repository + ":" + bare[:12]
 	// Tagging again restores a tag a prune removed.
 	if _, err := runtimeOutput(ctx, runtime, "tag", id, tag); err != nil {
 		return nil, err
@@ -505,12 +512,4 @@ func extractTarMember(archive io.Reader, name, file string) (string, error) {
 			return install(reader, file)
 		}
 	}
-}
-
-// relativeToCache is file's path under the instance's cache directory.
-func relativeToCache(file string) string {
-	if filepath.Base(filepath.Dir(file)) == "cache" {
-		return filepath.Base(file)
-	}
-	return filepath.Join(filepath.Base(filepath.Dir(file)), filepath.Base(file))
 }
