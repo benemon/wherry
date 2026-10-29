@@ -82,9 +82,7 @@ leak)
   done
   secrets=("the mock token=$WHERRY_DEV_MOCK_TOKEN")
   if [ "${STORAGE:-false}" = true ]; then
-    for name in s3-access-key s3-secret-key; do
-      secrets+=("the $name=$(cat "$root/env/host/credentials/$name")")
-    done
+    secrets+=("the s3-secret-key=$(cat "$root/env/host/credentials/s3-secret-key")")
   fi
   for file in "$root/env/nomad/nomad.log" "$work/jobs.json" "$work/receiver.log" "$work/out/transcript.jsonl"; do
     [ -s "$file" ] || fail "$file is empty"
@@ -93,6 +91,15 @@ leak)
       if grep -qF "${secret#*=}" "$file"; then fail "${secret%%=*} is in $file"; fi
     done
   done
+  # A presigned URL names its access key ID in X-Amz-Credential (SigV4), and the agent's job fetches its S3 inputs by
+  # presigned URL, so the job specs hold the ID by design; the ID appears nowhere else.
+  if [ "${STORAGE:-false}" = true ]; then
+    access=$(cat "$root/env/host/credentials/s3-access-key")
+    [ -n "$access" ] || fail "the s3-access-key is empty"
+    for file in "$root/env/nomad/nomad.log" "$work/receiver.log" "$work/out/transcript.jsonl"; do
+      if grep -qF "$access" "$file"; then fail "the s3-access-key is in $file"; fi
+    done
+  fi
   ;;
 fail)
   id=$(submit 'mock: fail')
