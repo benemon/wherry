@@ -920,8 +920,8 @@ never dispatched. It passes the values to the plugin in Dispatch. It logs
 a seal that does not open by run and attempt alone.
 
 Before it uses a URL, the receiver checks it against the pool's
-`storage`: its scheme is `https`, its host and port, 443 when absent, are
-the endpoint's, it carries no user information, fragment or opaque part,
+`storage`: its scheme, host and port, the scheme's default port when
+absent, are the endpoint's, it carries no user information, fragment or opaque part,
 and its escaped path is `/<bucket>/` and the object's key exactly. A URL
 that fails ends the run `TASK_STATE_FAILED` with
 `the URL for S3 input <name> is not one of pool <pool>'s storage`, or

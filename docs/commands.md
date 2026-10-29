@@ -546,26 +546,27 @@ wherry dev init [--instance NAME] [--runtime podman|docker] [--storage-enabled] 
 Acquires everything `up` runs into `cache/` and records it in
 `cache/manifest.json`:
 
-- Nomad CE 2.0.7, the release the nomad plugin's CI tests, its
-  `SHA256SUMS` checked against HashiCorp's release key, fingerprint
-  `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`, and against the
-  pinned SHA-256 of its `linux_amd64` zip, and the zip against
-  `SHA256SUMS`; on Linux with Podman, the newest `nomad-driver-podman` the
-  same way;
-- the newest `nomad/v*` release of the nomad plugin whose `checksums.txt`
-  verifies against its sigstore bundle from the plugin's release workflow,
-  whose archive matches `checksums.txt`, and whose binary speaks this
-  wherry's plugin protocol; a binary that speaks another is dropped for the
-  next older release;
+- Nomad CE 2.0.7, the release the nomad plugin's CI tests. Its
+  `SHA256SUMS` must carry a signature by HashiCorp's release key,
+  fingerprint `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`, and list
+  the pinned SHA-256 of the `linux_amd64` zip. The zip must match
+  `SHA256SUMS`.
+- On Linux with Podman, the newest `nomad-driver-podman`, checked the same
+  way.
+- The newest `nomad/v*` release of the nomad plugin that passes three
+  checks: its `checksums.txt` verifies against its sigstore bundle from the
+  plugin's release workflow, its archive matches `checksums.txt`, and its
+  binary speaks this wherry's plugin protocol. A binary that speaks another
+  is dropped for the next older release.
 - `docker.io/apache/kafka:latest`, pulled and tagged
-  `wherry-dev/kafka:<id12>` in the runtime's own store, and with
-  `--storage-enabled`, `quay.io/benjamin_holmes/ceph-aio:v21` tagged
-  `wherry-dev/ceph-aio:<id12>`. Under Podman the tags start `localhost/`;
-- a copy of the running wherry binary, which the receiver job runs.
+  `wherry-dev/kafka:<id12>` in the runtime's own store. With
+  `--storage-enabled`, also `quay.io/benjamin_holmes/ceph-aio:v21`, tagged
+  `wherry-dev/ceph-aio:<id12>`. Under Podman the tags start `localhost/`.
+- A copy of the running wherry binary, which the receiver job runs.
 
 `--runtime` is required when both `docker` and `podman` answer `version`,
 and found otherwise. `init` looks for `claude`, `codex` and `gemini` on
-`PATH`. One found is the default agent; with several it asks on a
+`PATH`. One found is the default agent. With several it asks on a
 terminal, and fails with `found claude and codex; choose the default with
 --agent` without one. With none and no `--agent` it fails with
 `no agent harness found on PATH (looked for claude, codex, gemini); install one, or choose --agent mock`
@@ -619,21 +620,21 @@ returns once a run of the mock agent completes. Its steps:
    them. On Linux without a Podman socket it starts `podman system
    service` beside Nomad.
 6. `kafka` runs the broker as a Nomad job from the local tag and waits for
-   a metadata request over SCRAM; `operator-acl` grants `wherry.operator`
+   a metadata request over SCRAM. `operator-acl` grants `wherry.operator`
    its ACL on `wherry.admin`.
 7. `bootstrap` makes the admin calls of the operator's steps: pool `dev`,
    tenant `dev`, host `dev` and receiver `dev-1` with a plugin profile per
    agent, and registers the host key.
 8. `receiver` runs `wherry receiver run` from the copy as a `raw_exec` job
    and waits for `dev-1` to be live with every profile ready.
-9. `smoke` runs the mock agent and checks the output it returns; `ready`
+9. `smoke` runs the mock agent and checks the output it returns. `ready`
    writes `env/up.json` and prints the summary.
 
 The harness profiles and `mock` run under `raw_exec` with label
-`isolation: host`. `--agent-image NAME=IMAGE` splits at the first `=`; it
+`isolation: host`. `--agent-image NAME=IMAGE` splits at the first `=`. It
 runs agent `NAME` in `IMAGE` with label `isolation: container`, never
 pulled, so the image must be in the runtime. For `claude`, `codex` and
-`gemini` the profile runs the harness from `/local`; any other `NAME` runs
+`gemini` the profile runs the harness from `/local`. Any other `NAME` runs
 the image's entrypoint, which meets the
 [agent contract](configuration.md#agent-contract).
 [`agent.Containerfile`](https://github.com/benemon/wherry/blob/main/docs/agent.Containerfile) builds one for `claude`.
@@ -654,16 +655,21 @@ A failed step leaves the environment for `down` to remove.
 wherry dev down [--instance NAME]
 ```
 
-Deregisters the receiver, every agent job, storage and Kafka, waits up to
-60 seconds for their allocations to end and purges them; waits up to 60
-seconds for the runtime to list no container of theirs, then removes those
-left by ID; stops Nomad and the Podman service with `SIGTERM`, and
-`SIGKILL` after 30 seconds; checks that the ports are free; and removes
-`env/`. Each step runs after a failed one, and `down` fails naming every
-failed step. It keeps `cache/` and prints a `mcp remove` line for each
-harness, since the registration names a configuration that is gone. An
-instance that is not up prints `instance NAME is not up`, removes a
-leftover `env/` and exits 0.
+Its steps, each run after a failed one:
+
+1. `jobs` deregisters the receiver, every agent job, storage and Kafka,
+   waits up to 60 seconds for their allocations to end, and purges them.
+2. `containers` waits up to 60 seconds for the runtime to list no
+   container of theirs, then removes those left by ID.
+3. `nomad` stops Nomad and the Podman service with `SIGTERM`, and
+   `SIGKILL` after 30 seconds.
+4. `ports` checks that the ports are free.
+5. `data` removes `env/`.
+
+`down` fails naming every failed step. It keeps `cache/` and prints a
+`mcp remove` line for each harness, since the registration names a
+configuration that is gone. An instance that is not up prints
+`instance NAME is not up`, removes a leftover `env/` and exits 0.
 
 ### `wherry dev reset`
 
@@ -672,7 +678,7 @@ wherry dev reset [--instance NAME]
 ```
 
 Removes `cache/`. It refuses while the instance is up. The images stay in
-the runtime's store; remove `wherry-dev/kafka:<id12>` with the runtime.
+the runtime's store. Remove `wherry-dev/kafka:<id12>` with the runtime.
 
 ## Admin commands
 
