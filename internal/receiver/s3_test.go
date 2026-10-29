@@ -41,8 +41,13 @@ type store struct {
 
 func newStore(t *testing.T) *store {
 	t.Helper()
+	return startStore(t, httptest.NewTLSServer)
+}
+
+func startStore(t *testing.T, start func(http.Handler) *httptest.Server) *store {
+	t.Helper()
 	s := &store{puts: map[string][]byte{}}
-	s.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s.server = start(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.handle != nil {
 			s.handle(w, r)
 			return
@@ -219,6 +224,49 @@ func TestS3URLsAreCheckedAgainstPoolStorage(t *testing.T) {
 			t.Fatalf("status %v, %+v", status, f.lastTask(t).Status)
 		}
 	})
+}
+
+// A pool whose storage is plain http on 127.0.0.1 takes http URLs for it, and refuses https ones.
+func TestS3OverLoopbackHTTP(t *testing.T) {
+	s := startStore(t, httptest.NewServer)
+	if !strings.HasPrefix(s.endpoint(), "http://127.0.0.1:") {
+		t.Fatalf("endpoint %s", s.endpoint())
+	}
+	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
+	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
+	f.sealS3(t, validURLs(s.endpoint()))
+	if status := <-done; status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	if fetches := f.lastRun().Fetches; len(fetches) != 1 || !strings.HasPrefix(fetches[0].URL, s.endpoint()+"/") {
+		t.Fatalf("fetches %+v", fetches)
+	}
+	if data, ok := s.put("/" + s3Bucket + "/" + wire.S3OutputKey(testTenant, "run-a", "report.pdf")); !ok || string(data) != "report" {
+		t.Fatalf("store holds %q, %v for the output", data, ok)
+	}
+	if strings.Contains(f.logs.String(), s3Signature) {
+		t.Fatalf("logs hold a URL:\n%s", f.logs.String())
+	}
+	inputKey := wire.S3InputKey(testTenant, "run-a", "dataset.bin")
+	for name, get := range map[string]string{
+		"https":        presigned(strings.Replace(s.endpoint(), "http://", "https://", 1), inputKey),
+		"default port": presigned("http://127.0.0.1", inputKey),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := s3Fixture(t, s, resultStream, nil)
+			done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
+			f.sealS3(t, func(input, output string) (string, string) {
+				_, put := validURLs(s.endpoint())(input, output)
+				return get, put
+			})
+			if status := <-done; status != kgo.AckReject || f.lastTask(t).Status.Message.Parts[0].Text != "the URL for S3 input dataset.bin is not one of pool pool-a's storage" {
+				t.Fatalf("status %v, %+v", status, f.lastTask(t).Status)
+			}
+			if strings.Contains(f.logs.String(), s3Signature) {
+				t.Fatalf("logs hold the URL:\n%s", f.logs.String())
+			}
+		})
+	}
 }
 
 func TestS3UseWithoutPoolStorageIsRejected(t *testing.T) {

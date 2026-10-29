@@ -1,0 +1,4 @@
+78b5300907f8df59e5ebb51996933f873da5efa431b3ead844a86f88f550f556  wherry-plugin-kubernetes_v0.1.0-rc.8_darwin_amd64.tar.gz
+f2138eabfcd447ca87bfc224b412b6762c44ac38556ff37fefcb823e667e39f5  wherry-plugin-kubernetes_v0.1.0-rc.8_darwin_arm64.tar.gz
+b61856f2e24c1a80109ab36a30f100a52e13995a8685ee52a6e5e7527bfdbfe6  wherry-plugin-kubernetes_v0.1.0-rc.8_linux_amd64.tar.gz
+fe2952d2a172cc64b7d460e7fda34d7e4f159de91909047d863e6e1bee100cd5  wherry-plugin-kubernetes_v0.1.0-rc.8_linux_arm64.tar.gz

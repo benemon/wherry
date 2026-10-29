@@ -1,11 +1,14 @@
 package admin
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -89,8 +92,8 @@ func (terms Terms) LockDuration() time.Duration {
 	return time.Duration(terms.LockDurationMS) * time.Millisecond
 }
 
-// Storage is the S3-compatible endpoint, an https origin with no path, and the bucket a pool's S3 inputs and outputs
-// live in.
+// Storage is the S3-compatible endpoint, an origin with no path, and the bucket a pool's S3 inputs and outputs live
+// in. The endpoint is https, or http when its host is the literal 127.0.0.1 or [::1], whose traffic stays on the machine.
 type Storage struct {
 	Endpoint string `json:"endpoint" yaml:"endpoint"`
 	Bucket   string `json:"bucket" yaml:"bucket"`
@@ -99,24 +102,52 @@ type Storage struct {
 // bucketName is an S3 bucket name as every S3-compatible store accepts one.
 var bucketName = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
 
-// Host is the endpoint's host and port, the port defaulting to 443.
+// Secure reports whether the endpoint is https.
+func (storage Storage) Secure() bool {
+	return strings.HasPrefix(storage.Endpoint, "https://")
+}
+
+// Host is the endpoint's host and port, the port defaulting to the scheme's.
 func (storage Storage) Host() string {
-	host := strings.TrimPrefix(storage.Endpoint, "https://")
-	if !strings.Contains(host, ":") {
-		host += ":443"
+	host, port := strings.TrimPrefix(strings.TrimPrefix(storage.Endpoint, "https://"), "http://"), "80"
+	if storage.Secure() {
+		port = "443"
+	}
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		host = net.JoinHostPort(strings.Trim(host, "[]"), port)
 	}
 	return host
 }
 
+// Serves reports whether u has the endpoint's scheme, host and port.
+func (storage Storage) Serves(u *url.URL) bool {
+	scheme, port := "http", "80"
+	if storage.Secure() {
+		scheme, port = "https", "443"
+	}
+	return u.Scheme == scheme && net.JoinHostPort(u.Hostname(), cmp.Or(u.Port(), port)) == storage.Host()
+}
+
 func (storage Storage) validate() error {
-	host, ok := strings.CutPrefix(storage.Endpoint, "https://")
-	if !ok || !wire.ValidVCSHost(host) {
-		return errors.New("storage endpoint must be https:// and a lowercase host name, optionally with :port, and nothing else")
+	host, secure := strings.CutPrefix(storage.Endpoint, "https://")
+	if secure && !wire.ValidVCSHost(host) || !secure && !loopbackHTTP(storage.Endpoint) {
+		return errors.New("storage endpoint must be https:// and a lowercase host name, or http:// and 127.0.0.1 or [::1], optionally with :port, and nothing else")
 	}
 	if !bucketName.MatchString(storage.Bucket) || strings.Contains(storage.Bucket, "..") {
 		return errors.New("storage bucket must be 3 to 63 lowercase letters, digits, dots and hyphens")
 	}
 	return nil
+}
+
+// loopbackHTTP reports whether endpoint is http:// and the literal 127.0.0.1 or [::1], optionally with a port of 1 to
+// 65535. A name that resolves to loopback does not count: its resolution is outside the pool's terms.
+func loopbackHTTP(endpoint string) bool {
+	for _, origin := range []string{"http://127.0.0.1", "http://[::1]"} {
+		if port, ok := strings.CutPrefix(endpoint, origin); ok && (port == "" || strings.HasPrefix(port, ":") && wire.ValidVCSHost("127.0.0.1"+port)) {
+			return true
+		}
+	}
+	return false
 }
 
 // The Default values are a pool's terms where its terms leave them out; MaxRunDurationMS caps a run after its queue

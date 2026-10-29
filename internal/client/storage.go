@@ -62,7 +62,7 @@ func (h *Host) bucket(ctx context.Context, pool string, storage *admin.Storage) 
 	}
 	// minio drops the default port Host adds, as presigned URLs are signed without it.
 	return minio.New(storage.Host(), &minio.Options{
-		Creds: credentials.NewStaticV4(keys[0], keys[1], ""), Secure: true, BucketLookup: minio.BucketLookupPath, Transport: storageTransport,
+		Creds: credentials.NewStaticV4(keys[0], keys[1], ""), Secure: storage.Secure(), BucketLookup: minio.BucketLookupPath, Transport: storageTransport,
 	})
 }
 

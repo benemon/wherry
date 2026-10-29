@@ -588,11 +588,38 @@ func TestPoolStorage(t *testing.T) {
 	if err != nil || *state.Pools["pool-a"].Storage != *terms.Storage || state.Pools["pool-a"].Storage.Host() != "s3.example.test:8443" {
 		t.Fatalf("storage %+v, %v; want the terms' own", state.Pools["pool-a"].Storage, err)
 	}
-	if host := (Storage{Endpoint: "https://s3.example.test"}).Host(); host != "s3.example.test:443" {
-		t.Fatalf("host %s; want the https default port", host)
+	for endpoint, host := range map[string]string{
+		"https://s3.example.test": "s3.example.test:443", "http://127.0.0.1": "127.0.0.1:80", "http://[::1]": "[::1]:80", "http://[::1]:18080": "[::1]:18080",
+	} {
+		if got := (Storage{Endpoint: endpoint}).Host(); got != host {
+			t.Errorf("host of %s is %s; want %s", endpoint, got, host)
+		}
+	}
+	for _, endpoint := range []string{"https://s3.example.test", "https://127.0.0.1:8443", "http://127.0.0.1:18080", "http://[::1]:18080", "http://127.0.0.1"} {
+		terms.Storage = &Storage{Endpoint: endpoint, Bucket: "wherry-lab"}
+		if err := validateTerms(terms); err != nil {
+			t.Errorf("storage %s: %v", endpoint, err)
+		}
 	}
 	for _, storage := range []Storage{
 		{Endpoint: "http://s3.example.test", Bucket: "wherry-lab"},
+		{Endpoint: "http://localhost", Bucket: "wherry-lab"},
+		{Endpoint: "http://localhost:18080", Bucket: "wherry-lab"},
+		{Endpoint: "http://10.0.0.1", Bucket: "wherry-lab"},
+		{Endpoint: "http://127.0.0.1.nip.io", Bucket: "wherry-lab"},
+		{Endpoint: "http://127.0.0.2", Bucket: "wherry-lab"},
+		{Endpoint: "http://127.0.0.1:", Bucket: "wherry-lab"},
+		{Endpoint: "http://127.0.0.1:0", Bucket: "wherry-lab"},
+		{Endpoint: "http://127.0.0.1/path", Bucket: "wherry-lab"},
+		{Endpoint: "http://[::1]/path", Bucket: "wherry-lab"},
+		{Endpoint: "http://user@127.0.0.1", Bucket: "wherry-lab"},
+		{Endpoint: "http://[::1]:x", Bucket: "wherry-lab"},
+		{Endpoint: "http://0177.0.0.1", Bucket: "wherry-lab"},
+		{Endpoint: "http://127.1", Bucket: "wherry-lab"},
+		{Endpoint: "http://[::ffff:127.0.0.1]", Bucket: "wherry-lab"},
+		{Endpoint: "http://[::1%25lo0]", Bucket: "wherry-lab"},
+		{Endpoint: "HTTP://127.0.0.1", Bucket: "wherry-lab"},
+		{Endpoint: "https://[::1]:18080", Bucket: "wherry-lab"},
 		{Endpoint: "https://s3.example.test/path", Bucket: "wherry-lab"},
 		{Endpoint: "https://S3.example.test", Bucket: "wherry-lab"},
 		{Endpoint: "https://user@s3.example.test", Bucket: "wherry-lab"},

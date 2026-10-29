@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -900,5 +901,50 @@ func TestPaddedStorageKeyIsRedacted(t *testing.T) {
 	}
 	if got := Redact(err.Error()); strings.Contains(got, "padded-access-key") {
 		t.Fatalf("redacted error holds the access key: %s", got)
+	}
+}
+
+// A pool's storage at http://127.0.0.1 is reached over plain http, and its presigned URLs are http URLs.
+func TestLoopbackHTTPStorage(t *testing.T) {
+	var puts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Has("location"):
+			fmt.Fprint(w, "<LocationConstraint></LocationConstraint>")
+		case r.Method == http.MethodPut:
+			io.Copy(io.Discard, r.Body)
+			puts.Add(1)
+			w.Header().Set("ETag", `"0"`)
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(server.Close)
+	access, secret := filepath.Join(t.TempDir(), "access"), filepath.Join(t.TempDir(), "secret")
+	for _, file := range []string{access, secret} {
+		if err := os.WriteFile(file, []byte("key"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := &Host{storage: &StorageConfig{AccessKey: "access", SecretKey: "secret"},
+		credentials: map[string]credential.Source{"access": {File: access}, "secret": {File: secret}}}
+	ctx := context.Background()
+	storage := &admin.Storage{Endpoint: server.URL, Bucket: testBucket}
+	store, err := h.bucket(ctx, "pool-s3", storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, _ := randomFile(t, "dataset.bin", 16)
+	if _, err := uploadInputs(ctx, store, testBucket, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}}); err != nil || puts.Load() != 1 {
+		t.Fatalf("upload = %v after %d PUTs; want one PUT over http", err, puts.Load())
+	}
+	values, err := presign(ctx, store, testBucket, "tenant-a", "run-1", []string{"dataset.bin"}, nil, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	get, err := url.Parse(string(values[signed.S3InputValue("dataset.bin")]))
+	if err != nil || !storage.Serves(get) {
+		t.Fatalf("presigned %s, %v; want a URL the pool's storage serves", get, err)
 	}
 }

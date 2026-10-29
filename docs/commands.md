@@ -7,7 +7,7 @@
 
 ## Conventions
 
-- `wherry admin`, `wherry receiver run` and `wherry version` read no client
+- `wherry admin`, `wherry dev`, `wherry receiver run` and `wherry version` read no client
   configuration. Every other command reads it first, and every command except `key` and `mcp`
   then connects to Kafka. `key` connects only to settle a
   [leftover next key](#wherry-key-rotate).
@@ -520,6 +520,165 @@ git tag, such as `v0.1.0-rc.9`. A build from an untagged commit prints a Go
 pseudo-version, and a build without git information prints `(devel)` and an
 empty revision. A build from a working tree with uncommitted changes adds
 `modified=true`. It takes no flags and reads no configuration.
+
+## Dev commands
+
+`wherry dev` runs a whole deployment on one machine for trying wherry and
+developing against it, as [Try it on one machine](quickstart.md#try-it-on-one-machine)
+walks through. Each command takes `--instance NAME`, default `default`, a
+[name](#names). An instance lives in `$XDG_DATA_HOME/wherry/dev/NAME`, by
+default `~/.local/share/wherry/dev/NAME`, mode 0700, in two parts:
+`cache/`, which `init` fills and `reset` removes, and `env/`, which `up`
+creates and `down` removes. The ports are fixed, so one instance is up at
+a time: Nomad on 4646, 4647 and 4648, Kafka on 9093 and, with storage, S3
+on 18080, all on 127.0.0.1.
+
+An instance is up while its `env/up.json` names a live Nomad agent that
+`up` started. Every step prints its name on standard error, and a failed
+step fails with `step <name>: <cause>`.
+
+### `wherry dev init`
+
+```sh
+wherry dev init [--instance NAME] [--runtime podman|docker] [--storage-enabled] [--agent NAME]
+```
+
+Acquires everything `up` runs into `cache/` and records it in
+`cache/manifest.json`:
+
+- Nomad CE 2.0.7, the release the nomad plugin's CI tests. Its
+  `SHA256SUMS` must carry a signature by HashiCorp's release key,
+  fingerprint `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`, and list
+  the pinned SHA-256 of the `linux_amd64` zip. The zip must match
+  `SHA256SUMS`.
+- On Linux with Podman, the newest `nomad-driver-podman`, checked the same
+  way.
+- The newest `nomad/v*` release of the nomad plugin that passes three
+  checks: its `checksums.txt` verifies against its sigstore bundle from the
+  plugin's release workflow, its archive matches `checksums.txt`, and its
+  binary speaks this wherry's plugin protocol. A binary that speaks another
+  is dropped for the next older release.
+- `docker.io/apache/kafka:latest`, pulled and tagged
+  `wherry-dev/kafka:<id12>` in the runtime's own store. With
+  `--storage-enabled`, also `quay.io/benjamin_holmes/ceph-aio:v21`, tagged
+  `wherry-dev/ceph-aio:<id12>`. Under Podman the tags start `localhost/`.
+- A copy of the running wherry binary, which the receiver job runs.
+
+`--runtime` is required when both `docker` and `podman` answer `version`,
+and found otherwise. `init` looks for `claude`, `codex` and `gemini` on
+`PATH`. One found is the default agent. With several it asks on a
+terminal, and fails with `found claude and codex; choose the default with
+--agent` without one. With none and no `--agent` it fails with
+`no agent harness found on PATH (looked for claude, codex, gemini); install one, or choose --agent mock`
+before it downloads anything. `--agent NAME` takes a harness it found or
+`mock`. `init` without `--storage-enabled` drops storage from an instance
+that has it.
+
+`init` sends `GH_TOKEN`, else `GITHUB_TOKEN`, to GitHub's API as a bearer
+token when one is set. Without one, GitHub allows 60 API requests an hour
+from an address, and a spent limit fails naming the time it resets.
+
+`init` downloads only what changed and prints `instance NAME: unchanged`
+when nothing did. A harness installed later needs `init` again. It refuses
+while the instance is up with `instance NAME is up; run wherry dev down
+first`. A manifest of another layout version is refused naming its path.
+
+### `wherry dev up`
+
+```sh
+wherry dev up [--instance NAME] [--runtime podman|docker] [--agent-image NAME=IMAGE]...
+```
+
+Builds and starts the environment from `cache/`, downloading nothing, and
+returns once a run of the mock agent completes. Its steps:
+
+1. `preflight` refuses while this instance is up (`instance NAME is
+   already up`) or another is (`instance OTHER is up; run wherry dev down
+   --instance OTHER first`), without a manifest (`nothing acquired for
+   instance NAME; run wherry dev init first`), with a cached file whose
+   SHA-256 differs from the manifest's, with a `--runtime` other than the
+   manifest's, with a port in use (`port 9093 is in use`), and when the
+   running binary differs from the copy (`the running wherry differs from
+   the snapshot; run wherry dev init`).
+2. `harnesses`, `credentials`: the agents are the harnesses `init` found,
+   the `--agent-image` names and `mock`. For each, the set variables of
+   `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY` (else
+   `OPENAI_API_KEY`), `GEMINI_API_KEY` and `WHERRY_DEV_MOCK_TOKEN` are
+   copied into `env/host/credentials/`, mode 0600.
+3. `tls`, `passwords`: an instance CA, the broker's certificate for
+   127.0.0.1, and the SCRAM passwords of `wherry-admin` and
+   `wherry.operator`. `env/admin/admin.env` exports the five
+   [`WHERRY_TRUST_*` variables](configuration.md#environment-variables)
+   for `wherry admin` against the instance.
+4. `image` checks that the manifest's tags are still in the runtime, and
+   fails with `image TAG is no longer in the runtime; run wherry dev init`.
+5. `nomad` starts `nomad agent -dev` as you, detached, its log in
+   `env/nomad/nomad.log` and its data directory mode 0700. Its
+   `env.denylist` holds Nomad's default list, the copied variables and
+   every variable whose name ends `_TOKEN`, `_KEY`, `_SECRET` or
+   `_PASSWORD` when `init` ran, so the agents' environment carries none of
+   them. On Linux without a Podman socket it starts `podman system
+   service` beside Nomad.
+6. `kafka` runs the broker as a Nomad job from the local tag and waits for
+   a metadata request over SCRAM. `operator-acl` grants `wherry.operator`
+   its ACL on `wherry.admin`.
+7. `bootstrap` makes the admin calls of the operator's steps: pool `dev`,
+   tenant `dev`, host `dev` and receiver `dev-1` with a plugin profile per
+   agent, and registers the host key.
+8. `receiver` runs `wherry receiver run` from the copy as a `raw_exec` job
+   and waits for `dev-1` to be live with every profile ready.
+9. `smoke` runs the mock agent and checks the output it returns. `ready`
+   writes `env/up.json` and prints the summary.
+
+The harness profiles and `mock` run under `raw_exec` with label
+`isolation: host`. `--agent-image NAME=IMAGE` splits at the first `=`. It
+runs agent `NAME` in `IMAGE` with label `isolation: container`, never
+pulled, so the image must be in the runtime. For `claude`, `codex` and
+`gemini` the profile runs the harness from `/local`. Any other `NAME` runs
+the image's entrypoint, which meets the
+[agent contract](configuration.md#agent-contract).
+[`agent.Containerfile`](https://github.com/benemon/wherry/blob/main/docs/agent.Containerfile) builds one for `claude`.
+
+With storage, `storage`, `s3-user` and `bucket` run after `kafka`. ceph-aio
+serves S3 on `http://127.0.0.1:18080`. `s3-user` has `radosgw-admin`
+generate the user's keys and writes them to `env/host/credentials/`. Pool
+`dev` takes the endpoint as its [storage](configuration.md#pool-terms), and
+the smoke run sends an S3 input and returns its output through the bucket.
+The ceph-aio job reserves 2048 MB of memory, and its data lives in the
+container, so `down` removes it.
+
+A failed step leaves the environment for `down` to remove.
+
+### `wherry dev down`
+
+```sh
+wherry dev down [--instance NAME]
+```
+
+Its steps, each run after a failed one:
+
+1. `jobs` deregisters the receiver, every agent job, storage and Kafka,
+   waits up to 60 seconds for their allocations to end, and purges them.
+2. `containers` waits up to 60 seconds for the runtime to list no
+   container of theirs, then removes those left by ID.
+3. `nomad` stops Nomad and the Podman service with `SIGTERM`, and
+   `SIGKILL` after 30 seconds.
+4. `ports` checks that the ports are free.
+5. `data` removes `env/`.
+
+`down` fails naming every failed step. It keeps `cache/` and prints a
+`mcp remove` line for each harness, since the registration names a
+configuration that is gone. An instance that is not up prints
+`instance NAME is not up`, removes a leftover `env/` and exits 0.
+
+### `wherry dev reset`
+
+```sh
+wherry dev reset [--instance NAME]
+```
+
+Removes `cache/`. It refuses while the instance is up. The images stay in
+the runtime's store. Remove `wherry-dev/kafka:<id12>` with the runtime.
 
 ## Admin commands
 

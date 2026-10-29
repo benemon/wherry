@@ -1,41 +1,12 @@
 # Quickstart
 
-This guide sets up one deployment and runs a first task on it, in three
-parts: the operator's, the receiver's and the host's. The deployment is pool
-`build`, tenant `acme` with host `laptop`, and receiver `nomad-1` running
-agent `claude` on a Nomad cluster. [Key concepts](concepts.md) explains the
-parts involved.
-
-Each step names the machine it runs on: the operator's machine, which holds
-the Kafka credentials `wherry admin` uses; the receiver host, which runs
-receiver `nomad-1`; and `laptop`, the host the tenant submits from.
-
-Two pairs of files name the same credentials:
-
-- The pool terms give agent `claude` the credential `claude-oauth-token`.
-  The host's configuration maps that name to a source on `laptop`.
-- The receiver configuration names the platform credential `nomad-token`,
-  the Nomad token the receiver authenticates with. The receiver's local
-  configuration maps that name to a source on the receiver host.
-
-The configuration on `wherry.admin` holds the names. Each value is read from
-its source on the machine that resolves it.
-
-## Prerequisites
-
-- A Nomad cluster with:
-  - a namespace for agent jobs, `agents`;
-  - nodes in the default node pool with the `docker` driver, able to pull
-    `registry.example.com/claude-agent:1.0`, an image with Claude Code
-    installed as `claude`;
-  - a node pool `agents-host` whose nodes run the `exec` driver and have
-    Claude Code installed as `claude`;
-  - a token carrying the
-    [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy);
-  - its CA certificate on the receiver host at `/etc/wherry/nomad-ca.pem`.
-- A Claude Code OAuth token, which `claude setup-token` prints, on `laptop`.
-- An agent that meets the [agent contract](configuration.md#agent-contract),
-  here Claude Code in the image and on the `agents-host` nodes.
+This guide runs wherry two ways. [Try it on one machine](#try-it-on-one-machine)
+runs a whole deployment on one machine with `wherry dev`. The operator path
+then sets up one deployment across machines and runs a first task on it, in
+three parts: the [operator's](#operator), the [receiver's](#receiver) and
+the [host's](#host). That deployment is pool `build`, tenant `acme` with
+host `laptop`, and receiver `nomad-1` running agent `claude` on a Nomad
+cluster. [Key concepts](concepts.md) explains the parts involved.
 
 ## Install wherry
 
@@ -72,7 +43,129 @@ gh attestation verify "$archive" -R benemon/wherry
 Install wherry this way on the operator's machine before the operator's
 steps.
 
+## Try it on one machine
+
+To try wherry or develop against it before the operator's steps,
+`wherry dev` runs a whole deployment on one machine: a Nomad dev agent, a
+single-broker Kafka with TLS and SCRAM, pool `dev`, tenant `dev` with host
+`dev`, and receiver `dev-1`. Its agents run under Nomad's `raw_exec`
+driver as you, so a harness uses your own login. Nothing in it is fit for
+production: Nomad's ACLs are off and every agent runs with your rights.
+[Dev commands](commands.md#dev-commands) describes each command.
+
+### Prerequisites
+
+- Linux or macOS, `amd64` or `arm64`, with wherry installed as
+  [Install wherry](#install-wherry) shows.
+- Docker or Podman that answers `docker version` or `podman version`. On
+  macOS, Podman runs through `podman machine`.
+- An agent harness on `PATH`, `claude`, `codex` or `gemini`, logged in.
+  Without one, `--agent mock` runs the built-in mock agent alone.
+- Ports 4646, 4647, 4648 and 9093 free on 127.0.0.1, and 18080 with
+  storage.
+- 1536 MB of memory for Kafka, which its Nomad job reserves, and the
+  memory the agents use. Storage reserves 2048 MB more.
+
+### 1. Acquire
+
+```sh
+wherry dev init
+```
+
+`init` downloads Nomad 2.0.7, the newest nomad plugin release and Kafka's
+image, checks their signatures and checksums, and records them in the
+instance's manifest. It asks for the default agent when it finds more than
+one harness; `--agent NAME` chooses it. `--storage-enabled` adds S3
+storage on 127.0.0.1:18080, a ceph-aio job whose data lives in the
+container and goes with `down`.
+
+### 2. Start
+
+```sh
+wherry dev up
+```
+
+`up` downloads nothing. It starts the environment, runs the mock agent
+once, and prints:
+
+```
+ready: instance default (nomad 2.0.7, kafka 1a2b3c4d5e6f, plugin nomad/v0.1.0-rc.16, wherry v0.1.0-rc.24)
+config: /home/me/.local/share/wherry/dev/default/env/host/config.yaml
+submit: wherry submit --config-file /home/me/.local/share/wherry/dev/default/env/host/config.yaml --prompt "..."
+claude: claude mcp add wherry-default -- /home/me/.local/share/wherry/dev/default/cache/wherry mcp --config-file /home/me/.local/share/wherry/dev/default/env/host/config.yaml
+```
+
+The `claude:` line registers the MCP server with Claude Code, so a session
+submits through the `wherry-default` tools. `up` copies
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY` (or
+`OPENAI_API_KEY`) and `GEMINI_API_KEY` from its environment into the host's
+credential files when they are set, and Nomad keeps them out of the agents'
+environment, so they reach an agent only through its run.
+`--agent-image NAME=IMAGE` runs agent `NAME` in a container image, such as
+one [`agent.Containerfile`](https://github.com/benemon/wherry/blob/main/docs/agent.Containerfile)
+builds.
+
+### 3. Submit
+
+```sh
+config=~/.local/share/wherry/dev/default/env/host/config.yaml
+wherry submit --config-file "$config" --prompt "List the files in your input directory."
+```
+
+`submit` prints `run_id=run-<id> pool=dev`. Each harness runs its own
+default model.
+
+### 4. Wait
+
+```sh
+wherry wait run-<id> --config-file "$config"
+```
+
+`watch` prints the agent's transcript as it runs, then the final state and
+the agent's message. It answers the run's credential requests while it
+waits, so start it right after `submit`.
+
+### 5. Stop
+
+```sh
+wherry dev down
+```
+
+`down` stops everything and deletes the environment's data and
+credentials. `wherry dev reset` deletes the downloads.
+
 ## Operator
+
+Each step names the machine it runs on: the operator's machine, which holds
+the Kafka credentials `wherry admin` uses; the receiver host, which runs
+receiver `nomad-1`; and `laptop`, the host the tenant submits from.
+
+Two pairs of files name the same credentials:
+
+- The pool terms give agent `claude` the credential `claude-oauth-token`.
+  The host's configuration maps that name to a source on `laptop`.
+- The receiver configuration names the platform credential `nomad-token`,
+  the Nomad token the receiver authenticates with. The receiver's local
+  configuration maps that name to a source on the receiver host.
+
+The configuration on `wherry.admin` holds the names. Each value is read from
+its source on the machine that resolves it.
+
+### Prerequisites
+
+- A Nomad cluster with:
+  - a namespace for agent jobs, `agents`;
+  - nodes in the default node pool with the `docker` driver, able to pull
+    `registry.example.com/claude-agent:1.0`, an image with Claude Code
+    installed as `claude`;
+  - a node pool `agents-host` whose nodes run the `exec` driver and have
+    Claude Code installed as `claude`;
+  - a token carrying the
+    [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy);
+  - its CA certificate on the receiver host at `/etc/wherry/nomad-ca.pem`.
+- A Claude Code OAuth token, which `claude setup-token` prints, on `laptop`.
+- An agent that meets the [agent contract](configuration.md#agent-contract),
+  here Claude Code in the image and on the `agents-host` nodes.
 
 ### 1. Prepare Kafka
 

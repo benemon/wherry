@@ -793,8 +793,9 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    `wherry/<tenant>/<run>/` in it.
 
 2. Name it in the pool's [terms](configuration.md#pool-terms). The endpoint is
-   `https://` and the host, with `:port` when it is not 443, and no path;
-   wherry refuses a plain `http` endpoint.
+   `https://` and the host, with `:port` when it is not 443, and no path.
+   wherry refuses a plain `http` endpoint except on the literal loopback
+   hosts the [pool terms](configuration.md#pool-terms) name.
 
    ```yaml
    storage:

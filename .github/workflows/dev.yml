@@ -1,0 +1,82 @@
+name: dev
+
+# wherry dev end to end on a GitHub runner: init, up with the mock agent, runs, a leak check, down and reset.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: dev-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  dev:
+    name: dev (${{ matrix.runtime }}${{ matrix.storage && ', storage' || '' }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [docker, podman]
+        storage: [false]
+        include:
+          - runtime: docker
+            storage: true
+    env:
+      RUNTIME: ${{ matrix.runtime }}
+      STORAGE: ${{ matrix.storage }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            pluginsdk/go.sum
+      - name: Build wherry
+        run: go build -trimpath -o "$RUNNER_TEMP/wherry" ./cmd/wherry
+      - name: Acquire
+        run: test/dev/lane.sh init
+      - name: Acquire again, unchanged
+        run: test/dev/lane.sh unchanged
+      - name: Make the mock's credential
+        run: |
+          token=$(openssl rand -hex 24)
+          echo "::add-mask::$token"
+          echo "WHERRY_DEV_MOCK_TOKEN=$token" >> "$GITHUB_ENV"
+      - name: Start the environment
+        run: test/dev/lane.sh up
+      - name: Refuse up, init and reset while up
+        run: test/dev/lane.sh refusals
+      - name: List the receiver
+        run: test/dev/lane.sh receivers
+      - name: Run the mock
+        run: test/dev/lane.sh run
+      - name: Find the mock's and storage's credentials nowhere
+        run: test/dev/lane.sh leak
+      - name: Fail a run
+        run: test/dev/lane.sh fail
+      - name: Tear the environment down
+        run: test/dev/lane.sh down
+      - name: Remove the cache
+        run: test/dev/lane.sh reset
+      - name: Collect the Nomad, receiver and Kafka logs
+        if: failure()
+        run: test/dev/collect.sh "$RUNNER_TEMP/dev-artifacts"
+      - name: Upload the collected logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dev-${{ matrix.runtime }}${{ matrix.storage && '-storage' || '' }}
+          path: ${{ runner.temp }}/dev-artifacts
+          retention-days: 7
