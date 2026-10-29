@@ -677,8 +677,6 @@ func TestValidateOffers(t *testing.T) {
 	}
 }
 
-// An offer is a profile and its agent; labels belong to the configuration record, so a signed offer carrying them
-// does not decode. The payload is the producer's advertisement with labels added to its offer.
 func TestGitInputPlacement(t *testing.T) {
 	clash := validSubmission()
 	clash.Wherry.Git = &GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", HostKey: hostKey}
