@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -375,16 +376,24 @@ func runtimeOutput(ctx context.Context, runtime string, args ...string) (string,
 	return string(output), nil
 }
 
+// get fetches url, sending GH_TOKEN, else GITHUB_TOKEN, to GitHub's API when set.
 func get(ctx context.Context, url string) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
+	}
+	if token := cmp.Or(os.Getenv("GH_TOKEN"), os.Getenv("GITHUB_TOKEN")); token != "" && request.URL.Host == "api.github.com" {
+		request.Header.Set("Authorization", "Bearer "+token)
 	}
 	response, err := devHTTP.Do(request)
 	if err != nil {
 		return nil, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusForbidden && response.Header.Get("X-RateLimit-Remaining") == "0" {
+		reset, _ := strconv.ParseInt(response.Header.Get("X-RateLimit-Reset"), 10, 64)
+		return nil, fmt.Errorf("GET %s: GitHub's API rate limit is spent until %s; GH_TOKEN or GITHUB_TOKEN raises it", url, time.Unix(reset, 0).UTC().Format(time.RFC3339))
+	}
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s: %s", url, response.Status)
 	}

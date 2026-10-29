@@ -582,10 +582,12 @@ func TestCredentialNames(t *testing.T) {
 type fakeTransport struct {
 	responses map[string]*http.Response
 	requested []string
+	headers   []http.Header
 }
 
 func (f *fakeTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	f.requested = append(f.requested, request.URL.String())
+	f.headers = append(f.headers, request.Header)
 	if response, ok := f.responses[request.URL.String()]; ok {
 		return response, nil
 	}
@@ -807,5 +809,35 @@ func TestDevOperatorACL(t *testing.T) {
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Fatalf("dev grants\n%s\nwherry admin expects\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestGitHubLookups(t *testing.T) {
+	const token = "gh-token-value"
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", token)
+	const asset = "https://github.com/benemon/wherry-plugins/releases/download/nomad/v0.1.0/checksums.txt"
+	fake := fakeHTTP(t, map[string][]byte{pluginReleases: []byte("[]"), asset: []byte("sums")})
+	if _, err := get(context.Background(), pluginReleases); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := get(context.Background(), asset); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.headers[0].Get("Authorization"); got != "Bearer "+token {
+		t.Fatalf("API Authorization %q; want the bearer token", got)
+	}
+	if got := fake.headers[1].Get("Authorization"); got != "" {
+		t.Fatalf("download Authorization %q; want none outside the API", got)
+	}
+
+	fake = fakeHTTP(t, nil)
+	fake.responses[pluginReleases] = &http.Response{
+		StatusCode: http.StatusForbidden, Status: "403 Forbidden", Body: io.NopCloser(strings.NewReader("")),
+		Header: http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {"1793268000"}},
+	}
+	_, err := get(context.Background(), pluginReleases)
+	if err == nil || !strings.Contains(err.Error(), "rate limit is spent until 2026-10-29T10:00:00Z") || strings.Contains(err.Error(), token) {
+		t.Fatalf("rate limited: %v; want the limit and its reset time, without the token", err)
 	}
 }

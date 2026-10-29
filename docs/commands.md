@@ -573,6 +573,10 @@ before it downloads anything. `--agent NAME` takes a harness it found or
 `mock`. `init` without `--storage-enabled` drops storage from an instance
 that has it.
 
+`init` sends `GH_TOKEN`, else `GITHUB_TOKEN`, to GitHub's API as a bearer
+token when one is set. Without one, GitHub allows 60 API requests an hour
+from an address, and a spent limit fails naming the time it resets.
+
 `init` downloads only what changed and prints `instance NAME: unchanged`
 when nothing did. A harness installed later needs `init` again. It refuses
 while the instance is up with `instance NAME is up; run wherry dev down
