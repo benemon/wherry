@@ -476,10 +476,10 @@ func TestReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 	}
 }
 
-func TestAdminRecordDecodeIsStrict(t *testing.T) {
+func TestAdminRecordDecodeRefusesDuplicateAndMissingMembers(t *testing.T) {
 	for name, encoded := range map[string]string{
-		"unknown member":   `{"v":1,"kind":"host","tenant":"t","host":"h","at_ms":1,"extra":1}`,
-		"duplicate member": `{"v":1,"kind":"host","tenant":"t","host":"h","host":"g","at_ms":1}`,
+		"duplicate member":        `{"v":1,"kind":"host","tenant":"t","host":"h","host":"g","at_ms":1}`,
+		"missing required member": `{"v":1,"kind":"host","tenant":"t","host":"h","extra":1}`,
 	} {
 		if _, err := DecodeRecord([]byte(encoded)); err == nil {
 			t.Fatalf("accepted an admin record with a %s", name)
