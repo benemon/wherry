@@ -637,7 +637,9 @@ the image's entrypoint, which meets the
 With storage, `storage`, `s3-user` and `bucket` run after `kafka`: ceph-aio
 serves S3 on `http://127.0.0.1:18080`, pool `dev` takes it as its
 [storage](configuration.md#pool-terms), and the smoke run sends an S3 input
-and returns its output through the bucket.
+and returns its output through the bucket. The ceph-aio job reserves
+2048 MB of memory, and its data lives in the container, so `down` removes
+it.
 
 A failed step leaves the environment for `down` to remove.
 

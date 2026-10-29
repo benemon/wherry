@@ -131,8 +131,9 @@ environment, so they reach an agent only through its run.
 
 `wherry dev down` stops everything and deletes the environment's data and
 credentials, and `wherry dev reset` deletes the downloads. `wherry dev init
---storage-enabled` adds S3 storage on 127.0.0.1:18080, which takes about
-1 GiB more memory. `wherry dev up --agent-image NAME=IMAGE` runs agent
+--storage-enabled` adds S3 storage on 127.0.0.1:18080, a ceph-aio job that
+reserves 2048 MB of memory. Its data lives in the container and goes with
+`down`. `wherry dev up --agent-image NAME=IMAGE` runs agent
 `NAME` in a container image, such as one
 [`agent.Containerfile`](https://github.com/benemon/wherry/blob/main/docs/agent.Containerfile) builds.
 
