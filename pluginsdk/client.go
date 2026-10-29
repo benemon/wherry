@@ -74,7 +74,7 @@ func (p *Process) start() (*plugin.Client, pluginv1.PluginClient, error) {
 	p.path, p.cmd = path, exec.Command(path)
 	config := &plugin.ClientConfig{
 		HandshakeConfig:  handshake,
-		Plugins:          plugin.PluginSet{pluginName: &grpcPlugin{}},
+		VersionedPlugins: versionedPlugins(&grpcPlugin{}),
 		Cmd:              p.cmd,
 		AllowedProtocols: []plugin.Protocol{plugin.ProtocolGRPC},
 		AutoMTLS:         true,

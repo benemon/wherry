@@ -679,7 +679,7 @@ func TestLastOffsetIgnoresMismatchedStatus(t *testing.T) {
 		progressRecord(t, hash, 42, nil),
 		progressRecord(t, strings.Repeat("c", 64), 99, nil),
 		progressRecord(t, hash, 99, func(progress *wire.Progress) { progress.Tenant = "tenant-b" }),
-		[]byte(`{"v":1,"tenant":"tenant-a","task_hash":"` + hash + `","attempt":1,"log_offset":99,"extra":1}`),
+		[]byte(`{"v":1,"tenant":"tenant-a","tenant":"tenant-a","task_hash":"` + hash + `","attempt":1,"log_offset":99}`),
 	} {
 		f.produce(t, admin.ReceiverProgressTopic(testReceiver), "run-offset-binding", value)
 	}

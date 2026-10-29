@@ -12,7 +12,10 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 )
 
-// Strict decodes wherry's records and files, refusing unknown members and duplicate names.
+// Tolerant decodes wherry's records other than wherry.admin's, ignoring the unknown members a later release adds and refusing duplicate names.
+var Tolerant = json.JoinOptions(json.RejectUnknownMembers(false), jsontext.AllowDuplicateNames(false))
+
+// Strict decodes wherry.admin records, local files and seals, refusing unknown members and duplicate names.
 var Strict = json.JoinOptions(json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false))
 
 // Sign signs payload as a compact JWS of type typ; kid names the owner and
@@ -37,7 +40,7 @@ func Sign(typ, owner string, payload any, key ed25519.PrivateKey) ([]byte, error
 }
 
 // Verify checks encoded against the owner's current key named by its kid and
-// only then decodes the payload strictly into dst. It returns the owner, which
+// only then decodes the payload into dst. It returns the owner, which
 // the caller must match against the payload's own claims.
 func Verify(encoded []byte, typ string, keys Keys, dst any) (string, error) {
 	return verify(encoded, typ, keys.current, dst)
@@ -76,7 +79,7 @@ func verify(encoded []byte, typ string, key func(owner, keyID string) (ed25519.P
 	if err != nil {
 		return "", errors.New("invalid JWS signature")
 	}
-	if err := json.Unmarshal(payload, dst, Strict); err != nil {
+	if err := json.Unmarshal(payload, dst, Tolerant); err != nil {
 		return "", fmt.Errorf("decode payload: %w", err)
 	}
 	return owner, nil

@@ -150,6 +150,7 @@ func OpenSeal(encoded []byte, expected SealBinding, key *ecdsa.PrivateKey, now t
 	}
 	protected, _, _ := strings.Cut(string(encoded), ".")
 	decoded, err := base64.RawURLEncoding.DecodeString(protected)
+	// An ignored binding member would widen what the seal is bound to.
 	var header sealHeader
 	if err != nil || json.Unmarshal(decoded, &header, Strict) != nil || header.Type != SealType {
 		return SealValues{}, errors.New("seal protected header holds other members than a seal's")

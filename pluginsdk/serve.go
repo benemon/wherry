@@ -31,8 +31,8 @@ func Serve(factory func(Settings, hclog.Logger) (Plugin, error)) {
 	// redirects it.
 	logger := hclog.New(&hclog.LoggerOptions{Output: os.Stderr, JSONFormat: true, Level: hclog.Info})
 	plugin.Serve(&plugin.ServeConfig{
-		HandshakeConfig: handshake,
-		Plugins:         plugin.PluginSet{pluginName: &grpcPlugin{server: &server{factory: factory, logger: logger, profiles: map[string]Plugin{}}}},
+		HandshakeConfig:  handshake,
+		VersionedPlugins: versionedPlugins(&grpcPlugin{server: &server{factory: factory, logger: logger, profiles: map[string]Plugin{}}}),
 		GRPCServer: func(options []grpc.ServerOption) *grpc.Server {
 			return grpc.NewServer(append(options, grpc.MaxRecvMsgSize(maxMessage),
 				grpc.ChainUnaryInterceptor(recoverUnary(logger)), grpc.ChainStreamInterceptor(recoverStream(logger)))...)

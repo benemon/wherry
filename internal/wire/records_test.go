@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	json "encoding/json/v2"
 	"fmt"
 	"strings"
 	"testing"
@@ -62,6 +63,48 @@ func testKeys(t *testing.T) (signed.Keys, ed25519.PrivateKey, ed25519.PrivateKey
 		signed.HostOwner("tenant-a", "host-a"): {Current: host.Public().(ed25519.PublicKey)},
 		"receiver-a":                           {Current: receiver.Public().(ed25519.PublicKey)},
 	}, host, receiver
+}
+
+func TestRecordsIgnoreUnknownMembers(t *testing.T) {
+	keys, host, receiver := testKeys(t)
+	for name, record := range testRecords() {
+		key := receiver
+		if strings.HasPrefix(name, "submission") || name == "cancel" {
+			key = host
+		}
+		*record.version() = 1
+		encoded, err := json.Marshal(record, json.Deterministic(true))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for edit, test := range map[string]struct {
+			payload []byte
+			decodes bool
+		}{
+			"unknown member": {append([]byte(`{"later_member":{"a":[1]},`), encoded[1:]...), true},
+			"duplicate name": {append([]byte(`{"v":1,`), encoded[1:]...), false},
+			"no v":           {withoutMember(t, encoded, `"v":1`), false},
+		} {
+			options := new(jose.SignerOptions).WithType(jose.ContentType(record.jwsType())).WithHeader("kid", record.owner()+"/"+signed.KeyID(key.Public().(ed25519.PublicKey)))
+			signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: key}, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			jws, err := signer.Sign(test.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			signedRecord, err := jws.CompactSerialize()
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded := testRecords()[name]
+			err = ParseRecord([]byte(signedRecord), keys, decoded)
+			if reencoded, _ := json.Marshal(decoded, json.Deterministic(true)); (err == nil) != test.decodes || test.decodes && string(reencoded) != string(encoded) {
+				t.Errorf("%s, %s: decoded %s, %v; want decodes %v", name, edit, reencoded, err, test.decodes)
+			}
+		}
+	}
 }
 
 func TestRecordsRoundTrip(t *testing.T) {
@@ -296,7 +339,7 @@ func TestRecordValidation(t *testing.T) {
 }
 
 // The limits on inline inputs are the broker's and the profiles', so a submission of any size signs and the host applies them.
-func TestProgressDecodesStrictly(t *testing.T) {
+func TestProgressDecodes(t *testing.T) {
 	encoded, err := EncodeProgress(Progress{Tenant: "tenant-a", TaskHash: testHash, Attempt: 2, LogOffset: 42})
 	if err != nil {
 		t.Fatal(err)
@@ -304,8 +347,10 @@ func TestProgressDecodesStrictly(t *testing.T) {
 	if decoded, err := DecodeProgress(encoded); err != nil || decoded != (Progress{V: 1, Tenant: "tenant-a", TaskHash: testHash, Attempt: 2, LogOffset: 42}) {
 		t.Fatalf("decoded %+v, %v", decoded, err)
 	}
+	if decoded, err := DecodeProgress([]byte(`{"v":1,"tenant":"tenant-a","task_hash":"` + testHash + `","attempt":2,"log_offset":42,"run":"run-a"}`)); err != nil || decoded != (Progress{V: 1, Tenant: "tenant-a", TaskHash: testHash, Attempt: 2, LogOffset: 42}) {
+		t.Fatalf("decoded progress with an unknown member to %+v, %v", decoded, err)
+	}
 	for name, value := range map[string]string{
-		"unknown member":   `{"v":1,"tenant":"tenant-a","task_hash":"` + testHash + `","attempt":1,"log_offset":0,"run":"run-a"}`,
 		"duplicate name":   `{"v":1,"tenant":"tenant-a","tenant":"tenant-b","task_hash":"` + testHash + `","attempt":1,"log_offset":0}`,
 		"unknown version":  `{"v":2,"tenant":"tenant-a","task_hash":"` + testHash + `","attempt":1,"log_offset":0}`,
 		"no attempt":       `{"v":1,"tenant":"tenant-a","task_hash":"` + testHash + `","attempt":0,"log_offset":0}`,

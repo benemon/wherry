@@ -30,6 +30,28 @@ jobs:
       - name: Run every gate
         run: make check
 
+  proto:
+    runs-on: ubuntu-latest
+    env:
+      BUF_VERSION: 1.75.0
+      BUF_SHA256: fad1e38d6909bbb583a4da81d8c02a01046e2cd663bde7e337dd24277393764b
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Install the Buf CLI
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/buf" "https://github.com/bufbuild/buf/releases/download/v$BUF_VERSION/buf-Linux-x86_64"
+          echo "$BUF_SHA256  $RUNNER_TEMP/buf" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/buf"
+      # The plugin protocol is released with the pluginsdk module, so the previous release is the newest pluginsdk/v*
+      # tag reachable from HEAD.
+      - name: Check the plugin protocol for breaking changes
+        run: |
+          against=$(git describe --tags --abbrev=0 --match 'pluginsdk/v*')
+          "$RUNNER_TEMP/buf" breaking pluginsdk --against ".git#tag=$against,subdir=pluginsdk"
+
   broker:
     runs-on: ubuntu-latest
     steps:
