@@ -206,6 +206,7 @@ func TestListenFlags(t *testing.T) {
 		{"--token-file", token},
 		{"--tls-cert", token, "--tls-key", token},
 		{"--listen", "127.0.0.1"},
+		{"--url-lifetime", "0s"},
 	} {
 		if err := runMCP(context.Background(), append(args, "--config-file", filepath.Join(dir, "missing.yaml"))); err == nil || strings.Contains(err.Error(), "missing.yaml") {
 			t.Errorf("%v: %v; want a refusal before the configuration is read", args, err)

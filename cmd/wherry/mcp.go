@@ -70,6 +70,9 @@ func runMCP(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if *urlLifetime < time.Second {
+		return errors.New("--url-lifetime must be at least 1s")
+	}
 	config, err := loadConfig(*configFile)
 	if err != nil {
 		return err
