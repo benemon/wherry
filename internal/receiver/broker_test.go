@@ -139,7 +139,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			logs := &syncBuffer{}
 			plugin := &fakePlugin{stream: noResultStream, endDelay: time.Minute}
 			r := &Receiver{id: receiverID, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-				factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
+				factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 					return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 				}}
 			runCtx, stop := context.WithCancel(ctx)
@@ -296,7 +296,7 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 		keys[id] = signed.KeyState{Current: signing.Public().(ed25519.PublicKey)}
 		logs, plugin := &syncBuffer{}, &fakePlugin{outcome: pluginsdk.OutcomeNothingCreated}
 		return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-			factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
+			factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 				return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 			}}, plugin, logs
 	}
@@ -419,7 +419,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	logs := &syncBuffer{}
 	plugin := &fakePlugin{stream: resultStream}
 	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
+		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
@@ -483,7 +483,7 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 	logs := &syncBuffer{}
 	fake := &fakePlugin{stream: resultStream}
 	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
+		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
@@ -591,7 +591,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	}
 	fake := &fakePlugin{stream: resultStream, outputs: outputs}
 	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
+		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
@@ -685,7 +685,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	patch := []byte("From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n")
 	fake := &fakePlugin{stream: resultStream, outputs: []pluginsdk.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
 	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
+		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)

@@ -80,7 +80,7 @@ func (c *clusterRig) start(t *testing.T, ctx context.Context) {
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	c.plugin = &fakePlugin{stream: resultStream}
 	r := &Receiver{id: c.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(c.logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.ProfileSettings) (Named, error) {
+		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: c.plugin}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)

@@ -85,7 +85,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	case "receiver add":
 		_, dryRun := options["dry-run"]
 		if len(pos) != 3 || options["pool"] == "" || options["bundle-file"] == "" && !dryRun {
-			return errors.New("usage: wherry admin receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> <--bundle-file FILE|--dry-run>")
+			return errors.New("usage: wherry admin receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... <--bundle-file FILE|--dry-run>")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -93,6 +93,9 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		}
 		config, err := readReceiverConfig(path, directory)
 		if err != nil {
+			return err
+		}
+		if config.PluginSHA256, err = pluginPins(options["plugin-sha256"]); err != nil {
 			return err
 		}
 		config.Receiver, config.Pool = pos[2], options["pool"]
@@ -105,7 +108,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return service.ReceiverAdd(ctx, config, options["bundle-file"])
 	case "receiver update":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver update ID <--config-file FILE|--config-dir DIR> [--force] [--dry-run]")
+			return errors.New("usage: wherry admin receiver update ID <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... [--force] [--dry-run]")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -113,6 +116,9 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		}
 		config, err := readReceiverConfig(path, directory)
 		if err != nil {
+			return err
+		}
+		if config.PluginSHA256, err = pluginPins(options["plugin-sha256"]); err != nil {
 			return err
 		}
 		config.Receiver = pos[2]
@@ -200,16 +206,17 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	}
 }
 
-// showReceiver writes config's capacity and resolved profiles, in routing order, to out as YAML.
+// showReceiver writes config's capacity, plugin pins and resolved profiles, in routing order, to out as YAML.
 func showReceiver(out io.Writer, config admin.ReceiverConfig) error {
 	// The record decodes numbers as float64, which YAML would print as 1e+06.
 	for i := range config.Profiles {
 		config.Profiles[i].Config = integral(config.Profiles[i].Config).(map[string]any)
 	}
 	encoded, err := yaml.Marshal(struct {
-		Capacity int64                   `yaml:"capacity"`
-		Profiles []admin.ProfileSettings `yaml:"profiles"`
-	}{config.Capacity, config.Profiles})
+		Capacity     int64                   `yaml:"capacity"`
+		PluginSHA256 map[string]string       `yaml:"plugin_sha256,omitempty"`
+		Profiles     []admin.ProfileSettings `yaml:"profiles"`
+	}{config.Capacity, config.PluginSHA256, config.Profiles})
 	if err != nil {
 		return err
 	}
@@ -242,6 +249,9 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 	for _, name := range []string{"pool", "config-file", "config-dir", "bundle-file", "tenant", "wait", "sha256"} {
 		flags.String(name, "", "")
 	}
+	var pins []string
+	// --plugin-sha256 is the option given once per plugin type; its values join with newlines.
+	flags.Func("plugin-sha256", "", func(value string) error { pins = append(pins, value); return nil })
 	flags.Bool("dry-run", false, "")
 	flags.Bool("force", false, "")
 	positional, err := parseAnywhere(flags, args)
@@ -250,11 +260,18 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 	}
 	options := map[string]string{}
 	flags.Visit(func(option *flag.Flag) {
-		if set, ok := option.Value.(flag.Getter).Get().(bool); ok && !set {
+		getter, ok := option.Value.(flag.Getter)
+		if !ok {
+			return
+		}
+		if set, ok := getter.Get().(bool); ok && !set {
 			return
 		}
 		options[option.Name] = option.Value.String()
 	})
+	if len(pins) > 0 {
+		options["plugin-sha256"] = strings.Join(pins, "\n")
+	}
 	command := strings.Join(positional[:min(len(positional), 2)], " ")
 	if len(positional) > 0 && positional[0] == "skip" {
 		command = "skip"
@@ -262,8 +279,8 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 	allowed := map[string]map[string]bool{
 		"pool create":     {"config-file": true, "config-dir": true},
 		"pool update":     {"config-file": true, "config-dir": true, "dry-run": true},
-		"receiver add":    {"pool": true, "config-file": true, "config-dir": true, "bundle-file": true, "dry-run": true},
-		"receiver update": {"config-file": true, "config-dir": true, "force": true, "dry-run": true},
+		"receiver add":    {"pool": true, "config-file": true, "config-dir": true, "plugin-sha256": true, "bundle-file": true, "dry-run": true},
+		"receiver update": {"config-file": true, "config-dir": true, "plugin-sha256": true, "force": true, "dry-run": true},
 		"receiver show":   {},
 		"pool entitle":    {"tenant": true},
 		"host add":        {"tenant": true, "bundle-file": true},
@@ -280,6 +297,23 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 		}
 	}
 	return positional, options, nil
+}
+
+// pluginPins is the map of plugin type to SHA-256 the --plugin-sha256 values name, one TYPE=HEX per line; admin
+// validates each before it writes a record.
+func pluginPins(values string) (map[string]string, error) {
+	pins := map[string]string{}
+	if values == "" {
+		return pins, nil
+	}
+	for _, value := range strings.Split(values, "\n") {
+		kind, sum, ok := strings.Cut(value, "=")
+		if _, repeated := pins[kind]; !ok || repeated {
+			return nil, fmt.Errorf("--plugin-sha256 %q needs the form TYPE=HEX, once per type", value)
+		}
+		pins[kind] = sum
+	}
+	return pins, nil
 }
 
 func configInput(options map[string]string) (string, bool, error) {

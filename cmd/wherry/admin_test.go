@@ -174,7 +174,8 @@ func TestReceiverShowAndDryRun(t *testing.T) {
 	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
 	}
-	recorded := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 3, Profiles: []admin.ProfileSettings{{Name: "old", Plugin: "nomad", Agent: "claude"}}}
+	recorded := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 3, Profiles: []admin.ProfileSettings{{Name: "old", Plugin: "nomad", Agent: "claude"}},
+		PluginSHA256: map[string]string{"nomad": fakeSHA256}}
 	if err := service.ReceiverAdd(ctx, recorded, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +196,9 @@ func TestReceiverShowAndDryRun(t *testing.T) {
 		}
 		return stdout.String()
 	}
-	const shown = `capacity: 3
+	shown := `capacity: 3
+plugin_sha256:
+    nomad: ` + fakeSHA256 + `
 profiles:
     - name: old
       plugin: nomad
@@ -208,11 +211,22 @@ profiles:
 	}
 	file := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": basePlugin + item("name: claude\nagent: claude\nlabels: {tier: batch}\nconfig: {runtime: {config: {image: claude:1}}}\n", "      ")}), "receiver.yaml")
 	before := records()
-	dryRun := wherry("receiver", "update", "receiver-a", "--config-file", file, "--dry-run")
+	pin := "nomad=" + fakeSHA256
+	for _, bad := range []string{"nomad=" + strings.ToUpper(fakeSHA256), "nomad=" + fakeSHA256[1:], "nomad=" + fakeSHA256 + "0", "nomad=" + strings.Repeat("g", 64), "Nomad=" + fakeSHA256, "nomad"} {
+		if err := runAdmin([]string{"receiver", "update", "receiver-a", "--config-file", file, "--plugin-sha256", bad}, io.Discard, io.Discard); err == nil || records() != before {
+			t.Fatalf("update --plugin-sha256 %s: %v; want it refused before writing", bad, err)
+		}
+	}
+	if err := runAdmin([]string{"receiver", "update", "receiver-a", "--config-file", file}, io.Discard, io.Discard); err == nil || err.Error() != "plugin type nomad has no pinned SHA-256; set it with receiver update --plugin-sha256 nomad=HEX" || records() != before {
+		t.Fatalf("update without a pin: %v; want it refused before writing", err)
+	}
+	dryRun := wherry("receiver", "update", "receiver-a", "--config-file", file, "--plugin-sha256", pin, "--dry-run")
 	if records() != before {
 		t.Fatal("update --dry-run produced a record")
 	}
-	const resolved = `capacity: 1
+	resolved := `capacity: 1
+plugin_sha256:
+    nomad: ` + fakeSHA256 + `
 profiles:
     - name: claude
       plugin: nomad
@@ -236,7 +250,7 @@ profiles:
 	if dryRun != resolved {
 		t.Fatalf("dry run printed\n%s\nwant\n%s", dryRun, resolved)
 	}
-	if got := wherry("receiver", "add", "receiver-b", "--pool", "pool-a", "--config-file", file, "--dry-run"); got != resolved || records() != before {
+	if got := wherry("receiver", "add", "receiver-b", "--pool", "pool-a", "--config-file", file, "--plugin-sha256", pin, "--dry-run"); got != resolved || records() != before {
 		t.Fatalf("receiver add --dry-run printed\n%s\nand left %d records; want the resolution and %d records", got, records(), before)
 	}
 	if err := runAdmin([]string{"receiver", "show", "receiver-b"}, io.Discard, io.Discard); err == nil {
@@ -246,10 +260,10 @@ profiles:
 		t.Fatalf("after a dry run, show printed\n%s\nwant the recorded configuration", got)
 	}
 	outside := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": basePlugin + item("name: codex\nagent: codex\n", "      ")}), "receiver.yaml")
-	if err := runAdmin([]string{"receiver", "update", "receiver-a", "--config-file", outside, "--dry-run"}, io.Discard, io.Discard); err == nil || err.Error() != "receiver agent is outside pool terms" {
+	if err := runAdmin([]string{"receiver", "update", "receiver-a", "--config-file", outside, "--plugin-sha256", pin, "--dry-run"}, io.Discard, io.Discard); err == nil || err.Error() != "receiver agent is outside pool terms" {
 		t.Fatalf("dry run of an agent outside the pool's terms: %v; want it refused", err)
 	}
-	if got := wherry("receiver", "update", "receiver-a", "--config-file", file); got != "" || records() != before+1 {
+	if got := wherry("receiver", "update", "receiver-a", "--config-file", file, "--plugin-sha256", pin); got != "" || records() != before+1 {
 		t.Fatalf("update printed %q and left %d records; want nothing printed and one record more than %d", got, records(), before)
 	}
 	if got := wherry("receiver", "show", "receiver-a"); got != dryRun {
@@ -258,7 +272,7 @@ profiles:
 	if state, err := service.LoadState(ctx); err != nil || state.Receivers["receiver-a"].Force {
 		t.Fatalf("update without --force recorded force: %v", err)
 	}
-	if got := wherry("receiver", "update", "receiver-a", "--force", "--config-file", file); got != "" || records() != before+2 {
+	if got := wherry("receiver", "update", "receiver-a", "--force", "--config-file", file, "--plugin-sha256", pin); got != "" || records() != before+2 {
 		t.Fatalf("update --force printed %q and left %d records; want one record more", got, records())
 	}
 	if state, err := service.LoadState(ctx); err != nil || !state.Receivers["receiver-a"].Force {

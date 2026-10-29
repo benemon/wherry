@@ -350,19 +350,23 @@ how a command reads `WHERRY_MODEL`.
 covers the `codex exec` flags and the API key variable the pool's terms
 target.
 
-2. Check the configuration. `--dry-run` validates it against the pool's
-   terms and prints each plugin profile as the record would hold it,
-   writing nothing:
+2. Check the configuration. `--plugin-sha256 nomad=HEX` pins the Nomad
+   plugin binary's SHA-256, its line in the release's verified
+   `checksums.txt` ([Install plugins](#install-plugins)). `--dry-run`
+   validates the configuration against the pool's terms and prints the
+   pins and each plugin profile as the record would hold them, writing
+   nothing:
 
    ```sh
-   wherry admin receiver add nomad-1 --pool build --config-dir nomad-1 --dry-run
+   wherry admin receiver add nomad-1 --pool build --config-dir nomad-1 \
+     --plugin-sha256 nomad=<sha256> --dry-run
    ```
 
 3. Add the receiver:
 
    ```sh
-   wherry admin receiver add nomad-1 --pool build \
-     --config-dir nomad-1 --bundle-file nomad-1.bundle
+   wherry admin receiver add nomad-1 --pool build --config-dir nomad-1 \
+     --plugin-sha256 nomad=<sha256> --bundle-file nomad-1.bundle
    ```
 
 4. Deliver the bundle to the receiver host over a channel you trust, such
@@ -408,12 +412,14 @@ restart the receiver; the bundle stays as it is.
 Prerequisites: the `wherry admin` environment and the receiver's new
 configuration.
 
-1. Check the configuration. `--dry-run` validates it against the pool's
-   terms as `update` does, and prints each plugin profile as the record
-   would hold it, writing nothing:
+1. Check the configuration. `--plugin-sha256` gives the pin of each
+   plugin type, as [Install plugins](#install-plugins) takes it from the
+   release's `checksums.txt`. `--dry-run` validates the configuration
+   against the pool's terms as `update` does, and prints the pins and each
+   plugin profile as the record would hold them, writing nothing:
 
    ```sh
-   wherry admin receiver update nomad-1 --config-dir nomad-1 --dry-run
+   wherry admin receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256> --dry-run
    ```
 
 2. Compare the output with what the receiver runs now, which
@@ -422,7 +428,7 @@ configuration.
 3. Record the configuration:
 
    ```sh
-   wherry admin receiver update nomad-1 --config-dir nomad-1
+   wherry admin receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256>
    ```
 
 4. At its next configuration check, within 15 seconds, the receiver stops
@@ -441,7 +447,7 @@ run's profile or changes its agent, the adopting receiver stops and purges
 the run's job and dispatches the run again:
 
 ```sh
-wherry admin receiver update nomad-1 --config-dir nomad-1 --force
+wherry admin receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256> --force
 ```
 
 A `--force` update during a drain ends it.
@@ -511,20 +517,38 @@ On macOS, `shasum -a 256 -c -` takes the place of `sha256sum -c -`.
 archive's provenance attestation in place of the signature and checksum steps.
 
 Install each plugin as `wherry-plugin-<type>` in one directory on the
-receiver host, owned by root and writable by no one else:
+receiver host. A symbolic link to the binary is accepted:
 
 ```sh
-install -d -o root -g root -m 0755 /usr/local/libexec/wherry/plugins
-install -o root -g root -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
+install -d /usr/local/libexec/wherry/plugins
+install -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
 ```
 
-The receiver refuses a plugin directory or binary owned by a user other
-than root or the receiver's, or that group or others can write, and a
-plugin that is not a regular file. It checks again before restarting a
-plugin. It exits with
-`profile <name>: no plugin for type <type>` when a type's plugin is
-missing. Install a new plugin version while the receiver is stopped, or
-restart the receiver after replacing it.
+Then pin the binary's SHA-256 on the receiver's record. `checksums.txt`
+holds a line for each plugin binary,
+`wherry-plugin-<plugin>_<version>_<os>_<arch>`, beside the archive's; the
+binary in the archive has that SHA-256. With the `wherry admin` environment
+and the receiver's configuration, and the verified `checksums.txt`:
+
+```sh
+sha256=$(awk -v name="wherry-plugin-${plugin}_${version}_${os}_${arch}" '$2 == name {print $1}' checksums.txt)
+wherry admin receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 "$plugin=$sha256"
+```
+
+Give `--plugin-sha256` once for each plugin type the configuration names.
+The receiver drains and restarts as in
+[Change a receiver's configuration](#change-a-receivers-configuration), and
+starts each plugin only from a binary whose SHA-256 is the pin.
+[go-plugin's `SecureConfig`](https://pkg.go.dev/github.com/hashicorp/go-plugin#SecureConfig)
+checks it before every start and restart. A binary whose SHA-256 differs
+fails with
+`profile <name>: plugin type <type>: <path> has SHA-256 <hex> and the pin is <hex>`,
+and a type with no binary with `profile <name>: no plugin for type <type>`.
+
+An upgrade or rollback takes the same steps with the other version: verify
+its `checksums.txt`, install the binary, then record its pin with
+`receiver update`. Until the receiver restarts on the new record, a plugin
+restart refuses the new binary.
 
 To check the install, start the receiver and find one line per plugin,
 logged when the receiver starts it:

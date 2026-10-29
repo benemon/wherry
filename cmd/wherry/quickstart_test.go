@@ -32,7 +32,7 @@ func TestQuickstartFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config.Receiver, config.Pool = "nomad-1", "build"
+	config.Receiver, config.Pool, config.PluginSHA256 = "nomad-1", "build", map[string]string{"nomad": fakeSHA256}
 	if err := admin.ValidateConfig(config, terms); err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 		t.Fatal(err)
 	}
 	unsourced := &plugins{dir: t.TempDir(), registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
-	_, err = unsourced.profile("build", config.Profiles[0])
+	_, err = unsourced.profile("build", config.Profiles[0], fakeSHA256)
 	if err == nil {
 		t.Fatal("configured a profile whose credential has no source")
 	}
@@ -113,8 +113,8 @@ func TestQuickstartAdminOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	wherry("pool", "entitle", "build", "--tenant", "acme")
-	dryRun := wherry("receiver", "add", "nomad-1", "--pool", "build", "--config-file", quickstart("nomad-1.yaml"), "--dry-run")
-	wherry("receiver", "add", "nomad-1", "--pool", "build", "--config-file", quickstart("nomad-1.yaml"), "--bundle-file", filepath.Join(dir, "nomad-1.bundle"))
+	dryRun := wherry("receiver", "add", "nomad-1", "--pool", "build", "--config-file", quickstart("nomad-1.yaml"), "--plugin-sha256", "nomad="+fakeSHA256, "--dry-run")
+	wherry("receiver", "add", "nomad-1", "--pool", "build", "--config-file", quickstart("nomad-1.yaml"), "--plugin-sha256", "nomad="+fakeSHA256, "--bundle-file", filepath.Join(dir, "nomad-1.bundle"))
 	shown := wherry("receiver", "show", "nomad-1")
 	wherry("host", "add", "laptop", "--tenant", "acme", "--bundle-file", filepath.Join(dir, "laptop.bundle"))
 	if shown != dryRun {
@@ -124,7 +124,8 @@ func TestQuickstartAdminOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count := strings.Count(string(doc), "```yaml\n"+dryRun+"```\n"); count != 2 {
+	// The docs show an example pin in place of the test plugin's.
+	if count := strings.Count(string(doc), "```yaml\n"+strings.ReplaceAll(dryRun, fakeSHA256, strings.Repeat("0123456789abcdef", 4))+"```\n"); count != 2 {
 		t.Errorf("docs/quickstart.md holds what receiver add --dry-run and receiver show print in %d code blocks, want 2:\n%s", count, dryRun)
 	}
 }

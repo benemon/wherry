@@ -3,6 +3,7 @@ package pluginsdktest_test
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"os"
@@ -50,7 +51,12 @@ func conform(t *testing.T, wrap func(pluginsdk.Plugin) pluginsdk.Plugin) {
 	if output, err := exec.Command("go", "build", "-o", plugin, "../internal/testplugin").CombinedOutput(); err != nil {
 		t.Fatalf("build test plugin: %v\n%s", err, output)
 	}
-	p, err := pluginsdk.Launch(func() (string, error) { return plugin, nil }, io.Discard)
+	content, err := os.ReadFile(plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := sha256.Sum256(content)
+	p, err := pluginsdk.Launch("fake", func() (string, error) { return plugin, nil }, pin[:], io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
