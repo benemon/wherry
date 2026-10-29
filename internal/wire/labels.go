@@ -157,8 +157,17 @@ func validateTask(task *Task) error {
 	if task.Artifacts == nil || task.History == nil {
 		return errors.New("invalid task")
 	}
+	// The first artifact is the result's text; each after it is a reference to an artifact the run streamed.
 	for i := range task.Artifacts {
-		if err := validateArtifact(&task.Artifacts[i]); err != nil {
+		artifact := &task.Artifacts[i]
+		if slices.ContainsFunc(task.Artifacts[:i], func(other Artifact) bool { return other.ArtifactID == artifact.ArtifactID }) {
+			return errors.New("a task's artifact IDs are unique")
+		}
+		validate := validateArtifact
+		if i > 0 {
+			validate = validateReferenceArtifact
+		}
+		if err := validate(artifact); err != nil {
 			return err
 		}
 	}

@@ -19,7 +19,11 @@ message, `data` or text, with no test for JSON. The agent contract states
 that an outcome message's other parts are dropped. The extension reserves
 the bare `metadata` keys wherry writes. New sections: [Binding](#binding),
 which maps A2A's operations and errors to records, and
-[Agent Card](#agent-card).
+[Agent Card](#agent-card). A result's `artifacts` keep the `result`
+artifact and add a [reference artifact](#reference-artifacts) for each
+output it returns, its reply chunks and its transcript, so `result` and
+`transcript` are reserved output names. Tenant feeds and transcript topics
+take records of up to 2 MiB.
 
 **Change note, 2026-10-29:** edited in place at version 1. A reply over
 64 KiB once redacted travels as [reply chunks](#the-reply), output chunks with
@@ -109,7 +113,41 @@ which this extension defines, and its data is an object:
 - `unstored` says why the content is not stored: `input` for an input the
   submission carried, `oversize` for a transcript line over 512 KiB.
 - Readers reject a part with this media type whose data lacks a valid
-  `sha256`, has a negative `size`, or has another `unstored`.
+  `sha256`, has a negative `size`, or has another `unstored`, except in a
+  result's [reference artifacts](#reference-artifacts).
+
+### Reference artifacts
+
+A result names each artifact its run streamed, after its `result`
+artifact, as a reference artifact: one [reference part](#reference-parts),
+with no `filename`, that stands in for the chunks of the artifact with the
+same `artifactId`. It declares the extension, as every artifact wherry
+writes does, and has no `unstored`, since the content is stored, in chunks:
+
+```json
+{"artifactId": "out/report.md", "name": "out/report.md", "parts": [{"data": {"sha256": "9f86...", "size": 1200}, "mediaType": "application/vnd.wherry.reference.v1+json"}], "extensions": ["https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md"]}
+```
+
+- An output the run returned has its name as `artifactId` and `name`, and
+  data `{"sha256", "size"}` of the bytes its
+  [output chunks](#output-chunk) carry, as `outputs` in the
+  [metadata](#metadata) lists them.
+- The [reply chunks](#the-reply), when the reply is over 64 KiB, have
+  `artifactId` `.wherry/reply`, no `name`, and data `{"sha256", "size"}`
+  as `reply` in the metadata lists them.
+- The [transcript](#chunk), once it has a line, has `artifactId`
+  `transcript`, no `name`, and data `{}`. A receiver that adopts a run
+  cannot hash or count an earlier attempt's lines, and a reader reads the
+  transcript to its `lastChunk` chunk, so the artifact names it alone.
+- They follow the `result` artifact in that order: the outputs in name
+  order, the reply, then the transcript. An S3 output is not streamed and
+  has none.
+- Readers reject a result whose artifact IDs repeat, and a reference
+  artifact other than these.
+
+`outputs` and `reply` in the metadata stay the manifest a host verifies
+chunks against; the reference artifacts make the task an A2A reader can
+follow to them.
 
 wherry writes no `url` part.
 
@@ -518,7 +556,9 @@ A result is the A2A `Task` a run ends with.
   gave as a `data` part and it is still JSON once redacted, a `raw` part with media type `text/plain` when it is not valid
   UTF-8 or escaping it as a JSON string would make it longer than base64
   does, and otherwise a text
-  part. With no result text, the part's text is the state's name.
+  part. With no result text, the part's text is the state's name. A
+  [reference artifact](#reference-artifacts) follows it for each output the
+  run returned, its reply chunks and its transcript.
 - [Metadata](#metadata) says where the run executed.
 
 A receiver writes the result in the same transaction as the run's
@@ -596,6 +636,7 @@ extension reserves its keys ([Encoding](#encoding)):
 | `rejected: symlink`, `rejected: fifo`, `rejected: device`, `rejected: socket`, `rejected: irregular file` | the entry is not a regular file and was not read |
 | `rejected: invalid name` | the path is not a relative path of file names of at most 512 bytes; `name` is the path quoted as ASCII, at most 256 bytes |
 | `rejected: size changed while read` | the plugin read a length other than the size it listed |
+| `rejected: reserved name` | the path is `result` or `transcript`, a result's own [artifact](#reference-artifacts) IDs |
 | `exceeds the S3 object limit` | an S3 output over 5 GiB |
 | `not streamed by the plugin` | the plugin did not stream an S3 output it found |
 | `not uploaded: no upload URL` | the attempt holds no PUT URL for the S3 output |
@@ -1239,6 +1280,10 @@ appears as its variable. The lines hold no credential value.
 output name leads into it, and the receiver collects nothing in it as an
 output. An MCP host writes a reply over 64 KiB among its outputs as
 `reply.txt`, so a submission expecting an output of that name is invalid.
+A result's artifacts take the IDs `result` and `transcript`, and A2A
+requires a task's artifact IDs unique, so a submission expecting an output
+of either name is invalid, and the receiver lists an output of either name
+as not returned, `rejected: reserved name`.
 
 When the job ends, the receiver stops it, then asks the plugin to collect the
 outputs, whatever the job's exit. The plugin lists every entry beneath the outputs

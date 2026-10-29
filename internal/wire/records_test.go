@@ -40,6 +40,13 @@ func testRecords() map[string]Record {
 			Wherry: ChunkBinding{ReceiverBinding: testBinding(), TaskHash: testHash, Seq: 0}},
 		"result": &Result{Task: Task{ID: "run-a", ContextID: "run-a", Status: TaskStatus{State: "TASK_STATE_COMPLETED", Timestamp: testTime}, Artifacts: []Artifact{}, History: []Message{testMessage("run-a")}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
+		"result with references": &Result{Task: Task{ID: "run-a", ContextID: "run-a", Status: TaskStatus{State: "TASK_STATE_COMPLETED", Timestamp: testTime}, Artifacts: []Artifact{
+			{ArtifactID: ResultArtifact, Parts: []Part{{Text: "done"}}, Extensions: []string{ExtensionURI}},
+			{ArtifactID: "sub/Report.md", Name: "sub/Report.md", Parts: []Part{{Data: []byte(`{"sha256":"` + testHash + `","size":1}`), MediaType: ReferenceMediaType}}, Extensions: []string{ExtensionURI}},
+			{ArtifactID: ReplyArtifact, Parts: []Part{{Data: []byte(`{"sha256":"` + testHash + `","size":0}`), MediaType: ReferenceMediaType}}, Extensions: []string{ExtensionURI}},
+			{ArtifactID: TranscriptArtifact, Parts: []Part{{Data: []byte(`{}`), MediaType: ReferenceMediaType}}, Extensions: []string{ExtensionURI}},
+		}, History: []Message{testMessage("run-a")}},
+			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
 		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Placement: placement, TaskHash: testHash, MessageID: "message-a"},
 		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Profile: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
 		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 1},
@@ -312,6 +319,87 @@ func TestRecordValidation(t *testing.T) {
 		"submission output reply.txt": func(r map[string]Record) Record {
 			value := r["submission with credentials and outputs"].(*Submission)
 			value.Wherry.Outputs[0].Name = ReplyFile
+			return value
+		},
+		"submission output result": func(r map[string]Record) Record {
+			value := r["submission with credentials and outputs"].(*Submission)
+			value.Wherry.Outputs[0].Name = ResultArtifact
+			return value
+		},
+		"submission output transcript": func(r map[string]Record) Record {
+			value := r["submission with credentials and outputs"].(*Submission)
+			value.Wherry.Outputs[0].Name = TranscriptArtifact
+			return value
+		},
+		"result with a duplicate artifact ID": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts = append(value.Task.Artifacts, value.Task.Artifacts[1])
+			return value
+		},
+		"result referencing an output named result": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[0].ArtifactID = "answer"
+			value.Task.Artifacts[1].ArtifactID, value.Task.Artifacts[1].Name = ResultArtifact, ResultArtifact
+			return value
+		},
+		"result referencing an output under another name": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[1].Name = "other"
+			return value
+		},
+		"result referencing an invalid output name": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[1].ArtifactID, value.Task.Artifacts[1].Name = "sub/../x", "sub/../x"
+			return value
+		},
+		"result referencing an output without a hash": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[1].Parts[0].Data = []byte(`{"size":1}`)
+			return value
+		},
+		"result referencing the reply without a size": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[2].Parts[0].Data = []byte(`{"sha256":"` + testHash + `"}`)
+			return value
+		},
+		"result referencing an output with a negative size": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[1].Parts[0].Data = []byte(`{"sha256":"` + testHash + `","size":-1}`)
+			return value
+		},
+		"result referencing the transcript by name": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[3].Name = TranscriptArtifact
+			return value
+		},
+		"result referencing the transcript with no object": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[3].Parts[0].Data = []byte(`[]`)
+			return value
+		},
+		"result reference with a text part": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[1].Parts[0] = Part{Text: "x", MediaType: ReferenceMediaType}
+			return value
+		},
+		"result reference with another media type": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[1].Parts[0].MediaType = "application/json"
+			return value
+		},
+		"result reference with a filename": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[1].Parts[0].Filename = "Report.md"
+			return value
+		},
+		"result reference with two parts": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[1].Parts = append(value.Task.Artifacts[1].Parts, value.Task.Artifacts[1].Parts[0])
+			return value
+		},
+		"result reference without the extension": func(r map[string]Record) Record {
+			value := r["result with references"].(*Result)
+			value.Task.Artifacts[2].Extensions = nil
 			return value
 		},
 		"output appending at index 0": func(r map[string]Record) Record {

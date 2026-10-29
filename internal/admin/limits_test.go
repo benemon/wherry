@@ -353,17 +353,98 @@ func TestPoolCreateRecordsTheRecordLimit(t *testing.T) {
 	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
-	setTopicLimit(t, service, TenantTopic("tenant-a"), "900000")
-	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err == nil || !strings.Contains(err.Error(), "a transcript chunk record is ") || !strings.Contains(err.Error(), "over the 900000-byte record limit") {
-		t.Fatalf("pool update = %v; want the transcript chunk refused against the tenant feed's limit", err)
+	// A tenant feed's own max.message.bytes overrides the brokers', so the largest result fits a feed above them.
+	if err := service.Check(ctx); err != nil {
+		t.Fatalf("check = %v; want the feeds at %d to carry the largest result", err, FeedRecordLimit)
 	}
-	setTopicLimit(t, service, TenantTopic("tenant-a"), "700000")
-	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err == nil || !strings.Contains(err.Error(), "a result record is ") || !strings.Contains(err.Error(), "over the 700000-byte record limit") {
-		t.Fatalf("pool update = %v; want the result refused against the tenant feed's limit", err)
+	// Check measures the feeds as they stand; pool update, which raises them first, and its dry run never see them low.
+	setTopicLimit(t, service, TenantTopic("tenant-a"), "1200000")
+	if err := service.Check(ctx); err == nil || !strings.Contains(err.Error(), "a result record is ") || !strings.Contains(err.Error(), "over the 1200000-byte record limit") {
+		t.Fatalf("check = %v; want the result refused against the tenant feed's limit", err)
 	}
 	setTopicLimit(t, service, TenantTopic("tenant-a"), "400000")
-	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err == nil || !strings.Contains(err.Error(), "an output chunk record is ") || !strings.Contains(err.Error(), "over the 400000-byte record limit") {
-		t.Fatalf("pool update = %v; want the output chunk refused against the tenant feed's limit", err)
+	if err := service.Check(ctx); err == nil || !strings.Contains(err.Error(), "an output chunk record is ") || !strings.Contains(err.Error(), "over the 400000-byte record limit") {
+		t.Fatalf("check = %v; want the output chunk refused against the tenant feed's limit", err)
+	}
+	if err := service.PoolUpdate(ctx, "pool-a", terms, true); err != nil {
+		t.Fatalf("pool update dry run = %v; want the feed measured at the limit the update raises it to", err)
+	}
+	if got := topicLimit(t, service, TenantTopic("tenant-a")); got != "400000" {
+		t.Fatalf("dry run left the feed at %s; want it untouched", got)
+	}
+	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Check(ctx); err != nil {
+		t.Fatalf("check after pool update = %v; want the feed raised", err)
+	}
+}
+
+func topicLimit(t *testing.T, service *Service, topic string) string {
+	t.Helper()
+	values, err := service.topicConfigs(context.Background(), "max.message.bytes", topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return values[topic]
+}
+
+// Every tenant feed and transcript topic is at FeedRecordLimit: host add and pool entitle create them there, and pool
+// entitle, create and update raise existing ones to it. Check reports one below it, though the largest records fit.
+func TestTenantFeedsTakeTheFeedRecordLimit(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	feeds := func(tenant string) []string { return []string{TenantTopic(tenant), TenantTranscriptTopic(tenant)} }
+	atLimit := func(when string, topics ...string) {
+		t.Helper()
+		for _, topic := range topics {
+			if got := topicLimit(t, service, topic); got != "2097152" {
+				t.Fatalf("%s: %s max.message.bytes = %s, want 2097152", when, topic, got)
+			}
+		}
+	}
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.HostAdd(ctx, "tenant-a", "host-a", filepath.Join(t.TempDir(), "host.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	atLimit("host add", feeds("tenant-a")...)
+	if err := service.createTopics(ctx, strconv.Itoa(tenantRetentionMS), feeds("tenant-b")...); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.TenantAdd(ctx, "tenant-b", "pool-a"); err != nil {
+		t.Fatal(err)
+	}
+	atLimit("pool entitle on existing feeds", feeds("tenant-b")...)
+	if err := service.TenantAdd(ctx, "tenant-c", "pool-a"); err != nil {
+		t.Fatal(err)
+	}
+	atLimit("pool entitle", feeds("tenant-c")...)
+	if err := service.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, topic := range append(feeds("tenant-a"), feeds("tenant-b")...) {
+		setTopicLimit(t, service, topic, "2000000")
+		if err := service.Check(ctx); err == nil || err.Error() != "topic "+topic+" max.message.bytes 2000000 is below required 2097152" {
+			t.Fatalf("check = %v; want %s reported below the feed record limit", err, topic)
+		}
+		setTopicLimit(t, service, topic, "2097152")
+	}
+	setTopicLimit(t, service, TenantTopic("tenant-a"), "1048588")
+	setTopicLimit(t, service, TenantTranscriptTopic("tenant-b"), "1048588")
+	if err := service.PoolCreate(ctx, "pool-b", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	atLimit("pool create", append(feeds("tenant-a"), feeds("tenant-b")...)...)
+	setTopicLimit(t, service, TenantTopic("tenant-c"), "1048588")
+	if err := service.PoolUpdate(ctx, "pool-b", modelTerms(), false); err != nil {
+		t.Fatal(err)
+	}
+	atLimit("pool update", feeds("tenant-c")...)
+	if err := service.Check(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -391,8 +472,10 @@ func TestCheckReportsLimitsTheBrokerNoLongerCarries(t *testing.T) {
 	}
 }
 
+// A tenant feed whose limit pool entitle cannot raise, as a broker refusing the change leaves it, refuses the
+// entitlement.
 func TestTenantAddRefusesAFeedThePoolDoesNotFit(t *testing.T) {
-	_, service, closeFixture := kfakeService(t)
+	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
 	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
@@ -402,6 +485,18 @@ func TestTenantAddRefusesAFeedThePoolDoesNotFit(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTopicLimit(t, service, TenantTopic("tenant-a"), "400000")
+	// The broker acknowledges the change and keeps the limit.
+	cluster.ControlKey(int16(kmsg.IncrementalAlterConfigs), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		alter := request.(*kmsg.IncrementalAlterConfigsRequest)
+		response := alter.ResponseKind().(*kmsg.IncrementalAlterConfigsResponse)
+		for _, resource := range alter.Resources {
+			altered := kmsg.NewIncrementalAlterConfigsResponseResource()
+			altered.ResourceType, altered.ResourceName = resource.ResourceType, resource.ResourceName
+			response.Resources = append(response.Resources, altered)
+		}
+		return response, nil, true
+	})
 	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err == nil || !strings.HasSuffix(err.Error(), "over the 400000-byte record limit") {
 		t.Fatalf("tenant add = %v; want the tenant feed's limit", err)
 	}
@@ -866,13 +961,23 @@ func largestRecords() ([]feedRecord, error) {
 	// A result lists at most 256 collected entries and the expected outputs missing among them. An S3 output is an
 	// expected one, listed with its key, so a result returning 256 of them misses none.
 	// A reply over wire.MaxText adds its entry to either result.
+	// Each output a result returns is also a reference artifact, which A2A requires named uniquely within the task.
 	reply := &wire.ReturnedReply{SHA256: hash, Size: math.MaxInt64, Cut: true}
 	metadata, s3Metadata := wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name, Reply: reply}, wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name, Reply: reply}
-	for range wire.MaxOutputs {
-		metadata.Outputs = append(metadata.Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64})
+	reference := func(id, name string, data []byte) wire.Artifact {
+		return wire.Artifact{ArtifactID: id, Name: name, Parts: []wire.Part{{Data: data, MediaType: wire.ReferenceMediaType}}, Extensions: []string{wire.ExtensionURI}}
+	}
+	streamed, _ := json.Marshal(wire.StreamedReference{SHA256: hash, Size: math.MaxInt64}) // a string and an integer always encode
+	var references []wire.Artifact
+	for i := range wire.MaxOutputs {
+		returned := fmt.Sprintf("%s%02x", outputName[:len(outputName)-2], i)
+		metadata.Outputs = append(metadata.Outputs, wire.ReturnedOutput{Name: returned, SHA256: hash, Size: math.MaxInt64})
 		metadata.NotReturned = append(metadata.NotReturned, wire.UnreturnedOutput{Name: outputName, Size: math.MaxInt64, Reason: "rejected: size changed while read"})
 		s3Metadata.S3Outputs = append(s3Metadata.S3Outputs, wire.ReturnedOutput{Name: outputName, SHA256: hash, Size: math.MaxInt64, Key: wire.S3OutputKey(name, run, outputName)})
+		references = append(references, reference(returned, returned, streamed))
 	}
+	// The reply chunks and the transcript are references in either result.
+	ended := []wire.Artifact{reference(wire.ReplyArtifact, "", streamed), reference(wire.TranscriptArtifact, "", []byte("{}"))}
 	encodedMetadata, err := json.Marshal(metadata)
 	if err != nil {
 		return nil, err
@@ -883,7 +988,7 @@ func largestRecords() ([]feedRecord, error) {
 	}
 	history := message
 	history.Parts = pointers
-	result := func(metadata []byte) *wire.Result {
+	result := func(metadata []byte, references []wire.Artifact) *wire.Result {
 		return &wire.Result{
 			Task: wire.Task{
 				ID: run, ContextID: run, History: []wire.Message{history}, Metadata: metadata,
@@ -892,7 +997,7 @@ func largestRecords() ([]feedRecord, error) {
 						{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}, {Data: []byte(`{"credential":"` + name + `"}`), MediaType: "application/json"},
 					},
 				}},
-				Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}}, Extensions: []string{wire.ExtensionURI}}},
+				Artifacts: append([]wire.Artifact{{ArtifactID: wire.ResultArtifact, Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.MaxText), MediaType: "text/plain"}}, Extensions: []string{wire.ExtensionURI}}}, references...),
 			},
 			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
 		}
@@ -909,8 +1014,8 @@ func largestRecords() ([]feedRecord, error) {
 			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
 		}},
 		// Receiver texts are names and fixed words, which JSON does not escape; an agent's text that it would travels raw.
-		{"a result", result(encodedMetadata)},
-		{"a result returning S3 outputs", result(encodedS3Metadata)},
+		{"a result", result(encodedMetadata, append(references, ended...))},
+		{"a result returning S3 outputs", result(encodedS3Metadata, ended)},
 		{"a transcript chunk", &wire.Chunk{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
 				TaskID: run, ContextID: run, Append: true, LastChunk: true,

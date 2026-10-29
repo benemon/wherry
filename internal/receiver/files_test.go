@@ -122,8 +122,8 @@ func TestNoPartIsAnUnstoredURL(t *testing.T) {
 			references += bytes.Count(payload, []byte(`"mediaType":"`+wire.ReferenceMediaType+`"`))
 		}
 	}
-	if references != 3 {
-		t.Fatalf("%d reference parts, want the two inputs' and the long line's", references)
+	if references != 4 {
+		t.Fatalf("%d reference parts, want the two inputs', the long line's and the result's to the transcript", references)
 	}
 }
 
@@ -601,8 +601,9 @@ func TestResultTextIsBounded(t *testing.T) {
 	}
 }
 
-// The largest result the receiver builds from bounded fields fits a default producer's batch: an agent's message that
-// JSON escaping would lengthen travels raw in its status as in its artifact, beside the credential it needs.
+// The largest result the receiver builds from bounded fields fits a feed's record batch: an agent's message that JSON
+// escaping would lengthen travels raw in its status as in its artifact, beside the credential it needs, and the result
+// references each returned output, the reply and the transcript.
 func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-w", 1)
@@ -612,10 +613,11 @@ func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 	}
 	run.history = []wire.Message{{MessageID: "msg-a", Role: wire.RoleUser, Parts: parts, Extensions: []string{wire.ExtensionURI}}}
 	name := strings.Repeat("a/", 255) + "aa"
-	for range wire.MaxOutputs {
-		run.returned = append(run.returned, wire.ReturnedOutput{Name: name, SHA256: strings.Repeat("0", 64), Size: 1 << 62})
+	for i := range wire.MaxOutputs {
+		run.returned = append(run.returned, wire.ReturnedOutput{Name: fmt.Sprintf("%s%02x", name[:len(name)-2], i), SHA256: strings.Repeat("0", 64), Size: 1 << 62})
 		run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: name, Size: 1 << 62, Reason: "rejected: size changed while read"})
 	}
+	run.replied, run.next = &wire.ReturnedReply{SHA256: strings.Repeat("0", 64), Size: 1 << 62, Cut: true}, 1<<62
 	text := strings.Repeat("\x01", wire.MaxText)
 	status := taskStatus(wire.TaskStateFailed, text)
 	status.Message.Parts = append(status.Message.Parts, wire.Part{Data: []byte(`{"credential":"` + strings.Repeat("c", 32) + `"}`), MediaType: "application/json"})
@@ -626,8 +628,17 @@ func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 	if err := wire.ParseRecord(record.Value, f.keys(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if raw := result.Task.Status.Message.Parts[0].Raw; len(raw) != wire.MaxText || size > 1000012 {
+	if raw := result.Task.Status.Message.Parts[0].Raw; len(raw) != wire.MaxText || len(result.Task.Artifacts) != 1+wire.MaxOutputs+2 || size > admin.FeedRecordLimit {
 		t.Fatalf("largest result is a %d-byte batch with a %d-byte raw status message", size, len(raw))
+	}
+	// The receiver's producer batches it whole, and the tenant's feed takes it.
+	producer, err := run.receiver.newClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer producer.Close()
+	if err := producer.ProduceSync(f.ctx, record).FirstErr(); err != nil {
+		t.Fatalf("produce the largest result to %s: %v", record.Topic, err)
 	}
 }
 

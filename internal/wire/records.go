@@ -452,6 +452,9 @@ func (value *Submission) validate() error {
 		if output.Name == ReplyFile {
 			return errors.New("expected output " + ReplyFile + " is reserved for the run's reply")
 		}
+		if ReservedArtifact(output.Name) {
+			return errors.New("expected output " + output.Name + " is reserved: the run's result takes it as an artifact ID")
+		}
 		if output.Storage != "" && output.Storage != StorageS3 {
 			return errors.New("an expected output's storage is s3 or absent")
 		}

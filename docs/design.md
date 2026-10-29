@@ -109,7 +109,9 @@ replication factor, `cleanup.policy=delete` and
 `message.timestamp.type=LogAppendTime`, except `wherry.receivers` and the
 progress topics, which it creates with `cleanup.policy=compact,delete`,
 `segment.ms=3600000` and `max.compaction.lag.ms=3600000`, so a segment
-closes and compacts within an hour.
+closes and compacts within an hour. A tenant feed and transcript topic also
+have `max.message.bytes=2097152`, the 2 MiB a receiver batches, so a result
+naming 256 outputs fits.
 
 | Topic | Created by | `retention.ms` |
 | --- | --- | --- |
@@ -134,7 +136,9 @@ at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 that every recording command sets the configuration above on
 `wherry.receivers`, `pool create` sets the retention and timestamp type of the pool's tasks
 and events topics, and `receiver add` and `pool create` set every
-configuration above on the progress topics of the pool's live receivers. A
+configuration above on the progress topics of the pool's live receivers.
+`pool entitle`, `pool create` and `pool update` set `max.message.bytes` on
+existing tenant feeds and transcript topics. A
 tenant feed's or transcript topic's retention can be changed with Kafka's
 own tools. `pool create` and `pool entitle` refuse terms that need more than
 an entitled tenant's feed or transcript topic keeps, and `wherry admin

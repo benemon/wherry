@@ -56,7 +56,9 @@ defaults, `2h` and `10m`.
   status from a receiver, it returns at once with `state`
   `TASK_STATE_SUBMITTED`, the `message` `status` gives, and no
   `retry_after`. With a progress token it sends a progress notification
-  every 5 seconds. Each artifact is `{artifact_id, parts}`, and each part has
+  every 5 seconds. The artifacts are the result's: `result`, then a
+  [reference](a2a-extension-v1.md#reference-artifacts) for each returned
+  output, the reply over 64 KiB and the transcript. Each artifact is `{artifact_id, parts}`, and each part has
   one of `text`, `data`, `url` or `raw_bytes` (the size of a binary part, which
   is not included), with `media_type`. `wait` writes the run's verified
   outputs as `wherry wait` does, to the default outputs directory, and returns

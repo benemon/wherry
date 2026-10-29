@@ -83,9 +83,13 @@ func validResult() *Result {
 		V: 1,
 		Task: Task{
 			ID: "run-1", ContextID: "run-1",
-			Status:    TaskStatus{State: TaskStateCompleted, Timestamp: "2026-10-17T10:00:00.000Z"},
-			History:   []Message{validSubmission().Message},
-			Artifacts: []Artifact{{ArtifactID: "artifact-1", Name: "answer", Parts: []Part{{Text: "done"}}, Extensions: []string{ExtensionURI}}},
+			Status:  TaskStatus{State: TaskStateCompleted, Timestamp: "2026-10-17T10:00:00.000Z"},
+			History: []Message{validSubmission().Message},
+			Artifacts: []Artifact{
+				{ArtifactID: "artifact-1", Name: "answer", Parts: []Part{{Text: "done"}}, Extensions: []string{ExtensionURI}},
+				{ArtifactID: "out/report.md", Name: "out/report.md", Parts: []Part{{Data: []byte(`{"sha256":"` + wireHash + `","size":2}`), MediaType: ReferenceMediaType}}, Extensions: []string{ExtensionURI}},
+				{ArtifactID: TranscriptArtifact, Parts: []Part{{Data: []byte(`{}`), MediaType: ReferenceMediaType}}, Extensions: []string{ExtensionURI}},
+			},
 		},
 		Wherry: ResultBinding{ReceiverBinding: receiverBinding(), TaskHash: wireHash},
 	}

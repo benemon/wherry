@@ -1710,6 +1710,8 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 			// The name is the agent's and may be any bytes; it is listed only as quoted ASCII.
 			name, reason = strconv.QuoteToASCII(name), "rejected: invalid name"
 			name = name[:min(len(name), 256)]
+		case wire.ReservedArtifact(name):
+			reason = "rejected: reserved name"
 		case output.Mode.Type() != 0:
 			reason = "rejected: " + fileType(output.Mode)
 		case slices.Contains(s3, name):
@@ -2150,7 +2152,7 @@ func (run *activeRun) chunks(lines []pluginsdk.Line, last bool) []*kgo.Record {
 		records = append(records, run.transcript(&wire.Chunk{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
 				TaskID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run,
-				Artifact: wire.Artifact{ArtifactID: "transcript", Parts: []wire.Part{}, Extensions: []string{wire.ExtensionURI}},
+				Artifact: wire.Artifact{ArtifactID: wire.TranscriptArtifact, Parts: []wire.Part{}, Extensions: []string{wire.ExtensionURI}},
 				Append:   run.next > 0, LastChunk: true,
 			},
 			Wherry: wire.ChunkBinding{ReceiverBinding: run.receiver.binding(run.task, run.attempt), TaskHash: run.taskHash, Seq: run.next},
@@ -2173,7 +2175,7 @@ func (run *activeRun) chunks(lines []pluginsdk.Line, last bool) []*kgo.Record {
 		chunk := &wire.Chunk{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
 				TaskID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run,
-				Artifact: wire.Artifact{ArtifactID: "transcript", Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI}},
+				Artifact: wire.Artifact{ArtifactID: wire.TranscriptArtifact, Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI}},
 				// The stream's first chunk is the line at log offset zero; an adopter resumes past it.
 				Append:    line.Offset > 0,
 				LastChunk: last && i == len(lines)-1,
@@ -2213,11 +2215,32 @@ func (run *activeRun) result(status wire.TaskStatus, result string) *kgo.Record 
 		Task: wire.Task{
 			ID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run, Status: run.redactStatus(status),
 			History:   inputPointers(run.history),
-			Artifacts: []wire.Artifact{{ArtifactID: "result", Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI}}},
+			Artifacts: append([]wire.Artifact{{ArtifactID: wire.ResultArtifact, Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI}}}, run.references()...),
 			Metadata:  metadata,
 		},
 		Wherry: wire.ResultBinding{ReceiverBinding: run.receiver.binding(run.task, run.attempt), TaskHash: run.taskHash},
 	})
+}
+
+// references are the result's reference artifacts, one for each artifact the run streamed: each returned output and
+// the reply chunks, with the SHA-256 and size of their bytes, then the transcript once it has a line, by name alone.
+func (run *activeRun) references() []wire.Artifact {
+	reference := func(id, name string, data []byte) wire.Artifact {
+		return wire.Artifact{ArtifactID: id, Name: name, Parts: []wire.Part{{Data: data, MediaType: wire.ReferenceMediaType}}, Extensions: []string{wire.ExtensionURI}}
+	}
+	var artifacts []wire.Artifact
+	for _, output := range run.returned {
+		data, _ := json.Marshal(wire.StreamedReference{SHA256: output.SHA256, Size: output.Size}) // a string and an integer always encode
+		artifacts = append(artifacts, reference(output.Name, output.Name, data))
+	}
+	if run.replied != nil {
+		data, _ := json.Marshal(wire.StreamedReference{SHA256: run.replied.SHA256, Size: run.replied.Size}) // a string and an integer always encode
+		artifacts = append(artifacts, reference(wire.ReplyArtifact, "", data))
+	}
+	if run.next > 0 {
+		artifacts = append(artifacts, reference(wire.TranscriptArtifact, "", []byte("{}")))
+	}
+	return artifacts
 }
 
 // inputPointers is history with each raw and data part replaced by a reference to it with its filename, size and

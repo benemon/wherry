@@ -512,7 +512,7 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		t.Fatalf("re-salt SCRAM credential: %v %v", err, altered.Error())
 	}
 	opts := []kgo.Opt{kgo.SeedBrokers(f.cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()), kgo.FetchMaxWait(10 * time.Millisecond)}
-	base, err := kgo.NewClient(opts...)
+	base, err := kgo.NewClient(feedBatches(opts)...)
 	if err != nil {
 		t.Fatal(err)
 	}

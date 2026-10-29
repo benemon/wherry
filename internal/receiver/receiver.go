@@ -111,7 +111,7 @@ func New(bundle admin.Bundle, stateDir string, rotateKey bool, drainTimeout time
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, err
 	}
-	base, err := kgo.NewClient(opts...)
+	base, err := kgo.NewClient(feedBatches(opts)...)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +125,12 @@ func New(bundle admin.Bundle, stateDir string, rotateKey bool, drainTimeout time
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
 	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+}
+
+// feedBatches is opts with producer batches up to what a tenant's feed takes, so the largest result fits. Every client
+// of the receiver's connection carries it.
+func feedBatches(opts []kgo.Opt) []kgo.Opt {
+	return append(opts, kgo.ProducerBatchMaxBytes(admin.FeedRecordLimit))
 }
 
 // newClient is a client of the receiver's connection with extra options.
