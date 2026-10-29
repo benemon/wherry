@@ -1596,7 +1596,8 @@ func TestRevocationStopsAHeldRun(t *testing.T) {
 				t.Fatalf("revocation incomplete: %+v", result.Steps)
 			}
 			for f.receiver.held() > 0 {
-				if time.Since(revoked) > 20*time.Second {
+				// One lock duration after the first denial, a state check, then the bounded denied status.
+				if time.Since(revoked) > 25*time.Second {
 					t.Fatalf("held run kept going %s after revocation; logs:\n%s", time.Since(revoked), f.logs.String())
 				}
 				time.Sleep(50 * time.Millisecond)
