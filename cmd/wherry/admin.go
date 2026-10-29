@@ -260,7 +260,11 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 	}
 	options := map[string]string{}
 	flags.Visit(func(option *flag.Flag) {
-		if set, ok := option.Value.(flag.Getter).Get().(bool); ok && !set {
+		getter, ok := option.Value.(flag.Getter)
+		if !ok {
+			return
+		}
+		if set, ok := getter.Get().(bool); ok && !set {
 			return
 		}
 		options[option.Name] = option.Value.String()
