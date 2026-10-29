@@ -318,7 +318,8 @@ func (r *remote) Dispatch(ctx context.Context, run Run) (Outcome, Handle, error)
 	if err != nil {
 		err = callError(ctx, err)
 		var tooLarge *InputTooLargeError
-		if errors.As(err, &tooLarge) {
+		var failure *Error
+		if errors.As(err, &tooLarge) || errors.As(err, &failure) && failure.Class == ClassFetch {
 			return OutcomeNothingCreated, Handle{}, err
 		}
 		return OutcomeUnknown, Handle{}, err

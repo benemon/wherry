@@ -45,14 +45,16 @@ type Run struct {
 // Fetch is an input the plugin fetches from URL, a presigned GET the core has checked against its pool's
 // storage, and verifies as Size bytes with SHA256 before the agent starts. URL is a credential: never log it or put it
 // in an error. A fetch that fails or does not verify ends the job before its agent starts, with Terminal.Class
-// ClassFetch.
+// ClassFetch; one that fails in Dispatch before any job exists is an Error of Class ClassFetch with
+// OutcomeNothingCreated, which ends the run.
 type Fetch struct {
 	Name, URL string
 	Size      int64
 	SHA256    string
 }
 
-// ClassFetch is the Terminal.Class of a job that ended before its agent started because a Fetch failed.
+// ClassFetch is the Terminal.Class of a job that ended before its agent started because a Fetch failed, and the
+// Error.Class of a Dispatch whose Fetch failed before it created a job.
 const ClassFetch = "fetch"
 
 // File is one input file.
