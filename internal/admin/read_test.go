@@ -543,3 +543,62 @@ func TestListOffsetsListsAgainOnlyOnARetriablePartitionError(t *testing.T) {
 		})
 	}
 }
+
+// A topic missing from the first listings' metadata, as a created topic is from a broker its metadata has not reached,
+// is listed again until it is there.
+func TestReadFromListsAgainWhileTheTopicIsMissing(t *testing.T) {
+	cluster, client := readerClusterOf(t, nil)
+	listed := make(chan struct{})
+	var once sync.Once
+	cluster.ControlKey(int16(kmsg.Metadata), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		cluster.KeepControl()
+		for _, topic := range request.(*kmsg.MetadataRequest).Topics {
+			if topic.Topic != nil && *topic.Topic == "keys-a" {
+				once.Do(func() { close(listed) })
+			}
+		}
+		return nil, nil, false
+	})
+	created := make(chan error, 1)
+	go func() {
+		<-listed
+		created <- cluster.CreateTopic("keys-a", 1, nil)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), topicWait)
+	defer cancel()
+	records, err := readTopic(ctx, client, "keys-a")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("records %v, %v; want the created topic read empty", records, err)
+	}
+	if err := <-created; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A topic still missing after topicWait is reported missing, as it was before the wait.
+func TestATopicMissingPastTheWaitIsReportedMissing(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		read func(context.Context, *kgo.Client) error
+	}{
+		{"ReadFrom", func(ctx context.Context, client *kgo.Client) error {
+			_, err := readTopic(ctx, client, "keys-a")
+			return err
+		}},
+		{"ListOffsets", func(ctx context.Context, client *kgo.Client) error {
+			_, err := ListOffsets(ctx, kadm.NewClient(client).ListEndOffsets, "keys-a")
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			client := readerCluster(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*topicWait)
+			defer cancel()
+			start := time.Now()
+			if err := test.read(ctx, client); err != kerr.UnknownTopicOrPartition || time.Since(start) < topicWait {
+				t.Fatalf("%v after %v; want %v after %v", err, time.Since(start), kerr.UnknownTopicOrPartition, topicWait)
+			}
+		})
+	}
+}
