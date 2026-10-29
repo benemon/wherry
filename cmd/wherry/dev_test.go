@@ -22,8 +22,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/admin"
 	"github.com/hashicorp/nomad/api"
 	"github.com/sigstore/sigstore-go/pkg/root"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // manifestFixture is section 2's manifest with every field set.
@@ -758,5 +762,50 @@ func TestDevStorageUserPassesNoKey(t *testing.T) {
 	stdout = `{"keys": [{"secret_key": "` + secret + `"`
 	if _, err := storageUser(context.Background(), nil, "alloc-1"); err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("truncated output: %v; want a refusal that names no key", err)
+	}
+}
+
+// TestDevOperatorACL fails when dev's operator ACL drifts from the one wherry admin expects of the operator.
+func TestDevOperatorACL(t *testing.T) {
+	cluster := kfake.MustCluster()
+	defer cluster.Close()
+	client, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	ctx := context.Background()
+	results, err := kadm.NewClient(client).CreateACLs(ctx, operatorACL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range results {
+		if result.Err != nil {
+			t.Fatal(result.Err)
+		}
+	}
+	described, err := kadm.NewClient(client).DescribeACLs(ctx, kadm.NewACLs().AnyResource().Allow().AllowHosts().Operations(kadm.OpAny).ResourcePatternType(kadm.ACLPatternAny))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got, want []string
+	for _, result := range described {
+		for _, acl := range result.Described {
+			got = append(got, fmt.Sprintf("%s %s %s %s %s %s %s", acl.Principal, acl.Host, acl.Type, acl.Name, acl.Pattern, acl.Operation, acl.Permission))
+		}
+	}
+	for _, acl := range admin.ACLs(admin.State{}) {
+		pattern := "LITERAL"
+		if acl.Prefix {
+			pattern = "PREFIXED"
+		}
+		for _, operation := range acl.Operations {
+			want = append(want, fmt.Sprintf("User:%s * %s %s %s %s ALLOW", acl.Principal, strings.ToUpper(acl.ResourceType), acl.Resource, pattern, operation))
+		}
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("dev grants\n%s\nwherry admin expects\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }

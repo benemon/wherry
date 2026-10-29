@@ -271,9 +271,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	}
 	defer root.Close()
 	defer operator.Close()
-	acl := kadm.NewACLs().Allow("User:"+admin.OperatorPrincipal).AllowHosts("*").Topics(admin.AdminTopic).
-		Operations(kadm.OpRead, kadm.OpWrite, kadm.OpDescribe).ResourcePatternType(kadm.ACLPatternLiteral)
-	results, err := kadm.NewClient(root).CreateACLs(ctx, acl)
+	results, err := kadm.NewClient(root).CreateACLs(ctx, operatorACL())
 	if err == nil {
 		for _, result := range results {
 			err = cmpError(err, result.Err)
@@ -317,6 +315,12 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	current = ""
 	printReady(stdout, env)
 	return nil
+}
+
+// operatorACL is the operator's ACL on wherry.admin, which the cluster's preparer grants before wherry admin runs.
+func operatorACL() *kadm.ACLBuilder {
+	return kadm.NewACLs().Allow("User:"+admin.OperatorPrincipal).AllowHosts("*").Topics(admin.AdminTopic).
+		Operations(kadm.OpRead, kadm.OpWrite, kadm.OpDescribe).ResourcePatternType(kadm.ACLPatternLiteral)
 }
 
 // verifyCache checks every file the manifest records against its SHA-256.
