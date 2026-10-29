@@ -1,0 +1,4 @@
+caf1a982c2eb6545ec5bd808a218c8d1b7dacf3ec28e14bc838ac75ae37fd950  wherry-plugin-nomad_v0.1.0-rc.16_darwin_amd64.tar.gz
+dc7f04b661ecc2b630d9d6fd342536f9bba1fbe4eefdf91202e738d219d6b21a  wherry-plugin-nomad_v0.1.0-rc.16_darwin_arm64.tar.gz
+cadae29ead1f6a05d442824e97a144c92ad49c7f7f102053913fadcba6eb3d34  wherry-plugin-nomad_v0.1.0-rc.16_linux_amd64.tar.gz
+89ba743a293c29097aa2c2bc2c2d96287dc11e56096d9d3570f655030c6fd6cf  wherry-plugin-nomad_v0.1.0-rc.16_linux_arm64.tar.gz

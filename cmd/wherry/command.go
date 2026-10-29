@@ -25,7 +25,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|key rotate|receivers|submit|cancel|wait|status|events|logs|cleanup|receiver run|admin|mcp|version>")
+		return errors.New("usage: wherry <init|key|key rotate|receivers|submit|cancel|wait|status|events|logs|cleanup|receiver run|admin|mcp|dev|version>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
