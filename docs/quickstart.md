@@ -332,17 +332,37 @@ with `--config-dir`.
 
 ### 2. Check the receiver configuration
 
-On the operator's machine, check the file against the pool's terms:
+On the operator's machine, download the `checksums.txt` of the Nomad
+plugin's [wherry-plugins release](https://github.com/benemon/wherry-plugins/releases),
+verify its signature, and take the plugin binary's SHA-256 from it, as
+[Install plugins](operations.md#install-plugins) describes. The receiver
+starts the plugin only from a binary with that SHA-256:
 
 ```sh
-wherry admin receiver add nomad-1 --pool build --config-file nomad-1.yaml --dry-run
+plugin=nomad version=<version> arch=amd64
+base=https://github.com/benemon/wherry-plugins/releases/download/$plugin/$version
+curl -fsSL --remote-name-all "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp "^https://github\.com/benemon/wherry-plugins/\.github/workflows/release\.yml@refs/tags/$plugin/v" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256=$(awk -v name="wherry-plugin-${plugin}_${version}_linux_${arch}" '$2 == name {print $1}' checksums.txt)
 ```
 
-`--dry-run` writes nothing and prints each plugin profile as the record will
-hold it, with the plugin's `config` merged in and its keys sorted:
+Check the file against the pool's terms, with the pin:
+
+```sh
+wherry admin receiver add nomad-1 --pool build --config-file nomad-1.yaml \
+  --plugin-sha256 "nomad=$sha256" --dry-run
+```
+
+`--dry-run` writes nothing and prints the pin and each plugin profile as the
+record will hold them, with the plugin's `config` merged in and its keys
+sorted:
 
 ```yaml
 capacity: 2
+plugin_sha256:
+    nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 profiles:
     - name: container
       plugin: nomad
@@ -397,11 +417,11 @@ profile whose agent is outside the pool's terms fails with
 On the operator's machine:
 
 ```sh
-wherry admin receiver add nomad-1 --pool build \
-  --config-file nomad-1.yaml --bundle-file nomad-1.bundle
+wherry admin receiver add nomad-1 --pool build --config-file nomad-1.yaml \
+  --plugin-sha256 "nomad=$sha256" --bundle-file nomad-1.bundle
 ```
 
-`receiver add` records the configuration on `wherry.admin`, creates the
+`receiver add` records the configuration and the pin on `wherry.admin`, creates the
 receiver's Kafka principal, and writes its bundle, `nomad-1.bundle`, with mode
 0600. The bundle holds the receiver's Kafka password; hand it to the receiver
 host over a channel you trust.
@@ -423,12 +443,14 @@ cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 grep "  $archive\$" checksums.txt | sha256sum -c -
 tar -xzf "$archive" --strip-components=1 "${archive%.tar.gz}/wherry-plugin-$plugin"
-install -d -o root -g root -m 0755 /usr/local/libexec/wherry/plugins
-install -o root -g root -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
+install -d /usr/local/libexec/wherry/plugins
+install -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
 ```
 
-The receiver refuses a plugin directory or binary that a user other than
-root or the receiver's owns, or that group or others can write.
+The binary in the archive has the SHA-256 that step 2 pinned. To upgrade
+the plugin later, install the new version's binary, then record its pin with
+`receiver update --plugin-sha256`, as
+[Install plugins](operations.md#install-plugins) describes.
 
 ### 5. Place the bundle
 
@@ -514,6 +536,8 @@ It prints the record, the same YAML `--dry-run` printed in
 
 ```yaml
 capacity: 2
+plugin_sha256:
+    nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 profiles:
     - name: container
       plugin: nomad

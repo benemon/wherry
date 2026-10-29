@@ -206,16 +206,17 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	}
 }
 
-// showReceiver writes config's capacity and resolved profiles, in routing order, to out as YAML.
+// showReceiver writes config's capacity, plugin pins and resolved profiles, in routing order, to out as YAML.
 func showReceiver(out io.Writer, config admin.ReceiverConfig) error {
 	// The record decodes numbers as float64, which YAML would print as 1e+06.
 	for i := range config.Profiles {
 		config.Profiles[i].Config = integral(config.Profiles[i].Config).(map[string]any)
 	}
 	encoded, err := yaml.Marshal(struct {
-		Capacity int64                   `yaml:"capacity"`
-		Profiles []admin.ProfileSettings `yaml:"profiles"`
-	}{config.Capacity, config.Profiles})
+		Capacity     int64                   `yaml:"capacity"`
+		PluginSHA256 map[string]string       `yaml:"plugin_sha256,omitempty"`
+		Profiles     []admin.ProfileSettings `yaml:"profiles"`
+	}{config.Capacity, config.PluginSHA256, config.Profiles})
 	if err != nil {
 		return err
 	}

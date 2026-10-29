@@ -196,7 +196,9 @@ func TestReceiverShowAndDryRun(t *testing.T) {
 		}
 		return stdout.String()
 	}
-	const shown = `capacity: 3
+	shown := `capacity: 3
+plugin_sha256:
+    nomad: ` + fakeSHA256 + `
 profiles:
     - name: old
       plugin: nomad
@@ -222,7 +224,9 @@ profiles:
 	if records() != before {
 		t.Fatal("update --dry-run produced a record")
 	}
-	const resolved = `capacity: 1
+	resolved := `capacity: 1
+plugin_sha256:
+    nomad: ` + fakeSHA256 + `
 profiles:
     - name: claude
       plugin: nomad

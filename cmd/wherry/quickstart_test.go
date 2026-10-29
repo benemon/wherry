@@ -124,7 +124,8 @@ func TestQuickstartAdminOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count := strings.Count(string(doc), "```yaml\n"+dryRun+"```\n"); count != 2 {
+	// The docs show an example pin in place of the test plugin's.
+	if count := strings.Count(string(doc), "```yaml\n"+strings.ReplaceAll(dryRun, fakeSHA256, strings.Repeat("0123456789abcdef", 4))+"```\n"); count != 2 {
 		t.Errorf("docs/quickstart.md holds what receiver add --dry-run and receiver show print in %d code blocks, want 2:\n%s", count, dryRun)
 	}
 }
