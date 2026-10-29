@@ -84,7 +84,7 @@ flag and in every path.
 | --- | --- | --- |
 | `bundle` | required | the receiver's bundle |
 | `state_dir` | `state` in the bundle file's directory | the receiver's signing key |
-| `plugin_dir` | `/usr/local/libexec/wherry/plugins` | the directory holding the `wherry-plugin-<type>` binaries |
+| `plugin_dir` | `/usr/local/libexec/wherry/plugins` | the directory holding the `wherry-plugin-<type>` binaries, or symbolic links to them; each starts only when its SHA-256 is the receiver record's pin for its type |
 | `metrics_addr` | none | `HOST:PORT` to serve [`/metrics`](operations.md#metrics) on; without it the receiver serves no metrics |
 | `drain_timeout` | `0s` | how long the runs the receiver holds may go on after `SIGINT` or `SIGTERM` before it releases their tasks for adoption, a duration such as `25s`; [set it with the platform's stop window](#drain-timeout-and-the-stop-window) |
 | `credentials` | none | [platform credential](#platform-credentials) name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]`, validated and resolved as the host's |
@@ -381,7 +381,10 @@ What `receiver add` and `receiver update` read, recorded on
 `wherry.admin`: a [directory](#receiver-configuration-directory) named by
 `--config-dir`, or a single YAML file named by `--config-file` with the same
 entries in maps and lists. Exactly one is required. The receiver and pool
-come from the command. Unknown fields are errors.
+come from the command, as do the plugin pins: `--plugin-sha256 TYPE=HEX`
+for each plugin type, the line for the plugin binary in its release's
+signed `checksums.txt` ([Install plugins](operations.md#install-plugins)).
+Unknown fields are errors.
 
 | Field of the single file | Content |
 | --- | --- |
@@ -479,7 +482,7 @@ same address, credential and resources, the `exec` driver with `command`
 alone in its driver configuration, and the labels `platform: nomad` and
 `isolation: host`.
 `wherry admin receiver update ID --dry-run` prints what a file resolves
-to, and `wherry admin receiver show ID` prints what a receiver's record
+to, with the pins, and `wherry admin receiver show ID` prints what a receiver's record
 holds ([commands](commands.md#wherry-admin-receiver-show-receiver)).
 
 ### Receiver configuration directory
@@ -518,7 +521,7 @@ plugin profile's `config` holds only what the example needs; the
 lists every setting. Neither profile names an agent credential: each
 delivers its agent's credentials at the targets the pool's terms give them.
 As one file for
-`receiver add nomad-1 --pool build --config-file nomad-1.yaml`:
+`receiver add nomad-1 --pool build --config-file nomad-1.yaml --plugin-sha256 nomad=<sha256>`:
 
 ```yaml
 capacity: 3
@@ -558,7 +561,7 @@ plugins:
 ```
 
 The same configuration as a directory for
-`receiver add nomad-1 --pool build --config-dir nomad-1`:
+`receiver add nomad-1 --pool build --config-dir nomad-1 --plugin-sha256 nomad=<sha256>`:
 
 ```
 nomad-1/

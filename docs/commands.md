@@ -698,7 +698,8 @@ parse as Go flags, in the forms `--name value`, `--name=value` and
 `admin`. An option without a value fails with
 `flag needs an argument: -<name>`, one no admin command takes with
 `flag provided but not defined: -<name>`, and one the command does not take
-with `unknown option --<name>`. `pool create`, `pool update`,
+with `unknown option --<name>`. `--plugin-sha256` is given once per plugin
+type; any other repeated option takes its last value. `pool create`, `pool update`,
 `pool entitle`, `host add` and `receiver add` then create every ACL the new
 state calls for, re-read them, and fail with `ACL plan incomplete` when one
 is missing.
@@ -769,7 +770,7 @@ its bundle.
 
 ```sh
 wherry admin receiver add RECEIVER --pool POOL \
-  <--config-file FILE|--config-dir DIR> <--bundle-file FILE|--dry-run>
+  <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... <--bundle-file FILE|--dry-run>
 ```
 
 Reads the [receiver configuration](configuration.md#receiver-configuration) from a
@@ -780,20 +781,28 @@ bundle. It creates the progress topic of every other live receiver in the
 pool that lacks one, and sets the
 [progress topic configuration](design.md#topics-1) on each existing one. It
 refuses an existing receiver.
+`--plugin-sha256 TYPE=HEX`, given once per plugin type, pins the SHA-256 of
+that type's binary as lowercase hex: the line for the binary in the plugin
+release's signed `checksums.txt`
+([Install plugins](operations.md#install-plugins)). Every plugin type in the
+configuration needs a pin, and a pin that is not 64 lowercase hex digits is
+an error; either refusal writes nothing.
 The bundle holds the receiver's Kafka identity alone; the receiver's [local
 configuration](configuration.md#receiver-local-configuration) gives the
 sources of its [platform credentials](configuration.md#platform-credentials).
 With `--dry-run`, it makes the same checks and prints each plugin profile as
-the record would hold it, in the format of `receiver show`, and creates and
+the record would hold it, with the pins, in the format of `receiver show`, and creates and
 writes nothing; `--bundle-file` is then not needed.
 
 ### `wherry admin receiver update RECEIVER`
 
 ```sh
-wherry admin receiver update RECEIVER <--config-file FILE|--config-dir DIR> [--force] [--dry-run]
+wherry admin receiver update RECEIVER <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... [--force] [--dry-run]
 ```
 
-Records a new configuration for a live receiver in its pool. The
+Records a new configuration for a live receiver in its pool, with the
+plugin pins as `receiver add` takes them. The record holds only the pins
+the command gives, so give one for every plugin type each time. The
 principal, password and bundle stay as they are. When the receiver reads a
 record that differs from the configuration it runs, it stops claiming, lets
 each run it holds end and commit with no time limit, then exits, and its
@@ -812,12 +821,15 @@ with or without `--dry-run`.
 ### `wherry admin receiver show RECEIVER`
 
 Prints the receiver's recorded configuration as YAML: `capacity`, then
+`plugin_sha256`, the SHA-256 pinned for each plugin type, then
 `profiles`, each plugin profile resolved, in routing order, with its
 `name`, `plugin`, `agent`, `labels` and merged `config`
 ([Plugin profile merge](configuration.md#plugin-profile-merge)):
 
 ```yaml
 capacity: 3
+plugin_sha256:
+    nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 profiles:
     - name: claude
       plugin: nomad
@@ -946,13 +958,18 @@ plugin, and configures every plugin profile of that plugin in it.
 [wherry-plugins](https://github.com/benemon/wherry-plugins) holds the
 plugins, `nomad` among them.
 
-The plugin directory is made absolute, so the binary checked is the one run and
-`PATH` is never searched. The receiver refuses a plugin directory or binary
-owned by a user other than root or the receiver's, or that group or others can
-write, and a binary that is not a regular file; a symbolic link is refused. It
-checks again before every restart. A type with no binary in the directory is a
-configuration error, and the receiver exits with
-`profile <name>: no plugin for type <type>`. A plugin checks its profile's
+The plugin directory is made absolute and `PATH` is never searched. The
+binary may be a symbolic link; the receiver resolves it and runs the file it
+names. Before every start and restart,
+[go-plugin's `SecureConfig`](https://pkg.go.dev/github.com/hashicorp/go-plugin#SecureConfig)
+checks the binary's SHA-256 against the pin the receiver's record holds for
+its type (`--plugin-sha256` on
+[`receiver update`](#wherry-admin-receiver-update-receiver)). The receiver
+refuses a plugin whose type has no pin, and a binary whose SHA-256 differs,
+exiting with
+`profile <name>: plugin type <type>: <path> has SHA-256 <hex> and the pin is <hex>`.
+A type with no binary in the directory is a configuration error, and the
+receiver exits with `profile <name>: no plugin for type <type>`. A plugin checks its profile's
 `config` section when the receiver calls its `Configure`, and the receiver exits with
 `profile <name>: ...` on an error.
 

@@ -195,9 +195,11 @@ Confirm it:
 
 Then:
 
-- For `plugin restart failed` naming ownership or mode, reinstall the
-  plugin as in [Install plugins](operations.md#install-plugins). The
-  receiver checks the binary again before every restart.
+- For `plugin restart failed` naming a SHA-256 that differs from the pin,
+  install the binary the pin names, or record the installed binary's pin
+  from its release's `checksums.txt`, as in
+  [Install plugins](operations.md#install-plugins). The receiver checks the
+  binary again before every restart.
 - For a protocol version mismatch, install the plugin release that matches
   the receiver's, as in [Upgrade wherry](operations.md#upgrade-wherry).
 - For a crash or a missed ping, read the plugin's lines for the cause,
