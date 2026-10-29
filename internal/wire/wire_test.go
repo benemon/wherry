@@ -240,18 +240,21 @@ func TestTerminalStates(t *testing.T) {
 }
 
 func TestArtifactUpdateRequiresOnePart(t *testing.T) {
-	pointer := Part{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + wireHash + `","size":4}`)}
+	reference := func(data string) Part { return Part{Data: jsontext.Value(data), MediaType: ReferenceMediaType} }
+	pointer := reference(`{"sha256":"` + wireHash + `","size":4,"unstored":"oversize"}`)
 	for name, test := range map[string]struct {
 		parts []Part
 		ok    bool
 	}{
-		"text":                {[]Part{{Text: "line"}}, true},
-		"pointer":             {[]Part{pointer}, true},
-		"line and pointer":    {[]Part{{Text: "line"}, pointer}, false},
-		"neither":             {[]Part{}, false},
-		"pointer no metadata": {[]Part{{URL: "unstored:oversize"}}, false},
-		"pointer bad hash":    {[]Part{{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"x","size":4}`)}}, false},
-		"pointer zero size":   {[]Part{{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + wireHash + `","size":0}`)}}, false},
+		"text":              {[]Part{{Text: "line"}}, true},
+		"pointer":           {[]Part{pointer}, true},
+		"line and pointer":  {[]Part{{Text: "line"}, pointer}, false},
+		"neither":           {[]Part{}, false},
+		"pointer not data":  {[]Part{{Text: "line", MediaType: ReferenceMediaType}}, false},
+		"pointer bad hash":  {[]Part{reference(`{"sha256":"x","size":4,"unstored":"oversize"}`)}, false},
+		"pointer negative":  {[]Part{reference(`{"sha256":"` + wireHash + `","size":-1,"unstored":"oversize"}`)}, false},
+		"pointer no reason": {[]Part{reference(`{"sha256":"` + wireHash + `","size":4}`)}, false},
+		"pointer other":     {[]Part{reference(`{"sha256":"` + wireHash + `","size":4,"unstored":"lost"}`)}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			chunk := validChunk()

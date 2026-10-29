@@ -9,7 +9,10 @@ when its seal goes unanswered and when its agent reports
 `TASK_STATE_AUTH_REQUIRED`. wherry no longer treats
 `TASK_STATE_AUTH_REQUIRED` as terminal. A submission's message has `role`
 `ROLE_USER`. An output chunk's artifact has `name`, and its part
-`filename` and `mediaType`.
+`filename` and `mediaType`. Content a record does not carry, an input in a
+result's history or a transcript line over 512 KiB, is a
+[reference part](#reference-parts) in place of a `url` part
+`unstored:input` or `unstored:oversize`.
 
 **Change note, 2026-10-29:** edited in place at version 1. A reply over
 64 KiB once redacted travels as [reply chunks](#the-reply), output chunks with
@@ -75,6 +78,25 @@ not. [Key concepts](concepts.md) explains the roles this document names, and
 - Run IDs match `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`. A run's
   transactional ID is `p.<pool>.<run>`. A receiver's admission
   transactional ID is `p.<pool>.admission.<receiver>`.
+
+### Reference parts
+
+A reference part is a `data` part that stands in for content its record does
+not carry. Its `mediaType` is `application/vnd.wherry.reference.v1+json`,
+which this extension defines, and its data is an object:
+
+```json
+{"data": {"sha256": "9f86...", "size": 600000, "unstored": "oversize"}, "mediaType": "application/vnd.wherry.reference.v1+json"}
+```
+
+- `sha256` is the content's lowercase hex SHA-256, and `size` its size in
+  bytes, 0 or more.
+- `unstored` says why the content is not stored: `input` for an input the
+  submission carried, `oversize` for a transcript line over 512 KiB.
+- Readers reject a part with this media type whose data lacks a valid
+  `sha256`, has a negative `size`, or has another `unstored`.
+
+wherry writes no `url` part.
 
 ## Signed records
 
@@ -393,13 +415,12 @@ A chunk is one line of the agent's standard output, as the A2A artifact
 }
 ```
 
-- The artifact has `artifactId` `transcript` and exactly one part with media
-  type `application/x-ndjson`: a text part holding the line, a `raw` part for an
-  empty line, one that is not UTF-8, or one longer escaped as a JSON string than
-  base64-encoded, or, for a line over 512 KiB, a `url` part with the value
-  `unstored:oversize` whose `metadata` holds the line's hex `sha256` and its
-  `size` in bytes. The line itself is then not stored. Readers require a
-  `url` part's `sha256` to be lowercase hex SHA-256 and its `size` over 0.
+- The artifact has `artifactId` `transcript` and exactly one part: with media
+  type `application/x-ndjson`, a text part holding the line, or a `raw` part
+  for an empty line, one that is not UTF-8, or one longer escaped as a JSON
+  string than base64-encoded; for a line over 512 KiB, a
+  [reference part](#reference-parts) with `unstored` `oversize` and the line's
+  `sha256` and `size`. The line itself is then not stored.
 - `seq` is the line's byte offset in the agent's output and orders the
   chunks. An adopter follows from the highest offset of the run's
   `started` statuses and [progress](#progress) records, so a
@@ -467,9 +488,9 @@ A result is the A2A `Task` a run ends with.
 - `task.id` and `task.contextId` are the run ID. `task.status` is the
   run's final status, with the message its `terminal` status carries.
 - `task.history` holds the run's submitted message alone. Each `raw` and
-  `data` part is replaced by a `url` part with the value `unstored:input`,
-  the input's `filename` and `mediaType`, and `metadata` holding the hex
-  `sha256` and `size` in bytes of its `raw` bytes or its `data` JSON. A
+  `data` part is replaced by a [reference part](#reference-parts) with the
+  input's `filename`, and `unstored` `input` with the `sha256` and `size` of
+  its `raw` bytes or its `data` JSON. A
   reader requires `history[0].messageId` to equal the `message_id` of the
   run's echo.
 - `task.artifacts` holds the artifact `result`, with one part: the agent's
@@ -970,8 +991,8 @@ result metadata it replaces within JSON string values only, so the metadata
 stays valid. The marker can be longer than a value, so the limits hold for the
 redacted bytes: an output whose redacted form is over the pool's `output_limit`,
 or would take the run's outputs over it, is listed as `exceeds output limit`; a
-transcript line whose redacted form is over 512 KiB becomes an
-`unstored:oversize` part with that form's hash and size; a reply whose redacted
+transcript line whose redacted form is over 512 KiB becomes a
+[reference part](#reference-parts) with that form's hash and size; a reply whose redacted
 form is over 64 KiB travels as its preview and [reply chunks](#the-reply), both
 cut from the redacted form; and a credential name whose
 redacted form is over 64 KiB is replaced by `[redacted text over 65536 bytes]`. A result whose agent fields are 16 KiB of

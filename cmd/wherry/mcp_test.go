@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -628,7 +629,7 @@ func (b *bus) attemptBinding(admitted task, attempt int64) wire.ReceiverBinding 
 func (b *bus) chunk(t *testing.T, admitted task, attempt, seq int64, part wire.Part) []byte {
 	t.Helper()
 	runID := admitted.submission.Wherry.Run
-	part.MediaType = "application/x-ndjson"
+	part.MediaType = cmp.Or(part.MediaType, "application/x-ndjson")
 	return b.sign(t, &wire.Chunk{
 		ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: runID, ContextID: runID, Append: seq > 0, Artifact: wire.Artifact{
 			ArtifactID: "transcript", Parts: []wire.Part{part}, Extensions: []string{wire.ExtensionURI},
@@ -662,7 +663,7 @@ func transcriptRun(t *testing.T) (*bus, string) {
 		b.chunk(t, admitted, 2, 30, wire.Part{Raw: wire.StdBytes(`"q"`)}),
 		b.chunk(t, admitted, 2, 35, wire.Part{Raw: wire.StdBytes{}}),
 		b.chunk(t, admitted, 2, 10, wire.Part{Text: "second " + marker}),
-		b.chunk(t, admitted, 2, 40, wire.Part{URL: "unstored:oversize", Metadata: jsontext.Value(`{"sha256":"` + hashOf("x") + `","size":600000}`)}),
+		b.chunk(t, admitted, 2, 40, wire.Part{Data: jsontext.Value(`{"sha256":"` + hashOf("x") + `","size":600000,"unstored":"oversize"}`), MediaType: wire.ReferenceMediaType}),
 		b.chunk(t, admitted, 2, 50, wire.Part{Text: transcriptBig}),
 		b.chunk(t, admitted, 2, 60, wire.Part{Text: "tail"}),
 		b.sign(t, &wire.RunStatus{StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: runID, ContextID: runID, Status: canceled},
@@ -704,7 +705,7 @@ func TestMCPLogs(t *testing.T) {
 	callTool(t, ctx, session, "logs", map[string]any{"id": runID}, &reply)
 	want := logsReply{ID: runID, Attempt: 3, Total: 9, NextOffset: 6, Redacted: map[string]int{"model": 1}, Lines: []logsLine{
 		{Seq: 0, Attempt: 2, Text: `{"type":"start"}`}, {Seq: 10, Attempt: 2, Text: "second [redacted:model]"}, {Seq: 20, Attempt: 2, RawBytes: 2},
-		{Seq: 30, Attempt: 2, Text: `"q"`}, {Seq: 35, Attempt: 2}, {Seq: 40, Attempt: 2, Unstored: &wire.PointerMetadata{SHA256: hashOf("x"), Size: 600000}},
+		{Seq: 30, Attempt: 2, Text: `"q"`}, {Seq: 35, Attempt: 2}, {Seq: 40, Attempt: 2, Unstored: &unstoredLine{SHA256: hashOf("x"), Size: 600000}},
 	}}
 	if !reflect.DeepEqual(reply, want) {
 		t.Fatalf("transcript %+v, want %+v", reply, want)

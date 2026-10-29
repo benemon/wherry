@@ -2124,8 +2124,8 @@ func (run *activeRun) chunks(lines []pluginsdk.Line, last bool) []*kgo.Record {
 		part := wire.Part{Text: string(line.Data), MediaType: "application/x-ndjson"}
 		switch {
 		case form.over():
-			metadata, _ := json.Marshal(wire.PointerMetadata{SHA256: form.hash(), Size: form.size}) // a string and an integer always encode
-			part = wire.Part{URL: "unstored:oversize", MediaType: part.MediaType, Metadata: metadata}
+			data, _ := json.Marshal(wire.Reference{SHA256: form.hash(), Size: form.size, Unstored: wire.UnstoredOversize}) // strings and an integer always encode
+			part = wire.Part{Data: data, MediaType: wire.ReferenceMediaType}
 		case len(line.Data) == 0 || !utf8.Valid(line.Data) || escapedLength(line.Data) > base64.StdEncoding.EncodedLen(len(line.Data)):
 			// A text part holds only non-empty UTF-8, and no more than a raw part would once JSON-escaped, so a chunk
 			// stays within the record a line of wire.MaxLine raw bytes makes; other lines travel as exact bytes.
@@ -2181,9 +2181,8 @@ func (run *activeRun) result(status wire.TaskStatus, result string) *kgo.Record 
 	})
 }
 
-// inputPointers is history with each raw and data part replaced by an unstored:input part with its filename, media
-// type, size and SHA-256: the inputs already travelled once, and carrying them again could put the result past the
-// record limit.
+// inputPointers is history with each raw and data part replaced by a reference to it with its filename, size and
+// SHA-256: the inputs already travelled once, and carrying them again could put the result past the record limit.
 func inputPointers(history []wire.Message) []wire.Message {
 	stripped := slices.Clone(history)
 	for i := range stripped {
@@ -2196,8 +2195,8 @@ func inputPointers(history []wire.Message) []wire.Message {
 			if content == nil {
 				continue
 			}
-			metadata, _ := json.Marshal(wire.PointerMetadata{SHA256: wire.TaskHash(content), Size: int64(len(content))}) // a string and an integer always encode
-			stripped[i].Parts[j] = wire.Part{URL: "unstored:input", Filename: part.Filename, MediaType: part.MediaType, Metadata: metadata}
+			data, _ := json.Marshal(wire.Reference{SHA256: wire.TaskHash(content), Size: int64(len(content)), Unstored: wire.UnstoredInput}) // strings and an integer always encode
+			stripped[i].Parts[j] = wire.Part{Data: data, Filename: part.Filename, MediaType: wire.ReferenceMediaType}
 		}
 	}
 	return stripped

@@ -1,7 +1,6 @@
 package wire
 
 import (
-	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"regexp"
@@ -144,12 +143,6 @@ func validateArtifactUpdate(update *TaskArtifactUpdateEvent) error {
 	}
 	if len(update.Artifact.Parts) != 1 {
 		return errors.New("artifact_update requires exactly one part")
-	}
-	if part := update.Artifact.Parts[0]; part.URL != "" {
-		var pointer PointerMetadata
-		if part.Metadata == nil || json.Unmarshal(part.Metadata, &pointer) != nil || !ValidHash(pointer.SHA256) || pointer.Size <= 0 {
-			return errors.New("url part metadata requires sha256 and a positive size")
-		}
 	}
 	return validateMetadata(update.Metadata)
 }

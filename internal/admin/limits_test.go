@@ -856,9 +856,9 @@ func largestRecords() ([]feedRecord, error) {
 	}
 	name, run, hash := strings.Repeat("n", 32), largestKey, strings.Repeat("0", 64)
 	pointers := make([]wire.Part, wire.MaxParts)
-	pointer, _ := json.Marshal(wire.PointerMetadata{SHA256: hash, Size: math.MaxInt64}) // a string and an integer always encode
+	pointer, _ := json.Marshal(wire.Reference{SHA256: hash, Size: math.MaxInt64, Unstored: wire.UnstoredInput}) // strings and an integer always encode
 	for i := range pointers {
-		pointers[i] = wire.Part{URL: "unstored:input", Filename: fmt.Sprintf("%0255d", i), Metadata: pointer}
+		pointers[i] = wire.Part{Data: pointer, Filename: fmt.Sprintf("%0255d", i), MediaType: wire.ReferenceMediaType}
 	}
 	message := wire.Message{MessageID: "msg-" + strings.Repeat("0", 32), ContextID: run, TaskID: run, Role: wire.RoleUser, Extensions: []string{wire.ExtensionURI}}
 	binding := wire.ReceiverBinding{Receiver: name, Tenant: name, Pool: name, Run: run, Attempt: math.MaxInt64}

@@ -90,11 +90,40 @@ func TestInputPartsLandAsNamedFiles(t *testing.T) {
 		if content == nil {
 			continue
 		}
-		pointer, _ := json.Marshal(wire.PointerMetadata{SHA256: fmt.Sprintf("%x", sha256.Sum256(content)), Size: int64(len(content))})
-		want := wire.Part{URL: "unstored:input", Filename: submitted[i].Filename, MediaType: submitted[i].MediaType}
-		if got := history[i]; got.URL != want.URL || got.Filename != want.Filename || got.MediaType != want.MediaType || got.Raw != nil || got.Data != nil || string(got.Metadata) != string(pointer) {
-			t.Fatalf("history part %d is %+v, want %+v with metadata %s", i, got, want, pointer)
+		reference, _ := json.Marshal(wire.Reference{SHA256: fmt.Sprintf("%x", sha256.Sum256(content)), Size: int64(len(content)), Unstored: wire.UnstoredInput})
+		want := wire.Part{Data: reference, Filename: submitted[i].Filename, MediaType: wire.ReferenceMediaType}
+		if got := history[i]; got.URL != "" || got.Filename != want.Filename || got.MediaType != want.MediaType || got.Raw != nil || string(got.Data) != string(want.Data) || got.Metadata != nil {
+			t.Fatalf("history part %d is %+v, want %+v", i, got, want)
 		}
+	}
+}
+
+// Content a record does not carry, the run's inputs in its result's history and a transcript line over 512 KiB, is a
+// reference data part, never a url part.
+func TestNoPartIsAnUnstoredURL(t *testing.T) {
+	f := newFixture(t, []string{strings.Repeat("x", wire.MaxLine+1), doneOutcome})
+	f.answer(t, credentialName)
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Message.Parts = append(task.Message.Parts, wire.Part{Raw: wire.StdBytes("a,b\n"), Filename: "data.csv"}, wire.Part{Data: jsontext.Value(`{"k":1}`), Filename: "config"})
+	})
+	if status := f.execute(t, record, 1); status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	references := 0
+	for _, topic := range []string{admin.TenantTopic(testTenant), admin.TenantTranscriptTopic(testTenant)} {
+		for _, record := range f.records(t, topic) {
+			payload, err := base64.RawURLEncoding.DecodeString(strings.Split(string(record.Value), ".")[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(payload, []byte(`"url":"unstored:`)) {
+				t.Fatalf("record %s holds an unstored url part", payload[:min(len(payload), 200)])
+			}
+			references += bytes.Count(payload, []byte(`"mediaType":"`+wire.ReferenceMediaType+`"`))
+		}
+	}
+	if references != 3 {
+		t.Fatalf("%d reference parts, want the two inputs' and the long line's", references)
 	}
 }
 
@@ -488,8 +517,8 @@ func TestRedactionCannotExpandPastTheLimits(t *testing.T) {
 	if err := wire.ParseRecord(run.chunks([]pluginsdk.Line{{Data: line}}, false)[0].Value, f.keys(), &chunk); err != nil {
 		t.Fatal(err)
 	}
-	var pointer wire.PointerMetadata
-	if part := chunk.ArtifactUpdate.Artifact.Parts[0]; part.URL != "unstored:oversize" || json.Unmarshal(part.Metadata, &pointer) != nil ||
+	var pointer wire.Reference
+	if part := chunk.ArtifactUpdate.Artifact.Parts[0]; part.MediaType != wire.ReferenceMediaType || json.Unmarshal(part.Data, &pointer) != nil || pointer.Unstored != wire.UnstoredOversize ||
 		pointer.Size != int64(len(redacted)) || pointer.SHA256 != fmt.Sprintf("%x", sha256.Sum256(redacted)) {
 		t.Fatalf("transcript part %+v, want a pointer to the %d-byte redacted line", chunk.ArtifactUpdate.Artifact.Parts[0], len(redacted))
 	}

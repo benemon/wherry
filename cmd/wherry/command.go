@@ -701,9 +701,9 @@ func runLogs(ctx context.Context, client *busclient.Host, args []string, stdout,
 			}
 			printed = line.Seq
 			switch part := line.Part; {
-			case part.URL != "":
-				var pointer wire.PointerMetadata
-				json.Unmarshal(part.Metadata, &pointer) // validation decoded it
+			case part.MediaType == wire.ReferenceMediaType:
+				var pointer wire.Reference
+				json.Unmarshal(part.Data, &pointer) // validation decoded it
 				fmt.Fprintf(stderr, "line at offset %d not stored: sha256=%s size=%d\n", line.Seq, pointer.SHA256, pointer.Size)
 			case part.Raw != nil:
 				fmt.Fprintf(stdout, "%s\n", part.Raw)

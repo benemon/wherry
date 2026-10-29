@@ -223,7 +223,11 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 			var offset int64
 			for i, chunk := range chunks {
 				update, part := chunk.ArtifactUpdate, chunk.ArtifactUpdate.Artifact.Parts[0]
-				if update.TaskID != "run-a" || update.ContextID != "run-a" || update.Artifact.ArtifactID != "transcript" || chunk.Wherry.Seq != offset || part.MediaType != "application/x-ndjson" ||
+				mediaType := "application/x-ndjson"
+				if i == test.pointer {
+					mediaType = wire.ReferenceMediaType
+				}
+				if update.TaskID != "run-a" || update.ContextID != "run-a" || update.Artifact.ArtifactID != "transcript" || chunk.Wherry.Seq != offset || part.MediaType != mediaType ||
 					chunk.Wherry.Tenant != testTenant || chunk.Wherry.Pool != testPool {
 					t.Fatalf("chunk %d: %#v", i, chunk)
 				}
@@ -232,11 +236,11 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 				}
 				line := test.stream[i]
 				if i == test.pointer {
-					var pointer wire.PointerMetadata
-					if err := json.Unmarshal(part.Metadata, &pointer); err != nil {
+					var pointer wire.Reference
+					if err := json.Unmarshal(part.Data, &pointer); err != nil {
 						t.Fatal(err)
 					}
-					if part.URL != "unstored:oversize" || part.Text != "" || pointer.SHA256 != wire.TaskHash([]byte(line)) || pointer.Size != int64(len(line)) {
+					if part.URL != "" || part.Text != "" || pointer.Unstored != wire.UnstoredOversize || pointer.SHA256 != wire.TaskHash([]byte(line)) || pointer.Size != int64(len(line)) {
 						t.Fatalf("oversized line became %#v with %#v", part, pointer)
 					}
 				} else if slices.Contains(test.raw, i) {
@@ -275,7 +279,7 @@ func TestOversizedAgentOutputIsBounded(t *testing.T) {
 	if task.Status.State != wire.TaskStateCompleted || task.Artifacts[0].Parts[0].Text != strings.Repeat("x", wire.MaxText) {
 		t.Fatalf("task ended %s with result %#v", task.Status.State, task.Artifacts[0].Parts[0])
 	}
-	if part := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0]; part.URL != "unstored:oversize" || part.Text != "" {
+	if part := f.chunks(t)[0].ArtifactUpdate.Artifact.Parts[0]; part.MediaType != wire.ReferenceMediaType || part.Data == nil || part.Text != "" {
 		t.Fatalf("chunk part %#v, want an oversized pointer", part)
 	}
 }
