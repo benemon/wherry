@@ -1,0 +1,1 @@
+{"state": "TASK_STATE_AUTH_REQUIRED", "message": {"role": "ROLE_AGENT", "parts": [{"text": "fixture: auth_required"}, {"data": {"credential": "fixture-token"}}]}}
