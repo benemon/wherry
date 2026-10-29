@@ -541,7 +541,7 @@ credentials:
 invalid input: auth required: credential claude-oauth-token is not in this host's configuration
 ```
 
-When a receiver claims a task and asks for the credential, `wherry watch`
+When a receiver claims a task and asks for the credential, `wherry wait`
 seals the file's contents byte for byte to that receiver. A credential can
 also come from an environment variable of the answering process,
 `env: CLAUDE_CODE_OAUTH_TOKEN`, or from a command's output,
@@ -595,33 +595,35 @@ run_id=run-<id> pool=build
 
 `--selector isolation=host` runs it on plugin profile `host`.
 
-### 7. Watch the run
+### 7. Wait for the run
 
 On `laptop`:
 
 ```sh
-wherry watch run-<id>
+wherry wait run-<id>
 ```
 
-`watch` prints the agent's transcript lines as the agent runs, then the final
-state, the agent's message and a line for each output it wrote, the run's
-transcript in `transcript.jsonl` among them. It exits non-zero for any state
-other than `TASK_STATE_COMPLETED`. `--result-only` prints the agent's message
-alone, and `-q` prints nothing. It waits 2 hours 10 minutes by default
-(`--timeout` changes that). While it waits it answers `nomad-1`'s request for
-`claude-oauth-token`. Start it within 5 minutes of `nomad-1` claiming the
-task, and keep it running until the task starts, or the run ends
-`TASK_STATE_FAILED`.
+`wait` prints the agent's message and a line for each output it wrote,
+once the run ends. It exits 0 for `TASK_STATE_COMPLETED` and with a code
+per state otherwise, as [exit codes](commands.md#exit-codes) lists. It
+waits 2 hours 10 minutes by default (`--timeout` changes that). While it
+waits it answers `nomad-1`'s request for `claude-oauth-token`. Start it
+within 5 minutes of `nomad-1` claiming the task, and keep it running until
+the task starts, or the run ends `TASK_STATE_FAILED`.
+
+In another terminal, `wherry logs -f run-<id>` prints the agent's
+transcript lines as the agent runs and exits when the run ends.
+`wherry logs run-<id> > run.log` keeps the transcript.
 
 `wherry events run-<id>` prints the run's status history.
 
 ### If the run needs a credential
 
 A run that ends in `TASK_STATE_FAILED` with a message naming a credential
-received no seal for it within 5 minutes: the host was not running `watch`,
+received no seal for it within 5 minutes: the host was not running `wait`,
 or its source did not resolve, which the answerer logs as
 `run <id>: resolve credential <name>: <cause>`. The run does not resume.
 
 1. Fix the credential's source in `credentials` in the host configuration.
 2. Submit the task again with `wherry submit`, which starts a new run.
-3. Run `wherry watch` with the new run ID, which answers its request.
+3. Run `wherry wait` with the new run ID, which answers its request.

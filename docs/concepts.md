@@ -124,7 +124,7 @@ following links. The receiver redacts each file, publishes it in chunks on
 the tenant's transcript topic in the result's transaction, and lists every
 output in the result with the size and SHA-256 it computed, or with the
 reason it was not returned. A required output that is not returned fails
-the run. `wherry watch` verifies each output's chunks against the result
+the run. `wherry wait` verifies each output's chunks against the result
 before it writes the file locally.
 
 A pool can also carry files through an S3-compatible bucket its operator
@@ -192,7 +192,7 @@ run before a receiver claims it.
 
 A run passes through these records from submission to result.
 
-![A run's lifecycle: submission, claim, seal, dispatch, statuses and transcript, result and watch, with where a redelivery and an adoption enter](diagrams/run-lifecycle.svg)
+![A run's lifecycle: submission, claim, seal, dispatch, statuses and transcript, result and wait, with where a redelivery and an adoption enter](diagrams/run-lifecycle.svg)
 
 ## Cancellation
 
@@ -222,7 +222,7 @@ No claim or write by the principal is authorised after step 5. Readers
 reject its records once they read the step 6 record. A host also skips
 every record a receiver wrote once that receiver's membership has ended,
 including records it wrote before, so the runs it served lose that history
-in `watch` and `events`.
+in `wait` and `events`.
 
 A receiver treats an authorisation error as denial. It stops claiming at
 once, and stops its in-flight jobs once denial has lasted one lock

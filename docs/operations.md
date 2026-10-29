@@ -188,7 +188,7 @@ retention drops below its bound, and a pool topic whose timestamp type is not
 
 A tenant transcript topic whose retention is shorter than its feed's loses an
 old run's reply and transcript before its result: the result then keeps the
-reply's first 64 KiB, and `wherry watch` reports the rest
+reply's first 64 KiB, and `wherry wait` reports the rest
 `rejected by this host: gap`. `wherry admin check` does not report the
 difference.
 
@@ -694,7 +694,7 @@ For a host:
 
 1. Wait for the runs the host submitted to end. `wherry status` lists them.
 2. Stop every other wherry process of the host, such as the MCP server and
-   any `wherry watch`. They hold the old key.
+   any `wherry wait`. They hold the old key.
 3. Run the rotation:
 
    ```sh
@@ -1001,7 +1001,7 @@ credential as a file and checks the host:
 - A public repository needs no credential.
 
 With `--git-changes`, the agent returns its commits as `changes.patch` or
-`changes.bundle`, which `watch` writes like any output, and the parent
+`changes.bundle`, which `wait` writes like any output, and the parent
 applies them with its own credentials:
 
 ```
@@ -1109,7 +1109,7 @@ configuration, bundle and state directory.
 `wherry mcp` serves the host operations as MCP tools over stdio. It reads
 the client configuration and connects to Kafka as one host when it starts.
 Every tool call and seal answer reuses that host and its one tenant-feed
-follower, and `watch`, `events` and `transcript` also read the tenant's
+follower, and `wait`, `events` and `logs` also read the tenant's
 transcript topic. While the connection fails, the server retries it on each
 tool call and every five seconds.
 [MCP tools](mcp.md) lists the tools.

@@ -300,9 +300,6 @@ const (
 // ReplyArtifact is the artifact ID of a reply's chunks. It lies beneath OutcomeDir, so no collected output takes it.
 const ReplyArtifact = OutcomeDir + "/reply"
 
-// TranscriptFile is where a host writes a run's transcript among its outputs, so no output takes its name.
-const TranscriptFile = "transcript.jsonl"
-
 // ReplyFile is where an MCP host writes a run's reply among its outputs, so no output takes its name.
 const ReplyFile = "reply.txt"
 

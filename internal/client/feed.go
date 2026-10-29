@@ -155,6 +155,9 @@ type runView struct {
 	reread map[string]bool
 	// fed is the feed offset past the records history read.
 	fed int64
+	// requests are the run's seal requests, and requested the Kafka timestamp of each.
+	requests  []wire.SealRequest
+	requested []time.Time
 
 	binding  binding
 	statuses []*wire.RunStatus
@@ -271,6 +274,7 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 			if request, err := authorize(ctx, r, kid, func(v view) (wire.SealRequest, error) {
 				return admin.AuthorizeSealRequest(v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && request.Run == r.run {
+				r.requests, r.requested = append(r.requests, request), append(r.requested, record.Timestamp)
 				return
 			}
 		}
@@ -1018,23 +1022,56 @@ func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
 	return s.r.transcript(), nil
 }
 
-// Wait blocks until there are records past those Next last took, the consumer it reads from stops, or ctx ends.
-// Before the run has an echo it reads the feed's follower. Before the first Next it returns at once.
+// Wait blocks until there are records past those Next last took, on the feed or once the run has an echo on the
+// transcript topic, a consumer it reads from stops, or ctx ends. Before the first Next it returns at once.
 func (s *TranscriptStream) Wait(ctx context.Context) {
-	f, next := s.tail, s.next
-	if f == nil {
-		f, next = s.feed, s.fed
-	}
-	if f == nil {
+	if s.feed == nil {
 		return
 	}
-	if _, read, woken, _ := f.from(next); read <= next {
-		select {
-		case <-woken:
-		case <-f.ctx.Done():
-		case <-ctx.Done():
+	_, fed, fedWoken, _ := s.feed.from(s.fed)
+	var tailWoken, tailDone <-chan struct{}
+	if s.tail != nil {
+		_, read, woken, _ := s.tail.from(s.next)
+		if read > s.next {
+			return
+		}
+		tailWoken, tailDone = woken, s.tail.ctx.Done()
+	}
+	if fed > s.fed {
+		return
+	}
+	select {
+	case <-fedWoken:
+	case <-s.feed.ctx.Done():
+	case <-tailWoken:
+	case <-tailDone:
+	case <-ctx.Done():
+	}
+}
+
+// Ended reports whether the run had an outcome when Next last read it.
+func (s *TranscriptStream) Ended() bool {
+	return s.r != nil && s.r.outcome != nil
+}
+
+// answerGrace is how long a seal request goes unanswered before Unanswered reports it, past the answerer's retry.
+const answerGrace = 3 * retryInterval
+
+// Unanswered reports whether, when Next last read the run, it had a seal request older than answerGrace that has not
+// expired and that no answerer of this host has sealed.
+func (s *TranscriptStream) Unanswered() bool {
+	if s.r == nil || s.r.outcome != nil {
+		return false
+	}
+	for i, request := range s.r.requests {
+		if time.Since(s.r.requested[i]) < answerGrace || !time.Now().Before(time.UnixMilli(request.ExpiryMS)) {
+			continue
+		}
+		if _, err := os.Stat(s.h.markerPath(s.run, request.Attempt)); errors.Is(err, os.ErrNotExist) {
+			return true
 		}
 	}
+	return false
 }
 
 // Await follows the tenant feed until the run has an outcome, answering seal requests while it waits.
@@ -1070,12 +1107,12 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	r := newRunView(h, v, runID, local)
 	r.read(waitCtx, records)
 	if r.pool == "" {
-		return AwaitResult{}, fmt.Errorf("watch %s: %w", runID, ErrRunNotFound)
+		return AwaitResult{}, fmt.Errorf("wait %s: %w", runID, ErrRunNotFound)
 	}
 	rederive := func() error {
 		v, err := h.load(waitCtx)
 		if err != nil {
-			return fmt.Errorf("watch %s: %w", runID, err)
+			return fmt.Errorf("wait %s: %w", runID, err)
 		}
 		r.v, r.reread = v, map[string]bool{}
 		r.derive()
@@ -1091,7 +1128,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			outcome.Skipped, outcome.Model = r.skipped, r.model()
 			if r.result != nil {
 				if err := r.readTranscript(waitCtx); err != nil {
-					return AwaitResult{}, fmt.Errorf("watch %s: %w", runID, err)
+					return AwaitResult{}, fmt.Errorf("wait %s: %w", runID, err)
 				}
 				outcome.Skipped = r.skipped
 				outcome.Outputs, outcome.Stored, outcome.NotReturned, outcome.Rejected, outcome.Reply = r.verifiedOutputs(r.result)
@@ -1136,7 +1173,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		}
 		stopPoll()
 		if err := waitCtx.Err(); err != nil {
-			return AwaitResult{}, fmt.Errorf("watch %s: %w", runID, err)
+			return AwaitResult{}, fmt.Errorf("wait %s: %w", runID, err)
 		}
 		if err != nil {
 			return AwaitResult{}, err

@@ -152,7 +152,7 @@ Then:
 ## WherryCredentialRequestsUnanswered
 
 A receiver that claims a run with credentials to deliver publishes a seal
-request, and the submitting host answers it while `wherry watch` or
+request, and the submitting host answers it while `wherry wait` or
 `wherry mcp` runs. A request no host answers within 5 minutes ends the run
 `TASK_STATE_FAILED`. The alert fires on 2 or more `unanswered` seal waits
 (`wherry_seal_waits_total`) for one tenant in an hour.
@@ -164,7 +164,7 @@ Confirm it:
    the host did not answer.
 2. Run `wherry receivers`. An agent's `credentials` marks `missing` each
    credential the host's configuration has no source for.
-3. Read the standard error of the host's `wherry watch` or `wherry mcp`. A
+3. Read the standard error of the host's `wherry wait` or `wherry mcp`. A
    failed source logs
    `run <id>: resolve credential <name>: <cause>`.
 
@@ -173,7 +173,7 @@ Then, on the tenant's host, as in
 
 - Add a source for each `missing` credential, or fix the source the log
   names, such as a file mode or a command that exits non-zero.
-- Keep `wherry watch RUN_ID` or `wherry mcp` running until the run starts.
+- Keep `wherry wait RUN_ID` or `wherry mcp` running until the run starts.
 - Submit the run again.
 
 ## WherryPluginRestartLoop

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1732 1142" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
   <title id="title">wherry run lifecycle</title>
-  <desc id="desc">Sequence of one run across the host, the pool's tasks and events topics, the tenant feed, the tenant's transcript topic, the host topic, the receiver's progress topic, the receiver, its plugin and the job. The host resolves placement, records the run locally and publishes a signed submission. A receiver claims it through the share group, admits it and commits the echo and the claimed status. When the run needs a seal, the receiver writes a seal request to the tenant feed, the host's watch or mcp reads it and writes a seal to its host topic, and the receiver opens it. The receiver dispatches to the plugin, which starts the job, and writes started with the log offset it follows from. While the job runs, its output lines stream through the plugin to the receiver, which on each renewal commits redacted transcript chunks to the transcript topic and the run's latest log offset to its progress topic in one transaction. When the agent exits the receiver stops the job, collects outputs and the agent's outcome file, commits the last chunks, outputs, result, terminal status and a tombstone for the run's progress record in one transaction, and acknowledges the delivery. The host's watch reads the result and verifies the outputs. A redelivery enters at the claim, as the next attempt; an adoption enters after the claim, where the receiver finds the run's job, resumes from the highest of the run's started offsets and its holders' progress records, and skips dispatch.</desc>
+  <desc id="desc">Sequence of one run across the host, the pool's tasks and events topics, the tenant feed, the tenant's transcript topic, the host topic, the receiver's progress topic, the receiver, its plugin and the job. The host resolves placement, records the run locally and publishes a signed submission. A receiver claims it through the share group, admits it and commits the echo and the claimed status. When the run needs a seal, the receiver writes a seal request to the tenant feed, the host's wait or mcp reads it and writes a seal to its host topic, and the receiver opens it. The receiver dispatches to the plugin, which starts the job, and writes started with the log offset it follows from. While the job runs, its output lines stream through the plugin to the receiver, which on each renewal commits redacted transcript chunks to the transcript topic and the run's latest log offset to its progress topic in one transaction. When the agent exits the receiver stops the job, collects outputs and the agent's outcome file, commits the last chunks, outputs, result, terminal status and a tombstone for the run's progress record in one transaction, and acknowledges the delivery. The host's wait reads the result and verifies the outputs. A redelivery enters at the claim, as the next attempt; an adoption enters after the claim, where the receiver finds the run's job, resumes from the highest of the run's started offsets and its holders' progress records, and skips dispatch.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e4a35"/>
@@ -105,7 +105,7 @@
     <path d="M 1280 360 H 620" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
     <text x="950" y="353" fill="#3f6b4a">seal request, in its own transaction</text>
     <path d="M 614 392 H 116" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
-    <text x="362" y="385" fill="#3f6b4a">wherry watch or wherry mcp reads it</text>
+    <text x="362" y="385" fill="#3f6b4a">wherry wait or wherry mcp reads it</text>
     <path d="M 116 424 H 944" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
     <text x="530" y="417" fill="#3f6b4a">seal, encrypted to the attempt's key</text>
     <path d="M 950 456 H 1280" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
@@ -157,9 +157,9 @@
     <path d="M 1280 926 H 284" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
     <text x="782" y="919">acknowledges the delivery</text>
 
-    <!-- 14. watch -->
+    <!-- 14. wait -->
     <path d="M 614 958 H 116" stroke="#2e4a35" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-    <text x="362" y="951">watch verifies the outputs and returns the result</text>
+    <text x="362" y="951">wait verifies the outputs and returns the result</text>
   </g>
 
   <!-- where a redelivery and an adoption enter -->

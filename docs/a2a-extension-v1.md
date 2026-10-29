@@ -331,7 +331,7 @@ base64 does. The fixed texts are:
   and ended by a signal or a non-zero exit, and, when the
   [seal wait](#seal-request) expires,
   `credential <name> was not answered within 5m; add it to credentials in
-  the host's wherry configuration, keep wherry watch or wherry mcp running,
+  the host's wherry configuration, keep wherry wait or wherry mcp running,
   and submit again`. For several credentials the text opens
   `credentials <name>, <name> were not answered within 5m; add them to
   credentials`. When the request also asked for presigned URLs, the subject
@@ -813,7 +813,7 @@ run's `claimed` status.
   wait ends. A redelivered or adopted attempt makes a new key and a new
   request; a seal answering an earlier request does not open for it.
 
-The host that submitted the run answers while `wherry watch` or `wherry
+The host that submitted the run answers while `wherry wait` or `wherry
 mcp` runs, at most once per run and attempt. It answers only when all of
 these hold:
 
@@ -1170,10 +1170,8 @@ appears as its variable. The lines hold no credential value.
 
 `.wherry/` beneath the outputs directory is reserved for the outcome file. No
 output name leads into it, and the receiver collects nothing in it as an
-output. A host writes the run's transcript among its outputs as
-`transcript.jsonl`, and an MCP host writes a reply over 64 KiB as
-`reply.txt`, so a submission expecting an output of either name is
-invalid.
+output. An MCP host writes a reply over 64 KiB among its outputs as
+`reply.txt`, so a submission expecting an output of that name is invalid.
 
 When the job ends, the receiver stops it, then asks the plugin to collect the
 outputs, whatever the job's exit. The plugin lists every entry beneath the outputs

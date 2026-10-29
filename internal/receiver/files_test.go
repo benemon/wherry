@@ -256,7 +256,7 @@ func TestMissingTaskCredentialFailsNamingIt(t *testing.T) {
 		t.Fatalf("status %v", status)
 	}
 	task := f.lastTask(t)
-	want := "credentials " + credentialName + ", deploy-key were not answered within 5m; add them to credentials in the host's wherry configuration, keep wherry watch or wherry mcp running, and submit again"
+	want := "credentials " + credentialName + ", deploy-key were not answered within 5m; add them to credentials in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again"
 	if task.Status.State != wire.TaskStateFailed || task.Status.Message.Parts[0].Text != want {
 		t.Fatalf("ended %s with %q, want FAILED naming both credentials", task.Status.State, task.Status.Message.Parts[0].Text)
 	}
