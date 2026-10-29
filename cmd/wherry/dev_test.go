@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	jsonv1 "encoding/json"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,9 +18,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/hashicorp/nomad/api"
 	"github.com/sigstore/sigstore-go/pkg/root"
 )
 
@@ -344,7 +348,7 @@ func TestDevRendering(t *testing.T) {
 	}
 	properties := renderServerProperties("cluster-id")
 	hcl := renderAgentHCL(env)
-	job, _ := json.Marshal(kafkaJob(env, "cluster-id"))
+	job, _ := jsonv1.Marshal(kafkaJob(env, "cluster-id"))
 	for name, text := range map[string]string{"server.properties": properties, "agent.hcl": hcl, "kafka job": string(job)} {
 		if strings.Contains(text, "localhost") {
 			t.Errorf("%s names localhost:\n%s", name, text)
@@ -396,7 +400,7 @@ func TestDevRendering(t *testing.T) {
 
 	env.driver, env.socket, env.selinux = "podman", "unix:///run/user/1000/podman/podman.sock", true
 	hcl = renderAgentHCL(env)
-	job, _ = json.Marshal(kafkaJob(env, "cluster-id"))
+	job, _ = jsonv1.Marshal(kafkaJob(env, "cluster-id"))
 	for _, block := range []string{"plugin_dir = " + strconv.Quote(instance.cache("nomad-plugins")), "plugin \"nomad-driver-podman\" {\n  config {\n    socket_path = \"unix:///run/user/1000/podman/podman.sock\"\n  }\n}\n"} {
 		if !strings.Contains(hcl, block) {
 			t.Errorf("podman agent.hcl lacks %q:\n%s", block, hcl)
@@ -634,5 +638,91 @@ func TestAcquireNomadTakesThePin(t *testing.T) {
 	}
 	if slices.Contains(fake.requested, zip) {
 		t.Fatal("fetched the zip against a pin SHA256SUMS does not list")
+	}
+}
+
+// fakeNomad serves the Nomad API calls runJob and stopJobs make, each job with one allocation that runs at once and
+// completes on deregistration, and records each call.
+func fakeNomad(t *testing.T) (*api.Client, *[]string) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls []string
+	status := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, r.Method+" "+r.URL.RequestURI())
+		path := strings.TrimPrefix(r.URL.Path, "/v1/")
+		switch {
+		case r.Method == http.MethodPut && path == "jobs":
+			var request api.JobRegisterRequest
+			jsonv1.NewDecoder(r.Body).Decode(&request)
+			status[*request.Job.ID] = api.AllocClientStatusRunning
+			jsonv1.NewEncoder(w).Encode(api.JobRegisterResponse{})
+		case r.Method == http.MethodGet && path == "jobs":
+			var stubs []api.JobListStub
+			for id := range status {
+				stubs = append(stubs, api.JobListStub{ID: id})
+			}
+			jsonv1.NewEncoder(w).Encode(stubs)
+		case r.Method == http.MethodGet && strings.HasSuffix(path, "/allocations"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "job/"), "/allocations")
+			jsonv1.NewEncoder(w).Encode([]api.AllocationListStub{{ID: id + "-alloc", CreateIndex: 1}})
+		case r.Method == http.MethodGet && strings.HasPrefix(path, "allocation/"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "allocation/"), "-alloc")
+			if _, ok := status[id]; !ok {
+				http.NotFound(w, r)
+				return
+			}
+			jsonv1.NewEncoder(w).Encode(api.Allocation{ID: id + "-alloc", ClientStatus: status[id]})
+		case r.Method == http.MethodDelete && strings.HasPrefix(path, "job/"):
+			id := strings.TrimPrefix(path, "job/")
+			status[id] = api.AllocClientStatusComplete
+			if r.URL.Query().Get("purge") == "true" {
+				delete(status, id)
+			}
+			jsonv1.NewEncoder(w).Encode(api.JobDeregisterResponse{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := api.NewClient(&api.Config{Address: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client, &calls
+}
+
+func TestDevNomadJobs(t *testing.T) {
+	instance := devFixture(t)
+	env := devEnv{instance: instance, driver: "docker", manifest: devManifest{Images: map[string]devImage{"kafka": {Tag: "wherry-dev/kafka:0123456789ab"}}}}
+	nomad, calls := fakeNomad(t)
+	alloc, err := runJob(context.Background(), nomad, kafkaJob(env, "cluster-id"))
+	if err != nil || alloc != "wherry-default-kafka-alloc" {
+		t.Fatalf("runJob: %q, %v", alloc, err)
+	}
+	if _, err := runJob(context.Background(), nomad, receiverJob(env)); err != nil {
+		t.Fatal(err)
+	}
+	*calls = nil
+	seen, err := stopJobs(context.Background(), nomad, instance)
+	if err != nil || !slices.Equal(seen, []string{"wherry-default-receiver-alloc", "wherry-default-kafka-alloc"}) {
+		t.Fatalf("stopJobs: %v, %v", seen, err)
+	}
+	var deletes []string
+	for _, call := range *calls {
+		if strings.HasPrefix(call, http.MethodDelete) {
+			deletes = append(deletes, call)
+		}
+	}
+	if want := []string{
+		"DELETE /v1/job/wherry-default-receiver?purge=false", "DELETE /v1/job/wherry-default-receiver?purge=true",
+		"DELETE /v1/job/wherry-default-kafka?purge=false", "DELETE /v1/job/wherry-default-kafka?purge=true",
+	}; !slices.Equal(deletes, want) {
+		t.Fatalf("deletes %v; want %v", deletes, want)
+	}
+	if !slices.Contains(*calls, "GET /v1/jobs?meta=true") {
+		t.Fatalf("calls %v; want the job list with meta", *calls)
 	}
 }

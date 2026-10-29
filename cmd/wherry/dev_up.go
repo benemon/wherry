@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -33,6 +34,7 @@ import (
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/hashicorp/nomad/api"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -217,17 +219,20 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	}
 
 	step("nomad")
+	nomad, err := devNomad()
+	if err != nil {
+		return err
+	}
 	stopWait := waiting(stderr, "nomad")
-	nomad, podmanPID, err := startNomad(ctx, &env)
+	nomadPID, podmanPID, err := startNomad(ctx, nomad, &env)
 	stopWait()
 	if err != nil {
 		return err
 	}
-	api := nomadAPI{devNomadAddr}
 
 	step("kafka")
 	stopWait = waiting(stderr, "kafka")
-	kafkaAlloc, err := startKafka(ctx, api, env)
+	kafkaAlloc, err := startKafka(ctx, nomad, env)
 	stopWait()
 	if err != nil {
 		return err
@@ -238,13 +243,13 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	if env.storage() {
 		step("storage")
 		stopWait = waiting(stderr, "storage")
-		s3Alloc, err = startStorage(ctx, api, env)
+		s3Alloc, err = startStorage(ctx, nomad, env)
 		stopWait()
 		if err != nil {
 			return err
 		}
 		step("s3-user")
-		if storageKeys, err = storageUser(ctx, env, s3Alloc); err != nil {
+		if storageKeys, err = storageUser(ctx, nomad, s3Alloc); err != nil {
 			return err
 		}
 		for i, name := range []string{"s3-access-key", "s3-secret-key"} {
@@ -286,7 +291,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 
 	step("receiver")
 	stopWait = waiting(stderr, "receiver")
-	err = startReceiver(ctx, api, env, hostConfig)
+	err = startReceiver(ctx, nomad, env, hostConfig)
 	stopWait()
 	if err != nil {
 		return err
@@ -301,7 +306,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	}
 
 	step("ready")
-	state := devUpState{NomadPID: nomad, PodmanPID: podmanPID, Runtime: manifest.Runtime, KafkaAlloc: kafkaAlloc, S3Alloc: s3Alloc, Ports: env.ports(), Started: time.Now().UTC().Truncate(time.Second)}
+	state := devUpState{NomadPID: nomadPID, PodmanPID: podmanPID, Runtime: manifest.Runtime, KafkaAlloc: kafkaAlloc, S3Alloc: s3Alloc, Ports: env.ports(), Started: time.Now().UTC().Truncate(time.Second)}
 	encoded, err := json.Marshal(state)
 	if err != nil {
 		return err
@@ -541,23 +546,23 @@ func kafkaScript(clusterID string) string {
 
 func jobID(instance devInstance, kind string) string { return "wherry-" + instance.name + "-" + kind }
 
-func serviceJob(id string, group map[string]any) map[string]any {
-	return map[string]any{"ID": id, "Name": id, "Type": "service", "Datacenters": []string{"*"}, "TaskGroups": []any{group}}
+func serviceJob(id string, group *api.TaskGroup) *api.Job {
+	return &api.Job{ID: new(id), Name: new(id), Type: new(api.JobTypeService), Datacenters: []string{"*"}, TaskGroups: []*api.TaskGroup{group}}
 }
 
 // kafkaJob runs the broker from the manifest's local tag on the published port 9093.
-func kafkaJob(env devEnv, clusterID string) map[string]any {
+func kafkaJob(env devEnv, clusterID string) *api.Job {
 	mounts := []string{env.instance.env("kafka", "cfg") + ":/cfg:ro", env.instance.env("kafka", "data") + ":/data"}
 	config := map[string]any{
 		"image": env.manifest.Images["kafka"].Tag, "force_pull": false, "ports": []string{"scram"},
 		"entrypoint": []string{"/bin/sh", "-c"}, "args": []string{kafkaScript(clusterID)},
 	}
-	task := map[string]any{
-		"Name": "kafka", "Driver": env.driver, "Env": map[string]string{"LOG_DIR": "/data/logs"},
-		"Resources": map[string]any{"CPU": 1000, "MemoryMB": 1536},
+	task := &api.Task{
+		Name: "kafka", Driver: env.driver, Env: map[string]string{"LOG_DIR": "/data/logs"},
+		Resources: &api.Resources{CPU: new(1000), MemoryMB: new(1536)},
 	}
 	// The broker reads the user's 0600 files in /cfg, so it runs as the user; keep-id maps that uid unchanged.
-	task["User"] = fmt.Sprintf("%d:%d", env.uid, env.gid)
+	task.User = fmt.Sprintf("%d:%d", env.uid, env.gid)
 	if env.driver == "podman" {
 		config["userns"] = "keep-id"
 		if env.selinux {
@@ -565,44 +570,44 @@ func kafkaJob(env devEnv, clusterID string) map[string]any {
 		}
 	}
 	config["volumes"] = mounts
-	task["Config"] = config
-	return serviceJob(jobID(env.instance, "kafka"), map[string]any{
-		"Name": "kafka", "Count": 1,
-		"Networks":      []any{map[string]any{"ReservedPorts": []any{map[string]any{"Label": "scram", "Value": 9093, "To": 9093}}}},
-		"RestartPolicy": map[string]any{"Attempts": 0, "Mode": "fail"},
-		"Tasks":         []any{task},
+	task.Config = config
+	return serviceJob(jobID(env.instance, "kafka"), &api.TaskGroup{
+		Name: new("kafka"), Count: new(1),
+		Networks:      []*api.NetworkResource{{ReservedPorts: []api.Port{{Label: "scram", Value: 9093, To: 9093}}}},
+		RestartPolicy: &api.RestartPolicy{Attempts: new(0), Mode: new(api.RestartPolicyModeFail)},
+		Tasks:         []*api.Task{task},
 	})
 }
 
 // storageJob runs ceph-aio's RGW from the manifest's local tag on the published port 18080.
-func storageJob(env devEnv) map[string]any {
-	return serviceJob(jobID(env.instance, "s3"), map[string]any{
-		"Name": "s3", "Count": 1,
-		"Networks":      []any{map[string]any{"ReservedPorts": []any{map[string]any{"Label": "s3", "Value": 18080, "To": 8000}}}},
-		"RestartPolicy": map[string]any{"Attempts": 0, "Mode": "fail"},
-		"Tasks": []any{map[string]any{
-			"Name": "s3", "Driver": env.driver, "Env": map[string]string{"ENABLE_CEPHFS": "false"},
-			"Config":    map[string]any{"image": env.manifest.Storage.Tag, "force_pull": false, "ports": []string{"s3"}},
-			"Resources": map[string]any{"CPU": 1000, "MemoryMB": 2048},
+func storageJob(env devEnv) *api.Job {
+	return serviceJob(jobID(env.instance, "s3"), &api.TaskGroup{
+		Name: new("s3"), Count: new(1),
+		Networks:      []*api.NetworkResource{{ReservedPorts: []api.Port{{Label: "s3", Value: 18080, To: 8000}}}},
+		RestartPolicy: &api.RestartPolicy{Attempts: new(0), Mode: new(api.RestartPolicyModeFail)},
+		Tasks: []*api.Task{{
+			Name: "s3", Driver: env.driver, Env: map[string]string{"ENABLE_CEPHFS": "false"},
+			Config:    map[string]any{"image": env.manifest.Storage.Tag, "force_pull": false, "ports": []string{"s3"}},
+			Resources: &api.Resources{CPU: new(1000), MemoryMB: new(2048)},
 		}},
 	})
 }
 
 // receiverJob runs the snapshot's receiver under raw_exec; it exits on a configuration change and restarts.
-func receiverJob(env devEnv) map[string]any {
-	return serviceJob(jobID(env.instance, "receiver"), map[string]any{
-		"Name": "receiver", "Count": 1,
-		"RestartPolicy": map[string]any{"Attempts": 10, "Interval": int64(5 * time.Minute), "Delay": int64(2 * time.Second), "Mode": "delay"},
-		"Tasks": []any{map[string]any{
-			"Name": "receiver", "Driver": "raw_exec",
-			"Config": map[string]any{"command": env.instance.cache("wherry"), "args": []string{"receiver", "run", "--config-file", env.instance.env("receiver", "config.yaml")}},
+func receiverJob(env devEnv) *api.Job {
+	return serviceJob(jobID(env.instance, "receiver"), &api.TaskGroup{
+		Name: new("receiver"), Count: new(1),
+		RestartPolicy: &api.RestartPolicy{Attempts: new(10), Interval: new(5 * time.Minute), Delay: new(2 * time.Second), Mode: new(api.RestartPolicyModeDelay)},
+		Tasks: []*api.Task{{
+			Name: "receiver", Driver: "raw_exec",
+			Config: map[string]any{"command": env.instance.cache("wherry"), "args": []string{"receiver", "run", "--config-file", env.instance.env("receiver", "config.yaml")}},
 		}},
 	})
 }
 
 // startNomad starts the dev agent detached as the invoking user, and the podman API service beside it when podman's
 // socket is absent, and waits for a ready node with raw_exec and the runtime's driver healthy.
-func startNomad(ctx context.Context, env *devEnv) (int, int, error) {
+func startNomad(ctx context.Context, nomad *api.Client, env *devEnv) (int, int, error) {
 	podmanPID := 0
 	runtimeName := env.manifest.Runtime
 	switch {
@@ -647,26 +652,28 @@ func startNomad(ctx context.Context, env *devEnv) (int, int, error) {
 	if err != nil {
 		return 0, podmanPID, err
 	}
-	api := nomadAPI{devNomadAddr}
+	q := (&api.QueryOptions{}).WithContext(ctx)
 	err = poll(ctx, 2*time.Minute, func() error {
 		if !alive(pid) {
 			return errStop{fmt.Errorf("nomad exited; see %s", env.instance.env("nomad", "nomad.log"))}
 		}
-		if err := api.call(ctx, http.MethodGet, "/v1/agent/self", nil, nil); err != nil {
+		if _, err := nomad.Agent().Self(); err != nil {
 			return err
 		}
-		var nodes []struct{ ID, Status string }
-		if err := api.call(ctx, http.MethodGet, "/v1/nodes", nil, &nodes); err != nil {
+		nodes, _, err := nomad.Nodes().List(q)
+		if err != nil {
 			return err
 		}
-		for _, node := range nodes {
-			var detail struct {
-				Drivers map[string]struct{ Detected, Healthy bool }
-			}
-			if node.Status != "ready" || api.call(ctx, http.MethodGet, "/v1/node/"+node.ID, nil, &detail) != nil {
+		for _, stub := range nodes {
+			if stub.Status != api.NodeStatusReady {
 				continue
 			}
-			if detail.Drivers["raw_exec"].Healthy && detail.Drivers[env.driver].Detected && detail.Drivers[env.driver].Healthy {
+			node, _, err := nomad.Nodes().Info(stub.ID, q)
+			if err != nil {
+				continue
+			}
+			rawExec, driver := node.Drivers["raw_exec"], node.Drivers[env.driver]
+			if rawExec != nil && rawExec.Healthy && driver != nil && driver.Detected && driver.Healthy {
 				return nil
 			}
 		}
@@ -720,7 +727,7 @@ func poll(ctx context.Context, bound time.Duration, check func() error) error {
 
 // startKafka writes the broker's configuration, registers its job and waits for an authenticated metadata request
 // over SCRAM to succeed; rootless podman's port forwarder accepts connections while the container is down.
-func startKafka(ctx context.Context, api nomadAPI, env devEnv) (string, error) {
+func startKafka(ctx context.Context, nomad *api.Client, env devEnv) (string, error) {
 	raw := make([]byte, 16)
 	clusterID := "-"
 	for strings.HasPrefix(clusterID, "-") {
@@ -730,7 +737,7 @@ func startKafka(ctx context.Context, api nomadAPI, env devEnv) (string, error) {
 	if err := os.WriteFile(env.instance.env("kafka", "cfg", "server.properties"), []byte(renderServerProperties(clusterID)), 0o600); err != nil {
 		return "", err
 	}
-	alloc, err := runJob(ctx, api, kafkaJob(env, clusterID))
+	alloc, err := runJob(ctx, nomad, kafkaJob(env, clusterID))
 	if err != nil {
 		return "", err
 	}
@@ -747,7 +754,7 @@ func startKafka(ctx context.Context, api nomadAPI, env devEnv) (string, error) {
 		return alloc, err
 	}
 	return alloc, poll(ctx, 3*time.Minute, func() error {
-		if err := allocRunning(ctx, api, alloc); err != nil {
+		if err := allocRunning(ctx, nomad, alloc); err != nil {
 			return errStop{err}
 		}
 		client, err := kgo.NewClient(opts...)
@@ -763,46 +770,36 @@ func startKafka(ctx context.Context, api nomadAPI, env devEnv) (string, error) {
 }
 
 // runJob registers job and waits for its allocation to run, returning the allocation's ID.
-func runJob(ctx context.Context, api nomadAPI, job map[string]any) (string, error) {
-	if err := api.call(ctx, http.MethodPost, "/v1/jobs", map[string]any{"Job": job}, nil); err != nil {
+func runJob(ctx context.Context, nomad *api.Client, job *api.Job) (string, error) {
+	if _, _, err := nomad.Jobs().Register(job, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
 		return "", err
 	}
-	id := job["ID"].(string)
 	alloc := ""
 	err := poll(ctx, 5*time.Minute, func() error {
-		var allocs []nomadAlloc
-		if err := api.call(ctx, http.MethodGet, "/v1/job/"+id+"/allocations", nil, &allocs); err != nil {
+		allocs, _, err := nomad.Jobs().Allocations(*job.ID, false, (&api.QueryOptions{}).WithContext(ctx))
+		if err != nil {
 			return err
 		}
 		if len(allocs) == 0 {
 			return errors.New("no allocation yet")
 		}
-		latest := slices.MaxFunc(allocs, func(a, b nomadAlloc) int { return int(a.CreateIndex - b.CreateIndex) })
+		latest := slices.MaxFunc(allocs, func(a, b *api.AllocationListStub) int { return cmp.Compare(a.CreateIndex, b.CreateIndex) })
 		alloc = latest.ID
-		return allocRunning(ctx, api, alloc)
+		return allocRunning(ctx, nomad, alloc)
 	})
 	return alloc, err
 }
 
-type nomadAlloc struct {
-	ID           string
-	ClientStatus string
-	CreateIndex  int64
-	TaskStates   map[string]struct {
-		Events []struct{ Type, DisplayMessage string }
-	}
-}
-
 // allocRunning is nil for a running allocation, errStop for one that ended, naming its last task event.
-func allocRunning(ctx context.Context, api nomadAPI, id string) error {
-	var alloc nomadAlloc
-	if err := api.call(ctx, http.MethodGet, "/v1/allocation/"+id, nil, &alloc); err != nil {
+func allocRunning(ctx context.Context, nomad *api.Client, id string) error {
+	alloc, _, err := nomad.Allocations().Info(id, (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
 		return err
 	}
 	switch alloc.ClientStatus {
-	case "running":
+	case api.AllocClientStatusRunning:
 		return nil
-	case "pending":
+	case api.AllocClientStatusPending:
 		return errors.New("allocation pending")
 	}
 	last := ""
@@ -817,8 +814,8 @@ func allocRunning(ctx context.Context, api nomadAPI, id string) error {
 
 // startStorage registers ceph-aio and waits for the image's health check; Nomad reports the task running long
 // before RGW answers.
-func startStorage(ctx context.Context, api nomadAPI, env devEnv) (string, error) {
-	alloc, err := runJob(ctx, api, storageJob(env))
+func startStorage(ctx context.Context, nomad *api.Client, env devEnv) (string, error) {
+	alloc, err := runJob(ctx, nomad, storageJob(env))
 	if err != nil {
 		return "", err
 	}
@@ -839,16 +836,24 @@ func startStorage(ctx context.Context, api nomadAPI, env devEnv) (string, error)
 }
 
 // storageUser creates an RGW user with generated keys inside the storage task, returning the access and secret keys.
-func storageUser(ctx context.Context, env devEnv, alloc string) (*[2]string, error) {
+func storageUser(ctx context.Context, nomad *api.Client, alloc string) (*[2]string, error) {
 	access, secret := make([]byte, 10), make([]byte, 20)
 	rand.Read(access)
 	rand.Read(secret)
 	keys := [2]string{hex.EncodeToString(access), hex.EncodeToString(secret)}
-	command := exec.CommandContext(ctx, env.instance.cache("nomad"), "alloc", "exec", "-task", "s3", alloc,
-		"radosgw-admin", "user", "create", "--uid=wherry-dev", "--display-name=wherry dev", "--access-key="+keys[0], "--secret-key="+keys[1])
-	command.Env = append(os.Environ(), "NOMAD_ADDR="+devNomadAddr)
-	if output, err := command.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("radosgw-admin user create: %w: %s", err, bytes.TrimSpace(output))
+	info, _, err := nomad.Allocations().Info(alloc, (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	var output bytes.Buffer
+	code, err := nomad.Allocations().Exec(ctx, info, "s3", false,
+		[]string{"radosgw-admin", "user", "create", "--uid=wherry-dev", "--display-name=wherry dev", "--access-key=" + keys[0], "--secret-key=" + keys[1]},
+		strings.NewReader(""), &output, &output, nil, nil)
+	if err == nil && code != 0 {
+		err = fmt.Errorf("exit status %d", code)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("radosgw-admin user create: %w: %s", err, bytes.TrimSpace(output.Bytes()))
 	}
 	return &keys, nil
 }
@@ -990,8 +995,8 @@ func writeYAML(path string, value any) error {
 }
 
 // startReceiver registers the receiver job and waits until dev-1 is live with every profile ready.
-func startReceiver(ctx context.Context, api nomadAPI, env devEnv, hostConfig busclient.Config) error {
-	if _, err := runJob(ctx, api, receiverJob(env)); err != nil {
+func startReceiver(ctx context.Context, nomad *api.Client, env devEnv, hostConfig busclient.Config) error {
+	if _, err := runJob(ctx, nomad, receiverJob(env)); err != nil {
 		return err
 	}
 	host, err := busclient.Connect(hostConfig, log.New(io.Discard, "", 0))
@@ -1090,43 +1095,9 @@ func printReady(stdout io.Writer, env devEnv) {
 	}
 }
 
-// nomadAPI calls the dev agent's HTTP API, which has ACLs disabled.
-type nomadAPI struct{ addr string }
-
-// errNotFound is a 404 from the Nomad API.
-var errNotFound = errors.New("not found")
-
-func (n nomadAPI) call(ctx context.Context, method, path string, body, out any) error {
-	var reader io.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = bytes.NewReader(encoded)
-	}
-	request, err := http.NewRequestWithContext(ctx, method, n.addr+path, reader)
-	if err != nil {
-		return err
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(response.Body, 16<<20))
-	if err != nil {
-		return err
-	}
-	switch {
-	case response.StatusCode == http.StatusNotFound:
-		return fmt.Errorf("%s %s: %w", method, path, errNotFound)
-	case response.StatusCode/100 != 2:
-		return fmt.Errorf("%s %s: %s: %s", method, path, response.Status, bytes.TrimSpace(data))
-	case out == nil:
-		return nil
-	}
-	return json.Unmarshal(data, out)
+// devNomad is a client of the dev agent's HTTP API, which has ACLs disabled.
+func devNomad() (*api.Client, error) {
+	return api.NewClient(&api.Config{Address: devNomadAddr})
 }
 
 // devDown tears the instance's environment down, each step running whatever the one before it left, and keeps the
@@ -1151,7 +1122,11 @@ func devDown(ctx context.Context, instance devInstance, stdout, stderr io.Writer
 		}
 	}
 	fmt.Fprintln(stderr, "jobs")
-	allocs, err := stopJobs(ctx, nomadAPI{devNomadAddr}, instance)
+	var allocs []string
+	nomad, err := devNomad()
+	if err == nil {
+		allocs, err = stopJobs(ctx, nomad, instance)
+	}
 	fail("jobs", err)
 	for _, alloc := range []string{state.KafkaAlloc, state.S3Alloc} {
 		if alloc != "" && !slices.Contains(allocs, alloc) {
@@ -1204,12 +1179,10 @@ func leftover(instance devInstance) *devUpState {
 
 // stopJobs deregisters the receiver, every agent job, storage and Kafka, in that order, waits for each one's
 // allocations to end, 60 seconds at most, and purges it; it returns every allocation it saw.
-func stopJobs(ctx context.Context, api nomadAPI, instance devInstance) ([]string, error) {
-	var jobs []struct {
-		ID   string
-		Meta map[string]string
-	}
-	if err := api.call(ctx, http.MethodGet, "/v1/jobs?meta=true", nil, &jobs); err != nil {
+func stopJobs(ctx context.Context, nomad *api.Client, instance devInstance) ([]string, error) {
+	q, w := (&api.QueryOptions{}).WithContext(ctx), (&api.WriteOptions{}).WithContext(ctx)
+	jobs, _, err := nomad.Jobs().ListOptions(&api.JobListOptions{Fields: &api.JobListFields{Meta: true}}, q)
+	if err != nil {
 		return nil, err
 	}
 	order := []string{jobID(instance, "receiver")}
@@ -1222,44 +1195,45 @@ func stopJobs(ctx context.Context, api nomadAPI, instance devInstance) ([]string
 	var seen []string
 	var failures []error
 	for _, id := range order {
-		if !slices.ContainsFunc(jobs, func(job struct {
-			ID   string
-			Meta map[string]string
-		}) bool {
-			return job.ID == id
-		}) {
+		if !slices.ContainsFunc(jobs, func(job *api.JobListStub) bool { return job.ID == id }) {
 			continue
 		}
-		var allocs []nomadAlloc
-		if err := api.call(ctx, http.MethodGet, "/v1/job/"+id+"/allocations", nil, &allocs); err != nil {
+		allocs, _, err := nomad.Jobs().Allocations(id, false, q)
+		if err != nil {
 			failures = append(failures, err)
 			continue
 		}
 		// A purge drops the allocations from the server at once, before the client has stopped their tasks, so the
 		// purge waits for them to end.
-		if err := api.call(ctx, http.MethodDelete, "/v1/job/"+id, nil, nil); err != nil {
+		if _, _, err := nomad.Jobs().Deregister(id, false, w); err != nil {
 			failures = append(failures, err)
 			continue
 		}
 		for _, alloc := range allocs {
 			seen = append(seen, alloc.ID)
 			failures = append(failures, poll(ctx, time.Minute, func() error {
-				var current nomadAlloc
-				err := api.call(ctx, http.MethodGet, "/v1/allocation/"+alloc.ID, nil, &current)
+				current, _, err := nomad.Allocations().Info(alloc.ID, q)
 				switch {
-				case errors.Is(err, errNotFound):
+				case notFound(err):
 					return nil
 				case err != nil:
 					return err
-				case current.ClientStatus == "complete" || current.ClientStatus == "failed" || current.ClientStatus == "lost":
+				case current.ClientTerminalStatus():
 					return nil
 				}
 				return fmt.Errorf("job %s allocation %s is %s", id, alloc.ID, current.ClientStatus)
 			}))
 		}
-		failures = append(failures, api.call(ctx, http.MethodDelete, "/v1/job/"+id+"?purge=true", nil, nil))
+		_, _, err = nomad.Jobs().Deregister(id, true, w)
+		failures = append(failures, err)
 	}
 	return seen, errors.Join(failures...)
+}
+
+// notFound reports whether err is a 404 from the Nomad API.
+func notFound(err error) bool {
+	var response api.UnexpectedResponseError
+	return errors.As(err, &response) && response.StatusCode() == http.StatusNotFound
 }
 
 // devContainers lists the runtime's containers of an allocation and removes containers; a variable so tests can fake
