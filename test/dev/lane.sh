@@ -80,9 +80,18 @@ leak)
   for id in $(curl -fsS "$NOMAD_ADDR/v1/jobs" | jq -r '.[].ID'); do
     curl -fsS "$NOMAD_ADDR/v1/job/$id" >> "$work/jobs.json"
   done
+  secrets=("the mock token=$WHERRY_DEV_MOCK_TOKEN")
+  if [ "${STORAGE:-false}" = true ]; then
+    for name in s3-access-key s3-secret-key; do
+      secrets+=("the $name=$(cat "$root/env/host/credentials/$name")")
+    done
+  fi
   for file in "$root/env/nomad/nomad.log" "$work/jobs.json" "$work/receiver.log" "$work/out/transcript.jsonl"; do
     [ -s "$file" ] || fail "$file is empty"
-    if grep -qF "$WHERRY_DEV_MOCK_TOKEN" "$file"; then fail "the mock token is in $file"; fi
+    for secret in "${secrets[@]}"; do
+      [ -n "${secret#*=}" ] || fail "${secret%%=*} is empty"
+      if grep -qF "${secret#*=}" "$file"; then fail "${secret%%=*} is in $file"; fi
+    done
   done
   ;;
 fail)

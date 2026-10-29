@@ -64,7 +64,7 @@ jobs:
         run: test/dev/lane.sh receivers
       - name: Run the mock
         run: test/dev/lane.sh run
-      - name: Find the mock's credential nowhere
+      - name: Find the mock's and storage's credentials nowhere
         run: test/dev/lane.sh leak
       - name: Fail a run
         run: test/dev/lane.sh fail

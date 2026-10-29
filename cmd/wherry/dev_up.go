@@ -835,27 +835,37 @@ func startStorage(ctx context.Context, nomad *api.Client, env devEnv) (string, e
 	})
 }
 
-// storageUser creates an RGW user with generated keys inside the storage task, returning the access and secret keys.
+// storageUser creates the RGW user inside the storage task, returning the access and secret keys radosgw-admin
+// generates and prints; no key travels in the exec request.
 func storageUser(ctx context.Context, nomad *api.Client, alloc string) (*[2]string, error) {
-	access, secret := make([]byte, 10), make([]byte, 20)
-	rand.Read(access)
-	rand.Read(secret)
-	keys := [2]string{hex.EncodeToString(access), hex.EncodeToString(secret)}
-	info, _, err := nomad.Allocations().Info(alloc, (&api.QueryOptions{}).WithContext(ctx))
-	if err != nil {
-		return nil, err
-	}
-	var output bytes.Buffer
-	code, err := nomad.Allocations().Exec(ctx, info, "s3", false,
-		[]string{"radosgw-admin", "user", "create", "--uid=wherry-dev", "--display-name=wherry dev", "--access-key=" + keys[0], "--secret-key=" + keys[1]},
-		strings.NewReader(""), &output, &output, nil, nil)
+	var stdout, stderr bytes.Buffer
+	code, err := devExec(ctx, nomad, alloc, "s3", []string{"radosgw-admin", "user", "create", "--uid=wherry-dev", "--display-name=wherry dev"}, &stdout, &stderr)
 	if err == nil && code != 0 {
 		err = fmt.Errorf("exit status %d", code)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("radosgw-admin user create: %w: %s", err, bytes.TrimSpace(output.Bytes()))
+		return nil, fmt.Errorf("radosgw-admin user create: %w: %s", err, bytes.TrimSpace(stderr.Bytes()))
 	}
-	return &keys, nil
+	var user struct {
+		Keys []struct {
+			AccessKey string `json:"access_key"`
+			SecretKey string `json:"secret_key"`
+		} `json:"keys"`
+	}
+	// stdout holds the keys, so the error carries none of it.
+	if json.Unmarshal(stdout.Bytes(), &user) != nil || len(user.Keys) == 0 || user.Keys[0].AccessKey == "" || user.Keys[0].SecretKey == "" {
+		return nil, errors.New("radosgw-admin user create printed no user with keys")
+	}
+	return &[2]string{user.Keys[0].AccessKey, user.Keys[0].SecretKey}, nil
+}
+
+// devExec runs command in task of allocation alloc; a variable so tests can fake the exec.
+var devExec = func(ctx context.Context, nomad *api.Client, alloc, task string, command []string, stdout, stderr io.Writer) (int, error) {
+	info, _, err := nomad.Allocations().Info(alloc, (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return 0, err
+	}
+	return nomad.Allocations().Exec(ctx, info, task, false, command, strings.NewReader(""), stdout, stderr, nil, nil)
 }
 
 func createBucket(ctx context.Context, keys [2]string) error {

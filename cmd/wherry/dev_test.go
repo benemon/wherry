@@ -726,3 +726,37 @@ func TestDevNomadJobs(t *testing.T) {
 		t.Fatalf("calls %v; want the job list with meta", *calls)
 	}
 }
+
+func TestDevStorageUserPassesNoKey(t *testing.T) {
+	previous := devExec
+	t.Cleanup(func() { devExec = previous })
+	const access, secret = "ACCESSKEYVALUE", "secretkeyvalue0123456789"
+	var argv []string
+	stdout := `{"user_id": "wherry-dev", "keys": [{"user": "wherry-dev", "access_key": "` + access + `", "secret_key": "` + secret + `"}]}`
+	devExec = func(_ context.Context, _ *api.Client, alloc, task string, command []string, out, _ io.Writer) (int, error) {
+		if alloc != "alloc-1" || task != "s3" {
+			t.Errorf("exec in %s task %s", alloc, task)
+		}
+		argv = command
+		io.WriteString(out, stdout)
+		return 0, nil
+	}
+	keys, err := storageUser(context.Background(), nil, "alloc-1")
+	if err != nil || keys == nil || *keys != [2]string{access, secret} {
+		t.Fatalf("keys %v, %v; want the printed ones", keys, err)
+	}
+	for _, arg := range argv {
+		if strings.Contains(arg, "key") || strings.Contains(arg, access) || strings.Contains(arg, secret) {
+			t.Fatalf("argv %q carries a key", argv)
+		}
+	}
+	if !slices.Equal(argv[:3], []string{"radosgw-admin", "user", "create"}) {
+		t.Fatalf("argv %q", argv)
+	}
+
+	// Output that is no user is refused without repeating it.
+	stdout = `{"keys": [{"secret_key": "` + secret + `"`
+	if _, err := storageUser(context.Background(), nil, "alloc-1"); err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("truncated output: %v; want a refusal that names no key", err)
+	}
+}
