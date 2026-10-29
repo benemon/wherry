@@ -2,6 +2,7 @@ bundle: /etc/wherry/receiver.bundle
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
+drain_timeout: 25s
 credentials:
   nomad-token:
     file: /etc/wherry/nomad-token

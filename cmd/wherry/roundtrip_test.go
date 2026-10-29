@@ -290,7 +290,7 @@ func TestRoundTrip(t *testing.T) {
 	logger := log.New(logs, "receiver: ", 0)
 	newReceiver := func(plugins *plugins) *receiver.Receiver {
 		t.Helper()
-		r, err := receiver.New(bundle, stateDir, false, plugins.profile, logger, prometheus.NewRegistry())
+		r, err := receiver.New(bundle, stateDir, false, 0, plugins.profile, logger, prometheus.NewRegistry())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -678,7 +678,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 		registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	logs := &syncBuffer{}
-	r, err := receiver.New(bundle, filepath.Join(dir, "state"), false, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
+	r, err := receiver.New(bundle, filepath.Join(dir, "state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

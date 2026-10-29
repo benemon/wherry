@@ -62,6 +62,8 @@ type Receiver struct {
 	// rotateKey, set by New only, has Run replace the signing key in keyFile before it claims anything.
 	keyFile   string
 	rotateKey bool
+	// drainTimeout bounds how long Run lets held runs end after its context ends.
+	drainTimeout time.Duration
 	// config and profiles are set by configure before any claim and never change.
 	config   admin.ReceiverConfig
 	profiles []Named
@@ -94,7 +96,7 @@ type Receiver struct {
 // New builds the receiver's Kafka client from bundle and loads or creates its signing key in stateDir, settling a
 // rotation an earlier start left. With rotateKey, Run rotates the key. Once configured, the receiver registers its
 // metric families on registry.
-func New(bundle admin.Bundle, stateDir string, rotateKey bool, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
+func New(bundle admin.Bundle, stateDir string, rotateKey bool, drainTimeout time.Duration, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
 	id, ok := strings.CutPrefix(bundle.Principal, admin.ReceiverPrincipal(""))
 	if !ok || !wire.ValidName(id) {
 		return nil, errors.New("bundle principal is not a receiver principal")
@@ -122,7 +124,7 @@ func New(bundle admin.Bundle, stateDir string, rotateKey bool, factory ProfileFa
 		base.Close()
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, rotateKey: rotateKey, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
 // newClient is a client of the receiver's connection with extra options.
@@ -131,7 +133,8 @@ func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
 }
 
 // Run registers the receiver's keys, rotates them when New was asked to, waits for its configuration, then advertises
-// and claims until ctx ends or the configuration changes.
+// and claims until ctx ends or the configuration changes. Held runs then go on: after a configuration change until they
+// end, and after ctx ends for at most the drain timeout. A forced configuration change releases their tasks at once.
 func (r *Receiver) Run(ctx context.Context) error {
 	defer r.base.Close()
 	defer r.reader.Close()
@@ -156,21 +159,32 @@ func (r *Receiver) Run(ctx context.Context) error {
 	if err := r.advertise(ctx); err != nil {
 		r.logger.Printf("advertise: %v", err)
 	}
+	release := make(chan struct{})
+	releaseHeld := sync.OnceFunc(func() { close(release) })
+	defer context.AfterFunc(ctx, func() { time.AfterFunc(r.drainTimeout, releaseHeld) })()
 	ctx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
+	// Held runs still read cancels and denials, so the periodic steps last until held tasks are released.
+	running, stopRunning := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopRunning()
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		r.every(ctx, advertiseInterval, r.advertise)
+		r.every(running, advertiseInterval, r.advertise)
 	}()
 	go func() {
 		defer wg.Done()
-		r.every(ctx, refreshInterval, func(ctx context.Context) error {
-			err := r.refresh(ctx)
+		r.every(running, refreshInterval, func(running context.Context) error {
+			err := r.refresh(running)
 			if errors.Is(err, ErrConfigChanged) {
-				r.logger.Printf("configuration changed; exiting")
-				stop(ErrConfigChanged)
+				if state, _, _ := r.snapshot(); state.Receivers[r.id].Force {
+					releaseHeld()
+				}
+				if ctx.Err() == nil {
+					r.logger.Printf("configuration changed; exiting once held runs end")
+					stop(ErrConfigChanged)
+				}
 			}
 			return err
 		})
@@ -178,23 +192,23 @@ func (r *Receiver) Run(ctx context.Context) error {
 	// A separate step, so a pool events read failure never delays noticing a configuration change.
 	go func() {
 		defer wg.Done()
-		r.every(ctx, cancelReadInterval, r.readCancels)
+		r.every(running, cancelReadInterval, r.readCancels)
 	}()
 	// Held tasks are released only once every idle slot's share client has closed: a closing client releases what its
 	// pending fetch acquired, so a task released earlier would hop through each, one delivery per hop.
-	running, stopRunning := context.WithCancel(context.WithoutCancel(ctx))
-	defer stopRunning()
-	var idle sync.WaitGroup
+	var idle, slots sync.WaitGroup
 	idle.Add(int(r.config.Capacity))
 	for slot := int64(0); slot < r.config.Capacity; slot++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			r.claimLoop(ctx, running, sync.OnceFunc(idle.Done))
-		}()
+		slots.Go(func() { r.claimLoop(ctx, running, sync.OnceFunc(idle.Done)) })
 	}
 	idle.Wait()
+	go func() {
+		slots.Wait()
+		releaseHeld()
+	}()
+	<-release
 	stopRunning()
+	slots.Wait()
 	wg.Wait()
 	return context.Cause(ctx)
 }
@@ -310,15 +324,16 @@ func (r *Receiver) refresh(ctx context.Context) error {
 		r.deny(err, capRead)
 		return err
 	}
-	if !reflect.DeepEqual(state.Receivers[r.id], r.config) {
-		return ErrConfigChanged
-	}
 	r.mu.Lock()
 	r.state, r.peers, r.hosts = state, peers, hosts
 	r.mu.Unlock()
+	// A membership end comes before a configuration change, so a revoked receiver does not drain.
 	if state.Ended[admin.ReceiverPrincipal(r.id)] {
 		r.deny(kerr.ClusterAuthorizationFailed, capMembership)
 		return nil
+	}
+	if !reflect.DeepEqual(state.Receivers[r.id], r.config) {
+		return ErrConfigChanged
 	}
 	r.restore(capRead)
 	if r.holds(capWrite) || r.holds(capTransactional) {

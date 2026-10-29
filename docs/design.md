@@ -95,9 +95,10 @@ A receiver starts with its local configuration, which names its bundle, a
 state directory, a plugin directory and the sources of its platform
 credentials. It registers its signing key, waits for its configuration
 record, validates it against the terms and configures its profiles. It then advertises every 30 seconds.
-When a new configuration record appears, the receiver stops and exits, so its
-platform restarts it with the new configuration. Runs in flight are adopted on
-redelivery.
+When a new configuration record appears, the receiver stops claiming, lets
+the runs it holds end and exits, so its platform restarts it with the new
+configuration. A record `receiver update --force` wrote has it release the
+tasks it holds at once; runs in flight are then adopted on redelivery.
 
 ## Kafka resources
 

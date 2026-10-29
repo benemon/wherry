@@ -159,6 +159,8 @@ type ReceiverConfig struct {
 	Pool     string            `json:"pool"`
 	Capacity int64             `json:"capacity"`
 	Profiles []ProfileSettings `json:"profiles"`
+	// Force has the receiver running the previous configuration release its held tasks at once.
+	Force bool `json:"force,omitzero"`
 }
 
 // ProfileSettings configures one profile: the plugin that runs it, the agent it launches, the labels its

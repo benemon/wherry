@@ -46,8 +46,9 @@ Confirm it:
      advertisement and its cause.
    - `denied (write): <error>` or `denied (membership): <error>` name an
      authorisation failure.
-   - `configuration changed; exiting` comes before a restart the
-     supervisor is expected to make.
+   - `configuration changed; exiting once held runs end` comes before a
+     restart the supervisor is expected to make, once the runs the
+     receiver holds have ended.
 3. Run `wherry admin receiver show RECEIVER` to check the receiver has a
    configuration.
 

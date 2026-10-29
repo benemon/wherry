@@ -255,6 +255,15 @@ profiles:
 	if got := wherry("receiver", "show", "receiver-a"); got != dryRun {
 		t.Fatalf("show printed\n%s\nwant what the dry run printed\n%s", got, dryRun)
 	}
+	if state, err := service.LoadState(ctx); err != nil || state.Receivers["receiver-a"].Force {
+		t.Fatalf("update without --force recorded force: %v", err)
+	}
+	if got := wherry("receiver", "update", "receiver-a", "--force", "--config-file", file); got != "" || records() != before+2 {
+		t.Fatalf("update --force printed %q and left %d records; want one record more", got, records())
+	}
+	if state, err := service.LoadState(ctx); err != nil || !state.Receivers["receiver-a"].Force {
+		t.Fatalf("update --force recorded no force: %v", err)
+	}
 }
 
 // pool update records new terms and re-applies the share group's delivery limit and lock duration; pool create refuses

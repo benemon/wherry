@@ -125,15 +125,17 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 		stop func(t *testing.T, ctx context.Context, b brokerPool, cancel context.CancelFunc)
 		want error
 	}{
-		"cancelled":             {func(_ *testing.T, _ context.Context, _ brokerPool, cancel context.CancelFunc) { cancel() }, context.Canceled},
-		"configuration changed": {func(t *testing.T, ctx context.Context, b brokerPool, _ context.CancelFunc) { b.configure(t, ctx, 7) }, ErrConfigChanged},
+		"cancelled": {func(_ *testing.T, _ context.Context, _ brokerPool, cancel context.CancelFunc) { cancel() }, context.Canceled},
+		"forced configuration change": {func(t *testing.T, ctx context.Context, b brokerPool, _ context.CancelFunc) {
+			b.configure(t, ctx, 7, true)
+		}, ErrConfigChanged},
 	} {
 		t.Run(name, func(t *testing.T) {
 			shortIntervals(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 			defer cancel()
 			b := newBrokerPool(t, ctx, address)
-			b.configure(t, ctx, 6)
+			b.configure(t, ctx, 6, false)
 			b.deliveryLimit(t, ctx, 5)
 			opts, kafka, receiverID, pool, tenant, host := b.opts, b.kafka, b.receiver, b.pool, b.tenant, b.host
 			_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
@@ -220,11 +222,11 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 	}
 }
 
-// configure writes the receiver's configuration record with capacity.
-func (b brokerPool) configure(t *testing.T, ctx context.Context, capacity int64) {
+// configure writes the receiver's configuration record with capacity and force.
+func (b brokerPool) configure(t *testing.T, ctx context.Context, capacity int64, force bool) {
 	t.Helper()
 	config := testConfig(b.receiver)
-	config.Pool, config.Capacity = b.pool, capacity
+	config.Pool, config.Capacity, config.Force = b.pool, capacity, force
 	encoded, err := admin.EncodeRecord(admin.Record{Kind: "receiver", Pool: b.pool, Receiver: b.receiver, Config: &config})
 	if err != nil {
 		t.Fatal(err)

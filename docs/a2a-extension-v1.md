@@ -946,7 +946,8 @@ which equal the record's, the receiver's `capacity`, and its `profiles` in
 routing order, the plugins in the order of their names. Each plugin profile is the
 [profile entry](configuration.md#receiver-configuration) as `name`, `plugin`
 naming its plugin, `agent`, `labels` when set, and the merged
-`config`, which keeps a `credential` name and never a credential value. An `end` names
+`config`, which keeps a `credential` name and never a credential value. `config`
+also holds `force`, `true` when `receiver update --force` wrote the record. An `end` names
 exactly one of `receiver`, or `tenant` and `host`.
 Readers fold the records in order. A reader loads no state when:
 

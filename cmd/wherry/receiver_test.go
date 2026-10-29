@@ -330,7 +330,7 @@ func writeLocalConfig(t *testing.T, content string) string {
 
 func TestReceiverLocalConfigExampleParses(t *testing.T) {
 	config, err := loadReceiverLocalConfig(filepath.Join("testdata", "example-receiver-config.yaml"))
-	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464",
+	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 25 * time.Second,
 		Credentials: map[string]credential.Source{"nomad-token": {File: "/etc/wherry/nomad-token"}}}
 	if err != nil || !reflect.DeepEqual(config, want) {
 		t.Fatalf("example = %+v, %v; want %+v", config, err, want)
@@ -354,6 +354,7 @@ func TestReceiverLocalConfigRefusals(t *testing.T) {
 	for name, test := range map[string]struct{ content, want string }{
 		"an unknown field":     {"bundle: b\nbundle_file: b\n", "decode config: invalid or unknown field at line 2"},
 		"no bundle":            {"state_dir: s\n", "config requires bundle"},
+		"a negative drain":     {"bundle: b\ndrain_timeout: -1s\n", "config drain_timeout must not be negative"},
 		"two kinds of source":  {"bundle: b\ncredentials:\n  token: {file: x, env: A}\n", "config credential token: needs exactly one of file, env and command"},
 		"no kind of source":    {"bundle: b\ncredentials:\n  token: {}\n", "config credential token: needs exactly one of file, env and command"},
 		"an empty command":     {"bundle: b\ncredentials:\n  token:\n    command: ['']\n", "config credential token: command names no program"},

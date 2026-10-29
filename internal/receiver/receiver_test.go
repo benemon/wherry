@@ -1014,11 +1014,11 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 		"host principal": {Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.TenantPrincipal("tenant-a", "host-a"), Password: "p"},
 		"no CA":          {Broker: "127.0.0.1:1", Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"},
 	} {
-		if _, err := New(bundle, filepath.Join(dir, name), false, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
+		if _, err := New(bundle, filepath.Join(dir, name), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
 			t.Fatalf("%s: New accepted the bundle", name)
 		}
 	}
-	r, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), false, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	r, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1026,7 +1026,7 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 	if r.id != "receiver-a" {
 		t.Fatalf("receiver ID %q", r.id)
 	}
-	again, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), false, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	again, err := New(admin.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: admin.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1333,7 +1333,7 @@ func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Re
 // TestStopReleasesHeldTaskOnce stops a receiver with more slots than the pool's delivery limit while it holds a run:
 // the next member takes the task as its second delivery.
 func TestStopReleasesHeldTaskOnce(t *testing.T) {
-	for name, want := range map[string]error{"cancelled": context.Canceled, "configuration changed": ErrConfigChanged} {
+	for name, want := range map[string]error{"cancelled": context.Canceled, "forced configuration change": ErrConfigChanged} {
 		t.Run(name, func(t *testing.T) {
 			terms, config := testTerms(), testConfig(testReceiver)
 			terms.DeliveryLimit, config.Capacity = 5, 6
@@ -1353,13 +1353,18 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 				time.Sleep(50 * time.Millisecond)
 			}
 			if want == ErrConfigChanged {
-				config.Capacity = 7
+				config.Capacity, config.Force = 7, true
 				f.appendConfig(t, config)
 			} else {
 				stop()
 			}
-			if err := <-done; !errors.Is(err, want) {
-				t.Fatalf("Run returned %v, want %v", err, want)
+			select {
+			case err := <-done:
+				if !errors.Is(err, want) {
+					t.Fatalf("Run returned %v, want %v", err, want)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("Run kept its held run; logs:\n%s", f.logs.String())
 			}
 			record, delivered := f.pollPool(t, "run-a", 10*time.Second)
 			if !delivered {
@@ -1370,4 +1375,208 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 			}
 		})
 	}
+}
+
+// holdRun runs the receiver until the test ends and returns once it follows run-a's job, with the channel Run's error
+// arrives on and the function that cancels Run's context.
+func holdRun(t *testing.T, f fixture) (<-chan error, context.CancelFunc) {
+	t.Helper()
+	f.answer(t, credentialName)
+	ctx, stop := context.WithCancel(f.ctx)
+	t.Cleanup(stop)
+	done := f.run(t, ctx)
+	f.submit(t, f.host, nil)
+	for {
+		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
+			return done, stop
+		}
+		if f.ctx.Err() != nil {
+			t.Fatalf("run never started; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// completed reports a COMPLETED result for run on the feed.
+func (f fixture) completed(t *testing.T, run string) bool {
+	t.Helper()
+	return slices.ContainsFunc(f.results(t), func(result wire.Result) bool {
+		return result.Task.ID == run && result.Task.Status.State == wire.TaskStateCompleted
+	})
+}
+
+// stopped waits for Run's error within wait.
+func (f fixture) stopped(t *testing.T, done <-chan error, wait time.Duration) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(wait):
+		t.Fatalf("Run kept going %s; logs:\n%s", wait, f.logs.String())
+		return nil
+	}
+}
+
+// TestConfigChangeDrainsHeldRun changes the configuration while the receiver holds a run whose job ends 3 seconds
+// later: the receiver claims nothing more, commits the run's result and only then exits.
+func TestConfigChangeDrainsHeldRun(t *testing.T) {
+	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: 3 * time.Second}})
+	done, _ := holdRun(t, f)
+	config := testConfig(testReceiver)
+	config.Capacity = 2
+	f.appendConfig(t, config)
+	f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
+	})
+	if err := f.stopped(t, done, 20*time.Second); !errors.Is(err, ErrConfigChanged) {
+		t.Fatalf("Run returned %v, want ErrConfigChanged", err)
+	}
+	if !f.completed(t, "run-a") {
+		t.Fatalf("Run exited before the held run completed; logs:\n%s", f.logs.String())
+	}
+	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 1 {
+		t.Fatalf("dispatches = %d, want 1: the draining receiver claimed another task", dispatches)
+	}
+	if record, delivered := f.pollPool(t, "run-b", 10*time.Second); !delivered || record.DeliveryCount() != 1 {
+		t.Fatal("the draining receiver acquired run-b")
+	}
+	if _, delivered := f.pollPool(t, "run-a", 2*time.Second); delivered {
+		t.Fatal("the completed run's task went back to the pool")
+	}
+}
+
+// TestCancelStopsADrainingRun cancels a run the receiver holds while it drains for a configuration change: the run
+// ends CANCELED and the receiver exits.
+func TestCancelStopsADrainingRun(t *testing.T) {
+	f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: time.Minute}})
+	done, _ := holdRun(t, f)
+	config := testConfig(testReceiver)
+	config.Capacity = 2
+	f.appendConfig(t, config)
+	for !strings.Contains(f.logs.String(), "configuration changed") {
+		time.Sleep(50 * time.Millisecond)
+	}
+	// The cancel goes on the pool's events alone: the receiver's own read of them must find it.
+	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: "run-a"}, f.host)))
+	if err := f.stopped(t, done, 10*time.Second); !errors.Is(err, ErrConfigChanged) {
+		t.Fatalf("Run returned %v, want ErrConfigChanged", err)
+	}
+	if task := f.lastTask(t); task.ID != "run-a" || task.Status.State != wire.TaskStateCanceled {
+		t.Fatalf("last task %s %s, want run-a CANCELED", task.ID, task.Status.State)
+	}
+}
+
+// TestForceEndsADrain writes a forced configuration record while the receiver drains for an earlier change: the held
+// task is released at once.
+func TestForceEndsADrain(t *testing.T) {
+	f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: time.Minute}})
+	done, _ := holdRun(t, f)
+	config := testConfig(testReceiver)
+	config.Capacity = 2
+	f.appendConfig(t, config)
+	for !strings.Contains(f.logs.String(), "configuration changed") {
+		time.Sleep(50 * time.Millisecond)
+	}
+	config.Capacity, config.Force = 3, true
+	f.appendConfig(t, config)
+	if err := f.stopped(t, done, 10*time.Second); !errors.Is(err, ErrConfigChanged) {
+		t.Fatalf("Run returned %v, want ErrConfigChanged", err)
+	}
+	if _, delivered := f.pollPool(t, "run-a", 10*time.Second); !delivered {
+		t.Fatal("task not released after the forced change")
+	}
+}
+
+// TestStopDrainsWithinTheDrainTimeout cancels Run, as SIGTERM does, while it holds a run: a job that ends inside the
+// drain timeout completes, and one that outlasts it is released at the timeout.
+func TestStopDrainsWithinTheDrainTimeout(t *testing.T) {
+	for name, c := range map[string]struct {
+		endDelay, drain time.Duration
+		complete        bool
+	}{
+		"job ends inside the timeout": {3 * time.Second, 30 * time.Second, true},
+		"job outlasts the timeout":    {time.Minute, 2 * time.Second, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: c.endDelay}})
+			f.receiver.drainTimeout = c.drain
+			done, stop := holdRun(t, f)
+			stop()
+			signalled := time.Now()
+			if err := f.stopped(t, done, 15*time.Second); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run returned %v, want context canceled", err)
+			}
+			if completed := f.completed(t, "run-a"); completed != c.complete {
+				t.Fatalf("run completed %t, want %t; logs:\n%s", completed, c.complete, f.logs.String())
+			}
+			if c.complete {
+				if _, delivered := f.pollPool(t, "run-a", 2*time.Second); delivered {
+					t.Fatal("the completed run's task went back to the pool")
+				}
+				return
+			}
+			if stopped := time.Since(signalled); stopped < c.drain {
+				t.Fatalf("Run returned %s after the stop, inside the drain timeout", stopped)
+			}
+			if record, delivered := f.pollPool(t, "run-a", 10*time.Second); !delivered || record.DeliveryCount() != 2 {
+				t.Fatal("the held task was not released at the drain timeout")
+			}
+		})
+	}
+}
+
+// TestRevocationStopsAHeldRun revokes the receiver while it holds a run whose job ends long after the pool's lock
+// duration, also while it drains for a configuration change: the receiver gives the run up within one lock duration
+// and the run never completes.
+func TestRevocationStopsAHeldRun(t *testing.T) {
+	for name, c := range map[string]struct {
+		stream   []string
+		draining bool
+	}{
+		"transcript moving":          {resultStream, false},
+		"transcript quiet":           {noResultStream, false},
+		"configuration change drain": {noResultStream, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixtureWith(t, c.stream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: c.stream, endDelay: 40 * time.Second}})
+			done, _ := holdRun(t, f)
+			if c.draining {
+				config := testConfig(testReceiver)
+				config.Capacity = 2
+				f.appendConfig(t, config)
+				for !strings.Contains(f.logs.String(), "configuration changed") {
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+			revoked := time.Now()
+			if result := f.service.RevokeReceiver(f.ctx, testReceiver, time.Millisecond, func(context.Context, string, string) error { return admin.ErrAuthorizationDenied }); !result.Complete {
+				t.Fatalf("revocation incomplete: %+v", result.Steps)
+			}
+			for f.receiver.held() > 0 {
+				if time.Since(revoked) > 20*time.Second {
+					t.Fatalf("held run kept going %s after revocation; logs:\n%s", time.Since(revoked), f.logs.String())
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			f.plugin.mu.Lock()
+			stops := f.plugin.stops
+			f.plugin.mu.Unlock()
+			t.Logf("run given up %s after revocation, job stops %d", time.Since(revoked).Round(100*time.Millisecond), stops)
+			if f.completed(t, "run-a") {
+				t.Fatal("revoked receiver's run completed")
+			}
+			if c.draining {
+				if err := f.stopped(t, done, 10*time.Second); !errors.Is(err, ErrConfigChanged) {
+					t.Fatalf("Run returned %v, want ErrConfigChanged", err)
+				}
+			}
+		})
+	}
+}
+
+// held is the number of runs the receiver holds.
+func (r *Receiver) held() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inFlight
 }
