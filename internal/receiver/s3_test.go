@@ -244,14 +244,29 @@ func TestS3OverLoopbackHTTP(t *testing.T) {
 	if data, ok := s.put("/" + s3Bucket + "/" + wire.S3OutputKey(testTenant, "run-a", "report.pdf")); !ok || string(data) != "report" {
 		t.Fatalf("store holds %q, %v for the output", data, ok)
 	}
-	t.Run("https", func(t *testing.T) {
-		f := s3Fixture(t, s, resultStream, nil)
-		done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-		f.sealS3(t, validURLs(strings.Replace(s.endpoint(), "http://", "https://", 1)))
-		if status := <-done; status != kgo.AckReject || f.lastTask(t).Status.Message.Parts[0].Text != "the URL for S3 input dataset.bin is not one of pool pool-a's storage" {
-			t.Fatalf("status %v, %+v", status, f.lastTask(t).Status)
-		}
-	})
+	if strings.Contains(f.logs.String(), s3Signature) {
+		t.Fatalf("logs hold a URL:\n%s", f.logs.String())
+	}
+	inputKey := wire.S3InputKey(testTenant, "run-a", "dataset.bin")
+	for name, get := range map[string]string{
+		"https":        presigned(strings.Replace(s.endpoint(), "http://", "https://", 1), inputKey),
+		"default port": presigned("http://127.0.0.1", inputKey),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := s3Fixture(t, s, resultStream, nil)
+			done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
+			f.sealS3(t, func(input, output string) (string, string) {
+				_, put := validURLs(s.endpoint())(input, output)
+				return get, put
+			})
+			if status := <-done; status != kgo.AckReject || f.lastTask(t).Status.Message.Parts[0].Text != "the URL for S3 input dataset.bin is not one of pool pool-a's storage" {
+				t.Fatalf("status %v, %+v", status, f.lastTask(t).Status)
+			}
+			if strings.Contains(f.logs.String(), s3Signature) {
+				t.Fatalf("logs hold the URL:\n%s", f.logs.String())
+			}
+		})
+	}
 }
 
 func TestS3UseWithoutPoolStorageIsRejected(t *testing.T) {

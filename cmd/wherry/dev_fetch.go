@@ -255,7 +255,7 @@ func acquirePlugin(ctx context.Context, cache, name string, prev *devPlugin, pro
 		if err != nil {
 			return nil, err
 		}
-		if err := verifySigstore(checksums, signature, tufCache); err != nil {
+		if err := pluginSignature(checksums, signature, tufCache); err != nil {
 			return nil, fmt.Errorf("%s checksums.txt: %w", release.Tag, err)
 		}
 		want, err := listedSHA256(checksums, archive)
@@ -304,6 +304,9 @@ func handshake(path string) (int, error) {
 	_, protocol := process.Version()
 	return protocol, nil
 }
+
+// pluginSignature checks a plugin release's checksums.txt; a variable so tests can stand in for the trusted root.
+var pluginSignature = verifySigstore
 
 // verifySigstore checks a keyless sigstore bundle over artifact against the plugin release workflow's identity, with
 // the public-good trusted root fetched through TUF into tufCache.

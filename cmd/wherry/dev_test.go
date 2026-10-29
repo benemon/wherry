@@ -1,8 +1,11 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	jsonv1 "encoding/json"
 	json "encoding/json/v2"
 	"errors"
@@ -839,5 +842,99 @@ func TestGitHubLookups(t *testing.T) {
 	_, err := get(context.Background(), pluginReleases)
 	if err == nil || !strings.Contains(err.Error(), "rate limit is spent until 2026-10-29T10:00:00Z") || strings.Contains(err.Error(), token) {
 		t.Fatalf("rate limited: %v; want the limit and its reset time, without the token", err)
+	}
+}
+
+// pluginRelease is a nomad/v* release as GitHub lists it, its archive holding binary, and the bodies of its assets.
+func pluginRelease(t *testing.T, tag string, binary []byte, bodies map[string][]byte) map[string]any {
+	t.Helper()
+	base := fmt.Sprintf("wherry-plugin-nomad_%s_%s_%s", strings.TrimPrefix(tag, "nomad/"), runtime.GOOS, runtime.GOARCH)
+	var archive bytes.Buffer
+	zipped := gzip.NewWriter(&archive)
+	tarred := tar.NewWriter(zipped)
+	if err := tarred.WriteHeader(&tar.Header{Name: base + "/wherry-plugin-nomad", Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(binary))}); err != nil {
+		t.Fatal(err)
+	}
+	tarred.Write(binary)
+	tarred.Close()
+	zipped.Close()
+	url := "https://github.com/benemon/wherry-plugins/releases/download/" + tag + "/"
+	bodies[url+base+".tar.gz"] = archive.Bytes()
+	bodies[url+"checksums.txt"] = fmt.Appendf(nil, "%x  %s.tar.gz\n", sha256.Sum256(archive.Bytes()), base)
+	bodies[url+"checksums.txt.sigstore.json"] = []byte("{}")
+	var assets []map[string]string
+	for _, name := range []string{base + ".tar.gz", "checksums.txt", "checksums.txt.sigstore.json"} {
+		assets = append(assets, map[string]string{"name": name, "browser_download_url": url + name})
+	}
+	return map[string]any{"tag_name": tag, "draft": false, "assets": assets}
+}
+
+func TestAcquirePluginFallsBack(t *testing.T) {
+	previous := pluginSignature
+	t.Cleanup(func() { pluginSignature = previous })
+	pluginSignature = func(_, bundle []byte, _ string) error {
+		if string(bundle) != "{}" {
+			return errors.New("not the release's bundle")
+		}
+		return nil
+	}
+	plugin, err := os.ReadFile(filepath.Join(pluginDir, "wherry-plugin-fake"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodies := map[string][]byte{}
+	missing := pluginRelease(t, "nomad/v0.4.0", plugin, bodies)
+	missing["assets"] = missing["assets"].([]map[string]string)[1:]
+	releases := []map[string]any{
+		missing,
+		pluginRelease(t, "nomad/v0.3.0", []byte("#!/bin/sh\necho '1|99|tcp|127.0.0.1:1|grpc'\nsleep 10\n"), bodies),
+		{"tag_name": "kubernetes/v0.9.0", "draft": false},
+		pluginRelease(t, "nomad/v0.2.0", plugin, bodies),
+		pluginRelease(t, "nomad/v0.1.0", []byte("#!/bin/sh\nexit 1\n"), bodies),
+	}
+	encoded, err := json.Marshal(releases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodies[pluginReleases] = encoded
+	fake := fakeHTTP(t, bodies)
+	cache := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cache, "plugins"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var progress bytes.Buffer
+	got, err := acquirePlugin(context.Background(), cache, filepath.Join("plugins", "wherry-plugin-nomad"), nil, &progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("%x", sha256.Sum256(plugin))
+	if got.Tag != "nomad/v0.2.0" || got.File != "plugins/wherry-plugin-nomad" || got.SHA256 != want || got.Protocol == 0 {
+		t.Fatalf("plugin %+v; want nomad/v0.2.0 with the fake plugin's SHA-256 %s", got, want)
+	}
+	if sum, err := fileSHA256(filepath.Join(cache, "plugins", "wherry-plugin-nomad")); err != nil || sum != want {
+		t.Fatalf("installed %s, %v", sum, err)
+	}
+	if _, err := os.Stat(filepath.Join(cache, "plugins", "wherry-plugin-nomad.candidate")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("candidate left: %v", err)
+	}
+	for _, line := range []string{
+		"plugin: nomad/v0.4.0 has no wherry-plugin-nomad_v0.4.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz with checksums.txt and its sigstore bundle; trying the next older release",
+		"plugin: nomad/v0.3.0 speaks another protocol; trying the next older release",
+	} {
+		if !strings.Contains(progress.String(), line+"\n") {
+			t.Errorf("progress lacks %q:\n%s", line, progress.String())
+		}
+	}
+	for _, url := range fake.requested {
+		if strings.Contains(url, "v0.1.0") {
+			t.Errorf("fetched %s past the release that handshakes", url)
+		}
+	}
+
+	// A handshake that fails for another reason ends the search.
+	bodies[pluginReleases], _ = json.Marshal([]map[string]any{releases[4], releases[3]})
+	fakeHTTP(t, bodies)
+	if _, err := acquirePlugin(context.Background(), t.TempDir(), "wherry-plugin-nomad", nil, io.Discard); err == nil || !strings.HasPrefix(err.Error(), "nomad/v0.1.0 handshake: ") {
+		t.Fatalf("acquire with a broken newest release: %v", err)
 	}
 }
