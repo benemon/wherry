@@ -33,6 +33,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if args[0] == "admin" {
 		return runAdmin(args[1:], stdout, stderr)
 	}
+	if args[0] == "dev" {
+		return runDev(args[1:], stdout, stderr)
+	}
 	if args[0] == "version" {
 		if len(args) != 1 {
 			return errors.New("usage: wherry version")
