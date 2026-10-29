@@ -15,7 +15,11 @@ result's history or a transcript line over 512 KiB, is a
 `unstored:input` or `unstored:oversize`. Every run's transcript ends with a
 `lastChunk` chunk, an empty one when no line is left for the terminal
 transaction. The result's reply keeps the part type of the agent's outcome
-message, `data` or text, with no test for JSON.
+message, `data` or text, with no test for JSON. The agent contract states
+that an outcome message's other parts are dropped. The extension reserves
+the bare `metadata` keys wherry writes. New sections: [Binding](#binding),
+which maps A2A's operations and errors to records, and
+[Agent Card](#agent-card).
 
 **Change note, 2026-10-29:** edited in place at version 1. A reply over
 64 KiB once redacted travels as [reply chunks](#the-reply), output chunks with
@@ -47,11 +51,13 @@ in place of `type` and no `platform`. Messages that named the adapter name
 the profile.
 
 Hosts and receivers exchange A2A tasks over Kafka with no server between
-them. This extension fixes the record formats and the checks each reader
-applies. Five of the records carry [A2A v1.0](https://a2a-protocol.org/)
-objects: submissions, statuses, transcript chunks, output chunks and
-results hold one under its A2A field name, beside a `wherry` object of
-bindings. Every `Message` and `Artifact` wherry writes
+them. wherry is a partial custom A2A protocol binding over Kafka: it
+provides some of A2A's operations, as records ([Binding](#binding)). This
+extension fixes the record formats and the checks each reader applies. Five
+of the records carry [A2A v1.0](https://a2a-protocol.org/) objects:
+submissions, statuses, transcript chunks, output chunks and results hold
+one under its A2A field name, beside a `wherry` object of the run's
+placement and routing. Every `Message` and `Artifact` wherry writes
 lists the URI above in its `extensions`, and readers reject one that does
 not. [Key concepts](concepts.md) explains the roles this document names, and
 [Topics](design.md#topics) lists the topics.
@@ -70,6 +76,12 @@ not. [Key concepts](concepts.md) explains the roles this document names, and
   Readers accept standard or URL-safe base64, padded or not.
 - Every `TaskStatus` has `timestamp`, an RFC 3339 time. Receivers write it
   in UTC with milliseconds.
+- This extension reserves the bare `metadata` keys wherry writes: in a
+  result's task `metadata`, `receiver_id`, `pool`, `profile`, `labels`,
+  `job`, `outputs`, `s3_outputs`, `not_returned` and `reply`
+  ([Metadata](#metadata)); in an output chunk's `artifactUpdate.metadata`,
+  `index`. They carry these meanings in every wherry record, and no other
+  extension's key takes their names there.
 - A `Task` has `artifacts` and `history`, and a `Message` and an `Artifact`
   have `parts`, each present even when empty. A `data` part holds valid
   JSON.
@@ -549,7 +561,8 @@ run's reply, and its transcript, before its result, which then reads
 
 ### Metadata
 
-The `metadata` of a result's `Task` says where the run executed:
+The `metadata` of a result's `Task` says where the run executed. This
+extension reserves its keys ([Encoding](#encoding)):
 
 - `receiver_id` (string): the receiver that wrote the result.
 - `pool` (string): the pool.
@@ -1316,3 +1329,110 @@ In each case the run ends with a result and a `terminal` status in
 stopping a job fails, the receiver releases the submission without a
 terminal status, and the next delivery tries again. A run that ends before
 a receiver acts on the cancel keeps the state it ended in.
+
+## Binding
+
+wherry is a partial custom A2A protocol binding over Kafka, as A2A section 12
+allows. Its binding URI, which an `AgentInterface`'s `protocolBinding` would
+name, is:
+
+```
+https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md#binding
+```
+
+A host is the A2A client and the pool's receivers together are the A2A
+server. There is no endpoint: each operation is a record on a Kafka topic, and
+its response is records on the tenant's topics. The A2A objects keep their
+proto3 JSON form ([Encoding](#encoding)) inside the signed records.
+
+| A2A operation | wherry |
+| --- | --- |
+| `SendMessage` | a [submission](#submission) on the pool's tasks topic; the run ID is the task ID and the context ID. The run's records answer it |
+| `CancelTask` | a [cancel](#cancel) on the pool's events topic |
+| `SubscribeToTask` | reading the tenant feed, `wherry.tenant.<tenant>`, for the run's statuses and result, and the tenant's transcript topic, `wherry.tenant.<tenant>.transcript`, for its chunks and output chunks |
+| `GetTask` | the run's latest [result](#result), or, before it has one, its latest [status](#status) |
+| `SendStreamingMessage` | a submission, then `SubscribeToTask` |
+| `ListTasks` | not provided |
+| push notification configuration (create, get, list, delete) | not provided |
+| `GetExtendedAgentCard` | not provided |
+
+A run is one task with one message. A run never asks for input
+(`TASK_STATE_INPUT_REQUIRED`) and is never resumed, so a host sends no
+second message to a task.
+
+### Errors
+
+A2A errors have no wire form here. A receiver answers a submission it can
+attribute to a host and run with a `rejected` [status](#status) in
+`TASK_STATE_REJECTED`, and drops one it cannot.
+
+| Refusal | Outcome | Message text |
+| --- | --- | --- |
+| the run ID belongs to another tenant | rejected | `run ID in use` |
+| the agent is not in the pool's terms | rejected | `agent is outside the pool terms` |
+| the model is not in the agent's terms | rejected | `model not in the pool's terms` |
+| a later submission of a run ID | rejected | `duplicate submission` |
+| the submission is older than the pool's `max_queue_deadline_ms` | rejected | `run expired` |
+| the queue deadline is past the pool's maximum | rejected | `queue deadline exceeds the pool's max queue deadline` |
+| the queue deadline or run deadline has passed | rejected | `queue deadline passed`, `run deadline passed` |
+| a required credential of the agent is unsupplied | rejected | `the host does not supply a required credential of the agent` |
+| a task credential takes an agent credential's target | rejected | `a task credential takes the target of one of the agent's credentials` |
+| the git remote's host is not a VCS host of the pool | rejected | `git remote host <host> is not in pool <pool>'s vcs hosts` |
+| S3 inputs or outputs in a pool without storage | rejected | `pool <pool> has no storage for S3 inputs and outputs` |
+| a `url` part in the message | rejected | `unsupported message part` |
+| the record fails a [signed-record check](#signed-records): its JWS, its signer, its payload, its version, its owner or its checks against `wherry.admin` | dropped | none |
+| the record's Kafka key is not its `run` | dropped | none |
+| the run already has a terminal status with the submission's task hash | acknowledged, nothing written | none |
+
+A receiver drops a record it cannot verify because a status names a tenant,
+run and task hash taken from the record: writing one for an unverified record
+would let any principal that can write the tasks topic place statuses on a
+tenant's feed. A record that fails to decode, or decodes to an invalid
+payload, names no run a status could bind to. A dropped submission's host
+learns nothing from the pool and sees its run stay submitted until its queue
+deadline passes. A submission whose run already ended is a redelivery, and
+the run's terminal status already answers it.
+
+A run that ends after admission ends `TASK_STATE_FAILED` or
+`TASK_STATE_CANCELED`, with the texts [Status](#status) lists. A cancel that
+fails the signed-record checks, or names a run whose key it does not carry, is
+ignored.
+
+### Ordering
+
+- Kafka orders records within a topic partition, and every record of a run
+  is keyed by its run ID, so a run's records on one topic arrive in the order
+  they were written. Records on different topics have no order between them.
+- A run's statuses and results carry `attempt`, the share-group delivery
+  count. Readers order them by `attempt`, and an earlier attempt's records do
+  not change the outcome of a later one.
+- A run's transcript orders by `seq`, the line's offset in the agent's
+  output. An adopted attempt can repeat a `seq`; a reader
+  takes the latest attempt's lines ([Chunk](#chunk)).
+- The end transaction commits the run's last chunks, its output chunks and
+  reply chunks, its result and its `terminal` status together, across the
+  tenant feed, the transcript topic and the pool's events. A reader sees each
+  topic's commit separately, so a host that reads the `terminal` status reads
+  the transcript topic to its high watermark before it reports the
+  transcript or the outputs complete ([Status](#status)). The last chunk has
+  `lastChunk` true.
+
+## Agent Card
+
+wherry serves no Agent Card. A card for a wherry pool would declare the
+extension in `capabilities.extensions` as this `AgentExtension`:
+
+```json
+{
+  "uri": "https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md",
+  "description": "wherry records: signed submissions, statuses, transcript chunks, output chunks and results on Kafka, with run placement, credentials sealed to the claiming receiver, and inputs and outputs",
+  "required": true,
+  "params": {"binding": "https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md#binding"}
+}
+```
+
+`required` is true: a client that does not follow this extension cannot form
+a submission a receiver admits. `params` names the binding URI. Activation
+is implicit: every `Message` and `Artifact` wherry writes lists the
+extension URI in its `extensions`, and readers reject one that does not, so
+no request activates the extension and no response confirms it.
