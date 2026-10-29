@@ -487,8 +487,8 @@ func TestReadKeysListsAgainOnARetriablePartitionError(t *testing.T) {
 	}
 }
 
-// A non-retriable partition error fails the read with the first listing; kadm fails the listing itself on an
-// authorization error, and keeps any other as the partition's.
+// A non-retriable partition error fails the read with the first listings of start and end offsets; kadm fails the
+// listing itself on an authorization error, which can cancel the concurrent listing before it reaches the broker.
 func TestReadKeysFailsAtOnceOnANonRetriablePartitionError(t *testing.T) {
 	for _, failure := range []*kerr.Error{kerr.TopicAuthorizationFailed, kerr.UnknownServerError} {
 		t.Run(failure.Message, func(t *testing.T) {
@@ -497,8 +497,8 @@ func TestReadKeysFailsAtOnceOnANonRetriablePartitionError(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			keys, err := ReadKeys(ctx, unretried, map[string]string{"receiver-a": "keys-a"})
-			if !errors.Is(err, failure) || keys != nil || seen.Load() != 2 {
-				t.Fatalf("keys %v, %v after %d listings; want %v after 2", keys, err, seen.Load(), failure)
+			if !errors.Is(err, failure) || keys != nil || seen.Load() > 2 {
+				t.Fatalf("keys %v, %v after %d listings; want %v after at most 2", keys, err, seen.Load(), failure)
 			}
 		})
 	}
