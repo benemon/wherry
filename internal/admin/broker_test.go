@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benemon/wherry/internal/kafkatest"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -307,6 +308,10 @@ func provision(t *testing.T) *fixture {
 		must(service.HostAdd(ctx, host[0], host[1], path))
 		f.bundles[TenantPrincipal(host[0], host[1])] = readBundle(t, path)
 	}
+	must(kafkatest.Led(ctx, service.Admin, PoolTasksTopic(f.poolA), PoolEventsTopic(f.poolA), PoolTasksTopic(f.poolB), PoolEventsTopic(f.poolB),
+		TenantTopic(f.tenantA), TenantTranscriptTopic(f.tenantA), TenantTopic(f.tenantB), TenantTranscriptTopic(f.tenantB),
+		ReceiverTopic(f.receiverA), ReceiverProgressTopic(f.receiverA), ReceiverTopic(f.receiverB), ReceiverProgressTopic(f.receiverB),
+		HostTopic(f.tenantA, f.hostA1), HostTopic(f.tenantA, f.hostA2), HostTopic(f.tenantB, f.hostB1)))
 	must(service.Check(ctx))
 	return f
 }

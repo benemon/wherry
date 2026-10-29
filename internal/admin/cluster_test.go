@@ -43,6 +43,9 @@ func TestCompactionAcrossReplicasOnCluster(t *testing.T) {
 	if err := service.createTopicsWith(ctx, progressConfigs(retentionBounds{tasks: 7 * 24 * 60 * 60 * 1000}), progress); err != nil {
 		t.Fatal(err)
 	}
+	if err := kafkatest.Led(ctx, kafka, ReceiversTopic, progress); err != nil {
+		t.Fatal(err)
+	}
 	// Segments close within seconds rather than the hour wherry sets, and the cleaner takes any dirty segment;
 	// wherry.receivers, which the other tests share, gets its configs back afterwards.
 	fast := []kadm.AlterConfig{
