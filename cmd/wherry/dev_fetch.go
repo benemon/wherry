@@ -47,6 +47,13 @@ const (
 	pluginIssuer   = "https://token.actions.githubusercontent.com"
 )
 
+// hashicorpPins are the releases init takes in place of the newest: Nomad at the version the nomad plugin's CI tests,
+// whose linux_amd64 zip SHA-256 (wherry-plugins .github/workflows/e2e.yml NOMAD_SHA256) the signed SHA256SUMS must
+// list. Bumping a pin is a deliberate change of both values.
+var hashicorpPins = map[string]struct{ version, linuxAMD64 string }{
+	"nomad": {"2.0.7", "4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1"},
+}
+
 // devHTTP fetches init's downloads; a release archive takes minutes on a slow link.
 var devHTTP = &http.Client{Timeout: 10 * time.Minute}
 
@@ -72,7 +79,7 @@ func newestRelease(versions []string) (string, bool) {
 	return best, bestParts != nil
 }
 
-// acquireHashiCorp fetches product's newest release binary for this OS and architecture into file, verifying
+// acquireHashiCorp fetches product's pinned or newest release binary for this OS and architecture into file, verifying
 // SHA256SUMS against HashiCorp's key and the zip against SHA256SUMS. It returns prev when that version is in file.
 func acquireHashiCorp(ctx context.Context, product, file string, prev *devArtefact, progress io.Writer) (*devArtefact, error) {
 	var index struct {
@@ -96,6 +103,13 @@ func acquireHashiCorp(ctx context.Context, product, file string, prev *devArtefa
 	if !ok {
 		return nil, fmt.Errorf("%s index.json lists no release", product)
 	}
+	pin, pinned := hashicorpPins[product]
+	if pinned {
+		version = pin.version
+		if _, ok := index.Versions[version]; !ok {
+			return nil, fmt.Errorf("%s index.json lists no release %s", product, version)
+		}
+	}
 	if prev != nil && prev.Version == version {
 		if sum, err := fileSHA256(file); err == nil && sum == prev.SHA256 {
 			return prev, nil
@@ -113,6 +127,12 @@ func acquireHashiCorp(ctx context.Context, product, file string, prev *devArtefa
 	}
 	if err := verifyHashiCorp(sums, signature); err != nil {
 		return nil, err
+	}
+	if pinned {
+		pinnedZip := fmt.Sprintf("%s_%s_linux_amd64.zip", product, version)
+		if listed, err := listedSHA256(sums, pinnedZip); err != nil || listed != pin.linuxAMD64 {
+			return nil, fmt.Errorf("SHA256SUMS does not list %s with the pinned SHA-256 %s", pinnedZip, pin.linuxAMD64)
+		}
 	}
 	archive := fmt.Sprintf("%s_%s_%s_%s.zip", product, version, runtime.GOOS, runtime.GOARCH)
 	want, err := listedSHA256(sums, archive)

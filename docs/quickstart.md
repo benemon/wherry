@@ -107,7 +107,7 @@ harness; `--agent NAME` chooses it. `up` downloads nothing. It starts the
 environment, runs the mock agent once, and prints:
 
 ```
-ready: instance default (nomad 2.1.0, kafka 1a2b3c4d5e6f, plugin nomad/v0.1.0-rc.16, wherry v0.1.0-rc.24)
+ready: instance default (nomad 2.0.7, kafka 1a2b3c4d5e6f, plugin nomad/v0.1.0-rc.16, wherry v0.1.0-rc.24)
 config: /home/me/.local/share/wherry/dev/default/env/host/config.yaml
 submit: wherry submit --config-file /home/me/.local/share/wherry/dev/default/env/host/config.yaml --prompt "..."
 claude: claude mcp add wherry-default -- /home/me/.local/share/wherry/dev/default/cache/wherry mcp --config-file /home/me/.local/share/wherry/dev/default/env/host/config.yaml

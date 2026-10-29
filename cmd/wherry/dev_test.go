@@ -5,7 +5,9 @@ import (
 	"context"
 	json "encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -565,5 +567,72 @@ func TestCredentialNames(t *testing.T) {
 	got := credentialNames([]string{"GITHUB_TOKEN=x", "PATH=/bin", "AWS_KEY=y", "A_SECRET=", "DB_PASSWORD=z", "TOKEN=t", "KEY_ID=k", "GITHUB_TOKEN=again"})
 	if want := []string{"AWS_KEY", "A_SECRET", "DB_PASSWORD", "GITHUB_TOKEN"}; !slices.Equal(got, want) {
 		t.Fatalf("names %v; want %v", got, want)
+	}
+}
+
+// fakeTransport answers requests from responses by URL, 404 otherwise, and records each URL.
+type fakeTransport struct {
+	responses map[string]*http.Response
+	requested []string
+}
+
+func (f *fakeTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	f.requested = append(f.requested, request.URL.String())
+	if response, ok := f.responses[request.URL.String()]; ok {
+		return response, nil
+	}
+	return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
+}
+
+// fakeHTTP points devHTTP at a fakeTransport answering each URL with its body.
+func fakeHTTP(t *testing.T, bodies map[string][]byte) *fakeTransport {
+	t.Helper()
+	fake := &fakeTransport{responses: map[string]*http.Response{}}
+	for url, body := range bodies {
+		fake.responses[url] = &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{}, Body: io.NopCloser(bytes.NewReader(body))}
+	}
+	previous := devHTTP
+	devHTTP = &http.Client{Transport: fake}
+	t.Cleanup(func() { devHTTP = previous })
+	return fake
+}
+
+func TestAcquireNomadTakesThePin(t *testing.T) {
+	read := func(name string) []byte {
+		data, err := os.ReadFile("testdata/dev/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	base := hashicorpReleases + "/nomad/"
+	bodies := map[string][]byte{
+		base + "index.json": []byte(`{"versions": {
+			"2.0.7": {"shasums": "nomad_2.0.7_SHA256SUMS", "shasums_signature": "nomad_2.0.7_SHA256SUMS.sig"},
+			"2.1.0": {"shasums": "nomad_2.1.0_SHA256SUMS", "shasums_signature": "nomad_2.1.0_SHA256SUMS.sig"}}}`),
+		base + "2.0.7/nomad_2.0.7_SHA256SUMS": read("nomad_2.0.7_SHA256SUMS"), base + "2.0.7/nomad_2.0.7_SHA256SUMS.sig": read("nomad_2.0.7_SHA256SUMS.sig"),
+		base + "2.1.0/nomad_2.1.0_SHA256SUMS": read("nomad_2.1.0_SHA256SUMS"), base + "2.1.0/nomad_2.1.0_SHA256SUMS.sig": read("nomad_2.1.0_SHA256SUMS.sig"),
+	}
+	fake := fakeHTTP(t, bodies)
+	zip := fmt.Sprintf("%s2.0.7/nomad_2.0.7_%s_%s.zip", base, runtime.GOOS, runtime.GOARCH)
+	if _, err := acquireHashiCorp(context.Background(), "nomad", filepath.Join(t.TempDir(), "nomad"), nil, io.Discard); err == nil || !strings.Contains(err.Error(), zip+": 404") {
+		t.Fatalf("acquire: %v; want the pinned zip fetched", err)
+	}
+	for _, url := range fake.requested {
+		if strings.Contains(url, "2.1.0") {
+			t.Fatalf("fetched %s; want only the pinned 2.0.7", url)
+		}
+	}
+
+	// A pin the signed SHA256SUMS does not list is refused before the zip.
+	previous := hashicorpPins["nomad"]
+	t.Cleanup(func() { hashicorpPins["nomad"] = previous })
+	hashicorpPins["nomad"] = struct{ version, linuxAMD64 string }{"2.0.7", strings.Repeat("0", 64)}
+	fake = fakeHTTP(t, bodies)
+	if _, err := acquireHashiCorp(context.Background(), "nomad", filepath.Join(t.TempDir(), "nomad"), nil, io.Discard); err == nil || !strings.Contains(err.Error(), "pinned SHA-256") {
+		t.Fatalf("acquire with another pinned SHA-256: %v", err)
+	}
+	if slices.Contains(fake.requested, zip) {
+		t.Fatal("fetched the zip against a pin SHA256SUMS does not list")
 	}
 }

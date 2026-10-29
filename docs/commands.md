@@ -546,10 +546,12 @@ wherry dev init [--instance NAME] [--runtime podman|docker] [--storage-enabled] 
 Acquires everything `up` runs into `cache/` and records it in
 `cache/manifest.json`:
 
-- the newest Nomad CE release, its `SHA256SUMS` checked against
-  HashiCorp's release key, fingerprint
-  `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`, and the zip against
-  `SHA256SUMS`; on Linux with Podman, `nomad-driver-podman` the same way;
+- Nomad CE 2.0.7, the release the nomad plugin's CI tests, its
+  `SHA256SUMS` checked against HashiCorp's release key, fingerprint
+  `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`, and against the
+  pinned SHA-256 of its `linux_amd64` zip, and the zip against
+  `SHA256SUMS`; on Linux with Podman, the newest `nomad-driver-podman` the
+  same way;
 - the newest `nomad/v*` release of the nomad plugin whose `checksums.txt`
   verifies against its sigstore bundle from the plugin's release workflow,
   whose archive matches `checksums.txt`, and whose binary speaks this
