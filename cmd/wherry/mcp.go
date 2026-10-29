@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"crypto/subtle"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
@@ -11,6 +13,9 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
+	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -48,11 +53,19 @@ const answerRetry = 5 * time.Second
 func runMCP(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	configFile := flags.String("config-file", "", "host configuration file")
+	listen := flags.String("listen", "", "serve MCP Streamable HTTP at /mcp on this address instead of stdio")
+	tokenFile := flags.String("token-file", "", "file holding the bearer token every HTTP request carries")
+	tlsCert := flags.String("tls-cert", "", "TLS certificate file; with --tls-key, serves HTTPS")
+	tlsKey := flags.String("tls-key", "", "TLS private key file")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry mcp [--config-file FILE]")
+		return errors.New("usage: wherry mcp [--config-file FILE] [--listen ADDR --token-file FILE [--tls-cert FILE --tls-key FILE]]")
+	}
+	token, err := listenToken(*listen, *tokenFile, *tlsCert, *tlsKey)
+	if err != nil {
+		return err
 	}
 	config, err := loadConfig(*configFile)
 	if err != nil {
@@ -73,7 +86,96 @@ func runMCP(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return newMCPServer(connect, inputReader(open), open, wait, logger).Run(ctx, &mcp.StdioTransport{})
+	server := newMCPServer(connect, inputReader(open), open, wait, logger)
+	if *listen == "" {
+		return server.Run(ctx, &mcp.StdioTransport{})
+	}
+	listener, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return err
+	}
+	return serveHTTP(ctx, listener, server, token, *tlsCert, *tlsKey, logger)
+}
+
+// listenToken checks the HTTP flags and returns the token, nil for stdio. Every listener takes a token; one off
+// loopback also takes TLS.
+func listenToken(listen, tokenFile, tlsCert, tlsKey string) ([]byte, error) {
+	if listen == "" {
+		if tokenFile != "" || tlsCert != "" || tlsKey != "" {
+			return nil, errors.New("--token-file, --tls-cert and --tls-key need --listen")
+		}
+		return nil, nil
+	}
+	if (tlsCert == "") != (tlsKey == "") {
+		return nil, errors.New("--tls-cert and --tls-key go together")
+	}
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return nil, fmt.Errorf("--listen: %w", err)
+	}
+	if address, err := netip.ParseAddr(host); (err != nil || !address.IsLoopback()) && tlsCert == "" {
+		return nil, errors.New("--listen off loopback needs --tls-cert and --tls-key")
+	}
+	if tokenFile == "" {
+		return nil, errors.New("--listen needs --token-file")
+	}
+	file, err := os.Open(tokenFile)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("token file %s is open to group or others; make it mode 0600", tokenFile)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 4<<10))
+	if err != nil {
+		return nil, err
+	}
+	token := bytes.TrimSpace(data)
+	if len(token) < 32 {
+		return nil, fmt.Errorf("token file %s holds fewer than 32 characters", tokenFile)
+	}
+	return token, nil
+}
+
+// serveHTTP serves server's Streamable HTTP at /mcp on listener until ctx ends, to requests that carry the token.
+func serveHTTP(ctx context.Context, listener net.Listener, server *mcp.Server, token []byte, tlsCert, tlsKey string, logger *log.Logger) error {
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	httpServer := &http.Server{Handler: bearer(token, mux, logger), ErrorLog: logger, ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		<-ctx.Done()
+		httpServer.Close()
+	}()
+	logger.Printf("serving MCP at %s/mcp", listener.Addr())
+	var err error
+	if tlsCert != "" {
+		err = httpServer.ServeTLS(listener, tlsCert, tlsKey)
+	} else {
+		err = httpServer.Serve(listener)
+	}
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+// bearer passes on the requests that carry the token as a bearer token. A refusal's log line names the peer alone.
+func bearer(token []byte, next http.Handler, logger *log.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		presented, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(presented), token) != 1 {
+			logger.Printf("refused an MCP request from %s without a valid bearer token", r.RemoteAddr)
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // waitCommand returns the shell command that waits for a run and prints its reply, naming configFile, made absolute
