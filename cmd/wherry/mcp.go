@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
@@ -57,6 +58,7 @@ func runMCP(ctx context.Context, args []string) error {
 	tokenFile := flags.String("token-file", "", "file holding the bearer token every HTTP request carries")
 	tlsCert := flags.String("tls-cert", "", "TLS certificate file; with --tls-key, serves HTTPS")
 	tlsKey := flags.String("tls-key", "", "TLS private key file")
+	urlLifetime := flags.Duration("url-lifetime", time.Hour, "lifetime of the presigned URLs upload and wait return over HTTP")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -86,10 +88,10 @@ func runMCP(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	server := newMCPServer(connect, inputReader(open), open, wait, logger)
 	if *listen == "" {
-		return server.Run(ctx, &mcp.StdioTransport{})
+		return newMCPServer(connect, inputReader(open), open, wait, logger, nil).Run(ctx, &mcp.StdioTransport{})
 	}
+	server := newMCPServer(connect, inputReader(open), open, wait, logger, &remoteForms{urlLifetime: *urlLifetime})
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return err
@@ -300,7 +302,10 @@ type credentialInput struct {
 }
 
 type fileInput struct {
-	Path    string `json:"path" jsonschema:"local file"`
+	Path    string `json:"path,omitempty" jsonschema:"local file; refused over HTTP"`
+	Name    string `json:"name,omitempty" jsonschema:"over HTTP: the file name the agent finds content or an upload under"`
+	Content string `json:"content,omitempty" jsonschema:"over HTTP: the file's bytes, base64"`
+	Upload  string `json:"upload,omitempty" jsonschema:"over HTTP: the id upload returned, for a file put to the pool's bucket, which the host verifies before it publishes the task"`
 	Storage string `json:"storage,omitempty" jsonschema:"s3 to upload the file, up to 5 GiB, to the pool's bucket, from which the agent's plugin fetches it; absent, it goes in the task, or through the pool's bucket when over the broker's record limit or a profile's declared limit and the pool has storage and the host a storage credential, else submit refuses"`
 }
 
@@ -327,7 +332,19 @@ type submitInput struct {
 type submitOutput struct {
 	ID   string `json:"id" jsonschema:"run id"`
 	Pool string `json:"pool" jsonschema:"pool the task was placed in"`
-	Wait string `json:"wait" jsonschema:"shell command that waits for the run to end and prints its reply; run it in the background"`
+	Wait string `json:"wait,omitempty" jsonschema:"shell command that waits for the run to end and prints its reply; run it in the background; absent over HTTP"`
+}
+
+type uploadInput struct {
+	Name   string `json:"name" jsonschema:"file name the agent finds the input under"`
+	Size   int64  `json:"size" jsonschema:"the file's size in bytes, at most 5 GiB"`
+	SHA256 string `json:"sha256" jsonschema:"the file's SHA-256, lowercase hex"`
+}
+
+type uploadOutput struct {
+	ID      string `json:"id" jsonschema:"upload id: name it in a submit input as {upload: id}"`
+	URL     string `json:"url" jsonschema:"presigned URL to PUT the file's bytes to, such as with curl --upload-file"`
+	Expires string `json:"expires" jsonschema:"RFC 3339 time the URL expires"`
 }
 
 type runInput struct {
@@ -458,9 +475,14 @@ type logsReply struct {
 	Skipped    int            `json:"skipped,omitempty"`
 }
 
-// newMCPServer serves the wherry tools. Every call uses the host connect returns, which the server's seal-request
-// answering shares, so the process runs one tenant-feed follower.
-func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), waitCommand func(id string) string, logger *log.Logger) *mcp.Server {
+// remoteForms are the settings of the HTTP forms of the tools.
+type remoteForms struct {
+	urlLifetime time.Duration
+}
+
+// newMCPServer serves the wherry tools, in their HTTP forms when remote is set. Every call uses the host connect
+// returns, which the server's seal-request answering shares, so the process runs one tenant-feed follower.
+func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), waitCommand func(id string) string, logger *log.Logger, remote *remoteForms) *mcp.Server {
 	// The model sees an UNAVAILABLE's class alone; the server's log, which only the host's user reads, keeps its cause
 	// with every credential value the host resolved redacted.
 	failure := func(err error) error {
@@ -495,9 +517,13 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with wait, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which wait writes locally. While this server runs, it seals the agent's and the task's configured credentials to the receiver that claims the task when that receiver asks for them. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
+		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with wait, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; over HTTP each is {name, content} with content base64, or {upload} naming an id from upload, and prompt_file is refused; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which wait writes locally. While this server runs, it seals the agent's and the task's configured credentials to the receiver that claims the task when that receiver asks for them. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
-		submission, err := submitFromInput(input, readInput, openInput)
+		files := input.Inputs
+		if remote != nil {
+			input.Inputs = nil
+		}
+		submission, err := submitFromInput(input, readInput, openInput, remote != nil)
 		if err != nil {
 			return nil, submitOutput{}, err
 		}
@@ -512,12 +538,64 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, submitOutput{}, failure(err)
 		}
+		var uploads []string
+		if remote != nil {
+			for _, file := range files {
+				content, err := base64.StdEncoding.DecodeString(file.Content)
+				switch {
+				case file.Path != "" || file.Name == "" == (file.Upload == ""):
+					return nil, submitOutput{}, invalidArgument("inputs over HTTP carry their content: each is {name, content} or {upload}")
+				case err != nil:
+					return nil, submitOutput{}, invalidArgument("an input's content is base64")
+				case file.Upload != "":
+					uploaded, err := client.Uploaded(ctx, file.Upload)
+					if err != nil {
+						return nil, submitOutput{}, failure(err)
+					}
+					submission.S3Inputs = append(submission.S3Inputs, uploaded)
+					uploads = append(uploads, file.Upload)
+				case file.Storage == wire.StorageS3:
+					submission.S3Inputs = append(submission.S3Inputs, busclient.S3File{Name: file.Name, Body: bytes.NewReader(content)})
+				case file.Storage == "":
+					submission.Parts = append(submission.Parts, wire.Part{Raw: append(wire.StdBytes{}, content...), Filename: file.Name})
+				default:
+					return nil, submitOutput{}, invalidArgument("an input's storage is s3 or absent")
+				}
+			}
+		}
 		result, err := client.Submit(ctx, submission)
 		if err != nil {
 			return nil, submitOutput{}, failure(err)
 		}
+		for _, id := range uploads {
+			if err := client.DeleteUpload(ctx, id); err != nil {
+				logger.Print("delete upload " + id + ": " + busclient.Redact(err.Error()))
+			}
+		}
+		if remote != nil {
+			return nil, submitOutput{ID: result.RunID, Pool: result.Pool}, nil
+		}
 		return nil, submitOutput{ID: result.RunID, Pool: result.Pool, Wait: waitCommand(result.RunID)}, nil
 	})
+
+	if remote != nil {
+		mcp.AddTool(server, &mcp.Tool{
+			Name: "upload",
+			Description: "Presign a PUT to the pool's bucket for an input too large to send inline. PUT the file's bytes to url before " +
+				"it expires, then name the id in a submit input as {upload: id}; submit verifies the size and sha256 given here before " +
+				"it publishes the task. Needs a pool with storage and a host storage credential.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, input uploadInput) (*mcp.CallToolResult, uploadOutput, error) {
+			client, err := connect()
+			if err != nil {
+				return nil, uploadOutput{}, failure(err)
+			}
+			upload, err := client.PresignUpload(ctx, input.Name, input.Size, input.SHA256, remote.urlLifetime)
+			if err != nil {
+				return nil, uploadOutput{}, failure(err)
+			}
+			return nil, uploadOutput{ID: upload.ID, URL: upload.URL, Expires: upload.Expires.UTC().Format(time.RFC3339)}, nil
+		})
+	}
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "status",
@@ -738,7 +816,11 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	return server
 }
 
-func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error)) (busclient.SubmitInput, error) {
+// submitFromInput reads input's prompt file and inputs through readInput and openInput; remote refuses a prompt file.
+func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), remote bool) (busclient.SubmitInput, error) {
+	if remote && input.PromptFile != "" {
+		return busclient.SubmitInput{}, invalidArgument("prompt_file is refused over HTTP; prompt carries the text")
+	}
 	if (input.Prompt == "") == (input.PromptFile == "") {
 		return busclient.SubmitInput{}, invalidArgument("exactly one of prompt and prompt_file is required")
 	}
@@ -759,6 +841,9 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 	var parts []wire.Part
 	var s3Inputs []string
 	for _, file := range input.Inputs {
+		if file.Name != "" || file.Content != "" || file.Upload != "" {
+			return busclient.SubmitInput{}, invalidArgument("name, content and upload are the forms of inputs over HTTP; over stdio an input is a path")
+		}
 		switch file.Storage {
 		case "":
 			part, err := readInput(file.Path, math.MaxInt64)

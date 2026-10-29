@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"log"
 	"math/big"
@@ -33,7 +34,7 @@ func httpHost(t *testing.T, connect func() (*busclient.Host, error)) (string, *s
 	logs := &syncBuffer{}
 	logger := log.New(logs, "", 0)
 	open := inputOpener(t.TempDir(), busclient.Config{})
-	server := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry wait " + id }, logger)
+	server := newMCPServer(connect, inputReader(open), open, func(id string) string { return "wherry wait " + id }, logger, &remoteForms{urlLifetime: time.Hour})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +221,7 @@ func TestHTTPServesTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	open := inputOpener(t.TempDir(), busclient.Config{})
-	server := newMCPServer(b.connect(t), inputReader(open), open, func(id string) string { return "wherry wait " + id }, log.New(testLog{t}, "", 0))
+	server := newMCPServer(b.connect(t), inputReader(open), open, func(id string) string { return "wherry wait " + id }, log.New(testLog{t}, "", 0), &remoteForms{urlLifetime: time.Hour})
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -274,4 +275,55 @@ func selfSigned(t *testing.T) (string, string, *x509.CertPool) {
 	pool := x509.NewCertPool()
 	pool.AddCert(parsed)
 	return cert, keyFile, pool
+}
+
+// Over HTTP an input carries its content; a path or a prompt file, which would name the host's files, is refused.
+func TestHTTPInputsCarryTheirContent(t *testing.T) {
+	b := newBus(t)
+	endpoint, _ := httpHost(t, b.connect(t))
+	session, err := httpSession(t, endpoint, httpToken, http.DefaultTransport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, arguments := range map[string]map[string]any{
+		"path":        {"prompt": "work", "inputs": []any{map[string]any{"path": "/etc/hostname"}}},
+		"path, named": {"prompt": "work", "inputs": []any{map[string]any{"path": "/etc/hostname", "name": "hostname"}}},
+		"no name":     {"prompt": "work", "inputs": []any{map[string]any{"content": "YQ=="}}},
+		"both forms":  {"prompt": "work", "inputs": []any{map[string]any{"name": "a", "content": "YQ==", "upload": "upload-1"}}},
+	} {
+		if failure := callToolError(t, b.ctx, session, "submit", arguments); failure.Message != "inputs over HTTP carry their content: each is {name, content} or {upload}" {
+			t.Errorf("%s: %+v", name, failure)
+		}
+	}
+	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt_file": "/etc/hostname"}); failure.Message != "prompt_file is refused over HTTP; prompt carries the text" {
+		t.Errorf("prompt_file: %+v", failure)
+	}
+	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "inputs": []any{map[string]any{"upload": "upload-1"}}}); failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "not one this host issued") {
+		t.Errorf("unknown upload: %+v", failure)
+	}
+	if failure := callToolError(t, b.ctx, session, "upload", map[string]any{"name": "big.bin", "size": 1, "sha256": hashOf("x")}); failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, "no storage credential") {
+		t.Errorf("upload without storage: %+v", failure)
+	}
+	var submitted submitOutput
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "inputs": []any{map[string]any{"name": "data.csv", "content": base64.StdEncoding.EncodeToString([]byte("a,b\n"))}}}, &submitted)
+	if submitted.Wait != "" {
+		t.Errorf("submit over HTTP returned the host's shell command %q", submitted.Wait)
+	}
+	parts := b.tasks(t, submitted.ID)[0].submission.Message.Parts
+	if len(parts) != 2 || parts[1].Filename != "data.csv" || string(parts[1].Raw) != "a,b\n" {
+		t.Fatalf("parts %+v; want the prompt and data.csv", parts)
+	}
+	stdio := mcpSession(t, b.connect(t), nil)
+	if failure := callToolError(t, b.ctx, stdio, "submit", map[string]any{"prompt": "work", "inputs": []any{map[string]any{"name": "data.csv", "content": "YQ=="}}}); failure.Code != "INVALID_ARGUMENT" {
+		t.Errorf("content over stdio: %+v", failure)
+	}
+	tools, err := stdio.ListTools(b.ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools.Tools {
+		if tool.Name == "upload" {
+			t.Error("stdio serves upload")
+		}
+	}
 }
