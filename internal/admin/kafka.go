@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
-	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
@@ -411,7 +410,7 @@ func (service *Service) Skip(ctx context.Context, offset int64, hash string) err
 		}
 		if _, err := DecodeRecord(entry.Value); err == nil {
 			return fmt.Errorf("record at offset %d decodes and cannot be skipped", offset)
-		} else if errors.Is(err, json.ErrUnknownName) {
+		} else if errors.Is(err, ErrNewerRecord) {
 			return fmt.Errorf("%w at offset %d; upgrade this wherry instead of skipping it", ErrNewerRecord, offset)
 		}
 		sum := sha256.Sum256(entry.Value)

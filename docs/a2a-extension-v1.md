@@ -45,10 +45,10 @@ not. [Key concepts](concepts.md) explains the roles this document names, and
 
 - Payloads are JSON objects. Readers ignore unknown members and reject
   duplicate names. A member added after wherry 1.0 states, beside it, what a
-  reader that ignores it does. [Admin records](#admin-records) are the
-  exception: readers reject one with an unknown member.
+  reader that ignores it does.
 - Every payload has `v`, the payload version, which is `1`. Readers reject
-  any other version.
+  any other version; a reader reports an [admin record](#admin-records)
+  with a higher version as written by a later release.
 - A2A objects use the
   [proto3 JSON mapping](https://protobuf.dev/programming-guides/json/) of
   the A2A v1.0 schema. wherry writes `bytes` as padded standard base64.
@@ -1002,8 +1002,10 @@ Readers fold the records in order. A reader loads no state when:
 - two of the Kafka names that pools, receivers and hosts derive (topics,
   share groups, principals and transactional prefixes) collide.
 
-When every undecodable record no `skip` matches fails only on unknown
-members, the reader reports that a later wherry release wrote them and that
+Readers ignore unknown members on a record and reject duplicate names. A
+record whose `v` is higher than the reader's release knows was written by a
+later release; when every undecodable record no `skip` matches is such a
+record, the reader reports that a later wherry release wrote them and that
 this one needs an upgrade.
 
 ## Admission
