@@ -2,10 +2,12 @@ package pluginsdk
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"os/exec"
 	"slices"
 	"sync"
@@ -33,6 +35,10 @@ var (
 // answer a ping, Process starts it again with back-off and configures every profile again; until then their calls
 // return ErrLinkLost.
 type Process struct {
+	// kind is the plugin's type, for errors and log lines.
+	kind string
+	// checksum is the SHA-256 the binary must have at every start.
+	checksum []byte
 	// resolve checks the plugin binary and returns its path, before every start.
 	resolve func() (string, error)
 	// path is the binary the latest start ran, for log lines.
@@ -52,10 +58,11 @@ type Process struct {
 	version  string
 }
 
-// Launch starts the plugin binary resolve returns over mutual TLS, and calls resolve again before every
-// restart; logs receives the link's and the plugin's log lines.
-func Launch(resolve func() (string, error), logs io.Writer) (*Process, error) {
-	p := &Process{resolve: resolve, logger: hclog.New(&hclog.LoggerOptions{Name: "plugin", Output: logs, Level: logLevel})}
+// Launch starts the plugin binary of type kind that resolve returns over mutual TLS, and calls resolve again before
+// every restart; go-plugin refuses each start whose binary's SHA-256 is not checksum. logs receives the link's and the
+// plugin's log lines.
+func Launch(kind string, resolve func() (string, error), checksum []byte, logs io.Writer) (*Process, error) {
+	p := &Process{kind: kind, checksum: checksum, resolve: resolve, logger: hclog.New(&hclog.LoggerOptions{Name: "plugin", Output: logs, Level: logLevel})}
 	client, rpc, err := p.start()
 	if err != nil {
 		return nil, err
@@ -79,12 +86,18 @@ func (p *Process) start() (*plugin.Client, pluginv1.PluginClient, error) {
 		AllowedProtocols: []plugin.Protocol{plugin.ProtocolGRPC},
 		AutoMTLS:         true,
 		Logger:           p.logger,
+		// The hash is stateful, so each start takes a new one.
+		SecureConfig: &plugin.SecureConfig{Checksum: p.checksum, Hash: sha256.New()},
 	}
 	client := plugin.NewClient(config)
 	protocol, err := client.Client()
+	if errors.Is(err, plugin.ErrChecksumsDoNotMatch) {
+		client.Kill()
+		return nil, nil, fmt.Errorf("plugin type %s: %s has SHA-256 %s and the pin is %x", p.kind, path, fileSHA256(path), p.checksum)
+	}
 	if err != nil {
 		client.Kill()
-		return nil, nil, fmt.Errorf("plugin %s: %w", path, err)
+		return nil, nil, fmt.Errorf("plugin type %s: %s: %w", p.kind, path, err)
 	}
 	// AutoMTLS makes the certificate the plugin's handshake offers the link's only root; a plugin that
 	// offered none would otherwise get a link without one.
@@ -105,6 +118,20 @@ func (p *Process) start() (*plugin.Client, pluginv1.PluginClient, error) {
 		}
 	}
 	return client, rpc, nil
+}
+
+// fileSHA256 is the hex SHA-256 of the file at path, or the error reading it.
+func fileSHA256(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return err.Error()
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil))
 }
 
 // configure builds settings' profile in the plugin and returns what the plugin reports of it.

@@ -197,6 +197,9 @@ type ReceiverConfig struct {
 	Pool     string            `json:"pool"`
 	Capacity int64             `json:"capacity"`
 	Profiles []ProfileSettings `json:"profiles"`
+	// PluginSHA256 maps each plugin type to the lowercase hex SHA-256 its binary must have; the receiver refuses to
+	// start a plugin whose type has none.
+	PluginSHA256 map[string]string `json:"plugin_sha256"`
 	// Force has the receiver running the previous configuration release its held tasks at once.
 	Force bool `json:"force,omitzero"`
 }
@@ -351,6 +354,9 @@ func (state State) CheckNames() error {
 	return nil
 }
 
+// pluginSHA256 is a pinned plugin binary's SHA-256 as the release's checksums.txt writes it.
+var pluginSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	if err := validateNames(config.Receiver, config.Pool); err != nil {
 		return err
@@ -358,12 +364,20 @@ func ValidateConfig(config ReceiverConfig, terms Terms) error {
 	if config.Capacity <= 0 || len(config.Profiles) == 0 {
 		return errors.New("receiver config needs a capacity and profiles")
 	}
+	for kind, sum := range config.PluginSHA256 {
+		if !wire.ValidName(kind) || !pluginSHA256.MatchString(sum) {
+			return fmt.Errorf("plugin SHA-256 %q=%q needs a valid plugin type and 64 lowercase hex digits", kind, sum)
+		}
+	}
 	names := map[string]bool{}
 	for _, profile := range config.Profiles {
 		if validateNames(profile.Name) != nil || names[profile.Name] || !wire.ValidName(profile.Plugin) {
 			return errors.New("profiles need unique valid names and a valid plugin")
 		}
 		names[profile.Name] = true
+		if _, ok := config.PluginSHA256[profile.Plugin]; !ok {
+			return fmt.Errorf("plugin type %s has no pinned SHA-256; set it with receiver update --plugin-sha256 %s=HEX", profile.Plugin, profile.Plugin)
+		}
 		if err := wire.ValidateLabels(profile.Labels); err != nil {
 			return err
 		}

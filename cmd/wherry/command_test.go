@@ -124,7 +124,8 @@ func newBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	receiverBundle := filepath.Join(t.TempDir(), "receiver.yaml")
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []admin.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}}}
+	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []admin.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}},
+		PluginSHA256: map[string]string{"nomad": fakeSHA256}}
 	if err := b.service.ReceiverAdd(ctx, config, receiverBundle); err != nil {
 		t.Fatal(err)
 	}

@@ -461,12 +461,16 @@ func TestReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 	if err := ValidateReceiverRecord(record, "receiver-a", terms); err != nil {
 		t.Fatal(err)
 	}
-	badLabels, outsideAgent := modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a")
+	badLabels, outsideAgent, unpinned, badPin := modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a"), modelConfig("receiver-a", "pool-a")
 	badLabels.Profiles[0].Labels = map[string]string{"wherry.io/gpu": "yes"}
 	outsideAgent.Profiles[0].Agent = "agent-z"
+	unpinned.PluginSHA256 = nil
+	badPin.PluginSHA256 = map[string]string{"fake": strings.Repeat("AB", 32)}
 	for name, outside := range map[string]ReceiverConfig{
 		"reserved label": badLabels,
 		"agent":          outsideAgent,
+		"unpinned type":  unpinned,
+		"bad pin":        badPin,
 	} {
 		record.Config = &outside
 		if err := ValidateReceiverRecord(record, "receiver-a", terms); err == nil {
@@ -491,7 +495,8 @@ func modelTerms() Terms {
 }
 
 func modelConfig(receiver, pool string) ReceiverConfig {
-	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Profiles: []ProfileSettings{{Name: "profile-a", Plugin: "fake", Agent: "agent-a"}}}
+	return ReceiverConfig{Receiver: receiver, Pool: pool, Capacity: 1, Profiles: []ProfileSettings{{Name: "profile-a", Plugin: "fake", Agent: "agent-a"}},
+		PluginSHA256: map[string]string{"fake": strings.Repeat("ab", 32)}}
 }
 
 func modelState(t *testing.T) State {

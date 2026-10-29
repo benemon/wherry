@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2026,7 +2027,12 @@ func TestPluginOutputIsRedactedAgainstLiveRuns(t *testing.T) {
 	f := newFixture(t, resultStream)
 	testActiveRun(t, f, "run-a", 1).deliver(map[string][]byte{credentialName: []byte(testToken)})
 	logs := &syncBuffer{}
-	plugin, err := pluginsdk.Launch(func() (string, error) { return path, nil }, f.receiver.PluginLogs(logs))
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := sha256.Sum256(content)
+	plugin, err := pluginsdk.Launch("fake", func() (string, error) { return path, nil }, pin[:], f.receiver.PluginLogs(logs))
 	if err != nil {
 		t.Fatal(err)
 	}

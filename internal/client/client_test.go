@@ -187,7 +187,7 @@ func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 	config := admin.ReceiverConfig{Receiver: id, Pool: pool, Capacity: 2, Profiles: []admin.ProfileSettings{
 		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
 		{Name: "cloud", Plugin: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
-	}}
+	}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32), "aws": strings.Repeat("cd", 32)}}
 	return f.addReceiverConfig(t, config)
 }
 
@@ -563,7 +563,7 @@ func TestSubmitIgnoresInlineLimitOfOfferOutsideSelector(t *testing.T) {
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2, Profiles: []admin.ProfileSettings{
 		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}},
 		{Name: "other", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}},
-	}}
+	}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}}
 	receiver := f.addReceiverConfig(t, config)
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Offers = []wire.Offer{{Profile: "lab", Agent: "claude", InlineLimit: 5000}, {Profile: "other", Agent: "claude", InlineLimit: 100}}

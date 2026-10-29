@@ -219,7 +219,8 @@ func TestPoolUpdateRefusesTermsThatStrandALiveReceiver(t *testing.T) {
 	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
 	}
-	config := ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []ProfileSettings{{Name: "profile-codex", Plugin: "fake", Agent: "codex"}}}
+	config := ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []ProfileSettings{{Name: "profile-codex", Plugin: "fake", Agent: "codex"}},
+		PluginSHA256: map[string]string{"fake": strings.Repeat("ab", 32)}}
 	if err := service.ReceiverAdd(ctx, config, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}

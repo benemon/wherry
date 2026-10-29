@@ -276,7 +276,7 @@ func acquirePlugin(ctx context.Context, cache, name string, prev *devPlugin, pro
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", archive, err)
 		}
-		protocol, err := handshake(binary)
+		protocol, err := handshake(binary, sum)
 		if err != nil && strings.Contains(strings.ToLower(err.Error()), "incompatible api version") {
 			os.Remove(binary)
 			fmt.Fprintf(progress, "plugin: %s speaks another protocol; trying the next older release\n", release.Tag)
@@ -294,9 +294,14 @@ func acquirePlugin(ctx context.Context, cache, name string, prev *devPlugin, pro
 	return nil, errors.New("no nomad plugin release speaks this wherry's plugin protocol; a plugin release must follow the protocol change")
 }
 
-// handshake starts the plugin at path and stops it, returning the protocol version it negotiated.
-func handshake(path string) (int, error) {
-	process, err := pluginsdk.Launch(func() (string, error) { return path, nil }, io.Discard)
+// handshake starts the plugin at path, pinned to its SHA-256 hex sum, and stops it, returning the protocol version it
+// negotiated.
+func handshake(path, sum string) (int, error) {
+	pin, err := hex.DecodeString(sum)
+	if err != nil {
+		return 0, err
+	}
+	process, err := pluginsdk.Launch("nomad", func() (string, error) { return path, nil }, pin, io.Discard)
 	if err != nil {
 		return 0, err
 	}

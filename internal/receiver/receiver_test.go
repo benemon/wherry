@@ -399,10 +399,14 @@ func testTerms() admin.Terms {
 	}
 }
 
+// testPluginSHA256 is testConfig's pin for the fake plugin, which the fixture's factory requires.
+var testPluginSHA256 = strings.Repeat("ab", 32)
+
 func testConfig(receiver string) admin.ReceiverConfig {
 	return admin.ReceiverConfig{
 		Receiver: receiver, Pool: testPool, Capacity: 1,
-		Profiles: []admin.ProfileSettings{{Name: "nomad", Plugin: "fake", Agent: "claude", Labels: map[string]string{"zone": "dc1", "example.com/gpu": "none"}, Config: map[string]any{}}},
+		Profiles:     []admin.ProfileSettings{{Name: "nomad", Plugin: "fake", Agent: "claude", Labels: map[string]string{"zone": "dc1", "example.com/gpu": "none"}, Config: map[string]any{}}},
+		PluginSHA256: map[string]string{"fake": testPluginSHA256},
 	}
 }
 
@@ -518,9 +522,9 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		t.Fatal(err)
 	}
 	logs := &syncBuffer{}
-	factory := func(pool string, settings admin.ProfileSettings) (Named, error) {
+	factory := func(pool string, settings admin.ProfileSettings, pluginSHA256 string) (Named, error) {
 		plugin, ok := f.plugins[settings.Name]
-		if !ok || settings.Plugin != "fake" {
+		if !ok || settings.Plugin != "fake" || pluginSHA256 != config.PluginSHA256["fake"] {
 			return Named{}, errors.New("no fake plugin")
 		}
 		plugin.mu.Lock()
@@ -952,6 +956,17 @@ func TestConfigureRefusesConfigOutsideTerms(t *testing.T) {
 	restarted := &Receiver{id: testReceiver, base: f.receiver.base, reader: admin.NewReader(f.receiver.base), logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
 	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "outside pool terms") {
 		t.Fatalf("configure: %v, want a refusal naming the terms", err)
+	}
+}
+
+func TestConfigureRefusesUnpinnedPluginType(t *testing.T) {
+	f := newFixture(t, resultStream)
+	config := testConfig(testReceiver)
+	config.PluginSHA256 = map[string]string{"other": testPluginSHA256}
+	f.appendConfig(t, config)
+	restarted := &Receiver{id: testReceiver, base: f.receiver.base, reader: admin.NewReader(f.receiver.base), logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
+	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "plugin type fake has no pinned SHA-256; set it with receiver update --plugin-sha256 fake=HEX") {
+		t.Fatalf("configure: %v, want a refusal naming the type and the flag", err)
 	}
 }
 
@@ -1485,6 +1500,22 @@ func TestConfigChangeDrainsHeldRun(t *testing.T) {
 	}
 	if _, delivered := f.pollPool(t, "run-a", 2*time.Second); delivered {
 		t.Fatal("the completed run's task went back to the pool")
+	}
+}
+
+// TestPinChangeDrainsHeldRun changes only the plugin pin while the receiver holds a run: the receiver commits the
+// run's result and then exits to start again on the new pin.
+func TestPinChangeDrainsHeldRun(t *testing.T) {
+	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: 3 * time.Second}})
+	done, _ := holdRun(t, f)
+	config := testConfig(testReceiver)
+	config.PluginSHA256 = map[string]string{"fake": strings.Repeat("cd", 32)}
+	f.appendConfig(t, config)
+	if err := f.stopped(t, done, 20*time.Second); !errors.Is(err, ErrConfigChanged) {
+		t.Fatalf("Run returned %v, want ErrConfigChanged", err)
+	}
+	if !f.completed(t, "run-a") {
+		t.Fatalf("Run exited before the held run completed; logs:\n%s", f.logs.String())
 	}
 }
 

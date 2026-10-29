@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	json "encoding/json/v2"
 	"errors"
 	"flag"
@@ -181,8 +183,8 @@ type plugins struct {
 }
 
 // profile configures one profile in its type's plugin, handing the plugin the value of the credential its config names
-// in place of the name.
-func (p *plugins) profile(pool string, settings admin.ProfileSettings) (receiver.Named, error) {
+// in place of the name. The plugin starts only from a binary whose SHA-256 is pluginSHA256.
+func (p *plugins) profile(pool string, settings admin.ProfileSettings, pluginSHA256 string) (receiver.Named, error) {
 	config := maps.Clone(settings.Config)
 	var value []byte
 	if named, ok := config["credential"]; ok {
@@ -200,8 +202,11 @@ func (p *plugins) profile(pool string, settings admin.ProfileSettings) (receiver
 	}
 	running, ok := p.running[settings.Plugin]
 	if !ok {
-		var err error
-		running, err = pluginsdk.Launch(func() (string, error) { return pluginPath(p.dir, settings.Plugin) }, p.logs)
+		checksum, err := hex.DecodeString(pluginSHA256)
+		if err != nil || len(checksum) != sha256.Size {
+			return receiver.Named{}, fmt.Errorf("plugin type %s has no pinned SHA-256; set it with receiver update --plugin-sha256 %s=HEX", settings.Plugin, settings.Plugin)
+		}
+		running, err = pluginsdk.Launch(settings.Plugin, func() (string, error) { return pluginPath(p.dir, settings.Plugin) }, checksum, p.logs)
 		if err != nil {
 			return receiver.Named{}, err
 		}
@@ -237,14 +242,8 @@ func (p *plugins) close() {
 	}
 }
 
-// receiverUID is the user besides root that may own the plugin directory and binaries; a variable so
-// tests can stand in for another owner.
-var receiverUID = os.Getuid()
-
-// pluginPath is the absolute path of the plugin named kind in dir. Whoever can write the
-// directory or the binary runs code as the receiver, so it refuses either when group or others can
-// write it or a user other than root or the receiver's owns it, and a binary that is not a regular
-// file. An absolute path is never looked up on PATH, so the binary checked is the one run.
+// pluginPath is the absolute path, with every symlink resolved, of the plugin named kind in dir. go-plugin checks the
+// file at that path against the pinned SHA-256 and runs it; an absolute path is never looked up on PATH.
 func pluginPath(dir, kind string) (string, error) {
 	if !wire.ValidName(kind) {
 		return "", fmt.Errorf("plugin %q is not a valid name", kind)
@@ -253,29 +252,19 @@ func pluginPath(dir, kind string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("plugin directory: %w", err)
 	}
-	info, err := os.Stat(dir)
-	if err != nil {
-		return "", fmt.Errorf("plugin directory: %w", err)
-	}
-	if !info.IsDir() || !ownerOnly(info) {
-		return "", fmt.Errorf("plugin directory %s is not a directory that only root or the receiver's user owns and can write", dir)
-	}
-	path := filepath.Join(dir, "wherry-plugin-"+kind)
-	info, err = os.Lstat(path)
+	path, err := filepath.EvalSymlinks(filepath.Join(dir, "wherry-plugin-"+kind))
 	if errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("no plugin for type %s", kind)
 	}
 	if err != nil {
 		return "", err
 	}
-	if !info.Mode().IsRegular() || !ownerOnly(info) {
-		return "", fmt.Errorf("plugin %s is not a regular file that only root or the receiver's user owns and can write", path)
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("plugin %s is not a regular file", path)
 	}
 	return path, nil
-}
-
-// ownerOnly reports that root or the receiver's user owns info and that neither group nor others can write it.
-func ownerOnly(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && (stat.Uid == 0 || int(stat.Uid) == receiverUID) && info.Mode().Perm()&0o022 == 0
 }

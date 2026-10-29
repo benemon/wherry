@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -82,13 +83,24 @@ func fixed(path string) func() (string, error) {
 	return func() (string, error) { return path, nil }
 }
 
+// sha256Of is the SHA-256 of the file at path.
+func sha256Of(t *testing.T, path string) []byte {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(content)
+	return sum[:]
+}
+
 // launch starts the test plugin with a fresh record file and returns both.
 func launch(t *testing.T) (*Process, string, *syncBuffer) {
 	t.Helper()
 	record := filepath.Join(t.TempDir(), "record.jsonl")
 	t.Setenv("WHERRY_TESTPLUGIN_RECORD", record)
 	logs := &syncBuffer{}
-	p, err := Launch(fixed(testPlugin), logs)
+	p, err := Launch("fake", fixed(testPlugin), sha256Of(t, testPlugin), logs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,7 +454,7 @@ func TestRefusesPluginWithoutMutualTLS(t *testing.T) {
 	record := filepath.Join(t.TempDir(), "record.jsonl")
 	t.Setenv("WHERRY_TESTPLUGIN_RECORD", record)
 	t.Setenv("WHERRY_TESTPLUGIN_PLAINTEXT", "1")
-	p, err := Launch(fixed(testPlugin), &syncBuffer{})
+	p, err := Launch("fake", fixed(testPlugin), sha256Of(t, testPlugin), &syncBuffer{})
 	if err == nil {
 		_, configureErr := p.Configure(Settings{Name: "a", Credential: platformCredential})
 		p.Close()
@@ -544,6 +556,56 @@ func TestCloseStopsRestarts(t *testing.T) {
 		if entry.PID != closed {
 			t.Fatalf("plugin started again as %d after Close", entry.PID)
 		}
+	}
+}
+
+// go-plugin checks the binary against the pin before each start, the first and every restart, and the refusal names
+// the type and both hashes.
+func TestChecksumIsCheckedAtStartAndRestart(t *testing.T) {
+	shortRestart(t)
+	t.Setenv("WHERRY_TESTPLUGIN_RECORD", filepath.Join(t.TempDir(), "record.jsonl"))
+	binary := filepath.Join(t.TempDir(), "wherry-plugin-fake")
+	content, err := os.ReadFile(testPlugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binary, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pin := sha256Of(t, binary)
+	other := sha256.Sum256([]byte("other"))
+	if p, err := Launch("fake", fixed(binary), other[:], &syncBuffer{}); err == nil {
+		p.Close()
+		t.Fatal("launched a binary whose SHA-256 is not the pin")
+	} else if want := fmt.Sprintf("plugin type fake: %s has SHA-256 %x and the pin is %x", binary, pin, other); err.Error() != want {
+		t.Fatalf("launch error %v; want %q", err, want)
+	}
+	logs := &syncBuffer{}
+	p, err := Launch("fake", fixed(binary), pin, logs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+	configured(t, p, "a", "{}")
+	// A running binary cannot be written in place, so the changed one replaces it.
+	replacement := binary + ".new"
+	if err := os.WriteFile(replacement, append(content, 0), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	changed := sha256Of(t, replacement)
+	if err := os.Rename(replacement, binary); err != nil {
+		t.Fatal(err)
+	}
+	kill(t, p)
+	want := fmt.Sprintf("plugin type fake: %s has SHA-256 %x and the pin is %x", binary, changed, pin)
+	eventually(t, "the restart refused", func() error {
+		if !strings.Contains(logs.String(), want) {
+			return fmt.Errorf("logs:\n%s", logs.String())
+		}
+		return nil
+	})
+	if restarts := p.Restarts(); restarts != 0 {
+		t.Fatalf("restarts = %d; want the changed binary refused", restarts)
 	}
 }
 
@@ -692,7 +754,7 @@ func TestOtherProtocolVersionsAreRefused(t *testing.T) {
 		if err := os.WriteFile(script, fmt.Appendf(nil, "#!/bin/sh\necho '1|%d|tcp|127.0.0.1:1|grpc'\nsleep 5\n", version), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		p, err := Launch(fixed(script), &syncBuffer{})
+		p, err := Launch("other", fixed(script), sha256Of(t, script), &syncBuffer{})
 		if err == nil {
 			p.Close()
 			t.Fatalf("launched a version %d plugin", version)
@@ -713,7 +775,7 @@ func TestProtocolTenBeforeVersionedPlugins(t *testing.T) {
 		t.Fatalf("build the protocol 10 fixture: %v\n%s", err, output)
 	}
 	t.Run("its plugin under this Launch", func(t *testing.T) {
-		p, err := Launch(fixed(binary), &syncBuffer{})
+		p, err := Launch("protocol10", fixed(binary), sha256Of(t, binary), &syncBuffer{})
 		if err != nil {
 			t.Fatal(err)
 		}

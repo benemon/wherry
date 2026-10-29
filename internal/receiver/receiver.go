@@ -46,8 +46,8 @@ type Named struct {
 }
 
 // ProfileFactory configures one profile for the receiver's pool from its settings in the receiver's configuration
-// record.
-type ProfileFactory func(pool string, settings admin.ProfileSettings) (Named, error)
+// record and the SHA-256 the record pins for its plugin's binary.
+type ProfileFactory func(pool string, settings admin.ProfileSettings, pluginSHA256 string) (Named, error)
 
 // Receiver claims tasks for one pool and runs them through its profiles.
 type Receiver struct {
@@ -282,7 +282,7 @@ func (r *Receiver) configure(ctx context.Context) error {
 			}
 			profiles := make([]Named, 0, len(config.Profiles))
 			for _, settings := range config.Profiles {
-				named, err := r.factory(config.Pool, settings)
+				named, err := r.factory(config.Pool, settings, config.PluginSHA256[settings.Plugin])
 				if err != nil {
 					return fmt.Errorf("profile %s: %s", settings.Name, logText(r.redactLive, err))
 				}

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,8 +25,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// pluginDir holds wherry-plugin-fake, the protocol module's test plugin, for the package's tests.
-var pluginDir string
+// pluginDir holds wherry-plugin-fake, the protocol module's test plugin, for the package's tests; fakeSHA256 is its
+// SHA-256 in lowercase hex.
+var pluginDir, fakeSHA256 string
 
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "wherry-plugins")
@@ -38,6 +40,12 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "build test plugin: %v\n%s", err, output)
 		os.Exit(1)
 	}
+	binary, err := os.ReadFile(filepath.Join(dir, "wherry-plugin-fake"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fakeSHA256 = fmt.Sprintf("%x", sha256.Sum256(binary))
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
@@ -75,68 +83,41 @@ func recordPlugin(t *testing.T) func() []pluginRecord {
 	}
 }
 
-func TestPluginPathRefusesWritableOrIrregularFiles(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "plugins")
-	if err := os.Mkdir(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+func TestPluginPathResolvesSymlinks(t *testing.T) {
+	dir, releases := t.TempDir(), t.TempDir()
 	binary := filepath.Join(dir, "wherry-plugin-nomad")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// The umask must not mask the modes under test.
-	chmod := func(path string, mode os.FileMode) {
-		t.Helper()
-		if err := os.Chmod(path, mode); err != nil {
+	if path, err := pluginPath(dir, "nomad"); err != nil || path != binary {
+		t.Fatalf("pluginPath = %q, %v; want the regular file", path, err)
+	}
+	release := filepath.Join(releases, "wherry-plugin-linked-1.0")
+	if err := os.WriteFile(release, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{"wherry-plugin-linked": release, "wherry-plugin-dangling": filepath.Join(releases, "gone")} {
+		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if path, err := pluginPath(dir, "nomad"); err != nil || path != binary {
-		t.Fatalf("pluginPath = %q, %v; want the owner-only binary", path, err)
+	if path, err := pluginPath(dir, "linked"); err != nil || path != release {
+		t.Fatalf("pluginPath = %q, %v; want the link's target %s", path, err, release)
 	}
-	for _, mode := range []os.FileMode{0o775, 0o757, 0o777} {
-		chmod(dir, mode)
-		if _, err := pluginPath(dir, "nomad"); err == nil {
-			t.Fatalf("accepted a plugin directory with mode %o", mode)
-		}
-	}
-	chmod(dir, 0o755)
-	for _, mode := range []os.FileMode{0o775, 0o757, 0o777} {
-		chmod(binary, mode)
-		if _, err := pluginPath(dir, "nomad"); err == nil {
-			t.Fatalf("accepted a plugin binary with mode %o", mode)
-		}
-	}
-	chmod(binary, 0o755)
-	if err := os.Symlink(binary, filepath.Join(dir, "wherry-plugin-linked")); err != nil {
-		t.Fatal(err)
+	if _, err := pluginPath(dir, "dangling"); err == nil || err.Error() != "no plugin for type dangling" {
+		t.Fatalf("dangling link: %v; want no plugin for type dangling", err)
 	}
 	if err := os.Mkdir(filepath.Join(dir, "wherry-plugin-folder"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"linked", "folder"} {
-		if _, err := pluginPath(dir, kind); err == nil || !strings.Contains(err.Error(), "regular file") {
-			t.Fatalf("plugin %s: %v; want refused as not a regular file", kind, err)
-		}
+	if _, err := pluginPath(dir, "folder"); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("plugin folder: %v; want refused as not a regular file", err)
 	}
 	if _, err := pluginPath(dir, "kubernetes"); err == nil || err.Error() != "no plugin for type kubernetes" {
 		t.Fatalf("missing plugin: %v", err)
 	}
 	if _, err := pluginPath(dir, "../nomad"); err == nil {
 		t.Fatal("accepted a plugin naming a path")
-	}
-	if os.Getuid() == 0 {
-		t.Log("running as root: every file here is root's, so another owner cannot be stood in")
-		return
-	}
-	previous := receiverUID
-	receiverUID = os.Getuid() + 1
-	defer func() { receiverUID = previous }()
-	if _, err := pluginPath(dir, "nomad"); err == nil {
-		t.Fatal("accepted a plugin directory owned by a user other than root or the receiver's")
-	}
-	if root, err := os.Stat("/"); err != nil || !ownerOnly(root) {
-		t.Fatalf("refused root's directory /: %v", err)
 	}
 }
 
@@ -167,7 +148,7 @@ func TestRelativePluginDirRunsTheCheckedBinary(t *testing.T) {
 	t.Chdir(dir)
 	plugins := &plugins{dir: ".", logs: io.Discard, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	_, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"})
+	_, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}, fakeSHA256)
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Fatal("a binary found on PATH ran in place of the checked plugin")
 	}
@@ -182,12 +163,10 @@ func TestRestartChecksThePluginAgain(t *testing.T) {
 	logs := &syncBuffer{}
 	plugins := &plugins{dir: dir, logs: logs, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	if _, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}); err != nil {
+	if _, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}, fakeSHA256); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Join(dir, "wherry-plugin-fake"), 0o775); err != nil {
-		t.Fatal(err)
-	}
+	changed := replacePlugin(t, dir, "fake")
 	first := read()[0].PID
 	if err := syscall.Kill(first, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
@@ -195,18 +174,59 @@ func TestRestartChecksThePluginAgain(t *testing.T) {
 	time.Sleep(3 * time.Second)
 	for _, record := range read() {
 		if record.PID != first {
-			t.Fatalf("restarted a plugin binary that group can write, as %d", record.PID)
+			t.Fatalf("restarted a plugin binary whose SHA-256 is not the pin, as %d", record.PID)
 		}
 	}
-	if !strings.Contains(logs.String(), "plugin restart failed") || !strings.Contains(logs.String(), "only root or the receiver's user owns and can write") {
-		t.Fatalf("refused restart not logged:\n%s", logs.String())
+	if want := fmt.Sprintf("plugin type fake: %s has SHA-256 %s and the pin is %s", filepath.Join(dir, "wherry-plugin-fake"), changed, fakeSHA256); !strings.Contains(logs.String(), "plugin restart failed") || !strings.Contains(logs.String(), want) {
+		t.Fatalf("refused restart not logged with %q:\n%s", want, logs.String())
+	}
+}
+
+// replacePlugin replaces the plugin of type kind in dir with the test plugin and one more byte, as a new file since a
+// running binary cannot be written, and returns its SHA-256 in hex.
+func replacePlugin(t *testing.T, dir, kind string) string {
+	t.Helper()
+	binary, err := os.ReadFile(filepath.Join(pluginDir, "wherry-plugin-fake"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary = append(binary, 0)
+	replacement := filepath.Join(dir, "replacement")
+	if err := os.WriteFile(replacement, binary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, filepath.Join(dir, "wherry-plugin-"+kind)); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(binary))
+}
+
+func TestPluginLaunchesOnlyFromItsPin(t *testing.T) {
+	recordPlugin(t)
+	dir, releases := t.TempDir(), installPlugin(t)
+	if err := os.Symlink(filepath.Join(releases, "wherry-plugin-fake"), filepath.Join(dir, "wherry-plugin-fake")); err != nil {
+		t.Fatal(err)
+	}
+	plugins := &plugins{dir: dir, logs: io.Discard, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	defer plugins.close()
+	settings := admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}
+	if _, err := plugins.profile("build", settings, ""); err == nil || err.Error() != "plugin type fake has no pinned SHA-256; set it with receiver update --plugin-sha256 fake=HEX" {
+		t.Fatalf("unpinned plugin: %v; want refused naming the type and the flag", err)
+	}
+	other := strings.Repeat("0", 64)
+	want := fmt.Sprintf("plugin type fake: %s has SHA-256 %s and the pin is %s", filepath.Join(releases, "wherry-plugin-fake"), fakeSHA256, other)
+	if _, err := plugins.profile("build", settings, other); err == nil || err.Error() != want {
+		t.Fatalf("mismatched plugin: %v; want %q", err, want)
+	}
+	if _, err := plugins.profile("build", settings, fakeSHA256); err != nil {
+		t.Fatalf("symlinked plugin at its pin: %v", err)
 	}
 }
 
 func TestMissingPluginIsAConfigurationError(t *testing.T) {
 	plugins := &plugins{dir: t.TempDir(), logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	_, err := plugins.profile("build", admin.ProfileSettings{Name: "lab", Plugin: "nomad", Agent: "claude"})
+	_, err := plugins.profile("build", admin.ProfileSettings{Name: "lab", Plugin: "nomad", Agent: "claude"}, fakeSHA256)
 	if err == nil || err.Error() != "no plugin for type nomad" {
 		t.Fatalf("got %v, want no plugin for type nomad", err)
 	}
@@ -230,7 +250,7 @@ func TestOneProcessPerPlugin(t *testing.T) {
 	for _, settings := range []admin.ProfileSettings{
 		{Name: "exec", Plugin: "fake", Agent: "claude"}, {Name: "podman", Plugin: "fake", Agent: "claude"}, {Name: "edge", Plugin: "other", Agent: "claude"},
 	} {
-		named, err := plugins.profile("build", settings)
+		named, err := plugins.profile("build", settings, fakeSHA256)
 		if err != nil || named.Name != settings.Name {
 			t.Fatalf("profile %s: %+v, %v", settings.Name, named, err)
 		}
@@ -401,7 +421,7 @@ func TestProfileCredentialReachesThePluginInPlaceOfItsName(t *testing.T) {
 		logs: io.Discard, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	settings := admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "nomad-token", "outputs": true}}
-	if _, err := plugins.profile("build", settings); err != nil {
+	if _, err := plugins.profile("build", settings, fakeSHA256); err != nil {
 		t.Fatal(err)
 	}
 	records := read()
@@ -433,7 +453,7 @@ func TestProfileCredentialFailures(t *testing.T) {
 		"nomad-token": `credential "nomad-token" has no source in the receiver's configuration`,
 		"open-token":  "resolve credential open-token: its file is writable by its group or open to others; chmod 600 it",
 	} {
-		_, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": name}})
+		_, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": name}}, fakeSHA256)
 		if err == nil || err.Error() != want || strings.Contains(err.Error(), value) || strings.Contains(err.Error(), dir) {
 			t.Errorf("credential %s: %v; want %q", name, err, want)
 		}

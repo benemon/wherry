@@ -134,7 +134,7 @@ func TestReceiverConfigExampleParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want.Receiver, want.Pool = "nomad-1", "build"
+	want.Receiver, want.Pool, want.PluginSHA256 = "nomad-1", "build", map[string]string{"nomad": fakeSHA256}
 	if err := admin.ValidateConfig(want, terms); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestReceiverConfigNullDeletesAnInheritedKey(t *testing.T) {
 	defer plugins.close()
 	settings := config.Profiles[0]
 	settings.Plugin = "fake"
-	if _, err := plugins.profile("build", settings); err != nil {
+	if _, err := plugins.profile("build", settings, fakeSHA256); err != nil {
 		t.Fatal(err)
 	}
 	if configured := string(read()[0].Settings.Config); strings.Contains(configured, "image") || strings.Contains(configured, "resources") || strings.Contains(configured, "null") {

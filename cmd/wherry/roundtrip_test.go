@@ -261,7 +261,8 @@ func TestRoundTrip(t *testing.T) {
 	hostBundle, otherBundle, receiverBundle := filepath.Join(dir, "host.yaml"), filepath.Join(dir, "other.yaml"), filepath.Join(dir, "receiver.yaml")
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2,
 		Profiles: []admin.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude", Labels: map[string]string{"gpu": "yes"},
-			Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000, "credential": "fake-token"}}}}
+			Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000, "credential": "fake-token"}}},
+		PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	for _, step := range []func() error{
 		func() error { return service.PoolCreate(ctx, "pool-a", terms) },
 		func() error { return service.TenantAdd(ctx, "tenant-a", "pool-a") },
@@ -659,7 +660,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []admin.ProfileSettings{
 		{Name: "fake", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "fake-token", "log_credential": true}},
-	}}
+	}, PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "receiver.yaml")
 	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {

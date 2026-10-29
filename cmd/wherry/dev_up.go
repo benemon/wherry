@@ -936,7 +936,8 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, service admi
 	if err := service.HostAdd(ctx, devTenant, devHost, instance.env("host", "dev.bundle")); err != nil {
 		return busclient.Config{}, fmt.Errorf("host add: %w", err)
 	}
-	receiver := admin.ReceiverConfig{Receiver: devReceiver, Pool: devPool, Capacity: 2, Profiles: devProfiles(env, agents)}
+	receiver := admin.ReceiverConfig{Receiver: devReceiver, Pool: devPool, Capacity: 2, Profiles: devProfiles(env, agents),
+		PluginSHA256: map[string]string{"nomad": env.manifest.Plugin.SHA256}}
 	if err := service.ReceiverAdd(ctx, receiver, instance.env("receiver", "dev-1.bundle")); err != nil {
 		return busclient.Config{}, fmt.Errorf("receiver add: %w", err)
 	}
