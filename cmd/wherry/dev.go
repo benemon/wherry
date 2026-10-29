@@ -554,6 +554,7 @@ func devReset(instance devInstance, stdout io.Writer) error {
 	return nil
 }
 
+// os.ModeCharDevice is set for /dev/null too, so a stdlib check would take init </dev/null for a terminal.
 func isTerminal(file *os.File) bool {
 	return term.IsTerminal(int(file.Fd()))
 }
