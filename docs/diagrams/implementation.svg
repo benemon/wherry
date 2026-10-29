@@ -39,7 +39,7 @@
     <text x="205" y="364" text-anchor="middle" font-weight="600">wherry client</text>
     <text x="205" y="383" text-anchor="middle" font-size="10.5" fill="#2e4a35">CLI commands and MCP tools</text>
     <text x="205" y="398" text-anchor="middle" font-size="10.5" fill="#2e4a35">places, signs and submits runs</text>
-    <text x="205" y="413" text-anchor="middle" font-size="10.5" fill="#2e4a35">watch follows the feed and answers seals</text>
+    <text x="205" y="413" text-anchor="middle" font-size="10.5" fill="#2e4a35">wait follows the feed and answers seals</text>
 
     <rect x="60" y="466" width="290" height="110" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="205" y="490" text-anchor="middle" font-weight="600">Host files</text>

@@ -5,7 +5,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -71,8 +70,7 @@ func TestCollectDeletesS3ObjectsOnlyOnceEveryOutputVerified(t *testing.T) {
 	f, o, runID, result := s3Run(t, "")
 	dir := t.TempDir()
 	collected, err := f.host.Collect(f.ctx, runID, result, dir)
-	if err != nil || len(collected.Rejected) != 0 || len(collected.Outputs) != 2 || collected.Outputs[1].Path != filepath.Join(dir, "b.bin") ||
-		collected.Transcript.Path != filepath.Join(dir, wire.TranscriptFile) {
+	if err != nil || len(collected.Rejected) != 0 || len(collected.Outputs) != 2 || collected.Outputs[1].Path != filepath.Join(dir, "b.bin") {
 		t.Fatalf("collected %+v, %v", collected, err)
 	}
 	o.mu.Lock()
@@ -124,7 +122,7 @@ func TestCollectOfAnUnclaimedRunCollectsNothing(t *testing.T) {
 	result.Outputs = []Output{{Name: "report.md", SHA256: hexSum([]byte("x")), Size: 1, Data: []byte("x")}}
 	dir := filepath.Join(t.TempDir(), "outputs")
 	collected, err := f.host.Collect(f.ctx, submitted.RunID, result, dir)
-	if err != nil || collected.Outputs != nil || collected.Transcript.Path != "" || collected.Lines != nil || collected.Rejected != nil {
+	if err != nil || collected.Outputs != nil || collected.Rejected != nil {
 		t.Fatalf("collected %+v, %v; want nothing", collected, err)
 	}
 	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
@@ -160,27 +158,10 @@ func TestCollectNamesTheStepThatFailed(t *testing.T) {
 			t.Fatalf("collect = %v, want the S3 outputs named", err)
 		}
 	})
-	t.Run("write transcript", func(t *testing.T) {
-		f := newFixture(t)
-		task := f.endedRun(t, 2)
-		runID := task.submission.Wherry.Run
-		result, err := f.host.Await(f.ctx, runID, 5*time.Second)
-		if err != nil {
-			t.Fatal(err)
-		}
-		dir := t.TempDir()
-		if err := os.Mkdir(filepath.Join(dir, wire.TranscriptFile), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		_, err = f.host.Collect(f.ctx, runID, result, dir)
-		if failed := (*CollectError)(nil); !errors.As(err, &failed) || failed.Step != "write transcript" || err.Error() != "write transcript: "+failed.Err.Error() {
-			t.Fatalf("collect = %v, want the transcript's write named", err)
-		}
-	})
 }
 
-// The transcript Collect writes is its lines as ViewLines keeps them, each as AppendLine appends it.
-func TestCollectWritesTheTranscriptLines(t *testing.T) {
+// Collect writes the run's outputs alone; logs reads the transcript.
+func TestCollectWritesNoTranscript(t *testing.T) {
 	f := newFixture(t)
 	task := f.endedRun(t, 3)
 	runID := task.submission.Wherry.Run
@@ -188,13 +169,11 @@ func TestCollectWritesTheTranscriptLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	collected, err := f.host.Collect(f.ctx, runID, result, "")
-	if err != nil {
+	dir := t.TempDir()
+	if _, err := f.host.Collect(f.ctx, runID, result, dir); err != nil {
 		t.Fatal(err)
 	}
-	written, err := os.ReadFile(collected.Transcript.Path)
-	if err != nil || string(written) != "line\nline\nline\n" || string(collected.Transcript.Data) != string(written) ||
-		!slices.Equal([]int64{collected.Lines[0].Seq, collected.Lines[1].Seq, collected.Lines[2].Seq}, []int64{0, 5, 10}) {
-		t.Fatalf("transcript %q, %v; lines %+v", written, err, collected.Lines)
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("outputs directory holds %v, %v; want nothing", entries, err)
 	}
 }

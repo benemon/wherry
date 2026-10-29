@@ -72,7 +72,7 @@ var (
 	// collectTimeout bounds a plugin's collection of a run's outputs, during which the claim is renewed.
 	collectTimeout = 2 * time.Minute
 	// sealWait bounds how long a claimed run waits for its host's seal, which comes only while the parent runs
-	// watch or the MCP server; beyond it the run ends failed.
+	// wait or the MCP server; beyond it the run ends failed.
 	sealWait = wire.SealWait
 )
 
@@ -1508,7 +1508,7 @@ func unansweredReason(credentials []string, urls bool) string {
 	} else if len(credentials) > 0 {
 		configure = "add the credentials and storage"
 	}
-	return subject + " " + verb + " not answered within " + strings.TrimSuffix(wire.SealWait.String(), "0s") + "; " + configure + " in the host's wherry configuration, keep wherry watch or wherry mcp running, and submit again"
+	return subject + " " + verb + " not answered within " + strings.TrimSuffix(wire.SealWait.String(), "0s") + "; " + configure + " in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again"
 }
 
 // startFailure purges the run's job and returns the task to the pool for a member that can start it; cause is what the

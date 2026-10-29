@@ -25,7 +25,7 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wherry <init|key|key rotate|receivers|submit|cancel|watch|status|events|transcript|cleanup|receiver run|admin|mcp|version>")
+		return errors.New("usage: wherry <init|key|key rotate|receivers|submit|cancel|wait|status|events|logs|cleanup|receiver run|admin|mcp|version>")
 	}
 	if args[0] == "receiver" {
 		return runReceiver(args[1:], stdout, stderr)
@@ -122,7 +122,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	command, ok := map[string]func(context.Context, *busclient.Host, []string, io.Writer, io.Writer) error{
 		"receivers": runReceivers, "submit": runSubmit,
-		"cancel": runCancel, "watch": runWatch, "status": runStatus, "events": runEvents, "transcript": runTranscript, "cleanup": runCleanup,
+		"cancel": runCancel, "wait": runWait, "status": runStatus, "events": runEvents, "logs": runLogs, "cleanup": runCleanup,
 	}[args[0]]
 	if !ok {
 		return fmt.Errorf("unknown command %q", args[0])
@@ -265,7 +265,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	model := flags.String("model", "", "model the agent runs, one of its models as receivers lists them (default: the agent's default model)")
 	selectorText := flags.String("selector", "", "labels the profile must carry: key=v|v, key!=v|v, key, !key, comma-separated")
 	prompt := flags.String("prompt", "", "prompt text")
-	promptFile := flags.String("prompt-file", "", "prompt file")
+	promptFile := flags.String("prompt-file", "", "prompt file, or - for standard input")
 	gitRemote := flags.String("git", "", "REMOTE@REF: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit")
 	gitPath := flags.String("git-path", "", "checkout directory, relative (default: the repository name)")
 	gitChanges := flags.String("git-changes", "", "patch or bundle: ask for the agent's commits back as changes.patch or changes.bundle")
@@ -301,7 +301,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE]... [--s3-input FILE]... [--credential NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE]... [--s3-input FILE]... [--credential NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {
@@ -326,7 +326,13 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return errors.New("deadlines must be positive")
 	}
 	if promptFileSet {
-		contents, err := os.ReadFile(*promptFile)
+		var contents []byte
+		var err error
+		if *promptFile == "-" {
+			contents, err = io.ReadAll(stdin)
+		} else {
+			contents, err = os.ReadFile(*promptFile)
+		}
 		if err != nil {
 			return err
 		}
@@ -397,37 +403,52 @@ func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
 	}
 }
 
-// defaultWatchTimeout covers a run at the default queue deadline and run deadline.
-const defaultWatchTimeout = busclient.DefaultQueueDeadline + busclient.DefaultDeadline
+// stdin is a variable so tests can give submit a prompt on standard input.
+var stdin io.Reader = os.Stdin
 
-// streamRetry separates a failed read of a live run's transcript that watch streams from the next.
+// defaultWaitTimeout covers a run at the default queue deadline and run deadline.
+const defaultWaitTimeout = busclient.DefaultQueueDeadline + busclient.DefaultDeadline
+
+// streamRetry separates a failed read of a run's transcript that logs follows from the next, and bounds each wait for
+// more of it.
 const streamRetry = progressInterval
 
-func runWatch(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const watchUsage = "usage: wherry watch RUN_ID [--result-only|-q] [--timeout 2h10m] [--outputs-dir DIR]"
-	flags := flag.NewFlagSet("watch", flag.ContinueOnError)
+// exitError is an error wherry exits with code for.
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+
+func (e *exitError) Unwrap() error { return e.err }
+
+// stateCodes are wait's exit codes for a run that ends in a state other than COMPLETED, and timeoutCode for its
+// timeout passing with the run still going.
+var stateCodes = map[wire.TaskState]int{
+	wire.TaskStateFailed: 2, wire.TaskStateCanceled: 3, wire.TaskStateRejected: 4, wire.TaskStateAuthRequired: 5,
+}
+
+const timeoutCode = 6
+
+func runWait(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
+	const waitUsage = "usage: wherry wait RUN_ID [--timeout 2h10m] [--outputs-dir DIR]"
+	flags := flag.NewFlagSet("wait", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, watchUsage)
-		fmt.Fprintln(stderr, "Stopping watch can leave a credential request unanswered, ending the run FAILED after the seal wait.")
+		fmt.Fprintln(stderr, waitUsage)
+		fmt.Fprintln(stderr, "Stopping wait can leave a credential request unanswered, ending the run FAILED after the seal wait.")
 		flags.PrintDefaults()
 	}
 	configFile := flags.String("config-file", "", "host configuration file")
-	timeout := flags.Duration("timeout", defaultWatchTimeout, "wait timeout")
+	timeout := flags.Duration("timeout", defaultWaitTimeout, "wait timeout")
 	outputsDir := flags.String("outputs-dir", "", "directory for the run's outputs (default: <state_dir>/runs/RUN_ID/outputs)")
-	resultOnly := flags.Bool("result-only", false, "print the run's reply alone")
-	var quiet bool
-	flags.BoolVar(&quiet, "q", false, "print nothing but errors; the exit status tells the outcome")
-	flags.BoolVar(&quiet, "quiet", false, "print nothing but errors; the exit status tells the outcome")
 	positional, err := parseAnywhere(flags, args)
 	if err != nil {
 		return err
 	}
 	if len(positional) != 1 {
-		return errors.New(watchUsage)
-	}
-	if *resultOnly && quiet {
-		return errors.New("--result-only and --quiet are mutually exclusive")
+		return errors.New(waitUsage)
 	}
 	runID := positional[0]
 	if *timeout <= 0 {
@@ -438,61 +459,21 @@ func runWatch(ctx context.Context, client *busclient.Host, args []string, stdout
 		return err
 	}
 	defer closeClient()
-	full := !*resultOnly && !quiet
-	diagnostics := stderr
-	if quiet {
-		diagnostics = io.Discard
-	}
-	// printed is the seq past which transcript lines are yet to print; lines print in seq order and once each.
-	printed := int64(-1)
-	printLines := func(lines []busclient.TranscriptLine) {
-		for _, line := range lines {
-			if line.Seq > printed {
-				stdout.Write(busclient.AppendLine(nil, line))
-				printed = line.Seq
-			}
-		}
-	}
-	streamCtx, stopStream := context.WithCancel(ctx)
-	streamed := make(chan struct{})
-	if full {
-		stream := client.StreamTranscript(runID)
-		go func() {
-			defer close(streamed)
-			for streamCtx.Err() == nil {
-				// A failed read is retried; the transcript Collect writes holds every line.
-				if transcript, err := stream.Next(streamCtx); err == nil {
-					printLines(busclient.ViewLines(transcript.Lines))
-					stream.Wait(streamCtx)
-					continue
-				}
-				select {
-				case <-streamCtx.Done():
-				case <-time.After(streamRetry):
-				}
-			}
-		}()
-	} else {
-		close(streamed)
-	}
 	result, err := client.Await(ctx, runID, *timeout)
-	stopStream()
-	<-streamed
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		return &exitError{timeoutCode, err}
+	}
 	if err != nil {
 		return err
 	}
 	collected, collectErr := client.Collect(ctx, runID, result, *outputsDir)
-	if full {
-		printLines(collected.Lines)
-		fmt.Fprintln(stdout, result.Status.State)
-	}
 	if result.Unclaimed != "" {
 		return errors.New(result.Unclaimed)
 	}
 	if result.Model != "" {
-		fmt.Fprintf(diagnostics, "model=%s\n", result.Model)
+		fmt.Fprintf(stderr, "model=%s\n", result.Model)
 	}
-	if result.Status.Message != nil && !quiet {
+	if result.Status.Message != nil {
 		for _, part := range result.Status.Message.Parts {
 			if replyPreview(result, part) {
 				fmt.Fprintln(stdout, string(result.Reply.Data))
@@ -504,31 +485,33 @@ func runWatch(ctx context.Context, client *busclient.Host, args []string, stdout
 	switch {
 	case result.Reply == nil:
 	case result.Reply.Rejected != "":
-		fmt.Fprintf(diagnostics, "reply rejected by this host: %s; printed its preview\n", result.Reply.Rejected)
+		fmt.Fprintf(stderr, "reply rejected by this host: %s; printed its preview\n", result.Reply.Rejected)
 	case result.Reply.Cut:
-		fmt.Fprintln(diagnostics, "reply cut at the pool's reply limit")
+		fmt.Fprintln(stderr, "reply cut at the pool's reply limit")
 	}
 	if collectErr != nil {
 		return collectErr
 	}
-	for _, output := range append(collected.Outputs, collected.Transcript) {
-		if full {
-			fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, output.Path, output.SHA256, output.Size)
-		}
+	for _, output := range collected.Outputs {
+		fmt.Fprintf(stdout, "output=%s path=%s sha256=%s size=%d\n", output.Name, output.Path, output.SHA256, output.Size)
 		switch output.Name {
 		case wire.GitPatch:
-			fmt.Fprintf(diagnostics, "apply with: git am %s\n", output.Path)
+			fmt.Fprintf(stderr, "apply with: git am %s\n", output.Path)
 		case wire.GitBundle:
-			fmt.Fprintf(diagnostics, "fetch with: git fetch %s HEAD\n", output.Path)
+			fmt.Fprintf(stderr, "fetch with: git fetch %s HEAD\n", output.Path)
 		}
 	}
 	for _, output := range append(result.NotReturned, collected.Rejected...) {
-		fmt.Fprintf(diagnostics, "output %s not returned: %s\n", output.Name, output.Reason)
+		fmt.Fprintf(stderr, "output %s not returned: %s\n", output.Name, output.Reason)
 	}
-	warnRedacted(diagnostics, result.Redacted)
-	warnSkipped(diagnostics, result.Skipped)
-	if result.Status.State != wire.TaskStateCompleted {
-		return fmt.Errorf("run ended in %s", result.Status.State)
+	warnRedacted(stderr, result.Redacted)
+	warnSkipped(stderr, result.Skipped)
+	if state := result.Status.State; state != wire.TaskStateCompleted {
+		code, ok := stateCodes[state]
+		if !ok {
+			code = 1
+		}
+		return &exitError{code, fmt.Errorf("run ended in %s", state)}
 	}
 	if len(collected.Rejected) > 0 {
 		return fmt.Errorf("%d outputs failed verification", len(collected.Rejected))
@@ -678,50 +661,81 @@ func runEvents(ctx context.Context, client *busclient.Host, args []string, stdou
 	return nil
 }
 
-func runTranscript(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
-	const transcriptUsage = "usage: wherry transcript RUN_ID [--offset N] [--limit N]"
-	flags := flag.NewFlagSet("transcript", flag.ContinueOnError)
+func runLogs(ctx context.Context, client *busclient.Host, args []string, stdout, stderr io.Writer) error {
+	const logsUsage = "usage: wherry logs RUN_ID [-f|--follow]"
+	flags := flag.NewFlagSet("logs", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configFile := flags.String("config-file", "", "host configuration file")
-	offset := flags.Int("offset", 0, "lines to skip")
-	limit := flags.Int("limit", 0, "most lines to print (default: all)")
+	var follow bool
+	flags.BoolVar(&follow, "f", false, "print lines as the agent prints them until the run ends")
+	flags.BoolVar(&follow, "follow", false, "print lines as the agent prints them until the run ends")
 	positional, err := parseAnywhere(flags, args)
 	if err != nil {
 		return err
 	}
 	if len(positional) != 1 {
-		return errors.New(transcriptUsage)
+		return errors.New(logsUsage)
 	}
 	runID := positional[0]
-	if *offset < 0 || *limit < 0 {
-		return errors.New("--offset and --limit must not be negative")
-	}
 	client, closeClient, err := commandClient(client, *configFile, stderr)
 	if err != nil {
 		return err
 	}
 	defer closeClient()
+	// printed is the seq past which lines are yet to print; lines print in seq order and once each.
+	printed := int64(-1)
+	printLines := func(lines []busclient.TranscriptLine) {
+		for _, line := range busclient.ViewLines(lines) {
+			if line.Seq <= printed {
+				continue
+			}
+			printed = line.Seq
+			switch part := line.Part; {
+			case part.URL != "":
+				var pointer wire.PointerMetadata
+				json.Unmarshal(part.Metadata, &pointer) // validation decoded it
+				fmt.Fprintf(stderr, "line at offset %d not stored: sha256=%s size=%d\n", line.Seq, pointer.SHA256, pointer.Size)
+			case part.Raw != nil:
+				fmt.Fprintf(stdout, "%s\n", part.Raw)
+			default:
+				fmt.Fprintln(stdout, part.Text)
+			}
+		}
+	}
+	if follow {
+		stream := client.StreamTranscript(runID)
+		warned := false
+		for {
+			transcript, err := stream.Next(ctx)
+			if errors.Is(err, busclient.ErrRunNotFound) || ctx.Err() != nil {
+				return err
+			}
+			if err != nil {
+				// A failed read is retried; the transcript read once the run ends holds every line.
+				select {
+				case <-ctx.Done():
+				case <-time.After(streamRetry):
+				}
+				continue
+			}
+			printLines(transcript.Lines)
+			if stream.Ended() {
+				break
+			}
+			if !warned && stream.Unanswered() {
+				fmt.Fprintf(stderr, "run is waiting for credentials; run wherry wait %s\n", runID)
+				warned = true
+			}
+			waitCtx, stopWait := context.WithTimeout(ctx, streamRetry)
+			stream.Wait(waitCtx)
+			stopWait()
+		}
+	}
 	result, err := client.Transcript(ctx, runID)
 	if err != nil {
 		return err
 	}
-	result.Lines = busclient.ViewLines(result.Lines)
-	lines := result.Lines[min(*offset, len(result.Lines)):]
-	if *limit > 0 {
-		lines = lines[:min(*limit, len(lines))]
-	}
-	for _, line := range lines {
-		switch part := line.Part; {
-		case part.URL != "":
-			var pointer wire.PointerMetadata
-			json.Unmarshal(part.Metadata, &pointer) // validation decoded it
-			fmt.Fprintf(stderr, "line at offset %d not stored: sha256=%s size=%d\n", line.Seq, pointer.SHA256, pointer.Size)
-		case part.Raw != nil:
-			fmt.Fprintf(stdout, "%s\n", part.Raw)
-		default:
-			fmt.Fprintln(stdout, part.Text)
-		}
-	}
+	printLines(result.Lines)
 	warnRedacted(stderr, result.Redacted)
 	warnSkipped(stderr, result.Skipped)
 	return nil

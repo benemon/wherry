@@ -57,7 +57,7 @@ literally and interprets only the agent name.
 A profile whose agent lists `models` runs `default_model` unless you pass
 `model`, one of those `models`, to `submit`; an agent with one model runs
 it, and with two or more and no `default_model` you must pass one. A model outside them, or none where one is required, returns
-`INVALID_ARGUMENT`. `watch` returns the `model` asked for.
+`INVALID_ARGUMENT`. `wait` returns the `model` asked for.
 
 ## Submit, then keep working
 
@@ -65,16 +65,17 @@ Call `submit` with `prompt`, and `agent`, `selector` and `git` when you
 need them. For a long brief, write it to a file and pass its path as
 `prompt_file` instead of `prompt`; the server reads it as it reads `inputs`,
 and refuses an empty one.
-It returns `id`, `pool` and `watch` straight away. `watch` is a shell
-command, `wherry watch <id> --result-only`. Where your harness runs shell
+It returns `id`, `pool` and `wait` straight away. `wait` is a shell
+command, `wherry wait <id>`. Where your harness runs shell
 commands in the background and tells you when they finish, start that command
 in the background now, before anything else: it blocks until the run ends (or
 for 2 hours 10 minutes; `--timeout` changes that), prints the agent's reply
-alone, writes returned outputs and `transcript.jsonl`, answers the receiver's
-credential request, and exits non-zero for any state other than
-`TASK_STATE_COMPLETED`, and at once when the queue deadline passes with no
+and a line for each returned output, writes the outputs, answers the
+receiver's credential request, and exits 0 for `TASK_STATE_COMPLETED`, 2
+failed, 3 canceled, 4 rejected, 5 auth required, 6 timed out, and 1 when it
+could not wait or collect, at once when the queue deadline passes with no
 receiver claiming the run. Its completion is how you learn the run ended, so
-you skip the `watch` tool loop below. Then carry on with other work. Do not stop
+you skip the `wait` tool loop below. Then carry on with other work. Do not stop
 the command while the run waits for a credential: an unanswered credential
 request ends the run `TASK_STATE_FAILED` after 5 minutes, unless the wherry
 MCP server answers it.
@@ -114,15 +115,15 @@ To send a large file through S3 directly, up to 5 GiB, add its path to
 in its input directory like any input. Add `storage: "s3"` to an output to
 return it through the bucket. Both need a pool with storage and a storage
 credential in the user's wherry configuration; without them `submit`
-returns `INVALID_ARGUMENT` saying which is missing. `watch` downloads S3
+returns `INVALID_ARGUMENT` saying which is missing. `wait` downloads S3
 outputs like any output, and deletes the run's objects from the bucket
 once the run has ended and every one has verified. A run that ended while
-nothing watched it keeps them until you call `cleanup` with its id;
+nothing waited for it keeps them until you call `cleanup` with its id;
 `cleanup` refuses a run that has not ended.
 
 ## Collect the result
 
-Without a background command, call the `watch` tool with the id, and call it
+Without a background command, call the `wait` tool with the id, and call it
 again until the run ends; nothing tells you when it does. It waits up to 45
 seconds and returns one of:
 
@@ -137,8 +138,6 @@ seconds and returns one of:
   credential it needs, often an optional one the host has no source for. The
   run has ended; add a source for the credential to the host's
   configuration and submit again.
-- Every ended run also returns `transcript`, the local path of the
-  `transcript.jsonl` holding the agent's redacted standard output.
 - `TASK_STATE_REJECTED` or `TASK_STATE_CANCELED` with a `message` that
   says why.
 - `TASK_STATE_SUBMITTED` with the `message`
@@ -146,14 +145,14 @@ seconds and returns one of:
   `retry_after`: no receiver took the run before its queue deadline and none
   will. Check `receivers` for a live one that fits, then `submit` again.
 - `retry_after` with the current `state`: the run has not finished. Wait
-  that many seconds, or do other work, then call `watch` again.
+  that many seconds, or do other work, then call `wait` again.
 
 `status` with the id returns the run's latest state without waiting. Without
 an id it lists every run this host can see, latest update first, each with
 its `pool`, `state` and `updated` time; use it to find a run whose
 id you no longer hold. `events` returns the run's status history.
 
-`transcript` with the id returns the agent's standard output as the
+`logs` with the id returns the agent's standard output as the
 receiver redacted it: up to 100 lines from `offset`,
 and `next_offset` while more remain. Call it again with `next_offset` to read
 on. Use it to follow a long run or to see why one failed. Each line names the
@@ -171,14 +170,14 @@ agent requires or the task names. An optional credential the host lacks is not
 delivered, and the agent's prompt names it as not supplied.
 
 The receiver that claims a task asks this host for the run's credentials, and
-the wherry MCP server answers while it runs, as `wherry watch` does. When no
+the wherry MCP server answers while it runs, as `wherry wait` does. When no
 answer arrives within 5 minutes, usually because a credential's source failed
 to resolve, the run ends `TASK_STATE_FAILED` with a `message` that names the
 credentials and never holds their values. Tell the user to add a source for
 the credential under that name to `credentials` in their wherry configuration:
 a file, an environment variable of the process answering, or a command. Never ask for the value or handle it
 yourself. When the user says it is in place, call `submit` again with the
-same input, and start its `watch` as before.
+same input, and start its `wait` as before.
 
 ## Cancel unneeded work
 
@@ -197,5 +196,5 @@ restart the server, since a harness keeps the old process running. `UNAVAILABLE`
 server's log, and the user can also run the same operation with the `wherry`
 CLI to see it. `OUTPUTS_NOT_WRITTEN` means
 the result arrived but its outputs could not be written, downloaded or cleaned
-up, or its transcript written; the message starts with the step that failed,
+up; the message starts with the step that failed,
 and the MCP server's log holds the cause.

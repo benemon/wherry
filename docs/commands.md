@@ -15,20 +15,23 @@
   `~/.config/wherry/config.yaml`. A leading `~/` is expanded.
 - A command's flags may come before or after its `RUN_ID`.
 - A failed command prints `wherry: <error>` on standard error and exits
-  with status 1.
+  with status 1. `wait` has its own [exit codes](#exit-codes).
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
   positive. `host revoke` and `receiver revoke` refuse a `--wait` of zero or
   less before they revoke anything; without `--wait` they compute the wait
   from the broker's timeouts.
-- `cancel`, `watch`, `status`, `events` and `transcript` print
+- `cancel`, `wait`, `status`, `events` and `logs` print
   `skipped N unverifiable records` on standard error when N records of the
-  run fail verification. `watch -q` discards it.
-- `watch` and `status` print each redaction marker of a run this host
+  run fail verification.
+- Standard output carries a command's result and standard error its
+  errors and diagnostics, so `wherry wait ID >/dev/null` keeps only the
+  diagnostics and the exit status.
+- `wait` and `status` print each redaction marker of a run this host
   submitted as `[redacted:<name>]`, naming the credential or S3 object,
   and `<name> redacted N times` on standard error for each name whose
   markers they printed. A host maps a marker with the run's redaction key
   in `state_dir`, and prints a marker as it is when the run's record holds
-  no 32-byte key. `watch -q` discards the counts.
+  no 32-byte key.
 
 ### Names
 
@@ -112,7 +115,7 @@ Replaces the host key with a new one:
    `old_key_id=<id> new_key_id=<id>`.
 
 Stop every other wherry process of the host first, such as the MCP server
-and any `wherry watch`; they hold the old key.
+and any `wherry wait`; they hold the old key.
 
 Every host command that finds `<host_key>.next` folds the host's key topic
 before anything else. When the current key is the next key's, it renames
@@ -172,7 +175,7 @@ and needs `wherry init` on a re-provisioned host.
 | `--model` | the agent's `default_model` | model the agent runs, one of its `models` in the pool's terms |
 | `--selector` | empty | [selector](#selectors) over plugin profile labels |
 | `--prompt` | | prompt text |
-| `--prompt-file` | | file holding the prompt |
+| `--prompt-file` | | file holding the prompt; `-` reads standard input |
 | `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
 | `--git-changes patch\|bundle` | | ask for the agent's commits back as the output `changes.patch` or `changes.bundle` |
@@ -196,7 +199,9 @@ interpret a model name; the profile's plugin passes it to the agent as
 `WHERRY_MODEL`.
 
 Exactly one of `--prompt` and `--prompt-file` is required, and an empty
-prompt file fails with `--prompt-file is empty`. The other `--git-` flags
+prompt file fails with `--prompt-file is empty`. `--prompt-file -` reads the
+prompt from standard input, as in `generate-brief | wherry submit
+--prompt-file -`. The other `--git-` flags
 need `--git`, which splits at its last `@`. `submit` writes a
 `user@host:path` remote as `ssh://user@host/path`. The
 [extension](a2a-extension-v1.md#git-input) gives the rules for the remote,
@@ -282,14 +287,14 @@ carries about 75.
 
 `submit` seals nothing. The receiver that claims the task asks for the
 agent's credentials the host supplies, the task's credentials and presigned URLs
-for its S3 inputs and outputs, and `wherry watch` or `wherry mcp` answers
+for its S3 inputs and outputs, and `wherry wait` or `wherry mcp` answers
 ([sealed credentials](security.md#sealed-credentials)). When no seal
 answers the request within 5 minutes, the run ends `TASK_STATE_FAILED` with a message
 that names the credentials, and the presigned URLs when the run has S3
 inputs or outputs:
 
 ```
-credential <name> was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry watch or wherry mcp running, and submit again
+credential <name> was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again
 ```
 
 ### `wherry cancel RUN_ID`
@@ -297,26 +302,23 @@ credential <name> was not answered within 5m; add it to credentials in the host'
 Publishes a signed cancel of the run to its pool's events and prints
 `run_id=<id>`.
 
-### `wherry watch RUN_ID`
+### `wherry wait RUN_ID`
 
 Waits for a run to finish and collects it. `--timeout` sets the wait,
 `2h10m` by default: the default queue deadline and run deadline together.
 `--outputs-dir DIR` sets where the run's outputs go, by default
 `<state_dir>/runs/<run>/outputs/`.
 
-`watch` has three output modes. `--result-only` and `-q` refuse each other.
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--timeout` | `2h10m` | how long to wait for the run to end |
+| `--outputs-dir` | `<state_dir>/runs/<run>/outputs/` | where the run's outputs go |
 
-- By default everything goes to standard output, so `wherry watch ID >
-  run.log` keeps a full record. While the run is live, `watch` streams the
-  run's redacted transcript lines as the agent printed them, following the
-  tenant's transcript topic with one consumer from the run's echo, so each
-  line prints as it is written. Each line prints once, in order. After the last line come the state, each part
-  of the status message on its own line, and the `output=` lines.
-- `--result-only` prints the status message's parts alone, so standard output
-  is the reply.
-- `-q` or `--quiet` prints nothing on standard output. On standard error it
-  prints errors and the log of the seal requests it answers. The exit status
-  tells the outcome.
+Standard output carries the result: each part of the status message on its
+own line, then the `output=` lines. `wait` prints no transcript;
+[`wherry logs`](#wherry-logs-run-id) reads it, and `wherry logs ID > file`
+keeps it. Standard error carries errors, the diagnostics below and the log
+of the seal requests `wait` answers.
 
 The status message's parts are the agent's answer or what went wrong, as its
 [outcome file](configuration.md#agent-contract) reports it, or the
@@ -324,22 +326,18 @@ receiver's reason, for every state. A part prints as its text, its JSON
 data, `[url <url>]`, or `[raw <media type> <n> bytes]`. For a
 [reply](a2a-extension-v1.md#the-reply) over 64 KiB, the reply chunks'
 verified bytes print whole in place of the preview the message carries, and
-`watch` writes no file of it. Standard error then says
+`wait` writes no file of it. Standard error then says
 `reply cut at the pool's reply limit` when the reply was longer than the
 pool's `reply_limit`, or
 `reply rejected by this host: <reason>; printed its preview` when the chunks
 do not verify, with a reason as for an output.
 
-Every mode writes the outputs and `transcript.jsonl`, deletes the run's S3
-objects once they verify, answers seal requests, and exits as below. The
-diagnostics below that go to standard error print in every mode but `-q`.
-
-For a run whose placement names a model, `watch` prints `model=<model>` on
+For a run whose placement names a model, `wait` prints `model=<model>` on
 standard error.
 
-`watch` writes each output that [verifies](a2a-extension-v1.md#inputs-and-outputs)
+`wait` writes each output that [verifies](a2a-extension-v1.md#inputs-and-outputs)
 against the result, at its relative path beneath the outputs directory, and
-by default prints a line for it:
+prints a line for it:
 
 ```
 output=<name> path=<path> sha256=<hex> size=<bytes>
@@ -347,51 +345,56 @@ output=<name> path=<path> sha256=<hex> size=<bytes>
 
 For `changes.patch` it also prints `apply with: git am <path>`, and for
 `changes.bundle` `fetch with: git fetch <path> HEAD`, on standard error.
+No expected output takes the name `reply.txt`.
 
-`watch` writes the run's redacted transcript to `transcript.jsonl` in the
-outputs directory, one line per transcript line as `wherry transcript`
-prints them, and by default prints its line as it prints an output's, last.
-No expected output takes the name `transcript.jsonl` or `reply.txt`.
-
-`watch` reads the run's statuses and result from the tenant feed, and its
-output and transcript chunks from the tenant's transcript topic, from the
-first offset at or after one minute before the append time of the run's
-earliest echo on the feed. Once it sees a terminal status, it reads the transcript topic to its
-last stable offset, and waits until that reaches the high watermark it
-lists after it sees the terminal, before it writes the outputs and the
-transcript.
+`wait` reads the run's statuses and result from the tenant feed, and its
+output chunks from the tenant's transcript topic, from the first offset at
+or after one minute before the append time of the run's earliest echo on
+the feed. Once it sees a terminal status, it reads the transcript topic to
+its last stable offset, and waits until that reaches the high watermark it
+lists after it sees the terminal, before it writes the outputs.
 
 It prints `output <name> not returned: <reason>` on standard error for each
 output the result lists as not returned and each one that fails
 verification. A write never leaves the outputs directory, whatever links
 it holds.
 
-`watch` downloads each S3 output the result lists with the host's storage
+`wait` downloads each S3 output the result lists with the host's storage
 credential, to the same place, and prints it as it prints any output. It
 downloads only an S3 output the run declares, at its key
 `wherry/<tenant>/<run>/outputs/<name>`, and writes it only when its bytes
 match the listed size and SHA-256; a file already there that matches is
 kept. Once the run is terminal and every listed S3 output has verified,
-`watch` deletes every object under `wherry/<tenant>/<run>/` in the pool's
-bucket, inputs included. A run that ends while no `watch` runs keeps them
+`wait` deletes every object under `wherry/<tenant>/<run>/` in the pool's
+bucket, inputs included. A run that ends while no `wait` runs keeps them
 until `wherry cleanup` or the bucket's lifecycle rule removes them.
 
 A run this host submitted whose queue deadline passes with no status from
-a receiver can never start. `watch` then collects nothing, prints
-`TASK_STATE_SUBMITTED` by default, and exits at once with status 1 and
+a receiver can never start. `wait` then collects nothing, prints nothing on
+standard output, and exits at once with status 1 and
 `queue deadline passed at <RFC 3339 time> and no receiver claimed the run`.
 The queue deadline comes from this host's record of the submission, so
-`watch` on another host of the tenant waits for its timeout.
+`wait` on another host of the tenant waits for its timeout.
 
-`watch` exits with status 1, `run ended in <state>`, for any state other
-than `TASK_STATE_COMPLETED`, with status 1 when an output fails
-verification, and with status 1 when the timeout passes.
+#### Exit codes
 
-While it waits, `watch` answers the seal requests on the tenant feed for
+| Code | Meaning |
+| --- | --- |
+| 0 | the run ended `TASK_STATE_COMPLETED` and its outputs were written |
+| 1 | `wait` could not wait or collect: usage, run not found, broker unreachable, outputs not written or failing verification, queue deadline passed unclaimed |
+| 2 | the run ended `TASK_STATE_FAILED` |
+| 3 | the run ended `TASK_STATE_CANCELED` |
+| 4 | the run ended `TASK_STATE_REJECTED` |
+| 5 | the run ended `TASK_STATE_AUTH_REQUIRED` |
+| 6 | `--timeout` passed with the run still going |
+
+For codes 2 to 5 the error is `run ended in <state>`.
+
+While it waits, `wait` answers the seal requests on the tenant feed for
 every run this host submitted that has not ended, once per attempt, and logs on standard error
 each answer and each verified request of its own runs that it skips or
 refuses, by run, receiver and credential names. It resolves each credential's
-[source](security.md#credential-sources) at the answer. Stopping `watch`
+[source](security.md#credential-sources) at the answer. Stopping `wait`
 can leave a credential request unanswered, and the run then ends
 `TASK_STATE_FAILED` after the 5-minute seal wait.
 
@@ -449,34 +452,46 @@ attempt=<n> transcript_chunks=<n>
 `message` appears when the status has one, with each redaction marker shown
 as `wherry status` shows it.
 
-### `wherry transcript RUN_ID`
+### `wherry logs RUN_ID`
 
 Prints a run's transcript: each line of the agent's standard output, in
 output order, as the receiver redacted it. The lines are those the run's
 highest delivery attempt published, and, before its first line, those of
 the highest earlier attempt that has them, as
-[Chunk](a2a-extension-v1.md#chunk) specifies.
+[Chunk](a2a-extension-v1.md#chunk) specifies. `logs` is read-only and
+answers no seal request.
 
-`transcript` reads the lines from the tenant's transcript topic, from the
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-f`, `--follow` | off | print lines as the agent prints them, until the run ends |
+
+`logs` reads the lines from the tenant's transcript topic, from the
 first offset at or after one minute before the append time of the run's
 earliest echo on the tenant feed. Once the feed holds the run's terminal status, it reads the
 transcript topic to its last stable offset, and waits until that reaches the
 high watermark it lists after it sees the terminal, before it prints.
+Without `-f`, it prints the lines the topic holds and exits.
 
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--offset` | `0` | lines to skip |
-| `--limit` | `0`, every line | most lines to print |
+With `-f`, `logs` follows the tenant's transcript topic with one consumer
+from the run's echo, so each line prints as it is written, once and in
+order. When the run reaches a terminal status, it reads the transcript
+topic to the high watermark as above, prints the lines it has not printed,
+and exits with status 0. When it sees a seal request for the run that no
+answerer of this host has sealed after 3 seconds, it prints once on
+standard error:
 
-A negative `--offset` or `--limit` fails with
-`--offset and --limit must not be negative`.
+```
+run is waiting for credentials; run wherry wait <id>
+```
 
-`transcript` shows a Claude stream-json transcript without each thinking
-block's `signature` and without `system` lines of subtype `thinking_tokens`,
-and counts `--offset` and `--limit` over the lines it shows. The transcript
-topic keeps both. A line it drops a signature from is re-encoded compact
-with its members sorted and escapes resolved; a line that does not decode is shown as
-published.
+`logs` prints every line; a range comes from the shell, as in
+`wherry logs ID | sed -n '101,200p'`.
+
+`logs` shows a Claude stream-json transcript without each thinking
+block's `signature` and without `system` lines of subtype `thinking_tokens`.
+The transcript topic keeps both. A line it drops a signature from is
+re-encoded compact with its members sorted and escapes resolved; a line
+that does not decode is shown as published.
 
 A line that is not UTF-8 prints as its bytes. For a line over 512 KiB, which
 the receiver did not store, it prints `line at offset <seq> not stored:
@@ -485,14 +500,14 @@ sha256=<hex> size=<bytes>` on standard error. Each redaction marker reads
 the markers in every line of the transcript. The transcript grows while the agent
 runs.
 
-`watch`, `status`, `events`, `transcript`, `cleanup` and `cancel`
+`wait`, `status`, `events`, `logs`, `cleanup` and `cancel`
 find a run from this host's record of it in `state_dir`, or from a receiver's
 echo on the tenant feed. They fail with `run not found` when there is neither.
 
 ### `wherry mcp`
 
 Serves the [MCP tools](mcp.md) over stdio. For as long as it runs it
-answers seal requests as `watch` does, logging to standard error.
+answers seal requests as `wait` does, logging to standard error.
 The packaged MCP launch uses `["mcp"]` and the default configuration path.
 A server that runs `wherry mcp --config-file PATH` uses another, as
 [Harness integration](operations.md#harness-integration) shows.

@@ -49,7 +49,6 @@ func TestSubmitFileFlags(t *testing.T) {
 		"inputs over the limit":       {[]string{"--input", large}, "inline inputs are over profile lab's 49152-byte limit"},
 		"output escaping":             {[]string{"--output", "../report.md"}, "expected outputs must be unique relative paths of portable file names"},
 		"output in the outcome dir":   {[]string{"--output", ".wherry/outcome.json"}, "expected outputs must be unique relative paths of portable file names"},
-		"transcript output":           {[]string{"--output", "transcript.jsonl"}, "expected output transcript.jsonl is reserved for the run's transcript"},
 		"credential file escaping":    {[]string{"--credential", "deploy-key:file=../id"}, "credential deploy-key: file must be a portable file name"},
 		"unknown output suffix":       {[]string{"--output", "report.md:needed"}, "want NAME[:required][:s3]"},
 		"repeated output suffix":      {[]string{"--output", "report.md:required:required"}, "want NAME[:required][:s3]"},
@@ -109,15 +108,15 @@ func hashOf(data string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func TestWatchWritesVerifiedOutputs(t *testing.T) {
+func TestWaitWritesVerifiedOutputs(t *testing.T) {
 	b := newBus(t)
 	admitted := b.admitted(t)
 	runID := admitted.submission.Wherry.Run
 	b.outputResult(t, admitted, "sub/report.md", "# Report\n", hashOf("# Report\n"))
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	if err := runWatch(b.ctx, b.client, []string{runID, "--outputs-dir", dir}, &stdout, &stderr); err != nil {
-		t.Fatalf("watch: %v; stderr %s", err, stderr.String())
+	if err := runWait(b.ctx, b.client, []string{runID, "--outputs-dir", dir}, &stdout, &stderr); err != nil {
+		t.Fatalf("wait: %v; stderr %s", err, stderr.String())
 	}
 	path := filepath.Join(dir, "sub", "report.md")
 	if want := "output=sub/report.md path=" + path + " sha256=" + hashOf("# Report\n") + " size=9\n"; !strings.Contains(stdout.String(), want) {
@@ -131,22 +130,45 @@ func TestWatchWritesVerifiedOutputs(t *testing.T) {
 	}
 }
 
-func TestWatchFailsOnAnOutputItCannotVerify(t *testing.T) {
+// An expected output may be named transcript.jsonl, which wait writes as the agent left it.
+func TestOutputMayBeNamedTranscript(t *testing.T) {
+	b := newBus(t)
+	var stdout, stderr bytes.Buffer
+	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--output", "transcript.jsonl"}, &stdout, &stderr); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	runID, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
+	if outputs := b.tasks(t, runID)[0].submission.Wherry.Outputs; !slices.Equal(outputs, []wire.ExpectedOutput{{Name: "transcript.jsonl"}}) {
+		t.Fatalf("submitted outputs %+v", outputs)
+	}
+	admitted := b.admitted(t)
+	b.outputResult(t, admitted, "transcript.jsonl", "the agent's own\n", hashOf("the agent's own\n"))
+	dir := t.TempDir()
+	stdout.Reset()
+	if err := runWait(b.ctx, b.client, []string{admitted.submission.Wherry.Run, "--outputs-dir", dir}, &stdout, &stderr); err != nil {
+		t.Fatalf("wait: %v; stderr %s", err, stderr.String())
+	}
+	if written, err := os.ReadFile(filepath.Join(dir, "transcript.jsonl")); err != nil || string(written) != "the agent's own\n" {
+		t.Fatalf("transcript.jsonl %q, %v; want the agent's output", written, err)
+	}
+}
+
+func TestWaitFailsOnAnOutputItCannotVerify(t *testing.T) {
 	b := newBus(t)
 	admitted := b.admitted(t)
 	runID := admitted.submission.Wherry.Run
 	b.outputResult(t, admitted, "report.md", "# Report\n", hashOf("# Forged\n"))
 	var stdout, stderr bytes.Buffer
-	err := runWatch(b.ctx, b.client, []string{runID}, &stdout, &stderr)
+	err := runWait(b.ctx, b.client, []string{runID}, &stdout, &stderr)
 	if err == nil || !strings.Contains(stderr.String(), "output report.md not returned: rejected by this host: size or hash mismatch") {
-		t.Fatalf("watch = %v, stderr %q; want the output refused", err, stderr.String())
+		t.Fatalf("wait = %v, stderr %q; want the output refused", err, stderr.String())
 	}
 	if _, statErr := os.Stat(filepath.Join(b.stateDir, "runs", runID, "outputs", "report.md")); statErr == nil {
 		t.Fatal("wrote an output that failed verification")
 	}
 }
 
-func TestMCPSubmitCarriesFilesAndWatchWritesOutputs(t *testing.T) {
+func TestMCPSubmitCarriesFilesAndWaitWritesOutputs(t *testing.T) {
 	b := newBus(t)
 	b.credentials["deploy-key"] = b.credentials["model"]
 	work := t.TempDir()
@@ -169,12 +191,12 @@ func TestMCPSubmitCarriesFilesAndWatchWritesOutputs(t *testing.T) {
 	}
 	b.feed(t, submitted.ID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
 	b.outputResult(t, admitted, "report.md", "# Report\n", hashOf("# Report\n"))
-	var reply watchReply
-	callTool(t, b.ctx, session, "watch", map[string]any{"id": submitted.ID}, &reply)
+	var reply waitReply
+	callTool(t, b.ctx, session, "wait", map[string]any{"id": submitted.ID}, &reply)
 	path := filepath.Join(b.stateDir, "runs", submitted.ID, "outputs", "report.md")
 	if !slices.Equal(reply.Outputs, []outputReply{{Name: "report.md", Path: path, SHA256: hashOf("# Report\n"), Size: 9}}) ||
 		!slices.Equal(reply.NotReturned, []wire.UnreturnedOutput{{Name: "notes.md", Reason: "missing"}}) {
-		t.Fatalf("watch outputs %+v, not returned %+v", reply.Outputs, reply.NotReturned)
+		t.Fatalf("wait outputs %+v, not returned %+v", reply.Outputs, reply.NotReturned)
 	}
 	if written, err := os.ReadFile(path); err != nil || string(written) != "# Report\n" {
 		t.Fatalf("written %q, %v", written, err)
@@ -320,7 +342,7 @@ func TestMCPInputsStayInTheInputRoots(t *testing.T) {
 	}
 }
 
-func TestWatchSaysHowToApplyGitChanges(t *testing.T) {
+func TestWaitSaysHowToApplyGitChanges(t *testing.T) {
 	for name, command := range map[string]string{wire.GitPatch: "apply with: git am %s\n", wire.GitBundle: "fetch with: git fetch %s HEAD\n"} {
 		t.Run(name, func(t *testing.T) {
 			b := newBus(t)
@@ -328,8 +350,8 @@ func TestWatchSaysHowToApplyGitChanges(t *testing.T) {
 			b.outputResult(t, admitted, name, "changes\n", hashOf("changes\n"))
 			dir := t.TempDir()
 			var stdout, stderr bytes.Buffer
-			if err := runWatch(b.ctx, b.client, []string{admitted.submission.Wherry.Run, "--outputs-dir", dir}, &stdout, &stderr); err != nil {
-				t.Fatalf("watch: %v; stderr %s", err, stderr.String())
+			if err := runWait(b.ctx, b.client, []string{admitted.submission.Wherry.Run, "--outputs-dir", dir}, &stdout, &stderr); err != nil {
+				t.Fatalf("wait: %v; stderr %s", err, stderr.String())
 			}
 			if want := fmt.Sprintf(command, filepath.Join(dir, name)); !strings.Contains(stderr.String(), want) {
 				t.Fatalf("stderr %q, want %q", stderr.String(), want)

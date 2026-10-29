@@ -42,10 +42,10 @@ One `wherry` binary with three sides:
 - **Host:** `wherry init` and `wherry key` register and show the host's signing
   key. `receivers` lists the receivers the tenant may use with their plugin
   profiles and labels. `submit` places a task by agent and label selector and publishes
-  it. `watch`, `status`, `events` and `cancel` follow and stop a run, and
-  `watch` answers the claiming receiver's request for the agent's
+  it. `wait`, `status`, `events` and `cancel` follow and stop a run, and
+  `wait` answers the claiming receiver's request for the agent's
   credential. `status` without a run ID lists every run the host
-  can see, `transcript` prints a run's agent output, and `cleanup` deletes
+  can see, `logs` prints a run's agent output, and `cleanup` deletes
   a run's S3 objects. `mcp` serves every one of these commands but `init`
   and `key` as an MCP tool of the same name; see
   [Harness integration](operations.md#harness-integration).

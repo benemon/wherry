@@ -34,7 +34,7 @@ with credentials to deliver makes a P-256 key pair for that
 attempt and publishes a signed **seal request** on the tenant feed: the
 run and attempt, the public key, the credential names and an expiry
 5 minutes out. The host that submitted the run answers it while `wherry
-watch` or `wherry mcp` runs. It checks the request's signature against the
+wait` or `wherry mcp` runs. It checks the request's signature against the
 receiver's registered key, that the receiver is a live member of the run's
 pool and holds the run's current attempt, that the pool's terms approve
 each agent credential for the run's agent, and that the run declares each
@@ -109,7 +109,7 @@ pool whose terms list the agent's credentials.
 3. Submit the task. Give each task credential its target with
    `--credential NAME:file=FILE` or `--credential NAME:env=VAR`.
 
-4. Keep `wherry watch RUN_ID` or `wherry mcp` running until the task
+4. Keep `wherry wait RUN_ID` or `wherry mcp` running until the task
    starts, so the host answers the receiver's
    [seal request](#sealed-credentials) within 5 minutes.
 
@@ -214,7 +214,7 @@ When a receiver is revoked, rotate each credential sealed to it, as in
 
 ## Credential sources
 
-The answering process, `wherry watch` or `wherry mcp`, resolves each source
+The answering process, `wherry wait` or `wherry mcp`, resolves each source
 when it answers a seal request, after it authorises the request and before it
 takes the attempt's lock, so a slow source holds up no other answerer of the
 host. The configuration holds no value and no source prompts.

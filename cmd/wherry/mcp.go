@@ -28,19 +28,19 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// watchBound stays below the shortest common harness tool-call timeout, so every model can loop on watch.
-const watchBound = 45 * time.Second
+// waitBound stays below the shortest common harness tool-call timeout, so every model can loop on wait.
+const waitBound = 45 * time.Second
 
-// retryAfter is the pause, in seconds, that watch suggests before the next call while a run is unfinished.
+// retryAfter is the pause, in seconds, that wait suggests before the next call while a run is unfinished.
 const retryAfter = 5
 
 const progressInterval = 5 * time.Second
 
-// transcriptLimit and transcriptMaxLimit are the default and the largest page of transcript lines.
-const transcriptLimit, transcriptMaxLimit = 100, 500
+// logsLimit and logsMaxLimit are the default and the largest page of transcript lines.
+const logsLimit, logsMaxLimit = 100, 500
 
-// transcriptBytes bounds a transcript page's JSON, within the 25,000-token default of Claude Code's MAX_MCP_OUTPUT_TOKENS.
-const transcriptBytes = 24 << 10
+// logsBytes bounds a transcript page's JSON, within the 25,000-token default of Claude Code's MAX_MCP_OUTPUT_TOKENS.
+const logsBytes = 24 << 10
 
 // answerRetry separates the server's attempts to answer seal requests after a failure.
 const answerRetry = 5 * time.Second
@@ -69,25 +69,25 @@ func runMCP(ctx context.Context, args []string) error {
 	defer stop()
 	go answer(ctx, connect, logger)
 	open := inputOpener(dir, config)
-	watch, err := watchCommand(*configFile)
+	wait, err := waitCommand(*configFile)
 	if err != nil {
 		return err
 	}
-	return newMCPServer(connect, inputReader(open), open, watch, logger).Run(ctx, &mcp.StdioTransport{})
+	return newMCPServer(connect, inputReader(open), open, wait, logger).Run(ctx, &mcp.StdioTransport{})
 }
 
-// watchCommand returns the shell command that waits for a run and prints its reply alone, naming configFile, made
-// absolute and quoted, when it is set.
-func watchCommand(configFile string) (func(id string) string, error) {
+// waitCommand returns the shell command that waits for a run and prints its reply, naming configFile, made absolute
+// and quoted, when it is set.
+func waitCommand(configFile string) (func(id string) string, error) {
 	if configFile == "" {
-		return func(id string) string { return "wherry watch " + id + " --result-only" }, nil
+		return func(id string) string { return "wherry wait " + id }, nil
 	}
 	path, err := filepath.Abs(configFile)
 	if err != nil {
 		return nil, err
 	}
 	quoted := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
-	return func(id string) string { return "wherry watch " + id + " --result-only --config-file " + quoted }, nil
+	return func(id string) string { return "wherry wait " + id + " --config-file " + quoted }, nil
 }
 
 // sharedHost returns a connect that opens one host on its first successful call and returns it to every later call, and
@@ -117,7 +117,7 @@ func sharedHost(open func() (*busclient.Host, error)) (func() (*busclient.Host, 
 }
 
 // answer answers seal requests for as long as the server runs, so a credentialed task is sealed while the harness
-// is between watch calls.
+// is between wait calls.
 func answer(ctx context.Context, connect func() (*busclient.Host, error), logger *log.Logger) {
 	for ctx.Err() == nil {
 		host, err := connect()
@@ -213,15 +213,15 @@ type submitInput struct {
 	Inputs        []string           `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names; over the broker's record limit or a profile's declared limit they go through the pool's bucket when the pool has storage and the host a storage credential, else submit refuses"`
 	S3Inputs      []string           `json:"s3_inputs,omitempty" jsonschema:"local files of up to 5 GiB each uploaded to the pool's bucket and fetched into the agent's WHERRY_INPUT_DIR under their base names"`
 	Credentials   []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent, each as a file in WHERRY_CREDENTIALS_DIR or in an environment variable; no two share a target, and none takes the target of one of the agent's own credentials"`
-	Outputs       []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; watch writes the returned ones locally"`
+	Outputs       []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; wait writes the returned ones locally"`
 	Deadline      string             `json:"deadline,omitempty" jsonschema:"task deadline, a Go duration such as 90m; default 2h"`
 	QueueDeadline string             `json:"queue_deadline,omitempty" jsonschema:"queue deadline, a Go duration such as 30m; default 10m"`
 }
 
 type submitOutput struct {
-	ID    string `json:"id" jsonschema:"run id"`
-	Pool  string `json:"pool" jsonschema:"pool the task was placed in"`
-	Watch string `json:"watch" jsonschema:"shell command that waits for the run to end and prints its reply; run it in the background"`
+	ID   string `json:"id" jsonschema:"run id"`
+	Pool string `json:"pool" jsonschema:"pool the task was placed in"`
+	Wait string `json:"wait" jsonschema:"shell command that waits for the run to end and prints its reply; run it in the background"`
 }
 
 type runInput struct {
@@ -275,14 +275,13 @@ type replyFile struct {
 	Rejected string `json:"rejected,omitempty" jsonschema:"why this host could not verify the reply, of which message holds the first 64 KiB"`
 }
 
-type watchReply struct {
+type waitReply struct {
 	ID          string                  `json:"id"`
 	State       string                  `json:"state"`
 	Model       string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
-	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling watch again"`
+	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling wait again"`
 	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, or this host's note that the queue deadline passed and no receiver claimed the run; an answer over 64 KiB is cut to its first 64 KiB, and reply names the whole"`
 	Reply       *replyFile              `json:"reply,omitempty" jsonschema:"set when the agent's answer is over 64 KiB"`
-	Transcript  string                  `json:"transcript,omitempty" jsonschema:"path of the run's redacted transcript, one JSON line per transcript line, written locally"`
 	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
 	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
 	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the run did not return or this host could not verify, each with its reason"`
@@ -308,26 +307,26 @@ type eventOutput struct {
 	Message  string `json:"message,omitempty"`
 }
 
-type transcriptOutput struct {
+type chunksOutput struct {
 	Attempt int64 `json:"attempt"`
 	Chunks  int   `json:"chunks"`
 }
 
 type eventsOutput struct {
-	ID          string             `json:"id"`
-	Events      []eventOutput      `json:"events"`
-	Transcripts []transcriptOutput `json:"transcripts"`
-	Redacted    map[string]int     `json:"redacted,omitempty" jsonschema:"redaction markers in the events' messages by the credential or S3 object each names"`
-	Skipped     int                `json:"skipped,omitempty"`
+	ID       string         `json:"id"`
+	Events   []eventOutput  `json:"events"`
+	Chunks   []chunksOutput `json:"chunks"`
+	Redacted map[string]int `json:"redacted,omitempty" jsonschema:"redaction markers in the events' messages by the credential or S3 object each names"`
+	Skipped  int            `json:"skipped,omitempty"`
 }
 
-type transcriptInput struct {
+type logsInput struct {
 	ID     string `json:"id" jsonschema:"run id"`
 	Offset int    `json:"offset,omitempty" jsonschema:"lines to skip"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"most lines to return, at most 500; default 100"`
 }
 
-type transcriptLine struct {
+type logsLine struct {
 	Seq       int64                 `json:"seq" jsonschema:"the line's byte offset in the agent's output"`
 	Attempt   int64                 `json:"attempt" jsonschema:"the delivery attempt that published the line"`
 	Text      string                `json:"text" jsonschema:"the line of the agent's standard output, without its newline; empty for a line with raw_bytes or unstored"`
@@ -337,19 +336,19 @@ type transcriptLine struct {
 	Unstored  *wire.PointerMetadata `json:"unstored,omitempty" jsonschema:"sha256 and size of a line over 512 KiB, which the receiver did not store"`
 }
 
-type transcriptReply struct {
-	ID         string           `json:"id"`
-	Attempt    int64            `json:"attempt" jsonschema:"the delivery attempt whose lines these are; 0 while no receiver has reported on the run"`
-	Total      int              `json:"total" jsonschema:"lines of the attempt on the feed so far, less those the view drops"`
-	NextOffset int              `json:"next_offset,omitempty" jsonschema:"set while lines remain past this page: the offset to call with next"`
-	Lines      []transcriptLine `json:"lines"`
-	Redacted   map[string]int   `json:"redacted,omitempty" jsonschema:"redaction markers in every line of the attempt, not only this page, by the credential or S3 object each names"`
-	Skipped    int              `json:"skipped,omitempty"`
+type logsReply struct {
+	ID         string         `json:"id"`
+	Attempt    int64          `json:"attempt" jsonschema:"the delivery attempt whose lines these are; 0 while no receiver has reported on the run"`
+	Total      int            `json:"total" jsonschema:"lines of the attempt on the feed so far, less those the view drops"`
+	NextOffset int            `json:"next_offset,omitempty" jsonschema:"set while lines remain past this page: the offset to call with next"`
+	Lines      []logsLine     `json:"lines"`
+	Redacted   map[string]int `json:"redacted,omitempty" jsonschema:"redaction markers in every line of the attempt, not only this page, by the credential or S3 object each names"`
+	Skipped    int            `json:"skipped,omitempty"`
 }
 
 // newMCPServer serves the wherry tools. Every call uses the host connect returns, which the server's seal-request
 // answering shares, so the process runs one tenant-feed follower.
-func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), watchCommand func(id string) string, logger *log.Logger) *mcp.Server {
+func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), waitCommand func(id string) string, logger *log.Logger) *mcp.Server {
 	// The model sees an UNAVAILABLE's class alone; the server's log, which only the host's user reads, keeps its cause
 	// with every credential value the host resolved redacted.
 	failure := func(err error) error {
@@ -384,7 +383,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with watch, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which watch writes locally. While this server runs, it seals the agent's and the task's configured credentials to the receiver that claims the task when that receiver asks for them. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
+		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with wait, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which wait writes locally. While this server runs, it seals the agent's and the task's configured credentials to the receiver that claims the task when that receiver asks for them. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		submission, err := submitFromInput(input, readInput, openInput)
 		if err != nil {
@@ -405,7 +404,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, submitOutput{}, failure(err)
 		}
-		return nil, submitOutput{ID: result.RunID, Pool: result.Pool, Watch: watchCommand(result.RunID)}, nil
+		return nil, submitOutput{ID: result.RunID, Pool: result.Pool, Wait: waitCommand(result.RunID)}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -439,33 +438,33 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "watch",
+		Name: "wait",
 		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish. Returns the result, a failed, canceled or rejected state "+
-			"with its message, or {id, state, retry_after} while the run is unfinished: call watch again. "+
+			"with its message, or {id, state, retry_after} while the run is unfinished: call wait again. "+
 			"A run whose queue deadline passed with no receiver claiming it returns its state and a message saying so, without retry_after. "+
 			"A finished run's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
-			"Use status to check a run without waiting.", int(watchBound.Seconds())),
-	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, watchReply, error) {
+			"Use status to check a run without waiting.", int(waitBound.Seconds())),
+	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, waitReply, error) {
 		client, err := connect()
 		if err != nil {
-			return nil, watchReply{}, failure(err)
+			return nil, waitReply{}, failure(err)
 		}
 		if token := request.Params.GetProgressToken(); token != nil {
 			stop := notifyProgress(ctx, request.Session, token, input.ID)
 			defer stop()
 		}
-		result, err := client.Await(ctx, input.ID, watchBound)
+		result, err := client.Await(ctx, input.ID, waitBound)
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			status, err := client.Status(ctx, input.ID)
 			if err != nil {
-				return nil, watchReply{}, failure(err)
+				return nil, waitReply{}, failure(err)
 			}
-			return nil, watchReply{ID: input.ID, State: string(status.Status.State), Model: status.Model, RetryAfter: retryAfter, Skipped: status.Skipped}, nil
+			return nil, waitReply{ID: input.ID, State: string(status.Status.State), Model: status.Model, RetryAfter: retryAfter, Skipped: status.Skipped}, nil
 		}
 		if err != nil {
-			return nil, watchReply{}, failure(err)
+			return nil, waitReply{}, failure(err)
 		}
-		output := watchReply{
+		output := waitReply{
 			ID: input.ID, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
 			Redacted: result.Redacted, Skipped: result.Skipped,
 		}
@@ -478,20 +477,19 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			// The model sees the step that failed; the server's log keeps the cause.
 			logger.Print("tool failed: " + busclient.Redact(err.Error()))
-			return nil, watchReply{}, collectFailure(err)
+			return nil, waitReply{}, collectFailure(err)
 		}
 		for _, written := range collected.Outputs {
 			output.Outputs = append(output.Outputs, outputReply{Name: written.Name, Path: written.Path, SHA256: written.SHA256, Size: written.Size})
 		}
 		output.NotReturned = append(result.NotReturned, collected.Rejected...)
-		output.Transcript = collected.Transcript.Path
 		if reply := result.Reply; reply != nil {
 			output.Reply = &replyFile{Rejected: reply.Rejected}
 			if reply.Rejected == "" {
 				paths, err := client.WriteOutputs(input.ID, "", []busclient.Output{{Name: wire.ReplyFile, SHA256: reply.SHA256, Size: reply.Size, Data: reply.Data}})
 				if err != nil {
 					logger.Print("tool failed: " + busclient.Redact(err.Error()))
-					return nil, watchReply{}, collectFailure(err)
+					return nil, waitReply{}, collectFailure(err)
 				}
 				output.Reply = &replyFile{Path: paths[0], SHA256: reply.SHA256, Size: reply.Size, Cut: reply.Cut}
 			}
@@ -517,7 +515,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "events",
-		Description: "Return a run's verified status history and its transcript chunk counts per attempt. Read the lines with transcript.",
+		Description: "Return a run's verified status history and its transcript chunk counts per attempt. Read the lines with logs.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, eventsOutput, error) {
 		client, err := connect()
@@ -528,7 +526,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if err != nil {
 			return nil, eventsOutput{}, failure(err)
 		}
-		output := eventsOutput{ID: input.ID, Events: []eventOutput{}, Transcripts: []transcriptOutput{}, Redacted: result.Redacted, Skipped: result.Skipped}
+		output := eventsOutput{ID: input.ID, Events: []eventOutput{}, Chunks: []chunksOutput{}, Redacted: result.Redacted, Skipped: result.Skipped}
 		for _, record := range result.Statuses {
 			status := record.StatusUpdate.Status
 			output.Events = append(output.Events, eventOutput{
@@ -537,50 +535,50 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			})
 		}
 		for attempt, chunks := range result.Chunks {
-			output.Transcripts = append(output.Transcripts, transcriptOutput{Attempt: attempt, Chunks: chunks})
+			output.Chunks = append(output.Chunks, chunksOutput{Attempt: attempt, Chunks: chunks})
 		}
-		sort.Slice(output.Transcripts, func(i, j int) bool {
-			return output.Transcripts[i].Attempt < output.Transcripts[j].Attempt
+		sort.Slice(output.Chunks, func(i, j int) bool {
+			return output.Chunks[i].Attempt < output.Chunks[j].Attempt
 		})
 		return nil, output, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "transcript",
+		Name: "logs",
 		Description: fmt.Sprintf("Return a page of a run's transcript: the lines of the agent's standard output, redacted by the "+
 			"receiver, in output order. The lines are the run's latest delivery attempt's, and before its first line, or while it "+
 			"has none, each earlier attempt's line, so an adopted run reads from the start; each line names its attempt. A page "+
 			"holds at most limit lines and %d KiB of JSON, which fits a harness's default tool output limit; a line too long for "+
 			"a page alone comes back truncated, with its size in bytes. next_offset is set while more lines are on the feed. The "+
-			"transcript grows while the run runs.", transcriptBytes>>10),
+			"transcript grows while the run runs.", logsBytes>>10),
 		Annotations: readOnly,
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, input transcriptInput) (*mcp.CallToolResult, transcriptReply, error) {
-		if input.Offset < 0 || input.Limit < 0 || input.Limit > transcriptMaxLimit {
-			return nil, transcriptReply{}, invalidArgument(fmt.Sprintf("offset must not be negative, and limit must be 0 to %d", transcriptMaxLimit))
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input logsInput) (*mcp.CallToolResult, logsReply, error) {
+		if input.Offset < 0 || input.Limit < 0 || input.Limit > logsMaxLimit {
+			return nil, logsReply{}, invalidArgument(fmt.Sprintf("offset must not be negative, and limit must be 0 to %d", logsMaxLimit))
 		}
 		if input.Limit == 0 {
-			input.Limit = transcriptLimit
+			input.Limit = logsLimit
 		}
 		client, err := connect()
 		if err != nil {
-			return nil, transcriptReply{}, failure(err)
+			return nil, logsReply{}, failure(err)
 		}
 		result, err := client.Transcript(ctx, input.ID)
 		if err != nil {
-			return nil, transcriptReply{}, failure(err)
+			return nil, logsReply{}, failure(err)
 		}
 		result.Lines = busclient.ViewLines(result.Lines)
-		output := transcriptReply{ID: input.ID, Attempt: result.Attempt, Total: len(result.Lines), Lines: []transcriptLine{},
+		output := logsReply{ID: input.ID, Attempt: result.Attempt, Total: len(result.Lines), Lines: []logsLine{},
 			Redacted: result.Redacted, Skipped: result.Skipped}
 		size := func(value any) int {
 			encoded, _ := json.Marshal(value, jsontext.EscapeForHTML(true), jsontext.EscapeForJS(true)) // as the SDK's encoding/json writes it
 			return len(encoded)
 		}
 		output.NextOffset = len(result.Lines)
-		room := transcriptBytes - size(output)
+		room := logsBytes - size(output)
 		output.NextOffset = 0
 		for i := min(input.Offset, len(result.Lines)); i < len(result.Lines); i++ {
-			line := transcriptLine{Seq: result.Lines[i].Seq, Attempt: result.Lines[i].Attempt}
+			line := logsLine{Seq: result.Lines[i].Seq, Attempt: result.Lines[i].Attempt}
 			switch part := result.Lines[i].Part; {
 			case part.URL != "":
 				line.Unstored = &wire.PointerMetadata{}
@@ -611,8 +609,8 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "cleanup",
-		Description: "Delete every object under a run's prefix in its pool's bucket: its S3 inputs and outputs. watch does this once a " +
-			"run is terminal and its S3 outputs verify; use cleanup for a run that ended while nothing watched it.",
+		Description: "Delete every object under a run's prefix in its pool's bucket: its S3 inputs and outputs. wait does this once a " +
+			"run is terminal and its S3 outputs verify; use cleanup for a run that ended while nothing waited for it.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, cleanupOutput, error) {
 		client, err := connect()
@@ -719,7 +717,7 @@ func notifyProgress(ctx context.Context, session *mcp.ServerSession, token any, 
 				return
 			case <-ticker.C:
 				_ = session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
-					ProgressToken: token, Progress: time.Since(start).Seconds(), Total: watchBound.Seconds(),
+					ProgressToken: token, Progress: time.Since(start).Seconds(), Total: waitBound.Seconds(),
 					Message: "waiting for " + runID,
 				}) // a lost notification only delays the client's keep-alive
 			}
