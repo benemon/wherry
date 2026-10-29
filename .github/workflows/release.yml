@@ -62,18 +62,11 @@ jobs:
         run: |
           .github/release-tools.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      # The tap's formula is pushed over SSH, trusting only the host keys GitHub publishes.
-      - name: Write GitHub's SSH host keys
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$RUNNER_TEMP/known_hosts"
-      # The deploy key, with write access to benemon/homebrew-tap alone, reaches goreleaser only; without the secret
-      # the formula is left alone.
-      - name: Build, sign and publish the release
+      # goreleaser builds, signs and uploads to a draft release, and writes the Homebrew formula to dist without pushing
+      # it.
+      - name: Build, sign and upload the draft release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
-          TAP_KNOWN_HOSTS: ${{ runner.temp }}/known_hosts
         run: goreleaser release --clean
       # Verify with:
       #   gh attestation verify wherry_<tag>_<os>_<arch>.tar.gz -R benemon/wherry
@@ -81,3 +74,108 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: dist/wherry_*.tar.gz
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          case "$RELEASE_TAG" in (*[!A-Za-z0-9._-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
+          gh release edit "$RELEASE_TAG" --draft=false
+      # The formula is pushed over SSH, trusting only the host keys GitHub publishes, once the release its URLs name is
+      # public.
+      - name: Write GitHub's SSH host keys
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$RUNNER_TEMP/known_hosts"
+      # The deploy key has write access to benemon/homebrew-tap alone; without the secret the formula is left alone.
+      - name: Push the Homebrew formula
+        env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_DEPLOY_KEY" ]; then echo "no HOMEBREW_TAP_DEPLOY_KEY; the formula is left alone"; exit 0; fi
+          case "$RELEASE_TAG" in (*[!A-Za-z0-9._-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
+          key="$RUNNER_TEMP/tap_deploy_key"
+          (umask 077 && printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$key")
+          export GIT_SSH_COMMAND="ssh -i $key -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          tap="$RUNNER_TEMP/homebrew-tap"
+          git clone --depth 1 --branch main git@github.com:benemon/homebrew-tap.git "$tap"
+          cp dist/homebrew/Formula/wherry.rb "$tap/Formula/wherry.rb"
+          git -C "$tap" add Formula/wherry.rb
+          if git -C "$tap" diff --cached --quiet; then
+            echo "Formula/wherry.rb already matches $RELEASE_TAG"
+          else
+            git -C "$tap" -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "wherry $RELEASE_TAG"
+            git -C "$tap" push origin HEAD:main
+          fi
+          rm -f "$key"
+
+  # Checks the published release as a user receives it, from the release alone: the assets against
+  # .github/release-contents.txt, the checksums' signature, the checksums, and each archive's provenance.
+  verify:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install cosign
+        run: |
+          .github/release-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Download the release's assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          case "$RELEASE_TAG" in (*[!A-Za-z0-9._-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -D "$RUNNER_TEMP/assets"
+      # Each archive in .github/release-contents.txt, its SBOM, and the signed checksums, and nothing else.
+      - name: Compare the assets with the expected list
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          export LC_ALL=C
+          grep -v '^ ' .github/release-contents.txt | sed "s/_VERSION_/_${RELEASE_TAG}_/" |
+            while read -r archive; do printf '%s\n%s.sbom.json\n' "$archive" "$archive"; done |
+            { cat; printf 'checksums.txt\nchecksums.txt.sigstore.json\n'; } | sort > "$RUNNER_TEMP/assets-expected.txt"
+          find "$RUNNER_TEMP/assets" -type f -printf '%f\n' | sort > "$RUNNER_TEMP/assets-actual.txt"
+          diff -u "$RUNNER_TEMP/assets-expected.txt" "$RUNNER_TEMP/assets-actual.txt"
+          .github/release-contents.sh "$RUNNER_TEMP/assets" | diff -u .github/release-contents.txt -
+      # The identity docs/quickstart.md gives users.
+      - name: Verify the checksums' signature and the checksums
+        working-directory: ${{ runner.temp }}/assets
+        run: |
+          cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+            --certificate-identity-regexp '^https://github\.com/benemon/wherry/\.github/workflows/release\.yml@refs/tags/v' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          sha256sum --strict -c checksums.txt
+      - name: Verify each archive's provenance
+        working-directory: ${{ runner.temp }}/assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: for archive in wherry_*.tar.gz; do gh attestation verify "$archive" -R benemon/wherry; done
+
+  # Installs the release from the tap as the README does, on Apple silicon, and runs the formula's test, which checks
+  # the installed binary's version.
+  verify-brew:
+    needs: publish
+    runs-on: macos-latest
+    steps:
+      - name: Install wherry from benemon/tap and test it
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          case "$RELEASE_TAG" in (*[!A-Za-z0-9._-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
+          brew install benemon/tap/wherry
+          installed=$(brew list --versions wherry)
+          if [ "$installed" != "wherry ${RELEASE_TAG#v}" ]; then
+            echo "benemon/tap installed $installed, not $RELEASE_TAG" >&2
+            exit 1
+          fi
+          brew test wherry

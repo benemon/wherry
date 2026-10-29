@@ -115,9 +115,13 @@ A `v*` tag cuts a release: `.github/workflows/release.yml` checks that the
 tagged commit's `ci` run on `main` passed, then runs
 [goreleaser](https://goreleaser.com/) from `.goreleaser.yaml`. goreleaser builds
 the archives, writes `checksums.txt` and an SBOM per archive
-(`<archive>.sbom.json`), signs `checksums.txt` with cosign, publishes the
-release and updates the Homebrew formula. The workflow then attests the
-archives' provenance. A tag with a hyphenated qualifier, such as
+(`<archive>.sbom.json`), signs `checksums.txt` with cosign, and uploads them to a draft release. The
+workflow then attests the archives' provenance, publishes the release, and
+pushes the Homebrew formula to `benemon/homebrew-tap`. Its `verify` jobs check
+the published release as a user receives it: the assets against
+`.github/release-contents.txt`, the checksums' signature and the checksums,
+each archive's attestation, and, on macOS, `brew install benemon/tap/wherry`
+and `brew test wherry`. A tag with a hyphenated qualifier, such as
 `v0.1.0-rc.1`, publishes a prerelease. `pluginsdk/v*` tags version the
 `pluginsdk` module and publish nothing. The same build, unsigned and
 unpublished, writes the archives into `dist` locally:
