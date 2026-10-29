@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
@@ -499,8 +500,12 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 	for {
 		status, statusErr := host.Status(ctx, submitted.RunID)
 		if statusErr == nil && status.Status.State == wire.TaskStateFailed {
-			if status.Status.Message == nil || len(status.Status.Message.Parts) != 1 || status.Status.Message.Parts[0].Text != want || strings.Contains(status.Status.Message.Parts[0].Text, testToken) {
-				t.Fatalf("failed status %+v, want the credential name and no value", status.Status)
+			message := status.Status.Message
+			if message == nil || len(message.Parts) != 2 || message.Parts[0].Text != want || neededCredential(message.Parts[1]) != credentialName {
+				t.Fatalf("failed status %+v, want the reason and a credential part naming %s", status.Status, credentialName)
+			}
+			if encoded, _ := json.Marshal(message); strings.Contains(string(encoded), testToken) {
+				t.Fatal("the failed status carries the credential's value")
 			}
 			break
 		}
