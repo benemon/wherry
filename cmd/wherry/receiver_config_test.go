@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -442,9 +443,19 @@ func TestReceiverConfigFileRefusesIdentity(t *testing.T) {
 	}
 }
 
-func TestAdminArgsRefusesARepeatedOption(t *testing.T) {
-	if _, _, err := adminArgs([]string{"receiver", "add", "r", "--pool", "a", "--pool", "b"}); err == nil {
-		t.Error("a repeated --pool was accepted")
+func TestAdminArgsParseAsFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"pool", "update", "p", "--config-file=x", "--dry-run"},
+		{"pool", "update", "p", "-config-file", "x", "-dry-run=true"},
+		{"pool", "update", "--config-file", "y", "p", "--config-file", "x", "--dry-run"},
+	} {
+		positional, options, err := adminArgs(args)
+		if err != nil || !slices.Equal(positional, []string{"pool", "update", "p"}) || !maps.Equal(options, map[string]string{"config-file": "x", "dry-run": "true"}) {
+			t.Errorf("adminArgs(%q) = %q, %v, %v; want pool update p with --config-file x and --dry-run", args, positional, options, err)
+		}
+	}
+	if _, options, err := adminArgs([]string{"receiver", "update", "r", "--force=false"}); err != nil || len(options) != 0 {
+		t.Errorf("adminArgs with --force=false = %v, %v; want no options", options, err)
 	}
 }
 

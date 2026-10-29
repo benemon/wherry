@@ -194,7 +194,7 @@ func TestAdminArgsRejectsUnknownOptions(t *testing.T) {
 		{"receiver", "add", "receiver-a", "--pool", "pool-a", "--platform-credential-file", "nomad=token"},
 	} {
 		_, _, err := adminArgs(args)
-		option := args[len(args)-2]
+		option := strings.TrimPrefix(args[len(args)-2], "-")
 		if err == nil || !strings.Contains(err.Error(), option) {
 			t.Fatalf("adminArgs(%q) = %v, want an error naming %s", args, err, option)
 		}

@@ -92,7 +92,7 @@ entry clones anonymously, and an `ssh` one then returns `INVALID_ARGUMENT`. Add
 pushes only when your prompt asks it to, and only to the branch
 `wherry/<run>`.
 
-To send files, add `inputs`: paths of regular files beneath one of the wherry
+To send files, add `inputs`: `{path}` for each regular file beneath one of the wherry
 MCP server's input roots (the directory it runs in, unless the user's wherry
 configuration lists `input_roots`), which the agent finds under their base
 names in its input directory. Inputs travel inside the task's broker record up
@@ -110,8 +110,8 @@ target of an agent's own credential. To get files back, add
 `outputs`: `{name, required}` for each file the agent should leave in
 `WHERRY_OUTPUT_DIR`. The prompt the agent receives names all of them.
 
-To send a large file through S3 directly, up to 5 GiB, add its path to
-`s3_inputs` instead: the server uploads it to the pool's bucket and the agent finds it
+To send a large file through S3 directly, up to 5 GiB, add `storage: "s3"`
+to its input: the server uploads it to the pool's bucket and the agent finds it
 in its input directory like any input. Add `storage: "s3"` to an output to
 return it through the bucket. Both need a pool with storage and a storage
 credential in the user's wherry configuration; without them `submit`

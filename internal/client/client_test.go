@@ -1155,10 +1155,10 @@ func TestReceiversListsLiveStaleSilentAndEnded(t *testing.T) {
 	if b := got["receiver-b"]; b.Status != "stale" || b.Capacity != 4 || b.InFlight != 2 || len(b.Profiles) != 2 || b.Profiles[0].Ready || b.Profiles[1].Ready {
 		t.Fatalf("stale receiver %#v; want its profiles listed, none ready", b)
 	}
-	if c := got["receiver-c"]; c.Status != "silent" || c.HeartbeatAge != "-" {
+	if c := got["receiver-c"]; c.Status != "silent" || !c.LastAdvertised.IsZero() {
 		t.Fatalf("silent receiver %#v", c)
 	}
-	if d := got["receiver-d"]; d.Status != "ended" || !d.Ended {
+	if d := got["receiver-d"]; d.Status != "ended" {
 		t.Fatalf("ended receiver %#v", d)
 	}
 }
@@ -1533,8 +1533,8 @@ func TestReceiversDoesNotShowAFutureAdvertisementAsLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(receivers) != 1 || receivers[0].Status == "live" || strings.HasPrefix(receivers[0].HeartbeatAge, "-") || receivers[0].Profiles[0].Ready {
-		t.Fatalf("receivers %#v; want a future advertisement neither live, ready nor of negative age", receivers)
+	if len(receivers) != 1 || receivers[0].Status == "live" || receivers[0].Profiles[0].Ready {
+		t.Fatalf("receivers %#v; want a future advertisement neither live nor ready", receivers)
 	}
 }
 

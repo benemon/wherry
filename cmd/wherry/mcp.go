@@ -197,6 +197,11 @@ type credentialInput struct {
 	Env  string `json:"env,omitempty" jsonschema:"environment variable the agent finds it in; exactly one of file and env"`
 }
 
+type fileInput struct {
+	Path    string `json:"path" jsonschema:"local file"`
+	Storage string `json:"storage,omitempty" jsonschema:"s3 to upload the file, up to 5 GiB, to the pool's bucket, from which the agent's plugin fetches it; absent, it goes in the task, or through the pool's bucket when over the broker's record limit or a profile's declared limit and the pool has storage and the host a storage credential, else submit refuses"`
+}
+
 type outputInput struct {
 	Name     string `json:"name" jsonschema:"relative path the agent is asked to write in WHERRY_OUTPUT_DIR"`
 	Required bool   `json:"required,omitempty" jsonschema:"fail the run when the output is not returned"`
@@ -210,8 +215,7 @@ type submitInput struct {
 	Model         string             `json:"model,omitempty" jsonschema:"model the agent runs, one of its models as receivers lists them; default: the agent's default model"`
 	Selector      []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the profile must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
 	Git           *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts, and its credential and an ssh remote's host key come from the git entry of this host's wherry config whose url is the longest prefix of the remote"`
-	Inputs        []string           `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names; over the broker's record limit or a profile's declared limit they go through the pool's bucket when the pool has storage and the host a storage credential, else submit refuses"`
-	S3Inputs      []string           `json:"s3_inputs,omitempty" jsonschema:"local files of up to 5 GiB each uploaded to the pool's bucket and fetched into the agent's WHERRY_INPUT_DIR under their base names"`
+	Inputs        []fileInput        `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names"`
 	Credentials   []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent, each as a file in WHERRY_CREDENTIALS_DIR or in an environment variable; no two share a target, and none takes the target of one of the agent's own credentials"`
 	Outputs       []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; wait writes the returned ones locally"`
 	Deadline      string             `json:"deadline,omitempty" jsonschema:"task deadline, a Go duration such as 90m; default 2h"`
@@ -644,12 +648,20 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 		selector = []wire.Requirement{}
 	}
 	var parts []wire.Part
-	for _, path := range input.Inputs {
-		part, err := readInput(path, math.MaxInt64)
-		if err != nil {
-			return busclient.SubmitInput{}, err
+	var s3Inputs []string
+	for _, file := range input.Inputs {
+		switch file.Storage {
+		case "":
+			part, err := readInput(file.Path, math.MaxInt64)
+			if err != nil {
+				return busclient.SubmitInput{}, err
+			}
+			parts = append(parts, part)
+		case wire.StorageS3:
+			s3Inputs = append(s3Inputs, file.Path)
+		default:
+			return busclient.SubmitInput{}, invalidArgument("an input's storage is s3 or absent")
 		}
-		parts = append(parts, part)
 	}
 	deadline, queueDeadline, err := deadlines(input.Deadline, input.QueueDeadline)
 	if err != nil {
@@ -669,7 +681,7 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 	for _, output := range input.Outputs {
 		submission.Outputs = append(submission.Outputs, wire.ExpectedOutput{Name: output.Name, Required: output.Required, Storage: output.Storage})
 	}
-	for _, path := range input.S3Inputs {
+	for _, path := range s3Inputs {
 		file, err := openInput(path)
 		if err != nil {
 			for _, opened := range submission.S3Inputs {
