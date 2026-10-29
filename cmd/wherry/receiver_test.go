@@ -84,7 +84,7 @@ func recordPlugin(t *testing.T) func() []pluginRecord {
 }
 
 func TestPluginPathResolvesSymlinks(t *testing.T) {
-	dir, releases := t.TempDir(), t.TempDir()
+	dir, releases := resolvedTempDir(t), resolvedTempDir(t)
 	binary := filepath.Join(dir, "wherry-plugin-nomad")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -123,10 +123,21 @@ func TestPluginPathResolvesSymlinks(t *testing.T) {
 
 var discard = log.New(io.Discard, "", 0)
 
+// resolvedTempDir is a new temporary directory with every symlink in its path resolved, as pluginPath returns it;
+// macOS's lies under the /var symlink.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // installPlugin copies the test plugin into a new directory as wherry-plugin-fake and returns the directory.
 func installPlugin(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	binary, err := os.ReadFile(filepath.Join(pluginDir, "wherry-plugin-fake"))
 	if err != nil {
 		t.Fatal(err)
