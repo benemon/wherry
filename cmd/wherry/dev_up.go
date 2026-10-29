@@ -144,13 +144,13 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 		return fmt.Errorf("instance %s was acquired for %s; run wherry dev init --runtime %s", instance.name, manifest.Runtime, runtimeFlag)
 	}
 	env := devEnv{instance: instance, manifest: *manifest, driver: "docker", uid: os.Getuid(), gid: os.Getgid(), images: images}
+	if err := sameSnapshot(*manifest); err != nil {
+		return err
+	}
 	for _, port := range env.ports() {
 		if err := portFree(port); err != nil {
 			return err
 		}
-	}
-	if err := sameSnapshot(*manifest); err != nil {
-		return err
 	}
 	if err := os.RemoveAll(instance.env()); err != nil {
 		return err
@@ -556,13 +556,13 @@ func kafkaJob(env devEnv, clusterID string) map[string]any {
 		"Name": "kafka", "Driver": env.driver, "Env": map[string]string{"LOG_DIR": "/data/logs"},
 		"Resources": map[string]any{"CPU": 1000, "MemoryMB": 1536},
 	}
+	// The broker reads the user's 0600 files in /cfg, so it runs as the user; keep-id maps that uid unchanged.
+	task["User"] = fmt.Sprintf("%d:%d", env.uid, env.gid)
 	if env.driver == "podman" {
 		config["userns"] = "keep-id"
 		if env.selinux {
 			mounts = []string{mounts[0] + ",Z", mounts[1] + ":Z"}
 		}
-	} else {
-		task["User"] = fmt.Sprintf("%d:%d", env.uid, env.gid)
 	}
 	config["volumes"] = mounts
 	task["Config"] = config

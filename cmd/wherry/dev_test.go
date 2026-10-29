@@ -408,8 +408,8 @@ func TestDevRendering(t *testing.T) {
 			t.Errorf("podman kafka job lacks %s:\n%s", want, job)
 		}
 	}
-	if strings.Contains(string(job), `"User"`) {
-		t.Errorf("podman kafka job sets a user:\n%s", job)
+	if !strings.Contains(string(job), `"User":"1000:1000"`) {
+		t.Errorf("podman kafka job does not run as the user:\n%s", job)
 	}
 }
 
