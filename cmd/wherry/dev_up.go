@@ -540,7 +540,7 @@ log.dirs=/data/kraft
 `
 }
 
-// kafkaScript formats /data with the two SCRAM users, read from /cfg, unless it is formatted, and starts the broker.
+// kafkaScript reads the passwords as $(cat /cfg/...) from the read-only bind mount, so they never enter the job spec.
 func kafkaScript(clusterID string) string {
 	return "/opt/kafka/bin/kafka-storage.sh format --standalone -t " + clusterID + " -c /cfg/server.properties --ignore-formatted" +
 		` --add-scram "SCRAM-SHA-512=[name=wherry-admin,password=$(cat /cfg/admin-password)]"` +
@@ -609,8 +609,7 @@ func receiverJob(env devEnv) *api.Job {
 	})
 }
 
-// startNomad starts the dev agent detached as the invoking user, and the podman API service beside it when podman's
-// socket is absent, and waits for a ready node with raw_exec and the runtime's driver healthy.
+// startNomad starts the dev agent and waits for a ready node with raw_exec and the runtime's driver healthy.
 func startNomad(ctx context.Context, nomad *api.Client, env *devEnv) (int, int, error) {
 	podmanPID := 0
 	runtimeName := env.manifest.Runtime
@@ -729,8 +728,8 @@ func poll(ctx context.Context, bound time.Duration, check func() error) error {
 	}
 }
 
-// startKafka writes the broker's configuration, registers its job and waits for an authenticated metadata request
-// over SCRAM to succeed; rootless podman's port forwarder accepts connections while the container is down.
+// startKafka waits for an authenticated metadata request, since rootless podman's port forwarder accepts connections
+// while the container is down.
 func startKafka(ctx context.Context, nomad *api.Client, env devEnv) (string, error) {
 	raw := make([]byte, 16)
 	clusterID := "-"
@@ -948,8 +947,7 @@ func devProfiles(env devEnv, agents []string) []admin.ProfileSettings {
 	return profiles
 }
 
-// devBootstrap makes the CLI's admin calls for pool dev, tenant dev, host dev and receiver dev-1, writes the host and
-// receiver configurations and registers the host key.
+// devBootstrap makes the operator's admin calls for the instance and registers its host.
 func devBootstrap(ctx context.Context, env devEnv, agents []string, service admin.Service, sources map[string]credential.Source) (busclient.Config, error) {
 	instance := env.instance
 	if err := service.PoolCreate(ctx, devPool, devTerms(agents, env.manifest.DefaultAgent, env.storage())); err != nil {
@@ -1041,8 +1039,7 @@ func startReceiver(ctx context.Context, nomad *api.Client, env devEnv, hostConfi
 	})
 }
 
-// smoke runs the mock once and checks that echo.txt comes back holding the prompt; with storage, the run also takes an
-// S3 input and returns echo.txt through the bucket.
+// smoke runs the mock once, through the bucket with storage, and checks that echo.txt holds the prompt.
 func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 	host, err := busclient.Connect(hostConfig, log.New(io.Discard, "", 0))
 	if err != nil {
@@ -1114,8 +1111,7 @@ func devNomad() (*api.Client, error) {
 	return api.NewClient(&api.Config{Address: devNomadAddr})
 }
 
-// devDown tears the instance's environment down, each step running whatever the one before it left, and keeps the
-// cache. An instance whose up failed has a Nomad agent and no up.json; its pid file finds it.
+// devDown tears the environment down; the pid file finds the Nomad agent of an up that failed before up.json.
 func devDown(ctx context.Context, instance devInstance, stdout, stderr io.Writer) error {
 	manifest, _ := readManifest(instance)
 	state := upState(instance)
@@ -1191,8 +1187,7 @@ func leftover(instance devInstance) *devUpState {
 	return state
 }
 
-// stopJobs deregisters the receiver, every agent job, storage and Kafka, in that order, waits for each one's
-// allocations to end, 60 seconds at most, and purges it; it returns every allocation it saw.
+// stopJobs purges the receiver, every agent job, storage and Kafka, in that order, returning every allocation it saw.
 func stopJobs(ctx context.Context, nomad *api.Client, instance devInstance) ([]string, error) {
 	q, w := (&api.QueryOptions{}).WithContext(ctx), (&api.WriteOptions{}).WithContext(ctx)
 	jobs, _, err := nomad.Jobs().ListOptions(&api.JobListOptions{Fields: &api.JobListFields{Meta: true}}, q)

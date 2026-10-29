@@ -442,8 +442,7 @@ func devInit(ctx context.Context, instance devInstance, runtimeName string, stor
 // devStdin is where init asks for the default agent; a variable so tests can give it no terminal.
 var devStdin = os.Stdin
 
-// chooseAgent is the default agent: given, which must be detected or mock; else the one detected harness; else the
-// one a terminal answers.
+// chooseAgent is the default agent from given, the detected harnesses or a terminal's answer.
 func chooseAgent(detected []string, given string) (string, error) {
 	if given != "" {
 		if given != "mock" && !slices.Contains(detected, given) {

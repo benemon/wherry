@@ -19,7 +19,7 @@ import (
 
 // runDevMock is the dev environment's agent, run by the mock profile under raw_exec. It reads prompt.txt in its
 // working directory, which holds the receiver's preamble, a blank line and the task's prompt; the prompt's first line
-// chooses what it does. It uses no network.
+// chooses what it does.
 func runDevMock(args []string, stdout io.Writer) error {
 	if len(args) != 0 {
 		return errors.New("usage: wherry dev mock")

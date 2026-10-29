@@ -166,6 +166,7 @@ func acquireHashiCorp(ctx context.Context, product, file string, prev *devArtefa
 }
 
 // verifyHashiCorp checks signature, a detached binary OpenPGP signature, over sums against HashiCorp's key.
+// go-crypto enforces key and signature expiry against the clock; the primary key and signing subkey expire 2030-03-01.
 func verifyHashiCorp(sums, signature []byte) error {
 	keyring, err := openpgp.ReadArmoredKeyRing(bytes.NewReader(hashicorpKey))
 	if err != nil {
@@ -210,10 +211,8 @@ func (release githubRelease) asset(name string) string {
 	return ""
 }
 
-// acquirePlugin fetches the newest nomad plugin release whose protocol this wherry speaks into file. Each release's
-// checksums.txt is verified against its sigstore bundle and the archive against checksums.txt; a binary that refuses
-// the handshake as an incompatible API version is dropped for the next older release. It returns prev when the
-// newest release is in file.
+// acquirePlugin fetches the newest nomad plugin release whose protocol this wherry speaks into file. It returns prev
+// when the newest release is in file.
 func acquirePlugin(ctx context.Context, file string, prev *devPlugin, progress io.Writer) (*devPlugin, error) {
 	encoded, err := get(ctx, pluginReleases)
 	if err != nil {
