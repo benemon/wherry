@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -90,7 +91,7 @@ func (b *bus) outputResult(t *testing.T, admitted task, name, data, listedHash s
 	metadata, _ := json.Marshal(wire.OutputMetadata{Index: 0})
 	chunk := b.sign(t, &wire.Output{
 		ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: run, ContextID: run, LastChunk: true, Metadata: metadata,
-			Artifact: wire.Artifact{ArtifactID: name, Parts: []wire.Part{{Raw: wire.StdBytes(data)}}, Extensions: []string{wire.ExtensionURI}}},
+			Artifact: wire.Artifact{ArtifactID: name, Name: name, Parts: []wire.Part{{Raw: wire.StdBytes(data), Filename: path.Base(name), MediaType: wire.OutputMediaType}}, Extensions: []string{wire.ExtensionURI}}},
 		Wherry: wire.ResultBinding{ReceiverBinding: b.binding(admitted), TaskHash: admitted.hash},
 	})
 	manifest, _ := json.Marshal(map[string]any{"receiver_id": "receiver-a", "pool": "pool-a",

@@ -359,6 +359,19 @@ func file(name, data string) pluginsdk.Output {
 	return pluginsdk.Output{Name: name, Size: int64(len(data)), Data: []byte(data)}
 }
 
+// An output's chunks name it, and their part carries its last path segment as filename and the octet-stream media type.
+func TestOutputArtifactNamesItsFile(t *testing.T) {
+	f, _, status := runWithOutputs(t, nil, []pluginsdk.Output{file("notes/extra.txt", "extra\n")}, nil)
+	outputs := f.outputChunks(t)
+	if status != kgo.AckAccept || len(outputs) != 1 {
+		t.Fatalf("ended %v with %d output chunks, want one", status, len(outputs))
+	}
+	artifact := outputs[0].ArtifactUpdate.Artifact
+	if part := artifact.Parts[0]; artifact.ArtifactID != "notes/extra.txt" || artifact.Name != "notes/extra.txt" || part.Filename != "extra.txt" || part.MediaType != "application/octet-stream" {
+		t.Fatalf("artifact %q name %q, part filename %q media type %q", artifact.ArtifactID, artifact.Name, part.Filename, part.MediaType)
+	}
+}
+
 func TestCollectionRejectsWhatIsNotARegularFile(t *testing.T) {
 	f, task, status := runWithOutputs(t, nil, []pluginsdk.Output{
 		{Name: "link", Size: 9, Mode: fs.ModeSymlink},

@@ -67,6 +67,17 @@ func validChunk() *Chunk {
 	}
 }
 
+func validOutput() *Output {
+	return &Output{
+		V: 1,
+		ArtifactUpdate: TaskArtifactUpdateEvent{
+			TaskID: "run-1", ContextID: "run-1", LastChunk: true, Metadata: jsontext.Value(`{"index":0}`),
+			Artifact: Artifact{ArtifactID: "out/report.md", Name: "out/report.md", Parts: []Part{{Raw: StdBytes("x"), Filename: "report.md", MediaType: OutputMediaType}}, Extensions: []string{ExtensionURI}},
+		},
+		Wherry: ResultBinding{ReceiverBinding: receiverBinding(), TaskHash: wireHash},
+	}
+}
+
 func validResult() *Result {
 	return &Result{
 		V: 1,

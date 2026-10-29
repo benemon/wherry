@@ -49,7 +49,7 @@ func testRecords() map[string]Record {
 		"seal request for task credentials alone": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
 			Credentials: []string{}, TaskCredentials: []string{"deploy-key"}, ExpiryMS: 1},
 		"output": &Output{ArtifactUpdate: TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", Append: true, LastChunk: true, Metadata: []byte(`{"index":1}`),
-			Artifact: Artifact{ArtifactID: "sub/Report.md", Parts: []Part{{Raw: StdBytes("x")}}, Extensions: []string{ExtensionURI}}},
+			Artifact: Artifact{ArtifactID: "sub/Report.md", Name: "sub/Report.md", Parts: []Part{{Raw: StdBytes("x"), Filename: "Report.md", MediaType: OutputMediaType}}, Extensions: []string{ExtensionURI}}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
 		"reply output": &Output{ArtifactUpdate: TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", LastChunk: true, Metadata: []byte(`{"index":0}`),
 			Artifact: Artifact{ArtifactID: ReplyArtifact, Parts: []Part{{Raw: StdBytes("x")}}, Extensions: []string{ExtensionURI}}},
@@ -332,6 +332,26 @@ func TestRecordValidation(t *testing.T) {
 		"output chunk over 256 KiB": func(r map[string]Record) Record {
 			value := r["output"].(*Output)
 			value.ArtifactUpdate.Artifact.Parts = []Part{{Raw: make(StdBytes, OutputChunk+1)}}
+			return value
+		},
+		"output without its artifact name": func(r map[string]Record) Record {
+			value := r["output"].(*Output)
+			value.ArtifactUpdate.Artifact.Name = ""
+			return value
+		},
+		"output whose filename is its whole path": func(r map[string]Record) Record {
+			value := r["output"].(*Output)
+			value.ArtifactUpdate.Artifact.Parts[0].Filename = "sub/Report.md"
+			return value
+		},
+		"output whose filename is another file's": func(r map[string]Record) Record {
+			value := r["output"].(*Output)
+			value.ArtifactUpdate.Artifact.Parts[0].Filename = "Other.md"
+			return value
+		},
+		"output without its media type": func(r map[string]Record) Record {
+			value := r["output"].(*Output)
+			value.ArtifactUpdate.Artifact.Parts[0].MediaType = ""
 			return value
 		},
 		"output with a text part": func(r map[string]Record) Record {

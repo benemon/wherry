@@ -169,6 +169,9 @@ type UnreturnedOutput struct {
 	Reason string `json:"reason"`
 }
 
+// OutputMediaType is the media type of an output chunk's part.
+const OutputMediaType = "application/octet-stream"
+
 // OutputChunk bounds the data of one output chunk, below a record's limit.
 const OutputChunk = 256 << 10
 

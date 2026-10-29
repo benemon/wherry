@@ -904,7 +904,7 @@ func largestRecords() ([]feedRecord, error) {
 		{"an output chunk", &wire.Output{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
 				TaskID: run, ContextID: run, Append: true, LastChunk: true, Metadata: []byte(`{"index":9223372036854775807}`),
-				Artifact: wire.Artifact{ArtifactID: outputName, Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.OutputChunk)}}, Extensions: []string{wire.ExtensionURI}},
+				Artifact: wire.Artifact{ArtifactID: outputName, Name: outputName, Parts: []wire.Part{{Raw: make(wire.StdBytes, wire.OutputChunk), Filename: "aa", MediaType: wire.OutputMediaType}}, Extensions: []string{wire.ExtensionURI}},
 			},
 			Wherry: wire.ResultBinding{ReceiverBinding: binding, TaskHash: hash},
 		}},

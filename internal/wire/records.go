@@ -10,6 +10,7 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"slices"
 	"time"
@@ -586,6 +587,10 @@ func (value *Output) validate() error {
 	if !(ValidOutputName(artifact.ArtifactID) || artifact.ArtifactID == ReplyArtifact) || !slices.Contains(artifact.Extensions, ExtensionURI) || len(artifact.Parts) != 1 || artifact.Parts[0].Raw == nil ||
 		len(artifact.Parts[0].Raw) > OutputChunk {
 		return errors.New("an output chunk is one raw part of at most 256 KiB of the artifact its output or the reply names")
+	}
+	if part := artifact.Parts[0]; artifact.ArtifactID != ReplyArtifact &&
+		(artifact.Name != artifact.ArtifactID || part.Filename != path.Base(artifact.ArtifactID) || part.MediaType != OutputMediaType) {
+		return errors.New("an output's chunk has its name, its last path segment as filename and media type application/octet-stream")
 	}
 	if err := validateParts(artifact.Parts); err != nil {
 		return err

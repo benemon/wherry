@@ -79,6 +79,7 @@ func TestRecordsAreA2AObjects(t *testing.T) {
 		"submission": {validSubmission(), "message", "Message", "taskId", "contextId"},
 		"status":     {validStatus(), "statusUpdate", "TaskStatusUpdateEvent", "taskId", "contextId"},
 		"chunk":      {validChunk(), "artifactUpdate", "TaskArtifactUpdateEvent", "taskId", "contextId"},
+		"output":     {validOutput(), "artifactUpdate", "TaskArtifactUpdateEvent", "taskId", "contextId"},
 		"result":     {validResult(), "task", "Task", "id", "contextId"},
 	} {
 		t.Run(name, func(t *testing.T) {

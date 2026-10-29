@@ -8,7 +8,8 @@ A run that ends for want of a credential ends `TASK_STATE_FAILED` with a
 when its seal goes unanswered and when its agent reports
 `TASK_STATE_AUTH_REQUIRED`. wherry no longer treats
 `TASK_STATE_AUTH_REQUIRED` as terminal. A submission's message has `role`
-`ROLE_USER`.
+`ROLE_USER`. An output chunk's artifact has `name`, and its part
+`filename` and `mediaType`.
 
 **Change note, 2026-10-29:** edited in place at version 1. A reply over
 64 KiB once redacted travels as [reply chunks](#the-reply), output chunks with
@@ -432,6 +433,10 @@ names.
   file names joined by `/` that follows the `outputs` name rules, or
   `.wherry/reply` for a chunk of the run's [reply](#the-reply). It has
   exactly one `raw` part holding at most 256 KiB of the file.
+- An output's artifact has `name`, the output's name, and its part has
+  `filename`, the name's last path segment, and `mediaType`
+  `application/octet-stream`. A reply chunk's artifact has none of the
+  three.
 - `artifactUpdate.metadata` is exactly `{"index": <n>}`, with `n` 0 or
   more. A file's chunks have
   indexes 0, 1, 2 and so on, in file order. `append` is false at index 0

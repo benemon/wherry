@@ -21,6 +21,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -1942,10 +1943,14 @@ func (run *activeRun) outputChunks(name string, data []byte) []*kgo.Record {
 		piece := data[:min(len(data), wire.OutputChunk)]
 		data = data[len(piece):]
 		metadata, _ := json.Marshal(wire.OutputMetadata{Index: index}) // an integer always encodes
+		artifact := wire.Artifact{ArtifactID: name, Parts: []wire.Part{{Raw: append(wire.StdBytes{}, piece...)}}, Extensions: []string{wire.ExtensionURI}}
+		if name != wire.ReplyArtifact {
+			artifact.Name, artifact.Parts[0].Filename, artifact.Parts[0].MediaType = name, path.Base(name), wire.OutputMediaType
+		}
 		records = append(records, run.transcript(&wire.Output{
 			ArtifactUpdate: wire.TaskArtifactUpdateEvent{
 				TaskID: run.task.Wherry.Run, ContextID: run.task.Wherry.Run,
-				Artifact: wire.Artifact{ArtifactID: name, Parts: []wire.Part{{Raw: append(wire.StdBytes{}, piece...)}}, Extensions: []string{wire.ExtensionURI}},
+				Artifact: artifact,
 				Append:   index > 0, LastChunk: len(data) == 0, Metadata: metadata,
 			},
 			Wherry: wire.ResultBinding{ReceiverBinding: run.receiver.binding(run.task, run.attempt), TaskHash: run.taskHash},
