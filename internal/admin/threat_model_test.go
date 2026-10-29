@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -616,7 +617,7 @@ func TestLoadNamesALaterReleasesRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	later := append([]byte(`{"later_member":true,`), raw[0].Value[1:]...)
+	later := bytes.Replace(raw[0].Value, []byte(`"v":1`), []byte(`"v":2`), 1)
 	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: later}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
@@ -636,6 +637,25 @@ func TestLoadNamesALaterReleasesRecord(t *testing.T) {
 	}
 	if _, err := service.LoadState(ctx); errors.Is(err, ErrNewerRecord) || err == nil || !strings.Contains(err.Error(), "wherry admin skip") {
 		t.Fatalf("load over a later release's record and a corrupt one: %v; want the skip advice", err)
+	}
+}
+
+// An unknown member at this release's version folds; a higher version is a later release's; a duplicate name is refused.
+func TestDecodeRecordToleratesUnknownMembers(t *testing.T) {
+	encoded, err := EncodeRecord(Record{Kind: "host", Tenant: "tenant-a", Host: "host-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := append([]byte(`{"later_member":true,`), encoded[1:]...)
+	state, err := load([]rawRecord{{Offset: 0, Value: extra}})
+	if err != nil || state.Hosts[TenantPrincipal("tenant-a", "host-a")].Name != "host-a" {
+		t.Fatalf("unknown member at v1: %v, %v; want it folded", state.Hosts, err)
+	}
+	if _, err := DecodeRecord(bytes.Replace(encoded, []byte(`"v":1`), []byte(`"v":2`), 1)); !errors.Is(err, ErrNewerRecord) {
+		t.Fatalf("v2 record: %v; want ErrNewerRecord", err)
+	}
+	if _, err := DecodeRecord(append([]byte(`{"host":"host-b",`), encoded[1:]...)); err == nil || errors.Is(err, ErrNewerRecord) {
+		t.Fatalf("duplicate name: %v; want refused as undecodable", err)
 	}
 }
 

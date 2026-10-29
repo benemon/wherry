@@ -12,10 +12,10 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 )
 
-// Tolerant decodes wherry's records other than wherry.admin's, ignoring the unknown members a later release adds and refusing duplicate names.
+// Tolerant decodes wherry's records other than local files and seals, ignoring the unknown members a later release adds and refusing duplicate names.
 var Tolerant = json.JoinOptions(json.RejectUnknownMembers(false), jsontext.AllowDuplicateNames(false))
 
-// Strict decodes wherry.admin records, local files and seals, refusing unknown members and duplicate names.
+// Strict decodes local files and seals, refusing unknown members and duplicate names.
 var Strict = json.JoinOptions(json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false))
 
 // Sign signs payload as a compact JWS of type typ; kid names the owner and

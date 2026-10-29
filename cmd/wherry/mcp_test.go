@@ -908,7 +908,8 @@ func TestWaitCommand(t *testing.T) {
 
 func TestToolFailureCodes(t *testing.T) {
 	for err, want := range map[error]string{
-		fmt.Errorf("load: %w", admin.ErrNewerRecord):                    "VERSION_SKEW",
+		fmt.Errorf("load: %w", admin.ErrNewerRecord): "VERSION_SKEW",
+		newerRecord(t): "VERSION_SKEW",
 		fmt.Errorf("submit: %w", busclient.ErrQueueDeadlinePastMaximum): "INVALID_ARGUMENT",
 		busclient.ErrNoMatchingReceiver:                                 "NO_MATCHING_RECEIVER",
 	} {
@@ -916,6 +917,16 @@ func TestToolFailureCodes(t *testing.T) {
 			t.Errorf("%v: code %s, want %s", err, failure.Code, want)
 		}
 	}
+}
+
+// newerRecord is DecodeRecord's error for a record one version above this release's.
+func newerRecord(t *testing.T) error {
+	encoded, err := admin.EncodeRecord(admin.Record{Kind: "host", Tenant: "tenant-a", Host: "host-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = admin.DecodeRecord(bytes.Replace(encoded, []byte(`"v":1`), []byte(fmt.Sprintf(`"v":%d`, admin.RecordVersion+1)), 1))
+	return fmt.Errorf("load: %w", err)
 }
 
 // A failed Collect reaches the model as its step alone.

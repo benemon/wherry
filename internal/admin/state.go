@@ -238,9 +238,12 @@ func NewState() State {
 	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}}
 }
 
+// RecordVersion is the wherry.admin record version this release writes and the highest it reads.
+const RecordVersion = 1
+
 func EncodeRecord(record Record) ([]byte, error) {
 	if record.Version == 0 {
-		record.Version = 1
+		record.Version = RecordVersion
 	}
 	if record.AtMS == 0 {
 		record.AtMS = time.Now().UnixMilli()
@@ -251,9 +254,19 @@ func EncodeRecord(record Record) ([]byte, error) {
 	return json.Marshal(record, json.Deterministic(true))
 }
 
+// DecodeRecord ignores unknown members; a record with a version above RecordVersion is ErrNewerRecord.
 func DecodeRecord(encoded []byte) (Record, error) {
+	var version struct {
+		V int `json:"v"`
+	}
+	if err := json.Unmarshal(encoded, &version, signed.Tolerant); err != nil {
+		return Record{}, fmt.Errorf("decode admin record: %w", err)
+	}
+	if version.V > RecordVersion {
+		return Record{}, fmt.Errorf("%w: record version %d", ErrNewerRecord, version.V)
+	}
 	var record Record
-	if err := json.Unmarshal(encoded, &record, signed.Strict); err != nil {
+	if err := json.Unmarshal(encoded, &record, signed.Tolerant); err != nil {
 		return Record{}, fmt.Errorf("decode admin record: %w", err)
 	}
 	if err := validateRecord(record); err != nil {
@@ -589,7 +602,7 @@ func subject(record Record) string {
 }
 
 func validateRecord(record Record) error {
-	if record.Version != 1 || record.AtMS <= 0 {
+	if record.Version != RecordVersion || record.AtMS <= 0 {
 		return errors.New("invalid admin record")
 	}
 	switch record.Kind {
@@ -628,7 +641,7 @@ type rawRecord struct {
 	Value  []byte
 }
 
-// ErrNewerRecord is a wherry.admin record with a member this release does not know, written by a later release.
+// ErrNewerRecord is a wherry.admin record whose version is above RecordVersion, written by a later release.
 var ErrNewerRecord = errors.New("wherry.admin holds records a later wherry release wrote")
 
 // load folds wherry.admin. An undecodable record is tolerated only when a
@@ -643,7 +656,7 @@ func load(raw []rawRecord) (State, error) {
 		if err != nil {
 			sum := sha256.Sum256(entry.Value)
 			undecodable[entry.Offset] = hex.EncodeToString(sum[:])
-			newer[entry.Offset] = errors.Is(err, json.ErrUnknownName)
+			newer[entry.Offset] = errors.Is(err, ErrNewerRecord)
 			continue
 		}
 		if record.Kind == "skip" {
