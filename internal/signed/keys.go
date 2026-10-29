@@ -95,7 +95,7 @@ func ApplyKeyRecord(state KeyState, topicOwner string, encoded []byte, appended 
 		return state, errors.New("invalid key signature")
 	}
 	var record KeyRecord
-	if err := json.Unmarshal(payload, &record, Strict); err != nil {
+	if err := json.Unmarshal(payload, &record, Tolerant); err != nil {
 		return state, fmt.Errorf("decode key record: %w", err)
 	}
 	key, ok := record.Key.Key.(ed25519.PublicKey)

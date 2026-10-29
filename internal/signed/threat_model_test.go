@@ -1,8 +1,10 @@
 package signed
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	json "encoding/json/v2"
 	"testing"
 	"time"
 
@@ -137,22 +139,85 @@ func TestSignatureMustVerifyAgainstNamedKey(t *testing.T) {
 	}
 }
 
-func TestPayloadDecodeIsStrict(t *testing.T) {
+func TestPayloadDecodeIgnoresUnknownMembers(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	owner := HostOwner("tenant-a", "host-a")
 	keys := Keys{owner: {Current: key.Public().(ed25519.PublicKey)}}
 	kid := owner + "/" + KeyID(key.Public().(ed25519.PublicKey))
 	base := `{"v":1,"tenant":"tenant-a","host":"host-a","run":"run-a"`
-	for name, payload := range map[string]string{"unknown member": base + `,"extra":1}`, "duplicate member": base + `,"run":"run-b"}`} {
-		encoded, err := signRaw(testType, kid, []byte(payload), key)
+	for name, test := range map[string]struct {
+		payload string
+		decodes bool
+	}{
+		"unknown member":   {base + `,"later_member":{"a":[1]}}`, true},
+		"duplicate member": {base + `,"run":"run-b"}`, false},
+	} {
+		encoded, err := signRaw(testType, kid, []byte(test.payload), key)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var decoded testRecord
-		if _, err := Verify(encoded, testType, keys, &decoded); err == nil {
-			t.Fatalf("accepted a payload with a %s", name)
+		if _, err := Verify(encoded, testType, keys, &decoded); (err == nil) != test.decodes || test.decodes && decoded != (testRecord{V: 1, Tenant: "tenant-a", Host: "host-a", Run: "run-a"}) {
+			t.Fatalf("%s: decoded %+v, %v; want decodes %v", name, decoded, err, test.decodes)
 		}
 	}
+}
+
+func TestKeyRecordDecodeIgnoresUnknownMembers(t *testing.T) {
+	_, current, _ := ed25519.GenerateKey(rand.Reader)
+	_, next, _ := ed25519.GenerateKey(rand.Reader)
+	owner := HostOwner("tenant-a", "host-a")
+	registered := KeyState{Current: current.Public().(ed25519.PublicKey)}
+	register := KeyRecord{Version: 1, Owner: owner, Action: "register", Key: publicJWK(current)}
+	rotate := KeyRecord{Version: 1, Owner: owner, Action: "rotate", Key: publicJWK(next), PreviousKeyID: KeyID(current.Public().(ed25519.PublicKey))}
+	for name, test := range map[string]struct {
+		state   KeyState
+		record  KeyRecord
+		edit    func([]byte) []byte
+		signers []ed25519.PrivateKey
+		applies bool
+	}{
+		"register with an unknown member": {KeyState{}, register, laterMember, []ed25519.PrivateKey{current}, true},
+		"rotate with an unknown member":   {registered, rotate, laterMember, []ed25519.PrivateKey{current, next}, true},
+		"duplicate name": {KeyState{}, register, func(encoded []byte) []byte {
+			return bytes.Replace(encoded, []byte(`"v":1`), []byte(`"v":1,"owner":"tenant-b.host-a"`), 1)
+		}, []ed25519.PrivateKey{current}, false},
+		"no owner": {KeyState{}, register, func(encoded []byte) []byte {
+			return bytes.Replace(encoded, []byte(`"owner":"`+owner+`",`), nil, 1)
+		}, []ed25519.PrivateKey{current}, false},
+	} {
+		encoded, err := json.Marshal(test.record, json.Deterministic(true))
+		if err != nil {
+			t.Fatal(err)
+		}
+		signedRecord := signKeysRaw(t, test.edit(encoded), test.signers...)
+		if state, err := ApplyKeyRecord(test.state, owner, signedRecord, time.Time{}); (err == nil) != test.applies || test.applies && !state.Current.Equal(test.record.Key.Key) {
+			t.Fatalf("%s: %+v, %v; want applies %v", name, state, err, test.applies)
+		}
+	}
+}
+
+func laterMember(encoded []byte) []byte {
+	return append([]byte(`{"later_member":true,`), encoded[1:]...)
+}
+
+// signKeysRaw signs payload bytes as a key record, for payloads signKeys would not encode.
+func signKeysRaw(t *testing.T, payload []byte, keys ...ed25519.PrivateKey) []byte {
+	t.Helper()
+	signing := make([]jose.SigningKey, len(keys))
+	for i, key := range keys {
+		signing[i] = jose.SigningKey{Algorithm: jose.EdDSA, Key: jose.JSONWebKey{Key: key, KeyID: KeyID(key.Public().(ed25519.PublicKey)), Algorithm: string(jose.EdDSA)}}
+	}
+	options := &jose.SignerOptions{EmbedJWK: true}
+	signer, err := jose.NewMultiSigner(signing, options.WithType(jose.ContentType(KeyType)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jws, err := signer.Sign(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []byte(jws.FullSerialize())
 }
 
 // signRaw signs payload bytes under an arbitrary kid, for forgeries.

@@ -35,8 +35,10 @@ not. [Key concepts](concepts.md) explains the roles this document names, and
 
 ## Encoding
 
-- Payloads are JSON objects. Readers reject unknown members and duplicate
-  names.
+- Payloads are JSON objects. Readers ignore unknown members and reject
+  duplicate names. A member added after wherry 1.0 states, beside it, what a
+  reader that ignores it does. [Admin records](#admin-records) are the
+  exception: readers reject one with an unknown member.
 - Every payload has `v`, the payload version, which is `1`. Readers reject
   any other version.
 - A2A objects use the
@@ -93,8 +95,7 @@ A reader accepts a signed record only when all of these hold:
    its tenant feed and transcript topic, and a receiver reading its pool's
    statuses, also accept a [retired key](#key-records) for a record the
    broker appended before that key's rotation.
-3. The payload decodes strictly, has `v` 1 and passes the rules for its
-   type.
+3. The payload decodes, has `v` 1 and passes the rules for its type.
 4. The owner the payload names equals the `kid` owner.
 5. The record passes the checks against `wherry.admin` for its type:
    - A submission or cancel comes from a host on `wherry.admin`, without a
@@ -655,7 +656,6 @@ JSON:
 - Only that receiver writes its progress topic, so Kafka authenticates the
   record, and no other principal can write a key that compaction would let
   supersede it. The live members of its pool read it; hosts do not.
-  Readers decode it strictly.
 - `log_offset` is the agent output offset the run's transcript is committed
   up to. The record commits in the transaction of the [chunks](#chunk) it
   covers, every 10 seconds while the job runs. An interval with no new

@@ -298,10 +298,10 @@ func EncodeProgress(value Progress) ([]byte, error) {
 	return json.Marshal(value, json.Deterministic(true))
 }
 
-// DecodeProgress decodes a progress record strictly.
+// DecodeProgress decodes a progress record.
 func DecodeProgress(encoded []byte) (Progress, error) {
 	var value Progress
-	if err := json.Unmarshal(encoded, &value, signed.Strict); err != nil {
+	if err := json.Unmarshal(encoded, &value, signed.Tolerant); err != nil {
 		return Progress{}, err
 	}
 	if value.V != 1 {
@@ -592,7 +592,7 @@ func (value *Output) validate() error {
 		return err
 	}
 	var metadata OutputMetadata
-	if update.Metadata == nil || json.Unmarshal(update.Metadata, &metadata, signed.Strict) != nil || metadata.Index < 0 || update.Append != (metadata.Index > 0) {
+	if update.Metadata == nil || json.Unmarshal(update.Metadata, &metadata, signed.Tolerant) != nil || metadata.Index < 0 || update.Append != (metadata.Index > 0) {
 		return errors.New("output chunk metadata requires its index, and append exactly from index 1")
 	}
 	return nil

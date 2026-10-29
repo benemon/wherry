@@ -1057,9 +1057,10 @@ brokers or to the storage endpoint.
 
 ## Upgrade wherry
 
-Readers reject records with unknown members or versions, so hosts and
-receivers run the same release. A host's run records carry `redaction_key`,
-so an older `wherry` cannot read a run this release submitted. A host or
+Readers reject `wherry.admin` records with unknown members and every record
+with an unknown version, so hosts and receivers run the same release. A
+host's run records carry `redaction_key`, so an older `wherry` cannot read a
+run this release submitted. A host or
 receiver of an earlier release cannot decode pool terms that set `models` or
 `default_model`, and stops reading `wherry.admin` while they hold them, so
 upgrade every receiver and host before the terms set them. An older release

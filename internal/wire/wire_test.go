@@ -159,7 +159,6 @@ func TestParseRecordIsStrict(t *testing.T) {
 	encoded := recordJSON(t, validSubmission())
 	for name, payload := range map[string][]byte{
 		"duplicate member": replaceOnce(t, encoded, `"run":"run-1"`, `"run":"run-1","run":"run-1"`),
-		"unknown member":   replaceOnce(t, encoded, `"run":"run-1"`, `"run":"run-1","unexpected":true`),
 		"trailing value":   append(bytes.Clone(encoded), " {}"...),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -167,13 +166,6 @@ func TestParseRecordIsStrict(t *testing.T) {
 				t.Fatal("non-strict payload accepted")
 			}
 		})
-	}
-}
-
-func TestRecordWithTurnIsRefused(t *testing.T) {
-	payload := replaceOnce(t, recordJSON(t, validSubmission()), `"run":"run-1"`, `"run":"run-1","turn":1`)
-	if err := parseJSON(t, "tenant-1.host-1", payload, &Submission{}); err == nil {
-		t.Fatal("record carrying turn decoded")
 	}
 }
 
@@ -687,29 +679,6 @@ func TestValidateOffers(t *testing.T) {
 
 // An offer is a profile and its agent; labels belong to the configuration record, so a signed offer carrying them
 // does not decode. The payload is the producer's advertisement with labels added to its offer.
-func TestAdvertisementOfferWithLabelsDoesNotDecode(t *testing.T) {
-	keys, _, receiver := testKeys(t)
-	produced := testRecords()["advertisement"].(*Advertisement)
-	produced.V = 1
-	encoded, err := json.Marshal(produced)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(encoded, &payload); err != nil {
-		t.Fatal(err)
-	}
-	payload["offers"].([]any)[0].(map[string]any)["labels"] = map[string]any{"runtime": "podman"}
-	signedPayload, err := signed.Sign(produced.jwsType(), produced.owner(), payload, receiver)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded Advertisement
-	if err := ParseRecord(signedPayload, keys, &decoded); err == nil {
-		t.Fatalf("decoded an offer with labels: %#v", decoded.Offers)
-	}
-}
-
 func TestGitInputPlacement(t *testing.T) {
 	clash := validSubmission()
 	clash.Wherry.Git = &GitInput{Remote: "ssh://git@git.example.test/org/repo.git", Ref: "main", HostKey: hostKey}
