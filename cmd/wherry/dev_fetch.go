@@ -203,6 +203,7 @@ func acquirePlugin(ctx context.Context, file string, prev *devPlugin, progress i
 		return nil, fmt.Errorf("plugin releases: %w", err)
 	}
 	// The API lists releases newest first. Every nomad release so far is a prerelease, so prereleases count.
+	// The 1.0 cut switches this to GA releases only.
 	releases = slices.DeleteFunc(releases, func(release githubRelease) bool {
 		return release.Draft || !strings.HasPrefix(release.Tag, "nomad/v")
 	})
