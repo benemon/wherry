@@ -200,8 +200,12 @@ func runReceivers(ctx context.Context, client *busclient.Host, args []string, st
 		fmt.Fprintln(stdout, string(encoded))
 	} else {
 		for _, receiver := range receivers {
+			age := "-"
+			if !receiver.LastAdvertised.IsZero() {
+				age = max(time.Since(receiver.LastAdvertised), 0).Round(time.Second).String()
+			}
 			fmt.Fprintf(stdout, "receiver=%s pool=%s capacity=%d in_flight=%d heartbeat_age=%s status=%s\n",
-				receiver.ReceiverID, receiver.Pool, receiver.Capacity, receiver.InFlight, receiver.HeartbeatAge, receiver.Status)
+				receiver.ReceiverID, receiver.Pool, receiver.Capacity, receiver.InFlight, age, receiver.Status)
 			for _, profile := range receiver.Profiles {
 				fmt.Fprintf(stdout, "  profile=%s plugin=%s agent=%s ready=%t labels=%s", profile.Name, profile.Plugin, profile.Agent, profile.Ready, wire.TermsText(profile.Labels))
 				if profile.InlineLimit > 0 {
@@ -272,9 +276,17 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	gitRemote := flags.String("git", "", "REMOTE@REF: git repository the agent clones, an https or ssh URL or user@host:path, at a branch, tag or commit")
 	gitPath := flags.String("git-path", "", "checkout directory, relative (default: the repository name)")
 	gitChanges := flags.String("git-changes", "", "patch or bundle: ask for the agent's commits back as changes.patch or changes.bundle")
-	var inputs []string
-	flags.Func("input", "file to deliver to the agent's input directory (repeatable)", func(value string) error {
-		inputs = append(inputs, value)
+	var inputs, s3Inputs []string
+	flags.Func("input", "FILE[:s3]: a file to deliver to the agent's input directory, through the pool's bucket with :s3 (repeatable)", func(value string) error {
+		path, suffix, found := strings.Cut(value, ":")
+		switch {
+		case !found:
+			inputs = append(inputs, path)
+		case suffix == "s3":
+			s3Inputs = append(s3Inputs, path)
+		default:
+			return fmt.Errorf("want FILE[:s3], not %q", value)
+		}
 		return nil
 	})
 	var credentials []wire.TaskCredential
@@ -291,11 +303,6 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		}
 		return nil
 	})
-	var s3Inputs []string
-	flags.Func("s3-input", "file to upload to the pool's bucket, which the agent finds in its input directory (repeatable)", func(value string) error {
-		s3Inputs = append(s3Inputs, value)
-		return nil
-	})
 	var outputs []wire.ExpectedOutput
 	flags.Func("output", "NAME[:required][:s3]: a file the agent is asked to leave in its output directory, returned through the pool's bucket with :s3 (repeatable)", outputFlag(&outputs))
 	deadline := flags.Duration("deadline", busclient.DefaultDeadline, "task deadline")
@@ -304,7 +311,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE]... [--s3-input FILE]... [--credential NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE[:s3]]... [--credential NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {

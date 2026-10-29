@@ -321,6 +321,10 @@ func (b *bus) admitted(t *testing.T) task {
 
 func TestReceiversJSONOutputShape(t *testing.T) {
 	b := newBus(t)
+	silent := admin.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Capacity: 1, Profiles: []admin.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude"}}}
+	if err := b.service.ReceiverAdd(b.ctx, silent, filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
+		t.Fatal(err)
+	}
 	var stdout, stderr bytes.Buffer
 	if err := runReceivers(b.ctx, b.client, []string{"--json"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
@@ -332,17 +336,23 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("got %d rows, want 1", len(rows))
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
 	}
 	keys := make([]string, 0, len(rows[0]))
 	for key := range rows[0] {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	wantKeys := []string{"capacity", "ended", "heartbeat_age", "in_flight", "pool", "profiles", "receiver_id", "status"}
+	wantKeys := []string{"capacity", "in_flight", "last_advertised", "pool", "profiles", "receiver_id", "status"}
 	if !reflect.DeepEqual(keys, wantKeys) {
 		t.Fatalf("got JSON fields %v, want %v", keys, wantKeys)
+	}
+	if advertised, err := time.Parse(time.RFC3339, rows[0]["last_advertised"].(string)); err != nil || time.Since(advertised) > time.Minute {
+		t.Fatalf("last_advertised %v, %v; want the RFC 3339 time of the live receiver's advertisement", rows[0]["last_advertised"], err)
+	}
+	if _, ok := rows[1]["last_advertised"]; ok || rows[1]["receiver_id"] != "receiver-b" || rows[1]["status"] != "silent" {
+		t.Fatalf("row %#v; want the silent receiver without last_advertised", rows[1])
 	}
 	if rows[0]["receiver_id"] != "receiver-a" || rows[0]["status"] != "live" || rows[0]["pool"] != "pool-a" {
 		t.Fatalf("unexpected JSON row: %#v", rows[0])
@@ -375,6 +385,13 @@ func TestReceiversShowsEnded(t *testing.T) {
 	}
 	if want := "receiver=receiver-a pool=pool-a capacity=0 in_flight=0 heartbeat_age=- status=ended\n"; stdout.String() != want || stderr.Len() != 0 {
 		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
+	}
+	stdout.Reset()
+	if err := runReceivers(b.ctx, b.client, []string{"--json"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if want := `[{"receiver_id":"receiver-a","pool":"pool-a","profiles":[],"capacity":0,"in_flight":0,"status":"ended"}]` + "\n"; stdout.String() != want {
+		t.Fatalf("stdout %q, want %q", stdout.String(), want)
 	}
 }
 

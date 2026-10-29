@@ -91,14 +91,13 @@ type CancelResult struct {
 // Receiver describes a receiver of a pool the tenant is entitled to, its profiles as wherry.admin records them and its
 // latest advertisement.
 type Receiver struct {
-	ReceiverID   string    `json:"receiver_id"`
-	Pool         string    `json:"pool"`
-	Profiles     []Profile `json:"profiles"`
-	Capacity     int64     `json:"capacity"`
-	InFlight     int64     `json:"in_flight"`
-	HeartbeatAge string    `json:"heartbeat_age"`
-	Status       string    `json:"status"`
-	Ended        bool      `json:"ended"`
+	ReceiverID     string    `json:"receiver_id"`
+	Pool           string    `json:"pool"`
+	Profiles       []Profile `json:"profiles"`
+	Capacity       int64     `json:"capacity"`
+	InFlight       int64     `json:"in_flight"`
+	LastAdvertised time.Time `json:"last_advertised,omitzero"`
+	Status         string    `json:"status"`
 }
 
 // Profile is one profile of a receiver: its plugin type, agent and labels from its config record, the agent's models,
@@ -545,23 +544,23 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 			continue
 		}
 		receiver := Receiver{
-			ReceiverID: id, Pool: config.Pool, Profiles: []Profile{}, HeartbeatAge: "-", Status: "silent",
-			Ended: v.state.Ended[admin.ReceiverPrincipal(id)],
+			ReceiverID: id, Pool: config.Pool, Profiles: []Profile{}, Status: "silent",
 		}
+		ended := v.state.Ended[admin.ReceiverPrincipal(id)]
 		ad, advertised := ads[id]
-		if receiver.Ended {
+		if ended {
 			receiver.Status = "ended"
 		} else if advertised {
 			age := now.Sub(time.UnixMilli(ad.AtMS))
 			receiver.Capacity, receiver.InFlight = ad.Capacity, ad.InFlight
-			receiver.HeartbeatAge = max(age, 0).Round(time.Second).String()
+			receiver.LastAdvertised = time.UnixMilli(ad.AtMS).UTC()
 			receiver.Status = "stale"
 			if age <= liveness && age >= -liveness {
 				receiver.Status = "live"
 			}
 		}
 		for _, profile := range config.Profiles {
-			if receiver.Ended {
+			if ended {
 				break
 			}
 			labels := profile.Labels

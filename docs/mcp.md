@@ -8,7 +8,7 @@ defaults, `2h` and `10m`.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `s3_inputs`, `credentials`, `outputs`, `deadline`, `queue_deadline` | `id`, `pool`, `wait` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `credentials`, `outputs`, `deadline`, `queue_deadline` | `id`, `pool`, `wait` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `wait` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped` |
 | `cancel` | `id` | `id`, `skipped` |
@@ -29,11 +29,11 @@ defaults, `2h` and `10m`.
   `selector` is an array of `{key, operator, values}`. `git` is
   `{remote, ref, path, changes}`, as `--git`, `--git-path` and `--git-changes`
   take them, with `remote` and `ref` required; its credential and host key come
-  from the client configuration's `git` entries, as for `submit`. `inputs` and
-  `s3_inputs` are arrays of file paths, `credentials` an array of `{name, file}`
+  from the client configuration's `git` entries, as for `submit`. `inputs` is
+  an array of `{path, storage}`, `credentials` an array of `{name, file}`
   or `{name, env}` and `outputs` an array of `{name, required, storage}`,
-  as `--input`, `--s3-input`, `--credential` and `--output` take them;
-  `storage` `s3` is `:s3`. An input or S3 input must resolve, through any
+  as `--input`, `--credential` and `--output` take them;
+  `storage` is `s3` or absent, and `s3` is `:s3`. An input must resolve, through any
   symbolic links, to a regular file beneath one of the
   [`input_roots`](configuration.md#client-configuration), and to none of `state_dir`,
   `host_key`, `bundle`, a file a `file` source names or a storage key file; a relative

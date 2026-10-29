@@ -7,6 +7,10 @@
 
 ## Conventions
 
+- The [MCP tools](mcp.md)' results are the machine interface, and their
+  shape freezes at 1.0. The CLI's text output may change. `wherry receivers
+  --json` is the one CLI JSON form, and it prints the objects the MCP
+  `receivers` tool returns.
 - `wherry admin`, `wherry dev`, `wherry receiver run` and `wherry version` read no client
   configuration. Every other command reads it first, and every command except `key` and `mcp`
   then connects to Kafka. `key` connects only to settle a
@@ -154,9 +158,8 @@ target.
 | `receiver_id`, `pool` | strings |
 | `profiles` | `{name, plugin, agent, inline_limit, models, default_model, credentials, labels, ready}`, `credentials` holding `{name, optional, configured}`; optional values are omitted when unset |
 | `capacity`, `in_flight` | integers from the latest advertisement |
-| `heartbeat_age` | Go duration string, or `-` |
+| `last_advertised` | RFC 3339 time of the latest advertisement; omitted when there is none |
 | `status` | `live`, `stale`, `silent` or `ended` |
-| `ended` | boolean |
 
 ### `wherry submit`
 
@@ -179,8 +182,7 @@ and needs `wherry init` on a re-provisioned host.
 | `--git REMOTE@REF` | | repository the agent clones: an `https` or `ssh` URL, or `user@host:path`, at a branch, tag or commit |
 | `--git-path` | the repository name | checkout directory, relative to the agent's working directory |
 | `--git-changes patch\|bundle` | | ask for the agent's commits back as the output `changes.patch` or `changes.bundle` |
-| `--input FILE` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
-| `--s3-input FILE` | | file of at most 5 GiB that `submit` uploads to the pool's bucket and the agent gets in `WHERRY_INPUT_DIR` under its base name; repeatable |
+| `--input FILE[:s3]` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; `:s3` uploads it, at most 5 GiB, to the pool's bucket; repeatable |
 | `--credential NAME:file=FILE` or `--credential NAME:env=VAR` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR` or in the environment variable `VAR`; repeatable |
 | `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket, in either order; repeatable |
 | `--deadline` | `2h` | time from now by which the run must end |
@@ -224,6 +226,9 @@ With a host key, no input may be named `known_hosts`.
 `--git-changes` adds `changes.patch` or `changes.bundle` to the expected
 outputs, unless `--output` names it already; neither is required.
 
+`--input` and `--output` read everything after the first `:` in their value
+as suffixes, so they refuse a path or name that holds a `:`.
+
 Input files travel inline in the submission record under two limits. The
 first is the smallest `inline_limit` declared for a profile among the chosen
 pool's receivers' profiles that launch the placed agent and satisfy the
@@ -264,7 +269,7 @@ An optional credential of the agent without a source is named in the
 submission's `unsupplied_credentials`; the run goes without it, and its
 [prompt](configuration.md#agent-contract) names it as not supplied.
 
-`--s3-input` and `:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
+`--input FILE:s3` and `--output NAME:s3` use the pool's [S3 lane](a2a-extension-v1.md#s3-inputs-and-outputs).
 `submit` refuses them, before it uploads or publishes anything, when the
 client configuration has no [`storage`](configuration.md#client-configuration) or the
 pool's terms no [`storage`](configuration.md#pool-terms):
@@ -687,11 +692,13 @@ the runtime's store. Remove `wherry-dev/kafka:<id12>` with the runtime.
 It writes every `wherry.admin` record as `wherry.operator`, creating
 `wherry.admin` and `wherry.receivers` first if they are missing and setting the
 [configuration](design.md#topics-1) of an existing `wherry.receivers`. Options
-other than `--dry-run` take a value, and options can appear anywhere after
+parse as Go flags, in the forms `--name value`, `--name=value` and
+`-name value`, and the last of a repeated option wins. Options other than
+`--dry-run` and `--force` take a value, and options can appear anywhere after
 `admin`. An option without a value fails with
-`admin option requires a value`, one the command does not
-take with `unknown option --<name>`, and a repeated one with
-`option --<name> is given twice`. `pool create`, `pool update`,
+`flag needs an argument: -<name>`, one no admin command takes with
+`flag provided but not defined: -<name>`, and one the command does not take
+with `unknown option --<name>`. `pool create`, `pool update`,
 `pool entitle`, `host add` and `receiver add` then create every ACL the new
 state calls for, re-read them, and fail with `ACL plan incomplete` when one
 is missing.

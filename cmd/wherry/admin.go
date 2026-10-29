@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"maps"
@@ -236,29 +237,24 @@ func integral(value any) any {
 }
 
 func adminArgs(args []string) ([]string, map[string]string, error) {
-	var positional, optionNames []string
-	options := map[string]string{}
-	for i := 0; i < len(args); i++ {
-		if !strings.HasPrefix(args[i], "--") {
-			positional = append(positional, args[i])
-			continue
-		}
-		name := strings.TrimPrefix(args[i], "--")
-		if _, repeated := options[name]; repeated {
-			return nil, nil, fmt.Errorf("option --%s is given twice", name)
-		}
-		// --dry-run and --force are the options without a value.
-		if name == "dry-run" || name == "force" {
-			options[name], optionNames = "", append(optionNames, name)
-			continue
-		}
-		if i+1 == len(args) {
-			return nil, nil, errors.New("admin option requires a value")
-		}
-		options[name] = args[i+1]
-		optionNames = append(optionNames, name)
-		i++
+	flags := flag.NewFlagSet("admin", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	for _, name := range []string{"pool", "config-file", "config-dir", "bundle-file", "tenant", "wait", "sha256"} {
+		flags.String(name, "", "")
 	}
+	flags.Bool("dry-run", false, "")
+	flags.Bool("force", false, "")
+	positional, err := parseAnywhere(flags, args)
+	if err != nil {
+		return nil, nil, err
+	}
+	options := map[string]string{}
+	flags.Visit(func(option *flag.Flag) {
+		if set, ok := option.Value.(flag.Getter).Get().(bool); ok && !set {
+			return
+		}
+		options[option.Name] = option.Value.String()
+	})
 	command := strings.Join(positional[:min(len(positional), 2)], " ")
 	if len(positional) > 0 && positional[0] == "skip" {
 		command = "skip"
@@ -277,7 +273,7 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 		"check":           {},
 	}[command]
 	if allowed != nil {
-		for _, name := range optionNames {
+		for _, name := range slices.Sorted(maps.Keys(options)) {
 			if !allowed[name] {
 				return nil, nil, fmt.Errorf("unknown option --%s", name)
 			}

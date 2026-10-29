@@ -23,7 +23,7 @@ clones itself.
    `--credential NAME:file=FILE` or `--credential NAME:env=VAR` for each
    configured credential it needs as a file or an environment variable, and `--output NAME[:required]` for each file you want back. Where the
    pool has storage and your configuration a storage credential,
-   `--s3-input FILE` sends a larger file (5 GiB at most) through the pool's
+   `--input FILE:s3` sends a larger file (5 GiB at most) through the pool's
    bucket, and `--output NAME:s3` returns one that way. Keep working.
 3. `wherry wait RUN_ID` blocks until the run ends (2 hours 10 minutes at
    most by default), then prints the agent's reply and an

@@ -18,6 +18,7 @@ import (
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestSubmitFileFlags(t *testing.T) {
@@ -177,7 +178,7 @@ func TestMCPSubmitCarriesFilesAndWaitWritesOutputs(t *testing.T) {
 	if err := os.WriteFile(input, []byte("a,b\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	arguments := map[string]any{"prompt": "summarise", "inputs": []string{input},
+	arguments := map[string]any{"prompt": "summarise", "inputs": []map[string]any{{"path": input}},
 		"credentials": []map[string]any{{"name": "deploy-key", "file": "id_ed25519"}}, "outputs": []map[string]any{{"name": "report.md", "required": true}}}
 	var submitted submitOutput
 	callTool(t, b.ctx, session, "submit", arguments, &submitted)
@@ -186,7 +187,7 @@ func TestMCPSubmitCarriesFilesAndWaitWritesOutputs(t *testing.T) {
 		len(submission.Wherry.Credentials) != 1 || !slices.Equal(submission.Wherry.Outputs, []wire.ExpectedOutput{{Name: "report.md", Required: true}}) {
 		t.Fatalf("submission %+v", submission)
 	}
-	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "inputs": []string{filepath.Join(t.TempDir(), "absent")}}); failure.Code != "INVALID_ARGUMENT" {
+	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": filepath.Join(t.TempDir(), "absent")}}}); failure.Code != "INVALID_ARGUMENT" {
 		t.Fatalf("submit with an unreadable input: %+v", failure)
 	}
 	b.feed(t, submitted.ID, b.echo(t, admitted), b.status(t, admitted, "claimed-1", "claimed", now(wire.TaskStateWorking)))
@@ -425,22 +426,44 @@ func TestSubmitTakesS3InputsAndOutputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	const rule = "this host's configuration has no storage credential for S3 inputs and outputs"
-	for _, args := range [][]string{{"--s3-input", data}, {"--output", "report.pdf:required:s3"}} {
+	for _, args := range [][]string{{"--input", data + ":s3"}, {"--output", "report.pdf:required:s3"}} {
 		var stdout, stderr bytes.Buffer
 		if err := runSubmit(b.ctx, b.client, append([]string{"--prompt", "x"}, args...), &stdout, &stderr); err == nil || !strings.Contains(err.Error(), rule) {
 			t.Fatalf("submit %v = %v; want the S3 lane refused for want of storage", args, err)
 		}
 	}
+	var stdout, stderr bytes.Buffer
+	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "x", "--input", data}, &stdout, &stderr); err != nil {
+		t.Fatalf("submit of a small input without :s3 = %v; want it sent in the task", err)
+	}
+	for _, args := range [][]string{{"--input", data + ":S3"}, {"--input", data + ":required"}} {
+		if err := runSubmit(b.ctx, b.client, append([]string{"--prompt", "x"}, args...), &stdout, &stderr); err == nil || strings.Contains(err.Error(), rule) {
+			t.Fatalf("submit %v = %v; want the arguments refused", args, err)
+		}
+	}
+	if err := runSubmit(b.ctx, b.client, []string{"--prompt", "x", "--s3-input", data}, &stdout, &stderr); err == nil || err.Error() != "flag provided but not defined: -s3-input" {
+		t.Fatalf("submit --s3-input = %v; want an unknown flag", err)
+	}
 	session := mcpSessionReading(t, b.connect(t), nil, inputOpener(work, busclient.Config{}))
 	for _, arguments := range []map[string]any{
-		{"prompt": "x", "s3_inputs": []string{"dataset.bin"}},
+		{"prompt": "x", "inputs": []map[string]any{{"path": "dataset.bin", "storage": "s3"}}},
 		{"prompt": "x", "outputs": []map[string]any{{"name": "report.pdf", "storage": "s3"}}},
 	} {
 		if failure := callToolError(t, b.ctx, session, "submit", arguments); failure.Code != "INVALID_ARGUMENT" || !strings.Contains(failure.Message, rule) {
 			t.Fatalf("MCP submit %v = %+v", arguments, failure)
 		}
 	}
-	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "s3_inputs": []string{"../outside.bin"}}); failure.Code != "INVALID_ARGUMENT" ||
+	var submitted submitOutput
+	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": "dataset.bin"}}}, &submitted)
+	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": "dataset.bin", "storage": "feed"}}}); failure.Code != "INVALID_ARGUMENT" ||
+		strings.Contains(failure.Message, rule) {
+		t.Fatalf("MCP submit of an input with storage feed = %+v; want it refused", failure)
+	}
+	result, err := session.CallTool(b.ctx, &mcp.CallToolParams{Name: "submit", Arguments: map[string]any{"prompt": "x", "s3_inputs": []string{"dataset.bin"}}})
+	if err != nil || !result.IsError || !strings.Contains(toolText(result), `unexpected additional properties ["s3_inputs"]`) {
+		t.Fatalf("MCP submit with s3_inputs = %+v, %v; want s3_inputs refused as unknown", result, err)
+	}
+	if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "x", "inputs": []map[string]any{{"path": "../outside.bin", "storage": "s3"}}}); failure.Code != "INVALID_ARGUMENT" ||
 		!strings.Contains(failure.Message, "beneath one of the MCP server's input roots") {
 		t.Fatalf("MCP submit of an S3 input outside the working directory = %+v", failure)
 	}
