@@ -1,6 +1,8 @@
 # MCP tools
 
-`wherry mcp` serves eight tools over stdio. Each takes and returns JSON with
+`wherry mcp` serves eight tools over stdio, and with `--listen` the same
+tools and `upload` over Streamable HTTP, in the [forms](#over-http) a remote
+client uses. Each takes and returns JSON with
 a declared schema and uses the server's one host. `deadline` and
 `queue_deadline` are Go durations, such as `90m`; omitted, they take the CLI
 defaults, `2h` and `10m`.
@@ -117,7 +119,52 @@ error text from the bus, the broker or the host key.
 | `INVALID_ARGUMENT` | an input is missing or malformed; the message names the rule it breaks |
 | `RUN_NOT_FOUND` | this host has not submitted the run and no receiver has admitted it |
 | `NO_MATCHING_RECEIVER` | no live receiver of an entitled pool can take the agent and selector |
-| `OUTPUTS_NOT_WRITTEN` | the run's verified outputs could not be written, its S3 outputs downloaded or the run's prefix deleted; the message starts with the step, `write outputs` or `S3 outputs`, and the server writes the cause to standard error |
+| `OUTPUTS_NOT_WRITTEN` | the run's verified outputs could not be written, its S3 outputs downloaded, the run's prefix deleted or, over HTTP, an output presigned; the message starts with the step, `write outputs`, `S3 outputs` or `presign outputs`, and the server writes the cause to standard error |
 | `CANCELLED` | the request was cancelled |
 | `VERSION_SKEW` | `wherry.admin` holds records a later release wrote, with a `v` higher than this release knows; upgrade `wherry` and restart the MCP server |
 | `UNAVAILABLE` | any other failure; the server writes its cause to standard error, which the harness keeps in its MCP server log, and the CLI reports it too |
+
+## Over HTTP
+
+`wherry mcp --listen` serves the tools to a client on another machine, which
+names none of the host's files and reads the outputs through MCP or S3.
+Every other tool and result is as over stdio.
+
+- `submit` takes each of `inputs` as `{name, content}`, with `content` the
+  file's bytes in base64, or as `{upload}`, naming an `upload` id. `storage`
+  `s3` sends `content` through the pool's bucket. An input with `path` fails
+  with `INVALID_ARGUMENT`
+  `inputs over HTTP carry their content: each is {name, content} or {upload}`,
+  and `prompt_file` with `prompt_file is refused over HTTP; prompt carries the text`.
+  Content is bounded by the profile's inline limit and the pool's record limit
+  as a path input is, and moves to the pool's bucket under the same rules.
+  The result has no `wait`.
+- `upload` takes `{name, size, sha256}`, with `sha256` in lowercase hex, and
+  returns `{id, url, expires}`: a presigned PUT to the bucket of the first of
+  the tenant's pools by name with storage, valid for `--url-lifetime`, `1h` by
+  default. The client PUTs the file to `url`, for example with
+  `curl --upload-file FILE URL`, and names `{upload: id}` in `submit`. `submit`
+  copies the object to an unlinked file in `state_dir` as it hashes it, fails
+  with `nothing was put to upload <id>` or
+  `upload <id> does not match its size and sha256`, and otherwise sends the
+  verified bytes as the run's S3 input. Once the task is published it deletes
+  the upload's object and record. Without a pool with storage or a host
+  storage credential, `upload` fails as an S3 input does.
+- `wait` returns each output as `{name, sha256, size, uri}`, with `uri`
+  `wherry://runs/<run>/outputs/<name>`, and adds a resource link for each
+  after the JSON text. An output over `--output-bound`, 1 MiB by default, or
+  returned through S3 is `{name, sha256, size, url, expires}` instead: the
+  host puts the verified file at `wherry/<tenant>/<run>/host/<name>` in the
+  run's pool's bucket, a key no receiver's PUT URL names, and presigns a GET
+  valid for `--url-lifetime`. A later `wait` reuses an object of the same
+  size. A run whose pool or host has no storage returns every output as a
+  `uri`. `reply` takes the same form for `reply.txt`. No result carries a
+  host path.
+- `resources/read` of an output's `uri` returns the file the host wrote
+  beneath `state_dir/runs/<run>/outputs/`: `text` when it is UTF-8, else
+  `blob` in base64. `resources/templates/list` names the template
+  `wherry://runs/{run}/outputs/{+name}`. A name that leaves the run's output
+  directory, through `..` or a symbolic link, is not found.
+- `cleanup` also deletes `state_dir/runs/<run>/outputs/`. A run whose pool
+  or host has no storage has nothing in S3, and `cleanup` deletes its local
+  outputs alone.

@@ -516,6 +516,26 @@ The packaged MCP launch uses `["mcp"]` and the default configuration path.
 A server that runs `wherry mcp --config-file PATH` uses another, as
 [Harness integration](operations.md#harness-integration) shows.
 
+With `--listen ADDR` it serves the tools over MCP Streamable HTTP at `/mcp`
+on `ADDR` instead, in their [HTTP forms](mcp.md#over-http), as
+[An always-on host](operations.md#an-always-on-host) runs it. Every request
+carries `Authorization: Bearer TOKEN` with the token in `--token-file`; any
+other request gets `401` with `WWW-Authenticate: Bearer`, and the server logs
+the refusal with the peer's address. A loopback `ADDR`, `127.0.0.1` or
+`::1`, takes plain HTTP; any other takes `--tls-cert` and `--tls-key` and
+serves HTTPS. `wherry mcp` refuses to start without a token file, with a
+token file that group or others can read or write, with a token shorter than
+32 characters, or off loopback without a certificate.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--config-file` | `~/.config/wherry/config.yaml` | the client configuration |
+| `--listen ADDR` | | `HOST:PORT` to serve Streamable HTTP on; without it, stdio |
+| `--token-file FILE` | | file holding the bearer token, mode `0600`; required with `--listen` |
+| `--tls-cert FILE`, `--tls-key FILE` | | PEM certificate and key to serve HTTPS with; required off loopback |
+| `--output-bound BYTES` | `1048576` | largest output `wait` returns over HTTP as an MCP resource; a larger one is a presigned GET URL |
+| `--url-lifetime` | `1h` | lifetime of the presigned URLs `upload` and `wait` return over HTTP, from `1s` to `168h`; a longer one is cut to `168h` |
+
 ### `wherry version`
 
 Prints the binary's release as `version=<release>` and its commit as
