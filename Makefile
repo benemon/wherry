@@ -1,11 +1,5 @@
 GO_LICENSES_VERSION := v1.6.0
 GO_LICENSES         := $(shell go env GOPATH)/bin/go-licenses
-CYCLONEDX_VERSION   := v1.11.0
-CYCLONEDX           := $(shell go env GOPATH)/bin/cyclonedx-gomod
-
-VERSION   ?= dev
-DIST      ?= dist
-PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
 LICENCE_ALLOWLIST := MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0
 
@@ -38,9 +32,6 @@ test: ## Test both modules
 $(GO_LICENSES):
 	go install github.com/google/go-licenses@$(GO_LICENSES_VERSION)
 
-$(CYCLONEDX):
-	go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@$(CYCLONEDX_VERSION)
-
 .PHONY: check-licenses
 # A failure means a dependency changed licence on upgrade: investigate the
 # module, do not widen the list to get green.
@@ -66,26 +57,3 @@ check: check-fmt vet test check-licenses check-markers ## Run every CI gate
 .PHONY: docs
 docs: ## Build the documentation site into docs-site/.vitepress/dist (npm ci in docs-site first)
 	cd docs-site && npm run build
-
-.PHONY: sbom
-# app mode describes what the wherry binary links, not the module graph with
-# its test-only dependencies. The tool reads tags through go-git, so run it
-# from a plain clone with tags fetched.
-sbom: $(CYCLONEDX) ## Write a CycloneDX SBOM for the wherry binary
-	mkdir -p $(DIST)
-	$(CYCLONEDX) app -json -licenses -main cmd/wherry -output $(DIST)/wherry.cdx.json .
-
-.PHONY: dist
-dist: ## Cross-compile release archives and checksums.txt into DIST
-	rm -rf $(DIST)/wherry_*
-	mkdir -p $(DIST)
-	@set -e; for p in $(PLATFORMS); do \
-		os=$${p%/*}; arch=$${p#*/}; name=wherry_$(VERSION)_$${os}_$${arch}; \
-		mkdir -p $(DIST)/$$name; \
-		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -o $(DIST)/$$name/wherry ./cmd/wherry; \
-		cp LICENSE README.md $(DIST)/$$name/; \
-		mkdir -p $(DIST)/$$name/contrib && cp -R contrib/observability $(DIST)/$$name/contrib/; \
-		tar -C $(DIST) -czf $(DIST)/$$name.tar.gz $$name; \
-		rm -rf $(DIST)/$$name; \
-	done
-	cd $(DIST) && sha256sum wherry_*.tar.gz > checksums.txt

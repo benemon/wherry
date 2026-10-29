@@ -123,3 +123,48 @@ jobs:
       - name: Show the brokers' logs
         if: failure()
         run: for node in 1 2 3; do docker logs --tail 200 "wherry-kafka-$node"; done
+
+  # The release build as a snapshot, unsigned and unpublished: it checks .goreleaser.yaml, cross-compiles every
+  # platform, and fails when the archives or the files they hold differ from .github/release-contents.txt.
+  release-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # goreleaser versions the snapshot from the newest v* tag.
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            pluginsdk/go.sum
+      - name: Install goreleaser, syft and cosign
+        run: |
+          .github/release-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      # goreleaser check fails on deprecated properties as well as invalid ones. brews, deprecated in favour of
+      # homebrew_casks, stays until the move is decided; any other finding fails the job.
+      - name: Check the goreleaser configuration
+        run: |
+          if out=$(goreleaser check 2>&1); then printf '%s\n' "$out"; exit 0; fi
+          printf '%s\n' "$out"
+          # goreleaser colours its output on the runner; the matches below read the plain text.
+          out=$(printf '%s\n' "$out" | sed 's/\x1b\[[0-9;]*m//g')
+          printf '%s\n' "$out" | grep -q 'configuration is valid, but uses deprecated properties' || exit 1
+          if printf '%s\n' "$out" | grep 'DEPRECATED:' | grep -v -q 'DEPRECATED: *brews '; then exit 1; fi
+          echo "valid; brews is the only deprecated property"
+      - name: Build a snapshot release
+        run: goreleaser release --snapshot --clean --skip=sign
+      - name: Compare the archives with the last release's
+        run: |
+          .github/release-contents.sh dist | tee "$RUNNER_TEMP/release-contents.txt"
+          diff -u .github/release-contents.txt "$RUNNER_TEMP/release-contents.txt"
+          cd dist && sha256sum -c checksums.txt
+          for archive in wherry_*.tar.gz; do
+            test -s "$archive.sbom.json" || { echo "no SBOM for $archive"; exit 1; }
+          done
