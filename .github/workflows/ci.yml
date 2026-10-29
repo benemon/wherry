@@ -124,8 +124,8 @@ jobs:
         if: failure()
         run: for node in 1 2 3; do docker logs --tail 200 "wherry-kafka-$node"; done
 
-  # The release build as a snapshot, unsigned and unpublished: it checks .goreleaser.yaml, cross-compiles every
-  # platform, and fails when the archives or the files they hold differ from .github/release-contents.txt.
+  # The release build as a snapshot, unsigned and unpublished: it fails when the archives or the files they hold differ
+  # from .github/release-contents.txt.
   release-build:
     runs-on: ubuntu-latest
     steps:

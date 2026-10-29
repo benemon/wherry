@@ -28,7 +28,6 @@ builds:
 
 archives:
   - id: wherry
-    ids: [wherry]
     formats: [tar.gz]
     # The tag, v included, as the archive names have always carried it; a snapshot carries its snapshot version.
     name_template: "{{ .ProjectName }}_v{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -42,7 +41,6 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
-# One SBOM per archive, written by syft.
 sboms:
   - artifacts: archive
 
@@ -70,12 +68,10 @@ release:
   replace_existing_artifacts: true
 
 # Formula/wherry.rb in benemon/homebrew-tap, through a deploy key with write access to that repository alone, so
-# brew install benemon/tap/wherry is unchanged. The formula moves on prereleases too, as it did before goreleaser.
-# Skipped until the HOMEBREW_TAP_DEPLOY_KEY secret exists. brews is deprecated in favour of homebrew_casks, which
-# goreleaser check reports; ci.yml's release-build job accepts that one deprecation.
+# brew install benemon/tap/wherry is unchanged. The formula moves on prereleases too. brews is deprecated in favour of
+# homebrew_casks, which goreleaser check reports; ci.yml's release-build job accepts that one deprecation.
 brews:
   - name: wherry
-    ids: [wherry]
     description: Delegate coding agent tasks to receivers on other compute over Kafka
     homepage: https://benemon.github.io/wherry/
     license: MPL-2.0
