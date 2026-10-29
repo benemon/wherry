@@ -763,8 +763,9 @@ each such record as `offset=<n> size=<n> sha256=<hex>`.
    ```
 
 The command refuses a record that decodes, so a skip cannot hide state such
-as a membership end. It also refuses a record a later release wrote; the
-error says so, and upgrading `wherry` reads it.
+as a membership end. It also refuses a record a later release wrote, one
+whose `v` is higher than this release knows; the error says so, and
+upgrading `wherry` reads it.
 
 ## Inputs and outputs
 
@@ -1070,15 +1071,16 @@ brokers or to the storage endpoint.
 
 ## Upgrade wherry
 
-Readers reject `wherry.admin` records with unknown members and every record
-with an unknown version, so hosts and receivers run the same release. A
+Readers ignore unknown members on `wherry.admin` records and reject every
+record with a higher `v` than their release knows as written by a later
+release; do not skip such a record, upgrade the reader. A
 host's run records carry `redaction_key`, so an older `wherry` cannot read a
-run this release submitted. A host or
-receiver of an earlier release cannot decode pool terms that set `models` or
-`default_model`, and stops reading `wherry.admin` while they hold them, so
-upgrade every receiver and host before the terms set them. An older release
-reports such records as written by a later release; do not skip them, upgrade
-it. A harness does not restart a running `wherry mcp` when its binary
+run this release submitted. A host or receiver of an earlier release that
+rejects unknown members on `wherry.admin` records cannot decode pool terms
+that set `models` or `default_model`, and stops reading `wherry.admin` while
+they hold them, so upgrade every receiver and host before the terms set them.
+Such a release reports those records as written by a later release; do not
+skip them, upgrade it. A harness does not restart a running `wherry mcp` when its binary
 changes, so restart the MCP server after upgrading.
 
 The [release notes](https://github.com/benemon/wherry/releases) mark a

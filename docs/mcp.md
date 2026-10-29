@@ -117,5 +117,5 @@ error text from the bus, the broker or the host key.
 | `NO_MATCHING_RECEIVER` | no live receiver of an entitled pool can take the agent and selector |
 | `OUTPUTS_NOT_WRITTEN` | the run's verified outputs could not be written, its S3 outputs downloaded or the run's prefix deleted; the message starts with the step, `write outputs` or `S3 outputs`, and the server writes the cause to standard error |
 | `CANCELLED` | the request was cancelled |
-| `VERSION_SKEW` | `wherry.admin` holds records a later release wrote; upgrade `wherry` and restart the MCP server |
+| `VERSION_SKEW` | `wherry.admin` holds records a later release wrote, with a `v` higher than this release knows; upgrade `wherry` and restart the MCP server |
 | `UNAVAILABLE` | any other failure; the server writes its cause to standard error, which the harness keeps in its MCP server log, and the CLI reports it too |
