@@ -602,3 +602,26 @@ func TestATopicMissingPastTheWaitIsReportedMissing(t *testing.T) {
 		})
 	}
 }
+
+// A broker that does not know a new topic can fail the whole listing as a shard error; until topicWait it is retried,
+// and any other shard error is not.
+func TestMissingTopicShardErrorIsRetried(t *testing.T) {
+	later, past := time.Now().Add(time.Minute), time.Now().Add(-time.Second)
+	unknown := &kadm.ShardErrors{Name: "ListOffsets", Errs: []kadm.ShardError{{Err: kerr.UnknownTopicOrPartition}}}
+	mixed := &kadm.ShardErrors{Name: "ListOffsets", Errs: []kadm.ShardError{{Err: kerr.UnknownTopicOrPartition}, {Err: kerr.TopicAuthorizationFailed}}}
+	for _, c := range []struct {
+		name     string
+		err      error
+		deadline time.Time
+		want     bool
+	}{
+		{"unknown topic", unknown, later, true},
+		{"unknown topic past the wait", unknown, past, false},
+		{"another shard error beside it", mixed, later, false},
+		{"not a shard error", kerr.UnknownTopicOrPartition, later, false},
+	} {
+		if got := missing(c.err, c.deadline); got != c.want {
+			t.Errorf("%s: missing = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

@@ -123,12 +123,13 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[st
 			ends, err = admin.ListCommittedOffsets(groupCtx, topics...)
 			return err
 		})
-		if err := group.Wait(); err != nil {
+		err := group.Wait()
+		if err != nil && !missing(err, deadline) {
 			return nil, err
 		}
 		// kgo retries a partition that is changing leader only while its listing evicts the topic's metadata, which the
 		// concurrent listing may already have done.
-		if !retriable(starts, deadline) && !retriable(ends, deadline) {
+		if err == nil && !retriable(starts, deadline) && !retriable(ends, deadline) {
 			break
 		}
 		select {
@@ -244,18 +245,33 @@ func retriable(listed kadm.ListedOffsets, deadline time.Time) bool {
 	return retry
 }
 
+// missing reports whether, before deadline, every shard of a failed request failed because a broker did not yet know
+// the topic: kadm reports a broker answering UNKNOWN_TOPIC_OR_PARTITION for the whole request as a shard error.
+func missing(err error, deadline time.Time) bool {
+	var shards *kadm.ShardErrors
+	if !errors.As(err, &shards) || len(shards.Errs) == 0 || !time.Now().Before(deadline) {
+		return false
+	}
+	for _, shard := range shards.Errs {
+		if !errors.Is(shard.Err, kerr.UnknownTopicOrPartition) {
+			return false
+		}
+	}
+	return true
+}
+
 // ListOffsets lists topic's offsets with list, again after listBackoff while a listed partition carries a retriable
 // error or, up to topicWait, the topic is missing, and returns the last listing with its first partition error.
 func ListOffsets(ctx context.Context, list func(context.Context, ...string) (kadm.ListedOffsets, error), topic string) (kadm.ListedOffsets, error) {
 	deadline := time.Now().Add(topicWait)
 	for {
 		listed, err := list(ctx, topic)
-		if err != nil {
+		if err != nil && !missing(err, deadline) {
 			return nil, err
 		}
 		// kgo retries a partition that is changing leader only while its listing evicts the topic's metadata, which a
 		// concurrent listing of the topic through the same client may already have done.
-		if !retriable(listed, deadline) {
+		if err == nil && !retriable(listed, deadline) {
 			return listed, listed.Error()
 		}
 		select {
