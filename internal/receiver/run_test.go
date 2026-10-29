@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1171,6 +1173,61 @@ func TestOutcomeFileEndsTheRun(t *testing.T) {
 				t.Fatalf("collects %d stops %d, want the job stopped and its outputs collected once", f.plugin.collects, f.plugin.stops)
 			}
 		})
+	}
+}
+
+// Each supported harness's captured outcome files end the run as the receiver reported them when captured, whatever the
+// agent's exit: a valid file's state wins over exit 1. Only captured files belong in testdata/outcome.
+func TestCapturedOutcomes(t *testing.T) {
+	captured := map[string]struct {
+		state   wire.TaskState
+		message string
+	}{
+		"completed.json":     {wire.TaskStateCompleted, "fixture: completed"},
+		"failed.json":        {wire.TaskStateFailed, "fixture: failed"},
+		"auth_required.json": {wire.TaskStateAuthRequired, "fixture: auth_required\n{\"credential\":\"fixture-token\"}"},
+		"malformed.json":     {wire.TaskStateFailed, "agent reported no outcome"},
+		"no_state.json":      {wire.TaskStateFailed, "agent reported no outcome"},
+	}
+	for _, agent := range []string{"claude", "codex"} {
+		dirs, _ := filepath.Glob(filepath.Join("testdata", "outcome", agent+"-*"))
+		if len(dirs) != 1 {
+			t.Fatalf("%d fixture directories for %s, want testdata/outcome/%s-<version>", len(dirs), agent, agent)
+		}
+		files, _ := filepath.Glob(filepath.Join(dirs[0], "*.json"))
+		if len(files) == 0 {
+			t.Fatalf("%s holds no captured outcome files", dirs[0])
+		}
+		for _, file := range files {
+			want, ok := captured[filepath.Base(file)]
+			if !ok {
+				t.Fatalf("%s is no captured row", file)
+			}
+			data, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, exit := range []int{0, 1} {
+				t.Run(filepath.Base(dirs[0])+"/"+filepath.Base(file)+"/exit "+strconv.Itoa(exit), func(t *testing.T) {
+					message := want.message
+					if exit != 0 && message == "agent reported no outcome" {
+						message = "agent exited 1"
+					}
+					fake := &fakePlugin{stream: noResultStream, ended: &pluginsdk.Terminal{Started: true, ExitCode: exit}, outputs: []pluginsdk.Output{outcomeOutput(string(data))}}
+					f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
+					f.answer(t, credentialName)
+					f.execute(t, f.submit(t, f.host, nil), 1)
+					status := f.lastTask(t).Status
+					var texts []string
+					for _, part := range status.Message.Parts {
+						texts = append(texts, cmp.Or(part.Text, string(part.Data)))
+					}
+					if status.State != want.state || strings.Join(texts, "\n") != message {
+						t.Fatalf("status %s with %q, want %s with %q", status.State, texts, want.state, message)
+					}
+				})
+			}
+		}
 	}
 }
 
