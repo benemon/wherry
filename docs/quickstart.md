@@ -72,6 +72,70 @@ gh attestation verify "$archive" -R benemon/wherry
 Install wherry this way on the operator's machine before the operator's
 steps.
 
+## Try it on one machine
+
+`wherry dev` runs a whole deployment on one machine, to try wherry or
+develop against it before the operator's steps below: a Nomad dev agent, a
+single-broker Kafka with TLS and SCRAM, pool `dev`, tenant `dev` with host
+`dev`, and receiver `dev-1`. Its agents run under Nomad's `raw_exec`
+driver as you, so a harness uses your own login. Nothing in it is fit for
+production: Nomad's ACLs are off and every agent runs with your rights.
+[Dev commands](commands.md#dev-commands) describes each command.
+
+Prerequisites:
+
+- Linux or macOS, `amd64` or `arm64`, with wherry installed as
+  [Install wherry](#install-wherry) shows.
+- Docker or Podman that answers `docker version` or `podman version`. On
+  macOS, Podman runs through `podman machine`.
+- An agent harness on `PATH`, `claude`, `codex` or `gemini`, logged in.
+  Without one, `--agent mock` runs the built-in mock agent alone.
+- Ports 4646, 4647, 4648 and 9093 free on 127.0.0.1.
+- About 2 GiB of memory for Kafka and the agents.
+
+Acquire the instance's files, then start it:
+
+```sh
+wherry dev init
+wherry dev up
+```
+
+`init` downloads Nomad, the newest nomad plugin release and Kafka's image,
+checks their signatures and checksums, and records them in the instance's
+manifest. It asks for the default agent when it finds more than one
+harness; `--agent NAME` chooses it. `up` downloads nothing. It starts the
+environment, runs the mock agent once, and prints:
+
+```
+ready: instance default (nomad 2.1.0, kafka 1a2b3c4d5e6f, plugin nomad/v0.1.0-rc.16, wherry v0.1.0-rc.24)
+config: /home/me/.local/share/wherry/dev/default/env/host/config.yaml
+submit: wherry submit --config-file /home/me/.local/share/wherry/dev/default/env/host/config.yaml --prompt "..."
+claude: claude mcp add wherry-default -- /home/me/.local/share/wherry/dev/default/cache/wherry mcp --config-file /home/me/.local/share/wherry/dev/default/env/host/config.yaml
+```
+
+Each harness runs its own default model. Submit and watch a run with the
+printed configuration:
+
+```sh
+config=~/.local/share/wherry/dev/default/env/host/config.yaml
+wherry submit --config-file "$config" --prompt "List the files in your input directory."
+wherry watch run-<id> --config-file "$config"
+```
+
+The `claude:` line registers the MCP server with Claude Code, so a session
+submits through the `wherry-default` tools. `up` copies
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY` (or
+`OPENAI_API_KEY`) and `GEMINI_API_KEY` from its environment into the host's
+credential files when they are set, and Nomad keeps them out of the agents'
+environment, so they reach an agent only through its run.
+
+`wherry dev down` stops everything and deletes the environment's data and
+credentials, and `wherry dev reset` deletes the downloads. `wherry dev init
+--storage-enabled` adds S3 storage on 127.0.0.1:18080, which takes about
+1 GiB more memory. `wherry dev up --agent-image NAME=IMAGE` runs agent
+`NAME` in a container image, such as one
+[`agent.Containerfile`](https://github.com/benemon/wherry/blob/main/docs/agent.Containerfile) builds.
+
 ## Operator
 
 ### 1. Prepare Kafka
