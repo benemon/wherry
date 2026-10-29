@@ -1,9 +1,9 @@
 name: release
 
 # A v* tag is the release act. Tags with a hyphenated qualifier (v0.1.0-rc.1)
-# publish a prerelease. The build lives in the Makefile; CI only picks
-# targets, so a release reproduces locally. pluginsdk/v* tags version the
-# plugin protocol module and publish nothing.
+# publish a prerelease. The build lives in .goreleaser.yaml, and ci.yml's
+# release-build job runs it as a snapshot on every change. pluginsdk/v* tags
+# version the plugin protocol module and publish nothing.
 on:
   push:
     tags: ['v*']
@@ -46,14 +46,11 @@ jobs:
       contents: write      # release creation and asset upload
       id-token: write      # provenance attestation and keyless signing
       attestations: write
-    env:
-      # Only whether the tap's deploy key is configured; the key itself stays in the step that uses it.
-      HAS_TAP_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY != '' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # cyclonedx-gomod derives the version from the tag history.
+          # goreleaser reads the tag and the previous one from the history.
           fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -61,59 +58,27 @@ jobs:
           go-version-file: go.mod
           check-latest: true
           cache: true
-      - name: Write the SBOM
-        run: make sbom
-      - name: Build the release archives
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
+      - name: Install goreleaser, syft and cosign
         run: |
-          case "$RELEASE_TAG" in (*[!A-Za-z0-9._-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
-          make dist VERSION="$RELEASE_TAG"
+          .github/release-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      # The tap's formula is pushed over SSH, trusting only the host keys GitHub publishes.
+      - name: Write GitHub's SSH host keys
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$RUNNER_TEMP/known_hosts"
+      # Builds the archives, writes checksums.txt and an SBOM per archive, signs checksums.txt with cosign, publishes
+      # the release and moves the Homebrew formula (.goreleaser.yaml). The deploy key, with write access to
+      # benemon/homebrew-tap alone, reaches goreleaser only; without the secret the formula is left alone.
+      - name: Build, sign and publish the release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          TAP_KNOWN_HOSTS: ${{ runner.temp }}/known_hosts
+        run: goreleaser release --clean
       # Verify with:
       #   gh attestation verify wherry_<tag>_<os>_<arch>.tar.gz -R benemon/wherry
       - name: Attest the archives' provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: dist/wherry_*.tar.gz
-      - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-      # Keyless signature over checksums.txt, which names every archive's
-      # SHA-256. Verify with:
-      #   cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
-      #     --certificate-identity-regexp '^https://github.com/benemon/wherry/\.github/workflows/release\.yml@' \
-      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
-      - name: Sign the checksums
-        run: cosign sign-blob --yes --bundle dist/checksums.txt.sigstore.json dist/checksums.txt
-      - name: Publish the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          case "$RELEASE_TAG" in (*[!A-Za-z0-9._-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
-          prerelease=""
-          case "$RELEASE_TAG" in (*-*) prerelease="--prerelease";; esac
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
-            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes $prerelease
-          gh release upload "$RELEASE_TAG" --clobber \
-            dist/wherry_*.tar.gz dist/checksums.txt dist/checksums.txt.sigstore.json dist/wherry.cdx.json
-      # Writes Formula/wherry.rb in benemon/homebrew-tap for this release, through a deploy key with write access to
-      # that repository alone. Skipped until the HOMEBREW_TAP_DEPLOY_KEY secret exists.
-      - name: Update the Homebrew tap
-        if: env.HAS_TAP_KEY == 'true'
-        env:
-          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          case "$RELEASE_TAG" in (*[!A-Za-z0-9._-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
-          ssh=$(mktemp -d)
-          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$ssh/key" && chmod 600 "$ssh/key"
-          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$ssh/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $ssh/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh/known_hosts"
-          git clone --depth 1 git@github.com:benemon/homebrew-tap.git "$RUNNER_TEMP/tap"
-          .github/homebrew/update-tap.sh "$RELEASE_TAG" "$RUNNER_TEMP/tap"
-          cd "$RUNNER_TEMP/tap"
-          if git diff --quiet; then echo "formula already at $RELEASE_TAG"; exit 0; fi
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -qam "wherry $RELEASE_TAG"
-          git push origin HEAD:main

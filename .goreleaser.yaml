@@ -1,0 +1,102 @@
+# The release build: .github/workflows/release.yml runs it on a v* tag, once the tagged commit's ci run on main passed,
+# and ci.yml's release-build job checks it and runs it as a snapshot on every change. wherry version reads the
+# version and revision Go stamps from the checkout, so the build passes no -X flags.
+version: 2
+
+project_name: wherry
+
+git:
+  # pluginsdk/v* and adapter/v* tag other modules in this repository and publish nothing here.
+  ignore_tags:
+    - pluginsdk/*
+    - adapter/*
+
+builds:
+  - id: wherry
+    main: ./cmd/wherry
+    binary: wherry
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # An empty entry keeps goreleaser's default ldflags (-s -w and -X main.*) off, so the binary links as go build
+    # does.
+    ldflags:
+      - ""
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: wherry
+    ids: [wherry]
+    formats: [tar.gz]
+    # The tag, v included, as the archive names have always carried it; a snapshot carries its snapshot version.
+    name_template: "{{ .ProjectName }}_v{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    wrap_in_directory: true
+    files:
+      - LICENSE
+      - README.md
+      - contrib/observability/*
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# One SBOM per archive, written by syft.
+sboms:
+  - artifacts: archive
+
+# Keyless, through release.yml's OIDC token; ci.yml's snapshot build skips it. Verify with:
+#   cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+#     --certificate-identity-regexp '^https://github.com/benemon/wherry/\.github/workflows/release\.yml@' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: [sign-blob, --yes, "--bundle=${signature}", "${artifact}"]
+
+changelog:
+  use: github-native
+
+release:
+  github:
+    owner: benemon
+    name: wherry
+  name_template: "{{ .Tag }}"
+  # A hyphenated qualifier (v0.1.0-rc.1) publishes a prerelease.
+  prerelease: auto
+  mode: keep-existing
+  replace_existing_artifacts: true
+
+# Formula/wherry.rb in benemon/homebrew-tap, through a deploy key with write access to that repository alone, so
+# brew install benemon/tap/wherry is unchanged. The formula moves on prereleases too, as it did before goreleaser.
+# Skipped until the HOMEBREW_TAP_DEPLOY_KEY secret exists. brews is deprecated in favour of homebrew_casks, which
+# goreleaser check reports; ci.yml's release-build job accepts that one deprecation.
+brews:
+  - name: wherry
+    ids: [wherry]
+    description: Delegate coding agent tasks to receivers on other compute over Kafka
+    homepage: https://benemon.github.io/wherry/
+    license: MPL-2.0
+    directory: Formula
+    repository:
+      owner: benemon
+      name: homebrew-tap
+      branch: main
+      git:
+        url: git@github.com:benemon/homebrew-tap.git
+        private_key: '{{ envOrDefault "HOMEBREW_TAP_DEPLOY_KEY" "" }}'
+        # GitHub's published host keys, which release.yml writes, and no others.
+        ssh_command: >-
+          ssh -i {{ .KeyPath }} -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
+          -o UserKnownHostsFile={{ envOrDefault "TAP_KNOWN_HOSTS" "/dev/null" }}
+    commit_author:
+      name: github-actions[bot]
+      email: 41898282+github-actions[bot]@users.noreply.github.com
+    commit_msg_template: "wherry {{ .Tag }}"
+    skip_upload: '{{ if envOrDefault "HOMEBREW_TAP_DEPLOY_KEY" "" }}false{{ else }}true{{ end }}'
+    install: |
+      bin.install "wherry"
+    test: |
+      assert_match "version=v#{version}", shell_output("#{bin}/wherry version")
