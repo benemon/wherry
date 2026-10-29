@@ -42,7 +42,7 @@ type Run struct {
 	Fetches     []Fetch
 }
 
-// Fetch is an input the plugin fetches from URL, a presigned https GET the core has checked against its pool's
+// Fetch is an input the plugin fetches from URL, a presigned GET the core has checked against its pool's
 // storage, and verifies as Size bytes with SHA256 before the agent starts. URL is a credential: never log it or put it
 // in an error. A fetch that fails or does not verify ends the job before its agent starts, with Terminal.Class
 // ClassFetch.

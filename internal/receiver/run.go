@@ -1210,8 +1210,8 @@ func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input,
 	check := func(name, key string) (string, bool) {
 		value := values[name]
 		parsed, err := url.Parse(string(value))
-		if err != nil || storage == nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" ||
-			parsed.Hostname()+":"+cmp.Or(parsed.Port(), "443") != storage.Host() || parsed.EscapedPath() != "/"+storage.Bucket+"/"+key {
+		if err != nil || storage == nil || !storage.Serves(parsed) || parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" ||
+			parsed.EscapedPath() != "/"+storage.Bucket+"/"+key {
 			return "", false
 		}
 		signatures[name] = []byte(parsed.Query().Get("X-Amz-Signature"))
