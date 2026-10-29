@@ -452,7 +452,7 @@ func TestRedactionCannotExpandPastTheLimits(t *testing.T) {
 		run := testActiveRun(t, f, "run-x", 1)
 		run.deliver(map[string][]byte{name: []byte(value)})
 		f.plugin.outputs = outputs
-		run.collect(f.ctx, pluginsdk.Handle{}, true)
+		run.collect(f.ctx, pluginsdk.Handle{}, true, run.terms())
 		return run
 	}
 	run := collect(file("expanding.txt", strings.Repeat(value, 450)), file("small.txt", "key "+value))
@@ -545,7 +545,7 @@ func TestResultTextIsBounded(t *testing.T) {
 		}
 		return result.Task.Artifacts[0].Parts[0]
 	}
-	if got := part(run.reply(strings.Repeat("x", wire.MaxText+1))); got.Text != strings.Repeat("x", wire.MaxText) {
+	if got := part(run.reply(strings.Repeat("x", wire.MaxText+1), run.terms().ReplyLimit)); got.Text != strings.Repeat("x", wire.MaxText) {
 		t.Fatalf("result over the cap is %d bytes of text", len(got.Text))
 	}
 	escapes := strings.Repeat("\x01", 1000)

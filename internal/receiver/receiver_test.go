@@ -123,9 +123,11 @@ type fakePlugin struct {
 	collectFailures int
 	// collectHangs makes Collect block until its context ends.
 	collectHangs bool
-	collects     int
-	stopsBefore  []int
-	limits       pluginsdk.Limits
+	// collecting runs in Collect before it streams anything.
+	collecting  func()
+	collects    int
+	stopsBefore []int
+	limits      pluginsdk.Limits
 	// samples are what Metrics reports, unless metricsHang makes it block until its context ends.
 	samples     []pluginsdk.Sample
 	metricsHang bool
@@ -248,7 +250,7 @@ func (f *fakePlugin) Collect(ctx context.Context, _ pluginsdk.Handle, limits plu
 	f.collects++
 	f.limits = limits
 	f.stopsBefore = append(f.stopsBefore, f.stops)
-	outputs, err, hangs := slices.Clone(f.outputs), f.collectErr, f.collectHangs
+	outputs, err, hangs, collecting := slices.Clone(f.outputs), f.collectErr, f.collectHangs, f.collecting
 	if f.collects <= f.collectFailures {
 		err = errors.New("collect failed")
 	}
@@ -264,6 +266,9 @@ func (f *fakePlugin) Collect(ctx context.Context, _ pluginsdk.Handle, limits plu
 		}
 	}
 	f.mu.Unlock()
+	if collecting != nil {
+		collecting()
+	}
 	if hangs {
 		<-ctx.Done()
 		return ctx.Err()
