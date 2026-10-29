@@ -678,7 +678,8 @@ too. Once its access is gone, the receiver gives up a run at its first
 failed write and leaves the job for an adopter. It stops the job of a run
 that writes nothing one lock duration after its first denial, since it
 cannot tell a revocation from a passing denial and no other member can
-take the task before the lock expires.
+take the task before the lock expires, then spends at most 5 seconds
+recording the run as failed before it releases the task.
 
 A revoked name cannot be reused. Provision a returning host or receiver
 under a new name.

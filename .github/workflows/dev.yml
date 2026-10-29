@@ -45,10 +45,15 @@ jobs:
             pluginsdk/go.sum
       - name: Build wherry
         run: go build -trimpath -o "$RUNNER_TEMP/wherry" ./cmd/wherry
+      # Shared runner addresses spend GitHub's unauthenticated API limit; the workflow's own token raises it.
       - name: Acquire
         run: test/dev/lane.sh init
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Acquire again, unchanged
         run: test/dev/lane.sh unchanged
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Make the mock's credential
         run: |
           token=$(openssl rand -hex 24)

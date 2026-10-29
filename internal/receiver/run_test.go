@@ -1677,7 +1677,7 @@ func TestResultAfterLastingDenialReleasesTask(t *testing.T) {
 }
 
 // TestDeniedRunDoesNotWaitOnItsStatus stops a denied run whose status the broker never answers, as a revoked producer's
-// metadata load is not: the run is still released within deniedStatusTimeout.
+// metadata load is not: the run is still released within shutdownTimeout.
 func TestDeniedRunDoesNotWaitOnItsStatus(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-denied-unanswered", 1)
@@ -1694,7 +1694,7 @@ func TestDeniedRunDoesNotWaitOnItsStatus(t *testing.T) {
 		if status != kgo.AckRelease {
 			t.Fatalf("status %v, want release", status)
 		}
-	case <-time.After(deniedStatusTimeout + 5*time.Second):
+	case <-time.After(shutdownTimeout + 5*time.Second):
 		t.Fatal("denied run waited on a status the broker never answered")
 	}
 	f.plugin.mu.Lock()

@@ -408,6 +408,7 @@ func TestPoolGroupTakesTermDefaultsOnRealBroker(t *testing.T) {
 	ctx := context.Background()
 	terms := modelTerms()
 	terms.DeliveryLimit, terms.LockDurationMS = 0, 0
+	// The broker keeps wherry.admin between runs and pool create refuses an existing pool, so each run names its own.
 	pool := fmt.Sprintf("defaults-%d", time.Now().UnixNano())
 	if err := service.PoolCreate(ctx, pool, terms); err != nil {
 		t.Fatal(err)
