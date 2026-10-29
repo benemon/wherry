@@ -123,9 +123,11 @@ type fakePlugin struct {
 	collectFailures int
 	// collectHangs makes Collect block until its context ends.
 	collectHangs bool
-	collects     int
-	stopsBefore  []int
-	limits       pluginsdk.Limits
+	// collecting runs in Collect before it streams anything.
+	collecting  func()
+	collects    int
+	stopsBefore []int
+	limits      pluginsdk.Limits
 	// samples are what Metrics reports, unless metricsHang makes it block until its context ends.
 	samples     []pluginsdk.Sample
 	metricsHang bool
@@ -248,7 +250,7 @@ func (f *fakePlugin) Collect(ctx context.Context, _ pluginsdk.Handle, limits plu
 	f.collects++
 	f.limits = limits
 	f.stopsBefore = append(f.stopsBefore, f.stops)
-	outputs, err, hangs := slices.Clone(f.outputs), f.collectErr, f.collectHangs
+	outputs, err, hangs, collecting := slices.Clone(f.outputs), f.collectErr, f.collectHangs, f.collecting
 	if f.collects <= f.collectFailures {
 		err = errors.New("collect failed")
 	}
@@ -264,6 +266,9 @@ func (f *fakePlugin) Collect(ctx context.Context, _ pluginsdk.Handle, limits plu
 		}
 	}
 	f.mu.Unlock()
+	if collecting != nil {
+		collecting()
+	}
 	if hangs {
 		<-ctx.Done()
 		return ctx.Err()
@@ -969,6 +974,44 @@ func TestRunExitsOnConfigChange(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run kept going under a changed configuration")
+	}
+}
+
+// A pool update reaches a running receiver at its next read of wherry.admin: the next claim collects under the new
+// output limit, with no restart.
+func TestRunAppliesUpdatedTerms(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.answer(t, credentialName)
+	f.run(t, f.ctx)
+	collectedUnder := func(run string) int64 {
+		t.Helper()
+		f.submit(t, f.host, func(task *wire.Submission) {
+			task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+		})
+		f.await(t, run, anyTask)
+		f.plugin.mu.Lock()
+		defer f.plugin.mu.Unlock()
+		return f.plugin.limits.FileBytes
+	}
+	if limit := collectedUnder("run-a"); limit != admin.DefaultOutputLimit {
+		t.Fatalf("collected under %d, want the default output limit", limit)
+	}
+	terms := testTerms()
+	terms.OutputLimit = 1000
+	if err := f.service.PoolUpdate(f.ctx, testPool, terms, false); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if state, _, _ := f.receiver.snapshot(); state.Pools[testPool].OutputLimit == 1000 {
+			break
+		}
+		if f.ctx.Err() != nil {
+			t.Fatalf("receiver never read the updated terms; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if limit := collectedUnder("run-b"); limit != 1000 {
+		t.Fatalf("collected under %d after the pool update, want 1000", limit)
 	}
 }
 

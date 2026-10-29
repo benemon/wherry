@@ -1614,7 +1614,8 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 		}
 		stopped = false
 	}
-	run.collect(ctx, handle, stopped)
+	terms := run.terms()
+	run.collect(ctx, handle, stopped, terms)
 	cause, reason := "", ""
 	if terminal.Reason != "" {
 		reason = " (" + logText(run.redactText, errors.New(terminal.Reason)) + ")"
@@ -1635,7 +1636,7 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 	}
 	result := ""
 	if status.Message != nil {
-		result = run.reply(text(*status.Message))
+		result = run.reply(text(*status.Message), terms.ReplyLimit)
 		status.Message = replyMessage(*status.Message, result)
 	}
 	for _, output := range run.unreturned {
@@ -1658,8 +1659,8 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 // collect reads the outputs of a stopped job, redacts them and keeps their chunks and the result's lists of what the
 // run returned and did not. S3 outputs are uploaded as Collect streams them, unredacted, since they go to the host's own
 // bucket and never to the feed. Every expected output is listed as one or the other.
-func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stopped bool) {
-	limit := run.terms().OutputLimit
+func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stopped bool, terms admin.Terms) {
+	limit := terms.OutputLimit
 	stored := map[string]storedOutput{}
 	collected, err := run.collected(ctx, handle, stopped, limit, stored)
 	if err != nil {
@@ -1678,7 +1679,7 @@ func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stop
 			run.unreturned = append(run.unreturned, wire.UnreturnedOutput{Name: output.Name, Reason: "not collected"})
 		}
 		if run.outcome == nil {
-			run.collectOutcome(ctx, handle)
+			run.collectOutcome(ctx, handle, limit)
 		}
 		return
 	}
@@ -1772,7 +1773,7 @@ func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, st
 	for output := range outputs {
 		if output.Name == wire.OutcomeDir || strings.HasPrefix(output.Name, wire.OutcomeDir+"/") {
 			if output.Name == wire.OutcomeFile && output.Mode.Type() == 0 {
-				run.outcome = run.readOutcome(output)
+				run.outcome = run.readOutcome(output, limit)
 			}
 			if output.Body != nil {
 				output.Body.Close()
@@ -1802,17 +1803,17 @@ func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, st
 }
 
 // collectOutcome runs the plugin's Collect for the outcome file alone, reading no other output, under collectTimeout.
-func (run *activeRun) collectOutcome(ctx context.Context, handle pluginsdk.Handle) {
+func (run *activeRun) collectOutcome(ctx context.Context, handle pluginsdk.Handle, limit int64) {
 	ctx, cancel := context.WithTimeout(ctx, collectTimeout)
 	defer cancel()
 	outputs := make(chan pluginsdk.Output)
 	go func() {
 		defer close(outputs)
-		run.profile.Plugin.Collect(ctx, handle, pluginsdk.Limits{Files: wire.MaxOutputs, Stream: []string{wire.OutcomeFile}, StreamBytes: run.terms().OutputLimit}, outputs)
+		run.profile.Plugin.Collect(ctx, handle, pluginsdk.Limits{Files: wire.MaxOutputs, Stream: []string{wire.OutcomeFile}, StreamBytes: limit}, outputs)
 	}()
 	for output := range outputs {
 		if output.Name == wire.OutcomeFile && output.Mode.Type() == 0 {
-			run.outcome = run.readOutcome(output)
+			run.outcome = run.readOutcome(output, limit)
 			cancel()
 		}
 		if output.Body != nil {
@@ -1877,8 +1878,7 @@ func (run *activeRun) store(ctx context.Context, output pluginsdk.Output) stored
 // readOutcome reads and decodes an outcome file of at most the pool's output limit. Any outcome but a TaskStatus of a state an
 // agent may report, with a ROLE_AGENT message and for TASK_STATE_AUTH_REQUIRED the credential it needs, is nil. The
 // status keeps the message's text and that credential's name, redacted.
-func (run *activeRun) readOutcome(output pluginsdk.Output) *wire.TaskStatus {
-	limit := run.terms().OutputLimit
+func (run *activeRun) readOutcome(output pluginsdk.Output, limit int64) *wire.TaskStatus {
 	if output.Size > limit {
 		return nil
 	}
@@ -1951,16 +1951,17 @@ func (run *activeRun) outputChunks(name string, data []byte) []*kgo.Record {
 // reply is text redacted whole as the result and terminal status carry it: all of it within wire.MaxText, else its
 // first wire.MaxText bytes. A longer reply, cut to the pool's reply limit, joins the outputs as reply chunks. Both cuts
 // are of the redacted bytes, so no part of a value reaches the feed.
-func (run *activeRun) reply(text string) string {
+func (run *activeRun) reply(text string, limit int64) string {
 	form := run.redact([]byte(text), math.MaxInt64)
 	if form.size <= wire.MaxText {
 		return string(form.data)
 	}
-	whole := wire.CutUTF8(string(form.data), int(run.terms().ReplyLimit))
+	redacted := string(form.data)
+	whole := wire.CutUTF8(redacted, int(limit))
 	sum := sha256.Sum256([]byte(whole))
 	run.replied = &wire.ReturnedReply{SHA256: hex.EncodeToString(sum[:]), Size: int64(len(whole)), Cut: int64(len(whole)) < form.size}
 	run.outputs = append(run.outputs, run.outputChunks(wire.ReplyArtifact, []byte(whole))...)
-	return wire.CutUTF8(string(form.data), wire.MaxText)
+	return wire.CutUTF8(redacted, wire.MaxText)
 }
 
 // replyMessage is message with its text parts replaced by one holding text, ahead of its other parts.

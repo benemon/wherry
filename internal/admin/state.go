@@ -152,7 +152,7 @@ func withDefaults(terms Terms) Terms {
 	if terms.OutputLimit == 0 {
 		terms.OutputLimit = DefaultOutputLimit
 	}
-	// A pool whose output limit is below the default reply limit takes its output limit.
+	// validateTerms requires the reply limit to be at most the output limit.
 	if terms.ReplyLimit == 0 {
 		terms.ReplyLimit = min(DefaultReplyLimit, terms.OutputLimit)
 	}
@@ -439,8 +439,7 @@ func AuthorizeStatus(parse func([]byte, signed.Keys, wire.Record) error, state S
 	return status, nil
 }
 
-// AuthorizePoolStatus accepts a status from a live member of pool for a tenant entitled to it, for a reader of the
-// pool's events with no run tenant; the status binds its run's tenant through its task hash.
+// AuthorizePoolStatus accepts a status from a live member of pool for a tenant entitled to it.
 func AuthorizePoolStatus(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, pool string) (wire.RunStatus, error) {
 	var status wire.RunStatus
 	if err := parse(encoded, keys, &status); err != nil {
@@ -488,8 +487,7 @@ func AuthorizeOutput(parse func([]byte, signed.Keys, wire.Record) error, state S
 	return output, nil
 }
 
-// AuthorizePoolStartFailure accepts a start failure from a live member of pool for a tenant entitled to it, for a
-// reader of the pool's events with no run tenant; the failure binds its run's tenant through its task hash.
+// AuthorizePoolStartFailure accepts a start failure from a live member of pool for a tenant entitled to it.
 func AuthorizePoolStartFailure(parse func([]byte, signed.Keys, wire.Record) error, state State, keys signed.Keys, encoded []byte, pool string) (wire.StartFailure, error) {
 	var failure wire.StartFailure
 	if err := parse(encoded, keys, &failure); err != nil {

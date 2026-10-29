@@ -266,7 +266,6 @@ type SealRequest struct {
 	ExpiryMS  int64    `json:"expiry_at_ms"`
 }
 
-// startFailureClasses are the classes a start failure carries.
 var startFailureClasses = []string{"dispatch", "platform", "input-too-large"}
 
 // StartFailure records that a receiver could not start a run's attempt.

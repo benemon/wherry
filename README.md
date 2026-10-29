@@ -113,10 +113,10 @@ publishes the site from `main`.
 
 A `v*` tag cuts a release: `.github/workflows/release.yml` checks that the
 tagged commit's `ci` run on `main` passed, then runs
-[goreleaser](https://goreleaser.com/) from `.goreleaser.yaml`, which builds the
-archives, writes `checksums.txt` and an SBOM per archive
+[goreleaser](https://goreleaser.com/) from `.goreleaser.yaml`. goreleaser builds
+the archives, writes `checksums.txt` and an SBOM per archive
 (`<archive>.sbom.json`), signs `checksums.txt` with cosign, publishes the
-release and updates the Homebrew formula; the workflow then attests the
+release and updates the Homebrew formula. The workflow then attests the
 archives' provenance. A tag with a hyphenated qualifier, such as
 `v0.1.0-rc.1`, publishes a prerelease. `pluginsdk/v*` tags version the
 `pluginsdk` module and publish nothing. The same build, unsigned and

@@ -67,9 +67,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$RUNNER_TEMP/known_hosts"
-      # Builds the archives, writes checksums.txt and an SBOM per archive, signs checksums.txt with cosign, publishes
-      # the release and moves the Homebrew formula (.goreleaser.yaml). The deploy key, with write access to
-      # benemon/homebrew-tap alone, reaches goreleaser only; without the secret the formula is left alone.
+      # The deploy key, with write access to benemon/homebrew-tap alone, reaches goreleaser only; without the secret
+      # the formula is left alone.
       - name: Build, sign and publish the release
         env:
           GITHUB_TOKEN: ${{ github.token }}

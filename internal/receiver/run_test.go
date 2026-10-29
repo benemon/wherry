@@ -1176,6 +1176,30 @@ func TestOutcomeFileEndsTheRun(t *testing.T) {
 	}
 }
 
+// conclude reads the pool's terms once: a pool update that lands while Collect runs leaves the output limit the
+// outcome file is read under.
+func TestConcludeReadsTermsOnce(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.answer(t, credentialName)
+	lowered := testTerms()
+	lowered.OutputLimit = 8
+	f.plugin.collecting = func() {
+		if err := f.service.PoolUpdate(f.ctx, testPool, lowered, false); err != nil {
+			t.Error(err)
+		}
+		if err := f.receiver.refresh(f.ctx); err != nil {
+			t.Error(err)
+		}
+	}
+	ack := f.execute(t, f.submit(t, f.host, nil), 1)
+	if status := f.lastTask(t).Status; ack != kgo.AckAccept || status.State != wire.TaskStateCompleted {
+		t.Fatalf("ack %v, status %s; want the outcome file read under the terms at conclude", ack, status.State)
+	}
+	if state, _, _ := f.receiver.snapshot(); state.Pools[testPool].OutputLimit != 8 {
+		t.Fatalf("receiver holds output limit %d, want the update applied during Collect", state.Pools[testPool].OutputLimit)
+	}
+}
+
 // Each supported harness's captured outcome files end the run as the receiver reported them when captured, whatever the
 // agent's exit: a valid file's state wins over exit 1. Only captured files belong in testdata/outcome.
 func TestCapturedOutcomes(t *testing.T) {
@@ -1326,14 +1350,15 @@ func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
 			if result := task.Artifacts[0].Parts[0].Text; result != test.want {
 				t.Fatalf("result %.80q, want %.80q", result, test.want)
 			}
+			chunks := f.outputChunks(t)
 			var joined []byte
-			for _, chunk := range f.outputChunks(t) {
+			for _, chunk := range chunks {
 				joined = append(joined, chunk.ArtifactUpdate.Artifact.Parts[0].Raw...)
 			}
 			if string(joined) != test.chunks {
 				t.Fatalf("reply chunks hold %d bytes, want the %d of the redacted reply", len(joined), len(test.chunks))
 			}
-			if chunks := f.outputChunks(t); test.chunks == straddled && (len(chunks) != 2 || !strings.HasSuffix(string(chunks[0].ArtifactUpdate.Artifact.Parts[0].Raw), marker[:13])) {
+			if test.chunks == straddled && (len(chunks) != 2 || !strings.HasSuffix(string(chunks[0].ArtifactUpdate.Artifact.Parts[0].Raw), marker[:13])) {
 				t.Fatal("the chunk seam does not split the second marker")
 			}
 			for _, record := range append(f.records(t, admin.TenantTopic(testTenant)), f.records(t, admin.TenantTranscriptTopic(testTenant))...) {

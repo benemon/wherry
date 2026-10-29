@@ -407,9 +407,7 @@ func TestPoolGroupTakesTermDefaultsOnRealBroker(t *testing.T) {
 	if err := service.PoolCreate(ctx, pool, terms); err != nil {
 		t.Fatal(err)
 	}
-	if limit, lock := groupTerms(t, service, pool, "5", "15000"); limit != "5" || lock != "15000" {
-		t.Fatalf("share group delivery limit %q, lock %q; want the defaults 5 and 15000", limit, lock)
-	}
+	groupTerms(t, service, pool, "5", "15000")
 }
 
 // pool update re-applies the share group's delivery limit and lock duration; its dry run leaves them.
@@ -430,21 +428,16 @@ func TestPoolUpdateReappliesTheShareGroupOnRealBroker(t *testing.T) {
 	if err := service.PoolUpdate(ctx, pool, terms, true); err != nil {
 		t.Fatal(err)
 	}
-	if limit, lock := groupTerms(t, service, pool, "5", "15000"); limit != "5" || lock != "15000" {
-		t.Fatalf("after a dry run, share group delivery limit %q, lock %q; want 5 and 15000", limit, lock)
-	}
+	groupTerms(t, service, pool, "5", "15000")
 	if err := service.PoolUpdate(ctx, pool, terms, false); err != nil {
 		t.Fatal(err)
 	}
-	if limit, lock := groupTerms(t, service, pool, "3", "30000"); limit != "3" || lock != "30000" {
-		t.Fatalf("after update, share group delivery limit %q, lock %q; want 3 and 30000", limit, lock)
-	}
+	groupTerms(t, service, pool, "3", "30000")
 }
 
-// groupTerms is the delivery limit and lock duration DescribeConfigs reports for pool's share group, once they are
-// limit and lock or after 30 seconds: a broker reports the group's configuration only once the alter reaches its
-// metadata.
-func groupTerms(t *testing.T, service *Service, pool, limit, lock string) (string, string) {
+// groupTerms fails unless DescribeConfigs reports limit and lock as the delivery limit and lock duration of pool's share
+// group within 30 seconds: a broker reports the group's configuration only once the alter reaches its metadata.
+func groupTerms(t *testing.T, service *Service, pool, limit, lock string) {
 	t.Helper()
 	request := kmsg.NewPtrDescribeConfigsRequest()
 	resource := kmsg.NewDescribeConfigsRequestResource()
@@ -463,8 +456,11 @@ func groupTerms(t *testing.T, service *Service, pool, limit, lock string) (strin
 			}
 		}
 		gotLimit, gotLock := got["share.delivery.count.limit"], got["share.record.lock.duration.ms"]
-		if gotLimit == limit && gotLock == lock || time.Now().After(deadline) {
-			return gotLimit, gotLock
+		if gotLimit == limit && gotLock == lock {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("share group delivery limit %q, lock %q; want %q and %q", gotLimit, gotLock, limit, lock)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
