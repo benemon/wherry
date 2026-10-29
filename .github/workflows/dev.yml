@@ -1,8 +1,6 @@
 name: dev
 
-# wherry dev end to end on a GitHub runner: init, up with the mock agent, runs, a leak check, down and reset. The lane
-# takes the newest released nomad plugin, so a change to the plugin protocol fails here until a plugin release
-# serving it exists.
+# wherry dev end to end on a GitHub runner: init, up with the mock agent, runs, a leak check, down and reset.
 on:
   push:
     branches: [main]

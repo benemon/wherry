@@ -11,9 +11,8 @@ mkdir -p "$out"
 cp "$root/env/nomad/nomad.log" "$root/env/nomad/agent.hcl" "$root/cache/manifest.json" "$out/" 2>/dev/null
 for job in receiver kafka s3; do
   "$nomad" job status "wherry-default-$job" > "$out/$job-status.txt" 2>&1
-  task=$job
-  "$nomad" alloc logs -job "wherry-default-$job" "$task" > "$out/$job.stdout.log" 2>&1
-  "$nomad" alloc logs -stderr -job "wherry-default-$job" "$task" > "$out/$job.stderr.log" 2>&1
+  "$nomad" alloc logs -job "wherry-default-$job" "$job" > "$out/$job.stdout.log" 2>&1
+  "$nomad" alloc logs -stderr -job "wherry-default-$job" "$job" > "$out/$job.stderr.log" 2>&1
 done
 cp -r "$root/env/kafka/data/logs" "$out/kafka-server-logs" 2>/dev/null
 "${RUNTIME:-docker}" ps -a > "$out/containers.txt" 2>&1
