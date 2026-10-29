@@ -7,7 +7,8 @@ A run that ends for want of a credential ends `TASK_STATE_FAILED` with a
 [`credential` data part](#the-credential-data-part) for each credential,
 when its seal goes unanswered and when its agent reports
 `TASK_STATE_AUTH_REQUIRED`. wherry no longer treats
-`TASK_STATE_AUTH_REQUIRED` as terminal.
+`TASK_STATE_AUTH_REQUIRED` as terminal. A submission's message has `role`
+`ROLE_USER`.
 
 **Change note, 2026-10-29:** edited in place at version 1. A reply over
 64 KiB once redacted travels as [reply chunks](#the-reply), output chunks with
@@ -158,8 +159,9 @@ A submission is the task of one run.
 }
 ```
 
-- `message` is the run's A2A `Message`, with `role` `ROLE_USER` or
-  `ROLE_AGENT`. Its `taskId` and `contextId` are the run ID.
+- `message` is the run's A2A `Message`, with `role` `ROLE_USER`. Readers
+  reject a submission with another role. Its `taskId` and `contextId` are
+  the run ID.
 - `placement.agent` is an agent from the pool's terms. `placement.selector`
   is a list of `{key, operator, values}` requirements: `operator` is `In`,
   `NotIn`, `Exists` or `DoesNotExist`; `In` and `NotIn` take one or more

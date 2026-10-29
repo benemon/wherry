@@ -426,6 +426,9 @@ func (value *Submission) validate() error {
 	if err := validateMessage(&value.Message); err != nil {
 		return err
 	}
+	if value.Message.Role != RoleUser {
+		return errors.New("a submission's message role must be ROLE_USER")
+	}
 	if _, err := inputBytes(value.Message.Parts); err != nil {
 		return err
 	}

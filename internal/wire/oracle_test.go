@@ -120,6 +120,18 @@ func TestSubmissionIDsMustBeRunID(t *testing.T) {
 	}
 }
 
+// A submission is a client's message to the agent.
+func TestSubmissionRoleMustBeUser(t *testing.T) {
+	submission := validSubmission()
+	submission.Message.Role = RoleAgent
+	if err := submission.validate(); err == nil {
+		t.Fatal("ROLE_AGENT submission accepted")
+	}
+	if _, err := SignRecord(submission, wireKey); err == nil {
+		t.Fatal("ROLE_AGENT submission signed")
+	}
+}
+
 // checkProtoValue checks every member of a decoded JSON object against the vendored proto message,
 // descending into message-typed fields; Struct and Value fields are opaque.
 func checkProtoValue(t *testing.T, proto, message, path string, value any) {
