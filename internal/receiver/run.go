@@ -60,6 +60,9 @@ var (
 	stateCheckInterval = time.Second
 	// shutdownTimeout bounds the final transcript commit and ack flush after the receiver is told to stop.
 	shutdownTimeout = 5 * time.Second
+	// deniedStatusTimeout bounds the status of a run stopped for a lasting denial, whose lock has already run out: a
+	// revoked producer retries a metadata load it cannot complete for as long as its context lasts.
+	deniedStatusTimeout = 2 * time.Second
 	// reconcileInterval separates the Lookups that resolve an ambiguous Dispatch.
 	reconcileInterval = time.Second
 	// purgeDeadline bounds the Purge retries of a start failure.
@@ -1462,7 +1465,9 @@ func (run *activeRun) deny(ctx context.Context, handle pluginsdk.Handle, pending
 	}
 	const reason = "receiver denied"
 	status := taskStatus(wire.TaskStateFailed, reason)
-	if err := run.commit(ctx, append(append(run.chunks(pending, true), run.result(status, reason)), run.terminal(status, pending)...)...); err != nil {
+	statusCtx, cancel := context.WithTimeout(ctx, deniedStatusTimeout)
+	defer cancel()
+	if err := run.commit(statusCtx, append(append(run.chunks(pending, true), run.result(status, reason)), run.terminal(status, pending)...)...); err != nil {
 		run.receiver.logger.Printf("run %s: publish denied status: %v", run.task.Wherry.Run, err)
 	} else {
 		run.ended(status.State)

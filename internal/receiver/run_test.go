@@ -1594,6 +1594,35 @@ func TestResultAfterLastingDenialReleasesTask(t *testing.T) {
 	}
 }
 
+// TestDeniedRunDoesNotWaitOnItsStatus stops a denied run whose status the broker never answers, as a revoked producer's
+// metadata load is not: the run is still released within deniedStatusTimeout.
+func TestDeniedRunDoesNotWaitOnItsStatus(t *testing.T) {
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-denied-unanswered", 1)
+	previous := commitTransaction
+	t.Cleanup(func() { commitTransaction = previous })
+	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	done := make(chan kgo.AckStatus, 1)
+	go func() { done <- run.deny(f.ctx, pluginsdk.Handle{}, nil) }()
+	select {
+	case status := <-done:
+		if status != kgo.AckRelease {
+			t.Fatalf("status %v, want release", status)
+		}
+	case <-time.After(deniedStatusTimeout + 5*time.Second):
+		t.Fatal("denied run waited on a status the broker never answered")
+	}
+	f.plugin.mu.Lock()
+	releaseIDs := f.plugin.releaseIDs
+	f.plugin.mu.Unlock()
+	if !slices.Equal(releaseIDs, []string{"run-denied-unanswered"}) {
+		t.Fatalf("releases=%v", releaseIDs)
+	}
+}
+
 func TestShareGroupDenialRetestedByClaim(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
