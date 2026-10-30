@@ -913,38 +913,52 @@ func (h *Host) Transcript(ctx context.Context, runID string) (TranscriptResult, 
 
 // transcript is the run's transcript as Transcript returns it, from the chunks derived so far.
 func (r *runView) transcript() TranscriptResult {
-	result := TranscriptResult{Redacted: map[string]int{}, Skipped: r.skipped}
-	for _, status := range r.statuses {
-		result.Attempt = max(result.Attempt, status.Wherry.Attempt)
-	}
-	for _, chunk := range r.chunks {
-		result.Attempt = max(result.Attempt, chunk.Wherry.Attempt)
-	}
+	attempt, first := r.current()
+	result := TranscriptResult{Attempt: attempt, Redacted: map[string]int{}, Skipped: r.skipped}
 	var chunks []*wire.Chunk
-	first := int64(math.MaxInt64)
 	for _, chunk := range r.chunks {
 		// The empty last chunk holds no line.
-		if len(chunk.ArtifactUpdate.Artifact.Parts) == 0 {
-			continue
-		}
-		chunks = append(chunks, chunk)
-		if chunk.Wherry.Attempt == result.Attempt {
-			first = min(first, chunk.Wherry.Seq)
+		if len(chunk.ArtifactUpdate.Artifact.Parts) != 0 {
+			chunks = append(chunks, chunk)
 		}
 	}
 	sort.SliceStable(chunks, func(i, j int) bool { return chunks[i].Wherry.Attempt > chunks[j].Wherry.Attempt })
 	markers := r.h.markers(r.local)
 	seen := map[int64]bool{}
 	for _, chunk := range chunks {
-		if seen[chunk.Wherry.Seq] || chunk.Wherry.Attempt != result.Attempt && chunk.Wherry.Seq >= first {
+		if seen[chunk.Wherry.Seq] || chunk.Wherry.Attempt != attempt && chunk.Wherry.Seq >= first {
 			continue
 		}
 		seen[chunk.Wherry.Seq] = true
-		parts := unredactParts(chunk.ArtifactUpdate.Artifact.Parts, markers, result.Redacted)
-		result.Lines = append(result.Lines, TranscriptLine{Seq: chunk.Wherry.Seq, Attempt: chunk.Wherry.Attempt, Part: parts[0]})
+		result.Lines = append(result.Lines, transcriptLine(chunk, markers, result.Redacted))
 	}
 	sort.Slice(result.Lines, func(i, j int) bool { return result.Lines[i].Seq < result.Lines[j].Seq })
 	return result
+}
+
+// current returns the run's highest attempt and the lowest seq of that attempt's lines, math.MaxInt64 while it has
+// none.
+func (r *runView) current() (int64, int64) {
+	var attempt int64
+	for _, status := range r.statuses {
+		attempt = max(attempt, status.Wherry.Attempt)
+	}
+	for _, chunk := range r.chunks {
+		attempt = max(attempt, chunk.Wherry.Attempt)
+	}
+	first := int64(math.MaxInt64)
+	for _, chunk := range r.chunks {
+		if chunk.Wherry.Attempt == attempt && len(chunk.ArtifactUpdate.Artifact.Parts) != 0 {
+			first = min(first, chunk.Wherry.Seq)
+		}
+	}
+	return attempt, first
+}
+
+// transcriptLine is chunk's line, its markers named and counted in counts.
+func transcriptLine(chunk *wire.Chunk, markers map[string]string, counts map[string]int) TranscriptLine {
+	parts := unredactParts(chunk.ArtifactUpdate.Artifact.Parts, markers, counts)
+	return TranscriptLine{Seq: chunk.Wherry.Seq, Attempt: chunk.Wherry.Attempt, Part: parts[0]}
 }
 
 // TranscriptStream returns a run's transcript as its lines arrive.
@@ -960,6 +974,12 @@ type TranscriptStream struct {
 	// taken from it.
 	tail *follower
 	next int64
+	// attempt and first are the highest attempt and its lowest seq when Next last returned the whole transcript,
+	// returned the attempt of each line Next has returned by its seq, nil before the first, and redacted the markers
+	// counted in those lines.
+	attempt, first int64
+	returned       map[int64]int64
+	redacted       map[string]int
 }
 
 // StreamTranscript returns a stream of runID's transcript.
@@ -967,9 +987,10 @@ func (h *Host) StreamTranscript(runID string) *TranscriptStream {
 	return &TranscriptStream{h: h, run: runID}
 }
 
-// Next returns the run's transcript as Transcript would return it now; a caller printing it as it grows skips the
-// lines it has printed. The stream's consumer, and the host's follower when none runs, run under the ctx of the Next
-// that starts them.
+// Next returns, in seq order, the lines of the run's transcript at seqs no earlier Next returned, with Attempt and
+// Redacted as Transcript would return them now. Once the highest attempt or its lowest seq changes, which can replace
+// lines returned, it returns the whole transcript again; a caller printing lines skips the seqs it has printed. The
+// stream's consumer, and the host's follower when none runs, run under the ctx of the Next that starts them.
 func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
 	if s.r == nil {
 		f, err := s.h.follow(ctx)
@@ -1023,7 +1044,49 @@ func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
 	s.next = max(s.next, read)
 	s.r.addTranscript(ctx, records)
 	s.r.derive()
-	return s.r.transcript(), nil
+	return s.lines(), nil
+}
+
+// lines returns the transcript's lines at seqs Next has not returned, unredacting only theirs, or the whole transcript
+// when the lines returned may no longer be its own.
+func (s *TranscriptStream) lines() TranscriptResult {
+	attempt, first := s.r.current()
+	whole := func() TranscriptResult {
+		result := s.r.transcript()
+		s.attempt, s.first, s.returned, s.redacted = attempt, first, map[int64]int64{}, maps.Clone(result.Redacted)
+		for _, line := range result.Lines {
+			s.returned[line.Seq] = line.Attempt
+		}
+		return result
+	}
+	if s.returned == nil || attempt != s.attempt || first != s.first {
+		return whole()
+	}
+	chunks := map[int64]*wire.Chunk{}
+	for _, chunk := range s.r.chunks {
+		seq := chunk.Wherry.Seq
+		if len(chunk.ArtifactUpdate.Artifact.Parts) == 0 || chunk.Wherry.Attempt != attempt && seq >= first {
+			continue
+		}
+		if returned, ok := s.returned[seq]; ok {
+			if returned < chunk.Wherry.Attempt {
+				return whole()
+			}
+			continue
+		}
+		if kept := chunks[seq]; kept == nil || kept.Wherry.Attempt < chunk.Wherry.Attempt {
+			chunks[seq] = chunk
+		}
+	}
+	markers := s.r.h.markers(s.r.local)
+	result := TranscriptResult{Attempt: attempt, Skipped: s.r.skipped}
+	for seq, chunk := range chunks {
+		result.Lines = append(result.Lines, transcriptLine(chunk, markers, s.redacted))
+		s.returned[seq] = chunk.Wherry.Attempt
+	}
+	sort.Slice(result.Lines, func(i, j int) bool { return result.Lines[i].Seq < result.Lines[j].Seq })
+	result.Redacted = maps.Clone(s.redacted)
+	return result
 }
 
 // Wait blocks until there are records past those Next last took, on the feed or once the run has an echo on the

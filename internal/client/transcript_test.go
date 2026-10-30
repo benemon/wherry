@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -200,81 +203,160 @@ func mustRead(t *testing.T, f *fixture, topic string) []*kgo.Record {
 	return records
 }
 
+// textChunk is a chunk of attempt at seq whose line is text.
+func (r *testReceiver) textChunk(t *testing.T, task claimed, attempt, seq int64, text string) []byte {
+	run := task.submission.Wherry.Run
+	return r.sign(t, &wire.Chunk{
+		ArtifactUpdate: wire.TaskArtifactUpdateEvent{TaskID: run, ContextID: run, Artifact: wire.Artifact{ArtifactID: "transcript", Parts: []wire.Part{{Text: text}}, Extensions: []string{wire.ExtensionURI}}},
+		Wherry:         wire.ChunkBinding{ReceiverBinding: r.binding(task, attempt), TaskHash: task.hash, Seq: seq},
+	})
+}
+
 // A stream of ticks over a live run fetches each of its transcript records once, where a Transcript each tick fetches
-// the transcript topic from the run's echo again, and each tick returns the transcript as it stands.
+// the transcript topic from the run's echo again, and each tick returns only the lines new since the last, each
+// unredacted once: together they are the transcript Transcript returns, with its redaction counts.
 func TestTranscriptStreamFetchesEachChunkOnce(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
+	local, err := f.host.localRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := signed.RedactionMarker(local.RedactionKey, "model")
 	topic := admin.TenantTranscriptTopic("tenant-a")
 	var counted traffic
-	stream := f.countedReader(t, &counted).StreamTranscript(runID)
+	reader := f.countedReader(t, &counted)
+	// The reader names the markers of the credentials f.host configures.
+	reader.credentials = f.host.credentials
+	stream := reader.StreamTranscript(runID)
 	const ticks = 8
+	var streamed []TranscriptLine
+	var redacted map[string]int
 	for tick := range int64(ticks) {
-		receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, tick*5))
+		// Two lines a tick, the second redacted.
+		receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, tick*10), receiver.textChunk(t, task, 1, tick*10+5, "line "+marker))
 		got, err := stream.Next(f.ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got.Lines) != int(tick)+1 || got.Lines[tick].Seq != tick*5 {
-			t.Fatalf("tick %d returned %+v; want %d lines ending at %d", tick, got.Lines, tick+1, tick*5)
+		if len(got.Lines) != 2 || got.Lines[0].Seq != tick*10 || got.Lines[1].Seq != tick*10+5 || got.Attempt != 1 {
+			t.Fatalf("tick %d returned %+v; want the lines at %d and %d", tick, got.Lines, tick*10, tick*10+5)
 		}
-	}
-	if got, err := stream.Next(f.ctx); err != nil || len(got.Lines) != ticks {
-		t.Fatalf("a tick past the last chunk returned %+v, %v; want the %d lines", got.Lines, err, ticks)
-	}
-	// Each transaction appends its chunk and a commit marker.
-	end := f.endOffset(t, topic)
-	t.Logf("stream: %d ticks over %d chunks fetched %d of %d transcript records in %d fetch requests and %d listings", ticks+1, ticks, counted.records(topic), end, counted.counts().fetches, counted.counts().listings)
-	if n := counted.records(topic); n != end {
-		t.Fatalf("%d ticks fetched %d transcript records; want each of the %d once", ticks+1, n, end)
-	}
-}
-
-// A stream over an adopted run returns, as the second attempt's lines commit, the view Transcript returns, which takes
-// the adopter's line at a seq the first attempt also wrote and drops the first attempt's lines past the adopter's
-// first.
-func TestTranscriptStreamOfAnAdoptedRun(t *testing.T) {
-	f := newFixture(t)
-	receiver, task := f.admitted(t)
-	runID := task.submission.Wherry.Run
-	stream := f.host.StreamTranscript(runID)
-	type line struct{ attempt, seq int64 }
-	next := func() []line {
-		t.Helper()
-		got, err := stream.Next(f.ctx)
-		if err != nil {
-			t.Fatal(err)
+		if !maps.Equal(got.Redacted, map[string]int{"model": int(tick) + 1}) {
+			t.Fatalf("tick %d counted %v; want the %d markers so far", tick, got.Redacted, tick+1)
 		}
-		var lines []line
-		for _, l := range got.Lines {
-			lines = append(lines, line{l.Attempt, l.Seq})
-		}
-		return lines
+		streamed, redacted = append(streamed, got.Lines...), got.Redacted
 	}
-	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, 0), receiver.chunk(t, task, 1, 5), receiver.chunk(t, task, 1, 10))
-	if got, want := next(), []line{{1, 0}, {1, 5}, {1, 10}}; !slices.Equal(got, want) {
-		t.Fatalf("first attempt streamed %v, want %v", got, want)
-	}
-	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "claimed-2", "claimed", wire.TaskStateWorking, nil), receiver.chunk(t, task, 2, 10), receiver.chunk(t, task, 2, 15))
-	if got, want := next(), []line{{1, 0}, {1, 5}, {2, 10}, {2, 15}}; !slices.Equal(got, want) {
-		t.Fatalf("second attempt streamed %v, want %v", got, want)
-	}
-	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 2, 20), receiver.chunk(t, task, 1, 25))
-	streamed := next()
-	if want := []line{{1, 0}, {1, 5}, {2, 10}, {2, 15}, {2, 20}}; !slices.Equal(streamed, want) {
-		t.Fatalf("after adoption streamed %v, want %v without the first attempt's later line", streamed, want)
+	if got, err := stream.Next(f.ctx); err != nil || len(got.Lines) != 0 || !maps.Equal(got.Redacted, redacted) {
+		t.Fatalf("a tick past the last chunk returned %+v, %v; want no lines and the same counts", got, err)
 	}
 	transcript, err := f.host.Transcript(f.ctx, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var view []line
-	for _, l := range transcript.Lines {
-		view = append(view, line{l.Attempt, l.Seq})
+	if !reflect.DeepEqual(streamed, transcript.Lines) || !maps.Equal(redacted, transcript.Redacted) {
+		t.Fatalf("streamed %+v counting %v; want the transcript %+v counting %v", streamed, redacted, transcript.Lines, transcript.Redacted)
 	}
-	if !slices.Equal(view, streamed) {
-		t.Fatalf("transcript %v, want the streamed %v", view, streamed)
+	// Each transaction appends its chunks and a commit marker.
+	end := f.endOffset(t, topic)
+	t.Logf("stream: %d ticks over %d chunks fetched %d of %d transcript records in %d fetch requests and %d listings", ticks+1, 2*ticks, counted.records(topic), end, counted.counts().fetches, counted.counts().listings)
+	if n := counted.records(topic); n != end {
+		t.Fatalf("%d ticks fetched %d transcript records; want each of the %d once", ticks+1, n, end)
+	}
+}
+
+// streamed is a line of a stream by its attempt and seq.
+type streamed struct{ attempt, seq int64 }
+
+// printed returns the stream's Next, appending to printed the lines of it logs -f prints: those past the last printed.
+func printed(t *testing.T, f *fixture, stream *TranscriptStream, printed *[]streamed) TranscriptResult {
+	t.Helper()
+	got, err := stream.Next(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range got.Lines {
+		if len(*printed) == 0 || line.Seq > (*printed)[len(*printed)-1].seq {
+			*printed = append(*printed, streamed{line.Attempt, line.Seq})
+		}
+	}
+	return got
+}
+
+// A stream over an adopted run returns the whole view Transcript returns when the second attempt's lines commit,
+// which takes the adopter's line at a seq the first attempt also wrote, then only the adopter's new lines, never the
+// first attempt's lines past the adopter's first.
+func TestTranscriptStreamOfAnAdoptedRun(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	stream := f.host.StreamTranscript(runID)
+	next := func() []streamed {
+		t.Helper()
+		got, err := stream.Next(f.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var lines []streamed
+		for _, l := range got.Lines {
+			lines = append(lines, streamed{l.Attempt, l.Seq})
+		}
+		return lines
+	}
+	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, 0), receiver.chunk(t, task, 1, 5), receiver.chunk(t, task, 1, 10))
+	if got, want := next(), []streamed{{1, 0}, {1, 5}, {1, 10}}; !slices.Equal(got, want) {
+		t.Fatalf("first attempt streamed %v, want %v", got, want)
+	}
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "claimed-2", "claimed", wire.TaskStateWorking, nil), receiver.chunk(t, task, 2, 10), receiver.chunk(t, task, 2, 15))
+	if got, want := next(), []streamed{{1, 0}, {1, 5}, {2, 10}, {2, 15}}; !slices.Equal(got, want) {
+		t.Fatalf("second attempt streamed %v, want %v", got, want)
+	}
+	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 2, 20), receiver.chunk(t, task, 1, 25))
+	if got, want := next(), []streamed{{2, 20}}; !slices.Equal(got, want) {
+		t.Fatalf("after adoption streamed %v, want %v without the first attempt's later line", got, want)
+	}
+}
+
+// A takeover whose claim reaches the stream before its first line, which starts below a line of the first attempt the
+// stream returned, prints the lines logs -f printed when each Next returned the whole transcript, and ends with
+// Transcript's redaction counts, which no longer count the replaced line.
+func TestTranscriptStreamOfATakeoverBelowReturnedLines(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	runID := task.submission.Wherry.Run
+	local, err := f.host.localRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := signed.RedactionMarker(local.RedactionKey, "model")
+	stream := f.host.StreamTranscript(runID)
+	var lines []streamed
+	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, 0), receiver.chunk(t, task, 1, 5), receiver.textChunk(t, task, 1, 10, marker))
+	printed(t, f, stream, &lines)
+	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 2, "claimed-2", "claimed", wire.TaskStateWorking, nil))
+	// Next does not wait for the feed follower to take the claim.
+	got := printed(t, f, stream, &lines)
+	for deadline := time.Now().Add(5 * time.Second); got.Attempt != 2 && time.Now().Before(deadline); {
+		stream.Wait(f.ctx)
+		got = printed(t, f, stream, &lines)
+	}
+	if got.Attempt != 2 || !maps.Equal(got.Redacted, map[string]int{"model": 1}) {
+		t.Fatalf("after the claim got attempt %d counting %v; want attempt 2 and the first attempt's marker", got.Attempt, got.Redacted)
+	}
+	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 2, 8), receiver.chunk(t, task, 2, 15))
+	printed(t, f, stream, &lines)
+	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, 20), receiver.textChunk(t, task, 2, 20, marker+marker))
+	last := printed(t, f, stream, &lines)
+	if want := []streamed{{1, 0}, {1, 5}, {1, 10}, {2, 15}, {2, 20}}; !slices.Equal(lines, want) {
+		t.Fatalf("printed %v, want %v", lines, want)
+	}
+	transcript, err := f.host.Transcript(f.ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last.Attempt != transcript.Attempt || !maps.Equal(last.Redacted, transcript.Redacted) || !maps.Equal(last.Redacted, map[string]int{"model": 2}) {
+		t.Fatalf("stream ended at attempt %d counting %v; want the transcript's attempt %d counting %v", last.Attempt, last.Redacted, transcript.Attempt, transcript.Redacted)
 	}
 }
 
