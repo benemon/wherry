@@ -122,6 +122,23 @@ func TestDevMock(t *testing.T) {
 			t.Fatalf("outcome %v", got)
 		}
 	})
+	t.Run("timed sleep", func(t *testing.T) {
+		dir := mockTask(t, "mock: sleep 50ms")
+		start := time.Now()
+		if err := run([]string{"dev", "mock"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+			t.Fatalf("returned after %v; want at least 50ms", elapsed)
+		}
+		if got := outcome(t, dir); got["state"] != "TASK_STATE_COMPLETED" {
+			t.Fatalf("outcome %v", got)
+		}
+		mockTask(t, "mock: sleep soon")
+		if err := run([]string{"dev", "mock"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "duration") {
+			t.Fatalf("err %v; want a duration error", err)
+		}
+	})
 	t.Run("sleep", func(t *testing.T) {
 		dir := mockTask(t, "mock: sleep")
 		stdout := &lockedBuffer{}

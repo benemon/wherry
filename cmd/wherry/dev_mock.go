@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/benemon/wherry/internal/wire"
 )
@@ -40,12 +41,24 @@ func runDevMock(args []string, stdout io.Writer) error {
 	first, _, _ := strings.Cut(prompt, "\n")
 	output := os.Getenv("WHERRY_OUTPUT_DIR")
 	switch {
-	case first == "mock: sleep":
+	case first == "mock: sleep" || strings.HasPrefix(first, "mock: sleep "):
+		// A duration makes the run complete after it; without one it sleeps until SIGTERM, with no outcome.
+		var wake <-chan time.Time
+		if value := strings.TrimPrefix(first, "mock: sleep "); value != first {
+			duration, err := time.ParseDuration(value)
+			if err != nil || duration < 0 {
+				return fmt.Errorf("mock: sleep takes a duration such as 30s, not %q", value)
+			}
+			wake = time.After(duration)
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 		defer stop()
 		step(map[string]any{"step": "sleep"})
-		<-ctx.Done()
-		return nil
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-wake:
+		}
 	case first == "mock: fail":
 		return mockOutcome(output, wire.TaskStateFailed, "mock failed on request", "")
 	case strings.HasPrefix(first, "mock: exit "):
