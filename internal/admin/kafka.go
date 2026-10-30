@@ -655,12 +655,13 @@ func (service *Service) configureTopics(ctx context.Context, values map[string]s
 	return nil
 }
 
-// configured reports whether a describe of topics shows each of values.
+// configured reports whether a describe of topics shows each of values, or fails: a topic the describe cannot find
+// is reported by the caller's next read.
 func (service *Service) configured(ctx context.Context, values map[string]string, topics []string) bool {
 	for name, value := range values {
 		got, err := service.topicConfigs(ctx, name, topics...)
 		if err != nil {
-			return false
+			return true
 		}
 		for _, topic := range topics {
 			if got[topic] != value {
