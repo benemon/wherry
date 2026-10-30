@@ -2264,6 +2264,62 @@ func TestOversizedHandleIsRejected(t *testing.T) {
 	}
 }
 
+func TestOversizedJobNameIsRejected(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		size      int
+		attempt   int64
+		cancelled bool
+		ack       kgo.AckStatus
+	}{
+		{"dispatched at the bound", wire.MaxJobName, 1, false, kgo.AckAccept},
+		{"dispatched over the bound", wire.MaxJobName + 1, 1, false, kgo.AckRelease},
+		{"adopted over the bound", wire.MaxJobName + 1, 2, false, kgo.AckRelease},
+		{"adopted and cancelled over the bound", wire.MaxJobName + 1, 2, true, kgo.AckRelease},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.answer(t, credentialName)
+			f.plugin.jobName = strings.Repeat("j", test.size)
+			if test.attempt > 1 {
+				f.plugin.job = pluginsdk.JobRunning
+			}
+			record := f.submit(t, f.host, nil)
+			if test.cancelled {
+				f.publishCancel(t, "run-a", 0, f.host, nil)
+			}
+			if status := f.execute(t, record, test.attempt); status != test.ack {
+				t.Fatalf("status %v, want %v; logs:\n%s", status, test.ack, f.logs.String())
+			}
+			var jobs []string
+			for _, result := range f.results(t) {
+				var metadata wire.ResultMetadata
+				if err := json.Unmarshal(result.Task.Metadata, &metadata); err != nil {
+					t.Fatal(err)
+				}
+				jobs = append(jobs, metadata.Job)
+			}
+			if test.ack == kgo.AckAccept {
+				if !slices.Equal(jobs, []string{f.plugin.jobName}) {
+					t.Fatalf("results name jobs %q, want the job at the bound", jobs)
+				}
+				return
+			}
+			if len(jobs) != 0 || slices.Contains(f.kinds(t), "started") {
+				t.Fatalf("results %q statuses %v, want nothing published for the job", jobs, f.kinds(t))
+			}
+			if !strings.Contains(f.logs.String(), fmt.Sprintf("profile nomad returned a job name over %d bytes", wire.MaxJobName)) {
+				t.Fatalf("logs:\n%s", f.logs.String())
+			}
+			f.plugin.mu.Lock()
+			defer f.plugin.mu.Unlock()
+			if f.plugin.stops != 1 || f.plugin.follows != 0 {
+				t.Fatalf("stops %d follows %d, want the job behind the refused name stopped and not followed", f.plugin.stops, f.plugin.follows)
+			}
+		})
+	}
+}
+
 func TestReleasesAtTheBudgetFail(t *testing.T) {
 	for _, test := range []struct {
 		name  string

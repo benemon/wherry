@@ -15,7 +15,8 @@ import (
 type Handle struct {
 	// Data is plugin-private and at most 4 KiB; the plugin versions its encoding.
 	Data []byte
-	// Name is the platform's reference for the job, for diagnosis; the core logs it and never interprets it.
+	// Name is the platform's reference for the job, for diagnosis, at most 253 bytes; the core logs it and never
+	// interprets it.
 	Name string
 }
 
