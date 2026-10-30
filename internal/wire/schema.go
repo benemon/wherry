@@ -202,6 +202,9 @@ const MaxOutputs = 256
 // MaxText bounds a result's text and a status's text, once redacted; a longer reply travels as reply chunks.
 const MaxText = 64 << 10
 
+// MaxJobName bounds a handle's name: a DNS subdomain, over the plugins' longest, wherry-agent-<12 hex>-<run>.service, 97.
+const MaxJobName = 253
+
 // CutUTF8 is s cut to at most n bytes, at a rune boundary.
 func CutUTF8(s string, n int) string {
 	if len(s) <= n {

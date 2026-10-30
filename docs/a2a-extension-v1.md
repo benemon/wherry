@@ -613,7 +613,7 @@ extension reserves its keys ([Encoding](#encoding)):
   attempt adopted an earlier attempt's job, and when the profile declares no
   labels.
 - `job` (string): the plugin's reference for the job on its platform, for
-  diagnosis only. It is absent when no job was dispatched or adopted, and
+  diagnosis only, at most 253 bytes. It is absent when no job was dispatched or adopted, and
   when the plugin gives none.
 - `outputs` (array): each output the run returned, as `{name, sha256,
   size}`, where `sha256` is the lowercase hex SHA-256 and `size` the byte

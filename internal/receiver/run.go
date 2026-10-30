@@ -695,21 +695,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			break
 		}
 	}
-	if admitted.cancelled {
-		if adopted {
-			run.job = handle.Name
-			return run.stopAndCancel(ctx, handle, nil)
-		}
+	if admitted.cancelled && !adopted {
 		return run.cancel(ctx, nil)
 	}
 	if neverStarted {
 		return run.startFailure(ctx, "platform", "job never started")
 	}
-	if runCtx.Err() != nil && ctx.Err() == nil {
-		if adopted {
-			run.job = handle.Name
-			return run.stopAndFail(ctx, handle, "timeout", nil)
-		}
+	if runCtx.Err() != nil && ctx.Err() == nil && !adopted {
 		return run.fail(ctx, "timeout", nil)
 	}
 	// The agent's credentials are asked for under the pool's terms; a task credential of the same name rides with one.
@@ -812,8 +804,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		handle = dispatchedHandle
 		run.labels = admitted.profile.Labels
 	}
-	if len(handle.Data) > maxHandle {
-		r.logger.Printf("run %s: profile %s returned a handle over %d bytes", runID, run.profile.Name, maxHandle)
+	if len(handle.Data) > maxHandle || len(handle.Name) > wire.MaxJobName {
+		if len(handle.Data) > maxHandle {
+			r.logger.Printf("run %s: profile %s returned a handle over %d bytes", runID, run.profile.Name, maxHandle)
+		} else {
+			r.logger.Printf("run %s: profile %s returned a job name over %d bytes", runID, run.profile.Name, wire.MaxJobName)
+		}
 		if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
 			r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 			r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
@@ -821,6 +817,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		return run.returnTask(ctx, nil)
 	}
 	run.job = handle.Name
+	if adopted && admitted.cancelled {
+		return run.stopAndCancel(ctx, handle, nil)
+	}
+	if adopted && runCtx.Err() != nil && ctx.Err() == nil {
+		return run.stopAndFail(ctx, handle, "timeout", nil)
+	}
 
 	followCtx, stopFollow := context.WithCancel(runCtx)
 	defer stopFollow()
