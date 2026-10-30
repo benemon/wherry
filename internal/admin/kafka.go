@@ -642,7 +642,33 @@ func (service *Service) configureTopics(ctx context.Context, values map[string]s
 			return fmt.Errorf("configure topic %s: %w", response.Name, response.Err)
 		}
 	}
+	// The controller accepts the change before each broker applies it from the metadata log, and a describe that broker
+	// answers meanwhile returns the old value.
+	deadline := time.Now().Add(topicWait)
+	for !service.configured(ctx, values, topics) && time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(listBackoff):
+		}
+	}
 	return nil
+}
+
+// configured reports whether a describe of topics shows each of values.
+func (service *Service) configured(ctx context.Context, values map[string]string, topics []string) bool {
+	for name, value := range values {
+		got, err := service.topicConfigs(ctx, name, topics...)
+		if err != nil {
+			return false
+		}
+		for _, topic := range topics {
+			if got[topic] != value {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (service *Service) topicRetentions(ctx context.Context, topics ...string) (map[string]int64, error) {
