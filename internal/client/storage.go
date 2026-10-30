@@ -46,10 +46,10 @@ var storageTransport http.RoundTripper
 // receiver and the agent see only URLs it presigns.
 func (h *Host) bucket(ctx context.Context, pool string, storage *admin.Storage) (*minio.Client, error) {
 	if h.storage == nil {
-		return nil, fmt.Errorf("%w: this host's configuration has no storage credential for S3 inputs and outputs", ErrNoStorage)
+		return nil, fmt.Errorf("%w: this host's configuration has no storage credential for S3 inputs and outputs", ErrInvalidInput)
 	}
 	if storage == nil {
-		return nil, fmt.Errorf("%w: pool %s has no storage for S3 inputs and outputs", ErrNoStorage, pool)
+		return nil, fmt.Errorf("%w: pool %s has no storage for S3 inputs and outputs", ErrInvalidInput, pool)
 	}
 	var keys [2]string
 	for i, name := range []string{h.storage.AccessKey, h.storage.SecretKey} {
