@@ -1238,6 +1238,26 @@ func TestConfigInputRoots(t *testing.T) {
 	}
 }
 
+// TestConfigWithoutHome loads a configuration that names every path, as a system service without HOME does.
+func TestConfigWithoutHome(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	config := "bundle: " + dir + "/bundle.yaml\nhost_key: " + dir + "/host.key\nstate_dir: " + dir + "/state\n"
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", "")
+	if loaded, err := LoadConfig(path); err != nil || loaded.StateDir != dir+"/state" {
+		t.Fatalf("config without HOME: %+v, %v", loaded, err)
+	}
+	if err := os.WriteFile(path, []byte("bundle: "+dir+"/bundle.yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("a config that leaves state_dir to its default under HOME loaded without HOME")
+	}
+}
+
 // TestConfigExampleLoads loads the reference's complete host configuration, which sets every member.
 func TestConfigExampleLoads(t *testing.T) {
 	home := t.TempDir()
