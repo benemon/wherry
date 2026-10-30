@@ -74,15 +74,11 @@ func LoadConfig(path string) (Config, error) {
 	if config.Bundle == "" {
 		return Config{}, errors.New("config requires bundle")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return Config{}, err
-	}
 	if config.HostKey == "" {
-		config.HostKey = filepath.Join(home, ".config", "wherry", "host.key")
+		config.HostKey = "~/.config/wherry/host.key"
 	}
 	if config.StateDir == "" {
-		config.StateDir = filepath.Join(home, ".config", "wherry", "state")
+		config.StateDir = "~/.config/wherry/state"
 	}
 	for _, path := range []*string{&config.Bundle, &config.HostKey, &config.StateDir} {
 		if *path, err = ExpandHome(*path); err != nil {
