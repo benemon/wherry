@@ -79,7 +79,9 @@ type fakePlugin struct {
 	outcome pluginsdk.Outcome
 	// handleSize is the length of the handle data Dispatch and Lookup return.
 	handleSize int
-	lastRun    pluginsdk.Run
+	// jobName is the handle name Dispatch and Lookup return, or else agent- and the run ID.
+	jobName string
+	lastRun pluginsdk.Run
 	// lastDeadline is the deadline of the context Dispatch last ran under.
 	lastDeadline time.Time
 	lookups      int
@@ -149,7 +151,7 @@ func (f *fakePlugin) Ready(ctx context.Context) (bool, error) {
 }
 
 func (f *fakePlugin) handle(runID string) pluginsdk.Handle {
-	return pluginsdk.Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: "agent-" + runID}
+	return pluginsdk.Handle{Data: []byte(runID + strings.Repeat("h", max(0, f.handleSize-len(runID)))), Name: cmp.Or(f.jobName, "agent-"+runID)}
 }
 
 func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {

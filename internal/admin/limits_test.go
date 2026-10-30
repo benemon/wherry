@@ -968,7 +968,8 @@ func largestRecords() ([]feedRecord, error) {
 	// A reply over wire.MaxText adds its entry to either result.
 	// Each output a result returns is also a reference artifact, which A2A requires named uniquely within the task.
 	reply := &wire.ReturnedReply{SHA256: hash, Size: math.MaxInt64, Cut: true}
-	metadata, s3Metadata := wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name, Reply: reply}, wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name, Reply: reply}
+	job := strings.Repeat("j", wire.MaxJobName)
+	metadata, s3Metadata := wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name, Job: job, Reply: reply}, wire.ResultMetadata{ReceiverID: name, Pool: name, Profile: name, Job: job, Reply: reply}
 	reference := func(id, name string, data []byte) wire.Artifact {
 		return wire.Artifact{ArtifactID: id, Name: name, Parts: []wire.Part{{Data: data, MediaType: wire.ReferenceMediaType}}, Extensions: []string{wire.ExtensionURI}}
 	}
