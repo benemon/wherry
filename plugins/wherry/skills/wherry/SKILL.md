@@ -162,7 +162,7 @@ in this host's configuration` when the host has no source for a credential the
 agent requires or the task names. An optional credential the host lacks is not
 delivered, and the agent's prompt names it as not supplied.
 
-`submit` resolves the run's credentials and seals them in the task, so the run
+`submit` resolves the run's credentials and encrypts them in the task, so the run
 needs nothing more from this host. When a source fails to resolve, it returns
 `UNAVAILABLE`, and the wherry MCP server's log names the credential and the
 cause. A run whose agent needs a

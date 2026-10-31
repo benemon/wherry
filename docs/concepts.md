@@ -131,7 +131,7 @@ A pool can also carry files through an S3-compatible bucket its operator
 names, up to 5 GiB each. The host uploads an S3 input with its own
 credential before it publishes the task, and the task carries only the
 input's name, size and SHA-256. At submit, the host presigns a short-lived
-GET per input and a PUT per expected S3 output, and seals them with the
+GET per input and a PUT per expected S3 output, and encrypts them with the
 credentials in the task's envelope, so the URLs never sit on the broker in
 the clear. The receiver checks each URL against the pool's
 endpoint and bucket; the plugin fetches the inputs into the input
@@ -192,7 +192,7 @@ run before a receiver claims it.
 
 A run passes through these records from submission to result.
 
-![A run's lifecycle: submission, claim, seal, dispatch, statuses and transcript, result and wait, with where a redelivery and an adoption enter](diagrams/run-lifecycle.svg)
+![A run's lifecycle: submission with the host then free to go offline, claim, open request, attempt wrap, re-key wrap or open refusal, dispatch, statuses and transcript, result and wait, with where a redelivery and an adoption enter](diagrams/run-lifecycle.svg)
 
 ## Cancellation
 

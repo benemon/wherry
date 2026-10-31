@@ -298,7 +298,7 @@ inputs count against neither limit. When publishing fails, `submit`
 deletes what it uploaded.
 
 `submit` resolves the agent's credentials the host supplies and the task's
-credentials, presigns the S3 inputs and outputs, and seals them in the task's
+credentials, presigns the S3 inputs and outputs, and encrypts them in the task's
 envelope under the pool's key; the host can go offline once it returns
 ([credential envelopes](security.md#credential-envelopes)). It refuses a run
 whose envelope would pass 64 KiB, naming the envelope's size, and a run

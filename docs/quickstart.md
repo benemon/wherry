@@ -657,7 +657,7 @@ credentials:
 invalid input: auth required: credential claude-oauth-token is not in this host's configuration
 ```
 
-`wherry submit` seals the file's contents byte for byte in the task's
+`wherry submit` encrypts the file's contents byte for byte in the task's
 envelope under the pool's key, and the receiver that claims the task opens
 it through the pool's key custodian. A credential can also come from an
 environment variable of the submitting process,

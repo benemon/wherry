@@ -1002,7 +1002,10 @@ pool's events in a transaction of its own, after the run's `claimed` status.
   [claim decision](#claim-decision) strictly: an unknown or duplicate member
   refuses the record. Each verifies under the current key of a live member of
   the pool of its topic, or a key that member retired after the broker appended
-  the record, and names that member as its writer.
+  the record, and names that member as its writer. An attempt wrap, open
+  refusal or claim decision also verifies under the key its writer held when
+  its membership ended, for a record the broker appended before the reader
+  read that end.
 - `key` is the attempt's P-256 public JWK of exactly `kty`, `crv`, `x` and
   `y`. `task_hash` is the hash of the run's earliest accepted submission
   ([Admission](#admission)).
@@ -1028,7 +1031,9 @@ pool's events in a transaction of its own, after the run's `claimed` status.
   wait ends. A redelivered or adopted attempt makes a new key and a new
   request; a wrap answering an earlier request does not open for it.
 - A receiver giving back a claim it holds commits `released` before it
-  returns the task to the pool.
+  returns the task to the pool. When `released` does not commit, it leaves
+  the task unacknowledged, and the share group returns it when its
+  acquisition lock expires.
 
 ### The claim check
 
@@ -1058,7 +1063,7 @@ a [claim decision](#claim-decision) in the transaction of its answer; a later
 request for the same claim takes that decision. It then recovers the content
 key from the submit wrap or a [re-key wrap](#re-key-wrap) to a key it holds,
 opens the envelope and checks it against the task as [Submission](#submission)
-states; a check that fails refuses `key unavailable`, so a spliced envelope
+states; a check that fails refuses `envelope invalid`, so a spliced envelope
 never releases its content key. With no key it waits for a holder's re-key
 wrap until the earlier of the request's append time plus 5 minutes and the
 open bound, then refuses `key unavailable`. Otherwise it commits an attempt
@@ -1127,6 +1132,7 @@ custodian and acts on its `reason`:
 | `terminal` | acknowledges the task without a dispatch |
 | `past its bound` | ends the run past its bound: a first start with no job fails with `not started by task_started_by (<RFC 3339 time>)` and its job, if any, purged; an adopter stops its job and fails with `not ended by task_ended_by (<RFC 3339 time>)` |
 | `key unavailable` | decides from the job's state, below |
+| `envelope invalid` | ends the run `TASK_STATE_FAILED` with `envelope invalid`, without `key-lost`; an adopter stops its job first |
 
 Refused `key unavailable`, the claimant decides from the job's state, never
 from the `started` status:
@@ -1266,8 +1272,10 @@ A receiver that claims a submission:
    when it is a later copy, byte for byte, of the run's earliest accepted
    submission: the earliest on the pool's task topic, read to its last stable
    offset, that passes those checks under its run's Kafka key, carries an
-   `envelope`, and whose `task_started_by` falls within the pool's
-   `start_by_limit_ms` of its append time;
+   `envelope`, and whose bounds hold at its append time: `task_started_by`
+   not passed and within the pool's `start_by_limit_ms`, and
+   `task_ended_by` neither before `task_started_by` nor more than six hours
+   after it;
 3. rejects it with `run ID in use` when the run ID belongs to another
    tenant: the tenant of the run's earliest submission on the pool's task
    topic that a live host's current key verifies, or of the run's earliest

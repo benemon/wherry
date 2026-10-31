@@ -32,7 +32,7 @@ or for a task credential. An optional credential the host has no source for
 is not delivered, and the prompt names it as not supplied.
 
 A host resolves each credential's [source](#credential-sources) and
-presigns the run's S3 links when it submits, and seals them, with the run's
+presigns the run's S3 links when it submits, and encrypts them, with the run's
 redaction key, in the task's **envelope**: a compact JWE (`dir` with
 `A256GCM`, through [go-jose](https://github.com/go-jose/go-jose)) of at most
 64 KiB under a fresh content key, bound to the task's run, tenant, pool,
