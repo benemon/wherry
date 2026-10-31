@@ -464,8 +464,7 @@ base64 does. The fixed texts are:
   `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
 - failed: `not started by task_started_by (<RFC 3339 time>)`,
-  `not ended by task_ended_by (<RFC 3339 time>)`,
-  `not ended by task_started_by plus the 6h run cap (<RFC 3339 time>)`, `log stream failed`, `agent exited <code>`,
+  `not ended by task_ended_by (<RFC 3339 time>)`, `log stream failed`, `agent exited <code>`,
   `agent ended by <signal>` (each followed by the platform's reason,
   redacted, in parentheses when the plugin gives one, as in
   `agent exited 137 (OOMKilled)`), `agent reported no outcome`,

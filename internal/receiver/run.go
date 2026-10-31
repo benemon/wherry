@@ -618,11 +618,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	})
 	defer stopRenew()
 
-	// The cap is anchored to the signed task_started_by so redelivery cannot extend it.
 	deadline := wire.PastBound(task.Wherry.TaskEndedBy)
-	if limit := wire.PastBound(task.Wherry.TaskStartedBy).Add(time.Duration(admin.MaxRunDurationMS) * time.Millisecond); deadline.After(limit) {
-		deadline = limit
-	}
 	runCtx, cancelRun := context.WithDeadline(ctx, deadline)
 	defer cancelRun()
 	// startCtx bounds the run until its job starts.
@@ -712,8 +708,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	adopted, neverStarted := false, false
 	if attempt > 1 {
 		job, found, err := run.findJob(ctx, lookupCtx)
-		// An unresolved Lookup is asked again while the claim is held, until task_ended_by or the run cap passes; no open
-		// is requested before the job's state is known.
+		// An unresolved Lookup is asked again while the claim is held, until task_ended_by passes; no open is requested
+		// before the job's state is known.
 		for err != nil {
 			switch {
 			case ctx.Err() != nil:
@@ -1177,8 +1173,8 @@ type activeRun struct {
 	// labels is set when this attempt dispatched the job; an adopted job's profile labels are unknown.
 	labels map[string]string
 	job    string
-	// deadline is when the run passes task_ended_by or the run cap; puts are the presigned PUT URLs of its S3 outputs,
-	// by name, which an attempt holds once opened.
+	// deadline is when the run passes task_ended_by; puts are the presigned PUT URLs of its S3 outputs, by name, which
+	// an attempt holds once opened.
 	deadline time.Time
 	puts     map[string]string
 	// redactions are the forms of the values this attempt received, longest first, and redactionKey the run's key
@@ -1413,9 +1409,9 @@ func (run *activeRun) deny(ctx context.Context, handle pluginsdk.Handle, pending
 	return kgo.AckRelease
 }
 
-// expired ends a run past a bound: task_ended_by, or the run cap before it, once its deadline passed, else
-// task_started_by before its job started. With no handle, the run's job, if one exists, is purged; a run admitted
-// with no offer has no profile to purge in.
+// expired ends a run past a bound: task_ended_by once its deadline passed, else task_started_by before its job
+// started. With no handle, the run's job, if one exists, is purged; a run admitted with no offer has no profile to
+// purge in.
 func (run *activeRun) expired(ctx context.Context, job *pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
 	reason := run.expiredReason()
 	if job != nil {
@@ -1433,14 +1429,10 @@ func (run *activeRun) expired(ctx context.Context, job *pluginsdk.Handle, pendin
 	return run.fail(ctx, reason, pending)
 }
 
-// expiredReason names the bound a run is past: task_ended_by, or the run cap before it, once its deadline passed, else
-// task_started_by.
+// expiredReason names the bound a run is past: task_ended_by once its deadline passed, else task_started_by.
 func (run *activeRun) expiredReason() string {
-	switch {
-	case time.Now().Before(run.deadline):
+	if time.Now().Before(run.deadline) {
 		return wire.NotStartedBy(run.task.Wherry.TaskStartedBy)
-	case run.deadline.Before(wire.PastBound(run.task.Wherry.TaskEndedBy)):
-		return wire.NotEndedByRunCap(run.task.Wherry.TaskStartedBy + admin.MaxRunDurationMS/1000)
 	}
 	return wire.NotEndedBy(run.task.Wherry.TaskEndedBy)
 }
@@ -1741,7 +1733,7 @@ type storedOutput struct {
 }
 
 // collected runs the plugin's Collect under limit and uploads each streamed S3 output into stored as it arrives.
-// Collect may run until the run passes task_ended_by or the run cap, when its PUT URLs expire. The count and total are
+// Collect may run until the run passes task_ended_by, when its PUT URLs expire. The count and total are
 // checked again here, so a plugin that ignores the limits cannot grow the run's memory.
 func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, stopped bool, limit int64, stored map[string]storedOutput) ([]pluginsdk.Output, error) {
 	if !stopped {

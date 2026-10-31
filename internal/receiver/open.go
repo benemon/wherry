@@ -237,8 +237,8 @@ func (run *activeRun) keyLost(ctx context.Context) kgo.AckStatus {
 
 // reconcileKey ends a run refused key unavailable from its job's state: absent or never started, with key-lost; a job
 // running or ended is stopped and the run failed without it. While Lookup is unresolved it writes the run's
-// reconciliation status and asks again, holding the task, until task_ended_by or the run cap passes, when the run
-// ends past its bound, never key-lost.
+// reconciliation status and asks again, holding the task, until task_ended_by passes, when the run ends past its
+// bound, never key-lost.
 func (run *activeRun) reconcileKey(ctx context.Context) kgo.AckStatus {
 	written := false
 	for {

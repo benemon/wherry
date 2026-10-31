@@ -294,7 +294,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
 		}
 	}
-	// A receiver cuts a run at task_started_by plus the run cap, so a later task_ended_by would be cut silently.
+	// A receiver rejects a task_ended_by past task_started_by plus the run cap.
 	if limit := input.StartBy.Add(time.Duration(admin.MaxRunDurationMS) * time.Millisecond); input.EndBy.After(limit) {
 		return SubmitResult{}, fmt.Errorf("%w: task_ended_by (%s) is past task_started_by plus the 6h run cap (%s)", ErrInvalidInput, wire.RFC3339(input.EndBy.Unix()), wire.RFC3339(limit.Unix()))
 	}
