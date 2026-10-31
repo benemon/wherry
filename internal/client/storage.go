@@ -112,7 +112,7 @@ func presign(ctx context.Context, store *minio.Client, bucket, tenant, run strin
 	}
 	lifetime := min(time.Until(deadline).Truncate(time.Second)+time.Second, admin.MaxPresign)
 	if lifetime < 2*time.Second {
-		return nil, errors.New("the run's deadline has passed")
+		return nil, errors.New("task_ended_by has passed")
 	}
 	for _, output := range outputs {
 		put, err := store.PresignedPutObject(ctx, bucket, wire.S3OutputKey(tenant, run, output), lifetime)

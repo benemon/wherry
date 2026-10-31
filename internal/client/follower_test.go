@@ -120,7 +120,7 @@ func TestTheFollowerStartsWithoutReadingTheFeed(t *testing.T) {
 		t.Fatalf("the follower's start fetched %d feed records; want none", fetched)
 	}
 	if end := committedEnd(t, f); follower.start != end {
-		t.Fatalf("follower starts at %d; want the committed end %d, as no run's deadline is ahead", follower.start, end)
+		t.Fatalf("follower starts at %d; want the committed end %d, as no run's task_ended_by is ahead", follower.start, end)
 	}
 }
 

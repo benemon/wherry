@@ -1754,7 +1754,7 @@ func TestSSHRemote(t *testing.T) {
 	}
 }
 
-func TestSubmitRefusesADeadlinePastTheRunCap(t *testing.T) {
+func TestSubmitRefusesAnEndByPastTheRunCap(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", EndBy: time.Now().Add(6*time.Hour + 11*time.Minute), StartBy: time.Now().Add(10 * time.Minute)})

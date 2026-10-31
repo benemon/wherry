@@ -1163,7 +1163,7 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_redeliveries_total` | counter | `tenant`, `profile` | runs executed on a redelivery |
 | `wherry_in_flight` | gauge | `profile` | tasks held |
 | `wherry_capacity` | gauge | none | the configured capacity |
-| `wherry_runs_past_deadline` | gauge | `profile` | tasks held past their run's deadline that have not ended |
+| `wherry_runs_past_deadline` | gauge | `profile` | tasks held past their task_ended_by, or the 6h run cap, that have not ended |
 | `wherry_advertised_timestamp_seconds` | gauge | none | Unix time of the latest advertisement Kafka acknowledged, 0 before the first |
 | `wherry_start_failures_total` | counter | `profile`, `class` | start failures: `input-too-large`, `dispatch`, `platform`, and `offer-unavailable`, which counts a release by a member with no matching profile, has no start-failure record and carries `profile="none"` |
 | `wherry_dispatch_outcomes_total` | counter | `profile`, `outcome` | dispatches: `created`, `nothing`, `unknown` |

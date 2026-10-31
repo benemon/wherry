@@ -526,7 +526,7 @@ func TestAnswerSealsPresignedURLsForTheRunsObjects(t *testing.T) {
 	}
 	deadline := time.Until(time.Unix(task.submission.Wherry.TaskEndedBy, 0))
 	if expires(get) != 15*time.Minute || expires(put) < deadline-10*time.Second || expires(put) > deadline+2*time.Second {
-		t.Fatalf("GET lives %v and PUT %v; want 15m and the turn's deadline, %v away", expires(get), expires(put), deadline)
+		t.Fatalf("GET lives %v and PUT %v; want 15m and the turn's task_ended_by, %v away", expires(get), expires(put), deadline)
 	}
 	// The store honours each URL for its own object and method alone.
 	response, err := o.client.Get(get)
@@ -629,7 +629,7 @@ func TestAnswererLogsHoldNoSecret(t *testing.T) {
 	}
 }
 
-func TestPutURLExpiresAtTheTurnsDeadline(t *testing.T) {
+func TestPutURLExpiresAtTheTurnsEndBy(t *testing.T) {
 	f, o, receiver := storageFixture(t)
 	task, _ := submitS3(t, f, receiver, 4*time.Second)
 	asked := newRequest(t, receiver.binding(task, 1), "model")
@@ -641,7 +641,7 @@ func TestPutURLExpiresAtTheTurnsDeadline(t *testing.T) {
 	time.Sleep(time.Until(time.Unix(task.submission.Wherry.TaskEndedBy, 0).Add(2 * time.Second)))
 	request, _ := http.NewRequest(http.MethodPut, put, strings.NewReader("late"))
 	if response, err := o.client.Do(request); err != nil || response.StatusCode != http.StatusForbidden {
-		t.Fatalf("PUT after the deadline answered %v, %v; want forbidden", response.Status, err)
+		t.Fatalf("PUT after task_ended_by answered %v, %v; want forbidden", response.Status, err)
 	}
 }
 

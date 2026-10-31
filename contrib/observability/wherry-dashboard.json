@@ -275,8 +275,8 @@
     {
       "id": 32,
       "type": "timeseries",
-      "title": "Runs past their deadline",
-      "description": "Tasks held past their run's deadline that have not ended, by the plugin profile they were routed to. WherryRunStuckPastDeadline fires when one stays above 0 for 10 minutes.",
+      "title": "Runs past their task_ended_by",
+      "description": "Tasks held past their task_ended_by, or the 6h run cap, that have not ended, by the plugin profile they were routed to. WherryRunStuckPastDeadline fires when one stays above 0 for 10 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
