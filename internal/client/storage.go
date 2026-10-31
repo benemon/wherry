@@ -97,15 +97,22 @@ func uploadInputs(ctx context.Context, store *minio.Client, bucket, tenant, run 
 	return inputs, nil
 }
 
-// presign returns the seal values of a run's S3 inputs and outputs.
-func presign(ctx context.Context, store *minio.Client, bucket, tenant, run string, inputs, outputs []string, deadline time.Time) (map[string][]byte, error) {
+// presign returns the seal values of a run's S3 inputs, under inputRun's prefix, and outputs, under run's: GET URLs that
+// expire at getDeadline and PUT URLs at deadline.
+func presign(ctx context.Context, store *minio.Client, bucket, tenant, inputRun, run string, inputs, outputs []string, getDeadline, deadline time.Time) (map[string][]byte, error) {
 	values := map[string][]byte{}
-	for _, input := range inputs {
-		get, err := store.PresignedGetObject(ctx, bucket, wire.S3InputKey(tenant, run, input), getLifetime, nil)
-		if err != nil {
-			return nil, fmt.Errorf("presign S3 input %s: %w", input, err)
+	if len(inputs) > 0 {
+		lifetime := min(time.Until(getDeadline).Truncate(time.Second)+time.Second, admin.MaxPresign)
+		if lifetime < 2*time.Second {
+			return nil, errors.New("task_started_by has passed")
 		}
-		values[signed.S3InputValue(input)] = []byte(get.String())
+		for _, input := range inputs {
+			get, err := store.PresignedGetObject(ctx, bucket, wire.S3InputKey(tenant, inputRun, input), lifetime, nil)
+			if err != nil {
+				return nil, fmt.Errorf("presign S3 input %s: %w", input, err)
+			}
+			values[signed.S3InputValue(input)] = []byte(get.String())
+		}
 	}
 	if len(outputs) == 0 {
 		return values, nil
@@ -128,7 +135,7 @@ func presign(ctx context.Context, store *minio.Client, bucket, tenant, run strin
 // inputs and outputs, presigned as the answer will, to a throwaway key. The agent's credentials are not counted, nor a
 // task credential from a command source, which runs only to answer a seal.
 func (h *Host) checkSealSize(ctx context.Context, store *minio.Client, bucket, tenant, run string, credentials []wire.TaskCredential, inputs, outputs []string, deadline time.Time) error {
-	values, err := presign(ctx, store, bucket, tenant, run, inputs, outputs, deadline)
+	values, err := presign(ctx, store, bucket, tenant, run, run, inputs, outputs, time.Now().Add(getLifetime), deadline)
 	if err != nil {
 		return err
 	}
@@ -256,7 +263,8 @@ func download(ctx context.Context, store *minio.Client, bucket string, root *os.
 }
 
 // Cleanup deletes every object under a run's prefix in its pool's bucket, and nothing outside it. It refuses a run whose
-// run has no outcome, since its receiver may still read inputs or write outputs there.
+// run has no outcome, since its receiver may still read inputs or write outputs there. A resubmitted run's prefix holds
+// the inputs of its replacements, so it is kept until the last replacement has an outcome, whose cleanup deletes it too.
 func (h *Host) Cleanup(ctx context.Context, runID string) error {
 	if _, ok := h.runPath(runID); !ok {
 		return fmt.Errorf("cleanup %s: %w", runID, ErrRunNotFound)
@@ -271,17 +279,41 @@ func (h *Host) Cleanup(ctx context.Context, runID string) error {
 	if r.outcome == nil {
 		return fmt.Errorf("%w: run %s has not ended", ErrInvalidInput, runID)
 	}
+	chain, err := h.chain(runID)
+	if err != nil {
+		return err
+	}
+	root := runID
+	if r.local != nil && r.local.Task != nil {
+		root = r.local.Task.Wherry.InputRun()
+	}
+	if last := chain[len(chain)-1]; last != runID {
+		ended, err := h.history(ctx, last)
+		if err != nil {
+			return err
+		}
+		if ended.outcome == nil {
+			if root == runID {
+				return fmt.Errorf("%w: run %s's inputs serve its replacement %s, which has not ended", ErrInvalidInput, runID, last)
+			}
+			root = runID
+		}
+	}
 	storage := r.v.state.Pools[r.pool].Storage
 	store, err := h.bucket(ctx, r.pool, storage)
 	if err != nil {
 		return err
 	}
-	return h.removePrefix(ctx, store, storage.Bucket, runID)
+	if root != runID {
+		if err := h.removePrefix(ctx, store, storage.Bucket, wire.S3Prefix(h.tenant, root)); err != nil {
+			return err
+		}
+	}
+	return h.removePrefix(ctx, store, storage.Bucket, wire.S3Prefix(h.tenant, runID))
 }
 
-// removePrefix deletes every object a listing of the run's prefix returns that lies under the prefix.
-func (h *Host) removePrefix(ctx context.Context, store *minio.Client, bucket, runID string) error {
-	prefix := wire.S3Prefix(h.tenant, runID)
+// removePrefix deletes every object a listing of prefix returns that lies under it.
+func (h *Host) removePrefix(ctx context.Context, store *minio.Client, bucket, prefix string) error {
 	var listErr error
 	objects := func(yield func(minio.ObjectInfo) bool) {
 		for object := range store.ListObjectsIter(ctx, bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {

@@ -237,13 +237,14 @@ type statusInput struct {
 }
 
 type runOutput struct {
-	ID       string         `json:"id"`
-	Pool     string         `json:"pool"`
-	State    string         `json:"state"`
-	Model    string         `json:"model,omitempty" jsonschema:"model the run's placement names"`
-	Message  string         `json:"message,omitempty"`
-	Updated  string         `json:"updated" jsonschema:"RFC 3339 time of the latest status; while the run has none, of this host's submission, else of the receiver's echo"`
-	Redacted map[string]int `json:"redacted,omitempty" jsonschema:"redaction markers in the message by the credential or S3 object each names"`
+	ID         string         `json:"id"`
+	Pool       string         `json:"pool"`
+	State      string         `json:"state"`
+	Model      string         `json:"model,omitempty" jsonschema:"model the run's placement names"`
+	Message    string         `json:"message,omitempty"`
+	Updated    string         `json:"updated" jsonschema:"RFC 3339 time of the latest status; while the run has none, of this host's submission, else of the receiver's echo"`
+	Redacted   map[string]int `json:"redacted,omitempty" jsonschema:"redaction markers in the message by the credential or S3 object each names"`
+	ReplacedBy string         `json:"replaced_by,omitempty" jsonschema:"the run that resubmits this one, which lost its pool key before it started"`
 }
 
 type statusOutput struct {
@@ -291,6 +292,7 @@ type waitReply struct {
 	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the run did not return or this host could not verify, each with its reason"`
 	Redacted    map[string]int          `json:"redacted,omitempty" jsonschema:"redaction markers in the message and artifacts by the credential or S3 object each names"`
 	Skipped     int                     `json:"skipped,omitempty"`
+	Runs        []string                `json:"runs,omitempty" jsonschema:"set when the run lost its pool key before it started and was resubmitted: every run followed, the run whose outcome this is last"`
 }
 
 type cleanupOutput struct {
@@ -441,7 +443,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		for _, result := range runs.Runs {
 			output.Runs = append(output.Runs, runOutput{
 				ID: result.RunID, Pool: result.Pool, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
-				Updated: result.Updated.UTC().Format(time.RFC3339Nano), Redacted: result.Redacted,
+				Updated: result.Updated.UTC().Format(time.RFC3339Nano), Redacted: result.Redacted, ReplacedBy: result.Replacement,
 			})
 		}
 		return nil, output, nil
@@ -478,6 +480,10 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			ID: input.ID, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
 			Redacted: result.Redacted, Skipped: result.Skipped,
 		}
+		final := input.ID
+		if len(result.Runs) > 1 {
+			output.Runs, final = result.Runs, result.Runs[len(result.Runs)-1]
+		}
 		if result.Task != nil {
 			for _, artifact := range result.Task.Artifacts {
 				output.Artifacts = append(output.Artifacts, resultArtifact{ArtifactID: artifact.ArtifactID, Parts: resultParts(artifact.Parts)})
@@ -496,7 +502,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if reply := result.Reply; reply != nil {
 			output.Reply = &replyFile{Rejected: reply.Rejected}
 			if reply.Rejected == "" {
-				paths, err := client.WriteOutputs(input.ID, "", []busclient.Output{{Name: wire.ReplyFile, SHA256: reply.SHA256, Size: reply.Size, Data: reply.Data}})
+				paths, err := client.WriteOutputs(final, "", []busclient.Output{{Name: wire.ReplyFile, SHA256: reply.SHA256, Size: reply.Size, Data: reply.Data}})
 				if err != nil {
 					logger.Print("tool failed: " + busclient.Redact(err.Error()))
 					return nil, waitReply{}, collectFailure(err)

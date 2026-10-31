@@ -35,6 +35,9 @@ func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, di
 	if result.Unclaimed != "" {
 		return collected, nil
 	}
+	if len(result.Runs) > 0 {
+		runID = result.Runs[len(result.Runs)-1]
+	}
 	if len(result.Outputs) > 0 {
 		paths, err := h.WriteOutputs(runID, dir, result.Outputs)
 		if err != nil {

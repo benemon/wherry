@@ -3,7 +3,9 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -27,6 +29,7 @@ import (
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -45,6 +48,8 @@ type fixture struct {
 	stateDir  string
 	secret    string
 	receivers map[string]*testReceiver
+	// poolKeys holds each pool's current key, whose snapshot the pool's first receiver published as its custodian.
+	poolKeys map[string]*ecdsa.PrivateKey
 	// logs holds what every host of the fixture logs.
 	logs *syncBuffer
 }
@@ -107,7 +112,7 @@ func newFixtureNoHost(t *testing.T, opts ...kfake.Opt) *fixture {
 	t.Cleanup(operator.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	f := &fixture{ctx: ctx, cluster: cluster, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, receivers: map[string]*testReceiver{}, logs: &syncBuffer{}}
+	f := &fixture{ctx: ctx, cluster: cluster, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, receivers: map[string]*testReceiver{}, poolKeys: map[string]*ecdsa.PrivateKey{}, logs: &syncBuffer{}}
 	f.pool(t, "pool-a")
 	return f
 }
@@ -209,7 +214,26 @@ func (f *fixture) addReceiverConfig(t *testing.T, config admin.ReceiverConfig) *
 	}
 	receiver.produce(t, f.ctx, admin.ReceiverTopic(config.Receiver), config.Receiver, registration)
 	f.receivers[config.Receiver] = receiver
+	if f.poolKeys[config.Pool] == nil {
+		f.poolKeys[config.Pool] = receiver.snapshot(t, f.ctx, nil)
+	}
 	return receiver
+}
+
+// snapshot publishes a snapshot naming r custodian of its pool under a fresh key, which it returns; mutate may change
+// the snapshot before it is signed.
+func (r *testReceiver) snapshot(t *testing.T, ctx context.Context, mutate func(*wire.Snapshot)) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &wire.Snapshot{Pool: r.pool, Custodian: r.id, Reason: "bootstrap", Current: wire.PoolKey{KeyID: signed.SealKeyID(&key.PublicKey), Key: jose.JSONWebKey{Key: &key.PublicKey}}}
+	if mutate != nil {
+		mutate(snapshot)
+	}
+	r.produce(t, ctx, admin.CustodianTopic(r.pool), "custodian", r.sign(t, snapshot))
+	return key
 }
 
 func (r *testReceiver) produce(t *testing.T, ctx context.Context, topic, key string, value []byte) {

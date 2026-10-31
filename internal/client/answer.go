@@ -217,7 +217,12 @@ func (h *Host) active(ctx context.Context, request wire.SealRequest) string {
 // lockAttempt takes an exclusive lock on a run's attempt, shared by every process using the state directory, and
 // returns its release. It gives up when ctx ends.
 func (h *Host) lockAttempt(ctx context.Context, run string, attempt int64) (func(), error) {
-	path := h.markerPath(run, attempt) + ".lock"
+	return h.lockFile(ctx, h.markerPath(run, attempt)+".lock")
+}
+
+// lockFile takes an exclusive lock on the file at path, shared by every process using the state directory, and returns
+// its release. It gives up when ctx ends.
+func (h *Host) lockFile(ctx context.Context, path string) (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -387,7 +392,7 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 			}
 			return true
 		}
-		urls, err := presign(ctx, store, storage.Bucket, h.tenant, runID, request.S3Inputs, request.S3Outputs, time.Unix(local.TaskEndedBy, 0))
+		urls, err := presign(ctx, store, storage.Bucket, h.tenant, runID, runID, request.S3Inputs, request.S3Outputs, time.Now().Add(getLifetime), time.Unix(local.TaskEndedBy, 0))
 		if err != nil {
 			if ctx.Err() == nil {
 				logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)

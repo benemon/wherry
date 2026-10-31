@@ -21,8 +21,7 @@ var Strict = json.JoinOptions(json.RejectUnknownMembers(true), jsontext.AllowDup
 // Sign signs payload as a compact JWS of type typ; kid names the owner and
 // its key so a verifier resolves the key before reading the payload.
 func Sign(typ, owner string, payload any, key ed25519.PrivateKey) ([]byte, error) {
-	// Raw strings keep opaque agent JSON byte for byte through the signature.
-	encoded, err := json.Marshal(payload, json.Deterministic(true), jsontext.PreserveRawStrings(true))
+	encoded, err := Encode(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -37,6 +36,11 @@ func Sign(typ, owner string, payload any, key ed25519.PrivateKey) ([]byte, error
 	}
 	compact, err := jws.CompactSerialize()
 	return []byte(compact), err
+}
+
+// Encode is payload as Sign encodes it. Raw strings keep opaque agent JSON byte for byte through the signature.
+func Encode(payload any) ([]byte, error) {
+	return json.Marshal(payload, json.Deterministic(true), jsontext.PreserveRawStrings(true))
 }
 
 // Verify checks encoded against the owner's current key named by its kid and

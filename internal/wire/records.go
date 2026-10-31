@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -35,6 +36,29 @@ func SignRecord(value Record, key ed25519.PrivateKey) ([]byte, error) {
 		return nil, err
 	}
 	return signed.Sign(value.jwsType(), value.owner(), value, key)
+}
+
+// SignEnveloped signs a submission at version 1 with the envelope and wrap seal builds for its task core inserted as the
+// last members of its wherry object. The task core is the SHA-256 of the submission as signed.Sign encodes it.
+func SignEnveloped(value *Submission, key ed25519.PrivateKey, seal func(taskCore string) (envelope, wrap []byte, err error)) ([]byte, error) {
+	value.V, value.Wherry.Envelope, value.Wherry.Wrap = 1, "", ""
+	if err := value.validate(); err != nil {
+		return nil, err
+	}
+	core, err := signed.Encode(value)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(core)
+	envelope, wrap, err := seal(hex.EncodeToString(digest[:]))
+	if err != nil {
+		return nil, err
+	}
+	payload, err := signed.InsertEnvelope(core, envelope, wrap)
+	if err != nil {
+		return nil, err
+	}
+	return signed.Sign(value.jwsType(), value.owner(), jsontext.Value(payload), key)
 }
 
 // ParseRecord verifies encoded against the current key of the owner its kid names,
@@ -96,6 +120,20 @@ type SubmissionBinding struct {
 	Outputs    []ExpectedOutput `json:"outputs,omitzero"`
 	Git        *GitInput        `json:"git,omitzero"`
 	S3Inputs   []S3Input        `json:"s3_inputs,omitzero"`
+	// Replaces names the run a resubmission replaces, and S3InputRun the run whose input prefix holds its S3 inputs.
+	Replaces   string `json:"replaces,omitzero"`
+	S3InputRun string `json:"s3_input_run,omitzero"`
+	// Envelope and Wrap are the run's envelope and its content key's submit wrap, the binding's last two members.
+	Envelope string `json:"envelope,omitzero"`
+	Wrap     string `json:"wrap,omitzero"`
+}
+
+// InputRun is the run whose input prefix holds the run's S3 inputs.
+func (binding SubmissionBinding) InputRun() string {
+	if binding.S3InputRun != "" {
+		return binding.S3InputRun
+	}
+	return binding.Run
 }
 
 // PastBound is the first instant the receiver's clock is past a whole-second bound: a job started, or a terminal state
@@ -214,7 +252,13 @@ type StatusBinding struct {
 	LogOffset *int64 `json:"log_offset,omitzero"`
 	// TranscriptChunks is the number of transcript chunks the attempt wrote, on a terminal status.
 	TranscriptChunks int64 `json:"transcript_chunks,omitzero"`
+	// Event is EventKeyLost on a failed terminal status of a run whose envelope cannot be opened and whose job never
+	// started.
+	Event string `json:"event,omitzero"`
 }
+
+// EventKeyLost marks a run that failed before its job started because its pool key was lost; its host resubmits it.
+const EventKeyLost = "key-lost"
 
 // Chunk is a transcript artifact update on the tenant transcript topic.
 type Chunk struct {
@@ -271,6 +315,51 @@ type Advertisement struct {
 	Capacity int64   `json:"capacity"`
 	InFlight int64   `json:"in_flight"`
 	AtMS     int64   `json:"at_ms"`
+}
+
+// CustodianType is the JWS type of a custodian snapshot.
+const CustodianType = "wherry.custodian.v1"
+
+var custodianReasons = []string{"bootstrap", "rotation", "handover", "takeover", "contested"}
+
+// Snapshot is a pool's current custodian and public key, on the pool's snapshot topic. Its writer is the custodian it
+// names.
+type Snapshot struct {
+	V         int     `json:"v"`
+	Pool      string  `json:"pool"`
+	Custodian string  `json:"custodian"`
+	Reason    string  `json:"reason"`
+	Current   PoolKey `json:"current"`
+}
+
+// PoolKey is a pool's public P-256 key and its RFC 7638 key ID.
+type PoolKey struct {
+	KeyID string          `json:"key_id"`
+	Key   jose.JSONWebKey `json:"key"`
+}
+
+// ParseSnapshot verifies a snapshot against its writer's current key, decodes it strictly and requires its writer to
+// be the custodian it names.
+func ParseSnapshot(encoded []byte, keys signed.Keys) (Snapshot, error) {
+	var payload jsontext.Value
+	writer, err := signed.Verify(encoded, CustodianType, keys, &payload)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	var snapshot Snapshot
+	if err := json.Unmarshal(payload, &snapshot, signed.Strict); err != nil {
+		return Snapshot{}, fmt.Errorf("decode snapshot: %w", err)
+	}
+	if snapshot.V != 1 {
+		return Snapshot{}, errors.New("unknown record version")
+	}
+	if err := snapshot.validate(); err != nil {
+		return Snapshot{}, err
+	}
+	if writer != snapshot.Custodian {
+		return Snapshot{}, errors.New("snapshot is written by another receiver than the custodian it names")
+	}
+	return snapshot, nil
 }
 
 const SealRequestType = "application/vnd.wherry.seal-request.v1+jws"
@@ -365,6 +454,7 @@ func (*Echo) jwsType() string          { return EchoType }
 func (*Advertisement) jwsType() string { return "application/vnd.wherry.advertisement.v1+jws" }
 func (*StartFailure) jwsType() string  { return StartFailureType }
 func (*SealRequest) jwsType() string   { return SealRequestType }
+func (*Snapshot) jwsType() string      { return CustodianType }
 
 func (value *Submission) owner() string {
 	return signed.HostOwner(value.Wherry.Tenant, value.Wherry.Host)
@@ -378,6 +468,7 @@ func (value *Echo) owner() string          { return value.Receiver }
 func (value *Advertisement) owner() string { return value.Receiver }
 func (value *StartFailure) owner() string  { return value.Wherry.Receiver }
 func (value *SealRequest) owner() string   { return value.Receiver }
+func (value *Snapshot) owner() string      { return value.Custodian }
 
 func (value *Submission) version() *int    { return &value.V }
 func (value *Cancel) version() *int        { return &value.V }
@@ -389,6 +480,7 @@ func (value *Echo) version() *int          { return &value.V }
 func (value *Advertisement) version() *int { return &value.V }
 func (value *StartFailure) version() *int  { return &value.V }
 func (value *SealRequest) version() *int   { return &value.V }
+func (value *Snapshot) version() *int      { return &value.V }
 
 // runID keeps run IDs to name characters: a run's transactional ID
 // p.<pool>.<run> can then never equal another producer's, such as a receiver's
@@ -440,6 +532,15 @@ func (value *Submission) validate() error {
 	}
 	if binding.TaskStartedBy < 0 || binding.TaskEndedBy < 0 {
 		return errors.New("invalid submission")
+	}
+	if (binding.Replaces == "") != (binding.S3InputRun == "") || binding.Replaces == binding.Run {
+		return errors.New("a resubmission names both the run it replaces and its S3 input run, and replaces another run")
+	}
+	if binding.Replaces != "" && (!runID.MatchString(binding.Replaces) || !runID.MatchString(binding.S3InputRun)) {
+		return errors.New("replaces and s3_input_run must be run IDs")
+	}
+	if (binding.Envelope == "") != (binding.Wrap == "") || len(binding.Envelope) > signed.MaxEnvelope {
+		return errors.New("a submission carries both an envelope of at most 64 KiB and its wrap, or neither")
 	}
 	if err := binding.Placement.validate(); err != nil {
 		return err
@@ -582,12 +683,26 @@ func (value *RunStatus) validate() error {
 	if err := validateMetadata(update.Metadata); err != nil {
 		return err
 	}
+	if binding.Event != "" && (binding.Event != EventKeyLost || binding.Kind != "terminal" || update.Status.State != TaskStateFailed) {
+		return errors.New("a status's event is key-lost, on a failed terminal status")
+	}
 	switch binding.Kind {
 	case "claimed", "started", "rejected", "terminal":
 		return nil
 	default:
 		return errors.New("invalid status kind")
 	}
+}
+
+func (value *Snapshot) validate() error {
+	if err := validateIDs(map[string]string{"pool": value.Pool, "custodian": value.Custodian}); err != nil {
+		return err
+	}
+	key, ok := value.Current.Key.Key.(*ecdsa.PublicKey)
+	if !ok || key.Curve != elliptic.P256() || value.Current.KeyID != signed.SealKeyID(key) || !slices.Contains(custodianReasons, value.Reason) {
+		return errors.New("invalid custodian snapshot")
+	}
+	return nil
 }
 
 func (value *Chunk) validate() error {

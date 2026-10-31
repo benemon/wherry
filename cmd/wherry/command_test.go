@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -156,7 +158,26 @@ func newBus(t *testing.T) *bus {
 	b.produce(t, admin.ReceiverTopic("receiver-a"), "receiver-a", registration)
 	b.produce(t, admin.ReceiversTopic, "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
 		Offers: []wire.Offer{{Profile: "lab", Agent: "claude", InlineLimit: 49152}}, Capacity: 1, AtMS: time.Now().UnixMilli()}))
+	publishSnapshot(t, ctx, b.receiver, "pool-a", "receiver-a", b.receiverKey)
 	return b
+}
+
+// publishSnapshot publishes, as receiver, a snapshot naming it pool's custodian under a fresh key. Receivers publish
+// none before the receiver side of the pool key lands, so a test that submits publishes one in their place.
+func publishSnapshot(t *testing.T, ctx context.Context, kafka *kgo.Client, pool, receiver string, key ed25519.PrivateKey) {
+	t.Helper()
+	poolKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := wire.SignRecord(&wire.Snapshot{Pool: pool, Custodian: receiver, Reason: "bootstrap",
+		Current: wire.PoolKey{KeyID: signed.SealKeyID(&poolKey.PublicKey), Key: jose.JSONWebKey{Key: &poolKey.PublicKey}}}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.CustodianTopic(pool), Key: []byte("custodian"), Value: encoded}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // kafka opens a plain client as the principal of the bundle at path.

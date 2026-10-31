@@ -939,7 +939,7 @@ func TestLoopbackHTTPStorage(t *testing.T) {
 	if _, err := uploadInputs(ctx, store, testBucket, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}}); err != nil || puts.Load() != 1 {
 		t.Fatalf("upload = %v after %d PUTs; want one PUT over http", err, puts.Load())
 	}
-	values, err := presign(ctx, store, testBucket, "tenant-a", "run-1", []string{"dataset.bin"}, nil, time.Now().Add(time.Hour))
+	values, err := presign(ctx, store, testBucket, "tenant-a", "run-1", "run-1", []string{"dataset.bin"}, nil, time.Now().Add(getLifetime), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

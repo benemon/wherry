@@ -180,6 +180,15 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 	if err := service.configureTopicRetention(ctx, value, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
 		return err
 	}
+	if err := service.configureTopics(ctx, poolSegments, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
+		return err
+	}
+	if err := service.createTopicsWith(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
+		return err
+	}
+	if err := service.configureTopics(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
+		return err
+	}
 	if err := service.progressTopics(ctx, state, pool); err != nil {
 		return err
 	}
@@ -486,6 +495,17 @@ var receiversConfigs = map[string]string{
 	"max.compaction.lag.ms":  "3600000",
 }
 
+// poolSegments rolls a pool's task and events topics hourly, so retention deletes a record within an hour of its bound.
+var poolSegments = map[string]string{"segment.ms": "3600000"}
+
+// custodianConfigs are a pool's snapshot topic configs: readers want the latest committed snapshot, which compaction
+// keeps under its one key forever.
+var custodianConfigs = map[string]string{
+	"cleanup.policy":         "compact",
+	"message.timestamp.type": "LogAppendTime",
+	"retention.ms":           "-1",
+}
+
 // progressConfigs are a receiver's progress topic configs: an adopter wants each run's latest offset, its key's latest
 // record, while the pool's topics keep the run.
 func progressConfigs(retention retentionBounds) map[string]string {
@@ -777,6 +797,32 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 			return fmt.Errorf("topic %s message.timestamp.type is %s, want LogAppendTime", topic, types[topic])
 		}
 	}
+	for name, value := range poolSegments {
+		values, err := service.topicConfigs(ctx, name, poolTopics...)
+		if err != nil {
+			return err
+		}
+		for _, topic := range poolTopics {
+			if values[topic] != value {
+				return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], value)
+			}
+		}
+	}
+	var custodianTopics []string
+	for pool := range state.Pools {
+		custodianTopics = append(custodianTopics, CustodianTopic(pool))
+	}
+	for _, name := range slices.Sorted(maps.Keys(custodianConfigs)) {
+		values, err := service.topicConfigs(ctx, name, custodianTopics...)
+		if err != nil {
+			return err
+		}
+		for _, topic := range custodianTopics {
+			if values[topic] != custodianConfigs[name] {
+				return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], custodianConfigs[name])
+			}
+		}
+	}
 	for pool, terms := range state.Pools {
 		bounds, err := poolRetention(terms)
 		if err != nil {
@@ -951,6 +997,9 @@ func (service *Service) checkLimits(ctx context.Context, state State, pool strin
 			return 0, fmt.Errorf("%s record is %d bytes, over the %d-byte record limit", record.name, record.batch, feeds)
 		}
 	}
+	if taskRecord.batch > tasks {
+		return 0, fmt.Errorf("%s record is %d bytes, over the tasks topic's %d-byte record limit", taskRecord.name, taskRecord.batch, tasks)
+	}
 	return tasks, nil
 }
 
@@ -1008,6 +1057,13 @@ func (service *Service) recordLimits(ctx context.Context, state State, pool stri
 	}
 	return tasks, feeds, nil
 }
+
+// taskRecord is the smallest task a host submits, carrying a maximum envelope and a submit wrap, with the size of a
+// record batch holding it alone, signed. TestTaskRecordIsPinned builds and signs it to pin this.
+var taskRecord = struct {
+	name  string
+	batch int64
+}{"a task with a maximum envelope", 89385}
 
 // feedRecords are the largest bounded records a receiver writes to a feed, as a refusal names them, each with the size
 // of a record batch holding it alone, signed. TestFeedRecordsArePinned builds and signs each record to pin these.

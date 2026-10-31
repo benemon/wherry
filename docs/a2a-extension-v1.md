@@ -175,6 +175,7 @@ algorithm `EdDSA` (Ed25519). The protected header holds:
 | advertisement | `application/vnd.wherry.advertisement.v1+jws` | receiver | `wherry.receivers` | receiver ID |
 | start failure | `application/vnd.wherry.start-failure.v1+jws` | receiver | `wherry.pool.<pool>.events` | run ID |
 | seal request | `application/vnd.wherry.seal-request.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
+| custodian snapshot | `wherry.custodian.v1` | receiver | `wherry.pool.<pool>.custodian` | `custodian` |
 
 A reader accepts a signed record only when all of these hold:
 
@@ -200,6 +201,8 @@ A reader accepts a signed record only when all of these hold:
    - An echo on `wherry.tenant.<tenant>` names that tenant, and comes from a
      live member of the pool it names, to which the tenant is entitled.
    - An advertisement comes from a live member of the pool it names.
+   - A [custodian snapshot](#custodian-snapshot) comes from the live member
+     of the pool of its topic that it names as custodian.
 
 ## Submission
 
@@ -230,7 +233,11 @@ A submission is the task of one run.
       "ref": "main",
       "credential": "deploy-key",
       "host_key": "git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...\n"
-    }
+    },
+    "replaces": "run-7a21...",
+    "s3_input_run": "run-7a21...",
+    "envelope": "eyJhbGciOiJkaXIi...",
+    "wrap": "eyJhbGciOiJFQ0RILUVTK0EyNTZLVyIs..."
   }
 }
 ```
@@ -302,6 +309,42 @@ A submission is the task of one run.
   of its configuration that the remote falls under, and adds that credential
   to `credentials` at the file `git-credential`.
 
+- `replaces` and `s3_input_run` appear together, on a resubmission alone.
+  `replaces` is the run, other than this one, that the resubmission
+  replaces, and `s3_input_run` the run under whose prefix its S3 inputs lie,
+  the first run of the chain of replacements. Both are run IDs.
+- `envelope` and `wrap` appear together. `envelope` is a compact JWE of at
+  most 64 KiB, protected header exactly `alg` `dir`, `enc` `A256GCM`, `typ`
+  `application/vnd.wherry.envelope.v1+jwe` and `task_core`, encrypted under a
+  fresh 256-bit content key. Its plaintext holds exactly `credentials`, each
+  credential the run delivers by name, its value in standard base64;
+  `s3_inputs` and `s3_outputs`, each S3 input and S3 output by name, its
+  presigned URL; and `redaction_key`, the run's 32-byte key in standard
+  base64. `wrap` is a compact JWE carrying the content key to the pool's
+  current key from its [custodian snapshot](#custodian-snapshot), protected
+  header exactly `alg` `ECDH-ES+A256KW`, `enc` `A256GCM`, `kid`, the
+  recipient key's RFC 7638 thumbprint, and `epk`, a P-256 public JWK of
+  `kty`, `crv`, `x` and `y`.
+- `envelope` and `wrap` are the last two members of `wherry`, in that order.
+  `task_core` is the lowercase hex SHA-256 of the signed payload with the
+  bytes from the comma before `envelope` up to, not including, the closing
+  `}` of `wherry` removed. A payload with other members after them, either
+  of them repeated, or `wherry` holding no other member, is refused. Members
+  of the same names elsewhere, as inside `message`, are not part of the rule.
+- The envelope's credentials are exactly the agent's credentials in the
+  pool's terms other than `unsupplied_credentials`, and the task's
+  `credentials`, each once; its S3 inputs are exactly `s3_inputs` and its S3
+  outputs exactly the outputs with `storage` `s3`. Each URL is https, or
+  http for a loopback storage endpoint, of the storage endpoint's scheme,
+  host and port, with no user, opaque part or fragment, and the path of its
+  object: the bucket and `wherry/<tenant>/<s3_input_run>/inputs/<name>`, or
+  `wherry/<tenant>/<run>/outputs/<name>`, where a run without
+  `s3_input_run` is its own. No value is empty. A host refuses to build an
+  envelope that breaks these rules.
+- A host presigns an S3 input's GET until `task_started_by` plus 15
+  minutes, and an S3 output's PUT until `task_ended_by`, each at most 7
+  days.
+
 A submission whose input names repeat, among its input files, its S3 inputs
 and `known_hosts`, fails to decode, so a receiver drops it at
 [admission](#admission) step 2.
@@ -358,6 +401,11 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 - `log_offset` is the agent output offset an adopter follows from, on
   `started` only. The transcript is published up to at least that offset.
   Later offsets go to the receiver's [progress](#progress) topic.
+- `event` is the wherry event `key-lost`, on a `terminal` status with
+  state `TASK_STATE_FAILED` alone, absent otherwise. It marks a run that
+  failed before its job started because no holder of the pool key its
+  submit wrap names remained. The run's host
+  [resubmits](#resubmission) it.
 - `transcript_chunks` is the number of [chunks](#chunk) the attempt wrote,
   the empty final chunk included, on `terminal` only, and absent when zero. It commits in the same
   transaction as the attempt's last chunks.
@@ -712,6 +760,63 @@ An advertisement reports a receiver's liveness and capacity.
   each receiver's
   latest valid advertisement, and treat it as live when `at_ms` is within
   120 seconds of their own clock.
+
+## Custodian snapshot
+
+A custodian snapshot names the receiver holding a pool's private key and
+that key's public half, on the pool's compacted
+`wherry.pool.<pool>.custodian` topic under the Kafka key `custodian`.
+
+```json
+{
+  "v": 1,
+  "pool": "build",
+  "custodian": "nomad-1",
+  "reason": "rotation",
+  "current": {"key_id": "Qh3T...", "key": {"kty": "EC", "crv": "P-256", "x": "...", "y": "..."}}
+}
+```
+
+- Readers decode a snapshot strictly: an unknown or duplicate member
+  refuses it.
+- `custodian` is a receiver ID, and the snapshot's signer.
+- `reason` is `bootstrap`, `rotation`, `handover`, `takeover` or
+  `contested`.
+- `current.key` is a P-256 public JWK, and `current.key_id` its RFC 7638
+  SHA-256 thumbprint, unpadded base64url.
+- The current snapshot is the latest committed record on the topic. A host
+  submits to the pool only when that record verifies, its writer is the
+  custodian it names, and that custodian is a live member of the pool
+  without a membership end whose advertisement is within 120 seconds of the
+  host's clock. Otherwise the host refuses the submission, and never takes
+  an earlier record in its place. It also refuses when the pool has no
+  snapshot, and when the broker refuses its write to the pool's task topic,
+  as for a suspended pool. A host logs a `takeover` or `contested` snapshot.
+
+## Resubmission
+
+A run that ended with the wherry event `key-lost` before its
+`task_started_by` is resubmitted by its host when `submit`, `status`,
+`wait`, `logs -f` or the MCP server next reads it. The host keeps each run's
+submission without `envelope` and `wrap` in its local record; it holds no
+credential. Under an exclusive `flock` on the failed run, shared by every
+process using the host's state directory, the host:
+
+1. produces the stored replacement when the failed run's record names one
+   whose bytes are stored and not marked produced, and builds nothing new;
+2. otherwise records a new replacement run ID first, then resolves the
+   credentials again and builds and signs the replacement: the same message
+   content with the new run as `taskId` and `contextId` and a fresh
+   `messageId`, the same placement, credentials, outputs, git input, S3
+   inputs and bounds, `replaces` the failed run and `s3_input_run` the first
+   run of the chain;
+3. stores the signed bytes, produces them, and marks them produced.
+
+A crash before the bytes are stored resolves the credentials again on the
+next pass. A replacement's S3 outputs use its own prefix. A host keeps the
+first run's prefix until the last replacement has ended. `wait` and the MCP
+server follow a run's replacements, refuse a chain that names a run twice,
+and report every run they follow.
 
 ## Start failure
 
@@ -1349,7 +1454,8 @@ outputs that pass, and reports each rejected output with the reason after
 A pool whose terms name `storage`, an S3-compatible endpoint and bucket,
 carries files of up to 5 GiB each beside the broker. Each run's objects
 live under `wherry/<tenant>/<run>/`: an S3 input at `inputs/<name>`, and an
-S3 output at `outputs/<name>`. The host's own credential,
+S3 output at `outputs/<name>`; a resubmission's S3 inputs stay under its
+`s3_input_run`. The host's own credential,
 scoped by the operator to `wherry/<tenant>/`, uploads, downloads and
 deletes them, and never leaves the host. Receivers and plugins get only
 the presigned URLs in the [seal](#seal), checked against the pool's

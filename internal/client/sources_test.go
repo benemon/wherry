@@ -65,8 +65,9 @@ func TestAFailingSourceIsLoggedByNameAlone(t *testing.T) {
 			if name == "env unset" {
 				t.Setenv("WHERRY_TEST_UNSET_TOKEN", "")
 			}
-			f.host.credentials["model"] = test.source
 			receiver, task := f.admitted(t)
+			// Set after submit, which resolves the source for the envelope.
+			f.host.credentials["model"] = test.source
 			runID := task.submission.Wherry.Run
 			asked := newRequest(t, receiver.binding(task, 1), "model")
 			receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
@@ -100,8 +101,8 @@ func TestAFailingSourceIsLoggedByNameAlone(t *testing.T) {
 func TestACommandSourceRunsOutsideTheAttemptLock(t *testing.T) {
 	f := newFixture(t)
 	started := filepath.Join(t.TempDir(), "started")
-	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", "touch " + started + "; sleep 3; printf model-token"}}
 	receiver, task := f.admitted(t)
+	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", "touch " + started + "; sleep 3; printf model-token"}}
 	runID := task.submission.Wherry.Run
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
@@ -131,8 +132,8 @@ func TestAFailingCommandSourceBacksOff(t *testing.T) {
 	f := newFixture(t)
 	dir := t.TempDir()
 	runs, token := filepath.Join(dir, "runs"), filepath.Join(dir, "token")
-	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `echo >> "$0"; cat "$1"`, runs, token}}
 	receiver, task := f.admitted(t)
+	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `echo >> "$0"; cat "$1"`, runs, token}}
 	runID := task.submission.Wherry.Run
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
@@ -158,8 +159,8 @@ func TestAFailingCommandSourceBacksOff(t *testing.T) {
 func TestACommandSourceCutShortByTheEndLogsNothing(t *testing.T) {
 	f := newFixture(t)
 	started := filepath.Join(t.TempDir(), "started")
-	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `touch "$0"; exec sleep 30`, started}}
 	receiver, task := f.admitted(t)
+	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `touch "$0"; exec sleep 30`, started}}
 	runID := task.submission.Wherry.Run
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))

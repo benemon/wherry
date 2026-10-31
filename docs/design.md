@@ -36,6 +36,7 @@ differently live on different topics.
 | `wherry.receiver.<receiver>.progress` | that receiver | its pool's live members | each run's latest committed transcript offset |
 | `wherry.pool.<pool>.tasks` | entitled tenants' hosts | the pool's receivers, through its share group | submissions |
 | `wherry.pool.<pool>.events` | the pool's receivers, entitled tenants' hosts | the pool's receivers | statuses, start failures, cancels |
+| `wherry.pool.<pool>.custodian` | the pool's receivers | the pool's receivers, entitled tenants' hosts | custodian snapshots |
 | `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, results, echoes, seal requests |
 | `wherry.tenant.<tenant>.transcript` | receivers of the tenant's pools | the tenant's hosts | transcript chunks, output chunks |
 | `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key, seals |
@@ -109,7 +110,11 @@ replication factor, `cleanup.policy=delete` and
 `message.timestamp.type=LogAppendTime`, except `wherry.receivers` and the
 progress topics, which it creates with `cleanup.policy=compact,delete`,
 `segment.ms=3600000` and `max.compaction.lag.ms=3600000`, so a segment
-closes and compacts within an hour. A tenant feed and transcript topic also
+closes and compacts within an hour, and a pool's snapshot topic
+`wherry.pool.<pool>.custodian`, which it creates with
+`cleanup.policy=compact`. A pool's tasks and events topics have
+`segment.ms=3600000`, so retention deletes a record within an hour of its
+bound; `admin check` verifies it. A tenant feed and transcript topic also
 have `max.message.bytes=2097152`, the 2 MiB a receiver batches, so a result
 naming 256 outputs fits.
 
@@ -119,6 +124,7 @@ naming 256 outputs fits.
 | `wherry.receivers` | any recording command | `604800000` (7 days) |
 | `wherry.pool.<pool>.tasks` | `pool create` | `start_by_limit` plus 30 hours, in milliseconds; default `367200000` |
 | `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` sets the same value |
+| `wherry.pool.<pool>.custodian` | `pool create` | `-1`, outside the pool retention bound |
 | `wherry.tenant.<tenant>` | `pool entitle`, `host add` | `2592000000` (30 days) |
 | `wherry.tenant.<tenant>.transcript` | `pool entitle`, `host add` | as the tenant feed, `2592000000` (30 days) |
 | `wherry.receiver.<receiver>` | `receiver add` | `-1` |

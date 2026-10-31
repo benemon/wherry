@@ -110,3 +110,31 @@ func TestFileSourcePermissions(t *testing.T) {
 		t.Fatalf("resolve a directory: %v", err)
 	}
 }
+
+// A command source resolved for a task sees exactly one WHERRY_TASK_END_BY, the task's, in place of an inherited one;
+// concurrent resolutions each see their own, and the resolving process keeps its own environment.
+func TestCommandSourceGetsItsTasksEndBy(t *testing.T) {
+	t.Setenv(TaskEndByEnv, "inherited")
+	source := Source{Command: []string{"sh", "-c", "sleep 0.2; env | grep -c '^" + TaskEndByEnv + "='; printenv " + TaskEndByEnv}}
+	ends := []string{"2026-11-01T10:00:00Z", "2026-11-01T11:00:00Z"}
+	values := make([][]byte, len(ends))
+	errs := make([]error, len(ends))
+	done := make(chan int)
+	for i, end := range ends {
+		go func() {
+			values[i], errs[i] = source.ResolveForTask(context.Background(), end)
+			done <- i
+		}()
+	}
+	for range ends {
+		<-done
+	}
+	for i, end := range ends {
+		if errs[i] != nil || string(values[i]) != "1\n"+end+"\n" {
+			t.Errorf("resolution %d saw %q, %v; want one %s", i, values[i], errs[i], end)
+		}
+	}
+	if got := os.Getenv(TaskEndByEnv); got != "inherited" {
+		t.Fatalf("resolving process's %s is %q", TaskEndByEnv, got)
+	}
+}

@@ -25,7 +25,7 @@ func ACLs(state State) []ACL {
 		if state.Ended[principal] {
 			continue
 		}
-		acls = append(acls, ACL{principal, "topic", AdminTopic, false, readDescribe}, ACL{principal, "topic", ReceiverTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiverProgressTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiversTopic, false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", PoolTasksTopic(config.Pool), false, readDescribe}, ACL{principal, "topic", PoolEventsTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", PoolGroup(config.Pool), false, []string{"READ", "DESCRIBE", "DESCRIBE_CONFIGS"}}, ACL{principal, "transactional", TransactionalPrefix(config.Pool), true, writeDescribe})
+		acls = append(acls, ACL{principal, "topic", AdminTopic, false, readDescribe}, ACL{principal, "topic", ReceiverTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiverProgressTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiversTopic, false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", PoolTasksTopic(config.Pool), false, readDescribe}, ACL{principal, "topic", PoolEventsTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", PoolGroup(config.Pool), false, []string{"READ", "DESCRIBE", "DESCRIBE_CONFIGS"}}, ACL{principal, "topic", CustodianTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", CustodianGroup(config.Pool), false, readDescribe}, ACL{principal, "transactional", TransactionalPrefix(config.Pool), true, writeDescribe})
 		for peer, peerConfig := range state.Receivers {
 			if peer != receiver && peerConfig.Pool == config.Pool && !state.Ended[ReceiverPrincipal(peer)] {
 				acls = append(acls, ACL{principal, "topic", ReceiverTopic(peer), false, readDescribe}, ACL{principal, "topic", ReceiverProgressTopic(peer), false, readDescribe})
@@ -38,7 +38,7 @@ func ACLs(state State) []ACL {
 				if host.Tenant != tenant || state.Ended[principal] {
 					continue
 				}
-				acls = append(acls, ACL{principal, "topic", PoolTasksTopic(pool), false, writeDescribe}, ACL{principal, "topic", PoolEventsTopic(pool), false, writeDescribe})
+				acls = append(acls, ACL{principal, "topic", PoolTasksTopic(pool), false, writeDescribe}, ACL{principal, "topic", PoolEventsTopic(pool), false, writeDescribe}, ACL{principal, "topic", CustodianTopic(pool), false, readDescribe})
 				for receiver, config := range state.Receivers {
 					if config.Pool == pool && !state.Ended[ReceiverPrincipal(receiver)] {
 						acls = append(acls, ACL{principal, "topic", ReceiverTopic(receiver), false, readDescribe})

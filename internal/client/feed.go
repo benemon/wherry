@@ -50,6 +50,10 @@ type AwaitResult struct {
 	// Unclaimed is set, with Status SUBMITTED, when the run's task_started_by passed and no receiver claimed it.
 	Unclaimed string
 	Skipped   int
+	// Runs lists the run awaited and each replacement followed from it, the run the outcome is of last.
+	Runs []string
+	// keyLost marks an outcome whose run ended with the wherry event key-lost.
+	keyLost bool
 }
 
 // Output is an output of a run, verified against the size and SHA-256 its result lists: its bytes, or for an S3
@@ -89,6 +93,8 @@ type StatusResult struct {
 	// Unclaimed is set when the run's task_started_by passed and no receiver claimed it.
 	Unclaimed string
 	Skipped   int
+	// Replacement names the run that resubmits this one, when it lost its pool key before it started.
+	Replacement string
 }
 
 // EventsResult contains a run's verified statuses and its transcript chunk count per attempt.
@@ -671,7 +677,7 @@ func ends(status *wire.RunStatus) bool {
 	case "rejected":
 		return state == wire.TaskStateRejected
 	case "terminal":
-		return state == wire.TaskStateCanceled
+		return state == wire.TaskStateCanceled || status.Wherry.Event == wire.EventKeyLost
 	}
 	return false
 }
@@ -685,7 +691,12 @@ func (h *Host) Status(ctx context.Context, runID string) (StatusResult, error) {
 	if r.pool == "" {
 		return StatusResult{}, fmt.Errorf("status %s: %w", runID, ErrRunNotFound)
 	}
-	return r.status(), nil
+	h.resubmitIfLost(ctx, r)
+	result := r.status()
+	if chain, err := h.chain(runID); err == nil && len(chain) > 1 {
+		result.Replacement = chain[1]
+	}
+	return result, nil
 }
 
 // RunsResult lists runs, latest update first; Skipped counts their unverifiable records and undecodable local records.
@@ -735,6 +746,7 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 		r.reread = reread
 		r.read(ctx, records)
 		v = r.v
+		h.resubmitIfLost(ctx, r)
 		if r.pool != "" {
 			status := r.status()
 			result.Runs = append(result.Runs, status)
@@ -979,6 +991,8 @@ type TranscriptStream struct {
 	attempt, first int64
 	returned       map[int64]int64
 	redacted       map[string]int
+	// resubmitted is set once Next has resubmitted the run on its ending key-lost.
+	resubmitted bool
 }
 
 // StreamTranscript returns a stream of runID's transcript.
@@ -1024,6 +1038,10 @@ func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
 	}
 	if s.r.pool == "" {
 		return TranscriptResult{}, fmt.Errorf("transcript %s: %w", s.run, ErrRunNotFound)
+	}
+	if !s.resubmitted && s.r.keyLost() {
+		s.resubmitted = true
+		s.h.resubmitIfLost(ctx, s.r)
 	}
 	topic := admin.TenantTranscriptTopic(s.h.tenant)
 	if s.tail == nil {
@@ -1140,11 +1158,52 @@ func (s *TranscriptStream) Unanswered() bool {
 	return false
 }
 
-// Await follows the tenant feed until the run has an outcome, answering seal requests while it waits.
-// Each arrival re-reads wherry.admin and the receivers' keys and derives the run again, so nothing from a member ended
-// by then shapes the outcome.
+// Await follows the tenant feed until the run has an outcome, answering seal requests while it waits. A run that ended
+// key-lost and was resubmitted is followed to its replacement, and a chain of replacements that names a run twice is
+// refused; the outcome is the last run's, and Runs lists every run followed.
 func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (AwaitResult, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var runs []string
+	for {
+		chain, err := h.chain(runID)
+		if err != nil {
+			return AwaitResult{}, err
+		}
+		for _, run := range chain {
+			if slices.Contains(runs, run) {
+				return AwaitResult{}, fmt.Errorf("%w: run %s's replacements form a cycle at run %s", ErrInvalidInput, runs[0], run)
+			}
+		}
+		// A replacement stored but not produced is produced before it is awaited.
+		for _, run := range chain[:len(chain)-1] {
+			if _, err := h.resubmit(waitCtx, run); err != nil {
+				return AwaitResult{}, err
+			}
+		}
+		runs = append(runs, chain...)
+		outcome, err := h.awaitRun(waitCtx, runs[len(runs)-1])
+		if err != nil || !outcome.keyLost {
+			outcome.Runs = runs
+			return outcome, err
+		}
+		replacement, err := h.resubmit(waitCtx, runs[len(runs)-1])
+		if err != nil || replacement == "" {
+			if err != nil {
+				h.logger.Printf("run %s: resubmit: %v", runs[len(runs)-1], err)
+			}
+			outcome.Runs = runs
+			return outcome, nil
+		}
+		runID = replacement
+	}
+}
+
+// awaitRun follows the tenant feed until runID has an outcome, answering seal requests while it waits.
+// Each arrival re-reads wherry.admin and the receivers' keys and derives the run again, so nothing from a member ended
+// by then shapes the outcome.
+func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, error) {
+	waitCtx, cancel := context.WithCancel(waitCtx)
 	defer cancel()
 	f, err := h.follow(waitCtx)
 	if err != nil {
@@ -1191,7 +1250,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	for {
 		if r.outcome != nil {
 			outcome := *r.outcome
-			outcome.Skipped, outcome.Model = r.skipped, r.model()
+			outcome.Skipped, outcome.Model, outcome.keyLost = r.skipped, r.model(), r.keyLost()
 			if r.result != nil {
 				if err := r.readTranscript(waitCtx); err != nil {
 					return AwaitResult{}, fmt.Errorf("wait %s: %w", runID, err)

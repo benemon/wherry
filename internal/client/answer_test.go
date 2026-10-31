@@ -478,15 +478,16 @@ func TestAnswerLogsACredentialThisHostLacks(t *testing.T) {
 func TestARequestForAnEndedRunIsSettledQuietly(t *testing.T) {
 	f := newFixture(t)
 	resolved := filepath.Join(t.TempDir(), "resolved")
-	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `echo >> "$0"; printf model-token`, resolved}}
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
 	asked := newRequest(t, receiver.binding(task, 1), "model")
 	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record), receiver.result(t, task, 1, wire.TaskStateCompleted, nil),
 		receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil))
-	answering(t, f, f.host)
 	// A request for another run, after the first, shows the first has been read.
 	next := f.anotherRun(t, receiver)
+	// Set after submit, which resolves the source for the envelope.
+	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `echo >> "$0"; printf model-token`, resolved}}
+	answering(t, f, f.host)
 	control := newRequest(t, receiver.binding(next, 1), "model")
 	receiver.feed(t, f.ctx, next.submission.Wherry.Run, receiver.sign(t, &control.record))
 	f.waitSeals(t, "host-a", 1)
@@ -632,7 +633,7 @@ func TestAFailedTaskWriteLeavesNoRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.host.publish(cancelled, fresh, encoded, time.Now()); err == nil {
+	if err := f.host.publish(cancelled, fresh, encoded, time.Now(), make([]byte, 32)); err == nil {
 		t.Fatal("publish succeeded on a cancelled context")
 	}
 	if local, err := f.host.localRun("run-fresh"); err != nil || local != nil {

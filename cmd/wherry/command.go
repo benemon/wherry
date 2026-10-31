@@ -483,6 +483,9 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		return err
 	}
 	collected, collectErr := client.Collect(ctx, runID, result, *outputsDir)
+	for i := 1; i < len(result.Runs); i++ {
+		fmt.Fprintf(stderr, "run %s lost its pool key before it started; resubmitted as run %s\n", result.Runs[i-1], result.Runs[i])
+	}
 	if result.Unclaimed != "" {
 		return errors.New(result.Unclaimed)
 	}
@@ -606,6 +609,9 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		}
 		if result.Unclaimed != "" {
 			fmt.Fprintln(stdout, result.Unclaimed)
+		}
+		if result.Replacement != "" {
+			fmt.Fprintf(stdout, "replaced_by=%s\n", result.Replacement)
 		}
 		warnRedacted(stderr, result.Redacted)
 		warnSkipped(stderr, result.Skipped)

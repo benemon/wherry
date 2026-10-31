@@ -227,6 +227,13 @@ host. The configuration holds no value and no source prompts.
 | `env` | the variable in the answering process's environment; unset or empty fails the answer |
 | `command` | the standard output of the program, run without a shell with the answering process's environment and no standard input, byte for byte as for a file; standard error is discarded |
 
+A submitting host, and a host resubmitting a run, also resolves each source
+the run delivers, for the run's [envelope](a2a-extension-v1.md#submission). A
+`command` source then runs with `WHERRY_TASK_END_BY` set to the task's
+`task_ended_by` as an RFC 3339 time in UTC, in place of every copy the
+process would inherit; the submitting process's own environment is
+unchanged.
+
 A command has 60 seconds, time for an interactive unlock such as a password
 manager's, and at most 64 KiB of output. A command that exits non-zero, runs
 out of time or writes more fails the answer. A failed source leaves the
