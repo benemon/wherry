@@ -364,8 +364,11 @@ func TestRevocationRefusesAWaitBelowTheBrokersLongestTimeout(t *testing.T) {
 	revocationBounds(t, service, "100", "400", "200")
 	denied := func(context.Context, string, string) error { return ErrAuthorizationDenied }
 	result := service.RevokeReceiver(ctx, "receiver-a", 300*time.Millisecond, denied)
-	if result.Complete || len(result.Steps) != 5 || result.Steps[4].Err == nil || !strings.Contains(result.Steps[4].Err.Error(), "minimum 400ms") {
-		t.Fatalf("wait below the broker minimum: %+v; want step 5 refused naming 400ms", result)
+	if result.Complete || len(result.Steps) != 1 || result.Steps[0].Err == nil || !strings.Contains(result.Steps[0].Err.Error(), "minimum 400ms") {
+		t.Fatalf("wait below the broker minimum: %+v; want it refused at step 1 naming 400ms", result)
+	}
+	if state, err := service.LoadState(ctx); err != nil || state.Revoking[ReceiverPrincipal("receiver-a")] {
+		t.Fatalf("a refused wait changed state: revoking=%v, %v", state.Revoking[ReceiverPrincipal("receiver-a")], err)
 	}
 	started := time.Now()
 	if result := service.RevokeReceiver(ctx, "receiver-a", 600*time.Millisecond, denied); !result.Complete {
@@ -994,6 +997,7 @@ func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
+	revocationBounds(t, service, "1", "1", "1")
 	window, interval := probeWindow, probeInterval
 	defer func() { probeWindow, probeInterval = window, interval }()
 	probeInterval = time.Millisecond

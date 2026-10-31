@@ -49,6 +49,24 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 	}
 	var password string
 	if !run(1, "record revoking, rotate SCRAM password", func() error {
+		// A connection, share lock or transaction from before this step can outlive a shorter wait; refuse one before
+		// changing anything.
+		longest := func(a, b int64) int64 { return max(a, b) }
+		var minimum time.Duration
+		for _, name := range []string{"connections.max.reauth.ms", "group.share.max.record.lock.duration.ms", "transaction.max.timeout.ms"} {
+			ms, err := service.brokerSetting(ctx, name, longest)
+			if err != nil {
+				return err
+			}
+			if ms <= 0 {
+				return fmt.Errorf("%s is unbounded, so revocation cannot complete", name)
+			}
+			minimum = max(minimum, time.Duration(ms)*time.Millisecond)
+		}
+		if wait > 0 && wait < minimum {
+			return fmt.Errorf("wait %s is below the broker-derived minimum %s", wait, minimum)
+		}
+		wait = max(wait, minimum)
 		state, err := service.LoadState(ctx)
 		if err != nil {
 			return err
@@ -103,23 +121,6 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 		return result
 	}
 	if !run(5, "wait revocation intervals", func() error {
-		longest := func(a, b int64) int64 { return max(a, b) }
-		var minimum time.Duration
-		for _, name := range []string{"connections.max.reauth.ms", "group.share.max.record.lock.duration.ms", "transaction.max.timeout.ms"} {
-			ms, err := service.brokerSetting(ctx, name, longest)
-			if err != nil {
-				return err
-			}
-			if ms <= 0 {
-				return fmt.Errorf("%s is unbounded, so revocation cannot complete", name)
-			}
-			minimum = max(minimum, time.Duration(ms)*time.Millisecond)
-		}
-		// A connection, share lock or transaction from before step 1 can outlive a shorter wait.
-		if wait > 0 && wait < minimum {
-			return fmt.Errorf("wait %s is below the broker-derived minimum %s", wait, minimum)
-		}
-		wait = max(wait, minimum)
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
 		select {
