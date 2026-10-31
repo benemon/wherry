@@ -51,6 +51,10 @@ Run IDs match `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`. The client generates
 A key ID is the RFC 7638 SHA-256 thumbprint of the public key's JWK,
 unpadded base64url.
 
+wherry's own key files, the host key, `signing.key` and their `.next`
+files, are private JWKs (RFC 7517) with mode 0600. The TLS keys `wherry dev`
+writes for its Kafka broker are PEM, the format the broker reads.
+
 ### Labels
 
 A label key is a name, or a prefix, `/` and a name:

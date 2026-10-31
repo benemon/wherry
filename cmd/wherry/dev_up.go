@@ -446,6 +446,7 @@ func devTLS(instance devInstance) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The Kafka broker reads its TLS keys only as PEM, so these stay PEM where wherry's own key files are JWKs.
 	keyPEM := func(key *ecdsa.PrivateKey) []byte {
 		der, _ := x509.MarshalPKCS8PrivateKey(key)
 		return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
