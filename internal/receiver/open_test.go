@@ -1078,14 +1078,14 @@ func TestAdmissionActsOnTheEarliestAcceptedRecord(t *testing.T) {
 	_, other, _ := ed25519.GenerateKey(nil)
 	f.submit(t, other, nil)
 	record := f.submit(t, f.host, nil)
+	copied := f.produce(t, admin.PoolTasksTopic(testPool), "run-a", record.Value)
+	records := f.records(t, admin.PoolTasksTopic(testPool))
+	record.Offset, copied.Offset = records[1].Offset, records[2].Offset
+	if admitted, ack := f.receiver.admit(f.ctx, copied); admitted != nil || ack != kgo.AckAccept || len(f.eventStatuses(t)) != 0 {
+		t.Fatalf("a later copy admitted %v with %v and %d statuses written", admitted, ack, len(f.eventStatuses(t)))
+	}
 	if status := f.execute(t, record, 1); status != kgo.AckAccept {
 		t.Fatalf("the valid task ended %v; logs:\n%s", status, f.logs.String())
-	}
-	copied := f.produce(t, admin.PoolTasksTopic(testPool), "run-a", record.Value)
-	copied.Offset = f.records(t, admin.PoolTasksTopic(testPool))[2].Offset
-	statuses := len(f.eventStatuses(t))
-	if admitted, ack := f.receiver.admit(f.ctx, copied); admitted != nil || ack != kgo.AckAccept || len(f.eventStatuses(t)) != statuses {
-		t.Fatalf("a later copy admitted %v with %v and %d statuses written", admitted, ack, len(f.eventStatuses(t))-statuses)
 	}
 }
 
@@ -1160,5 +1160,24 @@ func TestHostOfflineAndANonCustodianRunsTheTask(t *testing.T) {
 	}
 	if !strings.Contains(otherLogs.String(), "run "+submitted.RunID+": attempt 1 in profile nomad") || strings.Contains(f.logs.String(), "run "+submitted.RunID+": attempt") {
 		t.Fatalf("the run did not run on the non-custodian; custodian logs:\n%s\nother logs:\n%s", f.logs.String(), otherLogs.String())
+	}
+}
+
+// Adoption is evidenced by a job, never by claim history: a redelivery after another member released the run, with no
+// job, is a first start, which commits no adopting status and dispatches.
+func TestRedeliveryAfterAReleaseWithNoJobIsAFirstStart(t *testing.T) {
+	f := newFixture(t, resultStream)
+	keyB := f.addPeer(t, "receiver-b", testPool)
+	record := f.submit(t, f.host, nil)
+	f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+	f.statusAs(t, record, "receiver-b", keyB, "released", 1)
+	if status := f.execute(t, record, 2); status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	if kinds := f.kinds(t); slices.Contains(kinds, "adopting") {
+		t.Fatalf("statuses %v, want no adoption", kinds)
+	}
+	if dispatches, lookups, _, _ := f.plugin.counts(); dispatches != 1 || lookups != 1 {
+		t.Fatalf("dispatches %d, lookups %d; want the job looked up and then dispatched", dispatches, lookups)
 	}
 }
