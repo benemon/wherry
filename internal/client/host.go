@@ -44,7 +44,7 @@ var (
 	// wrap its envelope to, or that the broker does not let this host write.
 	ErrNoSnapshot           = errors.New("pool has no custodian snapshot")
 	ErrCustodianUnavailable = errors.New("pool's custodian is not live or is revoked")
-	ErrPoolSuspended        = errors.New("pool is suspended")
+	ErrPoolSuspended        = errors.New("pool write refused")
 )
 
 // errUndecodable wraps a local state file that does not decode.
@@ -463,17 +463,25 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	return SubmitResult{RunID: runID, Pool: pool}, nil
 }
 
-// poolKey returns the current key of pool: that of the latest committed record on the pool's snapshot topic, when its
-// writer is the custodian it names and that custodian is live in ads and unrevoked. An earlier record never stands in.
+// poolKey returns the current key of pool: that of the latest committed record under the snapshot key on the pool's
+// snapshot topic, when its writer is the custodian it names and that custodian is live in ads and unrevoked. An earlier
+// record never stands in.
 func (h *Host) poolKey(ctx context.Context, v view, pool string, ads map[string]wire.Advertisement) (*ecdsa.PublicKey, error) {
 	records, err := h.reader.ReadFrom(ctx, admin.CustodianTopic(pool), 0)
 	if err != nil {
 		return nil, err
 	}
-	if len(records) == 0 {
+	var latest *kgo.Record
+	for _, record := range records {
+		// A record under another key is not a snapshot: compaction keeps the latest record of each key.
+		if string(record.Key) == wire.CustodianKey {
+			latest = record
+		}
+	}
+	if latest == nil {
 		return nil, fmt.Errorf("%w: pool %s has no custodian yet; submit again once a receiver of the pool has published one", ErrNoSnapshot, pool)
 	}
-	snapshot, err := admin.AuthorizeSnapshot(v.state, v.keys, records[len(records)-1].Value, pool)
+	snapshot, err := admin.AuthorizeSnapshot(v.state, v.keys, latest.Value, pool)
 	if err != nil {
 		return nil, fmt.Errorf("%w: pool %s's current snapshot: %v", ErrCustodianUnavailable, pool, err)
 	}
@@ -670,7 +678,7 @@ func (h *Host) produceTask(ctx context.Context, binding wire.SubmissionBinding, 
 	case errors.Is(err, kerr.MessageTooLarge):
 		return fmt.Errorf("%w: the submission is a %d-byte record, over the broker's record limit; shorten the prompt or the input files", ErrInvalidInput, len(encoded))
 	case errors.Is(err, kerr.TopicAuthorizationFailed):
-		return fmt.Errorf("%w: the broker refuses this host's write to pool %s's task topic", ErrPoolSuspended, binding.Pool)
+		return fmt.Errorf("%w: the broker refuses this host's write to pool %s's task topic: the pool is suspended or this host's ACLs were withdrawn", ErrPoolSuspended, binding.Pool)
 	}
 	return err
 }

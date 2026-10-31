@@ -80,7 +80,7 @@ func TestSubmitRefusesWithoutALiveCurrentCustodian(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		other.produce(t, f.ctx, admin.CustodianTopic("pool-a"), "custodian", forged)
+		other.produce(t, f.ctx, admin.CustodianTopic("pool-a"), wire.CustodianKey, forged)
 		if err := f.submitErr(t); !errors.Is(err, ErrCustodianUnavailable) || !strings.Contains(err.Error(), "written by another receiver") {
 			t.Fatalf("submit = %v, want the snapshot refused for its writer", err)
 		}
@@ -100,7 +100,7 @@ func TestSubmitRefusesWithoutALiveCurrentCustodian(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := f.submitErr(t); !errors.Is(err, ErrPoolSuspended) {
+		if err := f.submitErr(t); !errors.Is(err, ErrPoolSuspended) || !strings.Contains(err.Error(), "the pool is suspended or this host's ACLs were withdrawn") {
 			t.Fatalf("submit = %v, want %v", err, ErrPoolSuspended)
 		}
 	})
@@ -345,7 +345,7 @@ func TestOnlyAKeyLostRunBeforeItsStartBoundIsResubmitted(t *testing.T) {
 	receiver.keyLost(t, f.ctx, late)
 	for _, task := range []claimed{failed, late} {
 		runID := task.submission.Wherry.Run
-		if replacement, err := f.host.resubmit(f.ctx, runID); err != nil || replacement != "" {
+		if replacement, err := f.host.resubmit(f.ctx, runID, false); err != nil || replacement != "" {
 			t.Fatalf("resubmit %s = %q, %v; want none", runID, replacement, err)
 		}
 		if local, err := f.host.localRun(runID); err != nil || local.Replacement != "" {
@@ -371,7 +371,7 @@ func TestAStoredReplacementIsProducedAsStored(t *testing.T) {
 	produceReplacement = func(context.Context, *Host, wire.SubmissionBinding, []byte) error {
 		return errors.New("injected crash")
 	}
-	if _, err := f.host.resubmit(f.ctx, runID); err == nil {
+	if _, err := f.host.resubmit(f.ctx, runID, false); err == nil {
 		t.Fatal("resubmit succeeded through a failed write")
 	}
 	local, err := f.host.localRun(runID)
@@ -426,28 +426,9 @@ func TestWaitRefusesAReplacementCycle(t *testing.T) {
 // A replacement reads its S3 inputs from the root run's prefix, and cleanup keeps that prefix until the replacement
 // has ended.
 func TestAReplacementReadsTheRootRunsInputs(t *testing.T) {
-	o := newUploadOracle(t)
-	f := newFixture(t)
-	terms := testTerms()
-	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
-	if err := f.service.PoolUpdate(f.ctx, "pool-a", terms, false); err != nil {
-		t.Fatal(err)
-	}
-	f.host.storage = o.config
-	maps.Copy(f.host.credentials, o.sources)
-	receiver := f.addReceiver(t, "receiver-a", "pool-a")
-	receiver.advertise(t, f.ctx, nil)
-	file, _ := randomFile(t, "dataset.bin", 1024)
-	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
-		Outputs: []wire.ExpectedOutput{{Name: "report.pdf", Storage: wire.StorageS3}}, EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	root := submitted.RunID
-	task := receiver.claim(t, f.ctx, root)[0]
-	receiver.feed(t, f.ctx, root, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
-	receiver.keyLost(t, f.ctx, task)
-	replacementID, err := f.host.resubmit(f.ctx, root)
+	o, f, receiver, task := keyLostS3Run(t)
+	root := task.submission.Wherry.Run
+	replacementID, err := f.host.resubmit(f.ctx, root, false)
 	if err != nil || replacementID == "" {
 		t.Fatalf("resubmit = %q, %v", replacementID, err)
 	}
@@ -470,6 +451,136 @@ func TestAReplacementReadsTheRootRunsInputs(t *testing.T) {
 	}
 	if o.object(input) != nil {
 		t.Fatal("cleanup of the ended replacement left the root's inputs")
+	}
+}
+
+// keyLostS3Run submits a run with the S3 input dataset.bin and the S3 output report.pdf, and ends it key-lost after
+// receiver-a claims it.
+func keyLostS3Run(t *testing.T) (*uploadOracle, *fixture, *testReceiver, claimed) {
+	t.Helper()
+	o := newUploadOracle(t)
+	f := newFixture(t)
+	terms := testTerms()
+	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	if err := f.service.PoolUpdate(f.ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	f.host.storage = o.config
+	maps.Copy(f.host.credentials, o.sources)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	file, _ := randomFile(t, "dataset.bin", 1024)
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
+		Outputs: []wire.ExpectedOutput{{Name: "report.pdf", Storage: wire.StorageS3}}, EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := receiver.claim(t, f.ctx, submitted.RunID)[0]
+	receiver.feed(t, f.ctx, submitted.RunID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
+	receiver.keyLost(t, f.ctx, task)
+	return o, f, receiver, task
+}
+
+// Cleanup refuses a run that ended key-lost before its task_started_by, and a run whose last replacement did, and keeps
+// the root run's inputs.
+func TestCleanupKeepsAResubmittableRunsInputs(t *testing.T) {
+	o, f, receiver, task := keyLostS3Run(t)
+	root := task.submission.Wherry.Run
+	input := "/" + testBucket + "/" + wire.S3InputKey("tenant-a", root, "dataset.bin")
+	until := "resubmittable until " + wire.RFC3339(task.submission.Wherry.TaskStartedBy)
+	if err := f.host.Cleanup(f.ctx, root); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "run "+root+" lost its pool key and is "+until) || o.object(input) == nil {
+		t.Fatalf("cleanup of a key-lost run before its resubmission = %v; want it refused and its inputs kept", err)
+	}
+	replacementID, err := f.host.resubmit(f.ctx, root, true)
+	if err != nil || replacementID == "" {
+		t.Fatalf("resubmit = %q, %v", replacementID, err)
+	}
+	receiver.keyLost(t, f.ctx, receiver.claim(t, f.ctx, replacementID)[0])
+	for _, run := range []string{root, replacementID} {
+		if err := f.host.Cleanup(f.ctx, run); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "run "+replacementID+" lost its pool key and is "+until) || o.object(input) == nil {
+			t.Fatalf("cleanup of %s with its last replacement key-lost = %v; want it refused and the inputs kept", run, err)
+		}
+	}
+}
+
+// One submit judges every pending run from one read of the tenant feed and resubmits only the run that ended key-lost.
+func TestResubmissionReadsTheFeedOnce(t *testing.T) {
+	f := newFixture(t)
+	receiver, lost := f.admitted(t)
+	pending := []claimed{lost, f.anotherRun(t, receiver), f.anotherRun(t, receiver)}
+	receiver.keyLost(t, f.ctx, lost)
+	reads := f.failListings(t, admin.TenantTopic("tenant-a"), startListing, 0, 0)
+	if err := f.submitErr(t); err != nil {
+		t.Fatal(err)
+	}
+	if n := reads.Load(); n != 1 {
+		t.Fatalf("submit read the tenant feed %d times with %d pending runs; want once", n, len(pending))
+	}
+	for i, task := range pending {
+		want := 0
+		if i == 0 {
+			want = 1
+		}
+		if replaced := f.replacements(t, "pool-a", task.submission.Wherry.Run); len(replaced) != want {
+			t.Fatalf("pending run %d has %d replacements; want %d", i, len(replaced), want)
+		}
+	}
+}
+
+// Wait on a run that ended key-lost and whose resubmission fails returns the resubmission's error with the bound until
+// which the run is resubmitted.
+func TestWaitReportsAFailedResubmission(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	receiver.keyLost(t, f.ctx, task)
+	injected := errors.New("injected write failure")
+	previous := produceReplacement
+	t.Cleanup(func() { produceReplacement = previous })
+	produceReplacement = func(context.Context, *Host, wire.SubmissionBinding, []byte) error { return injected }
+	result, err := f.host.Await(f.ctx, task.submission.Wherry.Run, 5*time.Second)
+	if !errors.Is(err, injected) || !strings.Contains(err.Error(), "resubmitted until "+wire.RFC3339(task.submission.Wherry.TaskStartedBy)) || result.Status.State != wire.TaskStateFailed {
+		t.Fatalf("await = %+v, %v; want the outcome with the resubmission's error and bound", result, err)
+	}
+}
+
+// A resubmission's lock file is removed when it is done and never made for a run without a local record, and the
+// sweep removes one no process holds.
+func TestResubmitLockFiles(t *testing.T) {
+	f := newFixture(t)
+	receiver, task := f.admitted(t)
+	receiver.keyLost(t, f.ctx, task)
+	locks := filepath.Join(f.stateDir, "resubmit")
+	if replacement, err := f.host.resubmit(f.ctx, "run-unknown", true); err != nil || replacement != "" {
+		t.Fatalf("resubmit of an unknown run = %q, %v", replacement, err)
+	}
+	if _, err := os.Stat(locks); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("resubmit of an unknown run made the lock directory: %v", err)
+	}
+	if replacement, err := f.host.resubmit(f.ctx, task.submission.Wherry.Run, true); err != nil || replacement == "" {
+		t.Fatalf("resubmit = %q, %v", replacement, err)
+	}
+	if entries, err := os.ReadDir(locks); err != nil || len(entries) != 0 {
+		t.Fatalf("lock directory holds %d entries, %v; want none", len(entries), err)
+	}
+	stale := filepath.Join(locks, "run-stale.json.lock")
+	if err := os.WriteFile(stale, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.host.sweep(f.ctx)
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("sweep left a stale lock file: %v", err)
+	}
+}
+
+// The snapshot read takes the latest record under the snapshot key, as compaction keeps it; a later record under another
+// key does not stand in.
+func TestTheSnapshotIsTheLatestRecordUnderItsKey(t *testing.T) {
+	f := newFixture(t)
+	receiver := f.addReceiver(t, "receiver-a", "pool-a")
+	receiver.advertise(t, f.ctx, nil)
+	receiver.produce(t, f.ctx, admin.CustodianTopic("pool-a"), "other", []byte("not a snapshot"))
+	if err := f.submitErr(t); err != nil {
+		t.Fatalf("submit = %v; want the snapshot under its key", err)
 	}
 }
 
@@ -559,7 +670,7 @@ func TestResubmitHelperProcess(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	replacement, err := h.resubmit(ctx, config.Run)
+	replacement, err := h.resubmit(ctx, config.Run, false)
 	if err != nil {
 		t.Fatal(err)
 	}

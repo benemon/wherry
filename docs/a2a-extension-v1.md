@@ -175,7 +175,7 @@ algorithm `EdDSA` (Ed25519). The protected header holds:
 | advertisement | `application/vnd.wherry.advertisement.v1+jws` | receiver | `wherry.receivers` | receiver ID |
 | start failure | `application/vnd.wherry.start-failure.v1+jws` | receiver | `wherry.pool.<pool>.events` | run ID |
 | seal request | `application/vnd.wherry.seal-request.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
-| custodian snapshot | `wherry.custodian.v1` | receiver | `wherry.pool.<pool>.custodian` | `custodian` |
+| custodian snapshot | `application/vnd.wherry.custodian.v1+jws` | receiver | `wherry.pool.<pool>.custodian` | `custodian` |
 
 A reader accepts a signed record only when all of these hold:
 
@@ -784,14 +784,17 @@ that key's public half, on the pool's compacted
   `contested`.
 - `current.key` is a P-256 public JWK, and `current.key_id` its RFC 7638
   SHA-256 thumbprint, unpadded base64url.
-- The current snapshot is the latest committed record on the topic. A host
-  submits to the pool only when that record verifies, its writer is the
-  custodian it names, and that custodian is a live member of the pool
-  without a membership end whose advertisement is within 120 seconds of the
-  host's clock. Otherwise the host refuses the submission, and never takes
-  an earlier record in its place. It also refuses when the pool has no
-  snapshot, and when the broker refuses its write to the pool's task topic,
-  as for a suspended pool. A host logs a `takeover` or `contested` snapshot.
+- The current snapshot is the latest committed record under the key
+  `custodian` on the topic, the record compaction keeps for that key. A
+  record under another key is not a snapshot. A host submits to the pool
+  only when that record verifies, its writer is the custodian it names, and
+  that custodian is a live member of the pool without a membership end
+  whose advertisement is within 120 seconds of the host's clock. Otherwise
+  the host refuses the submission, and never takes an earlier record in its
+  place. It also refuses when the pool has no snapshot, and when the broker
+  refuses its write to the pool's task topic: the pool is suspended or the
+  host's ACLs were withdrawn. A host logs a `takeover` or `contested`
+  snapshot.
 
 ## Resubmission
 
@@ -814,7 +817,8 @@ process using the host's state directory, the host:
 
 A crash before the bytes are stored resolves the credentials again on the
 next pass. A replacement's S3 outputs use its own prefix. A host keeps the
-first run's prefix until the last replacement has ended. `wait` and the MCP
+first run's prefix until the last replacement has ended; a run that ended
+`key-lost` before its `task_started_by` has not ended. `wait` and the MCP
 server follow a run's replacements, refuse a chain that names a run twice,
 and report every run they follow.
 

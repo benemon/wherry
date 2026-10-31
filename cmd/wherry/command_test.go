@@ -175,7 +175,7 @@ func publishSnapshot(t *testing.T, ctx context.Context, kafka *kgo.Client, pool,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.CustodianTopic(pool), Key: []byte("custodian"), Value: encoded}).FirstErr(); err != nil {
+	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.CustodianTopic(pool), Key: []byte(wire.CustodianKey), Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }

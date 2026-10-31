@@ -318,7 +318,10 @@ type Advertisement struct {
 }
 
 // CustodianType is the JWS type of a custodian snapshot.
-const CustodianType = "wherry.custodian.v1"
+const CustodianType = "application/vnd.wherry.custodian.v1+jws"
+
+// CustodianKey is the Kafka key of every custodian snapshot, so compaction keeps the current snapshot.
+const CustodianKey = "custodian"
 
 var custodianReasons = []string{"bootstrap", "rotation", "handover", "takeover", "contested"}
 

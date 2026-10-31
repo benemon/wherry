@@ -232,7 +232,7 @@ func (r *testReceiver) snapshot(t *testing.T, ctx context.Context, mutate func(*
 	if mutate != nil {
 		mutate(snapshot)
 	}
-	r.produce(t, ctx, admin.CustodianTopic(r.pool), "custodian", r.sign(t, snapshot))
+	r.produce(t, ctx, admin.CustodianTopic(r.pool), wire.CustodianKey, r.sign(t, snapshot))
 	return key
 }
 

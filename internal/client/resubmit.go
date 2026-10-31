@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"golang.org/x/sync/errgroup"
 )
 
 // produceReplacement and replacing are variables so tests can fail a replacement's write and hold a pass between
@@ -23,14 +26,17 @@ var (
 	replacing = func(string) {}
 )
 
-// resubmitLost resubmits each run of this host's local records that may have ended key-lost and has no produced
-// replacement. A run past its task_started_by with no replacement recorded is passed over. Failures are logged; a later
-// pass retries them.
+// resubmitLost resubmits each run of this host's local records that ended key-lost and has no produced replacement. A
+// run past its task_started_by with no replacement recorded is passed over. The runs still before their bound are judged
+// from one read of the tenant feed from the lowest of their feed offsets. Failures are logged; a later pass retries them.
 func (h *Host) resubmitLost(ctx context.Context) {
 	entries, err := os.ReadDir(filepath.Join(h.stateDir, "runs"))
 	if err != nil {
 		return
 	}
+	now := time.Now()
+	pending := map[string]*runRecord{}
+	offset := int64(math.MaxInt64)
 	for _, entry := range entries {
 		runID, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || entry.IsDir() {
@@ -40,17 +46,55 @@ func (h *Host) resubmitLost(ctx context.Context) {
 		if err != nil || local == nil || local.Task == nil {
 			continue
 		}
-		if local.Replacement == "" && !time.Now().Before(wire.PastBound(local.TaskStartedBy)) {
+		if local.Replacement == "" {
+			if now.Before(wire.PastBound(local.TaskStartedBy)) {
+				pending[runID] = local
+				offset = min(offset, local.FeedOffset)
+			}
 			continue
 		}
-		if local.Replacement != "" {
-			if replacement, err := h.localRun(local.Replacement); err == nil && replacement != nil && replacement.Produced {
-				continue
-			}
+		if replacement, err := h.localRun(local.Replacement); err == nil && replacement != nil && replacement.Produced {
+			continue
 		}
-		if _, err := h.resubmit(ctx, runID); err != nil && ctx.Err() == nil {
-			h.logger.Printf("run %s: resubmit: %v", runID, err)
+		h.logResubmit(ctx, runID, false)
+	}
+	if len(pending) == 0 {
+		return
+	}
+	h.followMu.Lock()
+	f := h.follower
+	h.followMu.Unlock()
+	var v view
+	var records []*kgo.Record
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() (err error) {
+		v, err = h.load(groupCtx)
+		return err
+	})
+	group.Go(func() (err error) {
+		records, _, err = h.readFeed(groupCtx, f, offset)
+		return err
+	})
+	if err := group.Wait(); err != nil {
+		if ctx.Err() == nil {
+			h.logger.Printf("resubmit: %v", err)
 		}
+		return
+	}
+	byRun := map[string][]*kgo.Record{}
+	for _, record := range records {
+		if _, ok := pending[string(record.Key)]; ok {
+			byRun[string(record.Key)] = append(byRun[string(record.Key)], record)
+		}
+	}
+	// One reread map and a view carried forward bound the reloads to one per unknown kid across all runs.
+	reread := map[string]bool{}
+	for runID, local := range pending {
+		r := newRunView(h, v, runID, local)
+		r.reread = reread
+		r.read(ctx, byRun[runID])
+		v = r.v
+		h.resubmitIfLost(ctx, r)
 	}
 }
 
@@ -59,26 +103,40 @@ func (h *Host) resubmitIfLost(ctx context.Context, r *runView) {
 	if r.local == nil || r.local.Task == nil || !r.keyLost() {
 		return
 	}
-	if _, err := h.resubmit(ctx, r.run); err != nil && ctx.Err() == nil {
-		h.logger.Printf("run %s: resubmit: %v", r.run, err)
+	h.logResubmit(ctx, r.run, true)
+}
+
+// logResubmit resubmits runID as resubmit does, logging a failure.
+func (h *Host) logResubmit(ctx context.Context, runID string, lost bool) {
+	if _, err := h.resubmit(ctx, runID, lost); err != nil && ctx.Err() == nil {
+		h.logger.Printf("run %s: resubmit: %v", runID, err)
 	}
 }
 
 // resubmit replaces runID, a run of this host that ended key-lost before its task_started_by, and returns its
-// replacement, or "" when the run is not to be resubmitted. Under a lock on the run shared by every process using the
-// state directory, it produces a stored replacement not yet produced and builds nothing new; otherwise it records the
-// replacement's run ID, builds and signs the replacement from the run's template, stores the signed bytes, produces
-// them and marks them produced. A replacement whose bytes were not stored is built again.
-func (h *Host) resubmit(ctx context.Context, runID string) (string, error) {
+// replacement, or "" when the run is not to be resubmitted. lost reports that the caller read the run's latest status as
+// key-lost, which no later record changes; otherwise resubmit reads the run under the lock. Under a lock on the run
+// shared by every process using the state directory, it produces a stored replacement not yet produced and builds
+// nothing new; otherwise it records the replacement's run ID, builds and signs the replacement from the run's template,
+// stores the signed bytes, produces them and marks them produced. A replacement whose bytes were not stored is built
+// again. A run without a local record takes no lock.
+func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, error) {
 	path, ok := h.runPath(runID)
 	if !ok {
 		return "", fmt.Errorf("resubmit %s: %w", runID, ErrRunNotFound)
 	}
-	unlock, err := h.lockFile(ctx, filepath.Join(h.stateDir, "resubmit", filepath.Base(path)+".lock"))
+	if local, err := h.localRun(runID); err != nil || local == nil || local.Task == nil {
+		return "", err
+	}
+	lock := filepath.Join(h.stateDir, "resubmit", filepath.Base(path)+".lock")
+	unlock, err := h.lockFile(ctx, lock)
 	if err != nil {
 		return "", err
 	}
-	defer unlock()
+	defer func() {
+		os.Remove(lock)
+		unlock()
+	}()
 	local, err := h.localRun(runID)
 	if err != nil || local == nil || local.Task == nil {
 		return "", err
@@ -106,12 +164,14 @@ func (h *Host) resubmit(ctx context.Context, runID string) (string, error) {
 		return "", nil
 	}
 	if local.Replacement == "" {
-		r, err := h.history(ctx, runID)
-		if err != nil {
-			return "", err
-		}
-		if !r.keyLost() {
-			return "", nil
+		if !lost {
+			r, err := h.history(ctx, runID)
+			if err != nil {
+				return "", err
+			}
+			if !r.keyLost() {
+				return "", nil
+			}
 		}
 		replacing(runID)
 		local.Replacement = wire.RandomID("run-")
@@ -178,6 +238,11 @@ func (r *runView) keyLost() bool {
 		}
 	}
 	return latest != nil && latest.Wherry.Kind == "terminal" && latest.Wherry.Event == wire.EventKeyLost
+}
+
+// resubmittable reports whether the run ended key-lost and this host may still resubmit it at now.
+func (r *runView) resubmittable(now time.Time) bool {
+	return r.local != nil && r.local.Task != nil && r.keyLost() && now.Before(wire.PastBound(r.local.TaskStartedBy))
 }
 
 // chain is runID followed by each replacement its local records name whose signed bytes are stored. A chain that names

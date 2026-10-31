@@ -265,6 +265,7 @@ func download(ctx context.Context, store *minio.Client, bucket string, root *os.
 // Cleanup deletes every object under a run's prefix in its pool's bucket, and nothing outside it. It refuses a run whose
 // run has no outcome, since its receiver may still read inputs or write outputs there. A resubmitted run's prefix holds
 // the inputs of its replacements, so it is kept until the last replacement has an outcome, whose cleanup deletes it too.
+// A run that ended key-lost and may still be resubmitted has not ended.
 func (h *Host) Cleanup(ctx context.Context, runID string) error {
 	if _, ok := h.runPath(runID); !ok {
 		return fmt.Errorf("cleanup %s: %w", runID, ErrRunNotFound)
@@ -287,17 +288,20 @@ func (h *Host) Cleanup(ctx context.Context, runID string) error {
 	if r.local != nil && r.local.Task != nil {
 		root = r.local.Task.Wherry.InputRun()
 	}
-	if last := chain[len(chain)-1]; last != runID {
-		ended, err := h.history(ctx, last)
-		if err != nil {
+	last := r
+	if id := chain[len(chain)-1]; id != runID {
+		if last, err = h.history(ctx, id); err != nil {
 			return err
 		}
-		if ended.outcome == nil {
-			if root == runID {
-				return fmt.Errorf("%w: run %s's inputs serve its replacement %s, which has not ended", ErrInvalidInput, runID, last)
-			}
-			root = runID
+	}
+	if lost := last.resubmittable(time.Now()); last.outcome == nil || lost {
+		switch {
+		case lost && (last == r || root == runID):
+			return fmt.Errorf("%w: run %s lost its pool key and is resubmittable until %s", ErrInvalidInput, last.run, wire.RFC3339(last.local.TaskStartedBy))
+		case root == runID:
+			return fmt.Errorf("%w: run %s's inputs serve its replacement %s, which has not ended", ErrInvalidInput, runID, last.run)
 		}
+		root = runID
 	}
 	storage := r.v.state.Pools[r.pool].Storage
 	store, err := h.bucket(ctx, r.pool, storage)

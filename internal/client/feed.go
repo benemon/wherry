@@ -1160,7 +1160,8 @@ func (s *TranscriptStream) Unanswered() bool {
 
 // Await follows the tenant feed until the run has an outcome, answering seal requests while it waits. A run that ended
 // key-lost and was resubmitted is followed to its replacement, and a chain of replacements that names a run twice is
-// refused; the outcome is the last run's, and Runs lists every run followed.
+// refused; the outcome is the last run's, and Runs lists every run followed. A run that ended key-lost and whose
+// resubmission fails returns its outcome with the resubmission's error.
 func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (AwaitResult, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -1177,7 +1178,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		}
 		// A replacement stored but not produced is produced before it is awaited.
 		for _, run := range chain[:len(chain)-1] {
-			if _, err := h.resubmit(waitCtx, run); err != nil {
+			if _, err := h.resubmit(waitCtx, run, false); err != nil {
 				return AwaitResult{}, err
 			}
 		}
@@ -1187,12 +1188,16 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			outcome.Runs = runs
 			return outcome, err
 		}
-		replacement, err := h.resubmit(waitCtx, runs[len(runs)-1])
-		if err != nil || replacement == "" {
-			if err != nil {
-				h.logger.Printf("run %s: resubmit: %v", runs[len(runs)-1], err)
+		last := runs[len(runs)-1]
+		replacement, err := h.resubmit(waitCtx, last, true)
+		outcome.Runs = runs
+		if err != nil {
+			if local, localErr := h.localRun(last); localErr == nil && local != nil {
+				err = fmt.Errorf("run %s lost its pool key and is resubmitted until %s; resubmitting it failed: %w", last, wire.RFC3339(local.TaskStartedBy), err)
 			}
-			outcome.Runs = runs
+			return outcome, fmt.Errorf("wait %s: %w", runs[0], err)
+		}
+		if replacement == "" {
 			return outcome, nil
 		}
 		runID = replacement

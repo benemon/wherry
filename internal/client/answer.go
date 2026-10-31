@@ -146,9 +146,14 @@ func (h *Host) markerPath(run string, attempt int64) string {
 	return filepath.Join(h.stateDir, "answered", fmt.Sprintf("%s.%d", run, attempt))
 }
 
-// sweep removes the markers of attempts whose request has expired or whose run has an outcome, and
-// lock files without a marker that no answerer holds.
+// sweep removes the markers of attempts whose request has expired or whose run has an outcome, lock files without a
+// marker that no answerer holds, and resubmission lock files no process holds.
 func (h *Host) sweep(ctx context.Context) {
+	if locks, err := os.ReadDir(filepath.Join(h.stateDir, "resubmit")); err == nil {
+		for _, lock := range locks {
+			removeLock(filepath.Join(h.stateDir, "resubmit", lock.Name()))
+		}
+	}
 	entries, err := os.ReadDir(filepath.Join(h.stateDir, "answered"))
 	if err != nil {
 		return
