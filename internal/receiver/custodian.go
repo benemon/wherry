@@ -23,6 +23,7 @@ import (
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -95,6 +96,8 @@ func (r *Receiver) keepCustody(ctx context.Context) {
 			r.assign(false)
 		}
 	}
+	// The group only assigns custody: it is never polled and commits no offsets, so the offsets it fetches on assignment
+	// never decide the current snapshot; readCurrent scans the topic for it.
 	group, err := r.newClient(kgo.ConsumerGroup(admin.CustodianGroup(r.config.Pool)), kgo.ConsumeTopics(topic), kgo.InstanceID(r.id),
 		kgo.DisableAutoCommit(), kgo.OnPartitionsAssigned(gained), kgo.OnPartitionsRevoked(lost), kgo.OnPartitionsLost(lost))
 	if err != nil {
@@ -169,9 +172,24 @@ type current struct {
 func (c current) names(r *Receiver) bool { return c.snapshot != nil && c.snapshot.Custodian == r.id }
 
 func (r *Receiver) readCurrent(ctx context.Context) (current, error) {
-	records, err := r.reader.ReadFrom(ctx, admin.CustodianTopic(r.config.Pool), 0)
+	topic := admin.CustodianTopic(r.config.Pool)
+	listing, err := r.reader.Admin()
 	if err != nil {
 		return current{}, err
+	}
+	ends, err := admin.ListOffsets(ctx, listing.ListEndOffsets, topic)
+	if err != nil {
+		return current{}, err
+	}
+	records, stable, err := r.reader.ReadFromWithEnd(ctx, topic, 0)
+	if err != nil {
+		return current{}, err
+	}
+	// A transaction open below the end holds the last stable offset: the snapshot it may commit would be current.
+	var end int64
+	ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
+	if stable < end {
+		return current{}, errors.New("an open transaction holds the snapshot topic's last stable offset")
 	}
 	var latest current
 	for _, record := range records {
@@ -264,9 +282,9 @@ func rotationAt(appended time.Time, pool, keyID string) time.Time {
 }
 
 // keepKeys marks the key latest names current for this receiver published at latest's append time, gives every other
-// key its deadline, and deletes the keys whose deadline has passed. An unpublished key is kept to its creation time and
-// the longest any snapshot could have named it. A takeover is counted when its key is marked, so once, also when its
-// commit landed but its read-back failed.
+// key its deadline, and deletes the keys whose deadline has passed. An unmarked key not named, which a snapshot before
+// latest may have named, gets its deadline from latest's append time; with no snapshot it was never named. A takeover
+// is counted when its key is marked, so once, also when its commit landed but its read-back failed.
 func (r *Receiver) keepKeys(keys map[string]*poolKey, latest current, now time.Time) error {
 	state, _, _ := r.snapshot()
 	window := state.Pools[r.config.Pool].StartByLimit() + keyGrace
@@ -297,10 +315,15 @@ func (r *Receiver) keepKeys(keys map[string]*poolKey, latest current, now time.T
 				r.logger.Printf("custodian: took over pool %s (WherryCustodianTakeover)", r.config.Pool)
 			}
 			continue
-		case key.PublishedMS == 0:
-			deadline = time.UnixMilli(key.CreatedMS).Add(window + rotationInterval)
 		case key.DeadlineMS == 0:
-			key.DeadlineMS = replaced.Add(window).UnixMilli()
+			from := replaced
+			if key.PublishedMS == 0 {
+				if latest.record == nil {
+					continue
+				}
+				from = latest.record.Timestamp
+			}
+			key.DeadlineMS = from.Add(window).UnixMilli()
 			if err := key.save(r.poolKeysDir()); err != nil {
 				return err
 			}

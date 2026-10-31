@@ -386,23 +386,45 @@ func writeKey(t *testing.T, r *Receiver, key *poolKey) string {
 	return key.id()
 }
 
-func TestUnmarkedKeyIsKeptToItsConservativeDeadline(t *testing.T) {
+func TestUnmarkedKeyNamedByTheCurrentSnapshotIsMarkedAndKeptAsCurrent(t *testing.T) {
 	f := newFixture(t, resultStream)
-	created := time.Now()
-	// A crash between persisting the key and publishing it; another receiver is custodian.
-	crashed := writeKey(t, f.receiver, &poolKey{CreatedMS: created.UnixMilli()})
+	custodian(t, f.ctx, f.receiver, time.Now())
+	id, key := onlyKey(t, f.receiver)
+	record := f.awaitSnapshots(t, 1)[0]
+	// A crash after the snapshot committed and before its key was marked, the key created a week before.
+	key.CreatedMS, key.PublishedMS = time.Now().Add(-7*24*time.Hour).UnixMilli(), 0
+	if err := key.save(f.receiver.poolKeysDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.tend(f.ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if key := heldKeys(t, f.receiver)[id]; key == nil || key.PublishedMS != record.Timestamp.UnixMilli() || key.DeadlineMS != 0 {
+		t.Fatalf("key = %s, want it marked published at the snapshot's append time with no deadline", describeKeys(map[string]*poolKey{id: key}))
+	}
+	if records := f.snapshotRecords(t); len(records) != 1 {
+		t.Fatalf("snapshots = %d, want the key kept as current", len(records))
+	}
+}
+
+func TestUnmarkedKeyNotNamedGetsItsDeadlineFromTheLaterSnapshot(t *testing.T) {
+	f := newFixture(t, resultStream)
+	// A crash between persisting the key and marking it, two days before; another receiver's snapshot is current.
+	crashed := writeKey(t, f.receiver, &poolKey{CreatedMS: time.Now().Add(-48 * time.Hour).UnixMilli()})
 	other := f.member(t, "receiver-b")
-	custodian(t, f.ctx, other, created)
+	custodian(t, f.ctx, other, time.Now())
+	record := f.awaitSnapshots(t, 1)[0]
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.UnixMilli(created.UnixMilli()).Add(time.Duration(admin.DefaultStartByLimitMS)*time.Millisecond + keyGrace + rotationInterval)
-	for _, now := range []time.Time{created, deadline.Add(-time.Millisecond)} {
+	deadline := record.Timestamp.Add(time.Duration(admin.DefaultStartByLimitMS)*time.Millisecond + keyGrace)
+	for _, now := range []time.Time{time.Now(), deadline.Add(-time.Millisecond)} {
 		if err := f.receiver.tend(f.ctx, now); err != nil {
 			t.Fatal(err)
 		}
-		if key := heldKeys(t, f.receiver)[crashed]; key == nil || key.PublishedMS != 0 {
-			t.Fatalf("unmarked key at %v: %s, want kept unmarked", now.Sub(created), describeKeys(map[string]*poolKey{crashed: key}))
+		if key := heldKeys(t, f.receiver)[crashed]; key == nil || key.PublishedMS != 0 || key.DeadlineMS != deadline.UnixMilli() {
+			t.Fatalf("unmarked key = %s, want it kept unmarked to the snapshot's append time + start_by_limit + 7h",
+				describeKeys(map[string]*poolKey{crashed: key}))
 		}
 	}
 	if err := f.receiver.tend(f.ctx, deadline); err != nil {
@@ -410,6 +432,53 @@ func TestUnmarkedKeyIsKeptToItsConservativeDeadline(t *testing.T) {
 	}
 	if heldKeys(t, f.receiver)[crashed] != nil {
 		t.Fatal("unmarked key kept past its deadline")
+	}
+}
+
+func TestNoKeyIsDeletedWhileTheSnapshotTopicCannotBeRead(t *testing.T) {
+	f := newFixture(t, resultStream)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	current, _ := onlyKey(t, f.receiver)
+	long := time.Now().Add(-30 * 24 * time.Hour).UnixMilli()
+	expired := writeKey(t, f.receiver, &poolKey{CreatedMS: long, PublishedMS: long, DeadlineMS: time.Now().Add(-time.Hour).UnixMilli()})
+	unmarked := writeKey(t, f.receiver, &poolKey{CreatedMS: long})
+	held := func(when string) {
+		t.Helper()
+		keys := heldKeys(t, f.receiver)
+		if keys[current] == nil || keys[expired] == nil || keys[unmarked] == nil || keys[unmarked].DeadlineMS != 0 {
+			t.Fatalf("%s: keys = %s, want every key kept as it was", when, describeKeys(keys))
+		}
+	}
+	failed, cancel := context.WithCancel(f.ctx)
+	cancel()
+	if err := f.receiver.tend(failed, time.Now()); err == nil {
+		t.Fatal("tended with the snapshot topic unread")
+	}
+	held("read error")
+	// Another writer's transaction open on the snapshot topic holds its last stable offset.
+	open, err := f.receiver.newClient(kgo.TransactionalID(admin.TransactionalPrefix(testPool) + "open"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(open.Close)
+	if err := open.BeginTransaction(); err != nil {
+		t.Fatal(err)
+	}
+	if err := open.ProduceSync(f.ctx, &kgo.Record{Topic: admin.CustodianTopic(testPool), Key: []byte(wire.CustodianKey), Value: []byte("pending")}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.tend(f.ctx, time.Now()); err == nil {
+		t.Fatal("tended behind an open transaction")
+	}
+	held("last stable offset blocked")
+	if err := open.EndTransaction(f.ctx, kgo.TryAbort); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.tend(f.ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if keys := heldKeys(t, f.receiver); keys[expired] != nil || keys[unmarked] == nil || keys[unmarked].DeadlineMS == 0 {
+		t.Fatalf("keys = %s after the abort, want the expired key deleted and the unmarked key given a deadline", describeKeys(keys))
 	}
 }
 

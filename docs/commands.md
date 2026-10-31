@@ -977,9 +977,12 @@ assigned again.
 A replaced key's deadline is the replacing snapshot's append time plus
 `start_by_limit` plus 7 hours; a key replaced before the receiver started
 gets the start time instead. A key no committed snapshot was read back
-naming is kept until its creation time plus `start_by_limit` plus 31 hours.
-The receiver deletes a key at its deadline only, and every key stays in
-its state directory.
+naming is marked published and kept current when the current snapshot names
+it; otherwise its deadline is the current snapshot's append time plus
+`start_by_limit` plus 7 hours. While the snapshot topic cannot be read to a
+last stable offset at its end, after a read error or behind an open
+transaction, every key is kept. The receiver deletes a key at its deadline
+only, and every key stays in its state directory.
 
 It logs its own lines to standard output with the prefix `receiver: `;
 plugin and link lines are hclog lines named `plugin`. Plugin lines, the
