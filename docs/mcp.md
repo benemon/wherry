@@ -1,14 +1,15 @@
 # MCP tools
 
 `wherry mcp` serves eight tools over stdio. Each takes and returns JSON with
-a declared schema and uses the server's one host. `deadline` and
-`queue_deadline` are Go durations, such as `90m`; omitted, they take the CLI
-defaults, `2h` and `10m`.
+a declared schema and uses the server's one host. `start_by` and `end_by`
+set the task's `task_started_by` and `task_ended_by`, each an RFC 3339 time
+or a Go duration from now, such as `90m`; omitted, they take the CLI
+defaults, `10m` and `2h`.
 
 | Tool | Input | Output |
 | --- | --- | --- |
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
-| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `credentials`, `outputs`, `deadline`, `queue_deadline` | `id`, `pool`, `wait` |
+| `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `wait` |
 | `status` | `id`, optional | `runs`, `skipped` |
 | `wait` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped` |
 | `cancel` | `id` | `id`, `skipped` |
@@ -44,15 +45,15 @@ defaults, `2h` and `10m`.
   Each entry is `{id, pool, state, model, message, updated, redacted}`,
   with `model` the run's placement's model, when it has one. The
   state is `TASK_STATE_SUBMITTED` until a receiver reports one. For a run
-  this host submitted whose queue deadline passed with no status from a
+  this host submitted whose `task_started_by` passed with no status from a
   receiver, `message` is
-  `queue deadline passed at <RFC 3339 time> and no receiver claimed the run`. `updated` is
+  `not started by task_started_by (<RFC 3339 time>): no receiver claimed the task`. `updated` is
   the RFC 3339 time of the latest status. While the run has none, it is this
   host's submission of the run when its record holds one, else the Kafka
   timestamp of the run's echo.
 - `wait` waits up to 45 seconds. It returns the outcome with `message`, the
   status message's parts, and `artifacts`, or, while the run is unfinished, its current `state` with
-  `retry_after` set to 5. For a run whose queue deadline passes with no
+  `retry_after` set to 5. For a run whose `task_started_by` passes with no
   status from a receiver, it returns at once with `state`
   `TASK_STATE_SUBMITTED`, the `message` `status` gives, and no
   `retry_after`. With a progress token it sends a progress notification
@@ -73,7 +74,7 @@ defaults, `2h` and `10m`.
   the pool's `reply_limit`; when the chunks do not verify, `reply` is
   `{rejected}` with the reason. A reply within 64 KiB is `message` whole, with
   no `reply`. No expected output takes the name `reply.txt`. For a
-  run whose queue deadline passed unclaimed it writes nothing. `model`
+  run whose `task_started_by` passed unclaimed it writes nothing. `model`
   is the run's placement's model. The `wait` tool returns no transcript;
   `logs` pages it.
 - `status`, `wait`, `events` and `logs` show each redaction marker as
