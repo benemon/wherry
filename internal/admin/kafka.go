@@ -1011,10 +1011,10 @@ var feedRecords = []struct {
 	name  string
 	batch int64
 }{
-	{"an output chunk", 468889},
-	{"a result", 1259686},
-	{"a result returning S3 outputs", 822761},
-	{"a transcript chunk", 933508},
+	{"an output chunk", 468880},
+	{"a result", 1259677},
+	{"a result returning S3 outputs", 822752},
+	{"a transcript chunk", 933498},
 }
 
 func createBundle(path string) (*os.File, error) {

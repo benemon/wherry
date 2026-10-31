@@ -160,8 +160,8 @@ algorithm `EdDSA` (Ed25519). The protected header holds:
 - `typ`: the record type below;
 - `kid`: `<owner>/<key id>`. The owner of a host record is
   `<tenant>.<host>`; the owner of a receiver record is the receiver ID. The
-  key ID is `sha256:` and the unpadded base64url SHA-256 of the Ed25519
-  public key.
+  key ID is the [RFC 7638](https://datatracker.ietf.org/doc/html/rfc7638)
+  SHA-256 thumbprint of the Ed25519 public key's JWK, unpadded base64url.
 
 | Record | `typ` | Signer | Topic | Kafka key |
 | --- | --- | --- | --- | --- |
@@ -833,8 +833,8 @@ signature's protected header carrying its public key as `jwk`.
   "v": 1,
   "owner": "nomad-1",
   "action": "rotate",
-  "key": {"kty": "OKP", "crv": "Ed25519", "x": "...", "kid": "sha256:...", "alg": "EdDSA", "use": "sig"},
-  "previous_key_id": "sha256:..."
+  "key": {"kty": "OKP", "crv": "Ed25519", "x": "...", "kid": "...", "alg": "EdDSA", "use": "sig"},
+  "previous_key_id": "..."
 }
 ```
 

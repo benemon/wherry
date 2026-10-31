@@ -360,7 +360,7 @@ that JSON escaping would lengthen travels, with a `credential` part, a
 `reply` entry, and reference artifacts for the reply and the transcript. A reply chunk is an output
 chunk, so `reply_limit` has no record-limit check. One result lists
 256 returned and 256 unreturned outputs with 512-byte names, each returned
-one also a reference artifact, and is the largest record, a 1259686-byte
+one also a reference artifact, and is the largest record, a 1259677-byte
 batch; the other lists 256 S3 outputs with their keys. Both carry a plugin's job name at its bound of
 253 bytes. A receiver's labels have no bound and are left empty. Any one over its record limit refuses the terms,
 naming its size and the limit.

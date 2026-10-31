@@ -674,7 +674,7 @@ wherry init
 ```
 
 `init` creates `~/.config/wherry/host.key`, registers it on the host's key
-topic, and prints its key ID, `sha256:<base64url>`. `wherry key` prints the
+topic, and prints its key ID, its RFC 7638 thumbprint in base64url. `wherry key` prints the
 same ID later. `wherry receivers` now lists `nomad-1` as
 [Receiver step 9](#_9-check-the-receiver) shows.
 

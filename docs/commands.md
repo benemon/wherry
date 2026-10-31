@@ -48,8 +48,8 @@ back to one set of names.
 Run IDs match `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`. The client generates
 `run-` followed by 32 hex digits.
 
-A key ID is `sha256:` and the unpadded base64url SHA-256 of the raw
-public key.
+A key ID is the RFC 7638 SHA-256 thumbprint of the public key's JWK,
+unpadded base64url.
 
 ### Labels
 
@@ -91,7 +91,8 @@ On the command line a selector is comma-separated:
 
 ### `wherry init`
 
-Creates the host key at `host_key` with mode 0600, unless the file exists,
+Creates the host key at `host_key`, a private JWK (RFC 7517) with mode
+0600, unless the file exists,
 creating its directory with mode 0700. It then registers the key on the
 host's key topic when the topic holds none, and prints the key ID. It fails
 when the key topic holds another key.
@@ -911,7 +912,8 @@ wherry receiver run [--config-file FILE] [--rotate-key]
 Runs a receiver as the principal of the bundle its [local
 configuration](configuration.md#receiver-local-configuration) names.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
-configuration's `state_dir` with mode 0700 and keeps `signing.key` in it.
+configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
+private JWK with mode 0600, in it.
 On start it:
 
 1. settles a leftover `signing.key.next` as a host command settles
