@@ -180,7 +180,7 @@ func (c *clusterRig) move(ctx context.Context, topic string) error {
 // rotation is extra pressure only: no assertion depends on when it moves anything.
 func TestLeaderMovesDuringReadAndAdmissionOnCluster(t *testing.T) {
 	shortIntervals(t)
-	sealWait = 60 * time.Second
+	openWait = 60 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	c := newClusterRig(t, ctx)
@@ -267,7 +267,7 @@ func TestLeaderMovesDuringReadAndAdmissionOnCluster(t *testing.T) {
 // aborts must leave nothing any of them shows.
 func TestTransactionsAcrossLeadersOnCluster(t *testing.T) {
 	shortIntervals(t)
-	sealWait = 30 * time.Second
+	openWait = 30 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	c := newClusterRig(t, ctx)

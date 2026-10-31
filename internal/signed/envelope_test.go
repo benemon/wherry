@@ -27,11 +27,11 @@ func contentKey(t *testing.T) []byte {
 
 func envelopeValues() EnvelopeValues {
 	return EnvelopeValues{
-		Credentials:  map[string][]byte{"model": []byte(sealSecret), "empty-ish": {0xfb, 0xff}},
+		Credentials:  map[string][]byte{"model": []byte(testSecret), "empty-ish": {0xfb, 0xff}},
 		Binding:      EnvelopeBinding{Run: "run-a", Tenant: "tenant-a", Pool: "pool-a", TaskStartedBy: 1_800_000_000, TaskEndedBy: 1_800_003_600},
 		S3Inputs:     map[string]string{"repo": "https://bucket.s3.example.com/wherry/tenant-a/run-a/inputs/repo"},
 		S3Outputs:    map[string]string{"report": "https://bucket.s3.example.com/wherry/tenant-a/run-a/outputs/report"},
-		RedactionKey: sealRedactionKey,
+		RedactionKey: testRedactionKey,
 	}
 }
 
@@ -61,7 +61,7 @@ func protectedHeader(t *testing.T, compact []byte) map[string]any {
 }
 
 func TestEnvelopeRoundTrip(t *testing.T) {
-	pool := sealKey(t)
+	pool := p256Key(t)
 	envelope, key := buildEnvelope(t)
 	wrap, err := WrapContentKey(key, &pool.PublicKey)
 	if err != nil {
@@ -75,7 +75,7 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	header = protectedHeader(t, wrap)
 	epk, _ := header["epk"].(map[string]any)
 	if !slices.Equal(slices.Sorted(maps.Keys(header)), []string{"alg", "enc", "epk", "kid"}) || header["alg"] != "ECDH-ES+A256KW" ||
-		header["enc"] != "A256GCM" || header["kid"] != SealKeyID(&pool.PublicKey) || !slices.Equal(slices.Sorted(maps.Keys(epk)), []string{"crv", "kty", "x", "y"}) {
+		header["enc"] != "A256GCM" || header["kid"] != KeyThumbprint(&pool.PublicKey) || !slices.Equal(slices.Sorted(maps.Keys(epk)), []string{"crv", "kty", "x", "y"}) {
 		t.Fatalf("wrap header %v", header)
 	}
 	unwrapped, err := UnwrapContentKey(wrap, pool)
@@ -116,7 +116,7 @@ func TestOpenEnvelopeRefusesHeader(t *testing.T) {
 		"unknown parameter": craftEnvelope(t, key, claims(map[jose.HeaderKey]any{"x": "y"}), "", validPlaintext),
 		"kid":               craftEnvelope(t, key, claims(map[jose.HeaderKey]any{"kid": "k"}), "", validPlaintext),
 		"missing typ":       craftEnvelope(t, key, map[jose.HeaderKey]any{}, "", validPlaintext),
-		"other typ":         craftEnvelope(t, key, claims(map[jose.HeaderKey]any{jose.HeaderType: SealType}), "", validPlaintext),
+		"other typ":         craftEnvelope(t, key, claims(map[jose.HeaderKey]any{jose.HeaderType: "application/vnd.wherry.other.v1+jwe"}), "", validPlaintext),
 		"encrypted key":     []byte(protected + ".AAAA" + rest),
 		"other enc":         compact(t, craft(t, jose.DIRECT, jose.A128GCM, key[:16], claims(nil), "", []byte(validPlaintext))),
 	} {
@@ -179,7 +179,7 @@ func TestEnvelopeSizeCap(t *testing.T) {
 // go-jose never writes.
 func craftWrap(t *testing.T, recipient *ecdsa.PublicKey, claims map[string]any, epkExtra map[string]any, plaintext []byte) []byte {
 	t.Helper()
-	ephemeral := sealKey(t)
+	ephemeral := p256Key(t)
 	epk, err := json.Marshal(jose.JSONWebKey{Key: &ephemeral.PublicKey})
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +189,7 @@ func craftWrap(t *testing.T, recipient *ecdsa.PublicKey, claims map[string]any, 
 		t.Fatal(err)
 	}
 	maps.Copy(epkMembers, epkExtra)
-	header := map[string]any{"alg": "ECDH-ES+A256KW", "enc": "A256GCM", "kid": SealKeyID(recipient), "epk": epkMembers}
+	header := map[string]any{"alg": "ECDH-ES+A256KW", "enc": "A256GCM", "kid": KeyThumbprint(recipient), "epk": epkMembers}
 	maps.Copy(header, claims)
 	encodedHeader, err := json.Marshal(header)
 	if err != nil {
@@ -222,7 +222,7 @@ func craftWrap(t *testing.T, recipient *ecdsa.PublicKey, claims map[string]any, 
 }
 
 func TestUnwrapRefuses(t *testing.T) {
-	pool, other := sealKey(t), sealKey(t)
+	pool, other := p256Key(t), p256Key(t)
 	key := contentKey(t)
 	if unwrapped, err := UnwrapContentKey(craftWrap(t, &pool.PublicKey, nil, nil, key), pool); err != nil || !bytes.Equal(unwrapped, key) {
 		t.Fatalf("crafted baseline: %v", err)
@@ -232,7 +232,7 @@ func TestUnwrapRefuses(t *testing.T) {
 		"apu":                craftWrap(t, &pool.PublicKey, map[string]any{"apu": "YQ"}, nil, key),
 		"epk with d":         craftWrap(t, &pool.PublicKey, nil, map[string]any{"d": base64.RawURLEncoding.EncodeToString(other.D.Bytes())}, key),
 		"epk extra member":   craftWrap(t, &pool.PublicKey, nil, map[string]any{"use": "enc"}, key),
-		"kid for other key":  craftWrap(t, &pool.PublicKey, map[string]any{"kid": SealKeyID(&other.PublicKey)}, nil, key),
+		"kid for other key":  craftWrap(t, &pool.PublicKey, map[string]any{"kid": KeyThumbprint(&other.PublicKey)}, nil, key),
 		"missing kid":        craftWrap(t, &pool.PublicKey, map[string]any{"kid": nil}, nil, key),
 		"31-byte plaintext":  craftWrap(t, &pool.PublicKey, nil, nil, key[:31]),
 		"33-byte plaintext":  craftWrap(t, &pool.PublicKey, nil, nil, append(slices.Clone(key), 0)),

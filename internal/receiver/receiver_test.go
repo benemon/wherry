@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -414,6 +415,10 @@ type fixture struct {
 	logs     *syncBuffer
 	// plugins are the fakes the receiver's factory builds, by profile name.
 	plugins map[string]*fakePlugin
+	// serving is set while the receiver, its pool's custodian, serves open requests.
+	serving *atomic.Bool
+	// envelope, when set, edits the values submit seals in a task's envelope.
+	envelope func(*wire.Submission, *signed.EnvelopeValues)
 }
 
 func testTerms() admin.Terms {
@@ -440,14 +445,16 @@ func testConfig(receiver string) admin.ReceiverConfig {
 }
 
 func shortIntervals(t *testing.T) {
-	for _, interval := range []*time.Duration{&renewInterval, &advertiseInterval, &refreshInterval, &cancelReadInterval, &reconcileInterval, &custodyInterval} {
+	for _, interval := range []*time.Duration{&renewInterval, &advertiseInterval, &refreshInterval, &cancelReadInterval, &reconcileInterval, &custodyInterval, &openInterval} {
 		previous := *interval
 		*interval = 200 * time.Millisecond
 		t.Cleanup(func() { *interval = previous })
 	}
-	previous := sealWait
-	sealWait = 1500 * time.Millisecond
-	t.Cleanup(func() { sealWait = previous })
+	for interval, short := range map[*time.Duration]time.Duration{&openWait: time.Second, &openGrace: 500 * time.Millisecond} {
+		previous := *interval
+		*interval = short
+		t.Cleanup(func() { *interval = previous })
+	}
 }
 
 func newService(t *testing.T, ctx context.Context, terms admin.Terms) (*kfake.Cluster, *admin.Service) {
@@ -485,6 +492,43 @@ func newFixture(t *testing.T, stream []string) fixture {
 
 func newFixtureWith(t *testing.T, stream []string, terms admin.Terms, config admin.ReceiverConfig, plugins map[string]*fakePlugin) fixture {
 	t.Helper()
+	f := newBareFixtureWith(t, terms, config, plugins)
+	// The receiver is its pool's custodian, as the custodian group assigns the only member, and serves open requests.
+	r := f.receiver
+	r.assign(true)
+	if err := r.tend(f.ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	f.serving.Store(true)
+	serveCtx, stop := context.WithCancel(f.ctx)
+	served := make(chan struct{})
+	t.Cleanup(func() { stop(); <-served })
+	go func() {
+		defer close(served)
+		for serveCtx.Err() == nil {
+			if f.serving.Load() {
+				r.serveOpens(serveCtx)
+			}
+			sleep(serveCtx, 50*time.Millisecond)
+		}
+	}()
+	return f
+}
+
+// quiet stops the receiver serving open requests, once a pass under way ends.
+func (f fixture) quiet() {
+	f.serving.Store(false)
+	f.receiver.custody.mu.Lock()
+	f.receiver.custody.mu.Unlock()
+}
+
+// newBareFixture is a fixture whose receiver has no part in its pool's key custody yet.
+func newBareFixture(t *testing.T) fixture {
+	return newBareFixtureWith(t, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+}
+
+func newBareFixtureWith(t *testing.T, terms admin.Terms, config admin.ReceiverConfig, plugins map[string]*fakePlugin) fixture {
+	t.Helper()
 	shortIntervals(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
@@ -493,7 +537,7 @@ func newFixtureWith(t *testing.T, stream []string, terms admin.Terms, config adm
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := fixture{ctx: ctx, cluster: cluster, service: service, host: host, plugins: plugins, plugin: plugins["nomad"]}
+	f := fixture{ctx: ctx, cluster: cluster, service: service, host: host, plugins: plugins, plugin: plugins["nomad"], serving: &atomic.Bool{}}
 	f.produce(t, admin.HostTopic(testTenant, testHost), "", must(t)(signed.RegisterKey(signed.HostOwner(testTenant, testHost), host)))
 	f.receiver, f.logs = f.newReceiver(t, config)
 	r := f.receiver
@@ -585,14 +629,72 @@ func testSubmission(run string) *wire.Submission {
 	}
 }
 
-// submit signs a submission with key and puts it on the pool's task topic, where every delivered record is.
+// submit signs a submission with key, with an envelope of its values wrapped to the pool's current key as a host builds
+// it, and puts it on the pool's task topic, where every delivered record is.
 func (f fixture) submit(t *testing.T, key ed25519.PrivateKey, mutate func(*wire.Submission)) *kgo.Record {
 	t.Helper()
 	submission := testSubmission("run-a")
 	if mutate != nil {
 		mutate(submission)
 	}
+	if submission.Wherry.Envelope == "" {
+		f.seal(t, submission)
+	}
 	return f.produce(t, admin.PoolTasksTopic(testPool), submission.Wherry.Run, must(t)(wire.SignRecord(submission, key)))
+}
+
+// seal puts in submission an envelope sealTask builds, edited by f.envelope, wrapped to the pool's current key.
+func (f fixture) seal(t *testing.T, submission *wire.Submission) {
+	t.Helper()
+	state, _, _ := f.receiver.snapshot()
+	sealTask(t, submission, state.Pools[testPool], f.poolKey(t), f.envelope)
+}
+
+// sealTask puts in submission an envelope of the values a host resolves for it under terms, testToken for each
+// credential and URLs in the pool's storage, edited by edit, under a fresh content key wrapped to poolKey.
+func sealTask(t *testing.T, submission *wire.Submission, terms admin.Terms, poolKey *ecdsa.PublicKey, edit func(*wire.Submission, *signed.EnvelopeValues)) {
+	t.Helper()
+	binding := submission.Wherry
+	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: testRedactionKey}
+	for _, agent := range terms.Agents {
+		for _, credential := range agent.Credentials {
+			if agent.Name == binding.Placement.Agent && !slices.Contains(binding.Unsupplied, credential.Name) {
+				values.Credentials[credential.Name] = []byte(testToken)
+			}
+		}
+	}
+	for _, credential := range binding.Credentials {
+		values.Credentials[credential.Name] = []byte(testToken)
+	}
+	if terms.Storage != nil {
+		for _, input := range binding.S3Inputs {
+			values.S3Inputs[input.Name] = presigned(terms.Storage.Endpoint, wire.S3InputKey(binding.Tenant, binding.InputRun(), input.Name))
+		}
+		for _, output := range s3Outputs(binding.Outputs) {
+			values.S3Outputs[output] = presigned(terms.Storage.Endpoint, wire.S3OutputKey(binding.Tenant, binding.Run, output))
+		}
+	}
+	if edit != nil {
+		edit(submission, &values)
+	}
+	contentKey := make([]byte, 32)
+	rand.Read(contentKey)
+	submission.Wherry.Envelope = string(must(t)(signed.BuildEnvelope(values, contentKey)))
+	submission.Wherry.Wrap = string(must(t)(signed.WrapContentKey(contentKey, poolKey)))
+}
+
+// poolKey is the pool's current public key, from its latest snapshot.
+func (f fixture) poolKey(t *testing.T) *ecdsa.PublicKey {
+	t.Helper()
+	records := f.records(t, admin.CustodianTopic(testPool))
+	if len(records) == 0 {
+		t.Fatal("no snapshot")
+	}
+	var snapshot wire.Snapshot
+	if err := json.Unmarshal(decodedPayload(records[len(records)-1].Value), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot.Current.Key.Key.(*ecdsa.PublicKey)
 }
 
 func (f fixture) turn(t *testing.T, run string, turn int64) *kgo.Record {
@@ -636,73 +738,22 @@ func (f fixture) publishCancel(t *testing.T, run string, turn int64, key ed25519
 	}
 }
 
-// sealRequests returns this receiver's seal requests on the tenant feed in log order.
-func (f fixture) sealRequests(t *testing.T) []wire.SealRequest {
+// sealing is an envelope edit that seals values as the task's credentials.
+func sealing(values map[string][]byte) func(*wire.Submission, *signed.EnvelopeValues) {
+	return func(_ *wire.Submission, envelope *signed.EnvelopeValues) { envelope.Credentials = values }
+}
+
+// openRequests returns this receiver's open requests on the pool's events in log order.
+func (f fixture) openRequests(t *testing.T) []wire.OpenRequest {
 	t.Helper()
-	var requests []wire.SealRequest
-	for _, record := range f.records(t, admin.TenantTopic(testTenant)) {
-		var request wire.SealRequest
-		if wire.ParseRecord(record.Value, f.keys(), &request) == nil {
+	var requests []wire.OpenRequest
+	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
+		var request wire.OpenRequest
+		if wire.ParseStrict(record.Value, f.keys(), record.Timestamp, &request) == nil {
 			requests = append(requests, request)
 		}
 	}
 	return requests
-}
-
-// sealFor seals values to request's key with signed.Seal, as the host's answer does, and puts the seal on the host's
-// topic under the request's run.
-func (f fixture) sealFor(t *testing.T, request wire.SealRequest, values map[string][]byte) {
-	t.Helper()
-	sealed, err := signed.Seal(signed.SealBinding{
-		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
-		S3Inputs: request.S3Inputs, S3Outputs: request.S3Outputs, ExpiryMS: request.ExpiryMS,
-	}, request.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: values, RedactionKey: testRedactionKey})
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.produce(t, admin.HostTopic(testTenant, testHost), request.Run, sealed)
-}
-
-// answer answers, until the test ends, each of this receiver's seal requests that names credential alone with
-// testToken, as a host holding that credential does.
-func (f fixture) answer(t *testing.T, credential string) {
-	t.Helper()
-	answerSeals(t, f.ctx, f.service.Admin, f.keys(), testTenant, testHost, credential, testToken)
-}
-
-// answerSeals answers, until the test ends, each seal request on tenant's feed signed under keys that names credential
-// alone: it seals value with signed.Seal, as the host's answer does, onto host's topic under the request's run.
-func answerSeals(t *testing.T, ctx context.Context, kafka *kgo.Client, keys signed.Keys, tenant, host, credential, value string) {
-	t.Helper()
-	ctx, stop := context.WithCancel(ctx)
-	done := make(chan struct{})
-	t.Cleanup(func() { stop(); <-done })
-	go func() {
-		defer close(done)
-		answered := map[string]bool{}
-		for ctx.Err() == nil {
-			records, err := readTopic(ctx, kafka, admin.TenantTopic(tenant))
-			for _, record := range records {
-				var request wire.SealRequest
-				if err != nil || wire.ParseRecord(record.Value, keys, &request) != nil || answered[request.KeyID] || !slices.Equal(request.Credentials, []string{credential}) {
-					continue
-				}
-				answered[request.KeyID] = true
-				sealed, err := signed.Seal(signed.SealBinding{
-					Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-					Attempt: request.Attempt, Credentials: request.Credentials, ExpiryMS: request.ExpiryMS,
-				}, request.Key.Key.(*ecdsa.PublicKey), signed.SealValues{Values: map[string][]byte{credential: []byte(value)}, RedactionKey: testRedactionKey})
-				if err == nil {
-					err = kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.HostTopic(tenant, host), Key: []byte(request.Run), Value: sealed}).FirstErr()
-				}
-				if err != nil && ctx.Err() == nil {
-					panic(err)
-				}
-			}
-			sleep(ctx, 50*time.Millisecond)
-		}
-	}()
 }
 
 // addPeer provisions another member of the pool and registers its key.
@@ -852,12 +903,11 @@ func (f fixture) await(t *testing.T, run string, done func(wire.Task) bool) wire
 
 func anyTask(wire.Task) bool { return true }
 
-// runToTask runs the receiver, answers its seal request, submits one task and returns its result.
+// runToTask runs the receiver, submits one task and returns its result.
 func runToTask(t *testing.T, f fixture) wire.Task {
 	t.Helper()
 	ctx, stop := context.WithCancel(f.ctx)
 	t.Cleanup(stop)
-	f.answer(t, credentialName)
 	f.run(t, ctx)
 	f.submit(t, f.host, nil)
 	return f.await(t, "run-a", anyTask)
@@ -1025,7 +1075,6 @@ func TestRunExitsOnConfigChange(t *testing.T) {
 // output limit, with no restart.
 func TestRunAppliesUpdatedTerms(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.run(t, f.ctx)
 	collectedUnder := func(run string) int64 {
 		t.Helper()
@@ -1311,7 +1360,6 @@ func newMultiFixture(t *testing.T) multiFixture {
 		{Name: "edge", Plugin: "fake", Agent: "claude", Labels: map[string]string{"site": "edge", "class": "arm"}, Config: map[string]any{}},
 	}
 	m.fixture = newFixtureWith(t, resultStream, testTerms(), config, map[string]*fakePlugin{"lab": m.lab, "cloud": m.cloud, "edge": m.edge})
-	m.answer(t, credentialName)
 	return m
 }
 
@@ -1425,7 +1473,6 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 			terms, config := testTerms(), testConfig(testReceiver)
 			terms.DeliveryLimit, config.Capacity = 5, 6
 			f := newFixtureWith(t, noResultStream, terms, config, map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: time.Minute}})
-			f.answer(t, credentialName)
 			ctx, stop := context.WithCancel(f.ctx)
 			defer stop()
 			done := f.run(t, ctx)
@@ -1468,7 +1515,6 @@ func TestStopReleasesHeldTaskOnce(t *testing.T) {
 // arrives on and the function that cancels Run's context.
 func holdRun(t *testing.T, f fixture) (<-chan error, context.CancelFunc) {
 	t.Helper()
-	f.answer(t, credentialName)
 	ctx, stop := context.WithCancel(f.ctx)
 	t.Cleanup(stop)
 	done := f.run(t, ctx)

@@ -161,9 +161,6 @@ type runView struct {
 	reread map[string]bool
 	// fed is the feed offset past the records history read.
 	fed int64
-	// requests are the run's seal requests, and requested the Kafka timestamp of each.
-	requests  []wire.SealRequest
-	requested []time.Time
 
 	binding  binding
 	statuses []*wire.RunStatus
@@ -273,14 +270,6 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 				return admin.AuthorizeResult(history, v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && result.Wherry.Run == r.run {
 				r.entries = append(r.entries, entry{receiver: result.Wherry.Receiver, result: &result})
-				return
-			}
-		case wire.SealRequestType:
-			// Answer reads seal requests; they shape no outcome.
-			if request, err := authorize(ctx, r, kid, func(v view) (wire.SealRequest, error) {
-				return admin.AuthorizeSealRequest(v.state, v.keys, value, r.pool, r.h.tenant)
-			}); err == nil && request.Run == r.run {
-				r.requests, r.requested = append(r.requests, request), append(r.requested, record.Timestamp)
 				return
 			}
 		}
@@ -1138,30 +1127,10 @@ func (s *TranscriptStream) Ended() bool {
 	return s.r != nil && s.r.outcome != nil
 }
 
-// answerGrace is how long a seal request goes unanswered before Unanswered reports it, past the answerer's retry.
-const answerGrace = 3 * retryInterval
-
-// Unanswered reports whether, when Next last read the run, it had a seal request older than answerGrace that has not
-// expired and that no answerer of this host has sealed.
-func (s *TranscriptStream) Unanswered() bool {
-	if s.r == nil || s.r.outcome != nil {
-		return false
-	}
-	for i, request := range s.r.requests {
-		if time.Since(s.r.requested[i]) < answerGrace || !time.Now().Before(time.UnixMilli(request.ExpiryMS)) {
-			continue
-		}
-		if _, err := os.Stat(s.h.markerPath(s.run, request.Attempt)); errors.Is(err, os.ErrNotExist) {
-			return true
-		}
-	}
-	return false
-}
-
-// Await follows the tenant feed until the run has an outcome, answering seal requests while it waits. A run that ended
-// key-lost and was resubmitted is followed to its replacement, and a chain of replacements that names a run twice is
-// refused; the outcome is the last run's, and Runs lists every run followed. A run that ended key-lost and whose
-// resubmission fails returns its outcome with the resubmission's error.
+// Await follows the tenant feed until the run has an outcome. A run that ended key-lost and was resubmitted is followed
+// to its replacement, and a chain of replacements that names a run twice is refused; the outcome is the last run's, and
+// Runs lists every run followed. A run that ended key-lost and whose resubmission fails returns its outcome with the
+// resubmission's error.
 func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (AwaitResult, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -1204,24 +1173,14 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	}
 }
 
-// awaitRun follows the tenant feed until runID has an outcome, answering seal requests while it waits.
+// awaitRun follows the tenant feed until runID has an outcome.
 // Each arrival re-reads wherry.admin and the receivers' keys and derives the run again, so nothing from a member ended
 // by then shapes the outcome.
 func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, error) {
-	waitCtx, cancel := context.WithCancel(waitCtx)
-	defer cancel()
 	f, err := h.follow(waitCtx)
 	if err != nil {
 		return AwaitResult{}, err
 	}
-	answered := make(chan struct{})
-	defer func() { cancel(); <-answered }()
-	go func() {
-		defer close(answered)
-		if err := h.Answer(waitCtx); err != nil {
-			h.logger.Printf("answer seal requests: %v", err)
-		}
-	}()
 	v, err := h.load(waitCtx)
 	if err != nil {
 		return AwaitResult{}, err

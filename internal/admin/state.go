@@ -591,18 +591,6 @@ func AuthorizeAdvertisement(state State, keys signed.Keys, encoded []byte) (wire
 	return advertisement, nil
 }
 
-// AuthorizeSealRequest accepts a seal request from a live member of the run's placed pool.
-func AuthorizeSealRequest(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.SealRequest, error) {
-	var request wire.SealRequest
-	if err := wire.ParseRecord(encoded, keys, &request); err != nil {
-		return wire.SealRequest{}, err
-	}
-	if err := state.receiverRecord(request.ReceiverBinding, placedPool, runTenant); err != nil {
-		return wire.SealRequest{}, err
-	}
-	return request, nil
-}
-
 func ValidateReceiverRecord(record Record, receiver string, terms Terms) error {
 	if record.Kind != "receiver" || record.Receiver != receiver || record.Config == nil || record.Config.Receiver != receiver {
 		return errors.New("configuration belongs to another receiver")

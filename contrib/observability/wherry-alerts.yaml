@@ -42,15 +42,15 @@ groups:
           description: Runs end TASK_STATE_FAILED with "delivery budget exhausted" when no receiver can start them.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherrydeliverybudgetexhausted
 
-      - alert: WherryCredentialRequestsUnanswered
+      - alert: WherryOpenRequestsUnanswered
         expr: |
-          sum by (pool, tenant) (increase(wherry_seal_waits_total{outcome="unanswered"}[1h])) >= 2
+          sum by (pool, tenant) (increase(wherry_open_waits_total{outcome="unanswered"}[1h])) >= 2
         labels:
           severity: warning
         annotations:
-          summary: Tenant {{ $labels.tenant }} left seal requests in pool {{ $labels.pool }} unanswered
-          description: A run whose seal request no host answers within 5 minutes ends TASK_STATE_FAILED.
-          runbook_url: https://benemon.github.io/wherry/runbooks#wherrycredentialrequestsunanswered
+          summary: No key custodian answered open requests for tenant {{ $labels.tenant }} in pool {{ $labels.pool }}
+          description: A claimant whose open request no key custodian answers within 5 minutes and 120 seconds releases the task.
+          runbook_url: https://benemon.github.io/wherry/runbooks#wherryopenrequestsunanswered
 
       # The receiver restarts an exited plugin after one second, doubling the wait after each failed start up to
       # 30 seconds.

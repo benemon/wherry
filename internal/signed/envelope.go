@@ -145,7 +145,7 @@ func WrapContentKey(contentKey []byte, recipient *ecdsa.PublicKey) ([]byte, erro
 	if len(contentKey) != 32 {
 		return nil, errors.New("content key is not 32 bytes")
 	}
-	encrypter, err := jose.NewEncrypter(jose.A256GCM, jose.Recipient{Algorithm: jose.ECDH_ES_A256KW, Key: recipient, KeyID: SealKeyID(recipient)}, nil)
+	encrypter, err := jose.NewEncrypter(jose.A256GCM, jose.Recipient{Algorithm: jose.ECDH_ES_A256KW, Key: recipient, KeyID: KeyThumbprint(recipient)}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +169,7 @@ func UnwrapContentKey(encoded []byte, key *ecdsa.PrivateKey) ([]byte, error) {
 	if err != nil || json.Unmarshal(decoded, &header, Strict) != nil {
 		return nil, errors.New("wrap protected header holds other members than a wrap's")
 	}
-	if header.KeyID != SealKeyID(&key.PublicKey) {
+	if header.KeyID != KeyThumbprint(&key.PublicKey) {
 		return nil, errors.New("wrap is for another key")
 	}
 	contentKey, err := jwe.Decrypt(key)

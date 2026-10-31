@@ -45,8 +45,9 @@ Everything wherry carries stays on infrastructure the operator runs:
 - inputs and outputs too large for a record travel through the operator's
   S3-compatible bucket, by URLs the host presigns, and the storage
   credential never leaves the host;
-- each credential leaves the host only inside a seal encrypted to one
-  receiver's key for one attempt, and reaches the agent at its target, as
+- each credential leaves the host only inside the task's envelope,
+  encrypted under the pool's key, opens for one attempt of the claiming
+  receiver, and reaches the agent at its target, as
   [Security](security.md) describes;
 - the host keeps its run records in its own state directory.
 

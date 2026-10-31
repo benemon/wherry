@@ -368,23 +368,6 @@ func parseSnapshot(verify func([]byte, string, signed.Keys, any) (string, error)
 	return snapshot, nil
 }
 
-const SealRequestType = "application/vnd.wherry.seal-request.v1+jws"
-
-// SealRequest asks a run's host, on the tenant feed, to seal credentials to key for one attempt.
-type SealRequest struct {
-	V int `json:"v"`
-	ReceiverBinding
-	Key         jose.JSONWebKey `json:"key"`
-	KeyID       string          `json:"key_id"`
-	Credentials []string        `json:"credentials"`
-	// TaskCredentials are the run's task credentials, outside the pool's terms.
-	TaskCredentials []string `json:"task_credentials,omitzero"`
-	// S3Inputs and S3Outputs name the run's S3 inputs and outputs the seal is to carry presigned URLs for.
-	S3Inputs  []string `json:"s3_inputs,omitzero"`
-	S3Outputs []string `json:"s3_outputs,omitzero"`
-	ExpiryMS  int64    `json:"expiry_at_ms"`
-}
-
 var startFailureClasses = []string{"dispatch", "platform", "input-too-large"}
 
 // StartFailure records that a receiver could not start a run's attempt.
@@ -459,7 +442,6 @@ func (*Output) jwsType() string        { return OutputType }
 func (*Echo) jwsType() string          { return EchoType }
 func (*Advertisement) jwsType() string { return "application/vnd.wherry.advertisement.v1+jws" }
 func (*StartFailure) jwsType() string  { return StartFailureType }
-func (*SealRequest) jwsType() string   { return SealRequestType }
 func (*Snapshot) jwsType() string      { return CustodianType }
 
 func (value *Submission) owner() string {
@@ -473,7 +455,6 @@ func (value *Output) owner() string        { return value.Wherry.Receiver }
 func (value *Echo) owner() string          { return value.Receiver }
 func (value *Advertisement) owner() string { return value.Receiver }
 func (value *StartFailure) owner() string  { return value.Wherry.Receiver }
-func (value *SealRequest) owner() string   { return value.Receiver }
 func (value *Snapshot) owner() string      { return value.Custodian }
 
 func (value *Submission) version() *int    { return &value.V }
@@ -485,7 +466,6 @@ func (value *Output) version() *int        { return &value.V }
 func (value *Echo) version() *int          { return &value.V }
 func (value *Advertisement) version() *int { return &value.V }
 func (value *StartFailure) version() *int  { return &value.V }
-func (value *SealRequest) version() *int   { return &value.V }
 func (value *Snapshot) version() *int      { return &value.V }
 
 // runID keeps run IDs to name characters: a run's transactional ID
@@ -693,7 +673,7 @@ func (value *RunStatus) validate() error {
 		return errors.New("a status's event is key-lost, on a failed terminal status")
 	}
 	switch binding.Kind {
-	case "claimed", "started", "rejected", "terminal":
+	case "claimed", "started", "rejected", "terminal", "released", "adopting", "reconciling":
 		return nil
 	default:
 		return errors.New("invalid status kind")
@@ -705,7 +685,7 @@ func (value *Snapshot) validate() error {
 		return err
 	}
 	key, ok := value.Current.Key.Key.(*ecdsa.PublicKey)
-	if !ok || key.Curve != elliptic.P256() || value.Current.KeyID != signed.SealKeyID(key) || !slices.Contains(custodianReasons, value.Reason) {
+	if !ok || key.Curve != elliptic.P256() || value.Current.KeyID != signed.KeyThumbprint(key) || !slices.Contains(custodianReasons, value.Reason) {
 		return errors.New("invalid custodian snapshot")
 	}
 	return nil
@@ -790,34 +770,4 @@ func (value *StartFailure) validate() error {
 		return errors.New("invalid start failure")
 	}
 	return validateIDs(map[string]string{"profile": value.Profile, "agent": value.Agent})
-}
-
-func (value *SealRequest) validate() error {
-	if err := value.ReceiverBinding.validate(); err != nil {
-		return err
-	}
-	key, ok := value.Key.Key.(*ecdsa.PublicKey)
-	names := append(slices.Clone(value.Credentials), value.TaskCredentials...)
-	if !ok || key.Curve != elliptic.P256() || value.KeyID != signed.SealKeyID(key) || value.ExpiryMS <= 0 || len(names)+len(value.S3Inputs)+len(value.S3Outputs) == 0 {
-		return errors.New("invalid seal request")
-	}
-	for i, input := range value.S3Inputs {
-		if !ValidFileName(input) || slices.Contains(value.S3Inputs[:i], input) {
-			return errors.New("a seal request names unique S3 inputs")
-		}
-	}
-	for i, output := range value.S3Outputs {
-		if !ValidOutputName(output) || slices.Contains(value.S3Outputs[:i], output) {
-			return errors.New("a seal request names unique S3 outputs")
-		}
-	}
-	for i, credential := range names {
-		if err := validateID(credential, "credential"); err != nil {
-			return err
-		}
-		if slices.Contains(names[:i], credential) {
-			return errors.New("a seal request names each credential once")
-		}
-	}
-	return nil
 }

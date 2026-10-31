@@ -175,10 +175,14 @@ func (r *Receiver) Run(ctx context.Context) error {
 	running, stopRunning := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopRunning()
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go func() {
 		defer wg.Done()
 		r.keepCustody(running)
+	}()
+	go func() {
+		defer wg.Done()
+		r.every(running, openInterval, r.serveOpens)
 	}()
 	go func() {
 		defer wg.Done()
@@ -607,12 +611,28 @@ func (r *Receiver) offer(placement wire.Placement) (Named, bool) {
 
 // poolEvents is one read of the pool's events topic.
 type poolEvents struct {
-	// statuses holds, per run, the statuses from live pool members in log order, one per event ID.
+	// statuses holds, per run, the statuses from live pool members in log order, one per event ID, and records the
+	// record of each.
 	statuses map[string][]wire.RunStatus
+	records  map[string][]*kgo.Record
 	// startFailures holds, per run, this receiver's start failures in log order.
 	startFailures map[string][]wire.StartFailure
 	// others holds, per run, every other record, such as cancels.
 	others map[string][][]byte
+	// requests holds the open requests in log order; answered holds the digest of each request an attempt wrap or a
+	// refusal answers.
+	requests []openRequest
+	answered map[string]bool
+	// rekeys holds, per task hash, its re-key wraps; decisions the first decision on each claim, by the claim's digest.
+	rekeys    map[string][]wire.RekeyWrap
+	decisions map[string]wire.ClaimDecision
+}
+
+// openRequest is an open request's record, with the request when it verifies as a live pool member's.
+type openRequest struct {
+	record  *kgo.Record
+	digest  string
+	request *wire.OpenRequest
 }
 
 func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
@@ -626,7 +646,10 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	state, peers, _ := r.snapshot()
 	peerTopics := admin.PoolKeyTopics(state, r.config.Pool)
 	reread := map[string]bool{}
-	events := poolEvents{statuses: map[string][]wire.RunStatus{}, startFailures: map[string][]wire.StartFailure{}, others: map[string][][]byte{}}
+	events := poolEvents{
+		statuses: map[string][]wire.RunStatus{}, records: map[string][]*kgo.Record{}, startFailures: map[string][]wire.StartFailure{}, others: map[string][][]byte{},
+		answered: map[string]bool{}, rekeys: map[string][]wire.RekeyWrap{}, decisions: map[string]wire.ClaimDecision{},
+	}
 	seen := map[string]bool{}
 	for _, record := range records {
 		run := string(record.Key)
@@ -635,11 +658,21 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 		// tells a record that does not verify, kept for the cancel check, from one that verifies and is refused.
 		var status wire.RunStatus
 		var failure wire.StartFailure
+		var request wire.OpenRequest
+		var attemptWrap wire.AttemptWrap
+		var refusal wire.OpenRefusal
+		var rekey wire.RekeyWrap
+		var decision wire.ClaimDecision
 		var parseErr error
 		typ := recordType(record.Value)
 		authorize := func(peers signed.Keys) error {
 			parse := func(encoded []byte, keys signed.Keys, value wire.Record) error {
 				parseErr = history(encoded, keys, value)
+				return parseErr
+			}
+			// The open records verify only against live pool members' keys, which is their authorisation.
+			strict := func(value wire.Record) error {
+				parseErr = wire.ParseStrict(record.Value, peers, record.Timestamp, value)
 				return parseErr
 			}
 			var err error
@@ -648,6 +681,16 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 				status, err = admin.AuthorizePoolStatus(parse, state, peers, record.Value, r.config.Pool)
 			case wire.StartFailureType:
 				failure, err = admin.AuthorizePoolStartFailure(parse, state, peers, record.Value, r.config.Pool)
+			case wire.OpenRequestType:
+				err = strict(&request)
+			case wire.AttemptWrapType:
+				err = strict(&attemptWrap)
+			case wire.OpenRefusalType:
+				err = strict(&refusal)
+			case wire.RekeyWrapType:
+				err = strict(&rekey)
+			case wire.ClaimDecisionType:
+				err = strict(&decision)
 			default:
 				parseErr = errors.New("record is neither a status nor a start failure")
 			}
@@ -663,6 +706,13 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 			err = authorize(peers)
 		}
 		switch {
+		case typ == wire.OpenRequestType:
+			// A request that does not verify is refused by its digest.
+			opened := openRequest{record: record, digest: wire.Digest(record.Value)}
+			if err == nil && request.Run == run {
+				opened.request = &request
+			}
+			events.requests = append(events.requests, opened)
 		case parseErr != nil:
 			events.others[run] = append(events.others[run], record.Value)
 		case err != nil:
@@ -672,10 +722,21 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 			if failure.Wherry.Run == run && failure.Wherry.Receiver == r.id {
 				events.startFailures[run] = append(events.startFailures[run], failure)
 			}
+		case typ == wire.AttemptWrapType:
+			events.answered[attemptWrap.Request] = true
+		case typ == wire.OpenRefusalType:
+			events.answered[refusal.Request] = true
+		case typ == wire.RekeyWrapType:
+			events.rekeys[rekey.TaskHash] = append(events.rekeys[rekey.TaskHash], rekey)
+		case typ == wire.ClaimDecisionType:
+			if _, decided := events.decisions[decision.Claim]; !decided {
+				events.decisions[decision.Claim] = decision
+			}
 		case status.Wherry.Run == run && !seen[status.Wherry.EventID]:
 			// A status binds its run's tenant through the task hash; the pool, membership and entitlement are checked here.
 			seen[status.Wherry.EventID] = true
 			events.statuses[run] = append(events.statuses[run], status)
+			events.records[run] = append(events.records[run], record)
 		}
 	}
 	return events, nil

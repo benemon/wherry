@@ -604,7 +604,7 @@ scrape_configs:
 
 The `tenant` label names each entitled tenant whose runs reach the pool.
 Whoever can scrape a receiver sees every tenant's activity on its pool: its
-runs and their outcomes, durations, rejections and seal waits. Give scrape access only to those who may
+runs and their outcomes, durations, rejections and open waits. Give scrape access only to those who may
 see all of the pool's tenants. No label or value carries a prompt, output,
 run ID, error text, URL, image, path, node or credential name.
 [Metrics](commands.md#metrics) lists the families.
@@ -614,7 +614,7 @@ holds a Grafana dashboard, `wherry-dashboard.json`, and Prometheus alert
 rules, `wherry-alerts.yaml`, built from these families. Each release archive
 carries them under `contrib/observability/`. The dashboard shows receivers
 and capacity in use, admissions, rejections and start failures, run
-durations and queue wait, seal waits, plugin restarts, platform errors and
+durations and queue wait, open waits, plugin restarts, platform errors and
 cleanup, and Kafka errors, for the pools and receivers its `pool` and
 `instance` variables select. [Runbooks](runbooks.md) has a section for each
 rule, which its `runbook_url` links.
@@ -703,11 +703,9 @@ the `wherry admin` environment.
    again from step 1. Step 3 already retries for up to 2 minutes while a
    broker still authorises the principal.
 
-3. For a receiver, rotate each credential sealed to it at its source. The
-   receiver has seen their values.
-
-Receivers stop reading a revoked host's topic, so no seal it writes reaches
-them.
+3. For a receiver, rotate at its source each credential of the runs it
+   opened and, when it held its pool's key as key custodian, of every run
+   whose envelope that key opens. The receiver has seen their values.
 
 Revoking a receiver is a hard stop of the runs it holds, during a drain
 too. Once its access is gone, the receiver gives up a run at its first
@@ -882,8 +880,8 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    ```
 
    Receivers and agents never hold the S3 credential; they get presigned URLs, a GET per input
-   for 15 minutes and a PUT per output until the run's `task_ended_by`, 7 days at
-   most.
+   until the run's `task_started_by` plus 15 minutes and a PUT per output until
+   its `task_ended_by`, 7 days at most.
 
 4. Set a lifecycle rule that expires `wherry/` after a period longer than
    any run: the host deletes a run's objects when it sees the run end with
@@ -1149,10 +1147,9 @@ configuration, bundle and state directory.
 
 `wherry mcp` serves the host operations as MCP tools over stdio. It reads
 the client configuration and connects to Kafka as one host when it starts.
-Every tool call and seal answer reuses that host and its one tenant-feed
-follower, and `wait`, `events` and `logs` also read the tenant's
-transcript topic. While the connection fails, the server retries it on each
-tool call and every five seconds.
+Every tool call reuses that host and its one tenant-feed follower, and
+`wait`, `events` and `logs` also read the tenant's transcript topic. While
+the connection fails, the server retries it on each tool call.
 [MCP tools](mcp.md) lists the tools.
 
 Prerequisites: `wherry` on the harness's `PATH`, and the client

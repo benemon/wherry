@@ -453,7 +453,6 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, waitUsage)
-		fmt.Fprintln(stderr, "Stopping wait can leave a credential request unanswered, ending the run FAILED after the seal wait.")
 		flags.PrintDefaults()
 	}
 	configFile := flags.String("config-file", "", "host configuration file")
@@ -726,7 +725,6 @@ func runLogs(ctx context.Context, client *busclient.Host, args []string, stdout,
 	}
 	if follow {
 		stream := client.StreamTranscript(runID)
-		warned := false
 		for {
 			transcript, err := stream.Next(ctx)
 			if errors.Is(err, busclient.ErrRunNotFound) || ctx.Err() != nil {
@@ -743,10 +741,6 @@ func runLogs(ctx context.Context, client *busclient.Host, args []string, stdout,
 			printLines(transcript.Lines)
 			if stream.Ended() {
 				break
-			}
-			if !warned && stream.Unanswered() {
-				fmt.Fprintf(stderr, "run is waiting for credentials; run wherry wait %s\n", runID)
-				warned = true
 			}
 			waitCtx, stopWait := context.WithTimeout(ctx, streamRetry)
 			stream.Wait(waitCtx)

@@ -14,7 +14,7 @@ in every path.
 | --- | --- | --- |
 | `bundle` | required | the host's bundle |
 | `host_key` | `~/.config/wherry/host.key` | host signing key file |
-| `state_dir` | `~/.config/wherry/state` | run records and answered seal requests |
+| `state_dir` | `~/.config/wherry/state` | run records |
 | `credentials` | none | credential name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]` |
 | `git` | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`, both optional ([git credentials](security.md#git-credentials)) |
 | `storage` | none | `{access_key, secret_key}`: the names of the credentials in `credentials` holding the access key and secret key of the host's S3 credential; a host without it uses no S3 lane |
@@ -23,11 +23,10 @@ in every path.
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
 readable by its owner alone, with `redaction_key`, the run's redaction key,
 made when this host submits the run, `runs/<run>/outputs/` for the outputs
-`wait` writes by default, and `answered/<run>.<attempt>` for each attempt
-it answered, with a `.lock` beside it that every process sharing the
-directory holds while it answers that attempt. `submit` writes the run's
-record before it publishes the task, and removes it when publishing
-fails.
+`wait` writes by default, and `resubmit/<run>.json.lock`, which every
+process sharing the directory holds while it resubmits that run. `submit`
+writes the run's record before it publishes the task, and removes it when
+publishing fails.
 
 ### Client configuration example
 
@@ -66,11 +65,11 @@ storage:
 
 `credentials` holds a source for each credential the agents of the
 [pool terms example](#pool-terms-example) take: two files, a password
-manager's command for `openai-api-key`, and the answering process's
+manager's command for `openai-api-key`, and the submitting process's
 `GITHUB_TOKEN` for `github-token`, which `git` also gives every task cloning
 under `https://github.com/acme/`. `storage` takes the S3 access key from a
-file and the secret key from the password manager. Each source resolves each time a receiver
-asks for its credential.
+file and the secret key from the password manager. Each source resolves at
+each submit.
 
 ## Receiver local configuration
 
@@ -674,7 +673,7 @@ receiver configuration names.
 From the moment it resolves a value until it exits, the receiver replaces
 the value in the plugin lines and plugin standard error it logs and in the
 configure, sweep and readiness errors it logs, in the two forms it replaces
-a [run credential](a2a-extension-v1.md#seal) in: the bytes without
+a [run credential](security.md#credential-envelopes) in: the bytes without
 trailing CR and LF, and those bytes escaped as a JSON string. The marker is
 `[redacted:`, 16 base64url characters and `]`, from the HMAC-SHA256 under an
 empty key of `wherry-redaction-v1` followed by the credential's name. A
@@ -774,7 +773,7 @@ publishes the run's `started` event. A receiver rejects a run no pool member
 has claimed with `not started by task_started_by (<RFC 3339 time>)` or
 `not ended by task_ended_by (<RFC 3339 time>)` once that bound has passed.
 A claimed run whose job has not started by `task_started_by`, while it waits
-for its seal or for the platform to place its job, ends `TASK_STATE_FAILED`
+for its envelope to open or for the platform to place its job, ends `TASK_STATE_FAILED`
 with `not started by task_started_by (<RFC 3339 time>)`, and the receiver
 purges any job the run has. A job that has started runs on past
 `task_started_by`. A redelivered run that a member has claimed is not

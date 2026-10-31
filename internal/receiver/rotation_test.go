@@ -41,14 +41,12 @@ func TestCompletedRunRedeliveredAfterSelfRotation(t *testing.T) {
 	for _, rotate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "control", true: "rotated"}[rotate], func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.answer(t, credentialName)
 			record := f.submit(t, f.host, nil)
 			if status := f.execute(t, record, 1); status != kgo.AckAccept {
 				t.Fatalf("first delivery %v", status)
 			}
 			if rotate {
 				rotateSelf(t, &f)
-				f.answer(t, credentialName)
 			}
 			admitted, ack := f.receiver.admit(f.ctx, record)
 			if admitted != nil || ack != kgo.AckAccept {

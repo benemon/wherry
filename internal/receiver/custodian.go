@@ -70,7 +70,7 @@ type poolKey struct {
 }
 
 func (key *poolKey) id() string {
-	return signed.SealKeyID(&key.Key.Key.(*ecdsa.PrivateKey).PublicKey)
+	return signed.KeyThumbprint(&key.Key.Key.(*ecdsa.PrivateKey).PublicKey)
 }
 
 // custodianTransactionalID is the one transactional ID every custodian of the pool writes through, so a successor's

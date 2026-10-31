@@ -2,7 +2,7 @@
 
 [Introduction](introduction.md) states the problem wherry solves.
 [Design](design.md) covers its topics and configuration delivery, and
-[Security](security.md) its sealed credentials.
+[Security](security.md) its credential envelopes.
 
 ## Roles
 
@@ -130,10 +130,10 @@ before it writes the file locally.
 A pool can also carry files through an S3-compatible bucket its operator
 names, up to 5 GiB each. The host uploads an S3 input with its own
 credential before it publishes the task, and the task carries only the
-input's name, size and SHA-256. When the claiming receiver asks for the
-seal, the host presigns a short-lived GET per input and a PUT per expected
-S3 output, and seals them with the credentials, so the URLs never sit on
-the broker in the clear. The receiver checks each URL against the pool's
+input's name, size and SHA-256. At submit, the host presigns a short-lived
+GET per input and a PUT per expected S3 output, and seals them with the
+credentials in the task's envelope, so the URLs never sit on the broker in
+the clear. The receiver checks each URL against the pool's
 endpoint and bucket; the plugin fetches the inputs into the input
 directory and verifies them; the receiver streams each S3 output to its
 PUT URL, hashing what it sends, and lists it in the result. The host then
@@ -168,7 +168,7 @@ acquisition lock for the whole run and renews it every 10 seconds. When a
 receiver stops renewing, the broker delivers the task again, and that
 delivery is the next attempt. The receiver that takes it looks for the
 run's job in each of its plugin profiles. If the job exists and came from the
-same profile and agent, as its platform metadata records, the receiver adopts it, asks for a seal of its own,
+same profile and agent, as its platform metadata records, the receiver adopts it, opens the envelope for its own attempt,
 and once it opens resumes the transcript from the run's latest committed
 offset, which each holder records on its own progress topic,
 `wherry.receiver.<receiver>.progress`. Any other job under the

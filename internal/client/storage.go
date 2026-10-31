@@ -2,9 +2,6 @@ package client
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -97,7 +94,7 @@ func uploadInputs(ctx context.Context, store *minio.Client, bucket, tenant, run 
 	return inputs, nil
 }
 
-// presign returns the seal values of a run's S3 inputs, under inputRun's prefix, and outputs, under run's: GET URLs that
+// presign returns the URLs of a run's S3 inputs, under inputRun's prefix, and outputs, under run's: GET URLs that
 // expire at getDeadline and PUT URLs at deadline.
 func presign(ctx context.Context, store *minio.Client, bucket, tenant, inputRun, run string, inputs, outputs []string, getDeadline, deadline time.Time) (map[string][]byte, error) {
 	values := map[string][]byte{}
@@ -129,42 +126,6 @@ func presign(ctx context.Context, store *minio.Client, bucket, tenant, inputRun,
 		values[signed.S3OutputValue(output)] = []byte(put.String())
 	}
 	return values, nil
-}
-
-// checkSealSize refuses a run whose seal would pass its limit: it seals the run's task credentials and URLs for its S3
-// inputs and outputs, presigned as the answer will, to a throwaway key. The agent's credentials are not counted, nor a
-// task credential from a command source, which runs only to answer a seal.
-func (h *Host) checkSealSize(ctx context.Context, store *minio.Client, bucket, tenant, run string, credentials []wire.TaskCredential, inputs, outputs []string, deadline time.Time) error {
-	values, err := presign(ctx, store, bucket, tenant, run, run, inputs, outputs, time.Now().Add(getLifetime), deadline)
-	if err != nil {
-		return err
-	}
-	var names []string
-	for _, credential := range credentials {
-		source := h.credentials[credential.Name]
-		if len(source.Command) > 0 {
-			continue
-		}
-		if values[credential.Name], err = source.Resolve(ctx); err != nil {
-			return fmt.Errorf("read credential %s: %w", credential.Name, err)
-		}
-		hold(credential.Name, values[credential.Name])
-		names = append(names, credential.Name)
-	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return err
-	}
-	// Fields the answer fills from the receiver's request are at their bounds.
-	placeholder := strings.Repeat("x", 32)
-	_, err = signed.Seal(signed.SealBinding{
-		Tenant: tenant, Pool: placeholder, Receiver: placeholder, KeyID: signed.SealKeyID(&key.PublicKey), Run: run, Attempt: 1 << 31,
-		Credentials: []string{}, TaskCredentials: names, S3Inputs: inputs, S3Outputs: outputs, ExpiryMS: deadline.UnixMilli(),
-	}, &key.PublicKey, signed.SealValues{Values: values, RedactionKey: make([]byte, 32)})
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
-	}
-	return nil
 }
 
 // DownloadOutputs downloads a run's S3 outputs beneath dir and verifies each against its result's size and SHA-256;

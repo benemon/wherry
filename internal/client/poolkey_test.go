@@ -77,7 +77,7 @@ func TestSubmitRefusesWithoutALiveCurrentCustodian(t *testing.T) {
 		other.advertise(t, f.ctx, nil)
 		key := f.poolKeys["pool-a"]
 		forged, err := signed.Sign(wire.CustodianType, other.id, &wire.Snapshot{V: 1, Pool: "pool-a", Custodian: "receiver-a", Reason: "rotation",
-			Current: wire.PoolKey{KeyID: signed.SealKeyID(&key.PublicKey), Key: jose.JSONWebKey{Key: &key.PublicKey}}}, other.key)
+			Current: wire.PoolKey{KeyID: signed.KeyThumbprint(&key.PublicKey), Key: jose.JSONWebKey{Key: &key.PublicKey}}}, other.key)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -107,11 +107,16 @@ func TestSubmitRefusesWithoutALiveCurrentCustodian(t *testing.T) {
 	})
 }
 
-// open decodes a task as a receiver reads it from the pool's task topic, unwraps its submit wrap with key, opens its
+// open decodes a task as a receiver reads it from its pool's task topic, unwraps its submit wrap with key, opens its
 // envelope and checks its binding against the task.
 func open(t *testing.T, f *fixture, runID string, key *ecdsa.PrivateKey) (wire.Submission, signed.EnvelopeValues, error) {
 	t.Helper()
-	records, err := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a"))
+	local, err := f.host.localRun(runID)
+	if err != nil || local == nil {
+		t.Fatalf("local record %v, %v", local, err)
+	}
+	pool := local.Pool
+	records, err := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic(pool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,11 +128,11 @@ func open(t *testing.T, f *fixture, runID string, key *ecdsa.PrivateKey) (wire.S
 		if err != nil {
 			t.Fatal(err)
 		}
-		keys, err := admin.ReadKeys(f.ctx, f.service.Admin, admin.HostKeyTopics(state, "pool-a"))
+		keys, err := admin.ReadKeys(f.ctx, f.service.Admin, admin.HostKeyTopics(state, pool))
 		if err != nil {
 			t.Fatal(err)
 		}
-		task, err := admin.AuthorizeSubmission(state, keys, record.Value, "pool-a")
+		task, err := admin.AuthorizeSubmission(state, keys, record.Value, pool)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -574,7 +579,7 @@ func TestResubmitLockFiles(t *testing.T) {
 	if err := os.WriteFile(stale, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.host.sweep(f.ctx)
+	f.host.sweep()
 	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("sweep left a stale lock file: %v", err)
 	}

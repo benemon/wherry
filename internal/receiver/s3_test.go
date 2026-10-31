@@ -99,21 +99,16 @@ func withS3(task *wire.Submission) {
 	task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.pdf", Required: true, Storage: wire.StorageS3}}
 }
 
-// sealS3 answers the turn's seal request with the agent's credential and the URLs urls makes for its S3 objects.
-func (f fixture) sealS3(t *testing.T, urls func(input, output string) (string, string)) wire.SealRequest {
-	t.Helper()
-	request := f.request(t, 1)
-	values := map[string][]byte{credentialName: []byte(testToken)}
-	for _, input := range request.S3Inputs {
-		get, _ := urls(input, "")
-		values[signed.S3InputValue(input)] = []byte(get)
+// withURLs is an envelope edit that seals the URLs urls makes for the task's S3 objects.
+func withURLs(urls func(input, output string) (string, string)) func(*wire.Submission, *signed.EnvelopeValues) {
+	return func(task *wire.Submission, values *signed.EnvelopeValues) {
+		for _, input := range task.Wherry.S3Inputs {
+			values.S3Inputs[input.Name], _ = urls(input.Name, "")
+		}
+		for _, output := range s3Outputs(task.Wherry.Outputs) {
+			_, values.S3Outputs[output] = urls("", output)
+		}
 	}
-	for _, output := range request.S3Outputs {
-		_, put := urls("", output)
-		values[signed.S3OutputValue(output)] = []byte(put)
-	}
-	f.sealFor(t, request, values)
-	return request
 }
 
 func validURLs(origin string) func(string, string) (string, string) {
@@ -122,15 +117,11 @@ func validURLs(origin string) func(string, string) (string, string) {
 	}
 }
 
-func TestS3ObjectsTravelOnlyInTheSeal(t *testing.T) {
+func TestS3ObjectsTravelOnlyInTheEnvelope(t *testing.T) {
 	s := newStore(t)
 	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
 	record := f.submit(t, f.host, withS3)
 	done := f.executing(t, f.ctx, record, 1)
-	request := f.sealS3(t, validURLs(s.endpoint()))
-	if !slices.Equal(request.S3Inputs, []string{"dataset.bin"}) || !slices.Equal(request.S3Outputs, []string{"report.pdf"}) {
-		t.Fatalf("seal request asks for inputs %v and outputs %v", request.S3Inputs, request.S3Outputs)
-	}
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
@@ -193,20 +184,21 @@ func TestS3URLsAreCheckedAgainstPoolStorage(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := s3Fixture(t, s, resultStream, nil)
-			done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-			f.sealS3(t, func(input, output string) (string, string) {
+			f.envelope = withURLs(func(input, output string) (string, string) {
 				_, put := validURLs(origin)(input, output)
 				return get, put
 			})
+			done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
 			if status := <-done; status != kgo.AckReject {
 				t.Fatalf("status %v; want the turn failed", status)
 			}
 			if dispatches, _, _ := f.dispatched(t); dispatches != 0 {
 				t.Fatal("dispatched with a URL off the pool's storage")
 			}
+			// The custodian refuses an envelope that does not check against its task, before any attempt wrap.
 			status := f.lastTask(t).Status
-			if status.State != wire.TaskStateFailed || status.Message.Parts[0].Text != "the URL for S3 input dataset.bin is not one of pool pool-a's storage" {
-				t.Fatalf("status %+v", status)
+			if status.State != wire.TaskStateFailed || status.Message.Parts[0].Text != keyLostReason || !strings.Contains(f.logs.String(), "the URL for S3 input dataset.bin is not its object in the pool's storage") {
+				t.Fatalf("status %+v; logs:\n%s", status, f.logs.String())
 			}
 			if strings.Contains(f.logs.String(), s3Signature) {
 				t.Fatalf("logs hold the URL:\n%s", f.logs.String())
@@ -215,12 +207,12 @@ func TestS3URLsAreCheckedAgainstPoolStorage(t *testing.T) {
 	}
 	t.Run("output", func(t *testing.T) {
 		f := s3Fixture(t, s, resultStream, nil)
-		done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-		f.sealS3(t, func(input, output string) (string, string) {
+		f.envelope = withURLs(func(input, output string) (string, string) {
 			get, _ := validURLs(origin)(input, output)
 			return get, presigned("https://127.0.0.1:1", wire.S3OutputKey(testTenant, "run-a", output))
 		})
-		if status := <-done; status != kgo.AckReject || f.lastTask(t).Status.Message.Parts[0].Text != "the URL for S3 output report.pdf is not one of pool pool-a's storage" {
+		done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
+		if status := <-done; status != kgo.AckReject || !strings.Contains(f.logs.String(), "the URL for S3 output report.pdf is not its object in the pool's storage") {
 			t.Fatalf("status %v, %+v", status, f.lastTask(t).Status)
 		}
 	})
@@ -234,7 +226,6 @@ func TestS3OverLoopbackHTTP(t *testing.T) {
 	}
 	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-	f.sealS3(t, validURLs(s.endpoint()))
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
@@ -254,12 +245,13 @@ func TestS3OverLoopbackHTTP(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := s3Fixture(t, s, resultStream, nil)
-			done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-			f.sealS3(t, func(input, output string) (string, string) {
+			f.envelope = withURLs(func(input, output string) (string, string) {
 				_, put := validURLs(s.endpoint())(input, output)
 				return get, put
 			})
-			if status := <-done; status != kgo.AckReject || f.lastTask(t).Status.Message.Parts[0].Text != "the URL for S3 input dataset.bin is not one of pool pool-a's storage" {
+			done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
+			if status := <-done; status != kgo.AckReject || f.lastTask(t).Status.Message.Parts[0].Text != keyLostReason ||
+				!strings.Contains(f.logs.String(), "the URL for S3 input dataset.bin is not its object in the pool's storage") {
 				t.Fatalf("status %v, %+v", status, f.lastTask(t).Status)
 			}
 			if strings.Contains(f.logs.String(), s3Signature) {
@@ -299,7 +291,6 @@ func TestS3URLsAreRedacted(t *testing.T) {
 		completedWith("used " + quoted)}
 	f := s3Fixture(t, s, stream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-	f.sealS3(t, validURLs(s.endpoint()))
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
@@ -373,7 +364,6 @@ func TestS3OutputIsStreamedAndHashedAsSent(t *testing.T) {
 	body := &pausedBody{first: content[:half], rest: content[half:], received: received}
 	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: int64(len(content)), Body: body}})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-	f.sealS3(t, validURLs(s.endpoint()))
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; not returned %+v; logs:\n%s", status, manifest(t, f.lastTask(t)).NotReturned, f.logs.String())
 	}
@@ -398,7 +388,6 @@ func TestS3OutputUploadFollowsNoRedirect(t *testing.T) {
 			}
 			f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
 			done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-			f.sealS3(t, validURLs(s.endpoint()))
 			if status := <-done; status != kgo.AckReject {
 				t.Fatalf("status %v; want the required output's turn failed", status)
 			}
@@ -424,7 +413,6 @@ func TestS3OutputRefusedByTheStoreIsNotReturned(t *testing.T) {
 	}
 	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-	f.sealS3(t, validURLs(s.endpoint()))
 	<-done
 	if listed := manifest(t, f.lastTask(t)); !slices.Equal(listed.NotReturned, []wire.UnreturnedOutput{{Name: "report.pdf", Size: 6, Reason: "not uploaded: status 403"}}) {
 		t.Fatalf("not returned %+v", listed.NotReturned)
@@ -440,7 +428,6 @@ func TestS3FetchFailureFailsTheTurn(t *testing.T) {
 		"nomad": {stream: noResultStream, neverStarted: true, neverClass: pluginsdk.ClassFetch},
 	})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-	f.sealS3(t, validURLs(s.endpoint()))
 	if status := <-done; status != kgo.AckReject {
 		t.Fatalf("status %v; want the turn failed and the task not returned to the pool", status)
 	}
@@ -455,7 +442,6 @@ func TestS3FetchFailureInDispatchFailsTheTurn(t *testing.T) {
 		"nomad": {stream: noResultStream, dispatchErr: &pluginsdk.Error{Op: "fetch dataset.bin", Class: pluginsdk.ClassFetch, Err: errors.New("403")}, outcome: pluginsdk.OutcomeNothingCreated},
 	})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-	f.sealS3(t, validURLs(s.endpoint()))
 	if status := <-done; status != kgo.AckReject || f.plugin.dispatches != 1 {
 		t.Fatalf("status %v after %d dispatches; want the turn failed at its one dispatch and the task not returned to the pool", status, f.plugin.dispatches)
 	}
@@ -464,18 +450,12 @@ func TestS3FetchFailureInDispatchFailsTheTurn(t *testing.T) {
 	}
 }
 
-// An adopter's seal carries fresh PUT URLs for the turn's S3 outputs and none for its inputs, which the job fetched.
+// An adopter takes the PUT URLs for the turn's S3 outputs from its envelope; the job fetched its inputs.
 func TestAnAdoptedRunReturnsAnS3Output(t *testing.T) {
 	s := newStore(t)
 	f := s3Fixture(t, s, resultStream, []pluginsdk.Output{{Name: "report.pdf", Size: 6, Body: io.NopCloser(strings.NewReader("report"))}})
 	f.plugin.job = pluginsdk.JobRunning
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 2)
-	request := f.sealS3(t, func(input, output string) (string, string) {
-		return "", presigned(s.endpoint(), wire.S3OutputKey(testTenant, "run-a", output))
-	})
-	if len(request.S3Inputs) != 0 || !slices.Equal(request.S3Outputs, []string{"report.pdf"}) {
-		t.Fatalf("adopter asks for inputs %v and outputs %v", request.S3Inputs, request.S3Outputs)
-	}
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}

@@ -11,7 +11,7 @@ import (
 )
 
 func testSnapshot() *Snapshot {
-	return &Snapshot{Pool: "pool-a", Custodian: "receiver-a", Reason: "bootstrap", Current: PoolKey{KeyID: signed.SealKeyID(&testSealKey.PublicKey), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}}}
+	return &Snapshot{Pool: "pool-a", Custodian: "receiver-a", Reason: "bootstrap", Current: PoolKey{KeyID: signed.KeyThumbprint(&testSealKey.PublicKey), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}}}
 }
 
 // A snapshot decodes strictly: an unknown or duplicate member, here or in its key, refuses it; and its writer must be
@@ -25,7 +25,7 @@ func TestSnapshotDecodesStrictlyAndBindsItsWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := ParseSnapshot(encoded, keys)
-	if err != nil || snapshot.Custodian != "receiver-a" || snapshot.Current.KeyID != signed.SealKeyID(&testSealKey.PublicKey) {
+	if err != nil || snapshot.Custodian != "receiver-a" || snapshot.Current.KeyID != signed.KeyThumbprint(&testSealKey.PublicKey) {
 		t.Fatalf("parse %+v, %v", snapshot, err)
 	}
 	payload, err := signed.Encode(testSnapshot())

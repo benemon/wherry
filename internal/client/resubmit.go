@@ -3,12 +3,14 @@ package client
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/benemon/wherry/internal/wire"
@@ -30,6 +32,7 @@ var (
 // run past its task_started_by with no replacement recorded is passed over. The runs still before their bound are judged
 // from one read of the tenant feed from the lowest of their feed offsets. Failures are logged; a later pass retries them.
 func (h *Host) resubmitLost(ctx context.Context) {
+	h.sweep()
 	entries, err := os.ReadDir(filepath.Join(h.stateDir, "runs"))
 	if err != nil {
 		return
@@ -262,5 +265,65 @@ func (h *Host) chain(runID string) ([]string, error) {
 			return chain, err
 		}
 		chain = append(chain, local.Replacement)
+	}
+}
+
+// lockRetry separates attempts on a busy lock.
+const lockRetry = 50 * time.Millisecond
+
+// sweep removes the resubmission lock files no process holds.
+func (h *Host) sweep() {
+	locks, err := os.ReadDir(filepath.Join(h.stateDir, "resubmit"))
+	if err != nil {
+		return
+	}
+	for _, lock := range locks {
+		removeLock(filepath.Join(h.stateDir, "resubmit", lock.Name()))
+	}
+}
+
+// lockFile takes an exclusive lock on the file at path, shared by every process using the state directory, and returns
+// its release. It gives up when ctx ends.
+func (h *Host) lockFile(ctx context.Context, path string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	for {
+		lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			// sweep unlinks a lock file it holds; a lock on an unlinked file excludes no one, so take the path again.
+			held, statErr := lock.Stat()
+			current, pathErr := os.Stat(path)
+			if statErr == nil && pathErr == nil && os.SameFile(held, current) {
+				return func() { lock.Close() }, nil
+			}
+			lock.Close()
+			continue
+		}
+		lock.Close()
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(lockRetry):
+		}
+	}
+}
+
+// removeLock unlinks a lock file only while holding it, so no process is inside it; a busy lock stays.
+func removeLock(path string) {
+	lock, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+		os.Remove(path)
 	}
 }

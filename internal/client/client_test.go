@@ -228,7 +228,7 @@ func (r *testReceiver) snapshot(t *testing.T, ctx context.Context, mutate func(*
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := &wire.Snapshot{Pool: r.pool, Custodian: r.id, Reason: "bootstrap", Current: wire.PoolKey{KeyID: signed.SealKeyID(&key.PublicKey), Key: jose.JSONWebKey{Key: &key.PublicKey}}}
+	snapshot := &wire.Snapshot{Pool: r.pool, Custodian: r.id, Reason: "bootstrap", Current: wire.PoolKey{KeyID: signed.KeyThumbprint(&key.PublicKey), Key: jose.JSONWebKey{Key: &key.PublicKey}}}
 	if mutate != nil {
 		mutate(snapshot)
 	}
@@ -460,7 +460,7 @@ func TestHostEndToEnd(t *testing.T) {
 	if err != nil || status.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("status %#v, %v", status, err)
 	}
-	// Submit seals nothing: the host topic holds the host's key alone.
+	// The host topic holds the host's key alone.
 	if records, err := readTopic(f.ctx, receiver.kafka, admin.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
 		t.Fatalf("host topic holds %d records, %v; want the key registration alone", len(records), err)
 	}

@@ -37,7 +37,6 @@ func TestGitInputAdmittedOnlyFromThePoolsVCSHosts(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixtureWith(t, resultStream, vcsTerms(test.hosts...), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
-			f.answer(t, credentialName)
 			record := f.submit(t, f.host, withGit(git))
 			if test.reason != "" {
 				f.rejected(t, record, test.reason)
@@ -64,13 +63,13 @@ func TestGitInputReachesTheAgentAsFilesAndCommands(t *testing.T) {
 	f := newFixtureWith(t, resultStream, vcsTerms("git.example.test:2222"), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	hostKey := "[git.example.test]:2222" + testHostKey[len("git.example.test"):]
 	git := wire.GitInput{Remote: "ssh://git@git.example.test:2222/org/repo.git", Ref: "v1.2.0", Path: "src/repo", Credential: "deploy-key", HostKey: hostKey}
+	f.envelope = sealing(map[string][]byte{credentialName: []byte(testToken), "deploy-key": []byte(deployValue)})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) {
 		withDeployKey(task)
 		task.Wherry.Git = &git
 		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: wire.GitPatch}}
 		task.Message.Parts = append(task.Message.Parts, wire.Part{Raw: wire.StdBytes("a,b\n"), Filename: "data.csv"})
 	}), 1)
-	f.sealFor(t, f.request(t, 1), map[string][]byte{credentialName: []byte(testToken), "deploy-key": []byte(deployValue)})
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}

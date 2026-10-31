@@ -29,7 +29,6 @@ func textPart(text string) map[string]string { return map[string]string{"text": 
 func replyRun(t *testing.T, terms admin.Terms, outcome string) (fixture, *wire.Task) {
 	t.Helper()
 	f := newFixtureWith(t, noResultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, outputs: []pluginsdk.Output{outcomeOutput(outcome)}}})
-	f.answer(t, credentialName)
 	f.execute(t, f.submit(t, f.host, nil), 1)
 	return f, f.lastTask(t)
 }

@@ -169,7 +169,7 @@ func onlyKey(t *testing.T, r *Receiver) (string, *poolKey) {
 }
 
 func TestFirstReceiverBootstrapsThePool(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	// At the commit the key is on disk and not yet marked published.
 	var atCommit map[string]*poolKey
 	f.cluster.ControlKey(kmsg.EndTxn.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
@@ -206,7 +206,7 @@ func TestFirstReceiverBootstrapsThePool(t *testing.T) {
 }
 
 func TestRestartInsideSessionTimeoutContinuesWithItsKey(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	stop := runUntilStopped(t, f.ctx, f.receiver)
 	f.awaitSnapshots(t, 1)
 	id, _ := onlyKey(t, f.receiver)
@@ -235,7 +235,7 @@ func TestRestartInsideSessionTimeoutContinuesWithItsKey(t *testing.T) {
 }
 
 func TestSameReceiverWithoutItsKeysTakesOver(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	stop := runUntilStopped(t, f.ctx, f.receiver)
 	f.awaitSnapshots(t, 1)
 	lost, _ := onlyKey(t, f.receiver)
@@ -257,7 +257,7 @@ func TestSameReceiverWithoutItsKeysTakesOver(t *testing.T) {
 }
 
 func TestSuccessorFencesTheOldCustodian(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	now := time.Now()
 	custodian(t, f.ctx, f.receiver, now)
 	successor := f.member(t, "receiver-b")
@@ -282,7 +282,7 @@ func TestSuccessorFencesTheOldCustodian(t *testing.T) {
 }
 
 func TestRotationFiresADayAndAJitterAfterTheSnapshot(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	first := f.snapshotRecords(t)[0]
 	id, _ := onlyKey(t, f.receiver)
@@ -328,7 +328,7 @@ func rotate(t *testing.T, f fixture, r *Receiver) *kgo.Record {
 }
 
 func TestSecondRotationKeepsBothEarlierKeys(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	first, _ := onlyKey(t, f.receiver)
 	second := rotate(t, f, f.receiver)
@@ -347,7 +347,7 @@ func TestSecondRotationKeepsBothEarlierKeys(t *testing.T) {
 }
 
 func TestReplacedKeyIsDeletedOnlyAtItsDeadline(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	first, _ := onlyKey(t, f.receiver)
 	rotation := rotate(t, f, f.receiver)
@@ -387,7 +387,7 @@ func writeKey(t *testing.T, r *Receiver, key *poolKey) string {
 }
 
 func TestUnmarkedKeyNamedByTheCurrentSnapshotIsMarkedAndKeptAsCurrent(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	id, key := onlyKey(t, f.receiver)
 	record := f.awaitSnapshots(t, 1)[0]
@@ -408,7 +408,7 @@ func TestUnmarkedKeyNamedByTheCurrentSnapshotIsMarkedAndKeptAsCurrent(t *testing
 }
 
 func TestUnmarkedKeyNotNamedGetsItsDeadlineFromTheLaterSnapshot(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	// A crash between persisting the key and marking it, two days before; another receiver's snapshot is current.
 	crashed := writeKey(t, f.receiver, &poolKey{CreatedMS: time.Now().Add(-48 * time.Hour).UnixMilli()})
 	other := f.member(t, "receiver-b")
@@ -436,7 +436,7 @@ func TestUnmarkedKeyNotNamedGetsItsDeadlineFromTheLaterSnapshot(t *testing.T) {
 }
 
 func TestNoKeyIsDeletedWhileTheSnapshotTopicCannotBeRead(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	current, _ := onlyKey(t, f.receiver)
 	long := time.Now().Add(-30 * 24 * time.Hour).UnixMilli()
@@ -483,7 +483,7 @@ func TestNoKeyIsDeletedWhileTheSnapshotTopicCannotBeRead(t *testing.T) {
 }
 
 func TestMarkedNonCurrentKeyGetsADeadlineOnStart(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	retired := writeKey(t, f.receiver, &poolKey{CreatedMS: time.Now().Add(-48 * time.Hour).UnixMilli(), PublishedMS: time.Now().Add(-48 * time.Hour).UnixMilli()})
 	now := time.Now()
 	if err := f.receiver.tend(f.ctx, now); err != nil {
@@ -496,7 +496,7 @@ func TestMarkedNonCurrentKeyGetsADeadlineOnStart(t *testing.T) {
 }
 
 func TestSigningKeyRotationRepublishesTheSnapshot(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	id, _ := onlyKey(t, f.receiver)
 	time.Sleep(5 * time.Millisecond)
@@ -522,7 +522,7 @@ func TestSigningKeyRotationRepublishesTheSnapshot(t *testing.T) {
 }
 
 func TestUnassignedReceiverNeverWritesASnapshot(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	runUntilStopped(t, f.ctx, f.receiver)
 	f.awaitSnapshots(t, 1)
 	other := f.member(t, "receiver-b")
@@ -561,7 +561,7 @@ func takeoverLines(f fixture) int {
 }
 
 func TestTakeoverIsCountedOnceAcrossARepublish(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	successor := f.member(t, "receiver-b")
 	custodian(t, f.ctx, successor, time.Now())
@@ -579,7 +579,7 @@ func TestTakeoverIsCountedOnceAcrossARepublish(t *testing.T) {
 }
 
 func TestSupersededReceiverLeavesTheCustodianUnfenced(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	successor := f.member(t, "receiver-b")
 	old := f.receiver.custody.producer
@@ -615,7 +615,7 @@ func TestSupersededReceiverLeavesTheCustodianUnfenced(t *testing.T) {
 }
 
 func TestTransientCommitErrorRetriesWithoutInitialisingAgain(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	var inits atomic.Int32
 	f.cluster.ControlKey(kmsg.InitProducerID.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		if id := request.(*kmsg.InitProducerIDRequest).TransactionalID; id != nil && *id == "p."+testPool+".custodian" {
@@ -643,7 +643,7 @@ func TestTransientCommitErrorRetriesWithoutInitialisingAgain(t *testing.T) {
 }
 
 func TestRepublishKeepsTheRotationTime(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	id, key := onlyKey(t, f.receiver)
 	// The key was published an hour before the republish.
@@ -671,7 +671,7 @@ func TestRepublishKeepsTheRotationTime(t *testing.T) {
 }
 
 func TestRevokedMemberNeverActsAsCustodian(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	f.receiver.mu.Lock()
 	f.receiver.state.Ended[admin.ReceiverPrincipal(testReceiver)] = true
@@ -691,7 +691,7 @@ func TestRevokedMemberNeverActsAsCustodian(t *testing.T) {
 }
 
 func TestTakeoverReadBackLostIsCountedOnTheNextPass(t *testing.T) {
-	f := newFixture(t, resultStream)
+	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	successor := f.member(t, "receiver-b")
 	ctx, cancel := context.WithCancel(f.ctx)

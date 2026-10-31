@@ -6,7 +6,7 @@ agent: the agent holds each value at its target while it runs.
 [Governance](governance.md) covers identity, grants, signed records and
 the audit trail.
 
-## Sealed credentials
+## Credential envelopes
 
 The agent usually needs a model credential, and each tenant's work runs on
 that tenant's own credential. Every credential has a **source** on the
@@ -31,56 +31,41 @@ when the host has no source for a required credential of the placed agent
 or for a task credential. An optional credential the host has no source for
 is not delivered, and the prompt names it as not supplied.
 
-A host seals nothing when it submits. The receiver that claims a run
-with credentials to deliver makes a P-256 key pair for that
-attempt and publishes a signed **seal request** on the tenant feed: the
-run and attempt, the public key, the credential names and an expiry
-5 minutes out. The host that submitted the run answers it while `wherry
-wait` or `wherry mcp` runs. It checks the request's signature against the
-receiver's registered key, that the receiver is a live member of the run's
-pool and holds the run's current attempt, that the pool's terms approve
-each agent credential for the run's agent, and that the run declares each
-task credential. It resolves each credential's [source](#credential-sources),
-then writes a **seal** to
-its own topic: a compact JWE (`ECDH-ES+A256KW` with `A256GCM`, through
-[go-jose](https://github.com/go-jose/go-jose)) encrypted to the request's
-key and bound in its protected header to the tenant, pool, receiver, key
-thumbprint, run, attempt, credential names and expiry. A seal is at most
-64 KiB, which bounds the values one seal carries. The host logs each
-verified request of its own runs that it skips or refuses, by run,
-receiver and credential name, on standard error.
+A host resolves each credential's [source](#credential-sources) and
+presigns the run's S3 links when it submits, and seals them, with the run's
+redaction key, in the task's **envelope**: a compact JWE (`dir` with
+`A256GCM`, through [go-jose](https://github.com/go-jose/go-jose)) of at most
+64 KiB under a fresh content key, bound to the task's run, tenant, pool,
+`task_started_by` and `task_ended_by`. The task's **wrap** carries the
+content key to the pool's current key, which the pool's key custodian holds
+and publishes in its [snapshot](a2a-extension-v1.md#custodian-snapshot).
+The host signs the task with both in it, and can go offline once `submit`
+returns.
 
-A seal passes from the host to one attempt of one receiver in these steps.
-
-![Credential delivery: the receiver's seal request, the host's checks and sealed answer, and delivery to the job](diagrams/credential-delivery.svg)
-
-Only the requesting receiver can open a seal, and only for that attempt.
-The private key lives in the receiver's memory until the seal opens or the
-wait ends, so a seal on the host's topic opens for no later attempt and for
-no restarted receiver. A redelivered run asks again, and a receiver that
-adopts a running job publishes nothing of the job until its own seal opens.
-Hosts cannot see the broker's claim, so a host seals only to the receiver
-that wrote the run's first `claimed` status, and refuses when a second
-receiver claims the same run. A run adopted by another receiver gets no
-seal, so that receiver stops the job and the run ends `TASK_STATE_FAILED`
-when its seal wait ends.
+The receiver that claims a run makes a P-256 key for that attempt and
+writes an **open request** on the pool's events. The key custodian checks
+that the receiver is the run's current claimant and that the run is neither
+terminal nor past its bound, and answers with an **attempt wrap**, the
+content key encrypted to the attempt's key, or a refusal. Only that attempt
+of that receiver opens the envelope: the attempt's private key lives in the
+receiver's memory until the envelope opens or the wait ends. A receiver
+whose request no key custodian answers within 5 minutes and 120 seconds
+releases the task to the pool. A run whose envelope no holder of a pool key
+can open ends `TASK_STATE_FAILED`, and its host resubmits it under the
+pool's current key until its `task_started_by`.
 
 The receiver redacts each credential of 8 bytes or more that it delivered,
 with or without its trailing newline and as JSON escapes it, from
 everything it publishes for the attempt. Each marker is an HMAC of the
-credential's name under a key the host makes for the run and sends in every
-seal, so no marker maps to a name without that key. The receiver redacts
-no value shorter than 8 bytes once its trailing CR and LF are removed, and
-logs `run <id>: credential <name> too short to redact`. Seal requests and
-the failed status of an unanswered seal request carry credential names and
-no values.
+credential's name under the run's redaction key, so no marker maps to a
+name without that key. The receiver redacts no value shorter than 8 bytes
+once its trailing CR and LF are removed, and logs
+`run <id>: credential <name> too short to redact`.
 
-A run whose seal does not arrive within 5 minutes ends in
-`TASK_STATE_FAILED` with a message naming each credential the host did not
-answer. An agent that finds a credential missing or refused during the run
-reports `TASK_STATE_AUTH_REQUIRED` naming the credential, and the run ends
-`TASK_STATE_FAILED`. Each message names its credentials in `credential` data
-parts, and neither run is resumed.
+An agent that finds a credential missing or refused during the run reports
+`TASK_STATE_AUTH_REQUIRED` naming the credential, and the run ends
+`TASK_STATE_FAILED`. The message names its credentials in `credential` data
+parts, and the run is not resumed.
 
 Everything else the agent needs comes from the platform or from the task:
 the image or host install, network access, CA bundles and SSH known hosts
@@ -110,13 +95,11 @@ pool whose terms list the agent's credentials.
    credential as `missing`.
 
 3. Submit the task. Give each task credential its target with
-   `--credential NAME:file=FILE` or `--credential NAME:env=VAR`.
+   `--credential NAME:file=FILE` or `--credential NAME:env=VAR`. `submit`
+   resolves each source and refuses the task, naming the credential, when
+   one fails.
 
-4. Keep `wherry wait RUN_ID` or `wherry mcp` running until the task
-   starts, so the host answers the receiver's
-   [seal request](#sealed-credentials) within 5 minutes.
-
-5. When the run ends `TASK_STATE_FAILED` naming a credential, fix that
+4. When the run ends `TASK_STATE_FAILED` naming a credential, fix that
    credential's source and submit a new run.
 
 ## A model credential per pool
@@ -191,10 +174,9 @@ account at the model provider.
 
 1. Issue a new key at the model provider for the pool's agents.
 2. Replace the value at the credential's source on each of the tenant's
-   hosts. The answering process resolves the source each time it answers a
-   seal request, so runs that start afterwards get the new key with no
-   restart.
-3. Wait for the runs that started with the old key to end. `wherry status`
+   hosts. `submit` resolves the source for each run, so runs submitted
+   afterwards get the new key with no restart.
+3. Wait for the runs submitted with the old key to end. `wherry status`
    lists each run and its state.
 4. Revoke the old key at the model provider.
 
@@ -208,52 +190,44 @@ Prerequisites: the tenant's account at the model provider.
 2. Remove the value from the credential's source on each of the tenant's
    hosts, or replace it with a new key as in
    [Rotate a pool's credential](#rotate-a-pool-s-credential). Until a source
-   resolves, seal requests for the credential go unanswered and those runs
-   end `TASK_STATE_FAILED`.
+   resolves, `submit` refuses runs that deliver the credential.
 
-When a receiver is revoked, rotate each credential sealed to it, as in
+When a receiver is revoked, rotate each credential it could open, as in
 [Revoke a host or receiver](operations.md#revoke-a-host-or-receiver).
 
 ## Credential sources
 
-The answering process, `wherry wait` or `wherry mcp`, resolves each source
-when it answers a seal request, after it authorises the request and before it
-takes the attempt's lock, so a slow source holds up no other answerer of the
-host. The configuration holds no value and no source prompts.
+A submitting host, and a host resubmitting a run, resolves each source the
+run delivers for the run's [envelope](a2a-extension-v1.md#submission). The
+configuration holds no value and no source prompts.
 
 | Source | Value |
 | --- | --- |
 | `file` | the file's contents as they are; a trailing newline is part of the value the agent gets, and the receiver redacts the value with and without it |
-| `env` | the variable in the answering process's environment; unset or empty fails the answer |
-| `command` | the standard output of the program, run without a shell with the answering process's environment and no standard input, byte for byte as for a file; standard error is discarded |
+| `env` | the variable in the submitting process's environment; unset or empty fails the submission |
+| `command` | the standard output of the program, run without a shell with the submitting process's environment and no standard input, byte for byte as for a file; standard error is discarded |
 
-A submitting host, and a host resubmitting a run, also resolves each source
-the run delivers, for the run's [envelope](a2a-extension-v1.md#submission). A
-`command` source then runs with `WHERRY_TASK_END_BY` set to the task's
+A `command` source runs with `WHERRY_TASK_END_BY` set to the task's
 `task_ended_by` as an RFC 3339 time in UTC, in place of every copy the
 process would inherit; the submitting process's own environment is
 unchanged.
 
 A command has 60 seconds, time for an interactive unlock such as a password
 manager's, and at most 64 KiB of output. A command that exits non-zero, runs
-out of time or writes more fails the answer. A failed source leaves the
-request unanswered, logged by credential name and cause alone. The
-answerer tries it again each second until the request expires; after a
-command source fails, it waits 60 seconds before it resolves the request's
-sources again, so an interactive unlock prompts no more often than it can
-be answered:
+out of time or writes more fails the submission, which names the
+credential and the cause alone:
 
 ```
-run <id>: resolve credential <name>: its command exited with status 1
+resolve credential <name>: its command exited with status 1
 ```
 
 A `file` source must name a regular file that its group cannot write and
 others cannot read, write or execute. Mode 0600 is the recommended mode.
 Group read is accepted, so a secrets agent can template the file for a
-service group at mode 0640. A file that breaks the rule fails the answer:
+service group at mode 0640. A file that breaks the rule fails the submission:
 
 ```
-run <id>: resolve credential <name>: its file is writable by its group or open to others; chmod 600 it
+resolve credential <name>: its file is writable by its group or open to others; chmod 600 it
 ```
 
 The `submit` of the [MCP server](mcp.md) refuses as an input every file

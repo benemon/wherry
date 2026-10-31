@@ -68,14 +68,14 @@ func (source Source) resolve(ctx context.Context, environment []string) ([]byte,
 		ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 		defer cancel()
 		command := exec.CommandContext(ctx, source.Command[0], source.Command[1:]...)
-		stdout := &boundedBuffer{limit: signed.MaxSeal}
+		stdout := &boundedBuffer{limit: signed.MaxEnvelope}
 		// WaitDelay stops a child that keeps the output open from holding the answer past the timeout.
 		command.Stdout, command.WaitDelay, command.Env = stdout, time.Second, environment
 		err := command.Run()
 		var exit *exec.ExitError
 		switch {
 		case stdout.over:
-			return nil, fmt.Errorf("its command wrote over %d bytes", signed.MaxSeal)
+			return nil, fmt.Errorf("its command wrote over %d bytes", signed.MaxEnvelope)
 		case errors.Is(ctx.Err(), context.DeadlineExceeded):
 			return nil, fmt.Errorf("its command did not finish within %s", commandTimeout)
 		case errors.As(err, &exit):

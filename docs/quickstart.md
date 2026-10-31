@@ -122,8 +122,7 @@ wherry wait run-<id> --config-file "$config"
 ```
 
 `watch` prints the agent's transcript as it runs, then the final state and
-the agent's message. It answers the run's credential requests while it
-waits, so start it right after `submit`.
+the agent's message.
 
 ### 5. Stop
 
@@ -658,9 +657,10 @@ credentials:
 invalid input: auth required: credential claude-oauth-token is not in this host's configuration
 ```
 
-When a receiver claims a task and asks for the credential, `wherry wait`
-seals the file's contents byte for byte to that receiver. A credential can
-also come from an environment variable of the answering process,
+`wherry submit` seals the file's contents byte for byte in the task's
+envelope under the pool's key, and the receiver that claims the task opens
+it through the pool's key custodian. A credential can also come from an
+environment variable of the submitting process,
 `env: CLAUDE_CODE_OAUTH_TOKEN`, or from a command's output,
 `command: [op, read, "op://wherry/claude/credential"]`
 ([credential sources](security.md#credential-sources)).
@@ -723,10 +723,8 @@ wherry wait run-<id>
 `wait` prints the agent's message and a line for each output it wrote,
 once the run ends. It exits 0 for `TASK_STATE_COMPLETED` and with a code
 per state otherwise, as [exit codes](commands.md#exit-codes) lists. It
-waits 2 hours 10 minutes by default (`--timeout` changes that). While it
-waits it answers `nomad-1`'s request for `claude-oauth-token`. Start it
-within 5 minutes of `nomad-1` claiming the task, and keep it running until
-the task starts, or the run ends `TASK_STATE_FAILED`.
+waits 2 hours 10 minutes by default (`--timeout` changes that). The run
+needs nothing more from the host once `submit` returns.
 
 In another terminal, `wherry logs -f run-<id>` prints the agent's
 transcript lines as the agent runs and exits when the run ends.
@@ -736,11 +734,10 @@ transcript lines as the agent runs and exits when the run ends.
 
 ### If the run needs a credential
 
-A run that ends in `TASK_STATE_FAILED` with a message naming a credential
-received no seal for it within 5 minutes: the host was not running `wait`,
-or its source did not resolve, which the answerer logs as
-`run <id>: resolve credential <name>: <cause>`. The run does not resume.
+`wherry submit` refuses a task whose credential source does not resolve,
+with `resolve credential <name>: <cause>`. A run that ends in
+`TASK_STATE_FAILED` with a message naming a credential found it missing or
+refused while it ran. The run does not resume.
 
 1. Fix the credential's source in `credentials` in the host configuration.
 2. Submit the task again with `wherry submit`, which starts a new run.
-3. Run `wherry wait` with the new run ID, which answers its request.

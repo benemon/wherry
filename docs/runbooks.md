@@ -149,32 +149,34 @@ Then:
   a margin, as in [Create a pool](operations.md#create-a-pool).
 - Resubmit the failed runs once the cause is fixed.
 
-## WherryCredentialRequestsUnanswered
+## WherryOpenRequestsUnanswered
 
-A receiver that claims a run with credentials to deliver publishes a seal
-request, and the submitting host answers it while `wherry wait` or
-`wherry mcp` runs. A request no host answers within 5 minutes ends the run
-`TASK_STATE_FAILED`. The alert fires on 2 or more `unanswered` seal waits
-(`wherry_seal_waits_total`) for one tenant in an hour.
+A receiver that claims a run writes an open request on the pool's events,
+and the pool's key custodian answers it with an attempt wrap or a refusal.
+A receiver whose request no key custodian answers within 5 minutes and 120
+seconds logs `run <id>: no answer to the open request for attempt <n>` and
+releases the task to the pool for another delivery. The alert fires on 2
+or more `unanswered` open waits (`wherry_open_waits_total`) for one tenant
+in a pool in an hour.
 
 Confirm it:
 
-1. Run `wherry status RUN_ID`. The message reads
-   `credential <name> was not answered within 5m` and names each credential
-   the host did not answer.
-2. Run `wherry receivers`. An agent's `credentials` marks `missing` each
-   credential the host's configuration has no source for.
-3. Read the standard error of the host's `wherry wait` or `wherry mcp`. A
-   failed source logs
-   `run <id>: resolve credential <name>: <cause>`.
+1. Read the claiming receivers' logs for
+   `run <id>: no answer to the open request for attempt <n>`.
+2. Run `wherry receivers`. The pool's key custodian is one of its `live`
+   receivers.
+3. Read the pool's receivers' logs for lines starting `custodian:`, such
+   as `custodian: published pool <pool> key <id> (<reason>)`,
+   `custodian: lost the custodian group's assignment for pool <pool>` and
+   `custodian group: <cause>`, and for Kafka denials
+   (`wherry_denials_total`).
 
-Then, on the tenant's host, as in
-[Run credentialed tasks](security.md#run-credentialed-tasks):
+Then:
 
-- Add a source for each `missing` credential, or fix the source the log
-  names, such as a file mode or a command that exits non-zero.
-- Keep `wherry wait RUN_ID` or `wherry mcp` running until the run starts.
-- Submit the run again.
+- Start or restart a receiver of the pool, so that the custodian group
+  assigns a live member and it publishes its snapshot.
+- Fix the broker access a denial names, as in
+  [Prepare Kafka](operations.md#prepare-kafka).
 
 ## WherryPluginRestartLoop
 

@@ -76,7 +76,6 @@ func TestFlushedTranscriptEndsWithAnEmptyLastChunk(t *testing.T) {
 func TestRunWithoutLinesEndsWithALastChunk(t *testing.T) {
 	fake := &fakePlugin{stream: []string{}, outputs: []pluginsdk.Output{outcomeOutput(doneOutcome)}}
 	f := newFixtureWith(t, nil, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
-	f.answer(t, credentialName)
 	if ack := f.execute(t, f.submit(t, f.host, nil), 1); ack != kgo.AckAccept {
 		t.Fatalf("ack %v; logs:\n%s", ack, f.logs.String())
 	}
@@ -91,7 +90,6 @@ func TestRunWithoutLinesEndsWithALastChunk(t *testing.T) {
 
 func TestStatusesAreDualWritten(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -110,7 +108,6 @@ func TestStatusesAreDualWritten(t *testing.T) {
 
 func TestEchoSharesTheClaimedTransaction(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	record := f.submit(t, f.host, nil)
 	f.execute(t, record, 1)
 	records := f.records(t, admin.TenantTopic(testTenant))
@@ -160,41 +157,6 @@ func TestFailedStatusSharesItsResultsTransaction(t *testing.T) {
 	}
 }
 
-func TestSealWaitExpiryFailsWithoutCredentialValue(t *testing.T) {
-	f := newFixture(t, resultStream)
-	record := f.submit(t, f.host, nil)
-	before := time.Now().Add(-time.Second)
-	if status := f.execute(t, record, 1); status != kgo.AckReject {
-		t.Fatalf("status %v, want reject", status)
-	}
-	f.plugin.mu.Lock()
-	dispatches, releases := f.plugin.dispatches, f.plugin.releases
-	f.plugin.mu.Unlock()
-	if dispatches != 0 || releases != 1 {
-		t.Fatalf("dispatches=%d releases=%d, want 0 and 1", dispatches, releases)
-	}
-	statuses := f.feedStatuses(t)
-	if len(statuses) != 2 || len(f.eventStatuses(t)) != 2 {
-		t.Fatalf("feed statuses=%d, want claimed and terminal on the feed and the pool's events", len(statuses))
-	}
-	terminal := statuses[1]
-	got := terminal.StatusUpdate.Status
-	if terminal.Wherry.Kind != "terminal" || got.State != wire.TaskStateFailed {
-		t.Fatalf("terminal status %#v, want FAILED", terminal)
-	}
-	want := "credential " + credentialName + " was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again"
-	if got.Message == nil || got.Message.Role != wire.RoleAgent || len(got.Message.Parts) != 2 || got.Message.Parts[0].Text != want || strings.Contains(got.Message.Parts[0].Text, testToken) ||
-		string(got.Message.Parts[1].Data) != `{"credential":"`+credentialName+`"}` {
-		t.Fatalf("status message %#v, want credential name and no value, and the credential part", got.Message)
-	}
-	if at, err := time.Parse(time.RFC3339, got.Timestamp); err != nil || at.Before(before) || at.After(time.Now()) {
-		t.Fatalf("status timestamp %q is not the time of the status: %v", got.Timestamp, err)
-	}
-	if task := f.lastTask(t); task.Status.State != wire.TaskStateFailed || task.Status.Message == nil || task.Status.Message.Parts[0].Text != want {
-		t.Fatalf("result %#v, want FAILED beside the terminal status", task)
-	}
-}
-
 // lab and cloud both launch claude; a task routed to cloud names cloud in its start failure.
 func TestStartFailureNamesTheRoutedProfile(t *testing.T) {
 	m := newMultiFixture(t)
@@ -210,7 +172,6 @@ func TestStartFailureNamesTheRoutedProfile(t *testing.T) {
 func TestTaskMetadataRecordsPlacement(t *testing.T) {
 	t.Run("dispatched", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		f.answer(t, credentialName)
 		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
 			t.Fatalf("status %v", status)
 		}
@@ -252,7 +213,6 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.answer(t, credentialName)
 			f.plugin.stream = test.stream
 			if test.progress {
 				f.plugin.endDelay = 3 * renewInterval
@@ -312,7 +272,6 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 
 func TestOversizedAgentOutputIsBounded(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	huge := strings.Repeat("x", 3<<19)
 	f.plugin.stream = []string{`{"type":"assistant","message":"` + huge + `"}`, completedWith(strings.Repeat("x", 3<<17))}
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
@@ -337,7 +296,6 @@ func completedWith(text string) string {
 // hold each run's claimed, started and terminal statuses and nothing else.
 func TestProgressStaysOffTheStateTopics(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	// A second line moves the transcript, so a progress tick commits.
 	f.plugin.stream = append([]string{`{"type":"system"}`}, noResultStream...)
 	f.plugin.endDelay = 4 * renewInterval
@@ -367,8 +325,9 @@ func TestProgressStaysOffTheStateTopics(t *testing.T) {
 			t.Fatalf("%s pool events hold statuses %v and %d other records, want only %v", run, kinds, len(events.others[run]), want)
 		}
 	}
-	if records := f.records(t, admin.PoolEventsTopic(testPool)); len(records) != len(runs)*len(want) {
-		t.Fatalf("pool events hold %d records, want %d", len(records), len(runs)*len(want))
+	// Each run's open adds its request, the claim decision and the attempt wrap.
+	if records := f.records(t, admin.PoolEventsTopic(testPool)); len(records) != len(runs)*(len(want)+3) {
+		t.Fatalf("pool events hold %d records, want %d", len(records), len(runs)*(len(want)+3))
 	}
 }
 
@@ -376,7 +335,6 @@ func TestProgressStaysOffTheStateTopics(t *testing.T) {
 // chunks are not committed either.
 func TestProgressCommitsWithItsChunks(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.plugin.stream = append([]string{`{"type":"system"}`}, noResultStream...)
 	f.plugin.endDelay = 4 * renewInterval
 	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.ReceiverProgressTopic(testReceiver)).Operations(kadm.OpAny))
@@ -393,7 +351,6 @@ func TestProgressCommitsWithItsChunks(t *testing.T) {
 func TestProgressOnlyWhenTheTranscriptMoves(t *testing.T) {
 	stream := []string{`{"type":"assistant","message":"one"}`, `{"type":"assistant","message":"two"}`, `{"type":"assistant","message":"three"}`, completedWith("answer")}
 	f := newFixture(t, stream)
-	f.answer(t, credentialName)
 	f.plugin.pauses, f.plugin.endDelay = map[int]time.Duration{2: 6 * renewInterval}, 3*renewInterval
 	record := f.submit(t, f.host, nil)
 	if status := f.execute(t, record, 1); status != kgo.AckAccept {
@@ -517,7 +474,6 @@ func TestReceiverReleasesAfterTerminal(t *testing.T) {
 	})
 	t.Run("dispatch error with no job", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		f.answer(t, credentialName)
 		f.plugin.dispatchErr = errors.New("dispatch failed")
 		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 			t.Fatalf("status %v", status)
@@ -685,7 +641,6 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
 	stream := []string{`{"type":"assistant","message":"one"}`, `{"type":"assistant","message":"two"}`, `{"type":"assistant","message":"three"}`, completedWith("adopted answer")}
 	f := newFixture(t, stream)
-	f.answer(t, credentialName)
 	f.plugin.job, f.plugin.endDelay = pluginsdk.JobRunning, 4*renewInterval
 	record := f.submit(t, f.host, nil)
 	resume := int64(len(stream[0]) + 1)
@@ -910,7 +865,6 @@ func shortLock(f fixture, lock time.Duration) {
 func TestFollowLinkLossResumesFromOffset(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.plugin.linkLost = 1
-	f.answer(t, credentialName)
 	f.submit(t, f.host, nil)
 	if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
 		t.Fatal(err)
@@ -938,7 +892,6 @@ func TestFollowLinkLossFailsAfterOneLockDuration(t *testing.T) {
 	f := newFixture(t, noResultStream)
 	f.plugin.linkLost = 1 << 20
 	shortLock(f, 2*time.Second)
-	f.answer(t, credentialName)
 	f.submit(t, f.host, nil)
 	done := make(chan error, 1)
 	started := time.Now()
@@ -973,7 +926,6 @@ func TestFollowErrorResumesFromOffsetByJobState(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), test.state
-			f.answer(t, credentialName)
 			f.submit(t, f.host, nil)
 			if err := f.receiver.claimOne(f.ctx, f.ctx, func() {}); err != nil {
 				t.Fatal(err)
@@ -1026,7 +978,6 @@ func TestFollowErrorFailsAfterOneLockDuration(t *testing.T) {
 			f := newFixture(t, noResultStream)
 			f.plugin.linkLost, f.plugin.lostErr, f.plugin.job, f.plugin.lookupErr = 1<<20, errors.New("stream reset"), pluginsdk.JobRunning, test.lookupErr
 			shortLock(f, 2*time.Second)
-			f.answer(t, credentialName)
 			f.submit(t, f.host, nil)
 			done := make(chan error, 1)
 			started := time.Now()
@@ -1055,7 +1006,6 @@ func TestFollowErrorFailsAfterOneLockDuration(t *testing.T) {
 func TestFollowErrorOnANeverStartedJobIsAStartFailure(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.plugin.linkLost, f.plugin.lostErr, f.plugin.job = 1, errors.New("stream reset"), pluginsdk.JobNeverStarted
-	f.answer(t, credentialName)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
 	}
@@ -1069,7 +1019,6 @@ func TestFollowErrorOnANeverStartedJobIsAStartFailure(t *testing.T) {
 
 func TestOversizedDispatchIsLoggedByName(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.plugin.dispatchErr = pluginsdk.ErrMessageTooLarge
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v", status)
@@ -1082,7 +1031,6 @@ func TestOversizedDispatchIsLoggedByName(t *testing.T) {
 func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 	const secret = "token=s3cr3t-dispatch-detail"
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.plugin.dispatchErr = errors.New(secret)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v", status)
@@ -1101,7 +1049,6 @@ func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 
 func TestDispatchErrorIsLoggedRedacted(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.plugin.dispatchErr = &pluginsdk.Error{Op: "write variable nomad/jobs/agent-run-a-t1", Class: "denied", Err: errors.New("status 403: echoed " + testToken)}
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v", status)
@@ -1201,7 +1148,6 @@ func TestOutcomeFileEndsTheRun(t *testing.T) {
 				fake.outputs = []pluginsdk.Output{outcomeOutput(test.outcome)}
 			}
 			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
-			f.answer(t, credentialName)
 			if ack := f.execute(t, f.submit(t, f.host, nil), 1); ack != test.ack {
 				t.Fatalf("ack %v, want %v", ack, test.ack)
 			}
@@ -1232,7 +1178,6 @@ func TestOutcomeFileEndsTheRun(t *testing.T) {
 // outcome file is read under.
 func TestConcludeReadsTermsOnce(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	lowered := testTerms()
 	lowered.OutputLimit = 8
 	f.plugin.collecting = func() {
@@ -1291,7 +1236,6 @@ func TestCapturedOutcomes(t *testing.T) {
 					}
 					fake := &fakePlugin{stream: noResultStream, ended: &pluginsdk.Terminal{Started: true, ExitCode: exit}, outputs: []pluginsdk.Output{outcomeOutput(string(data))}}
 					f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
-					f.answer(t, credentialName)
 					f.execute(t, f.submit(t, f.host, nil), 1)
 					status := f.lastTask(t).Status
 					var texts []string
@@ -1332,7 +1276,6 @@ func TestEndedAgentNamesItsReason(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			fake := &fakePlugin{stream: noResultStream, ended: test.terminal, outputs: test.outputs}
 			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
-			f.answer(t, credentialName)
 			if ack := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
 				task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md", Required: true}}
 			}), 1); ack != kgo.AckReject {
@@ -1350,7 +1293,6 @@ func TestOutcomeFileIsNotAnOutput(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, outputs: []pluginsdk.Output{
 		{Name: wire.OutcomeDir + "/notes.md", Size: 5, Data: []byte("notes")}, {Name: "report.md", Size: 6, Data: []byte("report")},
 	}}})
-	f.answer(t, credentialName)
 	f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md", Required: true}}
 	}), 1)
@@ -1390,7 +1332,6 @@ func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
 				map[string]string{"text": test.text}, map[string]any{"data": map[string]string{"credential": "cred-lab"}},
 			}}})
 			f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, outputs: []pluginsdk.Output{outcomeOutput(string(outcome))}}})
-			f.answer(t, credentialName)
 			f.execute(t, f.submit(t, f.host, nil), 1)
 			task := f.lastTask(t)
 			terminal := f.feedStatuses(t)[len(f.feedStatuses(t))-1].StatusUpdate.Status
@@ -1431,7 +1372,6 @@ func TestOutcomeMessageTravelsRawWhenEscapingGrowsIt(t *testing.T) {
 	f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, outputs: []pluginsdk.Output{
 		outcomeOutput(`{"state":"TASK_STATE_FAILED","message":{"role":"ROLE_AGENT","parts":[{"text":"` + text + `"}]}}`),
 	}}})
-	f.answer(t, credentialName)
 	f.execute(t, f.submit(t, f.host, nil), 1)
 	part := f.lastTask(t).Status.Message.Parts[0]
 	if part.Text != "" || string(part.Raw) != strings.Repeat("\x01", 64) || part.MediaType != "text/plain" {
@@ -1441,7 +1381,6 @@ func TestOutcomeMessageTravelsRawWhenEscapingGrowsIt(t *testing.T) {
 
 func TestReceiverRoutesToMatchedProfile(t *testing.T) {
 	m := newMultiFixture(t)
-	m.answer(t, "cred-cloud")
 	if status := m.execute(t, "run-lambda", accelerated, 1); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -1462,7 +1401,6 @@ func TestReceiverRoutesToMatchedProfile(t *testing.T) {
 
 func TestReceiverRedeliveryAdoptsViaLookup(t *testing.T) {
 	m := newMultiFixture(t)
-	m.answer(t, "cred-cloud")
 	m.cloud.job = pluginsdk.JobRunning
 	if status := m.execute(t, "run-moved", cpu, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
@@ -1572,7 +1510,6 @@ func TestShutdownDuringACommitCommitsTheDeliveredLine(t *testing.T) {
 			}
 			t.Cleanup(base.Close)
 			f.receiver.base = base
-			f.answer(t, credentialName)
 			f.submit(t, f.host, nil)
 			if err := f.receiver.claimOne(ctx, ctx, func() {}); err != nil && !errors.Is(err, context.Canceled) {
 				t.Fatalf("claimOne after shutdown: %v", err)
@@ -1589,6 +1526,7 @@ func TestShutdownDuringACommitCommitsTheDeliveredLine(t *testing.T) {
 
 func TestShutdownDuringTheStartedCommitCommitsAnAdoptersHeldLines(t *testing.T) {
 	f, record := adopting(t)
+	f.quiet()
 	ctx, shutdown := context.WithCancel(f.ctx)
 	base, err := kgo.NewClient(append(f.receiver.base.Opts(), kgo.WithHooks(shutdownAt{f, "started", shutdown}))...)
 	if err != nil {
@@ -1597,9 +1535,9 @@ func TestShutdownDuringTheStartedCommitCommitsAnAdoptersHeldLines(t *testing.T) 
 	t.Cleanup(base.Close)
 	f.receiver.base = base
 	done := f.executing(t, ctx, record, 2)
-	request := f.request(t, 1)
+	f.request(t, 1)
 	f.held(t)
-	f.sealFor(t, request, map[string][]byte{credentialName: []byte(testToken)})
+	f.serving.Store(true)
 	if status := <-done; status != kgo.AckRelease {
 		t.Fatalf("adopter ended %v, want the task released; logs:\n%s", status, f.logs.String())
 	}
@@ -1633,7 +1571,6 @@ func TestDenialStopsClaimingAndAccessResumesIt(t *testing.T) {
 	f := newFixture(t, resultStream)
 	ctx, stop := context.WithCancel(f.ctx)
 	defer stop()
-	f.answer(t, credentialName)
 	f.run(t, ctx)
 	f.submit(t, f.host, nil)
 	f.await(t, "run-a", anyTask)
@@ -1663,7 +1600,6 @@ func TestDenialStopsClaimingAndAccessResumesIt(t *testing.T) {
 
 func TestDeniedReceiverDoesNotClaim(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	// A transactional ID denial must classify as denial: claiming with it would fail every run's first write.
 	f.receiver.deny(kerr.TransactionalIDAuthorizationFailed, capWrite)
 	f.submit(t, f.host, nil)
@@ -1759,7 +1695,6 @@ func TestDeniedRunDoesNotWaitOnItsStatus(t *testing.T) {
 
 func TestShareGroupDenialRetestedByClaim(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.receiver.deny(kerr.GroupAuthorizationFailed, capRead)
 	f.submit(t, f.host, nil)
 	ctx, stop := context.WithTimeout(f.ctx, 5*time.Second)
@@ -1897,7 +1832,6 @@ func (f fixture) kinds(t *testing.T) []string {
 func TestAmbiguousDispatchAdoptsTheExistingJob(t *testing.T) {
 	t.Run("lookup finds it", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		f.answer(t, credentialName)
 		f.plugin.dispatchErr = errors.New("register response lost")
 		f.plugin.job = pluginsdk.JobRunning
 		if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
@@ -1911,7 +1845,6 @@ func TestAmbiguousDispatchAdoptsTheExistingJob(t *testing.T) {
 	})
 	t.Run("redelivery finds it", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		f.answer(t, credentialName)
 		f.plugin.dispatchErr = errors.New("register response lost")
 		f.plugin.lookupErr = errors.New("lookup failed")
 		record := f.submit(t, f.host, nil)
@@ -1985,7 +1918,6 @@ func TestMismatchedJobIsPurgedNotAdopted(t *testing.T) {
 
 func TestNeverStartedJobIsAPlatformStartFailure(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.plugin.job = pluginsdk.JobNeverStarted
 	if status := f.execute(t, f.submit(t, f.host, nil), 2); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
@@ -2008,7 +1940,6 @@ func TestNeverStartedPluginClassIsAPlatformStartFailure(t *testing.T) {
 		t.Run(class, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.plugin.stream, f.plugin.neverStarted, f.plugin.neverClass = nil, true, class
-			f.answer(t, credentialName)
 			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 				t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
 			}
@@ -2032,7 +1963,6 @@ func TestNeverStartedReasonIsLoggedRedacted(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.plugin.stream, f.plugin.neverStarted, f.plugin.neverReason = nil, true, test.reason
-			f.answer(t, credentialName)
 			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 				t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
 			}
@@ -2125,7 +2055,6 @@ func TestBudgetExhaustedByStartFailuresNamesTheLastCause(t *testing.T) {
 			f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {}})
 			testActiveRun(t, f, "run-b", 1).deliver(map[string][]byte{"github-token": []byte(otherToken)})
 			f.plugin.neverStarted, f.plugin.neverReason = true, test.reason
-			f.answer(t, credentialName)
 			if status := f.execute(t, f.submit(t, f.host, nil), 4); status != kgo.AckReject {
 				t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
 			}
@@ -2154,7 +2083,6 @@ func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			test.setup(t, f)
-			f.answer(t, credentialName)
 			if status := f.execute(t, f.submit(t, f.host, nil), test.attempt); status != kgo.AckRelease {
 				t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
 			}
@@ -2173,7 +2101,6 @@ func TestEveryStartFailurePurgesBeforeRelease(t *testing.T) {
 
 func TestPurgeRetriedUntilItSucceeds(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.plugin.outcome, f.plugin.purgeFailures = pluginsdk.OutcomeNothingCreated, 2
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
@@ -2190,7 +2117,6 @@ func TestPurgeFailingPastTheDeadlineFails(t *testing.T) {
 	purgeDeadline = time.Second
 	t.Cleanup(func() { purgeDeadline = previous })
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.plugin.outcome, f.plugin.purgeErr = pluginsdk.OutcomeNothingCreated, errors.New("deregister denied")
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject", status)
@@ -2216,7 +2142,6 @@ func TestStartFailureAtTheDeliveryBudgetFails(t *testing.T) {
 	} {
 		t.Run(fmt.Sprint(test.attempt), func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.answer(t, credentialName)
 			f.plugin.outcome = pluginsdk.OutcomeNothingCreated
 			if status := f.execute(t, f.submit(t, f.host, nil), test.attempt); status != test.ack {
 				t.Fatalf("status %v, want %v", status, test.ack)
@@ -2244,7 +2169,6 @@ func TestOversizedHandleIsRejected(t *testing.T) {
 	} {
 		t.Run(fmt.Sprint(test.size), func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.answer(t, credentialName)
 			f.plugin.handleSize = test.size
 			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != test.ack {
 				t.Fatalf("status %v, want %v", status, test.ack)
@@ -2279,7 +2203,6 @@ func TestOversizedJobNameIsRejected(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.answer(t, credentialName)
 			f.plugin.jobName = strings.Repeat("j", test.size)
 			if test.attempt > 1 {
 				f.plugin.job = pluginsdk.JobRunning
@@ -2327,11 +2250,6 @@ func TestReleasesAtTheBudgetFail(t *testing.T) {
 		// readable is false when the fault also blocks reading the feed back.
 		readable bool
 	}{
-		{"read seals", func(t *testing.T, f fixture) {
-			if _, err := kadm.NewClient(f.service.Admin).DeleteTopics(f.ctx, admin.HostTopic(testTenant, testHost)); err != nil {
-				t.Fatal(err)
-			}
-		}, true},
 		{"read events", func(t *testing.T, f fixture) {
 			f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 				f.cluster.KeepControl()
@@ -2348,7 +2266,6 @@ func TestReleasesAtTheBudgetFail(t *testing.T) {
 				return response, nil, true
 			})
 		}, false},
-		{"adoption lookup", func(t *testing.T, f fixture) { f.plugin.lookupErr = errors.New("lookup failed") }, true},
 		{"mismatch stop", func(t *testing.T, f fixture) {
 			f.plugin.job, f.plugin.jobAgent, f.plugin.stopErr = pluginsdk.JobRunning, "codex", errors.New("stop failed")
 		}, true},
@@ -2358,7 +2275,6 @@ func TestReleasesAtTheBudgetFail(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.answer(t, credentialName)
 			record := f.submit(t, f.host, nil)
 			admitted := f.admitted(t, record)
 			test.setup(t, f)
@@ -2377,7 +2293,6 @@ func TestReleasesAtTheBudgetFail(t *testing.T) {
 
 func TestShutdownAtTheBudgetStillReleases(t *testing.T) {
 	f := newFixture(t, noResultStream)
-	f.answer(t, credentialName)
 	f.plugin.endDelay = 30 * time.Second
 	record := f.submit(t, f.host, nil)
 	admitted := f.admitted(t, record)
@@ -2435,7 +2350,6 @@ func TestJobOfAnotherProfileIsLeftToIt(t *testing.T) {
 	// lab and cloud share one backend: both find the job, labelled with cloud.
 	m.lab.job, m.lab.jobProfile = pluginsdk.JobRunning, "cloud"
 	m.cloud.job = pluginsdk.JobRunning
-	m.answer(t, "cred-cloud")
 	if status := m.execute(t, "run-shared", cpu, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v", status)
 	}
@@ -2452,7 +2366,6 @@ func TestJobOfAnotherProfileIsLeftToIt(t *testing.T) {
 
 func TestNothingCreatedSkipsReconcile(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.plugin.outcome = pluginsdk.OutcomeNothingCreated
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)

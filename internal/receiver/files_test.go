@@ -62,7 +62,6 @@ func (f fixture) lastRun() pluginsdk.Run {
 
 func TestInputPartsLandAsNamedFiles(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	record := f.submit(t, f.host, func(task *wire.Submission) {
 		task.Message.Parts = append(task.Message.Parts,
 			wire.Part{Raw: wire.StdBytes("a,b\n1,2\n"), Filename: "data.csv", MediaType: "text/csv"},
@@ -102,7 +101,6 @@ func TestInputPartsLandAsNamedFiles(t *testing.T) {
 // reference data part, never a url part.
 func TestNoPartIsAnUnstoredURL(t *testing.T) {
 	f := newFixture(t, []string{strings.Repeat("x", wire.MaxLine+1), doneOutcome})
-	f.answer(t, credentialName)
 	record := f.submit(t, f.host, func(task *wire.Submission) {
 		task.Message.Parts = append(task.Message.Parts, wire.Part{Raw: wire.StdBytes("a,b\n"), Filename: "data.csv"}, wire.Part{Data: jsontext.Value(`{"k":1}`), Filename: "config"})
 	})
@@ -178,12 +176,8 @@ func TestLongTaskCredentialNameIsRejected(t *testing.T) {
 
 func TestCredentialsReachThePluginAtTheirTargets(t *testing.T) {
 	f := newFixture(t, resultStream)
+	f.envelope = sealing(map[string][]byte{credentialName: []byte(testToken), "deploy-key": []byte(deployValue)})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withDeployKey), 1)
-	request := f.request(t, 1)
-	if !slices.Equal(request.Credentials, []string{credentialName}) || !slices.Equal(request.TaskCredentials, []string{"deploy-key"}) {
-		t.Fatalf("seal request names %v and task credentials %v", request.Credentials, request.TaskCredentials)
-	}
-	f.sealFor(t, request, map[string][]byte{credentialName: []byte(testToken), "deploy-key": []byte(deployValue)})
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
@@ -202,12 +196,8 @@ func TestTaskCredentialsOfAnAgentWithoutCredentials(t *testing.T) {
 	terms := testTerms()
 	terms.Agents[0].Credentials = nil
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
+	f.envelope = sealing(map[string][]byte{"deploy-key": []byte(deployValue)})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withDeployKey), 1)
-	request := f.request(t, 1)
-	if request.Credentials == nil || len(request.Credentials) != 0 || !slices.Equal(request.TaskCredentials, []string{"deploy-key"}) {
-		t.Fatalf("seal request names %#v and task credentials %v", request.Credentials, request.TaskCredentials)
-	}
-	f.sealFor(t, request, map[string][]byte{"deploy-key": []byte(deployValue)})
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
@@ -218,7 +208,6 @@ func TestTaskCredentialsOfAnAgentWithoutCredentials(t *testing.T) {
 
 func TestTaskCredentialOfTheAgentsNameIsAskedOnce(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	record := f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Credentials = []wire.TaskCredential{{Name: credentialName, File: "token"}}
 	})
@@ -245,7 +234,6 @@ func TestAnUnsuppliedOptionalCredentialIsNamedInThePreamble(t *testing.T) {
 	outcome := `{"state":"TASK_STATE_AUTH_REQUIRED","message":{"role":"ROLE_AGENT","parts":[{"text":"gh needs a token"},{"data":{"credential":"github-token"}}]}}`
 	fake := &fakePlugin{stream: noResultStream, outputs: []pluginsdk.Output{outcomeOutput(outcome)}}
 	f := newFixtureWith(t, noResultStream, optionalTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": fake})
-	f.answer(t, credentialName)
 	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Unsupplied = []string{"github-token"} })
 	if ack := f.execute(t, record, 1); ack != kgo.AckReject {
 		t.Fatalf("ack %v; logs:\n%s", ack, f.logs.String())
@@ -276,20 +264,6 @@ func TestAdmissionRefusesCredentialsOutsideTheAgentsTerms(t *testing.T) {
 				t.Fatalf("admitted %v with ack %v, want a rejection", admitted, ack)
 			}
 		})
-	}
-}
-
-func TestMissingTaskCredentialFailsNamingIt(t *testing.T) {
-	f := newFixture(t, resultStream)
-	if status := f.execute(t, f.submit(t, f.host, withDeployKey), 1); status != kgo.AckReject {
-		t.Fatalf("status %v", status)
-	}
-	task := f.lastTask(t)
-	want := "credentials " + credentialName + ", deploy-key were not answered within 5m; add them to credentials in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again"
-	parts := task.Status.Message.Parts
-	if task.Status.State != wire.TaskStateFailed || len(parts) != 3 || parts[0].Text != want ||
-		string(parts[1].Data) != `{"credential":"`+credentialName+`"}` || string(parts[2].Data) != `{"credential":"deploy-key"}` {
-		t.Fatalf("ended %s with %+v, want FAILED naming both credentials, each in a credential part", task.Status.State, parts)
 	}
 }
 
@@ -324,8 +298,8 @@ func TestTaskCredentialIsRedactedFromTranscriptAndOutputs(t *testing.T) {
 	stream := []string{`{"type":"assistant","message":"key ` + deployValue + `"}`, doneOutcome}
 	f := newFixture(t, stream)
 	f.plugin.outputs = []pluginsdk.Output{{Name: "report.md", Size: int64(len("key " + deployValue + "\n")), Data: []byte("key " + deployValue + "\n")}}
+	f.envelope = sealing(map[string][]byte{credentialName: []byte(testToken), "deploy-key": []byte(deployValue)})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withDeployKey), 1)
-	f.sealFor(t, f.request(t, 1), map[string][]byte{credentialName: []byte(testToken), "deploy-key": []byte(deployValue)})
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
@@ -378,7 +352,6 @@ func runWithOutputs(t *testing.T, expected []wire.ExpectedOutput, outputs []plug
 func runWithOutputsUnder(t *testing.T, terms admin.Terms, expected []wire.ExpectedOutput, outputs []pluginsdk.Output, collectErr error) (fixture, *wire.Task, kgo.AckStatus) {
 	t.Helper()
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
-	f.answer(t, credentialName)
 	f.plugin.outputs, f.plugin.collectErr = outputs, collectErr
 	status := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.Outputs = expected }), 1)
 	return f, f.lastTask(t), status
@@ -687,7 +660,6 @@ func TestOutputsNotCollected(t *testing.T) {
 // A collection that fails before the outcome file arrives reads the file alone, and the run ends with its status.
 func TestOutcomeIsReadWhenCollectionFails(t *testing.T) {
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.plugin.outputs, f.plugin.collectFailures = []pluginsdk.Output{file("report.md", "r")}, 1
 	status := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md"}}
@@ -748,7 +720,6 @@ func TestInputTooLargeFailsTheTurnNamingIt(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.answer(t, credentialName)
 			f.plugin.dispatchErr, f.plugin.outcome = &pluginsdk.InputTooLargeError{Name: test.reported}, pluginsdk.OutcomeNothingCreated
 			record := f.submit(t, f.host, func(task *wire.Submission) {
 				task.Message.Parts = append(task.Message.Parts, wire.Part{Raw: wire.StdBytes("x"), Filename: "data.csv"})
@@ -778,7 +749,6 @@ func TestAHungCollectionIsNotCollected(t *testing.T) {
 	collectTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { collectTimeout = previous })
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	f.plugin.collectHangs = true
 	status := f.execute(t, f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Outputs = []wire.ExpectedOutput{{Name: "report.md", Required: true}}
@@ -798,8 +768,8 @@ func TestCredentialFormsAreRedacted(t *testing.T) {
 	}
 	f := newFixture(t, stream)
 	f.plugin.outputs = []pluginsdk.Output{file("report.md", `token sk-token-with-newline, password pass"word\back-slash`)}
+	f.envelope = sealing(map[string][]byte{credentialName: []byte(agentValue), "deploy-key": []byte(taskValue)})
 	done := f.executing(t, f.ctx, f.submit(t, f.host, withDeployKey), 1)
-	f.sealFor(t, f.request(t, 1), map[string][]byte{credentialName: []byte(agentValue), "deploy-key": []byte(taskValue)})
 	if status := <-done; status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}

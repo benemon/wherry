@@ -1,7 +1,6 @@
 package client
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,8 +14,8 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 )
 
-// Each kind of source delivers its value byte for byte, and no value reaches the logs.
-func TestEachSourceKindIsSealed(t *testing.T) {
+// Each kind of source delivers its value byte for byte into the envelope, and no value reaches the logs.
+func TestEachSourceKindIsEnveloped(t *testing.T) {
 	f := newFixture(t)
 	deployKey := filepath.Join(t.TempDir(), "deploy-key")
 	if err := os.WriteFile(deployKey, []byte("deploy-key-value\n"), 0o600); err != nil {
@@ -26,16 +25,14 @@ func TestEachSourceKindIsSealed(t *testing.T) {
 	f.host.credentials["model"] = credential.Source{Env: "WHERRY_TEST_MODEL_TOKEN"}
 	f.host.credentials["deploy-key"] = credential.Source{File: deployKey}
 	f.host.credentials["vault-token"] = credential.Source{Command: []string{"sh", "-c", `printf 'vault-from-command\n'; echo command-stderr >&2`}}
-	receiver, task := f.admittedWith(t, []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}, {Name: "vault-token", Env: "VAULT_TOKEN"}})
-	runID := task.submission.Wherry.Run
-	asked := newRequest(t, receiver.binding(task, 1), "model")
-	asked.record.TaskCredentials = []string{"deploy-key", "vault-token"}
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	answering(t, f, f.host)
-	f.waitSeals(t, "host-a", 1)
-	values := asked.open(t, f, "host-a")
+	_, task := f.admittedWith(t, []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}, {Name: "vault-token", Env: "VAULT_TOKEN"}})
+	_, opened, err := open(t, f, task.submission.Wherry.Run, f.poolKeys["pool-a"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := opened.Credentials
 	if string(values["model"]) != "model-from-env" || string(values["deploy-key"]) != "deploy-key-value\n" || string(values["vault-token"]) != "vault-from-command\n" || len(values) != 3 {
-		t.Fatalf("sealed %q, want each source's value as it is", values)
+		t.Fatalf("enveloped %q, want each source's value as it is", values)
 	}
 	for _, value := range []string{"model-from-env", "deploy-key-value", "vault-from-command", "command-stderr"} {
 		if strings.Contains(f.logs.String(), value) {
@@ -44,9 +41,9 @@ func TestEachSourceKindIsSealed(t *testing.T) {
 	}
 }
 
-// A source that fails to resolve leaves the request unsettled, logged by credential name and cause alone: no value, no
-// output of the command and no path reaches the logs.
-func TestAFailingSourceIsLoggedByNameAlone(t *testing.T) {
+// A source that fails to resolve refuses the submission by credential name and cause alone: no value, no output of the
+// command and no path reaches the error, and nothing is published.
+func TestAFailingSourceIsNamedAlone(t *testing.T) {
 	const secret = "source-output-never-logged"
 	for name, test := range map[string]struct {
 		source credential.Source
@@ -65,120 +62,19 @@ func TestAFailingSourceIsLoggedByNameAlone(t *testing.T) {
 			if name == "env unset" {
 				t.Setenv("WHERRY_TEST_UNSET_TOKEN", "")
 			}
-			receiver, task := f.admitted(t)
-			// Set after submit, which resolves the source for the envelope.
+			f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 			f.host.credentials["model"] = test.source
-			runID := task.submission.Wherry.Run
-			asked := newRequest(t, receiver.binding(task, 1), "model")
-			receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-			answering(t, f, f.host)
-			want := "run " + runID + ": resolve credential model: " + test.want
-			for !strings.Contains(f.logs.String(), want) {
-				if f.ctx.Err() != nil {
-					t.Fatalf("logs lack %q:\n%s", want, f.logs.String())
-				}
-				time.Sleep(50 * time.Millisecond)
+			err := f.submitErr(t)
+			if want := "resolve credential model: " + test.want; err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), secret) {
+				t.Fatalf("submit = %v; want %q alone", err, want)
 			}
 			if logs := f.logs.String(); strings.Contains(logs, secret) {
 				t.Fatalf("logs carry the source's output, value or path:\n%s", logs)
 			}
-			if seals := f.seals(t, "host-a"); seals != 0 {
-				t.Fatalf("host topic holds %d seals", seals)
-			}
-			// The request stays unsettled, so a source that resolves on a later pass is sealed.
-			if name == "env unset" {
-				os.Setenv("WHERRY_TEST_UNSET_TOKEN", "model-from-env")
-				f.waitSeals(t, "host-a", 1)
-				if values := asked.open(t, f, "host-a"); string(values["model"]) != "model-from-env" {
-					t.Fatalf("sealed %q, want the value set after the first pass", values)
-				}
+			if records, _ := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); len(records) != 0 {
+				t.Fatal("published a task whose credential did not resolve")
 			}
 		})
-	}
-}
-
-// A command source runs before the attempt's lock is taken, so a slow one never holds up the host's other answerers.
-func TestACommandSourceRunsOutsideTheAttemptLock(t *testing.T) {
-	f := newFixture(t)
-	started := filepath.Join(t.TempDir(), "started")
-	receiver, task := f.admitted(t)
-	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", "touch " + started + "; sleep 3; printf model-token"}}
-	runID := task.submission.Wherry.Run
-	asked := newRequest(t, receiver.binding(task, 1), "model")
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	answering(t, f, f.host)
-	for _, err := os.Stat(started); err != nil; _, err = os.Stat(started) {
-		if f.ctx.Err() != nil {
-			t.Fatalf("the command never started; logs:\n%s", f.logs.String())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	ctx, cancel := context.WithTimeout(f.ctx, time.Second)
-	defer cancel()
-	release, err := f.host.lockAttempt(ctx, runID, 1)
-	if err != nil {
-		t.Fatalf("the attempt's lock is held while the command runs: %v", err)
-	}
-	release()
-	f.waitSeals(t, "host-a", 1)
-}
-
-// A command source that fails is not run again for the request until commandBackoff has passed, and its failure is
-// logged once; one that recovers by then still answers the request.
-func TestAFailingCommandSourceBacksOff(t *testing.T) {
-	previous := commandBackoff
-	commandBackoff = 3 * time.Second
-	t.Cleanup(func() { commandBackoff = previous })
-	f := newFixture(t)
-	dir := t.TempDir()
-	runs, token := filepath.Join(dir, "runs"), filepath.Join(dir, "token")
-	receiver, task := f.admitted(t)
-	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `echo >> "$0"; cat "$1"`, runs, token}}
-	runID := task.submission.Wherry.Run
-	asked := newRequest(t, receiver.binding(task, 1), "model")
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	answering(t, f, f.host)
-	want := "run " + runID + ": resolve credential model: its command exited with status 1"
-	f.logged(t, "host-a", want, 4500*time.Millisecond)
-	if ran, _ := os.ReadFile(runs); len(ran) != 2 {
-		t.Fatalf("the command ran %d times in 4.5 seconds, want twice", len(ran))
-	}
-	if lines := f.logged(t, "host-a", want, 0); len(lines) != 1 {
-		t.Fatalf("want one line; logs:\n%s", f.logs.String())
-	}
-	if err := os.WriteFile(token, []byte("model-token"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f.waitSeals(t, "host-a", 1)
-	if values := asked.open(t, f, "host-a"); string(values["model"]) != "model-token" {
-		t.Fatalf("sealed %q, want the value the recovered command wrote", values)
-	}
-}
-
-// A command source cut short by the answerer's own end logs nothing.
-func TestACommandSourceCutShortByTheEndLogsNothing(t *testing.T) {
-	f := newFixture(t)
-	started := filepath.Join(t.TempDir(), "started")
-	receiver, task := f.admitted(t)
-	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `touch "$0"; exec sleep 30`, started}}
-	runID := task.submission.Wherry.Run
-	asked := newRequest(t, receiver.binding(task, 1), "model")
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	ctx, stop := context.WithCancel(f.ctx)
-	done := make(chan error, 1)
-	go func() { done <- f.host.Answer(ctx) }()
-	for _, err := os.Stat(started); err != nil; _, err = os.Stat(started) {
-		if f.ctx.Err() != nil {
-			t.Fatalf("the command never started; logs:\n%s", f.logs.String())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	stop()
-	if err := <-done; err != nil {
-		t.Fatalf("answer: %v", err)
-	}
-	if logs := f.logs.String(); strings.Contains(logs, "run "+runID) {
-		t.Fatalf("logged work its own end cut short:\n%s", logs)
 	}
 }
 

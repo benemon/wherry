@@ -240,8 +240,8 @@ func resalt(t *testing.T, service *admin.Service, bundlePath string) {
 
 // TestRoundTrip runs a task from a host's Submit through a receiver and the test plugin process to the host's Await,
 // on records each side produces for the other: provisioning through wherry admin, bundles, the host and receiver
-// constructors, plugin discovery and the plugin link, the platform credential's local source, the real claim, admission, the seal request Await answers, dual
-// write and feed reads.
+// constructors, plugin discovery and the plugin link, the platform credential's local source, the real claim, admission, the
+// envelope the receiver opens through the pool's key custodian, dual write and feed reads.
 func TestRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -330,7 +330,7 @@ func TestRoundTrip(t *testing.T) {
 	if err := os.WriteFile(deployPath, []byte(deployText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The agent's credential comes from the answerer's environment and the task's from a command; the host has no source
+	// The agent's credential comes from the host's environment and the task's from a command; the host has no source
 	// for the agent's optional credential.
 	t.Setenv("WHERRY_ROUNDTRIP_MODEL", credentialText)
 	hostConfig := busclient.Config{Bundle: hostBundle, HostKey: filepath.Join(dir, "host.key"), StateDir: filepath.Join(dir, "host-state"),
@@ -364,7 +364,6 @@ func TestRoundTrip(t *testing.T) {
 	if submitted.Pool != "pool-a" {
 		t.Fatalf("placed in %q, want pool-a", submitted.Pool)
 	}
-	// Await answers the receiver's seal request; nothing else seals.
 	awaited, err := host.Await(ctx, submitted.RunID, 20*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -417,7 +416,7 @@ func TestRoundTrip(t *testing.T) {
 		!reflect.DeepEqual(runs[0].Credentials, []pluginsdk.Secret{{Name: "model", Env: "MODEL_API_KEY", Value: []byte(credentialText)}, {Name: "deploy-key", File: "id_ed25519", Value: []byte(deployText)}}) ||
 		!strings.Contains(string(runs[0].Prompt), "Input files: /fake/inputs/data.csv.") ||
 		!strings.Contains(string(runs[0].Prompt), "This run's credentials are model, deploy-key, github-token (not supplied).") {
-		t.Fatalf("plugin runs %+v; want one dispatch with the host's sealed credentials at their targets, the input, and the unsupplied credential named", runs)
+		t.Fatalf("plugin runs %+v; want one dispatch with the host's credentials at their targets, the input, and the unsupplied credential named", runs)
 	}
 	if configured.Credential != platformText || configured.Pool != "pool-a" || configured.Agent != "claude" || strings.Contains(string(configured.Config), "credential") {
 		t.Fatalf("plugin configured with %+v; want the source's platform credential, the profile's settings and no credential key", configured)
@@ -439,14 +438,6 @@ func TestRoundTrip(t *testing.T) {
 		if strings.Contains(hostLogs.String(), secret) {
 			t.Fatalf("host logs carry a credential:\n%s", hostLogs.String())
 		}
-	}
-	sealed := false
-	for line := range strings.Lines(hostLogs.String()) {
-		sealed = sealed || strings.HasPrefix(line, fmt.Sprintf("host: answerer pid=%d version=", os.Getpid())) &&
-			strings.HasSuffix(line, ": run "+submitted.RunID+": sealed [model deploy-key] to receiver-a for attempt 1\n")
-	}
-	if !sealed {
-		t.Fatalf("the host did not answer the seal request; logs:\n%s", hostLogs.String())
 	}
 
 	if _, err := host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpDoesNotExist}},

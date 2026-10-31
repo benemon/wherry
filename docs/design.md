@@ -35,18 +35,18 @@ differently live on different topics.
 | `wherry.receiver.<receiver>` | that receiver | its pool's members, entitled tenants' hosts | its keys |
 | `wherry.receiver.<receiver>.progress` | that receiver | its pool's live members | each run's latest committed transcript offset |
 | `wherry.pool.<pool>.tasks` | entitled tenants' hosts | the pool's receivers, through its share group | submissions |
-| `wherry.pool.<pool>.events` | the pool's receivers, entitled tenants' hosts | the pool's receivers | statuses, start failures, cancels |
+| `wherry.pool.<pool>.events` | the pool's receivers, entitled tenants' hosts | the pool's receivers | statuses, start failures, cancels, open requests, attempt wraps, open refusals |
 | `wherry.pool.<pool>.custodian` | the pool's receivers | the pool's receivers, entitled tenants' hosts | custodian snapshots |
-| `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, results, echoes, seal requests |
+| `wherry.tenant.<tenant>` | receivers of the tenant's pools | the tenant's hosts | statuses, results, echoes |
 | `wherry.tenant.<tenant>.transcript` | receivers of the tenant's pools | the tenant's hosts | transcript chunks, output chunks |
-| `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key, seals |
+| `wherry.host.<tenant>.<host>` | that host | that host, receivers of the tenant's pools | its key |
 
 A host and a receiver read and write these topics as their grants allow,
 beside the platform, object storage and git remote a run uses.
 
 ![wherry's implementation: a host, the Kafka topics, a receiver with its plugins, a platform job, object storage and a git remote](diagrams/implementation.svg)
 
-`wherry.admin` records, progress records and seals carry no signature: each
+`wherry.admin` records and progress records carry no signature: each
 sits on a topic only one principal can write, so Kafka authenticates it. Every other record, key
 records included, is a versioned EdDSA
 [JWS](https://datatracker.ietf.org/doc/html/rfc7515). A record on a shared topic
@@ -101,7 +101,8 @@ assigns the snapshot topic's partition is the pool's key custodian. It
 holds the pool's P-256 private keys in its state directory, publishes the
 current public key in the pool's snapshot topic through the shared
 transactional ID `p.<pool>.custodian`, which fences any earlier custodian,
-and rotates the key daily.
+rotates the key daily, and answers each open request on the pool's events
+with an attempt wrap or a refusal.
 When a new configuration record appears, the receiver stops claiming, lets
 the runs it holds end and exits, so its platform restarts it with the new
 configuration. A record `receiver update --force` wrote has it release the

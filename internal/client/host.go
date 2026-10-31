@@ -298,16 +298,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if limit := input.StartBy.Add(time.Duration(admin.MaxRunDurationMS) * time.Millisecond); input.EndBy.After(limit) {
 		return SubmitResult{}, fmt.Errorf("%w: task_ended_by (%s) is past task_started_by plus the 6h run cap (%s)", ErrInvalidInput, wire.RFC3339(input.EndBy.Unix()), wire.RFC3339(limit.Unix()))
 	}
-	var s3Inputs, s3Outputs []string
-	for _, file := range input.S3Inputs {
-		s3Inputs = append(s3Inputs, file.Name)
-	}
-	for _, output := range outputs {
-		if output.Storage == wire.StorageS3 {
-			s3Outputs = append(s3Outputs, output.Name)
-		}
-	}
-	stored := len(s3Inputs)+len(s3Outputs) > 0
+	stored := len(input.S3Inputs)+len(s3OutputNames(outputs)) > 0
 	// Connect folds the key topic only when <host_key>.next exists, and receivers refuse a task under any key but the
 	// current one without writing a status.
 	owner := signed.HostOwner(h.tenant, h.host)
@@ -382,10 +373,6 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			}
 		}
 		input.Parts = parts
-		s3Inputs = s3Inputs[:0]
-		for _, file := range input.S3Inputs {
-			s3Inputs = append(s3Inputs, file.Name)
-		}
 		stored = true
 	}
 	if limit, limiting := profileInlineLimit(v.state, pool, placement, declared); limit > 0 {
@@ -431,10 +418,6 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	var store *minio.Client
 	if stored {
 		if store, err = h.bucket(ctx, pool, storage); err != nil {
-			return SubmitResult{}, err
-		}
-		deadline := time.Unix(submission.Wherry.TaskEndedBy, 0)
-		if err := h.checkSealSize(ctx, store, storage.Bucket, h.tenant, runID, input.Credentials, s3Inputs, s3Outputs, deadline); err != nil {
 			return SubmitResult{}, err
 		}
 		submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage.Bucket, h.tenant, runID, input.S3Inputs)
@@ -624,8 +607,7 @@ func (h *Host) submission(runID, pool string, placement wire.Placement, parts []
 	}, nil
 }
 
-// publish records the run locally, then writes encoded, the signed submission, to its pool's task topic. The record
-// comes first so this host answers the seal request a receiver may send as soon as it claims the task; a failed write
+// publish records the run locally, then writes encoded, the signed submission, to its pool's task topic. A failed write
 // removes the record.
 func (h *Host) publish(ctx context.Context, submission *wire.Submission, encoded []byte, now time.Time, redactionKey []byte) error {
 	record, err := h.newRecord(ctx, submission, encoded, now, redactionKey)
@@ -762,11 +744,11 @@ type runRecord struct {
 	TaskHash  string         `json:"task_hash"`
 	// SubmittedMS is when this host published the run.
 	SubmittedMS int64 `json:"submitted_at_ms,omitzero"`
-	// TaskCredentials names the task credentials the run declares, which this host may seal.
+	// TaskCredentials names the task credentials the run declares.
 	TaskCredentials []string `json:"task_credentials,omitzero"`
 	// VCSHost is the host of the git input the run declares.
 	VCSHost string `json:"vcs_host,omitzero"`
-	// S3Inputs and S3Outputs name the S3 inputs and outputs the run declares, which this host may presign.
+	// S3Inputs and S3Outputs name the S3 inputs and outputs the run declares.
 	S3Inputs  []string `json:"s3_inputs,omitzero"`
 	S3Outputs []string `json:"s3_outputs,omitzero"`
 	// TaskStartedBy and TaskEndedBy are the submission's bounds, in whole seconds; a PUT URL for its S3 outputs expires

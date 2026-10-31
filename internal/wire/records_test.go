@@ -51,10 +51,6 @@ func testRecords() map[string]Record {
 		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Profile: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
 		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 1},
 		"start failure":                &StartFailure{Wherry: testBinding(), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: testHash},
-		"seal request": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
-			Credentials: []string{"model"}, ExpiryMS: 1},
-		"seal request for task credentials alone": &SealRequest{ReceiverBinding: testBinding(), Key: jose.JSONWebKey{Key: &testSealKey.PublicKey}, KeyID: signed.SealKeyID(&testSealKey.PublicKey),
-			Credentials: []string{}, TaskCredentials: []string{"deploy-key"}, ExpiryMS: 1},
 		"output": &Output{ArtifactUpdate: TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", Append: true, LastChunk: true, Metadata: []byte(`{"index":1}`),
 			Artifact: Artifact{ArtifactID: "sub/Report.md", Name: "sub/Report.md", Parts: []Part{{Raw: StdBytes("x"), Filename: "Report.md", MediaType: OutputMediaType}}, Extensions: []string{ExtensionURI}}},
 			Wherry: ResultBinding{ReceiverBinding: testBinding(), TaskHash: testHash}},
@@ -239,28 +235,6 @@ func TestRecordValidation(t *testing.T) {
 		"advertisement with a duplicate offer profile": func(r map[string]Record) Record {
 			value := r["advertisement"].(*Advertisement)
 			value.Offers = append(value.Offers, value.Offers[0])
-			return value
-		},
-		"seal request naming another key": func(r map[string]Record) Record {
-			value := r["seal request"].(*SealRequest)
-			other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-			value.KeyID = signed.SealKeyID(&other.PublicKey)
-			return value
-		},
-		"seal request with a P-384 key": func(r map[string]Record) Record {
-			value := r["seal request"].(*SealRequest)
-			other, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-			value.Key, value.KeyID = jose.JSONWebKey{Key: &other.PublicKey}, signed.SealKeyID(&other.PublicKey)
-			return value
-		},
-		"seal request without credentials": func(r map[string]Record) Record {
-			value := r["seal request"].(*SealRequest)
-			value.Credentials = []string{}
-			return value
-		},
-		"seal request naming a credential twice": func(r map[string]Record) Record {
-			value := r["seal request"].(*SealRequest)
-			value.TaskCredentials = []string{"model"}
 			return value
 		},
 		"submission credential file escaping": func(r map[string]Record) Record {

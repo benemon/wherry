@@ -16,7 +16,6 @@ func referenceRun(t *testing.T, stream []string, reply string, outputs ...plugin
 	t.Helper()
 	outputs = append(outputs, outcomeOutput(outcomeWith(wire.TaskStateCompleted, textPart(reply))))
 	f := newFixtureWith(t, stream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: stream, outputs: outputs}})
-	f.answer(t, credentialName)
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
 		t.Fatalf("run ended %v, want accepted", status)
 	}
