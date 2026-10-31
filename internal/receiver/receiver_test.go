@@ -82,10 +82,12 @@ type fakePlugin struct {
 	// jobName is the handle name Dispatch and Lookup return, or else agent- and the run ID.
 	jobName string
 	lastRun pluginsdk.Run
-	// lastDeadline is the deadline of the context Dispatch last ran under.
+	// lastDeadline is the deadline of the context Follow last ran under.
 	lastDeadline time.Time
-	lookups      int
-	lookupErr    error
+	// placing makes Dispatch and Lookup wait, as for a job the platform never places, until their context ends.
+	placing   bool
+	lookups   int
+	lookupErr error
 	// job is the state Lookup reports; jobProfile and jobAgent override the metadata it reports.
 	job                  pluginsdk.JobState
 	jobProfile, jobAgent string
@@ -159,7 +161,12 @@ func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk
 	defer f.mu.Unlock()
 	f.dispatches++
 	f.lastRun = run
-	f.lastDeadline, _ = ctx.Deadline()
+	if f.placing {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, ctx.Err()
+	}
 	if f.dispatchErr != nil {
 		return f.outcome, pluginsdk.Handle{}, f.dispatchErr
 	}
@@ -173,6 +180,12 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lookups++
+	if f.placing {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		return pluginsdk.Job{}, ctx.Err()
+	}
 	if f.lookupErr != nil {
 		return pluginsdk.Job{}, f.lookupErr
 	}
@@ -190,6 +203,7 @@ func (f *fakePlugin) Follow(ctx context.Context, _ pluginsdk.Handle, from int64,
 	f.mu.Lock()
 	f.follows++
 	f.froms = append(f.froms, from)
+	f.lastDeadline, _ = ctx.Deadline()
 	lost, lostErr := f.follows <= f.linkLost, cmp.Or(f.lostErr, pluginsdk.ErrLinkLost)
 	stream, followErr, endDelay, pauses, neverStarted, neverClass, neverReason, ended := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.pauses, f.neverStarted, f.neverClass, f.neverReason, f.ended
 	f.mu.Unlock()
@@ -552,8 +566,8 @@ func testSubmission(run string) *wire.Submission {
 		Message: wire.Message{MessageID: "msg-a", ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "hi"}}, Extensions: []string{wire.ExtensionURI}},
 		Wherry: wire.SubmissionBinding{
 			Tenant: testTenant, Host: testHost, Pool: testPool, Run: run,
-			Placement:  wire.Placement{Agent: "claude", Selector: []wire.Requirement{}},
-			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
+			Placement:     wire.Placement{Agent: "claude", Selector: []wire.Requirement{}},
+			TaskStartedBy: time.Now().Add(time.Minute).Unix(), TaskEndedBy: time.Now().Add(time.Minute).Unix(),
 		},
 	}
 }

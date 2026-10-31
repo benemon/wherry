@@ -47,7 +47,7 @@ type AwaitResult struct {
 	// Redacted counts, by name, the redaction markers of the run's values in Task's artifacts and Status, where each
 	// marker reads [redacted:<name>] instead.
 	Redacted map[string]int
-	// Unclaimed is set, with Status SUBMITTED, when the run's queue deadline passed and no receiver claimed it.
+	// Unclaimed is set, with Status SUBMITTED, when the run's task_started_by passed and no receiver claimed it.
 	Unclaimed string
 	Skipped   int
 }
@@ -86,7 +86,7 @@ type StatusResult struct {
 	// Redacted counts, by name, the redaction markers of the run's values in Status, where each reads
 	// [redacted:<name>] instead.
 	Redacted map[string]int
-	// Unclaimed is set when the run's queue deadline passed and no receiver claimed it.
+	// Unclaimed is set when the run's task_started_by passed and no receiver claimed it.
 	Unclaimed string
 	Skipped   int
 }
@@ -523,7 +523,7 @@ type follower struct {
 }
 
 // follow returns the host's follower, first starting one under ctx when none runs. It starts at the lowest feed offset
-// of the host's runs whose run deadline has not passed, or at the feed's committed end when no such run exists, and at
+// of the host's runs whose task_ended_by has not passed, or at the feed's committed end when no such run exists, and at
 // no lower than the feed's log start.
 func (h *Host) follow(ctx context.Context) (*follower, error) {
 	h.followMu.Lock()
@@ -548,11 +548,11 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	now := time.Now().UnixMilli()
+	now := time.Now().Unix()
 	for _, file := range files {
 		if runID, ok := strings.CutSuffix(file.Name(), ".json"); ok && !file.IsDir() {
-			// A run cannot still be running past its run deadline.
-			if local, err := h.localRun(runID); err == nil && local != nil && local.DeadlineMS > now {
+			// A run cannot still be running past its task_ended_by.
+			if local, err := h.localRun(runID); err == nil && local != nil && local.TaskEndedBy >= now {
 				start = min(start, local.FeedOffset)
 			}
 		}
@@ -771,14 +771,13 @@ func (r *runView) status() StatusResult {
 	return result
 }
 
-// unclaimed says that the run's queue deadline passed at now with no status from a receiver, and is empty otherwise. Only
-// this host's record holds the queue deadline.
+// unclaimed says that the run's task_started_by passed at now with no status from a receiver, and is empty otherwise.
+// Only this host's record holds task_started_by.
 func (r *runView) unclaimed(now time.Time) string {
-	if r.local == nil || r.local.QueueDeadlineMS == 0 || len(r.statuses) > 0 || now.UnixMilli() <= r.local.QueueDeadlineMS {
+	if r.local == nil || r.local.TaskStartedBy == 0 || len(r.statuses) > 0 || now.Unix() <= r.local.TaskStartedBy {
 		return ""
 	}
-	deadline := time.UnixMilli(r.local.QueueDeadlineMS).UTC().Format(time.RFC3339)
-	return "queue deadline passed at " + deadline + " and no receiver claimed the run"
+	return wire.NotStartedBy(r.local.TaskStartedBy) + ": no receiver claimed the task"
 }
 
 // model is the model of the run's placement: this host's record of it, else its echo's.
@@ -1223,8 +1222,8 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 			return AwaitResult{Status: wire.TaskStatus{State: wire.TaskStateSubmitted}, Model: r.model(), Unclaimed: unclaimed, Skipped: r.skipped}, nil
 		}
 		pollCtx, stopPoll := waitCtx, context.CancelFunc(func() {})
-		if r.local != nil && r.local.QueueDeadlineMS > 0 && len(r.statuses) == 0 {
-			pollCtx, stopPoll = context.WithDeadline(waitCtx, time.UnixMilli(r.local.QueueDeadlineMS+1))
+		if r.local != nil && r.local.TaskStartedBy > 0 && len(r.statuses) == 0 {
+			pollCtx, stopPoll = context.WithDeadline(waitCtx, wire.PastBound(r.local.TaskStartedBy))
 		}
 		records, read, woken, _ := f.from(next)
 		if read <= next {

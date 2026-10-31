@@ -430,7 +430,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	b.joined(t, ctx, logs)
 	var submitted client.SubmitResult
 	for ctx.Err() == nil {
-		if submitted, err = host.Submit(ctx, client.SubmitInput{Prompt: "hello", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
+		if submitted, err = host.Submit(ctx, client.SubmitInput{Prompt: "hello", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}); err == nil {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -492,7 +492,7 @@ func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
 	go func() { done <- r.Run(runCtx) }()
 	defer func() { stop(); <-done }()
 	b.joined(t, ctx, logs)
-	submitted, err := host.Submit(ctx, client.SubmitInput{Prompt: "hello", Deadline: time.Minute, QueueDeadline: time.Minute})
+	submitted, err := host.Submit(ctx, client.SubmitInput{Prompt: "hello", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +608,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	for ctx.Err() == nil {
 		if submitted, err = host.Submit(ctx, client.SubmitInput{Prompt: "hello", Parts: []wire.Part{{Raw: input, Filename: "data.bin"}},
 			Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "report.md", Required: true}},
-			Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
+			EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}); err == nil {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -700,7 +700,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	b.joined(t, ctx, logs)
 	input := client.SubmitInput{
 		Prompt: "change the README", Git: &wire.GitInput{Remote: "git@git.example.test:org/repo.git", Ref: "main"},
-		GitChanges: "patch", Deadline: time.Minute, QueueDeadline: time.Minute,
+		GitChanges: "patch", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute),
 	}
 	var submitted client.SubmitResult
 	for ctx.Err() == nil {

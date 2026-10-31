@@ -118,16 +118,17 @@ func TestTaskSignedWithARetiredHostKeyIsRefused(t *testing.T) {
 }
 
 func TestAdmitRejections(t *testing.T) {
+	past := time.Now().Add(-time.Second).Unix()
 	for _, c := range []struct {
 		name   string
 		reason string
 		mutate func(*wire.Submission)
 	}{
-		{"ExpiredQueueDeadline", "queue deadline passed", func(task *wire.Submission) {
-			task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli()
+		{"PastStartBy", "not started by task_started_by (" + time.Unix(past, 0).UTC().Format(time.RFC3339) + ")", func(task *wire.Submission) {
+			task.Wherry.TaskStartedBy = past
 		}},
-		{"ExpiredRunDeadline", "run deadline passed", func(task *wire.Submission) {
-			task.Wherry.DeadlineMS = time.Now().Add(-time.Second).UnixMilli()
+		{"PastEndBy", "not ended by task_ended_by (" + time.Unix(past, 0).UTC().Format(time.RFC3339) + ")", func(task *wire.Submission) {
+			task.Wherry.TaskEndedBy = past
 		}},
 		{"AgentOutsideTerms", "agent is outside the pool terms", func(task *wire.Submission) { task.Wherry.Placement.Agent = "gemini" }},
 	} {
@@ -183,17 +184,20 @@ func TestDispatchCarriesThePlacementModel(t *testing.T) {
 	}
 }
 
-func TestRunTimeIsCappedSixHoursAfterTheQueueDeadline(t *testing.T) {
-	queueDeadline, twoHours := time.Now().Add(10*time.Minute).UnixMilli(), time.Now().Add(2*time.Hour).UnixMilli()
-	for name, test := range map[string]struct{ deadline, want int64 }{
-		"two hours":   {twoHours, twoHours},
-		"seven hours": {time.Now().Add(7 * time.Hour).UnixMilli(), time.UnixMilli(queueDeadline).Add(6 * time.Hour).UnixMilli()},
+func TestRunTimeIsCappedSixHoursAfterTheStartBy(t *testing.T) {
+	startBy, twoHours := time.Now().Add(10*time.Minute).Unix(), time.Now().Add(2*time.Hour).Unix()
+	for name, test := range map[string]struct {
+		endBy int64
+		want  time.Time
+	}{
+		"two hours":   {twoHours, time.Unix(twoHours+1, 0)},
+		"seven hours": {time.Now().Add(7 * time.Hour).Unix(), time.Unix(startBy+1, 0).Add(6 * time.Hour)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			f.answer(t, credentialName)
 			record := f.submit(t, f.host, func(task *wire.Submission) {
-				task.Wherry.DeadlineMS, task.Wherry.QueueDeadlineMS = test.deadline, queueDeadline
+				task.Wherry.TaskEndedBy, task.Wherry.TaskStartedBy = test.endBy, startBy
 			})
 			// The fixture's context ends within a minute, sooner than either deadline.
 			if status := f.receiver.execute(context.WithoutCancel(f.ctx), f.service.Admin, record, f.admitted(t, record), 1); status != kgo.AckAccept {
@@ -201,8 +205,8 @@ func TestRunTimeIsCappedSixHoursAfterTheQueueDeadline(t *testing.T) {
 			}
 			f.plugin.mu.Lock()
 			defer f.plugin.mu.Unlock()
-			if got := f.plugin.lastDeadline.UnixMilli(); got != test.want {
-				t.Fatalf("run deadline %v, want %v", f.plugin.lastDeadline, time.UnixMilli(test.want))
+			if !f.plugin.lastDeadline.Equal(test.want) {
+				t.Fatalf("run deadline %v, want %v", f.plugin.lastDeadline, test.want)
 			}
 		})
 	}
@@ -214,26 +218,26 @@ func TestAdmitRejectsRunPastLifetime(t *testing.T) {
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	record := f.turn(t, "run-expired", 1)
 	time.Sleep(10 * time.Millisecond)
-	f.rejected(t, record, "run expired")
+	f.rejected(t, record, "task_started_by is past the pool's start_by_limit")
 }
 
-func TestAdmitRejectsQueueDeadlinePastMaxQueueDeadline(t *testing.T) {
+func TestAdmitRejectsStartByPastTheStartByLimit(t *testing.T) {
 	terms := testTerms()
 	terms.StartByLimitMS = admin.Millis(time.Hour.Milliseconds())
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	first := f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-queued", "run-queued", "run-queued"
-		task.Wherry.QueueDeadlineMS = time.Now().Add(2 * time.Hour).UnixMilli()
+		task.Wherry.TaskStartedBy = time.Now().Add(2 * time.Hour).Unix()
 	})
-	f.rejected(t, first, "queue deadline exceeds the pool's max queue deadline")
+	f.rejected(t, first, "task_started_by is past the pool's start_by_limit")
 }
 
-func TestRedeliveredClaimedRunPastMaxQueueDeadlineIsAdopted(t *testing.T) {
+func TestRedeliveredClaimedRunPastStartByLimitIsAdopted(t *testing.T) {
 	terms := testTerms()
 	terms.StartByLimitMS = 50
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
 	record := startedTurn(t, f, "run-held", func(task *wire.Submission) {
-		task.Wherry.QueueDeadlineMS = time.Now().Add(20 * time.Millisecond).UnixMilli()
+		task.Wherry.TaskStartedBy = time.Now().Unix()
 	})
 	f.answer(t, credentialName)
 	time.Sleep(60 * time.Millisecond)
@@ -263,10 +267,10 @@ func noRejection(t *testing.T, f fixture) {
 	}
 }
 
-func TestRedeliveredClaimedTurnPastQueueDeadlineIsAdopted(t *testing.T) {
+func TestRedeliveredStartedTurnPastStartByIsAdopted(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
 	record := startedTurn(t, f, "run-queued-held", func(task *wire.Submission) {
-		task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli()
+		task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix()
 	})
 	// The adopter publishes nothing until its own seal arrives.
 	f.answer(t, credentialName)
@@ -284,11 +288,12 @@ func TestRedeliveredClaimedTurnPastQueueDeadlineIsAdopted(t *testing.T) {
 	}
 }
 
-func TestRedeliveredClaimedTurnPastRunDeadlineStopsItsJob(t *testing.T) {
+func TestRedeliveredClaimedTurnPastEndByStopsItsJob(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
+	endBy := time.Now().Add(-time.Second).Unix()
 	record := startedTurn(t, f, "run-deadline-held", func(task *wire.Submission) {
-		task.Wherry.QueueDeadlineMS = time.Now().Add(-2 * time.Second).UnixMilli()
-		task.Wherry.DeadlineMS = time.Now().Add(-time.Second).UnixMilli()
+		task.Wherry.TaskStartedBy = time.Now().Add(-2 * time.Second).Unix()
+		task.Wherry.TaskEndedBy = endBy
 	})
 	if status := f.execute(t, record, 2); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
@@ -300,8 +305,60 @@ func TestRedeliveredClaimedTurnPastRunDeadlineStopsItsJob(t *testing.T) {
 		t.Fatalf("dispatches=%d lookups=%d stops=%d, want the found job stopped", dispatches, lookups, stops)
 	}
 	noRejection(t, f)
-	if state, reason := terminalReason(t, f, "run-deadline-held"); state != wire.TaskStateFailed || reason != "timeout" {
-		t.Fatalf("terminal %s %q, want FAILED timeout", state, reason)
+	if state, reason := terminalReason(t, f, "run-deadline-held"); state != wire.TaskStateFailed || reason != wire.NotEndedBy(endBy) {
+		t.Fatalf("terminal %s %q, want FAILED %q", state, reason, wire.NotEndedBy(endBy))
+	}
+}
+
+// A claimed task whose job the platform has not started by task_started_by ends FAILED naming the bound, with any job
+// purged; the run's own end bound is later.
+func TestClaimedTaskNotStartedByItsStartByFails(t *testing.T) {
+	for name, attempt := range map[string]int64{"dispatched": 1, "redelivered": 2} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, placing: true}})
+			f.answer(t, credentialName)
+			startBy := time.Now().Add(time.Second).Unix()
+			record := f.submit(t, f.host, func(task *wire.Submission) {
+				task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = startBy, time.Now().Add(20*time.Second).Unix()
+			})
+			if status := f.execute(t, record, attempt); status != kgo.AckReject {
+				t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
+			}
+			if now := time.Now(); now.Before(wire.PastBound(startBy)) || now.After(wire.PastBound(startBy).Add(5*time.Second)) {
+				t.Fatalf("ended at %v, want just past task_started_by %v", now, time.Unix(startBy, 0))
+			}
+			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != wire.NotStartedBy(startBy) {
+				t.Fatalf("terminal %s %q, want FAILED %q", state, reason, wire.NotStartedBy(startBy))
+			}
+			f.plugin.mu.Lock()
+			defer f.plugin.mu.Unlock()
+			if f.plugin.purges == 0 || f.plugin.follows != 0 {
+				t.Fatalf("purges=%d follows=%d, want the unstarted job purged and never followed", f.plugin.purges, f.plugin.follows)
+			}
+			if !slices.ContainsFunc(f.eventStatuses(t), func(status wire.RunStatus) bool { return status.Wherry.Kind == "claimed" }) {
+				t.Fatal("the task was not claimed before it ended")
+			}
+		})
+	}
+}
+
+// A job that started by task_started_by keeps running past it to its end.
+func TestStartedJobRunsPastItsStartBy(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.answer(t, credentialName)
+	f.plugin.endDelay = 3 * time.Second
+	startBy := time.Now().Add(time.Second).Unix()
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = startBy, time.Now().Add(30*time.Second).Unix()
+	})
+	if status := f.execute(t, record, 1); status != kgo.AckAccept {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	if time.Now().Before(wire.PastBound(startBy)) {
+		t.Fatal("the run ended before task_started_by passed")
+	}
+	if state, _ := terminalReason(t, f, "run-a"); state != wire.TaskStateCompleted {
+		t.Fatalf("terminal %s, want COMPLETED", state)
 	}
 }
 
@@ -380,7 +437,7 @@ func TestReceiverRejectsURLParts(t *testing.T) {
 func TestRejectionPublishFailureReleases(t *testing.T) {
 	f := newFixture(t, resultStream)
 	record := f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli()
+		task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix()
 	})
 	f.cluster.ControlKey(kmsg.Produce.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		f.cluster.KeepControl()
@@ -647,7 +704,7 @@ func TestRunsUnderRetention(t *testing.T) {
 	if after := len(f.records(t, admin.PoolEventsTopic(testPool))); after != before {
 		t.Fatalf("a redelivered completed run wrote events %d -> %d", before, after)
 	}
-	if offset, err := f.receiver.lastOffset(f.ctx, adoptedTask, wire.TaskHash(adopted.Value)); err != nil || offset != 41 {
+	if offset, _, err := f.receiver.lastOffset(f.ctx, adoptedTask, wire.TaskHash(adopted.Value)); err != nil || offset != 41 {
 		t.Fatalf("adoption offset %d, %v; want 41", offset, err)
 	}
 	if status := f.receiver.execute(f.ctx, f.service.Admin, adopted, f.admitted(t, adopted), 2); status != kgo.AckAccept {
@@ -676,8 +733,9 @@ func (f fixture) startPeer(t *testing.T, id string) *Receiver {
 
 func TestCommittedRejectionAcknowledged(t *testing.T) {
 	f := newFixture(t, resultStream)
-	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli() })
-	f.rejected(t, record, "queue deadline passed")
+	past := time.Now().Add(-time.Second).Unix()
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = past })
+	f.rejected(t, record, wire.NotStartedBy(past))
 	before := len(f.records(t, admin.PoolEventsTopic(testPool)))
 	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckAccept {
 		t.Fatalf("redelivered rejection admitted=%v ack=%v, want accept", admitted != nil, ack)
@@ -721,7 +779,7 @@ func TestRejectionIsAllOrNothing(t *testing.T) {
 	f := newFixture(t, resultStream)
 	// Only the feed write is taken away: the pool's events must not get the rejection alone.
 	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.TenantTopic(testTenant)).Operations(kadm.OpWrite))
-	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli() })
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
 	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("admitted=%v ack=%v, want release", admitted != nil, ack)
 	}

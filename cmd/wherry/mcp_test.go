@@ -200,7 +200,7 @@ func TestMCPToolsList(t *testing.T) {
 	}
 }
 
-func TestDeadlineDefaultsAreTwoHours(t *testing.T) {
+func TestBoundsTakeATimeOrADurationAndDefault(t *testing.T) {
 	b := newBus(t)
 	session := mcpSession(t, b.connect(t), nil)
 	tools, err := session.ListTools(b.ctx, nil)
@@ -212,8 +212,8 @@ func TestDeadlineDefaultsAreTwoHours(t *testing.T) {
 			continue
 		}
 		encoded, _ := json.Marshal(tool.InputSchema)
-		for field, want := range map[string]time.Duration{"task deadline": busclient.DefaultDeadline, "queue deadline": busclient.DefaultQueueDeadline} {
-			_, rest, _ := strings.Cut(string(encoded), field+", a Go duration such as ")
+		for field, want := range map[string]time.Duration{"task_started_by": busclient.DefaultStartBy, "task_ended_by": busclient.DefaultEndBy} {
+			_, rest, _ := strings.Cut(string(encoded), `"`+field+", ")
 			_, rest, _ = strings.Cut(rest, "; default ")
 			stated, _, _ := strings.Cut(rest, `"`)
 			if got, err := time.ParseDuration(stated); err != nil || got != want {
@@ -221,15 +221,48 @@ func TestDeadlineDefaultsAreTwoHours(t *testing.T) {
 			}
 		}
 	}
-	for _, bad := range []string{"7200", "-1h", "soon"} {
-		if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "deadline": bad}); failure.Code != "INVALID_ARGUMENT" {
-			t.Errorf("deadline %q: %+v, want INVALID_ARGUMENT", bad, failure)
+	for _, bad := range []string{"7200", "-1h", "soon", time.Now().Add(-time.Minute).Format(time.RFC3339)} {
+		for _, field := range []string{"start_by", "end_by"} {
+			if failure := callToolError(t, b.ctx, session, "submit", map[string]any{"prompt": "work", field: bad}); failure.Code != "INVALID_ARGUMENT" {
+				t.Errorf("%s %q: %+v, want INVALID_ARGUMENT", field, bad, failure)
+			}
 		}
 	}
-	var custom submitOutput
-	callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "deadline": "90m", "queue_deadline": "5m"}, &custom)
-	if task := b.tasks(t, custom.ID)[0].submission.Wherry; time.Duration(task.DeadlineMS-task.QueueDeadlineMS)*time.Millisecond != 85*time.Minute {
-		t.Errorf("deadlines 90m and 5m gave %d and %d", task.DeadlineMS, task.QueueDeadlineMS)
+	// Each bound takes either form: a duration from now, or an RFC 3339 time that arrives as whole seconds.
+	at := time.Now().Add(time.Hour).Truncate(time.Second)
+	near := func(lane, field string, got int64, want time.Time) {
+		if got < want.Add(-5*time.Second).Unix() || got > want.Unix() {
+			t.Errorf("%s %s is %s, want %s", lane, field, time.Unix(got, 0), want)
+		}
+	}
+	for _, forms := range []struct{ startBy, endBy string }{{"5m", at.Format(time.RFC3339)}, {at.Format(time.RFC3339), "90m"}} {
+		var custom submitOutput
+		callTool(t, b.ctx, session, "submit", map[string]any{"prompt": "work", "start_by": forms.startBy, "end_by": forms.endBy}, &custom)
+		var stdout, stderr bytes.Buffer
+		if err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", "--start-by", forms.startBy, "--end-by", forms.endBy}, &stdout, &stderr); err != nil {
+			t.Fatal(err)
+		}
+		cli, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
+		for lane, runID := range map[string]string{"MCP": custom.ID, "CLI": cli} {
+			task := b.tasks(t, runID)[0].submission.Wherry
+			if forms.startBy == "5m" {
+				near(lane, "task_started_by", task.TaskStartedBy, time.Now().Add(5*time.Minute))
+				if task.TaskEndedBy != at.Unix() {
+					t.Errorf("%s end_by %s gave task_ended_by %d, want %d", lane, forms.endBy, task.TaskEndedBy, at.Unix())
+				}
+			} else {
+				near(lane, "task_ended_by", task.TaskEndedBy, time.Now().Add(90*time.Minute))
+				if task.TaskStartedBy != at.Unix() {
+					t.Errorf("%s start_by %s gave task_started_by %d, want %d", lane, forms.startBy, task.TaskStartedBy, at.Unix())
+				}
+			}
+		}
+	}
+	for _, flag := range []string{"--start-by", "--end-by"} {
+		var stdout, stderr bytes.Buffer
+		if err := runSubmit(b.ctx, b.client, []string{"--prompt", "work", flag, "soon"}, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), flag+": ") {
+			t.Errorf("submit %s soon: %v, want it refused naming the flag", flag, err)
+		}
 	}
 	before := time.Now()
 	var submitted submitOutput
@@ -242,8 +275,11 @@ func TestDeadlineDefaultsAreTwoHours(t *testing.T) {
 	cli, _, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "run_id="), " ")
 	for lane, runID := range map[string]string{"MCP": submitted.ID, "CLI": cli} {
 		task := b.tasks(t, runID)[0].submission.Wherry
-		if task.DeadlineMS < before.Add(2*time.Hour).UnixMilli() || task.DeadlineMS > after.Add(2*time.Hour).UnixMilli() {
-			t.Errorf("%s submit deadline %v, want two hours out", lane, time.UnixMilli(task.DeadlineMS))
+		if task.TaskEndedBy < before.Add(2*time.Hour).Unix() || task.TaskEndedBy > after.Add(2*time.Hour).Unix() {
+			t.Errorf("%s submit task_ended_by %v, want two hours out", lane, time.Unix(task.TaskEndedBy, 0))
+		}
+		if task.TaskStartedBy < before.Add(10*time.Minute).Unix() || task.TaskStartedBy > after.Add(10*time.Minute).Unix() {
+			t.Errorf("%s submit task_started_by %v, want ten minutes out", lane, time.Unix(task.TaskStartedBy, 0))
 		}
 	}
 }
@@ -430,22 +466,22 @@ func TestMCPWaitBoundedRetry(t *testing.T) {
 	}
 }
 
-func TestMCPWaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
+func TestMCPWaitAndStatusReportAnUnclaimedRunPastItsStartBy(t *testing.T) {
 	b := newBus(t)
 	ctx := b.ctx
 	session := mcpSession(t, b.connect(t), nil)
 	var submitted submitOutput
-	callTool(t, ctx, session, "submit", map[string]any{"prompt": "fix the bug", "queue_deadline": "2s"}, &submitted)
+	callTool(t, ctx, session, "submit", map[string]any{"prompt": "fix the bug", "start_by": "2s"}, &submitted)
 	start := time.Now()
 	var reply map[string]any
 	callTool(t, ctx, session, "wait", map[string]any{"id": submitted.ID}, &reply)
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("wait returned after %s, want soon after the 2s queue deadline", elapsed)
+		t.Fatalf("wait returned after %s, want soon after the 2s task_started_by", elapsed)
 	}
 	message, _ := reply["message"].(string)
-	if !strings.HasPrefix(message, "queue deadline passed at ") || !strings.HasSuffix(message, " and no receiver claimed the run") ||
+	if !strings.HasPrefix(message, "not started by task_started_by (") || !strings.HasSuffix(message, "): no receiver claimed the task") ||
 		!reflect.DeepEqual(reply, map[string]any{"id": submitted.ID, "state": string(wire.TaskStateSubmitted), "message": message}) {
-		t.Fatalf("wait %#v, want the passed queue deadline without retry_after", reply)
+		t.Fatalf("wait %#v, want the passed task_started_by without retry_after", reply)
 	}
 	var status statusOutput
 	callTool(t, ctx, session, "status", map[string]any{"id": submitted.ID}, &status)
@@ -911,8 +947,8 @@ func TestToolFailureCodes(t *testing.T) {
 	for err, want := range map[error]string{
 		fmt.Errorf("load: %w", admin.ErrNewerRecord): "VERSION_SKEW",
 		newerRecord(t): "VERSION_SKEW",
-		fmt.Errorf("submit: %w", busclient.ErrQueueDeadlinePastMaximum): "INVALID_ARGUMENT",
-		busclient.ErrNoMatchingReceiver:                                 "NO_MATCHING_RECEIVER",
+		fmt.Errorf("submit: %w", busclient.ErrStartByPastLimit): "INVALID_ARGUMENT",
+		busclient.ErrNoMatchingReceiver:                         "NO_MATCHING_RECEIVER",
 	} {
 		if failure := toolFailure(err).(*toolError); failure.Code != want {
 			t.Errorf("%v: code %s, want %s", err, failure.Code, want)

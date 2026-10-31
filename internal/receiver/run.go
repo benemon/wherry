@@ -306,11 +306,8 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	})
 	if !claimed {
 		maximum := terms.StartByLimit()
-		if time.Since(all[0].submitted) > maximum {
-			return reject("run expired")
-		}
-		if task.Wherry.QueueDeadlineMS > all[0].submitted.Add(maximum).UnixMilli() {
-			return reject("queue deadline exceeds the pool's max queue deadline")
+		if time.Since(all[0].submitted) > maximum || task.Wherry.TaskStartedBy > all[0].submitted.Add(maximum).Unix() {
+			return reject("task_started_by is past the pool's start_by_limit")
 		}
 	}
 	history := []wire.Message{task.Message}
@@ -318,12 +315,13 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if cancelled {
 		return admitted, 0
 	}
-	now := time.Now()
-	if !claimed && now.UnixMilli() > task.Wherry.QueueDeadlineMS {
-		return reject("queue deadline passed")
+	// The receiver's clock decides both bounds, each passed only when now is past its whole second.
+	now := time.Now().Unix()
+	if !claimed && now > task.Wherry.TaskStartedBy {
+		return rejectAs("not started by task_started_by", wire.NotStartedBy(task.Wherry.TaskStartedBy))
 	}
-	if !claimed && now.UnixMilli() > task.Wherry.DeadlineMS {
-		return reject("run deadline passed")
+	if !claimed && now > task.Wherry.TaskEndedBy {
+		return rejectAs("not ended by task_ended_by", wire.NotEndedBy(task.Wherry.TaskEndedBy))
 	}
 	declared := task.Wherry
 	var supplied []wire.TaskCredential
@@ -587,13 +585,16 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	})
 	defer stopRenew()
 
-	// The cap is anchored to the signed queue deadline so redelivery cannot extend it.
-	deadline := time.UnixMilli(task.Wherry.DeadlineMS)
-	if limit := time.UnixMilli(task.Wherry.QueueDeadlineMS).Add(time.Duration(admin.MaxRunDurationMS) * time.Millisecond); deadline.After(limit) {
+	// The cap is anchored to the signed task_started_by so redelivery cannot extend it.
+	deadline := wire.PastBound(task.Wherry.TaskEndedBy)
+	if limit := wire.PastBound(task.Wherry.TaskStartedBy).Add(time.Duration(admin.MaxRunDurationMS) * time.Millisecond); deadline.After(limit) {
 		deadline = limit
 	}
 	runCtx, cancelRun := context.WithDeadline(ctx, deadline)
 	defer cancelRun()
+	// startCtx bounds the run until its job starts.
+	startCtx, cancelStart := context.WithDeadline(runCtx, wire.PastBound(task.Wherry.TaskStartedBy))
+	defer cancelStart()
 
 	producer, err := r.newProducer(runID)
 	if err != nil {
@@ -635,22 +636,26 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
 		return run.abandon(err)
 	}
-	// A claimed run is redelivered even past its deadline; its job is looked up all the same, so it is stopped.
-	lookupCtx := runCtx
-	if runCtx.Err() != nil {
-		var cancelLookup context.CancelFunc
-		lookupCtx, cancelLookup = context.WithTimeout(ctx, readTimeout)
-		defer cancelLookup()
-	}
-	offset := int64(0)
+	offset, started := int64(0), false
 	if attempt > 1 {
 		r.metrics.redeliveries.WithLabelValues(task.Wherry.Tenant, admitted.profile.Name).Inc()
-		offset, err = r.lastOffset(lookupCtx, task, run.taskHash)
+		offset, started, err = r.lastOffset(ctx, task, run.taskHash)
 		if err != nil {
 			r.logger.Printf("run %s: read events: %v", runID, err)
 			return run.returnTask(ctx, nil)
 		}
 		run.next = offset
+	}
+	// A claimed run is redelivered even past its bounds; its job is looked up all the same, so it is stopped. The
+	// lookup of a job not yet started waits no later than task_started_by.
+	lookupCtx := startCtx
+	if started {
+		lookupCtx = runCtx
+	}
+	if lookupCtx.Err() != nil {
+		var cancelLookup context.CancelFunc
+		lookupCtx, cancelLookup = context.WithTimeout(ctx, readTimeout)
+		defer cancelLookup()
 	}
 	var handle pluginsdk.Handle
 	adopted, neverStarted := false, false
@@ -660,7 +665,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			job, err := named.Plugin.Lookup(lookupCtx, runID)
 			if err != nil {
 				if lookupCtx.Err() != nil && ctx.Err() == nil {
-					return run.fail(ctx, "timeout", nil)
+					return run.expired(ctx, nil, nil)
 				}
 				r.logger.Printf("run %s: lookup in profile %s: %s", runID, named.Name, logText(run.redactText, err))
 				return run.returnTask(ctx, nil)
@@ -701,8 +706,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if neverStarted {
 		return run.startFailure(ctx, "platform", "job never started")
 	}
-	if runCtx.Err() != nil && ctx.Err() == nil && !adopted {
-		return run.fail(ctx, "timeout", nil)
+	if startCtx.Err() != nil && ctx.Err() == nil && !adopted {
+		return run.expired(ctx, nil, nil)
 	}
 	// The agent's credentials are asked for under the pool's terms; a task credential of the same name rides with one.
 	agentCredentials, taskCredentials := []string{}, []string{}
@@ -725,7 +730,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		var secrets []pluginsdk.Secret
 		var fetches []pluginsdk.Fetch
 		if len(agentCredentials)+len(taskCredentials)+len(inputNames)+len(outputNames) > 0 {
-			sealed, status, ok := run.awaitSeal(ctx, runCtx, nil, agentCredentials, taskCredentials, inputNames, outputNames)
+			sealed, status, ok := run.awaitSeal(ctx, startCtx, nil, agentCredentials, taskCredentials, inputNames, outputNames)
 			if !ok {
 				return status
 			}
@@ -744,7 +749,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		for _, input := range admitted.inputs {
 			promptInputs = append(promptInputs, input.Name)
 		}
-		dispatched, dispatchedHandle, err := named.Plugin.Dispatch(runCtx, pluginsdk.Run{
+		dispatched, dispatchedHandle, err := named.Plugin.Dispatch(startCtx, pluginsdk.Run{
 			ID: runID, Profile: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Attempt: attempt,
 			Prompt: []byte(Preamble(named.Plugin.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID,
 				run.terms().ReplyLimit) + prompt(admitted.history)),
@@ -753,9 +758,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		var tooLarge *pluginsdk.InputTooLargeError
 		var failure *pluginsdk.Error
 		switch {
-		case err != nil && runCtx.Err() != nil && ctx.Err() == nil:
+		case err != nil && startCtx.Err() != nil && ctx.Err() == nil:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
-			return run.fail(ctx, "timeout", nil)
+			return run.expired(ctx, nil, nil)
 		case errors.As(err, &tooLarge) && dispatched == pluginsdk.OutcomeNothingCreated:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
 			// The plugin's name for the input reaches the status only when it is one of the run's inputs.
@@ -789,8 +794,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			return run.startFailure(ctx, "dispatch", "profile "+named.Name+" created no job")
 		default:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
-			job, resolved := run.reconcile(runCtx)
+			job, resolved := run.reconcile(startCtx)
 			switch {
+			case !resolved && startCtx.Err() != nil && ctx.Err() == nil:
+				return run.expired(ctx, nil, nil)
 			case !resolved:
 				r.logger.Printf("run %s: dispatch unresolved", runID)
 				return run.returnTask(ctx, nil)
@@ -821,7 +828,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		return run.stopAndCancel(ctx, handle, nil)
 	}
 	if adopted && runCtx.Err() != nil && ctx.Err() == nil {
-		return run.stopAndFail(ctx, handle, "timeout", nil)
+		return run.expired(ctx, &handle, nil)
 	}
 
 	followCtx, stopFollow := context.WithCancel(runCtx)
@@ -980,7 +987,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			case !lookupRetry:
 				follow(position)
 			case runCtx.Err() != nil && ctx.Err() == nil:
-				return run.stopAndFail(ctx, handle, "timeout", pending)
+				return run.expired(ctx, &handle, pending)
 			default:
 				if status, done := recoverFollow(followErr); done {
 					return status
@@ -997,7 +1004,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			}
 			switch {
 			case runCtx.Err() != nil && ctx.Err() == nil:
-				return run.stopAndFail(ctx, handle, "timeout", pending)
+				return run.expired(ctx, &handle, pending)
 			case ctx.Err() != nil:
 				return shutdown()
 			case errors.Is(end.err, pluginsdk.ErrLinkLost) && (retryUntil.IsZero() || time.Now().Before(retryUntil)):
@@ -1149,12 +1156,9 @@ func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *pluginsdk.Hand
 			return signed.SealValues{}, run.stopAndCancel(ctx, *job, nil), false
 		case cancelled:
 			return signed.SealValues{}, run.cancel(ctx, nil), false
-		case runCtx.Err() != nil && job != nil:
-			waited("expired")
-			return signed.SealValues{}, run.stopAndFail(ctx, *job, "timeout", nil), false
 		case runCtx.Err() != nil:
 			waited("expired")
-			return signed.SealValues{}, run.fail(ctx, "timeout", nil), false
+			return signed.SealValues{}, run.expired(ctx, job, nil), false
 		case waitCtx.Err() != nil && job != nil:
 			waited("adopter_refused")
 			if err := run.profile.Plugin.Stop(ctx, *job); err != nil {
@@ -1486,6 +1490,25 @@ func (run *activeRun) deny(ctx context.Context, handle pluginsdk.Handle, pending
 	}
 	run.release(ctx)
 	return kgo.AckRelease
+}
+
+// expired ends a run past a bound: task_ended_by once its deadline passed, else task_started_by before its job
+// started. With no handle, the run's job, if one exists, is purged.
+func (run *activeRun) expired(ctx context.Context, job *pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
+	reason := wire.NotStartedBy(run.task.Wherry.TaskStartedBy)
+	if !time.Now().Before(run.deadline) {
+		reason = wire.NotEndedBy(run.task.Wherry.TaskEndedBy)
+	}
+	if job != nil {
+		return run.stopAndFail(ctx, *job, reason, pending)
+	}
+	if err := run.purge(ctx); err != nil {
+		if ctx.Err() != nil {
+			return kgo.AckRelease
+		}
+		return run.returnTask(ctx, pending)
+	}
+	return run.fail(ctx, reason, pending)
 }
 
 func (run *activeRun) fail(ctx context.Context, reason string, pending []pluginsdk.Line) kgo.AckStatus {
@@ -2269,12 +2292,13 @@ func inputPointers(history []wire.Message) []wire.Message {
 // lastOffset returns the highest log offset this run reached under an earlier attempt: its started offsets, and the
 // progress of each receiver that held an attempt of it. A holder whose progress topic this receiver cannot read, such
 // as an ended one, contributes nothing.
-func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash string) (int64, error) {
+func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash string) (int64, bool, error) {
 	events, err := r.readEvents(ctx)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	var highest int64
+	started := false
 	holders := map[string]bool{}
 	for _, status := range events.statuses[task.Wherry.Run] {
 		if status.Wherry.Tenant != task.Wherry.Tenant || status.Wherry.TaskHash != hash {
@@ -2282,7 +2306,7 @@ func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash s
 		}
 		holders[status.Wherry.Receiver] = true
 		if status.Wherry.Kind == "started" && status.Wherry.LogOffset != nil {
-			highest = max(highest, *status.Wherry.LogOffset)
+			highest, started = max(highest, *status.Wherry.LogOffset), true
 		}
 	}
 	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
@@ -2293,7 +2317,7 @@ func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash s
 			continue
 		}
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		for _, record := range records {
 			if string(record.Key) != task.Wherry.Run || record.Value == nil {
@@ -2305,7 +2329,7 @@ func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash s
 			}
 		}
 	}
-	return highest, nil
+	return highest, started, nil
 }
 
 // attemptOf is the share-group delivery count, which franz-go reports as at least 1

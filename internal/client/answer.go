@@ -387,7 +387,7 @@ func (h *Host) answer(ctx context.Context, logger *log.Logger, runID string, enc
 			}
 			return true
 		}
-		urls, err := presign(ctx, store, storage.Bucket, h.tenant, runID, request.S3Inputs, request.S3Outputs, time.UnixMilli(local.DeadlineMS))
+		urls, err := presign(ctx, store, storage.Bucket, h.tenant, runID, request.S3Inputs, request.S3Outputs, time.Unix(local.TaskEndedBy, 0))
 		if err != nil {
 			if ctx.Err() == nil {
 				logger.Printf("run %s: skipped a seal request for S3 URLs: %v", runID, err)

@@ -1027,7 +1027,7 @@ func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 	const prompt = "mock: smoke"
 	input := busclient.SubmitInput{
 		Agent: "mock", Prompt: prompt, Outputs: []wire.ExpectedOutput{{Name: "echo.txt", Required: true}},
-		Deadline: busclient.DefaultDeadline, QueueDeadline: busclient.DefaultQueueDeadline,
+		StartBy: time.Now().Add(busclient.DefaultStartBy), EndBy: time.Now().Add(busclient.DefaultEndBy),
 	}
 	if env.storage() {
 		input.S3Inputs = []busclient.S3File{{Name: devSmokeInput, Body: strings.NewReader("smoke input\n")}}

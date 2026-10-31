@@ -39,7 +39,7 @@ func fakeStorageFixture(t *testing.T) (*fixture, *uploadOracle, *testReceiver) {
 func s3Run(t *testing.T, tampered string) (*fixture, *uploadOracle, string, AwaitResult) {
 	t.Helper()
 	f, o, receiver := fakeStorageFixture(t)
-	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Deadline: time.Minute, QueueDeadline: time.Minute,
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute),
 		Outputs: []wire.ExpectedOutput{{Name: "a.bin", Storage: wire.StorageS3}, {Name: "b.bin", Storage: wire.StorageS3}}})
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestCollectKeepsS3ObjectsWhenAnOutputDoesNotVerify(t *testing.T) {
 func TestCollectOfAnUnclaimedRunCollectsNothing(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Deadline: time.Minute, QueueDeadline: time.Second})
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}

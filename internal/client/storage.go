@@ -32,7 +32,7 @@ type S3File struct {
 }
 
 // getLifetime is how long a presigned GET for an S3 input lives; a PUT for an S3 output lives until its run's
-// deadline.
+// task_ended_by.
 const getLifetime = 15 * time.Minute
 
 // storageTransport carries the client's S3 requests, nil for Go's default. A variable so tests can trust their TLS

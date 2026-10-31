@@ -81,20 +81,37 @@ type Placement struct {
 
 // SubmissionBinding is the wherry block of a submission.
 type SubmissionBinding struct {
-	Tenant          string           `json:"tenant"`
-	Host            string           `json:"host"`
-	Pool            string           `json:"pool"`
-	Run             string           `json:"run"`
-	Placement       Placement        `json:"placement"`
-	DeadlineMS      int64            `json:"deadline_at_ms"`
-	QueueDeadlineMS int64            `json:"queue_deadline_at_ms"`
-	Credentials     []TaskCredential `json:"credentials,omitzero"`
+	Tenant    string    `json:"tenant"`
+	Host      string    `json:"host"`
+	Pool      string    `json:"pool"`
+	Run       string    `json:"run"`
+	Placement Placement `json:"placement"`
+	// TaskStartedBy bounds the agent job's start and TaskEndedBy the run's terminal state, each a JWT NumericDate:
+	// whole seconds since the epoch, UTC.
+	TaskStartedBy int64            `json:"task_started_by"`
+	TaskEndedBy   int64            `json:"task_ended_by"`
+	Credentials   []TaskCredential `json:"credentials,omitzero"`
 	// Unsupplied names the agent's optional credentials this host has no source for, which the run goes without.
 	Unsupplied []string         `json:"unsupplied_credentials,omitzero"`
 	Outputs    []ExpectedOutput `json:"outputs,omitzero"`
 	Git        *GitInput        `json:"git,omitzero"`
 	S3Inputs   []S3Input        `json:"s3_inputs,omitzero"`
 }
+
+// PastBound is the first instant the receiver's clock is past a whole-second bound: a job started, or a terminal state
+// reached, within the bound's own second meets it.
+func PastBound(bound int64) time.Time { return time.Unix(bound+1, 0) }
+
+// RFC3339 writes a whole-second bound as an RFC 3339 time in UTC.
+func RFC3339(bound int64) string { return time.Unix(bound, 0).UTC().Format(time.RFC3339) }
+
+// NotStartedBy is the reason a run whose job did not start by its task_started_by ends with.
+func NotStartedBy(bound int64) string {
+	return "not started by task_started_by (" + RFC3339(bound) + ")"
+}
+
+// NotEndedBy is the reason a run not ended by its task_ended_by ends with.
+func NotEndedBy(bound int64) string { return "not ended by task_ended_by (" + RFC3339(bound) + ")" }
 
 // TaskCredential is a credential of the host that the run's agent gets at exactly one target: the environment variable
 // Env, or the file File in its credentials directory.
@@ -415,7 +432,7 @@ func (value *Submission) validate() error {
 	if err := validateIDs(map[string]string{"tenant": binding.Tenant, "host": binding.Host, "pool": binding.Pool, "run": binding.Run}); err != nil {
 		return err
 	}
-	if binding.DeadlineMS < 0 || binding.QueueDeadlineMS < 0 {
+	if binding.TaskStartedBy < 0 || binding.TaskEndedBy < 0 {
 		return errors.New("invalid submission")
 	}
 	if err := binding.Placement.validate(); err != nil {

@@ -308,8 +308,9 @@ func TestRunPastItsDeadlineCountsUntilItEnds(t *testing.T) {
 	f.answer(t, credentialName)
 	release := make(chan struct{})
 	f.plugin.endDelay, f.plugin.stopCheck = time.Minute, func() error { <-release; return nil }
-	deadline := time.Now().Add(3 * time.Second)
-	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.DeadlineMS = deadline.UnixMilli() }), 1)
+	endBy := time.Now().Add(3 * time.Second).Unix()
+	deadline := wire.PastBound(endBy)
+	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskEndedBy = endBy }), 1)
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 			break

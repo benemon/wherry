@@ -67,7 +67,7 @@ func TestHostListingsListAgainOnlyOnARetriablePartitionError(t *testing.T) {
 	}{
 		{"publish", feed, committedListing, func(t *testing.T, f *fixture) func(context.Context) error {
 			return func(ctx context.Context) error {
-				submission := &wire.Submission{Wherry: wire.SubmissionBinding{Run: "run-listed", Pool: "pool-a", DeadlineMS: time.Now().Add(time.Minute).UnixMilli()}}
+				submission := &wire.Submission{Wherry: wire.SubmissionBinding{Run: "run-listed", Pool: "pool-a", TaskEndedBy: time.Now().Add(time.Minute).Unix()}}
 				return f.host.publish(ctx, submission, []byte("task"), time.Now())
 			}
 		}},

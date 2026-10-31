@@ -79,14 +79,14 @@ func following(t *testing.T, f *fixture, host *Host) *follower {
 	return follower
 }
 
-// pastDeadline moves the run deadline of host's local record of runID into the past and returns the record.
+// pastDeadline moves the task_ended_by of host's local record of runID into the past and returns the record.
 func pastDeadline(t *testing.T, host *Host, runID string) *runRecord {
 	t.Helper()
 	local, err := host.localRun(runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	local.DeadlineMS = time.Now().Add(-time.Minute).UnixMilli()
+	local.TaskEndedBy = time.Now().Add(-time.Minute).Unix()
 	if err := host.writeRun(*local); err != nil {
 		t.Fatal(err)
 	}

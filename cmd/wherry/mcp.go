@@ -157,8 +157,8 @@ func toolFailure(err error) error {
 		return &toolError{Code: "RUN_NOT_FOUND", Message: "this host has not submitted the run and no receiver has admitted it"}
 	case errors.Is(err, busclient.ErrNoMatchingReceiver):
 		return &toolError{Code: "NO_MATCHING_RECEIVER", Message: "no live receiver of an entitled pool offers a placement matching the selector"}
-	case errors.Is(err, busclient.ErrQueueDeadlinePastMaximum):
-		return invalidArgument("the queue deadline is longer than the pool's max_queue_deadline")
+	case errors.Is(err, busclient.ErrStartByPastLimit):
+		return invalidArgument(err.Error())
 	case errors.Is(err, busclient.ErrInvalidInput):
 		return invalidArgument(err.Error())
 	case errors.Is(err, context.Canceled):
@@ -209,17 +209,17 @@ type outputInput struct {
 }
 
 type submitInput struct {
-	Prompt        string             `json:"prompt,omitempty" jsonschema:"the task for the remote agent; exactly one of prompt and prompt_file is required"`
-	PromptFile    string             `json:"prompt_file,omitempty" jsonschema:"local file holding the prompt, read as an input is"`
-	Agent         string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
-	Model         string             `json:"model,omitempty" jsonschema:"model the agent runs, one of its models as receivers lists them; default: the agent's default model"`
-	Selector      []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the profile must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
-	Git           *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts, and its credential and an ssh remote's host key come from the git entry of this host's wherry config whose url is the longest prefix of the remote"`
-	Inputs        []fileInput        `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names"`
-	Credentials   []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent, each as a file in WHERRY_CREDENTIALS_DIR or in an environment variable; no two share a target, and none takes the target of one of the agent's own credentials"`
-	Outputs       []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; wait writes the returned ones locally"`
-	Deadline      string             `json:"deadline,omitempty" jsonschema:"task deadline, a Go duration such as 90m; default 2h"`
-	QueueDeadline string             `json:"queue_deadline,omitempty" jsonschema:"queue deadline, a Go duration such as 30m; default 10m"`
+	Prompt      string             `json:"prompt,omitempty" jsonschema:"the task for the remote agent; exactly one of prompt and prompt_file is required"`
+	PromptFile  string             `json:"prompt_file,omitempty" jsonschema:"local file holding the prompt, read as an input is"`
+	Agent       string             `json:"agent,omitempty" jsonschema:"agent to run, as the pool's terms name it; default: the pool's default agent"`
+	Model       string             `json:"model,omitempty" jsonschema:"model the agent runs, one of its models as receivers lists them; default: the agent's default model"`
+	Selector    []wire.Requirement `json:"selector,omitempty" jsonschema:"labels the profile must carry, each {key, operator, values}; operator is In or NotIn (with values), Exists or DoesNotExist (without); keys are arbitrary operator labels such as gpu or example.com/segment"`
+	Git         *gitInput          `json:"git,omitempty" jsonschema:"repository the agent clones itself; its host must be one of the pool's vcs hosts, and its credential and an ssh remote's host key come from the git entry of this host's wherry config whose url is the longest prefix of the remote"`
+	Inputs      []fileInput        `json:"inputs,omitempty" jsonschema:"local files delivered to the agent's WHERRY_INPUT_DIR under their base names"`
+	Credentials []credentialInput  `json:"credentials,omitempty" jsonschema:"configured credentials delivered to the agent, each as a file in WHERRY_CREDENTIALS_DIR or in an environment variable; no two share a target, and none takes the target of one of the agent's own credentials"`
+	Outputs     []outputInput      `json:"outputs,omitempty" jsonschema:"files the agent is asked to leave in WHERRY_OUTPUT_DIR; wait writes the returned ones locally"`
+	StartBy     string             `json:"start_by,omitempty" jsonschema:"task_started_by, by which the agent's job starts or the task fails: an RFC 3339 time or a Go duration from now such as 30m; default 10m"`
+	EndBy       string             `json:"end_by,omitempty" jsonschema:"task_ended_by, by which the task ends or fails: an RFC 3339 time or a Go duration from now such as 90m; default 2h"`
 }
 
 type submitOutput struct {
@@ -284,7 +284,7 @@ type waitReply struct {
 	State       string                  `json:"state"`
 	Model       string                  `json:"model,omitempty" jsonschema:"model the run's placement names"`
 	RetryAfter  int                     `json:"retry_after,omitempty" jsonschema:"set while the run is unfinished: seconds to wait before calling wait again"`
-	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, or this host's note that the queue deadline passed and no receiver claimed the run; an answer over 64 KiB is cut to its first 64 KiB, and reply names the whole"`
+	Message     string                  `json:"message,omitempty" jsonschema:"status message: the agent's answer or what went wrong, a credential the run could not obtain, or this host's note that task_started_by passed and no receiver claimed the task; an answer over 64 KiB is cut to its first 64 KiB, and reply names the whole"`
 	Reply       *replyFile              `json:"reply,omitempty" jsonschema:"set when the agent's answer is over 64 KiB"`
 	Artifacts   []resultArtifact        `json:"artifacts,omitempty"`
 	Outputs     []outputReply           `json:"outputs,omitempty" jsonschema:"the run's outputs, verified and written locally"`
@@ -451,7 +451,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		Name: "wait",
 		Description: fmt.Sprintf("Wait up to %d seconds for a run to finish. Returns the result, a failed, canceled or rejected state "+
 			"with its message, or {id, state, retry_after} while the run is unfinished: call wait again. "+
-			"A run whose queue deadline passed with no receiver claiming it returns its state and a message saying so, without retry_after. "+
+			"A run whose task_started_by passed with no receiver claiming it returns its state and a message saying so, without retry_after. "+
 			"A finished run's outputs are verified and written under this host's state directory; outputs lists their paths and hashes. "+
 			"Use status to check a run without waiting.", int(waitBound.Seconds())),
 	}, func(ctx context.Context, request *mcp.CallToolRequest, input runInput) (*mcp.CallToolResult, waitReply, error) {
@@ -670,13 +670,13 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 			return busclient.SubmitInput{}, invalidArgument("an input's storage is s3 or absent")
 		}
 	}
-	deadline, queueDeadline, err := deadlines(input.Deadline, input.QueueDeadline)
+	startBy, endBy, err := bounds(input.StartBy, input.EndBy, time.Now())
 	if err != nil {
 		return busclient.SubmitInput{}, err
 	}
 	submission := busclient.SubmitInput{
 		Agent: input.Agent, Model: input.Model, Selector: selector, Prompt: input.Prompt, Parts: parts,
-		Deadline: deadline, QueueDeadline: queueDeadline,
+		StartBy: startBy, EndBy: endBy,
 	}
 	if input.Git != nil {
 		submission.Git = &wire.GitInput{Remote: input.Git.Remote, Ref: input.Git.Ref, Path: input.Git.Path}
@@ -703,16 +703,16 @@ func submitFromInput(input submitInput, readInput func(string, int64) (wire.Part
 	return submission, nil
 }
 
-// deadlines parses the deadlines and applies the CLI's defaults to unset ones.
-func deadlines(deadline, queueDeadline string) (time.Duration, time.Duration, error) {
-	parsed := []time.Duration{busclient.DefaultDeadline, busclient.DefaultQueueDeadline}
-	for i, text := range []string{deadline, queueDeadline} {
-		if text == "" {
+// bounds parses start_by and end_by and applies the CLI's defaults to unset ones.
+func bounds(startBy, endBy string, now time.Time) (time.Time, time.Time, error) {
+	parsed := []time.Time{now.Add(busclient.DefaultStartBy), now.Add(busclient.DefaultEndBy)}
+	for i, field := range []struct{ name, text string }{{"start_by", startBy}, {"end_by", endBy}} {
+		if field.text == "" {
 			continue
 		}
-		value, err := time.ParseDuration(text)
-		if err != nil || value <= 0 {
-			return 0, 0, invalidArgument("deadlines must be positive Go durations, such as 90m")
+		value, err := busclient.ParseBound(field.text, now)
+		if err != nil {
+			return time.Time{}, time.Time{}, invalidArgument(field.name + ": " + err.Error())
 		}
 		parsed[i] = value
 	}

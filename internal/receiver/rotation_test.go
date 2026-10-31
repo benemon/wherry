@@ -58,10 +58,10 @@ func TestCompletedRunRedeliveredAfterSelfRotation(t *testing.T) {
 	}
 }
 
-// A completed run redelivered past its queue deadline after a rotation is acknowledged on redelivery.
-func TestCompletedRunPastQueueDeadlineAfterSelfRotation(t *testing.T) {
+// A completed run redelivered past its task_started_by after a rotation is acknowledged on redelivery.
+func TestCompletedRunPastStartByAfterSelfRotation(t *testing.T) {
 	f := newFixture(t, resultStream)
-	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli() })
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "terminal", wire.TaskStateCompleted, nil)
 	rotateSelf(t, &f)
 	admitted, ack := f.receiver.admit(f.ctx, record)
@@ -70,8 +70,8 @@ func TestCompletedRunPastQueueDeadlineAfterSelfRotation(t *testing.T) {
 	}
 }
 
-// A held run past its queue deadline is admitted for adoption after its holder rotates.
-func TestHeldRunPastQueueDeadline(t *testing.T) {
+// A held run past its task_started_by is admitted for adoption after its holder rotates.
+func TestHeldRunPastStartBy(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		rotate func(*testing.T, *fixture, ed25519.PrivateKey)
@@ -87,7 +87,7 @@ func TestHeldRunPastQueueDeadline(t *testing.T) {
 			if test.holder != testReceiver {
 				key = f.addPeer(t, test.holder, testPool)
 			}
-			record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli() })
+			record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
 			f.publishStatus(t, record, test.holder, key, "claimed", wire.TaskStateWorking, nil)
 			f.publishStatus(t, record, test.holder, key, "started", wire.TaskStateWorking, nil)
 			test.rotate(t, &f, key)
@@ -107,7 +107,7 @@ func TestLastOffsetAfterSelfRotation(t *testing.T) {
 	offset := int64(42)
 	f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &offset)
 	rotateSelf(t, &f)
-	got, err := f.receiver.lastOffset(f.ctx, task, hash)
+	got, _, err := f.receiver.lastOffset(f.ctx, task, hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestRunIDOfAnotherTenantAfterHolderRotation(t *testing.T) {
 func TestRetiredKeyAfterRotationRefused(t *testing.T) {
 	f := newFixture(t, resultStream)
 	old := f.receiver.signing
-	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli() })
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
 	rotateSelf(t, &f)
 	time.Sleep(10 * time.Millisecond)
 	f.publishStatus(t, record, testReceiver, old, "claimed", wire.TaskStateWorking, nil)

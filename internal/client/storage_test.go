@@ -297,7 +297,7 @@ func submitS3(t *testing.T, f *fixture, receiver *testReceiver, deadline time.Du
 	t.Helper()
 	file, data := randomFile(t, "dataset.bin", 5<<20)
 	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
-		Outputs: []wire.ExpectedOutput{{Name: "out/report.pdf", Required: true, Storage: wire.StorageS3}}, Deadline: deadline, QueueDeadline: time.Minute})
+		Outputs: []wire.ExpectedOutput{{Name: "out/report.pdf", Required: true, Storage: wire.StorageS3}}, EndBy: time.Now().Add(deadline), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestSubmitMovesInputsOverSmallestProfileLimitToS3(t *testing.T) {
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 1000 })
 	f.addReceiver(t, "receiver-b", "pool-inline").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 5000 })
 	data := bytes.Repeat([]byte("x"), 2000)
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: data, Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: data, Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestSubmitMovesInputsOverTheRecordLimitToS3(t *testing.T) {
 	f, o, receiver := recordLimitFixture(t, true)
 	data := make([]byte, 60000)
 	rand.Read(data)
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: data, Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: data, Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func TestSubmitMovesInputsOverTheRecordLimitToS3(t *testing.T) {
 
 func TestSubmitUnderTheRecordLimitKeepsInputsInline(t *testing.T) {
 	f, _, receiver := recordLimitFixture(t, true)
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: []byte("data"), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: []byte("data"), Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +425,7 @@ func TestSubmitOverTheRecordLimitMovesInputsToS3(t *testing.T) {
 	f, _, receiver := recordLimitFixture(t, true)
 	data := make([]byte, 60000)
 	rand.Read(data)
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: data, Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: data, Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +436,7 @@ func TestSubmitOverTheRecordLimitMovesInputsToS3(t *testing.T) {
 
 func TestSubmitRefusesARecordOverTheLimitWithoutStorage(t *testing.T) {
 	f, _, _ := recordLimitFixture(t, false)
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 60000), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 60000), Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "-byte record, over pool pool-r's 100000-byte record limit") {
 		t.Fatalf("submit = %v; want the record size and the record limit named", err)
 	}
@@ -447,7 +447,7 @@ func TestSubmitRefusesARecordOverTheLimitWithoutStorage(t *testing.T) {
 
 func TestSubmitRefusesAPromptOverTheRecordLimit(t *testing.T) {
 	f, _, _ := recordLimitFixture(t, true)
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: strings.Repeat("p", 80000), Parts: []wire.Part{{Raw: []byte("x"), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: strings.Repeat("p", 80000), Parts: []wire.Part{{Raw: []byte("x"), Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "the 80000-byte prompt makes a ") || !strings.Contains(err.Error(), "over pool pool-r's 100000-byte record limit") {
 		t.Fatalf("submit = %v; want the prompt and the record limit named", err)
 	}
@@ -477,7 +477,7 @@ func TestSubmitAppliesTheProfileLimitOfAStaleReceiver(t *testing.T) {
 		ad.Offers[0].InlineLimit = 1000
 		ad.AtMS = time.Now().Add(-10 * liveness).UnixMilli()
 	})
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 2000), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 2000), Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +524,7 @@ func TestAnswerSealsPresignedURLsForTheRunsObjects(t *testing.T) {
 		seconds, _ := strconv.Atoi(parsed.Query().Get("X-Amz-Expires"))
 		return time.Duration(seconds) * time.Second
 	}
-	deadline := time.Until(time.UnixMilli(task.submission.Wherry.DeadlineMS))
+	deadline := time.Until(time.Unix(task.submission.Wherry.TaskEndedBy, 0))
 	if expires(get) != 15*time.Minute || expires(put) < deadline-10*time.Second || expires(put) > deadline+2*time.Second {
 		t.Fatalf("GET lives %v and PUT %v; want 15m and the turn's deadline, %v away", expires(get), expires(put), deadline)
 	}
@@ -638,7 +638,7 @@ func TestPutURLExpiresAtTheTurnsDeadline(t *testing.T) {
 	answering(t, f, f.host)
 	f.waitSeals(t, "host-a", 1)
 	put := string(asked.open(t, f, "host-a")[signed.S3OutputValue("out/report.pdf")])
-	time.Sleep(time.Until(time.UnixMilli(task.submission.Wherry.DeadlineMS).Add(2 * time.Second)))
+	time.Sleep(time.Until(time.Unix(task.submission.Wherry.TaskEndedBy, 0).Add(2 * time.Second)))
 	request, _ := http.NewRequest(http.MethodPut, put, strings.NewReader("late"))
 	if response, err := o.client.Do(request); err != nil || response.StatusCode != http.StatusForbidden {
 		t.Fatalf("PUT after the deadline answered %v, %v; want forbidden", response.Status, err)
@@ -673,7 +673,7 @@ func TestS3UseIsRefusedBeforePublishing(t *testing.T) {
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
 	file, _ := randomFile(t, "dataset.bin", 16)
-	input := SubmitInput{Selector: defaultSelector(), Prompt: "x", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}}, Deadline: time.Minute, QueueDeadline: time.Minute}
+	input := SubmitInput{Selector: defaultSelector(), Prompt: "x", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}
 	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "this host's configuration has no storage credential") {
 		t.Fatalf("submit without a storage credential = %v", err)
 	}
@@ -681,7 +681,7 @@ func TestS3UseIsRefusedBeforePublishing(t *testing.T) {
 	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "pool pool-a has no storage for S3 inputs and outputs") {
 		t.Fatalf("submit to a pool without storage = %v", err)
 	}
-	output := SubmitInput{Selector: defaultSelector(), Prompt: "x", Outputs: []wire.ExpectedOutput{{Name: "r", Storage: wire.StorageS3}}, Deadline: time.Minute, QueueDeadline: time.Minute}
+	output := SubmitInput{Selector: defaultSelector(), Prompt: "x", Outputs: []wire.ExpectedOutput{{Name: "r", Storage: wire.StorageS3}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}
 	if _, err := f.host.Submit(f.ctx, output); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "pool pool-a has no storage") {
 		t.Fatalf("submit of an S3 output to a pool without storage = %v", err)
 	}
@@ -853,7 +853,7 @@ func TestASealOverItsLimitIsRefusedBeforeUploading(t *testing.T) {
 	}
 	file, _ := randomFile(t, "dataset.bin", 16)
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "x", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}}, Outputs: outputs,
-		Deadline: time.Minute, QueueDeadline: time.Minute})
+		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "over the 64 KiB limit") {
 		t.Fatalf("submit = %v; want the seal's size refused", err)
 	}
