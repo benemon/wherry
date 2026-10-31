@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net/url"
 	"slices"
+	"time"
 
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -17,13 +18,24 @@ func AuthorizeSnapshot(state State, keys signed.Keys, encoded []byte, pool strin
 	if err != nil {
 		return wire.Snapshot{}, err
 	}
-	if snapshot.Pool != pool {
-		return wire.Snapshot{}, errors.New("snapshot names another pool than its topic")
-	}
-	if err := state.liveMember(snapshot.Custodian, pool); err != nil {
+	return snapshot, state.custodianOf(snapshot, pool)
+}
+
+// AuthorizeSnapshotHistory is AuthorizeSnapshot for a snapshot the broker appended at appended, which also verifies
+// against a key its writer retired after that.
+func AuthorizeSnapshotHistory(state State, keys signed.Keys, encoded []byte, pool string, appended time.Time) (wire.Snapshot, error) {
+	snapshot, err := wire.ParseSnapshotHistory(encoded, keys, appended)
+	if err != nil {
 		return wire.Snapshot{}, err
 	}
-	return snapshot, nil
+	return snapshot, state.custodianOf(snapshot, pool)
+}
+
+func (state State) custodianOf(snapshot wire.Snapshot, pool string) error {
+	if snapshot.Pool != pool {
+		return errors.New("snapshot names another pool than its topic")
+	}
+	return state.liveMember(snapshot.Custodian, pool)
 }
 
 // CheckEnvelope checks an envelope's values against the task they travel in under its pool's terms: the credentials are

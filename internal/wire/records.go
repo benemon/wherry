@@ -344,8 +344,20 @@ type PoolKey struct {
 // ParseSnapshot verifies a snapshot against its writer's current key, decodes it strictly and requires its writer to
 // be the custodian it names.
 func ParseSnapshot(encoded []byte, keys signed.Keys) (Snapshot, error) {
+	return parseSnapshot(signed.Verify, encoded, keys)
+}
+
+// ParseSnapshotHistory is ParseSnapshot for a snapshot the broker appended at appended, which also verifies against a
+// key its writer retired after that.
+func ParseSnapshotHistory(encoded []byte, keys signed.Keys, appended time.Time) (Snapshot, error) {
+	return parseSnapshot(func(encoded []byte, typ string, keys signed.Keys, dst any) (string, error) {
+		return signed.VerifyHistory(encoded, typ, keys, appended, dst)
+	}, encoded, keys)
+}
+
+func parseSnapshot(verify func([]byte, string, signed.Keys, any) (string, error), encoded []byte, keys signed.Keys) (Snapshot, error) {
 	var payload jsontext.Value
-	writer, err := signed.Verify(encoded, CustodianType, keys, &payload)
+	writer, err := verify(encoded, CustodianType, keys, &payload)
 	if err != nil {
 		return Snapshot{}, err
 	}

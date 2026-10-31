@@ -8,9 +8,11 @@ import (
 	"crypto/rand"
 	json "encoding/json/v2"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,6 +143,19 @@ func custodian(t *testing.T, ctx context.Context, r *Receiver, now time.Time) {
 	}
 }
 
+// describeKeys names each key by its ID and custody record, never its private material.
+func describeKeys(keys map[string]*poolKey) string {
+	var described []string
+	for id, key := range keys {
+		if key == nil {
+			described = append(described, id+" absent")
+			continue
+		}
+		described = append(described, fmt.Sprintf("%s created_ms=%d published_ms=%d deadline_ms=%d", id, key.CreatedMS, key.PublishedMS, key.DeadlineMS))
+	}
+	return "[" + strings.Join(described, ", ") + "]"
+}
+
 func onlyKey(t *testing.T, r *Receiver) (string, *poolKey) {
 	t.Helper()
 	keys := heldKeys(t, r)
@@ -169,11 +184,11 @@ func TestFirstReceiverBootstrapsThePool(t *testing.T) {
 	if snapshot.Reason != "bootstrap" || snapshot.Custodian != testReceiver || snapshot.Pool != testPool {
 		t.Fatalf("snapshot = %+v, want a bootstrap naming %s", snapshot, testReceiver)
 	}
-	if len(atCommit) != 1 || atCommit[snapshot.Current.KeyID] == nil || atCommit[snapshot.Current.KeyID].Published {
-		t.Fatalf("keys at the commit = %v, want the snapshot's key persisted unmarked", atCommit)
+	if len(atCommit) != 1 || atCommit[snapshot.Current.KeyID] == nil || atCommit[snapshot.Current.KeyID].PublishedMS != 0 {
+		t.Fatalf("keys at the commit = %s, want the snapshot's key %s persisted unmarked", describeKeys(atCommit), snapshot.Current.KeyID)
 	}
 	for {
-		if id, key := onlyKey(t, f.receiver); id == snapshot.Current.KeyID && key.Published {
+		if id, key := onlyKey(t, f.receiver); id == snapshot.Current.KeyID && key.PublishedMS == records[0].Timestamp.UnixMilli() {
 			break
 		}
 		if f.ctx.Err() != nil {
@@ -338,7 +353,7 @@ func TestReplacedKeyIsDeletedOnlyAtItsDeadline(t *testing.T) {
 	rotation := rotate(t, f, f.receiver)
 	deadline := rotation.Timestamp.Add(time.Duration(admin.DefaultStartByLimitMS)*time.Millisecond + keyGrace)
 	if key := heldKeys(t, f.receiver)[first]; key == nil || key.DeadlineMS != deadline.UnixMilli() {
-		t.Fatalf("replaced key = %+v, want it held with the rotation's append time + start_by_limit + 7h", key)
+		t.Fatalf("replaced key = %s, want it held with the rotation's append time + start_by_limit + 7h", describeKeys(map[string]*poolKey{first: key}))
 	}
 	if err := f.receiver.tend(f.ctx, deadline.Add(-time.Millisecond)); err != nil {
 		t.Fatal(err)
@@ -386,8 +401,8 @@ func TestUnmarkedKeyIsKeptToItsConservativeDeadline(t *testing.T) {
 		if err := f.receiver.tend(f.ctx, now); err != nil {
 			t.Fatal(err)
 		}
-		if key := heldKeys(t, f.receiver)[crashed]; key == nil || key.Published {
-			t.Fatalf("unmarked key at %v: %+v, want kept unmarked", now.Sub(created), key)
+		if key := heldKeys(t, f.receiver)[crashed]; key == nil || key.PublishedMS != 0 {
+			t.Fatalf("unmarked key at %v: %s, want kept unmarked", now.Sub(created), describeKeys(map[string]*poolKey{crashed: key}))
 		}
 	}
 	if err := f.receiver.tend(f.ctx, deadline); err != nil {
@@ -400,7 +415,7 @@ func TestUnmarkedKeyIsKeptToItsConservativeDeadline(t *testing.T) {
 
 func TestMarkedNonCurrentKeyGetsADeadlineOnStart(t *testing.T) {
 	f := newFixture(t, resultStream)
-	retired := writeKey(t, f.receiver, &poolKey{CreatedMS: time.Now().Add(-48 * time.Hour).UnixMilli(), Published: true})
+	retired := writeKey(t, f.receiver, &poolKey{CreatedMS: time.Now().Add(-48 * time.Hour).UnixMilli(), PublishedMS: time.Now().Add(-48 * time.Hour).UnixMilli()})
 	now := time.Now()
 	if err := f.receiver.tend(f.ctx, now); err != nil {
 		t.Fatal(err)
@@ -442,7 +457,7 @@ func TestUnassignedReceiverNeverWritesASnapshot(t *testing.T) {
 	runUntilStopped(t, f.ctx, f.receiver)
 	f.awaitSnapshots(t, 1)
 	other := f.member(t, "receiver-b")
-	writeKey(t, other, &poolKey{CreatedMS: time.Now().UnixMilli(), Published: true})
+	writeKey(t, other, &poolKey{CreatedMS: time.Now().UnixMilli(), PublishedMS: time.Now().Add(-48 * time.Hour).UnixMilli()})
 	runUntilStopped(t, f.ctx, other)
 	time.Sleep(10 * custodyInterval)
 	for _, record := range f.snapshotRecords(t) {
@@ -454,5 +469,197 @@ func TestUnassignedReceiverNeverWritesASnapshot(t *testing.T) {
 	defer other.custody.mu.Unlock()
 	if other.custody.assigned || other.custody.producer != nil {
 		t.Fatal("the unassigned receiver acts as custodian")
+	}
+}
+
+// rotateSigningKey rotates r's signing key on its key topic and folds it in.
+func rotateSigningKey(t *testing.T, f fixture, r *Receiver) {
+	t.Helper()
+	time.Sleep(5 * time.Millisecond)
+	_, next, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.produce(t, admin.ReceiverTopic(r.id), r.id, must(t)(signed.RotateKey(r.id, r.signing, next)))
+	r.signing = next
+	if err := r.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func takeoverLines(f fixture) int {
+	return strings.Count(f.logs.String(), "took over pool "+testPool+" (WherryCustodianTakeover)")
+}
+
+func TestTakeoverIsCountedOnceAcrossARepublish(t *testing.T) {
+	f := newFixture(t, resultStream)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	successor := f.member(t, "receiver-b")
+	custodian(t, f.ctx, successor, time.Now())
+	rotateSigningKey(t, f, successor)
+	if err := successor.tend(f.ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	records := f.snapshotRecords(t)
+	if len(records) != 3 || parseSnapshot(t, records[2], "receiver-b", successor.signing).Reason != "takeover" {
+		t.Fatalf("snapshots = %d, want the bootstrap, the takeover and its republish", len(records))
+	}
+	if got := scrapedValue(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 || takeoverLines(f) != 1 {
+		t.Fatalf("takeovers counted %v and logged %d times, want once", got, takeoverLines(f))
+	}
+}
+
+func TestSupersededReceiverLeavesTheCustodianUnfenced(t *testing.T) {
+	f := newFixture(t, resultStream)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	successor := f.member(t, "receiver-b")
+	old := f.receiver.custody.producer
+	previous := commitTransaction
+	t.Cleanup(func() { commitTransaction = previous })
+	landed := false
+	// The successor's takeover lands while the old custodian commits, and the old custodian's commit then fails.
+	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+		if producer != old {
+			return previous(ctx, producer)
+		}
+		if !landed {
+			landed = true
+			custodian(t, f.ctx, successor, time.Now())
+		}
+		return errors.New("commit failed")
+	}
+	id, key := onlyKey(t, f.receiver)
+	if err := f.receiver.tend(f.ctx, rotationAt(time.UnixMilli(key.PublishedMS), testPool, id)); err == nil {
+		t.Fatal("the failed rotation succeeded")
+	}
+	if !f.receiver.custody.fenced || f.receiver.custody.producer != nil {
+		t.Fatalf("fenced=%v producer=%v, want the old custodian superseded", f.receiver.custody.fenced, f.receiver.custody.producer != nil)
+	}
+	// Still assigned in its own view, it neither initialises the transactional ID again nor writes.
+	if err := f.receiver.tend(f.ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if records := f.snapshotRecords(t); len(records) != 2 {
+		t.Fatalf("snapshots = %d, want the bootstrap and the successor's takeover", len(records))
+	}
+	rotate(t, f, successor)
+}
+
+func TestTransientCommitErrorRetriesWithoutInitialisingAgain(t *testing.T) {
+	f := newFixture(t, resultStream)
+	var inits atomic.Int32
+	f.cluster.ControlKey(kmsg.InitProducerID.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		if id := request.(*kmsg.InitProducerIDRequest).TransactionalID; id != nil && *id == "p."+testPool+".custodian" {
+			inits.Add(1)
+		}
+		return nil, nil, false
+	})
+	previous := commitTransaction
+	t.Cleanup(func() { commitTransaction = previous })
+	failed := false
+	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+		if !failed {
+			failed = true
+			return errors.New("transient commit error")
+		}
+		return previous(ctx, producer)
+	}
+	custodian(t, f.ctx, f.receiver, time.Now())
+	if records := f.snapshotRecords(t); len(records) != 1 || !failed {
+		t.Fatalf("snapshots = %d, want the bootstrap committed on a retry", len(records))
+	}
+	if inits.Load() != 1 {
+		t.Fatalf("%d initialisations of the custodian transactional ID, want 1", inits.Load())
+	}
+}
+
+func TestRepublishKeepsTheRotationTime(t *testing.T) {
+	f := newFixture(t, resultStream)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	id, key := onlyKey(t, f.receiver)
+	// The key was published an hour before the republish.
+	key.PublishedMS = time.UnixMilli(key.PublishedMS).Add(-time.Hour).UnixMilli()
+	if err := key.save(f.receiver.poolKeysDir()); err != nil {
+		t.Fatal(err)
+	}
+	rotateSigningKey(t, f, f.receiver)
+	if err := f.receiver.tend(f.ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if records := f.snapshotRecords(t); len(records) != 2 {
+		t.Fatalf("snapshots = %d, want the snapshot republished", len(records))
+	}
+	if got := heldKeys(t, f.receiver)[id].PublishedMS; got != key.PublishedMS {
+		t.Fatalf("published_ms = %d after the republish, want %d", got, key.PublishedMS)
+	}
+	if err := f.receiver.tend(f.ctx, rotationAt(time.UnixMilli(key.PublishedMS), testPool, id)); err != nil {
+		t.Fatal(err)
+	}
+	records := f.snapshotRecords(t)
+	if len(records) != 3 || parseSnapshot(t, records[2], testReceiver, f.receiver.signing).Reason != "rotation" {
+		t.Fatalf("snapshots = %d, want a rotation at the key's publication + 24h + jitter", len(records))
+	}
+}
+
+func TestRevokedMemberNeverActsAsCustodian(t *testing.T) {
+	f := newFixture(t, resultStream)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	f.receiver.mu.Lock()
+	f.receiver.state.Ended[admin.ReceiverPrincipal(testReceiver)] = true
+	f.receiver.mu.Unlock()
+	for range 2 {
+		f.receiver.assign(true)
+		if err := f.receiver.tend(f.ctx, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if f.receiver.custody.producer != nil {
+			t.Fatal("the revoked member holds the custodian producer")
+		}
+	}
+	if records := f.snapshotRecords(t); len(records) != 1 {
+		t.Fatalf("snapshots = %d, want the revoked member to write none", len(records))
+	}
+}
+
+func TestTakeoverReadBackLostIsCountedOnTheNextPass(t *testing.T) {
+	f := newFixture(t, resultStream)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	successor := f.member(t, "receiver-b")
+	ctx, cancel := context.WithCancel(f.ctx)
+	previous := commitTransaction
+	t.Cleanup(func() { commitTransaction = previous })
+	lost := false
+	// The commit lands, its answer and the read-back are lost.
+	commitTransaction = func(commitCtx context.Context, producer *kgo.Client) error {
+		if !lost {
+			lost = true
+			if err := previous(commitCtx, producer); err != nil {
+				t.Fatal(err)
+			}
+			cancel()
+		}
+		return errors.New("commit answer lost")
+	}
+	successor.assign(true)
+	if err := successor.tend(ctx, time.Now()); err == nil {
+		t.Fatal("the takeover was read back")
+	}
+	if records := f.snapshotRecords(t); len(records) != 2 || takeoverLines(f) != 0 {
+		t.Fatalf("snapshots = %d and %d takeover lines, want the takeover committed and not yet counted", len(records), takeoverLines(f))
+	}
+	commitTransaction = previous
+	for range 2 {
+		if err := successor.tend(f.ctx, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if records := f.snapshotRecords(t); len(records) != 2 {
+		t.Fatalf("snapshots = %d, want the confirmed takeover kept", len(records))
+	}
+	if got := scrapedValue(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 || takeoverLines(f) != 1 {
+		t.Fatalf("takeovers counted %v and logged %d times, want once", got, takeoverLines(f))
+	}
+	if got := scrapedValue(t, successor, `wherry_ambiguous_commits_total{pool="pool-a"}`); got != 1 {
+		t.Fatalf("ambiguous commits = %v, want 1", got)
 	}
 }

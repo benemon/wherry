@@ -928,8 +928,9 @@ configuration](configuration.md#receiver-local-configuration) names.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
 configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
 private JWK with mode 0600, in it, and in `pool-keys/` one file with mode
-0600 per pool key it holds: the private JWK, its creation time, whether a
-committed snapshot named it current, and its deadline.
+0600 per pool key it holds: the private JWK, its creation time, the append
+time of the committed snapshot first read back naming it current, and its
+deadline.
 On start it:
 
 1. settles a leftover `signing.key.next` as a host command settles
@@ -949,7 +950,8 @@ On start it:
 7. joins the pool's custodian group, `p-<pool>.custodian`, on
    `wherry.pool.<pool>.custodian` with its receiver ID as the static
    instance ID, and acts as the pool's key custodian while the group
-   assigns it the topic's partition.
+   assigns it the topic's partition. A receiver whose membership ended
+   leaves the group and never acts as custodian.
 
 The key custodian writes every snapshot through the transactional ID
 `p.<pool>.custodian`, one transaction per snapshot, and reads the committed
@@ -958,12 +960,19 @@ that the current snapshot names and that holds the snapshot's key continues
 with that key; any other generates a P-256 key, stores it, and publishes it
 with reason `bootstrap` when the topic holds no snapshot and `takeover`
 otherwise. A takeover logs `custodian: took over pool <pool>
-(WherryCustodianTakeover)` and counts in `wherry_custodian_takeovers_total`.
-The custodian rotates the key at the current snapshot's append time plus
-24 hours plus a jitter under one hour derived from the pool and key ID,
-publishing a `rotation` snapshot, and republishes its snapshot after its
-signing key rotates. A receiver whose assignment ends, or whose producer a
-successor fences, writes no more snapshots.
+(WherryCustodianTakeover)` and counts in `wherry_custodian_takeovers_total`
+once, when its snapshot is first read back, also on a later pass when the
+commit landed but its read-back failed. The custodian rotates the key at the
+append time of the snapshot first read back naming it plus 24 hours plus a
+jitter under one hour derived from the pool and key ID, publishing a
+`rotation` snapshot, and republishes its snapshot with the same reason after
+its signing key rotates; a republish does not move the rotation. A commit
+error is retried up to 3 times on the same producer; a commit with an
+unknown outcome counts in `wherry_ambiguous_commits_total`. The custodian
+initialises `p.<pool>.custodian` only when assigned. A receiver whose
+assignment ends, whose producer is fenced, or whose failed write is followed
+by another receiver's committed snapshot writes no more snapshots until it is
+assigned again.
 
 A replaced key's deadline is the replacing snapshot's append time plus
 `start_by_limit` plus 7 hours; a key replaced before the receiver started
@@ -1206,7 +1215,7 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_denials_total` | counter | `op` | Kafka authorisation errors, by the capability denied: `read`, `write`, `transactional ID`, `share group`, `membership` |
 | `wherry_renewal_failures_total` | counter | none | failed claim renewals |
 | `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
-| `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events |
+| `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events or, for the key custodian, its snapshot topic |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
 | `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover` |
 | `wherry_metrics_dropped_total` | counter | `profile`, `reason` | plugin samples dropped and `Metrics` calls that failed |
