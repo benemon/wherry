@@ -345,9 +345,8 @@ func (r *Receiver) refresh(ctx context.Context) error {
 		r.deny(err, capRead)
 		return err
 	}
-	for owner, keys := range ended {
-		ended[owner] = keys.RetiredAt(state.EndedAt[admin.ReceiverPrincipal(owner)])
-	}
+	// Revocation removes an ended receiver's write access before it records the end, so the broker refuses any record
+	// it signs afterwards: its keys verify only what it wrote while a member.
 	r.mu.Lock()
 	r.state, r.peers, r.hosts, r.ended = state, peers, hosts, ended
 	r.mu.Unlock()
@@ -691,7 +690,7 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 			// its membership ended.
 			historic := func(value wire.Record) error {
 				keys := peers
-				if owner, _, _ := kid(record.Value); keys[owner].Current == nil && ended[owner].Retired != nil {
+				if owner, _, _ := kid(record.Value); keys[owner].Current == nil && ended[owner].Current != nil {
 					keys = maps.Clone(peers)
 					keys[owner] = ended[owner]
 				}

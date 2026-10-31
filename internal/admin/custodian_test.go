@@ -9,7 +9,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -100,8 +99,7 @@ func TestSnapshotTopicACLs(t *testing.T) {
 	}
 }
 
-// A pool peer keeps READ on an ended member's key topic, never on its progress topic, and the member's end is the append
-// time of the record that ended it.
+// A pool peer keeps READ on an ended member's key topic, never on its progress topic.
 func TestEndedMembersKeyTopicStaysReadable(t *testing.T) {
 	terms := modelTerms()
 	records := []Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}}
@@ -110,21 +108,17 @@ func TestEndedMembersKeyTopicStaysReadable(t *testing.T) {
 		records = append(records, Record{Version: 1, Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &copy, AtMS: 1})
 	}
 	records = append(records, Record{Version: 1, Kind: "end", Receiver: "receiver-b", AtMS: 1})
-	ended := time.UnixMilli(1_700_000_000_000)
 	var raw []rawRecord
 	for i, record := range records {
 		encoded, err := EncodeRecord(record)
 		if err != nil {
 			t.Fatal(err)
 		}
-		raw = append(raw, rawRecord{int64(i), encoded, ended.Add(time.Duration(i-len(records)+1) * time.Second)})
+		raw = append(raw, rawRecord{int64(i), encoded})
 	}
 	state, err := load(raw)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !state.EndedAt[ReceiverPrincipal("receiver-b")].Equal(ended) {
-		t.Fatalf("receiver-b ended at %v, want %v", state.EndedAt[ReceiverPrincipal("receiver-b")], ended)
 	}
 	acls := ACLs(state)
 	if !hasACL(acls, ReceiverPrincipal("receiver-a"), ReceiverTopic("receiver-b"), "READ") || hasACL(acls, ReceiverPrincipal("receiver-a"), ReceiverProgressTopic("receiver-b"), "READ") {

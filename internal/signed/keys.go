@@ -54,21 +54,6 @@ type RetiredKey struct {
 	At  time.Time
 }
 
-// RetiredAt is state with every key retired by at: a record appended at or after at verifies under none of them.
-func (state KeyState) RetiredAt(at time.Time) KeyState {
-	var retired []RetiredKey
-	for _, key := range state.Retired {
-		if key.At.After(at) {
-			key.At = at
-		}
-		retired = append(retired, key)
-	}
-	if state.Current != nil {
-		retired = append(retired, RetiredKey{Key: state.Current, At: at})
-	}
-	return KeyState{Retired: retired}
-}
-
 // Keys maps an owner (HostOwner, or a receiver ID) to its folded key topic.
 type Keys map[string]KeyState
 

@@ -229,8 +229,6 @@ type Record struct {
 	Offset   int64           `json:"offset,omitzero"`
 	SHA256   string          `json:"sha256,omitzero"`
 	AtMS     int64           `json:"at_ms"`
-	// Appended is the broker append time load reads the record with.
-	Appended time.Time `json:"-"`
 }
 type Host struct{ Tenant, Name string }
 type State struct {
@@ -239,12 +237,10 @@ type State struct {
 	Hosts        map[string]Host
 	Entitlements map[string]map[string]bool
 	Ended        map[string]bool
-	// EndedAt is the append time of the record that ended each principal.
-	EndedAt map[string]time.Time
 }
 
 func NewState() State {
-	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}, map[string]time.Time{}}
+	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}}
 }
 
 // RecordVersion is the wherry.admin record version this release writes and the highest it reads.
@@ -323,9 +319,6 @@ func apply(state *State, record Record) error {
 		}
 		state.Entitlements[record.Tenant][record.Pool] = true
 	case "end":
-		if !state.Ended[subject(record)] {
-			state.EndedAt[subject(record)] = record.Appended
-		}
 		state.Ended[subject(record)] = true
 	}
 	return nil
@@ -648,9 +641,8 @@ func validateRecord(record Record) error {
 }
 
 type rawRecord struct {
-	Offset    int64
-	Value     []byte
-	Timestamp time.Time
+	Offset int64
+	Value  []byte
 }
 
 // ErrNewerRecord is a wherry.admin record whose version is above RecordVersion, written by a later release.
@@ -671,7 +663,6 @@ func load(raw []rawRecord) (State, error) {
 			newer[entry.Offset] = errors.Is(err, ErrNewerRecord)
 			continue
 		}
-		record.Appended = entry.Timestamp
 		if record.Kind == "skip" {
 			skips = append(skips, record)
 		} else {
