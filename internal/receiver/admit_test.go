@@ -210,7 +210,7 @@ func TestRunTimeIsCappedSixHoursAfterTheQueueDeadline(t *testing.T) {
 
 func TestAdmitRejectsRunPastLifetime(t *testing.T) {
 	terms := testTerms()
-	terms.MaxQueueDeadlineMS = 1
+	terms.StartByLimitMS = 1
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	record := f.turn(t, "run-expired", 1)
 	time.Sleep(10 * time.Millisecond)
@@ -219,7 +219,7 @@ func TestAdmitRejectsRunPastLifetime(t *testing.T) {
 
 func TestAdmitRejectsQueueDeadlinePastMaxQueueDeadline(t *testing.T) {
 	terms := testTerms()
-	terms.MaxQueueDeadlineMS = admin.Millis(time.Hour.Milliseconds())
+	terms.StartByLimitMS = admin.Millis(time.Hour.Milliseconds())
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	first := f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-queued", "run-queued", "run-queued"
@@ -230,7 +230,7 @@ func TestAdmitRejectsQueueDeadlinePastMaxQueueDeadline(t *testing.T) {
 
 func TestRedeliveredClaimedRunPastMaxQueueDeadlineIsAdopted(t *testing.T) {
 	terms := testTerms()
-	terms.MaxQueueDeadlineMS = 50
+	terms.StartByLimitMS = 50
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
 	record := startedTurn(t, f, "run-held", func(task *wire.Submission) {
 		task.Wherry.QueueDeadlineMS = time.Now().Add(20 * time.Millisecond).UnixMilli()
@@ -610,7 +610,7 @@ func TestProgressTickHonoursHeldCancel(t *testing.T) {
 
 func TestRunsUnderRetention(t *testing.T) {
 	terms := testTerms()
-	terms.MaxQueueDeadlineMS = admin.Millis(time.Hour.Milliseconds())
+	terms.StartByLimitMS = admin.Millis(time.Hour.Milliseconds())
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
 	aged := func(topic, key string, value []byte, age time.Duration) *kgo.Record {
 		t.Helper()

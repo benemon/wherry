@@ -305,7 +305,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return status.Wherry.TaskHash == hash && status.Wherry.Kind != "rejected"
 	})
 	if !claimed {
-		maximum := terms.MaxQueueDeadline()
+		maximum := terms.StartByLimit()
 		if time.Since(all[0].submitted) > maximum {
 			return reject("run expired")
 		}

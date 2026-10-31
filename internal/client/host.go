@@ -367,7 +367,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			toS3()
 		}
 	}
-	if input.QueueDeadline > v.state.Pools[pool].MaxQueueDeadline() {
+	if input.QueueDeadline > v.state.Pools[pool].StartByLimit() {
 		return SubmitResult{}, ErrQueueDeadlinePastMaximum
 	}
 	if input.Git != nil {

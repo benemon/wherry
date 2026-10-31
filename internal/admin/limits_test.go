@@ -48,8 +48,8 @@ func TestPoolLimitsDefaultWhereTermsLeaveThemOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := state.Pools["pool-a"]; got.OutputLimit != 8<<20 || got.MaxQueueDeadlineMS != DefaultMaxQueueDeadlineMS {
-		t.Fatalf("defaults %#v, want 8 MiB and a 14-day max queue deadline", got)
+	if got := state.Pools["pool-a"]; got.OutputLimit != 8<<20 || got.StartByLimitMS != Millis((72*time.Hour).Milliseconds()) {
+		t.Fatalf("defaults %#v, want 8 MiB and a 72h start_by_limit", got)
 	}
 	terms.OutputLimit = 2000
 	state, err = Fold([]Record{{Version: 1, Kind: "pool", Pool: "pool-a", Terms: &terms, AtMS: 1}})
@@ -156,11 +156,11 @@ func TestPoolCreateSetsDerivedRetentionOnNewAndExistingTopics(t *testing.T) {
 	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
 		t.Fatal(err)
 	}
-	want := int64(1317600000)
+	want := int64(367200000)
 	topics := []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")}
 	for _, topic := range topics {
 		if got := topicRetention(t, service, topic); got != want {
-			t.Fatalf("%s retention.ms = %d, want %d", topic, got, want)
+			t.Fatalf("%s retention.ms = %d, want %d, the 72h start_by_limit plus the 6h run cap and 24h margin", topic, got, want)
 		}
 		setTopicRetention(t, service, topic, 1)
 		setTopicConfig(t, service, topic, "message.timestamp.type", "CreateTime")
@@ -182,18 +182,41 @@ func TestPoolCreateSetsDerivedRetentionOnNewAndExistingTopics(t *testing.T) {
 	}
 }
 
-func TestPoolCreateRefusesMaxQueueDeadlinePastFeedRetention(t *testing.T) {
+func TestPoolCreateRefusesStartByLimitPastFeedRetention(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	terms := modelTerms()
-	terms.MaxQueueDeadlineMS = 30 * 24 * 60 * 60 * 1000
+	terms.StartByLimitMS = 30 * 24 * 60 * 60 * 1000
 	err := service.PoolCreate(context.Background(), "pool-a", terms)
-	if err == nil || err.Error() != "max queue deadline requires tenant feed retention.ms of at least 2613600000" {
+	if err == nil || err.Error() != "start_by_limit requires tenant feed retention.ms of at least 2613600000" {
 		t.Fatalf("pool create = %v", err)
 	}
 }
 
-func TestPoolUpdateRefusesMaxQueueDeadlinePastAnEntitledFeed(t *testing.T) {
+func TestPoolCreateRefusesAStartByLimitPastThePresignLimitWithStorage(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	terms := modelTerms()
+	terms.StartByLimitMS = Millis((7*24*time.Hour - 6*time.Hour + time.Millisecond).Milliseconds())
+	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
+		t.Fatalf("pool create without storage = %v", err)
+	}
+	terms.Storage = &Storage{Endpoint: "https://s3.example.test:8443", Bucket: "wherry-lab"}
+	err := service.PoolCreate(ctx, "pool-b", terms)
+	if err == nil || err.Error() != "start_by_limit plus the 6h run cap exceeds 7 days, the longest an S3 SigV4 presigned URL lasts" {
+		t.Fatalf("pool create with storage = %v", err)
+	}
+	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err == nil {
+		t.Fatal("pool update added storage under a start_by_limit past the presign limit")
+	}
+	terms.StartByLimitMS -= 1
+	if err := service.PoolCreate(ctx, "pool-b", terms); err != nil {
+		t.Fatalf("pool create with storage at the presign limit = %v", err)
+	}
+}
+
+func TestPoolUpdateRefusesStartByLimitPastAnEntitledFeed(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
@@ -203,9 +226,9 @@ func TestPoolUpdateRefusesMaxQueueDeadlinePastAnEntitledFeed(t *testing.T) {
 	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
-	setTopicRetention(t, service, TenantTopic("tenant-a"), 1231199999)
+	setTopicRetention(t, service, TenantTopic("tenant-a"), 280799999)
 	err := service.PoolUpdate(ctx, "pool-a", modelTerms(), false)
-	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 1231199999 is below required 1231200000" {
+	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 280799999 is below required 280800000" {
 		t.Fatalf("pool update = %v", err)
 	}
 }
@@ -238,18 +261,18 @@ func TestPoolUpdateRefusesTermsThatStrandALiveReceiver(t *testing.T) {
 	}
 }
 
-func TestTenantAddRefusesAFeedBelowThePoolsMaxQueueDeadline(t *testing.T) {
+func TestTenantAddRefusesAFeedBelowThePoolsStartByLimit(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
 	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.createTopics(ctx, "1231199999", TenantTopic("tenant-a")); err != nil {
+	if err := service.createTopics(ctx, "280799999", TenantTopic("tenant-a")); err != nil {
 		t.Fatal(err)
 	}
 	err := service.TenantAdd(ctx, "tenant-a", "pool-a")
-	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 1231199999 is below required 1231200000" {
+	if err == nil || err.Error() != "topic wherry.tenant.tenant-a retention.ms 280799999 is below required 280800000" {
 		t.Fatalf("tenant add = %v", err)
 	}
 	if state, err := service.LoadState(ctx); err != nil || len(state.Entitlements) != 0 {
@@ -263,17 +286,17 @@ func TestCheckReportsRetentionDrift(t *testing.T) {
 		mutate func(*testing.T, *Service)
 		want   string
 	}{
-		{"tasks below max queue deadline plus run time and margin", func(t *testing.T, service *Service) {
-			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 1317599999)
+		{"tasks below start_by_limit plus run time and margin", func(t *testing.T, service *Service) {
+			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 367199999)
 		}, "wherry.pool.pool-a.tasks"},
 		{"events below tasks", func(t *testing.T, service *Service) {
-			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 1320000000)
+			setTopicRetention(t, service, PoolTasksTopic("pool-a"), 370000000)
 		}, "wherry.pool.pool-a.events"},
-		{"feed below max queue deadline plus run time", func(t *testing.T, service *Service) {
-			setTopicRetention(t, service, TenantTopic("tenant-a"), 1231199999)
+		{"feed below start_by_limit plus run time", func(t *testing.T, service *Service) {
+			setTopicRetention(t, service, TenantTopic("tenant-a"), 280799999)
 		}, "wherry.tenant.tenant-a"},
-		{"transcript topic below max queue deadline plus run time", func(t *testing.T, service *Service) {
-			setTopicRetention(t, service, TenantTranscriptTopic("tenant-a"), 1231199999)
+		{"transcript topic below start_by_limit plus run time", func(t *testing.T, service *Service) {
+			setTopicRetention(t, service, TenantTranscriptTopic("tenant-a"), 280799999)
 		}, "wherry.tenant.tenant-a.transcript"},
 		{"events not stamped by the broker", func(t *testing.T, service *Service) {
 			setTopicConfig(t, service, PoolEventsTopic("pool-a"), "message.timestamp.type", "CreateTime")

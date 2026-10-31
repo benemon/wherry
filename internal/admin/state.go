@@ -48,14 +48,14 @@ func (agent AgentTerms) Targets() []wire.TaskCredential {
 }
 
 type Terms struct {
-	Agents             []AgentTerms `json:"agents" yaml:"agents"`
-	DefaultAgent       string       `json:"default_agent,omitzero" yaml:"default_agent"`
-	MaxQueueDeadlineMS Millis       `json:"max_queue_deadline_ms,omitzero" yaml:"max_queue_deadline"`
-	DeliveryLimit      int32        `json:"delivery_limit,omitzero" yaml:"delivery_limit"`
-	LockDurationMS     Millis       `json:"lock_duration_ms,omitzero" yaml:"lock_duration"`
-	ProducerByteRate   int64        `json:"producer_byte_rate" yaml:"producer_byte_rate"`
-	RequestPercentage  float64      `json:"request_percentage" yaml:"request_percentage"`
-	OutputLimit        int64        `json:"output_limit,omitzero" yaml:"output_limit"`
+	Agents            []AgentTerms `json:"agents" yaml:"agents"`
+	DefaultAgent      string       `json:"default_agent,omitzero" yaml:"default_agent"`
+	StartByLimitMS    Millis       `json:"start_by_limit_ms,omitzero" yaml:"start_by_limit"`
+	DeliveryLimit     int32        `json:"delivery_limit,omitzero" yaml:"delivery_limit"`
+	LockDurationMS    Millis       `json:"lock_duration_ms,omitzero" yaml:"lock_duration"`
+	ProducerByteRate  int64        `json:"producer_byte_rate" yaml:"producer_byte_rate"`
+	RequestPercentage float64      `json:"request_percentage" yaml:"request_percentage"`
+	OutputLimit       int64        `json:"output_limit,omitzero" yaml:"output_limit"`
 	// ReplyLimit bounds the redacted reply a result returns; a longer one is cut to it.
 	ReplyLimit int64 `json:"reply_limit,omitzero" yaml:"reply_limit"`
 	// VCS holds the hosts, as wire.GitInput.VCSHost names them, a git input may clone from; none allows no git input.
@@ -66,7 +66,7 @@ type Terms struct {
 	RecordLimit int64 `json:"record_limit,omitzero" yaml:"-"`
 }
 
-// Millis is a duration in milliseconds, which pool YAML writes as a Go duration such as 15s or 336h.
+// Millis is a duration in milliseconds, which pool YAML writes as a Go duration such as 15s or 72h.
 type Millis int64
 
 func (m *Millis) UnmarshalYAML(node *yaml.Node) error {
@@ -82,9 +82,9 @@ func (m *Millis) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// MaxQueueDeadline is MaxQueueDeadlineMS as a duration.
-func (terms Terms) MaxQueueDeadline() time.Duration {
-	return time.Duration(terms.MaxQueueDeadlineMS) * time.Millisecond
+// StartByLimit is StartByLimitMS as a duration.
+func (terms Terms) StartByLimit() time.Duration {
+	return time.Duration(terms.StartByLimitMS) * time.Millisecond
 }
 
 // LockDuration is LockDurationMS as a duration.
@@ -150,15 +150,17 @@ func loopbackHTTP(endpoint string) bool {
 	return false
 }
 
-// The Default values are a pool's terms where its terms leave them out; MaxRunDurationMS caps a run after its queue
-// deadline.
+// The Default values are a pool's terms where its terms leave them out; MaxRunDurationMS caps a run after its
+// task_started_by.
 const (
-	DefaultDeliveryLimit      = 5
-	DefaultLockDurationMS     = 15000
-	DefaultOutputLimit        = 8 << 20
-	DefaultReplyLimit         = 1 << 20
-	DefaultMaxQueueDeadlineMS = 14 * 24 * 60 * 60 * 1000
-	MaxRunDurationMS          = 6 * 60 * 60 * 1000
+	DefaultDeliveryLimit  = 5
+	DefaultLockDurationMS = 15000
+	DefaultOutputLimit    = 8 << 20
+	DefaultReplyLimit     = 1 << 20
+	DefaultStartByLimitMS = 72 * 60 * 60 * 1000
+	MaxRunDurationMS      = 6 * 60 * 60 * 1000
+	// MaxPresign is the longest lifetime S3 SigV4 allows a presigned URL.
+	MaxPresign = 7 * 24 * time.Hour
 )
 
 func withDefaults(terms Terms) Terms {
@@ -177,8 +179,8 @@ func withDefaults(terms Terms) Terms {
 	if terms.LockDurationMS == 0 {
 		terms.LockDurationMS = DefaultLockDurationMS
 	}
-	if terms.MaxQueueDeadlineMS == 0 {
-		terms.MaxQueueDeadlineMS = DefaultMaxQueueDeadlineMS
+	if terms.StartByLimitMS == 0 {
+		terms.StartByLimitMS = DefaultStartByLimitMS
 	}
 	if terms.OutputLimit == 0 {
 		terms.OutputLimit = DefaultOutputLimit
@@ -706,7 +708,7 @@ func load(raw []rawRecord) (State, error) {
 
 func validateTerms(terms Terms) error {
 	if len(terms.Agents) == 0 || terms.DeliveryLimit <= 0 || terms.LockDurationMS <= 0 || terms.ProducerByteRate <= 0 || terms.RequestPercentage <= 0 ||
-		terms.MaxQueueDeadlineMS < 0 || terms.RecordLimit < 0 || terms.OutputLimit < 0 || terms.ReplyLimit < 0 {
+		terms.StartByLimitMS < 0 || terms.RecordLimit < 0 || terms.OutputLimit < 0 || terms.ReplyLimit < 0 {
 		return errors.New("invalid pool terms")
 	}
 	// The outcome file is bounded by the output limit, so it can hold a reply at the reply limit.

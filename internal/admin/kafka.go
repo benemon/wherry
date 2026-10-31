@@ -119,6 +119,10 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 	if err != nil {
 		return err
 	}
+	// A run's presigned URLs must last from submit to its end.
+	if effective.Storage != nil && effective.StartByLimitMS+MaxRunDurationMS > Millis(MaxPresign.Milliseconds()) {
+		return errors.New("start_by_limit plus the 6h run cap exceeds 7 days, the longest an S3 SigV4 presigned URL lasts")
+	}
 	if service.DeliveryCeiling == 0 {
 		ceiling, err := service.brokerSetting(ctx, "group.share.max.delivery.count.limit", func(a, b int64) int64 { return min(a, b) })
 		if err != nil {
@@ -520,10 +524,10 @@ type retentionBounds struct {
 
 // poolRetention derives the pool topics' and its tenant feeds' minimum retention.ms from terms with defaults applied.
 func poolRetention(terms Terms) (retentionBounds, error) {
-	if terms.MaxQueueDeadlineMS > tenantRetentionMS-MaxRunDurationMS {
-		return retentionBounds{}, fmt.Errorf("max queue deadline requires tenant feed retention.ms of at least %d", terms.MaxQueueDeadlineMS+MaxRunDurationMS)
+	if terms.StartByLimitMS > tenantRetentionMS-MaxRunDurationMS {
+		return retentionBounds{}, fmt.Errorf("start_by_limit requires tenant feed retention.ms of at least %d", terms.StartByLimitMS+MaxRunDurationMS)
 	}
-	feed := int64(terms.MaxQueueDeadlineMS) + MaxRunDurationMS
+	feed := int64(terms.StartByLimitMS) + MaxRunDurationMS
 	return retentionBounds{tasks: feed + retentionMarginMS, feed: feed}, nil
 }
 
