@@ -207,7 +207,10 @@ that claims a cancelled run starts no job. Either way the run ends in
 Revoking a host or receiver removes its access at the broker, in six
 steps:
 
-1. Rotate the principal's SCRAM password.
+1. Record the principal as revoking on `wherry.admin`, then rotate its
+   SCRAM password. From the revoking record on, the principal is granted
+   no ACL, so an admin command that reconciles ACLs does not restore its
+   grants. It stays a member until step 6.
 2. Delete its ACLs.
 3. Probe every broker as the principal, with the new password. While any
    broker still authorises it, the step probes again every second for up
@@ -215,10 +218,13 @@ steps:
    the step at once.
 4. Delete its SCRAM credential.
 5. Wait the longest of the broker's re-authentication, share-group lock
-   and transaction timeout intervals.
+   and transaction timeout intervals. A longer wait can be asked for; a
+   shorter one is refused.
 6. Record its membership end on `wherry.admin`.
 
-No claim or write by the principal is authorised after step 5. Readers
+No claim or write by the principal is authorised after step 5. A
+revocation run again after a failed step continues from the revoking
+record. Readers
 reject its records once they read the step 6 record. A host also skips
 every record a receiver wrote once that receiver's membership has ended,
 including records it wrote before, so the runs it served lose that history

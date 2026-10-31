@@ -1229,6 +1229,7 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `host` | `tenant`, `host` | records a host of the tenant |
 | `entitlement` | `tenant`, `pool` | entitles the tenant to the pool |
 | `end` | `receiver`, or `tenant` and `host` | records a membership end |
+| `revoking` | `receiver`, or `tenant` and `host` | records a revocation in progress: the principal is granted no ACL and stays a member until its `end` |
 | `skip` | `offset`, `sha256` | passes over the undecodable record at that offset with that SHA-256 |
 
 `terms` has the members of the [pool terms](configuration.md#pool-terms) file
@@ -1241,7 +1242,8 @@ routing order, the plugins in the order of their names. Each plugin profile is t
 naming its plugin, `agent`, `labels` when set, and the merged
 `config`, which keeps a `credential` name and never a credential value. `config`
 also holds `force`, `true` when `receiver update --force` wrote the record. An `end` names
-exactly one of `receiver`, or `tenant` and `host`.
+exactly one of `receiver`, or `tenant` and `host`. A `revoking` names exactly one of `receiver`, or
+`tenant` and `host`, and no other member.
 Readers fold the records in order. A reader loads no state when:
 
 - a `receiver` record moves a receiver to another pool or names an unknown

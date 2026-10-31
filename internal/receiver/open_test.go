@@ -790,9 +790,11 @@ func TestClaimDecisionOutlivesItsCustodianAcrossARestart(t *testing.T) {
 func (f fixture) revoke(t *testing.T, receiver string) {
 	t.Helper()
 	denied := func(context.Context, string, string) error { return admin.ErrAuthorizationDenied }
+	revocationBounds(t, f.service, "1")
 	if result := f.service.RevokeReceiver(f.ctx, receiver, time.Millisecond, denied); !result.Complete {
 		t.Fatalf("revoke receiver: %#v", result.Steps)
 	}
+	revocationBounds(t, f.service, "")
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}

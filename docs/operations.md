@@ -22,13 +22,13 @@ principals and group configurations; the cluster itself is prepared once.
   the principal `wherry admin` uses as root. See
   [Authorization and ACLs](https://kafka.apache.org/documentation/#security_authz).
 - **`auto.create.topics.enable=false`**, so a mistyped topic name fails.
-- **`connections.max.reauth.ms`** is set on the listener. Without
-  `--wait`, revocation waits for it and fails while it is unbounded.
-- **`transaction.max.timeout.ms`** is short enough to wait out: without
-  `--wait`, revocation waits the longest of it,
+- **`connections.max.reauth.ms`** is set on the listener. Revocation
+  waits at least that long and fails while it is unbounded.
+- **`transaction.max.timeout.ms`** is short enough to wait out:
+  revocation waits at least the longest of it,
   `connections.max.reauth.ms` and
   `group.share.max.record.lock.duration.ms`. Kafka's default makes each
-  revocation wait that long unless `--wait` is given.
+  revocation wait that long.
 - **Two SCRAM principals** exist: the super user, and `wherry.operator`
   with Read, Write and Describe on topic `wherry.admin`.
 
@@ -695,12 +695,14 @@ the `wherry admin` environment.
    When it ends, the command prints one line per
    [revocation step](concepts.md#revocation) it ran,
    `step=<n> complete=<bool> name=<name>`. The wait in step 5 is usually the
-   longest; `--wait DURATION` replaces it and must be positive.
+   longest; `--wait DURATION` lengthens it, must be positive, and is
+   refused below the broker-derived minimum.
 
 2. If it fails with `revocation incomplete`, the line of the failed step
    ends in ` error=<cause>`. Check what that step depends on (the broker
    connection, the broker settings), then run the command again. It starts
-   again from step 1. Step 3 already retries for up to 2 minutes while a
+   again from step 1 and continues from the revoking record the failed run
+   left; the principal holds no ACL meanwhile. Step 3 already retries for up to 2 minutes while a
    broker still authorises the principal.
 
 3. For a receiver, rotate at its source each credential of the runs it

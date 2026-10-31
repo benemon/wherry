@@ -22,8 +22,8 @@
   with status 1. `wait` has its own [exit codes](#exit-codes).
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
   positive. `host revoke` and `receiver revoke` refuse a `--wait` of zero or
-  less before they revoke anything; without `--wait` they compute the wait
-  from the broker's timeouts.
+  less before they revoke anything. They compute the minimum wait from the
+  broker's timeouts; `--wait` can lengthen it but not shorten it.
 - `cancel`, `wait`, `status`, `events` and `logs` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
@@ -867,7 +867,8 @@ up to 2 minutes. It fails at once when the login fails or the probe returns
 any other error. Step 5 waits the largest of
 `connections.max.reauth.ms`, `group.share.max.record.lock.duration.ms` and
 `transaction.max.timeout.ms` across the brokers, and fails when one of them
-is unbounded. `--wait DURATION` replaces that wait and must be positive.
+is unbounded. `--wait DURATION` lengthens that wait and must be positive;
+step 5 refuses a duration below it and names the minimum.
 
 ### `wherry admin skip OFFSET --sha256 HASH`
 

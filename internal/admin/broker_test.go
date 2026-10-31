@@ -236,7 +236,7 @@ func TestRealBrokerFixture(t *testing.T) {
 		principal := TenantPrincipal(f.tenantB, f.hostB1)
 		old := f.connect(t, principal)
 		expectReadable(t, old, TenantTopic(f.tenantB))
-		result := f.service.RevokeHost(ctx, f.tenantB, f.hostB1, time.Second, f.service.Probe(HostTopic(f.tenantB, f.hostB1)))
+		result := f.service.RevokeHost(ctx, f.tenantB, f.hostB1, 0, f.service.Probe(HostTopic(f.tenantB, f.hostB1)))
 		for _, step := range result.Steps {
 			t.Logf("step %d %s complete=%t err=%v", step.Number, step.Name, step.Complete, step.Err)
 		}

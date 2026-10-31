@@ -1189,9 +1189,11 @@ func TestRunIDOwnershipSurvivesTheOwnersHostEnding(t *testing.T) {
 		t.Fatal(err)
 	}
 	denied := func(context.Context, string, string) error { return admin.ErrAuthorizationDenied }
+	revocationBounds(t, f.service, "1")
 	if result := f.service.RevokeHost(f.ctx, testTenant, testHost, time.Millisecond, denied); !result.Complete {
 		t.Fatalf("revoke host: %#v", result.Steps)
 	}
+	revocationBounds(t, f.service, "")
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}

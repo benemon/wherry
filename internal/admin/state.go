@@ -237,10 +237,11 @@ type State struct {
 	Hosts        map[string]Host
 	Entitlements map[string]map[string]bool
 	Ended        map[string]bool
+	Revoking     map[string]bool
 }
 
 func NewState() State {
-	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}}
+	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}, map[string]bool{}}
 }
 
 // RecordVersion is the wherry.admin record version this release writes and the highest it reads.
@@ -320,6 +321,8 @@ func apply(state *State, record Record) error {
 		state.Entitlements[record.Tenant][record.Pool] = true
 	case "end":
 		state.Ended[subject(record)] = true
+	case "revoking":
+		state.Revoking[subject(record)] = true
 	}
 	return nil
 }
@@ -633,6 +636,11 @@ func validateRecord(record Record) error {
 	case "end":
 		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil {
 			return errors.New("invalid membership end")
+		}
+	case "revoking":
+		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil ||
+			record.Pool != "" || record.Terms != nil || record.Config != nil || record.Offset != 0 || record.SHA256 != "" {
+			return errors.New("invalid revoking record")
 		}
 	default:
 		return errors.New("unknown admin record kind")

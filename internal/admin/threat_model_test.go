@@ -290,6 +290,7 @@ func TestRevocationRunsAllSixStepsInOrder(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, config, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
+	revocationBounds(t, service, "100", "400", "200")
 	wait := 500 * time.Millisecond
 	started := time.Now()
 	result := service.RevokeReceiver(ctx, "receiver-a", wait, func(ctx context.Context, user, password string) error {
@@ -339,17 +340,7 @@ func TestRevocationWithoutAWaitWaitsTheBrokersLongestTimeout(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	var alters []kadm.AlterConfig
-	for name, value := range map[string]string{"connections.max.reauth.ms": "100", "group.share.max.record.lock.duration.ms": "400", "transaction.max.timeout.ms": "200"} {
-		alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
-	}
-	responses, err := kadm.NewClient(service.Admin).AlterBrokerConfigs(ctx, alters)
-	if err == nil {
-		err = responses[0].Err
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
+	revocationBounds(t, service, "100", "400", "200")
 	started := time.Now()
 	result := service.RevokeReceiver(ctx, "receiver-a", 0, func(context.Context, string, string) error { return ErrAuthorizationDenied })
 	if !result.Complete {
@@ -358,6 +349,165 @@ func TestRevocationWithoutAWaitWaitsTheBrokersLongestTimeout(t *testing.T) {
 	if elapsed := time.Since(started); elapsed < 400*time.Millisecond {
 		t.Fatalf("revocation waited %v, want at least the longest broker timeout of 400ms", elapsed)
 	}
+}
+
+func TestRevocationRefusesAWaitBelowTheBrokersLongestTimeout(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	revocationBounds(t, service, "100", "400", "200")
+	denied := func(context.Context, string, string) error { return ErrAuthorizationDenied }
+	result := service.RevokeReceiver(ctx, "receiver-a", 300*time.Millisecond, denied)
+	if result.Complete || len(result.Steps) != 5 || result.Steps[4].Err == nil || !strings.Contains(result.Steps[4].Err.Error(), "minimum 400ms") {
+		t.Fatalf("wait below the broker minimum: %+v; want step 5 refused naming 400ms", result)
+	}
+	started := time.Now()
+	if result := service.RevokeReceiver(ctx, "receiver-a", 600*time.Millisecond, denied); !result.Complete {
+		t.Fatalf("incomplete revocation: %+v", result)
+	}
+	if elapsed := time.Since(started); elapsed < 600*time.Millisecond {
+		t.Fatalf("revocation waited %v, want the 600ms asked for", elapsed)
+	}
+}
+
+func TestRevokingPrincipalIsGrantedNothing(t *testing.T) {
+	state := modelState(t)
+	for _, record := range []Record{{Version: 1, Kind: "revoking", Receiver: "receiver-a", AtMS: 1}, {Version: 1, Kind: "revoking", Tenant: "tenant-a", Host: "host-a", AtMS: 1}} {
+		encoded, err := EncodeRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := DecodeRecord(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := apply(&state, decoded); err != nil {
+			t.Fatal(err)
+		}
+	}
+	acls := ACLs(state)
+	for _, acl := range acls {
+		if acl.Principal == ReceiverPrincipal("receiver-a") || acl.Principal == TenantPrincipal("tenant-a", "host-a") {
+			t.Fatalf("revoking principal granted %+v", acl)
+		}
+	}
+	if err := state.liveMember("receiver-a", "pool-a"); err != nil || state.Ended[ReceiverPrincipal("receiver-a")] {
+		t.Fatalf("revoking receiver is not a live member: %v", err)
+	}
+	if !hasACL(acls, TenantPrincipal("tenant-b", "host-b"), ReceiverTopic("receiver-a"), "READ") {
+		t.Fatal("a host lost READ on the revoking receiver's key topic")
+	}
+	for _, encoded := range []string{
+		`{"v":1,"kind":"revoking","at_ms":1}`,
+		`{"v":1,"kind":"revoking","receiver":"receiver-a","tenant":"tenant-a","host":"host-a","at_ms":1}`,
+		`{"v":1,"kind":"revoking","receiver":"receiver-a","pool":"pool-a","at_ms":1}`,
+	} {
+		if _, err := DecodeRecord([]byte(encoded)); err == nil {
+			t.Fatalf("decoded invalid revoking record %s", encoded)
+		}
+	}
+}
+
+func TestReconcileDuringRevocationRestoresNoGrant(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	revocationBounds(t, service, "1", "1", "1")
+	var restored int
+	result := service.RevokeReceiver(ctx, "receiver-a", 0, func(ctx context.Context, user, _ string) error {
+		// Adding a receiver reconciles every grant the folded state calls for.
+		if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+			return err
+		}
+		var err error
+		restored, err = principalACLs(ctx, service, user)
+		if err != nil {
+			return err
+		}
+		return ErrAuthorizationDenied
+	})
+	if !result.Complete {
+		t.Fatalf("incomplete revocation: %+v", result)
+	}
+	if restored != 0 {
+		t.Fatalf("a reconcile during revocation restored %d grants", restored)
+	}
+}
+
+func TestRevocationReRunContinuesAfterAFailedStep(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	revocationBounds(t, service, "1", "1", "1")
+	principal := ReceiverPrincipal("receiver-a")
+	if result := service.RevokeReceiver(ctx, "receiver-a", 0, func(context.Context, string, string) error { return errors.New("broker down") }); result.Complete || len(result.Steps) != 3 {
+		t.Fatalf("failed probe: %+v; want revocation stopped at step 3", result)
+	}
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Revoking[principal] || state.Ended[principal] {
+		t.Fatalf("after a failed step: revoking=%t ended=%t; want revoking and not ended", state.Revoking[principal], state.Ended[principal])
+	}
+	if result := service.RevokeReceiver(ctx, "receiver-a", 0, func(context.Context, string, string) error { return ErrAuthorizationDenied }); !result.Complete {
+		t.Fatalf("re-run: %+v; want it to continue and complete", result)
+	}
+	if state, err = service.LoadState(ctx); err != nil || !state.Ended[principal] {
+		t.Fatalf("re-run did not record the membership end: %v", err)
+	}
+}
+
+// revocationBounds sets the broker timeouts that bound revocation's step 5.
+func revocationBounds(t *testing.T, service *Service, reauth, lock, transaction string) {
+	t.Helper()
+	var alters []kadm.AlterConfig
+	for name, value := range map[string]string{"connections.max.reauth.ms": reauth, "group.share.max.record.lock.duration.ms": lock, "transaction.max.timeout.ms": transaction} {
+		alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
+	}
+	responses, err := kadm.NewClient(service.Admin).AlterBrokerConfigs(context.Background(), alters)
+	if err == nil {
+		err = responses[0].Err
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// principalACLs counts the ACLs the broker holds for principal.
+func principalACLs(ctx context.Context, service *Service, principal string) (int, error) {
+	builder := kadm.NewACLs().AnyResource().Allow(principal).AllowHosts("*").Operations(kadm.OpAny).ResourcePatternType(kadm.ACLPatternAny)
+	builder.PrefixUser()
+	results, err := kadm.NewClient(service.Admin).DescribeACLs(ctx, builder)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, result := range results {
+		if result.Err != nil {
+			return 0, result.Err
+		}
+		count += len(result.Described)
+	}
+	return count, nil
 }
 
 func TestRealBrokerTLSListener(t *testing.T) {

@@ -48,7 +48,22 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 		return err == nil
 	}
 	var password string
-	if !run(1, "rotate SCRAM password", func() error { var err error; password, err = service.upsertUser(ctx, principal); return err }) {
+	if !run(1, "record revoking, rotate SCRAM password", func() error {
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			return err
+		}
+		// A re-run continues from the revoking record of the run that failed.
+		if !state.Revoking[principal] {
+			revoking := end
+			revoking.Kind = "revoking"
+			if _, err := service.appendChecked(ctx, []byte("revoking."+principal), revoking); err != nil {
+				return err
+			}
+		}
+		password, err = service.upsertUser(ctx, principal)
+		return err
+	}) {
 		return result
 	}
 	if !run(2, "delete ACLs", func() error { return service.deletePrincipalACLs(ctx, principal) }) {
@@ -88,19 +103,23 @@ func (service *Service) revoke(ctx context.Context, end Record, principal string
 		return result
 	}
 	if !run(5, "wait revocation intervals", func() error {
-		if wait <= 0 {
-			longest := func(a, b int64) int64 { return max(a, b) }
-			for _, name := range []string{"connections.max.reauth.ms", "group.share.max.record.lock.duration.ms", "transaction.max.timeout.ms"} {
-				ms, err := service.brokerSetting(ctx, name, longest)
-				if err != nil {
-					return err
-				}
-				if ms <= 0 {
-					return fmt.Errorf("%s is unbounded, so revocation cannot complete", name)
-				}
-				wait = max(wait, time.Duration(ms)*time.Millisecond)
+		longest := func(a, b int64) int64 { return max(a, b) }
+		var minimum time.Duration
+		for _, name := range []string{"connections.max.reauth.ms", "group.share.max.record.lock.duration.ms", "transaction.max.timeout.ms"} {
+			ms, err := service.brokerSetting(ctx, name, longest)
+			if err != nil {
+				return err
 			}
+			if ms <= 0 {
+				return fmt.Errorf("%s is unbounded, so revocation cannot complete", name)
+			}
+			minimum = max(minimum, time.Duration(ms)*time.Millisecond)
 		}
+		// A connection, share lock or transaction from before step 1 can outlive a shorter wait.
+		if wait > 0 && wait < minimum {
+			return fmt.Errorf("wait %s is below the broker-derived minimum %s", wait, minimum)
+		}
+		wait = max(wait, minimum)
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
 		select {

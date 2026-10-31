@@ -761,7 +761,9 @@ func TestAdoptionFallsBackToStartedWithoutTheHoldersProgress(t *testing.T) {
 			}
 			switch cause {
 			case "ended":
+				revocationBounds(t, f.service, "1")
 				result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return admin.ErrAuthorizationDenied })
+				revocationBounds(t, f.service, "")
 				if !result.Complete {
 					t.Fatalf("incomplete revocation: %+v", result)
 				}

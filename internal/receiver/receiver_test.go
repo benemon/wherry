@@ -457,6 +457,26 @@ func shortIntervals(t *testing.T) {
 	}
 }
 
+// revocationBounds sets, or with "" deletes, the broker timeouts that bound revocation's step 5.
+func revocationBounds(t *testing.T, service *admin.Service, ms string) {
+	t.Helper()
+	var alters []kadm.AlterConfig
+	for _, name := range []string{"connections.max.reauth.ms", "group.share.max.record.lock.duration.ms", "transaction.max.timeout.ms"} {
+		alter := kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &ms}
+		if ms == "" {
+			alter = kadm.AlterConfig{Op: kadm.DeleteConfig, Name: name}
+		}
+		alters = append(alters, alter)
+	}
+	responses, err := kadm.NewClient(service.Admin).AlterBrokerConfigs(context.Background(), alters)
+	if err == nil {
+		err = responses[0].Err
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newService(t *testing.T, ctx context.Context, terms admin.Terms) (*kfake.Cluster, *admin.Service) {
 	t.Helper()
 	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("PLAIN", "wherry.operator", "operator-password"))
@@ -1698,9 +1718,11 @@ func TestRevocationStopsAHeldRun(t *testing.T) {
 				}
 			}
 			revoked := time.Now()
+			revocationBounds(t, f.service, "1")
 			if result := f.service.RevokeReceiver(f.ctx, testReceiver, time.Millisecond, func(context.Context, string, string) error { return admin.ErrAuthorizationDenied }); !result.Complete {
 				t.Fatalf("revocation incomplete: %+v", result.Steps)
 			}
+			revocationBounds(t, f.service, "")
 			for f.receiver.held() > 0 {
 				// One lock duration after the first denial, a state check, then the bounded denied status.
 				if time.Since(revoked) > 25*time.Second {
