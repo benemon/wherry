@@ -28,8 +28,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: Receiver {{ $labels.instance }} holds runs of profile {{ $labels.profile }} past their task_ended_by
-          description: A run held past its task_ended_by stays TASK_STATE_WORKING until the receiver stops its job and ends it.
+          summary: Receiver {{ $labels.instance }} holds runs of profile {{ $labels.profile }} past their task_ended_by or the 6h run cap
+          description: A run held past its task_ended_by or the 6h run cap stays TASK_STATE_WORKING until the receiver stops its job and ends it.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherryrunstuckpastdeadline
 
       - alert: WherryDeliveryBudgetExhausted

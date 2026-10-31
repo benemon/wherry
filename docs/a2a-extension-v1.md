@@ -1145,44 +1145,45 @@ A receiver that claims a submission:
    `not started by task_started_by (<RFC 3339 time>)` or
    `not ended by task_ended_by (<RFC 3339 time>)` when that bound has
    passed;
-6. releases it when no ready plugin profile satisfies the placement, unless
+6. rejects a run no pool member has claimed with
+   `task_ended_by is past task_started_by plus the 6h run cap` when its
+   `task_ended_by` is more than six hours after its `task_started_by`;
+7. releases it when no ready plugin profile satisfies the placement, unless
    a member has claimed the run and its `task_ended_by` has passed, or its
    `task_started_by` has passed with no `started` event;
-7. rejects it with `duplicate submission` when it is not the run's earliest
+8. rejects it with `duplicate submission` when it is not the run's earliest
    submission on the pool's task topic that a live host's current key
    verifies;
-8. rejects a run no pool member has claimed with
+9. rejects a run no pool member has claimed with
    `task_started_by is past the pool's start_by_limit` when its submission
    reached the pool's task topic more than the pool's `start_by_limit_ms`
    ago, or its `task_started_by` falls more than `start_by_limit_ms` after
-   that, and with `task_ended_by is past task_started_by plus the 6h run cap`
-   when its `task_ended_by` is more than six hours after its
-   `task_started_by`;
-9. rejects it when the host of the run's [git input](#git-input) is not
-   one of the pool's current VCS hosts, and with `pool <pool> has no
-   storage for S3 inputs and outputs` when the run has S3 inputs or
-   outputs and the pool's terms have no `storage`;
-10. rejects it with `unsupported message part` when a `url` part appears
+   that;
+10. rejects it when the host of the run's [git input](#git-input) is not
+    one of the pool's current VCS hosts, and with `pool <pool> has no
+    storage for S3 inputs and outputs` when the run has S3 inputs or
+    outputs and the pool's terms have no `storage`;
+11. rejects it with `unsupported message part` when a `url` part appears
     in the message;
-11. writes the echo and the `claimed` status.
+12. writes the echo and the `claimed` status.
 
-A run a cancel covers skips steps 5, 9 and 10, and ends `TASK_STATE_CANCELED`
+A run a cancel covers skips steps 5, 10 and 11, and ends `TASK_STATE_CANCELED`
 after its `claimed` status. A redelivered run that a member has claimed
 goes on to adoption past its bounds. When its `task_ended_by` has passed,
 the receiver stops the job it finds and ends the run `TASK_STATE_FAILED`
 with `not ended by task_ended_by (<RFC 3339 time>)`.
 
 A claimed run whose job has not started by `task_started_by`, while it
-waits for its seal, for the platform to place its job, or for the lookup
-of a redelivered run's job, ends `TASK_STATE_FAILED` with
+waits for its seal or for the platform to place its job, ends
+`TASK_STATE_FAILED` with
 `not started by task_started_by (<RFC 3339 time>)`, and the receiver
 purges the job when one exists. A redelivered run with no `started` event
 past `task_started_by` ends the same way: the receiver stops a job its
 lookup reports running or ended, and purges one that never started. A job
 that has started runs on past `task_started_by` until `task_ended_by`. A
-redelivered run with a `started` event whose lookup does not answer returns
-to the pool with its job and material in place, until the delivery budget
-ends it.
+redelivered run whose lookup does not answer returns to the pool with its
+job and material in place, with or without a `started` event, until the
+delivery budget ends it.
 
 ## Git input
 

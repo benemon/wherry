@@ -291,6 +291,9 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if !claimed && !cancelled && now > task.Wherry.TaskEndedBy {
 		return rejectAs("not ended by task_ended_by", wire.NotEndedBy(task.Wherry.TaskEndedBy))
 	}
+	if !claimed && task.Wherry.TaskEndedBy > task.Wherry.TaskStartedBy+admin.MaxRunDurationMS/1000 {
+		return reject("task_ended_by is past task_started_by plus the 6h run cap")
+	}
 	// A claimed run past a bound its job has not met is ended here, with or without an offer, so its job is stopped.
 	started := slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
 		return status.Wherry.TaskHash == hash && status.Wherry.Kind == "started" && status.Wherry.LogOffset != nil
@@ -321,9 +324,6 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		maximum := terms.StartByLimit()
 		if time.Since(all[0].submitted) > maximum || task.Wherry.TaskStartedBy > all[0].submitted.Add(maximum).Unix() {
 			return reject("task_started_by is past the pool's start_by_limit")
-		}
-		if task.Wherry.TaskEndedBy > task.Wherry.TaskStartedBy+admin.MaxRunDurationMS/1000 {
-			return reject("task_ended_by is past task_started_by plus the 6h run cap")
 		}
 	}
 	history := []wire.Message{task.Message}
@@ -672,10 +672,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		for _, named := range r.profiles {
 			job, err := named.Plugin.Lookup(lookupCtx, runID)
 			if err != nil {
-				// A started job the lookup did not resolve may hold the run's outputs, so it is retried and not purged.
-				if lookupCtx.Err() != nil && ctx.Err() == nil && !started {
-					return run.expired(ctx, nil, nil)
-				}
+				// A job the lookup did not resolve may have started, with or without a started event, so it is not purged.
 				r.logger.Printf("run %s: lookup in profile %s: %s", runID, named.Name, logText(run.redactText, err))
 				return run.returnTask(ctx, nil)
 			}
@@ -711,6 +708,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	if admitted.cancelled && !adopted {
 		return run.cancel(ctx, nil)
+	}
+	// A run admitted with no offer and no job found has no plugin to dispatch, purge or stop through.
+	if run.profile.Plugin == nil {
+		return run.expired(ctx, nil, nil)
 	}
 	// A job no started event reported by task_started_by is located only to be stopped.
 	if !started && adopted && !admitted.cancelled && startCtx.Err() != nil && ctx.Err() == nil {
@@ -2076,6 +2077,9 @@ func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result st
 }
 
 func (run *activeRun) release(ctx context.Context) {
+	if run.profile.Plugin == nil {
+		return
+	}
 	if err := run.profile.Plugin.Release(ctx, run.task.Wherry.Run); err != nil {
 		run.receiver.logger.Printf("run %s: release: %s", run.task.Wherry.Run, logText(run.redactText, err))
 	}
