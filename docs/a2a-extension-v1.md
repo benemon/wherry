@@ -1003,9 +1003,9 @@ pool's events in a transaction of its own, after the run's `claimed` status.
   refuses the record. Each verifies under the current key of a live member of
   the pool of its topic, or a key that member retired after the broker appended
   the record, and names that member as its writer. An attempt wrap, open
-  refusal or claim decision also verifies under the key its writer held when
-  its membership ended, for a record the broker appended before the reader
-  read that end.
+  refusal or claim decision also verifies under a key its writer held when
+  its membership ended, for a record the broker appended before the
+  `wherry.admin` record that ended it.
 - `key` is the attempt's P-256 public JWK of exactly `kty`, `crv`, `x` and
   `y`. `task_hash` is the hash of the run's earliest accepted submission
   ([Admission](#admission)).

@@ -27,8 +27,13 @@ func ACLs(state State) []ACL {
 		}
 		acls = append(acls, ACL{principal, "topic", AdminTopic, false, readDescribe}, ACL{principal, "topic", ReceiverTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiverProgressTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiversTopic, false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", PoolTasksTopic(config.Pool), false, readDescribe}, ACL{principal, "topic", PoolEventsTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", PoolGroup(config.Pool), false, []string{"READ", "DESCRIBE", "DESCRIBE_CONFIGS"}}, ACL{principal, "topic", CustodianTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", CustodianGroup(config.Pool), false, readDescribe}, ACL{principal, "transactional", TransactionalPrefix(config.Pool), true, writeDescribe})
 		for peer, peerConfig := range state.Receivers {
-			if peer != receiver && peerConfig.Pool == config.Pool && !state.Ended[ReceiverPrincipal(peer)] {
-				acls = append(acls, ACL{principal, "topic", ReceiverTopic(peer), false, readDescribe}, ACL{principal, "topic", ReceiverProgressTopic(peer), false, readDescribe})
+			if peer == receiver || peerConfig.Pool != config.Pool {
+				continue
+			}
+			// An ended peer's key records verify the open records it appended while live.
+			acls = append(acls, ACL{principal, "topic", ReceiverTopic(peer), false, readDescribe})
+			if !state.Ended[ReceiverPrincipal(peer)] {
+				acls = append(acls, ACL{principal, "topic", ReceiverProgressTopic(peer), false, readDescribe})
 			}
 		}
 	}

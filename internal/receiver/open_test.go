@@ -573,7 +573,13 @@ func (f fixture) advertiseAs(t *testing.T, receiver string, key ed25519.PrivateK
 // attempt wrap, a refusal's reason, or empty for none.
 func (f fixture) answered(t *testing.T, digest string) string {
 	t.Helper()
-	if err := f.receiver.serveOpens(f.ctx); err != nil {
+	return f.answeredBy(t, f.receiver, digest)
+}
+
+// answeredBy is answered with custodian serving the requests.
+func (f fixture) answeredBy(t *testing.T, custodian *Receiver, digest string) string {
+	t.Helper()
+	if err := custodian.serveOpens(f.ctx); err != nil {
 		t.Fatal(err)
 	}
 	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
@@ -744,6 +750,56 @@ func TestClaimDecisionOutlivesItsCustodian(t *testing.T) {
 	}
 	if decisions := f.decisions(t); len(decisions) != 0 {
 		t.Fatalf("decisions %+v, want receiver-d's reused", decisions)
+	}
+}
+
+// A claim decision outlives its custodian across a restart: a custodian started after the deciding custodian's
+// revocation, holding nothing in memory, verifies the decision under the key the custodian held when its membership
+// ended, and a record that key signed after the end verifies under nothing.
+func TestClaimDecisionOutlivesItsCustodianAcrossARestart(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		afterTheEnd  bool
+		answer       string
+		newDecisions int
+	}{
+		{"decided before the end", false, wire.RefusedTwoClaimants, 0},
+		{"signed after the end", true, "wrap", 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.quiet()
+			keyB, keyC, keyD := f.addPeer(t, "receiver-b", testPool), f.addPeer(t, "receiver-c", testPool), f.addPeer(t, "receiver-d", testPool)
+			record := f.submit(t, f.host, nil)
+			f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+			live := time.Now()
+			f.advertiseAs(t, "receiver-b", keyB, live)
+			claim := f.statusAs(t, record, "receiver-c", keyC, "claimed", 2)
+			decision := must(t)(wire.SignRecord(&wire.ClaimDecision{Custodian: "receiver-d", Claim: wire.Digest(claim), Previous: "receiver-b", Reason: wire.ClaimLive, Advertisement: &wire.AdvertisedRef{AtMS: live.UnixMilli()}}, keyD))
+			if !test.afterTheEnd {
+				f.produce(t, admin.PoolEventsTopic(testPool), "run-a", decision)
+			}
+			f.revoke(t, "receiver-d")
+			if test.afterTheEnd {
+				f.produce(t, admin.PoolEventsTopic(testPool), "run-a", decision)
+			}
+			// The advertisement the decision used is gone: receiver-b's latest advertisement before the claim lapsed.
+			f.advertiseAs(t, "receiver-b", keyB, live.Add(-claimantLease-time.Minute))
+			custodian := restarted(t, f.receiver)
+			if err := custodian.configure(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			custodian.assign(true)
+			if err := custodian.tend(f.ctx, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if answer := f.answeredBy(t, custodian, f.openAs(t, record, "receiver-c", keyC, 2)); answer != test.answer {
+				t.Fatalf("request answered %q, want %q; logs:\n%s", answer, test.answer, f.logs.String())
+			}
+			if decisions := f.decisions(t); len(decisions) != test.newDecisions {
+				t.Fatalf("decisions %+v of the restarted custodian, want %d", decisions, test.newDecisions)
+			}
+		})
 	}
 }
 

@@ -73,8 +73,8 @@ type Receiver struct {
 	// peers holds the pool's receiver keys, this receiver's included; hosts the keys of entitled tenants' hosts.
 	peers signed.Keys
 	hosts signed.Keys
-	// ended holds the keys of the pool's receivers whose membership ended while this receiver held their keys, each
-	// current key retired when the end was read, so the open records they appended while live still verify.
+	// ended holds the keys of the pool's ended receivers, each retired at the append time of the record that ended
+	// it, so the open records they appended while live still verify.
 	ended    signed.Keys
 	offers   []wire.Offer
 	inFlight int64
@@ -331,9 +331,12 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	state, err := r.reader.Load(ctx)
-	var peers, hosts signed.Keys
+	var peers, hosts, ended signed.Keys
 	if err == nil {
 		peers, err = r.reader.ReadKeys(ctx, admin.PoolKeyTopics(state, r.config.Pool))
+	}
+	if err == nil {
+		ended, err = r.reader.ReadKeys(ctx, admin.EndedPoolKeyTopics(state, r.config.Pool))
 	}
 	if err == nil {
 		hosts, err = r.reader.ReadKeys(ctx, admin.HostKeyTopics(state, r.config.Pool))
@@ -342,16 +345,10 @@ func (r *Receiver) refresh(ctx context.Context) error {
 		r.deny(err, capRead)
 		return err
 	}
-	r.mu.Lock()
-	ended := maps.Clone(r.ended)
-	for owner, keys := range r.peers {
-		if _, live := peers[owner]; !live && state.Ended[admin.ReceiverPrincipal(owner)] && keys.Current != nil {
-			if ended == nil {
-				ended = signed.Keys{}
-			}
-			ended[owner] = signed.KeyState{Retired: append(slices.Clone(keys.Retired), signed.RetiredKey{Key: keys.Current, At: time.Now()})}
-		}
+	for owner, keys := range ended {
+		ended[owner] = keys.RetiredAt(state.EndedAt[admin.ReceiverPrincipal(owner)])
 	}
+	r.mu.Lock()
 	r.state, r.peers, r.hosts, r.ended = state, peers, hosts, ended
 	r.mu.Unlock()
 	// A membership end comes before a configuration change, so a revoked receiver does not drain.

@@ -374,7 +374,7 @@ func readRaw(ctx context.Context, reader *Reader) ([]rawRecord, error) {
 	}
 	raw := make([]rawRecord, len(records))
 	for i, record := range records {
-		raw[i] = rawRecord{record.Offset, record.Value}
+		raw[i] = rawRecord{record.Offset, record.Value, record.Timestamp}
 	}
 	return raw, nil
 }
@@ -417,6 +417,17 @@ func PoolKeyTopics(state State, pool string) map[string]string {
 	topics := map[string]string{}
 	for receiver, config := range state.Receivers {
 		if config.Pool == pool && !state.Ended[ReceiverPrincipal(receiver)] {
+			topics[receiver] = ReceiverTopic(receiver)
+		}
+	}
+	return topics
+}
+
+// EndedPoolKeyTopics names the key topics of a pool's ended receivers.
+func EndedPoolKeyTopics(state State, pool string) map[string]string {
+	topics := map[string]string{}
+	for receiver, config := range state.Receivers {
+		if config.Pool == pool && state.Ended[ReceiverPrincipal(receiver)] {
 			topics[receiver] = ReceiverTopic(receiver)
 		}
 	}

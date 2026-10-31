@@ -177,8 +177,8 @@ transactional ID prefix.
 | receiver | topic `wherry.admin` | Read, Describe |
 | receiver | topic `wherry.receiver.<own>` | Read, Write, Describe |
 | receiver | topic `wherry.receiver.<own>.progress` | Read, Write, Describe |
-| receiver | topic `wherry.receiver.<peer>`, each other member of its pool | Read, Describe |
-| receiver | topic `wherry.receiver.<peer>.progress`, each other member of its pool | Read, Describe |
+| receiver | topic `wherry.receiver.<peer>`, each other member of its pool, live or ended | Read, Describe |
+| receiver | topic `wherry.receiver.<peer>.progress`, each other live member of its pool | Read, Describe |
 | receiver | topic `wherry.receivers` | Read, Write, Describe |
 | receiver | topic `wherry.pool.<own pool>.tasks` | Read, Describe |
 | receiver | topic `wherry.pool.<own pool>.events` | Read, Write, Describe |
