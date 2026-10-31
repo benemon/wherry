@@ -763,7 +763,11 @@ NumericDate): `task_started_by`, by which its agent job must start, and
 clock decides both. A bound fails only when that clock is past its second,
 so a job that starts at `task_started_by`, or a terminal state at
 `task_ended_by`, meets it. A run's time is also capped at six hours after
-`task_started_by`, and `submit` refuses a `task_ended_by` later than that.
+`task_started_by`. `submit` refuses a `task_ended_by` later than that, and a
+receiver rejects such a run no pool member has claimed with
+`task_ended_by is past task_started_by plus the 6h run cap`. A claimed run
+the cap stops before its `task_ended_by` ends `TASK_STATE_FAILED` with
+`not ended by task_started_by plus the 6h run cap (<RFC 3339 time>)`.
 
 A job starts when the plugin reports it running, at which the receiver
 publishes the run's `started` event. A receiver rejects a run no pool member

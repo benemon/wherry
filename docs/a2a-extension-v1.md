@@ -400,11 +400,13 @@ base64 does. The fixed texts are:
   `task_started_by is past the pool's start_by_limit`,
   `not started by task_started_by (<RFC 3339 time>)`,
   `not ended by task_ended_by (<RFC 3339 time>)`,
+  `task_ended_by is past task_started_by plus the 6h run cap`,
   `unsupported message part`, `run ID in use`,
   `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
 - failed: `not started by task_started_by (<RFC 3339 time>)`,
-  `not ended by task_ended_by (<RFC 3339 time>)`, `log stream failed`, `agent exited <code>`,
+  `not ended by task_ended_by (<RFC 3339 time>)`,
+  `not ended by task_started_by plus the 6h run cap (<RFC 3339 time>)`, `log stream failed`, `agent exited <code>`,
   `agent ended by <signal>` (each followed by the platform's reason,
   redacted, in parentheses when the plugin gives one, as in
   `agent exited 137 (OOMKilled)`), `agent reported no outcome`,
@@ -1139,19 +1141,23 @@ A receiver that claims a submission:
    `model not in the pool's terms` when the agent has `models` and the
    placement names no model or one outside the current `models`, or the
    agent has no `models` and the placement names one;
-5. releases it when no ready plugin profile satisfies the placement;
-6. rejects it with `duplicate submission` when it is not the run's earliest
-   submission on the pool's task topic that a live host's current key
-   verifies;
-7. rejects a run no pool member has claimed with
-   `task_started_by is past the pool's start_by_limit` when its submission
-   reached the pool's task topic more than the pool's `start_by_limit_ms`
-   ago, or its `task_started_by` falls more than `start_by_limit_ms` after
-   that;
-8. rejects a run no pool member has claimed with
+5. rejects a run no pool member has claimed with
    `not started by task_started_by (<RFC 3339 time>)` or
    `not ended by task_ended_by (<RFC 3339 time>)` when that bound has
    passed;
+6. releases it when no ready plugin profile satisfies the placement, unless
+   a member has claimed the run and its `task_ended_by` has passed, or its
+   `task_started_by` has passed with no `started` event;
+7. rejects it with `duplicate submission` when it is not the run's earliest
+   submission on the pool's task topic that a live host's current key
+   verifies;
+8. rejects a run no pool member has claimed with
+   `task_started_by is past the pool's start_by_limit` when its submission
+   reached the pool's task topic more than the pool's `start_by_limit_ms`
+   ago, or its `task_started_by` falls more than `start_by_limit_ms` after
+   that, and with `task_ended_by is past task_started_by plus the 6h run cap`
+   when its `task_ended_by` is more than six hours after its
+   `task_started_by`;
 9. rejects it when the host of the run's [git input](#git-input) is not
    one of the pool's current VCS hosts, and with `pool <pool> has no
    storage for S3 inputs and outputs` when the run has S3 inputs or
@@ -1160,7 +1166,7 @@ A receiver that claims a submission:
     in the message;
 11. writes the echo and the `claimed` status.
 
-A run a cancel covers skips steps 8 to 10, and ends `TASK_STATE_CANCELED`
+A run a cancel covers skips steps 5, 9 and 10, and ends `TASK_STATE_CANCELED`
 after its `claimed` status. A redelivered run that a member has claimed
 goes on to adoption past its bounds. When its `task_ended_by` has passed,
 the receiver stops the job it finds and ends the run `TASK_STATE_FAILED`
@@ -1170,8 +1176,13 @@ A claimed run whose job has not started by `task_started_by`, while it
 waits for its seal, for the platform to place its job, or for the lookup
 of a redelivered run's job, ends `TASK_STATE_FAILED` with
 `not started by task_started_by (<RFC 3339 time>)`, and the receiver
-purges the job when one exists. A job that has started runs on past
-`task_started_by` until `task_ended_by`.
+purges the job when one exists. A redelivered run with no `started` event
+past `task_started_by` ends the same way: the receiver stops a job its
+lookup reports running or ended, and purges one that never started. A job
+that has started runs on past `task_started_by` until `task_ended_by`. A
+redelivered run with a `started` event whose lookup does not answer returns
+to the pool with its job and material in place, until the delivery budget
+ends it.
 
 ## Git input
 
@@ -1434,6 +1445,7 @@ attribute to a host and run with a `rejected` [status](#status) in
 | the model is not in the agent's terms | rejected | `model not in the pool's terms` |
 | a later submission of a run ID | rejected | `duplicate submission` |
 | the submission is older than the pool's `start_by_limit_ms`, or its `task_started_by` is later than `start_by_limit_ms` after it | rejected | `task_started_by is past the pool's start_by_limit` |
+| `task_ended_by` is more than six hours after `task_started_by` | rejected | `task_ended_by is past task_started_by plus the 6h run cap` |
 | `task_started_by` or `task_ended_by` has passed | rejected | `not started by task_started_by (<RFC 3339 time>)`, `not ended by task_ended_by (<RFC 3339 time>)` |
 | a required credential of the agent is unsupplied | rejected | `the host does not supply a required credential of the agent` |
 | a task credential takes an agent credential's target | rejected | `a task credential takes the target of one of the agent's credentials` |

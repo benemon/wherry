@@ -113,6 +113,12 @@ func NotStartedBy(bound int64) string {
 // NotEndedBy is the reason a run not ended by its task_ended_by ends with.
 func NotEndedBy(bound int64) string { return "not ended by task_ended_by (" + RFC3339(bound) + ")" }
 
+// NotEndedByRunCap is the reason a run cut at task_started_by plus the run cap, bound, before its task_ended_by ends
+// with.
+func NotEndedByRunCap(bound int64) string {
+	return "not ended by task_started_by plus the 6h run cap (" + RFC3339(bound) + ")"
+}
+
 // TaskCredential is a credential of the host that the run's agent gets at exactly one target: the environment variable
 // Env, or the file File in its credentials directory.
 type TaskCredential struct {

@@ -278,9 +278,27 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if !modelInTerms(terms.Agents[agent], placement.Model) {
 		return reject("model not in the pool's terms")
 	}
+	cancelled := r.cancelledRun(ctx, events, run, task.Wherry.Tenant)
+	// A run a member already claimed is past the age and bound checks; its redelivery goes on to adoption.
+	claimed := slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
+		return status.Wherry.TaskHash == hash && status.Wherry.Kind != "rejected"
+	})
+	// The receiver's clock decides both bounds, each passed only when now is past its whole second.
+	now := time.Now().Unix()
+	if !claimed && !cancelled && now > task.Wherry.TaskStartedBy {
+		return rejectAs("not started by task_started_by", wire.NotStartedBy(task.Wherry.TaskStartedBy))
+	}
+	if !claimed && !cancelled && now > task.Wherry.TaskEndedBy {
+		return rejectAs("not ended by task_ended_by", wire.NotEndedBy(task.Wherry.TaskEndedBy))
+	}
+	// A claimed run past a bound its job has not met is ended here, with or without an offer, so its job is stopped.
+	started := slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
+		return status.Wherry.TaskHash == hash && status.Wherry.Kind == "started" && status.Wherry.LogOffset != nil
+	})
+	ending := claimed && (now > task.Wherry.TaskStartedBy && !started || now > task.Wherry.TaskEndedBy)
 	// A member that failed to start the task does not try again, and fetches nothing for one lock duration so the
 	// broker can hand the task to another member.
-	if failedHere(events.startFailures[run], hash) {
+	if failedHere(events.startFailures[run], hash) && !ending {
 		admitted, ack := giveBack()
 		if ack == kgo.AckRelease {
 			r.logger.Printf("run %s: already failed here; releasing for another member", run)
@@ -291,37 +309,27 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return admitted, ack
 	}
 	profile, offered := r.offer(placement)
-	if !offered {
+	if !offered && !ending {
 		r.logger.Printf("run %s: no current offer for agent %s satisfying its selector", run, placement.Agent)
 		r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
 		return giveBack()
 	}
-	cancelled := r.cancelledRun(ctx, events, run, task.Wherry.Tenant)
 	if len(all) == 0 || all[0].hash != hash {
 		return reject("duplicate submission")
 	}
-	// A run a member already claimed is past the age and deadline checks; its redelivery goes on to adoption.
-	claimed := slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
-		return status.Wherry.TaskHash == hash && status.Wherry.Kind != "rejected"
-	})
 	if !claimed {
 		maximum := terms.StartByLimit()
 		if time.Since(all[0].submitted) > maximum || task.Wherry.TaskStartedBy > all[0].submitted.Add(maximum).Unix() {
 			return reject("task_started_by is past the pool's start_by_limit")
+		}
+		if task.Wherry.TaskEndedBy > task.Wherry.TaskStartedBy+admin.MaxRunDurationMS/1000 {
+			return reject("task_ended_by is past task_started_by plus the 6h run cap")
 		}
 	}
 	history := []wire.Message{task.Message}
 	admitted := &admission{task: &task, taskHash: hash, profile: profile, history: history, cancelled: cancelled}
 	if cancelled {
 		return admitted, 0
-	}
-	// The receiver's clock decides both bounds, each passed only when now is past its whole second.
-	now := time.Now().Unix()
-	if !claimed && now > task.Wherry.TaskStartedBy {
-		return rejectAs("not started by task_started_by", wire.NotStartedBy(task.Wherry.TaskStartedBy))
-	}
-	if !claimed && now > task.Wherry.TaskEndedBy {
-		return rejectAs("not ended by task_ended_by", wire.NotEndedBy(task.Wherry.TaskEndedBy))
 	}
 	declared := task.Wherry
 	var supplied []wire.TaskCredential
@@ -664,7 +672,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		for _, named := range r.profiles {
 			job, err := named.Plugin.Lookup(lookupCtx, runID)
 			if err != nil {
-				if lookupCtx.Err() != nil && ctx.Err() == nil {
+				// A started job the lookup did not resolve may hold the run's outputs, so it is retried and not purged.
+				if lookupCtx.Err() != nil && ctx.Err() == nil && !started {
 					return run.expired(ctx, nil, nil)
 				}
 				r.logger.Printf("run %s: lookup in profile %s: %s", runID, named.Name, logText(run.redactText, err))
@@ -702,6 +711,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	if admitted.cancelled && !adopted {
 		return run.cancel(ctx, nil)
+	}
+	// A job no started event reported by task_started_by is located only to be stopped.
+	if !started && adopted && !admitted.cancelled && startCtx.Err() != nil && ctx.Err() == nil {
+		return run.stopAndFail(ctx, handle, wire.NotStartedBy(task.Wherry.TaskStartedBy), nil)
+	}
+	if !started && neverStarted && startCtx.Err() != nil && ctx.Err() == nil {
+		return run.expired(ctx, nil, nil)
 	}
 	if neverStarted {
 		return run.startFailure(ctx, "platform", "job never started")
@@ -1261,8 +1277,8 @@ type activeRun struct {
 	// labels is set when this attempt dispatched the job; an adopted job's profile labels are unknown.
 	labels map[string]string
 	job    string
-	// deadline is the run's; puts are the presigned PUT URLs of its S3 outputs, by name, which an attempt holds once
-	// sealed.
+	// deadline is when the run passes task_ended_by or the run cap; puts are the presigned PUT URLs of its S3 outputs,
+	// by name, which an attempt holds once sealed.
 	deadline time.Time
 	puts     map[string]string
 	// redactions are the forms of the values this attempt received, longest first, and redactionKey the run's key
@@ -1492,15 +1508,23 @@ func (run *activeRun) deny(ctx context.Context, handle pluginsdk.Handle, pending
 	return kgo.AckRelease
 }
 
-// expired ends a run past a bound: task_ended_by once its deadline passed, else task_started_by before its job
-// started. With no handle, the run's job, if one exists, is purged.
+// expired ends a run past a bound: task_ended_by, or the run cap before it, once its deadline passed, else
+// task_started_by before its job started. With no handle, the run's job, if one exists, is purged; a run admitted
+// with no offer has no profile to purge in.
 func (run *activeRun) expired(ctx context.Context, job *pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
 	reason := wire.NotStartedBy(run.task.Wherry.TaskStartedBy)
-	if !time.Now().Before(run.deadline) {
+	switch {
+	case time.Now().Before(run.deadline):
+	case run.deadline.Before(wire.PastBound(run.task.Wherry.TaskEndedBy)):
+		reason = wire.NotEndedByRunCap(run.task.Wherry.TaskStartedBy + admin.MaxRunDurationMS/1000)
+	default:
 		reason = wire.NotEndedBy(run.task.Wherry.TaskEndedBy)
 	}
 	if job != nil {
 		return run.stopAndFail(ctx, *job, reason, pending)
+	}
+	if run.profile.Plugin == nil {
+		return run.fail(ctx, reason, pending)
 	}
 	if err := run.purge(ctx); err != nil {
 		if ctx.Err() != nil {
@@ -1788,8 +1812,8 @@ type storedOutput struct {
 }
 
 // collected runs the plugin's Collect under limit and uploads each streamed S3 output into stored as it arrives.
-// Collect may run until the run's deadline, when its PUT URLs expire. The count and total are checked again here, so a
-// plugin that ignores the limits cannot grow the run's memory.
+// Collect may run until the run passes task_ended_by or the run cap, when its PUT URLs expire. The count and total are
+// checked again here, so a plugin that ignores the limits cannot grow the run's memory.
 func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, stopped bool, limit int64, stored map[string]storedOutput) ([]pluginsdk.Output, error) {
 	if !stopped {
 		return nil, errors.New("the job was not stopped")
