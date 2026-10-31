@@ -440,7 +440,7 @@ func testConfig(receiver string) admin.ReceiverConfig {
 }
 
 func shortIntervals(t *testing.T) {
-	for _, interval := range []*time.Duration{&renewInterval, &advertiseInterval, &refreshInterval, &cancelReadInterval, &reconcileInterval} {
+	for _, interval := range []*time.Duration{&renewInterval, &advertiseInterval, &refreshInterval, &cancelReadInterval, &reconcileInterval, &custodyInterval} {
 		previous := *interval
 		*interval = 200 * time.Millisecond
 		t.Cleanup(func() { *interval = previous })
@@ -561,7 +561,7 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		plugin.mu.Unlock()
 		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin}, nil
 	}
-	return &Receiver{id: config.Receiver, base: base, reader: admin.NewReader(base), signing: signing, factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
+	return &Receiver{id: config.Receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
 }
 
 func (f fixture) produce(t *testing.T, topic, key string, value []byte) *kgo.Record {

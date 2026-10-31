@@ -60,6 +60,9 @@ type Receiver struct {
 	// rotateKey, set by New only, has Run replace the signing key in keyFile before it claims anything.
 	keyFile   string
 	rotateKey bool
+	// stateDir holds the signing key and the pool keys.
+	stateDir string
+	custody  custody
 	// drainTimeout bounds how long Run lets held runs end after its context ends.
 	drainTimeout time.Duration
 	// config and profiles are set by configure before any claim and never change.
@@ -122,7 +125,7 @@ func New(bundle admin.Bundle, stateDir string, rotateKey bool, drainTimeout time
 		base.Close()
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, stateDir: stateDir, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
 // feedBatches is opts with producer batches up to what a tenant's feed takes, so the largest result fits. Every client
@@ -172,7 +175,11 @@ func (r *Receiver) Run(ctx context.Context) error {
 	running, stopRunning := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopRunning()
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		r.keepCustody(running)
+	}()
 	go func() {
 		defer wg.Done()
 		r.every(running, advertiseInterval, r.advertise)

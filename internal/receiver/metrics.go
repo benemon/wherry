@@ -36,6 +36,7 @@ type metrics struct {
 	startFailures, dispatchOutcomes, stopFailures, purgeFailures  *prometheus.CounterVec
 	sweepFailures, collectionFailures, sealWaits, redactions      *prometheus.CounterVec
 	busErrors, denials, dropped, budgetExhausted                  *prometheus.CounterVec
+	takeovers                                                     *prometheus.CounterVec
 	renewalFailures, transactionAborts, ambiguousCommits, fenced  prometheus.Counter
 
 	pluginDescs map[string]*prometheus.Desc
@@ -86,6 +87,7 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.redactions = counters("redactions_total", "Credential values replaced in published output.", "tenant", "profile")
 	m.busErrors = counters("bus_errors_total", "Kafka operation errors, by operation.", "op")
 	m.denials = counters("denials_total", "Kafka authorisation errors, by the capability denied.", "op")
+	m.takeovers = counters("custodian_takeovers_total", "Snapshots this receiver published taking over its pool's key custody, by reason.", "reason")
 	m.renewalFailures = counter("renewal_failures_total", "Failed claim renewals.")
 	m.transactionAborts = counter("transaction_aborts_total", "Transactions aborted after a failed produce.")
 	m.ambiguousCommits = counter("ambiguous_commits_total", "Transaction commits with an unknown outcome.")

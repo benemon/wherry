@@ -96,6 +96,12 @@ A receiver starts with its local configuration, which names its bundle, a
 state directory, a plugin directory and the sources of its platform
 credentials. It registers its signing key, waits for its configuration
 record, validates it against the terms and configures its profiles. It then advertises every 30 seconds.
+Each receiver joins its pool's custodian group; the member the group
+assigns the snapshot topic's partition is the pool's key custodian. It
+holds the pool's P-256 private keys in its state directory, publishes the
+current public key in the pool's snapshot topic through the shared
+transactional ID `p.<pool>.custodian`, which fences any earlier custodian,
+and rotates the key daily.
 When a new configuration record appears, the receiver stops claiming, lets
 the runs it holds end and exits, so its platform restarts it with the new
 configuration. A record `receiver update --force` wrote has it release the

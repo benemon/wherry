@@ -927,7 +927,9 @@ Runs a receiver as the principal of the bundle its [local
 configuration](configuration.md#receiver-local-configuration) names.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
 configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
-private JWK with mode 0600, in it.
+private JWK with mode 0600, in it, and in `pool-keys/` one file with mode
+0600 per pool key it holds: the private JWK, its creation time, whether a
+committed snapshot named it current, and its deadline.
 On start it:
 
 1. settles a leftover `signing.key.next` as a host command settles
@@ -943,7 +945,32 @@ On start it:
    credential](configuration.md#platform-credentials), starts its
    [plugin](#plugins) from `plugin_dir` when no earlier profile has, and
    configures the profile;
-6. reads its pool's events once, and starts advertising and claiming.
+6. reads its pool's events once, and starts advertising and claiming;
+7. joins the pool's custodian group, `p-<pool>.custodian`, on
+   `wherry.pool.<pool>.custodian` with its receiver ID as the static
+   instance ID, and acts as the pool's key custodian while the group
+   assigns it the topic's partition.
+
+The key custodian writes every snapshot through the transactional ID
+`p.<pool>.custodian`, one transaction per snapshot, and reads the committed
+snapshot back before it marks the key published. When assigned, a receiver
+that the current snapshot names and that holds the snapshot's key continues
+with that key; any other generates a P-256 key, stores it, and publishes it
+with reason `bootstrap` when the topic holds no snapshot and `takeover`
+otherwise. A takeover logs `custodian: took over pool <pool>
+(WherryCustodianTakeover)` and counts in `wherry_custodian_takeovers_total`.
+The custodian rotates the key at the current snapshot's append time plus
+24 hours plus a jitter under one hour derived from the pool and key ID,
+publishing a `rotation` snapshot, and republishes its snapshot after its
+signing key rotates. A receiver whose assignment ends, or whose producer a
+successor fences, writes no more snapshots.
+
+A replaced key's deadline is the replacing snapshot's append time plus
+`start_by_limit` plus 7 hours; a key replaced before the receiver started
+gets the start time instead. A key no committed snapshot was read back
+naming is kept until its creation time plus `start_by_limit` plus 31 hours.
+The receiver deletes a key at its deadline only, and every key stays in
+its state directory.
 
 It logs its own lines to standard output with the prefix `receiver: `;
 plugin and link lines are hclog lines named `plugin`. Plugin lines, the
@@ -1181,6 +1208,7 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
 | `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
+| `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover` |
 | `wherry_metrics_dropped_total` | counter | `profile`, `reason` | plugin samples dropped and `Metrics` calls that failed |
 | `wherry_plugin_platform_errors_total` | counter | `profile`, `class` | platform API errors: `unavailable`, `denied`, `conflict`, `timeout`, `other` |
 | `wherry_plugin_cleanup_pending` | gauge | `profile` | the profile's ended jobs awaiting cleanup |
