@@ -119,6 +119,15 @@ func TestCheckReportsSnapshotTopicAndSegmentDrift(t *testing.T) {
 		{"snapshot topic not compacted", func(t *testing.T, service *Service) {
 			setTopicConfig(t, service, CustodianTopic("pool-a"), "cleanup.policy", "delete")
 		}, CustodianTopic("pool-a") + " cleanup.policy"},
+		{"snapshot topic partitioned", func(t *testing.T, service *Service) {
+			responses, err := kadm.NewClient(service.Admin).CreatePartitions(context.Background(), 1, CustodianTopic("pool-a"))
+			if err == nil {
+				err = responses.Error()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}, CustodianTopic("pool-a") + " has 2 partitions"},
 		{"tasks segment.ms unset", func(t *testing.T, service *Service) {
 			deleteTopicConfig(t, service, PoolTasksTopic("pool-a"), "segment.ms")
 		}, PoolTasksTopic("pool-a") + " segment.ms"},

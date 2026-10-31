@@ -823,6 +823,16 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 			}
 		}
 	}
+	// One partition is what gives the custodian group a single assignee and readers one order.
+	details, err := kadm.NewClient(service.Admin).ListTopics(ctx, custodianTopics...)
+	if err != nil {
+		return err
+	}
+	for _, topic := range custodianTopics {
+		if partitions := len(details[topic].Partitions); partitions != 1 {
+			return fmt.Errorf("topic %s has %d partitions, want 1", topic, partitions)
+		}
+	}
 	for pool, terms := range state.Pools {
 		bounds, err := poolRetention(terms)
 		if err != nil {
