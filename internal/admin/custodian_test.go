@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -204,10 +203,12 @@ func largestEnvelopeTask() ([]byte, error) {
 		Message: wire.Message{MessageID: "msg-" + strings.Repeat("0", 32), ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "p"}}, Extensions: []string{wire.ExtensionURI}},
 		Wherry:  wire.SubmissionBinding{Tenant: name, Host: name, Pool: name, Run: run, Placement: wire.Placement{Agent: name, Selector: []wire.Requirement{}}},
 	}
-	return wire.SignEnveloped(task, key, func(string) ([]byte, []byte, error) {
-		wrap, err := signed.WrapContentKey(make([]byte, 32), &poolKey.PublicKey)
-		return bytes.Repeat([]byte("A"), signed.MaxEnvelope), wrap, err
-	})
+	wrap, err := signed.WrapContentKey(make([]byte, 32), &poolKey.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+	task.Wherry.Envelope, task.Wherry.Wrap = strings.Repeat("A", signed.MaxEnvelope), string(wrap)
+	return wire.SignRecord(task, key)
 }
 
 // CheckEnvelope, which the host runs before it builds an envelope and the receiver after it opens one, refuses

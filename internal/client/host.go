@@ -499,7 +499,7 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string, ads map[string]
 // last until task_started_by plus getLifetime and PUT links until task_ended_by.
 func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms admin.Terms, poolKey *ecdsa.PublicKey, store *minio.Client, redactionKey []byte) ([]byte, error) {
 	binding := submission.Wherry
-	values := signed.EnvelopeValues{Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: redactionKey}
+	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: redactionKey}
 	var names []string
 	if agent := slices.IndexFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == binding.Placement.Agent }); agent >= 0 {
 		for _, credential := range terms.Agents[agent].Credentials {
@@ -551,14 +551,16 @@ func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms
 	if _, err := rand.Read(contentKey); err != nil {
 		return nil, err
 	}
-	encoded, err := wire.SignEnveloped(submission, h.key, func(taskCore string) ([]byte, []byte, error) {
-		envelope, err := signed.BuildEnvelope(values, contentKey, taskCore)
-		if err != nil {
-			return nil, nil, err
-		}
-		wrap, err := signed.WrapContentKey(contentKey, poolKey)
-		return envelope, wrap, err
-	})
+	envelope, err := signed.BuildEnvelope(values, contentKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	wrap, err := signed.WrapContentKey(contentKey, poolKey)
+	if err != nil {
+		return nil, err
+	}
+	submission.Wherry.Envelope, submission.Wherry.Wrap = string(envelope), string(wrap)
+	encoded, err := wire.SignRecord(submission, h.key)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}

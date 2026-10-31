@@ -38,29 +38,6 @@ func SignRecord(value Record, key ed25519.PrivateKey) ([]byte, error) {
 	return signed.Sign(value.jwsType(), value.owner(), value, key)
 }
 
-// SignEnveloped signs a submission at version 1 with the envelope and wrap seal builds for its task core inserted as the
-// last members of its wherry object. The task core is the SHA-256 of the submission as signed.Sign encodes it.
-func SignEnveloped(value *Submission, key ed25519.PrivateKey, seal func(taskCore string) (envelope, wrap []byte, err error)) ([]byte, error) {
-	value.V, value.Wherry.Envelope, value.Wherry.Wrap = 1, "", ""
-	if err := value.validate(); err != nil {
-		return nil, err
-	}
-	core, err := signed.Encode(value)
-	if err != nil {
-		return nil, err
-	}
-	digest := sha256.Sum256(core)
-	envelope, wrap, err := seal(hex.EncodeToString(digest[:]))
-	if err != nil {
-		return nil, err
-	}
-	payload, err := signed.InsertEnvelope(core, envelope, wrap)
-	if err != nil {
-		return nil, err
-	}
-	return signed.Sign(value.jwsType(), value.owner(), jsontext.Value(payload), key)
-}
-
 // ParseRecord verifies encoded against the current key of the owner its kid names,
 // decodes it into value and requires the payload to name that owner.
 func ParseRecord(encoded []byte, keys signed.Keys, value Record) error {
@@ -123,7 +100,7 @@ type SubmissionBinding struct {
 	// Replaces names the run a resubmission replaces, and S3InputRun the run whose input prefix holds its S3 inputs.
 	Replaces   string `json:"replaces,omitzero"`
 	S3InputRun string `json:"s3_input_run,omitzero"`
-	// Envelope and Wrap are the run's envelope and its content key's submit wrap, the binding's last two members.
+	// Envelope and Wrap are the run's envelope and its content key's submit wrap.
 	Envelope string `json:"envelope,omitzero"`
 	Wrap     string `json:"wrap,omitzero"`
 }
@@ -134,6 +111,20 @@ func (binding SubmissionBinding) InputRun() string {
 		return binding.S3InputRun
 	}
 	return binding.Run
+}
+
+// EnvelopeBinding is the binding an envelope for the task carries.
+func (binding SubmissionBinding) EnvelopeBinding() signed.EnvelopeBinding {
+	return signed.EnvelopeBinding{Run: binding.Run, Tenant: binding.Tenant, Pool: binding.Pool, TaskStartedBy: binding.TaskStartedBy, TaskEndedBy: binding.TaskEndedBy}
+}
+
+// CheckBinding confirms an opened envelope's binding names task, a verified submission; the custodian checks it before
+// an attempt wrap and the claimant at open.
+func CheckBinding(task *Submission, binding signed.EnvelopeBinding) error {
+	if binding != task.Wherry.EnvelopeBinding() {
+		return errors.New("envelope is bound to another task")
+	}
+	return nil
 }
 
 // PastBound is the first instant the receiver's clock is past a whole-second bound: a job started, or a terminal state

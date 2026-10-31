@@ -313,24 +313,24 @@ A submission is the task of one run.
   `replaces` is the run, other than this one, that the resubmission
   replaces, and `s3_input_run` the run under whose prefix its S3 inputs lie,
   the first run of the chain of replacements. Both are run IDs.
-- `envelope` and `wrap` appear together. `envelope` is a compact JWE of at
-  most 64 KiB, protected header exactly `alg` `dir`, `enc` `A256GCM`, `typ`
-  `application/vnd.wherry.envelope.v1+jwe` and `task_core`, encrypted under a
-  fresh 256-bit content key. Its plaintext holds exactly `credentials`, each
-  credential the run delivers by name, its value in standard base64;
+- `envelope` and `wrap` appear together, as ordinary members of `wherry`.
+  `envelope` is a compact JWE of at most 64 KiB, protected header exactly
+  `alg` `dir`, `enc` `A256GCM` and `typ`
+  `application/vnd.wherry.envelope.v1+jwe`, encrypted under a fresh 256-bit
+  content key. Its plaintext holds exactly `binding`, the task's `run`,
+  `tenant`, `pool`, `task_started_by` and `task_ended_by`; `credentials`,
+  each credential the run delivers by name, its value in standard base64;
   `s3_inputs` and `s3_outputs`, each S3 input and S3 output by name, its
   presigned URL; and `redaction_key`, the run's 32-byte key in standard
   base64. `wrap` is a compact JWE carrying the content key to the pool's
   current key from its [custodian snapshot](#custodian-snapshot), protected
   header exactly `alg` `ECDH-ES+A256KW`, `enc` `A256GCM`, `kid`, the
   recipient key's RFC 7638 thumbprint, and `epk`, a P-256 public JWK of
-  `kty`, `crv`, `x` and `y`.
-- `envelope` and `wrap` are the last two members of `wherry`, in that order.
-  `task_core` is the lowercase hex SHA-256 of the signed payload with the
-  bytes from the comma before `envelope` up to, not including, the closing
-  `}` of `wherry` removed. A payload with other members after them, either
-  of them repeated, or `wherry` holding no other member, is refused. Members
-  of the same names elsewhere, as inside `message`, are not part of the rule.
+  `kty`, `crv`, `x` and `y`. The host signs the task with both in it as any
+  record.
+- An envelope whose `binding` differs from its task's `run`, `tenant`,
+  `pool`, `task_started_by` or `task_ended_by` is refused: by the custodian
+  before it wraps the content key to a claimant, and by the claimant at open.
 - The envelope's credentials are exactly the agent's credentials in the
   pool's terms other than `unsupplied_credentials`, and the task's
   `credentials`, each once; its S3 inputs are exactly `s3_inputs` and its S3

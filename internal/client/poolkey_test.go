@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -106,8 +107,8 @@ func TestSubmitRefusesWithoutALiveCurrentCustodian(t *testing.T) {
 	})
 }
 
-// open decodes a task as a receiver reads it from the pool's task topic, unwraps its submit wrap with key and opens its
-// envelope against the task core of the signed bytes.
+// open decodes a task as a receiver reads it from the pool's task topic, unwraps its submit wrap with key, opens its
+// envelope and checks its binding against the task.
 func open(t *testing.T, f *fixture, runID string, key *ecdsa.PrivateKey) (wire.Submission, signed.EnvelopeValues, error) {
 	t.Helper()
 	records, err := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a"))
@@ -130,16 +131,23 @@ func open(t *testing.T, f *fixture, runID string, key *ecdsa.PrivateKey) (wire.S
 		if err != nil {
 			t.Fatal(err)
 		}
-		core, err := signed.TaskCore(payload(t, record.Value))
-		if err != nil {
-			t.Fatal(err)
+		// The host signs the task once, as any record.
+		if resigned, err := wire.SignRecord(&task, f.host.key); err != nil || !bytes.Equal(resigned, record.Value) {
+			t.Fatalf("the produced task is not its submission signed as a record: %v", err)
 		}
 		contentKey, err := signed.UnwrapContentKey([]byte(task.Wherry.Wrap), key)
 		if err != nil {
 			return task, signed.EnvelopeValues{}, err
 		}
-		values, err := signed.OpenEnvelope([]byte(task.Wherry.Envelope), contentKey, core)
-		return task, values, err
+		values, err := signed.OpenEnvelope([]byte(task.Wherry.Envelope), contentKey)
+		if err != nil {
+			return task, values, err
+		}
+		binding := task.Wherry
+		if want := (signed.EnvelopeBinding{Run: binding.Run, Tenant: binding.Tenant, Pool: binding.Pool, TaskStartedBy: binding.TaskStartedBy, TaskEndedBy: binding.TaskEndedBy}); values.Binding != want {
+			t.Fatalf("envelope binding %+v, want the signed task's %+v", values.Binding, want)
+		}
+		return task, values, wire.CheckBinding(&task, values.Binding)
 	}
 	t.Fatalf("no task for run %s", runID)
 	return wire.Submission{}, signed.EnvelopeValues{}, nil

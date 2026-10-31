@@ -121,33 +121,33 @@ func TestSubmissionResubmissionAndEnvelopeMembers(t *testing.T) {
 	}
 }
 
-// The task core a submission's envelope is bound to is the hash of the payload signed.Sign produces with the envelope
-// span removed, also when the message holds raw JSON that a plain encoding would rewrite.
-func TestTaskCoreOfTheSignedPayloadIsTheCoresHash(t *testing.T) {
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	submission := testRecords()["submission"].(*Submission)
-	submission.Message.Parts = append(submission.Message.Parts, Part{Data: []byte(`{"k":"\u00e9\/"}`), Filename: "data", MediaType: "application/json"})
-	var core string
-	encoded, err := SignEnveloped(submission, key, func(taskCore string) ([]byte, []byte, error) {
-		core = taskCore
-		return []byte("envelope"), []byte("wrap"), nil
-	})
+// An envelope opened against a task that differs from its binding in any of the five members is refused.
+func TestCheckBindingRefusesEachOtherTask(t *testing.T) {
+	task := validSubmission()
+	contentKey := make([]byte, 32)
+	envelope, err := signed.BuildEnvelope(signed.EnvelopeValues{Binding: task.Wherry.EnvelopeBinding(), Credentials: map[string][]byte{},
+		S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: make([]byte, 32)}, contentKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	jws, err := jose.ParseSignedCompact(string(encoded), []jose.SignatureAlgorithm{jose.EdDSA})
+	values, err := signed.OpenEnvelope(envelope, contentKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := jws.Verify(key.Public())
-	if err != nil {
-		t.Fatal(err)
+	if err := CheckBinding(task, values.Binding); err != nil {
+		t.Fatalf("check against its own task: %v", err)
 	}
-	if got, err := signed.TaskCore(payload); err != nil || got != core {
-		t.Fatalf("task core of the signed payload %q, %v; the envelope was built for %q", got, err, core)
-	}
-	var decoded Submission
-	if err := ParseRecord(encoded, signed.Keys{"tenant-a.host-a": {Current: key.Public().(ed25519.PublicKey)}}, &decoded); err != nil || decoded.Wherry.Envelope != "envelope" || decoded.Wherry.Wrap != "wrap" {
-		t.Fatalf("decoded %+v, %v", decoded.Wherry, err)
+	for name, mutate := range map[string]func(*SubmissionBinding){
+		"run":             func(b *SubmissionBinding) { b.Run = "run-b" },
+		"tenant":          func(b *SubmissionBinding) { b.Tenant = "tenant-b" },
+		"pool":            func(b *SubmissionBinding) { b.Pool = "pool-b" },
+		"task_started_by": func(b *SubmissionBinding) { b.TaskStartedBy++ },
+		"task_ended_by":   func(b *SubmissionBinding) { b.TaskEndedBy++ },
+	} {
+		other := *task
+		mutate(&other.Wherry)
+		if err := CheckBinding(&other, values.Binding); err == nil {
+			t.Errorf("an envelope opened against a task with another %s passed", name)
+		}
 	}
 }

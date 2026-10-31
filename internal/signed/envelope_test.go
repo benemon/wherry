@@ -6,9 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	json "encoding/json/v2"
 	"maps"
 	"reflect"
@@ -20,16 +18,6 @@ import (
 	josecipher "github.com/go-jose/go-jose/v4/cipher"
 )
 
-// cores are task payloads without envelope and wrap, with envelope and wrap members outside the top-level wherry
-// object and string values holding "envelope":.
-var cores = map[string]string{
-	"compact":        `{"message":{"metadata":{"wherry":{"run":"m","envelope":"m","wrap":"m"}},"parts":[{"text":"x\",\"envelope\":\"y"}]},"wherry":{"run":"run-a","tenant":"tenant-a"}}`,
-	"multiline":      "{\n  \"message\": {\"metadata\": {\"wherry\": {\"envelope\": \"m\", \"wrap\": \"m\"}}},\n  \"wherry\": {\n    \"run\": \"run-a\" ,\n    \"tenant\" : \"tenant-a\"\n  }\n}\n",
-	"unknown member": `{"wherry":{"run":"run-a","later":{"envelope":[1,2.50,"e"]},"tenant":"tenant-a"},"message":{"parts":[{"text":"\"envelope\":"}]},"later":true}`,
-	"tabs":           "{\"wherry\":{\"run\":\"run-a\"\t}\t,\"message\":{}}",
-	"escaped names":  `{"\u0077herry":{"r\u0075n":"run-a"},"message":{}}`,
-}
-
 func contentKey(t *testing.T) []byte {
 	t.Helper()
 	key := make([]byte, 32)
@@ -40,29 +28,22 @@ func contentKey(t *testing.T) []byte {
 func envelopeValues() EnvelopeValues {
 	return EnvelopeValues{
 		Credentials:  map[string][]byte{"model": []byte(sealSecret), "empty-ish": {0xfb, 0xff}},
+		Binding:      EnvelopeBinding{Run: "run-a", Tenant: "tenant-a", Pool: "pool-a", TaskStartedBy: 1_800_000_000, TaskEndedBy: 1_800_003_600},
 		S3Inputs:     map[string]string{"repo": "https://bucket.s3.example.com/wherry/tenant-a/run-a/inputs/repo"},
 		S3Outputs:    map[string]string{"report": "https://bucket.s3.example.com/wherry/tenant-a/run-a/outputs/report"},
 		RedactionKey: sealRedactionKey,
 	}
 }
 
-func coreHash(core []byte) string {
-	digest := sha256.Sum256(core)
-	return hex.EncodeToString(digest[:])
-}
-
-// task builds a task payload from core as the host does, returning it with its envelope and content key.
-func task(t *testing.T, core string) (payload, envelope, key []byte) {
+// buildEnvelope builds an envelope of envelopeValues as the host does, returning it with its content key.
+func buildEnvelope(t *testing.T) (envelope, key []byte) {
 	t.Helper()
 	key = contentKey(t)
-	envelope, err := BuildEnvelope(envelopeValues(), key, coreHash([]byte(core)))
+	envelope, err := BuildEnvelope(envelopeValues(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload, err = InsertEnvelope([]byte(core), envelope, []byte("wrap.jwe")); err != nil {
-		t.Fatal(err)
-	}
-	return payload, envelope, key
+	return envelope, key
 }
 
 func protectedHeader(t *testing.T, compact []byte) map[string]any {
@@ -81,13 +62,13 @@ func protectedHeader(t *testing.T, compact []byte) map[string]any {
 
 func TestEnvelopeRoundTrip(t *testing.T) {
 	pool := sealKey(t)
-	payload, envelope, key := task(t, cores["compact"])
+	envelope, key := buildEnvelope(t)
 	wrap, err := WrapContentKey(key, &pool.PublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	header := protectedHeader(t, envelope)
-	if want := []string{"alg", "enc", "task_core", "typ"}; !slices.Equal(slices.Sorted(maps.Keys(header)), want) ||
+	if want := []string{"alg", "enc", "typ"}; !slices.Equal(slices.Sorted(maps.Keys(header)), want) ||
 		header["alg"] != "dir" || header["enc"] != "A256GCM" || header["typ"] != EnvelopeType {
 		t.Fatalf("envelope header %v", header)
 	}
@@ -104,94 +85,9 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	if err := CheckContentKey(envelope, unwrapped); err != nil {
 		t.Fatal(err)
 	}
-	taskCore, err := TaskCore(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	opened, err := OpenEnvelope(envelope, unwrapped, taskCore)
+	opened, err := OpenEnvelope(envelope, unwrapped)
 	if err != nil || !reflect.DeepEqual(opened, envelopeValues()) {
 		t.Fatalf("open: %+v, %v", opened, err)
-	}
-}
-
-func TestEnvelopeSpanInsertRemove(t *testing.T) {
-	for name, core := range cores {
-		t.Run(name, func(t *testing.T) {
-			payload, envelope, key := task(t, core)
-			removed, err := removeSpan(payload)
-			if err != nil || string(removed) != core {
-				t.Fatalf("removed %q, %v", removed, err)
-			}
-			taskCore, err := TaskCore(payload)
-			if err != nil || taskCore != coreHash([]byte(core)) {
-				t.Fatalf("task_core %q, %v", taskCore, err)
-			}
-			if _, err := OpenEnvelope(envelope, key, taskCore); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
-func TestTaskCoreRefusals(t *testing.T) {
-	for name, payload := range map[string]string{
-		"no wherry":            `{"message":{"wherry":{"run":"a","envelope":"e","wrap":"w"}}}`,
-		"wherry not an object": `{"wherry":"run"}`,
-		"envelope missing":     `{"wherry":{"run":"a","wrap":"w"}}`,
-		"wrap missing":         `{"wherry":{"run":"a","envelope":"e"}}`,
-		"envelope duplicated":  `{"wherry":{"run":"a","envelope":"e","envelope":"e","wrap":"w"}}`,
-		"wrap duplicated":      `{"wherry":{"run":"a","envelope":"e","wrap":"w","wrap":"w"}}`,
-		"reordered":            `{"wherry":{"run":"a","wrap":"w","envelope":"e"}}`,
-		"member after wrap":    `{"wherry":{"run":"a","envelope":"e","wrap":"w","tenant":"t"}}`,
-		"member between":       `{"wherry":{"run":"a","envelope":"e","tenant":"t","wrap":"w"}}`,
-		"envelope first":       `{"wherry":{"envelope":"e","wrap":"w"}}`,
-		"wherry duplicated":    `{"wherry":{"run":"a","envelope":"e","wrap":"w"},"wherry":{"run":"a","envelope":"e","wrap":"w"}}`,
-		"duplicate elsewhere":  `{"message":{"a":1,"a":2},"wherry":{"run":"a","envelope":"e","wrap":"w"}}`,
-		"truncated":            `{"wherry":{"run":"a","envelope":"e","wrap":"w"}`,
-		"invalid UTF-8":        "{\"message\":\"\xff\",\"wherry\":{\"run\":\"a\",\"envelope\":\"e\",\"wrap\":\"w\"}}",
-		"trailing data":        `{"wherry":{"run":"a","envelope":"e","wrap":"w"}} {}`,
-		"trailing garbage":     `{"wherry":{"run":"a","envelope":"e","wrap":"w"}}x`,
-		"top-level array":      `[{"wherry":{"run":"a","envelope":"e","wrap":"w"}}]`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			if taskCore, err := TaskCore([]byte(payload)); err == nil {
-				t.Fatalf("task_core %s of a payload breaking the span rule", taskCore)
-			}
-		})
-	}
-	for name, core := range map[string]string{
-		"has envelope": `{"wherry":{"run":"a","envelope":"e","wrap":"w"}}`,
-		"empty wherry": `{"wherry":{}}`,
-		"no wherry":    `{"message":{}}`,
-	} {
-		t.Run("insert "+name, func(t *testing.T) {
-			if _, err := InsertEnvelope([]byte(core), []byte("e"), []byte("w")); err == nil {
-				t.Fatal("inserted")
-			}
-		})
-	}
-}
-
-func TestEnvelopeBindsEveryByteOutsideSpan(t *testing.T) {
-	core := cores["compact"]
-	payload, envelope, key := task(t, core)
-	comma, closing, err := envelopeSpan(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range payload {
-		if i >= comma && i < closing {
-			continue
-		}
-		changed := slices.Clone(payload)
-		changed[i] ^= 0x01
-		taskCore, err := TaskCore(changed)
-		if err != nil {
-			continue
-		}
-		if _, err := OpenEnvelope(envelope, key, taskCore); err == nil {
-			t.Fatalf("envelope opens for the payload with byte %d changed: %q", i, changed)
-		}
 	}
 }
 
@@ -201,16 +97,16 @@ func craftEnvelope(t *testing.T, key []byte, claims map[jose.HeaderKey]any, comp
 	return compact(t, craft(t, jose.DIRECT, jose.A256GCM, key, claims, compression, []byte(plaintext)))
 }
 
-const validPlaintext = `{"credentials":{"model":"c2VjcmV0"},"s3_inputs":{},"s3_outputs":{},"redaction_key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}`
+const validPlaintext = `{"binding":{"run":"run-a","tenant":"tenant-a","pool":"pool-a","task_started_by":1800000000,"task_ended_by":1800003600},"credentials":{"model":"c2VjcmV0"},"s3_inputs":{},"s3_outputs":{},"redaction_key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}`
 
 func TestOpenEnvelopeRefusesHeader(t *testing.T) {
-	key, taskCore := contentKey(t), coreHash([]byte("core"))
+	key := contentKey(t)
 	claims := func(extra map[jose.HeaderKey]any) map[jose.HeaderKey]any {
-		base := map[jose.HeaderKey]any{jose.HeaderType: EnvelopeType, "task_core": taskCore}
+		base := map[jose.HeaderKey]any{jose.HeaderType: EnvelopeType}
 		maps.Copy(base, extra)
 		return base
 	}
-	if _, err := OpenEnvelope(craftEnvelope(t, key, claims(nil), "", validPlaintext), key, taskCore); err != nil {
+	if _, err := OpenEnvelope(craftEnvelope(t, key, claims(nil), "", validPlaintext), key); err != nil {
 		t.Fatalf("crafted baseline: %v", err)
 	}
 	withKey := craftEnvelope(t, key, claims(nil), "", validPlaintext)
@@ -219,15 +115,13 @@ func TestOpenEnvelopeRefusesHeader(t *testing.T) {
 		"zip":               craftEnvelope(t, key, claims(nil), jose.DEFLATE, validPlaintext),
 		"unknown parameter": craftEnvelope(t, key, claims(map[jose.HeaderKey]any{"x": "y"}), "", validPlaintext),
 		"kid":               craftEnvelope(t, key, claims(map[jose.HeaderKey]any{"kid": "k"}), "", validPlaintext),
-		"missing typ":       craftEnvelope(t, key, map[jose.HeaderKey]any{"task_core": taskCore}, "", validPlaintext),
+		"missing typ":       craftEnvelope(t, key, map[jose.HeaderKey]any{}, "", validPlaintext),
 		"other typ":         craftEnvelope(t, key, claims(map[jose.HeaderKey]any{jose.HeaderType: SealType}), "", validPlaintext),
-		"other task_core":   craftEnvelope(t, key, claims(map[jose.HeaderKey]any{"task_core": coreHash([]byte("other"))}), "", validPlaintext),
-		"missing task_core": craftEnvelope(t, key, map[jose.HeaderKey]any{jose.HeaderType: EnvelopeType}, "", validPlaintext),
 		"encrypted key":     []byte(protected + ".AAAA" + rest),
 		"other enc":         compact(t, craft(t, jose.DIRECT, jose.A128GCM, key[:16], claims(nil), "", []byte(validPlaintext))),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := OpenEnvelope(envelope, key, taskCore); err == nil {
+			if _, err := OpenEnvelope(envelope, key); err == nil {
 				t.Fatal("opened")
 			}
 		})
@@ -235,20 +129,29 @@ func TestOpenEnvelopeRefusesHeader(t *testing.T) {
 }
 
 func TestOpenEnvelopeRefusesPlaintext(t *testing.T) {
-	key, taskCore := contentKey(t), coreHash([]byte("core"))
-	claims := map[jose.HeaderKey]any{jose.HeaderType: EnvelopeType, "task_core": taskCore}
-	for name, plaintext := range map[string]string{
-		"unknown member":        strings.Replace(validPlaintext, `{"credentials"`, `{"later":1,"credentials"`, 1),
-		"duplicate member":      strings.Replace(validPlaintext, `{"credentials"`, `{"s3_inputs":{},"credentials"`, 1),
+	key := contentKey(t)
+	claims := map[jose.HeaderKey]any{jose.HeaderType: EnvelopeType}
+	if _, err := OpenEnvelope(craftEnvelope(t, key, claims, "", validPlaintext), key); err != nil {
+		t.Fatalf("crafted baseline: %v", err)
+	}
+	refused := map[string]string{
+		"unknown member":        strings.Replace(validPlaintext, `,"credentials"`, `,"later":1,"credentials"`, 1),
+		"duplicate member":      strings.Replace(validPlaintext, `,"credentials"`, `,"s3_inputs":{},"credentials"`, 1),
 		"missing member":        strings.Replace(validPlaintext, `"s3_inputs":{},`, ``, 1),
 		"null member":           strings.Replace(validPlaintext, `"s3_inputs":{}`, `"s3_inputs":null`, 1),
 		"wrong type":            strings.Replace(validPlaintext, `"s3_inputs":{}`, `"s3_inputs":{"repo":1}`, 1),
 		"unpadded credential":   strings.Replace(validPlaintext, `"c2VjcmV0"`, `"c2VjcmV0dA"`, 1),
 		"url alphabet":          strings.Replace(validPlaintext, `"c2VjcmV0"`, `"c2Vj-_V0"`, 1),
 		"31-byte redaction_key": strings.Replace(validPlaintext, `MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=`, `MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZQ==`, 1),
-	} {
+		"binding missing":       validPlaintext[:1] + validPlaintext[strings.Index(validPlaintext, `"credentials"`):],
+		"binding unknown":       strings.Replace(validPlaintext, `{"run"`, `{"host":"host-a","run"`, 1),
+	}
+	for _, member := range []string{`"run":"run-a",`, `"tenant":"tenant-a",`, `"pool":"pool-a",`, `"task_started_by":1800000000,`, `,"task_ended_by":1800003600`} {
+		refused["binding without "+member] = strings.Replace(validPlaintext, member, "", 1)
+	}
+	for name, plaintext := range refused {
 		t.Run(name, func(t *testing.T) {
-			if _, err := OpenEnvelope(craftEnvelope(t, key, claims, "", plaintext), key, taskCore); err == nil {
+			if _, err := OpenEnvelope(craftEnvelope(t, key, claims, "", plaintext), key); err == nil {
 				t.Fatal("opened")
 			}
 		})
@@ -256,15 +159,15 @@ func TestOpenEnvelopeRefusesPlaintext(t *testing.T) {
 }
 
 func TestEnvelopeSizeCap(t *testing.T) {
-	key, taskCore := contentKey(t), coreHash([]byte("core"))
+	key := contentKey(t)
 	values := envelopeValues()
 	values.Credentials["large"] = make([]byte, MaxEnvelope)
-	if _, err := BuildEnvelope(values, key, taskCore); err == nil {
+	if _, err := BuildEnvelope(values, key); err == nil {
 		t.Fatal("built an envelope over the cap")
 	}
 	large := strings.Replace(validPlaintext, `"s3_inputs":{}`, `"s3_inputs":{"repo":"https://`+strings.Repeat("a", MaxEnvelope)+`"}`, 1)
-	envelope := craftEnvelope(t, key, map[jose.HeaderKey]any{jose.HeaderType: EnvelopeType, "task_core": taskCore}, "", large)
-	if _, err := OpenEnvelope(envelope, key, taskCore); err == nil {
+	envelope := craftEnvelope(t, key, map[jose.HeaderKey]any{jose.HeaderType: EnvelopeType}, "", large)
+	if _, err := OpenEnvelope(envelope, key); err == nil {
 		t.Fatal("opened an envelope over the cap")
 	}
 	if err := CheckContentKey(envelope, key); err == nil {
@@ -358,7 +261,7 @@ func mustWrap(t *testing.T, key []byte, recipient *ecdsa.PublicKey) []byte {
 }
 
 func TestCheckContentKey(t *testing.T) {
-	_, envelope, key := task(t, cores["compact"])
+	envelope, key := buildEnvelope(t)
 	if err := CheckContentKey(envelope, key); err != nil {
 		t.Fatal(err)
 	}
