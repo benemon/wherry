@@ -132,20 +132,13 @@ func InsertEnvelope(core, envelope, wrap []byte) ([]byte, error) {
 	return payload, nil
 }
 
-// EnvelopeValues are the confidential values of a task. RedactionKey is the run's 32-byte key.
+// EnvelopeValues are the confidential values of a task, and an envelope's whole plaintext. RedactionKey is the run's
+// 32-byte key.
 type EnvelopeValues struct {
-	Credentials  map[string][]byte
-	S3Inputs     map[string]string
-	S3Outputs    map[string]string
-	RedactionKey []byte
-}
-
-// envelopePlaintext is every member an envelope's plaintext holds; bytes are base64url without padding.
-type envelopePlaintext struct {
-	Credentials  map[string]string `json:"credentials"`
+	Credentials  map[string][]byte `json:"credentials"`
 	S3Inputs     map[string]string `json:"s3_inputs"`
 	S3Outputs    map[string]string `json:"s3_outputs"`
-	RedactionKey string            `json:"redaction_key"`
+	RedactionKey []byte            `json:"redaction_key"`
 }
 
 // envelopeHeader is every member an envelope's protected header may hold.
@@ -161,14 +154,7 @@ func BuildEnvelope(values EnvelopeValues, contentKey []byte, taskCore string) ([
 	if len(contentKey) != 32 || len(values.RedactionKey) != 32 {
 		return nil, errors.New("envelope content key or redaction key is not 32 bytes")
 	}
-	plain := envelopePlaintext{
-		Credentials: make(map[string]string, len(values.Credentials)), S3Inputs: values.S3Inputs, S3Outputs: values.S3Outputs,
-		RedactionKey: base64.RawURLEncoding.EncodeToString(values.RedactionKey),
-	}
-	for name, value := range values.Credentials {
-		plain.Credentials[name] = base64.RawURLEncoding.EncodeToString(value)
-	}
-	plaintext, err := json.Marshal(plain, json.Deterministic(true))
+	plaintext, err := json.Marshal(values, json.Deterministic(true))
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +188,7 @@ func parseEnvelope(encoded []byte) (*jose.JSONWebEncryption, envelopeHeader, err
 		return nil, header, errors.New("envelope is not a compact JWE of the allowed algorithms")
 	}
 	protected, rest, _ := strings.Cut(string(encoded), ".")
-	// dir ignores an encrypted key, which would make the envelope malleable.
+	// RFC 7518 section 4.5: under dir the JWE Encrypted Key is empty.
 	if !strings.HasPrefix(rest, ".") {
 		return nil, header, errors.New("envelope carries an encrypted key")
 	}
@@ -226,18 +212,11 @@ func OpenEnvelope(encoded, contentKey []byte, taskCore string) (EnvelopeValues, 
 	if err != nil {
 		return EnvelopeValues{}, errors.New("envelope does not decrypt")
 	}
-	var plain envelopePlaintext
-	if json.Unmarshal(plaintext, &plain, Strict) != nil || plain.Credentials == nil || plain.S3Inputs == nil || plain.S3Outputs == nil {
+	var values EnvelopeValues
+	if json.Unmarshal(plaintext, &values, Strict) != nil || values.Credentials == nil || values.S3Inputs == nil || values.S3Outputs == nil {
 		return EnvelopeValues{}, errors.New("envelope plaintext is not an envelope's")
 	}
-	urlBytes := base64.RawURLEncoding.Strict()
-	values := EnvelopeValues{Credentials: make(map[string][]byte, len(plain.Credentials)), S3Inputs: plain.S3Inputs, S3Outputs: plain.S3Outputs}
-	for name, value := range plain.Credentials {
-		if values.Credentials[name], err = urlBytes.DecodeString(value); err != nil {
-			return EnvelopeValues{}, errors.New("envelope credential is not base64url")
-		}
-	}
-	if values.RedactionKey, err = urlBytes.DecodeString(plain.RedactionKey); err != nil || len(values.RedactionKey) != 32 {
+	if len(values.RedactionKey) != 32 {
 		return EnvelopeValues{}, errors.New("envelope redaction key is not 32 bytes")
 	}
 	return values, nil

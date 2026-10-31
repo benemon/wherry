@@ -27,6 +27,7 @@ var cores = map[string]string{
 	"multiline":      "{\n  \"message\": {\"metadata\": {\"wherry\": {\"envelope\": \"m\", \"wrap\": \"m\"}}},\n  \"wherry\": {\n    \"run\": \"run-a\" ,\n    \"tenant\" : \"tenant-a\"\n  }\n}\n",
 	"unknown member": `{"wherry":{"run":"run-a","later":{"envelope":[1,2.50,"e"]},"tenant":"tenant-a"},"message":{"parts":[{"text":"\"envelope\":"}]},"later":true}`,
 	"tabs":           "{\"wherry\":{\"run\":\"run-a\"\t}\t,\"message\":{}}",
+	"escaped names":  `{"\u0077herry":{"r\u0075n":"run-a"},"message":{}}`,
 }
 
 func contentKey(t *testing.T) []byte {
@@ -200,7 +201,7 @@ func craftEnvelope(t *testing.T, key []byte, claims map[jose.HeaderKey]any, comp
 	return compact(t, craft(t, jose.DIRECT, jose.A256GCM, key, claims, compression, []byte(plaintext)))
 }
 
-const validPlaintext = `{"credentials":{"model":"c2VjcmV0"},"s3_inputs":{},"s3_outputs":{},"redaction_key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"}`
+const validPlaintext = `{"credentials":{"model":"c2VjcmV0"},"s3_inputs":{},"s3_outputs":{},"redaction_key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}`
 
 func TestOpenEnvelopeRefusesHeader(t *testing.T) {
 	key, taskCore := contentKey(t), coreHash([]byte("core"))
@@ -242,8 +243,9 @@ func TestOpenEnvelopeRefusesPlaintext(t *testing.T) {
 		"missing member":        strings.Replace(validPlaintext, `"s3_inputs":{},`, ``, 1),
 		"null member":           strings.Replace(validPlaintext, `"s3_inputs":{}`, `"s3_inputs":null`, 1),
 		"wrong type":            strings.Replace(validPlaintext, `"s3_inputs":{}`, `"s3_inputs":{"repo":1}`, 1),
-		"padded credential":     strings.Replace(validPlaintext, `"c2VjcmV0"`, `"c2VjcmV0dA=="`, 1),
-		"31-byte redaction_key": strings.Replace(validPlaintext, `MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY`, `MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZQ`, 1),
+		"unpadded credential":   strings.Replace(validPlaintext, `"c2VjcmV0"`, `"c2VjcmV0dA"`, 1),
+		"url alphabet":          strings.Replace(validPlaintext, `"c2VjcmV0"`, `"c2Vj-_V0"`, 1),
+		"31-byte redaction_key": strings.Replace(validPlaintext, `MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=`, `MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZQ==`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := OpenEnvelope(craftEnvelope(t, key, claims, "", plaintext), key, taskCore); err == nil {
@@ -332,6 +334,8 @@ func TestUnwrapRefuses(t *testing.T) {
 		"31-byte plaintext":  craftWrap(t, &pool.PublicKey, nil, nil, key[:31]),
 		"33-byte plaintext":  craftWrap(t, &pool.PublicKey, nil, nil, append(slices.Clone(key), 0)),
 		"wrapped to another": mustWrap(t, key, &other.PublicKey),
+		"epk on P-384":       craftWrap(t, &pool.PublicKey, nil, map[string]any{"crv": "P-384"}, key),
+		"alg dir":            craftWrap(t, &pool.PublicKey, map[string]any{"alg": "dir"}, nil, key),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := UnwrapContentKey(wrap, pool); err == nil {
