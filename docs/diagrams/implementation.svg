@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 890" font-family="Outfit, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
   <title id="title">wherry implementation view</title>
-  <desc id="desc">The host laptop of tenant alice runs a coding agent harness with the wherry skill and the wherry mcp server, both using the wherry client, beside its signing key, bundle, credential sources, storage credential and state directory. The operator's wherry admin writes wherry.admin. Nine Kafka topics sit between host and receiver: the host reads wherry.admin, wherry.receivers, receiver key topics, its tenant feed and its tenant transcript topic, writes the pool's tasks and events, and reads and writes its own host topic. The receiver nomad-1 reads wherry.admin and the pool's tasks through the share group p-pool, reads and writes wherry.receivers, its own key topic, its own progress topic and the pool's events, reads the progress topics of the pool's other live receivers, writes the tenant feed and transcript topic and reads the host topic. The receiver runs plugins over mutual TLS, which run the unmodified agent as a Nomad job, a Kubernetes pod or a transient systemd service. Optional paths: the host and the receiver reach an S3-compatible bucket, the host with its own credential and the receiver and plugin with presigned URLs from the seal, and the agent clones a git remote on one of the pool's VCS hosts.</desc>
+  <desc id="desc">The host laptop of tenant alice runs a coding agent harness with the wherry skill and the wherry mcp server, both using the wherry client, beside its signing key, bundle, credential sources, storage credential and state directory. The operator's wherry admin writes wherry.admin. Nine Kafka topics sit between host and receiver: the host reads wherry.admin, wherry.receivers, receiver key topics, its tenant feed and its tenant transcript topic, writes the pool's tasks and events, and reads and writes its own host topic. The receiver nomad-1 reads wherry.admin and the pool's tasks through the share group p-pool, reads and writes wherry.receivers, its own key topic, its own progress topic and the pool's events, reads the progress topics of the pool's other live receivers, writes the tenant feed and transcript topic and reads the host topic. The receiver runs plugins over mutual TLS, which run the unmodified agent as a Nomad job, a Kubernetes pod or a transient systemd service. Optional paths: the host and the receiver reach an S3-compatible bucket, the host with its own credential and the receiver and plugin with presigned URLs from the task's envelope, and the agent clones a git remote on one of the pool's VCS hosts.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e4a35"/>
     </marker>
-    <marker id="arrow-seal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="arrow-key" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#3f6b4a"/>
     </marker>
   </defs>
@@ -33,13 +33,13 @@
     <rect x="213" y="214" width="121" height="52" rx="6" fill="#e8ebdf" stroke="#b7c0b0" stroke-width="1"/>
     <text x="273" y="236" text-anchor="middle" font-size="12" font-weight="600">MCP server</text>
     <text x="273" y="253" text-anchor="middle" font-size="10" fill="#2e4a35">wherry mcp, 8 tools</text>
-    <text x="205" y="290" text-anchor="middle" font-size="10.5" fill="#2e4a35">the server answers seal requests while it runs</text>
+    <text x="205" y="290" text-anchor="middle" font-size="10.5" fill="#2e4a35">the server submits and follows runs</text>
 
     <rect x="60" y="340" width="290" height="96" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="205" y="364" text-anchor="middle" font-weight="600">wherry client</text>
     <text x="205" y="383" text-anchor="middle" font-size="10.5" fill="#2e4a35">CLI commands and MCP tools</text>
     <text x="205" y="398" text-anchor="middle" font-size="10.5" fill="#2e4a35">places, signs and submits runs</text>
-    <text x="205" y="413" text-anchor="middle" font-size="10.5" fill="#2e4a35">wait follows the feed and answers seals</text>
+    <text x="205" y="413" text-anchor="middle" font-size="10.5" fill="#2e4a35">wait follows the feed</text>
 
     <rect x="60" y="466" width="290" height="110" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="205" y="490" text-anchor="middle" font-weight="600">Host files</text>
@@ -76,16 +76,16 @@
 
     <rect x="456" y="466" width="348" height="60" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="472" y="488" font-size="12" font-weight="600" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#00290b">wherry.pool.&lt;pool&gt;.events</text>
-    <text x="472" y="506">statuses, start failures, cancels</text>
+    <text x="472" y="506">statuses, cancels, open requests and wraps</text>
 
     <rect x="456" y="538" width="348" height="60" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="472" y="560" font-size="12" font-weight="600" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#00290b">wherry.tenant.&lt;tenant&gt;[.transcript]</text>
-    <text x="472" y="576">statuses, results, echoes, seal requests;</text>
+    <text x="472" y="576">statuses, results, echoes;</text>
     <text x="472" y="590">.transcript: transcript and output chunks</text>
 
     <rect x="456" y="610" width="348" height="60" rx="6" fill="#e8ebdf" stroke="#3f6b4a" stroke-width="1"/>
     <text x="472" y="632" font-size="12" font-weight="600" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#00290b">wherry.host.&lt;tenant&gt;.&lt;host&gt;</text>
-    <text x="472" y="650">the host's signing keys, seals</text>
+    <text x="472" y="650">the host's signing keys</text>
   </g>
 
   <!-- host <-> topics: an arrow into a topic writes, out of it reads -->
@@ -97,7 +97,7 @@
     <path d="M 370 496 H 450" marker-end="url(#arrow)"/>
     <path d="M 456 568 H 376" marker-end="url(#arrow)"/>
   </g>
-  <path d="M 376 640 H 450" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-start="url(#arrow-seal)" marker-end="url(#arrow-seal)"/>
+  <path d="M 376 640 H 450" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-start="url(#arrow-key)" marker-end="url(#arrow-key)"/>
   <g font-size="10" fill="#2e4a35" text-anchor="middle">
     <text x="413" y="201">state</text>
     <text x="413" y="273">liveness</text>
@@ -105,7 +105,7 @@
     <text x="413" y="417">submit</text>
     <text x="413" y="489">cancel</text>
     <text x="413" y="561">follow</text>
-    <text x="413" y="633" fill="#3f6b4a">key, seals</text>
+    <text x="413" y="633" fill="#3f6b4a">key</text>
   </g>
 
   <!-- receiver <-> topics -->
@@ -117,7 +117,7 @@
     <path d="M 810 496 H 904" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
     <path d="M 910 568 H 810" marker-end="url(#arrow)"/>
   </g>
-  <path d="M 804 640 H 904" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-seal)"/>
+  <path d="M 804 640 H 904" stroke="#3f6b4a" stroke-width="1.5" fill="none" marker-end="url(#arrow-key)"/>
   <g font-size="10" fill="#2e4a35" text-anchor="middle">
     <text x="857" y="201">configuration</text>
     <text x="857" y="273">advertise</text>
@@ -127,7 +127,7 @@
     <text x="857" y="482">statuses,</text>
     <text x="857" y="494">cancels</text>
     <text x="857" y="561">publish</text>
-    <text x="857" y="633" fill="#3f6b4a">seals</text>
+    <text x="857" y="633" fill="#3f6b4a">host keys</text>
   </g>
 
   <!-- ======================= Receiver ======================= -->
@@ -140,7 +140,7 @@
     <rect x="926" y="178" width="208" height="150" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5"/>
     <text x="1030" y="200" text-anchor="middle" font-weight="600">wherry receiver run</text>
     <text x="1030" y="219" text-anchor="middle" font-size="10.5" fill="#2e4a35">claims, admits, renews the lock</text>
-    <text x="1030" y="234" text-anchor="middle" font-size="10.5" fill="#2e4a35">asks for seals, opens them</text>
+    <text x="1030" y="234" text-anchor="middle" font-size="10.5" fill="#2e4a35">opens envelopes through the custodian</text>
     <text x="1030" y="249" text-anchor="middle" font-size="10.5" fill="#2e4a35">redacts what it publishes</text>
     <text x="1030" y="264" text-anchor="middle" font-size="10.5" fill="#2e4a35">writes each run through</text>
     <text x="1030" y="281" text-anchor="middle" font-size="10.5" font-family="'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace" fill="#2e4a35">p.&lt;pool&gt;.&lt;run&gt;</text>
@@ -188,7 +188,7 @@
 
   <path d="M 1030 700 V 768 H 810" stroke="#2e4a35" stroke-width="1.5" fill="none" stroke-dasharray="5 4" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
   <text x="1020" y="760" text-anchor="end" font-size="10" fill="#2e4a35">GET input, PUT output</text>
-  <text x="1020" y="788" text-anchor="end" font-size="10" fill="#2e4a35">presigned URLs from the seal</text>
+  <text x="1020" y="788" text-anchor="end" font-size="10" fill="#2e4a35">presigned URLs from the envelope</text>
 
   <rect x="1206" y="730" width="158" height="76" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1.5" stroke-dasharray="5 4"/>
   <text x="1285" y="754" text-anchor="middle" font-size="12.5" font-weight="600" fill="#00290b">Git remote</text>
@@ -203,8 +203,8 @@
   <g font-size="10.5" fill="#2e4a35">
     <line x1="40" y1="854" x2="80" y2="854" stroke="#2e4a35" stroke-width="1.5" marker-end="url(#arrow)"/>
     <text x="88" y="858">arrow into a topic writes it, out of a topic reads it</text>
-    <line x1="420" y1="854" x2="460" y2="854" stroke="#3f6b4a" stroke-width="1.5" marker-end="url(#arrow-seal)"/>
-    <text x="468" y="858" fill="#3f6b4a">credential seal path</text>
+    <line x1="420" y1="854" x2="460" y2="854" stroke="#3f6b4a" stroke-width="1.5" marker-end="url(#arrow-key)"/>
+    <text x="468" y="858" fill="#3f6b4a">host key path</text>
     <line x1="640" y1="854" x2="680" y2="854" stroke="#2e4a35" stroke-width="1.5" stroke-dasharray="5 4"/>
     <text x="688" y="858">optional, chosen by the pool's terms and the task</text>
   </g>
