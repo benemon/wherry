@@ -678,15 +678,22 @@ func TestClaimCheckRefusesARequestNotFromItsLiveClaimant(t *testing.T) {
 		record := f.submit(t, f.host, nil)
 		f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
 		digest := f.openAs(t, record, "receiver-b", keyB, 1)
-		denied := func(context.Context, string, string) error { return admin.ErrAuthorizationDenied }
-		if result := f.service.RevokeReceiver(f.ctx, "receiver-b", time.Millisecond, denied); !result.Complete {
-			t.Fatalf("revoke receiver: %#v", result.Steps)
-		}
-		if err := f.receiver.refresh(f.ctx); err != nil {
+		// The events are read while receiver-b is live, so its claim and request stand and rules 2 to 4 serve it.
+		events, err := f.receiver.readEvents(f.ctx)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if answer := f.answered(t, digest); answer != wire.RefusedNotClaimant {
-			t.Fatalf("answer %q, want %q", answer, wire.RefusedNotClaimant)
+		f.revoke(t, "receiver-b")
+		keys, err := loadPoolKeys(f.receiver.poolKeysDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		check := &claimCheck{r: f.receiver, events: events, tasks: f.records(t, admin.PoolTasksTopic(testPool)), keys: keys, now: time.Now()}
+		request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
+		answer := check.decide(f.ctx, events.requests[request])
+		var refusal wire.OpenRefusal
+		if len(answer) != 1 || wire.ParseStrict(answer[0].Value, f.keys(), time.Now(), &refusal) != nil || refusal.Reason != wire.RefusedNotClaimant {
+			t.Fatalf("answer of %d records, refusal %+v; want %q alone", len(answer), refusal, wire.RefusedNotClaimant)
 		}
 	})
 }
@@ -712,6 +719,43 @@ func TestClaimDecisionIsReusedForItsClaim(t *testing.T) {
 	}
 	if decisions := f.decisions(t); len(decisions) != 1 || decisions[0].Reason != wire.ClaimLease {
 		t.Fatalf("decisions %+v, want the one lease decision", decisions)
+	}
+}
+
+// A claim decision outlives its custodian: verified against the key current when it was appended, it decides a later
+// request for the same claim after its custodian is revoked and the advertisement it used is gone.
+func TestClaimDecisionOutlivesItsCustodian(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	keyB, keyC, keyD := f.addPeer(t, "receiver-b", testPool), f.addPeer(t, "receiver-c", testPool), f.addPeer(t, "receiver-d", testPool)
+	record := f.submit(t, f.host, nil)
+	f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+	lapsed := time.Now().Add(-claimantLease - time.Minute)
+	f.advertiseAs(t, "receiver-b", keyB, lapsed)
+	claim := f.statusAs(t, record, "receiver-c", keyC, "claimed", 2)
+	claimed := time.Now()
+	decision := &wire.ClaimDecision{Custodian: "receiver-d", Claim: wire.Digest(claim), Previous: "receiver-b", Reason: wire.ClaimLease, Advertisement: &wire.AdvertisedRef{AtMS: lapsed.UnixMilli()}, Served: true}
+	f.produce(t, admin.PoolEventsTopic(testPool), "run-a", must(t)(wire.SignRecord(decision, keyD)))
+	f.revoke(t, "receiver-d")
+	// The advertisement the decision used is gone: receiver-b now advertised within the lease of the claim.
+	f.advertiseAs(t, "receiver-b", keyB, claimed.Add(-time.Second))
+	if answer := f.answered(t, f.openAs(t, record, "receiver-c", keyC, 2)); answer != "wrap" {
+		t.Fatalf("request answered %q, want a wrap under receiver-d's decision; logs:\n%s", answer, f.logs.String())
+	}
+	if decisions := f.decisions(t); len(decisions) != 0 {
+		t.Fatalf("decisions %+v, want receiver-d's reused", decisions)
+	}
+}
+
+// revoke ends receiver's membership and refreshes the fixture's receiver.
+func (f fixture) revoke(t *testing.T, receiver string) {
+	t.Helper()
+	denied := func(context.Context, string, string) error { return admin.ErrAuthorizationDenied }
+	if result := f.service.RevokeReceiver(f.ctx, receiver, time.Millisecond, denied); !result.Complete {
+		t.Fatalf("revoke receiver: %#v", result.Steps)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -742,29 +786,40 @@ func TestClaimCheckBoundComesFromTheEvents(t *testing.T) {
 	}
 }
 
-// An envelope copied into a task it is not bound to never releases its content key: the custodian refuses before any
-// attempt wrap.
-func TestSplicedEnvelopeIsRefusedBeforeAnyWrap(t *testing.T) {
-	for name, edit := range map[string]func(*signed.EnvelopeBinding){
-		"run":             func(binding *signed.EnvelopeBinding) { binding.Run = "run-other" },
-		"tenant":          func(binding *signed.EnvelopeBinding) { binding.Tenant = "tenant-b" },
-		"pool":            func(binding *signed.EnvelopeBinding) { binding.Pool = "pool-b" },
-		"task_started_by": func(binding *signed.EnvelopeBinding) { binding.TaskStartedBy++ },
-		"task_ended_by":   func(binding *signed.EnvelopeBinding) { binding.TaskEndedBy++ },
+// An envelope copied into a task it is not bound to, or failing the section 5 check, never releases its content key:
+// the custodian refuses envelope invalid before any attempt wrap, and the run fails with that reason and no key-lost, so
+// its host does not resubmit it.
+func TestInvalidEnvelopeIsRefusedBeforeAnyWrap(t *testing.T) {
+	for name, edit := range map[string]func(*signed.EnvelopeValues){
+		"run":             func(values *signed.EnvelopeValues) { values.Binding.Run = "run-other" },
+		"tenant":          func(values *signed.EnvelopeValues) { values.Binding.Tenant = "tenant-b" },
+		"pool":            func(values *signed.EnvelopeValues) { values.Binding.Pool = "pool-b" },
+		"task_started_by": func(values *signed.EnvelopeValues) { values.Binding.TaskStartedBy++ },
+		"task_ended_by":   func(values *signed.EnvelopeValues) { values.Binding.TaskEndedBy++ },
+		"section 5":       func(values *signed.EnvelopeValues) { delete(values.Credentials, credentialName) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.envelope = func(_ *wire.Submission, values *signed.EnvelopeValues) { edit(&values.Binding) }
+			f.envelope = func(_ *wire.Submission, values *signed.EnvelopeValues) { edit(values) }
 			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckReject {
 				t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 			}
 			for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
 				if recordType(record.Value) == wire.AttemptWrapType {
-					t.Fatal("the custodian wrapped the content key of a spliced envelope")
+					t.Fatal("the custodian wrapped the content key of an invalid envelope")
 				}
 			}
-			if dispatches, _, _ := f.dispatched(t); dispatches != 0 || !strings.Contains(f.logs.String(), "envelope does not open for its task: envelope is bound to another task") {
-				t.Fatalf("dispatches %d; logs:\n%s", dispatches, f.logs.String())
+			if f.answeredWith(t, wire.RefusedEnvelopeInvalid) != 1 {
+				t.Fatalf("no envelope invalid refusal; logs:\n%s", f.logs.String())
+			}
+			statuses := f.eventStatuses(t)
+			terminal := statuses[len(statuses)-1]
+			if terminal.Wherry.Kind != "terminal" || terminal.StatusUpdate.Status.State != wire.TaskStateFailed || terminal.Wherry.Event != "" ||
+				terminal.StatusUpdate.Status.Message.Parts[0].Text != wire.RefusedEnvelopeInvalid {
+				t.Fatalf("terminal %+v, want the run failed envelope invalid without key-lost", terminal)
+			}
+			if dispatches, lookups, _, _ := f.plugin.counts(); dispatches != 0 || lookups != 0 {
+				t.Fatalf("dispatches %d, lookups %d; want neither", dispatches, lookups)
 			}
 		})
 	}
@@ -1028,6 +1083,7 @@ func TestEachRefusalTakesItsTableAction(t *testing.T) {
 		{wire.RefusedTerminal, kgo.AckAccept, []string{"claimed"}, ""},
 		{wire.RefusedPastBound, kgo.AckReject, []string{"claimed", "terminal"}, "not started by task_started_by"},
 		{wire.RefusedKeyUnavailable, kgo.AckReject, []string{"claimed", "terminal"}, keyLostReason},
+		{wire.RefusedEnvelopeInvalid, kgo.AckReject, []string{"claimed", "terminal"}, wire.RefusedEnvelopeInvalid},
 	} {
 		t.Run(test.reason, func(t *testing.T) {
 			f := newFixture(t, resultStream)
@@ -1071,6 +1127,37 @@ func TestReleasedIsCommittedBeforeTheTaskIsReleased(t *testing.T) {
 	}
 }
 
+// A released status whose transaction does not commit leaves the share record unacknowledged, for its acquisition lock
+// to return it.
+func TestAFailedReleasedCommitLeavesTheTaskUnacknowledged(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	record := f.submit(t, f.host, nil)
+	// The run's commits are its claimed status, its open request, then its released status.
+	commits := 0
+	f.cluster.ControlKey(kmsg.EndTxn.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		req := request.(*kmsg.EndTxnRequest)
+		if req.TransactionalID != admin.TransactionalPrefix(testPool)+"run-a" || !req.Commit {
+			f.cluster.KeepControl()
+			return nil, nil, false
+		}
+		if commits++; commits < 3 {
+			f.cluster.KeepControl()
+			return nil, nil, false
+		}
+		response := req.ResponseKind().(*kmsg.EndTxnResponse)
+		response.SetVersion(req.Version)
+		response.ErrorCode = kerr.InvalidTxnState.Code
+		return response, nil, true
+	})
+	if status := f.execute(t, record, 1); status != 0 {
+		t.Fatalf("status %v, want no acknowledgement; logs:\n%s", status, f.logs.String())
+	}
+	if kinds := f.kinds(t); !slices.Equal(kinds, []string{"claimed"}) {
+		t.Fatalf("statuses %v, want the claim alone", kinds)
+	}
+}
+
 // Receivers act only on a run's earliest accepted task record: a record under the run's key that does not verify does
 // not take the run, and a later copy of the accepted record is acknowledged without a claim.
 func TestAdmissionActsOnTheEarliestAcceptedRecord(t *testing.T) {
@@ -1086,6 +1173,45 @@ func TestAdmissionActsOnTheEarliestAcceptedRecord(t *testing.T) {
 	}
 	if status := f.execute(t, record, 1); status != kgo.AckAccept {
 		t.Fatalf("the valid task ended %v; logs:\n%s", status, f.logs.String())
+	}
+}
+
+// A run's earlier record that fails a structure or bound check at its append time never wins the run: the valid record
+// after it runs.
+func TestAnInvalidEarlierRecordNeverWins(t *testing.T) {
+	now := time.Now()
+	runCap := int64(admin.MaxRunDurationMS / 1000)
+	for name, edit := range map[string]func(*wire.Submission){
+		"past task_started_by at its append": func(task *wire.Submission) {
+			task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = now.Add(-time.Minute).Unix(), now.Add(time.Minute).Unix()
+		},
+		"task_ended_by before task_started_by": func(task *wire.Submission) {
+			task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = now.Add(time.Minute).Unix(), now.Add(30*time.Second).Unix()
+		},
+		"past the run cap": func(task *wire.Submission) {
+			task.Wherry.TaskStartedBy = now.Add(time.Minute).Unix()
+			task.Wherry.TaskEndedBy = task.Wherry.TaskStartedBy + runCap + 1
+		},
+		"past the start_by_limit": func(task *wire.Submission) {
+			task.Wherry.TaskStartedBy = now.Add(time.Duration(admin.DefaultStartByLimitMS)*time.Millisecond + time.Hour).Unix()
+			task.Wherry.TaskEndedBy = task.Wherry.TaskStartedBy
+		},
+		"no envelope": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			invalid := testSubmission("run-a")
+			if edit != nil {
+				edit(invalid)
+				f.seal(t, invalid)
+			}
+			f.produce(t, admin.PoolTasksTopic(testPool), "run-a", must(t)(wire.SignRecord(invalid, f.host)))
+			record := f.submit(t, f.host, nil)
+			record.Offset = f.records(t, admin.PoolTasksTopic(testPool))[1].Offset
+			if status := f.execute(t, record, 1); status != kgo.AckAccept {
+				t.Fatalf("the valid task ended %v; logs:\n%s", status, f.logs.String())
+			}
+		})
 	}
 }
 

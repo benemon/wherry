@@ -71,8 +71,11 @@ type Receiver struct {
 	mu       sync.Mutex
 	state    admin.State
 	// peers holds the pool's receiver keys, this receiver's included; hosts the keys of entitled tenants' hosts.
-	peers    signed.Keys
-	hosts    signed.Keys
+	peers signed.Keys
+	hosts signed.Keys
+	// ended holds the keys of the pool's receivers whose membership ended while this receiver held their keys, each
+	// current key retired when the end was read, so the open records they appended while live still verify.
+	ended    signed.Keys
 	offers   []wire.Offer
 	inFlight int64
 	// denials holds the capabilities an authorisation error took away; deniedSince is when the first was
@@ -340,7 +343,16 @@ func (r *Receiver) refresh(ctx context.Context) error {
 		return err
 	}
 	r.mu.Lock()
-	r.state, r.peers, r.hosts = state, peers, hosts
+	ended := maps.Clone(r.ended)
+	for owner, keys := range r.peers {
+		if _, live := peers[owner]; !live && state.Ended[admin.ReceiverPrincipal(owner)] && keys.Current != nil {
+			if ended == nil {
+				ended = signed.Keys{}
+			}
+			ended[owner] = signed.KeyState{Retired: append(slices.Clone(keys.Retired), signed.RetiredKey{Key: keys.Current, At: time.Now()})}
+		}
+	}
+	r.state, r.peers, r.hosts, r.ended = state, peers, hosts, ended
 	r.mu.Unlock()
 	// A membership end comes before a configuration change, so a revoked receiver does not drain.
 	if state.Ended[admin.ReceiverPrincipal(r.id)] {
@@ -644,6 +656,9 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 		return poolEvents{}, err
 	}
 	state, peers, _ := r.snapshot()
+	r.mu.Lock()
+	ended := r.ended
+	r.mu.Unlock()
 	peerTopics := admin.PoolKeyTopics(state, r.config.Pool)
 	reread := map[string]bool{}
 	events := poolEvents{
@@ -670,9 +685,20 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 				parseErr = history(encoded, keys, value)
 				return parseErr
 			}
-			// The open records verify only against live pool members' keys, which is their authorisation.
+			// Open requests and re-key wraps verify only against live pool members' keys, which is their authorisation.
 			strict := func(value wire.Record) error {
 				parseErr = wire.ParseStrict(record.Value, peers, record.Timestamp, value)
+				return parseErr
+			}
+			// A custodian's answers and claim decisions verify against the key current at their append time, also after
+			// its membership ended.
+			historic := func(value wire.Record) error {
+				keys := peers
+				if owner, _, _ := kid(record.Value); keys[owner].Current == nil && ended[owner].Retired != nil {
+					keys = maps.Clone(peers)
+					keys[owner] = ended[owner]
+				}
+				parseErr = wire.ParseStrict(record.Value, keys, record.Timestamp, value)
 				return parseErr
 			}
 			var err error
@@ -684,13 +710,13 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 			case wire.OpenRequestType:
 				err = strict(&request)
 			case wire.AttemptWrapType:
-				err = strict(&attemptWrap)
+				err = historic(&attemptWrap)
 			case wire.OpenRefusalType:
-				err = strict(&refusal)
+				err = historic(&refusal)
 			case wire.RekeyWrapType:
 				err = strict(&rekey)
 			case wire.ClaimDecisionType:
-				err = strict(&decision)
+				err = historic(&decision)
 			default:
 				parseErr = errors.New("record is neither a status nor a start failure")
 			}

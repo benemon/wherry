@@ -25,14 +25,15 @@ const (
 
 // The reasons of an open refusal.
 const (
-	RefusedTwoClaimants   = "two live claimants"
-	RefusedNotClaimant    = "not the current claimant"
-	RefusedTerminal       = "terminal"
-	RefusedPastBound      = "past its bound"
-	RefusedKeyUnavailable = "key unavailable"
+	RefusedTwoClaimants    = "two live claimants"
+	RefusedNotClaimant     = "not the current claimant"
+	RefusedTerminal        = "terminal"
+	RefusedPastBound       = "past its bound"
+	RefusedKeyUnavailable  = "key unavailable"
+	RefusedEnvelopeInvalid = "envelope invalid"
 )
 
-var refusalReasons = []string{RefusedTwoClaimants, RefusedNotClaimant, RefusedTerminal, RefusedPastBound, RefusedKeyUnavailable}
+var refusalReasons = []string{RefusedTwoClaimants, RefusedNotClaimant, RefusedTerminal, RefusedPastBound, RefusedKeyUnavailable, RefusedEnvelopeInvalid}
 
 // The reasons of a claim decision: no change of claimant, or a change after the previous claimant released or after its
 // lease lapsed; a decision refused because the previous claimant is live is live.

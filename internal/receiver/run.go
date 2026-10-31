@@ -568,11 +568,14 @@ func (r *Receiver) earliest(records []*kgo.Record, run string) *runSubmission {
 	return nil
 }
 
-// admissible reports a submission whose structure and bounds hold where it was appended: it carries an envelope and its
-// task_started_by is within the pool's start_by_limit of its append time. Only an admissible submission can be its
+// admissible reports a submission whose structure and bounds hold where it was appended: it carries an envelope, its
+// task_started_by had not passed at its append time and is within the pool's start_by_limit of it, and its
+// task_ended_by is not before task_started_by nor past the run cap after it. Only an admissible submission can be its
 // run's earliest accepted one.
 func admissible(submission runSubmission, terms admin.Terms) bool {
-	return submission.record.Wherry.Envelope != "" && submission.record.Wherry.TaskStartedBy <= submission.submitted.Add(terms.StartByLimit()).Unix()
+	binding, appended := submission.record.Wherry, submission.submitted
+	return binding.Envelope != "" && appended.Unix() <= binding.TaskStartedBy && binding.TaskStartedBy <= appended.Add(terms.StartByLimit()).Unix() &&
+		binding.TaskStartedBy <= binding.TaskEndedBy && binding.TaskEndedBy <= binding.TaskStartedBy+admin.MaxRunDurationMS/1000
 }
 
 // renewer keeps the share lock alive from claim until the final acknowledgement,

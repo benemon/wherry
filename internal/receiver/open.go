@@ -63,6 +63,10 @@ func (run *activeRun) awaitOpen(ctx, bound context.Context, job *pluginsdk.Handl
 			return signed.EnvelopeValues{}, kgo.AckAccept, false
 		case reason == wire.RefusedPastBound:
 			return signed.EnvelopeValues{}, run.expired(ctx, job, nil), false
+		case reason == wire.RefusedEnvelopeInvalid && job != nil:
+			return signed.EnvelopeValues{}, run.stopAndFail(ctx, *job, reason, nil), false
+		case reason == wire.RefusedEnvelopeInvalid:
+			return signed.EnvelopeValues{}, run.fail(ctx, reason, nil), false
 		case job != nil && requested == 0:
 			r.logger.Printf("run %s: refused %s; requesting once more", task.Wherry.Run, reason)
 		case job != nil:
@@ -274,7 +278,7 @@ func (run *activeRun) poolStatus(kind string, state wire.TaskState) *kgo.Record 
 }
 
 // released commits the run's released status, giving up its claim, before its task goes back to the pool. A fenced
-// holder leaves the task to its adopter.
+// holder leaves the task to its adopter; a released status not committed leaves the task to its acquisition lock.
 func (run *activeRun) released(ctx context.Context) kgo.AckStatus {
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()
@@ -287,7 +291,8 @@ func (run *activeRun) released(ctx context.Context) kgo.AckStatus {
 		return run.abandon(err)
 	}
 	if err != nil {
-		run.receiver.logger.Printf("run %s: publish released: %v", run.task.Wherry.Run, err)
+		run.receiver.logger.Printf("run %s: publish released: %v; the task returns when its lock expires", run.task.Wherry.Run, err)
+		return 0
 	}
 	return kgo.AckRelease
 }
@@ -451,7 +456,7 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	}
 	// Rule 1: the request verifies as the live pool member it names.
 	request := opened.request
-	if request == nil {
+	if state, _, _ := r.snapshot(); request == nil || !poolMember(state, r.config.Pool, request.Receiver) {
 		return refuse(wire.RefusedNotClaimant)
 	}
 	// Rule 2: the run's earliest accepted task, not terminal or cancelled, within its open bound.
@@ -514,7 +519,7 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	}
 	if err != nil {
 		r.logger.Printf("custodian: run %s's envelope does not open for its task: %v", request.Run, err)
-		return refuse(wire.RefusedKeyUnavailable)
+		return refuse(wire.RefusedEnvelopeInvalid)
 	}
 	attemptKey, _ := request.Key.Public() // checked when the request was read
 	jwe, err := signed.WrapContentKey(contentKey, attemptKey)
@@ -526,6 +531,12 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 		c.changed = decision.Reason
 	}
 	return answer(&wire.AttemptWrap{Custodian: r.id, TaskHash: task.hash, Request: opened.digest, Receiver: request.Receiver, Attempt: request.Attempt, JWE: string(jwe)})
+}
+
+// poolMember reports that receiver is a live member of pool.
+func poolMember(state admin.State, pool, receiver string) bool {
+	config, member := state.Receivers[receiver]
+	return member && config.Pool == pool && !state.Ended[admin.ReceiverPrincipal(receiver)]
 }
 
 // claimDecision decides the claim statuses[owners[last]] against the ownership event before it: unchanged for none or
@@ -548,8 +559,7 @@ func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses 
 	}
 	decision.Reason = wire.ClaimLease
 	state, peers, _ := c.r.snapshot()
-	config, member := state.Receivers[previous.Wherry.Receiver]
-	if !member || config.Pool != c.r.config.Pool || state.Ended[admin.ReceiverPrincipal(previous.Wherry.Receiver)] {
+	if !poolMember(state, c.r.config.Pool, previous.Wherry.Receiver) {
 		return decision
 	}
 	if !c.adsRead {

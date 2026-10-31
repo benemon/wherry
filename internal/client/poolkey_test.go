@@ -341,11 +341,14 @@ func TestAKeyLostRunIsResubmitted(t *testing.T) {
 	}
 }
 
-// A run that failed without key-lost, or ended key-lost after its task_started_by, is not resubmitted.
+// A run that failed without key-lost, such as one whose envelope the custodian refused as invalid, or ended key-lost
+// after its task_started_by, is not resubmitted.
 func TestOnlyAKeyLostRunBeforeItsStartBoundIsResubmitted(t *testing.T) {
 	f := newFixture(t)
 	receiver, failed := f.admitted(t)
-	receiver.feed(t, f.ctx, failed.submission.Wherry.Run, receiver.terminal(t, failed, 1, wire.TaskStateFailed, 0))
+	receiver.feed(t, f.ctx, failed.submission.Wherry.Run, receiver.status(t, failed, 1, "terminal-1", "terminal", wire.TaskStateFailed, func(status *wire.RunStatus) {
+		status.StatusUpdate.Status.Message = &wire.Message{MessageID: "msg-invalid", Role: wire.RoleAgent, Parts: []wire.Part{{Text: wire.RefusedEnvelopeInvalid}}, Extensions: []string{wire.ExtensionURI}}
+	}))
 	late := f.anotherRun(t, receiver)
 	local, err := f.host.localRun(late.submission.Wherry.Run)
 	if err != nil {
