@@ -683,7 +683,10 @@ runbook.
 ## Revoke a host or receiver
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
-the `wherry admin` environment.
+the `wherry admin` environment. Run no other `wherry admin` command until the
+revocation completes: admin commands do not lock each other, and one that read
+`wherry.admin` before the revocation started can restore the principal's
+credential and ACLs.
 
 1. Run the revocation:
 
