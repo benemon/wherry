@@ -72,7 +72,7 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.queueWait = histograms("queue_wait_seconds", "Time from submission to first claim.", "tenant", "profile")
 	m.inFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_in_flight", Help: "Tasks held, by the profile they were routed to."}, []string{"profile"})
 	m.capacity = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_capacity", Help: "Tasks the receiver holds at once."})
-	m.pastDeadline = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_runs_past_deadline", Help: "Tasks held past their run's deadline, by the profile they were routed to."}, []string{"profile"})
+	m.pastDeadline = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_runs_past_deadline", Help: "Tasks held past their task_ended_by, or the 6h run cap, by the profile they were routed to."}, []string{"profile"})
 	m.advertised = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_advertised_timestamp_seconds", Help: "Unix time of the receiver's latest advertisement Kafka acknowledged."})
 	m.collectors = append(m.collectors, m.inFlight, m.capacity, m.pastDeadline, m.advertised)
 	m.startFailures = counters("start_failures_total", "Start failures, by class.", "profile", "class")

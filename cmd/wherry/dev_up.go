@@ -446,6 +446,7 @@ func devTLS(instance devInstance) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The Kafka broker reads its TLS keys only as PEM, so these stay PEM where wherry's own key files are JWKs.
 	keyPEM := func(key *ecdsa.PrivateKey) []byte {
 		der, _ := x509.MarshalPKCS8PrivateKey(key)
 		return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
@@ -1027,7 +1028,7 @@ func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 	const prompt = "mock: smoke"
 	input := busclient.SubmitInput{
 		Agent: "mock", Prompt: prompt, Outputs: []wire.ExpectedOutput{{Name: "echo.txt", Required: true}},
-		Deadline: busclient.DefaultDeadline, QueueDeadline: busclient.DefaultQueueDeadline,
+		StartBy: time.Now().Add(busclient.DefaultStartBy), EndBy: time.Now().Add(busclient.DefaultEndBy),
 	}
 	if env.storage() {
 		input.S3Inputs = []busclient.S3File{{Name: devSmokeInput, Body: strings.NewReader("smoke input\n")}}

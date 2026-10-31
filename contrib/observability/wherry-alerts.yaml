@@ -19,8 +19,8 @@ groups:
           description: Hosts stop placing tasks on a receiver whose advertisement is older than 120 seconds.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherryreceivernotadvertising
 
-      # At a run's deadline the receiver stops its job and ends the run. A held run stays past its deadline while
-      # that stop or the run's terminal commit has not returned.
+      # At a run's task_ended_by, or the 6h run cap, the receiver stops its job and ends the run. A held run stays
+      # past it while that stop or the run's terminal commit has not returned.
       - alert: WherryRunStuckPastDeadline
         expr: |
           sum by (job, instance, pool, profile) (wherry_runs_past_deadline) > 0
@@ -28,8 +28,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: Receiver {{ $labels.instance }} holds runs of profile {{ $labels.profile }} past their deadline
-          description: A run held past its deadline stays TASK_STATE_WORKING until the receiver stops its job and ends it.
+          summary: Receiver {{ $labels.instance }} holds runs of profile {{ $labels.profile }} past their task_ended_by or the 6h run cap
+          description: A run held past its task_ended_by or the 6h run cap stays TASK_STATE_WORKING until the receiver stops its job and ends it.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherryrunstuckpastdeadline
 
       - alert: WherryDeliveryBudgetExhausted

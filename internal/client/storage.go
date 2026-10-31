@@ -32,11 +32,8 @@ type S3File struct {
 }
 
 // getLifetime is how long a presigned GET for an S3 input lives; a PUT for an S3 output lives until its run's
-// deadline.
+// task_ended_by.
 const getLifetime = 15 * time.Minute
-
-// maxPresign is the longest lifetime S3 SigV4 allows a presigned URL.
-const maxPresign = 7 * 24 * time.Hour
 
 // storageTransport carries the client's S3 requests, nil for Go's default. A variable so tests can trust their TLS
 // servers.
@@ -113,9 +110,9 @@ func presign(ctx context.Context, store *minio.Client, bucket, tenant, run strin
 	if len(outputs) == 0 {
 		return values, nil
 	}
-	lifetime := min(time.Until(deadline).Truncate(time.Second)+time.Second, maxPresign)
+	lifetime := min(time.Until(deadline).Truncate(time.Second)+time.Second, admin.MaxPresign)
 	if lifetime < 2*time.Second {
-		return nil, errors.New("the run's deadline has passed")
+		return nil, errors.New("task_ended_by has passed")
 	}
 	for _, output := range outputs {
 		put, err := store.PresignedPutObject(ctx, bucket, wire.S3OutputKey(tenant, run, output), lifetime)

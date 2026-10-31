@@ -87,9 +87,11 @@ as one file and as a `--config-dir` directory.
 - `lock_duration` is how long a claim survives without renewal, and how
   long a denied receiver keeps running its jobs. Receivers renew every 10
   seconds.
-- `max_queue_deadline` is the longest queue deadline a task may ask for,
-  and bounds how long after its submission a run's task is admitted. It
-  defaults to 14 days. See [Retention](#retention).
+- `start_by_limit` is the latest `task_started_by` a task may ask for, from
+  its submission, and bounds how long after its submission a run's task is
+  admitted. It defaults to 72 hours. For a pool with `storage`, it plus six
+  hours must not exceed 7 days, the longest an S3 SigV4 presigned URL lasts.
+  See [Retention](#retention).
 - `reply_limit` bounds the redacted reply a result returns beyond the 64 KiB
   its text carries; it defaults to 1 MiB, or to `output_limit` when that is
   lower, and `pool create` and `pool update` refuse one over `output_limit`,
@@ -163,24 +165,24 @@ file.
 
 ### Retention
 
-Receivers reject a task still unclaimed `max_queue_deadline` after its
-submission with `run expired`, and a task whose queue deadline is longer with
-`queue deadline exceeds the pool's max queue deadline`; `wherry submit`
-refuses such a queue deadline before it publishes. Every run therefore ends
-within six hours after `max_queue_deadline`. A longer maximum keeps prompts on
-the broker longer. Lowering `max_queue_deadline` of a pool with runs in progress lowers its topics'
+Receivers reject a task still unclaimed `start_by_limit` after its
+submission, and a task whose `task_started_by` is later, with
+`task_started_by is past the pool's start_by_limit`; `wherry submit`
+refuses such a `task_started_by` before it publishes. Every run therefore ends
+within six hours after `start_by_limit`. A longer limit keeps prompts on
+the broker longer. Lowering `start_by_limit` of a pool with runs in progress lowers its topics'
 retention at once: Kafka then deletes the records of runs older than the new
 bound, and receivers reject a redelivered task whose submission is gone.
 
 `pool create` sets the retention of the pool's tasks and events topics, new and
-existing, to `max_queue_deadline` plus the six-hour maximum run time plus a
+existing, to `start_by_limit` plus the six-hour maximum run time plus a
 one-day margin, and their timestamp type to `LogAppendTime`, since a run's age
 runs from the broker's time. It sets the same retention on the progress
-topics of the pool's live receivers. With the 14-day default that is `1317600000` ms, 15 days
+topics of the pool's live receivers. With the 72-hour default that is `367200000` ms, 4 days
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
 statuses and results, and tenant transcript topics transcripts, outputs and
-replies over 64 KiB, for 30 days, and both must keep them for at least `max_queue_deadline` plus six
-hours, so `pool create` refuses a maximum above 29 days and 18 hours, and
+replies over 64 KiB, for 30 days, and both must keep them for at least `start_by_limit` plus six
+hours, so `pool create` refuses a limit above 29 days and 18 hours, and
 `pool entitle` refuses a feed or transcript topic that keeps less. Identity and
 configuration topics stay forever. `wherry admin check` reports a topic whose
 retention drops below its bound, and a pool topic whose timestamp type is not
@@ -199,7 +201,7 @@ the broker's record limit bounds what a pool can carry. The Kafka cluster
 must allow a topic `max.message.bytes` of 2 MiB (2097152): every tenant
 feed and transcript topic has it, and receivers batch up to it. A result
 names each output the run returned, so the largest result is a
-1259686-byte record batch, over a broker's default limit. `host add` and
+1259677-byte record batch, over a broker's default limit. `host add` and
 `pool entitle` create a tenant's feed and transcript topic at 2 MiB, and
 `pool entitle`, `pool create` and `pool update` set existing ones to it. A
 cluster policy that refuses the setting fails the command, and
@@ -215,7 +217,7 @@ the brokers' `message.max.bytes`. `wherry admin check` measures the tenant
 topics as they stand, so a feed lowered to a broker's default since reads:
 
 ```
-a result record is 1259686 bytes, over the 1048588-byte record limit
+a result record is 1259677 bytes, over the 1048588-byte record limit
 ```
 
 `wherry submit` measures each signed submission against the recorded
@@ -880,7 +882,7 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    ```
 
    Receivers and agents never hold the S3 credential; they get presigned URLs, a GET per input
-   for 15 minutes and a PUT per output until the run's deadline, 7 days at
+   for 15 minutes and a PUT per output until the run's `task_ended_by`, 7 days at
    most.
 
 4. Set a lifecycle rule that expires `wherry/` after a period longer than

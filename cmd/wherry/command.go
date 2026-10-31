@@ -305,13 +305,13 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	})
 	var outputs []wire.ExpectedOutput
 	flags.Func("output", "NAME[:required][:s3]: a file the agent is asked to leave in its output directory, returned through the pool's bucket with :s3 (repeatable)", outputFlag(&outputs))
-	deadline := flags.Duration("deadline", busclient.DefaultDeadline, "task deadline")
-	queueDeadline := flags.Duration("queue-deadline", busclient.DefaultQueueDeadline, "queue deadline")
+	startBy := flags.String("start-by", busclient.DefaultStartBy.String(), "task_started_by: an RFC 3339 time or a Go duration from now by which the agent's job starts")
+	endBy := flags.String("end-by", busclient.DefaultEndBy.String(), "task_ended_by: an RFC 3339 time or a Go duration from now by which the task ends")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE[:s3]]... [--credential NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--deadline DURATION] [--queue-deadline DURATION]")
+		return errors.New("usage: wherry submit [--agent NAME] [--model NAME] [--selector REQUIREMENTS] <--prompt TEXT|--prompt-file PATH|-> [--git REMOTE@REF [--git-path PATH] [--git-changes patch|bundle]] [--input FILE[:s3]]... [--credential NAME:file=FILE|NAME:env=VAR]... [--output NAME[:required][:s3]]... [--start-by TIME|DURATION] [--end-by TIME|DURATION]")
 	}
 	parts, err := inputParts(inputs)
 	if err != nil {
@@ -332,8 +332,14 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	if promptSet == promptFileSet {
 		return errors.New("submit requires exactly one of --prompt or --prompt-file")
 	}
-	if *deadline <= 0 || *queueDeadline <= 0 {
-		return errors.New("deadlines must be positive")
+	now := time.Now()
+	startTime, err := busclient.ParseBound(*startBy, now)
+	if err != nil {
+		return fmt.Errorf("--start-by: %w", err)
+	}
+	endTime, err := busclient.ParseBound(*endBy, now)
+	if err != nil {
+		return fmt.Errorf("--end-by: %w", err)
 	}
 	if promptFileSet {
 		var contents []byte
@@ -371,7 +377,7 @@ func runSubmit(ctx context.Context, client *busclient.Host, args []string, stdou
 	defer closeClient()
 	result, err := client.Submit(ctx, busclient.SubmitInput{
 		Agent: *agent, Model: *model, Selector: selector, Prompt: *prompt, Parts: parts, Credentials: credentials, Outputs: outputs, Git: git, GitChanges: *gitChanges,
-		S3Inputs: stored, Deadline: *deadline, QueueDeadline: *queueDeadline,
+		S3Inputs: stored, StartBy: startTime, EndBy: endTime,
 	})
 	if err != nil {
 		return err
@@ -416,8 +422,8 @@ func outputFlag(outputs *[]wire.ExpectedOutput) func(string) error {
 // stdin is a variable so tests can give submit a prompt on standard input.
 var stdin io.Reader = os.Stdin
 
-// defaultWaitTimeout covers a run at the default queue deadline and run deadline.
-const defaultWaitTimeout = busclient.DefaultQueueDeadline + busclient.DefaultDeadline
+// defaultWaitTimeout covers a run at the default task_started_by and task_ended_by.
+const defaultWaitTimeout = busclient.DefaultStartBy + busclient.DefaultEndBy
 
 // streamRetry separates a failed read of a run's transcript that logs follows from the next, and bounds each wait for
 // more of it.

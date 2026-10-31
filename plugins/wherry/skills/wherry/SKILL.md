@@ -73,7 +73,7 @@ for 2 hours 10 minutes; `--timeout` changes that), prints the agent's reply
 and a line for each returned output, writes the outputs, answers the
 receiver's credential request, and exits 0 for `TASK_STATE_COMPLETED`, 2
 failed, 3 canceled, 4 rejected, 6 timed out, and 1 when it
-could not wait or collect, at once when the queue deadline passes with no
+could not wait or collect, at once when `task_started_by` passes with no
 receiver claiming the run. Its completion is how you learn the run ended, so
 you skip the `wait` tool loop below. Then carry on with other work. Do not stop
 the command while the run waits for a credential: an unanswered credential
@@ -139,9 +139,9 @@ seconds and returns one of:
 - `TASK_STATE_REJECTED` or `TASK_STATE_CANCELED` with a `message` that
   says why.
 - `TASK_STATE_SUBMITTED` with the `message`
-  `queue deadline passed at <time> and no receiver claimed the run` and no
-  `retry_after`: no receiver took the run before its queue deadline and none
-  will. Check `receivers` for a live one that fits, then `submit` again.
+  `not started by task_started_by (<time>): no receiver claimed the task` and
+  no `retry_after`: no receiver took the run before its `task_started_by` and
+  none will. Check `receivers` for a live one that fits, then `submit` again.
 - `retry_after` with the current `state`: the run has not finished. Wait
   that many seconds, or do other work, then call `wait` again.
 
@@ -187,8 +187,8 @@ ends in `TASK_STATE_CANCELED`.
 
 A failed call returns `{"code": ..., "message": ...}`. `RUN_NOT_FOUND`,
 `NO_MATCHING_RECEIVER` and `INVALID_ARGUMENT` call for a change to your input or
-end the run's handling; a queue deadline longer than the pool's
-`max_queue_deadline` is an `INVALID_ARGUMENT`, so ask for a shorter one. `CANCELLED` means the call itself was
+end the run's handling; a `start_by` later than the pool's `start_by_limit`
+from now is an `INVALID_ARGUMENT`, so ask for an earlier one. `CANCELLED` means the call itself was
 cancelled. `VERSION_SKEW` means the pool's records come from a later wherry
 release than the running MCP server: tell the user to upgrade `wherry` and
 restart the server, since a harness keeps the old process running. `UNAVAILABLE` is any other failure; its cause is in the MCP

@@ -419,7 +419,7 @@ func TestProgressOnlyWhenTheTranscriptMoves(t *testing.T) {
 			t.Fatalf("progress offsets %v: %d is a repeat or no committed line's start", offsets, offset)
 		}
 	}
-	if got, err := f.receiver.lastOffset(f.ctx, f.parse(t, record), wire.TaskHash(record.Value)); err != nil || got != last {
+	if got, _, err := f.receiver.lastOffset(f.ctx, f.parse(t, record), wire.TaskHash(record.Value)); err != nil || got != last {
 		t.Fatalf("resume offset %d err %v, want %d", got, err, last)
 	}
 	// The terminal counts the chunks the progress ticks committed with those it commits.
@@ -675,7 +675,7 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	if err := aborted.EndTransaction(f.ctx, kgo.TryAbort); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
+	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("resume offset %d err %v, want 42", got, err)
 	}
 }
@@ -739,7 +739,7 @@ func TestLastOffsetIgnoresMismatchedStatus(t *testing.T) {
 		f.produce(t, admin.ReceiverProgressTopic(testReceiver), "run-offset-binding", value)
 	}
 	f.produce(t, admin.ReceiverProgressTopic(testReceiver), "run-other", progressRecord(t, hash, 99, nil))
-	if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
+	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("resume offset %d err %v, want 42", got, err)
 	}
 }
@@ -783,7 +783,7 @@ func TestAdoptionTrustsPeerProgress(t *testing.T) {
 	f.holding(t, task, hash, "receiver-other-pool", otherSigning, "claimed", nil)
 	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), "run-peer", progressRecord(t, hash, 42, nil))
 	f.produce(t, admin.ReceiverProgressTopic("receiver-other-pool"), "run-peer", progressRecord(t, hash, 99, nil))
-	if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
+	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("peer progress offset %d err %v, want 42", got, err)
 	}
 }
@@ -801,7 +801,7 @@ func TestAdoptionFallsBackToStartedWithoutTheHoldersProgress(t *testing.T) {
 			f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &started)
 			f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
 			f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), "run-peer", progressRecord(t, hash, 42, nil))
-			if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
+			if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 				t.Fatalf("live peer's progress offset %d err %v, want 42", got, err)
 			}
 			switch cause {
@@ -816,7 +816,7 @@ func TestAdoptionFallsBackToStartedWithoutTheHoldersProgress(t *testing.T) {
 			case "no acl":
 				f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.ReceiverProgressTopic("receiver-peer")).Operations(kadm.OpAny))
 			}
-			if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != started {
+			if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != started {
 				t.Fatalf("offset %d err %v without the peer's progress, want the started offset %d", got, err, started)
 			}
 		})
@@ -1788,7 +1788,7 @@ func TestAdmissionWritesDoNotFenceTheRunsHolder(t *testing.T) {
 func TestTransactionalDenialClearsOnlyWhenTransactionsWork(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.deleteReceiverACLs(t, kadm.NewACLs().TransactionalIDs(admin.TransactionalPrefix(testPool)).Operations(kadm.OpAny))
-	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.QueueDeadlineMS = time.Now().Add(-time.Second).UnixMilli() })
+	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
 	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("admitted=%v ack=%v, want release when the rejection cannot be written", admitted != nil, ack)
 	}
@@ -1868,7 +1868,7 @@ func TestAdoptionTrustsRotatedPeerKey(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	f.holding(t, task, hash, "receiver-peer", next, "claimed", nil)
 	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), "run-peer", progressRecord(t, hash, 42, nil))
-	if got, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
+	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("claim under the peer's rotated key: offset %d err %v, want 42", got, err)
 	}
 }

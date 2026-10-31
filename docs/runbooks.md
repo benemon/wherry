@@ -67,15 +67,15 @@ Then:
 
 ## WherryRunStuckPastDeadline
 
-At a run's deadline the receiver stops the run's job and ends the run
-`TASK_STATE_FAILED` with `timeout`. When the plugin's `Stop` fails, the
+At a run's `task_ended_by` the receiver stops the run's job and ends the run
+`TASK_STATE_FAILED` with `not ended by task_ended_by (<RFC 3339 time>)`. When the plugin's `Stop` fails, the
 receiver returns the task to the pool instead, with the job still running
 and the run still `TASK_STATE_WORKING`. The next delivery looks the job up
 and stops it, until the delivery budget ends the run and leaves the job to
 the plugin's sweep. `wherry_runs_past_deadline` counts, by profile, the
-tasks a receiver holds whose run's deadline has passed and that have not
+tasks a receiver holds whose run's `task_ended_by` has passed and that have not
 ended. The alert fires when it stays above 0 for 10 minutes: a receiver has
-held a run past its deadline that long, as when a `Stop` call or the run's
+held a run past its `task_ended_by` that long, as when a `Stop` call or the run's
 terminal commit does not return. A task the receiver returns to the pool
 leaves the count until a receiver holds it again. A receiver that is down
 stops nothing either; its runs are adopted on redelivery, and
@@ -86,7 +86,7 @@ Confirm it:
 1. Run `wherry status`. A stuck run is listed `TASK_STATE_WORKING`.
 2. Run `wherry status RUN_ID` and `wherry events RUN_ID`. `events` prints
    the run's statuses by attempt, each with its receiver and time; a run
-   whose job cannot be stopped shows attempts after its deadline.
+   whose job cannot be stopped shows attempts after its `task_ended_by`.
 3. Read the receiver's log for `run <id>: stop: <text>`, and for the
    plugin's `op=<op> class=<class>: <text>` lines.
 4. Check the job on the platform with the plugin's own tools.

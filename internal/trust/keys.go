@@ -3,12 +3,13 @@ package trust
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+
+	jose "github.com/go-jose/go-jose/v4"
 )
 
 // GenerateSigningKeyFile creates an Ed25519 private-key file without replacing an existing file, synced with its
@@ -30,13 +31,19 @@ func LoadSigningKeyFile(path string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(key) != ed25519.PrivateKeySize {
-		return nil, errors.New("invalid Ed25519 private key length")
+	private, ok := key.Key.(ed25519.PrivateKey)
+	if !ok {
+		return nil, errors.New("key file is not an Ed25519 private JWK")
 	}
-	return ed25519.PrivateKey(key), nil
+	return private, nil
 }
 
-func writeKeyFile(path string, key []byte) (returnErr error) {
+// writeKeyFile writes key as a JWK (RFC 7517), private members included.
+func writeKeyFile(path string, key any) (returnErr error) {
+	encoded, err := (&jose.JSONWebKey{Key: key}).MarshalJSON()
+	if err != nil {
+		return err
+	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
@@ -49,8 +56,7 @@ func writeKeyFile(path string, key []byte) (returnErr error) {
 			returnErr = err
 		}
 	}()
-	encoded := base64.RawURLEncoding.EncodeToString(key)
-	if _, err := file.WriteString(encoded); err != nil {
+	if _, err := file.Write(encoded); err != nil {
 		return err
 	}
 	if err := file.Sync(); err != nil {
@@ -96,14 +102,17 @@ func ReadOwnerOnly(path string) ([]byte, error) {
 	return io.ReadAll(file)
 }
 
-func readKeyFile(path string) ([]byte, error) {
+func readKeyFile(path string) (jose.JSONWebKey, error) {
+	var key jose.JSONWebKey
 	encoded, err := ReadOwnerOnly(path)
 	if err != nil {
-		return nil, err
+		return key, err
 	}
-	key, err := base64.RawURLEncoding.Strict().DecodeString(string(encoded))
-	if err != nil {
-		return nil, fmt.Errorf("invalid base64url private key: %w", err)
+	if err := key.UnmarshalJSON(encoded); err != nil {
+		return key, fmt.Errorf("invalid JWK private key: %w", err)
+	}
+	if key.IsPublic() {
+		return key, errors.New("key file holds no private key")
 	}
 	return key, nil
 }

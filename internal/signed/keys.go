@@ -3,7 +3,6 @@ package signed
 import (
 	"crypto"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/base64"
 	json "encoding/json/v2"
 	"errors"
@@ -24,9 +23,10 @@ type KeyRecord struct {
 	PreviousKeyID string          `json:"previous_key_id,omitzero"`
 }
 
+// KeyID is the RFC 7638 SHA-256 thumbprint of a signing key, base64url.
 func KeyID(key ed25519.PublicKey) string {
-	sum := sha256.Sum256(key)
-	return "sha256:" + base64.RawURLEncoding.EncodeToString(sum[:])
+	thumbprint, _ := (&jose.JSONWebKey{Key: key}).Thumbprint(crypto.SHA256) // fails only for a key of another type
+	return base64.RawURLEncoding.EncodeToString(thumbprint)
 }
 
 // RegisterKey registers an owner's first signing key.

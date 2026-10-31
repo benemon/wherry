@@ -48,8 +48,12 @@ back to one set of names.
 Run IDs match `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`. The client generates
 `run-` followed by 32 hex digits.
 
-A key ID is `sha256:` and the unpadded base64url SHA-256 of the raw
-public key.
+A key ID is the RFC 7638 SHA-256 thumbprint of the public key's JWK,
+unpadded base64url.
+
+wherry's own key files, the host key, `signing.key` and their `.next`
+files, are private JWKs (RFC 7517) with mode 0600. The TLS keys `wherry dev`
+writes for its Kafka broker are PEM, the format the broker reads.
 
 ### Labels
 
@@ -91,7 +95,8 @@ On the command line a selector is comma-separated:
 
 ### `wherry init`
 
-Creates the host key at `host_key` with mode 0600, unless the file exists,
+Creates the host key at `host_key`, a private JWK (RFC 7517) with mode
+0600, unless the file exists,
 creating its directory with mode 0700. It then registers the key on the
 host's key topic when the topic holds none, and prints the key ID. It fails
 when the key topic holds another key.
@@ -185,8 +190,15 @@ and needs `wherry init` on a re-provisioned host.
 | `--input FILE[:s3]` | | file the agent gets in `WHERRY_INPUT_DIR` under its base name; `:s3` uploads it, at most 5 GiB, to the pool's bucket; repeatable |
 | `--credential NAME:file=FILE` or `--credential NAME:env=VAR` | | credential `NAME` from `credentials` in the client configuration, which the agent gets as the file `FILE` in `WHERRY_CREDENTIALS_DIR` or in the environment variable `VAR`; repeatable |
 | `--output NAME[:required][:s3]` | | file the agent is asked to leave in `WHERRY_OUTPUT_DIR`; `:required` fails the run without it, and `:s3` returns it through the pool's bucket, in either order; repeatable |
-| `--deadline` | `2h` | time from now by which the run must end |
-| `--queue-deadline` | `10m` | time from now by which a receiver must claim it |
+| `--start-by` | `10m` | `task_started_by`: an RFC 3339 time, or a Go duration from now, by which the agent's job must start |
+| `--end-by` | `2h` | `task_ended_by`: an RFC 3339 time, or a Go duration from now, by which the run must end |
+
+Each bound must fall after now, and travels in whole seconds. `submit`
+refuses, before it publishes, an `--end-by` later than `--start-by` plus
+six hours, and a `--start-by` later than the pool's `start_by_limit` from
+now with `task_started_by is past the pool's start_by_limit`. A task whose
+job has not started by `task_started_by` ends `TASK_STATE_FAILED` with
+`not started by task_started_by (<RFC 3339 time>)`.
 
 `submit` refuses, before it publishes, a model outside the agent's
 `models`, including any model for an agent with none:
@@ -310,7 +322,7 @@ Publishes a signed cancel of the run to its pool's events and prints
 ### `wherry wait RUN_ID`
 
 Waits for a run to finish and collects it. `--timeout` sets the wait,
-`2h10m` by default: the default queue deadline and run deadline together.
+`2h10m` by default: the default `--start-by` and `--end-by` together.
 `--outputs-dir DIR` sets where the run's outputs go, by default
 `<state_dir>/runs/<run>/outputs/`.
 
@@ -374,11 +386,11 @@ kept. Once the run is terminal and every listed S3 output has verified,
 bucket, inputs included. A run that ends while no `wait` runs keeps them
 until `wherry cleanup` or the bucket's lifecycle rule removes them.
 
-A run this host submitted whose queue deadline passes with no status from
+A run this host submitted whose `task_started_by` passes with no status from
 a receiver can never start. `wait` then collects nothing, prints nothing on
 standard output, and exits at once with status 1 and
-`queue deadline passed at <RFC 3339 time> and no receiver claimed the run`.
-The queue deadline comes from this host's record of the submission, so
+`not started by task_started_by (<RFC 3339 time>): no receiver claimed the task`.
+`task_started_by` comes from this host's record of the submission, so
 `wait` on another host of the tenant waits for its timeout.
 
 #### Exit codes
@@ -386,7 +398,7 @@ The queue deadline comes from this host's record of the submission, so
 | Code | Meaning |
 | --- | --- |
 | 0 | the run ended `TASK_STATE_COMPLETED` and its outputs were written |
-| 1 | `wait` could not wait or collect: usage, run not found, broker unreachable, outputs not written or failing verification, queue deadline passed unclaimed |
+| 1 | `wait` could not wait or collect: usage, run not found, broker unreachable, outputs not written or failing verification, `task_started_by` passed unclaimed |
 | 2 | the run ended `TASK_STATE_FAILED` |
 | 3 | the run ended `TASK_STATE_CANCELED` |
 | 4 | the run ended `TASK_STATE_REJECTED` |
@@ -419,9 +431,9 @@ Reads the latest verified state of a run without waiting. With `RUN_ID` it
 prints the state on the first line, `model=<model>` next when the run's
 placement names one, then one line per part of the status message. The
 state is `TASK_STATE_SUBMITTED` until a receiver reports one. For a run this
-host submitted whose queue deadline passed with no status from a receiver,
+host submitted whose `task_started_by` passed with no status from a receiver,
 the line after the state and model is
-`queue deadline passed at <RFC 3339 time> and no receiver claimed the run`.
+`not started by task_started_by (<RFC 3339 time>): no receiver claimed the task`.
 
 Without `RUN_ID` it prints one line per run, latest update first:
 
@@ -719,13 +731,16 @@ break the [pool terms](configuration.md#pool-terms) rules, and a delivery limit 
 [records do not fit the broker](configuration.md#record-limit). It refuses an
 existing pool with `pool exists; change its terms with pool update`. On new and
 existing topics it sets the tasks and events `retention.ms` to
-`max_queue_deadline` plus six hours plus one day, and their
+`start_by_limit` plus six hours plus one day, and their
 `message.timestamp.type` to `LogAppendTime`, and creates the progress topic
 of each live receiver in the pool, or sets an existing one's configuration,
-with the same `retention.ms`. It refuses a `max_queue_deadline` above
+with the same `retention.ms`. It refuses a `start_by_limit` above
 29 days and 18 hours, or one that with six hours added exceeds the
 `retention.ms` of the feed or transcript topic of a tenant entitled to the
-pool. Before it measures the records, it sets `max.message.bytes` to 2 MiB
+pool. For a pool with `storage` it refuses a `start_by_limit` that with six
+hours added exceeds 7 days, the longest an S3 SigV4 presigned URL lasts,
+with `start_by_limit plus the 6h run cap exceeds 7 days, the longest an S3
+SigV4 presigned URL lasts`. Before it measures the records, it sets `max.message.bytes` to 2 MiB
 (2097152) on the feed and transcript topic of every tenant with a host or an
 entitlement. See
 [Topics](design.md#topics-1).
@@ -760,7 +775,7 @@ it, and grants the tenant's hosts and the pool's receivers
 their ACLs. It refuses when the pool's records do not fit the
 [record limit](configuration.md#record-limit) with the tenant's feed and
 transcript topic counted, or when the `retention.ms` of either is below the
-pool's `max_queue_deadline` plus six hours, and records nothing. It applies
+pool's `start_by_limit` plus six hours, and records nothing. It applies
 each host's [quotas](configuration.md#quotas).
 
 ### `wherry admin host add HOST --tenant TENANT --bundle-file FILE`
@@ -911,7 +926,8 @@ wherry receiver run [--config-file FILE] [--rotate-key]
 Runs a receiver as the principal of the bundle its [local
 configuration](configuration.md#receiver-local-configuration) names.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
-configuration's `state_dir` with mode 0700 and keeps `signing.key` in it.
+configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
+private JWK with mode 0600, in it.
 On start it:
 
 1. settles a leftover `signing.key.next` as a host command settles
@@ -1147,7 +1163,7 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_redeliveries_total` | counter | `tenant`, `profile` | runs executed on a redelivery |
 | `wherry_in_flight` | gauge | `profile` | tasks held |
 | `wherry_capacity` | gauge | none | the configured capacity |
-| `wherry_runs_past_deadline` | gauge | `profile` | tasks held past their run's deadline that have not ended |
+| `wherry_runs_past_deadline` | gauge | `profile` | tasks held past their task_ended_by, or the 6h run cap, that have not ended |
 | `wherry_advertised_timestamp_seconds` | gauge | none | Unix time of the latest advertisement Kafka acknowledged, 0 before the first |
 | `wherry_start_failures_total` | counter | `profile`, `class` | start failures: `input-too-large`, `dispatch`, `platform`, and `offer-unavailable`, which counts a release by a member with no matching profile, has no start-failure record and carries `profile="none"` |
 | `wherry_dispatch_outcomes_total` | counter | `profile`, `outcome` | dispatches: `created`, `nothing`, `unknown` |
@@ -1172,11 +1188,13 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_plugin_placement_seconds` | histogram | `profile` | time from dispatch to the agent task starting |
 | `wherry_plugin_storage_free_bytes` | gauge | `profile` | free bytes of the storage the profile's runs share |
 
-A rejection's `reason` is its fixed text, such as `run expired`. A reason that
-quotes the task counts as `git remote host outside the pool's vcs hosts` or
-`pool has no storage`.
+A rejection's `reason` is its fixed text, such as `duplicate submission`. A
+reason that quotes the task counts as `git remote host outside the pool's vcs
+hosts`, `pool has no storage`, `not started by task_started_by` or
+`not ended by task_ended_by`.
 
-A seal wait is `expired` when the run's deadline passes, `unanswered` when
+A seal wait is `expired` when the run's `task_started_by`, or for an adopted
+job its `task_ended_by`, passes, `unanswered` when
 the 5-minute wait ends and the run fails, and `adopter_refused` when an
 adopter's wait ends and it stops the job before the run fails.
 

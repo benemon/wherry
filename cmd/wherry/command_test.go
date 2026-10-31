@@ -311,7 +311,7 @@ func (b *bus) feed(t *testing.T, runID string, values ...[]byte) {
 // admitted submits a task and writes its echo and claimed status, as receiver-a's admission does.
 func (b *bus) admitted(t *testing.T) task {
 	t.Helper()
-	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,9 +560,9 @@ func TestStatusPrintsFailed(t *testing.T) {
 	}
 }
 
-func TestWaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
+func TestWaitAndStatusReportAnUnclaimedRunPastItsStartBy(t *testing.T) {
 	b := newBus(t)
-	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", Deadline: time.Minute, QueueDeadline: 2 * time.Second})
+	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(2 * time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,9 +570,9 @@ func TestWaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
 	start := time.Now()
 	err = runWait(b.ctx, b.client, []string{submitted.RunID, "--timeout", "20s"}, &stdout, &stderr)
 	if elapsed := time.Since(start); elapsed > 6*time.Second {
-		t.Fatalf("wait returned after %s, want soon after the 2s queue deadline", elapsed)
+		t.Fatalf("wait returned after %s, want soon after the 2s task_started_by", elapsed)
 	}
-	if err == nil || !strings.HasPrefix(err.Error(), "queue deadline passed at ") || !strings.HasSuffix(err.Error(), " and no receiver claimed the run") {
+	if err == nil || !strings.HasPrefix(err.Error(), "not started by task_started_by (") || !strings.HasSuffix(err.Error(), "): no receiver claimed the task") {
 		t.Fatalf("wait error %v", err)
 	}
 	if stdout.Len() != 0 || stderr.Len() != 0 {
@@ -603,7 +603,7 @@ func TestStatusListsRuns(t *testing.T) {
 		t.Fatalf("empty list: %v, stdout %q stderr %q", err, stdout.String(), stderr.String())
 	}
 	working := b.admitted(t).submission.Wherry.Run
-	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +618,7 @@ func TestStatusListsRuns(t *testing.T) {
 
 func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 	b := newBus(t)
-	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	submitted, err := b.client.Submit(b.ctx, busclient.SubmitInput{Selector: []wire.Requirement{}, Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +627,7 @@ func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 	// The terminal counts its attempt's chunks.
 	rejected := b.sign(t, &wire.RunStatus{
 		StatusUpdate: wire.TaskStatusUpdateEvent{TaskID: submitted.RunID, ContextID: submitted.RunID, Status: wire.TaskStatus{State: wire.TaskStateRejected, Timestamp: "2026-10-17T10:00:00.000Z",
-			Message: &wire.Message{MessageID: "msg-1", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "queue deadline passed"}}, Extensions: extensions}}},
+			Message: &wire.Message{MessageID: "msg-1", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "not started by task_started_by (2026-10-17T10:00:00Z)"}}, Extensions: extensions}}},
 		Wherry: wire.StatusBinding{ReceiverBinding: b.binding(admitted), EventID: "terminal-1", Kind: "terminal", TaskHash: admitted.hash, TranscriptChunks: 2},
 	})
 	records := [][]byte{b.echo(t, admitted), rejected}
@@ -644,7 +644,7 @@ func TestEventsPrintsStatusesAndChunkCounts(t *testing.T) {
 	if err := runEvents(b.ctx, b.client, []string{submitted.RunID}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	want := "attempt=1 kind=terminal state=TASK_STATE_REJECTED receiver=receiver-a time=2026-10-17T10:00:00.000Z message=\"queue deadline passed\"\n" +
+	want := "attempt=1 kind=terminal state=TASK_STATE_REJECTED receiver=receiver-a time=2026-10-17T10:00:00.000Z message=\"not started by task_started_by (2026-10-17T10:00:00Z)\"\n" +
 		"attempt=1 transcript_chunks=2\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout %q, want %q", stdout.String(), want)
@@ -772,9 +772,9 @@ func TestUsageErrors(t *testing.T) {
 		{"submit selector", func(stderr *bytes.Buffer) error {
 			return runSubmit(context.Background(), nil, []string{"--selector", "runtime==exec", "--prompt", "p"}, stderr, stderr)
 		}, "selector: requirement values must be valid and unique"},
-		{"submit deadline", func(stderr *bytes.Buffer) error {
-			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--prompt", "p", "--deadline", "0s"}, stderr, stderr)
-		}, "deadlines must be positive"},
+		{"submit end-by", func(stderr *bytes.Buffer) error {
+			return runSubmit(context.Background(), nil, []string{"--selector", "a=b", "--prompt", "p", "--end-by", "0s"}, stderr, stderr)
+		}, "--end-by: not after now"},
 		{"wait timeout", func(stderr *bytes.Buffer) error {
 			return runWait(context.Background(), nil, []string{"run-a", "--timeout", "0s"}, stderr, stderr)
 		}, "timeout must be positive"},

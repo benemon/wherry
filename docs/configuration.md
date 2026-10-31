@@ -150,7 +150,7 @@ ignored. Any other entry and a directory with no agent files are errors.
 | --- | --- |
 | `agents` | one or more `{name, credentials, models, default_model}`: an agent, the [credentials](#agent-credentials) it takes, and optionally the models a task may name for it and the one a task naming none runs |
 | `default_agent` | an agent from `agents`, used when a task names none; optional when `agents` holds one, which it then defaults to |
-| `max_queue_deadline` | optional duration, default `336h` (14 days): the longest queue deadline a run may ask for, and the time from a run's submission past which a receiver rejects it unclaimed; it also sets the pool topics' retention |
+| `start_by_limit` | optional duration, default `72h`: the latest [`task_started_by`](#task-bounds) a run may ask for, from its submission, and the time from a run's submission past which a receiver rejects it unclaimed; it also sets the pool topics' retention. With `storage`, it plus six hours must not exceed 7 days, the longest an S3 SigV4 presigned URL lasts |
 | `delivery_limit` | optional, default 5: the share group's `share.delivery.count.limit` |
 | `lock_duration` | optional duration, default `15s`: the share group's `share.record.lock.duration.ms` |
 | `producer_byte_rate` | host quota, bytes per second |
@@ -251,7 +251,7 @@ agents:
       # A run whose host has no source for it goes without it.
       - {name: github-token, env: GH_TOKEN, required: false}
 default_agent: claude
-max_queue_deadline: 72h
+start_by_limit: 72h
 # Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
@@ -284,7 +284,7 @@ build/
 
 ```yaml
 default_agent: claude
-max_queue_deadline: 72h
+start_by_limit: 72h
 # Each receiver with no matching profile spends one delivery, so this covers the pool's receivers plus a margin.
 delivery_limit: 6
 # Above the receiver's 10s renewal interval.
@@ -360,7 +360,7 @@ that JSON escaping would lengthen travels, with a `credential` part, a
 `reply` entry, and reference artifacts for the reply and the transcript. A reply chunk is an output
 chunk, so `reply_limit` has no record-limit check. One result lists
 256 returned and 256 unreturned outputs with 512-byte names, each returned
-one also a reference artifact, and is the largest record, a 1259686-byte
+one also a reference artifact, and is the largest record, a 1259677-byte
 batch; the other lists 256 S3 outputs with their keys. Both carry a plugin's job name at its bound of
 253 bytes. A receiver's labels have no bound and are left empty. Any one over its record limit refuses the terms,
 naming its size and the limit.
@@ -755,24 +755,43 @@ file alone, within another 2 minutes, reading no other output.
 collected as an output, and no output name leads into it, since no segment
 of an output name starts with a dot.
 
-A run's time is capped at its deadline, and at six hours after its queue
-deadline. `submit` refuses a deadline later than the queue deadline plus six
-hours. A receiver rejects a run no pool member has claimed with
-`queue deadline passed` or `run deadline passed` once that deadline has
-passed. A redelivered run that a member has claimed is not rejected: the
-receiver adopts its job when it finds one, and dispatches the run again when
-it finds none. Past its run deadline, the receiver stops any job it finds and
-ends the run `TASK_STATE_FAILED` with `timeout`.
+### Task bounds
+
+A run has two bounds, each a whole second since the epoch in UTC (a JWT
+NumericDate): `task_started_by`, by which its agent job must start, and
+`task_ended_by`, by which it must reach a terminal state. The receiver's
+clock decides both. A bound fails only when that clock is past its second,
+so a job that starts at `task_started_by`, or a terminal state at
+`task_ended_by`, meets it. A run's time is also capped at six hours after
+`task_started_by`. `submit` refuses a `task_ended_by` later than that, and a
+receiver rejects such a run no pool member has claimed with
+`task_ended_by is past task_started_by plus the 6h run cap`. A claimed run
+the cap stops before its `task_ended_by` ends `TASK_STATE_FAILED` with
+`not ended by task_started_by plus the 6h run cap (<RFC 3339 time>)`.
+
+A job starts when the plugin reports it running, at which the receiver
+publishes the run's `started` event. A receiver rejects a run no pool member
+has claimed with `not started by task_started_by (<RFC 3339 time>)` or
+`not ended by task_ended_by (<RFC 3339 time>)` once that bound has passed.
+A claimed run whose job has not started by `task_started_by`, while it waits
+for its seal or for the platform to place its job, ends `TASK_STATE_FAILED`
+with `not started by task_started_by (<RFC 3339 time>)`, and the receiver
+purges any job the run has. A job that has started runs on past
+`task_started_by`. A redelivered run that a member has claimed is not
+rejected: the receiver adopts its job when it finds one, and dispatches the
+run again when it finds none and `task_started_by` has not passed. Past
+`task_ended_by`, the receiver stops any job it finds and ends the run
+`TASK_STATE_FAILED` with `not ended by task_ended_by (<RFC 3339 time>)`.
 
 A receiver measures a run's age from the broker's append time of its
-submission. It rejects a run no pool member has claimed with `run expired`
-when that time is more than `max_queue_deadline` ago, and with
-`queue deadline exceeds the pool's max queue deadline` when the run's queue
-deadline falls more than `max_queue_deadline` after it. A redelivered run
-that a member has claimed skips both checks. `wherry submit` and the MCP
-`submit` tool refuse, before publishing, a queue deadline longer than
-`max_queue_deadline`, the MCP tool with `INVALID_ARGUMENT`. Every run
-therefore ends within six hours after `max_queue_deadline`.
+submission. It rejects a run no pool member has claimed with
+`task_started_by is past the pool's start_by_limit` when that time is more
+than `start_by_limit` ago, or when the run's `task_started_by` falls more
+than `start_by_limit` after it. A redelivered run that a member has claimed
+skips both checks. `wherry submit` and the MCP `submit` tool refuse, before
+publishing, a `task_started_by` later than `start_by_limit` from now with the
+same text, the MCP tool with `INVALID_ARGUMENT`. Every run therefore ends
+within six hours after `start_by_limit`.
 
 ## Environment variables
 

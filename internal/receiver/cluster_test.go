@@ -97,7 +97,7 @@ func (c *clusterRig) run(t *testing.T, ctx context.Context) string {
 	var submitted client.SubmitResult
 	var err error
 	for ctx.Err() == nil {
-		if submitted, err = c.hostClient.Submit(ctx, client.SubmitInput{Prompt: "hello", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
+		if submitted, err = c.hostClient.Submit(ctx, client.SubmitInput{Prompt: "hello", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}); err == nil {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)

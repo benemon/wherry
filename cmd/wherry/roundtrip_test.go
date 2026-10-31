@@ -346,7 +346,7 @@ func TestRoundTrip(t *testing.T) {
 		submitted, err = host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}},
 			Prompt: "hello from the host", Parts: []wire.Part{{Raw: wire.StdBytes("a,b\n"), Filename: "data.csv"}},
 			Credentials: []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Required: true}},
-			Deadline: time.Minute, QueueDeadline: time.Minute})
+			EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 		if err == nil {
 			break
 		}
@@ -444,7 +444,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 
 	if _, err := host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpDoesNotExist}},
-		Prompt: "nowhere to run", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
+		Prompt: "nowhere to run", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}); err == nil {
 		t.Fatal("placed a task no plugin's labels satisfy")
 	}
 	inlineCapRoundTrip(t, ctx, bucket, host, read, logs, hostLogs)
@@ -456,7 +456,7 @@ func TestRoundTrip(t *testing.T) {
 func inlineCapRoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host *busclient.Host, read func() []pluginRecord, logs, hostLogs *syncBuffer) {
 	input := bytes.Repeat([]byte("dataset "), 250)
 	submitted, err := host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}}, Prompt: "use the dataset",
-		Parts: []wire.Part{{Raw: input, Filename: "dataset.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+		Parts: []wire.Part{{Raw: input, Filename: "dataset.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func s3RoundTrip(t *testing.T, ctx context.Context, bucket *s3Store, host *buscl
 	defer file.Close()
 	submitted, err := host.Submit(ctx, busclient.SubmitInput{Agent: "claude", Selector: []wire.Requirement{{Key: "gpu", Operator: wire.OpExists}}, Prompt: "use the dataset",
 		S3Inputs: []busclient.S3File{{Name: "dataset.bin", Body: file}}, Outputs: []wire.ExpectedOutput{{Name: "big.bin", Required: true, Storage: wire.StorageS3}},
-		Deadline: time.Minute, QueueDeadline: time.Minute})
+		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}

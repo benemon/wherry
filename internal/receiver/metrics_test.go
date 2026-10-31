@@ -301,26 +301,27 @@ func TestAcknowledgedAdvertisementSetsItsTime(t *testing.T) {
 	}
 }
 
-// A run counts past its deadline from the deadline until it ends, here held there by a Stop that has not returned.
-func TestRunPastItsDeadlineCountsUntilItEnds(t *testing.T) {
+// A run counts past its task_ended_by from that bound until it ends, here held there by a Stop that has not returned.
+func TestRunPastItsEndByCountsUntilItEnds(t *testing.T) {
 	const series = `wherry_runs_past_deadline{pool="pool-a",profile="nomad"}`
 	f := newFixture(t, resultStream)
 	f.answer(t, credentialName)
 	release := make(chan struct{})
 	f.plugin.endDelay, f.plugin.stopCheck = time.Minute, func() error { <-release; return nil }
-	deadline := time.Now().Add(3 * time.Second)
-	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.DeadlineMS = deadline.UnixMilli() }), 1)
+	endBy := time.Now().Add(3 * time.Second).Unix()
+	deadline := wire.PastBound(endBy)
+	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskEndedBy = endBy }), 1)
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the run was not followed before its deadline; logs:\n%s", f.logs.String())
+			t.Fatalf("the run was not followed before its task_ended_by; logs:\n%s", f.logs.String())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if value := scrapedValue(t, f.receiver, series); value != 0 || !time.Now().Before(deadline) {
-		t.Fatalf("%s %v before the deadline, want 0", series, value)
+		t.Fatalf("%s %v before task_ended_by, want 0", series, value)
 	}
 	scraped(t, f.receiver, series+" 1\n")
 	close(release)

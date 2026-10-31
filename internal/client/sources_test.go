@@ -185,7 +185,7 @@ func TestSubmitRefusesARequiredAgentCredentialWithoutASource(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	delete(f.host.credentials, "model")
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "auth required: credential model is not in this host's configuration") {
 		t.Fatalf("submit = %v; want the agent's credential named", err)
 	}
@@ -200,7 +200,7 @@ func TestSubmitGoesWithoutAnOptionalCredential(t *testing.T) {
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
 	submitted, err := f.host.Submit(f.ctx, SubmitInput{Agent: "codex", Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}},
-		Prompt: "p", Deadline: time.Minute, QueueDeadline: time.Minute})
+		Prompt: "p", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestSubmitRefusesATaskCredentialOnAnAgentTarget(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Credentials: []wire.TaskCredential{{Name: "openai", Env: "MODEL_API_KEY"}},
-		Deadline: time.Minute, QueueDeadline: time.Minute})
+		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "task credential openai takes the environment variable MODEL_API_KEY of one of agent claude's credentials") {
 		t.Fatalf("submit = %v; want the collision named", err)
 	}

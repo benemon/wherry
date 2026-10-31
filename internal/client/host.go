@@ -33,9 +33,9 @@ import (
 
 // Errors the client returns for a run or placement that cannot proceed.
 var (
-	ErrNoMatchingReceiver       = errors.New("no matching live receiver")
-	ErrRunNotFound              = errors.New("run not found")
-	ErrQueueDeadlinePastMaximum = errors.New("queue deadline exceeds the pool's max queue deadline")
+	ErrNoMatchingReceiver = errors.New("no matching live receiver")
+	ErrRunNotFound        = errors.New("run not found")
+	ErrStartByPastLimit   = errors.New("task_started_by is past the pool's start_by_limit")
 	// ErrInvalidInput wraps a submission the wire format rejects; its message names the rule, never the value.
 	ErrInvalidInput = errors.New("invalid input")
 )
@@ -65,16 +65,33 @@ type SubmitInput struct {
 	// GitChanges, patch or bundle, asks for the clone's changes back as that output.
 	GitChanges string
 	// S3Inputs are files uploaded to the pool's bucket before the task is published, which the plugin fetches.
-	S3Inputs      []S3File
-	Deadline      time.Duration
-	QueueDeadline time.Duration
+	S3Inputs []S3File
+	// StartBy bounds the agent job's start and EndBy the run's terminal state; each travels in whole seconds.
+	StartBy time.Time
+	EndBy   time.Time
 }
 
-// DefaultDeadline and DefaultQueueDeadline are a run's deadlines where the caller gives none.
+// DefaultStartBy and DefaultEndBy are a run's bounds, from now, where the caller gives none.
 const (
-	DefaultDeadline      = 2 * time.Hour
-	DefaultQueueDeadline = 10 * time.Minute
+	DefaultStartBy = 10 * time.Minute
+	DefaultEndBy   = 2 * time.Hour
 )
+
+// ParseBound reads a task bound as an RFC 3339 time or a Go duration from now; either must fall after now.
+func ParseBound(text string, now time.Time) (time.Time, error) {
+	bound, err := time.Parse(time.RFC3339, text)
+	if err != nil {
+		duration, durationErr := time.ParseDuration(text)
+		if durationErr != nil {
+			return time.Time{}, errors.New("not an RFC 3339 time or a Go duration such as 90m")
+		}
+		bound = now.Add(duration)
+	}
+	if !bound.After(now) {
+		return time.Time{}, errors.New("not after now")
+	}
+	return bound, nil
+}
 
 // SubmitResult describes a produced root task.
 type SubmitResult struct {
@@ -269,9 +286,9 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
 		}
 	}
-	// A receiver cuts a run at the queue deadline plus the run cap, so a later deadline would be cut silently.
-	if limit := input.QueueDeadline + time.Duration(admin.MaxRunDurationMS)*time.Millisecond; input.Deadline > limit {
-		return SubmitResult{}, fmt.Errorf("%w: the deadline is %s, past the queue deadline plus the 6h run cap (%s)", ErrInvalidInput, input.Deadline, limit)
+	// A receiver cuts a run at task_started_by plus the run cap, so a later task_ended_by would be cut silently.
+	if limit := input.StartBy.Add(time.Duration(admin.MaxRunDurationMS) * time.Millisecond); input.EndBy.After(limit) {
+		return SubmitResult{}, fmt.Errorf("%w: task_ended_by (%s) is past task_started_by plus the 6h run cap (%s)", ErrInvalidInput, wire.RFC3339(input.EndBy.Unix()), wire.RFC3339(limit.Unix()))
 	}
 	var s3Inputs, s3Outputs []string
 	for _, file := range input.S3Inputs {
@@ -367,8 +384,8 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			toS3()
 		}
 	}
-	if input.QueueDeadline > v.state.Pools[pool].MaxQueueDeadline() {
-		return SubmitResult{}, ErrQueueDeadlinePastMaximum
+	if input.StartBy.After(now.Add(v.state.Pools[pool].StartByLimit())) {
+		return SubmitResult{}, ErrStartByPastLimit
 	}
 	if input.Git != nil {
 		if host := input.Git.VCSHost(); !slices.Contains(v.state.Pools[pool].VCS, host) {
@@ -376,7 +393,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 	}
 	runID := wire.RandomID("run-")
-	submission, err := h.submission(runID, pool, placement, append([]wire.Part{{Text: input.Prompt}}, input.Parts...), input.Deadline, input.QueueDeadline, now)
+	submission, err := h.submission(runID, pool, placement, append([]wire.Part{{Text: input.Prompt}}, input.Parts...), input.StartBy, input.EndBy)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -404,7 +421,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		if err != nil {
 			return SubmitResult{}, err
 		}
-		deadline := time.UnixMilli(submission.Wherry.DeadlineMS)
+		deadline := time.Unix(submission.Wherry.TaskEndedBy, 0)
 		if err := h.checkSealSize(ctx, store, storage.Bucket, h.tenant, runID, input.Credentials, s3Inputs, s3Outputs, deadline); err != nil {
 			return SubmitResult{}, err
 		}
@@ -467,12 +484,12 @@ func (h *Host) Cancel(ctx context.Context, runID string) (CancelResult, error) {
 	return CancelResult{RunID: runID, Skipped: r.skipped}, nil
 }
 
-func (h *Host) submission(runID, pool string, placement wire.Placement, parts []wire.Part, deadline, queueDeadline time.Duration, now time.Time) (*wire.Submission, error) {
+func (h *Host) submission(runID, pool string, placement wire.Placement, parts []wire.Part, startBy, endBy time.Time) (*wire.Submission, error) {
 	return &wire.Submission{
 		Message: wire.Message{MessageID: wire.RandomID("msg-"), ContextID: runID, TaskID: runID, Role: wire.RoleUser, Parts: parts, Extensions: []string{wire.ExtensionURI}},
 		Wherry: wire.SubmissionBinding{
 			Tenant: h.tenant, Host: h.host, Pool: pool, Run: runID, Placement: placement,
-			DeadlineMS: now.Add(deadline).UnixMilli(), QueueDeadlineMS: now.Add(queueDeadline).UnixMilli(),
+			TaskStartedBy: startBy.Unix(), TaskEndedBy: endBy.Unix(),
 		},
 	}, nil
 }
@@ -483,8 +500,8 @@ func (h *Host) submission(runID, pool string, placement wire.Placement, parts []
 func (h *Host) publish(ctx context.Context, submission *wire.Submission, encoded []byte, now time.Time) error {
 	binding := submission.Wherry
 	record := runRecord{
-		Run: binding.Run, Pool: binding.Pool, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(), DeadlineMS: binding.DeadlineMS,
-		QueueDeadlineMS: binding.QueueDeadlineMS,
+		Run: binding.Run, Pool: binding.Pool, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(), TaskStartedBy: binding.TaskStartedBy,
+		TaskEndedBy: binding.TaskEndedBy,
 	}
 	for _, credential := range binding.Credentials {
 		record.TaskCredentials = append(record.TaskCredentials, credential.Name)
@@ -610,10 +627,10 @@ type runRecord struct {
 	// S3Inputs and S3Outputs name the S3 inputs and outputs the run declares, which this host may presign.
 	S3Inputs  []string `json:"s3_inputs,omitzero"`
 	S3Outputs []string `json:"s3_outputs,omitzero"`
-	// DeadlineMS is the run deadline, when a PUT URL for its S3 outputs expires.
-	DeadlineMS int64 `json:"deadline_at_ms,omitzero"`
-	// QueueDeadlineMS is the submission's queue deadline, past which no receiver claims the run.
-	QueueDeadlineMS int64 `json:"queue_deadline_at_ms,omitzero"`
+	// TaskStartedBy and TaskEndedBy are the submission's bounds, in whole seconds; a PUT URL for its S3 outputs expires
+	// at TaskEndedBy.
+	TaskStartedBy int64 `json:"task_started_by,omitzero"`
+	TaskEndedBy   int64 `json:"task_ended_by,omitzero"`
 	// FeedOffset is the tenant feed's committed end before the submission was published. Every record about the run
 	// is written after a receiver reads the submission, so it lies at or after this offset; zero reads the whole feed.
 	FeedOffset int64 `json:"feed_offset,omitzero"`

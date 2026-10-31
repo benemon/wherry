@@ -160,8 +160,8 @@ algorithm `EdDSA` (Ed25519). The protected header holds:
 - `typ`: the record type below;
 - `kid`: `<owner>/<key id>`. The owner of a host record is
   `<tenant>.<host>`; the owner of a receiver record is the receiver ID. The
-  key ID is `sha256:` and the unpadded base64url SHA-256 of the Ed25519
-  public key.
+  key ID is the [RFC 7638](https://datatracker.ietf.org/doc/html/rfc7638)
+  SHA-256 thumbprint of the Ed25519 public key's JWK, unpadded base64url.
 
 | Record | `typ` | Signer | Topic | Kafka key |
 | --- | --- | --- | --- | --- |
@@ -219,8 +219,8 @@ A submission is the task of one run.
       "selector": [{"key": "isolation", "operator": "In", "values": ["container"]}],
       "model": "sonnet"
     },
-    "deadline_at_ms": 1790000000000,
-    "queue_deadline_at_ms": 1789998800000,
+    "task_started_by": 1789998800,
+    "task_ended_by": 1790000000,
     "credentials": [{"name": "deploy-key", "file": "git-credential"}, {"name": "vault-token", "env": "VAULT_TOKEN"}],
     "unsupplied_credentials": ["github-token"],
     "outputs": [{"name": "report.md", "required": true}, {"name": "plot.pdf", "storage": "s3"}],
@@ -245,9 +245,14 @@ A submission is the task of one run.
   `placement.model` is one of the agent's `models` in the pool's terms, and
   absent for an agent with none.
   [Commands](commands.md#labels) gives the key and value grammar.
-- `deadline_at_ms` and `queue_deadline_at_ms` are Unix milliseconds by which the
-  run must end and a receiver must claim it, each 0 or more. A receiver ends
-  the run no later than six hours after `queue_deadline_at_ms`.
+- `task_started_by` and `task_ended_by` are JWT NumericDates
+  ([RFC 7519](https://datatracker.ietf.org/doc/html/rfc7519)): whole seconds
+  since the epoch, UTC, each 0 or more. The run's agent job must start by
+  `task_started_by`, and the run must reach a terminal state by
+  `task_ended_by`. The receiver's clock decides both bounds. A bound is
+  passed only when that clock is past its second, so a job that starts at
+  `task_started_by`, or a terminal state at `task_ended_by`, meets it. A
+  receiver ends the run no later than six hours after `task_started_by`.
 - The message has at most 256 parts, each with exactly one of `text`,
   `raw`, `url` and `data`. Receivers reject a `url` part
   ([admission](#admission)).
@@ -392,12 +397,16 @@ base64 does. The fixed texts are:
 
 - rejected: `agent is outside the pool terms`,
   `model not in the pool's terms`, `duplicate submission`,
-  `run expired`, `queue deadline exceeds the pool's max queue deadline`,
-  `queue deadline passed`, `run deadline passed`,
+  `task_started_by is past the pool's start_by_limit`,
+  `not started by task_started_by (<RFC 3339 time>)`,
+  `not ended by task_ended_by (<RFC 3339 time>)`,
+  `task_ended_by is past task_started_by plus the 6h run cap`,
   `unsupported message part`, `run ID in use`,
   `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
-- failed: `timeout`, `log stream failed`, `agent exited <code>`,
+- failed: `not started by task_started_by (<RFC 3339 time>)`,
+  `not ended by task_ended_by (<RFC 3339 time>)`,
+  `not ended by task_started_by plus the 6h run cap (<RFC 3339 time>)`, `log stream failed`, `agent exited <code>`,
   `agent ended by <signal>` (each followed by the platform's reason,
   redacted, in parentheses when the plugin gives one, as in
   `agent exited 137 (OOMKilled)`), `agent reported no outcome`,
@@ -833,8 +842,8 @@ signature's protected header carrying its public key as `jwk`.
   "v": 1,
   "owner": "nomad-1",
   "action": "rotate",
-  "key": {"kty": "OKP", "crv": "Ed25519", "x": "...", "kid": "sha256:...", "alg": "EdDSA", "use": "sig"},
-  "previous_key_id": "sha256:..."
+  "key": {"kty": "OKP", "crv": "Ed25519", "x": "...", "kid": "...", "alg": "EdDSA", "use": "sig"},
+  "previous_key_id": "..."
 }
 ```
 
@@ -950,7 +959,7 @@ logs the record's path.
 For each S3 input the host presigns a GET of
 `wherry/<tenant>/<run>/inputs/<name>` for 15 minutes, and for each S3 output a
 PUT of `wherry/<tenant>/<run>/outputs/<name>` until the run's
-`deadline_at_ms`, at most 7 days, path-style on the pool's endpoint with its own
+`task_ended_by`, at most 7 days, path-style on the pool's endpoint with its own
 credential.
 
 A host records a run locally before it publishes the run's submission, so a
@@ -1019,7 +1028,7 @@ is the seal type and its binding equals the request, with `key_id` the
 thumbprint of the receiver's own key, `expiry_at_ms` has not passed, the
 plaintext has `v` 1 and its `binding` equals the header's, `values` holds
 exactly the named credentials and URLs, and `redaction_key` is 32 bytes.
-It checks for a cancel, its shutdown, the run deadline and the request's
+It checks for a cancel, its shutdown, `task_started_by` and the request's
 expiry before it takes a seal, so a run stopped while its seal arrives is
 never dispatched. It passes the values to the plugin in Dispatch. It logs
 a seal that does not open by run and attempt alone.
@@ -1087,8 +1096,8 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 
 `terms` has the members of the [pool terms](configuration.md#pool-terms) file
 and `record_limit`, the tasks topic's record limit that `pool create` reads
-from the broker, with `max_queue_deadline_ms` and `lock_duration_ms` in milliseconds for its
-`max_queue_deadline` and `lock_duration`. `config` holds `receiver` and `pool`,
+from the broker, with `start_by_limit_ms` and `lock_duration_ms` in milliseconds for its
+`start_by_limit` and `lock_duration`. `config` holds `receiver` and `pool`,
 which equal the record's, the receiver's `capacity`, and its `profiles` in
 routing order, the plugins in the order of their names. Each plugin profile is the
 [profile entry](configuration.md#receiver-configuration) as `name`, `plugin`
@@ -1132,30 +1141,49 @@ A receiver that claims a submission:
    `model not in the pool's terms` when the agent has `models` and the
    placement names no model or one outside the current `models`, or the
    agent has no `models` and the placement names one;
-5. releases it when no ready plugin profile satisfies the placement;
-6. rejects it with `duplicate submission` when it is not the run's earliest
+5. rejects a run no pool member has claimed with
+   `not started by task_started_by (<RFC 3339 time>)` or
+   `not ended by task_ended_by (<RFC 3339 time>)` when that bound has
+   passed;
+6. rejects a run no pool member has claimed with
+   `task_ended_by is past task_started_by plus the 6h run cap` when its
+   `task_ended_by` is more than six hours after its `task_started_by`;
+7. releases it when no ready plugin profile satisfies the placement, unless
+   a member has claimed the run and its `task_ended_by` has passed, or its
+   `task_started_by` has passed with no `started` event;
+8. rejects it with `duplicate submission` when it is not the run's earliest
    submission on the pool's task topic that a live host's current key
    verifies;
-7. rejects a run no pool member has claimed with `run expired` when its
-   submission reached the pool's task topic more than the pool's
-   `max_queue_deadline_ms` ago, and with
-   `queue deadline exceeds the pool's max queue deadline` when its queue
-   deadline falls more than `max_queue_deadline_ms` after that;
-8. rejects a run no pool member has claimed when its queue deadline or run
-   deadline has passed;
-9. rejects it when the host of the run's [git input](#git-input) is not
-   one of the pool's current VCS hosts, and with `pool <pool> has no
-   storage for S3 inputs and outputs` when the run has S3 inputs or
-   outputs and the pool's terms have no `storage`;
-10. rejects it with `unsupported message part` when a `url` part appears
+9. rejects a run no pool member has claimed with
+   `task_started_by is past the pool's start_by_limit` when its submission
+   reached the pool's task topic more than the pool's `start_by_limit_ms`
+   ago, or its `task_started_by` falls more than `start_by_limit_ms` after
+   that;
+10. rejects it when the host of the run's [git input](#git-input) is not
+    one of the pool's current VCS hosts, and with `pool <pool> has no
+    storage for S3 inputs and outputs` when the run has S3 inputs or
+    outputs and the pool's terms have no `storage`;
+11. rejects it with `unsupported message part` when a `url` part appears
     in the message;
-11. writes the echo and the `claimed` status.
+12. writes the echo and the `claimed` status.
 
-A run a cancel covers skips steps 8 to 10, and ends `TASK_STATE_CANCELED`
+A run a cancel covers skips steps 5, 10 and 11, and ends `TASK_STATE_CANCELED`
 after its `claimed` status. A redelivered run that a member has claimed
-goes on to adoption past its deadlines. When its run deadline has passed,
+goes on to adoption past its bounds. When its `task_ended_by` has passed,
 the receiver stops the job it finds and ends the run `TASK_STATE_FAILED`
-with `timeout`.
+with `not ended by task_ended_by (<RFC 3339 time>)`.
+
+A claimed run whose job has not started by `task_started_by`, while it
+waits for its seal or for the platform to place its job, ends
+`TASK_STATE_FAILED` with
+`not started by task_started_by (<RFC 3339 time>)`, and the receiver
+purges the job when one exists. A redelivered run with no `started` event
+past `task_started_by` ends the same way: the receiver stops a job its
+lookup reports running or ended, and purges one that never started. A job
+that has started runs on past `task_started_by` until `task_ended_by`. A
+redelivered run whose lookup does not answer returns to the pool with its
+job and material in place, with or without a `started` event, until the
+delivery budget ends it.
 
 ## Git input
 
@@ -1342,7 +1370,7 @@ storage before use.
   its Content-Length, hashing the bytes it sends. It follows no redirect.
   An S3 output counts against neither `output_limit` nor the run's outputs
   together, but is at most 5 GiB, and among the 256 outputs a submission
-  expects. Collection waits until the run's deadline, when the PUT URLs
+  expects. Collection waits until the run's `task_ended_by`, when the PUT URLs
   expire, if that is later than 2 minutes. The receiver does not redact an
   S3 output, which goes to the host's own bucket and never to the
   transcript topic. An attempt that adopted an earlier attempt's job uploads
@@ -1417,9 +1445,9 @@ attribute to a host and run with a `rejected` [status](#status) in
 | the agent is not in the pool's terms | rejected | `agent is outside the pool terms` |
 | the model is not in the agent's terms | rejected | `model not in the pool's terms` |
 | a later submission of a run ID | rejected | `duplicate submission` |
-| the submission is older than the pool's `max_queue_deadline_ms` | rejected | `run expired` |
-| the queue deadline is past the pool's maximum | rejected | `queue deadline exceeds the pool's max queue deadline` |
-| the queue deadline or run deadline has passed | rejected | `queue deadline passed`, `run deadline passed` |
+| the submission is older than the pool's `start_by_limit_ms`, or its `task_started_by` is later than `start_by_limit_ms` after it | rejected | `task_started_by is past the pool's start_by_limit` |
+| `task_ended_by` is more than six hours after `task_started_by` | rejected | `task_ended_by is past task_started_by plus the 6h run cap` |
+| `task_started_by` or `task_ended_by` has passed | rejected | `not started by task_started_by (<RFC 3339 time>)`, `not ended by task_ended_by (<RFC 3339 time>)` |
 | a required credential of the agent is unsupplied | rejected | `the host does not supply a required credential of the agent` |
 | a task credential takes an agent credential's target | rejected | `a task credential takes the target of one of the agent's credentials` |
 | the git remote's host is not a VCS host of the pool | rejected | `git remote host <host> is not in pool <pool>'s vcs hosts` |
@@ -1434,8 +1462,8 @@ run and task hash taken from the record: writing one for an unverified record
 would let any principal that can write the tasks topic place statuses on a
 tenant's feed. A record that fails to decode, or decodes to an invalid
 payload, names no run a status could bind to. A dropped submission's host
-learns nothing from the pool and sees its run stay submitted until its queue
-deadline passes. A submission whose run already ended is a redelivery, and
+learns nothing from the pool and sees its run stay submitted until its
+`task_started_by` passes. A submission whose run already ended is a redelivery, and
 the run's terminal status already answers it.
 
 A run that ends after admission ends `TASK_STATE_FAILED` or

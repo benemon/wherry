@@ -82,8 +82,14 @@ type fakePlugin struct {
 	// jobName is the handle name Dispatch and Lookup return, or else agent- and the run ID.
 	jobName string
 	lastRun pluginsdk.Run
-	// lastDeadline is the deadline of the context Dispatch last ran under.
+	// lastDeadline is the deadline of the context Follow last ran under.
 	lastDeadline time.Time
+	// placing makes Dispatch and Lookup wait, as for a job the platform never places, until their context ends.
+	placing bool
+	// afterLookup, when set, runs after Lookup reports an absent job, as a receiver shutting down at that moment.
+	afterLookup func()
+	// lookupBlocks makes Lookup alone wait until its context ends, as a platform call that hangs.
+	lookupBlocks bool
 	lookups      int
 	lookupErr    error
 	// job is the state Lookup reports; jobProfile and jobAgent override the metadata it reports.
@@ -159,7 +165,12 @@ func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk
 	defer f.mu.Unlock()
 	f.dispatches++
 	f.lastRun = run
-	f.lastDeadline, _ = ctx.Deadline()
+	if f.placing {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, ctx.Err()
+	}
 	if f.dispatchErr != nil {
 		return f.outcome, pluginsdk.Handle{}, f.dispatchErr
 	}
@@ -173,6 +184,18 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lookups++
+	if f.lookupBlocks {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		return pluginsdk.Job{}, ctx.Err()
+	}
+	if f.placing {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		return pluginsdk.Job{}, ctx.Err()
+	}
 	if f.lookupErr != nil {
 		return pluginsdk.Job{}, f.lookupErr
 	}
@@ -180,6 +203,9 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 		return pluginsdk.Job{}, err
 	}
 	if f.job == pluginsdk.JobAbsent {
+		if f.afterLookup != nil {
+			f.afterLookup()
+		}
 		return pluginsdk.Job{}, nil
 	}
 	return pluginsdk.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Profile: cmp.Or(f.jobProfile, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
@@ -190,6 +216,7 @@ func (f *fakePlugin) Follow(ctx context.Context, _ pluginsdk.Handle, from int64,
 	f.mu.Lock()
 	f.follows++
 	f.froms = append(f.froms, from)
+	f.lastDeadline, _ = ctx.Deadline()
 	lost, lostErr := f.follows <= f.linkLost, cmp.Or(f.lostErr, pluginsdk.ErrLinkLost)
 	stream, followErr, endDelay, pauses, neverStarted, neverClass, neverReason, ended := append([]string(nil), f.stream...), f.followErr, f.endDelay, f.pauses, f.neverStarted, f.neverClass, f.neverReason, f.ended
 	f.mu.Unlock()
@@ -552,8 +579,8 @@ func testSubmission(run string) *wire.Submission {
 		Message: wire.Message{MessageID: "msg-a", ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "hi"}}, Extensions: []string{wire.ExtensionURI}},
 		Wherry: wire.SubmissionBinding{
 			Tenant: testTenant, Host: testHost, Pool: testPool, Run: run,
-			Placement:  wire.Placement{Agent: "claude", Selector: []wire.Requirement{}},
-			DeadlineMS: time.Now().Add(time.Minute).UnixMilli(), QueueDeadlineMS: time.Now().Add(time.Minute).UnixMilli(),
+			Placement:     wire.Placement{Agent: "claude", Selector: []wire.Requirement{}},
+			TaskStartedBy: time.Now().Add(time.Minute).Unix(), TaskEndedBy: time.Now().Add(time.Minute).Unix(),
 		},
 	}
 }
@@ -1656,4 +1683,23 @@ func (r *Receiver) held() int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.inFlight
+}
+
+func TestKIDNamesOwnerAndKeyOfASignedRecord(t *testing.T) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := signed.HostOwner(testTenant, testHost)
+	encoded, err := signed.Sign("application/vnd.wherry.submission.v1+jws", owner, map[string]string{"a": "b"}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotOwner, gotID, ok := kid(encoded)
+	if !ok || gotOwner != owner || gotID != signed.KeyID(key.Public().(ed25519.PublicKey)) {
+		t.Fatalf("kid returned %q, %q, %v; want %q and the key's ID", gotOwner, gotID, ok, owner)
+	}
+	if _, _, ok := kid([]byte("not a JWS")); ok {
+		t.Fatal("kid named a key for a value that is no JWS")
+	}
 }

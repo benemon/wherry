@@ -2,10 +2,13 @@ package trust
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	jose "github.com/go-jose/go-jose/v4"
 )
 
 func TestKeyFileRoundTrip(t *testing.T) {
@@ -24,6 +27,17 @@ func TestKeyFileRoundTrip(t *testing.T) {
 	}
 	if _, err := GenerateSigningKeyFile(signingPath); err == nil {
 		t.Fatal("existing signing key was overwritten")
+	}
+	encoded, err := os.ReadFile(signingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jwk jose.JSONWebKey
+	if err := jwk.UnmarshalJSON(encoded); err != nil {
+		t.Fatalf("key file is not a JWK: %v", err)
+	}
+	if private, ok := jwk.Key.(ed25519.PrivateKey); !ok || !private.Equal(signingKey) {
+		t.Fatal("key file is not the signing key's private JWK")
 	}
 
 	for _, path := range []string{signingPath} {

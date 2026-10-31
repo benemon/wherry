@@ -69,8 +69,8 @@ per key, and only the record's owner can write that key. Every other topic
 has `cleanup.policy=delete`.
 
 A pool's task and event topics and its receivers' progress topics keep
-records for its maximum queue deadline plus six hours plus a day, 15 days
-6 hours by default. The tenant feed and transcript topic keep them for 30
+records for its `start_by_limit` plus six hours plus a day, 4 days 6 hours
+by default. The tenant feed and transcript topic keep them for 30
 days and `wherry.receivers` for 7. The identity and configuration topics
 keep them forever.
 
@@ -117,7 +117,7 @@ naming 256 outputs fits.
 | --- | --- | --- |
 | `wherry.admin` | any recording command | `-1` |
 | `wherry.receivers` | any recording command | `604800000` (7 days) |
-| `wherry.pool.<pool>.tasks` | `pool create` | `max_queue_deadline` plus 30 hours, in milliseconds; default `1317600000` |
+| `wherry.pool.<pool>.tasks` | `pool create` | `start_by_limit` plus 30 hours, in milliseconds; default `367200000` |
 | `wherry.pool.<pool>.events` | `pool create` | at least tasks; `pool create` sets the same value |
 | `wherry.tenant.<tenant>` | `pool entitle`, `host add` | `2592000000` (30 days) |
 | `wherry.tenant.<tenant>.transcript` | `pool entitle`, `host add` | as the tenant feed, `2592000000` (30 days) |
@@ -125,11 +125,11 @@ naming 256 outputs fits.
 | `wherry.receiver.<receiver>.progress` | `receiver add`, `pool create` | as the pool's tasks topic |
 | `wherry.host.<tenant>.<host>` | `host add` | `-1` |
 
-The tasks retention keeps `max_queue_deadline`, the six-hour maximum run time,
+The tasks retention keeps `start_by_limit`, the six-hour maximum run time,
 and a one-day margin. Events and the pool's progress topics stay at least as
 long as tasks. A tenant feed and its transcript topic must stay for at least
-`max_queue_deadline` plus six hours; their 30-day default exceeds the
-default requirement of `1231200000`. Identity and configuration topics stay
+`start_by_limit` plus six hours; their 30-day default exceeds the
+default requirement of `280800000`. Identity and configuration topics stay
 at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 
 `wherry admin` leaves an existing topic's configuration as it is, except

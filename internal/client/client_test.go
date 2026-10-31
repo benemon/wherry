@@ -253,7 +253,7 @@ func defaultSelector() []wire.Requirement {
 
 func (f *fixture) submit(t *testing.T, selector []wire.Requirement) SubmitResult {
 	t.Helper()
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: selector, Prompt: "do the work", Deadline: 30 * time.Minute, QueueDeadline: 10 * time.Minute})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: selector, Prompt: "do the work", EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +487,7 @@ func TestSubmitNoMatchingReceiverProducesNothing(t *testing.T) {
 	f := newFixture(t)
 	// cloud would launch codex with runtime=exec, but it is not ready: the advertisement offers only lab.
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}, Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrNoMatchingReceiver) {
 		t.Fatalf("submit = %v, want no matching receiver", err)
 	}
@@ -501,7 +501,7 @@ func TestSubmitMatchesOneProfilesLabels(t *testing.T) {
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: []wire.Requirement{
 		{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}, {Key: "region", Operator: wire.OpIn, Values: []string{"eu"}},
-	}, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	}, Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrNoMatchingReceiver) {
 		t.Fatalf("submit matched labels of two different profiles: %v", err)
 	}
@@ -512,7 +512,7 @@ func TestSubmitMatchesAcrossProfiles(t *testing.T) {
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers = bothOffers() })
 	selector := []wire.Requirement{{Key: "runtime", Operator: wire.OpIn, Values: []string{"exec"}}}
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: selector, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: selector, Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatalf("second profile did not match: %v", err)
 	}
@@ -523,7 +523,7 @@ func TestSubmitMatchesAcrossProfiles(t *testing.T) {
 		"explicit agent the matching profile does not launch": {Agent: "claude", Selector: selector},
 		"agent outside the pool's terms":                      {Agent: "gemini"},
 	} {
-		input.Prompt, input.Deadline, input.QueueDeadline = "work", time.Minute, time.Minute
+		input.Prompt, input.EndBy, input.StartBy = "work", time.Now().Add(time.Minute), time.Now().Add(time.Minute)
 		if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrNoMatchingReceiver) {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -534,7 +534,7 @@ func TestSubmitRefusesInputsOverSmallestProfileInlineLimit(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 1000 })
 	f.addReceiver(t, "receiver-b", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 5000 })
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 2000), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 2000), Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "profile lab's 1000-byte limit") || !strings.Contains(err.Error(), "pool with storage") {
 		t.Fatalf("submit = %v, want invalid input naming profile lab's 1000-byte limit and storage", err)
 	}
@@ -548,7 +548,7 @@ func TestSubmitKeepsInputsWithinProfileInlineLimit(t *testing.T) {
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 1000 })
 	f.addReceiver(t, "receiver-b", "pool-a").advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.Offers[0].InlineLimit = 5000 })
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 900), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 900), Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,7 +568,7 @@ func TestSubmitIgnoresInlineLimitOfOfferOutsideSelector(t *testing.T) {
 	receiver.advertise(t, f.ctx, func(ad *wire.Advertisement) {
 		ad.Offers = []wire.Offer{{Profile: "lab", Agent: "claude", InlineLimit: 5000}, {Profile: "other", Agent: "claude", InlineLimit: 100}}
 	})
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 900), Filename: "data.bin"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Parts: []wire.Part{{Raw: make([]byte, 900), Filename: "data.bin"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +605,7 @@ func TestSubmitModel(t *testing.T) {
 		t.Fatalf("receivers list %+v, want claude's models and default model from the pool terms", lab)
 	}
 	for model, want := range map[string]string{"": "haiku", "sonnet": "sonnet"} {
-		result, err := f.host.Submit(f.ctx, SubmitInput{Model: model, Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+		result, err := f.host.Submit(f.ctx, SubmitInput{Model: model, Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 		if err != nil {
 			t.Fatalf("model %q: %v", model, err)
 		}
@@ -617,11 +617,11 @@ func TestSubmitModel(t *testing.T) {
 		}
 	}
 	published := f.tasksEnd(t, "pool-b")
-	_, err = f.host.Submit(f.ctx, SubmitInput{Model: "opus", Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err = f.host.Submit(f.ctx, SubmitInput{Model: "opus", Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "model opus") || !strings.Contains(err.Error(), "pool-b") {
 		t.Fatalf("submit of a model outside the terms = %v, want invalid input naming the model and pool", err)
 	}
-	if _, err := f.host.Submit(f.ctx, SubmitInput{Agent: "claude", Model: "opus", Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrInvalidInput) ||
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Agent: "claude", Model: "opus", Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}); !errors.Is(err, ErrInvalidInput) ||
 		!strings.Contains(err.Error(), "model opus is not in agent claude's models in pool pool-b") {
 		t.Fatalf("submit of a model outside the agent's models = %v, want invalid input naming the model, agent and pool", err)
 	}
@@ -633,7 +633,7 @@ func TestSubmitModel(t *testing.T) {
 func TestSubmitWithoutAModelForAnAgentRequiringOne(t *testing.T) {
 	f := newFixture(t)
 	f.modelPool(t, "")
-	_, err := f.host.Submit(f.ctx, SubmitInput{Agent: "claude", Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err := f.host.Submit(f.ctx, SubmitInput{Agent: "claude", Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "agent claude in pool pool-b requires a model") {
 		t.Fatalf("submit without a model = %v, want invalid input saying the agent requires one", err)
 	}
@@ -708,7 +708,7 @@ func TestSubmitIgnoresStaleOrUnauthorisedAdvertisements(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
 			setup(t, f)
-			if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute}); !errors.Is(err, ErrNoMatchingReceiver) {
+			if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}); !errors.Is(err, ErrNoMatchingReceiver) {
 				t.Fatalf("submit = %v, want no matching receiver", err)
 			}
 		})
@@ -991,12 +991,12 @@ func TestRecordsAfterMembershipEndAreRejected(t *testing.T) {
 	}
 }
 
-func TestSubmitRefusesQueueDeadlinePastMaximumBeforePublishing(t *testing.T) {
+func TestSubmitRefusesStartByPastTheLimitBeforePublishing(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-	input := SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: 15 * 24 * time.Hour}
-	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrQueueDeadlinePastMaximum) {
-		t.Fatalf("submit = %v, want queue deadline past the maximum", err)
+	input := SubmitInput{Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(15 * 24 * time.Hour)}
+	if _, err := f.host.Submit(f.ctx, input); !errors.Is(err, ErrStartByPastLimit) {
+		t.Fatalf("submit = %v, want task_started_by past the start_by_limit", err)
 	}
 	if n := f.tasksEnd(t, "pool-a"); n != 0 {
 		t.Fatalf("pool tasks hold %d records", n)
@@ -1014,7 +1014,7 @@ func TestSubmitRefusesAKeyThatIsNotCurrentBeforePublishing(t *testing.T) {
 	if err := f.host.produce(f.ctx, &kgo.Record{Topic: admin.HostTopic("tenant-a", "host-a"), Key: []byte("tenant-a.host-a"), Value: rotation}); err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err = f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err == nil || !strings.Contains(err.Error(), "host key is not the current key") || !strings.Contains(err.Error(), "wherry init") {
 		t.Fatalf("submit = %v, want the host key refused as not current", err)
 	}
@@ -1026,29 +1026,29 @@ func TestSubmitRefusesAKeyThatIsNotCurrentBeforePublishing(t *testing.T) {
 	}
 }
 
-// submitQueued submits a run with queueDeadline through receiver-a.
-func (f *fixture) submitQueued(t *testing.T, queueDeadline time.Duration) string {
+// submitQueued submits a run with startBy through receiver-a.
+func (f *fixture) submitQueued(t *testing.T, startBy time.Duration) string {
 	t.Helper()
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: queueDeadline})
+	result, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(startBy)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return result.RunID
 }
 
-func TestAwaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
+func TestAwaitAndStatusReportAnUnclaimedRunPastItsStartBy(t *testing.T) {
 	f := newFixture(t)
 	runID := f.submitQueued(t, 2*time.Second)
 	start := time.Now()
 	awaited, err := f.host.Await(f.ctx, runID, 20*time.Second)
 	elapsed := time.Since(start)
-	if err != nil || awaited.Status.State != wire.TaskStateSubmitted || !strings.HasPrefix(awaited.Unclaimed, "queue deadline passed at ") ||
-		!strings.HasSuffix(awaited.Unclaimed, " and no receiver claimed the run") {
-		t.Fatalf("await %#v, %v; want the passed queue deadline", awaited, err)
+	if err != nil || awaited.Status.State != wire.TaskStateSubmitted || !strings.HasPrefix(awaited.Unclaimed, "not started by task_started_by (") ||
+		!strings.HasSuffix(awaited.Unclaimed, "): no receiver claimed the task") {
+		t.Fatalf("await %#v, %v; want the passed task_started_by", awaited, err)
 	}
 	if elapsed > 5*time.Second {
-		t.Fatalf("await returned after %s, want soon after the 2s queue deadline", elapsed)
+		t.Fatalf("await returned after %s, want soon after the 2s task_started_by", elapsed)
 	}
 	status, err := f.host.Status(f.ctx, runID)
 	if err != nil || status.Status.State != wire.TaskStateSubmitted || status.Unclaimed != awaited.Unclaimed {
@@ -1056,32 +1056,32 @@ func TestAwaitAndStatusReportAnUnclaimedRunPastItsQueueDeadline(t *testing.T) {
 	}
 }
 
-func TestAwaitKeepsWaitingBeforeTheQueueDeadline(t *testing.T) {
+func TestAwaitKeepsWaitingBeforeTheStartBy(t *testing.T) {
 	f := newFixture(t)
 	runID := f.submitQueued(t, 10*time.Minute)
 	if awaited, err := f.host.Await(f.ctx, runID, 2*time.Second); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("await = %#v, %v; want it still waiting", awaited, err)
 	}
 	if status, err := f.host.Status(f.ctx, runID); err != nil || status.Unclaimed != "" {
-		t.Fatalf("status %#v, %v; want no passed queue deadline", status, err)
+		t.Fatalf("status %#v, %v; want no passed task_started_by", status, err)
 	}
 }
 
-func TestClaimedRunNeverReportsItsQueueDeadline(t *testing.T) {
+func TestClaimedRunNeverReportsItsStartBy(t *testing.T) {
 	f := newFixture(t)
 	runID := f.submitQueued(t, 5*time.Second)
 	receiver := f.receivers["receiver-a"]
 	task := receiver.claim(t, f.ctx, runID)[0]
 	receiver.feed(t, f.ctx, runID, receiver.echo(t, task), receiver.status(t, task, 1, "claimed-1", "claimed", wire.TaskStateWorking, nil))
-	if time.Now().UnixMilli() > task.submission.Wherry.QueueDeadlineMS {
-		t.Fatal("the claim landed after the queue deadline")
+	if time.Now().Unix() > task.submission.Wherry.TaskStartedBy {
+		t.Fatal("the claim landed after task_started_by")
 	}
-	time.Sleep(time.Until(time.UnixMilli(task.submission.Wherry.QueueDeadlineMS + 1)))
+	time.Sleep(time.Until(wire.PastBound(task.submission.Wherry.TaskStartedBy)))
 	if awaited, err := f.host.Await(f.ctx, runID, 2*time.Second); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("await = %#v, %v; want it still waiting on the claimed run", awaited, err)
 	}
 	if status, err := f.host.Status(f.ctx, runID); err != nil || status.Status.State != wire.TaskStateWorking || status.Unclaimed != "" {
-		t.Fatalf("status %#v, %v; want WORKING with no passed queue deadline", status, err)
+		t.Fatalf("status %#v, %v; want WORKING with no passed task_started_by", status, err)
 	}
 }
 
@@ -1596,7 +1596,7 @@ func TestRunsListsLocalAndEchoedRuns(t *testing.T) {
 	before := time.Now()
 	local := f.submit(t, defaultSelector())
 	other := f.newHost(t, "host-b", t.TempDir())
-	elsewhere, err := other.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	elsewhere, err := other.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1676,7 +1676,7 @@ func TestRunsDropsUnauthorisedRuns(t *testing.T) {
 	other := f.newHost(t, "host-b", t.TempDir())
 	submit := func() string {
 		t.Helper()
-		submitted, err := other.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+		submitted, err := other.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1717,7 +1717,7 @@ func TestRunsUpdatedUsesSubmissionAndEchoTimes(t *testing.T) {
 		t.Fatal(err)
 	}
 	other := f.newHost(t, "host-b", t.TempDir())
-	echoed, err := other.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute})
+	echoed, err := other.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1754,14 +1754,14 @@ func TestSSHRemote(t *testing.T) {
 	}
 }
 
-func TestSubmitRefusesADeadlinePastTheRunCap(t *testing.T) {
+func TestSubmitRefusesAnEndByPastTheRunCap(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Deadline: 6*time.Hour + 11*time.Minute, QueueDeadline: 10 * time.Minute})
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", EndBy: time.Now().Add(6*time.Hour + 11*time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "6h run cap") {
 		t.Fatalf("submit past the cap: %v; want it refused naming the cap", err)
 	}
-	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Deadline: 6*time.Hour + 10*time.Minute, QueueDeadline: 10 * time.Minute}); err != nil {
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", EndBy: time.Now().Add(6*time.Hour + 10*time.Minute), StartBy: time.Now().Add(10 * time.Minute)}); err != nil {
 		t.Fatalf("submit at the cap: %v", err)
 	}
 }
@@ -1814,7 +1814,7 @@ func TestStatusAndSubmitShareConnections(t *testing.T) {
 			return err
 		}},
 		{"submit", 7, func(h *Host) error {
-			_, err := h.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Deadline: 30 * time.Minute, QueueDeadline: 10 * time.Minute})
+			_, err := h.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)})
 			return err
 		}},
 	} {
@@ -1894,7 +1894,7 @@ func TestFailedKeyReadFailsTheLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	tasks := f.tasksEnd(t, "pool-a")
-	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Deadline: 30 * time.Minute, QueueDeadline: 10 * time.Minute}); err == nil {
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", EndBy: time.Now().Add(30 * time.Minute), StartBy: time.Now().Add(10 * time.Minute)}); err == nil {
 		t.Fatal("submitted over a key load missing a receiver's keys")
 	}
 	if end := f.tasksEnd(t, "pool-a"); end != tasks {

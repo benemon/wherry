@@ -35,8 +35,8 @@ func validSubmission() *Submission {
 		Message: Message{MessageID: "message-1", ContextID: "run-1", TaskID: "run-1", Role: RoleUser, Parts: []Part{{Text: "hello"}}, Extensions: []string{ExtensionURI}},
 		Wherry: SubmissionBinding{
 			Tenant: "tenant-1", Host: "host-1", Pool: "linux", Run: "run-1",
-			Placement:  Placement{Agent: "claude", Selector: []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}}},
-			DeadlineMS: 2_000, QueueDeadlineMS: 1_000,
+			Placement:     Placement{Agent: "claude", Selector: []Requirement{{Key: "region", Operator: OpIn, Values: []string{"eu"}}}},
+			TaskStartedBy: 1, TaskEndedBy: 2,
 		},
 	}
 }

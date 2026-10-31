@@ -610,7 +610,7 @@ func TestSubmitRecordsTheRunBeforeProducing(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(filepath.Join(f.stateDir, "runs"), 0o700) })
 	before := f.tasksEnd(t, "pool-a")
-	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", Deadline: time.Minute, QueueDeadline: time.Minute}); err == nil {
+	if _, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)}); err == nil {
 		t.Fatal("submitted without a local record")
 	}
 	if f.tasksEnd(t, "pool-a") != before {
@@ -624,7 +624,7 @@ func TestAFailedTaskWriteLeavesNoRecord(t *testing.T) {
 	_, task := f.admitted(t)
 	cancelled, cancel := context.WithCancel(f.ctx)
 	cancel()
-	fresh, err := f.host.submission("run-fresh", "pool-a", task.submission.Wherry.Placement, []wire.Part{{Text: "new"}}, time.Minute, time.Minute, time.Now())
+	fresh, err := f.host.submission("run-fresh", "pool-a", task.submission.Wherry.Placement, []wire.Part{{Text: "new"}}, time.Now().Add(time.Minute), time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -693,7 +693,7 @@ func (f *fixture) admittedWith(t *testing.T, credentials []wire.TaskCredential) 
 	t.Helper()
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
-	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Credentials: credentials, Deadline: time.Minute, QueueDeadline: time.Minute})
+	submitted, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", Credentials: credentials, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +769,7 @@ func TestAnswerRefusesAnUndeclaredTaskCredential(t *testing.T) {
 func TestSubmitRefusesAnUnconfiguredCredential(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Credentials: []wire.TaskCredential{{Name: "absent", File: "token"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Credentials: []wire.TaskCredential{{Name: "absent", File: "token"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "auth required: credential absent is not in this host's configuration") {
 		t.Fatalf("submit = %v; want the unconfigured credential named", err)
 	}
@@ -967,7 +967,7 @@ func TestSubmitRefusesALongCredentialName(t *testing.T) {
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	name := strings.Repeat("c", 33)
 	f.host.credentials[name] = credential.Source{File: f.secret}
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Credentials: []wire.TaskCredential{{Name: name, File: "token"}}, Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Credentials: []wire.TaskCredential{{Name: name, File: "token"}}, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "credential names are at most 32") {
 		t.Fatalf("submit = %v; want the name refused", err)
 	}
@@ -983,7 +983,7 @@ func TestSubmitRefusesOver256ExpectedOutputs(t *testing.T) {
 	for i := range wire.MaxOutputs + 1 {
 		outputs = append(outputs, wire.ExpectedOutput{Name: "o" + strings.Repeat("x", i%10) + string(rune('a'+i%26)) + strings.Repeat("y", i/26)})
 	}
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Outputs: outputs, Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "p", Outputs: outputs, EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "a submission expects at most 256 outputs") {
 		t.Fatalf("submit = %v; want the outputs refused", err)
 	}
@@ -1001,7 +1001,7 @@ func TestSubmitNamesARecordTheBrokerRefuses(t *testing.T) {
 	}
 	random := make([]byte, 10000)
 	rand.Read(random)
-	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: hex.EncodeToString(random), Deadline: time.Minute, QueueDeadline: time.Minute})
+	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: hex.EncodeToString(random), EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "-byte record, over the broker's record limit; shorten the prompt or the input files") {
 		t.Fatalf("submit = %v; want the record size and a remedy", err)
 	}

@@ -28,7 +28,7 @@ func (e *CollectError) Error() string { return e.Step + ": " + e.Err.Error() }
 func (e *CollectError) Unwrap() error { return e.Err }
 
 // Collect writes a run's verified outputs, S3 ones through DownloadOutputs, beneath dir, by default
-// <state_dir>/runs/<run>/outputs. A run whose queue deadline passed unclaimed has nothing collected. Its error is a
+// <state_dir>/runs/<run>/outputs. A run whose task_started_by passed unclaimed has nothing collected. Its error is a
 // *CollectError.
 func (h *Host) Collect(ctx context.Context, runID string, result AwaitResult, dir string) (Collected, error) {
 	var collected Collected

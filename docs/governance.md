@@ -28,8 +28,8 @@ can vouch for another's key. [Topics](design.md#topics) gives the detail.
 Every operator action is a record on `wherry.admin`, which keeps its
 records forever. A run's submission, statuses, transcript and result are
 records on its pool's and tenant's topics: the task and event topics keep
-them for the pool's maximum queue deadline plus a day and six hours, 15 days
-6 hours by default, and the tenant feed and transcript topic for 30 days. A
+them for the pool's `start_by_limit` plus a day and six hours, 4 days 6
+hours by default, and the tenant feed and transcript topic for 30 days. A
 receiver's progress topic holds the latest transcript offset of each run it
 holds, and compaction removes a run's record after its terminal status.
 [`wherry events`](commands.md#wherry-events-run-id) prints a run's status history.
