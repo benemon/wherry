@@ -4,8 +4,6 @@ package receiver
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/base64"
-	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"log"
@@ -514,21 +512,11 @@ func (r *Receiver) rereadKey(ctx context.Context, keys *signed.Keys, owner, topi
 
 // kid returns the owner and key ID a compact JWS names in its protected header.
 func kid(encoded []byte) (string, string, bool) {
-	header, _, ok := strings.Cut(string(encoded), ".")
-	if !ok {
+	jws, err := jose.ParseSignedCompact(string(encoded), []jose.SignatureAlgorithm{jose.EdDSA})
+	if err != nil || len(jws.Signatures) != 1 {
 		return "", "", false
 	}
-	decoded, err := base64.RawURLEncoding.DecodeString(header)
-	if err != nil {
-		return "", "", false
-	}
-	var protected struct {
-		KID string `json:"kid"`
-	}
-	if json.Unmarshal(decoded, &protected) != nil {
-		return "", "", false
-	}
-	return strings.Cut(protected.KID, "/")
+	return strings.Cut(jws.Signatures[0].Protected.KeyID, "/")
 }
 
 // recordType returns the record type encoded's JWS header names, unverified and empty when encoded is no

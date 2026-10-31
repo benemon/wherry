@@ -1657,3 +1657,22 @@ func (r *Receiver) held() int64 {
 	defer r.mu.Unlock()
 	return r.inFlight
 }
+
+func TestKIDNamesOwnerAndKeyOfASignedRecord(t *testing.T) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := signed.HostOwner(testTenant, testHost)
+	encoded, err := signed.Sign("application/vnd.wherry.submission.v1+jws", owner, map[string]string{"a": "b"}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotOwner, gotID, ok := kid(encoded)
+	if !ok || gotOwner != owner || gotID != signed.KeyID(key.Public().(ed25519.PublicKey)) {
+		t.Fatalf("kid returned %q, %q, %v; want %q and the key's ID", gotOwner, gotID, ok, owner)
+	}
+	if _, _, ok := kid([]byte("not a JWS")); ok {
+		t.Fatal("kid named a key for a value that is no JWS")
+	}
+}
