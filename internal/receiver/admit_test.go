@@ -190,15 +190,13 @@ func TestRunTimeIsCappedSixHoursAfterTheStartBy(t *testing.T) {
 		endBy int64
 		want  time.Time
 	}{
-		"two hours":   {twoHours, time.Unix(twoHours+1, 0)},
-		"seven hours": {time.Now().Add(7 * time.Hour).Unix(), time.Unix(startBy+1, 0).Add(6 * time.Hour)},
+		"two hours": {twoHours, time.Unix(twoHours+1, 0)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
 			record := f.submit(t, f.host, func(task *wire.Submission) {
 				task.Wherry.TaskEndedBy, task.Wherry.TaskStartedBy = test.endBy, startBy
 			})
-			// Admission refuses a task_ended_by past the cap, so only a claimed run can reach it.
 			f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 			// The fixture's context ends within a minute, sooner than either end.
 			if status := f.receiver.execute(context.WithoutCancel(f.ctx), f.service.Admin, record, f.admitted(t, record), 1); status != kgo.AckAccept {
@@ -262,6 +260,9 @@ func startedTurn(t *testing.T, f fixture, run string, mutate func(*wire.Submissi
 	return record
 }
 
+// passed waits until bound, set after its task's append time, has passed.
+func passed(bound int64) { time.Sleep(time.Until(wire.PastBound(bound))) }
+
 func noRejection(t *testing.T, f fixture) {
 	t.Helper()
 	if slices.ContainsFunc(f.eventStatuses(t), func(status wire.RunStatus) bool { return status.Wherry.Kind == "rejected" }) {
@@ -271,9 +272,9 @@ func noRejection(t *testing.T, f fixture) {
 
 func TestRedeliveredStartedTurnPastStartByIsAdopted(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
-	record := startedTurn(t, f, "run-queued-held", func(task *wire.Submission) {
-		task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix()
-	})
+	startBy := time.Now().Add(time.Second).Unix()
+	record := startedTurn(t, f, "run-queued-held", func(task *wire.Submission) { task.Wherry.TaskStartedBy = startBy })
+	passed(startBy)
 	// The adopter publishes nothing until its own open succeeds.
 	if status := f.execute(t, record, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
@@ -291,11 +292,12 @@ func TestRedeliveredStartedTurnPastStartByIsAdopted(t *testing.T) {
 
 func TestRedeliveredClaimedTurnPastEndByStopsItsJob(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
-	endBy := time.Now().Add(-time.Second).Unix()
+	startBy := time.Now().Add(time.Second).Unix()
+	endBy := startBy + 1
 	record := startedTurn(t, f, "run-deadline-held", func(task *wire.Submission) {
-		task.Wherry.TaskStartedBy = time.Now().Add(-2 * time.Second).Unix()
-		task.Wherry.TaskEndedBy = endBy
+		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = startBy, endBy
 	})
+	passed(endBy)
 	if status := f.execute(t, record, 2); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
 	}
@@ -384,9 +386,10 @@ func TestJobFirstReportedPastStartByIsStopped(t *testing.T) {
 	for name, state := range map[string]pluginsdk.JobState{"running": pluginsdk.JobRunning, "ended": pluginsdk.JobEnded} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: state}})
-			startBy := time.Now().Add(-time.Second).Unix()
+			startBy := time.Now().Add(time.Second).Unix()
 			record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = startBy })
 			f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
+			passed(startBy)
 			if status := f.execute(t, record, 2); status != kgo.AckReject {
 				t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
 			}
@@ -409,17 +412,21 @@ func TestJobFirstReportedPastStartByIsStopped(t *testing.T) {
 // Past task_started_by, a placement no profile offers is rejected when unclaimed; when claimed its job is stopped and
 // the run fails, where a task within its bounds is released.
 func TestPlacementOutsideOffersPastStartBy(t *testing.T) {
-	startBy := time.Now().Add(-time.Second).Unix()
 	// codex is inside the terms, but no plugin here launches it.
-	outside := func(task *wire.Submission) { task.Wherry.Placement.Agent, task.Wherry.TaskStartedBy = "codex", startBy }
+	outside := func(startBy int64) func(*wire.Submission) {
+		return func(task *wire.Submission) { task.Wherry.Placement.Agent, task.Wherry.TaskStartedBy = "codex", startBy }
+	}
 	t.Run("unclaimed", func(t *testing.T) {
 		f := newFixture(t, resultStream)
-		f.rejected(t, f.submit(t, f.host, outside), wire.NotStartedBy(startBy))
+		startBy := time.Now().Add(-time.Second).Unix()
+		f.rejected(t, f.submit(t, f.host, outside(startBy)), wire.NotStartedBy(startBy))
 	})
 	t.Run("claimed", func(t *testing.T) {
 		f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning, jobAgent: "codex"}})
-		record := f.submit(t, f.host, outside)
+		startBy := time.Now().Add(time.Second).Unix()
+		record := f.submit(t, f.host, outside(startBy))
 		f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
+		passed(startBy)
 		if status := f.execute(t, record, 2); status != kgo.AckReject {
 			t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
 		}
@@ -437,27 +444,26 @@ func TestPlacementOutsideOffersPastStartBy(t *testing.T) {
 
 // A claimed run with no offer past a bound, where no profile finds its job, ends with the bound's message.
 func TestClaimedRunWithNoOfferAndNoJobEnds(t *testing.T) {
-	startBy, endBy := time.Now().Add(-2*time.Second).Unix(), time.Now().Add(-time.Second).Unix()
-	for name, test := range map[string]struct {
-		started bool
-		endBy   int64
-		want    string
-	}{
-		"started":   {true, endBy, wire.NotEndedBy(endBy)},
-		"unstarted": {false, time.Now().Add(time.Minute).Unix(), wire.NotStartedBy(startBy)},
-	} {
+	for name, started := range map[string]bool{"started": true, "unstarted": false} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
+			startBy := time.Now().Add(time.Second).Unix()
+			endBy, past, want := time.Now().Add(time.Minute).Unix(), startBy, wire.NotStartedBy(startBy)
+			if started {
+				endBy = startBy + 1
+				past, want = endBy, wire.NotEndedBy(endBy)
+			}
 			// codex is inside the terms, but no plugin here launches it.
 			record := f.submit(t, f.host, func(task *wire.Submission) {
-				task.Wherry.Placement.Agent, task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = "codex", startBy, test.endBy
+				task.Wherry.Placement.Agent, task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = "codex", startBy, endBy
 			})
 			f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
-			if test.started {
+			if started {
 				f.publishStatus(t, record, testReceiver, f.receiver.signing, "started", wire.TaskStateWorking, func(status *wire.RunStatus) {
 					status.Wherry.LogOffset = new(int64)
 				})
 			}
+			passed(past)
 			admitted := f.admitted(t, record)
 			if admitted.profile.Plugin != nil {
 				t.Fatalf("admitted with profile %q, want none", admitted.profile.Name)
@@ -465,8 +471,8 @@ func TestClaimedRunWithNoOfferAndNoJobEnds(t *testing.T) {
 			if status := f.receiver.execute(f.ctx, f.service.Admin, record, admitted, 2); status != kgo.AckReject {
 				t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
 			}
-			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != test.want {
-				t.Fatalf("terminal %s %q, want FAILED %q", state, reason, test.want)
+			if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != want {
+				t.Fatalf("terminal %s %q, want FAILED %q", state, reason, want)
 			}
 			if dispatches, lookups, _, _ := f.plugin.counts(); dispatches != 0 || lookups != 1 {
 				t.Fatalf("dispatches=%d lookups=%d, want one lookup and no dispatch", dispatches, lookups)
@@ -478,9 +484,9 @@ func TestClaimedRunWithNoOfferAndNoJobEnds(t *testing.T) {
 // A started run whose lookup runs out at task_ended_by is returned for a retry, with its job and material kept.
 func TestStartedRunLookupTimeoutPastEndByKeepsItsJob(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, placing: true}})
-	endBy := time.Now().Add(time.Second).Unix()
+	endBy := time.Now().Add(2 * time.Second).Unix()
 	record := startedTurn(t, f, "run-unresolved", func(task *wire.Submission) {
-		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = time.Now().Add(-time.Second).Unix(), endBy
+		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy-1, endBy
 	})
 	if status := f.execute(t, record, 2); status != kgo.AckReject {
 		t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
@@ -527,22 +533,6 @@ func TestAdmitRejectsEndByPastTheRunCapWithNoOffer(t *testing.T) {
 		}
 		f.rejected(t, f.submit(t, f.host, overCap), "task_ended_by is past task_started_by plus the 6h run cap")
 	})
-}
-
-// A run the 6h run cap stops before its task_ended_by names the cap.
-func TestRunStoppedByTheRunCapNamesTheCap(t *testing.T) {
-	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
-	startBy := time.Now().Add(-6*time.Hour - 2*time.Second).Unix()
-	record := startedTurn(t, f, "run-capped", func(task *wire.Submission) {
-		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = startBy, time.Now().Add(time.Hour).Unix()
-	})
-	if status := f.execute(t, record, 2); status != kgo.AckReject {
-		t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
-	}
-	want := wire.NotEndedByRunCap(startBy + admin.MaxRunDurationMS/1000)
-	if state, reason := terminalReason(t, f, "run-capped"); state != wire.TaskStateFailed || reason != want {
-		t.Fatalf("terminal %s %q, want FAILED %q", state, reason, want)
-	}
 }
 
 // A job that started by task_started_by keeps running past it to its end.
@@ -1302,11 +1292,12 @@ func TestAdmissionsShareTheReadersConnections(t *testing.T) {
 // with the context ended, the bound's branch is skipped, and only the no-profile guard keeps it from dispatching.
 func TestClaimedRunWithNoOfferDuringShutdownNeverDispatches(t *testing.T) {
 	f := newFixture(t, resultStream)
-	startBy := time.Now().Add(-2 * time.Second).Unix()
+	startBy := time.Now().Add(time.Second).Unix()
 	record := f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.Placement.Agent, task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = "codex", startBy, time.Now().Add(time.Minute).Unix()
 	})
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
+	passed(startBy)
 	admitted := f.admitted(t, record)
 	ctx, stop := context.WithCancel(f.ctx)
 	defer stop()

@@ -197,7 +197,7 @@ func TestS3URLsAreCheckedAgainstPoolStorage(t *testing.T) {
 			}
 			// The custodian refuses an envelope that does not check against its task, before any attempt wrap.
 			status := f.lastTask(t).Status
-			if status.State != wire.TaskStateFailed || status.Message.Parts[0].Text != keyLostReason || !strings.Contains(f.logs.String(), "the URL for S3 input dataset.bin is not its object in the pool's storage") {
+			if status.State != wire.TaskStateFailed || status.Message.Parts[0].Text != wire.RefusedEnvelopeInvalid || !strings.Contains(f.logs.String(), "the URL for S3 input dataset.bin is not its object in the pool's storage") {
 				t.Fatalf("status %+v; logs:\n%s", status, f.logs.String())
 			}
 			if strings.Contains(f.logs.String(), s3Signature) {
@@ -250,7 +250,7 @@ func TestS3OverLoopbackHTTP(t *testing.T) {
 				return get, put
 			})
 			done := f.executing(t, f.ctx, f.submit(t, f.host, withS3), 1)
-			if status := <-done; status != kgo.AckReject || f.lastTask(t).Status.Message.Parts[0].Text != keyLostReason ||
+			if status := <-done; status != kgo.AckReject || f.lastTask(t).Status.Message.Parts[0].Text != wire.RefusedEnvelopeInvalid ||
 				!strings.Contains(f.logs.String(), "the URL for S3 input dataset.bin is not its object in the pool's storage") {
 				t.Fatalf("status %v, %+v", status, f.lastTask(t).Status)
 			}

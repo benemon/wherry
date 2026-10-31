@@ -307,7 +307,7 @@ func TestRunPastItsEndByCountsUntilItEnds(t *testing.T) {
 	f.plugin.endDelay, f.plugin.stopCheck = time.Minute, func() error { <-release; return nil }
 	endBy := time.Now().Add(3 * time.Second).Unix()
 	deadline := wire.PastBound(endBy)
-	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskEndedBy = endBy }), 1)
+	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy }), 1)
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 			break

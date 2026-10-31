@@ -85,9 +85,11 @@ func TestHeldRunPastStartBy(t *testing.T) {
 			if test.holder != testReceiver {
 				key = f.addPeer(t, test.holder, testPool)
 			}
-			record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
+			startBy := time.Now().Add(time.Second).Unix()
+			record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = startBy })
 			f.publishStatus(t, record, test.holder, key, "claimed", wire.TaskStateWorking, nil)
 			f.publishStatus(t, record, test.holder, key, "started", wire.TaskStateWorking, nil)
+			passed(startBy)
 			test.rotate(t, &f, key)
 			admitted, _ := f.receiver.admit(f.ctx, record)
 			if admitted == nil {
