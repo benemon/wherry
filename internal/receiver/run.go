@@ -775,9 +775,11 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		var tooLarge *pluginsdk.InputTooLargeError
 		var failure *pluginsdk.Error
 		switch {
+		// A dispatch that errs may have created a job; it is returned unpurged, and its redelivery locates the job and
+		// stops it if the bound has passed.
 		case err != nil && startCtx.Err() != nil && ctx.Err() == nil:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
-			return run.expired(ctx, nil, nil)
+			return run.returnTask(ctx, nil)
 		case errors.As(err, &tooLarge) && dispatched == pluginsdk.OutcomeNothingCreated:
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "nothing").Inc()
 			// The plugin's name for the input reaches the status only when it is one of the run's inputs.
@@ -813,8 +815,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			r.metrics.dispatchOutcomes.WithLabelValues(named.Name, "unknown").Inc()
 			job, resolved := run.reconcile(startCtx)
 			switch {
-			case !resolved && startCtx.Err() != nil && ctx.Err() == nil:
-				return run.expired(ctx, nil, nil)
 			case !resolved:
 				r.logger.Printf("run %s: dispatch unresolved", runID)
 				return run.returnTask(ctx, nil)

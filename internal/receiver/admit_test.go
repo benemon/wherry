@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json/jsontext"
+	"errors"
 	"net"
 	"slices"
 	"strings"
@@ -323,19 +324,33 @@ func TestClaimedTaskNotStartedByItsStartByFails(t *testing.T) {
 	record := f.submit(t, f.host, func(task *wire.Submission) {
 		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = startBy, time.Now().Add(20*time.Second).Unix()
 	})
-	if status := f.execute(t, record, 1); status != kgo.AckReject {
-		t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
+	// The dispatch still placing at task_started_by has an unknown outcome: the task is returned, nothing purged.
+	if status := f.execute(t, record, 1); status != kgo.AckRelease {
+		t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
 	}
 	if now := time.Now(); now.Before(wire.PastBound(startBy)) || now.After(wire.PastBound(startBy).Add(5*time.Second)) {
-		t.Fatalf("ended at %v, want just past task_started_by %v", now, time.Unix(startBy, 0))
+		t.Fatalf("returned at %v, want just past task_started_by %v", now, time.Unix(startBy, 0))
+	}
+	f.plugin.mu.Lock()
+	purged := f.plugin.purges
+	f.plugin.mu.Unlock()
+	if purged != 0 {
+		t.Fatalf("purges=%d after an unresolved dispatch, want 0", purged)
+	}
+	// The platform now answers: the job was never placed. The redelivery locates it past the bound and ends the run.
+	f.plugin.mu.Lock()
+	f.plugin.placing, f.plugin.job = false, pluginsdk.JobNeverStarted
+	f.plugin.mu.Unlock()
+	if status := f.execute(t, record, 2); status != kgo.AckReject {
+		t.Fatalf("redelivery status %v, want reject; logs:\n%s", status, f.logs.String())
 	}
 	if state, reason := terminalReason(t, f, "run-a"); state != wire.TaskStateFailed || reason != wire.NotStartedBy(startBy) {
 		t.Fatalf("terminal %s %q, want FAILED %q", state, reason, wire.NotStartedBy(startBy))
 	}
 	f.plugin.mu.Lock()
 	defer f.plugin.mu.Unlock()
-	if f.plugin.purges == 0 || f.plugin.follows != 0 {
-		t.Fatalf("purges=%d follows=%d, want the unstarted job purged and never followed", f.plugin.purges, f.plugin.follows)
+	if f.plugin.purges+f.plugin.stops == 0 || f.plugin.follows != 0 {
+		t.Fatalf("purges=%d stops=%d follows=%d, want the job removed by its redelivery and never followed", f.plugin.purges, f.plugin.stops, f.plugin.follows)
 	}
 	if !slices.ContainsFunc(f.eventStatuses(t), func(status wire.RunStatus) bool { return status.Wherry.Kind == "claimed" }) {
 		t.Fatal("the task was not claimed before it ended")
@@ -1284,5 +1299,49 @@ func TestAdmissionsShareTheReadersConnections(t *testing.T) {
 	t.Logf("admissions opened %v connections and sent %v offset listings", opened, listed)
 	if opened[0] > 7 || opened[1] > 1 || !slices.Equal(listed, []int64{4, 4}) {
 		t.Fatalf("admissions opened %v connections and sent %v offset listings, want at most 7 and then 1, and 4 each", opened, listed)
+	}
+}
+
+// A claimed run with no offer whose receiver shuts down just after every lookup reports no job never reaches a plugin:
+// with the context ended, the bound's branch is skipped, and only the no-profile guard keeps it from dispatching.
+func TestClaimedRunWithNoOfferDuringShutdownNeverDispatches(t *testing.T) {
+	f := newFixture(t, resultStream)
+	startBy := time.Now().Add(-2 * time.Second).Unix()
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Placement.Agent, task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = "codex", startBy, time.Now().Add(time.Minute).Unix()
+	})
+	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
+	admitted := f.admitted(t, record)
+	ctx, stop := context.WithCancel(f.ctx)
+	defer stop()
+	f.plugin.mu.Lock()
+	f.plugin.afterLookup = stop
+	f.plugin.mu.Unlock()
+	f.receiver.execute(ctx, f.service.Admin, record, admitted, 2)
+	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 {
+		t.Fatalf("dispatches=%d during shutdown, want none", dispatches)
+	}
+}
+
+// A dispatch with an unknown outcome whose reconciliation is still unresolved at task_started_by is returned with its
+// job and material kept: the job may exist, and only a lookup that resolves it may stop or purge it.
+func TestUnresolvedDispatchPastStartByKeepsItsJob(t *testing.T) {
+	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream,
+		dispatchErr: errors.New("connection reset"), lookupBlocks: true}})
+	f.answer(t, credentialName)
+	record := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = time.Now().Add(time.Second).Unix(), time.Now().Add(20*time.Second).Unix()
+	})
+	if status := f.execute(t, record, 1); status != kgo.AckRelease {
+		t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
+	}
+	f.plugin.mu.Lock()
+	purges := f.plugin.purges
+	f.plugin.mu.Unlock()
+	if purges != 0 {
+		t.Fatalf("purges=%d after an unresolved dispatch, want 0", purges)
+	}
+	if slices.ContainsFunc(f.feedStatuses(t), func(status wire.RunStatus) bool { return status.Wherry.Kind == "terminal" }) {
+		t.Fatal("an unresolved dispatch was ended")
 	}
 }

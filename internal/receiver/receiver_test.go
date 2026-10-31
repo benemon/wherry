@@ -85,9 +85,13 @@ type fakePlugin struct {
 	// lastDeadline is the deadline of the context Follow last ran under.
 	lastDeadline time.Time
 	// placing makes Dispatch and Lookup wait, as for a job the platform never places, until their context ends.
-	placing   bool
-	lookups   int
-	lookupErr error
+	placing bool
+	// afterLookup, when set, runs after Lookup reports an absent job, as a receiver shutting down at that moment.
+	afterLookup func()
+	// lookupBlocks makes Lookup alone wait until its context ends, as a platform call that hangs.
+	lookupBlocks bool
+	lookups      int
+	lookupErr    error
 	// job is the state Lookup reports; jobProfile and jobAgent override the metadata it reports.
 	job                  pluginsdk.JobState
 	jobProfile, jobAgent string
@@ -180,6 +184,12 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lookups++
+	if f.lookupBlocks {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		return pluginsdk.Job{}, ctx.Err()
+	}
 	if f.placing {
 		f.mu.Unlock()
 		<-ctx.Done()
@@ -193,6 +203,9 @@ func (f *fakePlugin) Lookup(ctx context.Context, runID string) (pluginsdk.Job, e
 		return pluginsdk.Job{}, err
 	}
 	if f.job == pluginsdk.JobAbsent {
+		if f.afterLookup != nil {
+			f.afterLookup()
+		}
 		return pluginsdk.Job{}, nil
 	}
 	return pluginsdk.Job{State: f.job, Handle: f.handle(runID), Attempt: 1, Profile: cmp.Or(f.jobProfile, f.name), Agent: cmp.Or(f.jobAgent, f.agent)}, nil
