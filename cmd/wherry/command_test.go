@@ -162,8 +162,8 @@ func newBus(t *testing.T) *bus {
 	return b
 }
 
-// publishSnapshot publishes, as receiver, a snapshot naming it pool's custodian under a fresh key. Receivers publish
-// none before the receiver side of the pool key lands, so a test that submits publishes one in their place.
+// publishSnapshot publishes, as receiver, a snapshot naming it pool's custodian under a fresh key; newBus runs no
+// receiver to publish one.
 func publishSnapshot(t *testing.T, ctx context.Context, kafka *kgo.Client, pool, receiver string, key ed25519.PrivateKey) {
 	t.Helper()
 	poolKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -426,7 +426,6 @@ func TestSubmitNeverPrintsCredential(t *testing.T) {
 	if strings.Contains(stdout.String()+stderr.String(), credentialText) {
 		t.Fatalf("submit printed the credential: stdout %q stderr %q", stdout.String(), stderr.String())
 	}
-	// The host topic holds the host's key alone.
 	if records, err := readTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
 		t.Fatalf("host topic holds %d records, %v; want the key registration alone", len(records), err)
 	}

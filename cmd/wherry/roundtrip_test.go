@@ -39,7 +39,6 @@ import (
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/receiver"
 	"github.com/benemon/wherry/internal/signed"
-	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/minio/minio-go/v7"
@@ -314,11 +313,6 @@ func TestRoundTrip(t *testing.T) {
 	plugins := &plugins{dir: pluginDir, credentials: sources, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	r := newReceiver(plugins)
-	signing, err := trust.LoadSigningKeyFile(filepath.Join(stateDir, "signing.key"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	publishSnapshot(t, ctx, service.Admin, "pool-a", "receiver-a", signing)
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	go func() { _ = r.Run(runCtx) }()
