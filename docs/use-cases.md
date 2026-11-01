@@ -16,7 +16,8 @@ A coding agent needs a repository or a service that only a particular
 network can reach. The task runs on a receiver inside that network, so the
 developer's machine never needs the access. The operator decides which
 tenants may use the pool, the broker enforces it, and the receiver gets
-only the credentials its run declares, which open for that attempt alone.
+only the credentials its run declares, in an envelope that opens for that
+attempt and for the pool's key custodian, which checks it against the task.
 [Identity and grants](governance.md#identity-and-grants),
 [Placement](concepts.md#placement) and
 [Credential envelopes](security.md#credential-envelopes) describe access,

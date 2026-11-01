@@ -140,6 +140,14 @@ seconds and returns one of:
 - `retry_after` with the current `state`: the run has not finished. Wait
   that many seconds, or do other work, then call `wait` again.
 
+A run whose pool lost its key before the run started ends
+`TASK_STATE_FAILED` with `cannot be opened: the pool's custodian changed and
+its key was lost`. Before its `task_started_by`, wherry resubmits it for you
+under a new run ID, with the same input. `wait` follows the new run, and `runs` then lists every run ID
+it followed, the run whose result it returns last. `status` returns the new
+run's ID as `replaced_by`. Use the last run ID for `status`, `events`,
+`logs`, `cancel` and `cleanup`. Do not submit the task again yourself.
+
 `status` with the id returns the run's latest state without waiting. Without
 an id it lists every run this host can see, latest update first, each with
 its `pool`, `state` and `updated` time; use it to find a run whose
@@ -188,7 +196,14 @@ cancelled. `VERSION_SKEW` means the pool's records come from a later wherry
 release than the running MCP server: tell the user to upgrade `wherry` and
 restart the server, since a harness keeps the old process running. `UNAVAILABLE` is any other failure; its cause is in the MCP
 server's log, and the user can also run the same operation with the `wherry`
-CLI to see it. `OUTPUTS_NOT_WRITTEN` means
+CLI to see it. It includes `submit`'s refusals of a pool that takes no task
+now, whose CLI error says `pool <pool> is suspended; submit again once
+it is resumed`, `pool <pool> has no custodian yet; submit again once a
+receiver of the pool has published one` or `pool <pool>'s custodian
+<receiver> is not live; submit again once a successor has published a
+snapshot`. A suspended pool waits for its operator to resume it, so tell
+the user. For a missing or silent custodian, submit again after a few
+minutes. A resubmission refused the same way fails `wait`. `OUTPUTS_NOT_WRITTEN` means
 the result arrived but its outputs could not be written, downloaded or cleaned
 up; the message starts with the step that failed,
 and the MCP server's log holds the cause.

@@ -308,6 +308,16 @@ whose source fails, naming the credential:
 resolve credential <name>: its command exited with status 1
 ```
 
+Before it places the task, `submit` resubmits each run in this host's
+records that ended with the wherry event `key-lost` before its
+`task_started_by` and has no produced replacement. The replacement is a new
+run under a new run ID whose submission `replaces` the failed run
+([Resubmission](a2a-extension-v1.md#resubmission)). `submit` logs
+`run <id>: lost its pool key before it started; resubmitted as run <id>` on
+standard error for each. A resubmission that fails is logged as
+`run <id>: resubmit: <error>` and retried by the next host command that
+reads the run. It does not fail the submission.
+
 ### `wherry cancel RUN_ID`
 
 Publishes a signed cancel of the run to its pool's events and prints
@@ -386,6 +396,24 @@ standard output, and exits at once with status 1 and
 `task_started_by` comes from this host's record of the submission, so
 `wait` on another host of the tenant waits for its timeout.
 
+A run this host submitted that ends with the wherry event `key-lost` before
+its `task_started_by` never started: its pool key was lost
+([Lost pool keys](concepts.md#lost-pool-keys)). `wait` resubmits it under a
+new run ID, or produces the replacement this host already stored, and
+follows the replacement to its outcome, through every later replacement. It
+prints one line on standard error per replacement:
+
+```
+run <id> lost its pool key before it started; resubmitted as run <id>
+```
+
+The result, outputs and exit code are those of the last run followed, and
+the default outputs directory is that run's. `wait` refuses a chain of
+replacements that names a run twice. When the resubmission fails, for
+example on a suspended pool or a pool with no live key custodian, `wait`
+exits with status 1 and
+`wait <id>: run <id> lost its pool key and is resubmittable until <RFC 3339 time>; resubmitting it failed: <error>`.
+
 #### Exit codes
 
 | Code | Meaning |
@@ -434,6 +462,15 @@ one, else the Kafka timestamp of the run's echo. A record in `state_dir`
 that does not decode counts as skipped, and its run is listed only through
 its echo. With no runs it prints nothing.
 
+A run that ended with the wherry event `key-lost` before its
+`task_started_by` shows `TASK_STATE_FAILED` with
+`cannot be opened: the pool's custodian changed and its key was lost`.
+`status`, with or without `RUN_ID`, resubmits such a run of this host under
+a new run ID, as `submit` does. With `RUN_ID`, its last line is then
+`replaced_by=<id>`, the replacement's run ID. `wherry status` with that ID
+reads the replacement, and `wherry wait` on either run follows it to its
+outcome.
+
 `status` exits with status 0 whenever it reads a state, whatever the
 state. It fails when the run is not found or the read fails.
 
@@ -477,6 +514,11 @@ from the run's echo, so each line prints as it is written, once and in
 order. When the run reaches a terminal status, it reads the transcript
 topic to the high watermark as above, prints the lines it has not printed,
 and exits with status 0.
+
+A run that ended with the wherry event `key-lost` never started, so it has
+no transcript. `logs -f` resubmits such a run of this host, as `submit`
+does. The replacement's lines are under its own run ID, which
+`wherry status RUN_ID` prints as `replaced_by=<id>`.
 
 `logs` prints every line; a range comes from the shell, as in
 `wherry logs ID | sed -n '101,200p'`.
@@ -762,7 +804,8 @@ each host's [quotas](configuration.md#quotas).
 Records a `suspend` record for the pool on `wherry.admin` and reconciles the
 ACLs. A suspended pool's tenants' hosts hold no `WRITE` on its tasks topic.
 The receivers keep `READ` on it, and every other ACL stays. A host refuses a
-submission to the pool with `pool is suspended` before it resolves any
+submission to the pool with `pool POOL is suspended; submit again once it is
+resumed` before it resolves any
 credential or uploads any input. Receivers fetch nothing from the pool's
 share group, so they claim no task. The key custodian refuses the open
 request of a run whose job has not started with `pool suspended`; the
@@ -773,7 +816,10 @@ their tasks are acknowledged as on an unsuspended pool. A suspension does
 not stop a running job or take back the credentials it holds: rotating them
 at their issuers does, and
 [`wherry admin receiver revoke`](#wherry-admin-receiver-revoke-receiver)
-stops a receiver. A stepping-down custodian's re-key scan waits for resume.
+stops a receiver. A key custodian that steps down while the pool is
+suspended does not scan the task topic or re-key any task. It keeps its
+pool keys to their deadlines and logs
+`custodian: hand over to <receiver>: pool <pool> is suspended; its re-key scan waits for resume; keeping the pool keys to their deadlines`.
 The key custodian keeps rotating.
 
 ### `wherry admin pool resume POOL`
@@ -1016,8 +1062,8 @@ with reason `bootstrap` when the topic holds no snapshot, `handover` when
 the previous custodian is another receiver whose latest advertisement is
 within 120 seconds and carries `stepping_down` with the `started_ms` of that
 advertisement and a `deadline_ms` after the receiver's clock, and
-`takeover` otherwise, the same receiver back without its
-keys included. A takeover logs `custodian: took over pool <pool>
+`takeover` otherwise, including when the same receiver returns without
+its keys. A takeover logs `custodian: took over pool <pool>
 (WherryCustodianTakeover)` and counts in `wherry_custodian_takeovers_total`
 with reason `takeover` once, when its snapshot is first read back, also on a
 later pass when the commit landed but its read-back failed. A `handover`
@@ -1079,17 +1125,18 @@ decision in one transaction through `p.<pool>.custodian`. A receiver that
 holds pool keys but not the current key answers an open request for a task
 it can open with a re-key wrap to the current key.
 
-A replaced key's deadline is the append time of the snapshot that replaced
-it, as the receiver's first pass after the replacement reads it, plus
-`start_by_limit` plus 7 hours; a key replaced before the receiver started
-counts from the receiver's first custody pass instead. A key no committed snapshot was read back
-naming is marked published and kept current when the current snapshot names
-it; otherwise its deadline is the current snapshot's append time plus
-`start_by_limit` plus 7 hours. While the snapshot topic cannot be read to a
-last stable offset at its end, after a read error or behind an open
-transaction, every key is kept. The receiver deletes a key at its deadline, or
-all of them at the end of a handover that re-keyed every task they open,
-and keeps every other key in its state directory.
+A replaced key's deadline is `start_by_limit` plus 7 hours after the append
+time of the snapshot that replaced it, as the receiver's first custody pass
+after the replacement reads it. A key replaced before the receiver started
+counts from the receiver's first custody pass. A key the receiver generated
+and has not yet read back in a committed snapshot is marked published and
+kept current when the current snapshot names it. Any other such key's
+deadline is `start_by_limit` plus 7 hours after the current snapshot's
+append time. While the snapshot topic cannot be read to a last stable
+offset at its end, after a read error or behind an open transaction, the
+receiver keeps every key. It deletes a key at its deadline, and all of its
+keys at the end of a handover that re-keyed every task they open. Every
+other key stays in its state directory.
 
 It logs its own lines to standard output with the prefix `receiver: `;
 plugin and link lines are hclog lines named `plugin`. Plugin lines, the

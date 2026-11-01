@@ -30,7 +30,7 @@ differently live on different topics.
 
 | Topic | Writers | Readers | Holds |
 | --- | --- | --- | --- |
-| `wherry.admin` | the operator | every principal | pool terms, receiver configurations, hosts, entitlements, membership ends, skips |
+| `wherry.admin` | the operator | every principal | pool terms, receiver configurations, hosts, entitlements, revocations in progress, membership ends, pool suspensions and resumes, rotate-key requests, skips |
 | `wherry.receivers` | receivers | receivers, hosts | advertisements |
 | `wherry.receiver.<receiver>` | that receiver | its pool's members, entitled tenants' hosts | its keys |
 | `wherry.receiver.<receiver>.progress` | that receiver | its pool's live members | each run's latest committed transcript offset |

@@ -49,8 +49,9 @@ model provider, go where its environment and configuration send them.
 
 The operator decides who may submit work and who may run it. Every host
 and receiver has its own identity, the broker enforces what each may
-reach, and each credential travels in an envelope under the pool's key
-that opens for the one receiver and the one attempt that needs it. [Governance](governance.md) and
+reach, and each credential travels in an envelope under the pool's key.
+The pool's key custodian opens it to check it is bound to its task, and
+it opens for the one receiver and the one attempt that needs it. [Governance](governance.md) and
 [Security](security.md) cover the model.
 
 ### Follow every delegated run, and recover it when a receiver restarts

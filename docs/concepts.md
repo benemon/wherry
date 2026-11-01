@@ -291,8 +291,8 @@ to their deadlines, and so does a drain while the pool is suspended, which
 scans nothing.
 
 With no other live member, as in a one-receiver pool, the custodian exits
-with its keys, and its restart continues as custodian. That is a stop, not a
-decommission: permanently removing a pool's only receiver loses its keys.
+with its keys, and its restart continues as custodian. Permanently removing
+a pool's only receiver loses its keys.
 With `drain_timeout` at `0s`, or with no successor's snapshot by the
 deadline, the custodian exits with its keys and the next custodian
 publishes a `takeover`. A former custodian that stays up answers open
@@ -351,12 +351,13 @@ Custodian loss gives a weaker guarantee than receiver loss:
 Suspending a pool stops new work on it while its running jobs complete and
 its key custody keeps working, so an operator can contain a compromise.
 [`wherry admin pool suspend`](commands.md#wherry-admin-pool-suspend-pool)
-withdraws the hosts' Write on the pool's tasks topic; the receivers keep
+withdraws the hosts' Write on the pool's tasks topic. The receivers keep
 Read, and every other grant stays. Hosts refuse to submit to the pool, and
-receivers claim nothing from it. The custodian refuses the open request of a
-run whose job has not started with `pool suspended`, so that run's task goes
-back to the queue unstarted; it serves adoptions of started jobs. Runs in
-progress continue to their terminal status. A suspension takes back no
+receivers claim nothing from it. The custodian refuses with
+`pool suspended` the open request of a run that has no `started` status and
+is not adopting a job, so that run's task goes back to the queue unstarted.
+It serves adoptions of started jobs. Runs in progress continue to their
+terminal status. A suspension takes back no
 credential a running job holds: rotating the credential at its issuer does,
 and revoking a receiver stops it. The custodian keeps rotating its key, and
 `rotate-key` runs only on a suspended pool. `wherry admin pool resume`

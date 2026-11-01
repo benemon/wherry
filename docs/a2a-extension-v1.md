@@ -2,10 +2,30 @@
 
 URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
+**Change note, 2026-11-01 (pool key):** edited in place at version 1. A
+pool's key custodian replaces the seal exchange: the seal request a
+receiver wrote to the tenant feed and the seal its host answered with are
+removed, with the seal request's `expiry_at_ms`. A submission carries
+its credentials, presigned S3 URLs and redaction key in an `envelope`, with
+its content key in a submit `wrap` to the pool's current key
+([Submission](#submission)). A claimant writes an
+[open request](#open-request). The custodian answers it after the
+[claim check](#the-claim-check) with an [attempt wrap](#attempt-wrap) or an
+[open refusal](#open-refusal), in one transaction with a
+[claim decision](#claim-decision). A receiver holding a replaced pool key
+writes a [re-key wrap](#re-key-wrap) to the current key. The custodian
+publishes a [custodian snapshot](#custodian-snapshot) on the pool's
+`wherry.pool.<pool>.custodian` topic. A [resubmission](#resubmission)
+carries `replaces` and `s3_input_run`. An [advertisement](#advertisement)
+carries `stepping_down` while a custodian drains. Statuses add the kinds
+`released`, `adopting` and `reconciling`, and a `terminal` status the
+wherry event `key-lost`.
+
 **Change note, 2026-10-29 (A2A conformance):** edited in place at version 1.
 A run that ends for want of a credential ends `TASK_STATE_FAILED` with a
-[`credential` data part](#the-credential-data-part) for each credential
-when its agent reports `TASK_STATE_AUTH_REQUIRED`. wherry no longer treats
+[`credential` data part](#the-credential-data-part) for each credential,
+when its seal goes unanswered and when its agent reports
+`TASK_STATE_AUTH_REQUIRED`. wherry no longer treats
 `TASK_STATE_AUTH_REQUIRED` as terminal. A submission's message has `role`
 `ROLE_USER`. An output chunk's artifact has `name`, and its part
 `filename` and `mediaType`. Content a record does not carry, an input in a
@@ -1133,7 +1153,7 @@ wrap under its admission transactional ID.
 ```
 
 - `holder` is the writer. `recipient_kid` is the current key's ID, and `jwe`
-  a wrap of the content key to that key.
+  is a wrap of the content key to that key.
 
 ## Open refusal
 

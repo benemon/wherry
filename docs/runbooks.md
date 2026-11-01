@@ -163,8 +163,9 @@ Confirm it:
 
 1. Read the claiming receivers' logs for
    `run <id>: no answer to the open request for attempt <n>`.
-2. Run `wherry receivers`. The pool's key custodian is one of its `live`
-   receivers.
+2. Find the pool's key custodian from its receivers' log lines, as in step 1
+   of [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
+   and check that it is `live` in `wherry receivers`.
 3. Read the pool's receivers' logs for lines starting `custodian:`, such
    as `custodian: published pool <pool> key <id> (<reason>)`,
    `custodian: lost the custodian group's assignment for pool <pool>` and
@@ -204,8 +205,9 @@ Confirm it:
    `custodian: stepping down in pool <pool>; waiting up to <timeout> for a successor`,
    and a stop with `drain_timeout` at `0s` logs
    `custodian: leaving pool <pool> with no drain timeout; keeping the pool keys to their deadlines`.
-3. Run `wherry receivers`. The pool's key custodian is one of its `live`
-   receivers.
+3. Find the pool's key custodian from its receivers' log lines, as in step 1
+   of [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
+   and check that it is `live` in `wherry receivers`.
 
 Then:
 

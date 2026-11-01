@@ -46,7 +46,8 @@ Everything wherry carries stays on infrastructure the operator runs:
   S3-compatible bucket, by URLs the host presigns, and the storage
   credential never leaves the host;
 - each credential leaves the host only inside the task's envelope,
-  encrypted under the pool's key, opens for one attempt of the claiming
+  encrypted under the pool's key, is opened by the pool's key custodian to
+  check its binding to the task and by one attempt of the claiming
   receiver, and reaches the agent at its target, as
   [Security](security.md) describes;
 - the host keeps its run records, each with the run's task content and

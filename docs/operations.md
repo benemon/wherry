@@ -786,7 +786,8 @@ can undo it, restoring the task topic grants a suspension withdrew, the
 grants a resume restored, or a revoked principal's credential and ACLs.
 
 1. Suspend the pool. It takes no new work: hosts stop submitting to it,
-   receivers stop claiming from it, and the key custodian starts no job.
+   receivers stop claiming from it, and the key custodian refuses the open
+   request of a run with no `started` status that is not adopting a job.
    Running jobs complete. A suspension does not take back the credentials a
    running job holds; rotating them at their issuers, in step 5, cuts off
    running jobs' use of them:

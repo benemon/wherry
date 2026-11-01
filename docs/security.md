@@ -54,9 +54,13 @@ never falls back to an earlier snapshot.
 The receiver that claims a run makes a P-256 key for that attempt and
 writes an **open request** on the pool's events. The key custodian checks
 the claim and answers with an **attempt wrap**, the content key encrypted to
-the attempt's key, or a refusal. Only that attempt of that receiver opens
-the envelope: the attempt's private key lives in the receiver's memory
-until the envelope opens or the wait ends. A receiver whose request no key
+the attempt's key, or a refusal. The key custodian opens the envelope
+itself to check its binding against the task before it wraps the content
+key ([The claim check](#the-claim-check)), and a receiver holding a
+replaced pool key decrypts it to check a content key before it re-keys it.
+Of the claimants, only that attempt of that receiver opens the envelope:
+the attempt's private key lives in the receiver's memory until the
+envelope opens or the wait ends. A receiver whose request no key
 custodian answers within 5 minutes and 120 seconds releases the task to the
 pool. A run that never started and whose envelope no holder of a pool key
 can open ends `TASK_STATE_FAILED` with the wherry event `key-lost`, and its
@@ -94,22 +98,28 @@ otherwise refuses it with the reason the
 - the run is within its open bound: `task_started_by` for a first start,
   `task_ended_by` once the run has started or the claimant is adopting its
   job;
+- the pool is not suspended, or the run has a `started` status or the
+  claim's `adopting` status, so on a suspended pool the custodian serves
+  adoptions of started jobs and no first start;
 - when the claim changed receivers, the previous claimant committed
   `released`, its membership ended, or its latest advertisement appended at
   or before the claim is more than 120 seconds old.
 
-No receiver keeps a run by being its first claimant. The custodian serves a
-new claimant once the previous claimant has released the task or gone
-silent, and refuses it with `two live claimants` while the previous claimant
-is live. It records each decision on a claim durably and reuses it, and it
+The custodian serves a new claimant once the previous claimant has
+released the task or gone silent, and refuses it with `two live claimants`
+while the previous claimant is live. It records each decision on a claim durably and reuses it, and it
 opens the envelope and checks its binding before it wraps the content key,
 so a spliced envelope never releases its key.
 
-A claimant refused `two live claimants`, `not the current claimant` or
-`pool suspended` releases the task to the pool; refused `terminal`, it acknowledges the task
-without a run; refused `past its bound` or `envelope invalid`, it ends the
-run `TASK_STATE_FAILED`; refused `key unavailable`, it decides from the run's
-job as [Lost pool keys](concepts.md#lost-pool-keys) describes.
+A refused claimant acts on the reason:
+
+| Reason | Claimant's action |
+| --- | --- |
+| `two live claimants`, `not the current claimant`, `pool suspended` | releases the task to the pool |
+| `terminal` | acknowledges the task without a run |
+| `past its bound`, `envelope invalid` | ends the run `TASK_STATE_FAILED` |
+| `key unavailable` | decides from the run's job, as [Lost pool keys](concepts.md#lost-pool-keys) describes |
+
 [Open refusal](a2a-extension-v1.md#open-refusal) gives each action in full.
 
 ## What the envelope binds
@@ -158,7 +168,7 @@ admission: a malformed first task can win its run and then fail at open with
 
 ## What the pool key protects
 
-The pool remains the trust boundary: its receivers trust each other fully.
+The pool is the trust boundary: its receivers trust each other fully.
 A malicious member of the pool forging claim evidence, initialising the
 custodian's transactional ID, publishing a snapshot naming itself with any
 reason, or withholding re-key wraps is out of scope.
@@ -174,8 +184,10 @@ Daily [rotation](concepts.md#rotation) stops a silently copied key from
 receiving new tasks within a day. Deleting a key at its deadline protects
 old envelopes only if the key was never copied.
 
-Against an exchange in which the submitting host answers each attempt with
-the run's credentials, custody in the pool:
+### Trade-offs of pool custody
+
+The pool's key custodian holds the key that opens every task's envelope, so
+no attempt needs an answer from the submitting host. Custody in the pool:
 
 - lets the host go offline once `submit` returns: retries, takeovers and
   drains need no answer from it;
