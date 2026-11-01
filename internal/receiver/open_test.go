@@ -1084,13 +1084,15 @@ func TestAnAdopterRefusedOnceRequestsAgain(t *testing.T) {
 		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
 		sealedTo(t, keyA)(task)
 	})
+	f.quiet()
 	done := f.executing(t, f.ctx, record, 2)
-	for f.answeredWith(t, wire.RefusedKeyUnavailable) == 0 {
-		time.Sleep(50 * time.Millisecond)
-	}
+	refusal := &wire.OpenRefusal{Custodian: testReceiver, Request: wire.Digest(f.requestRecord(t, 1).Value), Reason: wire.RefusedKeyUnavailable}
+	f.produce(t, admin.PoolEventsTopic(testPool), "run-b", must(t)(wire.SignRecord(refusal, f.receiver.signing)))
+	f.requestRecord(t, 2)
 	if err := a.serveOpens(f.ctx); err != nil {
 		t.Fatal(err)
 	}
+	f.serving.Store(true)
 	if status := <-done; status != kgo.AckAccept || f.lastTask(t).Status.State != wire.TaskStateCompleted {
 		t.Fatalf("adopter ended %v; logs:\n%s", status, f.logs.String())
 	}
