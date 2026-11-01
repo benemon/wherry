@@ -716,21 +716,24 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	if err != nil {
 		return poolEvents{}, err
 	}
-	// Retention deletes from the log start: what a read of the whole topic no longer sees is dropped.
-	retained := slices.IndexFunc(fold.entries, func(entry foldedEvent) bool { return entry.offset >= start })
+	// Retention deletes from the log start: what a read of the whole topic no longer sees is dropped, records this read
+	// fetched before the start moved included.
+	all := append(fold.entries, entries...)
+	retained := slices.IndexFunc(all, func(entry foldedEvent) bool { return entry.offset >= start })
 	if retained < 0 {
-		retained = len(fold.entries)
+		retained = len(all)
 	}
 	if retained > 0 {
-		fold.entries, fold.events = slices.Clone(fold.entries[retained:]), newPoolEvents()
+		fold.entries, fold.events = slices.Clone(all[retained:]), newPoolEvents()
 		for _, entry := range fold.entries {
 			entry.apply(&fold.events)
 		}
+	} else {
+		for _, entry := range entries {
+			entry.apply(&fold.events)
+		}
+		fold.entries = all
 	}
-	for _, entry := range entries {
-		entry.apply(&fold.events)
-	}
-	fold.entries = append(fold.entries, entries...)
 	fold.next, fold.state, fold.peers, fold.ended = max(fold.next, end), state, peers, ended
 	return fold.events.view(), nil
 }

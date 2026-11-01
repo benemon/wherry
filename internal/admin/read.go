@@ -39,7 +39,8 @@ type read struct {
 	records    []*kgo.Record
 	err        error
 	done       chan struct{}
-	// start and end are the highest log start and last stable offsets listed for the topic.
+	// start and end are the highest log start and last stable offsets listed for the topic, start raised by those its
+	// fetches report.
 	start, end int64
 }
 
@@ -95,7 +96,8 @@ func (r *Reader) ReadFromWithEnd(ctx context.Context, topic string, offset int64
 	return records, end, err
 }
 
-// ReadRange is ReadFromWithEnd that also returns the log start offset listed before the read.
+// ReadRange is ReadFromWithEnd that also returns the log start offset in effect at the read's last fetch, or listed
+// before the read when it fetched nothing: retention can move it past the listing between the two.
 func (r *Reader) ReadRange(ctx context.Context, topic string, offset int64) ([]*kgo.Record, int64, int64, error) {
 	reads, err := r.readFrom(ctx, map[string]int64{topic: offset})
 	if err != nil {
@@ -340,6 +342,7 @@ func (r *Reader) fetch(ctx context.Context) {
 		if !wanted {
 			return
 		}
+		current.start = max(current.start, partition.LogStartOffset)
 		for _, record := range partition.Records {
 			if record.Offset < end && !record.Attrs.IsControl() {
 				current.records = append(current.records, record)

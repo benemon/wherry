@@ -3,6 +3,7 @@ package receiver
 import (
 	"fmt"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // freshReader is a receiver with the ID of f's receiver and its own fold of the pool's events.
@@ -147,6 +150,34 @@ func TestPoolEventsDropWhatRetentionDeleted(t *testing.T) {
 	}
 	if kept := after.records["run-a"]; len(kept) != 1 || kept[0].Offset != repeated {
 		t.Fatalf("status records %d, want the one repeating the deleted status's event ID", len(kept))
+	}
+}
+
+// Retention moving the log start between the listing before a read and its fetch: the fold drops by the start in
+// effect after the fetch, as a full read sees it.
+func TestPoolEventsDropByTheStartInEffectAfterTheFetch(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	fresh := freshReader(t, f)
+	record := f.submit(t, f.host, nil)
+	topic := admin.PoolEventsTopic(testPool)
+	f.produce(t, topic, "run-a", must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: "run-a"}, f.host)))
+	before := sameAsFullRead(t, f, fresh)
+	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
+	records := f.records(t, topic)
+	last := records[len(records)-1].Offset
+	var once sync.Once
+	f.cluster.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Fetch}, Topic: topic, Observe: true, When: func(kmsg.Request) bool {
+		once.Do(func() {
+			if err := f.cluster.DeleteRecords(topic, 0, last); err != nil {
+				t.Error(err)
+			}
+		})
+		return true
+	}})
+	after := sameAsFullRead(t, f, fresh)
+	if len(before.others["run-a"]) != 1 || len(after.others["run-a"]) != 0 || len(after.statuses["run-a"]) != 1 {
+		t.Fatalf("cancels %d before and %d after, statuses %d after, want 1, 0 and the retained status", len(before.others["run-a"]), len(after.others["run-a"]), len(after.statuses["run-a"]))
 	}
 }
 
