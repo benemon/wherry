@@ -121,7 +121,7 @@ func TestRotateKeyReportStatesItsHorizon(t *testing.T) {
 	var out bytes.Buffer
 	writeRotateReport(&out, "pool-a", admin.RotateReport{SuspectKeys: []string{"kid-a", "kid-b"}, Horizon: map[int32]int64{1: 7, 0: 3}, OldestMS: now.Add(-50 * time.Hour).UnixMilli(),
 		Tasks: []admin.SuspectTask{{Run: "run-a", Tenant: "tenant-a", KeyID: "kid-a", Credentials: []string{"deploy", "model"}, AppendedMS: now.Add(-time.Hour).UnixMilli()}}}, now)
-	want := `rotate-key recorded for pool pool-a; its key custodian rotates on its next pass
+	want := `pool pool-a's key custodian rotated for the rotate-key request; tasks appended through that rotation are listed
 suspect_keys=kid-a,kid-b
 horizon partition=0 oldest_retained_offset=3
 horizon partition=1 oldest_retained_offset=7

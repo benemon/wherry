@@ -552,35 +552,42 @@ func poolRetention(terms Terms) (retentionBounds, error) {
 }
 
 func (service *Service) appendChecked(ctx context.Context, key []byte, record Record) (State, error) {
+	state, _, err := service.appendRecord(ctx, key, record)
+	return state, err
+}
+
+// appendRecord is appendChecked that also returns the record's wherry.admin offset.
+func (service *Service) appendRecord(ctx context.Context, key []byte, record Record) (State, int64, error) {
 	if err := service.createTopics(ctx, "-1", AdminTopic); err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	// A topic created with older configs converges on the next admin write.
 	if err := service.configureTopics(ctx, receiversConfigs, ReceiversTopic); err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	state, err := service.LoadState(ctx)
 	if err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	encoded, err := EncodeRecord(record)
 	if err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	decoded, _ := DecodeRecord(encoded)
 	if err := apply(&state, decoded); err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	if err := state.CheckNames(); err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
-	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Key: key, Value: encoded}).FirstErr(); err != nil {
-		return State{}, fmt.Errorf("write admin record: %w", err)
+	produced, err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Key: key, Value: encoded}).First()
+	if err != nil {
+		return State{}, 0, fmt.Errorf("write admin record: %w", err)
 	}
-	return state, nil
+	return state, produced.Offset, nil
 }
 
 func (service *Service) createTopics(ctx context.Context, retentionMS string, topics ...string) error {

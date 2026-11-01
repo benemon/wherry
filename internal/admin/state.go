@@ -229,8 +229,8 @@ type Record struct {
 	Offset   int64           `json:"offset,omitzero"`
 	SHA256   string          `json:"sha256,omitzero"`
 	AtMS     int64           `json:"at_ms"`
-	// AppendedMS is the record's append time on wherry.admin, which load sets; the writer's clock never decides it.
-	AppendedMS int64 `json:"-"`
+	// At is the record's offset on wherry.admin, which load sets; offsets, never clocks, order operator requests.
+	At int64 `json:"-"`
 }
 type Host struct{ Tenant, Name string }
 type State struct {
@@ -241,7 +241,7 @@ type State struct {
 	Ended        map[string]bool
 	Revoking     map[string]bool
 	Suspended    map[string]bool
-	// RotateRequested is the append time of each pool's latest rotate-key record.
+	// RotateRequested is the wherry.admin offset of each pool's latest rotate-key record.
 	RotateRequested map[string]int64
 }
 
@@ -338,7 +338,7 @@ func apply(state *State, record Record) error {
 		case "resume":
 			delete(state.Suspended, record.Pool)
 		default:
-			state.RotateRequested[record.Pool] = record.AppendedMS
+			state.RotateRequested[record.Pool] = record.At
 		}
 	}
 	return nil
@@ -693,7 +693,7 @@ func load(raw []rawRecord) (State, error) {
 			newer[entry.Offset] = errors.Is(err, ErrNewerRecord)
 			continue
 		}
-		record.AppendedMS = entry.AppendedMS
+		record.At = entry.Offset
 		if record.Kind == "skip" {
 			skips = append(skips, record)
 		} else {

@@ -330,6 +330,9 @@ type Snapshot struct {
 	Custodian string  `json:"custodian"`
 	Reason    string  `json:"reason"`
 	Current   PoolKey `json:"current"`
+	// RotatedFor is the wherry.admin offset of the latest rotate-key record for the pool a key published by this
+	// snapshot or an earlier one was generated after; every snapshot carries it on.
+	RotatedFor int64 `json:"rotated_for,omitzero"`
 }
 
 // PoolKey is a pool's public P-256 key and its RFC 7638 key ID.

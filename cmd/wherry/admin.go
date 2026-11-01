@@ -159,7 +159,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		if options["suspect-key"] != "" {
 			suspects = strings.Split(options["suspect-key"], "\n")
 		}
-		report, err := service.PoolRotateKey(ctx, pos[2], suspects)
+		report, err := service.PoolRotateKey(ctx, pos[2], suspects, stderr)
 		if err != nil {
 			return err
 		}
@@ -228,7 +228,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 // writeRotateReport writes report's suspect tasks by name, never a value, with the horizon before which retention deleted
 // tasks unlisted.
 func writeRotateReport(out io.Writer, pool string, report admin.RotateReport, now time.Time) {
-	fmt.Fprintf(out, "rotate-key recorded for pool %s; its key custodian rotates on its next pass\n", pool)
+	fmt.Fprintf(out, "pool %s's key custodian rotated for the rotate-key request; tasks appended through that rotation are listed\n", pool)
 	fmt.Fprintf(out, "suspect_keys=%s\n", strings.Join(report.SuspectKeys, ","))
 	for _, partition := range slices.Sorted(maps.Keys(report.Horizon)) {
 		fmt.Fprintf(out, "horizon partition=%d oldest_retained_offset=%d\n", partition, report.Horizon[partition])

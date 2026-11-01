@@ -18,17 +18,40 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// A rotate-key record has the key custodian rotate on its next pass, once, and a host then wraps to the new key.
+// A rotate-key request has the key custodian rotate on its next pass, once, the command returns once it reads the
+// rotated snapshot, and after resume a host wraps to the new key.
 func TestRotateKeyRecordRotatesAtOnceAndHostsEncryptToTheNewKey(t *testing.T) {
 	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	old, _ := onlyKey(t, f.receiver)
-	report, err := f.service.PoolRotateKey(f.ctx, testPool, nil)
-	if err != nil || !reflect.DeepEqual(report.SuspectKeys, []string{old}) {
-		t.Fatalf("rotate-key %+v, %v; want the current key %s suspect", report, err, old)
-	}
-	if err := f.receiver.refresh(f.ctx); err != nil {
+	if err := f.service.PoolSuspend(f.ctx, testPool, true); err != nil {
 		t.Fatal(err)
+	}
+	type rotated struct {
+		report admin.RotateReport
+		err    error
+	}
+	done := make(chan rotated, 1)
+	go func() {
+		report, err := f.service.PoolRotateKey(f.ctx, testPool, nil, io.Discard)
+		done <- rotated{report, err}
+	}()
+	var result rotated
+	for waiting := true; waiting; {
+		select {
+		case result = <-done:
+			waiting = false
+		case <-time.After(100 * time.Millisecond):
+			if err := f.receiver.refresh(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.receiver.tend(f.ctx, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if result.err != nil || !reflect.DeepEqual(result.report.SuspectKeys, []string{old}) {
+		t.Fatalf("rotate-key %+v, %v; want the current key %s suspect", result.report, result.err, old)
 	}
 	for range 2 {
 		if err := f.receiver.tend(f.ctx, time.Now()); err != nil {
@@ -39,6 +62,9 @@ func TestRotateKeyRecordRotatesAtOnceAndHostsEncryptToTheNewKey(t *testing.T) {
 	latest := parseSnapshot(t, records[len(records)-1], testReceiver, f.receiver.signing)
 	if len(records) != 2 || latest.Reason != "rotation" || latest.Current.KeyID == old {
 		t.Fatalf("%d snapshots, latest %s with key %s; want one rotation away from %s; logs:\n%s", len(records), latest.Reason, latest.Current.KeyID, old, f.logs.String())
+	}
+	if err := f.service.PoolSuspend(f.ctx, testPool, false); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("WHERRY_TEST_TOKEN", testToken)
 	kafka, err := kgo.NewClient(append(f.service.Admin.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
@@ -70,6 +96,50 @@ func TestRotateKeyRecordRotatesAtOnceAndHostsEncryptToTheNewKey(t *testing.T) {
 		return
 	}
 	t.Fatal("the submitted task is not on the task topic")
+}
+
+// Rotate-key requests are ordered by their wherry.admin offsets, never by a clock: a request above the offset the
+// current snapshot carries rotates the key once, whatever its timestamp, and one at or below it never does.
+func TestRotateKeyRequestsAreOrderedByOffset(t *testing.T) {
+	f := newBareFixture(t)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	request := func(stamped time.Time) int64 {
+		t.Helper()
+		record := &kgo.Record{Topic: admin.AdminTopic, Key: []byte("rotate-key." + testPool), Value: must(t)(admin.EncodeRecord(admin.Record{Kind: "rotate-key", Pool: testPool})), Timestamp: stamped}
+		if err := f.service.Admin.ProduceSync(f.ctx, record).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.receiver.refresh(f.ctx); err != nil {
+			t.Fatal(err)
+		}
+		return record.Offset
+	}
+	passes := func(want int, rotatedFor int64) {
+		t.Helper()
+		for range 3 {
+			if err := f.receiver.tend(f.ctx, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		records := f.snapshotRecords(t)
+		if latest := parseSnapshot(t, records[len(records)-1], testReceiver, f.receiver.signing); len(records) != want || latest.RotatedFor != rotatedFor {
+			t.Fatalf("%d snapshots, the latest rotated for %d; want %d, rotated for %d; logs:\n%s", len(records), latest.RotatedFor, want, rotatedFor, f.logs.String())
+		}
+	}
+	// Stamped after every snapshot, so a clock would rotate on it at every pass.
+	future := request(time.Now().Add(time.Hour))
+	passes(2, future)
+	// Stamped before every snapshot, so a clock would never rotate on it.
+	past := request(time.Now().Add(-time.Hour))
+	passes(3, past)
+	// A restarted custodian reads which requests are done from the snapshot.
+	again := restarted(t, f.receiver)
+	if err := again.configure(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	custodian(t, f.ctx, again, time.Now())
+	f.receiver = again
+	passes(3, past)
 }
 
 // A receiver of a suspended pool claims nothing, answers no open request and records no denial; after resume it claims

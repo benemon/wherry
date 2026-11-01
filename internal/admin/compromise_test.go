@@ -1,15 +1,18 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"io"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -126,8 +129,9 @@ func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
 	}
 }
 
-// The rotate-key report lists every retained task under a suspect key by run, tenant and credential names, from the
-// oldest retained offset, which it states; the record names its append time.
+// The rotate-key report of a suspended pool lists every task retained under a suspect key through the rotated snapshot,
+// one appended after the request included, by run, tenant and the credential names of the terms in force at its append,
+// from the oldest retained offset, which it states. A pool not suspended is refused.
 func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 	service, ctx := compromiseFixture(t)
 	_, receiverKey, _ := ed25519.GenerateKey(rand.Reader)
@@ -171,14 +175,66 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 	}
 	retained := submit("run-current", current)
 	submit("run-other", other)
-	requested := time.Now()
-	report, err := service.PoolRotateKey(ctx, "pool-a", nil)
-	if err != nil {
+	// The terms renaming the agent's credential come after run-current and run-other.
+	renamed := modelTerms()
+	renamed.Agents[0].Credentials[0].Name = "model-renamed"
+	if err := service.PoolUpdate(ctx, "pool-a", renamed, false); err != nil {
 		t.Fatal(err)
 	}
-	want := []SuspectTask{{"run-current", "tenant-a", currentID, []string{"deploy", "model"}, retained.Timestamp.UnixMilli()}}
+	if _, err := service.PoolRotateKey(ctx, "pool-a", nil, io.Discard); err == nil || !strings.Contains(err.Error(), "pool pool-a is not suspended") {
+		t.Fatalf("rotate-key of a pool not suspended = %v, want a refusal naming the suspension", err)
+	}
+	if err := service.PoolSuspend(ctx, "pool-a", true); err != nil {
+		t.Fatal(err)
+	}
+	// rotate runs rotate-key and plays the key custodian: once the command reports its wait, it calls between, then
+	// commits a snapshot rotated for the request.
+	rotations := 0
+	rotate := func(suspects []string, between func()) RotateReport {
+		t.Helper()
+		type rotated struct {
+			report RotateReport
+			err    error
+		}
+		done, waiting := make(chan rotated, 1), &signalWriter{signal: make(chan struct{}, 1)}
+		go func() {
+			report, err := service.PoolRotateKey(ctx, "pool-a", suspects, waiting)
+			done <- rotated{report, err}
+		}()
+		select {
+		case <-waiting.signal:
+		case result := <-done:
+			t.Fatalf("rotate-key returned %+v, %v before its custodian rotated", result.report, result.err)
+		}
+		state, err := service.LoadState(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		between()
+		rotations++
+		next, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		snapshot := mustBytes(t)(signed.Sign(wire.CustodianType, "receiver-a", &wire.Snapshot{V: 1, Pool: "pool-a", Custodian: "receiver-a", Reason: "rotation",
+			Current: wire.PoolKey{KeyID: signed.KeyThumbprint(&next.PublicKey), Key: jose.JSONWebKey{Key: &next.PublicKey}}, RotatedFor: state.RotateRequested["pool-a"]}, receiverKey))
+		if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: CustodianTopic("pool-a"), Key: []byte(wire.CustodianKey), Value: snapshot}).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+		result := <-done
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if !strings.Contains(waiting.String(), "waiting for pool pool-a's key custodian to rotate for the request at wherry.admin offset ") {
+			t.Fatalf("progress %q", waiting.String())
+		}
+		return result.report
+	}
+	var late *kgo.Record
+	report := rotate(nil, func() { late = submit("run-late", current) })
+	want := []SuspectTask{
+		{"run-current", "tenant-a", currentID, []string{"deploy", "model"}, retained.Timestamp.UnixMilli()},
+		{"run-late", "tenant-a", currentID, []string{"deploy", "model-renamed"}, late.Timestamp.UnixMilli()},
+	}
 	if !reflect.DeepEqual(report.SuspectKeys, []string{currentID}) || !reflect.DeepEqual(report.Tasks, want) {
-		t.Fatalf("report %+v, want the current key's retained task %+v", report, want)
+		t.Fatalf("report %+v, want the current key's retained tasks %+v", report, want)
 	}
 	if report.Horizon[expired.Partition] != expired.Offset+1 || report.OldestMS != retained.Timestamp.UnixMilli() {
 		t.Fatalf("horizon %v from %d, want partition %d from offset %d, the oldest retained task's time", report.Horizon, report.OldestMS, expired.Partition, expired.Offset+1)
@@ -190,14 +246,32 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 			}
 		}
 	}
-	state, err := service.LoadState(ctx)
-	if err != nil || state.RotateRequested["pool-a"] < requested.Add(-time.Second).UnixMilli() {
-		t.Fatalf("rotate-key request at %d, %v; want its append time", state.RotateRequested["pool-a"], err)
+	if named := rotate([]string{otherID, currentID}, func() {}); len(named.Tasks) != 3 || rotations != 2 {
+		t.Fatalf("report under both keys %+v; want all three retained tasks", named)
 	}
-	named, err := service.PoolRotateKey(ctx, "pool-a", []string{otherID, currentID})
-	if err != nil || len(named.Tasks) != 2 {
-		t.Fatalf("report under both keys %+v, %v; want both retained tasks", named, err)
+}
+
+// signalWriter keeps what is written to it and signals the first write.
+type signalWriter struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+	signal chan struct{}
+}
+
+func (w *signalWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	select {
+	case w.signal <- struct{}{}:
+	default:
 	}
+	return w.buffer.Write(p)
+}
+
+func (w *signalWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buffer.String()
 }
 
 func mustBytes(t *testing.T) func([]byte, error) []byte {

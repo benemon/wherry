@@ -435,13 +435,13 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 	}
 	key := keys[latest.snapshot.Current.KeyID]
 	if r.custody.contested {
-		return r.publish(ctx, keys, "contested", key, latest, now)
+		return r.publish(ctx, keys, "contested", key, latest.snapshot.RotatedFor, latest, now)
 	}
 	if latest.resign {
-		return r.publish(ctx, keys, latest.snapshot.Reason, key, latest, now)
+		return r.publish(ctx, keys, latest.snapshot.Reason, key, latest.snapshot.RotatedFor, latest, now)
 	}
-	// A rotate-key record appended after the current key's snapshot rotates it at once.
-	if state, _, _ := r.snapshot(); state.RotateRequested[r.config.Pool] > key.PublishedMS || !now.Before(rotationAt(time.UnixMilli(key.PublishedMS), r.config.Pool, latest.snapshot.Current.KeyID)) {
+	// A rotate-key record above the offset the current snapshot carries rotates the key at once.
+	if state, _, _ := r.snapshot(); state.RotateRequested[r.config.Pool] > latest.snapshot.RotatedFor || !now.Before(rotationAt(time.UnixMilli(key.PublishedMS), r.config.Pool, latest.snapshot.Current.KeyID)) {
 		return r.mint(ctx, keys, "rotation", latest, now)
 	}
 	return nil
@@ -553,8 +553,14 @@ func (r *Receiver) keepKeys(keys map[string]*poolKey, latest current, now time.T
 	return nil
 }
 
-// mint generates a pool key, persists it unpublished and publishes it as current for reason.
+// mint generates a pool key, persists it unpublished and publishes it as current for reason, rotated for every rotate-key
+// record the receiver has read.
 func (r *Receiver) mint(ctx context.Context, keys map[string]*poolKey, reason string, from current, now time.Time) error {
+	state, _, _ := r.snapshot()
+	rotatedFor := state.RotateRequested[r.config.Pool]
+	if from.snapshot != nil {
+		rotatedFor = max(rotatedFor, from.snapshot.RotatedFor)
+	}
 	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return err
@@ -564,16 +570,17 @@ func (r *Receiver) mint(ctx context.Context, keys map[string]*poolKey, reason st
 		return err
 	}
 	keys[key.id()] = key
-	return r.publish(ctx, keys, reason, key, from, now)
+	return r.publish(ctx, keys, reason, key, rotatedFor, from, now)
 }
 
-// publish commits a snapshot naming key current for reason in one transaction, reads the committed snapshot back, which
-// also settles an ambiguous commit, and then marks key published. from is the read the pass started from. A failed write
-// keeps the producer for the next pass, unless the producer was fenced or another receiver's snapshot committed after
-// from: then the receiver is superseded and writes no more until it is assigned again.
-func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason string, key *poolKey, from current, now time.Time) error {
+// publish commits a snapshot naming key current for reason and carrying rotatedFor in one transaction, reads the
+// committed snapshot back, which also settles an ambiguous commit, and then marks key published. from is the read the
+// pass started from. A failed write keeps the producer for the next pass, unless the producer was fenced or another
+// receiver's snapshot committed after from: then the receiver is superseded and writes no more until it is assigned
+// again.
+func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason string, key *poolKey, rotatedFor int64, from current, now time.Time) error {
 	public := &key.Key.Key.(*ecdsa.PrivateKey).PublicKey
-	value := r.sign(&wire.Snapshot{Pool: r.config.Pool, Custodian: r.id, Reason: reason, Current: wire.PoolKey{KeyID: key.id(), Key: jose.JSONWebKey{Key: public}}})
+	value := r.sign(&wire.Snapshot{Pool: r.config.Pool, Custodian: r.id, Reason: reason, Current: wire.PoolKey{KeyID: key.id(), Key: jose.JSONWebKey{Key: public}}, RotatedFor: rotatedFor})
 	producer := r.custody.producer
 	// A transaction a failed pass left open is aborted first.
 	err := producer.EndTransaction(ctx, kgo.TryAbort)
