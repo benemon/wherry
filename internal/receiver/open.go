@@ -160,6 +160,8 @@ func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle
 		switch {
 		case ctx.Err() != nil:
 			return nil, "", kgo.AckRelease, true
+		case run.poolSuspended(ctx):
+			return nil, "", run.suspended(ctx, job, nil), true
 		case cancelled && job != nil:
 			return nil, "", run.stopAndCancel(ctx, *job, nil), true
 		case cancelled:

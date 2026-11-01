@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -107,7 +108,14 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		r.mu.Unlock()
 	})
 	defer fetched()
+	// The broker reports a refused acknowledgement, a renewal included, only to this callback.
+	readDenied := &atomic.Bool{}
 	share, err := r.newClient(
+		kgo.ShareAckCallback(func(_ *kgo.Client, results kgo.ShareAckResults) {
+			if authorisationError(results.Error()) {
+				readDenied.Store(true)
+			}
+		}),
 		kgo.ConsumeTopics(admin.PoolTasksTopic(r.config.Pool)),
 		kgo.ShareGroup(admin.PoolGroup(r.config.Pool)),
 		kgo.ShareMaxRecords(1),
@@ -171,6 +179,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		record.Ack(ack)
 		return flush()
 	}
+	admitted.readDenied = readDenied
 	r.adjustInFlight(1)
 	defer r.adjustInFlight(-1)
 	tenant, routed := admitted.task.Wherry.Tenant, admitted.profile.Name
@@ -203,6 +212,8 @@ type admission struct {
 	s3Inputs    []wire.S3Input
 	// cancelled is set when a host of the run's tenant cancelled the run; it ends CANCELED without a dispatch.
 	cancelled bool
+	// readDenied is set when the broker refuses an acknowledgement of the task's claim authorisation.
+	readDenied *atomic.Bool
 }
 
 // admit decides whether record's task runs here; a nil admission carries the acknowledgement.
@@ -634,7 +645,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	defer producer.Close()
 	run := &activeRun{
 		receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, profile: admitted.profile,
-		expected: admitted.outputs, deadline: deadline, claimed: time.Now(),
+		expected: admitted.outputs, deadline: deadline, claimed: time.Now(), readDenied: admitted.readDenied,
 	}
 	defer func() {
 		r.liveMu.Lock()
@@ -992,12 +1003,16 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		return run.stopAndFail(ctx, handle, "log stream failed", pending), true
 	}
 	var followErr error
-	// stopHeld ends the run when the receiver holds its cancel or a denial lasting one lock interval.
+	// stopHeld ends the run when its pool is suspended, or the receiver holds its cancel or a denial lasting one lock
+	// interval.
 	stopHeld := func() (kgo.AckStatus, bool) {
 		r.mu.Lock()
 		cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
 		r.mu.Unlock()
 		switch {
+		case run.poolSuspended(ctx):
+			stopFollow()
+			return run.suspended(ctx, &handle, pending), true
 		case r.stopForDenial():
 			stopFollow()
 			return run.deny(ctx, handle, pending), true
@@ -1208,6 +1223,9 @@ type activeRun struct {
 	// event is the wherry event of the run's terminal status; kept leaves the run's material to the plugin's cleanup.
 	event string
 	kept  bool
+	// readDenied is set when the broker refuses an acknowledgement of the run's claim, its renewals included,
+	// authorisation; nil when nothing reports it.
+	readDenied *atomic.Bool
 }
 
 // deliver keeps the forms of each credential value delivered to the run, each with the marker of the value's name under
@@ -1410,6 +1428,35 @@ func (run *activeRun) deny(ctx context.Context, handle pluginsdk.Handle, pending
 	return kgo.AckRelease
 }
 
+// suspendedReason ends a run of a suspended pool. It is no key-lost, so no host resubmits the run.
+const suspendedReason = "pool suspended"
+
+// poolSuspended reports the run's pool suspended: as the receiver holds wherry.admin, or, once an acknowledgement of its
+// claim was refused authorisation, as wherry.admin reads now. A suspension is recorded before its ACLs are withdrawn.
+func (run *activeRun) poolSuspended(ctx context.Context) bool {
+	r := run.receiver
+	if state, _, _ := r.snapshot(); state.Suspended[r.config.Pool] {
+		return true
+	}
+	if run.readDenied == nil || !run.readDenied.Swap(false) {
+		return false
+	}
+	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	state, err := r.reader.Load(readCtx)
+	return err == nil && state.Suspended[r.config.Pool]
+}
+
+// suspended stops the run's job, if it has one, and ends the run failed. Its claim cannot be acknowledged while the
+// pool is suspended, so a delivery after resume finds the run terminal.
+func (run *activeRun) suspended(ctx context.Context, job *pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
+	run.receiver.logger.Printf("run %s: pool %s suspended; ending the run", run.task.Wherry.Run, run.receiver.config.Pool)
+	if job != nil {
+		return run.stopAndFail(ctx, *job, suspendedReason, pending)
+	}
+	return run.fail(ctx, suspendedReason, pending)
+}
+
 // expired ends a run past a bound: task_ended_by once its deadline passed, else task_started_by before its job
 // started. With no handle, the run's job, if one exists, is purged; a run admitted with no offer has no profile to
 // purge in.
@@ -1603,6 +1650,9 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 	}
 	terms := run.terms()
 	run.collect(ctx, handle, stopped, terms)
+	if run.poolSuspended(ctx) {
+		return run.suspended(ctx, &handle, pending)
+	}
 	cause, reason := "", ""
 	if terminal.Reason != "" {
 		reason = " (" + logText(run.redactText, errors.New(terminal.Reason)) + ")"

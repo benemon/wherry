@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"context"
 	"crypto/ed25519"
 	"io"
 	"log"
@@ -189,4 +190,122 @@ func TestDrainWhileSuspendedKeepsTheKeys(t *testing.T) {
 	if logs := f.logs.String(); !strings.Contains(logs, "is suspended, so its task topic cannot be scanned") || strings.Contains(logs, "denied (") {
 		t.Fatalf("want the suspended scan logged without a denial; logs:\n%s", logs)
 	}
+}
+
+// endedSuspended checks that run ended FAILED pool suspended, without key-lost, after stops Stops, and that its task
+// delivered again after resume is acknowledged without a run.
+func endedSuspended(t *testing.T, f fixture, record *kgo.Record, stops int) {
+	t.Helper()
+	var terminals []wire.RunStatus
+	for _, status := range f.eventStatuses(t) {
+		if status.Wherry.Run == string(record.Key) && status.Wherry.Kind == "terminal" {
+			terminals = append(terminals, status)
+		}
+	}
+	if len(terminals) != 1 || terminals[0].StatusUpdate.Status.State != wire.TaskStateFailed || terminals[0].StatusUpdate.Status.Message.Parts[0].Text != suspendedReason ||
+		terminals[0].Wherry.Event != "" {
+		t.Fatalf("terminals %+v, want one FAILED pool suspended without key-lost; logs:\n%s", terminals, f.logs.String())
+	}
+	f.plugin.mu.Lock()
+	stopped := f.plugin.stops
+	f.plugin.mu.Unlock()
+	if stopped != stops {
+		t.Fatalf("stops %d, want %d", stopped, stops)
+	}
+	if err := f.service.PoolSuspend(f.ctx, testPool, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckAccept {
+		t.Fatalf("after resume the task is admitted %v with %v, want acknowledged without a run", admitted != nil, ack)
+	}
+}
+
+// suspend suspends the pool and has the receiver read it.
+func (f fixture) suspend(t *testing.T) {
+	t.Helper()
+	if err := f.service.PoolSuspend(f.ctx, testPool, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A run waiting for its open when its pool is suspended ends FAILED pool suspended and never dispatches.
+func TestSuspendEndsARunBeforeItsOpen(t *testing.T) {
+	f := newFixture(t, resultStream)
+	previous := openWait
+	openWait = 30 * time.Second
+	t.Cleanup(func() { openWait = previous })
+	f.quiet()
+	record := f.submit(t, f.host, nil)
+	done := f.executing(t, f.ctx, record, 1)
+	f.request(t, 1)
+	f.suspend(t)
+	if status := <-done; status != kgo.AckReject {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	if dispatches, _, _ := f.dispatched(t); dispatches != 0 {
+		t.Fatalf("dispatches %d, want none", dispatches)
+	}
+	endedSuspended(t, f, record, 0)
+}
+
+// A run following its job when its pool is suspended has its job stopped and ends FAILED pool suspended, on the renewal
+// the withdrawn READ refuses, before the receiver reads wherry.admin again; after resume its task is not run again.
+func TestSuspendStopsARunningRunOnItsRefusedRenewal(t *testing.T) {
+	f := newFixture(t, noResultStream)
+	f.plugin.endDelay = 30 * time.Second
+	record := f.submit(t, f.host, nil)
+	done := make(chan error, 1)
+	go func() { done <- f.receiver.claimOne(f.ctx, f.ctx, func() {}) }()
+	for {
+		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
+			break
+		}
+		if f.ctx.Err() != nil {
+			t.Fatalf("run never started; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := f.service.PoolSuspend(f.ctx, testPool, true); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the run kept going on refused renewals; logs:\n%s", f.logs.String())
+	}
+	endedSuspended(t, f, record, 1)
+	// The claim the suspension left unacknowledged comes back after resume; the receiver acknowledges it unrun.
+	ctx, stop := context.WithCancel(f.ctx)
+	done = make(chan error, 1)
+	go func() { done <- f.receiver.Run(ctx) }()
+	time.Sleep(3 * time.Second)
+	stop()
+	<-done
+	if dispatches, _, _ := f.dispatched(t); dispatches != 1 {
+		t.Fatalf("dispatches %d after resume, want 1; logs:\n%s", dispatches, f.logs.String())
+	}
+	if record, delivered := f.pollPool(t, string(record.Key), 3*time.Second); delivered {
+		t.Fatalf("the task is still delivered (delivery %d) after resume", record.DeliveryCount())
+	}
+}
+
+// A run whose pool is suspended while its outputs are collected for its terminal commit ends FAILED pool suspended
+// with its job stopped, whatever its outcome.
+func TestSuspendEndsARunInItsTerminalCommit(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.collecting = func() { f.suspend(t) }
+	record := f.submit(t, f.host, nil)
+	if status := <-f.executing(t, f.ctx, record, 1); status != kgo.AckReject {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	f.plugin.mu.Lock()
+	f.plugin.collecting = nil
+	f.plugin.mu.Unlock()
+	endedSuspended(t, f, record, 2)
 }
