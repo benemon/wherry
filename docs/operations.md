@@ -702,10 +702,14 @@ runbook.
 
 ## Stop a pool's key custodian
 
-A key custodian that stops without handing over leaves the tasks under its
+A key custodian that stops without re-keying its tasks leaves the tasks under its
 keys to fail before they start, until their hosts resubmit them
 ([Lost pool keys](concepts.md#lost-pool-keys)). A planned stop hands its
-custody to another receiver of the pool and re-keys those tasks.
+custody to another receiver of the pool and re-keys those tasks. The
+successor publishes a `takeover` snapshot, as for any custodian change, so
+each planned stop of a custodian raises
+[WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover): expect it, and
+check that the new custodian is the receiver the stop handed on to.
 
 Prerequisites: `drain_timeout` over `0s` in each receiver's local
 configuration and the platform's stop window set with it, as in
@@ -726,7 +730,7 @@ and another live receiver in the pool.
    `custodian: stepping down in pool <pool>; waiting up to <timeout> for a successor`
    and then `custodian: re-keyed <n> tasks to pool key <id> and deleted <n> pool keys`,
    and the successor's log for
-   `custodian: published pool <pool> key <id> (handover)`.
+   `custodian: published pool <pool> key <id> (takeover)`.
 
 4. When the stopped custodian logged
    `custodian: no successor in pool <pool>; keeping the pool keys to their deadlines`
@@ -737,8 +741,11 @@ and another live receiver in the pool.
    logging `custodian: deleted pool key <id> at its deadline`.
 
 To remove a pool's only receiver for good, add its replacement to the pool
-first, then stop the old receiver as above. A pool's only receiver exits
-with its keys, so removing it without a successor loses them.
+first, then stop the old receiver as above. A pool's only receiver waits out
+`drain_timeout` for a successor that does not come and exits with its keys,
+so removing it without a successor loses them. Stopping a whole pool at once,
+or scaling it to zero, has its custodian wait out `drain_timeout` the same way,
+within the stop window.
 
 ## Revoke a host or receiver
 
@@ -1301,7 +1308,7 @@ configuration, bundle and state directory.
    `drain_timeout` plus 5 seconds. Allow the receiver 30 seconds to stop
    before a forced kill, with `drain_timeout` plus 5 seconds below that
    window. Restart a pool's receivers one at a time, so that a stopping key
-   custodian hands over to a live successor
+   custodian re-keys its tasks to a live successor
    ([Stop a pool's key custodian](#stop-a-pool-s-key-custodian)).
 4. Restart the harness sessions that run `wherry mcp`.
 

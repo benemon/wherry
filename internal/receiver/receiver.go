@@ -75,8 +75,6 @@ type Receiver struct {
 	custody  custody
 	// drainTimeout bounds how long Run lets held runs end after its context ends.
 	drainTimeout time.Duration
-	// started is when this process started, which its advertisements carry.
-	started time.Time
 	// config and profiles are set by configure before any claim and never change.
 	config   admin.ReceiverConfig
 	profiles []Named
@@ -90,8 +88,6 @@ type Receiver struct {
 	ended    signed.Keys
 	offers   []wire.Offer
 	inFlight int64
-	// steppingDown is set once the receiver drains as its pool's custodian.
-	steppingDown *wire.SteppingDown
 	// shutdownBy, set at a stop, is when every step of the stop must have ended.
 	shutdownBy time.Time
 	// halt, set by Run once it claims, ends claiming and held runs at once with the error Run returns.
@@ -144,7 +140,7 @@ func New(bundle admin.Bundle, stateDir string, rotateKey bool, drainTimeout time
 		base.Close()
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, stateDir: stateDir, rotateKey: rotateKey, drainTimeout: drainTimeout, started: time.Now(), factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, stateDir: stateDir, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
 // feedBatches is opts with producer batches up to what a tenant's feed takes, so the largest result fits. Every client
@@ -607,11 +603,10 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	r.offers = offers
-	inFlight, steppingDown := r.inFlight, r.steppingDown
+	inFlight := r.inFlight
 	r.mu.Unlock()
 	value, err := wire.SignRecord(&wire.Advertisement{
 		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: r.config.Capacity, InFlight: inFlight, AtMS: time.Now().UnixMilli(),
-		StartedMS: r.started.UnixMilli(), SteppingDown: steppingDown,
 	}, r.signing)
 	if err != nil {
 		return err

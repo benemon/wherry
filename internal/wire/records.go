@@ -300,18 +300,6 @@ type Advertisement struct {
 	Capacity int64   `json:"capacity"`
 	InFlight int64   `json:"in_flight"`
 	AtMS     int64   `json:"at_ms"`
-	// StartedMS is when the advertising process started.
-	StartedMS int64 `json:"started_ms,omitzero"`
-	// SteppingDown is set while the pool's custodian drains to hand its custody on.
-	SteppingDown *SteppingDown `json:"stepping_down,omitzero"`
-}
-
-// SteppingDown is when a draining custodian set it, the start time of the process that set it, and the end of its wait
-// for a successor: AtMS plus its drain timeout.
-type SteppingDown struct {
-	AtMS       int64 `json:"at_ms"`
-	StartedMS  int64 `json:"started_ms"`
-	DeadlineMS int64 `json:"deadline_ms"`
 }
 
 // CustodianType is the JWS type of a custodian snapshot.
@@ -320,7 +308,7 @@ const CustodianType = "application/vnd.wherry.custodian.v1+jws"
 // CustodianKey is the Kafka key of every custodian snapshot, so compaction keeps the current snapshot.
 const CustodianKey = "custodian"
 
-var custodianReasons = []string{"bootstrap", "rotation", "handover", "takeover", "contested"}
+var custodianReasons = []string{"bootstrap", "rotation", "takeover", "contested"}
 
 // Snapshot is a pool's current custodian and public key, on the pool's snapshot topic. Its writer is the custodian it
 // names.
@@ -765,8 +753,7 @@ func (value *Advertisement) validate() error {
 	if err := validateIDs(map[string]string{"receiver": value.Receiver, "pool": value.Pool}); err != nil {
 		return err
 	}
-	if value.Capacity < 0 || value.InFlight < 0 || value.AtMS <= 0 || value.StartedMS < 0 ||
-		value.SteppingDown != nil && (value.SteppingDown.AtMS <= 0 || value.SteppingDown.StartedMS <= 0 || value.SteppingDown.DeadlineMS <= value.SteppingDown.AtMS) {
+	if value.Capacity < 0 || value.InFlight < 0 || value.AtMS <= 0 {
 		return errors.New("invalid advertisement")
 	}
 	return validateOffers(value.Offers)

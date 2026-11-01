@@ -233,15 +233,15 @@ Each snapshot states why it was published:
 | --- | --- |
 | `bootstrap` | the pool's first custodian publishes its first key |
 | `rotation` | the custodian rotates its key, daily or on `wherry admin pool rotate-key` |
-| `handover` | a receiver becomes custodian while the previous custodian steps down in a planned drain |
-| `takeover` | a receiver becomes custodian any other way: the previous custodian crashed, stopped without a handover, or came back without its state directory |
+| `takeover` | a receiver becomes custodian after another: the previous custodian drained, crashed, or came back without its state directory |
 | `contested` | the custodian finds its writes fenced while the group still assigns it the partition |
 
 A receiver assigned the partition that the current snapshot already names,
 and that still holds the snapshot's key, continues with that key. Every
 `takeover` and `contested` snapshot raises
 [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover), and hosts
-log it. The group coordinates honest receivers; it does not authenticate
+log it: every custodian change, a planned drain's included, raises the
+alert, so a receiver taking custody that should not have is never silent. The group coordinates honest receivers; it does not authenticate
 custody against a malicious member of the pool
 ([What the pool key protects](security.md#what-the-pool-key-protects)).
 
@@ -256,7 +256,7 @@ A rotation publishes a `rotation` snapshot with a new key, and hosts encrypt
 to the new key once they read it.
 
 Tasks already queued under a replaced key still open. The custodian, and
-every former custodian that did not hand over, keeps each key it held until
+every former custodian that did not re-key its tasks in a drain, keeps each key it held until
 that key's deadline:
 the append time of the snapshot that replaced it plus the pool's
 `start_by_limit` plus 7 hours, the six-hour run cap and an hour's margin. A
@@ -268,14 +268,14 @@ re-key wrap to the current key, which the custodian then opens.
 [`wherry receiver run`](commands.md#wherry-receiver-run) states the
 deadlines a receiver sets after a crash.
 
-### Planned drain and handover
+### Planned drain and re-key
 
 A receiver that stops on `SIGINT` or `SIGTERM`, or for a configuration
 change, leaves the custodian group, so the group assigns the partition to
-another member. A stopping custodian with a `drain_timeout` over `0s`, while
-another member of the pool is live, first advertises `stepping_down`,
-waiting at most 2.5 seconds for that write, then leaves the group and waits
-up to `drain_timeout` for a successor's snapshot. The successor publishes a `handover`. The stepping-down custodian
+another member. A stopping custodian with a `drain_timeout` over `0s` leaves
+the group and waits up to `drain_timeout` for a successor's snapshot. The
+successor publishes a `takeover`, as for any custodian change, and raises
+[WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover). The draining custodian
 then re-keys to the successor's key, in one transaction, every task its keys
 open that is its run's earliest accepted task, not terminal and not past its
 `task_ended_by`, and deletes its pool keys. Every step of the drain ends
@@ -284,18 +284,19 @@ platform's kill window as
 [Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window)
 describes.
 
-A task appended under the stepping-down custodian's key after its re-key
+A task appended under the draining custodian's key after its re-key
 scan is not re-keyed: it fails before it starts and its host resubmits it,
 as for a [lost key](#lost-pool-keys). A scan or write error keeps the keys
 to their deadlines, and so does a drain while the pool is suspended, which
 scans nothing.
 
-With no other live member, as in a one-receiver pool, the custodian exits
-with its keys, and its restart continues as custodian. Permanently removing
-a pool's only receiver loses its keys.
 With `drain_timeout` at `0s`, or with no successor's snapshot by the
 deadline, the custodian exits with its keys and the next custodian
-publishes a `takeover`. A former custodian that stays up answers open
+publishes a `takeover`. The custodian does not know whether a successor
+will come: with no other member, as in a one-receiver pool, a scale to zero
+or a whole-pool stop, it waits out `drain_timeout` within the stop window and
+then exits with its keys, and its restart continues as custodian.
+Permanently removing a pool's only receiver loses its keys. A former custodian that stays up answers open
 requests for tasks under its keys with re-key wraps until their deadlines.
 [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian)
 gives the procedure.
@@ -303,7 +304,7 @@ gives the procedure.
 ### Lost pool keys
 
 A task wrapped to a key that no running receiver holds cannot open: its
-custodian lost its state directory, was killed before a handover, or was
+custodian lost its state directory, was killed before its drain re-keyed its tasks, or was
 the pool's only receiver and was removed. The next custodian publishes a
 `takeover` with a new key. When the task is claimed, the custodian waits up
 to 5 minutes for a holder's re-key wrap and then refuses the open request

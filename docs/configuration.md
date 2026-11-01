@@ -103,7 +103,7 @@ the pending transcript of each run still held and releases its task for
 adoption, leaving the job running. The stop fixes one deadline,
 `drain_timeout` plus 5 seconds after the signal: each held run's commit, its
 `released` status and the acknowledgement to the broker, and the key
-custodian's [drain](commands.md#wherry-receiver-run), its handover
+custodian's [drain](commands.md#wherry-receiver-run), its re-key
 included, all end by it. A run whose commit does not complete by then is
 left unacknowledged, and the broker returns its task when its acquisition
 lock expires. A stop therefore takes at most `drain_timeout` plus 5 seconds.
@@ -111,19 +111,24 @@ The receiver cannot read the window, so `drain_timeout` plus 5 seconds stays
 a few seconds below it: `20s` ends a stop within 25 seconds, inside
 Kubernetes' default 30-second window. At `0s` the
 receiver releases its held tasks at once, and a key custodian leaves without
-a handover.
+re-keying its tasks.
 
 The drain timeout is also the time a stopping key custodian waits for a
-successor before it hands over. A custodian stopped with `0s`, or killed
-before its successor publishes, keeps its keys, and the successor publishes
-a `takeover` ([Pool keys](concepts.md#pool-keys-and-the-key-custodian)).
+successor's snapshot before it re-keys its tasks to the successor's key. It
+waits whether or not a successor will come, so a custodian stopped alongside
+the pool's last other receiver, as in a scale to zero or a whole-pool stop,
+waits out `drain_timeout` within the stop window. A custodian stopped with
+`0s`, or killed before its successor publishes, keeps its keys. The
+successor publishes a `takeover` either way, which raises
+[WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover)
+([Pool keys](concepts.md#pool-keys-and-the-key-custodian)).
 
 Planned changes go through
 [`receiver update`](operations.md#change-a-receiver-s-configuration), which
 drains with no time limit. `receiver update --force` and
 [`receiver revoke`](operations.md#revoke-a-host-or-receiver) are hard stops.
 A Kafka authorisation error or a plugin process's exit also stops the
-receiver at once, with no drain and no key custodian handover, leaving its
+receiver at once, with no drain and no key custodian re-key, leaving its
 runs' jobs for an adopter. The receiver exits non-zero and relies on its
 platform to restart it: Nomad's `restart` block, a Kubernetes
 `restartPolicy` or systemd's `Restart=on-failure`.
