@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -29,11 +31,27 @@ func (service *Service) reconcileACLs(ctx context.Context, state State) error {
 	if err := service.verifyACLs(ctx, state); err != nil {
 		return fmt.Errorf("ACL plan incomplete after re-read: %w", err)
 	}
-	// ACLs grants nothing more on a suspended pool's task topic, so the READ and WRITE it granted before go.
+	// ACLs grants nothing more on a suspended pool's task topic, so the READ and WRITE it grants the pool's members
+	// unsuspended go, each by a filter naming its principal; no other principal's grant is touched.
 	for pool := range state.Suspended {
-		builder := kadm.NewACLs().Topics(PoolTasksTopic(pool)).Allow().AllowHosts().Operations(kadm.OpRead, kadm.OpWrite).ResourcePatternType(kadm.ACLPatternLiteral)
-		if err := service.deleteACLs(ctx, builder); err != nil {
-			return fmt.Errorf("withdraw suspended pool %s's task topic ACLs: %w", pool, err)
+		resumed := state
+		resumed.Suspended = maps.Clone(state.Suspended)
+		delete(resumed.Suspended, pool)
+		for _, acl := range ACLs(resumed) {
+			if acl.ResourceType != "topic" || acl.Resource != PoolTasksTopic(pool) {
+				continue
+			}
+			acl.Operations = slices.DeleteFunc(slices.Clone(acl.Operations), func(operation string) bool { return operation == "DESCRIBE" })
+			if len(acl.Operations) == 0 {
+				continue
+			}
+			builder, err := aclBuilder(acl)
+			if err != nil {
+				return err
+			}
+			if err := service.deleteACLs(ctx, builder); err != nil {
+				return fmt.Errorf("withdraw suspended pool %s's task topic ACLs: %w", pool, err)
+			}
 		}
 	}
 	return nil

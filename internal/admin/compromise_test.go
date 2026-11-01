@@ -61,11 +61,26 @@ func compromiseFixture(t *testing.T) (*Service, context.Context) {
 	return service, ctx
 }
 
-// Suspend withdraws the hosts' WRITE and the receivers' READ on the pool's task topic and nothing else; resume restores
-// both.
+// Suspend withdraws the hosts' WRITE and the receivers' READ on the pool's task topic and nothing else, an unrelated
+// principal's READ and WRITE on the topic included; resume restores both.
 func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
 	service, ctx := compromiseFixture(t)
+	unrelated := kadm.NewACLs().Topics(PoolTasksTopic("pool-a")).Allow("User:mirror").AllowHosts("*").Operations(kadm.OpRead, kadm.OpWrite).ResourcePatternType(kadm.ACLPatternLiteral)
+	created, err := kadm.NewClient(service.Admin).CreateACLs(ctx, unrelated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range created {
+		if result.Err != nil {
+			t.Fatal(result.Err)
+		}
+	}
 	before := brokerACLs(t, ctx, service)
+	for _, operation := range []string{"READ", "WRITE"} {
+		if !slices.Contains(before, "User:mirror TOPIC "+PoolTasksTopic("pool-a")+" "+operation) {
+			t.Fatalf("unrelated %s ACL absent before suspend: %v", operation, before)
+		}
+	}
 	if err := service.PoolSuspend(ctx, "pool-a", true); err != nil {
 		t.Fatal(err)
 	}
