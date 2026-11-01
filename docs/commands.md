@@ -779,13 +779,23 @@ the receiver finds the job with `Lookup` and stops it. `Lookup` and `Stop`
 are retried for up to a minute, and no `Stop` runs past it. A job not
 confirmed stopped by then, or before the receiver shuts down, may still
 run: the receiver ends the run `TASK_STATE_FAILED` with
-`pool suspended: job stop unconfirmed`, committing that status within 5
-seconds even as it shuts down, neither returns its task to the pool nor
-releases its platform material, logs it and counts it in
-`wherry_suspend_stop_unconfirmed_total`, on which
+`pool suspended: job stop unconfirmed`, keeps its platform material, logs
+it and counts it in `wherry_suspend_stop_unconfirmed_total`, on which
 [WherrySuspendStopUnconfirmed](runbooks.md#wherrysuspendstopunconfirmed)
-fires. The run is not
-`key-lost`, so no host resubmits it, and its task delivered again after
+fires. The counter is in the receiver's memory, so the alert is
+best-effort.
+
+On every one of these paths the receiver acknowledges its claim only after
+the run's terminal status is committed, and then rejects it. The terminal
+commit, and the abort of an open request cut short, each run within 5
+seconds even as the receiver shuts down. A terminal not committed, an abort
+not confirmed, or a shutdown before either, leaves the claim unacknowledged
+and publishes no `released`: the task returns to the pool when its
+acquisition lock expires and is delivered again after resume, and the
+receiver holding it then finds the job with `Lookup` and stops or adopts
+it. The durable account of a suspended run is its terminal status or,
+without one, that delivery after resume. A run ended `pool suspended` is
+not `key-lost`, so no host resubmits it, and its task delivered again after
 resume is acknowledged without a run. The key custodian keeps rotating.
 
 ### `wherry admin pool resume POOL`

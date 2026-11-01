@@ -265,7 +265,11 @@ whose stop the plugin does not confirm within a minute, or before the
 receiver shuts down, ends its run `TASK_STATE_FAILED` with
 `pool suspended: job stop unconfirmed`, keeps its platform material, and
 counts in `wherry_suspend_stop_unconfirmed_total`. The alert fires on any
-increase.
+increase. It is best-effort: the counter is in the receiver's memory, so a
+receiver restarted before a scrape loses it. The durable signal is the
+run's terminal status. A run whose terminal was not committed has none: its
+task was left unacknowledged and is delivered again after resume, where the
+receiver holding it finds the job with `Lookup` and stops or adopts it.
 
 Confirm it:
 

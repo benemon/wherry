@@ -1506,7 +1506,18 @@ func (run *activeRun) suspended(ctx context.Context, job *pluginsdk.Handle, pend
 	if job != nil {
 		return run.stopSuspended(ctx, job, pending)
 	}
-	return run.fail(ctx, suspendedReason, pending)
+	return run.endSuspended(ctx, suspendedReason, pending)
+}
+
+// endSuspended commits a suspended run's terminal past a shutdown and rejects its task only once the terminal is
+// committed; a terminal not committed leaves the task unacknowledged, to return when its lock expires.
+func (run *activeRun) endSuspended(ctx context.Context, reason string, pending []pluginsdk.Line) kgo.AckStatus {
+	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancel()
+	if run.fail(endCtx, reason, pending) != kgo.AckReject {
+		return 0
+	}
+	return kgo.AckReject
 }
 
 // stopSuspended stops a suspended run's job, looked up first when job is nil, and ends the run failed. Lookup and Stop
@@ -1524,7 +1535,7 @@ func (run *activeRun) stopSuspended(ctx context.Context, job *pluginsdk.Handle, 
 			case err != nil:
 				r.logger.Printf("run %s: lookup in profile %s: %s", runID, run.profile.Name, logText(run.redactText, err))
 			case found.State == pluginsdk.JobAbsent:
-				return run.fail(ctx, suspendedReason, pending)
+				return run.endSuspended(ctx, suspendedReason, pending)
 			default:
 				job = &found.Handle
 			}
@@ -1534,7 +1545,7 @@ func (run *activeRun) stopSuspended(ctx context.Context, job *pluginsdk.Handle, 
 			err := run.profile.Plugin.Stop(stopCtx, *job)
 			cancel()
 			if err == nil {
-				return run.fail(ctx, suspendedReason, pending)
+				return run.endSuspended(ctx, suspendedReason, pending)
 			}
 			r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
 			r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
@@ -1547,13 +1558,7 @@ func (run *activeRun) stopSuspended(ctx context.Context, job *pluginsdk.Handle, 
 	r.metrics.suspendStopUnconfirmed.Inc()
 	r.logger.Printf("run %s: pool %s suspended and the job's stop is unconfirmed; the task and its material stay held", runID, r.config.Pool)
 	run.kept = true
-	// A shutdown must not return the task: the terminal is committed past it and the task rejected.
-	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-	defer cancel()
-	if run.fail(endCtx, suspendStopUnconfirmed, pending) == 0 {
-		return 0
-	}
-	return kgo.AckReject
+	return run.endSuspended(ctx, suspendStopUnconfirmed, pending)
 }
 
 // expired ends a run past a bound: task_ended_by once its deadline passed, else task_started_by before its job

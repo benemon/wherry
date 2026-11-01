@@ -530,3 +530,129 @@ func TestSuspendCutsAnAdoptedRunsOpenShort(t *testing.T) {
 		})
 	}
 }
+
+// A suspended open of an adopted run whose cut-short commit's abort blocks or fails leaves its task unacknowledged:
+// no released status, no terminal and its job not stopped, for its lock to return the task after resume.
+func TestSuspendedOpenWhoseAbortIsUnconfirmedIsNotAcknowledged(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		abort func(f fixture, request *kmsg.EndTxnRequest) (kmsg.Response, error, bool)
+	}{
+		{"abort blocks", func(f fixture, request *kmsg.EndTxnRequest) (kmsg.Response, error, bool) {
+			release := make(chan struct{})
+			time.AfterFunc(shutdownTimeout+2*time.Second, func() { close(release) })
+			f.cluster.SleepControl(func() { <-release })
+			return nil, nil, false
+		}},
+		{"abort fails", func(f fixture, request *kmsg.EndTxnRequest) (kmsg.Response, error, bool) {
+			response := request.ResponseKind().(*kmsg.EndTxnResponse)
+			response.ErrorCode = kerr.UnknownServerError.Code
+			return response, nil, true
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, record := adopting(t)
+			f.quiet()
+			transactionalID := admin.TransactionalPrefix(testPool) + "run-a"
+			previous := commitTransaction
+			t.Cleanup(func() { commitTransaction = previous })
+			// The adopter's commits are its claimed status, its adopting status, then its open request.
+			blocked, commits := &atomic.Bool{}, 0
+			commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+				if producer.OptValue(kgo.TransactionalID) == transactionalID {
+					if commits++; commits == 3 {
+						blocked.Store(true)
+						<-ctx.Done()
+						return ctx.Err()
+					}
+				}
+				return previous(ctx, producer)
+			}
+			f.cluster.ControlKey(int16(kmsg.EndTxn), func(request kmsg.Request) (kmsg.Response, error, bool) {
+				f.cluster.KeepControl()
+				ended := request.(*kmsg.EndTxnRequest)
+				if ended.TransactionalID != transactionalID || ended.Commit || !blocked.Load() {
+					return nil, nil, false
+				}
+				return test.abort(f, ended)
+			})
+			done := f.executing(t, f.ctx, record, 2)
+			for !blocked.Load() {
+				if f.ctx.Err() != nil {
+					t.Fatalf("the open never blocked; logs:\n%s", f.logs.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			f.suspend(t)
+			if status := acknowledged(t, f, done, shutdownTimeout+10*time.Second); status != 0 {
+				t.Fatalf("status %v, want no acknowledgement; logs:\n%s", status, f.logs.String())
+			}
+			for _, status := range f.eventStatuses(t) {
+				if status.Wherry.Kind == "released" || status.Wherry.Kind == "terminal" {
+					t.Fatalf("the run published %s; logs:\n%s", status.Wherry.Kind, f.logs.String())
+				}
+			}
+			f.plugin.mu.Lock()
+			stops := f.plugin.stops
+			f.plugin.mu.Unlock()
+			if stops != 0 {
+				t.Fatalf("stops %d, want the job left to the redelivery's Lookup", stops)
+			}
+		})
+	}
+}
+
+// A suspended run whose terminal commit fails or times out at a shutdown leaves its task unacknowledged: no
+// rejection and no released status.
+func TestSuspendedTerminalNotCommittedAtShutdownIsNotAcknowledged(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		commit func(ctx context.Context) error
+	}{
+		{"commit fails", func(ctx context.Context) error { return errors.New("broker unavailable") }},
+		{"commit times out", func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.plugin.stopErr = errors.New("platform unavailable")
+			previous := commitTransaction
+			t.Cleanup(func() { commitTransaction = previous })
+			record := f.submit(t, f.host, nil)
+			failing := &atomic.Bool{}
+			commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+				if failing.Load() && producer.OptValue(kgo.TransactionalID) == admin.TransactionalPrefix(testPool)+string(record.Key) {
+					return test.commit(ctx)
+				}
+				return previous(ctx, producer)
+			}
+			ctx, shutdown := context.WithCancel(f.ctx)
+			defer shutdown()
+			done := suspendDuringDispatch(t, f, ctx, record)
+			for {
+				f.plugin.mu.Lock()
+				stops := f.plugin.stops
+				f.plugin.mu.Unlock()
+				if stops > 0 {
+					break
+				}
+				if f.ctx.Err() != nil {
+					t.Fatalf("never stopped; logs:\n%s", f.logs.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			failing.Store(true)
+			shutdown()
+			if status := acknowledged(t, f, done, shutdownTimeout+readTimeout+5*time.Second); status != 0 {
+				t.Fatalf("status %v, want no acknowledgement; logs:\n%s", status, f.logs.String())
+			}
+			for _, status := range f.eventStatuses(t) {
+				if status.Wherry.Kind == "released" || status.Wherry.Kind == "terminal" {
+					t.Fatalf("the run published %s; logs:\n%s", status.Wherry.Kind, f.logs.String())
+				}
+			}
+		})
+	}
+}

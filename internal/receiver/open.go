@@ -120,9 +120,14 @@ func (run *activeRun) openOnce(ctx, opening, bound context.Context, job *plugins
 		if !cut() {
 			return nil, "", run.abandon(err), true
 		}
-		// A commit the suspension cut short can leave its transaction open.
-		if err := run.producer.EndTransaction(ctx, kgo.TryAbort); err != nil {
-			return nil, "", run.abandon(err), true
+		// A commit the suspension cut short can leave its transaction open. A task whose abort is not confirmed is not
+		// acknowledged: it returns when its lock expires.
+		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		err := run.producer.EndTransaction(abortCtx, kgo.TryAbort)
+		cancel()
+		if err != nil {
+			r.logger.Printf("run %s: abort the cut-short open request: %v; the task returns when its lock expires", runID, err)
+			return nil, "", 0, true
 		}
 		return nil, "", run.suspended(ctx, job, nil), true
 	}
