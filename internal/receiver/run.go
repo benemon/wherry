@@ -681,10 +681,23 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
 		return run.abandon(err)
 	}
-	// A claim given back to the pool is released first, so the next claimant is served without waiting out this one.
+	// A claim given back to the pool is released first, so the next claimant is served without waiting out this one. A
+	// suspension latched or visible takes precedence: the job, which may still run, is stopped, never released.
 	defer func() {
-		if ack == kgo.AckRelease {
+		if ack != kgo.AckRelease {
+			return
+		}
+		if !run.poolSuspended(ctx) {
 			ack = run.released(ctx)
+			return
+		}
+		switch {
+		case !run.abortCut(ctx):
+			ack = 0
+		case run.profile.Plugin == nil:
+			ack = run.suspended(ctx, nil, nil)
+		default:
+			ack = run.stopSuspended(ctx, nil, nil)
 		}
 	}()
 	events, err := r.readEvents(ctx)
@@ -941,6 +954,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 				drained = true
 			}
 		}
+		if run.poolSuspended(ctx) {
+			if !run.abortCut(ctx) {
+				return 0
+			}
+			return run.suspended(ctx, &handle, pending)
+		}
 		if err := run.producer.EndTransaction(shutdownCtx, kgo.TryAbort); err != nil {
 			return run.abandon(err)
 		}
@@ -1095,7 +1114,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			default:
 				return run.conclude(ctx, handle, pending, end.terminal)
 			}
-		case <-ctx.Done():
+		// suspendCtx ends with ctx too; shutdown ends a suspended run as suspended.
+		case <-suspendCtx.Done():
 			stopFollow()
 			return shutdown()
 		case <-checks.C:
@@ -1494,6 +1514,18 @@ func (run *activeRun) watchSuspension(ctx context.Context) (context.Context, fun
 		}
 	}()
 	return held, cancel
+}
+
+// abortCut aborts the transaction a commit cut short can leave open, reporting it confirmed; a task whose abort is not
+// confirmed is not acknowledged: it returns when its lock expires.
+func (run *activeRun) abortCut(ctx context.Context) bool {
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancel()
+	if err := run.producer.EndTransaction(abortCtx, kgo.TryAbort); err != nil {
+		run.receiver.logger.Printf("run %s: abort the cut-short commit: %v; the task returns when its lock expires", run.task.Wherry.Run, err)
+		return false
+	}
+	return true
 }
 
 // suspendStopUnconfirmed ends a run of a suspended pool whose job was not confirmed stopped.

@@ -8,6 +8,7 @@ import (
 	"log"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -653,6 +654,175 @@ func TestSuspendedTerminalNotCommittedAtShutdownIsNotAcknowledged(t *testing.T) 
 					t.Fatalf("the run published %s; logs:\n%s", status.Wherry.Kind, f.logs.String())
 				}
 			}
+		})
+	}
+}
+
+// latched waits until a run the receiver holds has read its pool suspended.
+func latched(t *testing.T, f fixture) {
+	t.Helper()
+	for {
+		f.receiver.liveMu.Lock()
+		seen := false
+		for run := range f.receiver.live {
+			seen = seen || run.suspendSeen.Load()
+		}
+		f.receiver.liveMu.Unlock()
+		if seen {
+			return
+		}
+		if f.ctx.Err() != nil {
+			t.Fatalf("the suspension was never read; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// endedSuspendedAtShutdown checks that a run its shutdown found suspended was rejected, so only after its terminal
+// committed, published no released status, and ended FAILED pool suspended with its job stopped.
+func endedSuspendedAtShutdown(t *testing.T, f fixture, record *kgo.Record, done <-chan kgo.AckStatus) {
+	t.Helper()
+	if status := acknowledged(t, f, done, shutdownTimeout+10*time.Second); status != kgo.AckReject {
+		t.Fatalf("status %v, want the task rejected; logs:\n%s", status, f.logs.String())
+	}
+	for _, status := range f.eventStatuses(t) {
+		if status.Wherry.Kind == "released" {
+			t.Fatalf("the run published released; logs:\n%s", f.logs.String())
+		}
+	}
+	endedSuspended(t, f, record, 1)
+}
+
+// A shutdown of a following run whose pool is suspended, before the run's own check reads it, ends the run suspended:
+// its job stopped and its task rejected once the terminal commits, never released. The suspension is visible at the
+// shutdown, or was read by the run's watch while a progress commit held the run.
+func TestShutdownOfAFollowingRunAfterASuspensionEndsItSuspended(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// block blocks the run's progress commit until down ends, or does nothing.
+		block   func(t *testing.T, f fixture, record *kgo.Record, down context.Context) *atomic.Bool
+		latched bool
+	}{
+		{"visible at shutdown", func(t *testing.T, f fixture, record *kgo.Record, down context.Context) *atomic.Bool {
+			for interval, long := range map[*time.Duration]time.Duration{&stateCheckInterval: time.Minute, &renewInterval: time.Minute} {
+				previous := *interval
+				*interval = long
+				t.Cleanup(func() { *interval = previous })
+			}
+			return nil
+		}, false},
+		{"latched during a progress commit", func(t *testing.T, f fixture, record *kgo.Record, down context.Context) *atomic.Bool {
+			blocking := &atomic.Bool{}
+			previous := commitTransaction
+			t.Cleanup(func() { commitTransaction = previous })
+			commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+				if producer.OptValue(kgo.TransactionalID) == admin.TransactionalPrefix(testPool)+string(record.Key) && blocking.CompareAndSwap(true, false) {
+					<-down.Done()
+					return down.Err()
+				}
+				return previous(ctx, producer)
+			}
+			return blocking
+		}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, append(slices.Clone(noResultStream), noResultStream...))
+			f.plugin.endDelay = 30 * time.Second
+			record := f.submit(t, f.host, nil)
+			down, shutdown := context.WithCancel(f.ctx)
+			defer shutdown()
+			blocking := test.block(t, f, record, down)
+			done := f.executing(t, down, record, 1)
+			for {
+				f.plugin.mu.Lock()
+				delivered := f.plugin.delivered
+				f.plugin.mu.Unlock()
+				if delivered == 2 && slices.Contains(f.kinds(t), "started") {
+					break
+				}
+				if f.ctx.Err() != nil {
+					t.Fatalf("the run never followed its job; logs:\n%s", f.logs.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if blocking != nil {
+				blocking.Store(true)
+				for blocking.Load() {
+					if f.ctx.Err() != nil {
+						t.Fatalf("no progress commit; logs:\n%s", f.logs.String())
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+			}
+			f.suspend(t)
+			if test.latched {
+				latched(t, f)
+			}
+			shutdown()
+			endedSuspendedAtShutdown(t, f, record, done)
+		})
+	}
+}
+
+// A shutdown of an adopted run's open after its pool is suspended ends the run suspended, not released: the shutdown
+// arrives after the run's watch read the suspension while the open request's commit held the run, or while the run
+// waits for its answer with the suspension visible.
+func TestShutdownOfAnOpenAfterASuspensionEndsItSuspended(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// block holds the run in its open until down ends; it returns when the run is held there, and when, once
+		// suspended, it is ready for the shutdown.
+		block func(t *testing.T, f fixture, down context.Context) (held, ready func() bool)
+	}{
+		{"latched during the request's commit", func(t *testing.T, f fixture, down context.Context) (func() bool, func() bool) {
+			previous := commitTransaction
+			t.Cleanup(func() { commitTransaction = previous })
+			// The adopter's commits are its claimed status, its adopting status, then its open request, whose context
+			// the run's watch cuts once it reads the suspension.
+			blocked, cut, commits := &atomic.Bool{}, &atomic.Bool{}, 0
+			commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+				if producer.OptValue(kgo.TransactionalID) == admin.TransactionalPrefix(testPool)+"run-a" {
+					if commits++; commits == 3 {
+						blocked.Store(true)
+						<-ctx.Done()
+						cut.Store(down.Err() == nil)
+						<-down.Done()
+						return ctx.Err()
+					}
+				}
+				return previous(ctx, producer)
+			}
+			return blocked.Load, cut.Load
+		}},
+		{"visible awaiting the answer", func(t *testing.T, f fixture, down context.Context) (func() bool, func() bool) {
+			previous := stateCheckInterval
+			stateCheckInterval = time.Minute
+			t.Cleanup(func() { stateCheckInterval = previous })
+			return func() bool { return len(f.openRequests(t)) == 1 }, func() bool { return true }
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, record := adopting(t)
+			f.quiet()
+			down, shutdown := context.WithCancel(f.ctx)
+			defer shutdown()
+			held, ready := test.block(t, f, down)
+			done := f.executing(t, down, record, 2)
+			for !held() {
+				if f.ctx.Err() != nil {
+					t.Fatalf("the open never blocked; logs:\n%s", f.logs.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			f.suspend(t)
+			for !ready() {
+				if f.ctx.Err() != nil {
+					t.Fatalf("the suspension was never read; logs:\n%s", f.logs.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			shutdown()
+			endedSuspendedAtShutdown(t, f, record, done)
 		})
 	}
 }

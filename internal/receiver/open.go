@@ -87,8 +87,8 @@ func (run *activeRun) awaitOpen(ctx, opening, bound context.Context, job *plugin
 // done with the run's acknowledgement.
 func (run *activeRun) openOnce(ctx, opening, bound context.Context, job *pluginsdk.Handle, waited func(string)) (*signed.EnvelopeValues, string, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
-	// cut reports a broker call a suspension, not a shutdown, cut short.
-	cut := func() bool { return opening.Err() != nil && ctx.Err() == nil }
+	// cut reports a broker call cut short while the pool is suspended, whether by the suspension or by a shutdown.
+	cut := func() bool { return opening.Err() != nil && run.poolSuspended(ctx) }
 	runID := task.Wherry.Run
 	topic := admin.PoolEventsTopic(r.config.Pool)
 	key, err := newAttemptKey()
@@ -120,13 +120,7 @@ func (run *activeRun) openOnce(ctx, opening, bound context.Context, job *plugins
 		if !cut() {
 			return nil, "", run.abandon(err), true
 		}
-		// A commit the suspension cut short can leave its transaction open. A task whose abort is not confirmed is not
-		// acknowledged: it returns when its lock expires.
-		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-		err := run.producer.EndTransaction(abortCtx, kgo.TryAbort)
-		cancel()
-		if err != nil {
-			r.logger.Printf("run %s: abort the cut-short open request: %v; the task returns when its lock expires", runID, err)
+		if !run.abortCut(ctx) {
 			return nil, "", 0, true
 		}
 		return nil, "", run.suspended(ctx, job, nil), true
@@ -177,12 +171,13 @@ func (run *activeRun) openOnce(ctx, opening, bound context.Context, job *plugins
 		r.mu.Lock()
 		cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
 		r.mu.Unlock()
-		// A stop seen in the same iteration as an answer wins, so a cancelled or expired run never dispatches.
+		// A stop seen in the same iteration as an answer wins, so a cancelled or expired run never dispatches; a
+		// suspension wins over a shutdown.
 		switch {
-		case ctx.Err() != nil:
-			return nil, "", kgo.AckRelease, true
 		case run.poolSuspended(ctx):
 			return nil, "", run.suspended(ctx, job, nil), true
+		case ctx.Err() != nil:
+			return nil, "", kgo.AckRelease, true
 		case cancelled && job != nil:
 			return nil, "", run.stopAndCancel(ctx, *job, nil), true
 		case cancelled:

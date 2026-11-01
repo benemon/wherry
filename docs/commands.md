@@ -772,7 +772,9 @@ included, the broker refuses while `wherry.admin` records it, stops the job
 of every run of the pool it holds through the plugin and ends the run
 `TASK_STATE_FAILED` with `pool suspended`: a run requesting or waiting for
 its open, its job adopted or not, a run in `Dispatch`, a run following its
-job, and a run whose outputs it is collecting. The open request, the
+job, and a run whose outputs it is collecting. A suspension the receiver
+has read, or reads as it shuts down, ends the run so even then: a run of a
+suspended pool never publishes `released`. The open request, the
 listing before it and the wait for its answer are cut short. A `Dispatch` in
 progress is cancelled; unless it reported its job, or that it created none,
 the receiver finds the job with `Lookup` and stops it. `Lookup` and `Stop`
