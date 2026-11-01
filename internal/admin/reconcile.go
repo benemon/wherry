@@ -31,8 +31,7 @@ func (service *Service) reconcileACLs(ctx context.Context, state State) error {
 	if err := service.verifyACLs(ctx, state); err != nil {
 		return fmt.Errorf("ACL plan incomplete after re-read: %w", err)
 	}
-	// ACLs grants no WRITE on a suspended pool's task topic, so the WRITE it grants the pool's tenants unsuspended goes,
-	// each by a filter naming its principal; no other principal's grant is touched.
+	// A suspended pool's task-topic WRITE grants go by filters naming each principal, so no other grant is touched.
 	for pool := range state.Suspended {
 		resumed := state
 		resumed.Suspended = maps.Clone(state.Suspended)

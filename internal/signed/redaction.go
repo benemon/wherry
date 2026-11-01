@@ -1,22 +1,12 @@
 package signed
 
 import (
-	"crypto"
-	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-
-	jose "github.com/go-jose/go-jose/v4"
 )
 
 const redactionDomain = "wherry-redaction-v1"
-
-// KeyThumbprint is the RFC 7638 SHA-256 thumbprint of a P-256 key, base64url: a pool key's or an attempt key's ID.
-func KeyThumbprint(key *ecdsa.PublicKey) string {
-	thumbprint, _ := (&jose.JSONWebKey{Key: key}).Thumbprint(crypto.SHA256) // fails only for a key of another type
-	return base64.RawURLEncoding.EncodeToString(thumbprint)
-}
 
 // RedactionMarker returns the feed marker for a credential name under a run's key.
 func RedactionMarker(key []byte, name string) string {

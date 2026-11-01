@@ -16,9 +16,9 @@ import (
 
 func openRecords() map[string]Record {
 	return map[string]Record{
-		"open request": &OpenRequest{Run: "run-a", Attempt: 2, Receiver: "receiver-a", TaskHash: testHash, Key: NewAttemptKey(&testSealKey.PublicKey)},
+		"open request": &OpenRequest{Run: "run-a", Attempt: 2, Receiver: "receiver-a", TaskHash: testHash, Key: NewAttemptKey(&testPoolKey.PublicKey)},
 		"attempt wrap": &AttemptWrap{Custodian: "receiver-a", TaskHash: testHash, Request: testHash, Receiver: "receiver-b", Attempt: 2, JWE: "a.b.c.d.e"},
-		"re-key wrap":  &RekeyWrap{Holder: "receiver-a", TaskHash: testHash, RecipientKID: signed.KeyThumbprint(&testSealKey.PublicKey), JWE: "a.b.c.d.e"},
+		"re-key wrap":  &RekeyWrap{Holder: "receiver-a", TaskHash: testHash, RecipientKID: signed.KeyThumbprint(&testPoolKey.PublicKey), JWE: "a.b.c.d.e"},
 		"open refusal": &OpenRefusal{Custodian: "receiver-a", Request: testHash, Reason: RefusedKeyUnavailable},
 		"claim decision": &ClaimDecision{Custodian: "receiver-a", Claim: testHash, Previous: "receiver-b", Reason: ClaimLease,
 			Advertisement: &AdvertisedRef{Offset: 0, AtMS: 1}, Served: true},
@@ -78,7 +78,7 @@ func TestOpenRequestKeyIsAPublicP256JWK(t *testing.T) {
 	request := openRecords()["open request"].(*OpenRequest)
 	payload, _ := json.Marshal(request, json.Deterministic(true))
 	public, err := request.Key.Public()
-	if err != nil || !public.Equal(&testSealKey.PublicKey) {
+	if err != nil || !public.Equal(&testPoolKey.PublicKey) {
 		t.Fatalf("key %v, %v", public, err)
 	}
 	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)

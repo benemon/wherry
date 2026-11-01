@@ -38,11 +38,9 @@ var (
 // newAttemptKey is a variable so tests can watch the key an attempt opens with.
 var newAttemptKey = func() (*ecdsa.PrivateKey, error) { return ecdsa.GenerateKey(elliptic.P256(), rand.Reader) }
 
-// awaitOpen requests the task's content key under a key made for this attempt and waits, while the claim is renewed,
-// for the custodian's attempt wrap or refusal until min(the request's append time plus openWait and openGrace, bound's
-// deadline). It returns the envelope's values checked against the task; false carries the acknowledgement. job is
-// the adopted job, which a run ending while it waits stops first. An adopter refused key unavailable requests once
-// more. The attempt key never leaves this call.
+// awaitOpen requests the task's content key under a key made for this attempt and waits for the custodian's attempt
+// wrap or refusal until min(the request's append time plus openWait and openGrace, bound's deadline), returning the
+// envelope's values checked against the task, or false with the acknowledgement; the attempt key never leaves this call.
 func (run *activeRun) awaitOpen(ctx, bound context.Context, job *pluginsdk.Handle) (signed.EnvelopeValues, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
 	began := time.Now()
@@ -132,12 +130,12 @@ func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle
 				}
 			case wire.OpenRefusalType:
 				var refusal wire.OpenRefusal
-				if r.parseStrict(record, &refusal) && refusal.Request == digest && r.isCustodian(ctx, refusal.Custodian) {
+				if r.fromLiveMember(record, &refusal) && refusal.Request == digest && r.isCustodian(ctx, refusal.Custodian) {
 					refused = refusal.Reason
 				}
 			case wire.AttemptWrapType:
 				var wrap wire.AttemptWrap
-				if !r.parseStrict(record, &wrap) || wrap.Request != digest || wrap.Receiver != r.id || wrap.Attempt != run.attempt || wrap.TaskHash != run.taskHash ||
+				if !r.fromLiveMember(record, &wrap) || wrap.Request != digest || wrap.Receiver != r.id || wrap.Attempt != run.attempt || wrap.TaskHash != run.taskHash ||
 					!r.isCustodian(ctx, wrap.Custodian) {
 					return
 				}
@@ -189,8 +187,8 @@ func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle
 	}
 }
 
-// parseStrict decodes record into value as a live pool member's.
-func (r *Receiver) parseStrict(record *kgo.Record, value wire.Record) bool {
+// fromLiveMember decodes record into value as a live pool member's.
+func (r *Receiver) fromLiveMember(record *kgo.Record, value wire.Record) bool {
 	_, peers, _ := r.snapshot()
 	return wire.ParseStrict(record.Value, peers, record.Timestamp, value) == nil
 }
@@ -235,10 +233,8 @@ func (run *activeRun) keyLost(ctx context.Context) kgo.AckStatus {
 	return run.fail(ctx, keyLostReason, nil)
 }
 
-// reconcileKey ends a run refused key unavailable from its job's state: absent or never started, with key-lost; a job
-// running or ended is stopped and the run failed without it. While Lookup is unresolved it writes the run's
-// reconciliation status and asks again, holding the task, until task_ended_by passes, when the run ends past its
-// bound, never key-lost.
+// reconcileKey ends a run refused key unavailable from its job's state: key-lost only for a job absent or never
+// started, and past its bound once task_ended_by passes with Lookup unresolved.
 func (run *activeRun) reconcileKey(ctx context.Context) kgo.AckStatus {
 	written := false
 	for {
@@ -506,7 +502,7 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	if !adoption && r.suspended() {
 		return refuse(wire.RefusedPoolSuspended)
 	}
-	// Rule 4, decided once per claim: a change of claimant is served once the previous one released or its lease lapsed.
+	// Rule 6, decided once per claim: a change of claimant is served once the previous one released or its lease lapsed.
 	claimDigest := wire.Digest(c.events.records[request.Run][owners[len(owners)-1]].Value)
 	decided, reused := c.events.decisions[claimDigest]
 	if !reused {
@@ -551,9 +547,8 @@ func poolMember(state admin.State, pool, receiver string) bool {
 	return member && config.Pool == pool && !state.Ended[admin.ReceiverPrincipal(receiver)]
 }
 
-// claimDecision decides the claim statuses[owners[last]] against the ownership event before it: unchanged for none or
-// the same receiver; served when that previous owner released, is no live member, or advertised last at or before the
-// claim's append time more than claimantLease before now; refused while that advertisement is fresher.
+// claimDecision decides the claim statuses[owners[last]] against the ownership event before it, refusing a change of
+// claimant while the previous owner is a live member whose advertisement is within claimantLease.
 func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses []wire.RunStatus, owners []int) *wire.ClaimDecision {
 	decision := &wire.ClaimDecision{Custodian: c.r.id, Claim: digest, Reason: wire.ClaimUnchanged, Served: true}
 	claim := statuses[owners[len(owners)-1]]

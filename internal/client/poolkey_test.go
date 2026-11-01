@@ -110,8 +110,8 @@ func TestSuspendedPoolRefusesSubmitBeforeResolvingAnything(t *testing.T) {
 		return f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
 			EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
 	}
-	if _, err := submit(); !errors.Is(err, ErrPoolSuspended) || !strings.Contains(err.Error(), "pool pool-a is suspended") {
-		t.Fatalf("submit = %v, want %v", err, ErrPoolSuspended)
+	if _, err := submit(); err == nil || !strings.Contains(err.Error(), "pool pool-a is suspended") {
+		t.Fatalf("submit = %v, want pool pool-a is suspended", err)
 	}
 	if _, err := os.Stat(resolved); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a credential command ran for a suspended pool: %v", err)
@@ -564,7 +564,7 @@ func TestResubmissionReadsTheFeedOnce(t *testing.T) {
 }
 
 // Wait on a run that ended key-lost and whose resubmission fails returns the resubmission's error with the bound until
-// which the run is resubmitted.
+// which the run is resubmittable.
 func TestWaitReportsAFailedResubmission(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
@@ -574,7 +574,7 @@ func TestWaitReportsAFailedResubmission(t *testing.T) {
 	t.Cleanup(func() { produceReplacement = previous })
 	produceReplacement = func(context.Context, *Host, wire.SubmissionBinding, []byte) error { return injected }
 	result, err := f.host.Await(f.ctx, task.submission.Wherry.Run, 5*time.Second)
-	if !errors.Is(err, injected) || !strings.Contains(err.Error(), "resubmitted until "+wire.RFC3339(task.submission.Wherry.TaskStartedBy)) || result.Status.State != wire.TaskStateFailed {
+	if !errors.Is(err, injected) || !strings.Contains(err.Error(), "resubmittable until "+wire.RFC3339(task.submission.Wherry.TaskStartedBy)) || result.Status.State != wire.TaskStateFailed {
 		t.Fatalf("await = %+v, %v; want the outcome with the resubmission's error and bound", result, err)
 	}
 }

@@ -18,7 +18,7 @@ const testTime = "2026-10-19T10:00:00Z"
 
 var testHash = strings.Repeat("a", 64)
 
-var testSealKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+var testPoolKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 
 func testMessage(run string) Message {
 	return Message{MessageID: "message-a", ContextID: run, TaskID: run, Role: RoleUser, Parts: []Part{{Text: "hello"}}, Extensions: []string{ExtensionURI}}

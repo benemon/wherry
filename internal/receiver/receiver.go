@@ -802,7 +802,7 @@ func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state 
 			case wire.ClaimDecisionType:
 				err = historic(&decision)
 			default:
-				parseErr = errors.New("record is neither a status nor a start failure")
+				parseErr = errors.New("record is not a pool event")
 			}
 			return err
 		}

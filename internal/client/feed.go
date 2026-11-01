@@ -1162,7 +1162,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 		outcome.Runs = runs
 		if err != nil {
 			if local, localErr := h.localRun(last); localErr == nil && local != nil {
-				err = fmt.Errorf("run %s lost its pool key and is resubmitted until %s; resubmitting it failed: %w", last, wire.RFC3339(local.TaskStartedBy), err)
+				err = fmt.Errorf("run %s lost its pool key and is resubmittable until %s; resubmitting it failed: %w", last, wire.RFC3339(local.TaskStartedBy), err)
 			}
 			return outcome, fmt.Errorf("wait %s: %w", runs[0], err)
 		}

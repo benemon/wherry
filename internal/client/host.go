@@ -41,10 +41,9 @@ var (
 	// ErrInvalidInput wraps a submission the wire format rejects; its message names the rule, never the value.
 	ErrInvalidInput = errors.New("invalid input")
 	// ErrNoSnapshot and ErrCustodianUnavailable refuse a submission whose pool has no current key to wrap its envelope
-	// to, and ErrPoolSuspended one whose pool wherry.admin records suspended.
+	// to.
 	ErrNoSnapshot           = errors.New("pool has no custodian snapshot")
 	ErrCustodianUnavailable = errors.New("pool's custodian is not live or is revoked")
-	ErrPoolSuspended        = errors.New("pool is suspended")
 )
 
 // errUndecodable wraps a local state file that does not decode.
@@ -335,6 +334,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	if err != nil {
 		return SubmitResult{}, err
 	}
+	// Before any credential resolves or input uploads.
 	poolKey, err := h.poolKey(ctx, v, pool, ads)
 	if err != nil {
 		return SubmitResult{}, err
@@ -448,10 +448,10 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 
 // poolKey returns the current key of pool: that of the latest committed record under the snapshot key on the pool's
 // snapshot topic, when its writer is the custodian it names and that custodian is live in ads and unrevoked. An earlier
-// record never stands in. A suspended pool has none, so a submission resolves no credential and uploads no input.
+// record never stands in. A suspended pool has none.
 func (h *Host) poolKey(ctx context.Context, v view, pool string, ads map[string]wire.Advertisement) (*ecdsa.PublicKey, error) {
 	if v.state.Suspended[pool] {
-		return nil, fmt.Errorf("%w: pool %s is suspended; submit again once it is resumed", ErrPoolSuspended, pool)
+		return nil, fmt.Errorf("pool %s is suspended; submit again once it is resumed", pool)
 	}
 	records, err := h.reader.ReadFrom(ctx, admin.CustodianTopic(pool), 0)
 	if err != nil {

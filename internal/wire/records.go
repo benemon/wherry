@@ -118,8 +118,7 @@ func (binding SubmissionBinding) EnvelopeBinding() signed.EnvelopeBinding {
 	return signed.EnvelopeBinding{Run: binding.Run, Tenant: binding.Tenant, Pool: binding.Pool, TaskStartedBy: binding.TaskStartedBy, TaskEndedBy: binding.TaskEndedBy}
 }
 
-// CheckBinding confirms an opened envelope's binding names task, a verified submission; the custodian checks it before
-// an attempt wrap and the claimant at open.
+// CheckBinding confirms an opened envelope's binding names task, a verified submission.
 func CheckBinding(task *Submission, binding signed.EnvelopeBinding) error {
 	if binding != task.Wherry.EnvelopeBinding() {
 		return errors.New("envelope is bound to another task")

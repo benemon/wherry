@@ -28,9 +28,8 @@ var (
 	replacing = func(string) {}
 )
 
-// resubmitLost resubmits each run of this host's local records that ended key-lost and has no produced replacement. A
-// run past its task_started_by with no replacement recorded is passed over. The runs still before their bound are judged
-// from one read of the tenant feed from the lowest of their feed offsets. Failures are logged; a later pass retries them.
+// resubmitLost resubmits each run of this host's local records that ended key-lost and has no produced replacement,
+// judging the runs before their task_started_by from one read of the tenant feed.
 func (h *Host) resubmitLost(ctx context.Context) {
 	h.sweep()
 	entries, err := os.ReadDir(filepath.Join(h.stateDir, "runs"))
@@ -117,12 +116,8 @@ func (h *Host) logResubmit(ctx context.Context, runID string, lost bool) {
 }
 
 // resubmit replaces runID, a run of this host that ended key-lost before its task_started_by, and returns its
-// replacement, or "" when the run is not to be resubmitted. lost reports that the caller read the run's latest status as
-// key-lost, which no later record changes; otherwise resubmit reads the run under the lock. Under a lock on the run
-// shared by every process using the state directory, it produces a stored replacement not yet produced and builds
-// nothing new; otherwise it records the replacement's run ID, builds and signs the replacement from the run's template,
-// stores the signed bytes, produces them and marks them produced. A replacement whose bytes were not stored is built
-// again. A run without a local record takes no lock.
+// replacement, or "" when the run is not to be resubmitted; lost reports that the caller read the run's latest status as
+// key-lost. The lock on the run is shared by every process using the state directory, so a run is replaced at most once.
 func (h *Host) resubmit(ctx context.Context, runID string, lost bool) (string, error) {
 	path, ok := h.runPath(runID)
 	if !ok {

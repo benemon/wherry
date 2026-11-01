@@ -36,8 +36,8 @@ const (
 
 var refusalReasons = []string{RefusedTwoClaimants, RefusedNotClaimant, RefusedTerminal, RefusedPastBound, RefusedKeyUnavailable, RefusedEnvelopeInvalid, RefusedPoolSuspended}
 
-// The reasons of a claim decision: no change of claimant, or a change after the previous claimant released or after its
-// lease lapsed; a decision refused because the previous claimant is live is live.
+// The reasons of a claim decision: no change of claimant, a change after the previous claimant released or after its
+// lease lapsed, or a refusal while the previous claimant is live.
 const (
 	ClaimUnchanged = "unchanged"
 	ClaimReleased  = "released"

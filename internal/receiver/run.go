@@ -569,10 +569,7 @@ func (r *Receiver) earliest(records []*kgo.Record, run string) *runSubmission {
 	return nil
 }
 
-// admissible reports a submission whose structure and bounds hold where it was appended: it carries an envelope, its
-// task_started_by had not passed at its append time and is within the pool's start_by_limit of it, and its
-// task_ended_by is not before task_started_by nor past the run cap after it. Only an admissible submission can be its
-// run's earliest accepted one.
+// admissible reports a submission that carries an envelope and whose bounds hold at its append time under terms.
 func admissible(submission runSubmission, terms admin.Terms) bool {
 	binding, appended := submission.record.Wherry, submission.submitted
 	return binding.Envelope != "" && appended.Unix() <= binding.TaskStartedBy && binding.TaskStartedBy <= appended.Add(terms.StartByLimit()).Unix() &&

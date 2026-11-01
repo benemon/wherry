@@ -804,14 +804,14 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 			return fmt.Errorf("topic %s message.timestamp.type is %s, want LogAppendTime", topic, types[topic])
 		}
 	}
-	for name, value := range poolSegments {
+	for _, name := range slices.Sorted(maps.Keys(poolSegments)) {
 		values, err := service.topicConfigs(ctx, name, poolTopics...)
 		if err != nil {
 			return err
 		}
 		for _, topic := range poolTopics {
-			if values[topic] != value {
-				return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], value)
+			if values[topic] != poolSegments[name] {
+				return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], poolSegments[name])
 			}
 		}
 	}

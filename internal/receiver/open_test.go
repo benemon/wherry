@@ -608,7 +608,7 @@ func (f fixture) decisions(t *testing.T) []wire.ClaimDecision {
 	return decisions
 }
 
-// Rule 4: a claimant taking over from another is served once the previous one released or its lease lapsed, never
+// Rule 6: a claimant taking over from another is served once the previous one released or its lease lapsed, never
 // while it advertised within the lease of the claim.
 func TestClaimCheckServesANewClaimantOnlyOnceThePreviousIsGone(t *testing.T) {
 	for _, test := range []struct {

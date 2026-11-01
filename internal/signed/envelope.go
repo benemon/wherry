@@ -1,6 +1,7 @@
 package signed
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"encoding/base64"
 	json "encoding/json/v2"
@@ -15,6 +16,12 @@ const EnvelopeType = "application/vnd.wherry.envelope.v1+jwe"
 
 // MaxEnvelope bounds an envelope's compact serialisation.
 const MaxEnvelope = 64 << 10
+
+// KeyThumbprint is the RFC 7638 SHA-256 thumbprint of a P-256 key, base64url: a pool key's or an attempt key's ID.
+func KeyThumbprint(key *ecdsa.PublicKey) string {
+	thumbprint, _ := (&jose.JSONWebKey{Key: key}).Thumbprint(crypto.SHA256) // fails only for a key of another type
+	return base64.RawURLEncoding.EncodeToString(thumbprint)
+}
 
 // EnvelopeBinding names the task an envelope travels in.
 type EnvelopeBinding struct {

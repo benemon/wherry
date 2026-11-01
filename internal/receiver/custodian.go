@@ -135,7 +135,6 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 	ticker := time.NewTicker(custodyInterval)
 	defer ticker.Stop()
 	for {
-		// A revoked member leaves the custodian group.
 		if group != nil && r.revoked() {
 			group.Close()
 			group = nil
@@ -162,10 +161,8 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 }
 
 // stepDown relinquishes the custodian group at a drain stopped at stopped, closing group and removing its static
-// membership. A custodian with a drain timeout and another live member first advertises stepping_down and afterwards
-// waits until the drain timeout after stopped for a successor's snapshot: with one it hands its keys over; with none it
-// keeps them to their deadlines, so its restart is an ordinary custodian restart. Any other custodian leaves without
-// stepping_down, so its successor takes over.
+// membership; a custodian with a drain timeout and another live member hands its keys to a successor whose snapshot
+// commits within the drain timeout and otherwise keeps them to their deadlines.
 func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, group *kgo.Client) {
 	// Every step, the handover included, ends within the drain timeout and stepDownMargin of the stop, whatever ctx.
 	deadline := stopped.Add(r.drainTimeout)
@@ -217,7 +214,6 @@ func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, group *kgo.C
 				}
 				return
 			}
-			// With no other live member there is no successor to wait for.
 			if live, err := r.peerLive(waitCtx); err == nil && !live {
 				break
 			}
@@ -247,7 +243,7 @@ func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 	if err != nil {
 		return err
 	}
-	if state, _, _ := r.snapshot(); state.Suspended[r.config.Pool] {
+	if r.suspended() {
 		return fmt.Errorf("pool %s is suspended; its re-key scan waits for resume", r.config.Pool)
 	}
 	tasks, err := r.reader.ReadFrom(ctx, admin.PoolTasksTopic(r.config.Pool), 0)
@@ -382,8 +378,7 @@ func (r *Receiver) readCurrent(ctx context.Context) (current, error) {
 }
 
 // tend keeps the deadlines of the pool keys the receiver holds and, while it is assigned, not superseded and not
-// revoked, acts as the pool's key custodian: it becomes custodian, republishes a snapshot its rotated signing key wrote,
-// and rotates the pool key when due. now is the receiver's clock.
+// revoked, acts as the pool's key custodian; now is the receiver's clock.
 func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 	r.custody.mu.Lock()
 	defer r.custody.mu.Unlock()
@@ -583,11 +578,8 @@ func (r *Receiver) mint(ctx context.Context, keys map[string]*poolKey, reason st
 	return r.publish(ctx, keys, reason, key, rotatedFor, from, now)
 }
 
-// publish commits a snapshot naming key current for reason and carrying rotatedFor in one transaction, reads the
-// committed snapshot back, which also settles an ambiguous commit, and then marks key published. from is the read the
-// pass started from. A failed write keeps the producer for the next pass, unless the producer was fenced or another
-// receiver's snapshot committed after from: then the receiver is superseded and writes no more until it is assigned
-// again.
+// publish commits a snapshot naming key current for reason and carrying rotatedFor, and marks key published once the
+// snapshot reads back; a fenced producer, or another receiver's snapshot committed after from, supersedes the receiver.
 func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason string, key *poolKey, rotatedFor int64, from current, now time.Time) error {
 	public := &key.Key.Key.(*ecdsa.PrivateKey).PublicKey
 	value := r.sign(&wire.Snapshot{Pool: r.config.Pool, Custodian: r.id, Reason: reason, Current: wire.PoolKey{KeyID: key.id(), Key: jose.JSONWebKey{Key: public}}, RotatedFor: rotatedFor})
