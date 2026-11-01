@@ -66,16 +66,18 @@ pool the run was placed in, on behalf of a tenant entitled to it.
 Every topic has one partition and `LogAppendTime` timestamps, and no topic
 is deleted. `wherry.receivers` and the progress topics have
 `cleanup.policy=compact,delete`: their readers need only the latest record
-per key, and only the record's owner can write that key. Every other topic
-has `cleanup.policy=delete`.
+per key, and only the record's owner can write that key. A pool's snapshot
+topic has `cleanup.policy=compact`: its readers need only the latest
+committed snapshot, under its one key, and only the pool's receivers can
+write it. Every other topic has `cleanup.policy=delete`.
 
 A pool's task and event topics and its receivers' progress topics keep
 records for its `start_by_limit` plus six hours plus a day, 4 days 6 hours
 by default. The tenant feed and transcript topic keep them for 30
 days and `wherry.receivers` for 7. The identity and configuration topics
-keep them forever.
+keep them forever, and so does a pool's snapshot topic.
 
-A deployment has 2 + 2R + 2P + 2T + H topics for R receivers, P pools, T
+A deployment has 2 + 2R + 3P + 2T + H topics for R receivers, P pools, T
 tenants and H hosts. The count depends on configuration alone.
 
 Every principal reads all of `wherry.admin`, so tenants see each other's
@@ -102,7 +104,8 @@ holds the pool's P-256 private keys in its state directory, publishes the
 current public key in the pool's snapshot topic through the shared
 transactional ID `p.<pool>.custodian`, which fences any earlier custodian,
 rotates the key daily, and answers each open request on the pool's events
-with an attempt wrap or a refusal.
+with an attempt wrap or a refusal
+([Pool keys and the key custodian](concepts.md#pool-keys-and-the-key-custodian)).
 When a new configuration record appears, the receiver stops claiming, lets
 the runs it holds end and exits, so its platform restarts it with the new
 configuration. A record `receiver update --force` wrote has it release the
@@ -147,8 +150,9 @@ at `-1`, and `wherry.receivers` remains a seven-day liveness topic.
 
 `wherry admin` leaves an existing topic's configuration as it is, except
 that every recording command sets the configuration above on
-`wherry.receivers`, `pool create` sets the retention and timestamp type of the pool's tasks
-and events topics, and `receiver add` and `pool create` set every
+`wherry.receivers`, `pool create` and `pool update` set the retention,
+timestamp type and `segment.ms` of the pool's tasks and events topics and
+the configuration of its snapshot topic, and `receiver add` and `pool create` set every
 configuration above on the progress topics of the pool's live receivers.
 `pool entitle`, `pool create` and `pool update` set `max.message.bytes` on
 existing tenant feeds and transcript topics. A
@@ -157,7 +161,9 @@ own tools. `pool create` and `pool entitle` refuse terms that need more than
 an entitled tenant's feed or transcript topic keeps, and `wherry admin
 check` reports a topic below its bound, a progress topic that keeps less
 than its pool's tasks topic, and a pool topic whose timestamp type is not
-`LogAppendTime`.
+`LogAppendTime`, a tasks or events topic without the hourly `segment.ms`,
+and a snapshot topic whose configuration differs from the above or that has
+more than one partition.
 
 ### ACLs
 
@@ -173,6 +179,7 @@ transactional ID prefix.
 | host | topic `wherry.tenant.<own tenant>.transcript` | Read, Describe |
 | host | topic `wherry.host.<own tenant>.<own host>` | Read, Write, Describe |
 | host | topics `wherry.pool.<p>.tasks` and `.events`, each entitled pool | Write, Describe |
+| host | topic `wherry.pool.<p>.custodian`, each entitled pool | Read, Describe |
 | host | topic `wherry.receiver.<r>`, each receiver of an entitled pool | Read, Describe |
 | receiver | topic `wherry.admin` | Read, Describe |
 | receiver | topic `wherry.receiver.<own>` | Read, Write, Describe |
@@ -183,9 +190,14 @@ transactional ID prefix.
 | receiver | topic `wherry.pool.<own pool>.tasks` | Read, Describe |
 | receiver | topic `wherry.pool.<own pool>.events` | Read, Write, Describe |
 | receiver | group `p-<own pool>` | Read, Describe, DescribeConfigs |
+| receiver | topic `wherry.pool.<own pool>.custodian` | Read, Write, Describe |
+| receiver | group `p-<own pool>.custodian` | Read, Describe |
 | receiver | transactional ID prefix `p.<own pool>.` | Write, Describe |
 | receiver | topic `wherry.tenant.<t>`, each tenant entitled to its pool | Write, Describe |
 | receiver | topic `wherry.tenant.<t>.transcript`, each tenant entitled to its pool | Write, Describe |
 | receiver | topic `wherry.host.<t>.<h>`, each host of those tenants | Read, Describe |
 
-A principal whose membership has ended has no grants.
+A principal whose membership has ended, or whose revocation is under way,
+has no grants. While a pool is [suspended](commands.md#wherry-admin-pool-suspend-pool),
+its hosts and receivers hold Describe alone on its tasks topic: the hosts
+lose Write and the receivers Read. Every other grant stays.

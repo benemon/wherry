@@ -37,8 +37,9 @@ One `wherry` binary with three sides:
 
 - **Operator:** `wherry admin` creates pools and their terms, entitles
   tenants, adds hosts and receivers with their Kafka principals, ACLs and
-  bundles, records receiver configurations, revokes access, and checks the
-  result against the broker.
+  bundles, records receiver configurations, revokes access, suspends and
+  resumes pools and rotates their keys, and checks the result against the
+  broker.
 - **Host:** `wherry init` and `wherry key` register and show the host's signing
   key. `receivers` lists the receivers the tenant may use with their plugin
   profiles and labels. `submit` places a task by agent and label selector and publishes

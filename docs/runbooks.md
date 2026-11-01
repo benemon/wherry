@@ -189,8 +189,8 @@ their `task_started_by`. A custodian whose producer is fenced while the
 group still assigns it the partition re-initialises its transactional ID
 and republishes its snapshot as `contested`; a second fence within the
 45-second session timeout stands it down until it is assigned again. The
-alert fires on any increase of `wherry_custodian_takeovers_total`, by
-`reason`, `takeover` or `contested`. A `bootstrap`, `rotation` or
+alert fires on any increase of `wherry_custodian_takeovers_total` within 15
+minutes, by `reason`, `takeover` or `contested`. A `bootstrap`, `rotation` or
 `handover` snapshot counts nothing.
 
 Confirm it:
@@ -212,7 +212,8 @@ Then:
 - For a takeover after a crash or a lost state directory, nothing more is
   needed; the hosts of the lost tasks resubmit them when they next run.
 - For a takeover after a planned stop, raise `drain_timeout`, so that the
-  stopping custodian waits for a successor's snapshot and hands over.
+  stopping custodian waits for a successor's snapshot and hands over, as in
+  [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian).
 - For a contested snapshot with no custodian change, find the writer that
   initialised `p.<pool>.custodian`: every member of the pool holds that
   transactional ID. Revoke a suspect receiver with
@@ -220,13 +221,15 @@ Then:
 
 ## WherryRunsKeyLost
 
-Keys were lost; affected never-started runs are resubmitted by their hosts.
-A receiver ends a run that never started with the wherry event `key-lost`
-when no holder of a pool key can open its envelope, and counts it in
-`wherry_runs_key_lost_total`, whatever custody change came before: a
-takeover, a handover whose stepping-down custodian exited before re-keying,
-or a task appended under an old key after a drain's scan. The alert fires on
-any increase.
+A run whose envelope no holder of a pool key can open cannot start. A
+receiver ends such a run that never started `TASK_STATE_FAILED` with the
+wherry event `key-lost`, and counts it in `wherry_runs_key_lost_total`,
+whatever custody change came before: a takeover, a handover whose
+stepping-down custodian exited before re-keying, or a task appended under an
+old key after a drain's scan. Its host resubmits it before its
+`task_started_by` ([Lost pool keys](concepts.md#lost-pool-keys)). A run
+whose job had started ends with the same message without `key-lost`, and
+counts nothing. The alert fires on any increase within 15 minutes.
 
 Confirm it:
 
@@ -240,13 +243,19 @@ Confirm it:
 
 Then:
 
-- The hosts resubmit each run before its `task_started_by`; a run past it is
-  submitted again by hand.
+- The hosts resubmit each run before its `task_started_by` when `submit` or
+  `status` next runs there, or `wait`, `logs -f` or `status` for the run, or
+  the MCP server's `submit`, `status` or `wait`
+  ([Lost pool keys](concepts.md#lost-pool-keys));
+  `wherry status RUN_ID` then shows `replaced_by=<run>`. A run past its
+  `task_started_by`, or whose host does not come back, is submitted again by
+  hand.
 - For losses at planned stops, set `drain_timeout` and the platform's stop
   window as in
   [Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window),
-  and stop a pool's receivers one at a time, so that a stopping custodian
-  has a live successor.
+  and stop a pool's receivers one at a time, as in
+  [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
+  so that a stopping custodian has a live successor.
 
 ## WherrySuspendStopUnconfirmed
 

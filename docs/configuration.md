@@ -21,12 +21,15 @@ in every path.
 | `input_roots` | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
 
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
-readable by its owner alone, with `redaction_key`, the run's redaction key,
-made when this host submits the run, `runs/<run>/outputs/` for the outputs
+readable by its owner alone, with the run's submission without its envelope
+and wrap, kept to [resubmit](concepts.md#lost-pool-keys) the run if its key
+is lost, and `redaction_key`, the run's redaction key, made when this host
+submits the run; a replacement's record also holds its signed bytes,
+envelope included. It holds no credential value in the clear. It also holds `runs/<run>/outputs/` for the outputs
 `wait` writes by default, and `resubmit/<run>.json.lock`, which every
 process sharing the directory holds while it resubmits that run. `submit`
-writes the run's record before it publishes the task, and removes it when
-publishing fails.
+writes the run's record before it publishes the task, and removes it only
+when publishing fails.
 
 ### Client configuration example
 
@@ -82,7 +85,7 @@ flag and in every path.
 | Field | Default | Content |
 | --- | --- | --- |
 | `bundle` | required | the receiver's bundle |
-| `state_dir` | `state` in the bundle file's directory | the receiver's signing key |
+| `state_dir` | `state` in the bundle file's directory | the receiver's signing key and, while it holds any, its pool's keys in `pool-keys/` ([Pool keys](concepts.md#pool-keys-and-the-key-custodian)) |
 | `plugin_dir` | `/usr/local/libexec/wherry/plugins` | the directory holding the `wherry-plugin-<type>` binaries, or symbolic links to them; each starts only when its SHA-256 is the receiver record's pin for its type |
 | `metrics_addr` | none | `HOST:PORT` to serve [`/metrics`](operations.md#metrics) on; without it the receiver serves no metrics |
 | `drain_timeout` | `0s` | how long the runs the receiver holds may go on after `SIGINT` or `SIGTERM` before it releases their tasks for adoption, a duration such as `20s`; [set it with the platform's stop window](#drain-timeout-and-the-stop-window) |
@@ -97,15 +100,24 @@ or systemd's [`TimeoutStopSec`](https://www.freedesktop.org/software/systemd/man
 On `SIGINT` or `SIGTERM` the receiver stops claiming, closes its idle claims
 and lets the runs it holds go on for up to `drain_timeout`. It then commits
 the pending transcript of each run still held and releases its task for
-adoption, leaving the job running. A stop takes at most `drain_timeout`
-plus 5 seconds, the margin of the key custodian's
-[drain](commands.md#wherry-receiver-run). The receiver cannot read the window, so
-`drain_timeout` plus 5 seconds stays a few seconds below it, such as `20s`
-under a 30-second window. At `0s` the receiver releases its held tasks at
-once.
+adoption, leaving the job running. Each held run then has up to 5 seconds
+for that commit, 5 more to commit `released`, and 5 more to acknowledge the
+release to the broker. The key
+custodian's [drain](commands.md#wherry-receiver-run), its handover
+included, runs beside them and ends within `drain_timeout` plus 5 seconds of
+the stop. A stop therefore takes up to `drain_timeout` plus 15 seconds. The
+receiver cannot read the window, so `drain_timeout` plus 15 seconds stays a
+few seconds below it, such as `20s` under a 40-second window. At `0s` the
+receiver releases its held tasks at once, and a key custodian leaves without
+a handover.
+
+The drain timeout is also the time a stopping key custodian waits for a
+successor before it hands over. A custodian stopped with `0s`, or killed
+before its successor publishes, keeps its keys, and the successor publishes
+a `takeover` ([Pool keys](concepts.md#pool-keys-and-the-key-custodian)).
 
 Planned changes go through
-[`receiver update`](operations.md#change-a-receivers-configuration), which
+[`receiver update`](operations.md#change-a-receiver-s-configuration), which
 drains with no time limit. `receiver update --force` and
 [`receiver revoke`](operations.md#revoke-a-host-or-receiver) are hard stops.
 

@@ -1,8 +1,9 @@
 # Security
 
 How a run's credentials travel from the host to one attempt of one
-receiver, where the host takes their values from, and how they reach the
-agent: the agent holds each value at its target while it runs.
+receiver, what the pool key that carries them protects, where the host
+takes their values from, and how they reach the agent: the agent holds each
+value at its target while it runs.
 [Governance](governance.md) covers identity, grants, signed records and
 the audit trail.
 
@@ -42,17 +43,25 @@ and publishes in its [snapshot](a2a-extension-v1.md#custodian-snapshot).
 The host signs the task with both in it, and can go offline once `submit`
 returns.
 
+The pool's snapshot topic, `wherry.pool.<pool>.custodian`, holds the
+custodian's signed snapshots: public keys only. The pool's receivers read
+and write it, and the hosts of entitled tenants read it; no other principal
+has a grant on it ([ACLs](design.md#acls)). A host takes the latest
+committed snapshot alone, refuses to submit when its writer is not the
+custodian it names or that custodian is not a live member of the pool, and
+never falls back to an earlier snapshot.
+
 The receiver that claims a run makes a P-256 key for that attempt and
 writes an **open request** on the pool's events. The key custodian checks
-that the receiver is the run's current claimant and that the run is neither
-terminal nor past its bound, and answers with an **attempt wrap**, the
-content key encrypted to the attempt's key, or a refusal. Only that attempt
-of that receiver opens the envelope: the attempt's private key lives in the
-receiver's memory until the envelope opens or the wait ends. A receiver
-whose request no key custodian answers within 5 minutes and 120 seconds
-releases the task to the pool. A run whose envelope no holder of a pool key
-can open ends `TASK_STATE_FAILED`, and its host resubmits it under the
-pool's current key until its `task_started_by`.
+the claim and answers with an **attempt wrap**, the content key encrypted to
+the attempt's key, or a refusal. Only that attempt of that receiver opens
+the envelope: the attempt's private key lives in the receiver's memory
+until the envelope opens or the wait ends. A receiver whose request no key
+custodian answers within 5 minutes and 120 seconds releases the task to the
+pool. A run that never started and whose envelope no holder of a pool key
+can open ends `TASK_STATE_FAILED` with the wherry event `key-lost`, and its
+host resubmits it under the pool's current key until its `task_started_by`
+([Lost pool keys](concepts.md#lost-pool-keys)).
 
 The receiver redacts each credential of 8 bytes or more that it delivered,
 with or without its trailing newline and as JSON escapes it, from
@@ -70,6 +79,115 @@ parts, and the run is not resumed.
 Everything else the agent needs comes from the platform or from the task:
 the image or host install, network access, CA bundles and SSH known hosts
 from the platform, and files and task credentials from the task.
+
+## The claim check
+
+The key custodian serves an open request only when all of these hold, and
+otherwise refuses it with the reason the
+[claim check](a2a-extension-v1.md#the-claim-check) names:
+
+- the request is signed by the live member of the pool it names;
+- it names the run's earliest accepted task, and the run has no terminal
+  status and no cancel;
+- the run's latest ownership status is the requester's `claimed` for the
+  request's attempt;
+- the run is within its open bound: `task_started_by` for a first start,
+  `task_ended_by` once the run has started or the claimant is adopting its
+  job;
+- when the claim changed receivers, the previous claimant committed
+  `released`, its membership ended, or its latest advertisement appended at
+  or before the claim is more than 120 seconds old.
+
+No receiver keeps a run by being its first claimant. The custodian serves a
+new claimant once the previous claimant has released the task or gone
+silent, and refuses it with `two live claimants` while the previous claimant
+is live. It records each decision on a claim durably and reuses it, and it
+opens the envelope and checks its binding before it wraps the content key,
+so a spliced envelope never releases its key.
+
+A claimant refused `two live claimants` or `not the current claimant`
+releases the task to the pool; refused `terminal`, it acknowledges the task
+without a run; refused `past its bound` or `envelope invalid`, it ends the
+run `TASK_STATE_FAILED`; refused `key unavailable`, it decides from the run's
+job as [Lost pool keys](concepts.md#lost-pool-keys) describes.
+[Open refusal](a2a-extension-v1.md#open-refusal) gives each action in full.
+
+## What the envelope binds
+
+The envelope's `binding` holds the task's run, tenant, pool,
+`task_started_by` and `task_ended_by`. The key custodian checks it against
+the signed task before it wraps the content key, and the claimant checks it
+again at open, so an envelope copied into another task fails:
+
+- under another run, tenant or pool, the binding differs and the envelope
+  does not open;
+- under the same run while the original task is retained, the copy is not
+  the run's earliest accepted task, and receivers act on the earliest alone
+  ([Admission](a2a-extension-v1.md#admission));
+- under the same run after retention has deleted the original, the copy must
+  carry the original's bounds, which have passed, so admission rejects it.
+
+The binding does not protect the task's other members, such as its message,
+placement and outputs. They rest on the host's signature and on
+earliest-accepted admission, and only the Kafka operator, which is root, can
+append a record before the original. Receivers cannot read the binding at
+admission: a malformed first task can win its run and then fail at open with
+`envelope invalid`.
+
+## Envelope bounds
+
+- **Size.** An envelope is at most 64 KiB, and the signed task with its
+  envelope must fit the pool's record limit; `submit` measures the actual
+  record. `pool create` sizes the pool against a task with a maximum
+  envelope ([Size a pool against the broker](operations.md#size-a-pool-against-the-broker)).
+- **Time on the broker.** The pool's tasks and events topics keep records for
+  `start_by_limit` plus six hours plus a day, and roll a segment every hour,
+  so retention deletes a record within about an hour of that bound; an
+  envelope's exposure is that retention plus the broker's deletion lag.
+  Attempt wraps, re-key wraps and refusals live on the events topic and
+  expire with it. The snapshot topic is compacted and kept forever, and holds
+  public keys only.
+- **Presigned links.** A host presigns an S3 input's GET until
+  `task_started_by` plus 15 minutes and an S3 output's PUT until
+  `task_ended_by`, each at most 7 days, the longest an
+  [S3 SigV4](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html)
+  presigned URL lasts. For a pool with storage, `start_by_limit` plus six
+  hours must not exceed 7 days. The host signs with its static storage
+  credential, so the 7-day ceiling and those deadlines are the only bounds
+  on a link.
+
+## What the pool key protects
+
+The pool remains the trust boundary: its receivers trust each other fully.
+A malicious member of the pool forging claim evidence, initialising the
+custodian's transactional ID, publishing a snapshot naming itself with any
+reason, or withholding re-key wraps is out of scope.
+
+| Party | What it gets |
+| --- | --- |
+| Kafka operators and broker storage | ciphertext only, without a pool private key |
+| another tenant or pool | nothing: the platform's ACLs, TLS and SCRAM keep them apart, and only the pool's receivers can write its snapshot |
+| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as an honest receiver would, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover) |
+| the key custodian, or anyone who copies its keys | every retained envelope under those keys, without claiming |
+
+Daily [rotation](concepts.md#rotation) stops a silently copied key from
+receiving new tasks within a day. Deleting a key at its deadline protects
+old envelopes only if the key was never copied.
+
+Against an exchange in which the submitting host answers each attempt with
+the run's credentials, custody in the pool:
+
+- lets the host go offline once `submit` returns: retries, takeovers and
+  drains need no answer from it;
+- keeps the envelope on the chosen pool's task topic alone;
+- gives a [weaker guarantee](concepts.md#lost-pool-keys) when the
+  custodian's keys are lost: never-started tasks under them fail and run
+  only when their host resubmits them before their `task_started_by`, and
+  hosts refuse to submit between a custodian going silent and its
+  successor's snapshot;
+- keeps each run's non-secret task content, and its redaction key, on the
+  host, so the host can resubmit; the host keeps no credential value in
+  the clear.
 
 ## Run credentialed tasks
 

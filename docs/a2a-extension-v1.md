@@ -1026,7 +1026,9 @@ pool's events in a transaction of its own, after the run's `claimed` status.
   `y`. `task_hash` is the hash of the run's earliest accepted submission
   ([Admission](#admission)).
 - On a redelivery the receiver first asks its profiles' Lookup for the run's
-  job. Absent or never started is a first start. Running or ended is an
+  job. Absent is a first start. A job that never started is purged and
+  recorded as a `platform` [start failure](#start-failure), or the run ends
+  past its `task_started_by` once that has passed. Running or ended is an
   adoption: the receiver commits an `adopting` status for its claim, then
   requests. A Lookup that does not answer is asked again while the receiver
   holds the claim, with no open request, until it answers or `task_ended_by`
@@ -1146,7 +1148,7 @@ custodian and acts on its `reason`:
 | --- | --- |
 | `two live claimants`, `not the current claimant` | commits `released`, then returns the task to the pool |
 | `terminal` | acknowledges the task without a dispatch |
-| `past its bound` | ends the run past its bound: a first start with no job fails with `not started by task_started_by (<RFC 3339 time>)` and its job, if any, purged; an adopter stops its job and fails with `not ended by task_ended_by (<RFC 3339 time>)` |
+| `past its bound` | ends the run past its bound: a first start purges its job, if any, and an adopter stops its job; the run fails with `not started by task_started_by (<RFC 3339 time>)` while the receiver's clock is within `task_ended_by`, and with `not ended by task_ended_by (<RFC 3339 time>)` after it |
 | `key unavailable` | decides from the job's state, below |
 | `envelope invalid` | ends the run `TASK_STATE_FAILED` with `envelope invalid`, without `key-lost`; an adopter stops its job first |
 

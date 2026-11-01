@@ -497,7 +497,8 @@ receiver exits with:
 profile container: credential "nomad-token" has no source in the receiver's configuration
 ```
 
-`state_dir` keeps the receiver's signing key and survives restarts. The
+`state_dir` keeps the receiver's signing key, and the pool keys while the
+receiver is its pool's key custodian, and survives restarts. The
 receiver reads the token on this host, and neither `wherry.admin` nor the
 bundle holds it.
 

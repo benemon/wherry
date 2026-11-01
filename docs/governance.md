@@ -49,7 +49,8 @@ Everything wherry carries stays on infrastructure the operator runs:
   encrypted under the pool's key, opens for one attempt of the claiming
   receiver, and reaches the agent at its target, as
   [Security](security.md) describes;
-- the host keeps its run records in its own state directory.
+- the host keeps its run records, each with the run's task content and
+  redaction key but no credential value in the clear, in its own state directory.
 
 wherry has no hosted control plane: every host and receiver is one the
 operator runs, no component sends data to a third party, and the Kafka

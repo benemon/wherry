@@ -838,7 +838,8 @@ retention moved the start during the scan, the second `horizon` line names
 the offsets it deleted, from the start listed before the scan.
 
 The credential names are the task's own credentials and every credential
-any terms record of the pool on `wherry.admin` gives the task's agent. The
+any terms record of the pool on `wherry.admin` gives the task's agent,
+other than the task's `unsupplied_credentials`. The
 list can name a credential the envelope did not hold; it never omits one it
 did, so rotating every listed credential covers the exposure.
 
@@ -1039,7 +1040,8 @@ jitter under one hour derived from the pool and key ID, publishing a
 `rotation` snapshot, at once on a [`rotate-key`](#wherry-admin-pool-rotate-key-pool-suspect-key-kid) record whose
 `wherry.admin` offset is above the snapshot's `rotated_for`, and republishes its snapshot with the same reason after
 its signing key rotates; a republish does not move the rotation. A commit
-error is retried up to 3 times on the same producer; a commit with an
+is attempted up to 3 times on the same producer, and a fenced or denied
+commit is not retried; a commit with an
 unknown outcome counts in `wherry_ambiguous_commits_total`. The custodian
 initialises `p.<pool>.custodian` only when assigned. A custodian whose
 producer is fenced while assigned logs `custodian: fenced while assigned in
@@ -1085,19 +1087,21 @@ successor publishes a `takeover`.
 The key custodian answers its pool's open requests, every 2 seconds, with an
 attempt wrap or a refusal after the claim check
 ([Open request](a2a-extension-v1.md#open-request)), each with its claim
-decision in one transaction through `p.<pool>.custodian`. A receiver holding
-a pool key that is not current answers an open request for a task it can open
-with a re-key wrap to the current key.
+decision in one transaction through `p.<pool>.custodian`. A receiver that
+holds pool keys but not the current key answers an open request for a task
+it can open with a re-key wrap to the current key.
 
-A replaced key's deadline is the replacing snapshot's append time plus
+A replaced key's deadline is the append time of the snapshot that replaced
+it, as the receiver's first pass after the replacement reads it, plus
 `start_by_limit` plus 7 hours; a key replaced before the receiver started
-gets the start time instead. A key no committed snapshot was read back
+counts from the receiver's first custody pass instead. A key no committed snapshot was read back
 naming is marked published and kept current when the current snapshot names
 it; otherwise its deadline is the current snapshot's append time plus
 `start_by_limit` plus 7 hours. While the snapshot topic cannot be read to a
 last stable offset at its end, after a read error or behind an open
-transaction, every key is kept. The receiver deletes a key at its deadline
-only, and every key stays in its state directory.
+transaction, every key is kept. The receiver deletes a key at its deadline, or
+all of them at the end of a handover that re-keyed every task they open,
+and keeps every other key in its state directory.
 
 It logs its own lines to standard output with the prefix `receiver: `;
 plugin and link lines are hclog lines named `plugin`. Plugin lines, the
@@ -1112,7 +1116,8 @@ each held run go on for up to the local configuration's
 [`drain_timeout`](configuration.md#drain-timeout-and-the-stop-window),
 default `0s`. It then commits the pending transcript of each run still
 held, releases their tasks and exits, leaving their jobs running; set the
-platform's stop window a few seconds above `drain_timeout` plus 5 seconds.
+platform's stop window as in
+[Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window).
 When a
 configuration record that differs from its own appears, it stops claiming,
 lets each held run end with no time limit and fails with
