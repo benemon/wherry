@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
 )
@@ -66,19 +67,32 @@ func (service *Service) deletePrincipalACLs(ctx context.Context, principal strin
 			return result.Err
 		}
 	}
-	remaining, err := kadm.NewClient(service.Admin).DescribeACLs(ctx, builder)
-	if err != nil {
-		return err
-	}
-	for _, result := range remaining {
-		if result.Err != nil {
-			return result.Err
+	// Brokers apply an ACL deletion in turn, so a describe can briefly still list it; retry within the probe window.
+	deadline := time.Now().Add(probeWindow)
+	for {
+		remaining, err := kadm.NewClient(service.Admin).DescribeACLs(ctx, builder)
+		if err != nil {
+			return err
 		}
-		if len(result.Described) != 0 {
+		left := false
+		for _, result := range remaining {
+			if result.Err != nil {
+				return result.Err
+			}
+			left = left || len(result.Described) != 0
+		}
+		if !left {
+			return nil
+		}
+		if time.Now().After(deadline) {
 			return errors.New("principal ACLs remain after deletion")
 		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(probeInterval):
+		}
 	}
-	return nil
 }
 
 func aclBuilder(acl ACL) (*kadm.ACLBuilder, error) {
