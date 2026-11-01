@@ -58,6 +58,14 @@ agents' units, and a tmpfiles entry for the credential mount point. The
 [systemd plugin's README](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service)
 covers installing them.
 
+A systemd receiver adopts only the jobs on its own host. In a pool with
+receivers on several hosts, a task whose holder is lost, the latest receiver
+the key custodian served it to that has not since released it, starts again
+on another host once the lease lapses, 120 seconds after the holder's last
+advertisement, or once its membership ends, while the first job may still
+run. Give each systemd
+receiver a pool of its own.
+
 `config.yaml`:
 
 <<< @/examples/systemd/config.yaml{yaml}

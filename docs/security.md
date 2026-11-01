@@ -107,13 +107,17 @@ otherwise refuses it with the reason the
   acknowledged the suspension with `suspended_for` in its snapshot, which a
   pass publishes before it decides any request and after every attempt wrap
   of the previous pass committed: after that no new start opens;
-- when the claim changed receivers, the previous claimant committed
-  `released`, its membership ended, or its latest advertisement appended at
-  or before the claim is more than 120 seconds old.
+- when the claim changed receivers, it has no previous holder, or the
+  previous holder's membership ended or its latest advertisement in the pool
+  appended at or before the claim is more than 120 seconds old. The previous
+  holder is the receiver of the latest earlier `claimed` that the custodian
+  served and that the same receiver has not followed with its own
+  `released`; a refused claimant holds nothing, and its `released` ends only
+  its own claim.
 
-The custodian serves a new claimant once the previous claimant has
+The custodian serves a new claimant once the previous holder has
 released the task or gone silent, and refuses it with `two live claimants`
-while the previous claimant is live. It records each decision on a claim durably and reuses it, and it
+while the previous holder is live. It records each decision on a claim durably and reuses it, and it
 opens the envelope and checks its binding before it wraps the content key,
 so a spliced envelope never releases its key.
 

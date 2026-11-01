@@ -22,7 +22,7 @@ import (
 // keyLostReason ends a run whose envelope no holder of a pool key can open.
 const keyLostReason = "cannot be opened: the pool's custodian changed and its key was lost"
 
-// claimantLease is how old the previous claimant's advertisement at a claim must be when the custodian decides, for a
+// claimantLease is how old the previous holder's advertisement at a claim must be when the custodian decides, for a
 // new claimant to be served without its release.
 const claimantLease = 120 * time.Second
 
@@ -582,23 +582,33 @@ func poolMember(state admin.State, pool, receiver string) bool {
 	return member && config.Pool == pool && !state.Ended[admin.ReceiverPrincipal(receiver)]
 }
 
-// claimDecision decides the claim statuses[owners[last]] against the ownership event before it, refusing a change of
-// claimant while the previous owner is a live member whose advertisement is within claimantLease.
+// claimDecision decides the claim statuses[owners[last]] against its previous holder, the receiver of the latest earlier
+// claim served by its claim decision and not followed by that receiver's own release, refusing a change of claimant
+// while the previous holder is a live member whose advertisement is within claimantLease.
 func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses []wire.RunStatus, owners []int) *wire.ClaimDecision {
 	decision := &wire.ClaimDecision{Custodian: c.r.id, Claim: digest, Reason: wire.ClaimUnchanged, Served: true}
 	claim := statuses[owners[len(owners)-1]]
-	if len(owners) < 2 {
+	// A claim refused or never decided holds nothing; a release ends only its own receiver's claim.
+	var previous *wire.RunStatus
+	released := map[string]bool{}
+	for _, i := range slices.Backward(owners[:len(owners)-1]) {
+		if status := statuses[i]; status.Wherry.Kind == "released" {
+			released[status.Wherry.Receiver] = true
+		} else if !released[status.Wherry.Receiver] && c.events.decisions[wire.Digest(c.events.records[claim.Wherry.Run][i].Value)].Served {
+			previous = &status
+			break
+		}
+	}
+	if previous == nil {
+		if len(owners) > 1 {
+			decision.Previous, decision.Reason = statuses[owners[len(owners)-2]].Wherry.Receiver, wire.ClaimReleased
+		}
 		return decision
 	}
-	previous := statuses[owners[len(owners)-2]]
 	if previous.Wherry.Receiver == claim.Wherry.Receiver {
 		return decision
 	}
 	decision.Previous = previous.Wherry.Receiver
-	if previous.Wherry.Kind == "released" {
-		decision.Reason = wire.ClaimReleased
-		return decision
-	}
 	decision.Reason = wire.ClaimLease
 	state, peers, _ := c.r.snapshot()
 	if !poolMember(state, c.r.config.Pool, previous.Wherry.Receiver) {
@@ -609,7 +619,7 @@ func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses 
 		ads, err := c.r.reader.ReadFrom(readCtx, admin.ReceiversTopic, 0)
 		cancel()
 		if err != nil {
-			// Without the advertisements the previous claimant is taken as live.
+			// Without the advertisements the previous holder is taken as live.
 			c.r.logger.Printf("custodian: read advertisements: %v", err)
 			decision.Reason, decision.Served = wire.ClaimLive, false
 			return decision

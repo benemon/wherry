@@ -36,8 +36,8 @@ const (
 
 var refusalReasons = []string{RefusedTwoClaimants, RefusedNotClaimant, RefusedTerminal, RefusedPastBound, RefusedKeyUnavailable, RefusedEnvelopeInvalid, RefusedPoolSuspended}
 
-// The reasons of a claim decision: no change of claimant, a change after the previous claimant released or after its
-// lease lapsed, or a refusal while the previous claimant is live.
+// The reasons of a claim decision: no change of holder, a change after the previous holder released or after its
+// lease lapsed, or a refusal while the previous holder is live.
 const (
 	ClaimUnchanged = "unchanged"
 	ClaimReleased  = "released"
@@ -122,7 +122,9 @@ type OpenRefusal struct {
 }
 
 // ClaimDecision is the custodian's decision on a claim, the claimed status whose digest is Claim, against its previous
-// claimant: whether it is served, why, and the previous claimant's advertisement it was decided from.
+// holder: whether it is served, why, and the previous holder's advertisement it was decided from. Previous is the
+// previous holder, the receiver of the latest earlier claim served by its decision and not since released by that
+// receiver; with none, the receiver of the ownership status before the claim; empty when that is the claimant.
 type ClaimDecision struct {
 	V             int            `json:"v"`
 	Custodian     string         `json:"custodian"`
