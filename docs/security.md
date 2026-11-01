@@ -204,8 +204,8 @@ no attempt needs an answer from the submitting host. Custody in the pool:
 - keeps the envelope on the chosen pool's task topic alone;
 - gives a [weaker guarantee](concepts.md#lost-pool-keys) when the
   custodian's keys are lost: never-started tasks under them fail and run
-  only when their host resubmits them before their `task_started_by`, and
-  hosts refuse to submit between a custodian going silent and its
+  only when their host resubmits them before their `task_started_by`,
+  including tasks submitted between the custodian's crash and its
   successor's snapshot;
 - keeps each run's non-secret task content, and its redaction key, on the
   host, so the host can resubmit; the host keeps no credential value in
