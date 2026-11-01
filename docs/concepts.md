@@ -405,9 +405,9 @@ in `wait` and `events`.
 A receiver exits at its first authorisation error, or once it reads its
 membership ended. It stops claiming, serving open requests and key custody
 at once, and leaves the jobs of the runs it holds running. Closing its
-share sessions releases their tasks, so the broker delivers them again at
-once; when that release does not reach the broker, as under the denial
-that stopped the receiver, the tasks return when their locks lapse. On a pool-wide platform, such as Nomad or
+share sessions attempts to release their tasks: when the broker accepts
+the release they are delivered again at once; otherwise, as under the
+denial that stopped the receiver, they return when their locks lapse. On a pool-wide platform, such as Nomad or
 Kubernetes, the next holder, the restarted receiver or another member,
 adopts each job. A host-local platform, such as systemd, adopts only on the
 same host: the receiver restarted under the same receiver ID adopts its
