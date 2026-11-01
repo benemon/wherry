@@ -583,18 +583,18 @@ func poolMember(state admin.State, pool, receiver string) bool {
 }
 
 // claimDecision decides the claim statuses[owners[last]] against its previous holder, the receiver of the latest earlier
-// claim not followed by that receiver's own release, refusing a change of claimant while the previous holder is a live
-// member whose advertisement is within claimantLease.
+// claim served by its claim decision and not followed by that receiver's own release, refusing a change of claimant
+// while the previous holder is a live member whose advertisement is within claimantLease.
 func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses []wire.RunStatus, owners []int) *wire.ClaimDecision {
 	decision := &wire.ClaimDecision{Custodian: c.r.id, Claim: digest, Reason: wire.ClaimUnchanged, Served: true}
 	claim := statuses[owners[len(owners)-1]]
-	// A release ends only its own receiver's claim: another claimant's release leaves the previous holder's lease standing.
+	// A claim refused or never decided holds nothing; a release ends only its own receiver's claim.
 	var previous *wire.RunStatus
 	released := map[string]bool{}
 	for _, i := range slices.Backward(owners[:len(owners)-1]) {
 		if status := statuses[i]; status.Wherry.Kind == "released" {
 			released[status.Wherry.Receiver] = true
-		} else if !released[status.Wherry.Receiver] {
+		} else if !released[status.Wherry.Receiver] && c.events.decisions[wire.Digest(c.events.records[claim.Wherry.Run][i].Value)].Served {
 			previous = &status
 			break
 		}
@@ -619,7 +619,7 @@ func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses 
 		ads, err := c.r.reader.ReadFrom(readCtx, admin.ReceiversTopic, 0)
 		cancel()
 		if err != nil {
-			// Without the advertisements the previous claimant is taken as live.
+			// Without the advertisements the previous holder is taken as live.
 			c.r.logger.Printf("custodian: read advertisements: %v", err)
 			decision.Reason, decision.Served = wire.ClaimLive, false
 			return decision
@@ -631,7 +631,7 @@ func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses 
 		if string(ad.Key) != previous.Wherry.Receiver || ad.Timestamp.After(appended) {
 			continue
 		}
-		if advertisement, err := admin.AuthorizeAdvertisement(state, peers, ad.Value); err != nil || advertisement.Receiver != previous.Wherry.Receiver {
+		if advertisement, err := admin.AuthorizeAdvertisement(state, peers, ad.Value); err != nil || advertisement.Receiver != previous.Wherry.Receiver || advertisement.Pool != c.r.config.Pool {
 			continue
 		}
 		decision.Advertisement = &wire.AdvertisedRef{Offset: ad.Offset, AtMS: ad.Timestamp.UnixMilli()}

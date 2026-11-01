@@ -1102,13 +1102,14 @@ answers. It serves a request only when:
    `Lookup` finds the job, or the pool is not suspended in the read of
    `wherry.admin` the custodian makes at the start of its pass; otherwise
    `pool suspended`. A failed read leaves the pass's requests unanswered;
-6. when the claim changed receivers, the previous owner committed `released`,
-   has no live membership, or its latest advertisement appended at or before
-   the claim is more than 120 seconds old when the custodian decides;
-   otherwise `two live claimants`. The previous owner is the receiver of the
-   latest earlier `claimed` for the task that the same receiver has not
-   followed with its own `released`; a `released` ends only its own
-   receiver's claim.
+6. when the claim changed receivers, it has no previous holder, or the
+   previous holder has no live membership or its latest advertisement in the
+   pool appended at or before the claim is more than 120 seconds old when the
+   custodian decides; otherwise `two live claimants`. The previous holder is
+   the receiver of the latest earlier `claimed` for the task whose claim
+   decision served it and that the same receiver has not followed with its
+   own `released`. A claim refused or never decided holds nothing, and a
+   `released` ends only its own receiver's claim.
 
 The custodian decides rule 6 once for each claim and commits that decision as
 a [claim decision](#claim-decision) in the transaction of its answer; a later
@@ -1221,14 +1222,17 @@ the [claim check](#the-claim-check).
 
 - `custodian` is the writer. `claim` is the SHA-256, in lowercase hex, of the
   record value of the `claimed` status decided, and `previous` the previous
-  owner, or with none the receiver of the ownership status before the claim,
-  absent for no ownership status before it.
+  holder of rule 6, or with none the receiver of the ownership status before
+  the claim, absent for no ownership status before it.
 - `reason` is `unchanged` for no ownership status before the claim or a
-  previous owner that is the same receiver, `released` for no previous owner
-  after one, `lease` for a previous owner with no live membership or whose
-  advertisement at or before the claim is more than 120 seconds old or
-  absent, or `live`. `served` is false for `live` alone.
-- `advertisement` names the previous owner's advertisement the decision took,
+  previous holder that is the same receiver, `released` for no previous
+  holder after one, `lease` for a previous holder whose advertisement at or
+  before the claim is more than 120 seconds old or absent, or `live`.
+  `served` is false for `live` alone. A receiver whose membership ended has
+  no statuses on the pool's events, so a claim after an ended holder is
+  decided as if that holder never claimed, `unchanged` or `released`; it is
+  `lease` only when the membership ended after the custodian read the events.
+- `advertisement` names the previous holder's advertisement the decision took,
   by its offset on `wherry.receivers` and its append time, and is absent when
   it took none.
 - A custodian counts the claims it serves to a new claimant in

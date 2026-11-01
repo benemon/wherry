@@ -122,7 +122,9 @@ type OpenRefusal struct {
 }
 
 // ClaimDecision is the custodian's decision on a claim, the claimed status whose digest is Claim, against its previous
-// claimant: whether it is served, why, and the previous claimant's advertisement it was decided from.
+// holder: whether it is served, why, and the previous holder's advertisement it was decided from. Previous is the
+// previous holder, the receiver of the latest earlier claim served by its decision and not since released by that
+// receiver; with none, the receiver of the ownership status before the claim.
 type ClaimDecision struct {
 	V             int            `json:"v"`
 	Custodian     string         `json:"custodian"`

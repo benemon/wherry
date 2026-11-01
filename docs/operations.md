@@ -279,9 +279,11 @@ A receiver runs a pool's tasks on the plugin profiles of its
 [Placement](concepts.md#placement) says how a task reaches one.
 On a host-local platform such as systemd, a receiver adopts only the jobs on
 its own host, so a pool with receivers on several hosts can run a task twice
-after a receiver is lost: once the lease lapses, 120 seconds after the lost
-receiver's last advertisement, a receiver on another host starts the task
-again while the first job may still run. Give each host-local receiver a
+after a receiver is lost: once the lease of the task's holder, the latest
+receiver the key custodian served the task to that has not since released
+it, lapses 120 seconds after the holder's last advertisement, or once its
+membership ends, a receiver on another host starts the task again while the
+first job may still run. Give each host-local receiver a
 pool of its own, as the
 [systemd plugin's README](https://github.com/benemon/wherry-plugins/tree/main/systemd#run-the-receiver-as-a-systemd-service)
 says.
