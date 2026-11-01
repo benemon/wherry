@@ -65,6 +65,8 @@ type Receiver struct {
 	custody  custody
 	// drainTimeout bounds how long Run lets held runs end after its context ends.
 	drainTimeout time.Duration
+	// started is when this process started, which its advertisements carry.
+	started time.Time
 	// config and profiles are set by configure before any claim and never change.
 	config   admin.ReceiverConfig
 	profiles []Named
@@ -78,6 +80,8 @@ type Receiver struct {
 	ended    signed.Keys
 	offers   []wire.Offer
 	inFlight int64
+	// steppingDown is set once the receiver drains as its pool's custodian.
+	steppingDown *wire.SteppingDown
 	// denials holds the capabilities an authorisation error took away; deniedSince is when the first was
 	// lost, zero while access holds.
 	denials     map[capability]bool
@@ -128,7 +132,7 @@ func New(bundle admin.Bundle, stateDir string, rotateKey bool, drainTimeout time
 		base.Close()
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, stateDir: stateDir, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, stateDir: stateDir, rotateKey: rotateKey, drainTimeout: drainTimeout, started: time.Now(), factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
 // feedBatches is opts with producer batches up to what a tenant's feed takes, so the largest result fits. Every client
@@ -181,7 +185,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 	wg.Add(5)
 	go func() {
 		defer wg.Done()
-		r.keepCustody(running)
+		r.keepCustody(ctx, running)
 	}()
 	go func() {
 		defer wg.Done()
@@ -586,10 +590,11 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	r.offers = offers
-	inFlight := r.inFlight
+	inFlight, steppingDown := r.inFlight, r.steppingDown
 	r.mu.Unlock()
 	value, err := wire.SignRecord(&wire.Advertisement{
 		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: r.config.Capacity, InFlight: inFlight, AtMS: time.Now().UnixMilli(),
+		StartedMS: r.started.UnixMilli(), SteppingDown: steppingDown,
 	}, r.signing)
 	if err != nil {
 		return err

@@ -1265,7 +1265,7 @@ func TestHostOfflineAndANonCustodianRunsTheTask(t *testing.T) {
 	// The custodian keeps its place in the custodian group and serves opens, and claims nothing.
 	custody, stop := context.WithCancel(f.ctx)
 	t.Cleanup(stop)
-	go f.receiver.keepCustody(custody)
+	go f.receiver.keepCustody(custody, custody)
 	go f.receiver.every(custody, openInterval, f.receiver.serveOpens)
 	for {
 		f.receiver.custody.mu.Lock()

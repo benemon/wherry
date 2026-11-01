@@ -178,6 +178,44 @@ Then:
 - Fix the broker access a denial names, as in
   [Prepare Kafka](operations.md#prepare-kafka).
 
+## WherryCustodianTakeover
+
+The custodian group assigns a pool's key custody to one receiver. A
+receiver that becomes custodian without the previous custodian's handover
+publishes a `takeover` snapshot with a new pool key; the previous
+custodian's tasks that never started then fail key-lost unless a receiver
+holding the previous key re-keys them, and their hosts resubmit them before
+their `task_started_by`. A custodian whose producer is fenced while the
+group still assigns it the partition re-initialises its transactional ID
+and republishes its snapshot as `contested`; a second fence within the
+45-second session timeout stands it down until it is assigned again. The
+alert fires on any increase of `wherry_custodian_takeovers_total`, by
+`reason`, `takeover` or `contested`. A `bootstrap`, `rotation` or
+`handover` snapshot counts nothing.
+
+Confirm it:
+
+1. Read the receiver's log for
+   `custodian: took over pool <pool> (WherryCustodianTakeover)` or
+   `custodian: fenced while assigned in pool <pool>; re-initialising to republish (WherryCustodianTakeover)`,
+   and for
+   `custodian: fenced again within the session timeout in pool <pool>; standing down until assigned again`.
+2. Read the previous custodian's log for its stop: a planned drain logs
+   `custodian: stepping down in pool <pool>; waiting up to <timeout> for a successor`.
+3. Run `wherry receivers`. The pool's key custodian is one of its `live`
+   receivers.
+
+Then:
+
+- For a takeover after a crash or a lost state directory, nothing more is
+  needed; the hosts of the lost tasks resubmit them when they next run.
+- For a takeover after a planned stop, raise `drain_timeout`, so that the
+  stopping custodian waits for a successor's snapshot and hands over.
+- For a contested snapshot with no custodian change, find the writer that
+  initialised `p.<pool>.custodian`: every member of the pool holds that
+  transactional ID. Revoke a suspect receiver with
+  `wherry admin receiver revoke`.
+
 ## WherryPluginRestartLoop
 
 A plugin that exits is started again after one second, the wait doubling

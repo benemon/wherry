@@ -354,9 +354,7 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 		}
 		if err := r.transact(ctx, r.custody.producer, records...); err != nil {
 			if fenced(err) {
-				r.custody.fenced = true
-				r.logger.Printf("custodian: superseded in pool %s; serving no more opens until assigned again", r.config.Pool)
-				r.dropProducer()
+				r.contest()
 			}
 			return fmt.Errorf("answer an open request: %w", err)
 		}
@@ -385,17 +383,26 @@ func (r *Receiver) rekey(ctx context.Context, pending []openRequest, events pool
 		if contentKey == nil {
 			continue
 		}
-		jwe, err := signed.WrapContentKey(contentKey, current.Key.Key.(*ecdsa.PublicKey))
+		record, err := r.rekeyRecord(request.request.Run, hash, contentKey, current)
 		if err != nil {
 			return err
 		}
-		value := r.sign(&wire.RekeyWrap{Holder: r.id, TaskHash: hash, RecipientKID: current.KeyID, JWE: string(jwe)})
-		if err := r.admissionCommit(ctx, &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(request.request.Run), Value: value}); err != nil {
+		if err := r.admissionCommit(ctx, record); err != nil {
 			return fmt.Errorf("re-key run %s: %w", request.request.Run, err)
 		}
 		r.logger.Printf("run %s: re-keyed its content key to pool key %s", request.request.Run, current.KeyID)
 	}
 	return nil
+}
+
+// rekeyRecord is a re-key wrap of run's content key to current.
+func (r *Receiver) rekeyRecord(run, hash string, contentKey []byte, current wire.PoolKey) (*kgo.Record, error) {
+	jwe, err := signed.WrapContentKey(contentKey, current.Key.Key.(*ecdsa.PublicKey))
+	if err != nil {
+		return nil, err
+	}
+	value := r.sign(&wire.RekeyWrap{Holder: r.id, TaskHash: hash, RecipientKID: current.KeyID, JWE: string(jwe)})
+	return &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(run), Value: value}, nil
 }
 
 // contentKey recovers a task's content key from its submit wrap or a re-key wrap to a key in keys; a wrap whose key does

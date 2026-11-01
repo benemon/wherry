@@ -742,7 +742,8 @@ An advertisement reports a receiver's liveness and capacity.
   "receiver": "nomad-1", "pool": "build",
   "offers": [{"profile": "container", "agent": "coder"}],
   "capacity": 2, "in_flight": 0,
-  "at_ms": 1789998000000
+  "at_ms": 1789998000000,
+  "started_ms": 1789990000000
 }
 ```
 
@@ -757,6 +758,13 @@ An advertisement reports a receiver's liveness and capacity.
   the host carries them as S3 inputs, or refuses the run when the pool or
   the host has no storage.
 - `capacity` and `in_flight` are 0 or more, and `at_ms` is over 0.
+- `started_ms`, optional, is when the advertising process started.
+- `stepping_down`, optional, is present while the pool's key custodian
+  drains to hand its custody on: `at_ms`, when it was set, and
+  `started_ms`, the start time of the process that set it, both over 0. A
+  successor publishes a `handover` snapshot only when the previous
+  custodian's latest advertisement is live and carries `stepping_down`
+  whose `started_ms` equals the advertisement's.
 - A receiver advertises every 30 seconds, with or without a ready profile.
   Placement passes over a receiver whose `offers` is empty. Readers take
   each receiver's

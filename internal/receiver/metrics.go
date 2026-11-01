@@ -89,6 +89,10 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.busErrors = counters("bus_errors_total", "Kafka operation errors, by operation.", "op")
 	m.denials = counters("denials_total", "Kafka authorisation errors, by the capability denied.", "op")
 	m.takeovers = counters("custodian_takeovers_total", "Snapshots this receiver published taking over its pool's key custody, by reason.", "reason")
+	// Both series exist from the start, so an alert sees their first increase.
+	for _, reason := range []string{"takeover", "contested"} {
+		m.takeovers.WithLabelValues(reason)
+	}
 	m.claimantChanges = counters("claimant_changes_total", "Claims served to a new claimant, by reason.", "reason")
 	m.ignoredWraps = counter("ignored_wraps_total", "Wraps whose key does not decrypt the task's envelope.")
 	m.renewalFailures = counter("renewal_failures_total", "Failed claim renewals.")

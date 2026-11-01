@@ -52,6 +52,18 @@ groups:
           description: A claimant whose open request no key custodian answers within 5 minutes and 120 seconds releases the task.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherryopenrequestsunanswered
 
+      # A receiver counts each takeover or contested snapshot it publishes, by reason; a bootstrap, rotation or
+      # handover counts nothing.
+      - alert: WherryCustodianTakeover
+        expr: |
+          sum by (job, instance, pool, reason) (increase(wherry_custodian_takeovers_total[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Receiver {{ $labels.instance }} published a {{ $labels.reason }} snapshot of pool {{ $labels.pool }}
+          description: A takeover follows a key custodian lost without a handover, whose never-started tasks fail key-lost; a contested snapshot follows another writer initialising the custodian's transactional ID.
+          runbook_url: https://benemon.github.io/wherry/runbooks#wherrycustodiantakeover
+
       # The receiver restarts an exited plugin after one second, doubling the wait after each failed start up to
       # 30 seconds.
       - alert: WherryPluginRestartLoop

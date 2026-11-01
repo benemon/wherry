@@ -936,21 +936,48 @@ The key custodian writes every snapshot through the transactional ID
 snapshot back before it marks the key published. When assigned, a receiver
 that the current snapshot names and that holds the snapshot's key continues
 with that key; any other generates a P-256 key, stores it, and publishes it
-with reason `bootstrap` when the topic holds no snapshot and `takeover`
-otherwise. A takeover logs `custodian: took over pool <pool>
+with reason `bootstrap` when the topic holds no snapshot, `handover` when
+the previous custodian is another receiver whose latest advertisement is
+within 120 seconds and carries `stepping_down` with the `started_ms` of that
+advertisement, and `takeover` otherwise, the same receiver back without its
+keys included. A takeover logs `custodian: took over pool <pool>
 (WherryCustodianTakeover)` and counts in `wherry_custodian_takeovers_total`
-once, when its snapshot is first read back, also on a later pass when the
-commit landed but its read-back failed. The custodian rotates the key at the
+with reason `takeover` once, when its snapshot is first read back, also on a
+later pass when the commit landed but its read-back failed. The custodian rotates the key at the
 append time of the snapshot first read back naming it plus 24 hours plus a
 jitter under one hour derived from the pool and key ID, publishing a
 `rotation` snapshot, and republishes its snapshot with the same reason after
 its signing key rotates; a republish does not move the rotation. A commit
 error is retried up to 3 times on the same producer; a commit with an
 unknown outcome counts in `wherry_ambiguous_commits_total`. The custodian
-initialises `p.<pool>.custodian` only when assigned. A receiver whose
-assignment ends, whose producer is fenced, or whose failed write is followed
-by another receiver's committed snapshot writes no more snapshots until it is
-assigned again.
+initialises `p.<pool>.custodian` only when assigned. A custodian whose
+producer is fenced while assigned logs `custodian: fenced while assigned in
+pool <pool>; re-initialising to republish (WherryCustodianTakeover)`, counts
+in `wherry_custodian_takeovers_total` with reason `contested`, initialises
+`p.<pool>.custodian` again and republishes its snapshot with reason
+`contested`, under a new key when the current snapshot names another
+receiver. A second fence within the custodian group's 45-second session
+timeout logs `custodian: fenced again within the session timeout in pool
+<pool>; standing down until assigned again`. A receiver whose assignment
+ends, that stood down, or whose failed write is followed by another
+receiver's committed snapshot writes no more snapshots until it is assigned
+again.
+
+On `SIGINT`, `SIGTERM` or a configuration change, the key custodian
+advertises `stepping_down`, closes its custodian group client, removes its
+static membership from the group, which hands the partition on at once, and
+waits up to `drain_timeout` for another receiver's snapshot. With one, it
+reads the task topic to its last stable offset and the pool's events, writes
+in one transaction a re-key wrap to the successor's current key for every
+task its keys open that is its run's earliest accepted, not terminal and not
+past its `task_ended_by`, and then deletes its pool keys. A read or write
+error keeps the keys to their deadlines. A task appended under its key after
+that read is not re-keyed: it fails key-lost before it starts, and its host
+resubmits it before its `task_started_by`. With no successor's snapshot
+within `drain_timeout`, or as soon as no other member of the pool has an
+advertisement within 120 seconds, it logs `custodian: no successor in pool
+<pool>; keeping the pool keys to their deadlines` and exits with its keys,
+and its restart continues as custodian.
 
 The key custodian answers its pool's open requests, every 2 seconds, with an
 attempt wrap or a refusal after the claim check
@@ -1205,7 +1232,7 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
 | `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events or, for the key custodian, its snapshot topic |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
-| `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover` |
+| `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover`, `contested`; both start at 0 |
 | `wherry_claimant_changes_total` | counter | `reason` | claims the key custodian served to a new claimant: `released`, `lease` |
 | `wherry_ignored_wraps_total` | counter | none | wraps whose key does not decrypt the task's envelope |
 | `wherry_metrics_dropped_total` | counter | `profile`, `reason` | plugin samples dropped and `Metrics` calls that failed |

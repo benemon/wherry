@@ -300,6 +300,16 @@ type Advertisement struct {
 	Capacity int64   `json:"capacity"`
 	InFlight int64   `json:"in_flight"`
 	AtMS     int64   `json:"at_ms"`
+	// StartedMS is when the advertising process started.
+	StartedMS int64 `json:"started_ms,omitzero"`
+	// SteppingDown is set while the pool's custodian drains to hand its custody on.
+	SteppingDown *SteppingDown `json:"stepping_down,omitzero"`
+}
+
+// SteppingDown is when a draining custodian set it and the start time of the process that set it.
+type SteppingDown struct {
+	AtMS      int64 `json:"at_ms"`
+	StartedMS int64 `json:"started_ms"`
 }
 
 // CustodianType is the JWS type of a custodian snapshot.
@@ -750,7 +760,8 @@ func (value *Advertisement) validate() error {
 	if err := validateIDs(map[string]string{"receiver": value.Receiver, "pool": value.Pool}); err != nil {
 		return err
 	}
-	if value.Capacity < 0 || value.InFlight < 0 || value.AtMS <= 0 {
+	if value.Capacity < 0 || value.InFlight < 0 || value.AtMS <= 0 || value.StartedMS < 0 ||
+		value.SteppingDown != nil && (value.SteppingDown.AtMS <= 0 || value.SteppingDown.StartedMS <= 0) {
 		return errors.New("invalid advertisement")
 	}
 	return validateOffers(value.Offers)

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,11 @@ const (
 	// commitAttempts bounds the commits of one snapshot write; commitRetryInterval separates them.
 	commitAttempts      = 3
 	commitRetryInterval = 200 * time.Millisecond
+	// sessionTimeout is the custodian group's session timeout, also the window in which a second fence stands a
+	// contesting custodian down.
+	sessionTimeout = 45 * time.Second
+	// advertisementLive is how recent a receiver's advertisement is while the receiver is live.
+	advertisementLive = 120 * time.Second
 )
 
 // custodyInterval is how often the receiver tends its pool keys; a variable so tests can shorten it.
@@ -51,9 +57,13 @@ type custody struct {
 	assigned bool
 	// producer is the custodian transactional ID's producer while the receiver acts as custodian.
 	producer *kgo.Client
-	// fenced is set when the receiver is superseded, its producer fenced or another receiver's snapshot committed after
-	// its failed write, until the next assignment.
+	// fenced is set when the receiver is superseded, its producer fenced twice within the session timeout or another
+	// receiver's snapshot committed after its failed write, until the next assignment.
 	fenced bool
+	// contested is set when its producer was fenced while assigned, until a snapshot it republishes is read back;
+	// contestedAt is when.
+	contested   bool
+	contestedAt time.Time
 	// tended is set after the first pass of the process.
 	tended bool
 	wake   chan struct{}
@@ -82,8 +92,8 @@ func (r *Receiver) custodianTransactionalID() string {
 func (r *Receiver) poolKeysDir() string { return filepath.Join(r.stateDir, poolKeysDir) }
 
 // keepCustody joins the pool's custodian group with the receiver ID as its instance ID and tends the pool keys at each
-// custody interval and on each change of assignment, until ctx ends.
-func (r *Receiver) keepCustody(ctx context.Context) {
+// custody interval and on each change of assignment, until ctx ends, when a custodian steps down, or running ends.
+func (r *Receiver) keepCustody(ctx, running context.Context) {
 	topic := admin.CustodianTopic(r.config.Pool)
 	r.custody.wake = make(chan struct{}, 1)
 	gained := func(_ context.Context, _ *kgo.Client, partitions map[string][]int32) {
@@ -99,7 +109,7 @@ func (r *Receiver) keepCustody(ctx context.Context) {
 	// The group only assigns custody: it is never polled and commits no offsets, so the offsets it fetches on assignment
 	// never decide the current snapshot; readCurrent scans the topic for it.
 	group, err := r.newClient(kgo.ConsumerGroup(admin.CustodianGroup(r.config.Pool)), kgo.ConsumeTopics(topic), kgo.InstanceID(r.id),
-		kgo.DisableAutoCommit(), kgo.OnPartitionsAssigned(gained), kgo.OnPartitionsRevoked(lost), kgo.OnPartitionsLost(lost))
+		kgo.SessionTimeout(sessionTimeout), kgo.DisableAutoCommit(), kgo.OnPartitionsAssigned(gained), kgo.OnPartitionsRevoked(lost), kgo.OnPartitionsLost(lost))
 	if err != nil {
 		r.logger.Printf("custodian group: %v", err)
 		return
@@ -119,16 +129,132 @@ func (r *Receiver) keepCustody(ctx context.Context) {
 			group = nil
 			r.assign(false)
 		}
-		if err := r.tend(ctx, time.Now()); err != nil && ctx.Err() == nil {
+		if err := r.tend(running, time.Now()); err != nil && running.Err() == nil {
 			r.logger.Printf("custody: %v", err)
 		}
 		select {
 		case <-ctx.Done():
+			if group != nil {
+				r.stepDown(context.WithoutCancel(ctx), group)
+				group = nil
+			}
+			return
+		case <-running.Done():
 			return
 		case <-ticker.C:
 		case <-r.custody.wake:
 		}
 	}
+}
+
+// stepDown hands the pool's key custody on at a planned drain of its custodian: it advertises stepping_down, closes group,
+// removes its static membership and waits up to the drain timeout for a successor's snapshot. With one it hands its
+// keys over; with none it keeps them to their deadlines, so its restart is an ordinary custodian restart.
+func (r *Receiver) stepDown(ctx context.Context, group *kgo.Client) {
+	r.custody.mu.Lock()
+	acting := r.custody.producer != nil
+	r.custody.mu.Unlock()
+	if !acting {
+		group.Close()
+		return
+	}
+	r.mu.Lock()
+	r.steppingDown = &wire.SteppingDown{AtMS: time.Now().UnixMilli(), StartedMS: r.started.UnixMilli()}
+	r.mu.Unlock()
+	if err := r.advertise(ctx); err != nil {
+		r.logger.Printf("custodian: advertise stepping down: %v", err)
+	}
+	// A closed static member keeps its assignment until the session timeout; removing it hands the partition on at once.
+	group.Close()
+	r.assign(false)
+	leaveCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	left, err := kadm.NewClient(r.base).LeaveGroup(leaveCtx, kadm.LeaveGroup(admin.CustodianGroup(r.config.Pool)).InstanceIDs(r.id))
+	cancel()
+	if err == nil {
+		err = left.Error()
+	}
+	if err != nil {
+		r.logger.Printf("custodian: leave the custodian group: %v", err)
+	}
+	r.logger.Printf("custodian: stepping down in pool %s; waiting up to %s for a successor", r.config.Pool, r.drainTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, r.drainTimeout)
+	defer cancel()
+	for waitCtx.Err() == nil {
+		latest, err := r.readCurrent(waitCtx)
+		if err == nil && latest.snapshot != nil && latest.snapshot.Custodian != r.id {
+			handCtx, cancel := context.WithTimeout(ctx, readTimeout)
+			defer cancel()
+			if err := r.handOver(handCtx, latest.snapshot.Current); err != nil {
+				r.logger.Printf("custodian: hand over to %s: %v; keeping the pool keys to their deadlines", latest.snapshot.Custodian, err)
+			}
+			return
+		}
+		// With no other live member there is no successor to wait for.
+		state, peers, _ := r.snapshot()
+		live, err := r.reader.ReadAdvertisements(waitCtx, state, peers, time.Now(), advertisementLive)
+		delete(live, r.id)
+		if err == nil && len(live) == 0 {
+			break
+		}
+		sleep(waitCtx, custodyInterval)
+	}
+	r.logger.Printf("custodian: no successor in pool %s; keeping the pool keys to their deadlines", r.config.Pool)
+}
+
+// handOver writes, in one transaction, a re-key wrap to the successor's current key for every task the receiver's keys
+// open that is its run's earliest accepted, not terminal and not past its task_ended_by, from one read of the task topic
+// to its last stable offset, and then deletes the keys. Any error keeps them.
+func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
+	r.custody.mu.Lock()
+	defer r.custody.mu.Unlock()
+	keys, err := loadPoolKeys(r.poolKeysDir())
+	if err != nil {
+		return err
+	}
+	tasks, err := r.reader.ReadFrom(ctx, admin.PoolTasksTopic(r.config.Pool), 0)
+	if err != nil {
+		r.deny(err, capRead)
+		return err
+	}
+	events, err := r.readEvents(ctx)
+	if err != nil {
+		return err
+	}
+	var records []*kgo.Record
+	seen := map[string]bool{}
+	for _, record := range tasks {
+		run := string(record.Key)
+		if seen[run] {
+			continue
+		}
+		seen[run] = true
+		task := r.earliest(tasks, run)
+		if task == nil || events.committedTerminal(run, task.hash) || !time.Now().Before(wire.PastBound(task.record.Wherry.TaskEndedBy)) ||
+			slices.ContainsFunc(events.rekeys[task.hash], func(wrap wire.RekeyWrap) bool { return wrap.RecipientKID == current.KeyID }) {
+			continue
+		}
+		contentKey := r.contentKey(task.record, keys, events.rekeys[task.hash])
+		if contentKey == nil {
+			continue
+		}
+		rekey, err := r.rekeyRecord(run, task.hash, contentKey, current)
+		if err != nil {
+			return err
+		}
+		records = append(records, rekey)
+	}
+	if len(records) > 0 {
+		if err := r.admissionCommit(ctx, records...); err != nil {
+			return fmt.Errorf("re-key: %w", err)
+		}
+	}
+	for id := range keys {
+		if err := os.Remove(filepath.Join(r.poolKeysDir(), id+".json")); err != nil {
+			return err
+		}
+	}
+	r.logger.Printf("custodian: re-keyed %d tasks to pool key %s and deleted %d pool keys", len(records), current.KeyID, len(keys))
+	return nil
 }
 
 // assign records whether the group assigns this receiver the snapshot topic's partition. A receiver that loses it stops
@@ -256,8 +382,13 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 	}
 	if !latest.names(r) || keys[latest.snapshot.Current.KeyID] == nil {
 		reason := "takeover"
-		if latest.record == nil {
+		switch {
+		case latest.record == nil:
 			reason = "bootstrap"
+		case r.custody.contested:
+			reason = "contested"
+		case r.handedOver(ctx, latest, now):
+			reason = "handover"
 		}
 		return r.mint(ctx, keys, reason, latest, now)
 	}
@@ -265,6 +396,9 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 		r.logger.Printf("custodian: continuing as custodian of pool %s with key %s", r.config.Pool, latest.snapshot.Current.KeyID)
 	}
 	key := keys[latest.snapshot.Current.KeyID]
+	if r.custody.contested {
+		return r.publish(ctx, keys, "contested", key, latest, now)
+	}
 	if latest.resign {
 		return r.publish(ctx, keys, latest.snapshot.Reason, key, latest, now)
 	}
@@ -272,6 +406,41 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 		return r.mint(ctx, keys, "rotation", latest, now)
 	}
 	return nil
+}
+
+// handedOver reports that latest's custodian, another receiver, hands custody on: its latest advertisement is live at now
+// and carries stepping_down set by the process that wrote it. The same receiver back is a later process.
+func (r *Receiver) handedOver(ctx context.Context, latest current, now time.Time) bool {
+	if latest.snapshot == nil || latest.snapshot.Custodian == r.id {
+		return false
+	}
+	state, peers, _ := r.snapshot()
+	live, err := r.reader.ReadAdvertisements(ctx, state, peers, now, advertisementLive)
+	if err != nil {
+		r.logger.Printf("custodian: read advertisements: %v", err)
+		return false
+	}
+	advertisement, ok := live[latest.snapshot.Custodian]
+	return ok && advertisement.SteppingDown != nil && advertisement.SteppingDown.StartedMS == advertisement.StartedMS
+}
+
+// contest handles the custodian producer's fence while the group still assigns this receiver the partition: the first
+// fence re-initialises the producer on the next pass, which republishes the snapshot with reason contested; a second
+// within the session timeout stands the receiver down until it is assigned again.
+func (r *Receiver) contest() {
+	r.dropProducer()
+	if time.Since(r.custody.contestedAt) < sessionTimeout {
+		r.custody.fenced = true
+		r.logger.Printf("custodian: fenced again within the session timeout in pool %s; standing down until assigned again", r.config.Pool)
+		return
+	}
+	r.custody.contested, r.custody.contestedAt = true, time.Now()
+	r.metrics.takeovers.WithLabelValues("contested").Inc()
+	r.logger.Printf("custodian: fenced while assigned in pool %s; re-initialising to republish (WherryCustodianTakeover)", r.config.Pool)
+	select {
+	case r.custody.wake <- struct{}{}:
+	default:
+	}
 }
 
 // rotationAt is when the pool key keyID, published at appended, is rotated: a day later and a jitter derived from the
@@ -381,13 +550,16 @@ func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason
 	latest, readErr := r.readCurrent(ctx)
 	if readErr != nil || latest.record == nil || !bytes.Equal(latest.record.Value, value) {
 		superseded := readErr == nil && latest.record != nil && !latest.names(r) && (from.record == nil || latest.record.Offset > from.record.Offset)
-		if fenced(err) || superseded {
+		if fenced(err) {
+			r.contest()
+		} else if superseded {
 			r.custody.fenced = true
 			r.logger.Printf("custodian: superseded in pool %s; writing no more snapshots until assigned again", r.config.Pool)
 			r.dropProducer()
 		}
 		return fmt.Errorf("publish %s snapshot: %w", reason, errors.Join(err, readErr, errors.New("not read back")))
 	}
+	r.custody.contested = false
 	if err := r.keepKeys(keys, latest, now); err != nil {
 		return err
 	}
