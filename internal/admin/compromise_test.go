@@ -20,7 +20,9 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // brokerACLs lists every ACL the broker holds as principal, resource type, resource and operation.
@@ -44,9 +46,9 @@ func brokerACLs(t *testing.T, ctx context.Context, service *Service) []string {
 	return slices.Compact(acls)
 }
 
-func compromiseFixture(t *testing.T) (*Service, context.Context) {
+func compromiseFixture(t *testing.T) (*kfake.Cluster, *Service, context.Context) {
 	t.Helper()
-	_, service, closeFixture := kfakeService(t)
+	cluster, service, closeFixture := kfakeService(t)
 	t.Cleanup(closeFixture)
 	ctx := context.Background()
 	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
@@ -61,13 +63,13 @@ func compromiseFixture(t *testing.T) (*Service, context.Context) {
 	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	return service, ctx
+	return cluster, service, ctx
 }
 
 // Suspend withdraws the hosts' WRITE and the receivers' READ on the pool's task topic and nothing else, an unrelated
 // principal's READ and WRITE on the topic included; resume restores both.
 func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
-	service, ctx := compromiseFixture(t)
+	_, service, ctx := compromiseFixture(t)
 	unrelated := kadm.NewACLs().Topics(PoolTasksTopic("pool-a")).Allow("User:mirror").AllowHosts("*").Operations(kadm.OpRead, kadm.OpWrite).ResourcePatternType(kadm.ACLPatternLiteral)
 	created, err := kadm.NewClient(service.Admin).CreateACLs(ctx, unrelated)
 	if err != nil {
@@ -133,7 +135,7 @@ func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
 // one appended after the request included, by run, tenant and the credential names of the terms in force at its append,
 // from the oldest retained offset, which it states. A pool not suspended is refused.
 func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
-	service, ctx := compromiseFixture(t)
+	cluster, service, ctx := compromiseFixture(t)
 	_, receiverKey, _ := ed25519.GenerateKey(rand.Reader)
 	if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: ReceiverTopic("receiver-a"), Key: []byte("receiver-a"), Value: mustBytes(t)(signed.RegisterKey("receiver-a", receiverKey))}).FirstErr(); err != nil {
 		t.Fatal(err)
@@ -249,6 +251,22 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 	}
 	if named := rotate([]string{otherID, currentID}, func() {}); len(named.Tasks) != 3 || rotations != 2 {
 		t.Fatalf("report under both keys %+v; want all three retained tasks", named)
+	}
+	// Retention moving the log start between its listing and the scan's fetch: the report states the start in effect
+	// and the offsets deleted during the scan.
+	var once sync.Once
+	cluster.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Fetch}, Topic: retained.Topic, Observe: true, When: func(kmsg.Request) bool {
+		once.Do(func() {
+			if err := cluster.DeleteRecords(retained.Topic, retained.Partition, retained.Offset+1); err != nil {
+				t.Error(err)
+			}
+		})
+		return true
+	}})
+	moved := rotate([]string{otherID, currentID}, func() {})
+	if moved.Horizon[retained.Partition] != retained.Offset+1 || moved.DeletedFrom[retained.Partition] != expired.Offset+1 ||
+		slices.ContainsFunc(moved.Tasks, func(task SuspectTask) bool { return task.Run == "run-current" }) {
+		t.Fatalf("horizon %v, deleted from %v, tasks %+v; want the horizon past run-current, deleted from offset %d", moved.Horizon, moved.DeletedFrom, moved.Tasks, expired.Offset+1)
 	}
 }
 

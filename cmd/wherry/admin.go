@@ -233,6 +233,9 @@ func writeRotateReport(out io.Writer, pool string, report admin.RotateReport, no
 	for _, partition := range slices.Sorted(maps.Keys(report.Horizon)) {
 		fmt.Fprintf(out, "horizon partition=%d oldest_retained_offset=%d\n", partition, report.Horizon[partition])
 	}
+	for _, partition := range slices.Sorted(maps.Keys(report.DeletedFrom)) {
+		fmt.Fprintf(out, "horizon partition=%d: retention deleted the tasks at offsets %d to %d during the scan; they may not be listed\n", partition, report.DeletedFrom[partition], report.Horizon[partition]-1)
+	}
 	if report.OldestMS == 0 {
 		fmt.Fprintln(out, "horizon: the task topic retains no task; tasks deleted by retention are not listed")
 	} else {

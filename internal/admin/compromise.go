@@ -37,12 +37,14 @@ type SuspectTask struct {
 }
 
 // RotateReport lists the retained tasks under the suspect keys. Horizon is each task topic partition's oldest retained
-// offset and OldestMS the append time of the oldest retained record, 0 with none: a task deleted by retention before
-// them is not listed.
+// offset after the scan and OldestMS the append time of the oldest retained record, 0 with none: a task deleted by
+// retention before them is not listed. DeletedFrom is, for each partition whose log start retention moved during the
+// scan, its start before the scan: tasks from there to the horizon were deleted during it.
 type RotateReport struct {
 	SuspectKeys []string
 	Tasks       []SuspectTask
 	Horizon     map[int32]int64
+	DeletedFrom map[int32]int64
 	OldestMS    int64
 }
 
@@ -112,7 +114,7 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	if err != nil {
 		return RotateReport{}, err
 	}
-	report := RotateReport{SuspectKeys: suspects, Horizon: map[int32]int64{}}
+	report := RotateReport{SuspectKeys: suspects, Horizon: map[int32]int64{}, DeletedFrom: map[int32]int64{}}
 	starts.Each(func(listed kadm.ListedOffset) { report.Horizon[listed.Partition] = listed.Offset })
 	history, err := termsHistory(ctx, reader, pool)
 	if err != nil {
@@ -122,6 +124,16 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	if err != nil {
 		return RotateReport{}, err
 	}
+	// A fetch below the log start begins at the start then in effect, so the horizon is the one listed after the scan.
+	scanned, err := ListOffsets(ctx, listing.ListStartOffsets, PoolTasksTopic(pool))
+	if err != nil {
+		return RotateReport{}, err
+	}
+	scanned.Each(func(listed kadm.ListedOffset) {
+		if before := report.Horizon[listed.Partition]; listed.Offset > before {
+			report.DeletedFrom[listed.Partition], report.Horizon[listed.Partition] = before, listed.Offset
+		}
+	})
 	for _, record := range records {
 		if end, ok := ends.Lookup(record.Topic, record.Partition); !ok || record.Offset >= end.Offset {
 			continue

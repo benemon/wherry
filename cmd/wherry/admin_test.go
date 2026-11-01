@@ -115,7 +115,8 @@ func TestAdminCommandUsage(t *testing.T) {
 	}
 }
 
-// The rotate-key report names each task's run, tenant, key and credentials and states its horizon.
+// The rotate-key report names each task's run, tenant, key and credentials and states its horizon, and the tasks
+// retention deleted during its scan.
 func TestRotateKeyReportStatesItsHorizon(t *testing.T) {
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	var out bytes.Buffer
@@ -136,6 +137,11 @@ tasks=1
 	writeRotateReport(&out, "pool-a", admin.RotateReport{SuspectKeys: []string{"kid-a"}, Horizon: map[int32]int64{0: 0}}, now)
 	if !strings.Contains(out.String(), "horizon: the task topic retains no task; tasks deleted by retention are not listed\n") {
 		t.Fatalf("empty report states no horizon:\n%s", out.String())
+	}
+	out.Reset()
+	writeRotateReport(&out, "pool-a", admin.RotateReport{SuspectKeys: []string{"kid-a"}, Horizon: map[int32]int64{0: 9}, DeletedFrom: map[int32]int64{0: 3}}, now)
+	if !strings.Contains(out.String(), "horizon partition=0 oldest_retained_offset=9\nhorizon partition=0: retention deleted the tasks at offsets 3 to 8 during the scan; they may not be listed\n") {
+		t.Fatalf("report does not state the tasks deleted during the scan:\n%s", out.String())
 	}
 }
 
