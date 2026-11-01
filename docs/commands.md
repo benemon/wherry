@@ -770,15 +770,21 @@ answer none of its open requests and re-key none of its tasks. A receiver
 that reads the suspension, or whose acknowledgement of a claim, a renewal
 included, the broker refuses while `wherry.admin` records it, stops the job
 of every run of the pool it holds through the plugin and ends the run
-`TASK_STATE_FAILED` with `pool suspended`: a run waiting for its open, a run
-in `Dispatch`, a run following its job, and a run whose outputs it is
-collecting. A `Dispatch` in progress is cancelled; unless it reported its
-job, or that it created none, the receiver finds the job with `Lookup` and
-stops it. `Lookup` and `Stop` are retried for up to a minute. A job not
-confirmed stopped by then may still run: the receiver ends the run
-`TASK_STATE_FAILED` with `pool suspended: job stop unconfirmed`, neither
-returns its task to the pool nor releases its platform material, logs it
-and counts it in `wherry_suspend_stop_unconfirmed_total`. The run is not
+`TASK_STATE_FAILED` with `pool suspended`: a run requesting or waiting for
+its open, its job adopted or not, a run in `Dispatch`, a run following its
+job, and a run whose outputs it is collecting. The open request, the
+listing before it and the wait for its answer are cut short. A `Dispatch` in
+progress is cancelled; unless it reported its job, or that it created none,
+the receiver finds the job with `Lookup` and stops it. `Lookup` and `Stop`
+are retried for up to a minute, and no `Stop` runs past it. A job not
+confirmed stopped by then, or before the receiver shuts down, may still
+run: the receiver ends the run `TASK_STATE_FAILED` with
+`pool suspended: job stop unconfirmed`, committing that status within 5
+seconds even as it shuts down, neither returns its task to the pool nor
+releases its platform material, logs it and counts it in
+`wherry_suspend_stop_unconfirmed_total`, on which
+[WherrySuspendStopUnconfirmed](runbooks.md#wherrysuspendstopunconfirmed)
+fires. The run is not
 `key-lost`, so no host resubmits it, and its task delivered again after
 resume is acknowledged without a run. The key custodian keeps rotating.
 

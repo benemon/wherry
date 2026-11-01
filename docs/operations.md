@@ -737,10 +737,13 @@ that read it before the resume can withdraw the grants it restores.
    claiming from it; the events topic, the snapshot topic and the custodian
    group keep working. Each receiver stops the job of every run of the pool
    it holds and ends the run `TASK_STATE_FAILED` with `pool suspended`. A
-   run whose job's stop the plugin does not confirm within a minute ends
+   run whose job's stop the plugin does not confirm within a minute, or
+   before the receiver shuts down, ends
    `pool suspended: job stop unconfirmed` and counts in
-   `wherry_suspend_stop_unconfirmed_total`; its job may still run, so stop
-   it on the platform. No host resubmits such a run, and resume does not
+   `wherry_suspend_stop_unconfirmed_total`, which
+   [WherrySuspendStopUnconfirmed](runbooks.md#wherrysuspendstopunconfirmed)
+   alerts on; its job may still run, so stop it on the platform. No host
+   resubmits such a run, and resume does not
    run it again:
 
    ```sh

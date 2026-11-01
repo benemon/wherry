@@ -75,6 +75,18 @@ groups:
           description: Keys were lost; affected never-started runs are resubmitted by their hosts.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherryrunskeylost
 
+      # A receiver counts each run of a suspended pool it ended with its job's stop unconfirmed, by Stop's bound or a
+      # shutdown.
+      - alert: WherrySuspendStopUnconfirmed
+        expr: |
+          sum by (job, instance, pool) (increase(wherry_suspend_stop_unconfirmed_total[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Receiver {{ $labels.instance }} could not confirm the stop of a job of suspended pool {{ $labels.pool }}
+          description: A suspended pool's job may still run; stop it on the platform by hand.
+          runbook_url: https://benemon.github.io/wherry/runbooks#wherrysuspendstopunconfirmed
+
       # The receiver restarts an exited plugin after one second, doubling the wait after each failed start up to
       # 30 seconds.
       - alert: WherryPluginRestartLoop

@@ -248,6 +248,31 @@ Then:
   and stop a pool's receivers one at a time, so that a stopping custodian
   has a live successor.
 
+## WherrySuspendStopUnconfirmed
+
+A suspended pool's job may still run: stop it on the platform by hand. A
+receiver stops the job of every run of a suspended pool it holds; a job
+whose stop the plugin does not confirm within a minute, or before the
+receiver shuts down, ends its run `TASK_STATE_FAILED` with
+`pool suspended: job stop unconfirmed`, keeps its platform material, and
+counts in `wherry_suspend_stop_unconfirmed_total`. The alert fires on any
+increase.
+
+Confirm it:
+
+1. Read the receiver's log for
+   `run <run>: pool <pool> suspended and the job's stop is unconfirmed; the task and its material stay held`,
+   and the `run <run>: stop: <error>` lines before it.
+2. Run `wherry status RUN_ID`. The run is `TASK_STATE_FAILED` with
+   `pool suspended: job stop unconfirmed`.
+
+Then:
+
+- Find the run's job on the platform and stop it by hand, then remove the
+  material the plugin left for the run.
+- Follow [WherryPlatformErrorsRising](#wherryplatformerrorsrising) when the
+  stop errors are the platform's.
+
 ## WherryPluginRestartLoop
 
 A plugin that exits is started again after one second, the wait doubling
