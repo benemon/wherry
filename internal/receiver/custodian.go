@@ -255,6 +255,7 @@ func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 	if err != nil {
 		return err
 	}
+	earliest := r.earliestSubmissions(tasks)
 	var records []*kgo.Record
 	seen := map[string]bool{}
 	for _, record := range tasks {
@@ -263,7 +264,7 @@ func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 			continue
 		}
 		seen[run] = true
-		task := r.earliest(tasks, run)
+		task := earliest[run]
 		if task == nil || events.committedTerminal(run, task.hash) || !time.Now().Before(wire.PastBound(task.record.Wherry.TaskEndedBy)) ||
 			slices.ContainsFunc(events.rekeys[task.hash], func(wrap wire.RekeyWrap) bool { return wrap.RecipientKID == current.KeyID }) {
 			continue

@@ -1381,3 +1381,37 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 		t.Fatalf("key-lost %v, dispatches %d, want the late task failed key-lost and only its replacement dispatched", lost, dispatches)
 	}
 }
+
+// A handover verifies each run's task records up to its earliest accepted one, once for the pass: runs submitted twice
+// cost one verification each.
+func TestHandoverVerifiesEachTaskRecordOnce(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	const runs = 5
+	for i := range runs {
+		run := fmt.Sprintf("run-%d", i)
+		f.turn(t, run, 1)
+		f.turn(t, run, 2)
+	}
+	var verifications atomic.Int64
+	authorizeSubmission = func(state admin.State, hosts signed.Keys, encoded []byte, pool string) (wire.Submission, error) {
+		verifications.Add(1)
+		return admin.AuthorizeSubmission(state, hosts, encoded, pool)
+	}
+	t.Cleanup(func() { authorizeSubmission = admin.AuthorizeSubmission })
+	successor, err := newAttemptKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := wire.PoolKey{KeyID: signed.KeyThumbprint(&successor.PublicKey), Key: jose.JSONWebKey{Key: &successor.PublicKey}}
+	if err := f.receiver.handOver(f.ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if rekeys := f.rekeys(t); len(rekeys) != runs {
+		t.Fatalf("re-key wraps for %d runs, want %d", len(rekeys), runs)
+	}
+	t.Logf("%d verifications for %d runs over %d task records", verifications.Load(), runs, 2*runs)
+	if got := verifications.Load(); got != runs {
+		t.Fatalf("%d verifications for %d runs over %d task records, want one per run", got, runs, 2*runs)
+	}
+}

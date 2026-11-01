@@ -28,11 +28,12 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// parseHistory and parseStrict are wire.ParseHistory and wire.ParseStrict, swapped by tests that count the verifications
-// of a read.
+// parseHistory, parseStrict and authorizeSubmission are wire.ParseHistory, wire.ParseStrict and
+// admin.AuthorizeSubmission, swapped by tests that count the verifications of a read.
 var (
-	parseHistory = wire.ParseHistory
-	parseStrict  = wire.ParseStrict
+	parseHistory        = wire.ParseHistory
+	parseStrict         = wire.ParseStrict
+	authorizeSubmission = admin.AuthorizeSubmission
 )
 
 // ErrConfigChanged is returned by Run when wherry.admin holds a configuration other than the one it started with.

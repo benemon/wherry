@@ -551,7 +551,7 @@ func (r *Receiver) submissions(records []*kgo.Record, run string) []runSubmissio
 		if string(record.Key) != run {
 			continue
 		}
-		submission, err := admin.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
+		submission, err := authorizeSubmission(state, hosts, record.Value, r.config.Pool)
 		if err == nil && submission.Wherry.Run == run {
 			result = append(result, runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp, offset: record.Offset})
 		}
@@ -559,14 +559,26 @@ func (r *Receiver) submissions(records []*kgo.Record, run string) []runSubmissio
 	return result
 }
 
-// earliest is the run's earliest accepted task record among records, nil for none.
-func (r *Receiver) earliest(records []*kgo.Record, run string) *runSubmission {
-	state, _, _ := r.snapshot()
-	all := r.submissions(records, run)
-	if winner := slices.IndexFunc(all, func(submission runSubmission) bool { return admissible(submission, state.Pools[r.config.Pool]) }); winner >= 0 {
-		return &all[winner]
+// earliestSubmissions maps each run among records to its earliest accepted task record, verifying no record of a run
+// after that one.
+func (r *Receiver) earliestSubmissions(records []*kgo.Record) map[string]*runSubmission {
+	state, _, hosts := r.snapshot()
+	earliest := map[string]*runSubmission{}
+	for _, record := range records {
+		run := string(record.Key)
+		if earliest[run] != nil {
+			continue
+		}
+		submission, err := authorizeSubmission(state, hosts, record.Value, r.config.Pool)
+		if err != nil || submission.Wherry.Run != run {
+			continue
+		}
+		candidate := runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp, offset: record.Offset}
+		if admissible(candidate, state.Pools[r.config.Pool]) {
+			earliest[run] = &candidate
+		}
 	}
-	return nil
+	return earliest
 }
 
 // admissible reports a submission that carries an envelope and whose bounds hold at its append time under terms.

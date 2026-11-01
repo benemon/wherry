@@ -694,7 +694,7 @@ func TestClaimCheckRefusesARequestNotFromItsLiveClaimant(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		check := &claimCheck{r: f.receiver, events: events, tasks: f.records(t, admin.PoolTasksTopic(testPool)), keys: keys, now: time.Now()}
+		check := &claimCheck{r: f.receiver, events: events, earliest: f.receiver.earliestSubmissions(f.records(t, admin.PoolTasksTopic(testPool))), keys: keys, now: time.Now()}
 		request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
 		answer := check.decide(f.ctx, events.requests[request])
 		var refusal wire.OpenRefusal

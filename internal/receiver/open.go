@@ -339,10 +339,11 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 		r.deny(err, capRead)
 		return err
 	}
+	earliest := r.earliestSubmissions(tasks)
 	if !custodian {
-		return r.rekey(ctx, pending, events, tasks, keys, current)
+		return r.rekey(ctx, pending, events, earliest, keys, current)
 	}
-	check := &claimCheck{r: r, events: events, tasks: tasks, keys: keys, now: time.Now()}
+	check := &claimCheck{r: r, events: events, earliest: earliest, keys: keys, now: time.Now()}
 	for _, request := range pending {
 		records := check.decide(ctx, request)
 		if len(records) == 0 {
@@ -363,7 +364,7 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 
 // rekey writes, for each pending request's task that keys open, a re-key wrap of its content key to current, unless
 // one is on the events.
-func (r *Receiver) rekey(ctx context.Context, pending []openRequest, events poolEvents, tasks []*kgo.Record, keys map[string]*poolKey, current wire.PoolKey) error {
+func (r *Receiver) rekey(ctx context.Context, pending []openRequest, events poolEvents, earliest map[string]*runSubmission, keys map[string]*poolKey, current wire.PoolKey) error {
 	done := map[string]bool{}
 	for _, request := range pending {
 		if request.request == nil || done[request.request.TaskHash] {
@@ -371,7 +372,7 @@ func (r *Receiver) rekey(ctx context.Context, pending []openRequest, events pool
 		}
 		hash := request.request.TaskHash
 		done[hash] = true
-		task := r.earliest(tasks, request.request.Run)
+		task := earliest[request.request.Run]
 		if task == nil || task.hash != hash || slices.ContainsFunc(events.rekeys[hash], func(wrap wire.RekeyWrap) bool { return wrap.RecipientKID == current.KeyID }) {
 			continue
 		}
@@ -428,14 +429,14 @@ func (r *Receiver) contentKey(task *wire.Submission, keys map[string]*poolKey, r
 // claimCheck is one custodian pass's view for its claim checks; changed is the reason of the claimant change the last
 // decision served, empty for none.
 type claimCheck struct {
-	r       *Receiver
-	events  poolEvents
-	tasks   []*kgo.Record
-	keys    map[string]*poolKey
-	now     time.Time
-	ads     []*kgo.Record
-	adsRead bool
-	changed string
+	r        *Receiver
+	events   poolEvents
+	earliest map[string]*runSubmission
+	keys     map[string]*poolKey
+	now      time.Time
+	ads      []*kgo.Record
+	adsRead  bool
+	changed  string
 }
 
 // decide checks one open request against the claim check's four rules and returns the records answering it, in one
@@ -463,7 +464,7 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 		return refuse(wire.RefusedNotClaimant)
 	}
 	// Rule 2: the run's earliest accepted task, not terminal or cancelled, within its open bound.
-	task := r.earliest(c.tasks, request.Run)
+	task := c.earliest[request.Run]
 	if task == nil || task.hash != request.TaskHash {
 		return refuse(wire.RefusedNotClaimant)
 	}
