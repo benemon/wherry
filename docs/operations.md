@@ -727,11 +727,17 @@ under a new name.
 
 ## Respond to a compromised receiver or pool key
 
-Run the steps in order, with the `wherry admin` environment set.
+Run the steps in order, with the `wherry admin` environment set. Run no
+other `wherry admin` command while `pool suspend` or `pool resume` runs:
+admin commands do not lock each other, and one that read `wherry.admin`
+before the suspension can restore the task topic grants it withdraws, or one
+that read it before the resume can withdraw the grants it restores.
 
 1. Suspend the pool. Hosts stop submitting to it and receivers stop
    claiming from it; the events topic, the snapshot topic and the custodian
-   group keep working:
+   group keep working. Each receiver stops the job of every run of the pool
+   it holds and ends the run `TASK_STATE_FAILED` with `pool suspended`. No
+   host resubmits such a run, and resume does not run it again:
 
    ```sh
    wherry admin pool suspend build
@@ -754,9 +760,15 @@ Run the steps in order, with the `wherry admin` environment set.
    wherry admin pool rotate-key build --suspect-key <kid> --suspect-key <kid>
    ```
 
-   The output lists each retained task under those keys by run, tenant and
-   credential names, and states its horizon: the oldest retained task.
-   Tasks deleted by retention before the horizon are not listed.
+   The command refuses a pool that is not suspended. It waits up to 5
+   minutes for the key custodian's snapshot rotated for the request,
+   printing a progress line every 10 seconds, and then lists each task
+   retained under those keys through that snapshot by run, tenant and
+   credential names. A task's credential names are those of the pool terms
+   in force when it was appended and its own. The output states its
+   horizon: the oldest retained task. Tasks deleted by retention before the
+   horizon are not listed. When the wait ends without the snapshot, the
+   request stands: wait for the new key custodian and run the command again.
 
 5. Rotate each listed credential at its issuer. Tenants cancel or resubmit
    the affected tasks.

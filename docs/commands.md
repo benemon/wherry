@@ -690,8 +690,10 @@ with `unknown option --<name>`. `--plugin-sha256` is given once per plugin
 type and `--suspect-key` once per key; any other repeated option takes its last value. `pool create`, `pool update`,
 `pool entitle`, `pool suspend`, `pool resume`, `host add` and `receiver add` then create every ACL the new
 state calls for, re-read them, and fail with `ACL plan incomplete` when one
-is missing. They then delete every `READ` and `WRITE` ACL on a suspended
-pool's tasks topic.
+is missing. They then delete the `READ` and `WRITE` ACLs on a suspended
+pool's tasks topic that the pool's hosts and receivers hold unsuspended, each
+by a filter naming its principal; another principal's ACL on the topic
+stays.
 
 A bundle file must not exist beforehand. A command that fails removes the
 bundle it created.
@@ -764,8 +766,14 @@ no `READ`, on its tasks topic. The events topic, the snapshot topic, the
 receivers' topics and the custodian group keep their ACLs. A host refuses a
 submission to the pool with `pool is suspended` before it resolves any
 credential or uploads any input. Receivers claim nothing from the pool,
-answer none of its open requests and re-key none of its tasks; a run
-already claimed keeps running. The key custodian keeps rotating.
+answer none of its open requests and re-key none of its tasks. A receiver
+that reads the suspension, or whose acknowledgement of a claim, a renewal
+included, the broker refuses while `wherry.admin` records it, stops the job
+of every run of the pool it holds through the plugin and ends the run
+`TASK_STATE_FAILED` with `pool suspended`: a run waiting for its open, a run
+following its job, and a run whose outputs it is collecting. The run is not
+`key-lost`, so no host resubmits it, and its task delivered again after
+resume is acknowledged without a run. The key custodian keeps rotating.
 
 ### `wherry admin pool resume POOL`
 
@@ -776,22 +784,33 @@ again at their next refresh of `wherry.admin`.
 
 ### `wherry admin pool rotate-key POOL [--suspect-key KID]...`
 
-Records a `rotate-key` record for the pool on `wherry.admin`. The pool's key
-custodian publishes a `rotation` snapshot with a new key on its first pass
-after it reads a `rotate-key` record appended after its current key's
-snapshot, as at its daily rotation. Hosts encrypt to the new key once they
-read that snapshot.
+Refuses a pool that is not suspended with `pool <pool> is not suspended; run
+wherry admin pool suspend <pool> first`. Otherwise records a `rotate-key`
+record for the pool on `wherry.admin`. The pool's key custodian publishes a
+`rotation` snapshot with a new key on its first pass after it reads a
+`rotate-key` record whose `wherry.admin` offset is above the `rotated_for`
+its current snapshot carries, as at its daily rotation. A snapshot with a
+new key carries as `rotated_for` the offset of the latest `rotate-key`
+record its custodian read, and every later snapshot carries it on; append
+times do not decide it. Hosts encrypt to the new key once they read that
+snapshot.
 
-The command then reads the pool's tasks topic as the Kafka super user and
-lists every retained task record whose submit wrap's `kid` is one of the
-suspect keys. Without `--suspect-key` the suspect key is the key the current
-snapshot names when the command starts; the command refuses when the pool
-has no snapshot or its current snapshot does not verify. A task record is
-listed whether or not its signature verifies. The output names runs,
-tenants and credentials, and holds no credential value:
+The command waits up to 5 minutes for a snapshot whose `rotated_for` is at
+or above its record's offset, writing
+`waiting for pool <pool>'s key custodian to rotate for the request at wherry.admin offset <offset>, up to <time>`
+to standard error every 10 seconds. With none, it fails with
+`pool <pool>'s key custodian published no snapshot rotated for the rotate-key request at wherry.admin offset <offset> within 5m0s; the request stands`.
+It then captures the end offset of the pool's tasks topic, reads the topic
+as the Kafka super user through that offset, and lists every retained task
+record whose submit wrap's `kid` is one of the suspect keys. Without
+`--suspect-key` the suspect key is the key the current snapshot names when
+the command starts; the command refuses when the pool has no snapshot or its
+current snapshot does not verify. A task record is listed whether or not its
+signature verifies. The output names runs, tenants and credentials, and
+holds no credential value:
 
 ```
-rotate-key recorded for pool <pool>; its key custodian rotates on its next pass
+pool <pool>'s key custodian rotated for the rotate-key request; tasks appended through that rotation are listed
 suspect_keys=<kid>[,<kid>...]
 horizon partition=<n> oldest_retained_offset=<offset>
 horizon: the oldest retained task was appended at <time>, <age> ago; tasks deleted by retention before it are not listed
@@ -800,8 +819,9 @@ tasks=<n>
 ```
 
 The credential names are those of the task's envelope: the agent's
-credentials the host supplied, under the pool's current terms, and the
-task's own.
+credentials the host supplied under the pool terms in force when the task
+was appended, the last terms record on `wherry.admin` appended no later than
+the task, and the task's own.
 
 ### `wherry admin host add HOST --tenant TENANT --bundle-file FILE`
 
@@ -997,8 +1017,8 @@ snapshot's write ends at the `deadline_ms`; a write the deadline ends is
 followed on the next pass by a `takeover`. The custodian rotates the key at the
 append time of the snapshot first read back naming it plus 24 hours plus a
 jitter under one hour derived from the pool and key ID, publishing a
-`rotation` snapshot, at once on a [`rotate-key`](#wherry-admin-pool-rotate-key-pool-suspect-key-kid) record appended
-after that snapshot, and republishes its snapshot with the same reason after
+`rotation` snapshot, at once on a [`rotate-key`](#wherry-admin-pool-rotate-key-pool-suspect-key-kid) record whose
+`wherry.admin` offset is above the snapshot's `rotated_for`, and republishes its snapshot with the same reason after
 its signing key rotates; a republish does not move the rotation. A commit
 error is retried up to 3 times on the same producer; a commit with an
 unknown outcome counts in `wherry_ambiguous_commits_total`. The custodian

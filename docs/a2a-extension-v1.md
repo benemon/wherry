@@ -786,7 +786,8 @@ that key's public half, on the pool's compacted
   "pool": "build",
   "custodian": "nomad-1",
   "reason": "rotation",
-  "current": {"key_id": "Qh3T...", "key": {"kty": "EC", "crv": "P-256", "x": "...", "y": "..."}}
+  "current": {"key_id": "Qh3T...", "key": {"kty": "EC", "crv": "P-256", "x": "...", "y": "..."}},
+  "rotated_for": 4182
 }
 ```
 
@@ -797,6 +798,11 @@ that key's public half, on the pool's compacted
   `contested`.
 - `current.key` is a P-256 public JWK, and `current.key_id` its RFC 7638
   SHA-256 thumbprint, unpadded base64url.
+- `rotated_for` is the `wherry.admin` offset of the latest `rotate-key`
+  record for the pool that a key this snapshot or an earlier one published
+  was generated after; it is absent before the first. Every later snapshot
+  carries it on, and the custodian rotates on a `rotate-key` record whose
+  offset is above it.
 - The current snapshot is the latest committed record under the key
   `custodian` on the topic, the record compaction keeps for that key. A
   record under another key is not a snapshot. A host submits to the pool
