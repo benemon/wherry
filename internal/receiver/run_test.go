@@ -835,6 +835,15 @@ func TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial(t *testing.T) {
 	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != started || halt() != nil {
 		t.Fatalf("offset %d err %v, stopped with %v, without the ended holder's progress; want the started offset %d", got, err, halt(), started)
 	}
+	revoking, err := admin.EncodeRecord(admin.Record{Kind: "revoking", Receiver: testReceiver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.produce(t, admin.AdminTopic, "revoking."+admin.ReceiverPrincipal(testReceiver), revoking)
+	halt = f.halts()
+	if _, _, err := f.receiver.lastOffset(f.ctx, task, hash); !errors.Is(err, kerr.TopicAuthorizationFailed) || halt() == nil {
+		t.Fatalf("the topic denial while this receiver is being revoked returned %v and stopped the receiver with %v; want the denial", err, halt())
+	}
 }
 
 func TestFencedProducerStopsRunWrites(t *testing.T) {

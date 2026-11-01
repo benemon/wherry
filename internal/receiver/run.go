@@ -2245,7 +2245,9 @@ func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash s
 		}
 		// The end comes into the receiver's state only at its next refresh: a holder ended before then is a peer still.
 		if errors.Is(err, kerr.TopicAuthorizationFailed) {
-			if state, loadErr := r.reader.Load(readCtx); loadErr == nil && state.Ended[admin.ReceiverPrincipal(holder)] {
+			// A revocation of this receiver deletes its ACLs broker by broker, so its own denial can arrive here first.
+			self := admin.ReceiverPrincipal(r.id)
+			if state, loadErr := r.reader.Load(readCtx); loadErr == nil && state.Ended[admin.ReceiverPrincipal(holder)] && !state.Ended[self] && !state.Revoking[self] {
 				continue
 			}
 		}
