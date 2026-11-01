@@ -1035,12 +1035,12 @@ ends, that stood down, or whose failed write is followed by another
 receiver's committed snapshot writes no more snapshots until it is assigned
 again.
 
-On `SIGINT`, `SIGTERM` or a configuration change, a receiver closes its
-custodian group client and removes its static membership from the group,
-which hands the partition on at once. The key custodian with a
+On `SIGINT`, `SIGTERM` or a configuration change, a receiver ends any custody
+pass in progress at once, closes its custodian group client and removes its
+static membership from the group, which hands the partition on at once. The key custodian with a
 `drain_timeout` over `0s` while another member of the pool has an
 advertisement within 120 seconds without `stepping_down` first advertises
-`stepping_down` with `deadline_ms` at its time plus `drain_timeout`,
+`stepping_down` with `deadline_ms` at its stop plus `drain_timeout`,
 waiting at most 2.5 seconds for the write, and after the removal waits until
 that deadline for another receiver's snapshot. Every step of the drain, the
 handover's reads, its re-key transaction and the key deletion included,

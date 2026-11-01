@@ -124,6 +124,14 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 		}
 	}()
 	defer r.assign(false)
+	// A stop fixes the one shutdown deadline and ends a custody pass in progress at once.
+	pass, endPass := context.WithCancel(running)
+	defer endPass()
+	stopped := make(chan time.Time, 1)
+	defer context.AfterFunc(ctx, func() {
+		stopped <- time.Now()
+		endPass()
+	})()
 	ticker := time.NewTicker(custodyInterval)
 	defer ticker.Stop()
 	for {
@@ -133,44 +141,46 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 			group = nil
 			r.assign(false)
 		}
-		if err := r.tend(running, time.Now()); err != nil && running.Err() == nil {
+		if err := r.tend(pass, time.Now()); err != nil && pass.Err() == nil {
 			r.logger.Printf("custody: %v", err)
 		}
 		select {
 		case <-ctx.Done():
-			if group != nil {
-				r.stepDown(ctx, group)
-				group = nil
-			}
-			return
 		case <-running.Done():
-			return
 		case <-ticker.C:
+			continue
 		case <-r.custody.wake:
+			continue
 		}
+		// A stop steps down also when running has ended with it.
+		if ctx.Err() != nil && group != nil {
+			r.stepDown(ctx, <-stopped, group)
+			group = nil
+		}
+		return
 	}
 }
 
-// stepDown relinquishes the custodian group at a drain, closing group and removing its static membership. A custodian
-// with a drain timeout and another live member first advertises stepping_down and afterwards waits up to the drain timeout
-// for a successor's snapshot: with one it hands its keys over; with none it keeps them to their deadlines, so its restart
-// is an ordinary custodian restart. Any other custodian leaves without stepping_down, so its successor takes over.
-func (r *Receiver) stepDown(ctx context.Context, group *kgo.Client) {
-	// Every step, the handover included, ends within the drain timeout and stepDownMargin, whatever ctx.
-	bounded, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.drainTimeout+stepDownMargin)
+// stepDown relinquishes the custodian group at a drain stopped at stopped, closing group and removing its static
+// membership. A custodian with a drain timeout and another live member first advertises stepping_down and afterwards
+// waits until the drain timeout after stopped for a successor's snapshot: with one it hands its keys over; with none it
+// keeps them to their deadlines, so its restart is an ordinary custodian restart. Any other custodian leaves without
+// stepping_down, so its successor takes over.
+func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, group *kgo.Client) {
+	// Every step, the handover included, ends within the drain timeout and stepDownMargin of the stop, whatever ctx.
+	deadline := stopped.Add(r.drainTimeout)
+	bounded, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(stepDownMargin))
 	defer cancel()
 	r.custody.mu.Lock()
 	acting := r.custody.producer != nil
 	r.custody.mu.Unlock()
-	waiting, deadline := false, time.Time{}
+	waiting := false
 	if acting && r.drainTimeout > 0 {
 		adCtx, cancel := context.WithTimeout(bounded, stepDownMargin/2)
 		live, err := r.peerLive(adCtx)
 		if waiting = err == nil && live; waiting {
-			at := time.Now()
-			deadline = at.Add(r.drainTimeout)
 			r.mu.Lock()
-			r.steppingDown = &wire.SteppingDown{AtMS: at.UnixMilli(), StartedMS: r.started.UnixMilli(), DeadlineMS: deadline.UnixMilli()}
+			r.steppingDown = &wire.SteppingDown{AtMS: stopped.UnixMilli(), StartedMS: r.started.UnixMilli(), DeadlineMS: deadline.UnixMilli()}
 			r.mu.Unlock()
 			if err := r.advertise(adCtx); err != nil {
 				r.logger.Printf("custodian: advertise stepping down: %v", err)

@@ -1083,6 +1083,70 @@ func TestHandoverNearTheDeadlineEndsWithinTheBoundKeepingTheKeys(t *testing.T) {
 	}
 }
 
+// A stop arriving while a custody pass waits, with no held run, so the run drain ends with the stop: the custodian
+// steps down, advertises the deadline the stop fixed, and Run returns within the drain timeout and stepDownMargin. Both
+// ends are ready when the pass returns, so the stop runs eight times.
+func TestStopDuringACustodyPassStepsDownByTheStopsDeadline(t *testing.T) {
+	interval := custodyInterval
+	custodyInterval = 100 * time.Millisecond
+	t.Cleanup(func() { custodyInterval = interval })
+	for round := range 8 {
+		t.Run(fmt.Sprint(round), stopDuringACustodyPass)
+	}
+}
+
+func stopDuringACustodyPass(t *testing.T) {
+	f := newBareFixture(t)
+	f.receiver.drainTimeout = time.Second
+	peer := f.member(t, "receiver-b")
+	ctx, stop := context.WithCancel(f.ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = f.receiver.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		stop()
+		<-done
+	})
+	f.awaitSnapshots(t, 1)
+	awaitActing(t, f, f.receiver)
+	at := time.Now()
+	advertiseWith(t, f, peer, wire.Advertisement{AtMS: at.UnixMilli(), StartedMS: at.UnixMilli()})
+	// The next pass waits for the custody lock until half a second after the stop, when the run drain has ended too.
+	f.receiver.custody.mu.Lock()
+	time.Sleep(3 * custodyInterval)
+	stopped := time.Now()
+	stop()
+	time.Sleep(500 * time.Millisecond)
+	f.receiver.custody.mu.Unlock()
+	bound := f.receiver.drainTimeout + stepDownMargin
+	select {
+	case <-done:
+	case <-time.After(bound + 5*time.Second):
+		t.Fatalf("Run did not return; logs:\n%s", f.logs.String())
+	}
+	if took := time.Since(stopped); took > bound+time.Second {
+		t.Fatalf("shutdown took %s, want within %s", took, bound)
+	}
+	var advertisement wire.Advertisement
+	for _, record := range f.records(t, admin.ReceiversTopic) {
+		if string(record.Key) == testReceiver {
+			advertisement = wire.Advertisement{}
+			if err := wire.ParseRecord(record.Value, f.keys(), &advertisement); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if advertisement.SteppingDown == nil {
+		t.Fatalf("no stepping_down advertised; logs:\n%s", f.logs.String())
+	}
+	want := stopped.Add(f.receiver.drainTimeout).UnixMilli()
+	if got := advertisement.SteppingDown.DeadlineMS; got < want || got > want+250 {
+		t.Fatalf("deadline_ms %+d ms from the stop's deadline, want the stop's", got-want)
+	}
+}
+
 // failTaskListing fails every listing of the pool's task topic's offsets.
 func failTaskListing(f fixture) {
 	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {

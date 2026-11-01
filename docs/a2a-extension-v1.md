@@ -760,7 +760,7 @@ An advertisement reports a receiver's liveness and capacity.
 - `capacity` and `in_flight` are 0 or more, and `at_ms` is over 0.
 - `started_ms`, optional, is when the advertising process started.
 - `stepping_down`, optional, is present while the pool's key custodian
-  drains to hand its custody on: `at_ms`, when it was set, and
+  drains to hand its custody on: `at_ms`, when its stop arrived, and
   `started_ms`, the start time of the process that set it, both over 0,
   and `deadline_ms`, `at_ms` plus the custodian's drain timeout, over
   `at_ms`. A successor publishes a `handover` snapshot only when the
