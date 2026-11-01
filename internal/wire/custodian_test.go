@@ -44,6 +44,7 @@ func TestSnapshotDecodesStrictlyAndBindsItsWriter(t *testing.T) {
 		"unknown member":            {"receiver-a", keyA, strings.Replace(valid, `"pool":`, `"later":1,"pool":`, 1), "decode snapshot"},
 		"duplicate member":          {"receiver-a", keyA, strings.Replace(valid, `"pool":"pool-a"`, `"pool":"pool-a","pool":"pool-a"`, 1), "duplicate"},
 		"unknown reason":            {"receiver-a", keyA, strings.Replace(valid, `"bootstrap"`, `"promotion"`, 1), "invalid custodian snapshot"},
+		"handover reason":           {"receiver-a", keyA, strings.Replace(valid, `"bootstrap"`, `"handover"`, 1), "invalid custodian snapshot"},
 		"written by another":        {"receiver-b", keyB, valid, "written by another receiver than the custodian it names"},
 		"key ID not the thumbprint": {"receiver-a", keyA, strings.Replace(valid, `"key_id":"`, `"key_id":"x`, 1), "invalid custodian snapshot"},
 	} {

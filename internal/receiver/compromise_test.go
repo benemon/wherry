@@ -381,7 +381,7 @@ func TestSuspendWithNoCustodianReturns(t *testing.T) {
 
 // A drain while the pool is suspended scans nothing, does not stop for a denial and keeps every key it holds.
 func TestDrainWhileSuspendedKeepsTheKeys(t *testing.T) {
-	f, successor, drain := handoverFixture(t, 15*time.Second)
+	f, successor, drain := drainFixture(t, 15*time.Second)
 	f.submit(t, f.host, nil)
 	held := heldKeys(t, f.receiver)
 	if err := f.service.PoolSuspend(f.ctx, testPool, true); err != nil {
@@ -392,8 +392,8 @@ func TestDrainWhileSuspendedKeepsTheKeys(t *testing.T) {
 	}
 	drain()
 	records := f.snapshotRecords(t)
-	if parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing).Reason != "handover" {
-		t.Fatalf("no handover; logs:\n%s", f.logs.String())
+	if parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing).Reason != "takeover" {
+		t.Fatalf("no takeover; logs:\n%s", f.logs.String())
 	}
 	if keys := heldKeys(t, f.receiver); len(keys) != len(held) || len(f.rekeys(t)) != 0 {
 		t.Fatalf("keys %s and %d re-keyed runs after a drain while suspended, want %s kept and none", describeKeys(keys), len(f.rekeys(t)), describeKeys(held))

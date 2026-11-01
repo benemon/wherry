@@ -2,6 +2,13 @@
 
 URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
+**Change note, 2026-11-01 (custody coordination):** edited in place at
+version 1. An [advertisement](#advertisement) no longer carries
+`started_ms` or `stepping_down`, and a
+[custodian snapshot](#custodian-snapshot)'s `reason` is no longer
+`handover`: every custodian change publishes `takeover` or `contested`.
+A snapshot with reason `handover` is refused.
+
 **Change note, 2026-11-01 (pool key):** edited in place at version 1. A
 pool's key custodian replaces the seal exchange: the seal request a
 receiver wrote to the tenant feed and the seal its host answered with are
@@ -16,8 +23,7 @@ its content key in a submit `wrap` to the pool's current key
 writes a [re-key wrap](#re-key-wrap) to the current key. The custodian
 publishes a [custodian snapshot](#custodian-snapshot) on the pool's
 `wherry.pool.<pool>.custodian` topic. A [resubmission](#resubmission)
-carries `replaces` and `s3_input_run`. An [advertisement](#advertisement)
-carries `stepping_down` while a custodian drains. Statuses add the kinds
+carries `replaces` and `s3_input_run`. Statuses add the kinds
 `released`, `adopting` and `reconciling`, and a `terminal` status the
 wherry event `key-lost`.
 
@@ -762,8 +768,7 @@ An advertisement reports a receiver's liveness and capacity.
   "receiver": "nomad-1", "pool": "build",
   "offers": [{"profile": "container", "agent": "coder"}],
   "capacity": 2, "in_flight": 0,
-  "at_ms": 1789998000000,
-  "started_ms": 1789990000000
+  "at_ms": 1789998000000
 }
 ```
 
@@ -778,16 +783,6 @@ An advertisement reports a receiver's liveness and capacity.
   the host carries them as S3 inputs, or refuses the run when the pool or
   the host has no storage.
 - `capacity` and `in_flight` are 0 or more, and `at_ms` is over 0.
-- `started_ms`, optional, is when the advertising process started.
-- `stepping_down`, optional, is present while the pool's key custodian
-  drains to hand its custody on: `at_ms`, when its stop arrived, and
-  `started_ms`, the start time of the process that set it, both over 0,
-  and `deadline_ms`, `at_ms` plus the custodian's drain timeout, over
-  `at_ms`. A successor publishes a `handover` snapshot only when the
-  previous custodian's latest advertisement is live and carries
-  `stepping_down` whose `started_ms` equals the advertisement's, and only
-  while its own clock is before `deadline_ms`, with the snapshot's commit
-  bounded by it; otherwise it publishes a `takeover`.
 - A receiver advertises every 30 seconds, with or without a ready profile.
   Placement passes over a receiver whose `offers` is empty. Readers take
   each receiver's
@@ -814,8 +809,7 @@ that key's public half, on the pool's compacted
 - Readers decode a snapshot strictly: an unknown or duplicate member
   refuses it.
 - `custodian` is a receiver ID, and the snapshot's signer.
-- `reason` is `bootstrap`, `rotation`, `handover`, `takeover` or
-  `contested`.
+- `reason` is `bootstrap`, `rotation`, `takeover` or `contested`.
 - `current.key` is a P-256 public JWK, and `current.key_id` its RFC 7638
   SHA-256 thumbprint, unpadded base64url.
 - `rotated_for` is the `wherry.admin` offset of the latest `rotate-key`

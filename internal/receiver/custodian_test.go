@@ -100,7 +100,7 @@ func restarted(t *testing.T, r *Receiver) *Receiver {
 		t.Fatal(err)
 	}
 	t.Cleanup(base.Close)
-	return &Receiver{id: r.id, base: base, reader: admin.NewReader(base), signing: r.signing, stateDir: r.stateDir, started: time.Now(), drainTimeout: r.drainTimeout, factory: r.factory, logger: r.logger, metrics: newMetrics(prometheus.NewRegistry())}
+	return &Receiver{id: r.id, base: base, reader: admin.NewReader(base), signing: r.signing, stateDir: r.stateDir, drainTimeout: r.drainTimeout, factory: r.factory, logger: r.logger, metrics: newMetrics(prometheus.NewRegistry())}
 }
 
 // runUntilStopped runs r and returns a function that stops it and waits for Run to return.
@@ -814,9 +814,9 @@ func (f fixture) rekeys(t *testing.T) map[string][]wire.RekeyWrap {
 	return rekeys
 }
 
-// handoverFixture is a fixture whose receiver is custodian with drainTimeout, and receiver-b, a live member of the
+// drainFixture is a fixture whose receiver is custodian with drainTimeout, and receiver-b, a live member of the
 // custodian group; it returns receiver-b and the function that drains the custodian.
-func handoverFixture(t *testing.T, drainTimeout time.Duration) (fixture, *Receiver, func()) {
+func drainFixture(t *testing.T, drainTimeout time.Duration) (fixture, *Receiver, func()) {
 	t.Helper()
 	f := newBareFixture(t)
 	f.receiver.drainTimeout = drainTimeout
@@ -831,11 +831,11 @@ func handoverFixture(t *testing.T, drainTimeout time.Duration) (fixture, *Receiv
 	return f, successor, drain
 }
 
-// A planned drain hands custody on at once through the explicit leave: the successor publishes a handover snapshot
-// within seconds, every queued or running task under the old key is re-keyed to the successor's key, and the old keys
-// are then deleted.
+// A planned drain hands custody on at once through the explicit leave: the successor publishes a takeover snapshot
+// within seconds and counts it, every queued or running task under the old key is re-keyed to the successor's key, and
+// the old keys are then deleted. No advertisement carries stepping_down and no snapshot carries handover.
 func TestPlannedDrainHandsOverToALiveSuccessor(t *testing.T) {
-	f, successor, drain := handoverFixture(t, 15*time.Second)
+	f, successor, drain := drainFixture(t, 15*time.Second)
 	queued := f.submit(t, f.host, nil)
 	running := f.turn(t, "run-r", 1)
 	f.publishStatus(t, running, testReceiver, f.receiver.signing, "started", wire.TaskStateWorking, nil)
@@ -845,11 +845,11 @@ func TestPlannedDrainHandsOverToALiveSuccessor(t *testing.T) {
 	drain()
 	records := f.snapshotRecords(t)
 	snapshot := parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing)
-	if len(records) != 2 || snapshot.Reason != "handover" {
-		t.Fatalf("snapshots = %d, last %+v, want receiver-b's handover; logs:\n%s", len(records), snapshot, f.logs.String())
+	if len(records) != 2 || snapshot.Reason != "takeover" {
+		t.Fatalf("snapshots = %d, last %+v, want receiver-b's takeover; logs:\n%s", len(records), snapshot, f.logs.String())
 	}
 	if handed := records[1].Timestamp.Sub(began); handed > 10*time.Second {
-		t.Fatalf("handover %s after the drain began, want within seconds", handed)
+		t.Fatalf("takeover %s after the drain began, want within seconds", handed)
 	}
 	if keys := heldKeys(t, f.receiver); len(keys) != 0 {
 		t.Fatalf("the drained custodian holds %s, want its keys deleted", describeKeys(keys))
@@ -865,15 +865,24 @@ func TestPlannedDrainHandsOverToALiveSuccessor(t *testing.T) {
 			t.Fatalf("run %s: re-key wraps %+v, want one the successor's key opens", record.Key, wraps)
 		}
 	}
-	if got := scrapedValue(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 0 {
-		t.Fatalf("takeovers = %v after a handover, want 0", got)
+	if got := scrapedValue(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 {
+		t.Fatalf("takeovers = %v after a drain, want 1", got)
+	}
+	for _, record := range append(f.records(t, admin.ReceiversTopic), records...) {
+		parsed, err := jose.ParseSignedCompact(string(record.Value), []jose.SignatureAlgorithm{jose.EdDSA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if payload := string(parsed.UnsafePayloadWithoutVerification()); strings.Contains(payload, "stepping_down") || strings.Contains(payload, `"handover"`) {
+			t.Fatalf("record on %s carries the drain label: %s", record.Topic, payload)
+		}
 	}
 }
 
-// A drain with the default drain timeout of 0 leaves the custodian group without stepping_down: the successor takes over
-// and counts it, nothing is re-keyed and the old custodian keeps its keys.
+// A drain with the default drain timeout of 0 leaves the custodian group: the successor takes over and counts it,
+// nothing is re-keyed and the old custodian keeps its keys.
 func TestDrainWithNoTimeoutLeavesForATakeover(t *testing.T) {
-	f, successor, drain := handoverFixture(t, 0)
+	f, successor, drain := drainFixture(t, 0)
 	f.submit(t, f.host, nil)
 	held := heldKeys(t, f.receiver)
 	drain()
@@ -885,48 +894,10 @@ func TestDrainWithNoTimeoutLeavesForATakeover(t *testing.T) {
 		t.Fatalf("keys %s after the drain, want %s kept", describeKeys(keys), describeKeys(held))
 	}
 	if len(f.rekeys(t)) != 0 {
-		t.Fatal("re-key wraps written without a handover")
+		t.Fatal("re-key wraps written with no drain timeout")
 	}
 	if got := scrapedValue(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 {
 		t.Fatalf("takeovers = %v at the successor, want 1", got)
-	}
-}
-
-// A drain whose stepping_down advertisement cannot be written still leaves the custodian group, within the drain timeout
-// and stepDownMargin.
-func TestDrainLeavesWhenTheAdvertisementFails(t *testing.T) {
-	f := newBareFixture(t)
-	f.receiver.drainTimeout = time.Second
-	drain := custodyUntilDrained(t, f.ctx, f.receiver)
-	f.awaitSnapshots(t, 1)
-	awaitActing(t, f, f.receiver)
-	if err := f.peer(t, "receiver-b").advertise(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	var held atomic.Bool
-	held.Store(true)
-	arrived := holdProduces(t, f, admin.ReceiversTopic, &held)
-	var left atomic.Bool
-	f.cluster.ControlKey(kmsg.LeaveGroup.Int16(), func(kmsg.Request) (kmsg.Response, error, bool) {
-		f.cluster.KeepControl()
-		left.Store(true)
-		return nil, nil, false
-	})
-	bound := f.receiver.drainTimeout + stepDownMargin
-	// Past the bound the advertisement may land, so a drain that waits for it ends and fails here.
-	defer time.AfterFunc(bound+time.Second, func() { held.Store(false) }).Stop()
-	began := time.Now()
-	drain()
-	if took := time.Since(began); took > bound+time.Second {
-		t.Fatalf("drain took %s, want within %s", took, bound)
-	}
-	select {
-	case <-arrived:
-	default:
-		t.Fatal("no stepping_down advertisement attempted")
-	}
-	if !left.Load() {
-		t.Fatalf("no leave of the custodian group; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -937,118 +908,6 @@ func advertiseWith(t *testing.T, f fixture, r *Receiver, advertisement wire.Adve
 	value := must(t)(wire.SignRecord(&advertisement, r.signing))
 	if err := f.service.Admin.ProduceSync(f.ctx, &kgo.Record{Topic: admin.ReceiversTopic, Key: []byte(r.id), Value: value, Timestamp: time.UnixMilli(advertisement.AtMS)}).FirstErr(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// A successor counts a handover only when the previous custodian's latest advertisement is live and carries
-// stepping_down set by the process advertising; anything else is a takeover.
-func TestHandoverOnlyFromTheLiveProcessSteppingDown(t *testing.T) {
-	// Later than the fixtures' own advertisements.
-	now := time.Now().Add(time.Minute)
-	started := now.Add(-time.Hour).UnixMilli()
-	steppingDown := &wire.SteppingDown{AtMS: now.UnixMilli(), StartedMS: started, DeadlineMS: now.Add(time.Minute).UnixMilli()}
-	for name, test := range map[string]struct {
-		advertisement wire.Advertisement
-		reason        string
-	}{
-		"stepping down":                {wire.Advertisement{AtMS: now.UnixMilli(), StartedMS: started, SteppingDown: steppingDown}, "handover"},
-		"flag from an earlier process": {wire.Advertisement{AtMS: now.UnixMilli(), StartedMS: started + 1, SteppingDown: steppingDown}, "takeover"},
-		"advertisement not live":       {wire.Advertisement{AtMS: now.Add(-advertisementLive - time.Second).UnixMilli(), StartedMS: started, SteppingDown: steppingDown}, "takeover"},
-		"deadline passed":              {wire.Advertisement{AtMS: now.UnixMilli(), StartedMS: started, SteppingDown: &wire.SteppingDown{AtMS: now.Add(-2 * time.Second).UnixMilli(), StartedMS: started, DeadlineMS: now.Add(-time.Second).UnixMilli()}}, "takeover"},
-		"no flag":                      {wire.Advertisement{AtMS: now.UnixMilli(), StartedMS: started}, "takeover"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newBareFixture(t)
-			custodian(t, f.ctx, f.receiver, now)
-			successor := f.member(t, "receiver-b")
-			advertiseWith(t, f, f.receiver, test.advertisement)
-			custodian(t, f.ctx, successor, now)
-			records := f.snapshotRecords(t)
-			if snapshot := parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing); snapshot.Reason != test.reason {
-				t.Fatalf("reason %s, want %s", snapshot.Reason, test.reason)
-			}
-			if counted := strings.Contains(scrape(t, successor), `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"} 1`); counted != (test.reason == "takeover") {
-				t.Fatalf("takeover counted %v, want %v", counted, test.reason == "takeover")
-			}
-		})
-	}
-}
-
-// A stepping_down flag an earlier process left is not the live custodian's: the same receiver back without its keys after
-// a drain with no successor takes over, and counts it.
-func TestStaleSteppingDownThenStateLossIsATakeover(t *testing.T) {
-	f := newBareFixture(t)
-	f.receiver.drainTimeout = time.Second
-	drain := custodyUntilDrained(t, f.ctx, f.receiver)
-	f.awaitSnapshots(t, 1)
-	awaitActing(t, f, f.receiver)
-	// A live member that never joins the custodian group: the drain steps down and waits for no successor.
-	if err := f.peer(t, "receiver-b").advertise(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	drain()
-	if err := os.RemoveAll(f.receiver.poolKeysDir()); err != nil {
-		t.Fatal(err)
-	}
-	again := restarted(t, f.receiver)
-	if err := again.configure(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	// The latest advertisement is the earlier process's, stepping down.
-	custodian(t, f.ctx, again, time.Now())
-	records := f.snapshotRecords(t)
-	if len(records) != 2 || parseSnapshot(t, records[1], testReceiver, again.signing).Reason != "takeover" {
-		t.Fatalf("snapshots = %d, want the bootstrap and the takeover", len(records))
-	}
-	scraped(t, again, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"} 1`)
-}
-
-// latestAdvertisement is r's latest live advertisement.
-func latestAdvertisement(t *testing.T, f fixture, r *Receiver) wire.Advertisement {
-	t.Helper()
-	state, peers, _ := f.receiver.snapshot()
-	live, err := f.receiver.reader.ReadAdvertisements(f.ctx, state, peers, time.Now(), advertisementLive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	advertisement, ok := live[r.id]
-	if !ok {
-		t.Fatalf("no live advertisement of %s", r.id)
-	}
-	return advertisement
-}
-
-// The custodian and its only peer drain together, and a replacement starting after both exit records a takeover and
-// counts it: a draining peer is no successor, and a stepping_down past its deadline is no handover.
-func TestCustodianAndItsOnlyPeerDrainingTogetherLeaveATakeover(t *testing.T) {
-	for name, peerSteppingDown := range map[string]bool{"peer advertising stepping_down": true, "peer that exits without it": false} {
-		t.Run(name, func(t *testing.T) {
-			f := newBareFixture(t)
-			f.receiver.drainTimeout = time.Second
-			drain := custodyUntilDrained(t, f.ctx, f.receiver)
-			f.awaitSnapshots(t, 1)
-			awaitActing(t, f, f.receiver)
-			peer := f.peer(t, "receiver-b")
-			at := time.Now()
-			advertisement := wire.Advertisement{AtMS: at.UnixMilli(), StartedMS: at.Add(-time.Hour).UnixMilli()}
-			if peerSteppingDown {
-				advertisement.SteppingDown = &wire.SteppingDown{AtMS: at.UnixMilli(), StartedMS: advertisement.StartedMS, DeadlineMS: at.Add(time.Second).UnixMilli()}
-			}
-			advertiseWith(t, f, peer, advertisement)
-			drain()
-			if stepped := latestAdvertisement(t, f, f.receiver).SteppingDown != nil; stepped == peerSteppingDown {
-				t.Fatalf("stepping_down advertised %v, want %v; logs:\n%s", stepped, !peerSteppingDown, f.logs.String())
-			}
-			replacement := f.member(t, "receiver-c")
-			custodian(t, f.ctx, replacement, time.Now())
-			records := f.snapshotRecords(t)
-			if snapshot := parseSnapshot(t, records[len(records)-1], "receiver-c", replacement.signing); len(records) != 2 || snapshot.Reason != "takeover" {
-				t.Fatalf("snapshots = %d, last %+v, want receiver-c's takeover; logs:\n%s", len(records), snapshot, f.logs.String())
-			}
-			if got := scrapedValue(t, replacement, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 {
-				t.Fatalf("takeovers = %v at the replacement, want 1", got)
-			}
-		})
 	}
 }
 
@@ -1093,8 +952,8 @@ func TestHandoverNearTheDeadlineEndsWithinTheBoundKeepingTheKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := f.snapshotRecords(t)
-	if parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing).Reason != "handover" {
-		t.Fatalf("no handover; logs:\n%s", f.logs.String())
+	if parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing).Reason != "takeover" {
+		t.Fatalf("no takeover; logs:\n%s", f.logs.String())
 	}
 	if keys := heldKeys(t, f.receiver); len(keys) != len(held) {
 		t.Fatalf("keys %s after the bound ended the scan, want %s kept", describeKeys(keys), describeKeys(held))
@@ -1105,8 +964,8 @@ func TestHandoverNearTheDeadlineEndsWithinTheBoundKeepingTheKeys(t *testing.T) {
 }
 
 // A stop arriving while a custody pass waits, with no held run, so the run drain ends with the stop: the custodian
-// steps down, advertises the deadline the stop fixed, and Run returns within the drain timeout and stepDownMargin. Both
-// ends are ready when the pass returns, so the stop runs eight times.
+// steps down, waits for a successor until the deadline the stop fixed, and Run returns then, within the drain timeout and
+// stepDownMargin. Both ends are ready when the pass returns, so the stop runs eight times.
 func TestStopDuringACustodyPassStepsDownByTheStopsDeadline(t *testing.T) {
 	interval := custodyInterval
 	custodyInterval = 100 * time.Millisecond
@@ -1119,7 +978,6 @@ func TestStopDuringACustodyPassStepsDownByTheStopsDeadline(t *testing.T) {
 func stopDuringACustodyPass(t *testing.T) {
 	f := newBareFixture(t)
 	f.receiver.drainTimeout = time.Second
-	peer := f.member(t, "receiver-b")
 	ctx, stop := context.WithCancel(f.ctx)
 	done := make(chan struct{})
 	go func() {
@@ -1132,8 +990,6 @@ func stopDuringACustodyPass(t *testing.T) {
 	})
 	f.awaitSnapshots(t, 1)
 	awaitActing(t, f, f.receiver)
-	at := time.Now()
-	advertiseWith(t, f, peer, wire.Advertisement{AtMS: at.UnixMilli(), StartedMS: at.UnixMilli()})
 	// The next pass waits for the custody lock until half a second after the stop, when the run drain has ended too.
 	f.receiver.custody.mu.Lock()
 	time.Sleep(3 * custodyInterval)
@@ -1147,24 +1003,12 @@ func stopDuringACustodyPass(t *testing.T) {
 	case <-time.After(bound + 5*time.Second):
 		t.Fatalf("Run did not return; logs:\n%s", f.logs.String())
 	}
-	if took := time.Since(stopped); took > bound+time.Second {
-		t.Fatalf("shutdown took %s, want within %s", took, bound)
+	// The wait ends at the deadline the stop fixed, not half a second later when the pass let the step-down begin.
+	if took := time.Since(stopped); took < f.receiver.drainTimeout || took > f.receiver.drainTimeout+400*time.Millisecond {
+		t.Fatalf("shutdown took %s, want the drain timeout %s from the stop; logs:\n%s", took, f.receiver.drainTimeout, f.logs.String())
 	}
-	var advertisement wire.Advertisement
-	for _, record := range f.records(t, admin.ReceiversTopic) {
-		if string(record.Key) == testReceiver {
-			advertisement = wire.Advertisement{}
-			if err := wire.ParseRecord(record.Value, f.keys(), &advertisement); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if advertisement.SteppingDown == nil {
-		t.Fatalf("no stepping_down advertised; logs:\n%s", f.logs.String())
-	}
-	want := stopped.Add(f.receiver.drainTimeout).UnixMilli()
-	if got := advertisement.SteppingDown.DeadlineMS; got < want || got > want+250 {
-		t.Fatalf("deadline_ms %+d ms from the stop's deadline, want the stop's", got-want)
+	if !strings.Contains(f.logs.String(), "no successor in pool "+testPool) {
+		t.Fatalf("no wait for a successor; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -1191,14 +1035,14 @@ func failTaskListing(f fixture) {
 
 // A drain whose scan of the task topic fails keeps every key it holds.
 func TestDrainScanErrorKeepsTheKeys(t *testing.T) {
-	f, successor, drain := handoverFixture(t, 15*time.Second)
+	f, successor, drain := drainFixture(t, 15*time.Second)
 	f.submit(t, f.host, nil)
 	held := heldKeys(t, f.receiver)
 	failTaskListing(f)
 	drain()
 	records := f.snapshotRecords(t)
-	if parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing).Reason != "handover" {
-		t.Fatalf("no handover; logs:\n%s", f.logs.String())
+	if parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing).Reason != "takeover" {
+		t.Fatalf("no takeover; logs:\n%s", f.logs.String())
 	}
 	if keys := heldKeys(t, f.receiver); len(keys) != len(held) {
 		t.Fatalf("keys %s after a failed scan, want %s kept", describeKeys(keys), describeKeys(held))
@@ -1211,7 +1055,8 @@ func TestDrainScanErrorKeepsTheKeys(t *testing.T) {
 	}
 }
 
-// A drain with no successor exits keeping its keys, and its restart continues as custodian with the same key.
+// A drain with no successor waits out the drain timeout and exits within the stop window keeping its keys, and its
+// restart continues as custodian with the same key.
 func TestDrainWithNoSuccessorKeepsTheKeys(t *testing.T) {
 	f := newBareFixture(t)
 	f.receiver.drainTimeout = time.Second
@@ -1219,7 +1064,11 @@ func TestDrainWithNoSuccessorKeepsTheKeys(t *testing.T) {
 	f.awaitSnapshots(t, 1)
 	awaitActing(t, f, f.receiver)
 	id, _ := onlyKey(t, f.receiver)
+	began := time.Now()
 	stop()
+	if took := time.Since(began); took < f.receiver.drainTimeout || took > f.receiver.drainTimeout+stepDownMargin {
+		t.Fatalf("stop took %s, want between the drain timeout and %s", took, f.receiver.drainTimeout+stepDownMargin)
+	}
 	if !strings.Contains(f.logs.String(), "no successor in pool "+testPool+"; keeping the pool keys to their deadlines") {
 		t.Fatalf("no log of the drain without a successor; logs:\n%s", f.logs.String())
 	}
@@ -1377,8 +1226,8 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 	}
 	drain()
 	records := f.snapshotRecords(t)
-	if parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing).Reason != "handover" || len(heldKeys(t, f.receiver)) != 0 {
-		t.Fatalf("want receiver-b's handover and the old keys deleted; logs:\n%s", f.logs.String())
+	if parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing).Reason != "takeover" || len(heldKeys(t, f.receiver)) != 0 {
+		t.Fatalf("want receiver-b's takeover and the old keys deleted; logs:\n%s", f.logs.String())
 	}
 	held.Store(false)
 	var result client.SubmitResult
