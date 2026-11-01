@@ -3,6 +3,7 @@ package receiver
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"io"
 	"log"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -308,4 +310,81 @@ func TestSuspendEndsARunInItsTerminalCommit(t *testing.T) {
 	f.plugin.collecting = nil
 	f.plugin.mu.Unlock()
 	endedSuspended(t, f, record, 2)
+}
+
+// suspendDuringDispatch starts a run whose Dispatch hangs, with Lookup reporting its job running, and suspends the pool
+// once it dispatches; it returns the run's acknowledgement, which the test fails without within timeout.
+func suspendDuringDispatch(t *testing.T, f fixture, record *kgo.Record, timeout time.Duration) kgo.AckStatus {
+	t.Helper()
+	f.plugin.mu.Lock()
+	f.plugin.dispatchBlocks, f.plugin.job = true, pluginsdk.JobRunning
+	f.plugin.mu.Unlock()
+	done := f.executing(t, f.ctx, record, 1)
+	for {
+		if dispatches, _, _ := f.dispatched(t); dispatches == 1 {
+			break
+		}
+		if f.ctx.Err() != nil {
+			t.Fatalf("never dispatched; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.suspend(t)
+	select {
+	case status := <-done:
+		return status
+	case <-time.After(timeout):
+		t.Fatalf("the hung dispatch outlived the suspension; logs:\n%s", f.logs.String())
+		return 0
+	}
+}
+
+// A suspension cancels a hung Dispatch; the job it may have created is looked up and stopped, and the run ends FAILED
+// pool suspended.
+func TestSuspendCancelsAHungDispatchAndStopsItsJob(t *testing.T) {
+	f := newFixture(t, resultStream)
+	record := f.submit(t, f.host, nil)
+	if status := suspendDuringDispatch(t, f, record, 15*time.Second); status != kgo.AckReject {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	if _, lookups, _, _ := f.plugin.counts(); lookups == 0 {
+		t.Fatal("the job was not looked up after the cancelled dispatch")
+	}
+	endedSuspended(t, f, record, 1)
+}
+
+// A suspended run whose job's Stop fails until the bound ends FAILED job stop unconfirmed with its task and material
+// kept: no released status, no Release, and the stop counted unconfirmed.
+func TestSuspendWithAnUnconfirmedStopKeepsTheRunHeld(t *testing.T) {
+	f := newFixture(t, resultStream)
+	previous := suspendStopBound
+	suspendStopBound = 2 * time.Second
+	t.Cleanup(func() { suspendStopBound = previous })
+	f.plugin.stopErr = errors.New("platform unavailable")
+	record := f.submit(t, f.host, nil)
+	if status := suspendDuringDispatch(t, f, record, 15*time.Second); status != kgo.AckReject {
+		t.Fatalf("status %v, want the run ended, not released; logs:\n%s", status, f.logs.String())
+	}
+	var terminals []wire.RunStatus
+	for _, status := range f.eventStatuses(t) {
+		if status.Wherry.Kind == "released" {
+			t.Fatalf("the run published released; logs:\n%s", f.logs.String())
+		}
+		if status.Wherry.Kind == "terminal" {
+			terminals = append(terminals, status)
+		}
+	}
+	if len(terminals) != 1 || terminals[0].StatusUpdate.Status.State != wire.TaskStateFailed || terminals[0].StatusUpdate.Status.Message.Parts[0].Text != suspendStopUnconfirmed {
+		t.Fatalf("terminals %+v, want one FAILED %s; logs:\n%s", terminals, suspendStopUnconfirmed, f.logs.String())
+	}
+	f.plugin.mu.Lock()
+	stops, releases := f.plugin.stops, f.plugin.releases
+	f.plugin.mu.Unlock()
+	if stops < 2 || releases != 0 {
+		t.Fatalf("stops %d and releases %d, want Stop retried and nothing released", stops, releases)
+	}
+	if !strings.Contains(f.logs.String(), "the job's stop is unconfirmed") {
+		t.Fatalf("the unconfirmed stop is not logged; logs:\n%s", f.logs.String())
+	}
+	scraped(t, f.receiver, `wherry_suspend_stop_unconfirmed_total{pool="`+testPool+`"} 1`)
 }

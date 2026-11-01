@@ -87,6 +87,8 @@ type fakePlugin struct {
 	lastDeadline time.Time
 	// placing makes Dispatch and Lookup wait, as for a job the platform never places, until their context ends.
 	placing bool
+	// dispatchBlocks makes Dispatch alone wait until its context ends, as a platform call that hangs.
+	dispatchBlocks bool
 	// afterLookup, when set, runs after Lookup reports an absent job, as a receiver shutting down at that moment.
 	afterLookup func()
 	// lookupBlocks makes Lookup alone wait until its context ends, as a platform call that hangs.
@@ -166,7 +168,7 @@ func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk
 	defer f.mu.Unlock()
 	f.dispatches++
 	f.lastRun = run
-	if f.placing {
+	if f.placing || f.dispatchBlocks {
 		f.mu.Unlock()
 		<-ctx.Done()
 		f.mu.Lock()

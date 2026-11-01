@@ -61,6 +61,8 @@ var (
 	shutdownTimeout = 5 * time.Second
 	// reconcileInterval separates the Lookups that resolve an ambiguous Dispatch.
 	reconcileInterval = time.Second
+	// suspendStopBound bounds the Lookups and Stops of a suspended run's job.
+	suspendStopBound = time.Minute
 	// purgeDeadline bounds the Purge retries of a start failure.
 	purgeDeadline = 5 * time.Minute
 	// followRetryInterval separates the Follows of a run whose plugin link is lost.
@@ -652,6 +654,8 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		delete(r.live, run)
 		r.liveMu.Unlock()
 	}()
+	suspendCtx, stopWatch := run.watchSuspension(ctx)
+	defer stopWatch()
 	pastDeadline := r.metrics.pastDeadline.WithLabelValues(admitted.profile.Name)
 	// A timer firing as the run ends must not count it after its decrement.
 	var overdueMu sync.Mutex
@@ -788,12 +792,28 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		for _, input := range admitted.inputs {
 			promptInputs = append(promptInputs, input.Name)
 		}
-		dispatched, dispatchedHandle, err := named.Plugin.Dispatch(startCtx, pluginsdk.Run{
+		// A suspension cuts the Dispatch short as the start bound does.
+		dispatchCtx, cancelDispatch := context.WithCancel(startCtx)
+		stopCancel := context.AfterFunc(suspendCtx, cancelDispatch)
+		dispatched, dispatchedHandle, err := named.Plugin.Dispatch(dispatchCtx, pluginsdk.Run{
 			ID: runID, Profile: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Attempt: attempt,
 			Prompt: []byte(Preamble(named.Plugin.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID,
 				run.terms().ReplyLimit) + prompt(admitted.history)),
 			Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
+		stopCancel()
+		cancelDispatch()
+		// After a Dispatch that did not report its job, the job is looked up to be stopped.
+		if run.poolSuspended(ctx) {
+			switch {
+			case err == nil && dispatched == pluginsdk.OutcomeCreated:
+				return run.suspended(ctx, &dispatchedHandle, nil)
+			case dispatched == pluginsdk.OutcomeNothingCreated:
+				return run.suspended(ctx, nil, nil)
+			}
+			r.logger.Printf("run %s: pool %s suspended during dispatch; ending the run", runID, r.config.Pool)
+			return run.stopSuspended(ctx, nil, nil)
+		}
 		var tooLarge *pluginsdk.InputTooLargeError
 		var failure *pluginsdk.Error
 		switch {
@@ -1226,6 +1246,8 @@ type activeRun struct {
 	// readDenied is set when the broker refuses an acknowledgement of the run's claim, its renewals included,
 	// authorisation; nil when nothing reports it.
 	readDenied *atomic.Bool
+	// suspendSeen is set once the run read its pool suspended: the denial that reported it is consumed by that read.
+	suspendSeen atomic.Bool
 }
 
 // deliver keeps the forms of each credential value delivered to the run, each with the marker of the value's name under
@@ -1435,7 +1457,8 @@ const suspendedReason = "pool suspended"
 // claim was refused authorisation, as wherry.admin reads now. A suspension is recorded before its ACLs are withdrawn.
 func (run *activeRun) poolSuspended(ctx context.Context) bool {
 	r := run.receiver
-	if state, _, _ := r.snapshot(); state.Suspended[r.config.Pool] {
+	if state, _, _ := r.snapshot(); run.suspendSeen.Load() || state.Suspended[r.config.Pool] {
+		run.suspendSeen.Store(true)
 		return true
 	}
 	if run.readDenied == nil || !run.readDenied.Swap(false) {
@@ -1444,17 +1467,85 @@ func (run *activeRun) poolSuspended(ctx context.Context) bool {
 	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	state, err := r.reader.Load(readCtx)
-	return err == nil && state.Suspended[r.config.Pool]
+	if err == nil && state.Suspended[r.config.Pool] {
+		run.suspendSeen.Store(true)
+		return true
+	}
+	return false
 }
+
+// watchSuspension returns a context of ctx cancelled once the run reads its pool suspended, checked every
+// stateCheckInterval, and the function that ends the watch.
+func (run *activeRun) watchSuspension(ctx context.Context) (context.Context, func()) {
+	held, cancel := context.WithCancel(ctx)
+	go func() {
+		ticker := time.NewTicker(stateCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-held.Done():
+				return
+			case <-ticker.C:
+			}
+			if run.poolSuspended(ctx) {
+				cancel()
+				return
+			}
+		}
+	}()
+	return held, cancel
+}
+
+// suspendStopUnconfirmed ends a run of a suspended pool whose job was not confirmed stopped.
+const suspendStopUnconfirmed = suspendedReason + ": job stop unconfirmed"
 
 // suspended stops the run's job, if it has one, and ends the run failed. Its claim cannot be acknowledged while the
 // pool is suspended, so a delivery after resume finds the run terminal.
 func (run *activeRun) suspended(ctx context.Context, job *pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
 	run.receiver.logger.Printf("run %s: pool %s suspended; ending the run", run.task.Wherry.Run, run.receiver.config.Pool)
 	if job != nil {
-		return run.stopAndFail(ctx, *job, suspendedReason, pending)
+		return run.stopSuspended(ctx, job, pending)
 	}
 	return run.fail(ctx, suspendedReason, pending)
+}
+
+// stopSuspended stops a suspended run's job, looked up first when job is nil, and ends the run failed. Lookup and Stop
+// are retried until suspendStopBound; a job not confirmed stopped by then may still run, so the run ends failed with
+// its task and material kept, never released.
+func (run *activeRun) stopSuspended(ctx context.Context, job *pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
+	r, runID := run.receiver, run.task.Wherry.Run
+	deadline := time.Now().Add(suspendStopBound)
+	for {
+		if job == nil {
+			lookupCtx, cancel := context.WithTimeout(ctx, readTimeout)
+			found, err := run.profile.Plugin.Lookup(lookupCtx, runID)
+			cancel()
+			switch {
+			case err != nil:
+				r.logger.Printf("run %s: lookup in profile %s: %s", runID, run.profile.Name, logText(run.redactText, err))
+			case found.State == pluginsdk.JobAbsent:
+				return run.fail(ctx, suspendedReason, pending)
+			default:
+				job = &found.Handle
+			}
+		}
+		if job != nil {
+			err := run.profile.Plugin.Stop(ctx, *job)
+			if err == nil {
+				return run.fail(ctx, suspendedReason, pending)
+			}
+			r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
+			r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
+		}
+		if ctx.Err() != nil || !time.Now().Before(deadline) {
+			break
+		}
+		sleep(ctx, reconcileInterval)
+	}
+	r.metrics.suspendStopUnconfirmed.Inc()
+	r.logger.Printf("run %s: pool %s suspended and the job's stop is unconfirmed; the task and its material stay held", runID, r.config.Pool)
+	run.kept = true
+	return run.fail(ctx, suspendStopUnconfirmed, pending)
 }
 
 // expired ends a run past a bound: task_ended_by once its deadline passed, else task_started_by before its job
