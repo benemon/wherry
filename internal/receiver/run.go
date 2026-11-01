@@ -113,6 +113,14 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		kgo.ShareMaxRecordsStrict(),
 		// Closing waits out a pending fetch for up to its MaxWait plus 5 s; this bounds the receiver's stop.
 		kgo.FetchMaxWait(time.Second),
+		// FlushAcks does not return the broker's answer to an acknowledgement, a renewal included.
+		kgo.ShareAckCallback(func(_ *kgo.Client, results kgo.ShareAckResults) {
+			for _, result := range results {
+				if authorisationError(result.Err) {
+					r.deny(result.Err, capClaim)
+				}
+			}
+		}),
 	)
 	if err != nil {
 		return err
@@ -483,6 +491,9 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 	events, readErr := r.reader.ReadFrom(readCtx, admin.PoolEventsTopic(r.config.Pool), 0)
 	if readErr != nil {
 		r.logger.Printf("read back transaction: %v", readErr)
+		if authorisationError(readErr) {
+			return readErr
+		}
 		return err
 	}
 	if slices.ContainsFunc(events, func(event *kgo.Record) bool { return bytes.Equal(event.Value, records[index].Value) }) {
@@ -2206,8 +2217,8 @@ func inputPointers(history []wire.Message) []wire.Message {
 }
 
 // lastOffset returns the highest log offset this run reached under an earlier attempt: its started offsets, and the
-// progress of each receiver that held an attempt of it. A holder whose progress topic this receiver cannot read, such
-// as an ended one, contributes nothing.
+// progress of each receiver that held an attempt of it. An ended holder, whose progress topic revocation takes from
+// this receiver, contributes nothing.
 func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash string) (int64, bool, error) {
 	events, err := r.readEvents(ctx)
 	if err != nil {
@@ -2229,11 +2240,17 @@ func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash s
 	defer cancel()
 	for holder := range holders {
 		records, err := r.reader.ReadFrom(readCtx, admin.ReceiverProgressTopic(holder), 0)
-		if authorisationError(err) || errors.Is(err, kerr.UnknownTopicOrPartition) {
+		if errors.Is(err, kerr.UnknownTopicOrPartition) {
 			continue
 		}
+		// The end comes into the receiver's state only at its next refresh: a holder ended before then is a peer still.
+		if errors.Is(err, kerr.TopicAuthorizationFailed) {
+			if state, loadErr := r.reader.Load(readCtx); loadErr == nil && state.Ended[admin.ReceiverPrincipal(holder)] {
+				continue
+			}
+		}
 		if err != nil {
-			return 0, false, err
+			return 0, false, r.deny(err, capRead)
 		}
 		for _, record := range records {
 			if string(record.Key) != task.Wherry.Run || record.Value == nil {

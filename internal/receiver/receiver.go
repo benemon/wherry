@@ -2,6 +2,7 @@
 package receiver
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"errors"
@@ -171,7 +172,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 	if r.rotateKey {
 		next, err := admin.RotateKey(ctx, r.base, r.id, admin.ReceiverTopic(r.id), r.keyFile, r.signing)
 		if err != nil {
-			return fmt.Errorf("rotate key: %w", err)
+			return r.denyStep(fmt.Errorf("rotate key: %w", err), capWrite, "rotate key")
 		}
 		r.logger.Printf("rotated key: old=%s new=%s", signed.KeyID(r.signing.Public().(ed25519.PublicKey)), signed.KeyID(next.Public().(ed25519.PublicKey)))
 		r.signing = next
@@ -327,7 +328,7 @@ func (r *Receiver) register(ctx context.Context) error {
 	public := r.signing.Public().(ed25519.PublicKey)
 	records, err := r.reader.ReadFrom(ctx, topic, 0)
 	if err != nil {
-		return fmt.Errorf("read key topic: %w", err)
+		return r.denyStep(fmt.Errorf("read key topic: %w", err), capRead, "register")
 	}
 	if len(records) == 0 {
 		record, err := signed.RegisterKey(r.id, r.signing)
@@ -335,11 +336,11 @@ func (r *Receiver) register(ctx context.Context) error {
 			return err
 		}
 		if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(r.id), Value: record}).FirstErr(); err != nil {
-			return fmt.Errorf("register keys: %w", err)
+			return r.denyStep(fmt.Errorf("register keys: %w", err), capWrite, "register")
 		}
 		r.logger.Printf("registered key: signing=%s", signed.KeyID(public))
 		if records, err = r.reader.ReadFrom(ctx, topic, 0); err != nil {
-			return fmt.Errorf("read key topic: %w", err)
+			return r.denyStep(fmt.Errorf("read key topic: %w", err), capRead, "register")
 		}
 	}
 	var state signed.KeyState
@@ -361,9 +362,10 @@ func (r *Receiver) configure(ctx context.Context) error {
 	for {
 		state, err := r.reader.Load(ctx)
 		if err != nil {
-			return fmt.Errorf("read wherry.admin: %w", err)
+			return r.denyStep(fmt.Errorf("read wherry.admin: %w", err), capRead, "configure")
 		}
 		if state.Ended[admin.ReceiverPrincipal(r.id)] {
+			r.metrics.denials.WithLabelValues(string(capMembership)).Inc()
 			return errors.New("receiver membership has ended")
 		}
 		if config, ok := state.Receivers[r.id]; ok {
@@ -415,8 +417,7 @@ func (r *Receiver) refresh(ctx context.Context) error {
 		hosts, err = r.reader.ReadKeys(ctx, admin.HostKeyTopics(state, r.config.Pool))
 	}
 	if err != nil {
-		r.deny(err, capRead)
-		return err
+		return r.deny(err, capRead)
 	}
 	// Revocation removes an ended receiver's write access before it records the end, so the broker refuses any record
 	// it signs afterwards: its keys verify only what it wrote while a member.
@@ -445,14 +446,19 @@ const (
 	capMembership    capability = "membership"
 )
 
-// deny counts an error from an operation that used capability, and stops the receiver when it is an authorisation
-// error.
-func (r *Receiver) deny(err error, used capability) {
+// deny counts an error from an operation that used capability and returns it; an authorisation error stops the
+// receiver, and deny returns the error it stops for, naming the capability denied.
+func (r *Receiver) deny(err error, used capability) error {
+	return r.denyStep(err, used, "")
+}
+
+// denyStep is deny for an error of Run's startup step op, which the error a denial stops for names.
+func (r *Receiver) denyStep(err error, used capability, op string) error {
 	if used != capMembership && !errors.Is(err, context.Canceled) {
 		r.metrics.busErrors.WithLabelValues(string(used)).Inc()
 	}
 	if !authorisationError(err) {
-		return
+		return err
 	}
 	switch {
 	case errors.Is(err, kerr.TransactionalIDAuthorizationFailed):
@@ -461,7 +467,9 @@ func (r *Receiver) deny(err error, used capability) {
 		used = capClaim
 	}
 	r.metrics.denials.WithLabelValues(string(used)).Inc()
-	r.exit(fmt.Errorf("denied %s: %w", used, err))
+	err = fmt.Errorf("denied %s: %w", cmp.Or(op, string(used)), err)
+	r.exit(err)
+	return err
 }
 
 func authorisationError(err error) bool {
@@ -533,8 +541,7 @@ func staleKey(encoded []byte, keys signed.Keys, topics map[string]string) (strin
 func (r *Receiver) rereadKey(ctx context.Context, keys *signed.Keys, owner, topic string) (signed.Keys, error) {
 	fresh, err := r.reader.ReadKeys(ctx, map[string]string{owner: topic})
 	if err != nil {
-		r.deny(err, capRead)
-		return nil, err
+		return nil, r.deny(err, capRead)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -713,8 +720,7 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	}
 	records, start, end, err := r.reader.ReadRange(ctx, admin.PoolEventsTopic(r.config.Pool), fold.next)
 	if err != nil {
-		r.deny(err, capRead)
-		return poolEvents{}, err
+		return poolEvents{}, r.deny(err, capRead)
 	}
 	entries, err := r.foldEvents(ctx, records, state, peers, ended)
 	if err != nil {

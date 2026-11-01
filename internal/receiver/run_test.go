@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -744,8 +745,8 @@ func TestAdoptionTrustsPeerProgress(t *testing.T) {
 	}
 }
 
-// A holder whose progress topic the adopter cannot read contributes nothing: the adopter resumes from the run's
-// started offset.
+// An ended holder, whose progress topic revocation takes from the adopter, contributes nothing: the adopter resumes from
+// the run's started offset. Any other authorisation error reading a holder's progress stops the receiver.
 func TestAdoptionFallsBackToStartedWithoutTheHoldersProgress(t *testing.T) {
 	for _, cause := range []string{"ended", "no acl"} {
 		t.Run(cause, func(t *testing.T) {
@@ -774,10 +775,65 @@ func TestAdoptionFallsBackToStartedWithoutTheHoldersProgress(t *testing.T) {
 			case "no acl":
 				f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.ReceiverProgressTopic("receiver-peer")).Operations(kadm.OpAny))
 			}
-			if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != started {
+			halt := f.halts()
+			got, _, err := f.receiver.lastOffset(f.ctx, task, hash)
+			if cause == "no acl" {
+				if err == nil || halt() == nil || !strings.HasPrefix(halt().Error(), "denied read: ") {
+					t.Fatalf("a live holder's progress denied: offset %d err %v stopped the receiver with %v", got, err, halt())
+				}
+				return
+			}
+			if err != nil || got != started || halt() != nil {
 				t.Fatalf("offset %d err %v without the peer's progress, want the started offset %d", got, err, started)
 			}
 		})
+	}
+}
+
+// TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial reads an ended holder's progress before the receiver's refresh records
+// the end: a SASL failure stops the receiver, and the topic denial leaves the started offset.
+func TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial(t *testing.T) {
+	f := newFixture(t, resultStream)
+	peerSigning := f.addPeer(t, "receiver-peer", testPool)
+	task := testSubmission("run-peer")
+	hash := strings.Repeat("a", 64)
+	started := int64(7)
+	f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &started)
+	f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
+	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), "run-peer", progressRecord(t, hash, 42, nil))
+	revocationBounds(t, f.service, "1")
+	result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return admin.ErrAuthorizationDenied })
+	revocationBounds(t, f.service, "")
+	if !result.Complete {
+		t.Fatalf("incomplete revocation: %+v", result)
+	}
+	progress := admin.ReceiverProgressTopic("receiver-peer")
+	var sasl atomic.Bool
+	sasl.Store(true)
+	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		req := request.(*kmsg.ListOffsetsRequest)
+		if !sasl.Load() || len(req.Topics) != 1 || req.Topics[0].Topic != progress {
+			return nil, nil, false
+		}
+		response := kmsg.NewPtrListOffsetsResponse()
+		response.SetVersion(req.Version)
+		out := kmsg.ListOffsetsResponseTopic{Topic: progress}
+		for _, partition := range req.Topics[0].Partitions {
+			out.Partitions = append(out.Partitions, kmsg.ListOffsetsResponseTopicPartition{Partition: partition.Partition, ErrorCode: kerr.SaslAuthenticationFailed.Code})
+		}
+		response.Topics = append(response.Topics, out)
+		return response, nil, true
+	})
+	halt := f.halts()
+	if _, _, err := f.receiver.lastOffset(f.ctx, task, hash); !errors.Is(err, kerr.SaslAuthenticationFailed) || halt() == nil {
+		t.Fatalf("a SASL failure reading an ended holder's progress returned %v and stopped the receiver with %v", err, halt())
+	}
+	sasl.Store(false)
+	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(progress).Operations(kadm.OpAny))
+	halt = f.halts()
+	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != started || halt() != nil {
+		t.Fatalf("offset %d err %v, stopped with %v, without the ended holder's progress; want the started offset %d", got, err, halt(), started)
 	}
 }
 
@@ -1549,7 +1605,13 @@ func TestShutdownDuringTheStartedCommitCommitsAnAdoptersHeldLines(t *testing.T) 
 // deleteReceiverACLs removes the receiver principal's ACLs that builder's resources and operations select.
 func (f fixture) deleteReceiverACLs(t *testing.T, builder *kadm.ACLBuilder) {
 	t.Helper()
-	builder = builder.Allow(admin.ReceiverPrincipal(testReceiver)).AllowHosts("*").ResourcePatternType(kadm.ACLPatternAny)
+	f.deleteACLsOf(t, testReceiver, builder)
+}
+
+// deleteACLsOf removes receiver's principal's ACLs that builder's resources and operations select.
+func (f fixture) deleteACLsOf(t *testing.T, receiver string, builder *kadm.ACLBuilder) {
+	t.Helper()
+	builder = builder.Allow(admin.ReceiverPrincipal(receiver)).AllowHosts("*").ResourcePatternType(kadm.ACLPatternAny)
 	builder.PrefixUser()
 	results, err := kadm.NewClient(f.service.Admin).DeleteACLs(f.ctx, builder)
 	if err != nil {
@@ -1613,12 +1675,10 @@ func TestDenialStopsTheReceiver(t *testing.T) {
 		"share group":      {kadm.NewACLs().Groups(admin.PoolGroup(testPool)).Operations(kadm.OpAny), "denied share group: "},
 	} {
 		t.Run(name, func(t *testing.T) {
-			// The second line arrives after the denial, so a held run commits under its transactional ID; a second slot
-			// polls the share group, whose renewals report no error.
+			// The second line arrives after the denial, so a held run commits under its transactional ID; the held run's
+			// renewals are its only use of the share group.
 			stream := []string{noResultStream[0], noResultStream[0]}
-			config := testConfig(testReceiver)
-			config.Capacity = 2
-			f := newFixtureWith(t, stream, testTerms(), config, map[string]*fakePlugin{"nomad": {stream: stream, pauses: map[int]time.Duration{1: time.Second}, endDelay: 40 * time.Second}})
+			f := newFixtureWith(t, stream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: stream, pauses: map[int]time.Duration{1: time.Second}, endDelay: 40 * time.Second}})
 			done, _ := holdRun(t, f)
 			f.deleteReceiverACLs(t, c.denied)
 			// A record past those read makes the next read of the pool's events fetch.
@@ -1738,6 +1798,30 @@ func TestAmbiguousCommitReadBack(t *testing.T) {
 				t.Fatalf("terminals on the pool's events %d, want %d", terminals, test.terminals)
 			}
 		})
+	}
+}
+
+// A denied read-back of an ambiguous commit returns the denial, which stops the receiver, not the commit's error.
+func TestAmbiguousCommitReadBackDenied(t *testing.T) {
+	f := newFixture(t, resultStream)
+	run := testActiveRun(t, f, "run-ambiguous", 1)
+	previous := commitTransaction
+	t.Cleanup(func() { commitTransaction = previous })
+	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+		if err := producer.EndTransaction(ctx, kgo.TryAbort); err != nil {
+			return err
+		}
+		f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.PoolEventsTopic(testPool)).Operations(kadm.OpRead))
+		return kerr.RequestTimedOut
+	}
+	halt := f.halts()
+	err := run.commit(f.ctx, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)
+	if !errors.Is(err, kerr.TopicAuthorizationFailed) {
+		t.Fatalf("commit returned %v, want the read-back's denial", err)
+	}
+	run.abandon(err)
+	if err := halt(); err == nil || !strings.HasPrefix(err.Error(), "denied ") {
+		t.Fatalf("the read-back's denial stopped the receiver with %v", err)
 	}
 }
 

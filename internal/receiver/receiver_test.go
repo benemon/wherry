@@ -1841,6 +1841,26 @@ func TestRevocationLeavesAHeldRunToAnAdopter(t *testing.T) {
 	}
 }
 
+// TestRegistrationDenialStopsTheReceiver takes the write to its key topic from a receiver not yet registered: Run
+// returns the denial naming registration, and counts it.
+func TestRegistrationDenialStopsTheReceiver(t *testing.T) {
+	f := newBareFixture(t)
+	r, _ := f.newReceiver(t, testConfig("receiver-b"))
+	f.deleteACLsOf(t, "receiver-b", kadm.NewACLs().Topics(admin.ReceiverTopic("receiver-b")).Operations(kadm.OpWrite))
+	if err := r.Run(f.ctx); err == nil || !strings.HasPrefix(err.Error(), "denied register: ") {
+		t.Fatalf("Run returned %v, want the registration denied", err)
+	}
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(r.metrics.denials)
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(families) != 1 || len(families[0].GetMetric()) != 1 || families[0].GetMetric()[0].GetCounter().GetValue() != 1 {
+		t.Fatalf("wherry_denials_total %v, want one denial", families)
+	}
+}
+
 // held is the number of runs the receiver holds.
 func (r *Receiver) held() int64 {
 	r.mu.Lock()
