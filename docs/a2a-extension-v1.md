@@ -1105,7 +1105,10 @@ answers. It serves a request only when:
 6. when the claim changed receivers, the previous owner committed `released`,
    has no live membership, or its latest advertisement appended at or before
    the claim is more than 120 seconds old when the custodian decides;
-   otherwise `two live claimants`.
+   otherwise `two live claimants`. The previous owner is the receiver of the
+   latest earlier `claimed` for the task that the same receiver has not
+   followed with its own `released`; a `released` ends only its own
+   receiver's claim.
 
 The custodian decides rule 6 once for each claim and commits that decision as
 a [claim decision](#claim-decision) in the transaction of its answer; a later
@@ -1217,10 +1220,12 @@ the [claim check](#the-claim-check).
 ```
 
 - `custodian` is the writer. `claim` is the SHA-256, in lowercase hex, of the
-  record value of the `claimed` status decided, and `previous` the receiver
-  of the ownership status before it, absent for none.
-- `reason` is `unchanged` for no previous owner or the same receiver,
-  `released`, `lease` for a previous owner with no live membership or whose
+  record value of the `claimed` status decided, and `previous` the previous
+  owner, or with none the receiver of the ownership status before the claim,
+  absent for no ownership status before it.
+- `reason` is `unchanged` for no ownership status before the claim or a
+  previous owner that is the same receiver, `released` for no previous owner
+  after one, `lease` for a previous owner with no live membership or whose
   advertisement at or before the claim is more than 120 seconds old or
   absent, or `live`. `served` is false for `live` alone.
 - `advertisement` names the previous owner's advertisement the decision took,

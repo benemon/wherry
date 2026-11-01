@@ -647,6 +647,103 @@ func TestClaimCheckServesANewClaimantOnlyOnceThePreviousIsGone(t *testing.T) {
 	}
 }
 
+// Rule 6: the previous holder is the latest claimant not followed by its own release; another claimant's refusal and
+// release leave its lease standing.
+func TestClaimCheckHoldsTheLeaseUntilThePreviousHolderIsGone(t *testing.T) {
+	type keys struct{ b, c, d ed25519.PrivateKey }
+	refusedThenReleased := func(t *testing.T, f fixture, record *kgo.Record, k keys) {
+		f.advertiseAs(t, "receiver-b", k.b, time.Now())
+		f.statusAs(t, record, "receiver-c", k.c, "claimed", 2)
+		if answer := f.answered(t, f.openAs(t, record, "receiver-c", k.c, 2)); answer != wire.RefusedTwoClaimants {
+			t.Fatalf("first request answered %q, want %q", answer, wire.RefusedTwoClaimants)
+		}
+		f.statusAs(t, record, "receiver-c", k.c, "released", 2)
+	}
+	for _, test := range []struct {
+		name     string
+		claim    func(t *testing.T, f fixture, record *kgo.Record, k keys) string
+		answer   string
+		reason   string
+		previous string
+	}{
+		{"the refused claimant claims again", func(t *testing.T, f fixture, record *kgo.Record, k keys) string {
+			refusedThenReleased(t, f, record, k)
+			f.statusAs(t, record, "receiver-c", k.c, "claimed", 3)
+			return f.openAs(t, record, "receiver-c", k.c, 3)
+		}, wire.RefusedTwoClaimants, wire.ClaimLive, "receiver-b"},
+		{"another claimant after the refused one released", func(t *testing.T, f fixture, record *kgo.Record, k keys) string {
+			refusedThenReleased(t, f, record, k)
+			f.statusAs(t, record, "receiver-d", k.d, "claimed", 3)
+			return f.openAs(t, record, "receiver-d", k.d, 3)
+		}, wire.RefusedTwoClaimants, wire.ClaimLive, "receiver-b"},
+		{"the holder released", func(t *testing.T, f fixture, record *kgo.Record, k keys) string {
+			f.advertiseAs(t, "receiver-b", k.b, time.Now())
+			f.statusAs(t, record, "receiver-b", k.b, "released", 1)
+			f.statusAs(t, record, "receiver-c", k.c, "claimed", 2)
+			return f.openAs(t, record, "receiver-c", k.c, 2)
+		}, "wrap", wire.ClaimReleased, "receiver-b"},
+		{"the holder silent past its lease after a refusal", func(t *testing.T, f fixture, record *kgo.Record, k keys) string {
+			refusedThenReleased(t, f, record, k)
+			f.advertiseAs(t, "receiver-b", k.b, time.Now().Add(-claimantLease-time.Minute))
+			f.statusAs(t, record, "receiver-c", k.c, "claimed", 3)
+			return f.openAs(t, record, "receiver-c", k.c, 3)
+		}, "wrap", wire.ClaimLease, "receiver-b"},
+		{"the holder restarted", func(t *testing.T, f fixture, record *kgo.Record, k keys) string {
+			f.advertiseAs(t, "receiver-b", k.b, time.Now())
+			f.statusAs(t, record, "receiver-b", k.b, "claimed", 2)
+			return f.openAs(t, record, "receiver-b", k.b, 2)
+		}, "wrap", wire.ClaimUnchanged, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t, resultStream)
+			f.quiet()
+			k := keys{f.addPeer(t, "receiver-b", testPool), f.addPeer(t, "receiver-c", testPool), f.addPeer(t, "receiver-d", testPool)}
+			record := f.submit(t, f.host, nil)
+			f.statusAs(t, record, "receiver-b", k.b, "claimed", 1)
+			if answer := f.answered(t, test.claim(t, f, record, k)); answer != test.answer {
+				t.Fatalf("answer %q, want %q; logs:\n%s", answer, test.answer, f.logs.String())
+			}
+			decisions := f.decisions(t)
+			if last := decisions[len(decisions)-1]; last.Previous != test.previous || last.Reason != test.reason {
+				t.Fatalf("decisions %+v, want the last from %q, %s", decisions, test.previous, test.reason)
+			}
+		})
+	}
+}
+
+// Rule 6: a claim after the previous holder's membership ended is served without its advertisement. The events are read
+// while the holder is live, since a full read no longer counts an ended receiver's claim.
+func TestClaimCheckServesAClaimAfterThePreviousHolderEnded(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.quiet()
+	keyB, keyC := f.addPeer(t, "receiver-b", testPool), f.addPeer(t, "receiver-c", testPool)
+	record := f.submit(t, f.host, nil)
+	f.statusAs(t, record, "receiver-b", keyB, "claimed", 1)
+	f.advertiseAs(t, "receiver-b", keyB, time.Now())
+	f.statusAs(t, record, "receiver-c", keyC, "claimed", 2)
+	digest := f.openAs(t, record, "receiver-c", keyC, 2)
+	events, err := f.receiver.readEvents(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.revoke(t, "receiver-b")
+	keys, err := loadPoolKeys(f.receiver.poolKeysDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := &claimCheck{r: f.receiver, events: events, earliest: f.receiver.earliestSubmissions(f.records(t, admin.PoolTasksTopic(testPool))), keys: keys, now: time.Now()}
+	request := slices.IndexFunc(events.requests, func(request openRequest) bool { return request.digest == digest })
+	answer := check.decide(f.ctx, events.requests[request])
+	var decision wire.ClaimDecision
+	var wrap wire.AttemptWrap
+	if len(answer) != 2 || wire.ParseStrict(answer[0].Value, f.keys(), time.Now(), &decision) != nil || wire.ParseStrict(answer[1].Value, f.keys(), time.Now(), &wrap) != nil {
+		t.Fatalf("answer of %d records, want a decision and a wrap; logs:\n%s", len(answer), f.logs.String())
+	}
+	if decision.Previous != "receiver-b" || decision.Reason != wire.ClaimLease || !decision.Served {
+		t.Fatalf("decision %+v, want served from receiver-b, %s", decision, wire.ClaimLease)
+	}
+}
+
 // Rule 3: only the latest ownership event's claimant for its attempt is served; a request appended after its own
 // claimant released is refused.
 func TestClaimCheckRefusesARequestAfterItsRelease(t *testing.T) {
