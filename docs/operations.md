@@ -790,7 +790,8 @@ grants a resume restored, or a revoked principal's credential and ACLs.
    request of a claim that is not adopting a running job.
    Running jobs complete. A suspension does not take back the credentials a
    running job holds; rotating them at their issuers, in step 5, cuts off
-   running jobs' use of them:
+   running jobs' use of them. The command returns once the key custodian
+   has acknowledged the suspension; after that no new start opens:
 
    ```sh
    wherry admin pool suspend build

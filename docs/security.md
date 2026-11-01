@@ -99,10 +99,14 @@ otherwise refuses it with the reason the
   `task_ended_by` once the run has started or the claimant is adopting its
   job;
 - the claim has an `adopting` status, which its receiver writes once
-  `Lookup` finds the job, or the pool is not suspended in a read of
-  `wherry.admin` the custodian makes for the request, so on a suspended pool
-  the custodian serves adoptions of running jobs and no first start, even to
-  a receiver that has not yet read the suspension;
+  `Lookup` finds the job, or the pool is not suspended in the read of
+  `wherry.admin` the custodian makes at the start of its pass, so on a
+  suspended pool the custodian serves adoptions of running jobs and no first
+  start, even to a receiver that has not yet read the suspension.
+  `wherry admin pool suspend` returns once the key custodian has
+  acknowledged the suspension with `suspended_for` in its snapshot, which a
+  pass publishes before it decides any request and after every attempt wrap
+  of the previous pass committed: after that no new start opens;
 - when the claim changed receivers, the previous claimant committed
   `released`, its membership ended, or its latest advertisement appended at
   or before the claim is more than 120 seconds old.

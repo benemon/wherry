@@ -333,6 +333,11 @@ type Snapshot struct {
 	// RotatedFor is the wherry.admin offset of the latest rotate-key record for the pool a key published by this
 	// snapshot or an earlier one was generated after; every snapshot carries it on.
 	RotatedFor int64 `json:"rotated_for,omitzero"`
+	// SuspendedFor and ResumedFor are the wherry.admin offsets of the latest suspend and resume records for the pool its
+	// custodian acknowledged, each after every attempt wrap it decided before reading the record committed; every
+	// snapshot carries them on.
+	SuspendedFor int64 `json:"suspended_for,omitzero"`
+	ResumedFor   int64 `json:"resumed_for,omitzero"`
 }
 
 // PoolKey is a pool's public P-256 key and its RFC 7638 key ID.

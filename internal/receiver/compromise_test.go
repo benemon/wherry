@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"context"
 	"crypto/ed25519"
 	"io"
 	"log"
@@ -267,6 +268,113 @@ func TestCustodianReadsTheSuspensionFresh(t *testing.T) {
 	}
 	if dispatches, _, _ := f.dispatched(t); dispatches != 0 {
 		t.Fatalf("dispatches %d, want none", dispatches)
+	}
+}
+
+// A suspension landing after a pass's read of wherry.admin does not stop that pass's first start, and pool suspend
+// waits for the next pass's snapshot acknowledging the record; no first start decided after it opens.
+func TestSuspendReturnsOnceTheKeyCustodianAcknowledges(t *testing.T) {
+	// Restored once the fixture stops serving.
+	t.Cleanup(func() { loadState = (*admin.Reader).Load })
+	f := newFixture(t, resultStream)
+	f.quiet()
+	first := f.executing(t, f.ctx, f.submit(t, f.host, nil), 1)
+	f.request(t, 1)
+	type outcome struct {
+		text string
+		err  error
+	}
+	returned := make(chan outcome, 1)
+	var suspendedAt int64
+	landed := false
+	loadState = func(reader *admin.Reader, ctx context.Context) (admin.State, error) {
+		state, err := reader.Load(ctx)
+		if landed {
+			return state, err
+		}
+		landed = true
+		go func() {
+			text, err := f.service.PoolSuspendAcknowledged(f.ctx, testPool, true, io.Discard)
+			returned <- outcome{text, err}
+		}()
+		for {
+			if current, err := f.service.LoadState(f.ctx); err == nil && current.Suspended[testPool] {
+				suspendedAt = current.SuspendChanged[testPool]
+				return state, err
+			}
+			if f.ctx.Err() != nil {
+				t.Error("the suspend record was never written")
+				return state, err
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if err := f.receiver.serveOpens(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-returned:
+		t.Fatalf("pool suspend returned %+v before the key custodian acknowledged it", result)
+	case <-time.After(time.Second):
+	}
+	f.serving.Store(true)
+	result := <-returned
+	records := f.snapshotRecords(t)
+	acknowledged := parseSnapshot(t, records[len(records)-1], testReceiver, f.receiver.signing)
+	if result.err != nil || !strings.Contains(result.text, "no new start opens") || acknowledged.SuspendedFor != suspendedAt {
+		t.Fatalf("pool suspend returned %+v with the snapshot suspended for %d, want suspension in effect for %d", result, acknowledged.SuspendedFor, suspendedAt)
+	}
+	if status := <-first; status != kgo.AckAccept {
+		t.Fatalf("the first start decided before the suspension ended %v; logs:\n%s", status, f.logs.String())
+	}
+	second := f.submit(t, f.host, func(task *wire.Submission) {
+		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
+	})
+	if status := f.execute(t, second, 1); status != kgo.AckRelease || f.answeredWith(t, wire.RefusedPoolSuspended) != 1 {
+		t.Fatalf("a first start after the acknowledgement ended %v with %d pool suspended refusals, want released and one", status, f.answeredWith(t, wire.RefusedPoolSuspended))
+	}
+	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
+		if recordType(record.Value) == wire.AttemptWrapType && (string(record.Key) != "run-a" || record.Timestamp.After(records[len(records)-1].Timestamp)) {
+			t.Fatalf("an attempt wrap for %s appended at %s, after the acknowledgement at %s", record.Key, record.Timestamp, records[len(records)-1].Timestamp)
+		}
+	}
+}
+
+// A pass reads wherry.admin once for all its pending first starts.
+func TestOneSuspensionReadPerPass(t *testing.T) {
+	// Restored once the fixture stops serving.
+	t.Cleanup(func() { loadState = (*admin.Reader).Load })
+	f := newFixture(t, resultStream)
+	f.quiet()
+	if err := f.service.PoolSuspend(f.ctx, testPool, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []string{"run-a", "run-b", "run-c"} {
+		record := f.submit(t, f.host, func(task *wire.Submission) {
+			task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = run, run, run
+		})
+		f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
+		f.openAs(t, record, testReceiver, f.receiver.signing, 1)
+	}
+	reads := 0
+	loadState = func(reader *admin.Reader, ctx context.Context) (admin.State, error) {
+		reads++
+		return reader.Load(ctx)
+	}
+	if err := f.receiver.serveOpens(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if refused := f.answeredWith(t, wire.RefusedPoolSuspended); refused != 3 || reads != 1 {
+		t.Fatalf("%d pool suspended refusals over %d reads of wherry.admin, want 3 over one; logs:\n%s", refused, reads, f.logs.String())
+	}
+}
+
+// With no live key custodian pool suspend returns at once, saying so.
+func TestSuspendWithNoLiveCustodianReturns(t *testing.T) {
+	f := newBareFixture(t)
+	text, err := f.service.PoolSuspendAcknowledged(f.ctx, testPool, true, io.Discard)
+	if err != nil || !strings.Contains(text, "no live key custodian") {
+		t.Fatalf("pool suspend returned %q, %v; want no live key custodian", text, err)
 	}
 }
 

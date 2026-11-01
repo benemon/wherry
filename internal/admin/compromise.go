@@ -18,15 +18,76 @@ import (
 
 // PoolSuspend records pool suspended, or resumed when suspend is false, and reconciles the ACLs to match.
 func (service *Service) PoolSuspend(ctx context.Context, pool string, suspend bool) error {
+	_, err := service.poolSuspend(ctx, pool, suspend)
+	return err
+}
+
+// PoolSuspendAcknowledged is PoolSuspend that then waits for pool's key custodian to acknowledge the record, reporting
+// the wait to progress, and returns the outcome. With no live custodian it returns at once: none opens anything.
+func (service *Service) PoolSuspendAcknowledged(ctx context.Context, pool string, suspend bool, progress io.Writer) (string, error) {
+	recorded, err := service.poolSuspend(ctx, pool, suspend)
+	if err != nil {
+		return "", err
+	}
+	kind, effect := "resume", "resumed: its key custodian acknowledged the resume record at wherry.admin offset %d; first starts open again"
+	if suspend {
+		kind, effect = "suspend", "suspended: its key custodian acknowledged the suspend record at wherry.admin offset %d; no new start opens"
+	}
+	reader := NewReader(service.Admin)
+	defer reader.Close()
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return "", err
+	}
+	live, err := liveCustodian(ctx, reader, state, pool)
+	if err != nil {
+		return "", err
+	}
+	if !live {
+		return fmt.Sprintf("pool %s's %s record is written at wherry.admin offset %d; the pool has no live key custodian, so nothing opens until one starts", pool, kind, recorded), nil
+	}
+	err = awaitSnapshot(ctx, reader, state, pool, progress, func(current wire.Snapshot) bool {
+		return suspend && current.SuspendedFor >= recorded || !suspend && current.ResumedFor >= recorded
+	}, fmt.Sprintf("waiting for pool %s's key custodian to acknowledge the %s record at wherry.admin offset %d", pool, kind, recorded),
+		fmt.Errorf("pool %s's %s record is written at wherry.admin offset %d, but its key custodian did not acknowledge it within %s; it is not yet in effect", pool, kind, recorded, snapshotWait))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("pool %s is "+effect, pool, recorded), nil
+}
+
+// poolSuspend appends pool's suspend or resume record, reconciles the ACLs and returns the record's offset.
+func (service *Service) poolSuspend(ctx context.Context, pool string, suspend bool) (int64, error) {
 	kind := "resume"
 	if suspend {
 		kind = "suspend"
 	}
-	state, err := service.appendChecked(ctx, []byte(kind+"."+pool), Record{Kind: kind, Pool: pool})
+	state, recorded, err := service.appendRecord(ctx, []byte(kind+"."+pool), Record{Kind: kind, Pool: pool})
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return service.reconcileACLs(ctx, state)
+	return recorded, service.reconcileACLs(ctx, state)
+}
+
+// liveCustodian reports that pool's current snapshot names a custodian whose advertisement is live.
+func liveCustodian(ctx context.Context, reader *Reader, state State, pool string) (bool, error) {
+	current, err := currentSnapshot(ctx, reader, state, pool)
+	if errors.Is(err, errNoSnapshot) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	keys, err := reader.ReadKeys(ctx, PoolKeyTopics(state, pool))
+	if err != nil {
+		return false, err
+	}
+	live, err := reader.ReadAdvertisements(ctx, state, keys, time.Now(), advertisementLive)
+	if err != nil {
+		return false, err
+	}
+	_, ok := live[current.Custodian]
+	return ok, nil
 }
 
 // SuspectTask is a retained task record whose submit wrap is to a suspect key: names only, never a value.
@@ -48,9 +109,36 @@ type RotateReport struct {
 	OldestMS    int64
 }
 
-// rotateWait bounds rotate-key's wait for the snapshot rotated for its request, and rotateProgress separates the lines
-// reporting it; variables so tests can shorten them.
-var rotateWait, rotateProgress = 5 * time.Minute, 10 * time.Second
+// snapshotWait bounds an admin command's wait for the snapshot acknowledging its record, and snapshotProgress separates
+// the lines reporting it; variables so tests can shorten them. advertisementLive is how recent a live receiver's
+// advertisement is.
+var snapshotWait, snapshotProgress = 5 * time.Minute, 10 * time.Second
+
+const advertisementLive = 120 * time.Second
+
+// awaitSnapshot waits up to snapshotWait for a current snapshot of pool that done accepts, writing waiting and the time
+// left to progress every snapshotProgress, and fails with timeout without one.
+func awaitSnapshot(ctx context.Context, reader *Reader, state State, pool string, progress io.Writer, done func(wire.Snapshot) bool, waiting string, timeout error) error {
+	deadline, reported := time.Now().Add(snapshotWait), time.Time{}
+	for {
+		current, err := currentSnapshot(ctx, reader, state, pool)
+		if err == nil && done(current) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return timeout
+		}
+		if time.Since(reported) >= snapshotProgress {
+			reported = time.Now()
+			fmt.Fprintf(progress, "%s, up to %s\n", waiting, time.Until(deadline).Truncate(time.Second))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
 
 // PoolRotateKey records a rotate-key request for a suspended pool, waits for its key custodian's snapshot rotated for it,
 // reporting the wait to progress, and then reports every task retained through the task topic's end at that point whose
@@ -88,24 +176,11 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	if err != nil {
 		return RotateReport{}, err
 	}
-	deadline, reported := time.Now().Add(rotateWait), time.Time{}
-	for {
-		current, err := currentSnapshot(ctx, reader, state, pool)
-		if err == nil && current.RotatedFor >= requested {
-			break
-		}
-		if time.Now().After(deadline) {
-			return RotateReport{}, fmt.Errorf("pool %s's key custodian published no snapshot rotated for the rotate-key request at wherry.admin offset %d within %s; the request stands", pool, requested, rotateWait)
-		}
-		if time.Since(reported) >= rotateProgress {
-			reported = time.Now()
-			fmt.Fprintf(progress, "waiting for pool %s's key custodian to rotate for the request at wherry.admin offset %d, up to %s\n", pool, requested, time.Until(deadline).Truncate(time.Second))
-		}
-		select {
-		case <-ctx.Done():
-			return RotateReport{}, ctx.Err()
-		case <-time.After(time.Second):
-		}
+	err = awaitSnapshot(ctx, reader, state, pool, progress, func(current wire.Snapshot) bool { return current.RotatedFor >= requested },
+		fmt.Sprintf("waiting for pool %s's key custodian to rotate for the request at wherry.admin offset %d", pool, requested),
+		fmt.Errorf("pool %s's key custodian published no snapshot rotated for the rotate-key request at wherry.admin offset %d within %s; the request stands", pool, requested, snapshotWait))
+	if err != nil {
+		return RotateReport{}, err
 	}
 	listing, err := reader.Admin()
 	if err != nil {
@@ -204,5 +279,7 @@ func currentSnapshot(ctx context.Context, reader *Reader, state State, pool stri
 		}
 		return snapshot, nil
 	}
-	return wire.Snapshot{}, fmt.Errorf("pool %s has no custodian snapshot", pool)
+	return wire.Snapshot{}, fmt.Errorf("pool %s has %w", pool, errNoSnapshot)
 }
+
+var errNoSnapshot = errors.New("no custodian snapshot")

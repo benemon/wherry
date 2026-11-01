@@ -321,6 +321,20 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 	if !custodian && keys[current.KeyID] != nil {
 		return nil
 	}
+	// One read of wherry.admin decides the pass's suspension. A pass begins once every attempt wrap of the previous one
+	// committed, so a suspension acknowledged here holds for every first start decided after it.
+	var suspended bool
+	if custodian {
+		state, err := loadState(r.reader, ctx)
+		if err != nil {
+			r.deny(err, capRead)
+			return fmt.Errorf("read wherry.admin: %w", err)
+		}
+		suspended = state.Suspended[r.config.Pool]
+		if err := r.acknowledgeSuspension(ctx, keys, latest, state); err != nil {
+			return err
+		}
+	}
 	events, err := r.readEvents(ctx)
 	if err != nil {
 		return err
@@ -343,7 +357,7 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 	if !custodian {
 		return r.rekey(ctx, pending, events, earliest, keys, current)
 	}
-	check := &claimCheck{r: r, events: events, earliest: earliest, keys: keys, now: time.Now()}
+	check := &claimCheck{r: r, events: events, earliest: earliest, keys: keys, now: time.Now(), suspended: suspended}
 	for _, request := range pending {
 		records := check.decide(ctx, request)
 		if len(records) == 0 {
@@ -360,6 +374,21 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// acknowledgeSuspension republishes latest, the custodian's snapshot, carrying the offset of state's latest suspend or
+// resume record for the pool when latest does not acknowledge it.
+func (r *Receiver) acknowledgeSuspension(ctx context.Context, keys map[string]*poolKey, latest current, state admin.State) error {
+	marks, at := *latest.snapshot, state.SuspendChanged[r.config.Pool]
+	switch suspended := state.Suspended[r.config.Pool]; {
+	case suspended && at > marks.SuspendedFor:
+		marks.SuspendedFor = at
+	case !suspended && at > marks.ResumedFor:
+		marks.ResumedFor = at
+	default:
+		return nil
+	}
+	return r.publish(ctx, keys, marks.Reason, keys[marks.Current.KeyID], marks, latest, time.Now())
 }
 
 // rekey writes, for each pending request's task that keys open, a re-key wrap of its content key to current, unless
@@ -426,17 +455,18 @@ func (r *Receiver) contentKey(task *wire.Submission, keys map[string]*poolKey, r
 	return nil
 }
 
-// claimCheck is one custodian pass's view for its claim checks; changed is the reason of the claimant change the last
-// decision served, empty for none.
+// claimCheck is one custodian pass's view for its claim checks; suspended is the pool's suspension read at the pass's
+// start, and changed the reason of the claimant change the last decision served, empty for none.
 type claimCheck struct {
-	r        *Receiver
-	events   poolEvents
-	earliest map[string]*runSubmission
-	keys     map[string]*poolKey
-	now      time.Time
-	ads      []*kgo.Record
-	adsRead  bool
-	changed  string
+	r         *Receiver
+	events    poolEvents
+	earliest  map[string]*runSubmission
+	keys      map[string]*poolKey
+	now       time.Time
+	suspended bool
+	ads       []*kgo.Record
+	adsRead   bool
+	changed   string
 }
 
 // decide checks one open request against the claim check's four rules and returns the records answering it, in one
@@ -501,18 +531,9 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	if !c.now.Before(wire.PastBound(bound)) {
 		return refuse(wire.RefusedPastBound)
 	}
-	// A suspended pool starts no job; only this claim's adoption, written once Lookup found the job, is served. A first
-	// start waits on a fresh read of wherry.admin, which a stale receiver's claim does not bypass; unread, the request
-	// goes unanswered until the claimant's own bound.
-	if !adopting {
-		suspended, err := r.suspendedNow(ctx)
-		if err != nil {
-			r.logger.Printf("custodian: read wherry.admin for run %s's open request: %v", request.Run, err)
-			return nil
-		}
-		if suspended {
-			return refuse(wire.RefusedPoolSuspended)
-		}
+	// A suspended pool starts no job; only this claim's adoption, written once Lookup found the job, is served.
+	if !adopting && c.suspended {
+		return refuse(wire.RefusedPoolSuspended)
 	}
 	// Rule 6, decided once per claim: a change of claimant is served once the previous one released or its lease lapsed.
 	claimDigest := wire.Digest(c.events.records[request.Run][owners[len(owners)-1]].Value)

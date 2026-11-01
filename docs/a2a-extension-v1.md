@@ -823,6 +823,13 @@ that key's public half, on the pool's compacted
   was generated after; it is absent before the first. Every later snapshot
   carries it on, and the custodian rotates on a `rotate-key` record whose
   offset is above it.
+- `suspended_for` and `resumed_for` are the `wherry.admin` offsets of the
+  latest `suspend` and `resume` records for the pool the custodian
+  acknowledged; each is absent before the first. A pass over the open
+  requests that reads a record above the offset its snapshot carries
+  republishes the snapshot with the record's offset before it decides any
+  request, and passes begin only once every attempt wrap of the previous
+  pass committed. Every later snapshot carries them on.
 - The current snapshot is the latest committed record under the key
   `custodian` on the topic, the record compaction keeps for that key. A
   record under another key is not a snapshot. A host submits to the pool
@@ -1092,9 +1099,9 @@ answers. It serves a request only when:
    `adopting` status, `task_started_by` otherwise; otherwise
    `past its bound`;
 5. the claim has an `adopting` status, which its receiver writes once
-   `Lookup` finds the job, or the pool is not suspended in a read of
-   `wherry.admin` the custodian makes for the request; otherwise
-   `pool suspended`. A failed read leaves the request unanswered;
+   `Lookup` finds the job, or the pool is not suspended in the read of
+   `wherry.admin` the custodian makes at the start of its pass; otherwise
+   `pool suspended`. A failed read leaves the pass's requests unanswered;
 6. when the claim changed receivers, the previous owner committed `released`,
    has no live membership, or its latest advertisement appended at or before
    the claim is more than 120 seconds old when the custodian decides;

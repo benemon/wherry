@@ -441,10 +441,10 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 	}
 	key := keys[latest.snapshot.Current.KeyID]
 	if r.custody.contested {
-		return r.publish(ctx, keys, "contested", key, latest.snapshot.RotatedFor, latest, now)
+		return r.publish(ctx, keys, "contested", key, *latest.snapshot, latest, now)
 	}
 	if latest.resign {
-		return r.publish(ctx, keys, latest.snapshot.Reason, key, latest.snapshot.RotatedFor, latest, now)
+		return r.publish(ctx, keys, latest.snapshot.Reason, key, *latest.snapshot, latest, now)
 	}
 	// A rotate-key record above the offset the current snapshot carries rotates the key at once.
 	if state, _, _ := r.snapshot(); state.RotateRequested[r.config.Pool] > latest.snapshot.RotatedFor || !now.Before(rotationAt(time.UnixMilli(key.PublishedMS), r.config.Pool, latest.snapshot.Current.KeyID)) {
@@ -563,10 +563,11 @@ func (r *Receiver) keepKeys(keys map[string]*poolKey, latest current, now time.T
 // record the receiver has read.
 func (r *Receiver) mint(ctx context.Context, keys map[string]*poolKey, reason string, from current, now time.Time) error {
 	state, _, _ := r.snapshot()
-	rotatedFor := state.RotateRequested[r.config.Pool]
+	var marks wire.Snapshot
 	if from.snapshot != nil {
-		rotatedFor = max(rotatedFor, from.snapshot.RotatedFor)
+		marks = *from.snapshot
 	}
+	marks.RotatedFor = max(marks.RotatedFor, state.RotateRequested[r.config.Pool])
 	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return err
@@ -576,14 +577,16 @@ func (r *Receiver) mint(ctx context.Context, keys map[string]*poolKey, reason st
 		return err
 	}
 	keys[key.id()] = key
-	return r.publish(ctx, keys, reason, key, rotatedFor, from, now)
+	return r.publish(ctx, keys, reason, key, marks, from, now)
 }
 
-// publish commits a snapshot naming key current for reason and carrying rotatedFor, and marks key published once the
-// snapshot reads back; a fenced producer, or another receiver's snapshot committed after from, supersedes the receiver.
-func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason string, key *poolKey, rotatedFor int64, from current, now time.Time) error {
+// publish commits a snapshot naming key current for reason and carrying the wherry.admin offsets of marks, and marks key
+// published once the snapshot reads back; a fenced producer, or another receiver's snapshot committed after from,
+// supersedes the receiver.
+func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason string, key *poolKey, marks wire.Snapshot, from current, now time.Time) error {
 	public := &key.Key.Key.(*ecdsa.PrivateKey).PublicKey
-	value := r.sign(&wire.Snapshot{Pool: r.config.Pool, Custodian: r.id, Reason: reason, Current: wire.PoolKey{KeyID: key.id(), Key: jose.JSONWebKey{Key: public}}, RotatedFor: rotatedFor})
+	value := r.sign(&wire.Snapshot{Pool: r.config.Pool, Custodian: r.id, Reason: reason, Current: wire.PoolKey{KeyID: key.id(), Key: jose.JSONWebKey{Key: public}},
+		RotatedFor: marks.RotatedFor, SuspendedFor: marks.SuspendedFor, ResumedFor: marks.ResumedFor})
 	producer := r.custody.producer
 	// A transaction a failed pass left open is aborted first.
 	err := producer.EndTransaction(ctx, kgo.TryAbort)

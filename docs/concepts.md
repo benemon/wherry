@@ -355,8 +355,9 @@ withdraws the hosts' Write on the pool's tasks topic. The receivers keep
 Read, and every other grant stays. Hosts refuse to submit to the pool, and
 receivers claim nothing from it. The custodian refuses with
 `pool suspended` the open request of a claim with no `adopting` status, so
-that run's task goes back to the queue unstarted.
-It serves adoptions of started jobs. Runs in progress continue to their
+that run's task goes back to the queue unstarted. `pool suspend` returns
+once the key custodian has acknowledged the suspension in its snapshot;
+after that no new start opens. It serves adoptions of started jobs. Runs in progress continue to their
 terminal status. A suspension takes back no
 credential a running job holds: rotating the credential at its issuer does,
 and revoking a receiver stops it. The custodian keeps rotating its key, and

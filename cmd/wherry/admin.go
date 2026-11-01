@@ -150,7 +150,12 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		if len(pos) != 3 {
 			return fmt.Errorf("usage: wherry admin pool %s POOL", pos[1])
 		}
-		return service.PoolSuspend(ctx, pos[2], pos[1] == "suspend")
+		outcome, err := service.PoolSuspendAcknowledged(ctx, pos[2], pos[1] == "suspend", stderr)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, outcome)
+		return nil
 	case "pool rotate-key":
 		if len(pos) != 3 {
 			return errors.New("usage: wherry admin pool rotate-key POOL [--suspect-key KID]...")

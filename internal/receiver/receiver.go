@@ -29,11 +29,13 @@ import (
 )
 
 // parseHistory, parseStrict and authorizeSubmission are wire.ParseHistory, wire.ParseStrict and
-// admin.AuthorizeSubmission, swapped by tests that count the verifications of a read.
+// admin.AuthorizeSubmission, swapped by tests that count the verifications of a read; loadState is the custodian's read
+// of wherry.admin, swapped by tests that count its reads.
 var (
 	parseHistory        = wire.ParseHistory
 	parseStrict         = wire.ParseStrict
 	authorizeSubmission = admin.AuthorizeSubmission
+	loadState           = (*admin.Reader).Load
 )
 
 // ErrConfigChanged is returned by Run when wherry.admin holds a configuration other than the one it started with.
@@ -490,17 +492,6 @@ func (r *Receiver) blocked() bool {
 func (r *Receiver) suspended() bool {
 	state, _, _ := r.snapshot()
 	return state.Suspended[r.config.Pool]
-}
-
-// suspendedNow reports the receiver's pool suspended in a bounded read of wherry.admin.
-func (r *Receiver) suspendedNow(ctx context.Context) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, readTimeout)
-	defer cancel()
-	state, err := r.reader.Load(ctx)
-	if err != nil {
-		return false, err
-	}
-	return state.Suspended[r.config.Pool], nil
 }
 
 // backoff is how long the receiver waits before it fetches from its pool again.

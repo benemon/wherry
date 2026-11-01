@@ -243,10 +243,12 @@ type State struct {
 	Suspended    map[string]bool
 	// RotateRequested is the wherry.admin offset of each pool's latest rotate-key record.
 	RotateRequested map[string]int64
+	// SuspendChanged is the wherry.admin offset of each pool's latest suspend or resume record.
+	SuspendChanged map[string]int64
 }
 
 func NewState() State {
-	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]int64{}}
+	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]int64{}, map[string]int64{}}
 }
 
 // RecordVersion is the wherry.admin record version this release writes and the highest it reads.
@@ -334,9 +336,10 @@ func apply(state *State, record Record) error {
 		}
 		switch record.Kind {
 		case "suspend":
-			state.Suspended[record.Pool] = true
+			state.Suspended[record.Pool], state.SuspendChanged[record.Pool] = true, record.At
 		case "resume":
 			delete(state.Suspended, record.Pool)
+			state.SuspendChanged[record.Pool] = record.At
 		default:
 			state.RotateRequested[record.Pool] = record.At
 		}

@@ -822,12 +822,32 @@ pool keys to their deadlines and logs
 `custodian: hand over to <receiver>: pool <pool> is suspended; its re-key scan waits for resume; keeping the pool keys to their deadlines`.
 The key custodian keeps rotating.
 
+The key custodian reads `wherry.admin` once at the start of each pass over
+the open requests and decides every request of the pass by that read. A
+pass begins once every attempt wrap of the previous pass committed. The
+first pass that reads the `suspend` record republishes the custodian's
+snapshot with `suspended_for` set to the record's `wherry.admin` offset,
+before it decides any request. The command returns once the key custodian
+has acknowledged: it waits up to 5 minutes for a snapshot whose
+`suspended_for` is at or above its record's offset, writing
+`waiting for pool <pool>'s key custodian to acknowledge the suspend record at wherry.admin offset <offset>, up to <time>`
+to standard error every 10 seconds, then prints
+`pool <pool> is suspended: its key custodian acknowledged the suspend record at wherry.admin offset <offset>; no new start opens`.
+After that no new start opens. With no acknowledgement it fails with
+`pool <pool>'s suspend record is written at wherry.admin offset <offset>, but its key custodian did not acknowledge it within 5m0s; it is not yet in effect`.
+When the pool has no snapshot, or the custodian its snapshot names has no
+advertisement within 120 seconds, it returns at once with
+`pool <pool>'s suspend record is written at wherry.admin offset <offset>; the pool has no live key custodian, so nothing opens until one starts`.
+
 ### `wherry admin pool resume POOL`
 
 Records a `resume` record for the pool on `wherry.admin` and reconciles the
 ACLs, granting the hosts' `WRITE` on the tasks topic again. Receivers claim
-from the pool, and the key custodian serves its first starts, again at their
-next refresh of `wherry.admin`.
+from the pool again at their next refresh of `wherry.admin`. The key
+custodian serves first starts from the pass that acknowledges the record
+with `resumed_for` in its snapshot, and the command waits for that
+acknowledgement as `pool suspend` does, printing
+`pool <pool> is resumed: its key custodian acknowledged the resume record at wherry.admin offset <offset>; first starts open again`.
 
 ### `wherry admin pool rotate-key POOL [--suspect-key KID]...`
 
