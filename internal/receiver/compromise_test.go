@@ -228,6 +228,25 @@ func TestSuspendedPoolRefusesFirstStartsAndServesAdoptions(t *testing.T) {
 	})
 }
 
+// While its pool is suspended a run with an earlier started status whose job Lookup reports absent is a first start:
+// the custodian refuses its open request pool suspended and nothing is dispatched.
+func TestSuspendedPoolRefusesAStartedRunWhoseJobIsAbsent(t *testing.T) {
+	f := newFixture(t, resultStream)
+	record := f.submit(t, f.host, nil)
+	f.statusAs(t, record, testReceiver, f.receiver.signing, "claimed", 1)
+	f.statusAs(t, record, testReceiver, f.receiver.signing, "started", 1)
+	f.suspend(t)
+	if status := f.execute(t, record, 2); status != kgo.AckRelease {
+		t.Fatalf("status %v, want the task released; logs:\n%s", status, f.logs.String())
+	}
+	if refused := f.answeredWith(t, wire.RefusedPoolSuspended); refused != 1 {
+		t.Fatalf("%d pool suspended refusals, want one; logs:\n%s", refused, f.logs.String())
+	}
+	if dispatches, _, _ := f.dispatched(t); dispatches != 0 {
+		t.Fatalf("dispatches %d, want none", dispatches)
+	}
+}
+
 // A drain while the pool is suspended scans nothing, records no denial and keeps every key it holds.
 func TestDrainWhileSuspendedKeepsTheKeys(t *testing.T) {
 	f, successor, drain := handoverFixture(t, 15*time.Second)

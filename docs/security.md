@@ -98,9 +98,9 @@ otherwise refuses it with the reason the
 - the run is within its open bound: `task_started_by` for a first start,
   `task_ended_by` once the run has started or the claimant is adopting its
   job;
-- the pool is not suspended, or the run has a `started` status or the
-  claim's `adopting` status, so on a suspended pool the custodian serves
-  adoptions of started jobs and no first start;
+- the pool is not suspended, or the claim has an `adopting` status, which
+  its receiver writes once `Lookup` finds the job, so on a suspended pool the
+  custodian serves adoptions of running jobs and no first start;
 - when the claim changed receivers, the previous claimant committed
   `released`, its membership ended, or its latest advertisement appended at
   or before the claim is more than 120 seconds old.

@@ -487,20 +487,22 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	if claim.Wherry.Kind != "claimed" || claim.Wherry.Receiver != request.Receiver || claim.Wherry.Attempt != request.Attempt {
 		return refuse(wire.RefusedNotClaimant)
 	}
+	adopting := slices.ContainsFunc(statuses, func(status wire.RunStatus) bool {
+		return status.Wherry.TaskHash == task.hash && status.Wherry.Kind == "adopting" && status.Wherry.Receiver == request.Receiver && status.Wherry.Attempt == request.Attempt
+	})
+	started := slices.ContainsFunc(statuses, func(status wire.RunStatus) bool {
+		return status.Wherry.TaskHash == task.hash && status.Wherry.Kind == "started"
+	})
 	// The open bound comes from the events: a started job or this claim's adoption extends it to task_ended_by.
 	bound := binding.TaskStartedBy
-	adoption := slices.ContainsFunc(statuses, func(status wire.RunStatus) bool {
-		return status.Wherry.TaskHash == task.hash && (status.Wherry.Kind == "started" ||
-			status.Wherry.Kind == "adopting" && status.Wherry.Receiver == request.Receiver && status.Wherry.Attempt == request.Attempt)
-	})
-	if adoption {
+	if started || adopting {
 		bound = binding.TaskEndedBy
 	}
 	if !c.now.Before(wire.PastBound(bound)) {
 		return refuse(wire.RefusedPastBound)
 	}
-	// A suspended pool starts no job; a running one is still adopted.
-	if !adoption && r.suspended() {
+	// A suspended pool starts no job; only this claim's adoption, written once Lookup found the job, is served.
+	if !adopting && r.suspended() {
 		return refuse(wire.RefusedPoolSuspended)
 	}
 	// Rule 6, decided once per claim: a change of claimant is served once the previous one released or its lease lapsed.
