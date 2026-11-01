@@ -1082,52 +1082,6 @@
       "panels": []
     },
     {
-      "id": 22,
-      "type": "timeseries",
-      "title": "Plugin restarts",
-      "description": "Times each plugin process was started again.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 60
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "refId": "A",
-          "expr": "sum by (pool, type) (increase(wherry_plugin_restarts_total{pool=~\"$pool\", instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{pool}} {{type}}"
-        }
-      ]
-    },
-    {
       "id": 23,
       "type": "timeseries",
       "title": "Platform errors by class",
@@ -1139,7 +1093,7 @@
       "gridPos": {
         "h": 8,
         "w": 8,
-        "x": 8,
+        "x": 0,
         "y": 60
       },
       "fieldConfig": {
@@ -1185,7 +1139,7 @@
       "gridPos": {
         "h": 8,
         "w": 8,
-        "x": 16,
+        "x": 8,
         "y": 60
       },
       "fieldConfig": {

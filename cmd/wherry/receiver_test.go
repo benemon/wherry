@@ -15,14 +15,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/pluginsdk"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 // pluginDir holds wherry-plugin-fake, the protocol module's test plugin, for the package's tests; fakeSHA256 is its
@@ -157,7 +155,7 @@ func TestRelativePluginDirRunsTheCheckedBinary(t *testing.T) {
 	}
 	t.Setenv("PATH", decoys+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Chdir(dir)
-	plugins := &plugins{dir: ".", logs: io.Discard, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: ".", logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	_, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}, fakeSHA256)
 	if _, statErr := os.Stat(marker); statErr == nil {
@@ -168,57 +166,13 @@ func TestRelativePluginDirRunsTheCheckedBinary(t *testing.T) {
 	}
 }
 
-func TestRestartChecksThePluginAgain(t *testing.T) {
-	read := recordPlugin(t)
-	dir := installPlugin(t)
-	logs := &syncBuffer{}
-	plugins := &plugins{dir: dir, logs: logs, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
-	defer plugins.close()
-	if _, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}, fakeSHA256); err != nil {
-		t.Fatal(err)
-	}
-	changed := replacePlugin(t, dir, "fake")
-	first := read()[0].PID
-	if err := syscall.Kill(first, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(3 * time.Second)
-	for _, record := range read() {
-		if record.PID != first {
-			t.Fatalf("restarted a plugin binary whose SHA-256 is not the pin, as %d", record.PID)
-		}
-	}
-	if want := fmt.Sprintf("plugin type fake: %s has SHA-256 %s and the pin is %s", filepath.Join(dir, "wherry-plugin-fake"), changed, fakeSHA256); !strings.Contains(logs.String(), "plugin restart failed") || !strings.Contains(logs.String(), want) {
-		t.Fatalf("refused restart not logged with %q:\n%s", want, logs.String())
-	}
-}
-
-// replacePlugin replaces the plugin of type kind in dir with the test plugin and one more byte, as a new file since a
-// running binary cannot be written, and returns its SHA-256 in hex.
-func replacePlugin(t *testing.T, dir, kind string) string {
-	t.Helper()
-	binary, err := os.ReadFile(filepath.Join(pluginDir, "wherry-plugin-fake"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	binary = append(binary, 0)
-	replacement := filepath.Join(dir, "replacement")
-	if err := os.WriteFile(replacement, binary, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(replacement, filepath.Join(dir, "wherry-plugin-"+kind)); err != nil {
-		t.Fatal(err)
-	}
-	return fmt.Sprintf("%x", sha256.Sum256(binary))
-}
-
 func TestPluginLaunchesOnlyFromItsPin(t *testing.T) {
 	recordPlugin(t)
 	dir, releases := t.TempDir(), installPlugin(t)
 	if err := os.Symlink(filepath.Join(releases, "wherry-plugin-fake"), filepath.Join(dir, "wherry-plugin-fake")); err != nil {
 		t.Fatal(err)
 	}
-	plugins := &plugins{dir: dir, logs: io.Discard, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: dir, logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	settings := admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}
 	if _, err := plugins.profile("build", settings, ""); err == nil || err.Error() != "plugin type fake has no pinned SHA-256; set it with receiver update --plugin-sha256 fake=HEX" {
@@ -235,7 +189,7 @@ func TestPluginLaunchesOnlyFromItsPin(t *testing.T) {
 }
 
 func TestMissingPluginIsAConfigurationError(t *testing.T) {
-	plugins := &plugins{dir: t.TempDir(), logs: io.Discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: t.TempDir(), logs: io.Discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	_, err := plugins.profile("build", admin.ProfileSettings{Name: "lab", Plugin: "nomad", Agent: "claude"}, fakeSHA256)
 	if err == nil || err.Error() != "no plugin for type nomad" {
@@ -256,7 +210,7 @@ func TestOneProcessPerPlugin(t *testing.T) {
 		}
 	}
 	logged := &syncBuffer{}
-	plugins := &plugins{dir: dir, logs: io.Discard, logger: log.New(logged, "receiver: ", 0), registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: dir, logs: io.Discard, logger: log.New(logged, "receiver: ", 0), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	for _, settings := range []admin.ProfileSettings{
 		{Name: "exec", Plugin: "fake", Agent: "claude"}, {Name: "podman", Plugin: "fake", Agent: "claude"}, {Name: "edge", Plugin: "other", Agent: "claude"},
@@ -429,7 +383,7 @@ func TestProfileCredentialReachesThePluginInPlaceOfItsName(t *testing.T) {
 		t.Fatal(err)
 	}
 	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"nomad-token": {File: token}}, hold: func(string, []byte) {},
-		logs: io.Discard, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+		logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	settings := admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "nomad-token", "outputs": true}}
 	if _, err := plugins.profile("build", settings, fakeSHA256); err != nil {
@@ -458,7 +412,7 @@ func TestProfileCredentialFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"open-token": {File: open}}, logs: io.Discard,
-		registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+		running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	for name, want := range map[string]string{
 		"nomad-token": `credential "nomad-token" has no source in the receiver's configuration`,

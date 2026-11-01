@@ -154,12 +154,6 @@ func kill(t *testing.T, p *Process) int {
 	return killed
 }
 
-func shortRestart(t *testing.T) {
-	previous := restartBackoff
-	restartBackoff = 300 * time.Millisecond
-	t.Cleanup(func() { restartBackoff = previous })
-}
-
 // eventually polls check until it returns nil or ten seconds pass.
 func eventually(t *testing.T, what string, check func() error) {
 	t.Helper()
@@ -320,46 +314,39 @@ func TestConfigureFailureStaysWithItsProfile(t *testing.T) {
 	}
 }
 
-func TestRestartConfiguresEveryProfile(t *testing.T) {
-	shortRestart(t)
-	p, record, _ := launch(t)
-	a, b := configured(t, p, "a", "{}"), configured(t, p, "b", "{}")
-	killed := kill(t, p)
-	eventually(t, "link lost while the plugin is down", func() error {
-		if _, err := a.Ready(context.Background()); !errors.Is(err, ErrLinkLost) {
-			return fmt.Errorf("ready returned %v", err)
-		}
-		return nil
-	})
-	eventually(t, "both profiles back after the restart", func() error {
-		for _, profile := range []Plugin{a, b} {
-			if _, _, err := profile.Dispatch(context.Background(), Run{ID: "after"}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	configured := map[string]bool{}
+// exitedAlone waits for p's Exited, then checks no process takes its place: its profile's calls keep returning
+// ErrLinkLost and no call reaches another process.
+func exitedAlone(t *testing.T, p *Process, a Plugin, record string, first int) {
+	t.Helper()
+	select {
+	case <-p.Exited():
+	case <-time.After(10 * time.Second):
+		t.Fatal("Exited not closed after the plugin exited")
+	}
+	time.Sleep(2 * time.Second)
+	if _, err := a.Ready(context.Background()); !errors.Is(err, ErrLinkLost) {
+		t.Fatalf("ready after the exit returned %v; want ErrLinkLost", err)
+	}
 	for _, entry := range records(t, record) {
-		if entry.Call == "configure" && entry.PID != killed {
-			configured[entry.Settings.Name] = true
+		if entry.PID != first {
+			t.Fatalf("plugin started again as %d", entry.PID)
 		}
-	}
-	if !configured["a"] || !configured["b"] {
-		t.Fatalf("restarted process configured %v; want a and b", configured)
-	}
-	if restarts := p.Restarts(); restarts != 1 {
-		t.Fatalf("restarts = %d; want 1", restarts)
 	}
 }
 
-// A plugin that stops answering without exiting is killed and started again; the call it hung ends.
-func TestHungPluginIsRestarted(t *testing.T) {
-	shortRestart(t)
+func TestExitedClosesWhenThePluginExits(t *testing.T) {
+	p, record, _ := launch(t)
+	a := configured(t, p, "a", "{}")
+	first := kill(t, p)
+	exitedAlone(t, p, a, record, first)
+}
+
+// A plugin that stops answering without exiting is killed; the call it hung ends.
+func TestHungPluginIsKilled(t *testing.T) {
 	previous := pingInterval
 	pingInterval = 200 * time.Millisecond
 	t.Cleanup(func() { pingInterval = previous })
-	p, _, _ := launch(t)
+	p, record, _ := launch(t)
 	a := configured(t, p, "a", `{"hang":true}`)
 	hung := pid(p)
 	// Close waits on a stopped process; one the supervisor failed to kill is resumed so the test ends.
@@ -369,16 +356,7 @@ func TestHungPluginIsRestarted(t *testing.T) {
 	if _, err := a.Ready(ctx); !errors.Is(err, ErrLinkLost) {
 		t.Fatalf("ready on a hung plugin returned %v; want the link lost before its context ended", err)
 	}
-	eventually(t, "the profile back after the restart", func() error {
-		_, _, err := a.Dispatch(context.Background(), Run{ID: "after"})
-		return err
-	})
-	if after := pid(p); after == hung {
-		t.Fatalf("plugin process is still %d", hung)
-	}
-	if restarts := p.Restarts(); restarts != 1 {
-		t.Fatalf("restarts = %d; want 1", restarts)
-	}
+	exitedAlone(t, p, a, record, hung)
 }
 
 func TestOneProcessPerPlugin(t *testing.T) {
@@ -395,7 +373,6 @@ func TestOneProcessPerPlugin(t *testing.T) {
 }
 
 func TestFollowLinkLossIsDistinct(t *testing.T) {
-	shortRestart(t)
 	p, _, _ := launch(t)
 	a := configured(t, p, "a", "{}")
 	lines := make(chan Line, 4)
@@ -466,11 +443,10 @@ func TestRefusesPluginWithoutMutualTLS(t *testing.T) {
 }
 
 func TestSecretsStayOutOfLogs(t *testing.T) {
-	shortRestart(t)
 	previous := logLevel
 	logLevel = hclog.Trace
 	t.Cleanup(func() { logLevel = previous })
-	p, record, logs := launch(t)
+	p, _, logs := launch(t)
 	a, err := p.Configure(Settings{Name: "a", Pool: "pool-a", Agent: "claude", Config: []byte("{}"), Credential: platformCredential})
 	if err != nil {
 		t.Fatal(err)
@@ -485,18 +461,11 @@ func TestSecretsStayOutOfLogs(t *testing.T) {
 	if _, _, err := a.Dispatch(context.Background(), run); err != nil {
 		t.Fatal(err)
 	}
-	killed := kill(t, p)
-	eventually(t, "profile back after the restart", func() error {
-		_, err := a.Ready(context.Background())
-		return err
-	})
-	reconfigured := false
-	for _, entry := range records(t, record) {
-		reconfigured = reconfigured || entry.Call == "configure" && entry.PID != killed && entry.Settings.Credential == platformCredential
-	}
+	kill(t, p)
+	<-p.Exited()
 	output := logs.String()
-	if !reconfigured || !strings.Contains(output, "plugin restarted") || !strings.Contains(output, "starting plugin") {
-		t.Fatalf("restart did not carry the platform credential, or the logs miss the link's own lines:\n%s", output)
+	if !strings.Contains(output, "plugin exited") || !strings.Contains(output, "starting plugin") {
+		t.Fatalf("the logs miss the link's own lines:\n%s", output)
 	}
 	for _, secret := range []string{runCredential, platformCredential, taskCredential, fetchURL, "fetch-signature-never-logged"} {
 		if strings.Contains(output, secret) {
@@ -545,25 +514,8 @@ func TestLargeDispatch(t *testing.T) {
 	}
 }
 
-func TestCloseStopsRestarts(t *testing.T) {
-	shortRestart(t)
-	p, record, _ := launch(t)
-	configured(t, p, "a", "{}")
-	closed := pid(p)
-	p.Close()
-	time.Sleep(4 * restartBackoff)
-	for _, entry := range records(t, record) {
-		if entry.PID != closed {
-			t.Fatalf("plugin started again as %d after Close", entry.PID)
-		}
-	}
-}
-
-// go-plugin checks the binary against the pin before each start, the first and every restart, and the refusal names
-// the type and both hashes.
-func TestChecksumIsCheckedAtStartAndRestart(t *testing.T) {
-	shortRestart(t)
-	t.Setenv("WHERRY_TESTPLUGIN_RECORD", filepath.Join(t.TempDir(), "record.jsonl"))
+// go-plugin checks the binary against the pin before it starts it, and the refusal names the type and both hashes.
+func TestChecksumIsCheckedAtStart(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "wherry-plugin-fake")
 	content, err := os.ReadFile(testPlugin)
 	if err != nil {
@@ -579,33 +531,6 @@ func TestChecksumIsCheckedAtStartAndRestart(t *testing.T) {
 		t.Fatal("launched a binary whose SHA-256 is not the pin")
 	} else if want := fmt.Sprintf("plugin type fake: %s has SHA-256 %x and the pin is %x", binary, pin, other); err.Error() != want {
 		t.Fatalf("launch error %v; want %q", err, want)
-	}
-	logs := &syncBuffer{}
-	p, err := Launch("fake", fixed(binary), pin, logs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(p.Close)
-	configured(t, p, "a", "{}")
-	// A running binary cannot be written in place, so the changed one replaces it.
-	replacement := binary + ".new"
-	if err := os.WriteFile(replacement, append(content, 0), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	changed := sha256Of(t, replacement)
-	if err := os.Rename(replacement, binary); err != nil {
-		t.Fatal(err)
-	}
-	kill(t, p)
-	want := fmt.Sprintf("plugin type fake: %s has SHA-256 %x and the pin is %x", binary, changed, pin)
-	eventually(t, "the restart refused", func() error {
-		if !strings.Contains(logs.String(), want) {
-			return fmt.Errorf("logs:\n%s", logs.String())
-		}
-		return nil
-	})
-	if restarts := p.Restarts(); restarts != 0 {
-		t.Fatalf("restarts = %d; want the changed binary refused", restarts)
 	}
 }
 

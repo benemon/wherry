@@ -140,6 +140,8 @@ type fakePlugin struct {
 	// samples are what Metrics reports, unless metricsHang makes it block until its context ends.
 	samples     []pluginsdk.Sample
 	metricsHang bool
+	// exited stands for the plugin process's Exited.
+	exited chan struct{}
 }
 
 func (f *fakePlugin) Directories() pluginsdk.Directories {
@@ -623,7 +625,7 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		plugin.mu.Lock()
 		plugin.pool, plugin.name, plugin.agent = pool, settings.Name, settings.Agent
 		plugin.mu.Unlock()
-		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin}, nil
+		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin, Exited: plugin.exited}, nil
 	}
 	return &Receiver{id: config.Receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
 }
@@ -805,7 +807,7 @@ func (f fixture) records(t *testing.T, topic string) []*kgo.Record {
 }
 
 func (f fixture) keys() signed.Keys {
-	return signed.Keys{testReceiver: {Current: f.receiver.signing.Public().(ed25519.PublicKey)}}
+	return signed.Keys{f.receiver.id: {Current: f.receiver.signing.Public().(ed25519.PublicKey)}}
 }
 
 // statuses returns this receiver's statuses on topic in log order.
@@ -1776,10 +1778,10 @@ func TestHeldRunPastTheShutdownDeadlineIsLeftUnacknowledged(t *testing.T) {
 	}
 }
 
-// TestRevocationStopsAHeldRun revokes the receiver while it holds a run whose job ends long after the pool's lock
-// duration, also while it drains for a configuration change: the receiver gives the run up within one lock duration
-// and the run never completes.
-func TestRevocationStopsAHeldRun(t *testing.T) {
+// TestRevocationLeavesAHeldRunToAnAdopter revokes the receiver while it holds a run whose job ends long after the pool's
+// lock duration, also while it drains for a configuration change: the revoked receiver exits, and the pool's key
+// custodian, another member, adopts the job it left running and completes the run once.
+func TestRevocationLeavesAHeldRunToAnAdopter(t *testing.T) {
 	for name, c := range map[string]struct {
 		stream   []string
 		draining bool
@@ -1789,7 +1791,24 @@ func TestRevocationStopsAHeldRun(t *testing.T) {
 		"configuration change drain": {noResultStream, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newFixtureWith(t, c.stream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: c.stream, endDelay: 40 * time.Second}})
+			f := newBareFixtureWith(t, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: c.stream, endDelay: 40 * time.Second}})
+			// The adopter starts first, so it is the key custodian, and fetches nothing until the revoked receiver exits.
+			adopter := f.member(t, "receiver-b")
+			revoked := make(chan struct{})
+			go func() {
+				for {
+					adopter.mu.Lock()
+					adopter.backoffUntil = time.Now().Add(time.Second)
+					adopter.mu.Unlock()
+					select {
+					case <-revoked:
+						return
+					case <-time.After(100 * time.Millisecond):
+					}
+				}
+			}()
+			runUntilStopped(t, f.ctx, adopter)
+			f.awaitSnapshots(t, 1)
 			done, _ := holdRun(t, f)
 			if c.draining {
 				config := testConfig(testReceiver)
@@ -1799,32 +1818,46 @@ func TestRevocationStopsAHeldRun(t *testing.T) {
 					time.Sleep(50 * time.Millisecond)
 				}
 			}
-			revoked := time.Now()
 			revocationBounds(t, f.service, "1")
 			if result := f.service.RevokeReceiver(f.ctx, testReceiver, time.Millisecond, func(context.Context, string, string) error { return admin.ErrAuthorizationDenied }); !result.Complete {
 				t.Fatalf("revocation incomplete: %+v", result.Steps)
 			}
 			revocationBounds(t, f.service, "")
-			for f.receiver.held() > 0 {
-				// One lock duration after the first denial, a state check, then the bounded denied status.
-				if time.Since(revoked) > 25*time.Second {
-					t.Fatalf("held run kept going %s after revocation; logs:\n%s", time.Since(revoked), f.logs.String())
-				}
-				time.Sleep(50 * time.Millisecond)
+			if err := f.stopped(t, done, 10*time.Second); err == nil || !strings.HasPrefix(err.Error(), "denied ") {
+				t.Fatalf("Run returned %v, want the denial", err)
 			}
 			f.plugin.mu.Lock()
 			stops := f.plugin.stops
+			f.plugin.job, f.plugin.endDelay = pluginsdk.JobRunning, 0
 			f.plugin.mu.Unlock()
-			t.Logf("run given up %s after revocation, job stops %d", time.Since(revoked).Round(100*time.Millisecond), stops)
-			if f.completed(t, "run-a") {
-				t.Fatal("revoked receiver's run completed")
+			if stops != 0 || f.completed(t, "run-a") {
+				t.Fatalf("revoked receiver stopped the job %d times or completed its run", stops)
 			}
-			if c.draining {
-				if err := f.stopped(t, done, 10*time.Second); !errors.Is(err, ErrConfigChanged) {
-					t.Fatalf("Run returned %v, want ErrConfigChanged", err)
-				}
-			}
+			close(revoked)
+			// The fixture reads the records the adopter signs.
+			f.receiver = adopter
+			f.adoptedOnce(t)
 		})
+	}
+}
+
+// TestRegistrationDenialStopsTheReceiver takes the write to its key topic from a receiver not yet registered: Run
+// returns the denial naming registration, and counts it.
+func TestRegistrationDenialStopsTheReceiver(t *testing.T) {
+	f := newBareFixture(t)
+	r, _ := f.newReceiver(t, testConfig("receiver-b"))
+	f.deleteACLsOf(t, "receiver-b", kadm.NewACLs().Topics(admin.ReceiverTopic("receiver-b")).Operations(kadm.OpWrite))
+	if err := r.Run(f.ctx); err == nil || !strings.HasPrefix(err.Error(), "denied register: ") {
+		t.Fatalf("Run returned %v, want the registration denied", err)
+	}
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(r.metrics.denials)
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(families) != 1 || len(families[0].GetMetric()) != 1 || families[0].GetMetric()[0].GetCounter().GetValue() != 1 {
+		t.Fatalf("wherry_denials_total %v, want one denial", families)
 	}
 }
 

@@ -113,7 +113,8 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 	// The group only assigns custody: it is never polled and commits no offsets, so the offsets it fetches on assignment
 	// never decide the current snapshot; readCurrent scans the topic for it.
 	group, err := r.newClient(kgo.ConsumerGroup(admin.CustodianGroup(r.config.Pool)), kgo.ConsumeTopics(topic), kgo.InstanceID(r.id),
-		kgo.SessionTimeout(sessionTimeout), kgo.DisableAutoCommit(), kgo.OnPartitionsAssigned(gained), kgo.OnPartitionsRevoked(lost), kgo.OnPartitionsLost(lost))
+		kgo.SessionTimeout(sessionTimeout), kgo.DisableAutoCommit(), kgo.OnPartitionsAssigned(gained), kgo.OnPartitionsRevoked(lost), kgo.OnPartitionsLost(lost),
+		kgo.WithHooks(groupDenial{r}))
 	if err != nil {
 		r.logger.Printf("custodian group: %v", err)
 		return
@@ -151,12 +152,22 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 		case <-r.custody.wake:
 			continue
 		}
-		// A stop steps down also when running has ended with it.
-		if ctx.Err() != nil && group != nil {
+		// A stop steps down also when running has ended with it; a receiver halted for a denial or a plugin's exit does
+		// not.
+		if ctx.Err() != nil && group != nil && !halted(running) {
 			r.stepDown(ctx, <-stopped, group)
 			group = nil
 		}
 		return
+	}
+}
+
+// groupDenial stops the receiver for an authorisation error that ends a custodian group session.
+type groupDenial struct{ r *Receiver }
+
+func (h groupDenial) OnGroupManageError(err error) {
+	if authorisationError(err) {
+		h.r.deny(err, capClaim)
 	}
 }
 
@@ -344,11 +355,11 @@ func (r *Receiver) readCurrent(ctx context.Context) (current, error) {
 	}
 	ends, err := admin.ListOffsets(ctx, listing.ListEndOffsets, topic)
 	if err != nil {
-		return current{}, err
+		return current{}, r.deny(err, capRead)
 	}
 	records, stable, err := r.reader.ReadFromWithEnd(ctx, topic, 0)
 	if err != nil {
-		return current{}, err
+		return current{}, r.deny(err, capRead)
 	}
 	// A transaction open below the end holds the last stable offset: the snapshot it may commit would be current.
 	var end int64
@@ -400,7 +411,7 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 		// Initialising the producer before the read fences the previous custodian and settles its open transaction.
 		if _, _, err := producer.ProducerID(ctx); err != nil {
 			producer.Close()
-			return fmt.Errorf("initialise %s: %w", r.custodianTransactionalID(), err)
+			return r.deny(fmt.Errorf("initialise %s: %w", r.custodianTransactionalID(), err), capTransactional)
 		}
 		r.custody.producer = producer
 	}
@@ -603,6 +614,9 @@ func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason
 		if err != nil {
 			_ = producer.EndTransaction(ctx, kgo.TryAbort)
 		}
+	}
+	if err != nil && !fenced(err) {
+		r.deny(err, capWrite)
 	}
 	latest, readErr := r.readCurrent(ctx)
 	if readErr != nil || latest.record == nil || !bytes.Equal(latest.record.Value, value) {

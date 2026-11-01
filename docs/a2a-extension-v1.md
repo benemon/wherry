@@ -493,7 +493,7 @@ base64 does. The fixed texts are:
   ([Open refusal](#open-refusal)), the reason an opened envelope fails its
   check against the task, such as `envelope is bound to another task` or
   `the URL for S3 input <name> is not its object in the pool's storage`,
-  `receiver denied`, `delivery budget exhausted`,
+  `delivery budget exhausted`,
   `start failed and the job could not be removed`,
   `input <name> takes the run's inputs over what profile <profile>
   delivers`, naming the input at which they pass the profile's limit (or

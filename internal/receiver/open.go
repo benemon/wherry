@@ -366,6 +366,8 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 		if err := r.transact(ctx, r.custody.producer, records...); err != nil {
 			if fenced(err) {
 				r.contest()
+			} else {
+				r.deny(err, capWrite)
 			}
 			return fmt.Errorf("answer an open request: %w", err)
 		}

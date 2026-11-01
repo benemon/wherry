@@ -487,6 +487,27 @@ func TestNoKeyIsDeletedWhileTheSnapshotTopicCannotBeRead(t *testing.T) {
 	}
 }
 
+// TestCustodyDenialStopsTheReceiver takes away an access only the receiver's key custody uses: Run returns the denial.
+func TestCustodyDenialStopsTheReceiver(t *testing.T) {
+	for name, c := range map[string]struct {
+		denied *kadm.ACLBuilder
+		want   string
+	}{
+		"transactional ID init": {kadm.NewACLs().TransactionalIDs(admin.TransactionalPrefix(testPool)).Operations(kadm.OpAny), "denied transactional ID: "},
+		"snapshot read":         {kadm.NewACLs().Topics(admin.CustodianTopic(testPool)).Operations(kadm.OpRead), "denied read: "},
+		"snapshot transaction":  {kadm.NewACLs().Topics(admin.CustodianTopic(testPool)).Operations(kadm.OpWrite), "denied write: "},
+		"custodian group":       {kadm.NewACLs().Groups(admin.CustodianGroup(testPool)).Operations(kadm.OpAny), "denied share group: "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newBareFixture(t)
+			f.deleteReceiverACLs(t, c.denied)
+			if err := f.stopped(t, f.run(t, f.ctx), 20*time.Second); err == nil || !strings.HasPrefix(err.Error(), c.want) {
+				t.Fatalf("Run returned %v, want %q", err, c.want)
+			}
+		})
+	}
+}
+
 func TestMarkedNonCurrentKeyGetsADeadlineOnStart(t *testing.T) {
 	f := newBareFixture(t)
 	retired := writeKey(t, f.receiver, &poolKey{CreatedMS: time.Now().Add(-48 * time.Hour).UnixMilli(), PublishedMS: time.Now().Add(-48 * time.Hour).UnixMilli()})

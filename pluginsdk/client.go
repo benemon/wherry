@@ -22,47 +22,41 @@ import (
 
 // Variables so tests can change them.
 var (
-	logLevel          = hclog.Info
-	exitPoll          = 100 * time.Millisecond
-	restartBackoff    = time.Second
-	maxRestartBackoff = 30 * time.Second
-	configureTimeout  = 30 * time.Second
-	pingInterval      = 10 * time.Second
-	pingTimeout       = 5 * time.Second
+	logLevel         = hclog.Info
+	exitPoll         = 100 * time.Millisecond
+	configureTimeout = 30 * time.Second
+	pingInterval     = 10 * time.Second
+	pingTimeout      = 5 * time.Second
 )
 
-// Process is one plugin process and every profile configured in it. When the process exits, or fails or does not
-// answer a ping, Process starts it again with back-off and configures every profile again; until then their calls
-// return ErrLinkLost.
+// Process is one plugin process and every profile configured in it. A process that fails or does not answer a ping is
+// killed; once it has exited, Exited is closed and every profile's call returns ErrLinkLost.
 type Process struct {
 	// kind is the plugin's type, for errors and log lines.
 	kind string
-	// checksum is the SHA-256 the binary must have at every start.
+	// checksum is the SHA-256 the binary must have.
 	checksum []byte
-	// resolve checks the plugin binary and returns its path, before every start.
+	// resolve checks the plugin binary and returns its path.
 	resolve func() (string, error)
-	// path is the binary the latest start ran, for log lines.
+	// path is the binary the process runs, for log lines.
 	path string
-	// cmd is the process the latest start ran, killed when it stops answering pings.
+	// cmd is the process, killed when it stops answering pings.
 	cmd    *exec.Cmd
 	logger hclog.Logger
-	// configure serialises Configure with a restart, which configures every profile in settings.
+	// configure serialises Configure with Version.
 	configure sync.Mutex
-	settings  []Settings
 	mu        sync.Mutex
 	client    *plugin.Client
-	// rpc is nil while the process is down.
-	rpc      pluginv1.PluginClient
-	closed   bool
-	restarts int64
-	version  string
+	// rpc is nil once the process is down.
+	rpc     pluginv1.PluginClient
+	exited  chan struct{}
+	version string
 }
 
-// Launch starts the plugin binary of type kind that resolve returns over mutual TLS, and calls resolve again before
-// every restart; go-plugin refuses each start whose binary's SHA-256 is not checksum. logs receives the link's and the
-// plugin's log lines.
+// Launch starts the plugin binary of type kind that resolve returns over mutual TLS; go-plugin refuses a binary whose
+// SHA-256 is not checksum. logs receives the link's and the plugin's log lines.
 func Launch(kind string, resolve func() (string, error), checksum []byte, logs io.Writer) (*Process, error) {
-	p := &Process{kind: kind, checksum: checksum, resolve: resolve, logger: hclog.New(&hclog.LoggerOptions{Name: "plugin", Output: logs, Level: logLevel})}
+	p := &Process{kind: kind, checksum: checksum, resolve: resolve, logger: hclog.New(&hclog.LoggerOptions{Name: "plugin", Output: logs, Level: logLevel}), exited: make(chan struct{})}
 	client, rpc, err := p.start()
 	if err != nil {
 		return nil, err
@@ -72,7 +66,7 @@ func Launch(kind string, resolve func() (string, error), checksum []byte, logs i
 	return p, nil
 }
 
-// start launches the process and configures every profile in settings; the caller holds configure.
+// start launches the process.
 func (p *Process) start() (*plugin.Client, pluginv1.PluginClient, error) {
 	path, err := p.resolve()
 	if err != nil {
@@ -110,14 +104,7 @@ func (p *Process) start() (*plugin.Client, pluginv1.PluginClient, error) {
 		client.Kill()
 		return nil, nil, err
 	}
-	rpc := raw.(pluginv1.PluginClient)
-	for _, settings := range p.settings {
-		if _, err := configure(rpc, settings); err != nil {
-			client.Kill()
-			return nil, nil, fmt.Errorf("profile %s: %w", settings.Name, err)
-		}
-	}
-	return client, rpc, nil
+	return client, raw.(pluginv1.PluginClient), nil
 }
 
 // fileSHA256 is the hex SHA-256 of the file at path, or the error reading it.
@@ -147,59 +134,26 @@ func configure(rpc pluginv1.PluginClient, settings Settings) (*pluginv1.Configur
 	return resp, nil
 }
 
-// supervise restarts the process each time it exits, until Close. A process that fails or does not answer a ping every
-// interval is killed, since go-plugin's Kill waits on a graceful shutdown a hung process never makes.
+// supervise closes exited once the process exits. A process that fails or does not answer a ping every interval is
+// killed, since go-plugin's Kill waits on a graceful shutdown a hung process never makes.
 func (p *Process) supervise(client *plugin.Client, interval time.Duration) {
-	for {
-		pinged := time.Now()
-		for !client.Exited() {
-			time.Sleep(exitPoll)
-			if time.Since(pinged) < interval {
-				continue
-			}
-			if err := ping(client); err != nil && !client.Exited() {
-				p.logger.Warn("plugin did not answer a ping; killing it", "path", p.path, "error", err)
-				_ = p.cmd.Process.Kill()
-			}
-			pinged = time.Now()
+	pinged := time.Now()
+	for !client.Exited() {
+		time.Sleep(exitPoll)
+		if time.Since(pinged) < interval {
+			continue
 		}
-		p.mu.Lock()
-		if p.closed {
-			p.mu.Unlock()
-			return
+		if err := ping(client); err != nil && !client.Exited() {
+			p.logger.Warn("plugin did not answer a ping; killing it", "path", p.path, "error", err)
+			_ = p.cmd.Process.Kill()
 		}
-		p.rpc = nil
-		p.mu.Unlock()
-		p.logger.Warn("plugin exited; restarting", "path", p.path)
-		for backoff := restartBackoff; ; backoff = min(2*backoff, maxRestartBackoff) {
-			time.Sleep(backoff)
-			p.mu.Lock()
-			closed := p.closed
-			p.mu.Unlock()
-			if closed {
-				return
-			}
-			p.configure.Lock()
-			next, rpc, err := p.start()
-			p.configure.Unlock()
-			if err != nil {
-				p.logger.Error("plugin restart failed", "path", p.path, "error", err)
-				continue
-			}
-			p.mu.Lock()
-			if p.closed {
-				p.mu.Unlock()
-				next.Kill()
-				return
-			}
-			p.client, p.rpc = next, rpc
-			p.restarts++
-			p.mu.Unlock()
-			p.logger.Info("plugin restarted", "path", p.path)
-			client = next
-			break
-		}
+		pinged = time.Now()
 	}
+	p.mu.Lock()
+	p.rpc = nil
+	p.mu.Unlock()
+	p.logger.Warn("plugin exited", "path", p.path)
+	close(p.exited)
 }
 
 // ping checks the process answers go-plugin's health check within pingTimeout.
@@ -218,7 +172,7 @@ func ping(client *plugin.Client) error {
 	}
 }
 
-// Configure builds a profile in the plugin and returns its handle; the plugin configures it again after a restart.
+// Configure builds a profile in the plugin and returns its handle.
 func (p *Process) Configure(settings Settings) (Plugin, error) {
 	p.configure.Lock()
 	defer p.configure.Unlock()
@@ -230,7 +184,6 @@ func (p *Process) Configure(settings Settings) (Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	p.settings = append(p.settings, settings)
 	p.version = resp.GetVersion()
 	directories := resp.GetDirectories()
 	return &remote{plugin: p, name: settings.Name, directories: Directories{
@@ -239,7 +192,7 @@ func (p *Process) Configure(settings Settings) (Plugin, error) {
 }
 
 // Version is the plugin's version as the latest Configure reported it, empty from a plugin that reports none, and the
-// plugin protocol version the latest start negotiated.
+// plugin protocol version the start negotiated.
 func (p *Process) Version() (string, int) {
 	p.configure.Lock()
 	defer p.configure.Unlock()
@@ -248,20 +201,17 @@ func (p *Process) Version() (string, int) {
 	return p.version, p.client.NegotiatedVersion()
 }
 
-// Close stops the process and its restarts.
+// Close stops the process.
 func (p *Process) Close() {
 	p.mu.Lock()
-	p.closed, p.rpc = true, nil
-	client := p.client
+	p.rpc = nil
 	p.mu.Unlock()
-	client.Kill()
+	p.client.Kill()
 }
 
-// Restarts is the number of times the process has been started again since Launch.
-func (p *Process) Restarts() int64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.restarts
+// Exited is closed once the process has exited: on its own, killed after a failed ping, or by Close.
+func (p *Process) Exited() <-chan struct{} {
+	return p.exited
 }
 
 func (p *Process) link() (pluginv1.PluginClient, error) {

@@ -402,10 +402,22 @@ every record a receiver wrote once that receiver's membership has ended,
 including records it wrote before, so the runs it served lose that history
 in `wait` and `events`.
 
-A receiver treats an authorisation error as denial. It stops claiming at
-once, and stops its in-flight jobs once denial has lasted one lock
-duration. The broker then delivers their tasks to other members of the
-pool.
+A receiver exits at its first authorisation error, or once it reads its
+membership ended. It stops claiming, serving open requests and key custody
+at once, and leaves the jobs of the runs it holds running. Closing its
+share sessions attempts to release their tasks: when the broker accepts
+the release they are delivered again at once; otherwise, as under the
+denial that stopped the receiver, they return when their locks lapse. On a pool-wide platform, such as Nomad or
+Kubernetes, the next holder, the restarted receiver or another member,
+adopts each job. A host-local platform, such as systemd, adopts only on the
+same host: the receiver restarted under the same receiver ID adopts its
+jobs, but a member on another host that claims a task starts a second job
+once the [claim check](a2a-extension-v1.md#the-claim-check) no longer counts
+the exited receiver a live claimant, as after a receiver crash. The
+systemd plugin recommends a pool per receiver for this reason. Stopping the
+jobs would bind only an honest receiver; a compromised one ignores it, so
+leaving them for adoption removes no protection. Revocation still ends the
+receiver's access.
 
 A revoked principal does not return. A host or receiver that comes back is
 provisioned under a new name, with a new principal and key topic.
