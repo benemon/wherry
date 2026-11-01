@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -66,10 +65,12 @@ func parse(verify func([]byte, string, signed.Keys, any) (string, error), encode
 		return err
 	}
 	if owner != value.owner() {
-		return errors.New("record is signed by another owner than it names")
+		return errOtherOwner
 	}
 	return nil
 }
+
+var errOtherOwner = errors.New("record is signed by another owner than it names")
 
 // Placement is what a run asks of its pool: an agent, the labels a profile
 // must carry, and the model the agent runs, empty for an agent whose terms
@@ -343,37 +344,32 @@ type PoolKey struct {
 // ParseSnapshot verifies a snapshot against its writer's current key, decodes it strictly and requires its writer to
 // be the custodian it names.
 func ParseSnapshot(encoded []byte, keys signed.Keys) (Snapshot, error) {
-	return parseSnapshot(signed.Verify, encoded, keys)
+	var snapshot Snapshot
+	err := parse(strictly(signed.Verify), encoded, keys, &snapshot)
+	return parsedSnapshot(&snapshot, err)
 }
 
 // ParseSnapshotHistory is ParseSnapshot for a snapshot the broker appended at appended, which also verifies against a
 // key its writer retired after that.
 func ParseSnapshotHistory(encoded []byte, keys signed.Keys, appended time.Time) (Snapshot, error) {
-	return parseSnapshot(func(encoded []byte, typ string, keys signed.Keys, dst any) (string, error) {
-		return signed.VerifyHistory(encoded, typ, keys, appended, dst)
-	}, encoded, keys)
+	var snapshot Snapshot
+	err := ParseStrict(encoded, keys, appended, &snapshot)
+	return parsedSnapshot(&snapshot, err)
 }
 
-func parseSnapshot(verify func([]byte, string, signed.Keys, any) (string, error), encoded []byte, keys signed.Keys) (Snapshot, error) {
-	var payload jsontext.Value
-	writer, err := verify(encoded, CustodianType, keys, &payload)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	var snapshot Snapshot
-	if err := json.Unmarshal(payload, &snapshot, signed.Strict); err != nil {
-		return Snapshot{}, fmt.Errorf("decode snapshot: %w", err)
-	}
-	if snapshot.V != 1 {
-		return Snapshot{}, errors.New("unknown record version")
-	}
-	if err := snapshot.validate(); err != nil {
-		return Snapshot{}, err
-	}
-	if writer != snapshot.Custodian {
+// parsedSnapshot is snapshot once its parse returned err, which names the snapshot when it fails to decode or its writer
+// is not its custodian.
+func parsedSnapshot(snapshot *Snapshot, err error) (Snapshot, error) {
+	var decode decodeError
+	switch {
+	case errors.As(err, &decode):
+		return Snapshot{}, fmt.Errorf("decode snapshot: %w", decode.err)
+	case errors.Is(err, errOtherOwner):
 		return Snapshot{}, errors.New("snapshot is written by another receiver than the custodian it names")
+	case err != nil:
+		return Snapshot{}, err
 	}
-	return snapshot, nil
+	return *snapshot, nil
 }
 
 var startFailureClasses = []string{"dispatch", "platform", "input-too-large"}

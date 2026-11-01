@@ -144,15 +144,31 @@ func Digest(encoded []byte) string { return TaskHash(encoded) }
 
 // ParseStrict is ParseHistory for the records decoded strictly, refusing unknown members and duplicate names.
 func ParseStrict(encoded []byte, keys signed.Keys, appended time.Time, value Record) error {
-	return parse(func(encoded []byte, typ string, keys signed.Keys, dst any) (string, error) {
+	return parse(strictly(func(encoded []byte, typ string, keys signed.Keys, dst any) (string, error) {
+		return signed.VerifyHistory(encoded, typ, keys, appended, dst)
+	}), encoded, keys, value)
+}
+
+// strictly is verify decoding the payload strictly, a failure to decode as a decodeError.
+func strictly(verify func([]byte, string, signed.Keys, any) (string, error)) func([]byte, string, signed.Keys, any) (string, error) {
+	return func(encoded []byte, typ string, keys signed.Keys, dst any) (string, error) {
 		var payload jsontext.Value
-		owner, err := signed.VerifyHistory(encoded, typ, keys, appended, &payload)
+		owner, err := verify(encoded, typ, keys, &payload)
 		if err != nil {
 			return "", err
 		}
-		return owner, json.Unmarshal(payload, dst, signed.Strict)
-	}, encoded, keys, value)
+		if err := json.Unmarshal(payload, dst, signed.Strict); err != nil {
+			return owner, decodeError{err}
+		}
+		return owner, nil
+	}
 }
+
+// decodeError is a payload's failure to decode, worded as the decoder words it.
+type decodeError struct{ err error }
+
+func (e decodeError) Error() string { return e.err.Error() }
+func (e decodeError) Unwrap() error { return e.err }
 
 func (*OpenRequest) jwsType() string   { return OpenRequestType }
 func (*AttemptWrap) jwsType() string   { return AttemptWrapType }
