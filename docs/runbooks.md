@@ -44,8 +44,10 @@ Confirm it:
      configuration for the receiver.
    - `advertise: <error>` and `periodic step: <error>` name a failed
      advertisement and its cause.
-   - `denied (write): <error>` or `denied (membership): <error>` name an
-     authorisation failure.
+   - `stopping: denied write: <error>` or
+     `stopping: denied membership: <error>` name the authorisation failure
+     the receiver exited for. The supervisor restarts it, and a receiver
+     with revoked or wrong credentials exits again each time.
    - `configuration changed; exiting once held runs end` comes before a
      restart the supervisor is expected to make, once the runs the
      receiver holds have ended.
@@ -60,7 +62,7 @@ Then:
 - For `waiting for configuration`, record the configuration, as in
   [Add a receiver](operations.md#add-a-receiver).
 - For write errors, follow [WherryBrokerUnreachable](#wherrybrokerunreachable).
-  For `denied (write)`, run `wherry admin check`, which confirms that every
+  For `denied write`, run `wherry admin check`, which confirms that every
   ACL the state calls for exists.
 - A receiver whose membership has ended stays ended. Provision a new
   receiver under a new name and stop the old process.
@@ -341,8 +343,10 @@ Confirm it:
    turns `stale`.
 2. Read the receiver's log for `periodic step: <error>`,
    `run <id>: renew: <error>`, `run <id>: read events: <error>` and
-   `denied (<capability>): <error>`. An authorisation error names the
-   capability denied, and `access restored` follows its recovery.
+   `stopping: denied <op>: <error>`. At an authorisation error the receiver
+   exits, naming the operation denied, and its supervisor restarts it; the
+   runs it held are adopted from the pool once their tasks are delivered
+   again.
 3. From the receiver host, check the broker address and port in the
    receiver's bundle are reachable over TLS.
 
@@ -353,7 +357,8 @@ Then:
 - For a TLS or SCRAM error, check the bundle's CA against the listener's
   certificate and its principal and password against the cluster's SCRAM
   credentials.
-- For `denied (<capability>)`, run `wherry admin check` to confirm the ACLs
-  the state calls for exist.
+- For `denied <op>`, run `wherry admin check` to confirm the ACLs the state
+  calls for exist, and fix the bundle's credentials; until then the
+  receiver restarts and exits again.
 - A task whose claim lapsed during the outage is redelivered, and its next
   holder adopts the running job.

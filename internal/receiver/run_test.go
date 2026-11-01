@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -826,14 +827,15 @@ func TestFencedStartFailureLeavesTheJob(t *testing.T) {
 	}
 }
 
-func TestStartFailureWriteDenialEntersDenial(t *testing.T) {
+func TestStartFailureWriteDenialStopsTheReceiver(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-a", 1)
 	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.PoolEventsTopic(testPool)).Operations(kadm.OpWrite))
+	halt := f.halts()
 	if status := run.startFailure(f.ctx, "dispatch", "profile nomad created no job"); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
-	if !f.receiver.holds(capWrite) || !strings.Contains(f.logs.String(), "run run-a: write failed") {
+	if err := halt(); err == nil || !strings.HasPrefix(err.Error(), "denied write: ") || !strings.Contains(f.logs.String(), "run run-a: write failed") {
 		t.Fatalf("a start failure that could not be written was not denied and logged; logs:\n%s", f.logs.String())
 	}
 	f.plugin.mu.Lock()
@@ -1074,10 +1076,6 @@ func TestPluginErrorLogsAreRedacted(t *testing.T) {
 		{"stop on failure", func(t *testing.T, f fixture, run *activeRun) {
 			f.plugin.stopErr = failure
 			run.stopAndFail(f.ctx, pluginsdk.Handle{}, "timeout", nil)
-		}},
-		{"stop on denial", func(t *testing.T, f fixture, run *activeRun) {
-			f.plugin.stopErr = failure
-			run.deny(f.ctx, pluginsdk.Handle{}, nil)
 		}},
 		{"release", func(t *testing.T, f fixture, run *activeRun) {
 			f.plugin.releaseErr = failure
@@ -1548,11 +1546,6 @@ func TestShutdownDuringTheStartedCommitCommitsAnAdoptersHeldLines(t *testing.T) 
 	}
 }
 
-func (f fixture) deleteACLs(t *testing.T) {
-	t.Helper()
-	f.deleteReceiverACLs(t, kadm.NewACLs().AnyResource().Operations(kadm.OpAny))
-}
-
 // deleteReceiverACLs removes the receiver principal's ACLs that builder's resources and operations select.
 func (f fixture) deleteReceiverACLs(t *testing.T, builder *kadm.ACLBuilder) {
 	t.Helper()
@@ -1569,142 +1562,110 @@ func (f fixture) deleteReceiverACLs(t *testing.T, builder *kadm.ACLBuilder) {
 	}
 }
 
-func TestDenialStopsClaimingAndAccessResumesIt(t *testing.T) {
-	f := newFixture(t, resultStream)
-	ctx, stop := context.WithCancel(f.ctx)
-	defer stop()
-	f.run(t, ctx)
-	f.submit(t, f.host, nil)
-	f.await(t, "run-a", anyTask)
-	f.deleteACLs(t)
-	for !f.receiver.denied() {
-		if f.ctx.Err() != nil {
-			t.Fatalf("receiver never noticed the denial; logs:\n%s", f.logs.String())
+// halts has the receiver record the error it stops for, as Run's halt would take it, and returns its reader.
+func (f fixture) halts() func() error {
+	var mu sync.Mutex
+	var stopped error
+	f.receiver.mu.Lock()
+	f.receiver.halt = func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if stopped == nil {
+			stopped = err
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
-	f.submit(t, f.host, func(task *wire.Submission) {
-		task.Wherry.Run, task.Message.TaskID, task.Message.ContextID = "run-b", "run-b", "run-b"
-	})
-	time.Sleep(2 * time.Second)
-	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 1 {
-		t.Fatalf("dispatches %d while denied, want only the task before it", dispatches)
+	f.receiver.mu.Unlock()
+	return func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		return stopped
 	}
-	// Access returning resumes claiming.
-	if err := f.service.TenantAdd(f.ctx, testTenant, testPool); err != nil {
+}
+
+// leftRunning checks that the receiver that stopped did not stop, release or end run-a: its task returns to the pool
+// unacknowledged and its job runs on.
+func (f fixture) leftRunning(t *testing.T) {
+	t.Helper()
+	f.plugin.mu.Lock()
+	stops, releases := f.plugin.stops, f.plugin.releases
+	f.plugin.mu.Unlock()
+	if stops != 0 || releases != 0 {
+		t.Fatalf("stopped receiver stopped the held job %d times and released it %d times; logs:\n%s", stops, releases, f.logs.String())
+	}
+	if kinds := f.kinds(t); slices.Contains(kinds, "released") || slices.Contains(kinds, "terminal") {
+		t.Fatalf("stopped receiver acknowledged its held run: statuses %v", kinds)
+	}
+	if record, delivered := f.pollPool(t, "run-a", 30*time.Second); !delivered || record.DeliveryCount() < 2 {
+		t.Fatal("the held run's task was not delivered again")
+	}
+}
+
+// TestDenialStopsTheReceiver takes each kind of access away from a receiver holding a run: Run returns an error naming
+// the denied operation, at once, and leaves the run unacknowledged with its job running.
+func TestDenialStopsTheReceiver(t *testing.T) {
+	for name, c := range map[string]struct {
+		denied *kadm.ACLBuilder
+		want   string
+	}{
+		"fetch":            {kadm.NewACLs().Topics(admin.PoolEventsTopic(testPool)).Operations(kadm.OpRead), "denied read: "},
+		"produce":          {kadm.NewACLs().Topics(admin.ReceiversTopic).Operations(kadm.OpWrite), "denied write: "},
+		"transactional ID": {kadm.NewACLs().TransactionalIDs(admin.TransactionalPrefix(testPool)).Operations(kadm.OpAny), "denied transactional ID: "},
+		"share group":      {kadm.NewACLs().Groups(admin.PoolGroup(testPool)).Operations(kadm.OpAny), "denied share group: "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The second line arrives after the denial, so a held run commits under its transactional ID; a second slot
+			// polls the share group, whose renewals report no error.
+			stream := []string{noResultStream[0], noResultStream[0]}
+			config := testConfig(testReceiver)
+			config.Capacity = 2
+			f := newFixtureWith(t, stream, testTerms(), config, map[string]*fakePlugin{"nomad": {stream: stream, pauses: map[int]time.Duration{1: time.Second}, endDelay: 40 * time.Second}})
+			done, _ := holdRun(t, f)
+			f.deleteReceiverACLs(t, c.denied)
+			// A record past those read makes the next read of the pool's events fetch.
+			f.produce(t, admin.PoolEventsTopic(testPool), "noise", []byte("noise"))
+			denied := time.Now()
+			if err := f.stopped(t, done, 10*time.Second); err == nil || !strings.HasPrefix(err.Error(), c.want) {
+				t.Fatalf("Run returned %v, want %q", err, c.want)
+			}
+			t.Logf("Run returned %s after the denial", time.Since(denied).Round(100*time.Millisecond))
+			f.leftRunning(t)
+		})
+	}
+}
+
+// TestRestartedReceiverAdoptsTheJobADeniedOneLeft denies a receiver holding a run, then starts it again once access
+// returns: the new receiver adopts the job the denied one left running and completes the run once.
+func TestRestartedReceiverAdoptsTheJobADeniedOneLeft(t *testing.T) {
+	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: 40 * time.Second}})
+	done, _ := holdRun(t, f)
+	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.ReceiversTopic).Operations(kadm.OpWrite))
+	if err := f.stopped(t, done, 10*time.Second); err == nil {
+		t.Fatal("Run returned no error after a denial")
+	}
+	f.quiet()
+	if err := f.service.TenantAdd(f.ctx, testTenant, testPool); err != nil { // reconciles the ACLs
 		t.Fatal(err)
 	}
-	f.await(t, "run-b", anyTask)
-	if !strings.Contains(f.logs.String(), "access restored") {
-		t.Fatalf("logs:\n%s", f.logs.String())
-	}
-}
-
-func TestDeniedReceiverDoesNotClaim(t *testing.T) {
-	f := newFixture(t, resultStream)
-	// A transactional ID denial must classify as denial: claiming with it would fail every run's first write.
-	f.receiver.deny(kerr.TransactionalIDAuthorizationFailed, capWrite)
-	f.submit(t, f.host, nil)
-	ctx, stop := context.WithTimeout(f.ctx, 2*time.Second)
-	defer stop()
-	// The broker still grants access: only the held denial keeps the receiver from claiming.
-	f.receiver.claimLoop(ctx, ctx, func() {})
-	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 || len(f.records(t, admin.PoolEventsTopic(testPool))) != 0 {
-		t.Fatalf("a denied receiver claimed: dispatches %d", dispatches)
-	}
-	if record, delivered := f.pollPool(t, "run-a", 5*time.Second); !delivered || record.DeliveryCount() != 1 {
-		t.Fatal("the task was acquired while the receiver was denied")
-	}
-}
-
-func TestDeniedReceiverStopsInFlightRunsAfterOneLockInterval(t *testing.T) {
-	f := newFixture(t, noResultStream)
-	f.plugin.endDelay = 30 * time.Second
-	// kfake refuses a share lock below its minimum; the receiver reads the interval from the terms it folded.
-	f.receiver.mu.Lock()
-	terms := f.receiver.state.Pools[testPool]
-	terms.LockDurationMS = 2000
-	f.receiver.state.Pools[testPool] = terms
-	f.receiver.mu.Unlock()
-	done := startInFlight(t, f, f.ctx, "run-denied")
-	f.receiver.deny(kerr.TopicAuthorizationFailed, capRead)
-	deniedAt := time.Now()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("in-flight run kept going after a lasting denial")
-	}
-	if waited := time.Since(deniedAt); waited < 2*time.Second {
-		t.Fatalf("run stopped %s after the denial, before one lock interval", waited)
-	}
 	f.plugin.mu.Lock()
-	stops, releaseIDs := f.plugin.stops, f.plugin.releaseIDs
+	f.plugin.job, f.plugin.endDelay = pluginsdk.JobRunning, 0
 	f.plugin.mu.Unlock()
-	if stops != 1 || !slices.Equal(releaseIDs, []string{"run-denied"}) {
-		t.Fatalf("stops=%d releases=%v", stops, releaseIDs)
-	}
-	// Released, not acknowledged: the submission is delivered again to the pool.
-	if record, delivered := f.pollPool(t, "run-denied", 10*time.Second); !delivered || record.DeliveryCount() < 2 {
-		t.Fatal("denied run's submission was not released to the pool")
-	}
+	runUntilStopped(t, f.ctx, restarted(t, f.receiver))
+	f.adoptedOnce(t)
 }
 
-func TestResultAfterLastingDenialReleasesTask(t *testing.T) {
-	f := newFixture(t, resultStream)
-	run := testActiveRun(t, f, "run-denied-result", 1)
-	f.receiver.mu.Lock()
-	f.receiver.deniedSince = time.Now().Add(-time.Hour)
-	f.receiver.mu.Unlock()
-	if status := run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true}); status != kgo.AckRelease {
-		t.Fatalf("status %v, want release: an untrusted result must not end the task", status)
-	}
-	if state, reason := terminalReason(t, f, "run-denied-result"); state != wire.TaskStateFailed || reason != "receiver denied" {
-		t.Fatalf("terminal %s %q, want FAILED receiver denied", state, reason)
-	}
-}
-
-// TestDeniedRunDoesNotWaitOnItsStatus stops a denied run whose status the broker never answers, as a revoked producer's
-// metadata load is not: the run is still released within shutdownTimeout.
-func TestDeniedRunDoesNotWaitOnItsStatus(t *testing.T) {
-	f := newFixture(t, resultStream)
-	run := testActiveRun(t, f, "run-denied-unanswered", 1)
-	previous := commitTransaction
-	t.Cleanup(func() { commitTransaction = previous })
-	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
-		<-ctx.Done()
-		return ctx.Err()
-	}
-	done := make(chan kgo.AckStatus, 1)
-	go func() { done <- run.deny(f.ctx, pluginsdk.Handle{}, nil) }()
-	select {
-	case status := <-done:
-		if status != kgo.AckRelease {
-			t.Fatalf("status %v, want release", status)
+// adoptedOnce waits for run-a's one terminal result, which an adopter of the job the first dispatch created reached.
+func (f fixture) adoptedOnce(t *testing.T) {
+	t.Helper()
+	f.await(t, "run-a", func(task wire.Task) bool { return wire.Terminal(task.Status.State) })
+	terminals := 0
+	for _, result := range f.results(t) {
+		if result.Task.ID == "run-a" && wire.Terminal(result.Task.Status.State) {
+			terminals++
 		}
-	case <-time.After(shutdownTimeout + 5*time.Second):
-		t.Fatal("denied run waited on a status the broker never answered")
 	}
-	f.plugin.mu.Lock()
-	releaseIDs := f.plugin.releaseIDs
-	f.plugin.mu.Unlock()
-	if !slices.Equal(releaseIDs, []string{"run-denied-unanswered"}) {
-		t.Fatalf("releases=%v", releaseIDs)
-	}
-}
-
-func TestShareGroupDenialRetestedByClaim(t *testing.T) {
-	f := newFixture(t, resultStream)
-	f.receiver.deny(kerr.GroupAuthorizationFailed, capRead)
-	f.submit(t, f.host, nil)
-	ctx, stop := context.WithTimeout(f.ctx, 5*time.Second)
-	defer stop()
-	go f.receiver.claimLoop(ctx, ctx, func() {})
-	f.await(t, "run-a", anyTask)
-	if f.receiver.denied() {
-		t.Fatal("a claim that worked left the share group denial in place")
+	dispatches, lookups, _, _ := f.plugin.counts()
+	if terminals != 1 || dispatches != 1 || lookups == 0 || !slices.Contains(f.kinds(t), "adopting") {
+		t.Fatalf("terminals %d, dispatches %d, lookups %d, statuses %v; want one terminal by an adopter", terminals, dispatches, lookups, f.kinds(t))
 	}
 }
 
@@ -1719,34 +1680,6 @@ func TestAdmissionWritesDoNotFenceTheRunsHolder(t *testing.T) {
 	f.rejected(t, duplicate, "duplicate submission")
 	if err := holder.commit(f.ctx, holder.progress(0)); err != nil {
 		t.Fatalf("the rejection fenced the run's holder: %v", err)
-	}
-}
-
-func TestTransactionalDenialClearsOnlyWhenTransactionsWork(t *testing.T) {
-	f := newFixture(t, resultStream)
-	f.deleteReceiverACLs(t, kadm.NewACLs().TransactionalIDs(admin.TransactionalPrefix(testPool)).Operations(kadm.OpAny))
-	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
-	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
-		t.Fatalf("admitted=%v ack=%v, want release when the rejection cannot be written", admitted != nil, ack)
-	}
-	if !f.receiver.holds(capTransactional) {
-		t.Fatalf("the rejection's transactional ID error did not enter denial; logs:\n%s", f.logs.String())
-	}
-	// Reads still work, but they say nothing about the transactional ID.
-	if err := f.receiver.refresh(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	if !f.receiver.denied() {
-		t.Fatal("a read-only refresh cleared a transactional ID denial")
-	}
-	if err := f.service.TenantAdd(f.ctx, testTenant, testPool); err != nil { // reconciles the ACLs
-		t.Fatal(err)
-	}
-	if err := f.receiver.refresh(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	if f.receiver.denied() {
-		t.Fatalf("denial held after the transactional ID worked again; logs:\n%s", f.logs.String())
 	}
 }
 

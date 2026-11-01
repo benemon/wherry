@@ -151,8 +151,8 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 		case <-r.custody.wake:
 			continue
 		}
-		// A stop steps down also when running has ended with it.
-		if ctx.Err() != nil && group != nil {
+		// A stop steps down also when running has ended with it; a receiver halted for a denial does not.
+		if ctx.Err() != nil && group != nil && !halted(running) {
 			r.stepDown(ctx, <-stopped, group)
 			group = nil
 		}

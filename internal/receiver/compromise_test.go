@@ -155,14 +155,15 @@ func (f fixture) suspend(t *testing.T) {
 	}
 }
 
-// A receiver of a suspended pool claims nothing and records no denial; after resume it claims and runs the task.
+// A receiver of a suspended pool claims nothing and does not stop for a denial; after resume it claims and runs the
+// task.
 func TestSuspendedPoolIsNotClaimedFromUntilResumed(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.suspend(t)
 	f.submit(t, f.host, nil)
 	f.run(t, f.ctx)
 	time.Sleep(2 * time.Second)
-	if kinds := f.kinds(t); len(kinds) != 0 || strings.Contains(f.logs.String(), "denied (") {
+	if kinds := f.kinds(t); len(kinds) != 0 || strings.Contains(f.logs.String(), "stopping: ") {
 		t.Fatalf("statuses %v while suspended; logs:\n%s", kinds, f.logs.String())
 	}
 	if err := f.service.PoolSuspend(f.ctx, testPool, false); err != nil {
@@ -378,7 +379,7 @@ func TestSuspendWithNoCustodianReturns(t *testing.T) {
 	}
 }
 
-// A drain while the pool is suspended scans nothing, records no denial and keeps every key it holds.
+// A drain while the pool is suspended scans nothing, does not stop for a denial and keeps every key it holds.
 func TestDrainWhileSuspendedKeepsTheKeys(t *testing.T) {
 	f, successor, drain := handoverFixture(t, 15*time.Second)
 	f.submit(t, f.host, nil)
@@ -397,7 +398,7 @@ func TestDrainWhileSuspendedKeepsTheKeys(t *testing.T) {
 	if keys := heldKeys(t, f.receiver); len(keys) != len(held) || len(f.rekeys(t)) != 0 {
 		t.Fatalf("keys %s and %d re-keyed runs after a drain while suspended, want %s kept and none", describeKeys(keys), len(f.rekeys(t)), describeKeys(held))
 	}
-	if logs := f.logs.String(); !strings.Contains(logs, "is suspended; its re-key scan waits for resume") || strings.Contains(logs, "denied (") {
+	if logs := f.logs.String(); !strings.Contains(logs, "is suspended; its re-key scan waits for resume") || strings.Contains(logs, "stopping: ") {
 		t.Fatalf("want the suspended scan logged without a denial; logs:\n%s", logs)
 	}
 }

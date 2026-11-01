@@ -968,6 +968,7 @@ func TestRejectionIsAllOrNothing(t *testing.T) {
 	f := newFixture(t, resultStream)
 	// Only the feed write is taken away: the pool's events must not get the rejection alone.
 	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.TenantTopic(testTenant)).Operations(kadm.OpWrite))
+	halt := f.halts()
 	record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
 	if admitted, ack := f.receiver.admit(f.ctx, record); admitted != nil || ack != kgo.AckRelease {
 		t.Fatalf("admitted=%v ack=%v, want release", admitted != nil, ack)
@@ -975,8 +976,8 @@ func TestRejectionIsAllOrNothing(t *testing.T) {
 	if n := len(f.eventStatuses(t)); n != 0 {
 		t.Fatalf("pool events hold %d statuses of a rejection the feed never got", n)
 	}
-	if !f.receiver.denied() {
-		t.Fatal("an authorisation error writing the rejection did not enter denial")
+	if err := halt(); err == nil || !strings.HasPrefix(err.Error(), "denied write: ") {
+		t.Fatalf("an authorisation error writing the rejection stopped the receiver with %v", err)
 	}
 }
 

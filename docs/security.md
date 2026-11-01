@@ -331,6 +331,12 @@ Prerequisites: the tenant's account at the model provider.
 When a receiver is revoked, rotate each credential it could open, as in
 [Revoke a host or receiver](operations.md#revoke-a-host-or-receiver).
 
+A revoked or denied receiver exits and leaves the jobs it held running for
+another member to adopt. Stopping them would bind only an honest receiver; a
+compromised one ignores it, so leaving them removes no protection.
+Revocation still ends the receiver's access, and its jobs continue under an
+adopter.
+
 ## Credential sources
 
 A submitting host, and a host resubmitting a run, resolves each source the

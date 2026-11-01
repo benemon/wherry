@@ -52,12 +52,10 @@ var (
 	refreshInterval   = 15 * time.Second
 	// cancelReadInterval is how often the receiver reads the pool's events, once for every run it holds.
 	cancelReadInterval = 10 * time.Second
-	// stateCheckInterval is how often a running run checks the cancels and denial the receiver holds.
+	// stateCheckInterval is how often a running run checks the cancels the receiver holds.
 	stateCheckInterval = time.Second
 	// shutdownTimeout bounds each of a held run's final transcript commit, released status and ack flush, which after a
-	// stop also end by the shutdown deadline, and the
-	// status of a run stopped for a lasting denial: a revoked producer retries a metadata load it cannot complete for as
-	// long as its context lasts.
+	// stop also end by the shutdown deadline.
 	shutdownTimeout = 5 * time.Second
 	// reconcileInterval separates the Lookups that resolve an ambiguous Dispatch.
 	reconcileInterval = time.Second
@@ -77,7 +75,7 @@ func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 	defer idle()
 	for claiming.Err() == nil {
 		// A suspended pool takes no new work: its receivers fetch nothing from it.
-		if r.blocked() || r.suspended() {
+		if r.suspended() {
 			sleep(claiming, time.Second)
 			continue
 		}
@@ -129,9 +127,8 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	var record *kgo.Record
 	for record == nil {
 		pollCtx, cancel := context.WithTimeout(claiming, 30*time.Second)
-		// A denied receiver must not acquire a task: each release raises its delivery count.
 		go func() {
-			for pollCtx.Err() == nil && !r.blocked() && !r.suspended() && r.backoff() <= 0 {
+			for pollCtx.Err() == nil && !r.suspended() && r.backoff() <= 0 {
 				sleep(pollCtx, 100*time.Millisecond)
 			}
 			cancel()
@@ -142,14 +139,12 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		if claiming.Err() != nil {
 			return claiming.Err()
 		}
-		if (r.blocked() || r.suspended() || r.backoff() > 0) && len(fetches.Records()) == 0 {
+		if (r.suspended() || r.backoff() > 0) && len(fetches.Records()) == 0 {
 			return nil
 		}
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			return fmt.Errorf("poll: %w", err)
 		}
-		// A poll without an error is the claim attempt that re-tests a share group denial.
-		r.restore(capClaim)
 		if records := fetches.Records(); len(records) > 0 {
 			record = records[0]
 		}
@@ -157,7 +152,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	fetched()
 	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.
 	defer context.AfterFunc(claiming, idle)()
-	if r.blocked() || r.suspended() {
+	if r.suspended() {
 		record.Ack(kgo.AckRelease)
 		return flush()
 	}
@@ -438,7 +433,7 @@ func (r *Receiver) admissionTransactionalID() string {
 }
 
 // admissionCommit writes records in one transaction under the admission transactional ID; an
-// authorisation error enters denial.
+// authorisation error stops the receiver.
 func (r *Receiver) admissionCommit(ctx context.Context, records ...*kgo.Record) error {
 	r.admissionMu.Lock()
 	defer r.admissionMu.Unlock()
@@ -452,26 +447,6 @@ func (r *Receiver) admissionCommit(ctx context.Context, records ...*kgo.Record) 
 		return err
 	}
 	return nil
-}
-
-// probeWrite proves the write and transactional ID ACLs with an aborted admission transaction on the
-// pool's events, which no read_committed reader sees.
-func (r *Receiver) probeWrite(ctx context.Context) error {
-	r.admissionMu.Lock()
-	defer r.admissionMu.Unlock()
-	producer, err := r.newClient(kgo.TransactionalID(r.admissionTransactionalID()))
-	if err != nil {
-		return err
-	}
-	defer producer.Close()
-	if err := producer.BeginTransaction(); err != nil {
-		return err
-	}
-	if err := producer.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte("probe")}).FirstErr(); err != nil {
-		_ = producer.EndTransaction(ctx, kgo.TryAbort)
-		return err
-	}
-	return producer.EndTransaction(ctx, kgo.TryAbort)
 }
 
 // commitTransaction is a variable so tests can lose the answer to a commit the broker applied, which
@@ -620,10 +595,16 @@ func (r *Receiver) newProducer(run string) (*kgo.Client, error) {
 	return r.newClient(kgo.TransactionalID(admin.TransactionalPrefix(r.config.Pool) + run))
 }
 
-// execute runs one task; it returns the final share acknowledgement, or 0 when fenced.
+// execute runs one task; it returns the final share acknowledgement, or 0 when fenced or when the receiver stops for a
+// denial, which leaves the task to the broker's redelivery and its job running for an adopter.
 func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.Record, admitted *admission, attempt int64) (ack kgo.AckStatus) {
 	task := admitted.task
 	runID := task.Wherry.Run
+	defer func() {
+		if halted(ctx) {
+			ack = 0
+		}
+	}()
 	stopRenew := renewer(ctx, share, record, r.metrics.renewalFailures, func(format string, args ...any) {
 		r.logger.Printf("run %s: "+format, append([]any{runID}, args...)...)
 	})
@@ -678,7 +659,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 	// A claim given back to the pool is released first, so the next claimant is served without waiting out this one.
 	defer func() {
-		if ack == kgo.AckRelease {
+		if ack == kgo.AckRelease && !halted(ctx) {
 			ack = run.released(ctx)
 		}
 	}()
@@ -910,6 +891,9 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	// deadline, since ctx is already done, and returns the task. A commit the shutdown cut short can leave its
 	// transaction open. It ignores the delivery budget: the receiver is going away and an adopter continues the run.
 	shutdown := func() kgo.AckStatus {
+		if halted(ctx) {
+			return 0
+		}
 		shutdownCtx, cancel := r.shutdownContext(ctx)
 		defer cancel()
 		for drained := false; !drained; {
@@ -1002,16 +986,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		return run.stopAndFail(ctx, handle, "log stream failed", pending), true
 	}
 	var followErr error
-	// stopHeld ends the run when the receiver holds its cancel or a denial lasting one lock interval.
+	// stopHeld ends the run when the receiver holds its cancel.
 	stopHeld := func() (kgo.AckStatus, bool) {
 		r.mu.Lock()
 		cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
 		r.mu.Unlock()
-		switch {
-		case r.stopForDenial():
-			stopFollow()
-			return run.deny(ctx, handle, pending), true
-		case cancelled:
+		if cancelled {
 			stopFollow()
 			return run.stopAndCancel(ctx, handle, pending), true
 		}
@@ -1400,26 +1380,6 @@ func (run *activeRun) stopAndCancel(ctx context.Context, handle pluginsdk.Handle
 	return run.cancel(ctx, pending)
 }
 
-// deny stops a run on a denied receiver and releases its task to the pool; the terminal status is best effort.
-func (run *activeRun) deny(ctx context.Context, handle pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
-	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
-		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
-		run.receiver.logger.Printf("run %s: stop: %s", run.task.Wherry.Run, logText(run.redactText, err))
-		return kgo.AckRelease
-	}
-	const reason = "receiver denied"
-	status := taskStatus(wire.TaskStateFailed, reason)
-	statusCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
-	defer cancel()
-	if err := run.commit(statusCtx, append(append(run.chunks(pending, true), run.result(status, reason)), run.terminal(status, pending)...)...); err != nil {
-		run.receiver.logger.Printf("run %s: publish denied status: %v", run.task.Wherry.Run, err)
-	} else {
-		run.ended(status.State)
-	}
-	run.release(ctx)
-	return kgo.AckRelease
-}
-
 // expired ends a run past a bound: task_ended_by once its deadline passed, else task_started_by before its job
 // started. With no handle, the run's job, if one exists, is purged; a run admitted with no offer has no profile to
 // purge in.
@@ -1597,10 +1557,6 @@ func (run *activeRun) budgetEnded() {
 // conclude ends the run whose job ended as terminal says: with the status its outcome file reports, or failed for how
 // it ended when it left no valid one. The outputs are collected first, whatever the exit, so the file is always read.
 func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pending []pluginsdk.Line, terminal pluginsdk.Terminal) kgo.AckStatus {
-	// A result committed after access lapsed is untrusted, so acknowledging it would lose the run.
-	if run.receiver.stopForDenial() {
-		return run.deny(ctx, handle, pending)
-	}
 	stopped := true
 	if err := run.profile.Plugin.Stop(ctx, handle); err != nil {
 		run.receiver.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()

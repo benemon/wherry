@@ -91,10 +91,8 @@ type Receiver struct {
 	steppingDown *wire.SteppingDown
 	// shutdownBy, set at a stop, is when every step of the stop must have ended.
 	shutdownBy time.Time
-	// denials holds the capabilities an authorisation error took away; deniedSince is when the first was
-	// lost, zero while access holds.
-	denials     map[capability]bool
-	deniedSince time.Time
+	// halt, set by Run once it claims, ends claiming and held runs at once with the error Run returns.
+	halt func(error)
 	// backoffUntil is when the receiver may fetch from its pool again after releasing a task it failed to start, and
 	// fetching counts the share sessions polling the pool for a task.
 	backoffUntil time.Time
@@ -160,6 +158,8 @@ func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
 // Run registers the receiver's keys, rotates them when New was asked to, waits for its configuration, then advertises
 // and claims until ctx ends or the configuration changes. Held runs then go on: after a configuration change until they
 // end, and after ctx ends for at most the drain timeout. A forced configuration change releases their tasks at once.
+// A Kafka authorisation error ends Run at once with that error: held runs are left unacknowledged and their jobs
+// running, for an adopter to find once the broker redelivers their tasks.
 func (r *Receiver) Run(ctx context.Context) error {
 	defer r.base.Close()
 	defer r.reader.Close()
@@ -181,9 +181,6 @@ func (r *Receiver) Run(ctx context.Context) error {
 	if err := r.readCancels(ctx); err != nil {
 		return err
 	}
-	if err := r.advertise(ctx); err != nil {
-		r.logger.Printf("advertise: %v", err)
-	}
 	release := make(chan struct{})
 	releaseHeld := sync.OnceFunc(func() { close(release) })
 	// A stop fixes one shutdown deadline, the custodian's step-down bound, which held runs' final steps share.
@@ -195,9 +192,20 @@ func (r *Receiver) Run(ctx context.Context) error {
 	})()
 	ctx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
-	// Held runs still read cancels and denials, so the periodic steps last until held tasks are released.
-	running, stopRunning := context.WithCancel(context.WithoutCancel(ctx))
-	defer stopRunning()
+	// Held runs still read cancels, so the periodic steps last until held tasks are released.
+	running, stopRunning := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer stopRunning(nil)
+	// running ends first, so custody is given up without a step-down.
+	r.mu.Lock()
+	r.halt = func(err error) {
+		stopRunning(err)
+		stop(err)
+		releaseHeld()
+	}
+	r.mu.Unlock()
+	if err := r.advertise(ctx); err != nil {
+		r.logger.Printf("advertise: %v", err)
+	}
 	var wg sync.WaitGroup
 	wg.Add(5)
 	go func() {
@@ -246,10 +254,30 @@ func (r *Receiver) Run(ctx context.Context) error {
 		releaseHeld()
 	}()
 	<-release
-	stopRunning()
+	stopRunning(nil)
 	slots.Wait()
 	wg.Wait()
+	if halted(running) {
+		return context.Cause(running)
+	}
 	return context.Cause(ctx)
+}
+
+// exit stops the receiver for err once Run claims; before that, the step that failed ends Run.
+func (r *Receiver) exit(err error) {
+	r.mu.Lock()
+	halt := r.halt
+	r.mu.Unlock()
+	r.logger.Printf("stopping: %v", err)
+	if halt != nil {
+		halt(err)
+	}
+}
+
+// halted reports that ctx, or the running context it derives from, ended for a denial: nothing is then acknowledged,
+// stopped or handed over.
+func halted(ctx context.Context) bool {
+	return ctx.Err() != nil && context.Cause(ctx) != ctx.Err()
 }
 
 // shutdownContext outlives ctx for a held run's final step, ending after shutdownTimeout or at the shutdown deadline.
@@ -390,21 +418,10 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	if !reflect.DeepEqual(state.Receivers[r.id], r.config) {
 		return ErrConfigChanged
 	}
-	r.restore(capRead)
-	if r.holds(capWrite) || r.holds(capTransactional) {
-		if err := r.probeWrite(ctx); err != nil {
-			r.deny(err, capWrite)
-			return nil
-		}
-		r.restore(capWrite)
-		r.restore(capTransactional)
-	}
 	return nil
 }
 
-// capability is what an authorisation error took away. Each is restored only by an operation that
-// exercises it: a refresh for reads, an aborted admission transaction for writes and the transactional
-// ID, and the next claim for the share group.
+// capability is the operation an error came from, as the bus error and denial metrics label it.
 type capability string
 
 const (
@@ -412,11 +429,11 @@ const (
 	capWrite         capability = "write"
 	capTransactional capability = "transactional ID"
 	capClaim         capability = "share group"
-	// capMembership is never restored: an ended member is re-provisioned under a new principal.
-	capMembership capability = "membership"
+	capMembership    capability = "membership"
 )
 
-// deny counts an error from an operation that used capability, and records it when it is an authorisation error.
+// deny counts an error from an operation that used capability, and stops the receiver when it is an authorisation
+// error.
 func (r *Receiver) deny(err error, used capability) {
 	if used != capMembership && !errors.Is(err, context.Canceled) {
 		r.metrics.busErrors.WithLabelValues(string(used)).Inc()
@@ -431,39 +448,7 @@ func (r *Receiver) deny(err error, used capability) {
 		used = capClaim
 	}
 	r.metrics.denials.WithLabelValues(string(used)).Inc()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.denials[used] {
-		return
-	}
-	if r.denials == nil {
-		r.denials = map[capability]bool{}
-	}
-	if len(r.denials) == 0 {
-		r.deniedSince = time.Now()
-	}
-	r.denials[used] = true
-	r.logger.Printf("denied (%s): %v", used, err)
-}
-
-// restore clears a denial of capability; access is restored once no denial remains.
-func (r *Receiver) restore(c capability) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.denials[c] {
-		return
-	}
-	delete(r.denials, c)
-	if len(r.denials) == 0 {
-		r.deniedSince = time.Time{}
-		r.logger.Printf("access restored")
-	}
-}
-
-func (r *Receiver) holds(c capability) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.denials[c]
+	r.exit(fmt.Errorf("denied %s: %w", used, err))
 }
 
 func authorisationError(err error) bool {
@@ -473,19 +458,6 @@ func authorisationError(err error) bool {
 		}
 	}
 	return false
-}
-
-func (r *Receiver) denied() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.denials) > 0
-}
-
-// blocked reports a denial other than the share group's, which only a claim attempt can re-test.
-func (r *Receiver) blocked() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.denials) > 1 || len(r.denials) == 1 && !r.denials[capClaim]
 }
 
 // suspended reports the receiver's pool suspended as it holds wherry.admin.
@@ -506,15 +478,6 @@ func (r *Receiver) sessions() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.fetching
-}
-
-// stopForDenial reports whether denial has lasted one lock interval, after which the broker
-// can hand this receiver's held tasks to another member.
-func (r *Receiver) stopForDenial() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	lock := r.state.Pools[r.config.Pool].LockDuration()
-	return !r.deniedSince.IsZero() && time.Since(r.deniedSince) >= lock
 }
 
 func (r *Receiver) snapshot() (admin.State, signed.Keys, signed.Keys) {

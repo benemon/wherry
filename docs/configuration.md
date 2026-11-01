@@ -122,6 +122,8 @@ Planned changes go through
 [`receiver update`](operations.md#change-a-receiver-s-configuration), which
 drains with no time limit. `receiver update --force` and
 [`receiver revoke`](operations.md#revoke-a-host-or-receiver) are hard stops.
+A Kafka authorisation error also stops the receiver at once, with no drain
+and no key custodian handover, leaving its runs' jobs for an adopter.
 
 ### Receiver local configuration example
 

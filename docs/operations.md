@@ -84,9 +84,8 @@ as one file and as a `--config-dir` directory.
   cases the [extension](a2a-extension-v1.md#delivery-budget) lists. `pool
   create` refuses a `delivery_limit` above the broker's
   `group.share.max.delivery.count.limit`.
-- `lock_duration` is how long a claim survives without renewal, and how
-  long a denied receiver keeps running its jobs. Receivers renew every 10
-  seconds.
+- `lock_duration` is how long a claim survives without renewal. Receivers
+  renew every 10 seconds.
 - `start_by_limit` is the latest `task_started_by` a task may ask for, from
   its submission, and bounds how long after its submission a run's task is
   admitted. It defaults to 72 hours. For a pool with `storage`, it plus six
@@ -760,13 +759,13 @@ credential and ACLs.
    opened and, when it held its pool's key as key custodian, of every run
    whose envelope that key opens. The receiver has seen their values.
 
-Revoking a receiver is a hard stop of the runs it holds, during a drain
-too. Once its access is gone, the receiver gives up a run at its first
-failed write and leaves the job for an adopter. It stops the job of a run
-that writes nothing one lock duration after its first denial, since it
-cannot tell a revocation from a passing denial and no other member can
-take the task before the lock expires, then spends at most 5 seconds
-recording the run as failed before it releases the task.
+Revoking a receiver is a hard stop, during a drain too. At its first
+authorisation error, or once it reads its membership ended, the receiver
+exits non-zero with `denied <op>: <error>`. It leaves the runs it holds
+unacknowledged and their jobs running; the broker delivers their tasks
+again, and another member adopts each job. Its supervisor restarts it, and
+it exits again at its first denial, until you stop it or remove it from the
+platform.
 
 A revoked name cannot be reused. Provision a returning host or receiver
 under a new name.

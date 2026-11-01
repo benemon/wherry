@@ -402,10 +402,14 @@ every record a receiver wrote once that receiver's membership has ended,
 including records it wrote before, so the runs it served lose that history
 in `wait` and `events`.
 
-A receiver treats an authorisation error as denial. It stops claiming at
-once, and stops its in-flight jobs once denial has lasted one lock
-duration. The broker then delivers their tasks to other members of the
-pool.
+A receiver exits at its first authorisation error, or once it reads its
+membership ended. It stops claiming, serving open requests and key custody
+at once, and leaves the runs it holds unacknowledged with their jobs
+running. The broker delivers their tasks again, and the next holder, the
+restarted receiver or another member, adopts each job. Stopping the jobs
+would bind only an honest receiver; a compromised one ignores it, so leaving
+them for adoption removes no protection. Revocation still ends the
+receiver's access, and its jobs continue under an adopter.
 
 A revoked principal does not return. A host or receiver that comes back is
 provisioned under a new name, with a new principal and key topic.
