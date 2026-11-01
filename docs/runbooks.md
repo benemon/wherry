@@ -37,7 +37,7 @@ alert on the platform's series it lists follows this runbook.
 Confirm it:
 
 1. Run `wherry receivers`. The receiver's `status` is `stale` or `silent`,
-   or `ended` after a revocation, and `heartbeat_age` shows the age of its
+   or `ended` after a revocation, and `advertisement_age` shows the age of its
    latest advertisement.
 2. Read the receiver's log.
    - `waiting for configuration` repeats while `wherry.admin` holds no
