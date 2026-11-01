@@ -1091,9 +1091,10 @@ answers. It serves a request only when:
    `task_ended_by` when the run has a `started` status or the claim's
    `adopting` status, `task_started_by` otherwise; otherwise
    `past its bound`;
-5. the pool is not suspended, or the claim has an `adopting` status, which
-   its receiver writes once `Lookup` finds the job; otherwise
-   `pool suspended`;
+5. the claim has an `adopting` status, which its receiver writes once
+   `Lookup` finds the job, or the pool is not suspended in a read of
+   `wherry.admin` the custodian makes for the request; otherwise
+   `pool suspended`. A failed read leaves the request unanswered;
 6. when the claim changed receivers, the previous owner committed `released`,
    has no live membership, or its latest advertisement appended at or before
    the claim is more than 120 seconds old when the custodian decides;

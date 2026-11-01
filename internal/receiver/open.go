@@ -501,9 +501,18 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	if !c.now.Before(wire.PastBound(bound)) {
 		return refuse(wire.RefusedPastBound)
 	}
-	// A suspended pool starts no job; only this claim's adoption, written once Lookup found the job, is served.
-	if !adopting && r.suspended() {
-		return refuse(wire.RefusedPoolSuspended)
+	// A suspended pool starts no job; only this claim's adoption, written once Lookup found the job, is served. A first
+	// start waits on a fresh read of wherry.admin, which a stale receiver's claim does not bypass; unread, the request
+	// goes unanswered until the claimant's own bound.
+	if !adopting {
+		suspended, err := r.suspendedNow(ctx)
+		if err != nil {
+			r.logger.Printf("custodian: read wherry.admin for run %s's open request: %v", request.Run, err)
+			return nil
+		}
+		if suspended {
+			return refuse(wire.RefusedPoolSuspended)
+		}
 	}
 	// Rule 6, decided once per claim: a change of claimant is served once the previous one released or its lease lapsed.
 	claimDigest := wire.Digest(c.events.records[request.Run][owners[len(owners)-1]].Value)

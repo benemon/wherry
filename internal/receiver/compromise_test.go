@@ -247,6 +247,29 @@ func TestSuspendedPoolRefusesAStartedRunWhoseJobIsAbsent(t *testing.T) {
 	}
 }
 
+// A receiver that has not read its pool's suspension still claims, but the custodian reads wherry.admin before it serves
+// a first start: the open is refused pool suspended and no attempt wrap is written or job dispatched.
+func TestCustodianReadsTheSuspensionFresh(t *testing.T) {
+	f := newFixture(t, resultStream)
+	if err := f.service.PoolSuspend(f.ctx, testPool, true); err != nil {
+		t.Fatal(err)
+	}
+	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
+		t.Fatalf("status %v, want the task released; logs:\n%s", status, f.logs.String())
+	}
+	if refused := f.answeredWith(t, wire.RefusedPoolSuspended); refused != 1 {
+		t.Fatalf("%d pool suspended refusals, want one; logs:\n%s", refused, f.logs.String())
+	}
+	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
+		if recordType(record.Value) == wire.AttemptWrapType {
+			t.Fatal("an attempt wrap was written for a suspended pool")
+		}
+	}
+	if dispatches, _, _ := f.dispatched(t); dispatches != 0 {
+		t.Fatalf("dispatches %d, want none", dispatches)
+	}
+}
+
 // A drain while the pool is suspended scans nothing, records no denial and keeps every key it holds.
 func TestDrainWhileSuspendedKeepsTheKeys(t *testing.T) {
 	f, successor, drain := handoverFixture(t, 15*time.Second)

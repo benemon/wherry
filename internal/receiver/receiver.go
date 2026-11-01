@@ -473,6 +473,17 @@ func (r *Receiver) suspended() bool {
 	return state.Suspended[r.config.Pool]
 }
 
+// suspendedNow reports the receiver's pool suspended in a bounded read of wherry.admin.
+func (r *Receiver) suspendedNow(ctx context.Context) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	state, err := r.reader.Load(ctx)
+	if err != nil {
+		return false, err
+	}
+	return state.Suspended[r.config.Pool], nil
+}
+
 // backoff is how long the receiver waits before it fetches from its pool again.
 func (r *Receiver) backoff() time.Duration {
 	r.mu.Lock()
