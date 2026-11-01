@@ -1104,8 +1104,8 @@ in `wherry_custodian_takeovers_total` with reason `contested`, initialises
 `p.<pool>.custodian` again and republishes its snapshot with reason
 `contested`, under a new key when the current snapshot names another
 receiver. A second fence within the custodian group's 45-second session
-timeout logs `custodian: fenced again within the session timeout in pool
-<pool>; standing down until assigned again`. A receiver whose assignment
+timeout logs
+`custodian: fenced again within the session timeout in pool <pool>; standing down until assigned again`. A receiver whose assignment
 ends, that stood down, or whose failed write is followed by another
 receiver's committed snapshot writes no more snapshots until it is assigned
 again.
