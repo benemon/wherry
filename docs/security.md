@@ -332,7 +332,8 @@ When a receiver is revoked, rotate each credential it could open, as in
 [Revoke a host or receiver](operations.md#revoke-a-host-or-receiver).
 
 A revoked or denied receiver exits and leaves the jobs it held running, and
-closing its share sessions releases their tasks to the pool at once. On a
+closing its share sessions releases their tasks to the pool, at once when
+the release reaches the broker and otherwise when their locks lapse. On a
 pool-wide platform, such as Nomad or Kubernetes, another member adopts each
 job. A host-local platform, such as systemd, adopts only on the same host:
 the receiver restarted under the same receiver ID adopts its jobs, but a
@@ -341,8 +342,7 @@ member on another host starts a second job once the
 exited receiver a live claimant, as after a receiver crash, so the systemd
 plugin recommends a pool per receiver. Stopping the jobs would bind only an
 honest receiver; a compromised one ignores it, so leaving them removes no
-protection. Revocation still ends the receiver's access, and its jobs
-continue under an adopter.
+protection. Revocation still ends the receiver's access.
 
 ## Credential sources
 

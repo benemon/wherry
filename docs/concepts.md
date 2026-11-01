@@ -404,9 +404,10 @@ in `wait` and `events`.
 
 A receiver exits at its first authorisation error, or once it reads its
 membership ended. It stops claiming, serving open requests and key custody
-at once, and leaves the runs it holds unacknowledged with their jobs
-running. Closing its share sessions releases their tasks, so the broker
-delivers them again at once. On a pool-wide platform, such as Nomad or
+at once, and leaves the jobs of the runs it holds running. Closing its
+share sessions releases their tasks, so the broker delivers them again at
+once; when that release does not reach the broker, as under the denial
+that stopped the receiver, the tasks return when their locks lapse. On a pool-wide platform, such as Nomad or
 Kubernetes, the next holder, the restarted receiver or another member,
 adopts each job. A host-local platform, such as systemd, adopts only on the
 same host: the receiver restarted under the same receiver ID adopts its
@@ -416,7 +417,7 @@ the exited receiver a live claimant, as after a receiver crash. The
 systemd plugin recommends a pool per receiver for this reason. Stopping the
 jobs would bind only an honest receiver; a compromised one ignores it, so
 leaving them for adoption removes no protection. Revocation still ends the
-receiver's access, and its jobs continue under an adopter.
+receiver's access.
 
 A revoked principal does not return. A host or receiver that comes back is
 provisioned under a new name, with a new principal and key topic.
