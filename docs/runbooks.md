@@ -218,6 +218,36 @@ Then:
   transactional ID. Revoke a suspect receiver with
   `wherry admin receiver revoke`.
 
+## WherryRunsKeyLost
+
+Keys were lost; affected never-started runs are resubmitted by their hosts.
+A receiver ends a run that never started with the wherry event `key-lost`
+when no holder of a pool key can open its envelope, and counts it in
+`wherry_runs_key_lost_total`, whatever custody change came before: a
+takeover, a handover whose stepping-down custodian exited before re-keying,
+or a task appended under an old key after a drain's scan. The alert fires on
+any increase.
+
+Confirm it:
+
+1. Read the receiver's run log for terminal statuses with the message
+   `cannot be opened: the pool's custodian changed and its key was lost`.
+2. Read the receivers' logs for the custody change before it: a
+   `custodian: took over pool <pool> (WherryCustodianTakeover)` line, or a
+   stepping-down custodian's
+   `custodian: hand over to <receiver>: <error>; keeping the pool keys to their deadlines`
+   or `custodian: no successor in pool <pool>; keeping the pool keys to their deadlines`.
+
+Then:
+
+- The hosts resubmit each run before its `task_started_by`; a run past it is
+  submitted again by hand.
+- For losses at planned stops, set `drain_timeout` and the platform's stop
+  window as in
+  [Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window),
+  and stop a pool's receivers one at a time, so that a stopping custodian
+  has a live successor.
+
 ## WherryPluginRestartLoop
 
 A plugin that exits is started again after one second, the wait doubling

@@ -38,7 +38,7 @@ type metrics struct {
 	busErrors, denials, dropped, budgetExhausted                  *prometheus.CounterVec
 	takeovers, claimantChanges                                    *prometheus.CounterVec
 	renewalFailures, transactionAborts, ambiguousCommits, fenced  prometheus.Counter
-	ignoredWraps                                                  prometheus.Counter
+	ignoredWraps, keyLost                                         prometheus.Counter
 
 	pluginDescs map[string]*prometheus.Desc
 	// lastGood holds, by profile, the samples of its latest Metrics call that answered.
@@ -94,6 +94,7 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 		m.takeovers.WithLabelValues(reason)
 	}
 	m.claimantChanges = counters("claimant_changes_total", "Claims served to a new claimant, by reason.", "reason")
+	m.keyLost = counter("runs_key_lost_total", "Runs ended with the wherry event key-lost.")
 	m.ignoredWraps = counter("ignored_wraps_total", "Wraps whose key does not decrypt the task's envelope.")
 	m.renewalFailures = counter("renewal_failures_total", "Failed claim renewals.")
 	m.transactionAborts = counter("transaction_aborts_total", "Transactions aborted after a failed produce.")
@@ -279,6 +280,9 @@ func (run *activeRun) ended(state wire.TaskState) {
 		label = strings.ToLower(strings.TrimPrefix(string(state), "TASK_STATE_"))
 	}
 	m.runs.WithLabelValues(tenant, profile, agent, model, label).Inc()
+	if run.event == wire.EventKeyLost {
+		m.keyLost.Inc()
+	}
 	if !run.claimed.IsZero() {
 		m.runDuration.WithLabelValues(tenant, profile, agent, model, label).Observe(time.Since(run.claimed).Seconds())
 	}

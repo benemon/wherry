@@ -397,14 +397,14 @@ bundle: /etc/wherry/receiver.bundle
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
-drain_timeout: 25s
+drain_timeout: 20s
 credentials:
   nomad-token:
     file: /etc/wherry/nomad-token
 ```
 
 Start the receiver under a supervisor that restarts it when it exits and
-allows it 30 seconds to stop, with `drain_timeout: 25s`, as in
+allows it 30 seconds to stop, with `drain_timeout: 20s`, as in
 [Run a receiver](#run-a-receiver). A
 platform credential with no source fails that plugin profile's
 configuration, and the receiver exits with:
@@ -481,7 +481,9 @@ A `--force` update during a drain ends it.
 - a supervisor that restarts the process when it exits, since a
   configuration change ends it, and that allows it 30 seconds to stop
   after `SIGTERM` before a forced kill, with `drain_timeout` in the local
-  configuration set below that window, such as `25s`
+  configuration plus 5 seconds set below that window, such as `20s`; a stop
+  takes at most `drain_timeout` plus 5 seconds, the fixed margin of the key
+  custodian's drain
   ([Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window));
 - for the Nomad plugin, a Nomad token with the
   [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy), from a platform credential or `NOMAD_TOKEN`
@@ -1144,8 +1146,10 @@ configuration, bundle and state directory.
    stopping the jobs still running and releases their tasks to the pool.
    The next delivery of each task adopts the running
    job, on the restarted receiver or another member, and resumes the
-   transcript from the run's latest committed offset. Allow the receiver 30 seconds
-   to stop before a forced kill, with `drain_timeout` below that window.
+   transcript from the run's latest committed offset. A stop takes at most
+   `drain_timeout` plus 5 seconds. Allow the receiver 30 seconds to stop
+   before a forced kill, with `drain_timeout` plus 5 seconds below that
+   window.
 4. Restart the harness sessions that run `wherry mcp`.
 
 ## Harness integration

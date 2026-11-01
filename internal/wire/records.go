@@ -306,10 +306,12 @@ type Advertisement struct {
 	SteppingDown *SteppingDown `json:"stepping_down,omitzero"`
 }
 
-// SteppingDown is when a draining custodian set it and the start time of the process that set it.
+// SteppingDown is when a draining custodian set it, the start time of the process that set it, and the end of its wait
+// for a successor: AtMS plus its drain timeout.
 type SteppingDown struct {
-	AtMS      int64 `json:"at_ms"`
-	StartedMS int64 `json:"started_ms"`
+	AtMS       int64 `json:"at_ms"`
+	StartedMS  int64 `json:"started_ms"`
+	DeadlineMS int64 `json:"deadline_ms"`
 }
 
 // CustodianType is the JWS type of a custodian snapshot.
@@ -761,7 +763,7 @@ func (value *Advertisement) validate() error {
 		return err
 	}
 	if value.Capacity < 0 || value.InFlight < 0 || value.AtMS <= 0 || value.StartedMS < 0 ||
-		value.SteppingDown != nil && (value.SteppingDown.AtMS <= 0 || value.SteppingDown.StartedMS <= 0) {
+		value.SteppingDown != nil && (value.SteppingDown.AtMS <= 0 || value.SteppingDown.StartedMS <= 0 || value.SteppingDown.DeadlineMS <= value.SteppingDown.AtMS) {
 		return errors.New("invalid advertisement")
 	}
 	return validateOffers(value.Offers)

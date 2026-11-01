@@ -862,6 +862,9 @@ func TestInvalidEnvelopeIsRefusedBeforeAnyWrap(t *testing.T) {
 			if dispatches, lookups, _, _ := f.plugin.counts(); dispatches != 0 || lookups != 0 {
 				t.Fatalf("dispatches %d, lookups %d; want neither", dispatches, lookups)
 			}
+			if got := scrapedValue(t, f.receiver, `wherry_runs_key_lost_total{pool="pool-a"}`); got != 0 {
+				t.Fatalf("runs key-lost = %v, want 0", got)
+			}
 		})
 	}
 }
@@ -949,6 +952,9 @@ func TestStalledHolderLeavesTheKeyUnavailable(t *testing.T) {
 	}
 	if dispatches, lookups, _, _ := f.plugin.counts(); dispatches != 0 || lookups != 0 {
 		t.Fatalf("dispatches %d, lookups %d; want neither on a first delivery", dispatches, lookups)
+	}
+	if got := scrapedValue(t, f.receiver, `wherry_runs_key_lost_total{pool="pool-a"}`); got != 1 {
+		t.Fatalf("runs key-lost = %v, want 1", got)
 	}
 }
 

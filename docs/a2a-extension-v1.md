@@ -761,10 +761,13 @@ An advertisement reports a receiver's liveness and capacity.
 - `started_ms`, optional, is when the advertising process started.
 - `stepping_down`, optional, is present while the pool's key custodian
   drains to hand its custody on: `at_ms`, when it was set, and
-  `started_ms`, the start time of the process that set it, both over 0. A
-  successor publishes a `handover` snapshot only when the previous
-  custodian's latest advertisement is live and carries `stepping_down`
-  whose `started_ms` equals the advertisement's.
+  `started_ms`, the start time of the process that set it, both over 0,
+  and `deadline_ms`, `at_ms` plus the custodian's drain timeout, over
+  `at_ms`. A successor publishes a `handover` snapshot only when the
+  previous custodian's latest advertisement is live and carries
+  `stepping_down` whose `started_ms` equals the advertisement's, and only
+  while its own clock is before `deadline_ms`, with the snapshot's commit
+  bounded by it; otherwise it publishes a `takeover`.
 - A receiver advertises every 30 seconds, with or without a ready profile.
   Placement passes over a receiver whose `offers` is empty. Readers take
   each receiver's

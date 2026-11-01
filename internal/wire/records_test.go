@@ -50,7 +50,7 @@ func testRecords() map[string]Record {
 		"echo":                         &Echo{Receiver: "receiver-a", Tenant: "tenant-a", Pool: "pool-a", Run: "run-a", Placement: placement, TaskHash: testHash, MessageID: "message-a"},
 		"advertisement":                &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{{Profile: "nomad", Agent: "claude"}}, Capacity: 2, AtMS: 1},
 		"advertisement without offers": &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 1},
-		"advertisement stepping down":  &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 2, StartedMS: 1, SteppingDown: &SteppingDown{AtMS: 2, StartedMS: 1}},
+		"advertisement stepping down":  &Advertisement{Receiver: "receiver-a", Pool: "pool-a", Offers: []Offer{}, Capacity: 2, AtMS: 2, StartedMS: 1, SteppingDown: &SteppingDown{AtMS: 2, StartedMS: 1, DeadlineMS: 3}},
 		"start failure":                &StartFailure{Wherry: testBinding(), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: testHash},
 		"output": &Output{ArtifactUpdate: TaskArtifactUpdateEvent{TaskID: "run-a", ContextID: "run-a", Append: true, LastChunk: true, Metadata: []byte(`{"index":1}`),
 			Artifact: Artifact{ArtifactID: "sub/Report.md", Name: "sub/Report.md", Parts: []Part{{Raw: StdBytes("x"), Filename: "Report.md", MediaType: OutputMediaType}}, Extensions: []string{ExtensionURI}}},
@@ -236,6 +236,11 @@ func TestRecordValidation(t *testing.T) {
 		"advertisement stepping down without its process": func(r map[string]Record) Record {
 			value := r["advertisement stepping down"].(*Advertisement)
 			value.SteppingDown.StartedMS = 0
+			return value
+		},
+		"advertisement stepping down without a deadline after it": func(r map[string]Record) Record {
+			value := r["advertisement stepping down"].(*Advertisement)
+			value.SteppingDown.DeadlineMS = value.SteppingDown.AtMS
 			return value
 		},
 		"advertisement with a duplicate offer profile": func(r map[string]Record) Record {

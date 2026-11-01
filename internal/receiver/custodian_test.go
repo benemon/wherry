@@ -925,13 +925,15 @@ func TestHandoverOnlyFromTheLiveProcessSteppingDown(t *testing.T) {
 	// Later than the fixtures' own advertisements.
 	now := time.Now().Add(time.Minute)
 	started := now.Add(-time.Hour).UnixMilli()
+	steppingDown := &wire.SteppingDown{AtMS: now.UnixMilli(), StartedMS: started, DeadlineMS: now.Add(time.Minute).UnixMilli()}
 	for name, test := range map[string]struct {
 		advertisement wire.Advertisement
 		reason        string
 	}{
-		"stepping down":                {wire.Advertisement{AtMS: now.UnixMilli(), StartedMS: started, SteppingDown: &wire.SteppingDown{AtMS: now.UnixMilli(), StartedMS: started}}, "handover"},
-		"flag from an earlier process": {wire.Advertisement{AtMS: now.UnixMilli(), StartedMS: started + 1, SteppingDown: &wire.SteppingDown{AtMS: now.UnixMilli(), StartedMS: started}}, "takeover"},
-		"advertisement not live":       {wire.Advertisement{AtMS: now.Add(-advertisementLive - time.Second).UnixMilli(), StartedMS: started, SteppingDown: &wire.SteppingDown{AtMS: now.UnixMilli(), StartedMS: started}}, "takeover"},
+		"stepping down":                {wire.Advertisement{AtMS: now.UnixMilli(), StartedMS: started, SteppingDown: steppingDown}, "handover"},
+		"flag from an earlier process": {wire.Advertisement{AtMS: now.UnixMilli(), StartedMS: started + 1, SteppingDown: steppingDown}, "takeover"},
+		"advertisement not live":       {wire.Advertisement{AtMS: now.Add(-advertisementLive - time.Second).UnixMilli(), StartedMS: started, SteppingDown: steppingDown}, "takeover"},
+		"deadline passed":              {wire.Advertisement{AtMS: now.UnixMilli(), StartedMS: started, SteppingDown: &wire.SteppingDown{AtMS: now.Add(-2 * time.Second).UnixMilli(), StartedMS: started, DeadlineMS: now.Add(-time.Second).UnixMilli()}}, "takeover"},
 		"no flag":                      {wire.Advertisement{AtMS: now.UnixMilli(), StartedMS: started}, "takeover"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -978,6 +980,107 @@ func TestStaleSteppingDownThenStateLossIsATakeover(t *testing.T) {
 		t.Fatalf("snapshots = %d, want the bootstrap and the takeover", len(records))
 	}
 	scraped(t, again, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"} 1`)
+}
+
+// latestAdvertisement is r's latest live advertisement.
+func latestAdvertisement(t *testing.T, f fixture, r *Receiver) wire.Advertisement {
+	t.Helper()
+	state, peers, _ := f.receiver.snapshot()
+	live, err := f.receiver.reader.ReadAdvertisements(f.ctx, state, peers, time.Now(), advertisementLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advertisement, ok := live[r.id]
+	if !ok {
+		t.Fatalf("no live advertisement of %s", r.id)
+	}
+	return advertisement
+}
+
+// The custodian and its only peer drain together, and a replacement starting after both exit records a takeover and
+// counts it: a draining peer is no successor, and a stepping_down past its deadline is no handover.
+func TestCustodianAndItsOnlyPeerDrainingTogetherLeaveATakeover(t *testing.T) {
+	for name, peerSteppingDown := range map[string]bool{"peer advertising stepping_down": true, "peer that exits without it": false} {
+		t.Run(name, func(t *testing.T) {
+			f := newBareFixture(t)
+			f.receiver.drainTimeout = time.Second
+			drain := custodyUntilDrained(t, f.ctx, f.receiver)
+			f.awaitSnapshots(t, 1)
+			awaitActing(t, f, f.receiver)
+			peer := f.peer(t, "receiver-b")
+			at := time.Now()
+			advertisement := wire.Advertisement{AtMS: at.UnixMilli(), StartedMS: at.Add(-time.Hour).UnixMilli()}
+			if peerSteppingDown {
+				advertisement.SteppingDown = &wire.SteppingDown{AtMS: at.UnixMilli(), StartedMS: advertisement.StartedMS, DeadlineMS: at.Add(time.Second).UnixMilli()}
+			}
+			advertiseWith(t, f, peer, advertisement)
+			drain()
+			if stepped := latestAdvertisement(t, f, f.receiver).SteppingDown != nil; stepped == peerSteppingDown {
+				t.Fatalf("stepping_down advertised %v, want %v; logs:\n%s", stepped, !peerSteppingDown, f.logs.String())
+			}
+			replacement := f.member(t, "receiver-c")
+			custodian(t, f.ctx, replacement, time.Now())
+			records := f.snapshotRecords(t)
+			if snapshot := parseSnapshot(t, records[len(records)-1], "receiver-c", replacement.signing); len(records) != 2 || snapshot.Reason != "takeover" {
+				t.Fatalf("snapshots = %d, last %+v, want receiver-c's takeover; logs:\n%s", len(records), snapshot, f.logs.String())
+			}
+			if got := scrapedValue(t, replacement, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 {
+				t.Fatalf("takeovers = %v at the replacement, want 1", got)
+			}
+		})
+	}
+}
+
+// A successor arriving near the drain's deadline while the task topic's reads block: the drain ends within the drain
+// timeout and stepDownMargin, and the keys are kept.
+func TestHandoverNearTheDeadlineEndsWithinTheBoundKeepingTheKeys(t *testing.T) {
+	interval := custodyInterval
+	custodyInterval = 200 * time.Millisecond
+	t.Cleanup(func() { custodyInterval = interval })
+	f := newBareFixture(t)
+	f.receiver.drainTimeout = 4 * time.Second
+	drain := custodyUntilDrained(t, f.ctx, f.receiver)
+	f.awaitSnapshots(t, 1)
+	awaitActing(t, f, f.receiver)
+	f.submit(t, f.host, nil)
+	held := heldKeys(t, f.receiver)
+	successor := f.peer(t, "receiver-b")
+	if err := successor.advertise(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		if slices.ContainsFunc(request.(*kmsg.ListOffsetsRequest).Topics, func(topic kmsg.ListOffsetsRequestTopic) bool { return topic.Topic == admin.PoolTasksTopic(testPool) }) {
+			f.cluster.SleepControl(func() { <-release })
+		}
+		return nil, nil, false
+	})
+	tended := make(chan error, 1)
+	time.AfterFunc(f.receiver.drainTimeout-time.Second, func() {
+		successor.assign(true)
+		tended <- successor.tend(f.ctx, time.Now())
+	})
+	bound := f.receiver.drainTimeout + stepDownMargin
+	began := time.Now()
+	drain()
+	if took := time.Since(began); took > bound+time.Second {
+		t.Fatalf("drain took %s, want within %s", took, bound)
+	}
+	if err := <-tended; err != nil {
+		t.Fatal(err)
+	}
+	records := f.snapshotRecords(t)
+	if parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing).Reason != "handover" {
+		t.Fatalf("no handover; logs:\n%s", f.logs.String())
+	}
+	if keys := heldKeys(t, f.receiver); len(keys) != len(held) {
+		t.Fatalf("keys %s after the bound ended the scan, want %s kept", describeKeys(keys), describeKeys(held))
+	}
+	if len(f.rekeys(t)) != 0 {
+		t.Fatal("re-key wraps written from a scan the bound ended")
+	}
 }
 
 // failTaskListing fails every listing of the pool's task topic's offsets.

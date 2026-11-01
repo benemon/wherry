@@ -255,3 +255,35 @@ func TestCustodianTakeoverAlertFiresOnEitherReason(t *testing.T) {
 		}
 	}
 }
+
+var keyLostExpr = regexp.MustCompile(`increase\(wherry_runs_key_lost_total\[[^\]]+\]\)\)\s*>\s*0\s*$`)
+
+// WherryRunsKeyLost fires on any increase of wherry_runs_key_lost_total.
+func TestRunsKeyLostAlertFiresOnAnyIncrease(t *testing.T) {
+	var rules struct {
+		Groups []struct {
+			Rules []struct {
+				Alert string `yaml:"alert"`
+				Expr  string `yaml:"expr"`
+			} `yaml:"rules"`
+		} `yaml:"groups"`
+	}
+	data, err := os.ReadFile(filepath.Join(observability, "wherry-alerts.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(data, &rules); err != nil {
+		t.Fatal(err)
+	}
+	var expr string
+	for _, group := range rules.Groups {
+		for _, rule := range group.Rules {
+			if rule.Alert == "WherryRunsKeyLost" {
+				expr = rule.Expr
+			}
+		}
+	}
+	if !keyLostExpr.MatchString(strings.TrimSpace(expr)) {
+		t.Fatalf("WherryRunsKeyLost expr %q, want any increase of wherry_runs_key_lost_total above 0", expr)
+	}
+}

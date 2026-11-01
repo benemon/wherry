@@ -939,11 +939,14 @@ with that key; any other generates a P-256 key, stores it, and publishes it
 with reason `bootstrap` when the topic holds no snapshot, `handover` when
 the previous custodian is another receiver whose latest advertisement is
 within 120 seconds and carries `stepping_down` with the `started_ms` of that
-advertisement, and `takeover` otherwise, the same receiver back without its
+advertisement and a `deadline_ms` after the receiver's clock, and
+`takeover` otherwise, the same receiver back without its
 keys included. A takeover logs `custodian: took over pool <pool>
 (WherryCustodianTakeover)` and counts in `wherry_custodian_takeovers_total`
 with reason `takeover` once, when its snapshot is first read back, also on a
-later pass when the commit landed but its read-back failed. The custodian rotates the key at the
+later pass when the commit landed but its read-back failed. A `handover`
+snapshot's write ends at the `deadline_ms`; a write the deadline ends is
+followed on the next pass by a `takeover`. The custodian rotates the key at the
 append time of the snapshot first read back naming it plus 24 hours plus a
 jitter under one hour derived from the pool and key ID, publishing a
 `rotation` snapshot, and republishes its snapshot with the same reason after
@@ -967,10 +970,13 @@ On `SIGINT`, `SIGTERM` or a configuration change, a receiver closes its
 custodian group client and removes its static membership from the group,
 which hands the partition on at once. The key custodian with a
 `drain_timeout` over `0s` while another member of the pool has an
-advertisement within 120 seconds first advertises `stepping_down`, waiting
-at most 2.5 seconds for the write, and after the removal waits up to
-`drain_timeout` for another receiver's snapshot; the steps before any
-handover end within `drain_timeout` plus 5 seconds. With one, it
+advertisement within 120 seconds without `stepping_down` first advertises
+`stepping_down` with `deadline_ms` at its time plus `drain_timeout`,
+waiting at most 2.5 seconds for the write, and after the removal waits until
+that deadline for another receiver's snapshot. Every step of the drain, the
+handover's reads, its re-key transaction and the key deletion included,
+ends within `drain_timeout` plus 5 seconds of the stop; a read or write that
+bound ends keeps the keys. With a successor's snapshot, it
 reads the task topic to its last stable offset and the pool's events, writes
 in one transaction a re-key wrap to the successor's current key for every
 task its keys open that is its run's earliest accepted, not terminal and not
@@ -978,9 +984,9 @@ past its `task_ended_by`, and then deletes its pool keys. A read or write
 error keeps the keys to their deadlines. A task appended under its key after
 that read is not re-keyed: it fails key-lost before it starts, and its host
 resubmits it before its `task_started_by`. With no successor's snapshot
-within `drain_timeout`, as soon as no other member of the pool has an
-advertisement within 120 seconds, or with no such member when the drain
-began, it logs `custodian: no successor in pool <pool>; keeping the pool
+by the deadline, as soon as no other member of the pool has an
+advertisement within 120 seconds without `stepping_down`, or with no such
+member when the drain began, it logs `custodian: no successor in pool <pool>; keeping the pool
 keys to their deadlines` and exits with its keys, and its restart continues
 as custodian. With `drain_timeout` at `0s` it advertises no
 `stepping_down`, logs `custodian: leaving pool <pool> with no drain timeout;
@@ -1017,7 +1023,8 @@ each held run go on for up to the local configuration's
 [`drain_timeout`](configuration.md#drain-timeout-and-the-stop-window),
 default `0s`. It then commits the pending transcript of each run still
 held, releases their tasks and exits, leaving their jobs running; set the
-platform's stop window a few seconds above `drain_timeout`. When a
+platform's stop window a few seconds above `drain_timeout` plus 5 seconds.
+When a
 configuration record that differs from its own appears, it stops claiming,
 lets each held run end with no time limit and fails with
 `receiver configuration changed`; after a record `receiver update --force`
@@ -1241,6 +1248,7 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events or, for the key custodian, its snapshot topic |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
 | `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover`, `contested`; both start at 0 |
+| `wherry_runs_key_lost_total` | counter | none | runs this receiver ended with the wherry event `key-lost`; starts at 0 |
 | `wherry_claimant_changes_total` | counter | `reason` | claims the key custodian served to a new claimant: `released`, `lease` |
 | `wherry_ignored_wraps_total` | counter | none | wraps whose key does not decrypt the task's envelope |
 | `wherry_metrics_dropped_total` | counter | `profile`, `reason` | plugin samples dropped and `Metrics` calls that failed |

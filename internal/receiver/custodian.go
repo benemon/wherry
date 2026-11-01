@@ -12,6 +12,7 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -45,8 +46,8 @@ const (
 	sessionTimeout = 45 * time.Second
 	// advertisementLive is how recent a receiver's advertisement is while the receiver is live.
 	advertisementLive = 120 * time.Second
-	// stepDownMargin is how long a drain may take beyond the drain timeout before any handover: half of it bounds the
-	// read of live members and the stepping_down advertisement, the rest the leave of the custodian group.
+	// stepDownMargin is how long a drain may take beyond the drain timeout: half of it bounds the read of live members
+	// and the stepping_down advertisement; the leave of the custodian group and a handover end within the rest.
 	stepDownMargin = 5 * time.Second
 )
 
@@ -155,19 +156,21 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 // for a successor's snapshot: with one it hands its keys over; with none it keeps them to their deadlines, so its restart
 // is an ordinary custodian restart. Any other custodian leaves without stepping_down, so its successor takes over.
 func (r *Receiver) stepDown(ctx context.Context, group *kgo.Client) {
-	// The steps before a handover end within the drain timeout and stepDownMargin, whatever ctx.
+	// Every step, the handover included, ends within the drain timeout and stepDownMargin, whatever ctx.
 	bounded, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.drainTimeout+stepDownMargin)
 	defer cancel()
 	r.custody.mu.Lock()
 	acting := r.custody.producer != nil
 	r.custody.mu.Unlock()
-	waiting := false
+	waiting, deadline := false, time.Time{}
 	if acting && r.drainTimeout > 0 {
 		adCtx, cancel := context.WithTimeout(bounded, stepDownMargin/2)
 		live, err := r.peerLive(adCtx)
 		if waiting = err == nil && live; waiting {
+			at := time.Now()
+			deadline = at.Add(r.drainTimeout)
 			r.mu.Lock()
-			r.steppingDown = &wire.SteppingDown{AtMS: time.Now().UnixMilli(), StartedMS: r.started.UnixMilli()}
+			r.steppingDown = &wire.SteppingDown{AtMS: at.UnixMilli(), StartedMS: r.started.UnixMilli(), DeadlineMS: deadline.UnixMilli()}
 			r.mu.Unlock()
 			if err := r.advertise(adCtx); err != nil {
 				r.logger.Printf("custodian: advertise stepping down: %v", err)
@@ -193,14 +196,13 @@ func (r *Receiver) stepDown(ctx context.Context, group *kgo.Client) {
 		return
 	case waiting:
 		r.logger.Printf("custodian: stepping down in pool %s; waiting up to %s for a successor", r.config.Pool, r.drainTimeout)
-		waitCtx, cancel := context.WithTimeout(bounded, r.drainTimeout)
+		// A successor counts a handover only for a snapshot committed before the advertised deadline.
+		waitCtx, cancel := context.WithDeadline(bounded, deadline)
 		defer cancel()
 		for waitCtx.Err() == nil {
 			latest, err := r.readCurrent(waitCtx)
 			if err == nil && latest.snapshot != nil && latest.snapshot.Custodian != r.id {
-				handCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), readTimeout)
-				defer cancel()
-				if err := r.handOver(handCtx, latest.snapshot.Current); err != nil {
+				if err := r.handOver(bounded, latest.snapshot.Current); err != nil {
 					r.logger.Printf("custodian: hand over to %s: %v; keeping the pool keys to their deadlines", latest.snapshot.Custodian, err)
 				}
 				return
@@ -215,11 +217,13 @@ func (r *Receiver) stepDown(ctx context.Context, group *kgo.Client) {
 	r.logger.Printf("custodian: no successor in pool %s; keeping the pool keys to their deadlines", r.config.Pool)
 }
 
-// peerLive reports whether another member of the pool has a live advertisement.
+// peerLive reports whether another member of the pool has a live advertisement without stepping_down: a draining
+// custodian is no successor.
 func (r *Receiver) peerLive(ctx context.Context) (bool, error) {
 	state, peers, _ := r.snapshot()
 	live, err := r.reader.ReadAdvertisements(ctx, state, peers, time.Now(), advertisementLive)
 	delete(live, r.id)
+	maps.DeleteFunc(live, func(_ string, advertisement wire.Advertisement) bool { return advertisement.SteppingDown != nil })
 	return len(live) > 0, err
 }
 
@@ -269,6 +273,9 @@ func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 		if err := r.admissionCommit(ctx, records...); err != nil {
 			return fmt.Errorf("re-key: %w", err)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	for id := range keys {
 		if err := os.Remove(filepath.Join(r.poolKeysDir(), id+".json")); err != nil {
@@ -403,16 +410,22 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 		return nil
 	}
 	if !latest.names(r) || keys[latest.snapshot.Current.KeyID] == nil {
-		reason := "takeover"
+		reason, mintCtx := "takeover", ctx
 		switch {
 		case latest.record == nil:
 			reason = "bootstrap"
 		case r.custody.contested:
 			reason = "contested"
-		case r.handedOver(ctx, latest, now):
-			reason = "handover"
+		default:
+			// A handover snapshot commits before the outgoing custodian's deadline or not at all.
+			if deadline, ok := r.handedOver(ctx, latest, now); ok {
+				var cancel context.CancelFunc
+				reason = "handover"
+				mintCtx, cancel = context.WithDeadline(ctx, deadline)
+				defer cancel()
+			}
 		}
-		return r.mint(ctx, keys, reason, latest, now)
+		return r.mint(mintCtx, keys, reason, latest, now)
 	}
 	if becoming {
 		r.logger.Printf("custodian: continuing as custodian of pool %s with key %s", r.config.Pool, latest.snapshot.Current.KeyID)
@@ -430,20 +443,25 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-// handedOver reports that latest's custodian, another receiver, hands custody on: its latest advertisement is live at now
-// and carries stepping_down set by the process that wrote it. The same receiver back is a later process.
-func (r *Receiver) handedOver(ctx context.Context, latest current, now time.Time) bool {
+// handedOver reports that latest's custodian, another receiver, hands custody on, and the deadline of its wait for a
+// successor: its latest advertisement is live at now and carries stepping_down set by the process that wrote it, with a
+// deadline after now. The same receiver back is a later process.
+func (r *Receiver) handedOver(ctx context.Context, latest current, now time.Time) (time.Time, bool) {
 	if latest.snapshot == nil || latest.snapshot.Custodian == r.id {
-		return false
+		return time.Time{}, false
 	}
 	state, peers, _ := r.snapshot()
 	live, err := r.reader.ReadAdvertisements(ctx, state, peers, now, advertisementLive)
 	if err != nil {
 		r.logger.Printf("custodian: read advertisements: %v", err)
-		return false
+		return time.Time{}, false
 	}
 	advertisement, ok := live[latest.snapshot.Custodian]
-	return ok && advertisement.SteppingDown != nil && advertisement.SteppingDown.StartedMS == advertisement.StartedMS
+	if !ok || advertisement.SteppingDown == nil || advertisement.SteppingDown.StartedMS != advertisement.StartedMS {
+		return time.Time{}, false
+	}
+	deadline := time.UnixMilli(advertisement.SteppingDown.DeadlineMS)
+	return deadline, now.Before(deadline)
 }
 
 // contest handles the custodian producer's fence while the group still assigns this receiver the partition: the first
