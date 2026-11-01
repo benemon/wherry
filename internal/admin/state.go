@@ -670,9 +670,8 @@ func validateRecord(record Record) error {
 }
 
 type rawRecord struct {
-	Offset     int64
-	Value      []byte
-	AppendedMS int64
+	Offset int64
+	Value  []byte
 }
 
 // ErrNewerRecord is a wherry.admin record whose version is above RecordVersion, written by a later release.

@@ -230,8 +230,9 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 	var late *kgo.Record
 	report := rotate(nil, func() { late = submit("run-late", current) })
 	want := []SuspectTask{
-		{"run-current", "tenant-a", currentID, []string{"deploy", "model"}, retained.Timestamp.UnixMilli()},
-		{"run-late", "tenant-a", currentID, []string{"deploy", "model-renamed"}, late.Timestamp.UnixMilli()},
+		// Every terms record's credentials for the agent: a superset, never a miss across the terms change.
+		{"run-current", "tenant-a", currentID, []string{"deploy", "model", "model-renamed"}, retained.Timestamp.UnixMilli()},
+		{"run-late", "tenant-a", currentID, []string{"deploy", "model", "model-renamed"}, late.Timestamp.UnixMilli()},
 	}
 	if !reflect.DeepEqual(report.SuspectKeys, []string{currentID}) || !reflect.DeepEqual(report.Tasks, want) {
 		t.Fatalf("report %+v, want the current key's retained tasks %+v", report, want)

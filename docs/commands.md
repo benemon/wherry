@@ -818,10 +818,10 @@ task run=<run> tenant=<tenant> key=<kid> credentials=<name>[,<name>...] appended
 tasks=<n>
 ```
 
-The credential names are those of the task's envelope: the agent's
-credentials the host supplied under the pool terms in force when the task
-was appended, the last terms record on `wherry.admin` appended no later than
-the task, and the task's own.
+The credential names are the task's own credentials and every credential
+any terms record of the pool on `wherry.admin` gives the task's agent. The
+list can name a credential the envelope did not hold; it never omits one it
+did, so rotating every listed credential covers the exposure.
 
 ### `wherry admin host add HOST --tenant TENANT --bundle-file FILE`
 

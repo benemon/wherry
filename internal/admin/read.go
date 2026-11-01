@@ -374,7 +374,7 @@ func readRaw(ctx context.Context, reader *Reader) ([]rawRecord, error) {
 	}
 	raw := make([]rawRecord, len(records))
 	for i, record := range records {
-		raw[i] = rawRecord{record.Offset, record.Value, record.Timestamp.UnixMilli()}
+		raw[i] = rawRecord{record.Offset, record.Value}
 	}
 	return raw, nil
 }

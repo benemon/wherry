@@ -53,8 +53,8 @@ var rotateWait, rotateProgress = 5 * time.Minute, 10 * time.Second
 // PoolRotateKey records a rotate-key request for a suspended pool, waits for its key custodian's snapshot rotated for it,
 // reporting the wait to progress, and then reports every task retained through the task topic's end at that point whose
 // submit wrap is to one of suspects, by default the current key when the request is made. A task record is listed as
-// written, verified or not, since its envelope is exposed either way. Its credential names are those of the pool's
-// terms in force when it was appended and its own, never the current terms'.
+// written, verified or not, since its envelope is exposed either way. Its credential names are its own and those every
+// terms record of the pool on wherry.admin gives its agent: a superset, since an incident inventory must not miss one.
 func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects []string, progress io.Writer) (RotateReport, error) {
 	state, err := service.LoadState(ctx)
 	if err != nil {
@@ -145,15 +145,8 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 		for _, credential := range task.Wherry.Credentials {
 			names[credential.Name] = true
 		}
-		// The terms in force at the task's append are the last terms record appended no later than it.
-		var inForce *Terms
-		for _, dated := range history {
-			if dated.appendedMS <= record.Timestamp.UnixMilli() {
-				inForce = &dated.terms
-			}
-		}
-		if inForce != nil {
-			if agent, err := envelopeCredentials(*inForce, task.Wherry); err == nil {
+		for _, terms := range history {
+			if agent, err := envelopeCredentials(terms, task.Wherry); err == nil {
 				maps.Copy(names, agent)
 			}
 		}
@@ -162,23 +155,17 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	return report, nil
 }
 
-// datedTerms are a pool's terms as a wherry.admin pool record set them, with the record's append time.
-type datedTerms struct {
-	terms      Terms
-	appendedMS int64
-}
-
 // termsHistory is every terms record of pool on wherry.admin, which keeps them all, in offset order.
-func termsHistory(ctx context.Context, reader *Reader, pool string) ([]datedTerms, error) {
+func termsHistory(ctx context.Context, reader *Reader, pool string) ([]Terms, error) {
 	raw, err := readRaw(ctx, reader)
 	if err != nil {
 		return nil, err
 	}
-	var history []datedTerms
+	var history []Terms
 	for _, entry := range raw {
 		record, err := DecodeRecord(entry.Value)
 		if err == nil && record.Kind == "pool" && record.Pool == pool {
-			history = append(history, datedTerms{*record.Terms, entry.AppendedMS})
+			history = append(history, *record.Terms)
 		}
 	}
 	return history, nil
