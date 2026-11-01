@@ -58,7 +58,13 @@ var rotateWait, rotateProgress = 5 * time.Minute, 10 * time.Second
 // written, verified or not, since its envelope is exposed either way. Its credential names are its own and those every
 // terms record of the pool on wherry.admin gives its agent: a superset, since an incident inventory must not miss one.
 func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects []string, progress io.Writer) (RotateReport, error) {
-	state, err := service.LoadState(ctx)
+	operator := NewReader(service.Operator)
+	defer operator.Close()
+	raw, err := readRaw(ctx, operator)
+	if err != nil {
+		return RotateReport{}, err
+	}
+	state, err := load(raw)
 	if err != nil {
 		return RotateReport{}, err
 	}
@@ -116,10 +122,7 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	}
 	report := RotateReport{SuspectKeys: suspects, Horizon: map[int32]int64{}, DeletedFrom: map[int32]int64{}}
 	starts.Each(func(listed kadm.ListedOffset) { report.Horizon[listed.Partition] = listed.Offset })
-	history, err := termsHistory(ctx, reader, pool)
-	if err != nil {
-		return RotateReport{}, err
-	}
+	history := termsHistory(raw, pool)
 	records, err := reader.ReadFrom(ctx, PoolTasksTopic(pool), 0)
 	if err != nil {
 		return RotateReport{}, err
@@ -167,12 +170,8 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	return report, nil
 }
 
-// termsHistory is every terms record of pool on wherry.admin, which keeps them all, in offset order.
-func termsHistory(ctx context.Context, reader *Reader, pool string) ([]Terms, error) {
-	raw, err := readRaw(ctx, reader)
-	if err != nil {
-		return nil, err
-	}
+// termsHistory is every terms record of pool among raw, wherry.admin's records, which keep them all, in offset order.
+func termsHistory(raw []rawRecord, pool string) []Terms {
 	var history []Terms
 	for _, entry := range raw {
 		record, err := DecodeRecord(entry.Value)
@@ -180,7 +179,7 @@ func termsHistory(ctx context.Context, reader *Reader, pool string) ([]Terms, er
 			history = append(history, *record.Terms)
 		}
 	}
-	return history, nil
+	return history
 }
 
 // currentSnapshot is the latest committed snapshot of pool, verified by its writer's key, live or ended.
