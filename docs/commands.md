@@ -22,8 +22,8 @@
   with status 1. `wait` has its own [exit codes](#exit-codes).
 - Durations use Go syntax, such as `90s`, `45m` or `720h`, and must be
   positive. `host revoke` and `receiver revoke` refuse a `--wait` of zero or
-  less before they revoke anything; without `--wait` they compute the wait
-  from the broker's timeouts.
+  less before they revoke anything. They compute the minimum wait from the
+  broker's timeouts; `--wait` can lengthen it but not shorten it.
 - `cancel`, `wait`, `status`, `events` and `logs` print
   `skipped N unverifiable records` on standard error when N records of the
   run fail verification.
@@ -266,8 +266,8 @@ targets, and none takes the target of one of the agent's credentials:
 invalid input: task credential deploy-key takes the environment variable GH_TOKEN of one of agent codex's credentials
 ```
 
-A task credential named as one of the agent's is sealed once and delivered at
-both targets.
+A task credential named as one of the agent's travels once in the envelope
+and is delivered at both targets.
 
 `submit` refuses, before it publishes, a task credential or a required
 credential of the placed agent that the client configuration has no
@@ -295,24 +295,28 @@ bucket with one PUT, then publishes the task with each input's name, size and
 SHA-256 and no URL. S3 input names are file names, distinct from the input
 files' names, and the run's parts and S3 inputs number at most 256 together. S3
 inputs count against neither limit. When publishing fails, `submit`
-deletes what it uploaded. It also refuses a run with S3 inputs or outputs whose
-task credentials and presigned URLs would not fit one 64 KiB seal, naming the
-seal's size; a task credential from a `command` source is not counted, since the
-command runs only to answer a seal. A
-presigned URL of about 420 bytes takes about 840 bytes of the seal, so one seal
-carries about 75.
+deletes what it uploaded.
 
-`submit` seals nothing. The receiver that claims the task asks for the
-agent's credentials the host supplies, the task's credentials and presigned URLs
-for its S3 inputs and outputs, and `wherry wait` or `wherry mcp` answers
-([sealed credentials](security.md#sealed-credentials)). When no seal
-answers the request within 5 minutes, the run ends `TASK_STATE_FAILED` with a message
-that names the credentials, and the presigned URLs when the run has S3
-inputs or outputs:
+`submit` resolves the agent's credentials the host supplies and the task's
+credentials, presigns the S3 inputs and outputs, and encrypts them in the task's
+envelope under the pool's key; the host can go offline once it returns
+([credential envelopes](security.md#credential-envelopes)). It refuses a run
+whose envelope would pass 64 KiB, naming the envelope's size, and a run
+whose source fails, naming the credential:
 
 ```
-credential <name> was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again
+resolve credential <name>: its command exited with status 1
 ```
+
+Before it places the task, `submit` resubmits each run in this host's
+records that ended with the wherry event `key-lost` before its
+`task_started_by` and has no produced replacement. The replacement is a new
+run under a new run ID whose submission `replaces` the failed run
+([Resubmission](a2a-extension-v1.md#resubmission)). `submit` logs
+`run <id>: lost its pool key before it started; resubmitted as run <id>` on
+standard error for each. A resubmission that fails is logged as
+`run <id>: resubmit: <error>` and retried by the next host command that
+reads the run. It does not fail the submission.
 
 ### `wherry cancel RUN_ID`
 
@@ -334,8 +338,7 @@ Waits for a run to finish and collects it. `--timeout` sets the wait,
 Standard output carries the result: each part of the status message on its
 own line, then the `output=` lines. `wait` prints no transcript;
 [`wherry logs`](#wherry-logs-run-id) reads it, and `wherry logs ID > file`
-keeps it. Standard error carries errors, the diagnostics below and the log
-of the seal requests `wait` answers.
+keeps it. Standard error carries errors and the diagnostics below.
 
 The status message's parts are the agent's answer or what went wrong, as its
 [outcome file](configuration.md#agent-contract) reports it, or the
@@ -393,6 +396,24 @@ standard output, and exits at once with status 1 and
 `task_started_by` comes from this host's record of the submission, so
 `wait` on another host of the tenant waits for its timeout.
 
+A run this host submitted that ends with the wherry event `key-lost` before
+its `task_started_by` never started: its pool key was lost
+([Lost pool keys](concepts.md#lost-pool-keys)). `wait` resubmits it under a
+new run ID, or produces the replacement this host already stored, and
+follows the replacement to its outcome, through every later replacement. It
+prints one line on standard error per replacement:
+
+```
+run <id> lost its pool key before it started; resubmitted as run <id>
+```
+
+The result, outputs and exit code are those of the last run followed, and
+the default outputs directory is that run's. `wait` refuses a chain of
+replacements that names a run twice. When the resubmission fails, for
+example on a suspended pool or a pool with no live key custodian, `wait`
+exits with status 1 and
+`wait <id>: run <id> lost its pool key and is resubmittable until <RFC 3339 time>; resubmitting it failed: <error>`.
+
 #### Exit codes
 
 | Code | Meaning |
@@ -405,14 +426,6 @@ standard output, and exits at once with status 1 and
 | 6 | `--timeout` passed with the run still going |
 
 For codes 2 to 4 the error is `run ended in <state>`.
-
-While it waits, `wait` answers the seal requests on the tenant feed for
-every run this host submitted that has not ended, once per attempt, and logs on standard error
-each answer and each verified request of its own runs that it skips or
-refuses, by run, receiver and credential names. It resolves each credential's
-[source](security.md#credential-sources) at the answer. Stopping `wait`
-can leave a credential request unanswered, and the run then ends
-`TASK_STATE_FAILED` after the 5-minute seal wait.
 
 ### `wherry cleanup RUN_ID`
 
@@ -449,6 +462,15 @@ one, else the Kafka timestamp of the run's echo. A record in `state_dir`
 that does not decode counts as skipped, and its run is listed only through
 its echo. With no runs it prints nothing.
 
+A run that ended with the wherry event `key-lost` before its
+`task_started_by` shows `TASK_STATE_FAILED` with
+`cannot be opened: the pool's custodian changed and its key was lost`.
+`status`, with or without `RUN_ID`, resubmits such a run of this host under
+a new run ID, as `submit` does. With `RUN_ID`, its last line is then
+`replaced_by=<id>`, the replacement's run ID. `wherry status` with that ID
+reads the replacement, and `wherry wait` on either run follows it to its
+outcome.
+
 `status` exits with status 0 whenever it reads a state, whatever the
 state. It fails when the run is not found or the read fails.
 
@@ -474,8 +496,7 @@ Prints a run's transcript: each line of the agent's standard output, in
 output order, as the receiver redacted it. The lines are those the run's
 highest delivery attempt published, and, before its first line, those of
 the highest earlier attempt that has them, as
-[Chunk](a2a-extension-v1.md#chunk) specifies. `logs` is read-only and
-answers no seal request.
+[Chunk](a2a-extension-v1.md#chunk) specifies. `logs` is read-only.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -492,13 +513,12 @@ With `-f`, `logs` follows the tenant's transcript topic with one consumer
 from the run's echo, so each line prints as it is written, once and in
 order. When the run reaches a terminal status, it reads the transcript
 topic to the high watermark as above, prints the lines it has not printed,
-and exits with status 0. When it sees a seal request for the run that no
-answerer of this host has sealed after 3 seconds, it prints once on
-standard error:
+and exits with status 0.
 
-```
-run is waiting for credentials; run wherry wait <id>
-```
+A run that ended with the wherry event `key-lost` never started, so it has
+no transcript. `logs -f` resubmits such a run of this host, as `submit`
+does. The replacement's lines are under its own run ID, which
+`wherry status RUN_ID` prints as `replaced_by=<id>`.
 
 `logs` prints every line; a range comes from the shell, as in
 `wherry logs ID | sed -n '101,200p'`.
@@ -522,8 +542,7 @@ echo on the tenant feed. They fail with `run not found` when there is neither.
 
 ### `wherry mcp`
 
-Serves the [MCP tools](mcp.md) over stdio. For as long as it runs it
-answers seal requests as `wait` does, logging to standard error.
+Serves the [MCP tools](mcp.md) over stdio, logging to standard error.
 The packaged MCP launch uses `["mcp"]` and the default configuration path.
 A server that runs `wherry mcp --config-file PATH` uses another, as
 [Harness integration](operations.md#harness-integration) shows.
@@ -710,10 +729,12 @@ parse as Go flags, in the forms `--name value`, `--name=value` and
 `flag needs an argument: -<name>`, one no admin command takes with
 `flag provided but not defined: -<name>`, and one the command does not take
 with `unknown option --<name>`. `--plugin-sha256` is given once per plugin
-type; any other repeated option takes its last value. `pool create`, `pool update`,
-`pool entitle`, `host add` and `receiver add` then create every ACL the new
+type and `--suspect-key` once per key; any other repeated option takes its last value. `pool create`, `pool update`,
+`pool entitle`, `pool suspend`, `pool resume`, `host add` and `receiver add` then create every ACL the new
 state calls for, re-read them, and fail with `ACL plan incomplete` when one
-is missing.
+is missing. They then delete the `WRITE` ACLs on a suspended pool's tasks
+topic that the pool's hosts hold unsuspended, each by a filter naming its
+principal; another principal's ACL on the topic stays.
 
 A bundle file must not exist beforehand. A command that fails removes the
 bundle it created.
@@ -777,6 +798,104 @@ their ACLs. It refuses when the pool's records do not fit the
 transcript topic counted, or when the `retention.ms` of either is below the
 pool's `start_by_limit` plus six hours, and records nothing. It applies
 each host's [quotas](configuration.md#quotas).
+
+### `wherry admin pool suspend POOL`
+
+Records a `suspend` record for the pool on `wherry.admin` and reconciles the
+ACLs. A suspended pool's tenants' hosts hold no `WRITE` on its tasks topic.
+The receivers keep `READ` on it, and every other ACL stays. A host refuses a
+submission to the pool with `pool POOL is suspended; submit again once it is
+resumed` before it resolves any
+credential or uploads any input. Receivers fetch nothing from the pool's
+share group, so they claim no task. The key custodian refuses the open
+request of a run whose job has not started with `pool suspended`; the
+claimant publishes `released` and releases the task, which waits in the
+queue. Open requests of runs adopting a started job are served. Runs
+already holding a claim renew it and continue to their terminal status, and
+their tasks are acknowledged as on an unsuspended pool. A suspension does
+not stop a running job or take back the credentials it holds: rotating them
+at their issuers does, and
+[`wherry admin receiver revoke`](#wherry-admin-receiver-revoke-receiver)
+stops a receiver. A key custodian that steps down while the pool is
+suspended does not scan the task topic or re-key any task. It keeps its
+pool keys to their deadlines and logs
+`custodian: hand over to <receiver>: pool <pool> is suspended; its re-key scan waits for resume; keeping the pool keys to their deadlines`.
+The key custodian keeps rotating.
+
+The key custodian reads `wherry.admin` once at the start of each pass over
+the open requests and decides every request of the pass by that read. A
+pass begins once every attempt wrap of the previous pass committed. The
+first pass that reads the `suspend` record republishes the custodian's
+snapshot with `suspended_for` set to the record's `wherry.admin` offset,
+before it decides any request. The command returns once the key custodian
+has acknowledged: it waits up to 5 minutes for a snapshot whose
+`suspended_for` is at or above its record's offset, writing
+`waiting for pool <pool>'s key custodian to acknowledge the suspend record at wherry.admin offset <offset>, up to <time>`
+to standard error every 10 seconds, then prints
+`pool <pool> is suspended: its key custodian acknowledged the suspend record at wherry.admin offset <offset>; no new start opens`.
+After that no new start opens. With no acknowledgement it fails with
+`pool <pool>'s suspend record is written at wherry.admin offset <offset>, but its key custodian did not acknowledge it within 5m0s; it is not yet in effect`.
+When the pool has no snapshot it returns at once with
+`pool <pool>'s suspend record is written at wherry.admin offset <offset>; the pool has no key custodian yet, so nothing opens until one reads it`.
+A custodian whose advertisement has gone stale is still awaited, since it can still open requests.
+
+### `wherry admin pool resume POOL`
+
+Records a `resume` record for the pool on `wherry.admin` and reconciles the
+ACLs, granting the hosts' `WRITE` on the tasks topic again. Receivers claim
+from the pool again at their next refresh of `wherry.admin`. The key
+custodian serves first starts from the pass that acknowledges the record
+with `resumed_for` in its snapshot, and the command waits for that
+acknowledgement as `pool suspend` does, printing
+`pool <pool> is resumed: its key custodian acknowledged the resume record at wherry.admin offset <offset>; first starts open again`.
+
+### `wherry admin pool rotate-key POOL [--suspect-key KID]...`
+
+Refuses a pool that is not suspended with `pool <pool> is not suspended; run
+wherry admin pool suspend <pool> first`. Otherwise records a `rotate-key`
+record for the pool on `wherry.admin`. The pool's key custodian publishes a
+`rotation` snapshot with a new key on its first pass after it reads a
+`rotate-key` record whose `wherry.admin` offset is above the `rotated_for`
+its current snapshot carries, as at its daily rotation. A snapshot with a
+new key carries as `rotated_for` the offset of the latest `rotate-key`
+record its custodian read, and every later snapshot carries it on; append
+times do not decide it. Hosts encrypt to the new key once they read that
+snapshot.
+
+The command waits up to 5 minutes for a snapshot whose `rotated_for` is at
+or above its record's offset, writing
+`waiting for pool <pool>'s key custodian to rotate for the request at wherry.admin offset <offset>, up to <time>`
+to standard error every 10 seconds. With none, it fails with
+`pool <pool>'s key custodian published no snapshot rotated for the rotate-key request at wherry.admin offset <offset> within 5m0s; the request stands`.
+It then captures the end offset of the pool's tasks topic, reads the topic
+as the Kafka super user through that offset, and lists every retained task
+record whose submit wrap's `kid` is one of the suspect keys. Without
+`--suspect-key` the suspect key is the key the current snapshot names when
+the command starts; the command refuses when the pool has no snapshot or its
+current snapshot does not verify. A task record is listed whether or not its
+signature verifies. The output names runs, tenants and credentials, and
+holds no credential value:
+
+```
+pool <pool>'s key custodian rotated for the rotate-key request; tasks appended through that rotation are listed
+suspect_keys=<kid>[,<kid>...]
+horizon partition=<n> oldest_retained_offset=<offset>
+horizon partition=<n>: retention deleted the tasks at offsets <offset> to <offset> during the scan; they may not be listed
+horizon: the oldest retained task was appended at <time>, <age> ago; tasks deleted by retention before it are not listed
+task run=<run> tenant=<tenant> key=<kid> credentials=<name>[,<name>...] appended=<time>
+tasks=<n>
+```
+
+Each partition's horizon is its log start listed after the scan, since a
+fetch below the log start begins at the start then in effect. Where
+retention moved the start during the scan, the second `horizon` line names
+the offsets it deleted, from the start listed before the scan.
+
+The credential names are the task's own credentials and every credential
+any terms record of the pool on `wherry.admin` gives the task's agent,
+other than the task's `unsupplied_credentials`. The
+list can name a credential the envelope did not hold; it never omits one it
+did, so rotating every listed credential covers the exposure.
 
 ### `wherry admin host add HOST --tenant TENANT --bundle-file FILE`
 
@@ -890,7 +1009,8 @@ up to 2 minutes. It fails at once when the login fails or the probe returns
 any other error. Step 5 waits the largest of
 `connections.max.reauth.ms`, `group.share.max.record.lock.duration.ms` and
 `transaction.max.timeout.ms` across the brokers, and fails when one of them
-is unbounded. `--wait DURATION` replaces that wait and must be positive.
+is unbounded. `--wait DURATION` lengthens that wait and must be positive;
+step 5 refuses a duration below it and names the minimum.
 
 ### `wherry admin skip OFFSET --sha256 HASH`
 
@@ -927,7 +1047,10 @@ Runs a receiver as the principal of the bundle its [local
 configuration](configuration.md#receiver-local-configuration) names.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
 configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
-private JWK with mode 0600, in it.
+private JWK with mode 0600, in it, and in `pool-keys/` one file with mode
+0600 per pool key it holds: the private JWK, its creation time, the append
+time of the committed snapshot first read back naming it current, and its
+deadline.
 On start it:
 
 1. settles a leftover `signing.key.next` as a host command settles
@@ -943,13 +1066,103 @@ On start it:
    credential](configuration.md#platform-credentials), starts its
    [plugin](#plugins) from `plugin_dir` when no earlier profile has, and
    configures the profile;
-6. reads its pool's events once, and starts advertising and claiming.
+6. reads its pool's events once, and starts advertising and claiming;
+7. joins the pool's custodian group, `p-<pool>.custodian`, on
+   `wherry.pool.<pool>.custodian` with its receiver ID as the static
+   instance ID, and acts as the pool's key custodian while the group
+   assigns it the topic's partition. A receiver whose membership ended
+   leaves the group and never acts as custodian.
+
+The key custodian writes every snapshot through the transactional ID
+`p.<pool>.custodian`, one transaction per snapshot, and reads the committed
+snapshot back before it marks the key published. When assigned, a receiver
+that the current snapshot names and that holds the snapshot's key continues
+with that key; any other generates a P-256 key, stores it, and publishes it
+with reason `bootstrap` when the topic holds no snapshot, `handover` when
+the previous custodian is another receiver whose latest advertisement is
+within 120 seconds and carries `stepping_down` with the `started_ms` of that
+advertisement and a `deadline_ms` after the receiver's clock, and
+`takeover` otherwise, including when the same receiver returns without
+its keys. A takeover logs `custodian: took over pool <pool>
+(WherryCustodianTakeover)` and counts in `wherry_custodian_takeovers_total`
+with reason `takeover` once, when its snapshot is first read back, also on a
+later pass when the commit landed but its read-back failed. A `handover`
+snapshot's write ends at the `deadline_ms`; a write the deadline ends is
+followed on the next pass by a `takeover`. The custodian rotates the key at the
+append time of the snapshot first read back naming it plus 24 hours plus a
+jitter under one hour derived from the pool and key ID, publishing a
+`rotation` snapshot, at once on a [`rotate-key`](#wherry-admin-pool-rotate-key-pool-suspect-key-kid) record whose
+`wherry.admin` offset is above the snapshot's `rotated_for`, and republishes its snapshot with the same reason after
+its signing key rotates; a republish does not move the rotation. A commit
+is attempted up to 3 times on the same producer, and a fenced or denied
+commit is not retried; a commit with an
+unknown outcome counts in `wherry_ambiguous_commits_total`. The custodian
+initialises `p.<pool>.custodian` only when assigned. A custodian whose
+producer is fenced while assigned logs `custodian: fenced while assigned in
+pool <pool>; re-initialising to republish (WherryCustodianTakeover)`, counts
+in `wherry_custodian_takeovers_total` with reason `contested`, initialises
+`p.<pool>.custodian` again and republishes its snapshot with reason
+`contested`, under a new key when the current snapshot names another
+receiver. A second fence within the custodian group's 45-second session
+timeout logs `custodian: fenced again within the session timeout in pool
+<pool>; standing down until assigned again`. A receiver whose assignment
+ends, that stood down, or whose failed write is followed by another
+receiver's committed snapshot writes no more snapshots until it is assigned
+again.
+
+On `SIGINT`, `SIGTERM` or a configuration change, a receiver ends any custody
+pass in progress at once, closes its custodian group client and removes its
+static membership from the group, which hands the partition on at once. The key custodian with a
+`drain_timeout` over `0s` while another member of the pool has an
+advertisement within 120 seconds without `stepping_down` first advertises
+`stepping_down` with `deadline_ms` at its stop plus `drain_timeout`,
+waiting at most 2.5 seconds for the write, and after the removal waits until
+that deadline for another receiver's snapshot. Every step of the drain, the
+handover's reads, its re-key transaction and the key deletion included,
+ends within `drain_timeout` plus 5 seconds of the stop; a read or write that
+bound ends keeps the keys. With a successor's snapshot, it
+reads the task topic to its last stable offset and the pool's events, writes
+in one transaction a re-key wrap to the successor's current key for every
+task its keys open that is its run's earliest accepted, not terminal and not
+past its `task_ended_by`, and then deletes its pool keys. A read or write
+error keeps the keys to their deadlines. A task appended under its key after
+that read is not re-keyed: it fails key-lost before it starts, and its host
+resubmits it before its `task_started_by`. While its pool is suspended it
+does not scan the task topic and keeps its keys. With no successor's snapshot
+by the deadline, as soon as no other member of the pool has an
+advertisement within 120 seconds without `stepping_down`, or with no such
+member when the drain began, it logs `custodian: no successor in pool <pool>; keeping the pool
+keys to their deadlines` and exits with its keys, and its restart continues
+as custodian. With `drain_timeout` at `0s` it advertises no
+`stepping_down`, logs `custodian: leaving pool <pool> with no drain timeout;
+keeping the pool keys to their deadlines` and exits with its keys; its
+successor publishes a `takeover`.
+
+The key custodian answers its pool's open requests, every 2 seconds, with an
+attempt wrap or a refusal after the claim check
+([Open request](a2a-extension-v1.md#open-request)), each with its claim
+decision in one transaction through `p.<pool>.custodian`. A receiver that
+holds pool keys but not the current key answers an open request for a task
+it can open with a re-key wrap to the current key.
+
+A replaced key's deadline is `start_by_limit` plus 7 hours after the append
+time of the snapshot that replaced it, as the receiver's first custody pass
+after the replacement reads it. A key replaced before the receiver started
+counts from the receiver's first custody pass. A key the receiver generated
+and has not yet read back in a committed snapshot is marked published and
+kept current when the current snapshot names it. Any other such key's
+deadline is `start_by_limit` plus 7 hours after the current snapshot's
+append time. While the snapshot topic cannot be read to a last stable
+offset at its end, after a read error or behind an open transaction, the
+receiver keeps every key. It deletes a key at its deadline, and all of its
+keys at the end of a handover that re-keyed every task they open. Every
+other key stays in its state directory.
 
 It logs its own lines to standard output with the prefix `receiver: `;
 plugin and link lines are hclog lines named `plugin`. Plugin lines, the
 plugin's raw standard error that go-plugin relays, and profile configure,
 sweep and readiness errors carry the
-[marker](a2a-extension-v1.md#seal) of each credential value
+[marker](security.md#credential-envelopes) of each credential value
 delivered to a run the receiver holds, and of each [platform
 credential](configuration.md#platform-credentials) value, in place of the
 value. On
@@ -957,8 +1170,14 @@ value. On
 each held run go on for up to the local configuration's
 [`drain_timeout`](configuration.md#drain-timeout-and-the-stop-window),
 default `0s`. It then commits the pending transcript of each run still
-held, releases their tasks and exits, leaving their jobs running; set the
-platform's stop window a few seconds above `drain_timeout`. When a
+held, releases their tasks and exits, leaving their jobs running. Those
+commits, releases and acknowledgements and the key custodian's drain all end
+within `drain_timeout` plus 5 seconds of the signal, so a stop takes at most
+that; a run whose commit does not complete by then is left unacknowledged
+for its acquisition lock to return. Set the
+platform's stop window as in
+[Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window).
+When a
 configuration record that differs from its own appears, it stops claiming,
 lets each held run end with no time limit and fails with
 `receiver configuration changed`; after a record `receiver update --force`
@@ -1110,8 +1329,8 @@ plugin call's error as `op=<op> class=<class>: <text>`, without
 has no operation, under the rules for a
 reason above. A run's calls (dispatch, lookup, follow, stop, collect, purge
 and release) replace each credential value delivered to the run with its
-redaction marker; an adopter's lookup comes before its seal and has no values
-yet. The pool's calls (sweep, readiness and configure) belong to no run and
+redaction marker; an adopter's lookup comes before its envelope opens and has no
+values yet. The pool's calls (sweep, readiness and configure) belong to no run and
 replace each value delivered to a run the receiver holds and each platform
 credential value. Every call's text has its URLs replaced, its line breaks
 turned into spaces and is cut to 512 bytes. A profile's configure error ends
@@ -1163,7 +1382,7 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_redeliveries_total` | counter | `tenant`, `profile` | runs executed on a redelivery |
 | `wherry_in_flight` | gauge | `profile` | tasks held |
 | `wherry_capacity` | gauge | none | the configured capacity |
-| `wherry_runs_past_deadline` | gauge | `profile` | tasks held past their task_ended_by, or the 6h run cap, that have not ended |
+| `wherry_runs_past_deadline` | gauge | `profile` | tasks held past their task_ended_by that have not ended |
 | `wherry_advertised_timestamp_seconds` | gauge | none | Unix time of the latest advertisement Kafka acknowledged, 0 before the first |
 | `wherry_start_failures_total` | counter | `profile`, `class` | start failures: `input-too-large`, `dispatch`, `platform`, and `offer-unavailable`, which counts a release by a member with no matching profile, has no start-failure record and carries `profile="none"` |
 | `wherry_dispatch_outcomes_total` | counter | `profile`, `outcome` | dispatches: `created`, `nothing`, `unknown` |
@@ -1172,15 +1391,19 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_sweep_failures_total` | counter | `profile` | failed `Sweep` calls |
 | `wherry_collection_failures_total` | counter | `profile`, `reason` | runs whose outputs were not collected: `not_stopped`, `over_limits`, `timeout`, `failed` |
 | `wherry_plugin_restarts_total` | counter | `type` | plugin restarts |
-| `wherry_seal_waits_total` | counter | `tenant`, `outcome` | seal waits: `sealed`, `expired`, `unanswered`, `adopter_refused` |
-| `wherry_seal_wait_seconds` | histogram | `tenant` | time a run waited for its seal, whatever the outcome |
+| `wherry_open_waits_total` | counter | `tenant`, `outcome` | open request waits: `opened`, `refused`, `unanswered`, `expired` |
+| `wherry_open_wait_seconds` | histogram | `tenant` | time a claimed run waited for its attempt wrap or refusal |
 | `wherry_redactions_total` | counter | `tenant`, `profile` | credential values replaced in published output |
 | `wherry_bus_errors_total` | counter | `op` | Kafka errors: `read`, `write`, `transactional ID`, `share group` |
 | `wherry_denials_total` | counter | `op` | Kafka authorisation errors, by the capability denied: `read`, `write`, `transactional ID`, `share group`, `membership` |
 | `wherry_renewal_failures_total` | counter | none | failed claim renewals |
 | `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
-| `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events |
+| `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events or, for the key custodian, its snapshot topic |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
+| `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover`, `contested`; both start at 0 |
+| `wherry_runs_key_lost_total` | counter | none | runs this receiver ended with the wherry event `key-lost`; starts at 0 |
+| `wherry_claimant_changes_total` | counter | `reason` | claims the key custodian served to a new claimant: `released`, `lease` |
+| `wherry_ignored_wraps_total` | counter | none | wraps whose key does not decrypt the task's envelope |
 | `wherry_metrics_dropped_total` | counter | `profile`, `reason` | plugin samples dropped and `Metrics` calls that failed |
 | `wherry_plugin_platform_errors_total` | counter | `profile`, `class` | platform API errors: `unavailable`, `denied`, `conflict`, `timeout`, `other` |
 | `wherry_plugin_cleanup_pending` | gauge | `profile` | the profile's ended jobs awaiting cleanup |
@@ -1193,10 +1416,11 @@ reason that quotes the task counts as `git remote host outside the pool's vcs
 hosts`, `pool has no storage`, `not started by task_started_by` or
 `not ended by task_ended_by`.
 
-A seal wait is `expired` when the run's `task_started_by`, or for an adopted
-job its `task_ended_by`, passes, `unanswered` when
-the 5-minute wait ends and the run fails, and `adopter_refused` when an
-adopter's wait ends and it stops the job before the run fails.
+An open wait is `opened` when the key custodian's attempt wrap arrives,
+`refused` when the key custodian refuses the request, `unanswered` when no
+answer arrives within 5 minutes and 120 seconds of the request's append time
+and the receiver releases the task, and `expired` when the run's
+`task_started_by`, or for an adopted job its `task_ended_by`, passes first.
 
 The core histograms' buckets are 1, 5, 15, 30 and 60 seconds, 2, 5, 10 and 30
 minutes, and 1, 2, 4 and 6 hours. `wherry_plugin_placement_seconds` uses

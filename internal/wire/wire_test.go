@@ -2,10 +2,7 @@ package wire
 
 import (
 	"bytes"
-	"crypto/ecdsa"
 	"crypto/ed25519"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json/jsontext"
@@ -778,32 +775,6 @@ func TestS3InputsAndOutputsValidation(t *testing.T) {
 	clash.Wherry.S3Inputs = []S3Input{{Name: KnownHostsFile, SHA256: sha}}
 	if err := clash.validate(); err == nil || err.Error() != "an input named known_hosts conflicts with the git host key" {
 		t.Fatalf("S3 input named known_hosts beside a host key: %v", err)
-	}
-}
-
-func TestSealRequestNamesS3Objects(t *testing.T) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := func(inputs, outputs []string) *SealRequest {
-		return &SealRequest{ReceiverBinding: receiverBinding(), Key: jose.JSONWebKey{Key: &key.PublicKey}, KeyID: signed.SealKeyID(&key.PublicKey),
-			Credentials: []string{}, S3Inputs: inputs, S3Outputs: outputs, ExpiryMS: 1}
-	}
-	if err := request([]string{"data.bin"}, []string{"out/report.pdf"}).validate(); err != nil {
-		t.Fatalf("a request for S3 URLs alone: %v", err)
-	}
-	for name, invalid := range map[string]*SealRequest{
-		"nothing":           request(nil, nil),
-		"input path":        request([]string{"a/b"}, nil),
-		"duplicate input":   request([]string{"a", "a"}, nil),
-		"output dot dot":    request(nil, []string{"../x"}),
-		"duplicate output":  request(nil, []string{"x", "x"}),
-		"input leading dot": request([]string{".hidden"}, nil),
-	} {
-		if err := invalid.validate(); err == nil {
-			t.Errorf("%s: validated", name)
-		}
 	}
 }
 

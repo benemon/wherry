@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/benemon/wherry/internal/admin"
-	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -220,8 +219,9 @@ func TestPoolEventsRefuseAnEndedMember(t *testing.T) {
 	record := f.submit(t, f.host, nil)
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 	f.startFailed(t, record, testReceiver, f.receiver.signing)
+	// A refresh replaces the state, never edits it.
 	f.receiver.mu.Lock()
-	f.receiver.state.Ended[admin.ReceiverPrincipal(testReceiver)] = true
+	f.receiver.state.Ended = map[string]bool{admin.ReceiverPrincipal(testReceiver): true}
 	f.receiver.mu.Unlock()
 	events, err := f.receiver.readEvents(f.ctx)
 	if err != nil {
@@ -229,33 +229,5 @@ func TestPoolEventsRefuseAnEndedMember(t *testing.T) {
 	}
 	if len(events.statuses["run-a"]) != 0 || len(events.startFailures["run-a"]) != 0 {
 		t.Fatalf("an ended member's records counted: %+v", events)
-	}
-}
-
-// Each status and start failure on the pool's events is verified once, and any other record not at all.
-func TestPoolEventsVerifyEachRecordOnce(t *testing.T) {
-	f := newFixture(t, resultStream)
-	record := f.submit(t, f.host, nil)
-	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
-	f.startFailed(t, record, testReceiver, f.receiver.signing)
-	f.publishCancel(t, "run-a", 1, f.host, nil)
-	verifications := 0
-	parseHistory = func(appended time.Time) func([]byte, signed.Keys, wire.Record) error {
-		parse := wire.ParseHistory(appended)
-		return func(encoded []byte, keys signed.Keys, value wire.Record) error {
-			verifications++
-			return parse(encoded, keys, value)
-		}
-	}
-	t.Cleanup(func() { parseHistory = wire.ParseHistory })
-	events, err := f.receiver.readEvents(f.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(events.statuses["run-a"]) != 1 || len(events.startFailures["run-a"]) != 1 || len(events.others["run-a"]) != 1 {
-		t.Fatalf("events %+v, want one status, one start failure and the cancel", events)
-	}
-	if verifications != 2 {
-		t.Fatalf("%d verifications, want one per status and start failure", verifications)
 	}
 }

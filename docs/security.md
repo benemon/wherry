@@ -1,12 +1,13 @@
 # Security
 
 How a run's credentials travel from the host to one attempt of one
-receiver, where the host takes their values from, and how they reach the
-agent: the agent holds each value at its target while it runs.
+receiver, what the pool key that carries them protects, where the host
+takes their values from, and how they reach the agent: the agent holds each
+value at its target while it runs.
 [Governance](governance.md) covers identity, grants, signed records and
 the audit trail.
 
-## Sealed credentials
+## Credential envelopes
 
 The agent usually needs a model credential, and each tenant's work runs on
 that tenant's own credential. Every credential has a **source** on the
@@ -31,60 +32,180 @@ when the host has no source for a required credential of the placed agent
 or for a task credential. An optional credential the host has no source for
 is not delivered, and the prompt names it as not supplied.
 
-A host seals nothing when it submits. The receiver that claims a run
-with credentials to deliver makes a P-256 key pair for that
-attempt and publishes a signed **seal request** on the tenant feed: the
-run and attempt, the public key, the credential names and an expiry
-5 minutes out. The host that submitted the run answers it while `wherry
-wait` or `wherry mcp` runs. It checks the request's signature against the
-receiver's registered key, that the receiver is a live member of the run's
-pool and holds the run's current attempt, that the pool's terms approve
-each agent credential for the run's agent, and that the run declares each
-task credential. It resolves each credential's [source](#credential-sources),
-then writes a **seal** to
-its own topic: a compact JWE (`ECDH-ES+A256KW` with `A256GCM`, through
-[go-jose](https://github.com/go-jose/go-jose)) encrypted to the request's
-key and bound in its protected header to the tenant, pool, receiver, key
-thumbprint, run, attempt, credential names and expiry. A seal is at most
-64 KiB, which bounds the values one seal carries. The host logs each
-verified request of its own runs that it skips or refuses, by run,
-receiver and credential name, on standard error.
+A host resolves each credential's [source](#credential-sources) and
+presigns the run's S3 links when it submits, and encrypts them, with the run's
+redaction key, in the task's **envelope**: a compact JWE (`dir` with
+`A256GCM`, through [go-jose](https://github.com/go-jose/go-jose)) of at most
+64 KiB under a fresh content key, bound to the task's run, tenant, pool,
+`task_started_by` and `task_ended_by`. The task's **wrap** carries the
+content key to the pool's current key, which the pool's key custodian holds
+and publishes in its [snapshot](a2a-extension-v1.md#custodian-snapshot).
+The host signs the task with both in it, and can go offline once `submit`
+returns.
 
-A seal passes from the host to one attempt of one receiver in these steps.
+The pool's snapshot topic, `wherry.pool.<pool>.custodian`, holds the
+custodian's signed snapshots: public keys only. The pool's receivers read
+and write it, and the hosts of entitled tenants read it; no other principal
+has a grant on it ([ACLs](design.md#acls)). A host takes the latest
+committed snapshot alone, refuses to submit when its writer is not the
+custodian it names or that custodian is not a live member of the pool, and
+never falls back to an earlier snapshot.
 
-![Credential delivery: the receiver's seal request, the host's checks and sealed answer, and delivery to the job](diagrams/credential-delivery.svg)
-
-Only the requesting receiver can open a seal, and only for that attempt.
-The private key lives in the receiver's memory until the seal opens or the
-wait ends, so a seal on the host's topic opens for no later attempt and for
-no restarted receiver. A redelivered run asks again, and a receiver that
-adopts a running job publishes nothing of the job until its own seal opens.
-Hosts cannot see the broker's claim, so a host seals only to the receiver
-that wrote the run's first `claimed` status, and refuses when a second
-receiver claims the same run. A run adopted by another receiver gets no
-seal, so that receiver stops the job and the run ends `TASK_STATE_FAILED`
-when its seal wait ends.
+The receiver that claims a run makes a P-256 key for that attempt and
+writes an **open request** on the pool's events. The key custodian checks
+the claim and answers with an **attempt wrap**, the content key encrypted to
+the attempt's key, or a refusal. The key custodian opens the envelope
+itself to check its binding against the task before it wraps the content
+key ([The claim check](#the-claim-check)), and a receiver holding a
+replaced pool key decrypts it to check a content key before it re-keys it.
+Of the claimants, only that attempt of that receiver opens the envelope:
+the attempt's private key lives in the receiver's memory until the
+envelope opens or the wait ends. A receiver whose request no key
+custodian answers within 5 minutes and 120 seconds releases the task to the
+pool. A run that never started and whose envelope no holder of a pool key
+can open ends `TASK_STATE_FAILED` with the wherry event `key-lost`, and its
+host resubmits it under the pool's current key until its `task_started_by`
+([Lost pool keys](concepts.md#lost-pool-keys)).
 
 The receiver redacts each credential of 8 bytes or more that it delivered,
 with or without its trailing newline and as JSON escapes it, from
 everything it publishes for the attempt. Each marker is an HMAC of the
-credential's name under a key the host makes for the run and sends in every
-seal, so no marker maps to a name without that key. The receiver redacts
-no value shorter than 8 bytes once its trailing CR and LF are removed, and
-logs `run <id>: credential <name> too short to redact`. Seal requests and
-the failed status of an unanswered seal request carry credential names and
-no values.
+credential's name under the run's redaction key, so no marker maps to a
+name without that key. The receiver redacts no value shorter than 8 bytes
+once its trailing CR and LF are removed, and logs
+`run <id>: credential <name> too short to redact`.
 
-A run whose seal does not arrive within 5 minutes ends in
-`TASK_STATE_FAILED` with a message naming each credential the host did not
-answer. An agent that finds a credential missing or refused during the run
-reports `TASK_STATE_AUTH_REQUIRED` naming the credential, and the run ends
-`TASK_STATE_FAILED`. Each message names its credentials in `credential` data
-parts, and neither run is resumed.
+An agent that finds a credential missing or refused during the run reports
+`TASK_STATE_AUTH_REQUIRED` naming the credential, and the run ends
+`TASK_STATE_FAILED`. The message names its credentials in `credential` data
+parts, and the run is not resumed.
 
 Everything else the agent needs comes from the platform or from the task:
 the image or host install, network access, CA bundles and SSH known hosts
 from the platform, and files and task credentials from the task.
+
+## The claim check
+
+The key custodian serves an open request only when all of these hold, and
+otherwise refuses it with the reason the
+[claim check](a2a-extension-v1.md#the-claim-check) names:
+
+- the request is signed by the live member of the pool it names;
+- it names the run's earliest accepted task, and the run has no terminal
+  status and no cancel;
+- the run's latest ownership status is the requester's `claimed` for the
+  request's attempt;
+- the run is within its open bound: `task_started_by` for a first start,
+  `task_ended_by` once the run has started or the claimant is adopting its
+  job;
+- the claim has an `adopting` status, which its receiver writes once
+  `Lookup` finds the job, or the pool is not suspended in the read of
+  `wherry.admin` the custodian makes at the start of its pass, so on a
+  suspended pool the custodian serves adoptions of running jobs and no first
+  start, even to a receiver that has not yet read the suspension.
+  `wherry admin pool suspend` returns once the key custodian has
+  acknowledged the suspension with `suspended_for` in its snapshot, which a
+  pass publishes before it decides any request and after every attempt wrap
+  of the previous pass committed: after that no new start opens;
+- when the claim changed receivers, the previous claimant committed
+  `released`, its membership ended, or its latest advertisement appended at
+  or before the claim is more than 120 seconds old.
+
+The custodian serves a new claimant once the previous claimant has
+released the task or gone silent, and refuses it with `two live claimants`
+while the previous claimant is live. It records each decision on a claim durably and reuses it, and it
+opens the envelope and checks its binding before it wraps the content key,
+so a spliced envelope never releases its key.
+
+A refused claimant acts on the reason:
+
+| Reason | Claimant's action |
+| --- | --- |
+| `two live claimants`, `not the current claimant`, `pool suspended` | releases the task to the pool |
+| `terminal` | acknowledges the task without a run |
+| `past its bound`, `envelope invalid` | ends the run `TASK_STATE_FAILED` |
+| `key unavailable` | decides from the run's job, as [Lost pool keys](concepts.md#lost-pool-keys) describes |
+
+[Open refusal](a2a-extension-v1.md#open-refusal) gives each action in full.
+
+## What the envelope binds
+
+The envelope's `binding` holds the task's run, tenant, pool,
+`task_started_by` and `task_ended_by`. The key custodian checks it against
+the signed task before it wraps the content key, and the claimant checks it
+again at open, so an envelope copied into another task fails:
+
+- under another run, tenant or pool, the binding differs and the envelope
+  does not open;
+- under the same run while the original task is retained, the copy is not
+  the run's earliest accepted task, and receivers act on the earliest alone
+  ([Admission](a2a-extension-v1.md#admission));
+- under the same run after retention has deleted the original, the copy must
+  carry the original's bounds, which have passed, so admission rejects it.
+
+The binding does not protect the task's other members, such as its message,
+placement and outputs. They rest on the host's signature and on
+earliest-accepted admission, and only the Kafka operator, which is root, can
+append a record before the original. Receivers cannot read the binding at
+admission: a malformed first task can win its run and then fail at open with
+`envelope invalid`.
+
+## Envelope bounds
+
+- **Size.** An envelope is at most 64 KiB, and the signed task with its
+  envelope must fit the pool's record limit; `submit` measures the actual
+  record. `pool create` sizes the pool against a task with a maximum
+  envelope ([Size a pool against the broker](operations.md#size-a-pool-against-the-broker)).
+- **Time on the broker.** The pool's tasks and events topics keep records for
+  `start_by_limit` plus six hours plus a day, and roll a segment every hour,
+  so retention deletes a record within about an hour of that bound; an
+  envelope's exposure is that retention plus the broker's deletion lag.
+  Attempt wraps, re-key wraps and refusals live on the events topic and
+  expire with it. The snapshot topic is compacted and kept forever, and holds
+  public keys only.
+- **Presigned links.** A host presigns an S3 input's GET until
+  `task_started_by` plus 15 minutes and an S3 output's PUT until
+  `task_ended_by`, each at most 7 days, the longest an
+  [S3 SigV4](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html)
+  presigned URL lasts. For a pool with storage, `start_by_limit` plus six
+  hours must not exceed 7 days. The host signs with its static storage
+  credential, so the 7-day ceiling and those deadlines are the only bounds
+  on a link.
+
+## What the pool key protects
+
+The pool is the trust boundary: its receivers trust each other fully.
+A malicious member of the pool forging claim evidence, initialising the
+custodian's transactional ID, publishing a snapshot naming itself with any
+reason, or withholding re-key wraps is out of scope.
+
+| Party | What it gets |
+| --- | --- |
+| Kafka operators and broker storage | ciphertext only, without a pool private key |
+| another tenant or pool | nothing: the platform's ACLs, TLS and SCRAM keep them apart, and only the pool's receivers can write its snapshot |
+| a compromised receiver that is not the key custodian | the credentials of the runs it claims; it can become custodian through the custodian group as an honest receiver would, which raises [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover) |
+| the key custodian, or anyone who copies its keys | every retained envelope under those keys, without claiming |
+
+Daily [rotation](concepts.md#rotation) stops a silently copied key from
+receiving new tasks within a day. Deleting a key at its deadline protects
+old envelopes only if the key was never copied.
+
+### Trade-offs of pool custody
+
+The pool's key custodian holds the key that opens every task's envelope, so
+no attempt needs an answer from the submitting host. Custody in the pool:
+
+- lets the host go offline once `submit` returns: retries, takeovers and
+  drains need no answer from it;
+- keeps the envelope on the chosen pool's task topic alone;
+- gives a [weaker guarantee](concepts.md#lost-pool-keys) when the
+  custodian's keys are lost: never-started tasks under them fail and run
+  only when their host resubmits them before their `task_started_by`, and
+  hosts refuse to submit between a custodian going silent and its
+  successor's snapshot;
+- keeps each run's non-secret task content, and its redaction key, on the
+  host, so the host can resubmit; the host keeps no credential value in
+  the clear.
 
 ## Run credentialed tasks
 
@@ -110,13 +231,11 @@ pool whose terms list the agent's credentials.
    credential as `missing`.
 
 3. Submit the task. Give each task credential its target with
-   `--credential NAME:file=FILE` or `--credential NAME:env=VAR`.
+   `--credential NAME:file=FILE` or `--credential NAME:env=VAR`. `submit`
+   resolves each source and refuses the task, naming the credential, when
+   one fails.
 
-4. Keep `wherry wait RUN_ID` or `wherry mcp` running until the task
-   starts, so the host answers the receiver's
-   [seal request](#sealed-credentials) within 5 minutes.
-
-5. When the run ends `TASK_STATE_FAILED` naming a credential, fix that
+4. When the run ends `TASK_STATE_FAILED` naming a credential, fix that
    credential's source and submit a new run.
 
 ## A model credential per pool
@@ -191,10 +310,9 @@ account at the model provider.
 
 1. Issue a new key at the model provider for the pool's agents.
 2. Replace the value at the credential's source on each of the tenant's
-   hosts. The answering process resolves the source each time it answers a
-   seal request, so runs that start afterwards get the new key with no
-   restart.
-3. Wait for the runs that started with the old key to end. `wherry status`
+   hosts. `submit` resolves the source for each run, so runs submitted
+   afterwards get the new key with no restart.
+3. Wait for the runs submitted with the old key to end. `wherry status`
    lists each run and its state.
 4. Revoke the old key at the model provider.
 
@@ -208,45 +326,44 @@ Prerequisites: the tenant's account at the model provider.
 2. Remove the value from the credential's source on each of the tenant's
    hosts, or replace it with a new key as in
    [Rotate a pool's credential](#rotate-a-pool-s-credential). Until a source
-   resolves, seal requests for the credential go unanswered and those runs
-   end `TASK_STATE_FAILED`.
+   resolves, `submit` refuses runs that deliver the credential.
 
-When a receiver is revoked, rotate each credential sealed to it, as in
+When a receiver is revoked, rotate each credential it could open, as in
 [Revoke a host or receiver](operations.md#revoke-a-host-or-receiver).
 
 ## Credential sources
 
-The answering process, `wherry wait` or `wherry mcp`, resolves each source
-when it answers a seal request, after it authorises the request and before it
-takes the attempt's lock, so a slow source holds up no other answerer of the
-host. The configuration holds no value and no source prompts.
+A submitting host, and a host resubmitting a run, resolves each source the
+run delivers for the run's [envelope](a2a-extension-v1.md#submission). The
+configuration holds no value and no source prompts.
 
 | Source | Value |
 | --- | --- |
 | `file` | the file's contents as they are; a trailing newline is part of the value the agent gets, and the receiver redacts the value with and without it |
-| `env` | the variable in the answering process's environment; unset or empty fails the answer |
-| `command` | the standard output of the program, run without a shell with the answering process's environment and no standard input, byte for byte as for a file; standard error is discarded |
+| `env` | the variable in the submitting process's environment; unset or empty fails the submission |
+| `command` | the standard output of the program, run without a shell with the submitting process's environment and no standard input, byte for byte as for a file; standard error is discarded |
+
+A `command` source runs with `WHERRY_TASK_END_BY` set to the task's
+`task_ended_by` as an RFC 3339 time in UTC, in place of every copy the
+process would inherit; the submitting process's own environment is
+unchanged.
 
 A command has 60 seconds, time for an interactive unlock such as a password
 manager's, and at most 64 KiB of output. A command that exits non-zero, runs
-out of time or writes more fails the answer. A failed source leaves the
-request unanswered, logged by credential name and cause alone. The
-answerer tries it again each second until the request expires; after a
-command source fails, it waits 60 seconds before it resolves the request's
-sources again, so an interactive unlock prompts no more often than it can
-be answered:
+out of time or writes more fails the submission, which names the
+credential and the cause alone:
 
 ```
-run <id>: resolve credential <name>: its command exited with status 1
+resolve credential <name>: its command exited with status 1
 ```
 
 A `file` source must name a regular file that its group cannot write and
 others cannot read, write or execute. Mode 0600 is the recommended mode.
 Group read is accepted, so a secrets agent can template the file for a
-service group at mode 0640. A file that breaks the rule fails the answer:
+service group at mode 0640. A file that breaks the rule fails the submission:
 
 ```
-run <id>: resolve credential <name>: its file is writable by its group or open to others; chmod 600 it
+resolve credential <name>: its file is writable by its group or open to others; chmod 600 it
 ```
 
 The `submit` of the [MCP server](mcp.md) refuses as an input every file

@@ -229,6 +229,8 @@ type Record struct {
 	Offset   int64           `json:"offset,omitzero"`
 	SHA256   string          `json:"sha256,omitzero"`
 	AtMS     int64           `json:"at_ms"`
+	// At is the record's offset on wherry.admin, which load sets; offsets, never clocks, order operator requests.
+	At int64 `json:"-"`
 }
 type Host struct{ Tenant, Name string }
 type State struct {
@@ -237,10 +239,16 @@ type State struct {
 	Hosts        map[string]Host
 	Entitlements map[string]map[string]bool
 	Ended        map[string]bool
+	Revoking     map[string]bool
+	Suspended    map[string]bool
+	// RotateRequested is the wherry.admin offset of each pool's latest rotate-key record.
+	RotateRequested map[string]int64
+	// SuspendChanged is the wherry.admin offset of each pool's latest suspend or resume record.
+	SuspendChanged map[string]int64
 }
 
 func NewState() State {
-	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}}
+	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]int64{}, map[string]int64{}}
 }
 
 // RecordVersion is the wherry.admin record version this release writes and the highest it reads.
@@ -320,6 +328,21 @@ func apply(state *State, record Record) error {
 		state.Entitlements[record.Tenant][record.Pool] = true
 	case "end":
 		state.Ended[subject(record)] = true
+	case "revoking":
+		state.Revoking[subject(record)] = true
+	case "suspend", "resume", "rotate-key":
+		if _, ok := state.Pools[record.Pool]; !ok {
+			return errors.New(record.Kind + " names unknown pool")
+		}
+		switch record.Kind {
+		case "suspend":
+			state.Suspended[record.Pool], state.SuspendChanged[record.Pool] = true, record.At
+		case "resume":
+			delete(state.Suspended, record.Pool)
+			state.SuspendChanged[record.Pool] = record.At
+		default:
+			state.RotateRequested[record.Pool] = record.At
+		}
 	}
 	return nil
 }
@@ -591,18 +614,6 @@ func AuthorizeAdvertisement(state State, keys signed.Keys, encoded []byte) (wire
 	return advertisement, nil
 }
 
-// AuthorizeSealRequest accepts a seal request from a live member of the run's placed pool.
-func AuthorizeSealRequest(state State, keys signed.Keys, encoded []byte, placedPool, runTenant string) (wire.SealRequest, error) {
-	var request wire.SealRequest
-	if err := wire.ParseRecord(encoded, keys, &request); err != nil {
-		return wire.SealRequest{}, err
-	}
-	if err := state.receiverRecord(request.ReceiverBinding, placedPool, runTenant); err != nil {
-		return wire.SealRequest{}, err
-	}
-	return request, nil
-}
-
 func ValidateReceiverRecord(record Record, receiver string, terms Terms) error {
 	if record.Kind != "receiver" || record.Receiver != receiver || record.Config == nil || record.Config.Receiver != receiver {
 		return errors.New("configuration belongs to another receiver")
@@ -646,6 +657,15 @@ func validateRecord(record Record) error {
 		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil {
 			return errors.New("invalid membership end")
 		}
+	case "revoking":
+		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil ||
+			record.Pool != "" || record.Terms != nil || record.Config != nil || record.Offset != 0 || record.SHA256 != "" {
+			return errors.New("invalid revoking record")
+		}
+	case "suspend", "resume", "rotate-key":
+		if validateNames(record.Pool) != nil || record.Tenant != "" || record.Host != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil || record.Offset != 0 || record.SHA256 != "" {
+			return errors.New("invalid " + record.Kind + " record")
+		}
 	default:
 		return errors.New("unknown admin record kind")
 	}
@@ -675,6 +695,7 @@ func load(raw []rawRecord) (State, error) {
 			newer[entry.Offset] = errors.Is(err, ErrNewerRecord)
 			continue
 		}
+		record.At = entry.Offset
 		if record.Kind == "skip" {
 			skips = append(skips, record)
 		} else {

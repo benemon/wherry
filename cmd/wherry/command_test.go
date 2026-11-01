@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -156,7 +158,26 @@ func newBus(t *testing.T) *bus {
 	b.produce(t, admin.ReceiverTopic("receiver-a"), "receiver-a", registration)
 	b.produce(t, admin.ReceiversTopic, "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
 		Offers: []wire.Offer{{Profile: "lab", Agent: "claude", InlineLimit: 49152}}, Capacity: 1, AtMS: time.Now().UnixMilli()}))
+	publishSnapshot(t, ctx, b.receiver, "pool-a", "receiver-a", b.receiverKey)
 	return b
+}
+
+// publishSnapshot publishes, as receiver, a snapshot naming it pool's custodian under a fresh key; newBus runs no
+// receiver to publish one.
+func publishSnapshot(t *testing.T, ctx context.Context, kafka *kgo.Client, pool, receiver string, key ed25519.PrivateKey) {
+	t.Helper()
+	poolKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := wire.SignRecord(&wire.Snapshot{Pool: pool, Custodian: receiver, Reason: "bootstrap",
+		Current: wire.PoolKey{KeyID: signed.KeyThumbprint(&poolKey.PublicKey), Key: jose.JSONWebKey{Key: &poolKey.PublicKey}}}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.CustodianTopic(pool), Key: []byte(wire.CustodianKey), Value: encoded}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // kafka opens a plain client as the principal of the bundle at path.
@@ -405,7 +426,6 @@ func TestSubmitNeverPrintsCredential(t *testing.T) {
 	if strings.Contains(stdout.String()+stderr.String(), credentialText) {
 		t.Fatalf("submit printed the credential: stdout %q stderr %q", stdout.String(), stderr.String())
 	}
-	// Submit seals nothing; the receiver that claims the task asks for the credential.
 	if records, err := readTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
 		t.Fatalf("host topic holds %d records, %v; want the key registration alone", len(records), err)
 	}
@@ -452,13 +472,13 @@ func TestWaitPrintsDataPart(t *testing.T) {
 	}
 }
 
-// publishFailedRun admits a run and fails it after its credential is not answered.
+// publishFailedRun admits a run and fails it.
 func publishFailedRun(t *testing.T) (*bus, task) {
 	t.Helper()
 	b := newBus(t)
 	admitted := b.admitted(t)
 	status := now(wire.TaskStateFailed)
-	status.Message = &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "credential token was not answered within 5m"}}, Extensions: []string{wire.ExtensionURI}}
+	status.Message = &wire.Message{MessageID: "msg-status", Role: wire.RoleAgent, Parts: []wire.Part{{Text: "the agent exited with status 1"}}, Extensions: []string{wire.ExtensionURI}}
 	runID := admitted.submission.Wherry.Run
 	result := &wire.Result{Task: wire.Task{ID: runID, ContextID: runID, History: []wire.Message{admitted.submission.Message}, Status: status, Artifacts: []wire.Artifact{}},
 		Wherry: wire.ResultBinding{ReceiverBinding: b.binding(admitted), TaskHash: admitted.hash}}
@@ -496,7 +516,7 @@ func TestWaitPrintsFailed(t *testing.T) {
 	if err == nil || err.Error() != "run ended in TASK_STATE_FAILED" {
 		t.Fatalf("error %v", err)
 	}
-	want := "credential token was not answered within 5m\n"
+	want := "the agent exited with status 1\n"
 	if got := stdout.String(); got != want || stderr.Len() != 0 {
 		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
 	}
@@ -554,7 +574,7 @@ func TestStatusPrintsFailed(t *testing.T) {
 	if err := runStatus(b.ctx, b.client, []string{runID}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	want := "TASK_STATE_FAILED\ncredential token was not answered within 5m\n"
+	want := "TASK_STATE_FAILED\nthe agent exited with status 1\n"
 	if stdout.String() != want || stderr.Len() != 0 {
 		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
 	}

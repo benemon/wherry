@@ -361,7 +361,7 @@ func writeLocalConfig(t *testing.T, content string) string {
 
 func TestReceiverLocalConfigExampleParses(t *testing.T) {
 	config, err := loadReceiverLocalConfig(filepath.Join("testdata", "example-receiver-config.yaml"))
-	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 25 * time.Second,
+	want := receiverLocalConfig{Bundle: "/etc/wherry/receiver.bundle", StateDir: "/var/lib/wherry/state", PluginDir: defaultPluginDir, MetricsAddr: ":9464", DrainTimeout: 20 * time.Second,
 		Credentials: map[string]credential.Source{"nomad-token": {File: "/etc/wherry/nomad-token"}}}
 	if err != nil || !reflect.DeepEqual(config, want) {
 		t.Fatalf("example = %+v, %v; want %+v", config, err, want)

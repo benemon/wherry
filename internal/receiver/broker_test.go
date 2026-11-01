@@ -3,6 +3,7 @@ package receiver
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
@@ -50,7 +51,7 @@ func newBrokerPool(t *testing.T, ctx context.Context, address string) brokerPool
 	t.Cleanup(kafka.Close)
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	b := brokerPool{opts: opts, kafka: kafka, receiver: "receiver-" + suffix, pool: "pool-" + suffix, tenant: "tenant-" + suffix, host: "host-" + suffix}
-	b.createTopics(t, ctx, admin.AdminTopic, admin.ReceiversTopic, admin.PoolTasksTopic(b.pool), admin.PoolEventsTopic(b.pool), admin.TenantTopic(b.tenant), admin.TenantTranscriptTopic(b.tenant), admin.HostTopic(b.tenant, b.host), admin.ReceiverTopic(b.receiver), admin.ReceiverProgressTopic(b.receiver))
+	b.createTopics(t, ctx, admin.AdminTopic, admin.ReceiversTopic, admin.PoolTasksTopic(b.pool), admin.PoolEventsTopic(b.pool), admin.TenantTopic(b.tenant), admin.TenantTranscriptTopic(b.tenant), admin.HostTopic(b.tenant, b.host), admin.ReceiverTopic(b.receiver), admin.ReceiverProgressTopic(b.receiver), admin.CustodianTopic(b.pool))
 	terms := testTerms()
 	config := testConfig(b.receiver)
 	config.Pool = b.pool
@@ -132,14 +133,13 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.HostTopic(tenant, host), Value: registration}).FirstErr(); err != nil {
 				t.Fatal(err)
 			}
-			answerSeals(t, ctx, kafka, signed.Keys{receiverID: {Current: signing.Public().(ed25519.PublicKey)}}, tenant, host, credentialName, testToken)
 			base, err := kgo.NewClient(opts...)
 			if err != nil {
 				t.Fatal(err)
 			}
 			logs := &syncBuffer{}
 			plugin := &fakePlugin{stream: noResultStream, endDelay: time.Minute}
-			r := &Receiver{id: receiverID, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+			r := &Receiver{id: receiverID, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 				factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 					return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 				}}
@@ -150,6 +150,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			b.joined(t, ctx, logs)
 			submission := testSubmission("run-broker")
 			submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = tenant, host, pool
+			b.seal(t, ctx, submission)
 			value, err := wire.SignRecord(submission, hostKey)
 			if err != nil {
 				t.Fatal(err)
@@ -204,6 +205,29 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 				t.Fatalf("share group start offset %+v past the task at %d: the task was archived", offset, redelivered.Offset)
 			}
 		})
+	}
+}
+
+// seal puts in submission an envelope wrapped to the pool's current key once its custodian has published one.
+func (b brokerPool) seal(t *testing.T, ctx context.Context, submission *wire.Submission) {
+	t.Helper()
+	for {
+		records, err := readTopic(ctx, b.kafka, admin.CustodianTopic(b.pool))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(records) > 0 {
+			var snapshot wire.Snapshot
+			if err := json.Unmarshal(decodedPayload(records[len(records)-1].Value), &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			sealTask(t, submission, testTerms(), snapshot.Current.Key.Key.(*ecdsa.PublicKey), nil)
+			return
+		}
+		if ctx.Err() != nil {
+			t.Fatal("the pool's custodian never published a snapshot")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -296,14 +320,13 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 		_, signing, _ := ed25519.GenerateKey(rand.Reader)
 		keys[id] = signed.KeyState{Current: signing.Public().(ed25519.PublicKey)}
 		logs, plugin := &syncBuffer{}, &fakePlugin{outcome: pluginsdk.OutcomeNothingCreated}
-		return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+		return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 			factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 				return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 			}}, plugin, logs
 	}
 	first, firstPlugin, firstLogs := member(b.receiver)
 	later, laterPlugin, laterLogs := member(second)
-	answerSeals(t, ctx, b.kafka, keys, b.tenant, b.host, credentialName, testToken)
 	runMember := func(r *Receiver) {
 		runCtx, stop := context.WithCancel(ctx)
 		done := make(chan error, 1)
@@ -314,6 +337,7 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 	b.joined(t, ctx, firstLogs)
 	submission := testSubmission("run-budget")
 	submission.Wherry.Tenant, submission.Wherry.Host, submission.Wherry.Pool = b.tenant, b.host, b.pool
+	b.seal(t, ctx, submission)
 	value, err := wire.SignRecord(submission, hostKey)
 	if err != nil {
 		t.Fatal(err)
@@ -390,7 +414,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
 	}
 	shortIntervals(t)
-	sealWait = 30 * time.Second
+	openWait = 30 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
@@ -419,7 +443,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	logs := &syncBuffer{}
 	plugin := &fakePlugin{stream: resultStream}
-	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 		}}
@@ -451,86 +475,6 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	}
 }
 
-// TestUnansweredCredentialFailsOnRealBroker verifies that an expired seal wait is terminal and acknowledged.
-func TestUnansweredCredentialFailsOnRealBroker(t *testing.T) {
-	address := os.Getenv("WHERRY_KAFKA_TEST_BROKER")
-	if address == "" {
-		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
-	}
-	shortIntervals(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	b := newBrokerPool(t, ctx, address)
-	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
-	hostKafka, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The host configures the credential, so submit takes the run, but its source never resolves.
-	unresolved := map[string]credential.Source{credentialName: {Env: "WHERRY_TEST_UNSET_" + b.host}}
-	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), unresolved, nil, log.New(&syncBuffer{}, "", 0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer host.Close()
-	if _, err := host.Register(ctx); err != nil {
-		t.Fatal(err)
-	}
-	base, err := kgo.NewClient(b.opts...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, signing, _ := ed25519.GenerateKey(rand.Reader)
-	logs := &syncBuffer{}
-	fake := &fakePlugin{stream: resultStream}
-	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
-			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
-		}}
-	runCtx, stop := context.WithCancel(ctx)
-	done := make(chan error, 1)
-	go func() { done <- r.Run(runCtx) }()
-	defer func() { stop(); <-done }()
-	b.joined(t, ctx, logs)
-	submitted, err := host.Submit(ctx, client.SubmitInput{Prompt: "hello", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "credential " + credentialName + " was not answered within 5m; add it to credentials in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again"
-	for {
-		status, statusErr := host.Status(ctx, submitted.RunID)
-		if statusErr == nil && status.Status.State == wire.TaskStateFailed {
-			message := status.Status.Message
-			if message == nil || len(message.Parts) != 2 || message.Parts[0].Text != want || neededCredential(message.Parts[1]) != credentialName {
-				t.Fatalf("failed status %+v, want the reason and a credential part naming %s", status.Status, credentialName)
-			}
-			if encoded, _ := json.Marshal(message); strings.Contains(string(encoded), testToken) {
-				t.Fatal("the failed status carries the credential's value")
-			}
-			break
-		}
-		if ctx.Err() != nil {
-			t.Fatalf("run did not fail after its seal wait; status error %v; logs:\n%s", statusErr, logs.String())
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	member, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ConsumeTopics(admin.PoolTasksTopic(b.pool)), kgo.ShareGroup(admin.PoolGroup(b.pool)), kgo.ShareMaxRecords(1))...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer member.Close()
-	pollCtx, cancelPoll := context.WithTimeout(ctx, 3*time.Second)
-	defer cancelPoll()
-	for _, record := range member.PollRecords(pollCtx, 1).Records() {
-		if string(record.Key) == submitted.RunID {
-			t.Fatal("failed task was redelivered")
-		}
-	}
-	if dispatches, _, _, _ := fake.counts(); dispatches != 0 {
-		t.Fatalf("unsealed run dispatched %d jobs", dispatches)
-	}
-}
-
 // TestFilesOnRealBroker runs a task with an input, a task credential and outputs filling the output limit from a
 // host's Submit to its Await on the real broker: the outputs' chunks commit in the result's transaction, within the
 // broker's record limit, and the host verifies them. A 480 KiB input travels inline, and 250 long-named outputs over the
@@ -541,7 +485,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
 	}
 	shortIntervals(t)
-	sealWait = 30 * time.Second
+	openWait = 30 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
@@ -595,7 +539,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 		outputs = append(outputs, pluginsdk.Output{Name: strings.Repeat(fmt.Sprintf("x%0249d/", i), 2) + "over", Size: 1})
 	}
 	fake := &fakePlugin{stream: resultStream, outputs: outputs}
-	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}
@@ -641,7 +585,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 		t.Skip("WHERRY_KAFKA_TEST_BROKER not set")
 	}
 	shortIntervals(t)
-	sealWait = 30 * time.Second
+	openWait = 30 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
@@ -689,7 +633,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	logs := &syncBuffer{}
 	patch := []byte("From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n")
 	fake := &fakePlugin{stream: resultStream, outputs: []pluginsdk.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
-	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}

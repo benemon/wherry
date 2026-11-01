@@ -244,8 +244,8 @@ func TestAViewHoldsAClaimCommittedBeforeIt(t *testing.T) {
 	}
 }
 
-// Await and the Answer it runs read the tenant feed through one follower.
-func TestAwaitAndItsAnswerShareOneFollower(t *testing.T) {
+// Await reads the tenant feed through one follower.
+func TestAwaitReadsThroughOneFollower(t *testing.T) {
 	f := newFixture(t)
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
@@ -259,9 +259,7 @@ func TestAwaitAndItsAnswerShareOneFollower(t *testing.T) {
 		}
 		done <- awaited
 	}()
-	asked := newRequest(t, receiver.binding(task, 1), "model")
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	f.waitSeals(t, "host-a", 1)
+	time.Sleep(time.Second)
 	consumers := hook.consumers.Load()
 	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateCompleted, nil), receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil))
 	if awaited := <-done; awaited.Status.State != wire.TaskStateCompleted {
@@ -293,8 +291,8 @@ func TestARunBelowTheFollowersStartIsReadOnce(t *testing.T) {
 	}
 }
 
-// Await and the Answer it runs fetch the records after the run's feed offset, however long the feed's history.
-func TestAnsweringFetchesOnlyTheRecordsAfterTheRunsOffset(t *testing.T) {
+// Await fetches the records after the run's feed offset, however long the feed's history.
+func TestAwaitFetchesOnlyTheRecordsAfterTheRunsOffset(t *testing.T) {
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
@@ -317,15 +315,12 @@ func TestAnsweringFetchesOnlyTheRecordsAfterTheRunsOffset(t *testing.T) {
 		}
 		done <- awaited
 	}()
-	asked := newRequest(t, receiver.binding(task, 1), "model")
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	f.waitSeals(t, "host-a", 1)
-	fetched := hook.fetched.Load()
+	time.Sleep(time.Second)
 	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateCompleted, nil), receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCompleted, nil))
 	if awaited := <-done; awaited.Status.State != wire.TaskStateCompleted {
 		t.Fatalf("await %#v; want COMPLETED", awaited)
 	}
-	if fetched >= 50 {
-		t.Fatalf("answering fetched %d feed records; want the few after the run's offset, not the backlog of 2000", fetched)
+	if fetched := hook.fetched.Load(); fetched >= 50 {
+		t.Fatalf("await fetched %d feed records; want the few after the run's offset, not the backlog of 2000", fetched)
 	}
 }

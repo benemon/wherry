@@ -180,6 +180,15 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 	if err := service.configureTopicRetention(ctx, value, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
 		return err
 	}
+	if err := service.configureTopics(ctx, poolSegments, PoolTasksTopic(pool), PoolEventsTopic(pool)); err != nil {
+		return err
+	}
+	if err := service.createTopicsWith(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
+		return err
+	}
+	if err := service.configureTopics(ctx, custodianConfigs, CustodianTopic(pool)); err != nil {
+		return err
+	}
 	if err := service.progressTopics(ctx, state, pool); err != nil {
 		return err
 	}
@@ -486,6 +495,17 @@ var receiversConfigs = map[string]string{
 	"max.compaction.lag.ms":  "3600000",
 }
 
+// poolSegments rolls a pool's task and events topics hourly, so retention deletes a record within an hour of its bound.
+var poolSegments = map[string]string{"segment.ms": "3600000"}
+
+// custodianConfigs are a pool's snapshot topic configs: readers want the latest committed snapshot, which compaction
+// keeps under its one key forever.
+var custodianConfigs = map[string]string{
+	"cleanup.policy":         "compact",
+	"message.timestamp.type": "LogAppendTime",
+	"retention.ms":           "-1",
+}
+
 // progressConfigs are a receiver's progress topic configs: an adopter wants each run's latest offset, its key's latest
 // record, while the pool's topics keep the run.
 func progressConfigs(retention retentionBounds) map[string]string {
@@ -532,35 +552,42 @@ func poolRetention(terms Terms) (retentionBounds, error) {
 }
 
 func (service *Service) appendChecked(ctx context.Context, key []byte, record Record) (State, error) {
+	state, _, err := service.appendRecord(ctx, key, record)
+	return state, err
+}
+
+// appendRecord is appendChecked that also returns the record's wherry.admin offset.
+func (service *Service) appendRecord(ctx context.Context, key []byte, record Record) (State, int64, error) {
 	if err := service.createTopics(ctx, "-1", AdminTopic); err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	// A topic created with older configs converges on the next admin write.
 	if err := service.configureTopics(ctx, receiversConfigs, ReceiversTopic); err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	state, err := service.LoadState(ctx)
 	if err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	encoded, err := EncodeRecord(record)
 	if err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	decoded, _ := DecodeRecord(encoded)
 	if err := apply(&state, decoded); err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
 	if err := state.CheckNames(); err != nil {
-		return State{}, err
+		return State{}, 0, err
 	}
-	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Key: key, Value: encoded}).FirstErr(); err != nil {
-		return State{}, fmt.Errorf("write admin record: %w", err)
+	produced, err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Key: key, Value: encoded}).First()
+	if err != nil {
+		return State{}, 0, fmt.Errorf("write admin record: %w", err)
 	}
-	return state, nil
+	return state, produced.Offset, nil
 }
 
 func (service *Service) createTopics(ctx context.Context, retentionMS string, topics ...string) error {
@@ -777,6 +804,42 @@ func (service *Service) checkRetention(ctx context.Context, state State) error {
 			return fmt.Errorf("topic %s message.timestamp.type is %s, want LogAppendTime", topic, types[topic])
 		}
 	}
+	for _, name := range slices.Sorted(maps.Keys(poolSegments)) {
+		values, err := service.topicConfigs(ctx, name, poolTopics...)
+		if err != nil {
+			return err
+		}
+		for _, topic := range poolTopics {
+			if values[topic] != poolSegments[name] {
+				return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], poolSegments[name])
+			}
+		}
+	}
+	var custodianTopics []string
+	for pool := range state.Pools {
+		custodianTopics = append(custodianTopics, CustodianTopic(pool))
+	}
+	for _, name := range slices.Sorted(maps.Keys(custodianConfigs)) {
+		values, err := service.topicConfigs(ctx, name, custodianTopics...)
+		if err != nil {
+			return err
+		}
+		for _, topic := range custodianTopics {
+			if values[topic] != custodianConfigs[name] {
+				return fmt.Errorf("topic %s %s is %s, want %s", topic, name, values[topic], custodianConfigs[name])
+			}
+		}
+	}
+	// One partition is what gives the custodian group a single assignee and readers one order.
+	details, err := kadm.NewClient(service.Admin).ListTopics(ctx, custodianTopics...)
+	if err != nil {
+		return err
+	}
+	for _, topic := range custodianTopics {
+		if partitions := len(details[topic].Partitions); partitions != 1 {
+			return fmt.Errorf("topic %s has %d partitions, want 1", topic, partitions)
+		}
+	}
 	for pool, terms := range state.Pools {
 		bounds, err := poolRetention(terms)
 		if err != nil {
@@ -951,6 +1014,9 @@ func (service *Service) checkLimits(ctx context.Context, state State, pool strin
 			return 0, fmt.Errorf("%s record is %d bytes, over the %d-byte record limit", record.name, record.batch, feeds)
 		}
 	}
+	if taskRecord.batch > tasks {
+		return 0, fmt.Errorf("%s record is %d bytes, over the tasks topic's %d-byte record limit", taskRecord.name, taskRecord.batch, tasks)
+	}
 	return tasks, nil
 }
 
@@ -1008,6 +1074,13 @@ func (service *Service) recordLimits(ctx context.Context, state State, pool stri
 	}
 	return tasks, feeds, nil
 }
+
+// taskRecord is the smallest task a host submits, carrying a maximum envelope and a submit wrap, with the size of a
+// record batch holding it alone, signed. TestTaskRecordIsPinned builds and signs it to pin this.
+var taskRecord = struct {
+	name  string
+	batch int64
+}{"a task with a maximum envelope", 89385}
 
 // feedRecords are the largest bounded records a receiver writes to a feed, as a refusal names them, each with the size
 // of a record batch holding it alone, signed. TestFeedRecordsArePinned builds and signs each record to pin these.

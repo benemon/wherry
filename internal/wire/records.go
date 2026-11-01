@@ -65,10 +65,12 @@ func parse(verify func([]byte, string, signed.Keys, any) (string, error), encode
 		return err
 	}
 	if owner != value.owner() {
-		return errors.New("record is signed by another owner than it names")
+		return errOtherOwner
 	}
 	return nil
 }
+
+var errOtherOwner = errors.New("record is signed by another owner than it names")
 
 // Placement is what a run asks of its pool: an agent, the labels a profile
 // must carry, and the model the agent runs, empty for an agent whose terms
@@ -96,6 +98,33 @@ type SubmissionBinding struct {
 	Outputs    []ExpectedOutput `json:"outputs,omitzero"`
 	Git        *GitInput        `json:"git,omitzero"`
 	S3Inputs   []S3Input        `json:"s3_inputs,omitzero"`
+	// Replaces names the run a resubmission replaces, and S3InputRun the run whose input prefix holds its S3 inputs.
+	Replaces   string `json:"replaces,omitzero"`
+	S3InputRun string `json:"s3_input_run,omitzero"`
+	// Envelope and Wrap are the run's envelope and its content key's submit wrap.
+	Envelope string `json:"envelope,omitzero"`
+	Wrap     string `json:"wrap,omitzero"`
+}
+
+// InputRun is the run whose input prefix holds the run's S3 inputs.
+func (binding SubmissionBinding) InputRun() string {
+	if binding.S3InputRun != "" {
+		return binding.S3InputRun
+	}
+	return binding.Run
+}
+
+// EnvelopeBinding is the binding an envelope for the task carries.
+func (binding SubmissionBinding) EnvelopeBinding() signed.EnvelopeBinding {
+	return signed.EnvelopeBinding{Run: binding.Run, Tenant: binding.Tenant, Pool: binding.Pool, TaskStartedBy: binding.TaskStartedBy, TaskEndedBy: binding.TaskEndedBy}
+}
+
+// CheckBinding confirms an opened envelope's binding names task, a verified submission.
+func CheckBinding(task *Submission, binding signed.EnvelopeBinding) error {
+	if binding != task.Wherry.EnvelopeBinding() {
+		return errors.New("envelope is bound to another task")
+	}
+	return nil
 }
 
 // PastBound is the first instant the receiver's clock is past a whole-second bound: a job started, or a terminal state
@@ -112,12 +141,6 @@ func NotStartedBy(bound int64) string {
 
 // NotEndedBy is the reason a run not ended by its task_ended_by ends with.
 func NotEndedBy(bound int64) string { return "not ended by task_ended_by (" + RFC3339(bound) + ")" }
-
-// NotEndedByRunCap is the reason a run cut at task_started_by plus the run cap, bound, before its task_ended_by ends
-// with.
-func NotEndedByRunCap(bound int64) string {
-	return "not ended by task_started_by plus the 6h run cap (" + RFC3339(bound) + ")"
-}
 
 // TaskCredential is a credential of the host that the run's agent gets at exactly one target: the environment variable
 // Env, or the file File in its credentials directory.
@@ -214,7 +237,13 @@ type StatusBinding struct {
 	LogOffset *int64 `json:"log_offset,omitzero"`
 	// TranscriptChunks is the number of transcript chunks the attempt wrote, on a terminal status.
 	TranscriptChunks int64 `json:"transcript_chunks,omitzero"`
+	// Event is EventKeyLost on a failed terminal status of a run whose envelope cannot be opened and whose job never
+	// started.
+	Event string `json:"event,omitzero"`
 }
+
+// EventKeyLost marks a run that failed before its job started because its pool key was lost; its host resubmits it.
+const EventKeyLost = "key-lost"
 
 // Chunk is a transcript artifact update on the tenant transcript topic.
 type Chunk struct {
@@ -271,23 +300,81 @@ type Advertisement struct {
 	Capacity int64   `json:"capacity"`
 	InFlight int64   `json:"in_flight"`
 	AtMS     int64   `json:"at_ms"`
+	// StartedMS is when the advertising process started.
+	StartedMS int64 `json:"started_ms,omitzero"`
+	// SteppingDown is set while the pool's custodian drains to hand its custody on.
+	SteppingDown *SteppingDown `json:"stepping_down,omitzero"`
 }
 
-const SealRequestType = "application/vnd.wherry.seal-request.v1+jws"
+// SteppingDown is when a draining custodian set it, the start time of the process that set it, and the end of its wait
+// for a successor: AtMS plus its drain timeout.
+type SteppingDown struct {
+	AtMS       int64 `json:"at_ms"`
+	StartedMS  int64 `json:"started_ms"`
+	DeadlineMS int64 `json:"deadline_ms"`
+}
 
-// SealRequest asks a run's host, on the tenant feed, to seal credentials to key for one attempt.
-type SealRequest struct {
-	V int `json:"v"`
-	ReceiverBinding
-	Key         jose.JSONWebKey `json:"key"`
-	KeyID       string          `json:"key_id"`
-	Credentials []string        `json:"credentials"`
-	// TaskCredentials are the run's task credentials, outside the pool's terms.
-	TaskCredentials []string `json:"task_credentials,omitzero"`
-	// S3Inputs and S3Outputs name the run's S3 inputs and outputs the seal is to carry presigned URLs for.
-	S3Inputs  []string `json:"s3_inputs,omitzero"`
-	S3Outputs []string `json:"s3_outputs,omitzero"`
-	ExpiryMS  int64    `json:"expiry_at_ms"`
+// CustodianType is the JWS type of a custodian snapshot.
+const CustodianType = "application/vnd.wherry.custodian.v1+jws"
+
+// CustodianKey is the Kafka key of every custodian snapshot, so compaction keeps the current snapshot.
+const CustodianKey = "custodian"
+
+var custodianReasons = []string{"bootstrap", "rotation", "handover", "takeover", "contested"}
+
+// Snapshot is a pool's current custodian and public key, on the pool's snapshot topic. Its writer is the custodian it
+// names.
+type Snapshot struct {
+	V         int     `json:"v"`
+	Pool      string  `json:"pool"`
+	Custodian string  `json:"custodian"`
+	Reason    string  `json:"reason"`
+	Current   PoolKey `json:"current"`
+	// RotatedFor is the wherry.admin offset of the latest rotate-key record for the pool a key published by this
+	// snapshot or an earlier one was generated after; every snapshot carries it on.
+	RotatedFor int64 `json:"rotated_for,omitzero"`
+	// SuspendedFor and ResumedFor are the wherry.admin offsets of the latest suspend and resume records for the pool its
+	// custodian acknowledged, each after every attempt wrap it decided before reading the record committed; every
+	// snapshot carries them on.
+	SuspendedFor int64 `json:"suspended_for,omitzero"`
+	ResumedFor   int64 `json:"resumed_for,omitzero"`
+}
+
+// PoolKey is a pool's public P-256 key and its RFC 7638 key ID.
+type PoolKey struct {
+	KeyID string          `json:"key_id"`
+	Key   jose.JSONWebKey `json:"key"`
+}
+
+// ParseSnapshot verifies a snapshot against its writer's current key, decodes it strictly and requires its writer to
+// be the custodian it names.
+func ParseSnapshot(encoded []byte, keys signed.Keys) (Snapshot, error) {
+	var snapshot Snapshot
+	err := parse(strictly(signed.Verify), encoded, keys, &snapshot)
+	return parsedSnapshot(&snapshot, err)
+}
+
+// ParseSnapshotHistory is ParseSnapshot for a snapshot the broker appended at appended, which also verifies against a
+// key its writer retired after that.
+func ParseSnapshotHistory(encoded []byte, keys signed.Keys, appended time.Time) (Snapshot, error) {
+	var snapshot Snapshot
+	err := ParseStrict(encoded, keys, appended, &snapshot)
+	return parsedSnapshot(&snapshot, err)
+}
+
+// parsedSnapshot is snapshot once its parse returned err, which names the snapshot when it fails to decode or its writer
+// is not its custodian.
+func parsedSnapshot(snapshot *Snapshot, err error) (Snapshot, error) {
+	var decode decodeError
+	switch {
+	case errors.As(err, &decode):
+		return Snapshot{}, fmt.Errorf("decode snapshot: %w", decode.err)
+	case errors.Is(err, errOtherOwner):
+		return Snapshot{}, errors.New("snapshot is written by another receiver than the custodian it names")
+	case err != nil:
+		return Snapshot{}, err
+	}
+	return *snapshot, nil
 }
 
 var startFailureClasses = []string{"dispatch", "platform", "input-too-large"}
@@ -364,7 +451,7 @@ func (*Output) jwsType() string        { return OutputType }
 func (*Echo) jwsType() string          { return EchoType }
 func (*Advertisement) jwsType() string { return "application/vnd.wherry.advertisement.v1+jws" }
 func (*StartFailure) jwsType() string  { return StartFailureType }
-func (*SealRequest) jwsType() string   { return SealRequestType }
+func (*Snapshot) jwsType() string      { return CustodianType }
 
 func (value *Submission) owner() string {
 	return signed.HostOwner(value.Wherry.Tenant, value.Wherry.Host)
@@ -377,7 +464,7 @@ func (value *Output) owner() string        { return value.Wherry.Receiver }
 func (value *Echo) owner() string          { return value.Receiver }
 func (value *Advertisement) owner() string { return value.Receiver }
 func (value *StartFailure) owner() string  { return value.Wherry.Receiver }
-func (value *SealRequest) owner() string   { return value.Receiver }
+func (value *Snapshot) owner() string      { return value.Custodian }
 
 func (value *Submission) version() *int    { return &value.V }
 func (value *Cancel) version() *int        { return &value.V }
@@ -388,7 +475,7 @@ func (value *Output) version() *int        { return &value.V }
 func (value *Echo) version() *int          { return &value.V }
 func (value *Advertisement) version() *int { return &value.V }
 func (value *StartFailure) version() *int  { return &value.V }
-func (value *SealRequest) version() *int   { return &value.V }
+func (value *Snapshot) version() *int      { return &value.V }
 
 // runID keeps run IDs to name characters: a run's transactional ID
 // p.<pool>.<run> can then never equal another producer's, such as a receiver's
@@ -440,6 +527,15 @@ func (value *Submission) validate() error {
 	}
 	if binding.TaskStartedBy < 0 || binding.TaskEndedBy < 0 {
 		return errors.New("invalid submission")
+	}
+	if (binding.Replaces == "") != (binding.S3InputRun == "") || binding.Replaces == binding.Run {
+		return errors.New("a resubmission names both the run it replaces and its S3 input run, and replaces another run")
+	}
+	if binding.Replaces != "" && (!runID.MatchString(binding.Replaces) || !runID.MatchString(binding.S3InputRun)) {
+		return errors.New("replaces and s3_input_run must be run IDs")
+	}
+	if (binding.Envelope == "") != (binding.Wrap == "") || len(binding.Envelope) > signed.MaxEnvelope {
+		return errors.New("a submission carries both an envelope of at most 64 KiB and its wrap, or neither")
 	}
 	if err := binding.Placement.validate(); err != nil {
 		return err
@@ -582,12 +678,26 @@ func (value *RunStatus) validate() error {
 	if err := validateMetadata(update.Metadata); err != nil {
 		return err
 	}
+	if binding.Event != "" && (binding.Event != EventKeyLost || binding.Kind != "terminal" || update.Status.State != TaskStateFailed) {
+		return errors.New("a status's event is key-lost, on a failed terminal status")
+	}
 	switch binding.Kind {
-	case "claimed", "started", "rejected", "terminal":
+	case "claimed", "started", "rejected", "terminal", "released", "adopting", "reconciling":
 		return nil
 	default:
 		return errors.New("invalid status kind")
 	}
+}
+
+func (value *Snapshot) validate() error {
+	if err := validateIDs(map[string]string{"pool": value.Pool, "custodian": value.Custodian}); err != nil {
+		return err
+	}
+	key, ok := value.Current.Key.Key.(*ecdsa.PublicKey)
+	if !ok || key.Curve != elliptic.P256() || value.Current.KeyID != signed.KeyThumbprint(key) || !slices.Contains(custodianReasons, value.Reason) {
+		return errors.New("invalid custodian snapshot")
+	}
+	return nil
 }
 
 func (value *Chunk) validate() error {
@@ -655,7 +765,8 @@ func (value *Advertisement) validate() error {
 	if err := validateIDs(map[string]string{"receiver": value.Receiver, "pool": value.Pool}); err != nil {
 		return err
 	}
-	if value.Capacity < 0 || value.InFlight < 0 || value.AtMS <= 0 {
+	if value.Capacity < 0 || value.InFlight < 0 || value.AtMS <= 0 || value.StartedMS < 0 ||
+		value.SteppingDown != nil && (value.SteppingDown.AtMS <= 0 || value.SteppingDown.StartedMS <= 0 || value.SteppingDown.DeadlineMS <= value.SteppingDown.AtMS) {
 		return errors.New("invalid advertisement")
 	}
 	return validateOffers(value.Offers)
@@ -669,34 +780,4 @@ func (value *StartFailure) validate() error {
 		return errors.New("invalid start failure")
 	}
 	return validateIDs(map[string]string{"profile": value.Profile, "agent": value.Agent})
-}
-
-func (value *SealRequest) validate() error {
-	if err := value.ReceiverBinding.validate(); err != nil {
-		return err
-	}
-	key, ok := value.Key.Key.(*ecdsa.PublicKey)
-	names := append(slices.Clone(value.Credentials), value.TaskCredentials...)
-	if !ok || key.Curve != elliptic.P256() || value.KeyID != signed.SealKeyID(key) || value.ExpiryMS <= 0 || len(names)+len(value.S3Inputs)+len(value.S3Outputs) == 0 {
-		return errors.New("invalid seal request")
-	}
-	for i, input := range value.S3Inputs {
-		if !ValidFileName(input) || slices.Contains(value.S3Inputs[:i], input) {
-			return errors.New("a seal request names unique S3 inputs")
-		}
-	}
-	for i, output := range value.S3Outputs {
-		if !ValidOutputName(output) || slices.Contains(value.S3Outputs[:i], output) {
-			return errors.New("a seal request names unique S3 outputs")
-		}
-	}
-	for i, credential := range names {
-		if err := validateID(credential, "credential"); err != nil {
-			return err
-		}
-		if slices.Contains(names[:i], credential) {
-			return errors.New("a seal request names each credential once")
-		}
-	}
-	return nil
 }

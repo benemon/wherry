@@ -41,14 +41,12 @@ func TestCompletedRunRedeliveredAfterSelfRotation(t *testing.T) {
 	for _, rotate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "control", true: "rotated"}[rotate], func(t *testing.T) {
 			f := newFixture(t, resultStream)
-			f.answer(t, credentialName)
 			record := f.submit(t, f.host, nil)
 			if status := f.execute(t, record, 1); status != kgo.AckAccept {
 				t.Fatalf("first delivery %v", status)
 			}
 			if rotate {
 				rotateSelf(t, &f)
-				f.answer(t, credentialName)
 			}
 			admitted, ack := f.receiver.admit(f.ctx, record)
 			if admitted != nil || ack != kgo.AckAccept {
@@ -87,9 +85,11 @@ func TestHeldRunPastStartBy(t *testing.T) {
 			if test.holder != testReceiver {
 				key = f.addPeer(t, test.holder, testPool)
 			}
-			record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = time.Now().Add(-time.Second).Unix() })
+			startBy := time.Now().Add(time.Second).Unix()
+			record := f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy = startBy })
 			f.publishStatus(t, record, test.holder, key, "claimed", wire.TaskStateWorking, nil)
 			f.publishStatus(t, record, test.holder, key, "started", wire.TaskStateWorking, nil)
+			passed(startBy)
 			test.rotate(t, &f, key)
 			admitted, _ := f.receiver.admit(f.ctx, record)
 			if admitted == nil {

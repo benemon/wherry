@@ -200,3 +200,90 @@ func TestAlertRulesNameTheirRunbooks(t *testing.T) {
 		t.Fatal("no alert rules")
 	}
 }
+
+var (
+	takeoverSelector = regexp.MustCompile(`increase\(wherry_custodian_takeovers_total(\{[^}]*\})?\[[^\]]+\]\)\)\s*>\s*0\s*$`)
+	labelMatcher     = regexp.MustCompile(`(\w+)\s*(=~|!~|!=|=)\s*"([^"]*)"`)
+)
+
+// WherryCustodianTakeover fires on any increase of wherry_custodian_takeovers_total for either reason it counts.
+func TestCustodianTakeoverAlertFiresOnEitherReason(t *testing.T) {
+	var rules struct {
+		Groups []struct {
+			Rules []struct {
+				Alert string `yaml:"alert"`
+				Expr  string `yaml:"expr"`
+			} `yaml:"rules"`
+		} `yaml:"groups"`
+	}
+	data, err := os.ReadFile(filepath.Join(observability, "wherry-alerts.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(data, &rules); err != nil {
+		t.Fatal(err)
+	}
+	var expr string
+	for _, group := range rules.Groups {
+		for _, rule := range group.Rules {
+			if rule.Alert == "WherryCustodianTakeover" {
+				expr = rule.Expr
+			}
+		}
+	}
+	selector := takeoverSelector.FindStringSubmatch(strings.TrimSpace(expr))
+	if selector == nil {
+		t.Fatalf("WherryCustodianTakeover expr %q, want an increase of wherry_custodian_takeovers_total above 0", expr)
+	}
+	for _, reason := range []string{"takeover", "contested"} {
+		for _, matcher := range labelMatcher.FindAllStringSubmatch(selector[1], -1) {
+			if matcher[1] != "reason" {
+				continue
+			}
+			matches := regexp.MustCompile("^(?:" + matcher[3] + ")$").MatchString(reason)
+			switch matcher[2] {
+			case "=":
+				matches = reason == matcher[3]
+			case "!=":
+				matches = reason != matcher[3]
+			case "!~":
+				matches = !matches
+			}
+			if !matches {
+				t.Errorf("WherryCustodianTakeover expr %q does not fire on reason %s", expr, reason)
+			}
+		}
+	}
+}
+
+var keyLostExpr = regexp.MustCompile(`increase\(wherry_runs_key_lost_total\[[^\]]+\]\)\)\s*>\s*0\s*$`)
+
+// WherryRunsKeyLost fires on any increase of wherry_runs_key_lost_total.
+func TestRunsKeyLostAlertFiresOnAnyIncrease(t *testing.T) {
+	var rules struct {
+		Groups []struct {
+			Rules []struct {
+				Alert string `yaml:"alert"`
+				Expr  string `yaml:"expr"`
+			} `yaml:"rules"`
+		} `yaml:"groups"`
+	}
+	data, err := os.ReadFile(filepath.Join(observability, "wherry-alerts.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(data, &rules); err != nil {
+		t.Fatal(err)
+	}
+	var expr string
+	for _, group := range rules.Groups {
+		for _, rule := range group.Rules {
+			if rule.Alert == "WherryRunsKeyLost" {
+				expr = rule.Expr
+			}
+		}
+	}
+	if !keyLostExpr.MatchString(strings.TrimSpace(expr)) {
+		t.Fatalf("WherryRunsKeyLost expr %q, want any increase of wherry_runs_key_lost_total above 0", expr)
+	}
+}

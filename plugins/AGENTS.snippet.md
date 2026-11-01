@@ -30,27 +30,40 @@ clones itself.
    `output=<name> path=<path>` line for each output, and writes each returned
    output, S3 outputs included. Its exit status is 0 for
    `TASK_STATE_COMPLETED`, 2 failed, 3 canceled, 4 rejected,
-   6 timed out and 1 when it could not wait or collect. It also answers the receiver's
-   request for the run's credentials, so start it within 5 minutes of
-   submitting, and do not stop it while that request is open: unanswered, the
-   run ends `TASK_STATE_FAILED`. Start it in the background right after
-   submitting, where your harness reports background command completion: its
+   6 timed out and 1 when it could not wait or collect. Start it in the
+   background right after submitting, where your harness reports background command completion: its
    completion is how you learn the run ended.
 4. `submit` refuses with `auth required: credential NAME is not in this
    host's configuration` when the host has no source for a credential the
-   agent requires or the task names. A run whose credential request goes
-   unanswered for 5 minutes ends `TASK_STATE_FAILED`, and a run whose agent
-   needs a credential it lacks ends `TASK_STATE_FAILED` too; each message
-   names the credential. Tell the user which credential it names, and to add
+   agent requires or the task names, and names the credential when its
+   source fails. A run whose agent needs a credential it lacks ends
+   `TASK_STATE_FAILED`, and its message names the credential. Tell the user which credential it names, and to add
    a source for it (a file, an environment variable or a command) under
    `credentials` in their wherry configuration. Never handle the value
    yourself. Then submit the task again and wait for the new run.
-5. `wherry cancel RUN_ID` when the result is no longer needed.
-6. `wherry status RUN_ID` prints a run's state without waiting.
+5. A run whose pool lost its key before the run started ends
+   `TASK_STATE_FAILED` with `cannot be opened: the pool's custodian changed
+   and its key was lost`. Before its `task_started_by`, the host that
+   submitted it resubmits it under a new run ID.
+   `wherry wait` follows the new run and prints
+   `run <id> lost its pool key before it started; resubmitted as run <id>`
+   on standard error. `wherry status RUN_ID` prints `replaced_by=<id>`, and
+   the MCP `wait` tool lists every run ID it followed in `runs`, the last
+   one the run whose result it returns. Use the newest run ID from then on,
+   and do not submit the task again yourself.
+6. `submit` refuses a pool that takes no task now, with an error that says `pool <pool> is
+   suspended; submit again once it is resumed`, `pool <pool> has no
+   custodian yet; submit again once a receiver of the pool has published
+   one` or `pool <pool>'s custodian <receiver> is not live; submit again once
+   a successor has published a snapshot`. Tell the user about a suspended
+   pool, since its operator resumes it. Otherwise submit again after a few
+   minutes.
+7. `wherry cancel RUN_ID` when the result is no longer needed.
+8. `wherry status RUN_ID` prints a run's state without waiting.
    `wherry status` alone lists every run this host can see, latest update
    first. `wherry logs RUN_ID` prints the agent's output lines, and
    `wherry logs -f RUN_ID` prints them as the agent runs until the run ends.
-7. `wherry cleanup RUN_ID` deletes the S3 objects of a run that ended while
+9. `wherry cleanup RUN_ID` deletes the S3 objects of a run that ended while
    no `wait` ran.
 
 Where the `wherry` MCP server (`wherry mcp`) is configured, its tools do the

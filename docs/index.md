@@ -49,8 +49,9 @@ model provider, go where its environment and configuration send them.
 
 The operator decides who may submit work and who may run it. Every host
 and receiver has its own identity, the broker enforces what each may
-reach, and each credential is sealed to the one receiver and the one
-attempt that needs it. [Governance](governance.md) and
+reach, and each credential travels in an envelope under the pool's key.
+The pool's key custodian opens it to check it is bound to its task, and
+it opens for the one receiver and the one attempt that needs it. [Governance](governance.md) and
 [Security](security.md) cover the model.
 
 ### Follow every delegated run, and recover it when a receiver restarts
@@ -58,13 +59,12 @@ attempt that needs it. [Governance](governance.md) and
 A delegated run is managed work, so it outlives a dropped connection. When
 a receiver stops renewing its claim, Kafka offers the task again. The next
 receiver adopts the run's job when it matches and otherwise starts it
-afresh, and fencing stops the earlier attempt from publishing. Credentials
-bound recovery: a host seals a run's credentials only to the receiver that
-first claimed it, so a credentialed run that another receiver adopts fails
-and is submitted again. Every run's status, events and transcript can be
+afresh, and fencing stops the earlier attempt from publishing. The pool's
+key custodian opens a run's envelope for its current claimant, so an
+adopter receives the run's credentials for its own attempt. Every run's status, events and transcript can be
 followed from the CLI or from the agent's own harness.
 [Runs and attempts](concepts.md#runs-and-attempts) and
-[Sealed credentials](security.md#sealed-credentials) give the detail.
+[Credential envelopes](security.md#credential-envelopes) give the detail.
 
 ### Keep your agent and workflow when you change where work runs
 

@@ -59,8 +59,8 @@ func TestScrapeAfterARun(t *testing.T) {
 		`wherry_admissions_total{pool="pool-a",profile="nomad",tenant="tenant-a"} 1`,
 		`wherry_queue_wait_seconds_count{pool="pool-a",profile="nomad",tenant="tenant-a"} 1`,
 		`wherry_dispatch_outcomes_total{outcome="created",pool="pool-a",profile="nomad"} 1`,
-		`wherry_seal_waits_total{outcome="sealed",pool="pool-a",tenant="tenant-a"} 1`,
-		`wherry_seal_wait_seconds_count{pool="pool-a",tenant="tenant-a"} 1`,
+		`wherry_open_waits_total{outcome="opened",pool="pool-a",tenant="tenant-a"} 1`,
+		`wherry_open_wait_seconds_count{pool="pool-a",tenant="tenant-a"} 1`,
 		`wherry_runs_total{agent="claude",model="",pool="pool-a",profile="nomad",state="completed",tenant="tenant-a"} 1`,
 		`wherry_run_duration_seconds_count{agent="claude",model="",pool="pool-a",profile="nomad",state="completed",tenant="tenant-a"} 1`,
 		`wherry_in_flight{pool="pool-a",profile="nomad"} 0`,
@@ -82,9 +82,7 @@ func TestScrapeCarriesNoRunMaterial(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := f.submit(t, f.host, withS3)
-	done := f.executing(t, f.ctx, record, 1)
-	f.sealS3(t, validURLs(s.endpoint()))
-	if status := <-done; status != kgo.AckReject {
+	if status := f.execute(t, record, 1); status != kgo.AckReject {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
 	text := scraped(t, f.receiver,
@@ -305,12 +303,11 @@ func TestAcknowledgedAdvertisementSetsItsTime(t *testing.T) {
 func TestRunPastItsEndByCountsUntilItEnds(t *testing.T) {
 	const series = `wherry_runs_past_deadline{pool="pool-a",profile="nomad"}`
 	f := newFixture(t, resultStream)
-	f.answer(t, credentialName)
 	release := make(chan struct{})
 	f.plugin.endDelay, f.plugin.stopCheck = time.Minute, func() error { <-release; return nil }
 	endBy := time.Now().Add(3 * time.Second).Unix()
 	deadline := wire.PastBound(endBy)
-	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskEndedBy = endBy }), 1)
+	done := f.executing(t, f.ctx, f.submit(t, f.host, func(task *wire.Submission) { task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = endBy, endBy }), 1)
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows == 1 {
 			break

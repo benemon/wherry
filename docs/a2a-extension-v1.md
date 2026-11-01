@@ -2,6 +2,25 @@
 
 URI: `https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md`
 
+**Change note, 2026-11-01 (pool key):** edited in place at version 1. A
+pool's key custodian replaces the seal exchange: the seal request a
+receiver wrote to the tenant feed and the seal its host answered with are
+removed, with the seal request's `expiry_at_ms`. A submission carries
+its credentials, presigned S3 URLs and redaction key in an `envelope`, with
+its content key in a submit `wrap` to the pool's current key
+([Submission](#submission)). A claimant writes an
+[open request](#open-request). The custodian answers it after the
+[claim check](#the-claim-check) with an [attempt wrap](#attempt-wrap) or an
+[open refusal](#open-refusal), in one transaction with a
+[claim decision](#claim-decision). A receiver holding a replaced pool key
+writes a [re-key wrap](#re-key-wrap) to the current key. The custodian
+publishes a [custodian snapshot](#custodian-snapshot) on the pool's
+`wherry.pool.<pool>.custodian` topic. A [resubmission](#resubmission)
+carries `replaces` and `s3_input_run`. An [advertisement](#advertisement)
+carries `stepping_down` while a custodian drains. Statuses add the kinds
+`released`, `adopting` and `reconciling`, and a `terminal` status the
+wherry event `key-lost`.
+
 **Change note, 2026-10-29 (A2A conformance):** edited in place at version 1.
 A run that ends for want of a credential ends `TASK_STATE_FAILED` with a
 [`credential` data part](#the-credential-data-part) for each credential,
@@ -174,7 +193,12 @@ algorithm `EdDSA` (Ed25519). The protected header holds:
 | echo | `application/vnd.wherry.echo.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
 | advertisement | `application/vnd.wherry.advertisement.v1+jws` | receiver | `wherry.receivers` | receiver ID |
 | start failure | `application/vnd.wherry.start-failure.v1+jws` | receiver | `wherry.pool.<pool>.events` | run ID |
-| seal request | `application/vnd.wherry.seal-request.v1+jws` | receiver | `wherry.tenant.<tenant>` | run ID |
+| open request | `application/vnd.wherry.open-request.v1+jws` | receiver | `wherry.pool.<pool>.events` | run ID |
+| attempt wrap | `application/vnd.wherry.attempt-wrap.v1+jws` | receiver, the custodian | `wherry.pool.<pool>.events` | run ID |
+| re-key wrap | `application/vnd.wherry.rekey-wrap.v1+jws` | receiver | `wherry.pool.<pool>.events` | run ID |
+| open refusal | `application/vnd.wherry.open-refusal.v1+jws` | receiver, the custodian | `wherry.pool.<pool>.events` | run ID |
+| claim decision | `application/vnd.wherry.claim-decision.v1+jws` | receiver, the custodian | `wherry.pool.<pool>.events` | run ID |
+| custodian snapshot | `application/vnd.wherry.custodian.v1+jws` | receiver | `wherry.pool.<pool>.custodian` | `custodian` |
 
 A reader accepts a signed record only when all of these hold:
 
@@ -193,13 +217,18 @@ A reader accepts a signed record only when all of these hold:
    - A submission or cancel comes from a host on `wherry.admin`, without a
      membership end, of a tenant entitled to the pool. Its `pool` is the
      pool of the topic it arrived on.
-   - A status, chunk, output chunk, result, start failure or seal request
-     comes from a receiver on `wherry.admin`, without a membership end, in
-     the pool the run was placed in. Its `tenant` and `pool` are the run's,
-     and the tenant is entitled to the pool.
+   - A status, chunk, output chunk, result or start failure comes from a
+     receiver on `wherry.admin`, without a membership end, in the pool the run
+     was placed in. Its `tenant` and `pool` are the run's, and the tenant is
+     entitled to the pool.
+   - An open request, attempt wrap, re-key wrap, open refusal or claim
+     decision comes from a live member of the pool of its topic
+     ([Open request](#open-request)).
    - An echo on `wherry.tenant.<tenant>` names that tenant, and comes from a
      live member of the pool it names, to which the tenant is entitled.
    - An advertisement comes from a live member of the pool it names.
+   - A [custodian snapshot](#custodian-snapshot) comes from the live member
+     of the pool of its topic that it names as custodian.
 
 ## Submission
 
@@ -230,7 +259,11 @@ A submission is the task of one run.
       "ref": "main",
       "credential": "deploy-key",
       "host_key": "git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...\n"
-    }
+    },
+    "replaces": "run-7a21...",
+    "s3_input_run": "run-7a21...",
+    "envelope": "eyJhbGciOiJkaXIi...",
+    "wrap": "eyJhbGciOiJFQ0RILUVTK0EyNTZLVyIs..."
   }
 }
 ```
@@ -277,7 +310,7 @@ A submission is the task of one run.
   (`pluginsdk.ReservedEnv`), and `file` follows the file name rules. No two
   credentials share a target, and no task credential takes the target of one
   of the agent's credentials in the pool's terms. A task credential may
-  share its name with one of the agent's credentials; the seal carries the
+  share its name with one of the agent's credentials; the envelope carries the
   value once and the agent gets it at both targets. The pool's terms do not
   otherwise govern task credentials.
 - `unsupplied_credentials` names the agent's optional credentials in the
@@ -301,6 +334,42 @@ A submission is the task of one run.
   `credential` and `host_key` from the [git entry](configuration.md#client-configuration)
   of its configuration that the remote falls under, and adds that credential
   to `credentials` at the file `git-credential`.
+
+- `replaces` and `s3_input_run` appear together, on a resubmission alone.
+  `replaces` is the run, other than this one, that the resubmission
+  replaces, and `s3_input_run` the run under whose prefix its S3 inputs lie,
+  the first run of the chain of replacements. Both are run IDs.
+- `envelope` and `wrap` appear together, as ordinary members of `wherry`.
+  `envelope` is a compact JWE of at most 64 KiB, protected header exactly
+  `alg` `dir`, `enc` `A256GCM` and `typ`
+  `application/vnd.wherry.envelope.v1+jwe`, encrypted under a fresh 256-bit
+  content key. Its plaintext holds exactly `binding`, the task's `run`,
+  `tenant`, `pool`, `task_started_by` and `task_ended_by`; `credentials`,
+  each credential the run delivers by name, its value in standard base64;
+  `s3_inputs` and `s3_outputs`, each S3 input and S3 output by name, its
+  presigned URL; and `redaction_key`, the run's 32-byte key in standard
+  base64. `wrap` is a compact JWE carrying the content key to the pool's
+  current key from its [custodian snapshot](#custodian-snapshot), protected
+  header exactly `alg` `ECDH-ES+A256KW`, `enc` `A256GCM`, `kid`, the
+  recipient key's RFC 7638 thumbprint, and `epk`, a P-256 public JWK of
+  `kty`, `crv`, `x` and `y`. The host signs the task with both in it as any
+  record.
+- An envelope whose `binding` differs from its task's `run`, `tenant`,
+  `pool`, `task_started_by` or `task_ended_by` is refused: by the custodian
+  before it wraps the content key to a claimant, and by the claimant at open.
+- The envelope's credentials are exactly the agent's credentials in the
+  pool's terms other than `unsupplied_credentials`, and the task's
+  `credentials`, each once; its S3 inputs are exactly `s3_inputs` and its S3
+  outputs exactly the outputs with `storage` `s3`. Each URL is https, or
+  http for a loopback storage endpoint, of the storage endpoint's scheme,
+  host and port, with no user, opaque part or fragment, and the path of its
+  object: the bucket and `wherry/<tenant>/<s3_input_run>/inputs/<name>`, or
+  `wherry/<tenant>/<run>/outputs/<name>`, where a run without
+  `s3_input_run` is its own. No value is empty. A host refuses to build an
+  envelope that breaks these rules.
+- A host presigns an S3 input's GET until `task_started_by` plus 15
+  minutes, and an S3 output's PUT until `task_ended_by`, each at most 7
+  days.
 
 A submission whose input names repeat, among its input files, its S3 inputs
 and `known_hosts`, fails to decode, so a receiver drops it at
@@ -358,6 +427,11 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 - `log_offset` is the agent output offset an adopter follows from, on
   `started` only. The transcript is published up to at least that offset.
   Later offsets go to the receiver's [progress](#progress) topic.
+- `event` is the wherry event `key-lost`, on a `terminal` status with
+  state `TASK_STATE_FAILED` alone, absent otherwise. It marks a run that
+  failed before its job started because no holder of the pool key its
+  submit wrap names remained. The run's host
+  [resubmits](#resubmission) it.
 - `transcript_chunks` is the number of [chunks](#chunk) the attempt wrote,
   the empty final chunk included, on `terminal` only, and absent when zero. It commits in the same
   transaction as the attempt's last chunks.
@@ -368,9 +442,13 @@ A `terminal` status's `wherry` object adds the attempt's chunk count:
 | `started` | `TASK_STATE_WORKING` | the job has started | |
 | `rejected` | `TASK_STATE_REJECTED` | the receiver refuses the submission | the reason as message text |
 | `terminal` | `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED` or `TASK_STATE_CANCELED` | the run has ended | the agent's message from its [outcome file](configuration.md#agent-contract), or the reason as message text |
+| `released` | `TASK_STATE_SUBMITTED` | the receiver gives back its claim, before it returns the task to the pool | |
+| `adopting` | `TASK_STATE_WORKING` | the receiver found the run's job running or ended, before its [open request](#open-request) | |
+| `reconciling` | `TASK_STATE_WORKING` | the receiver, refused `key unavailable`, holds the claim while Lookup does not answer ([Open refusal](#open-refusal)) | |
 
-A receiver writes each status to the pool's events and the tenant feed,
-with identical bytes, in one Kafka transaction. A run's chunks and output
+A receiver writes `released`, `adopting` and `reconciling` to the pool's
+events alone. It writes each other status to the pool's events and the tenant
+feed, with identical bytes, in one Kafka transaction. A run's chunks and output
 chunks commit in the transaction of the status, result or
 [progress](#progress) record they belong to, so a transaction spans the
 tenant feed, the transcript topic, the pool's events and the receiver's
@@ -397,6 +475,7 @@ base64 does. The fixed texts are:
 
 - rejected: `agent is outside the pool terms`,
   `model not in the pool's terms`, `duplicate submission`,
+  `the task carries no envelope`,
   `task_started_by is past the pool's start_by_limit`,
   `not started by task_started_by (<RFC 3339 time>)`,
   `not ended by task_ended_by (<RFC 3339 time>)`,
@@ -405,14 +484,15 @@ base64 does. The fixed texts are:
   `git remote host <host> is not in pool <pool>'s vcs hosts`, and
   `pool <pool> has no storage for S3 inputs and outputs`;
 - failed: `not started by task_started_by (<RFC 3339 time>)`,
-  `not ended by task_ended_by (<RFC 3339 time>)`,
-  `not ended by task_started_by plus the 6h run cap (<RFC 3339 time>)`, `log stream failed`, `agent exited <code>`,
+  `not ended by task_ended_by (<RFC 3339 time>)`, `log stream failed`, `agent exited <code>`,
   `agent ended by <signal>` (each followed by the platform's reason,
   redacted, in parentheses when the plugin gives one, as in
   `agent exited 137 (OOMKilled)`), `agent reported no outcome`,
   `an S3 input was not fetched, or did not match its size and SHA-256`,
-  `the URL for S3 input <name> is not one of pool <pool>'s storage` (or
-  `S3 output <name>`),
+  `cannot be opened: the pool's custodian changed and its key was lost`
+  ([Open refusal](#open-refusal)), the reason an opened envelope fails its
+  check against the task, such as `envelope is bound to another task` or
+  `the URL for S3 input <name> is not its object in the pool's storage`,
   `receiver denied`, `delivery budget exhausted`,
   `start failed and the job could not be removed`,
   `input <name> takes the run's inputs over what profile <profile>
@@ -422,17 +502,8 @@ base64 does. The fixed texts are:
   `required output <name> not returned: <reason>` with a reason from
   [Metadata](#metadata), behind the agent's `agent exited <code>` or
   `agent ended by <signal>` and `; ` when it left no valid outcome file
-  and ended by a signal or a non-zero exit, and, when the
-  [seal wait](#seal-request) expires,
-  `credential <name> was not answered within 5m; add it to credentials in
-  the host's wherry configuration, keep wherry wait or wherry mcp running,
-  and submit again`. For several credentials the text opens
-  `credentials <name>, <name> were not answered within 5m; add them to
-  credentials`. When the request also asked for presigned URLs, the subject
-  adds `and presigned URLs for the S3 inputs and outputs` and the
-  instruction is `add the credentials and storage`; for URLs alone it is
-  `presigned URLs for the S3 inputs and outputs were not answered within
-  5m; configure them`. The text carries credential names and no values;
+  and ended by a signal or a non-zero exit. The text carries credential
+  names and no values;
 - canceled: `canceled by user`.
 
 The `wherry` CLI and MCP server pass the message text through and do not
@@ -448,9 +519,8 @@ status message names each credential in a data part:
 ```
 
 `credential` is a credential name: at most 32 lowercase letters, digits and
-hyphens. The receiver writes one part for each credential a
-[seal request](#seal-request) asked for when the seal wait expires, and one
-part for the credential an agent names when its
+hyphens. The receiver writes one part for the credential an agent names when
+its
 [outcome file](configuration.md#agent-contract) reports
 `TASK_STATE_AUTH_REQUIRED`. The agent's credential name is redacted like any
 agent text. It names one of the credentials the prompt lists, including an
@@ -692,7 +762,8 @@ An advertisement reports a receiver's liveness and capacity.
   "receiver": "nomad-1", "pool": "build",
   "offers": [{"profile": "container", "agent": "coder"}],
   "capacity": 2, "in_flight": 0,
-  "at_ms": 1789998000000
+  "at_ms": 1789998000000,
+  "started_ms": 1789990000000
 }
 ```
 
@@ -707,11 +778,95 @@ An advertisement reports a receiver's liveness and capacity.
   the host carries them as S3 inputs, or refuses the run when the pool or
   the host has no storage.
 - `capacity` and `in_flight` are 0 or more, and `at_ms` is over 0.
+- `started_ms`, optional, is when the advertising process started.
+- `stepping_down`, optional, is present while the pool's key custodian
+  drains to hand its custody on: `at_ms`, when its stop arrived, and
+  `started_ms`, the start time of the process that set it, both over 0,
+  and `deadline_ms`, `at_ms` plus the custodian's drain timeout, over
+  `at_ms`. A successor publishes a `handover` snapshot only when the
+  previous custodian's latest advertisement is live and carries
+  `stepping_down` whose `started_ms` equals the advertisement's, and only
+  while its own clock is before `deadline_ms`, with the snapshot's commit
+  bounded by it; otherwise it publishes a `takeover`.
 - A receiver advertises every 30 seconds, with or without a ready profile.
   Placement passes over a receiver whose `offers` is empty. Readers take
   each receiver's
   latest valid advertisement, and treat it as live when `at_ms` is within
   120 seconds of their own clock.
+
+## Custodian snapshot
+
+A custodian snapshot names the receiver holding a pool's private key and
+that key's public half, on the pool's compacted
+`wherry.pool.<pool>.custodian` topic under the Kafka key `custodian`.
+
+```json
+{
+  "v": 1,
+  "pool": "build",
+  "custodian": "nomad-1",
+  "reason": "rotation",
+  "current": {"key_id": "Qh3T...", "key": {"kty": "EC", "crv": "P-256", "x": "...", "y": "..."}},
+  "rotated_for": 4182
+}
+```
+
+- Readers decode a snapshot strictly: an unknown or duplicate member
+  refuses it.
+- `custodian` is a receiver ID, and the snapshot's signer.
+- `reason` is `bootstrap`, `rotation`, `handover`, `takeover` or
+  `contested`.
+- `current.key` is a P-256 public JWK, and `current.key_id` its RFC 7638
+  SHA-256 thumbprint, unpadded base64url.
+- `rotated_for` is the `wherry.admin` offset of the latest `rotate-key`
+  record for the pool that a key this snapshot or an earlier one published
+  was generated after; it is absent before the first. Every later snapshot
+  carries it on, and the custodian rotates on a `rotate-key` record whose
+  offset is above it.
+- `suspended_for` and `resumed_for` are the `wherry.admin` offsets of the
+  latest `suspend` and `resume` records for the pool the custodian
+  acknowledged; each is absent before the first. A pass over the open
+  requests that reads a record above the offset its snapshot carries
+  republishes the snapshot with the record's offset before it decides any
+  request, and passes begin only once every attempt wrap of the previous
+  pass committed. Every later snapshot carries them on.
+- The current snapshot is the latest committed record under the key
+  `custodian` on the topic, the record compaction keeps for that key. A
+  record under another key is not a snapshot. A host submits to the pool
+  only when that record verifies, its writer is the custodian it names, and
+  that custodian is a live member of the pool without a membership end
+  whose advertisement is within 120 seconds of the host's clock. Otherwise
+  the host refuses the submission, and never takes an earlier record in its
+  place. It also refuses when the pool has no snapshot, and when
+  `wherry.admin` records the pool suspended, before it resolves any
+  credential or uploads any input. A host logs a `takeover` or `contested`
+  snapshot.
+
+## Resubmission
+
+A run that ended with the wherry event `key-lost` before its
+`task_started_by` is resubmitted by its host when `submit`, `status`,
+`wait`, `logs -f` or the MCP server next reads it. The host keeps each run's
+submission without `envelope` and `wrap` in its local record; it holds no
+credential. Under an exclusive `flock` on the failed run, shared by every
+process using the host's state directory, the host:
+
+1. produces the stored replacement when the failed run's record names one
+   whose bytes are stored and not marked produced, and builds nothing new;
+2. otherwise records a new replacement run ID first, then resolves the
+   credentials again and builds and signs the replacement: the same message
+   content with the new run as `taskId` and `contextId` and a fresh
+   `messageId`, the same placement, credentials, outputs, git input, S3
+   inputs and bounds, `replaces` the failed run and `s3_input_run` the first
+   run of the chain;
+3. stores the signed bytes, produces them, and marks them produced.
+
+A crash before the bytes are stored resolves the credentials again on the
+next pass. A replacement's S3 outputs use its own prefix. A host keeps the
+first run's prefix until the last replacement has ended; a run that ended
+`key-lost` before its `task_started_by` has not ended. `wait` and the MCP
+server follow a run's replacements, refuse a chain that names a run twice,
+and report every run they follow.
 
 ## Start failure
 
@@ -861,7 +1016,7 @@ signature's protected header carrying its public key as `jwk`.
   statuses on a pool's events, that the broker appended before that
   timestamp, and nothing else. A record the
   broker appended at or after it does not verify under the retired key. Readers that admit work, such as a receiver
-  admitting a task or a cancel or a host answering a seal request, accept
+  admitting a task or a cancel, accept
   the current key alone.
 - Any other action is rejected.
 
@@ -869,191 +1024,223 @@ Readers fold the topic in order. Once the topic holds a key, every record
 must verify against the current key; a record that breaks a rule is
 ignored.
 
-## Seal request
+## Open request
 
-A receiver that claims a run whose agent takes credentials asks the run's
-host for them. It makes a P-256 key pair for the attempt and commits a
-seal request to the tenant feed in a transaction of its own, after the
-run's `claimed` status.
+A receiver that claims a run asks the pool's key custodian, named by the
+[custodian snapshot](#custodian-snapshot), for the run's content key. It makes
+a P-256 key pair for the attempt in memory and commits an open request to the
+pool's events in a transaction of its own, after the run's `claimed` status.
 
 ```json
 {
   "v": 1,
-  "receiver": "nomad-1", "tenant": "alice", "pool": "build",
-  "run": "run-0f3c...", "attempt": 2,
-  "key": {"kty": "EC", "crv": "P-256", "x": "...", "y": "..."},
-  "key_id": "hs9I_DeEnEcQZjRh56OShK8IHP_rXpmv2UZ2DQxMXz0",
-  "credentials": ["model-api-key"],
-  "task_credentials": ["deploy-key"],
-  "s3_inputs": ["dataset.parquet"],
-  "s3_outputs": ["plot.pdf"],
-  "expiry_at_ms": 1789998300000
+  "run": "run-0f3c...", "attempt": 2, "receiver": "nomad-1",
+  "task_hash": "9d2a...",
+  "key": {"kty": "EC", "crv": "P-256", "x": "...", "y": "..."}
 }
 ```
 
-- `key` is the attempt's P-256 EC public key as a JWK. `key_id` is its
-  [RFC 7638](https://datatracker.ietf.org/doc/html/rfc7638) SHA-256
-  thumbprint, unpadded base64url. `expiry_at_ms` is over 0. Credential
-  names are non-empty and lowercase, `s3_inputs` are file names and
-  `s3_outputs` follow the `outputs` name rules.
-- `credentials` names the agent's credentials in the pool's terms, less those
-  the submission lists in `unsupplied_credentials`, and is empty when there
-  are none.
-- `task_credentials` names the run's task credentials other than those,
-  and is absent when there are none. A name appears once across both
-  lists.
-- `s3_inputs` and `s3_outputs` name the run's S3 inputs and S3 outputs, for which the seal is to carry presigned URLs; each is absent
-  when empty, and each name appears once in its list. An attempt that
-  adopts an earlier attempt's job asks for the credentials and the S3
-  outputs alone, since the job has fetched its S3 inputs. A GET presigned
-  again differs from the first attempt's, so an adopter cannot redact the
-  first attempt's S3 input URLs, and a plugin never exposes its fetch URLs
-  to the job.
-- The four lists are not all empty. A run needs a seal when its agent takes
-  a credential its host supplies, or the run has task credentials, S3 inputs
-  or S3 outputs; an adopter, when it has credentials or S3 outputs.
-- `expiry_at_ms` is 5 minutes after the request. The receiver holds the claim
-  until a seal opens, a cancel of the run arrives, or `expiry_at_ms` passes.
-  At expiry it ends the run `TASK_STATE_FAILED` with a message naming the
-  credentials it asked for ([Status](#status)), each also in a
-  [`credential` data part](#the-credential-data-part), and
-  the task is not returned to the pool.
-- An adopter publishes nothing of the job until its seal opens. It holds
-  the job's lines, at most 4 MiB, dropping the oldest, and logs how many it
-  dropped and the offset its transcript resumes at; the first chunk's `seq`
-  shows the gap. At expiry it stops the job before it ends the run, and
-  the held lines are never published.
+- Readers decode an open request, [attempt wrap](#attempt-wrap),
+  [re-key wrap](#re-key-wrap), [open refusal](#open-refusal) and
+  [claim decision](#claim-decision) strictly: an unknown or duplicate member
+  refuses the record. Each verifies under the current key of a live member of
+  the pool of its topic, or a key that member retired after the broker appended
+  the record, and names that member as its writer. An attempt wrap, open
+  refusal or claim decision also verifies under a key its writer held when
+  its membership ended, for a record the broker appended before the
+  `wherry.admin` record that ended it.
+- `key` is the attempt's P-256 public JWK of exactly `kty`, `crv`, `x` and
+  `y`. `task_hash` is the hash of the run's earliest accepted submission
+  ([Admission](#admission)).
+- On a redelivery the receiver first asks its profiles' Lookup for the run's
+  job. Absent is a first start. A job that never started is purged and
+  recorded as a `platform` [start failure](#start-failure), or the run ends
+  past its `task_started_by` once that has passed. Running or ended is an
+  adoption: the receiver commits an `adopting` status for its claim, then
+  requests. A Lookup that does not answer is asked again while the receiver
+  holds the claim, with no open request, until it answers or `task_ended_by`
+  passes; the run then ends `TASK_STATE_FAILED` with
+  `not ended by task_ended_by (<RFC 3339 time>)`, its job and material left
+  to the plugin's cleanup.
+- The receiver holds the claim until an attempt wrap or a refusal answers its
+  request, a cancel of the run arrives, or the earlier of the request's append
+  time plus 5 minutes and 120 seconds and the open bound passes. The open
+  bound is `task_started_by` for a first start and `task_ended_by` for an
+  adoption. With no answer it commits `released` and returns the task to the
+  pool, so the delivery budget bounds the cycle; at the open bound the run
+  ends past its bound.
+- An adopter publishes nothing of the job until it opens. It holds the job's
+  lines, at most 4 MiB, dropping the oldest, and logs how many it dropped and
+  the offset its transcript resumes at; the first chunk's `seq` shows the gap.
 - The private key lives only in the receiver's memory and is gone once the
   wait ends. A redelivered or adopted attempt makes a new key and a new
-  request; a seal answering an earlier request does not open for it.
+  request; a wrap answering an earlier request does not open for it.
+- A receiver giving back a claim it holds commits `released` before it
+  returns the task to the pool. When `released` does not commit, it leaves
+  the task unacknowledged, and the share group returns it when its
+  acquisition lock expires.
 
-The host that submitted the run answers while `wherry wait` or `wherry
-mcp` runs, at most once per run and attempt. It answers only when all of
-these hold:
+### The claim check
 
-1. The request verifies as a [signed record](#signed-records) from a live
-   member of the run's pool, for the run's tenant.
-2. The host holds a local record of the run, written when it submitted the
-   run.
-3. `expiry_at_ms` has not passed and is at most 6 minutes away: the receiver's
-   5-minute wait and a minute of clock skew.
-4. Every `claimed` status of the run comes from one receiver, and the
-   request comes from it.
-5. The request names the receiver and attempt of the run's latest status,
-   which is `claimed` or `started`.
-6. Every name in `credentials` is in the pool's terms for the run's agent,
-   every name in `task_credentials` is a task credential the run declares,
-   and the host's configuration gives every name a source.
-7. Every name in `s3_inputs` and `s3_outputs` is an S3 input or S3 output
-   the run declares, the pool's terms have `storage`, and the host's
-   configuration has a storage credential.
+The custodian reads the pool's events and task topic to their last stable
+offsets, and answers each open request that no attempt wrap or refusal
+answers. It serves a request only when:
 
-The host makes the run's redaction key, 32 random bytes, when it records the
-run. It writes the key to its record of the run, readable by its owner
-alone, before it publishes the submission, and answers never write it. Every
-seal for the run carries that key: every attempt and adoption. A host never makes
-a second key for a run, since the markers already published would stop mapping
-to names: for a record whose key is not 32 bytes it refuses every request and
-logs the record's path.
+1. it verifies as the live member of the pool it names; otherwise it refuses
+   `not the current claimant`;
+2. its `task_hash` is that of the run's earliest accepted submission
+   (otherwise `not the current claimant`), and the run has no terminal status
+   and no cancel (otherwise `terminal`);
+3. the run's latest ownership status, `claimed` or `released`, is the
+   requester's `claimed` for the request's `attempt`; otherwise
+   `not the current claimant`;
+4. now is within the open bound, which the custodian takes from the events:
+   `task_ended_by` when the run has a `started` status or the claim's
+   `adopting` status, `task_started_by` otherwise; otherwise
+   `past its bound`;
+5. the claim has an `adopting` status, which its receiver writes once
+   `Lookup` finds the job, or the pool is not suspended in the read of
+   `wherry.admin` the custodian makes at the start of its pass; otherwise
+   `pool suspended`. A failed read leaves the pass's requests unanswered;
+6. when the claim changed receivers, the previous owner committed `released`,
+   has no live membership, or its latest advertisement appended at or before
+   the claim is more than 120 seconds old when the custodian decides;
+   otherwise `two live claimants`.
 
-For each S3 input the host presigns a GET of
-`wherry/<tenant>/<run>/inputs/<name>` for 15 minutes, and for each S3 output a
-PUT of `wherry/<tenant>/<run>/outputs/<name>` until the run's
-`task_ended_by`, at most 7 days, path-style on the pool's endpoint with its own
-credential.
+The custodian decides rule 6 once for each claim and commits that decision as
+a [claim decision](#claim-decision) in the transaction of its answer; a later
+request for the same claim takes that decision. It then recovers the content
+key from the submit wrap or a [re-key wrap](#re-key-wrap) to a key it holds,
+opens the envelope and checks it against the task as [Submission](#submission)
+states; a check that fails refuses `envelope invalid`, so a spliced envelope
+never releases its content key. With no key it waits for a holder's re-key
+wrap until the earlier of the request's append time plus 5 minutes and the
+open bound, then refuses `key unavailable`. Otherwise it commits an attempt
+wrap. Each answer is one transaction through the transactional ID
+`p.<pool>.custodian`, so a fenced custodian answers nothing; a commit whose
+outcome is unknown is read back from the pool's events.
 
-A host records a run locally before it publishes the run's submission, so a
-request can follow the task at once; a request read while the record is
-absent is checked again on each later pass until it expires. Once the
-request passes checks 1 to 3 and 6, the host resolves each credential's
-[source](security.md#credential-sources) before it takes the attempt's
-lock, so a slow command holds up no other answerer. A source that fails to
-resolve leaves the request for a later pass, logged by credential name and
-cause alone. The host holds
-an exclusive lock on the attempt, shared by every process using its state
-directory, from these checks to the record of its answer, and gives up
-waiting for the lock when its own work ends.
-Just before it writes the seal it checks again that `expiry_at_ms` has not
-passed, then reads the run again and repeats checks 4 and 5, so a status
-that ends the attempt, or another claim, while the seal is built stops the
-write. It records the attempt as answered once the write
-is acknowledged. A host that
-stops between the two answers again on its next start; the receiver opens
-the first seal that opens. Each start removes the records of attempts whose
-request has expired or whose run has ended.
+## Attempt wrap
 
-A host logs a skipped request that verifies and belongs to a run it
-submitted, by run, receiver and credential names, with no value. It logs
-nothing for a request for a run it did not submit, nor, apart from a failure
-to read its own run, for a request it cannot verify.
+An attempt wrap answers one open request with the run's content key.
 
-Check 4 is the only trace a forged claim leaves. The broker's share-group
-claim is invisible to hosts, so a live pool member can sign a `claimed`
-status it never received. A run that a second receiver claims, by
-adoption or by forgery, gets no seal and ends `TASK_STATE_FAILED` when its
-seal wait expires; an adopter stops the job first. A receiver adopting its own earlier
-attempt's job is sealed as usual.
+```json
+{
+  "v": 1, "custodian": "nomad-2",
+  "task_hash": "9d2a...", "request": "51c0...", "receiver": "nomad-1", "attempt": 2,
+  "jwe": "eyJhbGciOiJFQ0RILUVTK0EyNTZLVyIs..."
+}
+```
 
-## Seal
+- `custodian` is the writer. `request` is the SHA-256, in lowercase hex, of
+  the open request's record value, and `receiver` and `attempt` are the
+  request's. `jwe` is a wrap of the content key to the request's `key`, with
+  the protected header a submit wrap has ([Submission](#submission)).
+- The claimant takes an attempt wrap only when its writer is the current
+  snapshot's custodian and it names the claimant's own request, receiver,
+  attempt and task hash. It unwraps the content key, opens the envelope and
+  checks it against the task again. A wrap whose key does not decrypt the
+  envelope is ignored, logged and counted in `wherry_ignored_wraps_total`. A
+  check that fails ends the run `TASK_STATE_FAILED` with the check's reason
+  before anything is dispatched.
+- The claimant checks for a cancel, its shutdown and the open bound before it
+  takes a wrap, so a run stopped while its wrap arrives is never dispatched.
+  It passes the envelope's credentials and S3 URLs to the plugin in Dispatch,
+  and redacts with the envelope's redaction key ([Redaction](#redaction)).
 
-A seal answers one seal request. The host writes it to its own topic,
-`wherry.host.<tenant>.<host>`, unsigned, keyed by run ID, as a compact
-[JWE](https://datatracker.ietf.org/doc/html/rfc7516) encrypted to the
-request's `key`.
+## Re-key wrap
 
-- `alg` is `ECDH-ES+A256KW` and `enc` is `A256GCM`. Readers accept only
-  these algorithms and the compact serialization, and reject `zip`.
-- The protected header holds `alg`, `enc`, `epk`, `typ`
-  `application/vnd.wherry.seal.v2+jwe` and the binding: `tenant`, `pool`,
-  `receiver`, `key_id`, `run`, `attempt`, `credentials`, always present and
-  possibly empty, `task_credentials`, `s3_inputs` and `s3_outputs` when
-  non-empty, and `expiry_at_ms`, copied from the request. Readers reject any
-  other member.
-- The plaintext is a JSON object: `v` 1, `binding`, an object holding the
-  binding members again, and `values`, mapping each name in `credentials`
-  and `task_credentials` to its value, `s3-inputs/<name>` for each S3 input
-  to its presigned GET URL, and `s3-outputs/<name>` for each S3 output to
-  its presigned PUT URL, each as padded standard base64, and
-  `redaction_key`, the run's 32-byte redaction key as padded standard
-  base64. Presigned URLs travel nowhere else on the broker.
-- A seal is at most 64 KiB in compact form. A host refuses to build a larger
-  one and logs the credential names. At submit, a host refuses a run with S3
-  inputs or outputs whose seal of its task credentials and presigned URLs
-  would exceed 64 KiB, counting no `command` source, which runs only to
-  answer a seal.
+A receiver holding a pool key that is not current, such as a former
+custodian, answers an open request for a task it can open, from the task's
+submit wrap or a re-key wrap to a key it holds, with the content key wrapped
+straight to the current snapshot's key, unless a re-key wrap of the task to
+that key is on the pool's events. There are no chains. It writes the re-key
+wrap under its admission transactional ID.
 
-The receiver reads the host's topic from its end at the time of the request. It
-refuses a seal over 64 KiB, and opens a seal only when the header's `typ`
-is the seal type and its binding equals the request, with `key_id` the
-thumbprint of the receiver's own key, `expiry_at_ms` has not passed, the
-plaintext has `v` 1 and its `binding` equals the header's, `values` holds
-exactly the named credentials and URLs, and `redaction_key` is 32 bytes.
-It checks for a cancel, its shutdown, `task_started_by` and the request's
-expiry before it takes a seal, so a run stopped while its seal arrives is
-never dispatched. It passes the values to the plugin in Dispatch. It logs
-a seal that does not open by run and attempt alone.
+```json
+{"v": 1, "holder": "nomad-3", "task_hash": "9d2a...", "recipient_kid": "Qh3T...", "jwe": "..."}
+```
 
-Before it uses a URL, the receiver checks it against the pool's
-`storage`: its scheme, host and port, the scheme's default port when
-absent, are the endpoint's, it carries no user information, fragment or opaque part,
-and its escaped path is `/<bucket>/` and the object's key exactly. A URL
-that fails ends the run `TASK_STATE_FAILED` with
-`the URL for S3 input <name> is not one of pool <pool>'s storage`, or
-`S3 output`, before anything is dispatched, and the task is not returned to
-the pool.
+- `holder` is the writer. `recipient_kid` is the current key's ID, and `jwe`
+  is a wrap of the content key to that key.
+
+## Open refusal
+
+An open refusal answers one open request with a reason.
+
+```json
+{"v": 1, "custodian": "nomad-2", "request": "51c0...", "reason": "two live claimants"}
+```
+
+The claimant takes a refusal of its own request from the current snapshot's
+custodian and acts on its `reason`:
+
+| `reason` | Claimant's action |
+| --- | --- |
+| `two live claimants`, `not the current claimant`, `pool suspended` | commits `released`, then returns the task to the pool |
+| `terminal` | acknowledges the task without a dispatch |
+| `past its bound` | ends the run past its bound: a first start purges its job, if any, and an adopter stops its job; the run fails with `not started by task_started_by (<RFC 3339 time>)` while the receiver's clock is within `task_ended_by`, and with `not ended by task_ended_by (<RFC 3339 time>)` after it |
+| `key unavailable` | decides from the job's state, below |
+| `envelope invalid` | ends the run `TASK_STATE_FAILED` with `envelope invalid`, without `key-lost`; an adopter stops its job first |
+
+Refused `key unavailable`, the claimant decides from the job's state, never
+from the `started` status:
+
+- On the task's first delivery, attempt 1 with no earlier `claimed` status,
+  no job can exist: the run ends `TASK_STATE_FAILED` with
+  `cannot be opened: the pool's custodian changed and its key was lost` and
+  the wherry event `key-lost`.
+- Otherwise it asks its profiles' Lookup. An absent or never-started job ends
+  the run the same way. A running or ended job is stopped and the run ends
+  with the same message, without `key-lost`.
+- While Lookup does not answer, it commits a `reconciling` status and asks
+  again, holding the claim, until Lookup answers or `task_ended_by` passes,
+  when the run ends `TASK_STATE_FAILED` with
+  `not ended by task_ended_by (<RFC 3339 time>)`, never `key-lost`. A
+  claimant of a run with a `reconciling` status continues Lookup the same
+  way, with no open request and no dispatch.
+- An adopter refused `key unavailable` requests once more, then stops the job
+  and ends the run with the same message, without `key-lost`.
+
+## Claim decision
+
+A claim decision records the custodian's decision on a claim under rule 6 of
+the [claim check](#the-claim-check).
+
+```json
+{
+  "v": 1, "custodian": "nomad-2",
+  "claim": "7e1f...", "previous": "nomad-1", "reason": "lease",
+  "advertisement": {"offset": 4412, "at_ms": 1789998100000},
+  "served": true
+}
+```
+
+- `custodian` is the writer. `claim` is the SHA-256, in lowercase hex, of the
+  record value of the `claimed` status decided, and `previous` the receiver
+  of the ownership status before it, absent for none.
+- `reason` is `unchanged` for no previous owner or the same receiver,
+  `released`, `lease` for a previous owner with no live membership or whose
+  advertisement at or before the claim is more than 120 seconds old or
+  absent, or `live`. `served` is false for `live` alone.
+- `advertisement` names the previous owner's advertisement the decision took,
+  by its offset on `wherry.receivers` and its append time, and is absent when
+  it took none.
+- A custodian counts the claims it serves to a new claimant in
+  `wherry_claimant_changes_total` by `reason`.
+
+## Redaction
 
 Before it signs any transcript chunk, output chunk, result text or status
 message of the attempt, the receiver replaces every occurrence of each
-credential value its seal delivered, task credentials and presigned URLs
+credential value its envelope delivered, task credentials and presigned URLs
 included, and of each URL's `X-Amz-Signature` value alone, with the value's
 marker: `[redacted:`, 16 base64url characters and `]`, 27 bytes. The characters
 are the first 96 bits of the HMAC-SHA256, under the run's redaction key, of
 `wherry-redaction-v1` followed by the value's name: the credential's name, or
 `s3-inputs/<name>` or `s3-outputs/<name>` for a URL and its signature. Every
 form of a value takes the same marker, and every attempt of the run the same
-markers. No marker maps to a credential name without the run's redaction key.
-Seal requests and the failure that ends an unanswered seal wait name
-credentials. When
+markers. No marker maps to a credential name without the run's redaction key. When
 a form of any delivered value occurs within a marker, that marker is `[*]`
 instead, so a replacement cannot publish another value. The data passes through
 the replacement in pieces of 64 KiB. It replaces two forms of each value: its
@@ -1075,7 +1262,7 @@ redacted form is over 64 KiB is replaced by `[redacted text over 65536 bytes]`. 
 producer batch. A value shorter than 8 bytes once trimmed is not redacted; the
 receiver logs `credential <name> too short to redact` once for the attempt. A
 value in any other encoding, such as base64, is not replaced. An adopted attempt
-redacts the values its own seal delivers. Each form is replaced once, longest
+redacts the values of its own open of the envelope. Each form is replaced once, longest
 first, and a marker can join the bytes beside it into a value that was not there
 before: when a value starts with a marker's tail, such as `]`, and the rest of
 it follows a replaced value, the published text holds that value whole.
@@ -1092,6 +1279,7 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `host` | `tenant`, `host` | records a host of the tenant |
 | `entitlement` | `tenant`, `pool` | entitles the tenant to the pool |
 | `end` | `receiver`, or `tenant` and `host` | records a membership end |
+| `revoking` | `receiver`, or `tenant` and `host` | records a revocation in progress: the principal is granted no ACL and stays a member until its `end` |
 | `skip` | `offset`, `sha256` | passes over the undecodable record at that offset with that SHA-256 |
 
 `terms` has the members of the [pool terms](configuration.md#pool-terms) file
@@ -1104,7 +1292,8 @@ routing order, the plugins in the order of their names. Each plugin profile is t
 naming its plugin, `agent`, `labels` when set, and the merged
 `config`, which keeps a `credential` name and never a credential value. `config`
 also holds `force`, `true` when `receiver update --force` wrote the record. An `end` names
-exactly one of `receiver`, or `tenant` and `host`.
+exactly one of `receiver`, or `tenant` and `host`. A `revoking` names exactly one of `receiver`, or
+`tenant` and `host`, and no other member.
 Readers fold the records in order. A reader loads no state when:
 
 - a `receiver` record moves a receiver to another pool or names an unknown
@@ -1130,14 +1319,22 @@ A receiver that claims a submission:
    status in a terminal state, `TASK_STATE_REJECTED` included, with its task
    hash;
 2. drops it when it fails the [signed-record checks](#signed-records), or
-   when its Kafka key is not its `run`;
+   when its Kafka key is not its `run`, and acknowledges it and writes nothing
+   when it is a later copy, byte for byte, of the run's earliest accepted
+   submission: the earliest on the pool's task topic, read to its last stable
+   offset, that passes those checks under its run's Kafka key, carries an
+   `envelope`, and whose bounds hold at its append time: `task_started_by`
+   not passed and within the pool's `start_by_limit_ms`, and
+   `task_ended_by` neither before `task_started_by` nor more than six hours
+   after it;
 3. rejects it with `run ID in use` when the run ID belongs to another
    tenant: the tenant of the run's earliest submission on the pool's task
    topic that a live host's current key verifies, or of the run's earliest
    status other than a rejection on the pool's events. Ownership survives
    the owner's host being ended, since the run's statuses still name its
    tenant. This check comes before any record is written under the run ID;
-4. rejects it when its agent is outside the pool's terms; with
+4. rejects it with `the task carries no envelope` when it has none, and when
+   its agent is outside the pool's terms; with
    `model not in the pool's terms` when the agent has `models` and the
    placement names no model or one outside the current `models`, or the
    agent has no `models` and the placement names one;
@@ -1151,14 +1348,13 @@ A receiver that claims a submission:
 7. releases it when no ready plugin profile satisfies the placement, unless
    a member has claimed the run and its `task_ended_by` has passed, or its
    `task_started_by` has passed with no `started` event;
-8. rejects it with `duplicate submission` when it is not the run's earliest
-   submission on the pool's task topic that a live host's current key
-   verifies;
-9. rejects a run no pool member has claimed with
+8. rejects a run no pool member has claimed with
    `task_started_by is past the pool's start_by_limit` when its submission
    reached the pool's task topic more than the pool's `start_by_limit_ms`
    ago, or its `task_started_by` falls more than `start_by_limit_ms` after
    that;
+9. rejects it with `duplicate submission` when it is not the run's earliest
+   accepted submission;
 10. rejects it when the host of the run's [git input](#git-input) is not
     one of the pool's current VCS hosts, and with `pool <pool> has no
     storage for S3 inputs and outputs` when the run has S3 inputs or
@@ -1174,16 +1370,17 @@ the receiver stops the job it finds and ends the run `TASK_STATE_FAILED`
 with `not ended by task_ended_by (<RFC 3339 time>)`.
 
 A claimed run whose job has not started by `task_started_by`, while it
-waits for its seal or for the platform to place its job, ends
+waits for its open or for the platform to place its job, ends
 `TASK_STATE_FAILED` with
 `not started by task_started_by (<RFC 3339 time>)`, and the receiver
 purges the job when one exists. A redelivered run with no `started` event
 past `task_started_by` ends the same way: the receiver stops a job its
 lookup reports running or ended, and purges one that never started. A job
 that has started runs on past `task_started_by` until `task_ended_by`. A
-redelivered run whose lookup does not answer returns to the pool with its
-job and material in place, with or without a `started` event, until the
-delivery budget ends it.
+redelivered run whose lookup does not answer is held and asked again, with or
+without a `started` event, until `task_ended_by` passes, when it ends
+`TASK_STATE_FAILED` with `not ended by task_ended_by (<RFC 3339 time>)` and its
+job and material in place ([Open request](#open-request)).
 
 ## Git input
 
@@ -1349,17 +1546,19 @@ outputs that pass, and reports each rejected output with the reason after
 A pool whose terms name `storage`, an S3-compatible endpoint and bucket,
 carries files of up to 5 GiB each beside the broker. Each run's objects
 live under `wherry/<tenant>/<run>/`: an S3 input at `inputs/<name>`, and an
-S3 output at `outputs/<name>`. The host's own credential,
+S3 output at `outputs/<name>`; a resubmission's S3 inputs stay under its
+`s3_input_run`. The host's own credential,
 scoped by the operator to `wherry/<tenant>/`, uploads, downloads and
 deletes them, and never leaves the host. Receivers and plugins get only
-the presigned URLs in the [seal](#seal), checked against the pool's
-storage before use.
+the presigned URLs in the task's envelope, which the custodian and the
+claimant check against the pool's storage before use.
 
 - **In.** The host uploads each S3 input before it publishes the run and lists
   it in `s3_inputs`. The plugin fetches it into `WHERRY_INPUT_DIR` from its
   presigned GET before the agent starts, and verifies its size and SHA-256. The
-  plugin never exposes the GET URL to the job: an adopter's seal carries no GET
-  URL, so an adopter cannot redact it. A fetch that fails or does not verify
+  plugin never exposes the GET URL to the job, and an adopter, whose job has
+  fetched its inputs, does not take the GET URLs from the envelope or redact
+  them. A fetch that fails or does not verify
   ends the job before the agent starts, and the receiver ends the run
   `TASK_STATE_FAILED` with `an S3 input was not fetched, or did not match its
   size and SHA-256`, without returning the task to the pool. S3 inputs count
@@ -1374,7 +1573,7 @@ storage before use.
   expire, if that is later than 2 minutes. The receiver does not redact an
   S3 output, which goes to the host's own bucket and never to the
   transcript topic. An attempt that adopted an earlier attempt's job uploads
-  to the PUT URLs its own seal carries.
+  to the PUT URLs of the task's envelope.
 - **Back.** The host downloads each S3 output in the result's
   `s3_outputs` that the run declares, at the key for its name, and keeps it
   only when it matches the listed size and SHA-256. It reports each other
@@ -1498,7 +1697,7 @@ extension in `capabilities.extensions` as this `AgentExtension`:
 ```json
 {
   "uri": "https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md",
-  "description": "wherry records: signed submissions, statuses, transcript chunks, output chunks and results on Kafka, with run placement, credentials sealed to the claiming receiver, and inputs and outputs",
+  "description": "wherry records: signed submissions, statuses, transcript chunks, output chunks and results on Kafka, with run placement, credentials in an envelope under the pool's key, and inputs and outputs",
   "required": true,
   "params": {"binding": "https://github.com/benemon/wherry/blob/main/docs/a2a-extension-v1.md#binding"}
 }

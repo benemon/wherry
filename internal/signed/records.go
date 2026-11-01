@@ -12,17 +12,16 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 )
 
-// Tolerant decodes wherry's records other than local files and seals, ignoring the unknown members a later release adds and refusing duplicate names.
+// Tolerant decodes a record a later release may extend, ignoring unknown members and refusing duplicate names.
 var Tolerant = json.JoinOptions(json.RejectUnknownMembers(false), jsontext.AllowDuplicateNames(false))
 
-// Strict decodes local files and seals, refusing unknown members and duplicate names.
+// Strict decodes a record that admits no member it does not declare, refusing unknown members and duplicate names.
 var Strict = json.JoinOptions(json.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false))
 
 // Sign signs payload as a compact JWS of type typ; kid names the owner and
 // its key so a verifier resolves the key before reading the payload.
 func Sign(typ, owner string, payload any, key ed25519.PrivateKey) ([]byte, error) {
-	// Raw strings keep opaque agent JSON byte for byte through the signature.
-	encoded, err := json.Marshal(payload, json.Deterministic(true), jsontext.PreserveRawStrings(true))
+	encoded, err := encode(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -37,6 +36,11 @@ func Sign(typ, owner string, payload any, key ed25519.PrivateKey) ([]byte, error
 	}
 	compact, err := jws.CompactSerialize()
 	return []byte(compact), err
+}
+
+// encode is payload as Sign encodes it. Raw strings keep opaque agent JSON byte for byte through the signature.
+func encode(payload any) ([]byte, error) {
+	return json.Marshal(payload, json.Deterministic(true), jsontext.PreserveRawStrings(true))
 }
 
 // Verify checks encoded against the owner's current key named by its kid and

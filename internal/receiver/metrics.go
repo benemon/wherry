@@ -30,13 +30,15 @@ type metrics struct {
 	register   sync.Once
 
 	claims, admissions, rejections, runs, adoptions, redeliveries *prometheus.CounterVec
-	runDuration, queueWait, sealWait                              *prometheus.HistogramVec
+	runDuration, queueWait, openWait                              *prometheus.HistogramVec
 	inFlight, pastDeadline                                        *prometheus.GaugeVec
 	capacity, advertised                                          prometheus.Gauge
 	startFailures, dispatchOutcomes, stopFailures, purgeFailures  *prometheus.CounterVec
-	sweepFailures, collectionFailures, sealWaits, redactions      *prometheus.CounterVec
+	sweepFailures, collectionFailures, openWaits, redactions      *prometheus.CounterVec
 	busErrors, denials, dropped, budgetExhausted                  *prometheus.CounterVec
+	takeovers, claimantChanges                                    *prometheus.CounterVec
 	renewalFailures, transactionAborts, ambiguousCommits, fenced  prometheus.Counter
+	ignoredWraps, keyLost                                         prometheus.Counter
 
 	pluginDescs map[string]*prometheus.Desc
 	// lastGood holds, by profile, the samples of its latest Metrics call that answered.
@@ -72,7 +74,7 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.queueWait = histograms("queue_wait_seconds", "Time from submission to first claim.", "tenant", "profile")
 	m.inFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_in_flight", Help: "Tasks held, by the profile they were routed to."}, []string{"profile"})
 	m.capacity = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_capacity", Help: "Tasks the receiver holds at once."})
-	m.pastDeadline = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_runs_past_deadline", Help: "Tasks held past their task_ended_by, or the 6h run cap, by the profile they were routed to."}, []string{"profile"})
+	m.pastDeadline = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "wherry_runs_past_deadline", Help: "Tasks held past their task_ended_by, by the profile they were routed to."}, []string{"profile"})
 	m.advertised = prometheus.NewGauge(prometheus.GaugeOpts{Name: "wherry_advertised_timestamp_seconds", Help: "Unix time of the receiver's latest advertisement Kafka acknowledged."})
 	m.collectors = append(m.collectors, m.inFlight, m.capacity, m.pastDeadline, m.advertised)
 	m.startFailures = counters("start_failures_total", "Start failures, by class.", "profile", "class")
@@ -81,11 +83,19 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.purgeFailures = counters("purge_failures_total", "Failed plugin Purge calls.", "profile")
 	m.sweepFailures = counters("sweep_failures_total", "Failed plugin Sweep calls.", "profile")
 	m.collectionFailures = counters("collection_failures_total", "Runs whose outputs were not collected, by reason.", "profile", "reason")
-	m.sealWaits = counters("seal_waits_total", "Seal waits, by outcome.", "tenant", "outcome")
-	m.sealWait = histograms("seal_wait_seconds", "Time a run waited for its seal.", "tenant")
+	m.openWaits = counters("open_waits_total", "Open requests waited on, by outcome.", "tenant", "outcome")
+	m.openWait = histograms("open_wait_seconds", "Time a run waited for its attempt wrap or refusal.", "tenant")
 	m.redactions = counters("redactions_total", "Credential values replaced in published output.", "tenant", "profile")
 	m.busErrors = counters("bus_errors_total", "Kafka operation errors, by operation.", "op")
 	m.denials = counters("denials_total", "Kafka authorisation errors, by the capability denied.", "op")
+	m.takeovers = counters("custodian_takeovers_total", "Snapshots this receiver published taking over its pool's key custody, by reason.", "reason")
+	// Both series exist from the start, so an alert sees their first increase.
+	for _, reason := range []string{"takeover", "contested"} {
+		m.takeovers.WithLabelValues(reason)
+	}
+	m.claimantChanges = counters("claimant_changes_total", "Claims served to a new claimant, by reason.", "reason")
+	m.keyLost = counter("runs_key_lost_total", "Runs ended with the wherry event key-lost.")
+	m.ignoredWraps = counter("ignored_wraps_total", "Wraps whose key does not decrypt the task's envelope.")
 	m.renewalFailures = counter("renewal_failures_total", "Failed claim renewals.")
 	m.transactionAborts = counter("transaction_aborts_total", "Transactions aborted after a failed produce.")
 	m.ambiguousCommits = counter("ambiguous_commits_total", "Transaction commits with an unknown outcome.")
@@ -270,6 +280,9 @@ func (run *activeRun) ended(state wire.TaskState) {
 		label = strings.ToLower(strings.TrimPrefix(string(state), "TASK_STATE_"))
 	}
 	m.runs.WithLabelValues(tenant, profile, agent, model, label).Inc()
+	if run.event == wire.EventKeyLost {
+		m.keyLost.Inc()
+	}
 	if !run.claimed.IsZero() {
 		m.runDuration.WithLabelValues(tenant, profile, agent, model, label).Observe(time.Since(run.claimed).Seconds())
 	}

@@ -14,20 +14,22 @@ in every path.
 | --- | --- | --- |
 | `bundle` | required | the host's bundle |
 | `host_key` | `~/.config/wherry/host.key` | host signing key file |
-| `state_dir` | `~/.config/wherry/state` | run records and answered seal requests |
+| `state_dir` | `~/.config/wherry/state` | run records |
 | `credentials` | none | credential name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]` |
 | `git` | none | `{url, credential, host_key}` entries, each giving a task whose git remote starts with `url` the credential `credential` and the OpenSSH `known_hosts` file `host_key`, both optional ([git credentials](security.md#git-credentials)) |
 | `storage` | none | `{access_key, secret_key}`: the names of the credentials in `credentials` holding the access key and secret key of the host's S3 credential; a host without it uses no S3 lane |
 | `input_roots` | the MCP server's working directory | absolute paths of existing directories the MCP server sends inputs from; the CLI reads any path it is given |
 
 `state_dir` holds `runs/<run>.json` for each run this host submitted,
-readable by its owner alone, with `redaction_key`, the run's redaction key,
-made when this host submits the run, `runs/<run>/outputs/` for the outputs
-`wait` writes by default, and `answered/<run>.<attempt>` for each attempt
-it answered, with a `.lock` beside it that every process sharing the
-directory holds while it answers that attempt. `submit` writes the run's
-record before it publishes the task, and removes it when publishing
-fails.
+readable by its owner alone, with the run's submission without its envelope
+and wrap, kept to [resubmit](concepts.md#lost-pool-keys) the run if its key
+is lost, and `redaction_key`, the run's redaction key, made when this host
+submits the run; a replacement's record also holds its signed bytes,
+envelope included. It holds no credential value in the clear. It also holds `runs/<run>/outputs/` for the outputs
+`wait` writes by default, and `resubmit/<run>.json.lock`, which every
+process sharing the directory holds while it resubmits that run. `submit`
+writes the run's record before it publishes the task, and removes it only
+when publishing fails.
 
 ### Client configuration example
 
@@ -66,11 +68,11 @@ storage:
 
 `credentials` holds a source for each credential the agents of the
 [pool terms example](#pool-terms-example) take: two files, a password
-manager's command for `openai-api-key`, and the answering process's
+manager's command for `openai-api-key`, and the submitting process's
 `GITHUB_TOKEN` for `github-token`, which `git` also gives every task cloning
 under `https://github.com/acme/`. `storage` takes the S3 access key from a
-file and the secret key from the password manager. Each source resolves each time a receiver
-asks for its credential.
+file and the secret key from the password manager. Each source resolves at
+each submit.
 
 ## Receiver local configuration
 
@@ -83,10 +85,10 @@ flag and in every path.
 | Field | Default | Content |
 | --- | --- | --- |
 | `bundle` | required | the receiver's bundle |
-| `state_dir` | `state` in the bundle file's directory | the receiver's signing key |
+| `state_dir` | `state` in the bundle file's directory | the receiver's signing key and, while it holds any, its pool's keys in `pool-keys/` ([Pool keys](concepts.md#pool-keys-and-the-key-custodian)) |
 | `plugin_dir` | `/usr/local/libexec/wherry/plugins` | the directory holding the `wherry-plugin-<type>` binaries, or symbolic links to them; each starts only when its SHA-256 is the receiver record's pin for its type |
 | `metrics_addr` | none | `HOST:PORT` to serve [`/metrics`](operations.md#metrics) on; without it the receiver serves no metrics |
-| `drain_timeout` | `0s` | how long the runs the receiver holds may go on after `SIGINT` or `SIGTERM` before it releases their tasks for adoption, a duration such as `25s`; [set it with the platform's stop window](#drain-timeout-and-the-stop-window) |
+| `drain_timeout` | `0s` | how long the runs the receiver holds may go on after `SIGINT` or `SIGTERM` before it releases their tasks for adoption, a duration such as `20s`; [set it with the platform's stop window](#drain-timeout-and-the-stop-window) |
 | `credentials` | none | [platform credential](#platform-credentials) name to its [source](security.md#credential-sources), exactly one of `file: PATH`, `env: VAR` and `command: [PROGRAM, ARG...]`, validated and resolved as the host's |
 
 ### Drain timeout and the stop window
@@ -98,12 +100,26 @@ or systemd's [`TimeoutStopSec`](https://www.freedesktop.org/software/systemd/man
 On `SIGINT` or `SIGTERM` the receiver stops claiming, closes its idle claims
 and lets the runs it holds go on for up to `drain_timeout`. It then commits
 the pending transcript of each run still held and releases its task for
-adoption, leaving the job running. The receiver cannot read the window, so
-`drain_timeout` stays a few seconds below it, such as `25s` under a 30-second
-window. At `0s` the receiver releases its held tasks at once.
+adoption, leaving the job running. The stop fixes one deadline,
+`drain_timeout` plus 5 seconds after the signal: each held run's commit, its
+`released` status and the acknowledgement to the broker, and the key
+custodian's [drain](commands.md#wherry-receiver-run), its handover
+included, all end by it. A run whose commit does not complete by then is
+left unacknowledged, and the broker returns its task when its acquisition
+lock expires. A stop therefore takes at most `drain_timeout` plus 5 seconds.
+The receiver cannot read the window, so `drain_timeout` plus 5 seconds stays
+a few seconds below it: `20s` ends a stop within 25 seconds, inside
+Kubernetes' default 30-second window. At `0s` the
+receiver releases its held tasks at once, and a key custodian leaves without
+a handover.
+
+The drain timeout is also the time a stopping key custodian waits for a
+successor before it hands over. A custodian stopped with `0s`, or killed
+before its successor publishes, keeps its keys, and the successor publishes
+a `takeover` ([Pool keys](concepts.md#pool-keys-and-the-key-custodian)).
 
 Planned changes go through
-[`receiver update`](operations.md#change-a-receivers-configuration), which
+[`receiver update`](operations.md#change-a-receiver-s-configuration), which
 drains with no time limit. `receiver update --force` and
 [`receiver revoke`](operations.md#revoke-a-host-or-receiver) are hard stops.
 
@@ -118,7 +134,7 @@ bundle: /etc/wherry/receiver.bundle
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
-drain_timeout: 25s
+drain_timeout: 20s
 credentials:
   nomad-token:
     file: /etc/wherry/nomad-token
@@ -674,7 +690,7 @@ receiver configuration names.
 From the moment it resolves a value until it exits, the receiver replaces
 the value in the plugin lines and plugin standard error it logs and in the
 configure, sweep and readiness errors it logs, in the two forms it replaces
-a [run credential](a2a-extension-v1.md#seal) in: the bytes without
+a [run credential](security.md#credential-envelopes) in: the bytes without
 trailing CR and LF, and those bytes escaped as a JSON string. The marker is
 `[redacted:`, 16 base64url characters and `]`, from the HMAC-SHA256 under an
 empty key of `wherry-redaction-v1` followed by the credential's name. A
@@ -765,16 +781,14 @@ so a job that starts at `task_started_by`, or a terminal state at
 `task_ended_by`, meets it. A run's time is also capped at six hours after
 `task_started_by`. `submit` refuses a `task_ended_by` later than that, and a
 receiver rejects such a run no pool member has claimed with
-`task_ended_by is past task_started_by plus the 6h run cap`. A claimed run
-the cap stops before its `task_ended_by` ends `TASK_STATE_FAILED` with
-`not ended by task_started_by plus the 6h run cap (<RFC 3339 time>)`.
+`task_ended_by is past task_started_by plus the 6h run cap`.
 
 A job starts when the plugin reports it running, at which the receiver
 publishes the run's `started` event. A receiver rejects a run no pool member
 has claimed with `not started by task_started_by (<RFC 3339 time>)` or
 `not ended by task_ended_by (<RFC 3339 time>)` once that bound has passed.
 A claimed run whose job has not started by `task_started_by`, while it waits
-for its seal or for the platform to place its job, ends `TASK_STATE_FAILED`
+for its envelope to open or for the platform to place its job, ends `TASK_STATE_FAILED`
 with `not started by task_started_by (<RFC 3339 time>)`, and the receiver
 purges any job the run has. A job that has started runs on past
 `task_started_by`. A redelivered run that a member has claimed is not

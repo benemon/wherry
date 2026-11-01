@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/benemon/wherry/internal/signed"
@@ -39,9 +40,23 @@ func (source Source) Validate() error {
 	return nil
 }
 
+// TaskEndByEnv is the variable a command source's child reads its task's task_ended_by from, as RFC 3339.
+const TaskEndByEnv = "WHERRY_TASK_END_BY"
+
 // Resolve reads the source's value. Its errors name no value or path, and quote nothing the command writes; its
 // stderr is discarded.
 func (source Source) Resolve(ctx context.Context) ([]byte, error) {
+	return source.resolve(ctx, os.Environ())
+}
+
+// ResolveForTask is Resolve for a task that ends by endBy: a command source's child gets TaskEndByEnv set to endBy, in
+// place of every copy it would inherit; the resolving process's environment is unchanged.
+func (source Source) ResolveForTask(ctx context.Context, endBy string) ([]byte, error) {
+	environment := slices.DeleteFunc(os.Environ(), func(entry string) bool { return strings.HasPrefix(entry, TaskEndByEnv+"=") })
+	return source.resolve(ctx, append(environment, TaskEndByEnv+"="+endBy))
+}
+
+func (source Source) resolve(ctx context.Context, environment []string) ([]byte, error) {
 	switch {
 	case source.Env != "":
 		value := os.Getenv(source.Env)
@@ -53,14 +68,14 @@ func (source Source) Resolve(ctx context.Context) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 		defer cancel()
 		command := exec.CommandContext(ctx, source.Command[0], source.Command[1:]...)
-		stdout := &boundedBuffer{limit: signed.MaxSeal}
+		stdout := &boundedBuffer{limit: signed.MaxEnvelope}
 		// WaitDelay stops a child that keeps the output open from holding the answer past the timeout.
-		command.Stdout, command.WaitDelay = stdout, time.Second
+		command.Stdout, command.WaitDelay, command.Env = stdout, time.Second, environment
 		err := command.Run()
 		var exit *exec.ExitError
 		switch {
 		case stdout.over:
-			return nil, fmt.Errorf("its command wrote over %d bytes", signed.MaxSeal)
+			return nil, fmt.Errorf("its command wrote over %d bytes", signed.MaxEnvelope)
 		case errors.Is(ctx.Err(), context.DeadlineExceeded):
 			return nil, fmt.Errorf("its command did not finish within %s", commandTimeout)
 		case errors.As(err, &exit):

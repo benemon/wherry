@@ -28,8 +28,15 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// parseHistory is wire.ParseHistory, swapped by tests that count the verifications of a read.
-var parseHistory = wire.ParseHistory
+// parseHistory, parseStrict and authorizeSubmission are wire.ParseHistory, wire.ParseStrict and
+// admin.AuthorizeSubmission, swapped by tests that count the verifications of a read; loadState is the custodian's read
+// of wherry.admin, swapped by tests that count its reads.
+var (
+	parseHistory        = wire.ParseHistory
+	parseStrict         = wire.ParseStrict
+	authorizeSubmission = admin.AuthorizeSubmission
+	loadState           = (*admin.Reader).Load
+)
 
 // ErrConfigChanged is returned by Run when wherry.admin holds a configuration other than the one it started with.
 var ErrConfigChanged = errors.New("receiver configuration changed")
@@ -60,18 +67,30 @@ type Receiver struct {
 	// rotateKey, set by New only, has Run replace the signing key in keyFile before it claims anything.
 	keyFile   string
 	rotateKey bool
+	// stateDir holds the signing key and the pool keys.
+	stateDir string
+	custody  custody
 	// drainTimeout bounds how long Run lets held runs end after its context ends.
 	drainTimeout time.Duration
+	// started is when this process started, which its advertisements carry.
+	started time.Time
 	// config and profiles are set by configure before any claim and never change.
 	config   admin.ReceiverConfig
 	profiles []Named
 	mu       sync.Mutex
 	state    admin.State
 	// peers holds the pool's receiver keys, this receiver's included; hosts the keys of entitled tenants' hosts.
-	peers    signed.Keys
-	hosts    signed.Keys
+	peers signed.Keys
+	hosts signed.Keys
+	// ended holds the keys of the pool's ended receivers, each retired at the append time of the record that ended
+	// it, so the open records they appended while live still verify.
+	ended    signed.Keys
 	offers   []wire.Offer
 	inFlight int64
+	// steppingDown is set once the receiver drains as its pool's custodian.
+	steppingDown *wire.SteppingDown
+	// shutdownBy, set at a stop, is when every step of the stop must have ended.
+	shutdownBy time.Time
 	// denials holds the capabilities an authorisation error took away; deniedSince is when the first was
 	// lost, zero while access holds.
 	denials     map[capability]bool
@@ -89,6 +108,8 @@ type Receiver struct {
 	liveMu   sync.Mutex
 	live     map[*activeRun][]redact.Form
 	platform []redact.Form
+	// events is the pool's events folded so far, which every read of them shares.
+	events eventsFold
 }
 
 // New builds the receiver's Kafka client from bundle and loads or creates its signing key in stateDir, settling a
@@ -122,7 +143,7 @@ func New(bundle admin.Bundle, stateDir string, rotateKey bool, drainTimeout time
 		base.Close()
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, stateDir: stateDir, rotateKey: rotateKey, drainTimeout: drainTimeout, started: time.Now(), factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
 // feedBatches is opts with producer batches up to what a tenant's feed takes, so the largest result fits. Every client
@@ -165,14 +186,28 @@ func (r *Receiver) Run(ctx context.Context) error {
 	}
 	release := make(chan struct{})
 	releaseHeld := sync.OnceFunc(func() { close(release) })
-	defer context.AfterFunc(ctx, func() { time.AfterFunc(r.drainTimeout, releaseHeld) })()
+	// A stop fixes one shutdown deadline, the custodian's step-down bound, which held runs' final steps share.
+	defer context.AfterFunc(ctx, func() {
+		r.mu.Lock()
+		r.shutdownBy = time.Now().Add(r.drainTimeout + stepDownMargin)
+		r.mu.Unlock()
+		time.AfterFunc(r.drainTimeout, releaseHeld)
+	})()
 	ctx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 	// Held runs still read cancels and denials, so the periodic steps last until held tasks are released.
 	running, stopRunning := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopRunning()
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		r.keepCustody(ctx, running)
+	}()
+	go func() {
+		defer wg.Done()
+		r.every(running, openInterval, r.serveOpens)
+	}()
 	go func() {
 		defer wg.Done()
 		r.every(running, advertiseInterval, r.advertise)
@@ -215,6 +250,17 @@ func (r *Receiver) Run(ctx context.Context) error {
 	slots.Wait()
 	wg.Wait()
 	return context.Cause(ctx)
+}
+
+// shutdownContext outlives ctx for a held run's final step, ending after shutdownTimeout or at the shutdown deadline.
+func (r *Receiver) shutdownContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(shutdownTimeout)
+	r.mu.Lock()
+	if !r.shutdownBy.IsZero() && r.shutdownBy.Before(deadline) {
+		deadline = r.shutdownBy
+	}
+	r.mu.Unlock()
+	return context.WithDeadline(context.WithoutCancel(ctx), deadline)
 }
 
 // every runs step at each interval until ctx ends; Run has already run each step once.
@@ -317,9 +363,12 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	state, err := r.reader.Load(ctx)
-	var peers, hosts signed.Keys
+	var peers, hosts, ended signed.Keys
 	if err == nil {
 		peers, err = r.reader.ReadKeys(ctx, admin.PoolKeyTopics(state, r.config.Pool))
+	}
+	if err == nil {
+		ended, err = r.reader.ReadKeys(ctx, admin.EndedPoolKeyTopics(state, r.config.Pool))
 	}
 	if err == nil {
 		hosts, err = r.reader.ReadKeys(ctx, admin.HostKeyTopics(state, r.config.Pool))
@@ -328,8 +377,10 @@ func (r *Receiver) refresh(ctx context.Context) error {
 		r.deny(err, capRead)
 		return err
 	}
+	// Revocation removes an ended receiver's write access before it records the end, so the broker refuses any record
+	// it signs afterwards: its keys verify only what it wrote while a member.
 	r.mu.Lock()
-	r.state, r.peers, r.hosts = state, peers, hosts
+	r.state, r.peers, r.hosts, r.ended = state, peers, hosts, ended
 	r.mu.Unlock()
 	// A membership end comes before a configuration change, so a revoked receiver does not drain.
 	if state.Ended[admin.ReceiverPrincipal(r.id)] {
@@ -435,6 +486,12 @@ func (r *Receiver) blocked() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.denials) > 1 || len(r.denials) == 1 && !r.denials[capClaim]
+}
+
+// suspended reports the receiver's pool suspended as it holds wherry.admin.
+func (r *Receiver) suspended() bool {
+	state, _, _ := r.snapshot()
+	return state.Suspended[r.config.Pool]
 }
 
 // backoff is how long the receiver waits before it fetches from its pool again.
@@ -567,10 +624,11 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	r.offers = offers
-	inFlight := r.inFlight
+	inFlight, steppingDown := r.inFlight, r.steppingDown
 	r.mu.Unlock()
 	value, err := wire.SignRecord(&wire.Advertisement{
 		Receiver: r.id, Pool: r.config.Pool, Offers: offers, Capacity: r.config.Capacity, InFlight: inFlight, AtMS: time.Now().UnixMilli(),
+		StartedMS: r.started.UnixMilli(), SteppingDown: steppingDown,
 	}, r.signing)
 	if err != nil {
 		return err
@@ -600,27 +658,120 @@ func (r *Receiver) offer(placement wire.Placement) (Named, bool) {
 
 // poolEvents is one read of the pool's events topic.
 type poolEvents struct {
-	// statuses holds, per run, the statuses from live pool members in log order, one per event ID.
+	// statuses holds, per run, the statuses from live pool members in log order, one per event ID, and records the
+	// record of each.
 	statuses map[string][]wire.RunStatus
+	records  map[string][]*kgo.Record
 	// startFailures holds, per run, this receiver's start failures in log order.
 	startFailures map[string][]wire.StartFailure
 	// others holds, per run, every other record, such as cancels.
 	others map[string][][]byte
+	// requests holds the open requests in log order; answered holds the digest of each request an attempt wrap or a
+	// refusal answers.
+	requests []openRequest
+	answered map[string]bool
+	// rekeys holds, per task hash, its re-key wraps; decisions the first decision on each claim, by the claim's digest.
+	rekeys    map[string][]wire.RekeyWrap
+	decisions map[string]wire.ClaimDecision
+	// seen holds the event ID of each status in statuses; it is the fold's alone.
+	seen map[string]bool
 }
 
+func newPoolEvents() poolEvents {
+	return poolEvents{
+		statuses: map[string][]wire.RunStatus{}, records: map[string][]*kgo.Record{}, startFailures: map[string][]wire.StartFailure{}, others: map[string][][]byte{},
+		answered: map[string]bool{}, rekeys: map[string][]wire.RekeyWrap{}, decisions: map[string]wire.ClaimDecision{}, seen: map[string]bool{},
+	}
+}
+
+// view is a copy of events a reader may keep while the fold goes on: the fold only appends past each slice's length.
+func (events poolEvents) view() poolEvents {
+	events.statuses, events.records, events.startFailures, events.others = maps.Clone(events.statuses), maps.Clone(events.records), maps.Clone(events.startFailures), maps.Clone(events.others)
+	events.answered, events.rekeys, events.decisions, events.seen = maps.Clone(events.answered), maps.Clone(events.rekeys), maps.Clone(events.decisions), nil
+	return events
+}
+
+// eventsFold is the pool's events folded once per process, from the log start to next.
+type eventsFold struct {
+	mu   sync.Mutex
+	next int64
+	// entries holds what each folded record that counts adds to events, in log order.
+	entries []foldedEvent
+	events  poolEvents
+	// state, peers and ended are what every entry was verified and authorised against.
+	state        admin.State
+	peers, ended signed.Keys
+}
+
+// foldedEvent is what the record at offset adds to a view of the pool's events.
+type foldedEvent struct {
+	offset int64
+	apply  func(*poolEvents)
+}
+
+func (fold *eventsFold) reset() {
+	fold.next, fold.entries, fold.events = 0, nil, newPoolEvents()
+}
+
+// openRequest is an open request's record, with the request when it verifies as a live pool member's.
+type openRequest struct {
+	record  *kgo.Record
+	digest  string
+	request *wire.OpenRequest
+}
+
+// readEvents reads the pool's events after those already folded and returns the view a read of the whole topic gives.
 func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	records, err := r.reader.ReadFrom(ctx, admin.PoolEventsTopic(r.config.Pool), 0)
+	fold := &r.events
+	fold.mu.Lock()
+	defer fold.mu.Unlock()
+	state, peers, _ := r.snapshot()
+	r.mu.Lock()
+	ended := r.ended
+	r.mu.Unlock()
+	// Any record's verification or authorisation may differ under other state or keys, so the fold starts again.
+	if fold.events.seen == nil || !reflect.DeepEqual(fold.state, state) || !reflect.DeepEqual(fold.peers, peers) || !reflect.DeepEqual(fold.ended, ended) {
+		fold.reset()
+	}
+	records, start, end, err := r.reader.ReadRange(ctx, admin.PoolEventsTopic(r.config.Pool), fold.next)
 	if err != nil {
 		r.deny(err, capRead)
 		return poolEvents{}, err
 	}
-	state, peers, _ := r.snapshot()
+	entries, err := r.foldEvents(ctx, records, state, peers, ended)
+	if err != nil {
+		return poolEvents{}, err
+	}
+	// Retention deletes from the log start: what a read of the whole topic no longer sees is dropped, records this read
+	// fetched before the start moved included.
+	all := append(fold.entries, entries...)
+	retained := slices.IndexFunc(all, func(entry foldedEvent) bool { return entry.offset >= start })
+	if retained < 0 {
+		retained = len(all)
+	}
+	if retained > 0 {
+		fold.entries, fold.events = slices.Clone(all[retained:]), newPoolEvents()
+		for _, entry := range fold.entries {
+			entry.apply(&fold.events)
+		}
+	} else {
+		for _, entry := range entries {
+			entry.apply(&fold.events)
+		}
+		fold.entries = all
+	}
+	fold.next, fold.state, fold.peers, fold.ended = max(fold.next, end), state, peers, ended
+	return fold.events.view(), nil
+}
+
+// foldEvents verifies and authorises each record of the pool's events against state, peers and ended, and returns
+// what each that counts adds to their view.
+func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state admin.State, peers, ended signed.Keys) ([]foldedEvent, error) {
 	peerTopics := admin.PoolKeyTopics(state, r.config.Pool)
 	reread := map[string]bool{}
-	events := poolEvents{statuses: map[string][]wire.RunStatus{}, startFailures: map[string][]wire.StartFailure{}, others: map[string][][]byte{}}
-	seen := map[string]bool{}
+	var entries []foldedEvent
 	for _, record := range records {
 		run := string(record.Key)
 		history := parseHistory(record.Timestamp)
@@ -628,11 +779,32 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 		// tells a record that does not verify, kept for the cancel check, from one that verifies and is refused.
 		var status wire.RunStatus
 		var failure wire.StartFailure
+		var request wire.OpenRequest
+		var attemptWrap wire.AttemptWrap
+		var refusal wire.OpenRefusal
+		var rekey wire.RekeyWrap
+		var decision wire.ClaimDecision
 		var parseErr error
 		typ := recordType(record.Value)
 		authorize := func(peers signed.Keys) error {
 			parse := func(encoded []byte, keys signed.Keys, value wire.Record) error {
 				parseErr = history(encoded, keys, value)
+				return parseErr
+			}
+			// Open requests and re-key wraps verify only against live pool members' keys, which is their authorisation.
+			strict := func(value wire.Record) error {
+				parseErr = parseStrict(record.Value, peers, record.Timestamp, value)
+				return parseErr
+			}
+			// A custodian's answers and claim decisions verify against the key current at their append time, also after
+			// its membership ended.
+			historic := func(value wire.Record) error {
+				keys := peers
+				if owner, _, _ := kid(record.Value); keys[owner].Current == nil && ended[owner].Current != nil {
+					keys = maps.Clone(peers)
+					keys[owner] = ended[owner]
+				}
+				parseErr = parseStrict(record.Value, keys, record.Timestamp, value)
 				return parseErr
 			}
 			var err error
@@ -641,8 +813,18 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 				status, err = admin.AuthorizePoolStatus(parse, state, peers, record.Value, r.config.Pool)
 			case wire.StartFailureType:
 				failure, err = admin.AuthorizePoolStartFailure(parse, state, peers, record.Value, r.config.Pool)
+			case wire.OpenRequestType:
+				err = strict(&request)
+			case wire.AttemptWrapType:
+				err = historic(&attemptWrap)
+			case wire.OpenRefusalType:
+				err = historic(&refusal)
+			case wire.RekeyWrapType:
+				err = strict(&rekey)
+			case wire.ClaimDecisionType:
+				err = historic(&decision)
 			default:
-				parseErr = errors.New("record is neither a status nor a start failure")
+				parseErr = errors.New("record is not a pool event")
 			}
 			return err
 		}
@@ -651,27 +833,55 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 		if owner, topic, stale := staleKey(record.Value, peers, peerTopics); parseErr != nil && stale && !reread[owner] {
 			reread[owner] = true
 			if peers, err = r.rereadKey(ctx, &r.peers, owner, topic); err != nil {
-				return poolEvents{}, err
+				return nil, err
 			}
 			err = authorize(peers)
 		}
+		var apply func(*poolEvents)
 		switch {
+		case typ == wire.OpenRequestType:
+			// A request that does not verify is refused by its digest.
+			opened := openRequest{record: record, digest: wire.Digest(record.Value)}
+			if err == nil && request.Run == run {
+				opened.request = &request
+			}
+			apply = func(events *poolEvents) { events.requests = append(events.requests, opened) }
 		case parseErr != nil:
-			events.others[run] = append(events.others[run], record.Value)
+			apply = func(events *poolEvents) { events.others[run] = append(events.others[run], record.Value) }
 		case err != nil:
 			// A status or start failure that verifies but is not authorised counts for nothing.
 		case typ == wire.StartFailureType:
 			// A start failure binds its run's tenant through the task hash, which failedHere matches.
 			if failure.Wherry.Run == run && failure.Wherry.Receiver == r.id {
-				events.startFailures[run] = append(events.startFailures[run], failure)
+				apply = func(events *poolEvents) { events.startFailures[run] = append(events.startFailures[run], failure) }
 			}
-		case status.Wherry.Run == run && !seen[status.Wherry.EventID]:
+		case typ == wire.AttemptWrapType:
+			apply = func(events *poolEvents) { events.answered[attemptWrap.Request] = true }
+		case typ == wire.OpenRefusalType:
+			apply = func(events *poolEvents) { events.answered[refusal.Request] = true }
+		case typ == wire.RekeyWrapType:
+			apply = func(events *poolEvents) { events.rekeys[rekey.TaskHash] = append(events.rekeys[rekey.TaskHash], rekey) }
+		case typ == wire.ClaimDecisionType:
+			apply = func(events *poolEvents) {
+				if _, decided := events.decisions[decision.Claim]; !decided {
+					events.decisions[decision.Claim] = decision
+				}
+			}
+		case status.Wherry.Run == run:
 			// A status binds its run's tenant through the task hash; the pool, membership and entitlement are checked here.
-			seen[status.Wherry.EventID] = true
-			events.statuses[run] = append(events.statuses[run], status)
+			apply = func(events *poolEvents) {
+				if !events.seen[status.Wherry.EventID] {
+					events.seen[status.Wherry.EventID] = true
+					events.statuses[run] = append(events.statuses[run], status)
+					events.records[run] = append(events.records[run], record)
+				}
+			}
+		}
+		if apply != nil {
+			entries = append(entries, foldedEvent{offset: record.Offset, apply: apply})
 		}
 	}
-	return events, nil
+	return entries, nil
 }
 
 // committedTerminal reports a status in a terminal A2A state, a rejection included, for the exact task

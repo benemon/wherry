@@ -103,11 +103,45 @@ func TestAdminCommandUsage(t *testing.T) {
 		{[]string{"revoke", "receiver", "receiver-a"}, "unknown admin command"},
 		{[]string{"receiver", "configure", "receiver-a"}, "unknown admin command"},
 		{[]string{"pool", "update"}, "usage: wherry admin pool update NAME"},
+		{[]string{"pool", "suspend"}, "usage: wherry admin pool suspend POOL"},
+		{[]string{"pool", "resume", "pool-a", "pool-b"}, "usage: wherry admin pool resume POOL"},
+		{[]string{"pool", "rotate-key"}, "usage: wherry admin pool rotate-key POOL [--suspect-key KID]..."},
+		{[]string{"pool", "suspend", "pool-a", "--suspect-key", "kid"}, "unknown option --suspect-key"},
 	} {
 		var stdout, stderr bytes.Buffer
 		if err := runAdmin(test.args, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), test.want) {
 			t.Errorf("%q = %v, want %q", test.args, err, test.want)
 		}
+	}
+}
+
+// The rotate-key report names each task's run, tenant, key and credentials and states its horizon, and the tasks
+// retention deleted during its scan.
+func TestRotateKeyReportStatesItsHorizon(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	var out bytes.Buffer
+	writeRotateReport(&out, "pool-a", admin.RotateReport{SuspectKeys: []string{"kid-a", "kid-b"}, Horizon: map[int32]int64{1: 7, 0: 3}, OldestMS: now.Add(-50 * time.Hour).UnixMilli(),
+		Tasks: []admin.SuspectTask{{Run: "run-a", Tenant: "tenant-a", KeyID: "kid-a", Credentials: []string{"deploy", "model"}, AppendedMS: now.Add(-time.Hour).UnixMilli()}}}, now)
+	want := `pool pool-a's key custodian rotated for the rotate-key request; tasks appended through that rotation are listed
+suspect_keys=kid-a,kid-b
+horizon partition=0 oldest_retained_offset=3
+horizon partition=1 oldest_retained_offset=7
+horizon: the oldest retained task was appended at 2026-10-30T10:00:00Z, 50h0m0s ago; tasks deleted by retention before it are not listed
+task run=run-a tenant=tenant-a key=kid-a credentials=deploy,model appended=2026-11-01T11:00:00Z
+tasks=1
+`
+	if out.String() != want {
+		t.Fatalf("report:\n%s\nwant:\n%s", out.String(), want)
+	}
+	out.Reset()
+	writeRotateReport(&out, "pool-a", admin.RotateReport{SuspectKeys: []string{"kid-a"}, Horizon: map[int32]int64{0: 0}}, now)
+	if !strings.Contains(out.String(), "horizon: the task topic retains no task; tasks deleted by retention are not listed\n") {
+		t.Fatalf("empty report states no horizon:\n%s", out.String())
+	}
+	out.Reset()
+	writeRotateReport(&out, "pool-a", admin.RotateReport{SuspectKeys: []string{"kid-a"}, Horizon: map[int32]int64{0: 9}, DeletedFrom: map[int32]int64{0: 3}}, now)
+	if !strings.Contains(out.String(), "horizon partition=0 oldest_retained_offset=9\nhorizon partition=0: retention deleted the tasks at offsets 3 to 8 during the scan; they may not be listed\n") {
+		t.Fatalf("report does not state the tasks deleted during the scan:\n%s", out.String())
 	}
 }
 

@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -500,23 +499,21 @@ func payloadOf(t *testing.T, value []byte) []byte {
 	return payload
 }
 
-func TestAnswerSealsPresignedURLsForTheRunsObjects(t *testing.T) {
+func TestTheEnvelopeCarriesPresignedURLsForTheRunsObjects(t *testing.T) {
 	f, o, receiver := storageFixture(t)
 	task, data := submitS3(t, f, receiver, 10*time.Minute)
 	runID := task.submission.Wherry.Run
-	asked := newRequest(t, receiver.binding(task, 1), "model")
-	asked.record.S3Inputs, asked.record.S3Outputs = []string{"dataset.bin"}, []string{"out/report.pdf"}
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	answering(t, f, f.host)
-	f.waitSeals(t, "host-a", 1)
-	values := asked.open(t, f, "host-a")
-	get, put := string(values[signed.S3InputValue("dataset.bin")]), string(values[signed.S3OutputValue("out/report.pdf")])
-	if len(values) != 3 || get == "" || put == "" {
-		t.Fatalf("sealed %d values; want the credential and two URLs", len(values))
+	_, values, err := open(t, f, runID, f.poolKeys["pool-s3"])
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, sealed := range []string{get, put} {
-		if strings.Contains(sealed, o.secret) || strings.Contains(sealed, url.QueryEscape(o.secret)) {
-			t.Fatalf("a sealed URL holds the secret key: %s", sealed)
+	get, put := values.S3Inputs["dataset.bin"], values.S3Outputs["out/report.pdf"]
+	if len(values.S3Inputs) != 1 || len(values.S3Outputs) != 1 || get == "" || put == "" {
+		t.Fatalf("enveloped %d input and %d output URLs; want one of each", len(values.S3Inputs), len(values.S3Outputs))
+	}
+	for _, enveloped := range []string{get, put} {
+		if strings.Contains(enveloped, o.secret) || strings.Contains(enveloped, url.QueryEscape(o.secret)) {
+			t.Fatalf("an enveloped URL holds the secret key: %s", enveloped)
 		}
 	}
 	expires := func(raw string) time.Duration {
@@ -524,9 +521,10 @@ func TestAnswerSealsPresignedURLsForTheRunsObjects(t *testing.T) {
 		seconds, _ := strconv.Atoi(parsed.Query().Get("X-Amz-Expires"))
 		return time.Duration(seconds) * time.Second
 	}
+	getDeadline := time.Until(time.Unix(task.submission.Wherry.TaskStartedBy, 0).Add(15 * time.Minute))
 	deadline := time.Until(time.Unix(task.submission.Wherry.TaskEndedBy, 0))
-	if expires(get) != 15*time.Minute || expires(put) < deadline-10*time.Second || expires(put) > deadline+2*time.Second {
-		t.Fatalf("GET lives %v and PUT %v; want 15m and the turn's task_ended_by, %v away", expires(get), expires(put), deadline)
+	if expires(get) < getDeadline-10*time.Second || expires(get) > getDeadline+2*time.Second || expires(put) < deadline-10*time.Second || expires(put) > deadline+2*time.Second {
+		t.Fatalf("GET lives %v and PUT %v; want the turn's task_started_by plus 15m, %v away, and its task_ended_by, %v away", expires(get), expires(put), getDeadline, deadline)
 	}
 	// The store honours each URL for its own object and method alone.
 	response, err := o.client.Get(get)
@@ -558,113 +556,18 @@ func TestAnswerSealsPresignedURLsForTheRunsObjects(t *testing.T) {
 	}
 }
 
-// The answerer logs a seal with URLs, a second answerer's skip of the sealed attempt and an unauthorised request; no
-// answerer line holds a credential value, a URL, the storage secret or the run's redaction key.
-func TestAnswererLogsHoldNoSecret(t *testing.T) {
-	o := newUploadOracle(t)
-	if err := os.WriteFile(o.sources["storage-secret"].File, []byte("storage-secret-value"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f := newFixture(t)
-	terms := testTerms()
-	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
-	if err := f.service.PoolCreate(f.ctx, "pool-s3", terms); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.service.TenantAdd(f.ctx, "tenant-a", "pool-s3"); err != nil {
-		t.Fatal(err)
-	}
-	f.host.storage = o.config
-	maps.Copy(f.host.credentials, o.sources)
-	receiver := f.addReceiver(t, "receiver-s3", "pool-s3")
-	receiver.advertise(t, f.ctx, nil)
-	task, _ := submitS3(t, f, receiver, 10*time.Minute)
-	runID := task.submission.Wherry.Run
-	asked := newRequest(t, receiver.binding(task, 1), "model")
-	asked.record.S3Inputs, asked.record.S3Outputs = []string{"dataset.bin"}, []string{"out/report.pdf"}
-	receiver.feed(t, f.ctx, runID, receiver.sign(t, &asked.record))
-	answering(t, f, f.host)
-	f.waitSeals(t, "host-a", 1)
-	values := asked.open(t, f, "host-a")
-	twin, err := NewHost(f.host.kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, log.New(f.logs, "twin: ", 0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	twin.storage = f.host.storage
-	answering(t, f, twin)
-	f.logged(t, "twin", "run "+runID+": skipped a seal request from receiver-s3 for attempt 1, which another answerer already sealed", 0)
-	outsider := f.addReceiver(t, "receiver-b", "pool-a")
-	forged := newRequest(t, outsider.binding(task, 1), "model")
-	receiver.feed(t, f.ctx, runID, outsider.sign(t, &forged.record))
-	// Both answerers read the forged request.
-	for strings.Count(f.logs.String(), "run "+runID+": skipped a seal request: record names another pool or tenant than its run") < 2 {
-		if f.ctx.Err() != nil {
-			t.Fatalf("logs:\n%s", f.logs.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	local, err := f.host.localRun(runID)
-	if err != nil || local == nil {
-		t.Fatalf("local record %v, %v", local, err)
-	}
-	secrets := []string{"model-token", "storage-secret-value", o.endpoint, "X-Amz", "https://",
-		hex.EncodeToString(local.RedactionKey), base64.StdEncoding.EncodeToString(local.RedactionKey), base64.RawURLEncoding.EncodeToString(local.RedactionKey)}
-	for _, value := range values {
-		secrets = append(secrets, string(value))
-	}
-	var answerer int
-	for line := range strings.Lines(f.logs.String()) {
-		if !strings.Contains(line, "answerer pid=") {
-			continue
-		}
-		answerer++
-		for _, secret := range secrets {
-			if strings.Contains(line, secret) {
-				t.Fatalf("answerer line holds %q: %s", secret, line)
-			}
-		}
-	}
-	if answerer < 6 {
-		t.Fatalf("%d answerer lines; logs:\n%s", answerer, f.logs.String())
-	}
-}
-
 func TestPutURLExpiresAtTheTurnsEndBy(t *testing.T) {
 	f, o, receiver := storageFixture(t)
 	task, _ := submitS3(t, f, receiver, 4*time.Second)
-	asked := newRequest(t, receiver.binding(task, 1), "model")
-	asked.record.S3Outputs = []string{"out/report.pdf"}
-	receiver.feed(t, f.ctx, task.submission.Wherry.Run, receiver.sign(t, &asked.record))
-	answering(t, f, f.host)
-	f.waitSeals(t, "host-a", 1)
-	put := string(asked.open(t, f, "host-a")[signed.S3OutputValue("out/report.pdf")])
+	_, values, err := open(t, f, task.submission.Wherry.Run, f.poolKeys["pool-s3"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := values.S3Outputs["out/report.pdf"]
 	time.Sleep(time.Until(time.Unix(task.submission.Wherry.TaskEndedBy, 0).Add(2 * time.Second)))
 	request, _ := http.NewRequest(http.MethodPut, put, strings.NewReader("late"))
 	if response, err := o.client.Do(request); err != nil || response.StatusCode != http.StatusForbidden {
 		t.Fatalf("PUT after task_ended_by answered %v, %v; want forbidden", response.Status, err)
-	}
-}
-
-func TestAnswerRefusesS3ObjectsTheRunDoesNotDeclare(t *testing.T) {
-	f, _, receiver := storageFixture(t)
-	task, _ := submitS3(t, f, receiver, time.Minute)
-	for _, edit := range []func(*wire.SealRequest){
-		func(request *wire.SealRequest) { request.S3Inputs = []string{"other.bin"} },
-		func(request *wire.SealRequest) { request.S3Outputs = []string{"other.pdf"} },
-	} {
-		asked := newRequest(t, receiver.binding(task, 1), "model")
-		edit(&asked.record)
-		receiver.feed(t, f.ctx, task.submission.Wherry.Run, receiver.sign(t, &asked.record))
-	}
-	answering(t, f, f.host)
-	for !strings.Contains(f.logs.String(), "S3 output other.pdf, which the run does not declare") || !strings.Contains(f.logs.String(), "S3 input other.bin, which the run does not declare") {
-		if f.ctx.Err() != nil {
-			t.Fatalf("logs:\n%s", f.logs.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if seals := f.seals(t, "host-a"); seals != 0 {
-		t.Fatalf("%d seals written", seals)
 	}
 }
 
@@ -845,7 +748,7 @@ func TestCleanupDeletesTheRunsPrefixOnDemand(t *testing.T) {
 	}
 }
 
-func TestASealOverItsLimitIsRefusedBeforeUploading(t *testing.T) {
+func TestAnEnvelopeOverItsLimitPublishesNothing(t *testing.T) {
 	f, _, _ := storageFixture(t)
 	var outputs []wire.ExpectedOutput
 	for i := range 100 {
@@ -855,7 +758,7 @@ func TestASealOverItsLimitIsRefusedBeforeUploading(t *testing.T) {
 	_, err := f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "x", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}}, Outputs: outputs,
 		EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "over the 64 KiB limit") {
-		t.Fatalf("submit = %v; want the seal's size refused", err)
+		t.Fatalf("submit = %v; want the envelope's size refused", err)
 	}
 	if end := f.tasksEnd(t, "pool-s3"); end != 0 {
 		t.Fatalf("%d tasks published", end)
@@ -939,7 +842,7 @@ func TestLoopbackHTTPStorage(t *testing.T) {
 	if _, err := uploadInputs(ctx, store, testBucket, "tenant-a", "run-1", []S3File{{Name: "dataset.bin", Body: file}}); err != nil || puts.Load() != 1 {
 		t.Fatalf("upload = %v after %d PUTs; want one PUT over http", err, puts.Load())
 	}
-	values, err := presign(ctx, store, testBucket, "tenant-a", "run-1", []string{"dataset.bin"}, nil, time.Now().Add(time.Hour))
+	values, err := presign(ctx, store, testBucket, "tenant-a", "run-1", "run-1", []string{"dataset.bin"}, nil, time.Now().Add(getLifetime), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

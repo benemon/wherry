@@ -149,32 +149,115 @@ Then:
   a margin, as in [Create a pool](operations.md#create-a-pool).
 - Resubmit the failed runs once the cause is fixed.
 
-## WherryCredentialRequestsUnanswered
+## WherryOpenRequestsUnanswered
 
-A receiver that claims a run with credentials to deliver publishes a seal
-request, and the submitting host answers it while `wherry wait` or
-`wherry mcp` runs. A request no host answers within 5 minutes ends the run
-`TASK_STATE_FAILED`. The alert fires on 2 or more `unanswered` seal waits
-(`wherry_seal_waits_total`) for one tenant in an hour.
+A receiver that claims a run writes an open request on the pool's events,
+and the pool's key custodian answers it with an attempt wrap or a refusal.
+A receiver whose request no key custodian answers within 5 minutes and 120
+seconds logs `run <id>: no answer to the open request for attempt <n>` and
+releases the task to the pool for another delivery. The alert fires on 2
+or more `unanswered` open waits (`wherry_open_waits_total`) for one tenant
+in a pool in an hour.
 
 Confirm it:
 
-1. Run `wherry status RUN_ID`. The message reads
-   `credential <name> was not answered within 5m` and names each credential
-   the host did not answer.
-2. Run `wherry receivers`. An agent's `credentials` marks `missing` each
-   credential the host's configuration has no source for.
-3. Read the standard error of the host's `wherry wait` or `wherry mcp`. A
-   failed source logs
-   `run <id>: resolve credential <name>: <cause>`.
+1. Read the claiming receivers' logs for
+   `run <id>: no answer to the open request for attempt <n>`.
+2. Find the pool's key custodian from its receivers' log lines, as in step 1
+   of [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
+   and check that it is `live` in `wherry receivers`.
+3. Read the pool's receivers' logs for lines starting `custodian:`, such
+   as `custodian: published pool <pool> key <id> (<reason>)`,
+   `custodian: lost the custodian group's assignment for pool <pool>` and
+   `custodian group: <cause>`, and for Kafka denials
+   (`wherry_denials_total`).
 
-Then, on the tenant's host, as in
-[Run credentialed tasks](security.md#run-credentialed-tasks):
+Then:
 
-- Add a source for each `missing` credential, or fix the source the log
-  names, such as a file mode or a command that exits non-zero.
-- Keep `wherry wait RUN_ID` or `wherry mcp` running until the run starts.
-- Submit the run again.
+- Start or restart a receiver of the pool, so that the custodian group
+  assigns a live member and it publishes its snapshot.
+- Fix the broker access a denial names, as in
+  [Prepare Kafka](operations.md#prepare-kafka).
+
+## WherryCustodianTakeover
+
+The custodian group assigns a pool's key custody to one receiver. A
+receiver that becomes custodian without the previous custodian's handover
+publishes a `takeover` snapshot with a new pool key; the previous
+custodian's tasks that never started then fail key-lost unless a receiver
+holding the previous key re-keys them, and their hosts resubmit them before
+their `task_started_by`. A custodian whose producer is fenced while the
+group still assigns it the partition re-initialises its transactional ID
+and republishes its snapshot as `contested`; a second fence within the
+45-second session timeout stands it down until it is assigned again. The
+alert fires on any increase of `wherry_custodian_takeovers_total` within 15
+minutes, by `reason`, `takeover` or `contested`. A `bootstrap`, `rotation` or
+`handover` snapshot counts nothing.
+
+Confirm it:
+
+1. Read the receiver's log for
+   `custodian: took over pool <pool> (WherryCustodianTakeover)` or
+   `custodian: fenced while assigned in pool <pool>; re-initialising to republish (WherryCustodianTakeover)`,
+   and for
+   `custodian: fenced again within the session timeout in pool <pool>; standing down until assigned again`.
+2. Read the previous custodian's log for its stop: a planned drain logs
+   `custodian: stepping down in pool <pool>; waiting up to <timeout> for a successor`,
+   and a stop with `drain_timeout` at `0s` logs
+   `custodian: leaving pool <pool> with no drain timeout; keeping the pool keys to their deadlines`.
+3. Find the pool's key custodian from its receivers' log lines, as in step 1
+   of [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
+   and check that it is `live` in `wherry receivers`.
+
+Then:
+
+- For a takeover after a crash or a lost state directory, nothing more is
+  needed; the hosts of the lost tasks resubmit them when they next run.
+- For a takeover after a planned stop, raise `drain_timeout`, so that the
+  stopping custodian waits for a successor's snapshot and hands over, as in
+  [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian).
+- For a contested snapshot with no custodian change, find the writer that
+  initialised `p.<pool>.custodian`: every member of the pool holds that
+  transactional ID. Revoke a suspect receiver with
+  `wherry admin receiver revoke`.
+
+## WherryRunsKeyLost
+
+A run whose envelope no holder of a pool key can open cannot start. A
+receiver ends such a run that never started `TASK_STATE_FAILED` with the
+wherry event `key-lost`, and counts it in `wherry_runs_key_lost_total`,
+whatever custody change came before: a takeover, a handover whose
+stepping-down custodian exited before re-keying, or a task appended under an
+old key after a drain's scan. Its host resubmits it before its
+`task_started_by` ([Lost pool keys](concepts.md#lost-pool-keys)). A run
+whose job had started ends with the same message without `key-lost`, and
+counts nothing. The alert fires on any increase within 15 minutes.
+
+Confirm it:
+
+1. Read the receiver's run log for terminal statuses with the message
+   `cannot be opened: the pool's custodian changed and its key was lost`.
+2. Read the receivers' logs for the custody change before it: a
+   `custodian: took over pool <pool> (WherryCustodianTakeover)` line, or a
+   stepping-down custodian's
+   `custodian: hand over to <receiver>: <error>; keeping the pool keys to their deadlines`
+   or `custodian: no successor in pool <pool>; keeping the pool keys to their deadlines`.
+
+Then:
+
+- The hosts resubmit each run before its `task_started_by` when `submit` or
+  `status` next runs there, or `wait`, `logs -f` or `status` for the run, or
+  the MCP server's `submit`, `status` or `wait`
+  ([Lost pool keys](concepts.md#lost-pool-keys));
+  `wherry status RUN_ID` then shows `replaced_by=<run>`. A run past its
+  `task_started_by`, or whose host does not come back, is submitted again by
+  hand.
+- For losses at planned stops, set `drain_timeout` and the platform's stop
+  window as in
+  [Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window),
+  and stop a pool's receivers one at a time, as in
+  [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
+  so that a stopping custodian has a live successor.
 
 ## WherryPluginRestartLoop
 

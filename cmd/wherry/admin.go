@@ -28,7 +28,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(pos) == 0 {
-		return errors.New("usage: wherry admin <pool create|pool update|pool entitle|receiver add|receiver update|receiver show|receiver revoke|host add|host revoke|skip|check>")
+		return errors.New("usage: wherry admin <pool create|pool update|pool entitle|pool suspend|pool resume|pool rotate-key|receiver add|receiver update|receiver show|receiver revoke|host add|host revoke|skip|check>")
 	}
 	broker, caPath := os.Getenv("WHERRY_TRUST_BROKER"), os.Getenv("WHERRY_TRUST_CA")
 	if broker == "" || caPath == "" {
@@ -146,6 +146,30 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			return errors.New("usage: wherry admin pool entitle POOL --tenant TENANT")
 		}
 		return service.TenantAdd(ctx, options["tenant"], pos[2])
+	case "pool suspend", "pool resume":
+		if len(pos) != 3 {
+			return fmt.Errorf("usage: wherry admin pool %s POOL", pos[1])
+		}
+		outcome, err := service.PoolSuspendAcknowledged(ctx, pos[2], pos[1] == "suspend", stderr)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, outcome)
+		return nil
+	case "pool rotate-key":
+		if len(pos) != 3 {
+			return errors.New("usage: wherry admin pool rotate-key POOL [--suspect-key KID]...")
+		}
+		var suspects []string
+		if options["suspect-key"] != "" {
+			suspects = strings.Split(options["suspect-key"], "\n")
+		}
+		report, err := service.PoolRotateKey(ctx, pos[2], suspects, stderr)
+		if err != nil {
+			return err
+		}
+		writeRotateReport(stdout, pos[2], report, time.Now())
+		return nil
 	case "host add":
 		if len(pos) != 3 || options["tenant"] == "" || options["bundle-file"] == "" {
 			return errors.New("usage: wherry admin host add HOST --tenant TENANT --bundle-file FILE")
@@ -206,6 +230,28 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	}
 }
 
+// writeRotateReport writes report's suspect keys, retention horizon and suspect tasks, naming each task and never a value.
+func writeRotateReport(out io.Writer, pool string, report admin.RotateReport, now time.Time) {
+	fmt.Fprintf(out, "pool %s's key custodian rotated for the rotate-key request; tasks appended through that rotation are listed\n", pool)
+	fmt.Fprintf(out, "suspect_keys=%s\n", strings.Join(report.SuspectKeys, ","))
+	for _, partition := range slices.Sorted(maps.Keys(report.Horizon)) {
+		fmt.Fprintf(out, "horizon partition=%d oldest_retained_offset=%d\n", partition, report.Horizon[partition])
+	}
+	for _, partition := range slices.Sorted(maps.Keys(report.DeletedFrom)) {
+		fmt.Fprintf(out, "horizon partition=%d: retention deleted the tasks at offsets %d to %d during the scan; they may not be listed\n", partition, report.DeletedFrom[partition], report.Horizon[partition]-1)
+	}
+	if report.OldestMS == 0 {
+		fmt.Fprintln(out, "horizon: the task topic retains no task; tasks deleted by retention are not listed")
+	} else {
+		oldest := time.UnixMilli(report.OldestMS)
+		fmt.Fprintf(out, "horizon: the oldest retained task was appended at %s, %s ago; tasks deleted by retention before it are not listed\n", oldest.UTC().Format(time.RFC3339), now.Sub(oldest).Truncate(time.Second))
+	}
+	for _, task := range report.Tasks {
+		fmt.Fprintf(out, "task run=%s tenant=%s key=%s credentials=%s appended=%s\n", task.Run, task.Tenant, task.KeyID, strings.Join(task.Credentials, ","), time.UnixMilli(task.AppendedMS).UTC().Format(time.RFC3339))
+	}
+	fmt.Fprintf(out, "tasks=%d\n", len(report.Tasks))
+}
+
 // showReceiver writes config's capacity, plugin pins and resolved profiles, in routing order, to out as YAML.
 func showReceiver(out io.Writer, config admin.ReceiverConfig) error {
 	// The record decodes numbers as float64, which YAML would print as 1e+06.
@@ -252,6 +298,8 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 	var pins []string
 	// --plugin-sha256 is the option given once per plugin type; its values join with newlines.
 	flags.Func("plugin-sha256", "", func(value string) error { pins = append(pins, value); return nil })
+	var suspects []string
+	flags.Func("suspect-key", "", func(value string) error { suspects = append(suspects, value); return nil })
 	flags.Bool("dry-run", false, "")
 	flags.Bool("force", false, "")
 	positional, err := parseAnywhere(flags, args)
@@ -272,6 +320,9 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 	if len(pins) > 0 {
 		options["plugin-sha256"] = strings.Join(pins, "\n")
 	}
+	if len(suspects) > 0 {
+		options["suspect-key"] = strings.Join(suspects, "\n")
+	}
 	command := strings.Join(positional[:min(len(positional), 2)], " ")
 	if len(positional) > 0 && positional[0] == "skip" {
 		command = "skip"
@@ -283,6 +334,9 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 		"receiver update": {"config-file": true, "config-dir": true, "plugin-sha256": true, "force": true, "dry-run": true},
 		"receiver show":   {},
 		"pool entitle":    {"tenant": true},
+		"pool suspend":    {},
+		"pool resume":     {},
+		"pool rotate-key": {"suspect-key": true},
 		"host add":        {"tenant": true, "bundle-file": true},
 		"host revoke":     {"tenant": true, "wait": true},
 		"receiver revoke": {"wait": true},

@@ -42,9 +42,6 @@ const logsLimit, logsMaxLimit = 100, 500
 // logsBytes bounds a transcript page's JSON, within the 25,000-token default of Claude Code's MAX_MCP_OUTPUT_TOKENS.
 const logsBytes = 24 << 10
 
-// answerRetry separates the server's attempts to answer seal requests after a failure.
-const answerRetry = 5 * time.Second
-
 func runMCP(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	configFile := flags.String("config-file", "", "host configuration file")
@@ -65,9 +62,6 @@ func runMCP(ctx context.Context, args []string) error {
 	}
 	connect, closeHost := sharedHost(func() (*busclient.Host, error) { return busclient.Connect(config, logger) })
 	defer closeHost()
-	ctx, stop := context.WithCancel(ctx)
-	defer stop()
-	go answer(ctx, connect, logger)
 	open := inputOpener(dir, config)
 	wait, err := waitCommand(*configFile)
 	if err != nil {
@@ -112,24 +106,6 @@ func sharedHost(open func() (*busclient.Host, error)) (func() (*busclient.Host, 
 		defer mu.Unlock()
 		if host != nil {
 			host.Close()
-		}
-	}
-}
-
-// answer answers seal requests for as long as the server runs, so a credentialed task is sealed while the harness
-// is between wait calls.
-func answer(ctx context.Context, connect func() (*busclient.Host, error), logger *log.Logger) {
-	for ctx.Err() == nil {
-		host, err := connect()
-		if err == nil {
-			err = host.Answer(ctx)
-		}
-		if err != nil {
-			logger.Printf("answer seal requests: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(answerRetry):
 		}
 	}
 }
@@ -237,13 +213,14 @@ type statusInput struct {
 }
 
 type runOutput struct {
-	ID       string         `json:"id"`
-	Pool     string         `json:"pool"`
-	State    string         `json:"state"`
-	Model    string         `json:"model,omitempty" jsonschema:"model the run's placement names"`
-	Message  string         `json:"message,omitempty"`
-	Updated  string         `json:"updated" jsonschema:"RFC 3339 time of the latest status; while the run has none, of this host's submission, else of the receiver's echo"`
-	Redacted map[string]int `json:"redacted,omitempty" jsonschema:"redaction markers in the message by the credential or S3 object each names"`
+	ID         string         `json:"id"`
+	Pool       string         `json:"pool"`
+	State      string         `json:"state"`
+	Model      string         `json:"model,omitempty" jsonschema:"model the run's placement names"`
+	Message    string         `json:"message,omitempty"`
+	Updated    string         `json:"updated" jsonschema:"RFC 3339 time of the latest status; while the run has none, of this host's submission, else of the receiver's echo"`
+	Redacted   map[string]int `json:"redacted,omitempty" jsonschema:"redaction markers in the message by the credential or S3 object each names"`
+	ReplacedBy string         `json:"replaced_by,omitempty" jsonschema:"the run that resubmits this one, which lost its pool key before it started"`
 }
 
 type statusOutput struct {
@@ -291,6 +268,7 @@ type waitReply struct {
 	NotReturned []wire.UnreturnedOutput `json:"not_returned,omitempty" jsonschema:"outputs the run did not return or this host could not verify, each with its reason"`
 	Redacted    map[string]int          `json:"redacted,omitempty" jsonschema:"redaction markers in the message and artifacts by the credential or S3 object each names"`
 	Skipped     int                     `json:"skipped,omitempty"`
+	Runs        []string                `json:"runs,omitempty" jsonschema:"set when the run lost its pool key before it started and was resubmitted: every run followed, the run whose outcome this is last"`
 }
 
 type cleanupOutput struct {
@@ -356,8 +334,8 @@ type logsReply struct {
 	Skipped    int            `json:"skipped,omitempty"`
 }
 
-// newMCPServer serves the wherry tools. Every call uses the host connect returns, which the server's seal-request
-// answering shares, so the process runs one tenant-feed follower.
+// newMCPServer serves the wherry tools. Every call uses the host connect returns, so the process runs one tenant-feed
+// follower.
 func newMCPServer(connect func() (*busclient.Host, error), readInput func(string, int64) (wire.Part, error), openInput func(string) (*os.File, error), waitCommand func(id string) string, logger *log.Logger) *mcp.Server {
 	// The model sees an UNAVAILABLE's class alone; the server's log, which only the host's user reads, keeps its cause
 	// with every credential value the host resolved redacted.
@@ -393,7 +371,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "submit",
-		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with wait, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which wait writes locally. While this server runs, it seals the agent's and the task's configured credentials to the receiver that claims the task when that receiver asks for them. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
+		Description: "Sign and publish a task to the pool of the live receiver whose offers match the selector. Returns the run id at once; collect the result with wait, or check the run without waiting with status. Inputs are local files the agent finds in WHERRY_INPUT_DIR; credentials are configured credentials it finds as files in WHERRY_CREDENTIALS_DIR or in environment variables; outputs are files it is asked to leave in WHERRY_OUTPUT_DIR, which wait writes locally. Submit encrypts the agent's and the task's configured credentials into the task's envelope under the pool's key; the run needs nothing more from this host. Submit refuses with auth required when this host has no source for a credential the agent requires or the task names.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input submitInput) (*mcp.CallToolResult, submitOutput, error) {
 		submission, err := submitFromInput(input, readInput, openInput)
 		if err != nil {
@@ -441,7 +419,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		for _, result := range runs.Runs {
 			output.Runs = append(output.Runs, runOutput{
 				ID: result.RunID, Pool: result.Pool, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
-				Updated: result.Updated.UTC().Format(time.RFC3339Nano), Redacted: result.Redacted,
+				Updated: result.Updated.UTC().Format(time.RFC3339Nano), Redacted: result.Redacted, ReplacedBy: result.Replacement,
 			})
 		}
 		return nil, output, nil
@@ -478,6 +456,10 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 			ID: input.ID, State: string(result.Status.State), Model: result.Model, Message: cmp.Or(statusText(result.Status), result.Unclaimed),
 			Redacted: result.Redacted, Skipped: result.Skipped,
 		}
+		final := input.ID
+		if len(result.Runs) > 1 {
+			output.Runs, final = result.Runs, result.Runs[len(result.Runs)-1]
+		}
 		if result.Task != nil {
 			for _, artifact := range result.Task.Artifacts {
 				output.Artifacts = append(output.Artifacts, resultArtifact{ArtifactID: artifact.ArtifactID, Parts: resultParts(artifact.Parts)})
@@ -496,7 +478,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 		if reply := result.Reply; reply != nil {
 			output.Reply = &replyFile{Rejected: reply.Rejected}
 			if reply.Rejected == "" {
-				paths, err := client.WriteOutputs(input.ID, "", []busclient.Output{{Name: wire.ReplyFile, SHA256: reply.SHA256, Size: reply.Size, Data: reply.Data}})
+				paths, err := client.WriteOutputs(final, "", []busclient.Output{{Name: wire.ReplyFile, SHA256: reply.SHA256, Size: reply.Size, Data: reply.Data}})
 				if err != nil {
 					logger.Print("tool failed: " + busclient.Redact(err.Error()))
 					return nil, waitReply{}, collectFailure(err)

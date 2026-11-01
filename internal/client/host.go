@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
 	json "encoding/json/v2"
@@ -25,6 +26,7 @@ import (
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
+	"github.com/minio/minio-go/v7"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -38,6 +40,10 @@ var (
 	ErrStartByPastLimit   = errors.New("task_started_by is past the pool's start_by_limit")
 	// ErrInvalidInput wraps a submission the wire format rejects; its message names the rule, never the value.
 	ErrInvalidInput = errors.New("invalid input")
+	// ErrNoSnapshot and ErrCustodianUnavailable refuse a submission whose pool has no current key to wrap its envelope
+	// to.
+	ErrNoSnapshot           = errors.New("pool has no custodian snapshot")
+	ErrCustodianUnavailable = errors.New("pool's custodian is not live or is revoked")
 )
 
 // errUndecodable wraps a local state file that does not decode.
@@ -232,6 +238,7 @@ func (h *Host) load(ctx context.Context) (view, error) {
 // Submit places a task through the live receiver with the most spare capacity that can take it, and publishes it to
 // that receiver's pool.
 func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, error) {
+	h.resubmitLost(ctx)
 	// Checked before placement: an invalid key matches no offer and would read as no matching receiver.
 	if err := wire.ValidateRequirements(input.Selector); err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
@@ -286,20 +293,11 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, credential.Name)
 		}
 	}
-	// A receiver cuts a run at task_started_by plus the run cap, so a later task_ended_by would be cut silently.
+	// A receiver rejects a task_ended_by past task_started_by plus the run cap.
 	if limit := input.StartBy.Add(time.Duration(admin.MaxRunDurationMS) * time.Millisecond); input.EndBy.After(limit) {
 		return SubmitResult{}, fmt.Errorf("%w: task_ended_by (%s) is past task_started_by plus the 6h run cap (%s)", ErrInvalidInput, wire.RFC3339(input.EndBy.Unix()), wire.RFC3339(limit.Unix()))
 	}
-	var s3Inputs, s3Outputs []string
-	for _, file := range input.S3Inputs {
-		s3Inputs = append(s3Inputs, file.Name)
-	}
-	for _, output := range outputs {
-		if output.Storage == wire.StorageS3 {
-			s3Outputs = append(s3Outputs, output.Name)
-		}
-	}
-	stored := len(s3Inputs)+len(s3Outputs) > 0
+	stored := len(input.S3Inputs)+len(s3OutputNames(outputs)) > 0
 	// Connect folds the key topic only when <host_key>.next exists, and receivers refuse a task under any key but the
 	// current one without writing a status.
 	owner := signed.HostOwner(h.tenant, h.host)
@@ -333,6 +331,11 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		return age > liveness || age < -liveness
 	})
 	pool, placement, err := resolvePlacement(v.state, h.tenant, input.Agent, input.Model, input.Selector, ads)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	// Before any credential resolves or input uploads.
+	poolKey, err := h.poolKey(ctx, v, pool, ads)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -370,10 +373,6 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			}
 		}
 		input.Parts = parts
-		s3Inputs = s3Inputs[:0]
-		for _, file := range input.S3Inputs {
-			s3Inputs = append(s3Inputs, file.Name)
-		}
 		stored = true
 	}
 	if limit, limiting := profileInlineLimit(v.state, pool, placement, declared); limit > 0 {
@@ -415,37 +414,154 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 			return SubmitResult{}, fmt.Errorf("%w: the %d-byte prompt makes a %d-byte submission record, over pool %s's %d-byte record limit", ErrInvalidInput, len(input.Prompt), len(encoded), pool, limit)
 		}
 	}
+	storage := v.state.Pools[pool].Storage
+	var store *minio.Client
 	if stored {
-		storage := v.state.Pools[pool].Storage
-		store, err := h.bucket(ctx, pool, storage)
-		if err != nil {
-			return SubmitResult{}, err
-		}
-		deadline := time.Unix(submission.Wherry.TaskEndedBy, 0)
-		if err := h.checkSealSize(ctx, store, storage.Bucket, h.tenant, runID, input.Credentials, s3Inputs, s3Outputs, deadline); err != nil {
+		if store, err = h.bucket(ctx, pool, storage); err != nil {
 			return SubmitResult{}, err
 		}
 		submission.Wherry.S3Inputs, err = uploadInputs(ctx, store, storage.Bucket, h.tenant, runID, input.S3Inputs)
-		if err == nil && len(submission.Wherry.S3Inputs) > 0 {
-			if encoded, err = wire.SignRecord(submission, h.key); err != nil {
-				err = fmt.Errorf("%w: %v", ErrInvalidInput, err)
-			}
-		}
-		if err == nil {
-			err = h.publish(ctx, submission, encoded, now)
-		}
-		if err != nil {
-			if cleanupErr := h.removePrefix(ctx, store, storage.Bucket, runID); cleanupErr != nil {
+	}
+	redactionKey := make([]byte, 32)
+	if err == nil {
+		_, err = rand.Read(redactionKey)
+	}
+	if err == nil {
+		encoded, err = h.enveloped(ctx, submission, v.state.Pools[pool], poolKey, store, redactionKey)
+	}
+	if limit := v.state.Pools[pool].RecordLimit; err == nil && int64(len(encoded)) > limit {
+		err = fmt.Errorf("%w: with its envelope the submission is a %d-byte record, over pool %s's %d-byte record limit", ErrInvalidInput, len(encoded), pool, limit)
+	}
+	if err == nil {
+		err = h.publish(ctx, submission, encoded, now, redactionKey)
+	}
+	if err != nil {
+		if stored {
+			if cleanupErr := h.removePrefix(ctx, store, storage.Bucket, wire.S3Prefix(h.tenant, runID)); cleanupErr != nil {
 				h.logger.Printf("run %s: delete the S3 inputs of a task not published: %v", runID, cleanupErr)
 			}
-			return SubmitResult{}, err
 		}
-		return SubmitResult{RunID: runID, Pool: pool}, nil
-	}
-	if err := h.publish(ctx, submission, encoded, now); err != nil {
 		return SubmitResult{}, err
 	}
 	return SubmitResult{RunID: runID, Pool: pool}, nil
+}
+
+// poolKey returns the current key of pool: that of the latest committed record under the snapshot key on the pool's
+// snapshot topic, when its writer is the custodian it names and that custodian is live in ads and unrevoked. An earlier
+// record never stands in. A suspended pool has none.
+func (h *Host) poolKey(ctx context.Context, v view, pool string, ads map[string]wire.Advertisement) (*ecdsa.PublicKey, error) {
+	if v.state.Suspended[pool] {
+		return nil, fmt.Errorf("pool %s is suspended; submit again once it is resumed", pool)
+	}
+	records, err := h.reader.ReadFrom(ctx, admin.CustodianTopic(pool), 0)
+	if err != nil {
+		return nil, err
+	}
+	var latest *kgo.Record
+	for _, record := range records {
+		// A record under another key is not a snapshot: compaction keeps the latest record of each key.
+		if string(record.Key) == wire.CustodianKey {
+			latest = record
+		}
+	}
+	if latest == nil {
+		return nil, fmt.Errorf("%w: pool %s has no custodian yet; submit again once a receiver of the pool has published one", ErrNoSnapshot, pool)
+	}
+	snapshot, err := admin.AuthorizeSnapshot(v.state, v.keys, latest.Value, pool)
+	if err != nil {
+		return nil, fmt.Errorf("%w: pool %s's current snapshot: %v", ErrCustodianUnavailable, pool, err)
+	}
+	if _, live := ads[snapshot.Custodian]; !live {
+		return nil, fmt.Errorf("%w: pool %s's custodian %s is not live; submit again once a successor has published a snapshot", ErrCustodianUnavailable, pool, snapshot.Custodian)
+	}
+	if snapshot.Reason == "takeover" || snapshot.Reason == "contested" {
+		h.logger.Printf("pool %s: custodian %s holds the pool key by %s (WherryCustodianTakeover)", pool, snapshot.Custodian, snapshot.Reason)
+	}
+	return snapshot.Current.Key.Key.(*ecdsa.PublicKey), nil
+}
+
+// enveloped signs submission with an envelope of its credentials, its S3 links and redactionKey, under a fresh content
+// key wrapped to poolKey. Credentials resolve here, a command source's child with the task's task_ended_by; GET links
+// last until task_started_by plus getLifetime and PUT links until task_ended_by.
+func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms admin.Terms, poolKey *ecdsa.PublicKey, store *minio.Client, redactionKey []byte) ([]byte, error) {
+	binding := submission.Wherry
+	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: redactionKey}
+	var names []string
+	if agent := slices.IndexFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == binding.Placement.Agent }); agent >= 0 {
+		for _, credential := range terms.Agents[agent].Credentials {
+			if !slices.Contains(binding.Unsupplied, credential.Name) {
+				names = append(names, credential.Name)
+			}
+		}
+	}
+	for _, credential := range binding.Credentials {
+		names = append(names, credential.Name)
+	}
+	for _, name := range names {
+		if _, resolved := values.Credentials[name]; resolved {
+			continue
+		}
+		source, configured := h.credentials[name]
+		if !configured {
+			return nil, fmt.Errorf("%w: auth required: credential %s is not in this host's configuration", ErrInvalidInput, name)
+		}
+		value, err := source.ResolveForTask(ctx, wire.RFC3339(binding.TaskEndedBy))
+		if err != nil {
+			return nil, fmt.Errorf("resolve credential %s: %w", name, err)
+		}
+		hold(name, value)
+		values.Credentials[name] = value
+	}
+	if store != nil {
+		var inputs []string
+		for _, input := range binding.S3Inputs {
+			inputs = append(inputs, input.Name)
+		}
+		outputs := s3OutputNames(binding.Outputs)
+		urls, err := presign(ctx, store, terms.Storage.Bucket, h.tenant, binding.InputRun(), binding.Run, inputs, outputs,
+			time.Unix(binding.TaskStartedBy, 0).Add(getLifetime), time.Unix(binding.TaskEndedBy, 0))
+		if err != nil {
+			return nil, err
+		}
+		for _, input := range inputs {
+			values.S3Inputs[input] = string(urls[signed.S3InputValue(input)])
+		}
+		for _, output := range outputs {
+			values.S3Outputs[output] = string(urls[signed.S3OutputValue(output)])
+		}
+	}
+	if err := admin.CheckEnvelope(terms, submission, values); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	contentKey := make([]byte, 32)
+	if _, err := rand.Read(contentKey); err != nil {
+		return nil, err
+	}
+	envelope, err := signed.BuildEnvelope(values, contentKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	wrap, err := signed.WrapContentKey(contentKey, poolKey)
+	if err != nil {
+		return nil, err
+	}
+	submission.Wherry.Envelope, submission.Wherry.Wrap = string(envelope), string(wrap)
+	encoded, err := wire.SignRecord(submission, h.key)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	return encoded, nil
+}
+
+// s3OutputNames names the outputs returned through the pool's bucket.
+func s3OutputNames(outputs []wire.ExpectedOutput) []string {
+	var names []string
+	for _, output := range outputs {
+		if output.Storage == wire.StorageS3 {
+			names = append(names, output.Name)
+		}
+	}
+	return names
 }
 
 // scpRemote is git's scp-like remote syntax, [user@]host:path, which has no slash before its colon.
@@ -494,14 +610,34 @@ func (h *Host) submission(runID, pool string, placement wire.Placement, parts []
 	}, nil
 }
 
-// publish records the run locally, then writes encoded, the signed submission, to its pool's task topic. The record
-// comes first so this host answers the seal request a receiver may send as soon as it claims the task; a failed write
+// publish records the run locally, then writes encoded, the signed submission, to its pool's task topic. A failed write
 // removes the record.
-func (h *Host) publish(ctx context.Context, submission *wire.Submission, encoded []byte, now time.Time) error {
+func (h *Host) publish(ctx context.Context, submission *wire.Submission, encoded []byte, now time.Time, redactionKey []byte) error {
+	record, err := h.newRecord(ctx, submission, encoded, now, redactionKey)
+	if err != nil {
+		return err
+	}
+	if err := h.writeRun(record); err != nil {
+		return err
+	}
+	if err := h.produceTask(ctx, submission.Wherry, encoded); err != nil {
+		if path, ok := h.runPath(record.Run); ok {
+			os.Remove(path)
+		}
+		return err
+	}
+	return nil
+}
+
+// newRecord is the local record of a run whose signed submission is encoded, holding redactionKey, the envelope's, and
+// the submission without its envelope as the run's resubmission template.
+func (h *Host) newRecord(ctx context.Context, submission *wire.Submission, encoded []byte, now time.Time, redactionKey []byte) (runRecord, error) {
 	binding := submission.Wherry
+	template := *submission
+	template.Wherry.Envelope, template.Wherry.Wrap = "", ""
 	record := runRecord{
 		Run: binding.Run, Pool: binding.Pool, Placement: binding.Placement, TaskHash: wire.TaskHash(encoded), SubmittedMS: now.UnixMilli(), TaskStartedBy: binding.TaskStartedBy,
-		TaskEndedBy: binding.TaskEndedBy,
+		TaskEndedBy: binding.TaskEndedBy, RedactionKey: redactionKey, Task: &template,
 	}
 	for _, credential := range binding.Credentials {
 		record.TaskCredentials = append(record.TaskCredentials, credential.Name)
@@ -512,35 +648,24 @@ func (h *Host) publish(ctx context.Context, submission *wire.Submission, encoded
 	for _, input := range binding.S3Inputs {
 		record.S3Inputs = append(record.S3Inputs, input.Name)
 	}
-	for _, output := range binding.Outputs {
-		if output.Storage == wire.StorageS3 {
-			record.S3Outputs = append(record.S3Outputs, output.Name)
-		}
-	}
-	// Minted here, not at a seal answer, so every answerer of the run reads one key and none writes the record.
-	record.RedactionKey = make([]byte, 32)
-	if _, err := rand.Read(record.RedactionKey); err != nil {
-		return err
-	}
+	record.S3Outputs = s3OutputNames(binding.Outputs)
 	// Listed before the write: a receiver that claims at once writes the run's first records after the submission.
 	ends, err := admin.ListOffsets(ctx, kadm.NewClient(h.kafka).ListCommittedOffsets, admin.TenantTopic(h.tenant))
 	if err != nil {
-		return err
+		return runRecord{}, err
 	}
 	ends.Each(func(end kadm.ListedOffset) { record.FeedOffset = end.Offset })
-	if err := h.writeRun(record); err != nil {
-		return err
+	return record, nil
+}
+
+// produceTask writes encoded, a signed submission, to its pool's task topic.
+func (h *Host) produceTask(ctx context.Context, binding wire.SubmissionBinding, encoded []byte) error {
+	err := h.produce(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(binding.Pool), Key: []byte(binding.Run), Value: encoded})
+	switch {
+	case errors.Is(err, kerr.MessageTooLarge):
+		return fmt.Errorf("%w: the submission is a %d-byte record, over the broker's record limit; shorten the prompt or the input files", ErrInvalidInput, len(encoded))
 	}
-	if err := h.produce(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(binding.Pool), Key: []byte(binding.Run), Value: encoded}); err != nil {
-		if path, ok := h.runPath(binding.Run); ok {
-			os.Remove(path)
-		}
-		if errors.Is(err, kerr.MessageTooLarge) {
-			return fmt.Errorf("%w: the submission is a %d-byte record, over the broker's record limit; shorten the prompt or the input files", ErrInvalidInput, len(encoded))
-		}
-		return err
-	}
-	return nil
+	return err
 }
 
 // Receivers returns the receivers of the pools the tenant is entitled to, with their latest advertisement. An
@@ -620,11 +745,11 @@ type runRecord struct {
 	TaskHash  string         `json:"task_hash"`
 	// SubmittedMS is when this host published the run.
 	SubmittedMS int64 `json:"submitted_at_ms,omitzero"`
-	// TaskCredentials names the task credentials the run declares, which this host may seal.
+	// TaskCredentials names the task credentials the run declares.
 	TaskCredentials []string `json:"task_credentials,omitzero"`
 	// VCSHost is the host of the git input the run declares.
 	VCSHost string `json:"vcs_host,omitzero"`
-	// S3Inputs and S3Outputs name the S3 inputs and outputs the run declares, which this host may presign.
+	// S3Inputs and S3Outputs name the S3 inputs and outputs the run declares.
 	S3Inputs  []string `json:"s3_inputs,omitzero"`
 	S3Outputs []string `json:"s3_outputs,omitzero"`
 	// TaskStartedBy and TaskEndedBy are the submission's bounds, in whole seconds; a PUT URL for its S3 outputs expires
@@ -636,6 +761,14 @@ type runRecord struct {
 	FeedOffset int64 `json:"feed_offset,omitzero"`
 	// RedactionKey is the run's redaction key, minted when this host submits the run.
 	RedactionKey []byte `json:"redaction_key,omitzero"`
+	// Task is the run's resubmission template: its submission without envelope and wrap, which holds no credential.
+	Task *wire.Submission `json:"task,omitzero"`
+	// Replacement names the run that resubmits this one, recorded before the replacement is built.
+	Replacement string `json:"replacement,omitzero"`
+	// Signed is a resubmission's exact signed submission, stored before it is produced, and Produced records that the
+	// broker acknowledged it.
+	Signed   []byte `json:"signed,omitzero"`
+	Produced bool   `json:"produced,omitzero"`
 }
 
 // feedOffset is where the tenant feed's records about the run begin, zero without a local record of it.
@@ -692,6 +825,9 @@ func readState(path string, value any) error {
 	return nil
 }
 
+// fsync is a variable so tests can fail a sync.
+var fsync = (*os.File).Sync
+
 func writeState(path string, value any) error {
 	encoded, err := json.Marshal(value, json.Deterministic(true))
 	if err != nil {
@@ -700,7 +836,7 @@ func writeState(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	// A reader sees the old file or the new one, never a partial write.
+	// A reader sees the old file or the new one, never a partial write, and a crash keeps the file it reported written.
 	temp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
 	if err != nil {
 		return err
@@ -710,10 +846,22 @@ func writeState(path string, value any) error {
 		temp.Close()
 		return err
 	}
+	if err := fsync(temp); err != nil {
+		temp.Close()
+		return err
+	}
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(temp.Name(), path)
+	if err := os.Rename(temp.Name(), path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return fsync(dir)
 }
 
 func (h *Host) produce(ctx context.Context, records ...*kgo.Record) error {

@@ -18,6 +18,8 @@ func ReceiverProgressTopic(receiver string) string {
 }
 func PoolTasksTopic(pool string) string          { return "wherry.pool." + pool + ".tasks" }
 func PoolEventsTopic(pool string) string         { return "wherry.pool." + pool + ".events" }
+func CustodianTopic(pool string) string          { return "wherry.pool." + pool + ".custodian" }
+func CustodianGroup(pool string) string          { return "p-" + pool + ".custodian" }
 func TenantTopic(tenant string) string           { return "wherry.tenant." + tenant }
 func TenantTranscriptTopic(tenant string) string { return "wherry.tenant." + tenant + ".transcript" }
 func HostTopic(tenant, host string) string       { return "wherry.host." + tenant + "." + host }

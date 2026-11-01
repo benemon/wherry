@@ -50,6 +50,10 @@ type AwaitResult struct {
 	// Unclaimed is set, with Status SUBMITTED, when the run's task_started_by passed and no receiver claimed it.
 	Unclaimed string
 	Skipped   int
+	// Runs lists the run awaited and each replacement followed from it, the run the outcome is of last.
+	Runs []string
+	// keyLost marks an outcome whose run ended with the wherry event key-lost.
+	keyLost bool
 }
 
 // Output is an output of a run, verified against the size and SHA-256 its result lists: its bytes, or for an S3
@@ -89,6 +93,8 @@ type StatusResult struct {
 	// Unclaimed is set when the run's task_started_by passed and no receiver claimed it.
 	Unclaimed string
 	Skipped   int
+	// Replacement names the run that resubmits this one, when it lost its pool key before it started.
+	Replacement string
 }
 
 // EventsResult contains a run's verified statuses and its transcript chunk count per attempt.
@@ -155,9 +161,6 @@ type runView struct {
 	reread map[string]bool
 	// fed is the feed offset past the records history read.
 	fed int64
-	// requests are the run's seal requests, and requested the Kafka timestamp of each.
-	requests  []wire.SealRequest
-	requested []time.Time
 
 	binding  binding
 	statuses []*wire.RunStatus
@@ -267,14 +270,6 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 				return admin.AuthorizeResult(history, v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && result.Wherry.Run == r.run {
 				r.entries = append(r.entries, entry{receiver: result.Wherry.Receiver, result: &result})
-				return
-			}
-		case wire.SealRequestType:
-			// Answer reads seal requests; they shape no outcome.
-			if request, err := authorize(ctx, r, kid, func(v view) (wire.SealRequest, error) {
-				return admin.AuthorizeSealRequest(v.state, v.keys, value, r.pool, r.h.tenant)
-			}); err == nil && request.Run == r.run {
-				r.requests, r.requested = append(r.requests, request), append(r.requested, record.Timestamp)
 				return
 			}
 		}
@@ -671,7 +666,7 @@ func ends(status *wire.RunStatus) bool {
 	case "rejected":
 		return state == wire.TaskStateRejected
 	case "terminal":
-		return state == wire.TaskStateCanceled
+		return state == wire.TaskStateCanceled || status.Wherry.Event == wire.EventKeyLost
 	}
 	return false
 }
@@ -685,7 +680,12 @@ func (h *Host) Status(ctx context.Context, runID string) (StatusResult, error) {
 	if r.pool == "" {
 		return StatusResult{}, fmt.Errorf("status %s: %w", runID, ErrRunNotFound)
 	}
-	return r.status(), nil
+	h.resubmitIfLost(ctx, r)
+	result := r.status()
+	if chain, err := h.chain(runID); err == nil && len(chain) > 1 {
+		result.Replacement = chain[1]
+	}
+	return result, nil
 }
 
 // RunsResult lists runs, latest update first; Skipped counts their unverifiable records and undecodable local records.
@@ -735,6 +735,7 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 		r.reread = reread
 		r.read(ctx, records)
 		v = r.v
+		h.resubmitIfLost(ctx, r)
 		if r.pool != "" {
 			status := r.status()
 			result.Runs = append(result.Runs, status)
@@ -979,6 +980,8 @@ type TranscriptStream struct {
 	attempt, first int64
 	returned       map[int64]int64
 	redacted       map[string]int
+	// resubmitted is set once Next has resubmitted the run on its ending key-lost.
+	resubmitted bool
 }
 
 // StreamTranscript returns a stream of runID's transcript.
@@ -1024,6 +1027,10 @@ func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
 	}
 	if s.r.pool == "" {
 		return TranscriptResult{}, fmt.Errorf("transcript %s: %w", s.run, ErrRunNotFound)
+	}
+	if !s.resubmitted && s.r.keyLost() {
+		s.resubmitted = true
+		s.h.resubmitIfLost(ctx, s.r)
 	}
 	topic := admin.TenantTranscriptTopic(s.h.tenant)
 	if s.tail == nil {
@@ -1120,44 +1127,60 @@ func (s *TranscriptStream) Ended() bool {
 	return s.r != nil && s.r.outcome != nil
 }
 
-// answerGrace is how long a seal request goes unanswered before Unanswered reports it, past the answerer's retry.
-const answerGrace = 3 * retryInterval
-
-// Unanswered reports whether, when Next last read the run, it had a seal request older than answerGrace that has not
-// expired and that no answerer of this host has sealed.
-func (s *TranscriptStream) Unanswered() bool {
-	if s.r == nil || s.r.outcome != nil {
-		return false
-	}
-	for i, request := range s.r.requests {
-		if time.Since(s.r.requested[i]) < answerGrace || !time.Now().Before(time.UnixMilli(request.ExpiryMS)) {
-			continue
-		}
-		if _, err := os.Stat(s.h.markerPath(s.run, request.Attempt)); errors.Is(err, os.ErrNotExist) {
-			return true
-		}
-	}
-	return false
-}
-
-// Await follows the tenant feed until the run has an outcome, answering seal requests while it waits.
-// Each arrival re-reads wherry.admin and the receivers' keys and derives the run again, so nothing from a member ended
-// by then shapes the outcome.
+// Await follows the tenant feed until the run has an outcome. A run that ended key-lost and was resubmitted is followed
+// to its replacement, and a chain of replacements that names a run twice is refused; the outcome is the last run's, and
+// Runs lists every run followed. A run that ended key-lost and whose resubmission fails returns its outcome with the
+// resubmission's error.
 func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (AwaitResult, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	var runs []string
+	for {
+		chain, err := h.chain(runID)
+		if err != nil {
+			return AwaitResult{}, err
+		}
+		for _, run := range chain {
+			if slices.Contains(runs, run) {
+				return AwaitResult{}, fmt.Errorf("%w: run %s's replacements form a cycle at run %s", ErrInvalidInput, runs[0], run)
+			}
+		}
+		// A replacement stored but not produced is produced before it is awaited.
+		for _, run := range chain[:len(chain)-1] {
+			if _, err := h.resubmit(waitCtx, run, false); err != nil {
+				return AwaitResult{}, err
+			}
+		}
+		runs = append(runs, chain...)
+		outcome, err := h.awaitRun(waitCtx, runs[len(runs)-1])
+		if err != nil || !outcome.keyLost {
+			outcome.Runs = runs
+			return outcome, err
+		}
+		last := runs[len(runs)-1]
+		replacement, err := h.resubmit(waitCtx, last, true)
+		outcome.Runs = runs
+		if err != nil {
+			if local, localErr := h.localRun(last); localErr == nil && local != nil {
+				err = fmt.Errorf("run %s lost its pool key and is resubmittable until %s; resubmitting it failed: %w", last, wire.RFC3339(local.TaskStartedBy), err)
+			}
+			return outcome, fmt.Errorf("wait %s: %w", runs[0], err)
+		}
+		if replacement == "" {
+			return outcome, nil
+		}
+		runID = replacement
+	}
+}
+
+// awaitRun follows the tenant feed until runID has an outcome.
+// Each arrival re-reads wherry.admin and the receivers' keys and derives the run again, so nothing from a member ended
+// by then shapes the outcome.
+func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, error) {
 	f, err := h.follow(waitCtx)
 	if err != nil {
 		return AwaitResult{}, err
 	}
-	answered := make(chan struct{})
-	defer func() { cancel(); <-answered }()
-	go func() {
-		defer close(answered)
-		if err := h.Answer(waitCtx); err != nil {
-			h.logger.Printf("answer seal requests: %v", err)
-		}
-	}()
 	v, err := h.load(waitCtx)
 	if err != nil {
 		return AwaitResult{}, err
@@ -1191,7 +1214,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 	for {
 		if r.outcome != nil {
 			outcome := *r.outcome
-			outcome.Skipped, outcome.Model = r.skipped, r.model()
+			outcome.Skipped, outcome.Model, outcome.keyLost = r.skipped, r.model(), r.keyLost()
 			if r.result != nil {
 				if err := r.readTranscript(waitCtx); err != nil {
 					return AwaitResult{}, fmt.Errorf("wait %s: %w", runID, err)

@@ -70,15 +70,11 @@ command, `wherry wait <id>`. Where your harness runs shell
 commands in the background and tells you when they finish, start that command
 in the background now, before anything else: it blocks until the run ends (or
 for 2 hours 10 minutes; `--timeout` changes that), prints the agent's reply
-and a line for each returned output, writes the outputs, answers the
-receiver's credential request, and exits 0 for `TASK_STATE_COMPLETED`, 2
+and a line for each returned output, writes the outputs, and exits 0 for `TASK_STATE_COMPLETED`, 2
 failed, 3 canceled, 4 rejected, 6 timed out, and 1 when it
 could not wait or collect, at once when `task_started_by` passes with no
 receiver claiming the run. Its completion is how you learn the run ended, so
-you skip the `wait` tool loop below. Then carry on with other work. Do not stop
-the command while the run waits for a credential: an unanswered credential
-request ends the run `TASK_STATE_FAILED` after 5 minutes, unless the wherry
-MCP server answers it.
+you skip the `wait` tool loop below. Then carry on with other work.
 
 `git` names a repository the agent clones itself: `remote` (an `https` or `ssh`
 URL, or `user@host:path`) and `ref` are required. The clone's credential, and an
@@ -133,8 +129,7 @@ seconds and returns one of:
   lists each expected file that did not come back, with the reason.
 - `TASK_STATE_FAILED` with a `message`: what went wrong as the agent
   reported it, or why the receiver could not run it, a required output did
-  not come back, or a credential went unanswered or the agent needs one it
-  lacks, often an optional one the host has no source for. A `credential`
+  not come back, or the agent needs a credential it lacks, often an optional one the host has no source for. A `credential`
   data part names each such credential (see the next section).
 - `TASK_STATE_REJECTED` or `TASK_STATE_CANCELED` with a `message` that
   says why.
@@ -144,6 +139,14 @@ seconds and returns one of:
   none will. Check `receivers` for a live one that fits, then `submit` again.
 - `retry_after` with the current `state`: the run has not finished. Wait
   that many seconds, or do other work, then call `wait` again.
+
+A run whose pool lost its key before the run started ends
+`TASK_STATE_FAILED` with `cannot be opened: the pool's custodian changed and
+its key was lost`. Before its `task_started_by`, wherry resubmits it for you
+under a new run ID, with the same input. `wait` follows the new run, and `runs` then lists every run ID
+it followed, the run whose result it returns last. `status` returns the new
+run's ID as `replaced_by`. Use the last run ID for `status`, `events`,
+`logs`, `cancel` and `cleanup`. Do not submit the task again yourself.
 
 `status` with the id returns the run's latest state without waiting. Without
 an id it lists every run this host can see, latest update first, each with
@@ -167,14 +170,14 @@ in this host's configuration` when the host has no source for a credential the
 agent requires or the task names. An optional credential the host lacks is not
 delivered, and the agent's prompt names it as not supplied.
 
-The receiver that claims a task asks this host for the run's credentials, and
-the wherry MCP server answers while it runs, as `wherry wait` does. When no
-answer arrives within 5 minutes, usually because a credential's source failed
-to resolve, the run ends `TASK_STATE_FAILED` with a `message` that names the
-credentials and never holds their values. A run whose agent needs a
-credential it lacks ends `TASK_STATE_FAILED` the same way. Tell the user to add a source for
-the credential under that name to `credentials` in their wherry configuration:
-a file, an environment variable of the process answering, or a command. Never ask for the value or handle it
+`submit` resolves the run's credentials and encrypts them in the task, so the run
+needs nothing more from this host. When a source fails to resolve, it returns
+`UNAVAILABLE`, and the wherry MCP server's log names the credential and the
+cause. A run whose agent needs a
+credential it lacks ends `TASK_STATE_FAILED` with a `message` that names the
+credential and never holds its value. Tell the user to add or fix a source for
+the credential under that name in `credentials` in their wherry configuration:
+a file, an environment variable of the MCP server's process, or a command. Never ask for the value or handle it
 yourself. When the user says it is in place, call `submit` again with the
 same input, and start its `wait` as before.
 
@@ -193,7 +196,14 @@ cancelled. `VERSION_SKEW` means the pool's records come from a later wherry
 release than the running MCP server: tell the user to upgrade `wherry` and
 restart the server, since a harness keeps the old process running. `UNAVAILABLE` is any other failure; its cause is in the MCP
 server's log, and the user can also run the same operation with the `wherry`
-CLI to see it. `OUTPUTS_NOT_WRITTEN` means
+CLI to see it. It includes `submit`'s refusals of a pool that takes no task
+now, whose CLI error says `pool <pool> is suspended; submit again once
+it is resumed`, `pool <pool> has no custodian yet; submit again once a
+receiver of the pool has published one` or `pool <pool>'s custodian
+<receiver> is not live; submit again once a successor has published a
+snapshot`. A suspended pool waits for its operator to resume it, so tell
+the user. For a missing or silent custodian, submit again after a few
+minutes. A resubmission refused the same way fails `wait`. `OUTPUTS_NOT_WRITTEN` means
 the result arrived but its outputs could not be written, downloaded or cleaned
 up; the message starts with the step that failed,
 and the MCP server's log holds the cause.

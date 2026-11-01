@@ -4,9 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -35,9 +32,7 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
-	jose "github.com/go-jose/go-jose/v4"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -46,7 +41,7 @@ const (
 	readTimeout  = 30 * time.Second
 	maxHandle    = 4 << 10
 	budgetReason = "delivery budget exhausted"
-	// heldLimit bounds the transcript an adopter holds while it waits for its seal.
+	// heldLimit bounds the transcript an adopter holds while it waits for its attempt wrap.
 	heldLimit = 4 << 20
 )
 
@@ -59,7 +54,8 @@ var (
 	cancelReadInterval = 10 * time.Second
 	// stateCheckInterval is how often a running run checks the cancels and denial the receiver holds.
 	stateCheckInterval = time.Second
-	// shutdownTimeout bounds the final transcript commit and ack flush after the receiver is told to stop, and the
+	// shutdownTimeout bounds each of a held run's final transcript commit, released status and ack flush, which after a
+	// stop also end by the shutdown deadline, and the
 	// status of a run stopped for a lasting denial: a revoked producer retries a metadata load it cannot complete for as
 	// long as its context lasts.
 	shutdownTimeout = 5 * time.Second
@@ -71,9 +67,6 @@ var (
 	followRetryInterval = time.Second
 	// collectTimeout bounds a plugin's collection of a run's outputs, during which the claim is renewed.
 	collectTimeout = 2 * time.Minute
-	// sealWait bounds how long a claimed run waits for its host's seal, which comes only while the parent runs
-	// wait or the MCP server; beyond it the run ends failed.
-	sealWait = wire.SealWait
 )
 
 // claimLoop holds one slot: a dedicated share client per claimed record,
@@ -83,7 +76,8 @@ var (
 func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 	defer idle()
 	for claiming.Err() == nil {
-		if r.blocked() {
+		// A suspended pool takes no new work: its receivers fetch nothing from it.
+		if r.blocked() || r.suspended() {
 			sleep(claiming, time.Second)
 			continue
 		}
@@ -128,7 +122,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	defer share.Close()
 	// Acks are flushed on shutdown too, so they must outlive ctx.
 	flush := func() error {
-		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		flushCtx, cancel := r.shutdownContext(ctx)
 		defer cancel()
 		return share.FlushAcks(flushCtx)
 	}
@@ -137,7 +131,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		pollCtx, cancel := context.WithTimeout(claiming, 30*time.Second)
 		// A denied receiver must not acquire a task: each release raises its delivery count.
 		go func() {
-			for pollCtx.Err() == nil && !r.blocked() && r.backoff() <= 0 {
+			for pollCtx.Err() == nil && !r.blocked() && !r.suspended() && r.backoff() <= 0 {
 				sleep(pollCtx, 100*time.Millisecond)
 			}
 			cancel()
@@ -148,7 +142,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		if claiming.Err() != nil {
 			return claiming.Err()
 		}
-		if (r.blocked() || r.backoff() > 0) && len(fetches.Records()) == 0 {
+		if (r.blocked() || r.suspended() || r.backoff() > 0) && len(fetches.Records()) == 0 {
 			return nil
 		}
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
@@ -163,7 +157,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	fetched()
 	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.
 	defer context.AfterFunc(claiming, idle)()
-	if r.blocked() {
+	if r.blocked() || r.suspended() {
 		record.Ack(kgo.AckRelease)
 		return flush()
 	}
@@ -265,11 +259,20 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		r.logger.Printf("read run %s submissions: %v", run, err)
 		return nil, kgo.AckRelease
 	}
+	state, _, _ := r.snapshot()
+	terms := state.Pools[r.config.Pool]
+	// Receivers act only on a run's earliest accepted task record; a later copy of it, byte for byte, is acknowledged
+	// without a claim before anything is written under the run's key.
+	winner := slices.IndexFunc(all, func(submission runSubmission) bool { return admissible(submission, terms) })
+	if winner >= 0 && all[winner].hash == hash && all[winner].offset != record.Offset {
+		return nil, kgo.AckAccept
+	}
 	if foreignRun(all, events.statuses[run], task.Wherry.Tenant) {
 		return reject("run ID in use")
 	}
-	state, _, _ := r.snapshot()
-	terms := state.Pools[r.config.Pool]
+	if task.Wherry.Envelope == "" {
+		return reject("the task carries no envelope")
+	}
 	placement := task.Wherry.Placement
 	agent := slices.IndexFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == placement.Agent })
 	if agent < 0 {
@@ -317,14 +320,14 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
 		return giveBack()
 	}
-	if len(all) == 0 || all[0].hash != hash {
-		return reject("duplicate submission")
-	}
-	if !claimed {
+	if own := slices.IndexFunc(all, func(submission runSubmission) bool { return submission.offset == record.Offset }); !claimed && own >= 0 {
 		maximum := terms.StartByLimit()
-		if time.Since(all[0].submitted) > maximum || task.Wherry.TaskStartedBy > all[0].submitted.Add(maximum).Unix() {
+		if time.Since(all[own].submitted) > maximum || task.Wherry.TaskStartedBy > all[own].submitted.Add(maximum).Unix() {
 			return reject("task_started_by is past the pool's start_by_limit")
 		}
+	}
+	if winner < 0 || all[winner].hash != hash {
+		return reject("duplicate submission")
 	}
 	history := []wire.Message{task.Message}
 	admitted := &admission{task: &task, taskHash: hash, profile: profile, history: history, cancelled: cancelled}
@@ -471,9 +474,6 @@ func (r *Receiver) probeWrite(ctx context.Context) error {
 	return producer.EndTransaction(ctx, kgo.TryAbort)
 }
 
-// newSealKey is a variable so tests can watch the key a run's seal is opened with.
-var newSealKey = func() (*ecdsa.PrivateKey, error) { return ecdsa.GenerateKey(elliptic.P256(), rand.Reader) }
-
 // commitTransaction is a variable so tests can lose the answer to a commit the broker applied, which
 // kfake cannot do: its EndTxn faults all fail before the commit.
 var commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
@@ -526,11 +526,12 @@ func (r *Receiver) startFailure(task *wire.Submission, hash string, attempt int6
 type runSubmission struct {
 	record *wire.Submission
 	hash   string
-	// submitted is the broker's LogAppendTime for the task record.
+	// submitted is the broker's LogAppendTime for the task record, and offset its offset.
 	submitted time.Time
+	offset    int64
 }
 
-// readSubmissions reads the run's current-key submissions from the pool's task topic in log order.
+// readSubmissions reads the run's authorised submissions from the pool's task topic in log order.
 func (r *Receiver) readSubmissions(ctx context.Context, run string) ([]runSubmission, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
@@ -539,18 +540,53 @@ func (r *Receiver) readSubmissions(ctx context.Context, run string) ([]runSubmis
 		r.deny(err, capRead)
 		return nil, err
 	}
+	return r.submissions(records, run), nil
+}
+
+// submissions are the run's submissions among records in log order: each verified as an authorised host's, with the
+// run as its Kafka key.
+func (r *Receiver) submissions(records []*kgo.Record, run string) []runSubmission {
 	state, _, hosts := r.snapshot()
 	var result []runSubmission
 	for _, record := range records {
 		if string(record.Key) != run {
 			continue
 		}
-		submission, err := admin.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
+		submission, err := authorizeSubmission(state, hosts, record.Value, r.config.Pool)
 		if err == nil && submission.Wherry.Run == run {
-			result = append(result, runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp})
+			result = append(result, runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp, offset: record.Offset})
 		}
 	}
-	return result, nil
+	return result
+}
+
+// earliestSubmissions maps each run among records to its earliest accepted task record, verifying no record of a run
+// after that one.
+func (r *Receiver) earliestSubmissions(records []*kgo.Record) map[string]*runSubmission {
+	state, _, hosts := r.snapshot()
+	earliest := map[string]*runSubmission{}
+	for _, record := range records {
+		run := string(record.Key)
+		if earliest[run] != nil {
+			continue
+		}
+		submission, err := authorizeSubmission(state, hosts, record.Value, r.config.Pool)
+		if err != nil || submission.Wherry.Run != run {
+			continue
+		}
+		candidate := runSubmission{record: &submission, hash: wire.TaskHash(record.Value), submitted: record.Timestamp, offset: record.Offset}
+		if admissible(candidate, state.Pools[r.config.Pool]) {
+			earliest[run] = &candidate
+		}
+	}
+	return earliest
+}
+
+// admissible reports a submission that carries an envelope and whose bounds hold at its append time under terms.
+func admissible(submission runSubmission, terms admin.Terms) bool {
+	binding, appended := submission.record.Wherry, submission.submitted
+	return binding.Envelope != "" && appended.Unix() <= binding.TaskStartedBy && binding.TaskStartedBy <= appended.Add(terms.StartByLimit()).Unix() &&
+		binding.TaskStartedBy <= binding.TaskEndedBy && binding.TaskEndedBy <= binding.TaskStartedBy+admin.MaxRunDurationMS/1000
 }
 
 // renewer keeps the share lock alive from claim until the final acknowledgement,
@@ -585,7 +621,7 @@ func (r *Receiver) newProducer(run string) (*kgo.Client, error) {
 }
 
 // execute runs one task; it returns the final share acknowledgement, or 0 when fenced.
-func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.Record, admitted *admission, attempt int64) kgo.AckStatus {
+func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.Record, admitted *admission, attempt int64) (ack kgo.AckStatus) {
 	task := admitted.task
 	runID := task.Wherry.Run
 	stopRenew := renewer(ctx, share, record, r.metrics.renewalFailures, func(format string, args ...any) {
@@ -593,11 +629,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	})
 	defer stopRenew()
 
-	// The cap is anchored to the signed task_started_by so redelivery cannot extend it.
 	deadline := wire.PastBound(task.Wherry.TaskEndedBy)
-	if limit := wire.PastBound(task.Wherry.TaskStartedBy).Add(time.Duration(admin.MaxRunDurationMS) * time.Millisecond); deadline.After(limit) {
-		deadline = limit
-	}
 	runCtx, cancelRun := context.WithDeadline(ctx, deadline)
 	defer cancelRun()
 	// startCtx bounds the run until its job starts.
@@ -644,6 +676,24 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
 		return run.abandon(err)
 	}
+	// A claim given back to the pool is released first, so the next claimant is served without waiting out this one.
+	defer func() {
+		if ack == kgo.AckRelease {
+			ack = run.released(ctx)
+		}
+	}()
+	events, err := r.readEvents(ctx)
+	if err != nil {
+		r.logger.Printf("run %s: read events: %v", runID, err)
+		return run.returnTask(ctx, nil)
+	}
+	run.firstDelivery = attempt == 1 && run.firstClaim(events)
+	// A run whose earlier claimant was refused key unavailable and left Lookup unresolved goes on reconciling.
+	if slices.ContainsFunc(events.statuses[runID], func(status wire.RunStatus) bool {
+		return status.Wherry.Kind == "reconciling" && status.Wherry.TaskHash == run.taskHash
+	}) && !admitted.cancelled {
+		return run.reconcileKey(ctx)
+	}
 	offset, started := int64(0), false
 	if attempt > 1 {
 		r.metrics.redeliveries.WithLabelValues(task.Wherry.Tenant, admitted.profile.Name).Inc()
@@ -668,42 +718,29 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	var handle pluginsdk.Handle
 	adopted, neverStarted := false, false
 	if attempt > 1 {
-		// Offers can change between attempts, so the run may live in a profile other than the matched one.
-		for _, named := range r.profiles {
-			job, err := named.Plugin.Lookup(lookupCtx, runID)
-			if err != nil {
-				// A job the lookup did not resolve may have started, with or without a started event, so it is not purged.
-				r.logger.Printf("run %s: lookup in profile %s: %s", runID, named.Name, logText(run.redactText, err))
+		job, found, err := run.findJob(ctx, lookupCtx)
+		// An unresolved Lookup is asked again while the claim is held, until task_ended_by passes; no open is requested
+		// before the job's state is known.
+		for err != nil {
+			switch {
+			case ctx.Err() != nil:
+				return kgo.AckRelease
+			case errors.Is(err, errMisplaced):
 				return run.returnTask(ctx, nil)
+			case !time.Now().Before(deadline):
+				return run.unresolved(ctx)
 			}
-			if job.State == pluginsdk.JobAbsent {
-				continue
-			}
-			// A job of another profile of this receiver on the same backend is that profile's Lookup to judge.
-			if job.Profile != named.Name && slices.ContainsFunc(r.profiles, func(other Named) bool { return other.Name == job.Profile }) {
-				continue
-			}
-			if job.Profile != named.Name || job.Agent != task.Wherry.Placement.Agent {
-				if err := named.Plugin.Stop(ctx, job.Handle); err != nil {
-					r.metrics.stopFailures.WithLabelValues(named.Name).Inc()
-					r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
-					return run.returnTask(ctx, nil)
-				}
-				if err := named.Plugin.Purge(ctx, runID); err != nil {
-					r.metrics.purgeFailures.WithLabelValues(named.Name).Inc()
-					r.logger.Printf("run %s: purge: %s", runID, logText(run.redactText, err))
-					return run.returnTask(ctx, nil)
-				}
-				r.logger.Printf("run %s: purged a job from profile %q agent %q", runID, job.Profile, job.Agent)
-				continue
-			}
-			r.logger.Printf("run %s: found attempt %d's job in profile %s", runID, job.Attempt, named.Name)
-			handle, run.profile = job.Handle, named
+			sleep(ctx, reconcileInterval)
+			retryCtx, cancel := context.WithTimeout(ctx, min(readTimeout, time.Until(deadline)))
+			job, found, err = run.findJob(ctx, retryCtx)
+			cancel()
+		}
+		if found {
+			handle = job.Handle
 			adopted, neverStarted = job.State != pluginsdk.JobNeverStarted, job.State == pluginsdk.JobNeverStarted
 			if adopted {
-				r.metrics.adoptions.WithLabelValues(task.Wherry.Tenant, named.Name).Inc()
+				r.metrics.adoptions.WithLabelValues(task.Wherry.Tenant, run.profile.Name).Inc()
 			}
-			break
 		}
 	}
 	if admitted.cancelled && !adopted {
@@ -726,16 +763,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if startCtx.Err() != nil && ctx.Err() == nil && !adopted {
 		return run.expired(ctx, nil, nil)
 	}
-	// The agent's credentials are asked for under the pool's terms; a task credential of the same name rides with one.
-	agentCredentials, taskCredentials := []string{}, []string{}
-	for _, credential := range admitted.agentCredentials {
-		agentCredentials = append(agentCredentials, credential.Name)
-	}
-	for _, credential := range admitted.credentials {
-		if !slices.Contains(agentCredentials, credential.Name) && !slices.Contains(taskCredentials, credential.Name) {
-			taskCredentials = append(taskCredentials, credential.Name)
-		}
-	}
 	inputNames := make([]string, 0, len(admitted.s3Inputs))
 	for _, input := range admitted.s3Inputs {
 		inputNames = append(inputNames, input.Name)
@@ -744,24 +771,18 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if !adopted {
 		named := run.profile
 		credentials := slices.Concat(admitted.agentCredentials, admitted.credentials)
-		var secrets []pluginsdk.Secret
-		var fetches []pluginsdk.Fetch
-		if len(agentCredentials)+len(taskCredentials)+len(inputNames)+len(outputNames) > 0 {
-			sealed, status, ok := run.awaitSeal(ctx, startCtx, nil, agentCredentials, taskCredentials, inputNames, outputNames)
-			if !ok {
-				return status
-			}
-			values := sealed.Values
-			run.redactionKey = sealed.RedactionKey
-			for _, credential := range credentials {
-				secrets = append(secrets, pluginsdk.Secret{Name: credential.Name, Env: credential.Env, File: credential.File, Value: values[credential.Name]})
-			}
-			run.deliver(values)
-			if fetches, run.puts, err = run.presigned(values, admitted.s3Inputs, outputNames); err != nil {
-				r.logger.Printf("run %s: %v", runID, err)
-				return run.fail(ctx, err.Error(), nil)
-			}
+		values, status, ok := run.awaitOpen(ctx, startCtx, nil)
+		if !ok {
+			return status
 		}
+		run.redactionKey = values.RedactionKey
+		var secrets []pluginsdk.Secret
+		for _, credential := range credentials {
+			secrets = append(secrets, pluginsdk.Secret{Name: credential.Name, Env: credential.Env, File: credential.File, Value: values.Credentials[credential.Name]})
+		}
+		run.deliver(values.Credentials)
+		var fetches []pluginsdk.Fetch
+		fetches, run.puts = run.presigned(values, admitted.s3Inputs, outputNames)
 		promptInputs := make([]string, 0, len(admitted.inputs)+len(inputNames))
 		for _, input := range admitted.inputs {
 			promptInputs = append(promptInputs, input.Name)
@@ -847,6 +868,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if adopted && runCtx.Err() != nil && ctx.Err() == nil {
 		return run.expired(ctx, &handle, nil)
 	}
+	// Adoption is evidenced by the job; the event bound to this claim gives its open task_ended_by as bound.
+	if adopted {
+		if err := run.commit(ctx, run.poolStatus("adopting", wire.TaskStateWorking)); err != nil {
+			return run.abandon(err)
+		}
+	}
 
 	followCtx, stopFollow := context.WithCancel(runCtx)
 	defer stopFollow()
@@ -863,22 +890,19 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		}()
 	}
 	follow(offset)
-	// An adopter holds the job's lines until its own seal gives it the values to redact; the input URLs the job
-	// fetched with are not asked for again.
+	// An adopter holds the job's lines until its own open gives it the values to redact; the input URLs the job
+	// fetched with are not delivered again.
 	var held []pluginsdk.Line
-	if adopted && len(agentCredentials)+len(taskCredentials)+len(outputNames) > 0 {
+	if adopted {
 		release := run.hold(lines)
-		sealed, status, ok := run.awaitSeal(ctx, runCtx, &handle, agentCredentials, taskCredentials, nil, outputNames)
+		values, status, ok := run.awaitOpen(ctx, runCtx, &handle)
 		held = release()
 		if !ok {
 			return status
 		}
-		run.redactionKey = sealed.RedactionKey
-		run.deliver(sealed.Values)
-		if _, run.puts, err = run.presigned(sealed.Values, nil, outputNames); err != nil {
-			r.logger.Printf("run %s: %v", runID, err)
-			return run.stopAndFail(ctx, handle, err.Error(), nil)
-		}
+		run.redactionKey = values.RedactionKey
+		run.deliver(values.Credentials)
+		_, run.puts = run.presigned(values, nil, outputNames)
 	}
 	r.logger.Printf("run %s: attempt %d in profile %s with %s (%s)", runID, attempt, run.profile.Name, wire.TermsText(admitted.profile.Labels), handle.Name)
 	var pending []pluginsdk.Line
@@ -886,7 +910,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	// deadline, since ctx is already done, and returns the task. A commit the shutdown cut short can leave its
 	// transaction open. It ignores the delivery budget: the receiver is going away and an adopter continues the run.
 	shutdown := func() kgo.AckStatus {
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		shutdownCtx, cancel := r.shutdownContext(ctx)
 		defer cancel()
 		for drained := false; !drained; {
 			select {
@@ -1087,113 +1111,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	}
 }
 
-// awaitSeal asks the run's host for the agent's credentials, the task's, and presigned URLs for its S3 inputs and
-// outputs under a key made for this attempt, and waits for the seal while the claim is renewed. The key never leaves
-// this call. A run that ends while it waits stops job, the adopted job, first. False carries the acknowledgement.
-func (run *activeRun) awaitSeal(ctx, runCtx context.Context, job *pluginsdk.Handle, credentials, taskCredentials, s3Inputs, s3Outputs []string) (signed.SealValues, kgo.AckStatus, bool) {
-	r, task := run.receiver, run.task
-	runID := task.Wherry.Run
-	key, err := newSealKey()
-	if err != nil {
-		r.logger.Printf("run %s: seal key: %v", runID, err)
-		return signed.SealValues{}, run.returnTask(ctx, nil), false
-	}
-	request := &wire.SealRequest{
-		ReceiverBinding: r.binding(task, run.attempt), Key: jose.JSONWebKey{Key: &key.PublicKey}, KeyID: signed.SealKeyID(&key.PublicKey),
-		Credentials: credentials, ExpiryMS: time.Now().Add(sealWait).UnixMilli(),
-	}
-	if len(taskCredentials) > 0 {
-		request.TaskCredentials = taskCredentials
-	}
-	if len(s3Inputs) > 0 {
-		request.S3Inputs = s3Inputs
-	}
-	if len(s3Outputs) > 0 {
-		request.S3Outputs = s3Outputs
-	}
-	expected := signed.SealBinding{
-		Tenant: request.Tenant, Pool: request.Pool, Receiver: request.Receiver, KeyID: request.KeyID, Run: request.Run,
-		Attempt: request.Attempt, Credentials: request.Credentials, TaskCredentials: request.TaskCredentials,
-		S3Inputs: request.S3Inputs, S3Outputs: request.S3Outputs, ExpiryMS: request.ExpiryMS,
-	}
-	// Reading from the host topic's end before the request is committed sees every answer to it.
-	topic := admin.HostTopic(task.Wherry.Tenant, task.Wherry.Host)
-	ends, err := admin.ListOffsets(runCtx, kadm.NewClient(r.base).ListEndOffsets, topic)
-	if err != nil {
-		r.deny(err, capRead)
-		r.logger.Printf("run %s: read host topic: %v", runID, err)
-		return signed.SealValues{}, run.returnTask(ctx, nil), false
-	}
-	partitions := map[int32]kgo.Offset{}
-	ends.Each(func(end kadm.ListedOffset) { partitions[end.Partition] = kgo.NewOffset().At(end.Offset) })
-	reader, err := r.newClient(kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: partitions}))
-	if err != nil {
-		r.logger.Printf("run %s: host topic reader: %v", runID, err)
-		return signed.SealValues{}, run.returnTask(ctx, nil), false
-	}
-	defer reader.Close()
-	if err := run.commit(ctx, run.feed(request)); err != nil {
-		return signed.SealValues{}, run.abandon(err), false
-	}
-	waitCtx, cancel := context.WithDeadline(runCtx, time.UnixMilli(request.ExpiryMS))
-	defer cancel()
-	began := time.Now()
-	waited := func(outcome string) {
-		r.metrics.sealWaits.WithLabelValues(task.Wherry.Tenant, outcome).Inc()
-		r.metrics.sealWait.WithLabelValues(task.Wherry.Tenant).Observe(time.Since(began).Seconds())
-	}
-	for {
-		pollCtx, cancelPoll := context.WithTimeout(waitCtx, stateCheckInterval)
-		fetches := reader.PollFetches(pollCtx)
-		cancelPoll()
-		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-			r.deny(err, capRead)
-		}
-		var values *signed.SealValues
-		fetches.EachRecord(func(record *kgo.Record) {
-			if values != nil || string(record.Key) != runID {
-				return
-			}
-			opened, err := signed.OpenSeal(record.Value, expected, key, time.Now())
-			if err != nil {
-				// never log err: the cause may describe secret material
-				r.logger.Printf("run %s: a seal for attempt %d does not open", runID, run.attempt)
-				return
-			}
-			values = &opened
-		})
-		r.mu.Lock()
-		cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
-		r.mu.Unlock()
-		// A stop seen in the same iteration as a seal wins, so a cancelled or expired run never dispatches.
-		switch {
-		case ctx.Err() != nil:
-			return signed.SealValues{}, kgo.AckRelease, false
-		case cancelled && job != nil:
-			return signed.SealValues{}, run.stopAndCancel(ctx, *job, nil), false
-		case cancelled:
-			return signed.SealValues{}, run.cancel(ctx, nil), false
-		case runCtx.Err() != nil:
-			waited("expired")
-			return signed.SealValues{}, run.expired(ctx, job, nil), false
-		case waitCtx.Err() != nil && job != nil:
-			waited("adopter_refused")
-			if err := run.profile.Plugin.Stop(ctx, *job); err != nil {
-				r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
-				r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
-				return signed.SealValues{}, run.returnTask(ctx, nil), false
-			}
-			return signed.SealValues{}, run.unanswered(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
-		case waitCtx.Err() != nil:
-			waited("unanswered")
-			return signed.SealValues{}, run.unanswered(ctx, append(slices.Clone(credentials), taskCredentials...), len(s3Inputs)+len(s3Outputs) > 0), false
-		case values != nil:
-			waited("sealed")
-			return *values, 0, true
-		}
-	}
-}
-
 // hold reads lines until the returned release, which gives back the most recent of them within heldLimit bytes and
 // logs the lines it dropped. Nothing held is published before the attempt can redact it.
 func (run *activeRun) hold(lines <-chan pluginsdk.Line) func() []pluginsdk.Line {
@@ -1215,7 +1132,7 @@ func (run *activeRun) hold(lines <-chan pluginsdk.Line) func() []pluginsdk.Line 
 					if len(held) > 0 {
 						next = held[0].Offset
 					}
-					run.receiver.logger.Printf("run %s: dropped %d transcript lines held before the seal; the transcript resumes at offset %d", run.task.Wherry.Run, dropped, next)
+					run.receiver.logger.Printf("run %s: dropped %d transcript lines held before the open; the transcript resumes at offset %d", run.task.Wherry.Run, dropped, next)
 				}
 				done <- held
 				return
@@ -1228,42 +1145,31 @@ func (run *activeRun) hold(lines <-chan pluginsdk.Line) func() []pluginsdk.Line 
 	}
 }
 
-// presigned checks the seal's URLs against the pool's storage and returns the run's fetches and PUT URLs. An
-// error names its input or output, never the URL. Each URL's signature joins the redacted forms under the URL's name, so
-// a transcript quoting a URL in part is redacted too, with the URL's marker.
-func (run *activeRun) presigned(values map[string][]byte, inputs []wire.S3Input, outputs []string) ([]pluginsdk.Fetch, map[string]string, error) {
-	state, _, _ := run.receiver.snapshot()
-	storage := state.Pools[run.receiver.config.Pool].Storage
-	tenant, runID := run.task.Wherry.Tenant, run.task.Wherry.Run
-	signatures := map[string][]byte{}
-	check := func(name, key string) (string, bool) {
-		value := values[name]
-		parsed, err := url.Parse(string(value))
-		if err != nil || storage == nil || !storage.Serves(parsed) || parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" ||
-			parsed.EscapedPath() != "/"+storage.Bucket+"/"+key {
-			return "", false
+// presigned returns the run's fetches and PUT URLs from its envelope, and delivers the URLs for redaction under their
+// names, each with its signature, so a transcript quoting a URL in part is redacted too, with the URL's marker. The
+// envelope's URLs passed the section 5 checks.
+func (run *activeRun) presigned(values signed.EnvelopeValues, inputs []wire.S3Input, outputs []string) ([]pluginsdk.Fetch, map[string]string) {
+	urls, signatures := map[string][]byte{}, map[string][]byte{}
+	deliver := func(name, value string) {
+		urls[name] = []byte(value)
+		if parsed, err := url.Parse(value); err == nil {
+			signatures[name] = []byte(parsed.Query().Get("X-Amz-Signature"))
 		}
-		signatures[name] = []byte(parsed.Query().Get("X-Amz-Signature"))
-		return string(value), true
 	}
 	var fetches []pluginsdk.Fetch
 	for _, input := range inputs {
-		get, ok := check(signed.S3InputValue(input.Name), wire.S3InputKey(tenant, runID, input.Name))
-		if !ok {
-			return nil, nil, errors.New("the URL for S3 input " + input.Name + " is not one of pool " + run.receiver.config.Pool + "'s storage")
-		}
+		get := values.S3Inputs[input.Name]
+		deliver(signed.S3InputValue(input.Name), get)
 		fetches = append(fetches, pluginsdk.Fetch{Name: input.Name, URL: get, Size: input.Size, SHA256: input.SHA256})
 	}
 	puts := map[string]string{}
 	for _, output := range outputs {
-		put, ok := check(signed.S3OutputValue(output), wire.S3OutputKey(tenant, runID, output))
-		if !ok {
-			return nil, nil, errors.New("the URL for S3 output " + output + " is not one of pool " + run.receiver.config.Pool + "'s storage")
-		}
-		puts[output] = put
+		puts[output] = values.S3Outputs[output]
+		deliver(signed.S3OutputValue(output), puts[output])
 	}
+	run.deliver(urls)
 	run.deliver(signatures)
-	return fetches, puts, nil
+	return fetches, puts
 }
 
 type activeRun struct {
@@ -1278,12 +1184,12 @@ type activeRun struct {
 	// labels is set when this attempt dispatched the job; an adopted job's profile labels are unknown.
 	labels map[string]string
 	job    string
-	// deadline is when the run passes task_ended_by or the run cap; puts are the presigned PUT URLs of its S3 outputs,
-	// by name, which an attempt holds once sealed.
+	// deadline is when the run passes task_ended_by; puts are the presigned PUT URLs of its S3 outputs, by name, which
+	// an attempt holds once opened.
 	deadline time.Time
 	puts     map[string]string
 	// redactions are the forms of the values this attempt received, longest first, and redactionKey the run's key
-	// from its seal.
+	// from its envelope.
 	redactions   []redact.Form
 	redactionKey []byte
 	// expected are the outputs the run declares; outputs are the chunks of those the run returns, and returned and
@@ -1307,6 +1213,11 @@ type activeRun struct {
 	chunked int64
 	// next is the log offset past the last line this attempt has made a chunk of, or that it resumed from.
 	next int64
+	// firstDelivery marks the task's first claim, at attempt 1: no job can exist for it.
+	firstDelivery bool
+	// event is the wherry event of the run's terminal status; kept leaves the run's material to the plugin's cleanup.
+	event string
+	kept  bool
 }
 
 // deliver keeps the forms of each credential value delivered to the run, each with the marker of the value's name under
@@ -1509,18 +1420,11 @@ func (run *activeRun) deny(ctx context.Context, handle pluginsdk.Handle, pending
 	return kgo.AckRelease
 }
 
-// expired ends a run past a bound: task_ended_by, or the run cap before it, once its deadline passed, else
-// task_started_by before its job started. With no handle, the run's job, if one exists, is purged; a run admitted
-// with no offer has no profile to purge in.
+// expired ends a run past a bound: task_ended_by once its deadline passed, else task_started_by before its job
+// started. With no handle, the run's job, if one exists, is purged; a run admitted with no offer has no profile to
+// purge in.
 func (run *activeRun) expired(ctx context.Context, job *pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
-	reason := wire.NotStartedBy(run.task.Wherry.TaskStartedBy)
-	switch {
-	case time.Now().Before(run.deadline):
-	case run.deadline.Before(wire.PastBound(run.task.Wherry.TaskEndedBy)):
-		reason = wire.NotEndedByRunCap(run.task.Wherry.TaskStartedBy + admin.MaxRunDurationMS/1000)
-	default:
-		reason = wire.NotEndedBy(run.task.Wherry.TaskEndedBy)
-	}
+	reason := run.expiredReason()
 	if job != nil {
 		return run.stopAndFail(ctx, *job, reason, pending)
 	}
@@ -1536,6 +1440,21 @@ func (run *activeRun) expired(ctx context.Context, job *pluginsdk.Handle, pendin
 	return run.fail(ctx, reason, pending)
 }
 
+// expiredReason names the bound a run is past: task_ended_by once its deadline passed, else task_started_by.
+func (run *activeRun) expiredReason() string {
+	if time.Now().Before(run.deadline) {
+		return wire.NotStartedBy(run.task.Wherry.TaskStartedBy)
+	}
+	return wire.NotEndedBy(run.task.Wherry.TaskEndedBy)
+}
+
+// unresolved ends a run whose job's state Lookup left unresolved past its deadline with the end bound, leaving any job
+// and its material to the plugin's cleanup.
+func (run *activeRun) unresolved(ctx context.Context) kgo.AckStatus {
+	run.kept = true
+	return run.fail(ctx, run.expiredReason(), nil)
+}
+
 func (run *activeRun) fail(ctx context.Context, reason string, pending []pluginsdk.Line) kgo.AckStatus {
 	return run.end(ctx, taskStatus(wire.TaskStateFailed, reason), reason, pending, kgo.AckReject)
 }
@@ -1545,37 +1464,6 @@ func (run *activeRun) cancel(ctx context.Context, pending []pluginsdk.Line) kgo.
 }
 
 const cancelReason = "canceled by user"
-
-// unanswered ends the run FAILED for a seal its host did not answer, naming each credential in a credential data part.
-func (run *activeRun) unanswered(ctx context.Context, credentials []string, urls bool) kgo.AckStatus {
-	reason := unansweredReason(credentials, urls)
-	return run.end(ctx, withCredentials(taskStatus(wire.TaskStateFailed, reason), credentials), reason, nil, kgo.AckReject)
-}
-
-// unansweredReason names only the credential names and storage URLs the host did not answer.
-func unansweredReason(credentials []string, urls bool) string {
-	var reasons []string
-	switch len(credentials) {
-	case 0:
-	case 1:
-		reasons = append(reasons, "credential "+credentials[0])
-	default:
-		reasons = append(reasons, "credentials "+strings.Join(credentials, ", "))
-	}
-	if urls {
-		reasons = append(reasons, "presigned URLs for the S3 inputs and outputs")
-	}
-	subject := strings.Join(reasons, " and ")
-	verb, configure := "were", "configure them"
-	if len(credentials) == 1 && !urls {
-		verb, configure = "was", "add it to credentials"
-	} else if len(credentials) > 0 && !urls {
-		configure = "add them to credentials"
-	} else if len(credentials) > 0 {
-		configure = "add the credentials and storage"
-	}
-	return subject + " " + verb + " not answered within " + strings.TrimSuffix(wire.SealWait.String(), "0s") + "; " + configure + " in the host's wherry configuration, keep wherry wait or wherry mcp running, and submit again"
-}
 
 // startFailure purges the run's job and returns the task to the pool for a member that can start it; cause is what the
 // run's terminal message names when the return spends the delivery budget.
@@ -1617,6 +1505,49 @@ func (run *activeRun) purge(ctx context.Context) error {
 func (r *Receiver) budgetSpent(attempt int64) bool {
 	state, _, _ := r.snapshot()
 	return attempt >= int64(state.Pools[r.config.Pool].DeliveryLimit)-1
+}
+
+// errMisplaced is a job another profile or agent left that could not be stopped and purged.
+var errMisplaced = errors.New("a misplaced job was not removed")
+
+// findJob asks every profile's Lookup for the run's job and sets the run's profile to the one holding it; a job another
+// profile or agent left is stopped and purged, or errMisplaced returned. Offers can change between attempts, so the job
+// may live in a profile other than the matched one. A Lookup error leaves the job's state unresolved: a job may have
+// started, with or without a started event, so nothing is purged.
+func (run *activeRun) findJob(ctx, lookupCtx context.Context) (pluginsdk.Job, bool, error) {
+	r, runID := run.receiver, run.task.Wherry.Run
+	for _, named := range r.profiles {
+		job, err := named.Plugin.Lookup(lookupCtx, runID)
+		if err != nil {
+			r.logger.Printf("run %s: lookup in profile %s: %s", runID, named.Name, logText(run.redactText, err))
+			return pluginsdk.Job{}, false, err
+		}
+		if job.State == pluginsdk.JobAbsent {
+			continue
+		}
+		// A job of another profile of this receiver on the same backend is that profile's Lookup to judge.
+		if job.Profile != named.Name && slices.ContainsFunc(r.profiles, func(other Named) bool { return other.Name == job.Profile }) {
+			continue
+		}
+		if job.Profile != named.Name || job.Agent != run.task.Wherry.Placement.Agent {
+			if err := named.Plugin.Stop(ctx, job.Handle); err != nil {
+				r.metrics.stopFailures.WithLabelValues(named.Name).Inc()
+				r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
+				return pluginsdk.Job{}, false, errMisplaced
+			}
+			if err := named.Plugin.Purge(ctx, runID); err != nil {
+				r.metrics.purgeFailures.WithLabelValues(named.Name).Inc()
+				r.logger.Printf("run %s: purge: %s", runID, logText(run.redactText, err))
+				return pluginsdk.Job{}, false, errMisplaced
+			}
+			r.logger.Printf("run %s: purged a job from profile %q agent %q", runID, job.Profile, job.Agent)
+			continue
+		}
+		r.logger.Printf("run %s: found attempt %d's job in profile %s", runID, job.Attempt, named.Name)
+		run.profile = named
+		return job, true, nil
+	}
+	return pluginsdk.Job{}, false, nil
 }
 
 // reconcile looks up the job an ambiguous Dispatch may have created; false means it stays unresolved.
@@ -1813,7 +1744,7 @@ type storedOutput struct {
 }
 
 // collected runs the plugin's Collect under limit and uploads each streamed S3 output into stored as it arrives.
-// Collect may run until the run passes task_ended_by or the run cap, when its PUT URLs expire. The count and total are
+// Collect may run until the run passes task_ended_by, when its PUT URLs expire. The count and total are
 // checked again here, so a plugin that ignores the limits cannot grow the run's memory.
 func (run *activeRun) collected(ctx context.Context, handle pluginsdk.Handle, stopped bool, limit int64, stored map[string]storedOutput) ([]pluginsdk.Output, error) {
 	if !stopped {
@@ -2077,7 +2008,7 @@ func (run *activeRun) end(ctx context.Context, status wire.TaskStatus, result st
 }
 
 func (run *activeRun) release(ctx context.Context) {
-	if run.profile.Plugin == nil {
+	if run.profile.Plugin == nil || run.kept {
 		return
 	}
 	if err := run.profile.Plugin.Release(ctx, run.task.Wherry.Run); err != nil {
@@ -2120,6 +2051,7 @@ func (run *activeRun) statusRecords(kind string, status wire.TaskStatus, offset 
 func (run *activeRun) terminal(status wire.TaskStatus, pending []pluginsdk.Line) []*kgo.Record {
 	value := run.status("terminal", status, nil, nil)
 	value.Wherry.TranscriptChunks = run.chunked + int64(max(len(pending), 1))
+	value.Wherry.Event = run.event
 	tombstone := &kgo.Record{Topic: admin.ReceiverProgressTopic(run.receiver.id), Key: []byte(run.task.Wherry.Run)}
 	return append(run.receiver.statusRecords(run.task, value), tombstone)
 }

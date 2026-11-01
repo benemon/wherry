@@ -22,13 +22,13 @@ principals and group configurations; the cluster itself is prepared once.
   the principal `wherry admin` uses as root. See
   [Authorization and ACLs](https://kafka.apache.org/documentation/#security_authz).
 - **`auto.create.topics.enable=false`**, so a mistyped topic name fails.
-- **`connections.max.reauth.ms`** is set on the listener. Without
-  `--wait`, revocation waits for it and fails while it is unbounded.
-- **`transaction.max.timeout.ms`** is short enough to wait out: without
-  `--wait`, revocation waits the longest of it,
+- **`connections.max.reauth.ms`** is set on the listener. Revocation
+  waits at least that long and fails while it is unbounded.
+- **`transaction.max.timeout.ms`** is short enough to wait out:
+  revocation waits at least the longest of it,
   `connections.max.reauth.ms` and
   `group.share.max.record.lock.duration.ms`. Kafka's default makes each
-  revocation wait that long unless `--wait` is given.
+  revocation wait that long.
 - **Two SCRAM principals** exist: the super user, and `wherry.operator`
   with Read, Write and Describe on topic `wherry.admin`.
 
@@ -176,8 +176,12 @@ bound, and receivers reject a redelivered task whose submission is gone.
 
 `pool create` sets the retention of the pool's tasks and events topics, new and
 existing, to `start_by_limit` plus the six-hour maximum run time plus a
-one-day margin, and their timestamp type to `LogAppendTime`, since a run's age
-runs from the broker's time. It sets the same retention on the progress
+one-day margin, their timestamp type to `LogAppendTime`, since a run's age
+runs from the broker's time, and their `segment.ms` to one hour, so
+retention deletes a record within about an hour of its bound. The deadlines
+of replaced pool keys fall inside this retention
+([Rotation](concepts.md#rotation)). The pool's snapshot topic is compacted
+and keeps its latest snapshot forever; it holds public keys only. It sets the same retention on the progress
 topics of the pool's live receivers. With the 72-hour default that is `367200000` ms, 4 days
 and six hours, after which a run's prompts leave the broker. Tenant feeds keep
 statuses and results, and tenant transcript topics transcripts, outputs and
@@ -185,8 +189,9 @@ replies over 64 KiB, for 30 days, and both must keep them for at least `start_by
 hours, so `pool create` refuses a limit above 29 days and 18 hours, and
 `pool entitle` refuses a feed or transcript topic that keeps less. Identity and
 configuration topics stay forever. `wherry admin check` reports a topic whose
-retention drops below its bound, and a pool topic whose timestamp type is not
-`LogAppendTime`.
+retention drops below its bound, a pool topic whose timestamp type is not
+`LogAppendTime`, and a tasks or events topic without the hourly
+`segment.ms`.
 
 A tenant transcript topic whose retention is shorter than its feed's loses an
 old run's reply and transcript before its result: the result then keeps the
@@ -397,14 +402,14 @@ bundle: /etc/wherry/receiver.bundle
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
-drain_timeout: 25s
+drain_timeout: 20s
 credentials:
   nomad-token:
     file: /etc/wherry/nomad-token
 ```
 
 Start the receiver under a supervisor that restarts it when it exits and
-allows it 30 seconds to stop, with `drain_timeout: 25s`, as in
+allows it 30 seconds to stop, with `drain_timeout: 20s`, as in
 [Run a receiver](#run-a-receiver). A
 platform credential with no source fails that plugin profile's
 configuration, and the receiver exits with:
@@ -472,8 +477,10 @@ A `--force` update during a drain ends it.
   at `/etc/wherry/config.yaml` unless `--config-file` names another file;
 - the bundle, readable by the receiver alone;
 - a state directory that survives restarts. It holds the receiver's
-  private keys, and a receiver that loses them cannot start under the same
-  name again;
+  signing key, and while the receiver is or was its pool's key custodian,
+  the pool keys. A receiver that loses its signing key cannot start under the
+  same name again, and lost pool keys fail the runs that only they open
+  ([Lost pool keys](concepts.md#lost-pool-keys));
 - a plugin directory holding every plugin in its
   configuration, as in [Install plugins](#install-plugins);
 - a source for each [platform credential](configuration.md#platform-credentials) its
@@ -481,7 +488,8 @@ A `--force` update during a drain ends it.
 - a supervisor that restarts the process when it exits, since a
   configuration change ends it, and that allows it 30 seconds to stop
   after `SIGTERM` before a forced kill, with `drain_timeout` in the local
-  configuration set below that window, such as `25s`
+  configuration plus 5 seconds set below that window, such as `20s`; a stop
+  takes at most `drain_timeout` plus 5 seconds
   ([Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window));
 - for the Nomad plugin, a Nomad token with the
   [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy), from a platform credential or `NOMAD_TOKEN`
@@ -549,7 +557,7 @@ wherry admin receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 "$plug
 
 Give `--plugin-sha256` once for each plugin type the configuration names.
 The receiver drains and restarts as in
-[Change a receiver's configuration](#change-a-receivers-configuration), and
+[Change a receiver's configuration](#change-a-receiver-s-configuration), and
 starts each plugin only from a binary whose SHA-256 is the pin.
 [go-plugin's `SecureConfig`](https://pkg.go.dev/github.com/hashicorp/go-plugin#SecureConfig)
 checks it before every start and restart. A binary whose SHA-256 differs
@@ -604,7 +612,7 @@ scrape_configs:
 
 The `tenant` label names each entitled tenant whose runs reach the pool.
 Whoever can scrape a receiver sees every tenant's activity on its pool: its
-runs and their outcomes, durations, rejections and seal waits. Give scrape access only to those who may
+runs and their outcomes, durations, rejections and open waits. Give scrape access only to those who may
 see all of the pool's tenants. No label or value carries a prompt, output,
 run ID, error text, URL, image, path, node or credential name.
 [Metrics](commands.md#metrics) lists the families.
@@ -614,7 +622,7 @@ holds a Grafana dashboard, `wherry-dashboard.json`, and Prometheus alert
 rules, `wherry-alerts.yaml`, built from these families. Each release archive
 carries them under `contrib/observability/`. The dashboard shows receivers
 and capacity in use, admissions, rejections and start failures, run
-durations and queue wait, seal waits, plugin restarts, platform errors and
+durations and queue wait, open waits, plugin restarts, platform errors and
 cleanup, and Kafka errors, for the pools and receivers its `pool` and
 `instance` variables select. [Runbooks](runbooks.md) has a section for each
 rule, which its `runbook_url` links.
@@ -680,10 +688,53 @@ Deployment, job or unit. Link these alerts to the
 [WherryReceiverNotAdvertising](runbooks.md#wherryreceivernotadvertising)
 runbook.
 
+## Stop a pool's key custodian
+
+A key custodian that stops without handing over leaves the tasks under its
+keys to fail before they start, until their hosts resubmit them
+([Lost pool keys](concepts.md#lost-pool-keys)). A planned stop hands its
+custody to another receiver of the pool and re-keys those tasks.
+
+Prerequisites: `drain_timeout` over `0s` in each receiver's local
+configuration and the platform's stop window set with it, as in
+[Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window),
+and another live receiver in the pool.
+
+1. Find the key custodian: the receiver whose latest log line starting
+   `custodian: published pool <pool> key` or
+   `custodian: continuing as custodian of pool <pool>` is the most recent in
+   the pool, and that has not logged
+   `custodian: lost the custodian group's assignment for pool <pool>` since.
+
+2. Stop the pool's receivers one at a time, as for an
+   [upgrade](#upgrade-wherry), and wait for each to be `live` again in
+   `wherry receivers` before stopping the next.
+
+3. When the custodian stops, check its log for
+   `custodian: stepping down in pool <pool>; waiting up to <timeout> for a successor`
+   and then `custodian: re-keyed <n> tasks to pool key <id> and deleted <n> pool keys`,
+   and the successor's log for
+   `custodian: published pool <pool> key <id> (handover)`.
+
+4. When the stopped custodian logged
+   `custodian: no successor in pool <pool>; keeping the pool keys to their deadlines`
+   or `custodian: hand over to <receiver>: <error>; keeping the pool keys to their deadlines`,
+   start it again with the same state directory and keep it running. While
+   it holds its keys it answers each open request for a task under them with
+   a re-key wrap to the current key, and it deletes each key at its deadline,
+   logging `custodian: deleted pool key <id> at its deadline`.
+
+To remove a pool's only receiver for good, add its replacement to the pool
+first, then stop the old receiver as above. A pool's only receiver exits
+with its keys, so removing it without a successor loses them.
+
 ## Revoke a host or receiver
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
-the `wherry admin` environment.
+the `wherry admin` environment. Run no other `wherry admin` command until the
+revocation completes: admin commands do not lock each other, and one that read
+`wherry.admin` before the revocation started can restore the principal's
+credential and ACLs.
 
 1. Run the revocation:
 
@@ -695,19 +746,19 @@ the `wherry admin` environment.
    When it ends, the command prints one line per
    [revocation step](concepts.md#revocation) it ran,
    `step=<n> complete=<bool> name=<name>`. The wait in step 5 is usually the
-   longest; `--wait DURATION` replaces it and must be positive.
+   longest; `--wait DURATION` lengthens it, must be positive, and is
+   refused below the broker-derived minimum.
 
 2. If it fails with `revocation incomplete`, the line of the failed step
    ends in ` error=<cause>`. Check what that step depends on (the broker
    connection, the broker settings), then run the command again. It starts
-   again from step 1. Step 3 already retries for up to 2 minutes while a
+   again from step 1 and continues from the revoking record the failed run
+   left; the principal holds no ACL meanwhile. Step 3 already retries for up to 2 minutes while a
    broker still authorises the principal.
 
-3. For a receiver, rotate each credential sealed to it at its source. The
-   receiver has seen their values.
-
-Receivers stop reading a revoked host's topic, so no seal it writes reaches
-them.
+3. For a receiver, rotate at its source each credential of the runs it
+   opened and, when it held its pool's key as key custodian, of every run
+   whose envelope that key opens. The receiver has seen their values.
 
 Revoking a receiver is a hard stop of the runs it holds, during a drain
 too. Once its access is gone, the receiver gives up a run at its first
@@ -720,9 +771,91 @@ recording the run as failed before it releases the task.
 A revoked name cannot be reused. Provision a returning host or receiver
 under a new name.
 
+## Respond to a compromised receiver or pool key
+
+A suspect receiver, or a copy of a pool key, can open every retained task
+under the keys it holds. The response contains the pool, moves its key
+custody, and lists what was exposed so that its credentials are rotated at
+their issuers.
+
+Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
+the `wherry admin` environment. Run one `wherry admin` command at a time,
+each to its end, from the suspension to the resume: admin commands do not
+lock each other, and one that read `wherry.admin` before another's record
+can undo it, restoring the task topic grants a suspension withdrew, the
+grants a resume restored, or a revoked principal's credential and ACLs.
+
+1. Suspend the pool. It takes no new work: hosts stop submitting to it,
+   receivers stop claiming from it, and the key custodian refuses the open
+   request of a claim that is not adopting a running job.
+   Running jobs complete. A suspension does not take back the credentials a
+   running job holds; rotating them at their issuers, in step 5, cuts off
+   running jobs' use of them. The command returns once the key custodian
+   has acknowledged the suspension; after that no new start opens:
+
+   ```sh
+   wherry admin pool suspend build
+   ```
+
+2. Revoke the suspect receiver, as in
+   [Revoke a host or receiver](#revoke-a-host-or-receiver). Revocation is
+   the hard stop for a receiver:
+
+   ```sh
+   wherry admin receiver revoke nomad-1
+   ```
+
+3. When the revoked receiver was the pool's key custodian, wait for a new
+   one. Another receiver of the pool takes over and logs
+   `custodian: published pool <pool> key <id> (takeover)`.
+
+4. Rotate the pool key and list the tasks under the suspect keys: the key
+   IDs the revoked receiver held, which are the names of its state
+   directory's `pool-keys/<kid>.json` files without `.json`, and the key IDs
+   of its
+   `custodian: published pool <pool> key <id> (<reason>)` log lines:
+
+   ```sh
+   wherry admin pool rotate-key build --suspect-key <kid> --suspect-key <kid>
+   ```
+
+   The command refuses a pool that is not suspended. It waits up to 5
+   minutes for the key custodian's snapshot rotated for the request,
+   printing a progress line every 10 seconds, and then lists each task
+   retained under those keys through that snapshot by run, tenant and
+   credential names. The credential names are the task's own and every
+   credential any terms of the pool have given its agent, so the list can
+   name a credential the task's envelope did not hold but never omits one it
+   held. The output states its horizon, the oldest retained task: tasks
+   deleted by retention before it are not listed, and the output names any
+   offsets retention deleted during the scan. When the wait ends without the
+   snapshot, the request stands: wait for the new key custodian and run the
+   command again.
+
+5. Rotate each listed credential at its issuer, as in
+   [Rotate a pool's credential](security.md#rotate-a-pool-s-credential).
+
+6. Tenants cancel the listed runs with `wherry cancel RUN_ID`. A run
+   cancelled while the pool is suspended ends `TASK_STATE_CANCELED` when a
+   receiver claims it after the resume, without opening its envelope. A run
+   to run again is resubmitted with `wherry submit` once the pool resumes,
+   since a host refuses to submit to a suspended pool.
+
+7. Resume the pool, last:
+
+   ```sh
+   wherry admin pool resume build
+   ```
+
+A drain of the key custodian while the pool is suspended keeps its keys to
+their deadlines: it does not scan the task topic, so it re-keys nothing.
+
 ## Rotate a key
 
 A rotation replaces a host's or receiver's signing key and keeps its name.
+A pool's key custodian rotates the pool key itself, daily
+([Rotation](concepts.md#rotation)); a suspected pool key calls for
+[Respond to a compromised receiver or pool key](#respond-to-a-compromised-receiver-or-pool-key).
 Readers keep verifying the feed and transcript records the old key signed
 before the rotation. For a key that may be compromised, revoke the host or
 receiver instead.
@@ -780,7 +913,9 @@ pool's current terms, checks that every pool's largest records still fit the
 broker's record limit, reports a tenant feed or transcript topic whose
 `max.message.bytes` is below 2 MiB, reports topic retention below the pool's required
 bounds, including a receiver's progress topic that keeps less than its
-pool's tasks topic, and confirms that every ACL the state calls for exists. It does not
+pool's tasks topic, checks each pool's tasks and events `segment.ms` and its
+snapshot topic's configuration and single partition, and confirms that every
+ACL the state calls for exists. It does not
 check a plugin profile's plugin or `config` section; at start the receiver
 finds the type's plugin, the plugin checks each profile's section, and the
 receiver exits with `profile <name>: ...` on an error. Run it after changing a pool's terms, since
@@ -882,8 +1017,8 @@ addressing serves, such as Ceph RGW, NooBaa or MinIO.
    ```
 
    Receivers and agents never hold the S3 credential; they get presigned URLs, a GET per input
-   for 15 minutes and a PUT per output until the run's `task_ended_by`, 7 days at
-   most.
+   until the run's `task_started_by` plus 15 minutes and a PUT per output until
+   its `task_ended_by`, 7 days at most.
 
 4. Set a lifecycle rule that expires `wherry/` after a period longer than
    any run: the host deletes a run's objects when it sees the run end with
@@ -1141,18 +1276,21 @@ configuration, bundle and state directory.
    stopping the jobs still running and releases their tasks to the pool.
    The next delivery of each task adopts the running
    job, on the restarted receiver or another member, and resumes the
-   transcript from the run's latest committed offset. Allow the receiver 30 seconds
-   to stop before a forced kill, with `drain_timeout` below that window.
+   transcript from the run's latest committed offset. A stop takes up to
+   `drain_timeout` plus 5 seconds. Allow the receiver 30 seconds to stop
+   before a forced kill, with `drain_timeout` plus 5 seconds below that
+   window. Restart a pool's receivers one at a time, so that a stopping key
+   custodian hands over to a live successor
+   ([Stop a pool's key custodian](#stop-a-pool-s-key-custodian)).
 4. Restart the harness sessions that run `wherry mcp`.
 
 ## Harness integration
 
 `wherry mcp` serves the host operations as MCP tools over stdio. It reads
 the client configuration and connects to Kafka as one host when it starts.
-Every tool call and seal answer reuses that host and its one tenant-feed
-follower, and `wait`, `events` and `logs` also read the tenant's
-transcript topic. While the connection fails, the server retries it on each
-tool call and every five seconds.
+Every tool call reuses that host and its one tenant-feed follower, and
+`wait`, `events` and `logs` also read the tenant's transcript topic. While
+the connection fails, the server retries it on each tool call.
 [MCP tools](mcp.md) lists the tools.
 
 Prerequisites: `wherry` on the harness's `PATH`, and the client

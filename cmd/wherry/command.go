@@ -453,7 +453,6 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, waitUsage)
-		fmt.Fprintln(stderr, "Stopping wait can leave a credential request unanswered, ending the run FAILED after the seal wait.")
 		flags.PrintDefaults()
 	}
 	configFile := flags.String("config-file", "", "host configuration file")
@@ -483,6 +482,9 @@ func runWait(ctx context.Context, client *busclient.Host, args []string, stdout,
 		return err
 	}
 	collected, collectErr := client.Collect(ctx, runID, result, *outputsDir)
+	for i := 1; i < len(result.Runs); i++ {
+		fmt.Fprintf(stderr, "run %s lost its pool key before it started; resubmitted as run %s\n", result.Runs[i-1], result.Runs[i])
+	}
 	if result.Unclaimed != "" {
 		return errors.New(result.Unclaimed)
 	}
@@ -607,6 +609,9 @@ func runStatus(ctx context.Context, client *busclient.Host, args []string, stdou
 		if result.Unclaimed != "" {
 			fmt.Fprintln(stdout, result.Unclaimed)
 		}
+		if result.Replacement != "" {
+			fmt.Fprintf(stdout, "replaced_by=%s\n", result.Replacement)
+		}
 		warnRedacted(stderr, result.Redacted)
 		warnSkipped(stderr, result.Skipped)
 		return nil
@@ -720,7 +725,6 @@ func runLogs(ctx context.Context, client *busclient.Host, args []string, stdout,
 	}
 	if follow {
 		stream := client.StreamTranscript(runID)
-		warned := false
 		for {
 			transcript, err := stream.Next(ctx)
 			if errors.Is(err, busclient.ErrRunNotFound) || ctx.Err() != nil {
@@ -737,10 +741,6 @@ func runLogs(ctx context.Context, client *busclient.Host, args []string, stdout,
 			printLines(transcript.Lines)
 			if stream.Ended() {
 				break
-			}
-			if !warned && stream.Unanswered() {
-				fmt.Fprintf(stderr, "run is waiting for credentials; run wherry wait %s\n", runID)
-				warned = true
 			}
 			waitCtx, stopWait := context.WithTimeout(ctx, streamRetry)
 			stream.Wait(waitCtx)

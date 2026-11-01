@@ -1034,7 +1034,19 @@ func smoke(ctx context.Context, env devEnv, hostConfig busclient.Config) error {
 		input.S3Inputs = []busclient.S3File{{Name: devSmokeInput, Body: strings.NewReader("smoke input\n")}}
 		input.Outputs[0].Storage = wire.StorageS3
 	}
-	submitted, err := host.Submit(ctx, input)
+	// The receiver publishes the pool's first custodian snapshot shortly after it starts.
+	var submitted busclient.SubmitResult
+	for deadline := time.Now().Add(time.Minute); ; {
+		submitted, err = host.Submit(ctx, input)
+		if !errors.Is(err, busclient.ErrNoSnapshot) && !errors.Is(err, busclient.ErrCustodianUnavailable) || time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
 	if err != nil {
 		return err
 	}

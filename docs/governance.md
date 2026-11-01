@@ -45,10 +45,13 @@ Everything wherry carries stays on infrastructure the operator runs:
 - inputs and outputs too large for a record travel through the operator's
   S3-compatible bucket, by URLs the host presigns, and the storage
   credential never leaves the host;
-- each credential leaves the host only inside a seal encrypted to one
-  receiver's key for one attempt, and reaches the agent at its target, as
+- each credential leaves the host only inside the task's envelope,
+  encrypted under the pool's key, is opened by the pool's key custodian to
+  check its binding to the task and by one attempt of the claiming
+  receiver, and reaches the agent at its target, as
   [Security](security.md) describes;
-- the host keeps its run records in its own state directory.
+- the host keeps its run records, each with the run's task content and
+  redaction key but no credential value in the clear, in its own state directory.
 
 wherry has no hosted control plane: every host and receiver is one the
 operator runs, no component sends data to a third party, and the Kafka

@@ -11,7 +11,7 @@ defaults, `10m` and `2h`.
 | `receivers` | none | `receivers`, the objects `wherry receivers --json` prints |
 | `submit` | `prompt`, `prompt_file`, `agent`, `model`, `selector`, `git`, `inputs`, `credentials`, `outputs`, `start_by`, `end_by` | `id`, `pool`, `wait` |
 | `status` | `id`, optional | `runs`, `skipped` |
-| `wait` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped` |
+| `wait` | `id` | `id`, `state`, `model`, `retry_after`, `message`, `reply`, `artifacts`, `outputs`, `not_returned`, `redacted`, `skipped`, `runs` |
 | `cancel` | `id` | `id`, `skipped` |
 | `events` | `id` | `id`, `events`, `chunks`, `redacted`, `skipped` |
 | `logs` | `id`, `offset`, `limit` | `id`, `attempt`, `total`, `next_offset`, `lines`, `redacted`, `skipped` |
@@ -42,7 +42,7 @@ defaults, `10m` and `2h`.
 - `status` returns the latest verified state of a run without
   waiting. `runs` holds one entry for the run `id` names, or,
   without `id`, one per run `wherry status` lists, latest update first.
-  Each entry is `{id, pool, state, model, message, updated, redacted}`,
+  Each entry is `{id, pool, state, model, message, updated, redacted, replaced_by}`,
   with `model` the run's placement's model, when it has one. The
   state is `TASK_STATE_SUBMITTED` until a receiver reports one. For a run
   this host submitted whose `task_started_by` passed with no status from a
@@ -50,7 +50,9 @@ defaults, `10m` and `2h`.
   `not started by task_started_by (<RFC 3339 time>): no receiver claimed the task`. `updated` is
   the RFC 3339 time of the latest status. While the run has none, it is this
   host's submission of the run when its record holds one, else the Kafka
-  timestamp of the run's echo.
+  timestamp of the run's echo. A run that ended with the wherry event
+  `key-lost` before its `task_started_by` is resubmitted under a new run ID,
+  as `wherry status` does, and `replaced_by` is the replacement's run ID.
 - `wait` waits up to 45 seconds. It returns the outcome with `message`, the
   status message's parts, and `artifacts`, or, while the run is unfinished, its current `state` with
   `retry_after` set to 5. For a run whose `task_started_by` passes with no
@@ -77,6 +79,12 @@ defaults, `10m` and `2h`.
   run whose `task_started_by` passed unclaimed it writes nothing. `model`
   is the run's placement's model. The `wait` tool returns no transcript;
   `logs` pages it.
+- A run that ends with the wherry event `key-lost` before its
+  `task_started_by` never started: its pool key was lost. `wait` resubmits
+  it under a new run ID and follows each replacement, as `wherry wait` does.
+  `runs` then lists every run it followed, the run whose outcome it returns
+  last, and `outputs` are that run's. `id` stays the run the call named. A
+  resubmission that fails, for example on a suspended pool, fails the call.
 - `status`, `wait`, `events` and `logs` show each redaction marker as
   `wherry status` and `wherry wait` print it, and `redacted` maps each name
   to the number of its markers in the messages, the artifacts, or every line

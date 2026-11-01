@@ -24,8 +24,9 @@ terms, receiver configuration and environment variables.
 ## Operations
 
 [Operations](https://benemon.github.io/wherry/operations) covers preparing
-Kafka, adding tenants, hosts and receivers, revocation, key rotation and
-upgrades.
+Kafka, adding tenants, hosts and receivers, revocation, key rotation, the
+pool's key custodian, the response to a compromised receiver or pool key,
+and upgrades.
 
 ## Harness integration
 
