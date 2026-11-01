@@ -931,12 +931,22 @@ than this release knows, a later release wrote it and the error says to
 `wherry.admin`, and the deployment needs a reset: `wherry.admin` is
 append-only and read from offset 0, so no record on it can be passed over.
 
+No `wherry` command reads state while this holds, so the reset works on the
+platform and on Kafka directly.
+
 1. Stop every receiver and every `wherry mcp` and host command.
-2. As the super user, delete every topic, share group, ACL and SCRAM
-   principal `wherry admin` created, as [Kafka resources](design.md#kafka-resources)
-   lists them, keeping the super user, `wherry.operator` and its ACL on
-   `wherry.admin`.
-3. Set the deployment up again from [Create a pool](#create-a-pool), and
+2. Stop and remove every run's platform job (the Nomad job, Kubernetes Job
+   or systemd unit each [plugin](plugins.md) creates for a run). Once the
+   tasks topics are gone no receiver can adopt these jobs or end them at
+   their deadlines.
+3. As the super user, delete what `wherry admin` created: every topic whose
+   name starts with `wherry.`, including `wherry.admin`, as
+   [Kafka resources](design.md#kafka-resources) lists them; the share groups
+   and consumer groups on those topics; every ACL and SCRAM credential of a
+   principal named `wherry.rcv.<receiver>` or `wherry.tnt.<tenant>.<host>`;
+   and the client quotas set on the `wherry.tnt.` principals. Keep the super
+   user, `wherry.operator` and its ACLs.
+4. Set the deployment up again from [Create a pool](#create-a-pool), and
    give each host and receiver its new bundle.
 
 ## Inputs and outputs

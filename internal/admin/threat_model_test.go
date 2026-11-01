@@ -787,6 +787,19 @@ func TestLoadNamesALaterReleasesRecord(t *testing.T) {
 	}
 }
 
+// A later release's record beside a corrupt one, in either order, takes the reset advice and lists both.
+func TestLoadListsEveryUndecodableRecord(t *testing.T) {
+	newer := []byte(`{"v":2,"kind":"host"}`)
+	corrupt := []byte("not a record")
+	for _, raw := range [][]rawRecord{{{0, newer}, {1, corrupt}}, {{0, corrupt}, {1, newer}}} {
+		_, err := load(raw)
+		if err == nil || errors.Is(err, ErrNewerRecord) || !strings.Contains(err.Error(), "reset the deployment") ||
+			!strings.Contains(err.Error(), "offset=0 ") || !strings.Contains(err.Error(), "offset=1 ") {
+			t.Fatalf("load %q, %q: %v; want the reset advice naming offsets 0 and 1", raw[0].Value, raw[1].Value, err)
+		}
+	}
+}
+
 // An unknown member at this release's version folds; a higher version is a later release's; a duplicate name is refused.
 func TestDecodeRecordToleratesUnknownMembers(t *testing.T) {
 	encoded, err := EncodeRecord(Record{Kind: "host", Tenant: "tenant-a", Host: "host-a"})
