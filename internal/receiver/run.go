@@ -24,7 +24,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -61,8 +60,6 @@ var (
 	shutdownTimeout = 5 * time.Second
 	// reconcileInterval separates the Lookups that resolve an ambiguous Dispatch.
 	reconcileInterval = time.Second
-	// suspendStopBound bounds the Lookups and Stops of a suspended run's job.
-	suspendStopBound = time.Minute
 	// purgeDeadline bounds the Purge retries of a start failure.
 	purgeDeadline = 5 * time.Minute
 	// followRetryInterval separates the Follows of a run whose plugin link is lost.
@@ -78,8 +75,8 @@ var (
 func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 	defer idle()
 	for claiming.Err() == nil {
-		// A suspended pool's task topic denies its receivers READ, and a denial counted here would stop held runs.
-		if state, _, _ := r.snapshot(); r.blocked() || state.Suspended[r.config.Pool] {
+		// A suspended pool takes no new work: its receivers fetch nothing from it.
+		if r.blocked() || r.suspended() {
 			sleep(claiming, time.Second)
 			continue
 		}
@@ -110,14 +107,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		r.mu.Unlock()
 	})
 	defer fetched()
-	// The broker reports a refused acknowledgement, a renewal included, only to this callback.
-	readDenied := &atomic.Bool{}
 	share, err := r.newClient(
-		kgo.ShareAckCallback(func(_ *kgo.Client, results kgo.ShareAckResults) {
-			if authorisationError(results.Error()) {
-				readDenied.Store(true)
-			}
-		}),
 		kgo.ConsumeTopics(admin.PoolTasksTopic(r.config.Pool)),
 		kgo.ShareGroup(admin.PoolGroup(r.config.Pool)),
 		kgo.ShareMaxRecords(1),
@@ -140,7 +130,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		pollCtx, cancel := context.WithTimeout(claiming, 30*time.Second)
 		// A denied receiver must not acquire a task: each release raises its delivery count.
 		go func() {
-			for pollCtx.Err() == nil && !r.blocked() && r.backoff() <= 0 {
+			for pollCtx.Err() == nil && !r.blocked() && !r.suspended() && r.backoff() <= 0 {
 				sleep(pollCtx, 100*time.Millisecond)
 			}
 			cancel()
@@ -151,7 +141,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		if claiming.Err() != nil {
 			return claiming.Err()
 		}
-		if (r.blocked() || r.backoff() > 0) && len(fetches.Records()) == 0 {
+		if (r.blocked() || r.suspended() || r.backoff() > 0) && len(fetches.Records()) == 0 {
 			return nil
 		}
 		if err := fetches.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
@@ -166,7 +156,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	fetched()
 	// A slot holding a task releases it only after running ends, so it does not hold up the idle slots' close.
 	defer context.AfterFunc(claiming, idle)()
-	if r.blocked() {
+	if r.blocked() || r.suspended() {
 		record.Ack(kgo.AckRelease)
 		return flush()
 	}
@@ -181,7 +171,6 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 		record.Ack(ack)
 		return flush()
 	}
-	admitted.readDenied = readDenied
 	r.adjustInFlight(1)
 	defer r.adjustInFlight(-1)
 	tenant, routed := admitted.task.Wherry.Tenant, admitted.profile.Name
@@ -214,8 +203,6 @@ type admission struct {
 	s3Inputs    []wire.S3Input
 	// cancelled is set when a host of the run's tenant cancelled the run; it ends CANCELED without a dispatch.
 	cancelled bool
-	// readDenied is set when the broker refuses an acknowledgement of the task's claim authorisation.
-	readDenied *atomic.Bool
 }
 
 // admit decides whether record's task runs here; a nil admission carries the acknowledgement.
@@ -647,15 +634,13 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	defer producer.Close()
 	run := &activeRun{
 		receiver: r, producer: producer, task: task, taskHash: admitted.taskHash, history: admitted.history, attempt: attempt, profile: admitted.profile,
-		expected: admitted.outputs, deadline: deadline, claimed: time.Now(), readDenied: admitted.readDenied,
+		expected: admitted.outputs, deadline: deadline, claimed: time.Now(),
 	}
 	defer func() {
 		r.liveMu.Lock()
 		delete(r.live, run)
 		r.liveMu.Unlock()
 	}()
-	suspendCtx, stopWatch := run.watchSuspension(ctx)
-	defer stopWatch()
 	pastDeadline := r.metrics.pastDeadline.WithLabelValues(admitted.profile.Name)
 	// A timer firing as the run ends must not count it after its decrement.
 	var overdueMu sync.Mutex
@@ -681,23 +666,10 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if err := run.commit(ctx, append([]*kgo.Record{run.feed(r.echo(task, admitted.taskHash))}, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)...); err != nil {
 		return run.abandon(err)
 	}
-	// A claim given back to the pool is released first, so the next claimant is served without waiting out this one. A
-	// suspension latched or visible takes precedence: the job, which may still run, is stopped, never released.
+	// A claim given back to the pool is released first, so the next claimant is served without waiting out this one.
 	defer func() {
-		if ack != kgo.AckRelease {
-			return
-		}
-		if !run.poolSuspended(ctx) {
+		if ack == kgo.AckRelease {
 			ack = run.released(ctx)
-			return
-		}
-		switch {
-		case !run.abortCut(ctx):
-			ack = 0
-		case run.profile.Plugin == nil:
-			ack = run.suspended(ctx, nil, nil)
-		default:
-			ack = run.stopSuspended(ctx, nil, nil)
 		}
 	}()
 	events, err := r.readEvents(ctx)
@@ -789,7 +761,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if !adopted {
 		named := run.profile
 		credentials := slices.Concat(admitted.agentCredentials, admitted.credentials)
-		values, status, ok := run.awaitOpen(ctx, suspendCtx, startCtx, nil)
+		values, status, ok := run.awaitOpen(ctx, startCtx, nil)
 		if !ok {
 			return status
 		}
@@ -805,28 +777,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		for _, input := range admitted.inputs {
 			promptInputs = append(promptInputs, input.Name)
 		}
-		// A suspension cuts the Dispatch short as the start bound does.
-		dispatchCtx, cancelDispatch := context.WithCancel(startCtx)
-		stopCancel := context.AfterFunc(suspendCtx, cancelDispatch)
-		dispatched, dispatchedHandle, err := named.Plugin.Dispatch(dispatchCtx, pluginsdk.Run{
+		dispatched, dispatchedHandle, err := named.Plugin.Dispatch(startCtx, pluginsdk.Run{
 			ID: runID, Profile: named.Name, Agent: task.Wherry.Placement.Agent, Model: task.Wherry.Placement.Model, Attempt: attempt,
 			Prompt: []byte(Preamble(named.Plugin.Directories(), append(promptInputs, inputNames...), credentials, admitted.unsupplied, admitted.outputs, admitted.git, runID,
 				run.terms().ReplyLimit) + prompt(admitted.history)),
 			Inputs: admitted.inputs, Credentials: secrets, Fetches: fetches,
 		})
-		stopCancel()
-		cancelDispatch()
-		// After a Dispatch that did not report its job, the job is looked up to be stopped.
-		if run.poolSuspended(ctx) {
-			switch {
-			case err == nil && dispatched == pluginsdk.OutcomeCreated:
-				return run.suspended(ctx, &dispatchedHandle, nil)
-			case dispatched == pluginsdk.OutcomeNothingCreated:
-				return run.suspended(ctx, nil, nil)
-			}
-			r.logger.Printf("run %s: pool %s suspended during dispatch; ending the run", runID, r.config.Pool)
-			return run.stopSuspended(ctx, nil, nil)
-		}
 		var tooLarge *pluginsdk.InputTooLargeError
 		var failure *pluginsdk.Error
 		switch {
@@ -929,7 +885,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	var held []pluginsdk.Line
 	if adopted {
 		release := run.hold(lines)
-		values, status, ok := run.awaitOpen(ctx, suspendCtx, runCtx, &handle)
+		values, status, ok := run.awaitOpen(ctx, runCtx, &handle)
 		held = release()
 		if !ok {
 			return status
@@ -953,12 +909,6 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			default:
 				drained = true
 			}
-		}
-		if run.poolSuspended(ctx) {
-			if !run.abortCut(ctx) {
-				return 0
-			}
-			return run.suspended(ctx, &handle, pending)
 		}
 		if err := run.producer.EndTransaction(shutdownCtx, kgo.TryAbort); err != nil {
 			return run.abandon(err)
@@ -1042,16 +992,12 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 		return run.stopAndFail(ctx, handle, "log stream failed", pending), true
 	}
 	var followErr error
-	// stopHeld ends the run when its pool is suspended, or the receiver holds its cancel or a denial lasting one lock
-	// interval.
+	// stopHeld ends the run when the receiver holds its cancel or a denial lasting one lock interval.
 	stopHeld := func() (kgo.AckStatus, bool) {
 		r.mu.Lock()
 		cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
 		r.mu.Unlock()
 		switch {
-		case run.poolSuspended(ctx):
-			stopFollow()
-			return run.suspended(ctx, &handle, pending), true
 		case r.stopForDenial():
 			stopFollow()
 			return run.deny(ctx, handle, pending), true
@@ -1114,8 +1060,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 			default:
 				return run.conclude(ctx, handle, pending, end.terminal)
 			}
-		// suspendCtx ends with ctx too; shutdown ends a suspended run as suspended.
-		case <-suspendCtx.Done():
+		case <-ctx.Done():
 			stopFollow()
 			return shutdown()
 		case <-checks.C:
@@ -1263,11 +1208,6 @@ type activeRun struct {
 	// event is the wherry event of the run's terminal status; kept leaves the run's material to the plugin's cleanup.
 	event string
 	kept  bool
-	// readDenied is set when the broker refuses an acknowledgement of the run's claim, its renewals included,
-	// authorisation; nil when nothing reports it.
-	readDenied *atomic.Bool
-	// suspendSeen is set once the run read its pool suspended: the denial that reported it is consumed by that read.
-	suspendSeen atomic.Bool
 }
 
 // deliver keeps the forms of each credential value delivered to the run, each with the marker of the value's name under
@@ -1470,129 +1410,6 @@ func (run *activeRun) deny(ctx context.Context, handle pluginsdk.Handle, pending
 	return kgo.AckRelease
 }
 
-// suspendedReason ends a run of a suspended pool. It is no key-lost, so no host resubmits the run.
-const suspendedReason = "pool suspended"
-
-// poolSuspended reports the run's pool suspended: as the receiver holds wherry.admin, or, once an acknowledgement of its
-// claim was refused authorisation, as wherry.admin reads now. A suspension is recorded before its ACLs are withdrawn.
-func (run *activeRun) poolSuspended(ctx context.Context) bool {
-	r := run.receiver
-	if state, _, _ := r.snapshot(); run.suspendSeen.Load() || state.Suspended[r.config.Pool] {
-		run.suspendSeen.Store(true)
-		return true
-	}
-	if run.readDenied == nil || !run.readDenied.Swap(false) {
-		return false
-	}
-	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
-	defer cancel()
-	state, err := r.reader.Load(readCtx)
-	if err == nil && state.Suspended[r.config.Pool] {
-		run.suspendSeen.Store(true)
-		return true
-	}
-	return false
-}
-
-// watchSuspension returns a context of ctx cancelled once the run reads its pool suspended, checked every
-// stateCheckInterval, and the function that ends the watch.
-func (run *activeRun) watchSuspension(ctx context.Context) (context.Context, func()) {
-	held, cancel := context.WithCancel(ctx)
-	go func() {
-		ticker := time.NewTicker(stateCheckInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-held.Done():
-				return
-			case <-ticker.C:
-			}
-			if run.poolSuspended(ctx) {
-				cancel()
-				return
-			}
-		}
-	}()
-	return held, cancel
-}
-
-// abortCut aborts the transaction a commit cut short can leave open, reporting it confirmed; a task whose abort is not
-// confirmed is not acknowledged: it returns when its lock expires.
-func (run *activeRun) abortCut(ctx context.Context) bool {
-	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-	defer cancel()
-	if err := run.producer.EndTransaction(abortCtx, kgo.TryAbort); err != nil {
-		run.receiver.logger.Printf("run %s: abort the cut-short commit: %v; the task returns when its lock expires", run.task.Wherry.Run, err)
-		return false
-	}
-	return true
-}
-
-// suspendStopUnconfirmed ends a run of a suspended pool whose job was not confirmed stopped.
-const suspendStopUnconfirmed = suspendedReason + ": job stop unconfirmed"
-
-// suspended stops the run's job, if it has one, and ends the run failed. Its claim cannot be acknowledged while the
-// pool is suspended, so a delivery after resume finds the run terminal.
-func (run *activeRun) suspended(ctx context.Context, job *pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
-	run.receiver.logger.Printf("run %s: pool %s suspended; ending the run", run.task.Wherry.Run, run.receiver.config.Pool)
-	if job != nil {
-		return run.stopSuspended(ctx, job, pending)
-	}
-	return run.endSuspended(ctx, suspendedReason, pending)
-}
-
-// endSuspended commits a suspended run's terminal past a shutdown and rejects its task only once the terminal is
-// committed; a terminal not committed leaves the task unacknowledged, to return when its lock expires.
-func (run *activeRun) endSuspended(ctx context.Context, reason string, pending []pluginsdk.Line) kgo.AckStatus {
-	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-	defer cancel()
-	if run.fail(endCtx, reason, pending) != kgo.AckReject {
-		return 0
-	}
-	return kgo.AckReject
-}
-
-// stopSuspended stops a suspended run's job, looked up first when job is nil, and ends the run failed. Lookup and Stop
-// are retried until suspendStopBound, each Stop bounded by it; a job not confirmed stopped by then, or by a shutdown,
-// may still run, so the run ends failed with its task and material kept, never released.
-func (run *activeRun) stopSuspended(ctx context.Context, job *pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
-	r, runID := run.receiver, run.task.Wherry.Run
-	deadline := time.Now().Add(suspendStopBound)
-	for {
-		if job == nil {
-			lookupCtx, cancel := context.WithTimeout(ctx, readTimeout)
-			found, err := run.profile.Plugin.Lookup(lookupCtx, runID)
-			cancel()
-			switch {
-			case err != nil:
-				r.logger.Printf("run %s: lookup in profile %s: %s", runID, run.profile.Name, logText(run.redactText, err))
-			case found.State == pluginsdk.JobAbsent:
-				return run.endSuspended(ctx, suspendedReason, pending)
-			default:
-				job = &found.Handle
-			}
-		}
-		if job != nil {
-			stopCtx, cancel := context.WithDeadline(ctx, deadline)
-			err := run.profile.Plugin.Stop(stopCtx, *job)
-			cancel()
-			if err == nil {
-				return run.endSuspended(ctx, suspendedReason, pending)
-			}
-			r.metrics.stopFailures.WithLabelValues(run.profile.Name).Inc()
-			r.logger.Printf("run %s: stop: %s", runID, logText(run.redactText, err))
-		}
-		if ctx.Err() != nil || !time.Now().Before(deadline) {
-			break
-		}
-		sleep(ctx, reconcileInterval)
-	}
-	r.metrics.suspendStopUnconfirmed.Inc()
-	r.logger.Printf("run %s: pool %s suspended and the job's stop is unconfirmed; the task and its material stay held", runID, r.config.Pool)
-	run.kept = true
-	return run.endSuspended(ctx, suspendStopUnconfirmed, pending)
-}
-
 // expired ends a run past a bound: task_ended_by once its deadline passed, else task_started_by before its job
 // started. With no handle, the run's job, if one exists, is purged; a run admitted with no offer has no profile to
 // purge in.
@@ -1786,9 +1603,6 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 	}
 	terms := run.terms()
 	run.collect(ctx, handle, stopped, terms)
-	if run.poolSuspended(ctx) {
-		return run.suspended(ctx, &handle, pending)
-	}
 	cause, reason := "", ""
 	if terminal.Reason != "" {
 		reason = " (" + logText(run.redactText, errors.New(terminal.Reason)) + ")"

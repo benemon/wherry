@@ -87,12 +87,8 @@ type fakePlugin struct {
 	lastDeadline time.Time
 	// placing makes Dispatch and Lookup wait, as for a job the platform never places, until their context ends.
 	placing bool
-	// dispatchBlocks makes Dispatch alone wait until its context ends, as a platform call that hangs.
-	dispatchBlocks bool
 	// afterLookup, when set, runs after Lookup reports an absent job, as a receiver shutting down at that moment.
 	afterLookup func()
-	// stopBlocks makes Stop wait until its context ends, as a platform call that hangs.
-	stopBlocks bool
 	// lookupBlocks makes Lookup alone wait until its context ends, as a platform call that hangs.
 	lookupBlocks bool
 	lookups      int
@@ -170,7 +166,7 @@ func (f *fakePlugin) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk
 	defer f.mu.Unlock()
 	f.dispatches++
 	f.lastRun = run
-	if f.placing || f.dispatchBlocks {
+	if f.placing {
 		f.mu.Unlock()
 		<-ctx.Done()
 		f.mu.Lock()
@@ -268,15 +264,11 @@ func (f *fakePlugin) Follow(ctx context.Context, _ pluginsdk.Handle, from int64,
 	return pluginsdk.Terminal{Started: true, Node: "node-1"}, nil
 }
 
-func (f *fakePlugin) Stop(ctx context.Context, _ pluginsdk.Handle) error {
+func (f *fakePlugin) Stop(context.Context, pluginsdk.Handle) error {
 	f.mu.Lock()
 	f.stops++
-	err, check, blocks := f.stopErr, f.stopCheck, f.stopBlocks
+	err, check := f.stopErr, f.stopCheck
 	f.mu.Unlock()
-	if blocks {
-		<-ctx.Done()
-		return ctx.Err()
-	}
 	if check != nil {
 		return check()
 	}

@@ -248,7 +248,7 @@ func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 		return err
 	}
 	if state, _, _ := r.snapshot(); state.Suspended[r.config.Pool] {
-		return fmt.Errorf("pool %s is suspended, so its task topic cannot be scanned", r.config.Pool)
+		return fmt.Errorf("pool %s is suspended; its re-key scan waits for resume", r.config.Pool)
 	}
 	tasks, err := r.reader.ReadFrom(ctx, admin.PoolTasksTopic(r.config.Pool), 0)
 	if err != nil {

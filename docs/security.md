@@ -105,8 +105,8 @@ is live. It records each decision on a claim durably and reuses it, and it
 opens the envelope and checks its binding before it wraps the content key,
 so a spliced envelope never releases its key.
 
-A claimant refused `two live claimants` or `not the current claimant`
-releases the task to the pool; refused `terminal`, it acknowledges the task
+A claimant refused `two live claimants`, `not the current claimant` or
+`pool suspended` releases the task to the pool; refused `terminal`, it acknowledges the task
 without a run; refused `past its bound` or `envelope invalid`, it ends the
 run `TASK_STATE_FAILED`; refused `key unavailable`, it decides from the run's
 job as [Lost pool keys](concepts.md#lost-pool-keys) describes.

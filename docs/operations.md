@@ -785,25 +785,19 @@ lock each other, and one that read `wherry.admin` before another's record
 can undo it, restoring the task topic grants a suspension withdrew, the
 grants a resume restored, or a revoked principal's credential and ACLs.
 
-1. Suspend the pool. Hosts stop submitting to it and receivers stop
-   claiming from it; the events topic, the snapshot topic and the custodian
-   group keep working. Each receiver stops the job of every run of the pool
-   it holds and ends the run `TASK_STATE_FAILED` with `pool suspended`. A
-   run whose job's stop the plugin does not confirm within a minute, or
-   before the receiver shuts down, ends
-   `pool suspended: job stop unconfirmed` and counts in
-   `wherry_suspend_stop_unconfirmed_total`, which
-   [WherrySuspendStopUnconfirmed](runbooks.md#wherrysuspendstopunconfirmed)
-   alerts on; its job may still run, so stop it on the platform. No host
-   resubmits such a run, and resume does not
-   run it again:
+1. Suspend the pool. It takes no new work: hosts stop submitting to it,
+   receivers stop claiming from it, and the key custodian starts no job.
+   Running jobs complete. A suspension does not take back the credentials a
+   running job holds; rotating them at their issuers, in step 5, cuts off
+   running jobs' use of them:
 
    ```sh
    wherry admin pool suspend build
    ```
 
 2. Revoke the suspect receiver, as in
-   [Revoke a host or receiver](#revoke-a-host-or-receiver):
+   [Revoke a host or receiver](#revoke-a-host-or-receiver). Revocation is
+   the hard stop for a receiver:
 
    ```sh
    wherry admin receiver revoke nomad-1
@@ -852,7 +846,7 @@ grants a resume restored, or a revoked principal's credential and ACLs.
    ```
 
 A drain of the key custodian while the pool is suspended keeps its keys to
-their deadlines: it does not read the task topic, so it re-keys nothing.
+their deadlines: it does not scan the task topic, so it re-keys nothing.
 
 ## Rotate a key
 

@@ -288,7 +288,7 @@ A task appended under the stepping-down custodian's key after its re-key
 scan is not re-keyed: it fails before it starts and its host resubmits it,
 as for a [lost key](#lost-pool-keys). A scan or write error keeps the keys
 to their deadlines, and so does a drain while the pool is suspended, which
-re-keys nothing.
+scans nothing.
 
 With no other live member, as in a one-receiver pool, the custodian exits
 with its keys, and its restart continues as custodian. That is a stop, not a
@@ -348,18 +348,19 @@ Custodian loss gives a weaker guarantee than receiver loss:
 
 ### Suspension
 
-Suspending a pool stops its work at the broker while its key custody keeps
-working, so an operator can contain a compromise.
+Suspending a pool stops new work on it while its running jobs complete and
+its key custody keeps working, so an operator can contain a compromise.
 [`wherry admin pool suspend`](commands.md#wherry-admin-pool-suspend-pool)
-withdraws the hosts' Write and the receivers' Read on the pool's tasks
-topic; the events topic, the snapshot topic and the custodian group keep
-working. Hosts refuse to submit to the pool, and receivers claim nothing
-from it, answer none of its open requests and re-key none of its tasks.
-Each receiver stops the job of every run of the pool it holds and ends the
-run `TASK_STATE_FAILED` with `pool suspended`. Such a run is not
-resubmitted, and does not run again after the pool resumes. The custodian
-keeps rotating its key, and `rotate-key` runs only on a suspended pool.
-`wherry admin pool resume` restores the grants.
+withdraws the hosts' Write on the pool's tasks topic; the receivers keep
+Read, and every other grant stays. Hosts refuse to submit to the pool, and
+receivers claim nothing from it. The custodian refuses the open request of a
+run whose job has not started with `pool suspended`, so that run's task goes
+back to the queue unstarted; it serves adoptions of started jobs. Runs in
+progress continue to their terminal status. A suspension takes back no
+credential a running job holds: rotating the credential at its issuer does,
+and revoking a receiver stops it. The custodian keeps rotating its key, and
+`rotate-key` runs only on a suspended pool. `wherry admin pool resume`
+restores the grants, and queued tasks run.
 [Respond to a compromised receiver or pool key](operations.md#respond-to-a-compromised-receiver-or-pool-key)
 gives the procedure.
 

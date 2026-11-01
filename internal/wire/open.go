@@ -31,9 +31,10 @@ const (
 	RefusedPastBound       = "past its bound"
 	RefusedKeyUnavailable  = "key unavailable"
 	RefusedEnvelopeInvalid = "envelope invalid"
+	RefusedPoolSuspended   = "pool suspended"
 )
 
-var refusalReasons = []string{RefusedTwoClaimants, RefusedNotClaimant, RefusedTerminal, RefusedPastBound, RefusedKeyUnavailable, RefusedEnvelopeInvalid}
+var refusalReasons = []string{RefusedTwoClaimants, RefusedNotClaimant, RefusedTerminal, RefusedPastBound, RefusedKeyUnavailable, RefusedEnvelopeInvalid, RefusedPoolSuspended}
 
 // The reasons of a claim decision: no change of claimant, or a change after the previous claimant released or after its
 // lease lapsed; a decision refused because the previous claimant is live is live.

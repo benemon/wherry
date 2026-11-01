@@ -690,10 +690,9 @@ with `unknown option --<name>`. `--plugin-sha256` is given once per plugin
 type and `--suspect-key` once per key; any other repeated option takes its last value. `pool create`, `pool update`,
 `pool entitle`, `pool suspend`, `pool resume`, `host add` and `receiver add` then create every ACL the new
 state calls for, re-read them, and fail with `ACL plan incomplete` when one
-is missing. They then delete the `READ` and `WRITE` ACLs on a suspended
-pool's tasks topic that the pool's hosts and receivers hold unsuspended, each
-by a filter naming its principal; another principal's ACL on the topic
-stays.
+is missing. They then delete the `WRITE` ACLs on a suspended pool's tasks
+topic that the pool's hosts hold unsuspended, each by a filter naming its
+principal; another principal's ACL on the topic stays.
 
 A bundle file must not exist beforehand. A command that fails removes the
 bundle it created.
@@ -761,51 +760,28 @@ each host's [quotas](configuration.md#quotas).
 ### `wherry admin pool suspend POOL`
 
 Records a `suspend` record for the pool on `wherry.admin` and reconciles the
-ACLs. A suspended pool's tenants' hosts hold no `WRITE`, and its receivers
-no `READ`, on its tasks topic. The events topic, the snapshot topic, the
-receivers' topics and the custodian group keep their ACLs. A host refuses a
+ACLs. A suspended pool's tenants' hosts hold no `WRITE` on its tasks topic.
+The receivers keep `READ` on it, and every other ACL stays. A host refuses a
 submission to the pool with `pool is suspended` before it resolves any
-credential or uploads any input. Receivers claim nothing from the pool,
-answer none of its open requests and re-key none of its tasks. A receiver
-that reads the suspension, or whose acknowledgement of a claim, a renewal
-included, the broker refuses while `wherry.admin` records it, stops the job
-of every run of the pool it holds through the plugin and ends the run
-`TASK_STATE_FAILED` with `pool suspended`: a run requesting or waiting for
-its open, its job adopted or not, a run in `Dispatch`, a run following its
-job, and a run whose outputs it is collecting. A suspension the receiver
-has read, or reads as it shuts down, ends the run so even then: a run of a
-suspended pool never publishes `released`. The open request, the
-listing before it and the wait for its answer are cut short. A `Dispatch` in
-progress is cancelled; unless it reported its job, or that it created none,
-the receiver finds the job with `Lookup` and stops it. `Lookup` and `Stop`
-are retried for up to a minute, and no `Stop` runs past it. A job not
-confirmed stopped by then, or before the receiver shuts down, may still
-run: the receiver ends the run `TASK_STATE_FAILED` with
-`pool suspended: job stop unconfirmed`, keeps its platform material, logs
-it and counts it in `wherry_suspend_stop_unconfirmed_total`, on which
-[WherrySuspendStopUnconfirmed](runbooks.md#wherrysuspendstopunconfirmed)
-fires. The counter is in the receiver's memory, so the alert is
-best-effort.
-
-On every one of these paths the receiver acknowledges its claim only after
-the run's terminal status is committed, and then rejects it. The terminal
-commit, and the abort of an open request cut short, each run within 5
-seconds even as the receiver shuts down. A terminal not committed, an abort
-not confirmed, or a shutdown before either, leaves the claim unacknowledged
-and publishes no `released`: the task returns to the pool when its
-acquisition lock expires and is delivered again after resume, and the
-receiver holding it then finds the job with `Lookup` and stops or adopts
-it. The durable account of a suspended run is its terminal status or,
-without one, that delivery after resume. A run ended `pool suspended` is
-not `key-lost`, so no host resubmits it, and its task delivered again after
-resume is acknowledged without a run. The key custodian keeps rotating.
+credential or uploads any input. Receivers fetch nothing from the pool's
+share group, so they claim no task. The key custodian refuses the open
+request of a run whose job has not started with `pool suspended`; the
+claimant publishes `released` and releases the task, which waits in the
+queue. Open requests of runs adopting a started job are served. Runs
+already holding a claim renew it and continue to their terminal status, and
+their tasks are acknowledged as on an unsuspended pool. A suspension does
+not stop a running job or take back the credentials it holds: rotating them
+at their issuers does, and
+[`wherry admin receiver revoke`](#wherry-admin-receiver-revoke-receiver)
+stops a receiver. A stepping-down custodian's re-key scan waits for resume.
+The key custodian keeps rotating.
 
 ### `wherry admin pool resume POOL`
 
 Records a `resume` record for the pool on `wherry.admin` and reconciles the
-ACLs, granting the hosts' `WRITE` and the receivers' `READ` on the tasks
-topic again. Receivers claim from the pool and answer its open requests
-again at their next refresh of `wherry.admin`.
+ACLs, granting the hosts' `WRITE` on the tasks topic again. Receivers claim
+from the pool, and the key custodian serves its first starts, again at their
+next refresh of `wherry.admin`.
 
 ### `wherry admin pool rotate-key POOL [--suspect-key KID]...`
 
@@ -1086,7 +1062,7 @@ past its `task_ended_by`, and then deletes its pool keys. A read or write
 error keeps the keys to their deadlines. A task appended under its key after
 that read is not re-keyed: it fails key-lost before it starts, and its host
 resubmits it before its `task_started_by`. While its pool is suspended it
-does not read the task topic and keeps its keys. With no successor's snapshot
+does not scan the task topic and keeps its keys. With no successor's snapshot
 by the deadline, as soon as no other member of the pool has an
 advertisement within 120 seconds without `stepping_down`, or with no such
 member when the drain began, it logs `custodian: no successor in pool <pool>; keeping the pool
@@ -1353,7 +1329,6 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
 | `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events or, for the key custodian, its snapshot topic |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
-| `wherry_suspend_stop_unconfirmed_total` | counter | none | runs of a suspended pool ended `pool suspended: job stop unconfirmed`, their job possibly still running |
 | `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover`, `contested`; both start at 0 |
 | `wherry_runs_key_lost_total` | counter | none | runs this receiver ended with the wherry event `key-lost`; starts at 0 |
 | `wherry_claimant_changes_total` | counter | `reason` | claims the key custodian served to a new claimant: `released`, `lease` |

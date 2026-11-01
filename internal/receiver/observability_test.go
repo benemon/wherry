@@ -256,8 +256,10 @@ func TestCustodianTakeoverAlertFiresOnEitherReason(t *testing.T) {
 	}
 }
 
-// WherryRunsKeyLost and WherrySuspendStopUnconfirmed fire on any increase of their counters.
-func TestAlertsFireOnAnyIncrease(t *testing.T) {
+var keyLostExpr = regexp.MustCompile(`increase\(wherry_runs_key_lost_total\[[^\]]+\]\)\)\s*>\s*0\s*$`)
+
+// WherryRunsKeyLost fires on any increase of wherry_runs_key_lost_total.
+func TestRunsKeyLostAlertFiresOnAnyIncrease(t *testing.T) {
 	var rules struct {
 		Groups []struct {
 			Rules []struct {
@@ -273,17 +275,15 @@ func TestAlertsFireOnAnyIncrease(t *testing.T) {
 	if err := yaml.Unmarshal(data, &rules); err != nil {
 		t.Fatal(err)
 	}
-	for alert, counter := range map[string]string{"WherryRunsKeyLost": "wherry_runs_key_lost_total", "WherrySuspendStopUnconfirmed": "wherry_suspend_stop_unconfirmed_total"} {
-		var expr string
-		for _, group := range rules.Groups {
-			for _, rule := range group.Rules {
-				if rule.Alert == alert {
-					expr = rule.Expr
-				}
+	var expr string
+	for _, group := range rules.Groups {
+		for _, rule := range group.Rules {
+			if rule.Alert == "WherryRunsKeyLost" {
+				expr = rule.Expr
 			}
 		}
-		if !regexp.MustCompile(`increase\(` + counter + `\[[^\]]+\]\)\)\s*>\s*0\s*$`).MatchString(strings.TrimSpace(expr)) {
-			t.Errorf("%s expr %q, want any increase of %s above 0", alert, expr, counter)
-		}
+	}
+	if !keyLostExpr.MatchString(strings.TrimSpace(expr)) {
+		t.Fatalf("WherryRunsKeyLost expr %q, want any increase of wherry_runs_key_lost_total above 0", expr)
 	}
 }

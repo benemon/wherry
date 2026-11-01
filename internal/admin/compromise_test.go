@@ -66,8 +66,8 @@ func compromiseFixture(t *testing.T) (*kfake.Cluster, *Service, context.Context)
 	return cluster, service, ctx
 }
 
-// Suspend withdraws the hosts' WRITE and the receivers' READ on the pool's task topic and nothing else, an unrelated
-// principal's READ and WRITE on the topic included; resume restores both.
+// Suspend withdraws the hosts' WRITE on the pool's task topic and nothing else: the receivers' READ, and an unrelated
+// principal's READ and WRITE on the topic, are kept; resume restores the WRITE.
 func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
 	_, service, ctx := compromiseFixture(t)
 	unrelated := kadm.NewACLs().Topics(PoolTasksTopic("pool-a")).Allow("User:mirror").AllowHosts("*").Operations(kadm.OpRead, kadm.OpWrite).ResourcePatternType(kadm.ACLPatternLiteral)
@@ -100,11 +100,7 @@ func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
 			withdrawn = append(withdrawn, acl)
 		}
 	}
-	want := []string{
-		"User:" + ReceiverPrincipal("receiver-a") + " TOPIC " + PoolTasksTopic("pool-a") + " READ",
-		"User:" + TenantPrincipal("tenant-a", "host-a") + " TOPIC " + PoolTasksTopic("pool-a") + " WRITE",
-	}
-	slices.Sort(want)
+	want := []string{"User:" + TenantPrincipal("tenant-a", "host-a") + " TOPIC " + PoolTasksTopic("pool-a") + " WRITE"}
 	if !reflect.DeepEqual(withdrawn, want) || len(suspended) != len(before)-len(want) {
 		t.Fatalf("suspend withdrew %v, want exactly %v", withdrawn, want)
 	}

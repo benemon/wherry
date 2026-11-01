@@ -1127,6 +1127,7 @@ func TestEachRefusalTakesItsTableAction(t *testing.T) {
 	}{
 		{wire.RefusedTwoClaimants, kgo.AckRelease, []string{"claimed", "released"}, ""},
 		{wire.RefusedNotClaimant, kgo.AckRelease, []string{"claimed", "released"}, ""},
+		{wire.RefusedPoolSuspended, kgo.AckRelease, []string{"claimed", "released"}, ""},
 		{wire.RefusedTerminal, kgo.AckAccept, []string{"claimed"}, ""},
 		{wire.RefusedPastBound, kgo.AckReject, []string{"claimed", "terminal"}, "not started by task_started_by"},
 		{wire.RefusedKeyUnavailable, kgo.AckReject, []string{"claimed", "terminal"}, keyLostReason},

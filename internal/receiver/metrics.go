@@ -38,7 +38,7 @@ type metrics struct {
 	busErrors, denials, dropped, budgetExhausted                  *prometheus.CounterVec
 	takeovers, claimantChanges                                    *prometheus.CounterVec
 	renewalFailures, transactionAborts, ambiguousCommits, fenced  prometheus.Counter
-	ignoredWraps, keyLost, suspendStopUnconfirmed                 prometheus.Counter
+	ignoredWraps, keyLost                                         prometheus.Counter
 
 	pluginDescs map[string]*prometheus.Desc
 	// lastGood holds, by profile, the samples of its latest Metrics call that answered.
@@ -100,7 +100,6 @@ func newMetrics(registry *prometheus.Registry) *metrics {
 	m.transactionAborts = counter("transaction_aborts_total", "Transactions aborted after a failed produce.")
 	m.ambiguousCommits = counter("ambiguous_commits_total", "Transaction commits with an unknown outcome.")
 	m.fenced = counter("fenced_total", "Runs given up to a newer holder.")
-	m.suspendStopUnconfirmed = counter("suspend_stop_unconfirmed_total", "Runs of a suspended pool ended with their job's stop unconfirmed.")
 	m.dropped = counters("metrics_dropped_total", "Plugin samples refused, and plugin Metrics calls that failed, by reason.", "profile", "reason")
 	for _, family := range pluginFamilies {
 		labels := []string{"profile"}

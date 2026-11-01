@@ -199,5 +199,5 @@ transactional ID prefix.
 
 A principal whose membership has ended, or whose revocation is under way,
 has no grants. While a pool is [suspended](commands.md#wherry-admin-pool-suspend-pool),
-its hosts and receivers hold Describe alone on its tasks topic: the hosts
-lose Write and the receivers Read. Every other grant stays.
+its hosts hold Describe alone on its tasks topic: they lose Write. Every
+other grant stays.

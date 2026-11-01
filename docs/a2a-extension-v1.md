@@ -1071,12 +1071,14 @@ answers. It serves a request only when:
    `task_ended_by` when the run has a `started` status or the claim's
    `adopting` status, `task_started_by` otherwise; otherwise
    `past its bound`;
-5. when the claim changed receivers, the previous owner committed `released`,
+5. the pool is not suspended, or the run has a `started` status or the
+   claim's `adopting` status; otherwise `pool suspended`;
+6. when the claim changed receivers, the previous owner committed `released`,
    has no live membership, or its latest advertisement appended at or before
    the claim is more than 120 seconds old when the custodian decides;
    otherwise `two live claimants`.
 
-The custodian decides rule 5 once for each claim and commits that decision as
+The custodian decides rule 6 once for each claim and commits that decision as
 a [claim decision](#claim-decision) in the transaction of its answer; a later
 request for the same claim takes that decision. It then recovers the content
 key from the submit wrap or a [re-key wrap](#re-key-wrap) to a key it holds,
@@ -1146,7 +1148,7 @@ custodian and acts on its `reason`:
 
 | `reason` | Claimant's action |
 | --- | --- |
-| `two live claimants`, `not the current claimant` | commits `released`, then returns the task to the pool |
+| `two live claimants`, `not the current claimant`, `pool suspended` | commits `released`, then returns the task to the pool |
 | `terminal` | acknowledges the task without a dispatch |
 | `past its bound` | ends the run past its bound: a first start purges its job, if any, and an adopter stops its job; the run fails with `not started by task_started_by (<RFC 3339 time>)` while the receiver's clock is within `task_ended_by`, and with `not ended by task_ended_by (<RFC 3339 time>)` after it |
 | `key unavailable` | decides from the job's state, below |
@@ -1173,7 +1175,7 @@ from the `started` status:
 
 ## Claim decision
 
-A claim decision records the custodian's decision on a claim under rule 5 of
+A claim decision records the custodian's decision on a claim under rule 6 of
 the [claim check](#the-claim-check).
 
 ```json

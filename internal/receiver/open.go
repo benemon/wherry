@@ -42,26 +42,22 @@ var newAttemptKey = func() (*ecdsa.PrivateKey, error) { return ecdsa.GenerateKey
 // for the custodian's attempt wrap or refusal until min(the request's append time plus openWait and openGrace, bound's
 // deadline). It returns the envelope's values checked against the task; false carries the acknowledgement. job is
 // the adopted job, which a run ending while it waits stops first. An adopter refused key unavailable requests once
-// more. The attempt key never leaves this call. opening is ctx cancelled by a suspension: it bounds every broker call
-// and wait of the open, so a suspension ends the run as suspended.
-func (run *activeRun) awaitOpen(ctx, opening, bound context.Context, job *pluginsdk.Handle) (signed.EnvelopeValues, kgo.AckStatus, bool) {
+// more. The attempt key never leaves this call.
+func (run *activeRun) awaitOpen(ctx, bound context.Context, job *pluginsdk.Handle) (signed.EnvelopeValues, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
-	bound, stopBound := context.WithCancel(bound)
-	defer stopBound()
-	defer context.AfterFunc(opening, stopBound)()
 	began := time.Now()
 	waited := func(outcome string) {
 		r.metrics.openWaits.WithLabelValues(task.Wherry.Tenant, outcome).Inc()
 		r.metrics.openWait.WithLabelValues(task.Wherry.Tenant).Observe(time.Since(began).Seconds())
 	}
 	for requested := 0; ; requested++ {
-		values, reason, status, done := run.openOnce(ctx, opening, bound, job, waited)
+		values, reason, status, done := run.openOnce(ctx, bound, job, waited)
 		switch {
 		case values != nil:
 			return *values, 0, true
 		case done:
 			return signed.EnvelopeValues{}, status, false
-		case reason == wire.RefusedTwoClaimants || reason == wire.RefusedNotClaimant:
+		case reason == wire.RefusedTwoClaimants || reason == wire.RefusedNotClaimant || reason == wire.RefusedPoolSuspended:
 			return signed.EnvelopeValues{}, kgo.AckRelease, false
 		case reason == wire.RefusedTerminal:
 			return signed.EnvelopeValues{}, kgo.AckAccept, false
@@ -85,10 +81,8 @@ func (run *activeRun) awaitOpen(ctx, opening, bound context.Context, job *plugin
 
 // openOnce writes one open request and waits for its answer: the values of an attempt wrap, or a refusal's reason, or
 // done with the run's acknowledgement.
-func (run *activeRun) openOnce(ctx, opening, bound context.Context, job *pluginsdk.Handle, waited func(string)) (*signed.EnvelopeValues, string, kgo.AckStatus, bool) {
+func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle, waited func(string)) (*signed.EnvelopeValues, string, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
-	// cut reports a broker call cut short while the pool is suspended, whether by the suspension or by a shutdown.
-	cut := func() bool { return opening.Err() != nil && run.poolSuspended(ctx) }
 	runID := task.Wherry.Run
 	topic := admin.PoolEventsTopic(r.config.Pool)
 	key, err := newAttemptKey()
@@ -99,10 +93,7 @@ func (run *activeRun) openOnce(ctx, opening, bound context.Context, job *plugins
 	request := r.sign(&wire.OpenRequest{Run: runID, Attempt: run.attempt, Receiver: r.id, TaskHash: run.taskHash, Key: wire.NewAttemptKey(&key.PublicKey)})
 	digest := wire.Digest(request)
 	// Reading from the events' end before the request is committed sees every answer to it.
-	ends, err := admin.ListOffsets(opening, kadm.NewClient(r.base).ListEndOffsets, topic)
-	if err != nil && cut() {
-		return nil, "", run.suspended(ctx, job, nil), true
-	}
+	ends, err := admin.ListOffsets(ctx, kadm.NewClient(r.base).ListEndOffsets, topic)
 	if err != nil {
 		r.deny(err, capRead)
 		r.logger.Printf("run %s: read pool events: %v", runID, err)
@@ -116,14 +107,8 @@ func (run *activeRun) openOnce(ctx, opening, bound context.Context, job *plugins
 		return nil, "", run.returnTask(ctx, nil), true
 	}
 	defer reader.Close()
-	if err := run.commit(opening, &kgo.Record{Topic: topic, Key: []byte(runID), Value: request}); err != nil {
-		if !cut() {
-			return nil, "", run.abandon(err), true
-		}
-		if !run.abortCut(ctx) {
-			return nil, "", 0, true
-		}
-		return nil, "", run.suspended(ctx, job, nil), true
+	if err := run.commit(ctx, &kgo.Record{Topic: topic, Key: []byte(runID), Value: request}); err != nil {
+		return nil, "", run.abandon(err), true
 	}
 	// The answer is awaited from the request's append time once it is read back.
 	deadline := time.Now().Add(openWait + openGrace)
@@ -147,13 +132,13 @@ func (run *activeRun) openOnce(ctx, opening, bound context.Context, job *plugins
 				}
 			case wire.OpenRefusalType:
 				var refusal wire.OpenRefusal
-				if r.parseStrict(record, &refusal) && refusal.Request == digest && r.isCustodian(opening, refusal.Custodian) {
+				if r.parseStrict(record, &refusal) && refusal.Request == digest && r.isCustodian(ctx, refusal.Custodian) {
 					refused = refusal.Reason
 				}
 			case wire.AttemptWrapType:
 				var wrap wire.AttemptWrap
 				if !r.parseStrict(record, &wrap) || wrap.Request != digest || wrap.Receiver != r.id || wrap.Attempt != run.attempt || wrap.TaskHash != run.taskHash ||
-					!r.isCustodian(opening, wrap.Custodian) {
+					!r.isCustodian(ctx, wrap.Custodian) {
 					return
 				}
 				opened, err := run.open(key, []byte(wrap.JWE))
@@ -171,11 +156,8 @@ func (run *activeRun) openOnce(ctx, opening, bound context.Context, job *plugins
 		r.mu.Lock()
 		cancelled := r.cancelled[runKey{task.Wherry.Tenant, runID}]
 		r.mu.Unlock()
-		// A stop seen in the same iteration as an answer wins, so a cancelled or expired run never dispatches; a
-		// suspension wins over a shutdown.
+		// A stop seen in the same iteration as an answer wins, so a cancelled or expired run never dispatches.
 		switch {
-		case run.poolSuspended(ctx):
-			return nil, "", run.suspended(ctx, job, nil), true
 		case ctx.Err() != nil:
 			return nil, "", kgo.AckRelease, true
 		case cancelled && job != nil:
@@ -328,10 +310,6 @@ func (run *activeRun) firstClaim(events poolEvents) bool {
 func (r *Receiver) serveOpens(ctx context.Context) error {
 	r.custody.mu.Lock()
 	defer r.custody.mu.Unlock()
-	// A suspended pool's task topic is not readable; its open requests wait for resume.
-	if state, _, _ := r.snapshot(); state.Suspended[r.config.Pool] {
-		return nil
-	}
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	keys, err := loadPoolKeys(r.poolKeysDir())
@@ -514,14 +492,19 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	}
 	// The open bound comes from the events: a started job or this claim's adoption extends it to task_ended_by.
 	bound := binding.TaskStartedBy
-	if slices.ContainsFunc(statuses, func(status wire.RunStatus) bool {
+	adoption := slices.ContainsFunc(statuses, func(status wire.RunStatus) bool {
 		return status.Wherry.TaskHash == task.hash && (status.Wherry.Kind == "started" ||
 			status.Wherry.Kind == "adopting" && status.Wherry.Receiver == request.Receiver && status.Wherry.Attempt == request.Attempt)
-	}) {
+	})
+	if adoption {
 		bound = binding.TaskEndedBy
 	}
 	if !c.now.Before(wire.PastBound(bound)) {
 		return refuse(wire.RefusedPastBound)
+	}
+	// A suspended pool starts no job; a running one is still adopted.
+	if !adoption && r.suspended() {
+		return refuse(wire.RefusedPoolSuspended)
 	}
 	// Rule 4, decided once per claim: a change of claimant is served once the previous one released or its lease lapsed.
 	claimDigest := wire.Digest(c.events.records[request.Run][owners[len(owners)-1]].Value)

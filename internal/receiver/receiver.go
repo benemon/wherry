@@ -466,6 +466,12 @@ func (r *Receiver) blocked() bool {
 	return len(r.denials) > 1 || len(r.denials) == 1 && !r.denials[capClaim]
 }
 
+// suspended reports the receiver's pool suspended as it holds wherry.admin.
+func (r *Receiver) suspended() bool {
+	state, _, _ := r.snapshot()
+	return state.Suspended[r.config.Pool]
+}
+
 // backoff is how long the receiver waits before it fetches from its pool again.
 func (r *Receiver) backoff() time.Duration {
 	r.mu.Lock()
