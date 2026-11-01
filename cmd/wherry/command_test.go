@@ -405,7 +405,7 @@ func TestReceiversShowsEnded(t *testing.T) {
 	if err := runReceivers(b.ctx, b.client, nil, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	if want := "receiver=receiver-a pool=pool-a capacity=0 in_flight=0 heartbeat_age=- status=ended\n"; stdout.String() != want || stderr.Len() != 0 {
+	if want := "receiver=receiver-a pool=pool-a capacity=0 in_flight=0 advertisement_age=- status=ended\n"; stdout.String() != want || stderr.Len() != 0 {
 		t.Fatalf("stdout %q stderr %q, want %q", stdout.String(), stderr.String(), want)
 	}
 	stdout.Reset()

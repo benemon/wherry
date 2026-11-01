@@ -165,7 +165,7 @@ type OutputMetadata struct {
 	Index int64 `json:"index"`
 }
 
-// ReturnedOutput is an output a turn returned, as a result's task metadata lists it; SHA256 and Size are of the
+// ReturnedOutput is an output a run returned, as a result's task metadata lists it; SHA256 and Size are of the
 // bytes its chunks carry, or for an S3 output of the bytes the receiver uploaded to Key in its pool's bucket.
 type ReturnedOutput struct {
 	Name   string `json:"name"`
@@ -227,7 +227,7 @@ type ResultMetadata struct {
 	Reply       *ReturnedReply     `json:"reply,omitzero"`
 }
 
-// ReturnedReply is a reply over MaxText that a turn returned as reply chunks; SHA256 and Size are of the bytes the
+// ReturnedReply is a reply over MaxText that a run returned as reply chunks; SHA256 and Size are of the bytes the
 // chunks carry, and Cut is set when the redacted reply was longer than its pool's reply limit.
 type ReturnedReply struct {
 	SHA256 string `json:"sha256"`

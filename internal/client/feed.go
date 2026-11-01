@@ -38,7 +38,7 @@ type AwaitResult struct {
 	Outputs []Output
 	// Stored are the S3 outputs the result lists for DownloadOutputs.
 	Stored []wire.ReturnedOutput
-	// NotReturned are the outputs the turn's receiver did not return.
+	// NotReturned are the outputs the run's receiver did not return.
 	NotReturned []wire.UnreturnedOutput
 	// Rejected are the outputs this host could not verify.
 	Rejected []wire.UnreturnedOutput

@@ -121,8 +121,8 @@ default model.
 wherry wait run-<id> --config-file "$config"
 ```
 
-`watch` prints the agent's transcript as it runs, then the final state and
-the agent's message.
+`wait` prints the agent's message once the run ends. `wherry logs run-<id>`
+prints its transcript.
 
 ### 5. Stop
 
@@ -591,12 +591,12 @@ wherry receivers
 ```
 
 ```
-receiver=nomad-1 pool=build capacity=2 in_flight=0 heartbeat_age=4s status=live
+receiver=nomad-1 pool=build capacity=2 in_flight=0 advertisement_age=4s status=live
   profile=container plugin=nomad agent=claude ready=true labels=isolation=container inline_limit=45056 credentials=claude-oauth-token
   profile=host plugin=nomad agent=claude ready=true labels=isolation=host inline_limit=45056 credentials=claude-oauth-token
 ```
 
-`heartbeat_age` is the age of the receiver's latest advertisement, and
+`advertisement_age` is the age of the receiver's latest advertisement, and
 `status=live` holds while it is within 120 seconds. `ready=true` means the
 receiver offers the plugin profile. `inline_limit` is the most inline input
 bytes the Nomad plugin delivers. `credentials` lists the agent's credentials
