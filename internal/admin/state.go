@@ -229,6 +229,8 @@ type Record struct {
 	Offset   int64           `json:"offset,omitzero"`
 	SHA256   string          `json:"sha256,omitzero"`
 	AtMS     int64           `json:"at_ms"`
+	// AppendedMS is the record's append time on wherry.admin, which load sets; the writer's clock never decides it.
+	AppendedMS int64 `json:"-"`
 }
 type Host struct{ Tenant, Name string }
 type State struct {
@@ -238,10 +240,13 @@ type State struct {
 	Entitlements map[string]map[string]bool
 	Ended        map[string]bool
 	Revoking     map[string]bool
+	Suspended    map[string]bool
+	// RotateRequested is the append time of each pool's latest rotate-key record.
+	RotateRequested map[string]int64
 }
 
 func NewState() State {
-	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}, map[string]bool{}}
+	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]int64{}}
 }
 
 // RecordVersion is the wherry.admin record version this release writes and the highest it reads.
@@ -323,6 +328,18 @@ func apply(state *State, record Record) error {
 		state.Ended[subject(record)] = true
 	case "revoking":
 		state.Revoking[subject(record)] = true
+	case "suspend", "resume", "rotate-key":
+		if _, ok := state.Pools[record.Pool]; !ok {
+			return errors.New(record.Kind + " names unknown pool")
+		}
+		switch record.Kind {
+		case "suspend":
+			state.Suspended[record.Pool] = true
+		case "resume":
+			delete(state.Suspended, record.Pool)
+		default:
+			state.RotateRequested[record.Pool] = record.AppendedMS
+		}
 	}
 	return nil
 }
@@ -642,6 +659,10 @@ func validateRecord(record Record) error {
 			record.Pool != "" || record.Terms != nil || record.Config != nil || record.Offset != 0 || record.SHA256 != "" {
 			return errors.New("invalid revoking record")
 		}
+	case "suspend", "resume", "rotate-key":
+		if validateNames(record.Pool) != nil || record.Tenant != "" || record.Host != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil || record.Offset != 0 || record.SHA256 != "" {
+			return errors.New("invalid " + record.Kind + " record")
+		}
 	default:
 		return errors.New("unknown admin record kind")
 	}
@@ -649,8 +670,9 @@ func validateRecord(record Record) error {
 }
 
 type rawRecord struct {
-	Offset int64
-	Value  []byte
+	Offset     int64
+	Value      []byte
+	AppendedMS int64
 }
 
 // ErrNewerRecord is a wherry.admin record whose version is above RecordVersion, written by a later release.
@@ -671,6 +693,7 @@ func load(raw []rawRecord) (State, error) {
 			newer[entry.Offset] = errors.Is(err, ErrNewerRecord)
 			continue
 		}
+		record.AppendedMS = entry.AppendedMS
 		if record.Kind == "skip" {
 			skips = append(skips, record)
 		} else {

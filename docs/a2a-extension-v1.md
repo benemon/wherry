@@ -804,9 +804,9 @@ that key's public half, on the pool's compacted
   that custodian is a live member of the pool without a membership end
   whose advertisement is within 120 seconds of the host's clock. Otherwise
   the host refuses the submission, and never takes an earlier record in its
-  place. It also refuses when the pool has no snapshot, and when the broker
-  refuses its write to the pool's task topic: the pool is suspended or the
-  host's ACLs were withdrawn. A host logs a `takeover` or `contested`
+  place. It also refuses when the pool has no snapshot, and when
+  `wherry.admin` records the pool suspended, before it resolves any
+  credential or uploads any input. A host logs a `takeover` or `contested`
   snapshot.
 
 ## Resubmission

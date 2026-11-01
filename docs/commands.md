@@ -687,10 +687,11 @@ parse as Go flags, in the forms `--name value`, `--name=value` and
 `flag needs an argument: -<name>`, one no admin command takes with
 `flag provided but not defined: -<name>`, and one the command does not take
 with `unknown option --<name>`. `--plugin-sha256` is given once per plugin
-type; any other repeated option takes its last value. `pool create`, `pool update`,
-`pool entitle`, `host add` and `receiver add` then create every ACL the new
+type and `--suspect-key` once per key; any other repeated option takes its last value. `pool create`, `pool update`,
+`pool entitle`, `pool suspend`, `pool resume`, `host add` and `receiver add` then create every ACL the new
 state calls for, re-read them, and fail with `ACL plan incomplete` when one
-is missing.
+is missing. They then delete every `READ` and `WRITE` ACL on a suspended
+pool's tasks topic.
 
 A bundle file must not exist beforehand. A command that fails removes the
 bundle it created.
@@ -754,6 +755,53 @@ their ACLs. It refuses when the pool's records do not fit the
 transcript topic counted, or when the `retention.ms` of either is below the
 pool's `start_by_limit` plus six hours, and records nothing. It applies
 each host's [quotas](configuration.md#quotas).
+
+### `wherry admin pool suspend POOL`
+
+Records a `suspend` record for the pool on `wherry.admin` and reconciles the
+ACLs. A suspended pool's tenants' hosts hold no `WRITE`, and its receivers
+no `READ`, on its tasks topic. The events topic, the snapshot topic, the
+receivers' topics and the custodian group keep their ACLs. A host refuses a
+submission to the pool with `pool is suspended` before it resolves any
+credential or uploads any input. Receivers claim nothing from the pool,
+answer none of its open requests and re-key none of its tasks; a run
+already claimed keeps running. The key custodian keeps rotating.
+
+### `wherry admin pool resume POOL`
+
+Records a `resume` record for the pool on `wherry.admin` and reconciles the
+ACLs, granting the hosts' `WRITE` and the receivers' `READ` on the tasks
+topic again. Receivers claim from the pool and answer its open requests
+again at their next refresh of `wherry.admin`.
+
+### `wherry admin pool rotate-key POOL [--suspect-key KID]...`
+
+Records a `rotate-key` record for the pool on `wherry.admin`. The pool's key
+custodian publishes a `rotation` snapshot with a new key on its first pass
+after it reads a `rotate-key` record appended after its current key's
+snapshot, as at its daily rotation. Hosts encrypt to the new key once they
+read that snapshot.
+
+The command then reads the pool's tasks topic as the Kafka super user and
+lists every retained task record whose submit wrap's `kid` is one of the
+suspect keys. Without `--suspect-key` the suspect key is the key the current
+snapshot names when the command starts; the command refuses when the pool
+has no snapshot or its current snapshot does not verify. A task record is
+listed whether or not its signature verifies. The output names runs,
+tenants and credentials, and holds no credential value:
+
+```
+rotate-key recorded for pool <pool>; its key custodian rotates on its next pass
+suspect_keys=<kid>[,<kid>...]
+horizon partition=<n> oldest_retained_offset=<offset>
+horizon: the oldest retained task was appended at <time>, <age> ago; tasks deleted by retention before it are not listed
+task run=<run> tenant=<tenant> key=<kid> credentials=<name>[,<name>...] appended=<time>
+tasks=<n>
+```
+
+The credential names are those of the task's envelope: the agent's
+credentials the host supplied, under the pool's current terms, and the
+task's own.
 
 ### `wherry admin host add HOST --tenant TENANT --bundle-file FILE`
 
@@ -949,7 +997,8 @@ snapshot's write ends at the `deadline_ms`; a write the deadline ends is
 followed on the next pass by a `takeover`. The custodian rotates the key at the
 append time of the snapshot first read back naming it plus 24 hours plus a
 jitter under one hour derived from the pool and key ID, publishing a
-`rotation` snapshot, and republishes its snapshot with the same reason after
+`rotation` snapshot, at once on a [`rotate-key`](#wherry-admin-pool-rotate-key-pool-suspect-key-kid) record appended
+after that snapshot, and republishes its snapshot with the same reason after
 its signing key rotates; a republish does not move the rotation. A commit
 error is retried up to 3 times on the same producer; a commit with an
 unknown outcome counts in `wherry_ambiguous_commits_total`. The custodian
@@ -983,7 +1032,8 @@ task its keys open that is its run's earliest accepted, not terminal and not
 past its `task_ended_by`, and then deletes its pool keys. A read or write
 error keeps the keys to their deadlines. A task appended under its key after
 that read is not re-keyed: it fails key-lost before it starts, and its host
-resubmits it before its `task_started_by`. With no successor's snapshot
+resubmits it before its `task_started_by`. While its pool is suspended it
+does not read the task topic and keeps its keys. With no successor's snapshot
 by the deadline, as soon as no other member of the pool has an
 advertisement within 120 seconds without `stepping_down`, or with no such
 member when the drain began, it logs `custodian: no successor in pool <pool>; keeping the pool

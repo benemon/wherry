@@ -27,7 +27,6 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
-	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
@@ -86,25 +85,46 @@ func TestSubmitRefusesWithoutALiveCurrentCustodian(t *testing.T) {
 			t.Fatalf("submit = %v, want the snapshot refused for its writer", err)
 		}
 	})
-	t.Run("suspended", func(t *testing.T) {
-		f := newFixture(t)
-		f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-		withdrawn := kadm.NewACLs().Topics(admin.PoolTasksTopic("pool-a")).Allow(admin.TenantPrincipal("tenant-a", "host-a")).AllowHosts("*").
-			Operations(kadm.OpWrite).ResourcePatternType(kadm.ACLPatternLiteral)
-		withdrawn.PrefixUser()
-		results, err := kadm.NewClient(f.service.Admin).DeleteACLs(f.ctx, withdrawn)
-		if err == nil {
-			for _, result := range results {
-				err = errors.Join(err, result.Err)
-			}
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := f.submitErr(t); !errors.Is(err, ErrPoolSuspended) || !strings.Contains(err.Error(), "the pool is suspended or this host's ACLs were withdrawn") {
-			t.Fatalf("submit = %v, want %v", err, ErrPoolSuspended)
-		}
-	})
+}
+
+// A suspended pool refuses a submission before any credential command runs or any input uploads; once resumed, a
+// submission is published.
+func TestSuspendedPoolRefusesSubmitBeforeResolvingAnything(t *testing.T) {
+	o := newUploadOracle(t)
+	f := newFixture(t)
+	terms := testTerms()
+	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	if err := f.service.PoolUpdate(f.ctx, "pool-a", terms, false); err != nil {
+		t.Fatal(err)
+	}
+	f.host.storage = o.config
+	maps.Copy(f.host.credentials, o.sources)
+	resolved := filepath.Join(t.TempDir(), "resolved")
+	f.host.credentials["model"] = credential.Source{Command: []string{"sh", "-c", `echo >> "$0"; printf model-token`, resolved}}
+	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+	if err := f.service.PoolSuspend(f.ctx, "pool-a", true); err != nil {
+		t.Fatal(err)
+	}
+	submit := func() (SubmitResult, error) {
+		file, _ := randomFile(t, "dataset.bin", 1024)
+		return f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "do the work", S3Inputs: []S3File{{Name: "dataset.bin", Body: file}},
+			EndBy: time.Now().Add(time.Hour), StartBy: time.Now().Add(time.Minute)})
+	}
+	if _, err := submit(); !errors.Is(err, ErrPoolSuspended) || !strings.Contains(err.Error(), "pool pool-a is suspended") {
+		t.Fatalf("submit = %v, want %v", err, ErrPoolSuspended)
+	}
+	if _, err := os.Stat(resolved); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a credential command ran for a suspended pool: %v", err)
+	}
+	if len(o.ops) != 0 {
+		t.Fatalf("storage requests %v for a suspended pool, want none", o.ops)
+	}
+	if err := f.service.PoolSuspend(f.ctx, "pool-a", false); err != nil {
+		t.Fatal(err)
+	}
+	if submitted, err := submit(); err != nil || submitted.Pool != "pool-a" {
+		t.Fatalf("submit after resume = %+v, %v", submitted, err)
+	}
 }
 
 // open decodes a task as a receiver reads it from its pool's task topic, unwraps its submit wrap with key, opens its

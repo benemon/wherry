@@ -157,19 +157,28 @@ func WrapContentKey(contentKey []byte, recipient *ecdsa.PublicKey) ([]byte, erro
 	return []byte(compact), err
 }
 
+// WrapKeyID is the kid of a wrap's protected header, the recipient key's thumbprint, read without decrypting the wrap.
+func WrapKeyID(encoded []byte) (string, error) {
+	protected, _, _ := strings.Cut(string(encoded), ".")
+	decoded, err := base64.RawURLEncoding.DecodeString(protected)
+	var header wrapHeader
+	if err != nil || json.Unmarshal(decoded, &header, Strict) != nil {
+		return "", errors.New("wrap protected header holds other members than a wrap's")
+	}
+	return header.KeyID, nil
+}
+
 // UnwrapContentKey decrypts a wrap to key and returns its 32-byte content key.
 func UnwrapContentKey(encoded []byte, key *ecdsa.PrivateKey) ([]byte, error) {
 	jwe, err := jose.ParseEncryptedCompact(string(encoded), []jose.KeyAlgorithm{jose.ECDH_ES_A256KW}, []jose.ContentEncryption{jose.A256GCM})
 	if err != nil {
 		return nil, errors.New("wrap is not a compact JWE of the allowed algorithms")
 	}
-	protected, _, _ := strings.Cut(string(encoded), ".")
-	decoded, err := base64.RawURLEncoding.DecodeString(protected)
-	var header wrapHeader
-	if err != nil || json.Unmarshal(decoded, &header, Strict) != nil {
-		return nil, errors.New("wrap protected header holds other members than a wrap's")
+	kid, err := WrapKeyID(encoded)
+	if err != nil {
+		return nil, err
 	}
-	if header.KeyID != KeyThumbprint(&key.PublicKey) {
+	if kid != KeyThumbprint(&key.PublicKey) {
 		return nil, errors.New("wrap is for another key")
 	}
 	contentKey, err := jwe.Decrypt(key)

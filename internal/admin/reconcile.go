@@ -29,6 +29,13 @@ func (service *Service) reconcileACLs(ctx context.Context, state State) error {
 	if err := service.verifyACLs(ctx, state); err != nil {
 		return fmt.Errorf("ACL plan incomplete after re-read: %w", err)
 	}
+	// ACLs grants nothing more on a suspended pool's task topic, so the READ and WRITE it granted before go.
+	for pool := range state.Suspended {
+		builder := kadm.NewACLs().Topics(PoolTasksTopic(pool)).Allow().AllowHosts().Operations(kadm.OpRead, kadm.OpWrite).ResourcePatternType(kadm.ACLPatternLiteral)
+		if err := service.deleteACLs(ctx, builder); err != nil {
+			return fmt.Errorf("withdraw suspended pool %s's task topic ACLs: %w", pool, err)
+		}
+	}
 	return nil
 }
 
@@ -58,6 +65,11 @@ func (service *Service) verifyACLs(ctx context.Context, state State) error {
 func (service *Service) deletePrincipalACLs(ctx context.Context, principal string) error {
 	builder := kadm.NewACLs().AnyResource().Allow(principal).AllowHosts("*").Operations(kadm.OpAny).ResourcePatternType(kadm.ACLPatternAny)
 	builder.PrefixUser()
+	return service.deleteACLs(ctx, builder)
+}
+
+// deleteACLs deletes the ACLs builder matches and waits until no broker describes one.
+func (service *Service) deleteACLs(ctx context.Context, builder *kadm.ACLBuilder) error {
 	results, err := kadm.NewClient(service.Admin).DeleteACLs(ctx, builder)
 	if err != nil {
 		return err
@@ -85,7 +97,7 @@ func (service *Service) deletePrincipalACLs(ctx context.Context, principal strin
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return errors.New("principal ACLs remain after deletion")
+			return errors.New("ACLs remain after deletion")
 		}
 		select {
 		case <-ctx.Done():

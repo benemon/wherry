@@ -237,6 +237,9 @@ func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 	if err != nil {
 		return err
 	}
+	if state, _, _ := r.snapshot(); state.Suspended[r.config.Pool] {
+		return fmt.Errorf("pool %s is suspended, so its task topic cannot be scanned", r.config.Pool)
+	}
 	tasks, err := r.reader.ReadFrom(ctx, admin.PoolTasksTopic(r.config.Pool), 0)
 	if err != nil {
 		r.deny(err, capRead)
@@ -437,7 +440,8 @@ func (r *Receiver) tend(ctx context.Context, now time.Time) error {
 	if latest.resign {
 		return r.publish(ctx, keys, latest.snapshot.Reason, key, latest, now)
 	}
-	if !now.Before(rotationAt(time.UnixMilli(key.PublishedMS), r.config.Pool, latest.snapshot.Current.KeyID)) {
+	// A rotate-key record appended after the current key's snapshot rotates it at once.
+	if state, _, _ := r.snapshot(); state.RotateRequested[r.config.Pool] > key.PublishedMS || !now.Before(rotationAt(time.UnixMilli(key.PublishedMS), r.config.Pool, latest.snapshot.Current.KeyID)) {
 		return r.mint(ctx, keys, "rotation", latest, now)
 	}
 	return nil

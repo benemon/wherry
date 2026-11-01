@@ -40,11 +40,11 @@ var (
 	ErrStartByPastLimit   = errors.New("task_started_by is past the pool's start_by_limit")
 	// ErrInvalidInput wraps a submission the wire format rejects; its message names the rule, never the value.
 	ErrInvalidInput = errors.New("invalid input")
-	// ErrNoSnapshot, ErrCustodianUnavailable and ErrPoolSuspended refuse a submission whose pool has no current key to
-	// wrap its envelope to, or that the broker does not let this host write.
+	// ErrNoSnapshot and ErrCustodianUnavailable refuse a submission whose pool has no current key to wrap its envelope
+	// to, and ErrPoolSuspended one whose pool wherry.admin records suspended.
 	ErrNoSnapshot           = errors.New("pool has no custodian snapshot")
 	ErrCustodianUnavailable = errors.New("pool's custodian is not live or is revoked")
-	ErrPoolSuspended        = errors.New("pool write refused")
+	ErrPoolSuspended        = errors.New("pool is suspended")
 )
 
 // errUndecodable wraps a local state file that does not decode.
@@ -448,8 +448,11 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 
 // poolKey returns the current key of pool: that of the latest committed record under the snapshot key on the pool's
 // snapshot topic, when its writer is the custodian it names and that custodian is live in ads and unrevoked. An earlier
-// record never stands in.
+// record never stands in. A suspended pool has none, so a submission resolves no credential and uploads no input.
 func (h *Host) poolKey(ctx context.Context, v view, pool string, ads map[string]wire.Advertisement) (*ecdsa.PublicKey, error) {
+	if v.state.Suspended[pool] {
+		return nil, fmt.Errorf("%w: pool %s is suspended; submit again once it is resumed", ErrPoolSuspended, pool)
+	}
 	records, err := h.reader.ReadFrom(ctx, admin.CustodianTopic(pool), 0)
 	if err != nil {
 		return nil, err
@@ -661,8 +664,6 @@ func (h *Host) produceTask(ctx context.Context, binding wire.SubmissionBinding, 
 	switch {
 	case errors.Is(err, kerr.MessageTooLarge):
 		return fmt.Errorf("%w: the submission is a %d-byte record, over the broker's record limit; shorten the prompt or the input files", ErrInvalidInput, len(encoded))
-	case errors.Is(err, kerr.TopicAuthorizationFailed):
-		return fmt.Errorf("%w: the broker refuses this host's write to pool %s's task topic: the pool is suspended or this host's ACLs were withdrawn", ErrPoolSuspended, binding.Pool)
 	}
 	return err
 }

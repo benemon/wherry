@@ -43,18 +43,9 @@ func (state State) custodianOf(snapshot wire.Snapshot, pool string) error {
 // presigned for its object in the pool's storage, and no value is empty. Errors name no value.
 func CheckEnvelope(terms Terms, task *wire.Submission, values signed.EnvelopeValues) error {
 	binding := task.Wherry
-	agent := slices.IndexFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == binding.Placement.Agent })
-	if agent < 0 {
-		return errors.New("agent is outside the pool terms")
-	}
-	names := map[string]bool{}
-	for _, credential := range terms.Agents[agent].Credentials {
-		if !slices.Contains(binding.Unsupplied, credential.Name) {
-			names[credential.Name] = true
-		}
-	}
-	for _, credential := range binding.Credentials {
-		names[credential.Name] = true
+	names, err := envelopeCredentials(terms, binding)
+	if err != nil {
+		return err
 	}
 	if !sameNames(names, values.Credentials) {
 		return errors.New("envelope credentials are not the agent's supplied credentials and the task's")
@@ -95,6 +86,25 @@ func CheckEnvelope(terms Terms, task *wire.Submission, values signed.EnvelopeVal
 		return errors.New("envelope redaction key is not 32 bytes")
 	}
 	return nil
+}
+
+// envelopeCredentials names the credentials a task's envelope holds under terms: the agent's supplied credentials and the
+// task's.
+func envelopeCredentials(terms Terms, binding wire.SubmissionBinding) (map[string]bool, error) {
+	agent := slices.IndexFunc(terms.Agents, func(agent AgentTerms) bool { return agent.Name == binding.Placement.Agent })
+	if agent < 0 {
+		return nil, errors.New("agent is outside the pool terms")
+	}
+	names := map[string]bool{}
+	for _, credential := range terms.Agents[agent].Credentials {
+		if !slices.Contains(binding.Unsupplied, credential.Name) {
+			names[credential.Name] = true
+		}
+	}
+	for _, credential := range binding.Credentials {
+		names[credential.Name] = true
+	}
+	return names, nil
 }
 
 // sameNames reports whether values has exactly the keys of names.

@@ -114,7 +114,7 @@ func TestEndedMembersKeyTopicStaysReadable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		raw = append(raw, rawRecord{int64(i), encoded})
+		raw = append(raw, rawRecord{Offset: int64(i), Value: encoded})
 	}
 	state, err := load(raw)
 	if err != nil {

@@ -725,6 +725,51 @@ recording the run as failed before it releases the task.
 A revoked name cannot be reused. Provision a returning host or receiver
 under a new name.
 
+## Respond to a compromised receiver or pool key
+
+Run the steps in order, with the `wherry admin` environment set.
+
+1. Suspend the pool. Hosts stop submitting to it and receivers stop
+   claiming from it; the events topic, the snapshot topic and the custodian
+   group keep working:
+
+   ```sh
+   wherry admin pool suspend build
+   ```
+
+2. Revoke the suspect receiver, as in
+   [Revoke a host or receiver](#revoke-a-host-or-receiver):
+
+   ```sh
+   wherry admin receiver revoke nomad-1
+   ```
+
+3. Wait for a new key custodian. A handover or a takeover publishes a
+   snapshot naming another receiver; its log reads
+   `custodian: published pool <pool> key <id> (<reason>)`.
+
+4. Rotate the pool key and list the tasks under the suspect keys:
+
+   ```sh
+   wherry admin pool rotate-key build --suspect-key <kid> --suspect-key <kid>
+   ```
+
+   The output lists each retained task under those keys by run, tenant and
+   credential names, and states its horizon: the oldest retained task.
+   Tasks deleted by retention before the horizon are not listed.
+
+5. Rotate each listed credential at its issuer. Tenants cancel or resubmit
+   the affected tasks.
+
+6. Resume the pool:
+
+   ```sh
+   wherry admin pool resume build
+   ```
+
+A drain of the key custodian while the pool is suspended keeps its keys to
+their deadlines: it does not read the task topic, so it re-keys nothing.
+
 ## Rotate a key
 
 A rotation replaces a host's or receiver's signing key and keeps its name.

@@ -310,6 +310,10 @@ func (run *activeRun) firstClaim(events poolEvents) bool {
 func (r *Receiver) serveOpens(ctx context.Context) error {
 	r.custody.mu.Lock()
 	defer r.custody.mu.Unlock()
+	// A suspended pool's task topic is not readable; its open requests wait for resume.
+	if state, _, _ := r.snapshot(); state.Suspended[r.config.Pool] {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	keys, err := loadPoolKeys(r.poolKeysDir())

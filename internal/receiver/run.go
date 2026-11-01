@@ -75,7 +75,8 @@ var (
 func (r *Receiver) claimLoop(claiming, running context.Context, idle func()) {
 	defer idle()
 	for claiming.Err() == nil {
-		if r.blocked() {
+		// A suspended pool's task topic denies its receivers READ, and a denial counted here would stop held runs.
+		if state, _, _ := r.snapshot(); r.blocked() || state.Suspended[r.config.Pool] {
 			sleep(claiming, time.Second)
 			continue
 		}
