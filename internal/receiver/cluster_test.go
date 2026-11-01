@@ -79,7 +79,7 @@ func (c *clusterRig) start(t *testing.T, ctx context.Context) {
 	}
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	c.plugin = &fakePlugin{stream: resultStream}
-	r := &Receiver{id: c.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(c.logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+	r := &Receiver{id: c.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), logger: log.New(c.logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
 		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: c.plugin}, nil
 		}}
