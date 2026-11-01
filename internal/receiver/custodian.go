@@ -316,24 +316,9 @@ type current struct {
 func (c current) names(r *Receiver) bool { return c.snapshot != nil && c.snapshot.Custodian == r.id }
 
 func (r *Receiver) readCurrent(ctx context.Context) (current, error) {
-	topic := admin.CustodianTopic(r.config.Pool)
-	listing, err := r.reader.Admin()
-	if err != nil {
-		return current{}, err
-	}
-	ends, err := admin.ListOffsets(ctx, listing.ListEndOffsets, topic)
+	records, err := r.reader.ReadFrom(ctx, admin.CustodianTopic(r.config.Pool), 0)
 	if err != nil {
 		return current{}, r.deny(err, capRead)
-	}
-	records, stable, err := r.reader.ReadFromWithEnd(ctx, topic, 0)
-	if err != nil {
-		return current{}, r.deny(err, capRead)
-	}
-	// A transaction open below the end holds the last stable offset: the snapshot it may commit would be current.
-	var end int64
-	ends.Each(func(listed kadm.ListedOffset) { end = listed.Offset })
-	if stable < end {
-		return current{}, errors.New("an open transaction holds the snapshot topic's last stable offset")
 	}
 	var latest current
 	for _, record := range records {
