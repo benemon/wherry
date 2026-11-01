@@ -911,6 +911,52 @@ func advertiseWith(t *testing.T, f fixture, r *Receiver, advertisement wire.Adve
 	}
 }
 
+// Custody follows the custodian group's session alone: a custodian whose advertisement is stale stays custodian while
+// its session lives, and its crash hands custody on at the session timeout, as a counted takeover.
+func TestCustodyFollowsTheGroupSessionNotAdvertisements(t *testing.T) {
+	f := newBareFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout+time.Minute)
+	defer cancel()
+	custodian := f.peer(t, "receiver-b")
+	advertiseWith(t, f, custodian, wire.Advertisement{AtMS: time.Now().Add(-10 * time.Minute).UnixMilli()})
+	running, crash := context.WithCancel(ctx)
+	crashed := make(chan struct{})
+	go func() {
+		defer close(crashed)
+		custodian.keepCustody(ctx, running)
+	}()
+	awaitActing(t, f, custodian)
+	custodyUntilDrained(t, ctx, f.receiver)
+	time.Sleep(10 * custodyInterval)
+	latest, err := f.receiver.readCurrent(ctx)
+	f.receiver.custody.mu.Lock()
+	acting := f.receiver.custody.producer != nil
+	f.receiver.custody.mu.Unlock()
+	if err != nil || !latest.names(custodian) || acting {
+		t.Fatalf("snapshot %+v, %v, the member acting %v; want receiver-b custodian with a stale advertisement and a live session; logs:\n%s", latest.snapshot, err, acting, f.logs.String())
+	}
+	// A crash: the group client closes with no leave, so the static membership ends at the session timeout.
+	crash()
+	<-crashed
+	crashedAt := time.Now()
+	for !latest.names(f.receiver) {
+		if ctx.Err() != nil {
+			t.Fatalf("no takeover after the crash; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(500 * time.Millisecond)
+		latest, _ = f.receiver.readCurrent(ctx)
+	}
+	if took := time.Since(crashedAt); took < sessionTimeout/2 {
+		t.Fatalf("custody moved %s after the crash, before the session could expire", took)
+	}
+	if latest.snapshot.Reason != "takeover" {
+		t.Fatalf("reason %s, want takeover", latest.snapshot.Reason)
+	}
+	if got := scrapedValue(t, f.receiver, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 {
+		t.Fatalf("takeovers = %v after a crash, want 1", got)
+	}
+}
+
 // A successor arriving near the drain's deadline while the task topic's reads block: the drain ends within the drain
 // timeout and stepDownMargin, and the keys are kept.
 func TestHandoverNearTheDeadlineEndsWithinTheBoundKeepingTheKeys(t *testing.T) {

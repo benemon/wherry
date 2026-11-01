@@ -7,7 +7,10 @@ version 1. An [advertisement](#advertisement) no longer carries
 `started_ms` or `stepping_down`, and a
 [custodian snapshot](#custodian-snapshot)'s `reason` is no longer
 `handover`: every custodian change publishes `takeover` or `contested`.
-A snapshot with reason `handover` is refused.
+A snapshot with reason `handover` is refused. A host no longer refuses to
+submit when the current snapshot's custodian has no live advertisement:
+advertisements place tasks and custody follows the custodian group's
+session.
 
 **Change note, 2026-11-01 (pool key):** edited in place at version 1. A
 pool's key custodian replaces the seal exchange: the seal request a
@@ -828,8 +831,8 @@ that key's public half, on the pool's compacted
   `custodian` on the topic, the record compaction keeps for that key. A
   record under another key is not a snapshot. A host submits to the pool
   only when that record verifies, its writer is the custodian it names, and
-  that custodian is a live member of the pool without a membership end
-  whose advertisement is within 120 seconds of the host's clock. Otherwise
+  that custodian is a member of the pool without a membership end; the
+  custodian's advertisement is not read. Otherwise
   the host refuses the submission, and never takes an earlier record in its
   place. It also refuses when the pool has no snapshot, and when
   `wherry.admin` records the pool suspended, before it resolves any

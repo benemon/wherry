@@ -52,10 +52,9 @@ clones itself.
    one the run whose result it returns. Use the newest run ID from then on,
    and do not submit the task again yourself.
 6. `submit` refuses a pool that takes no task now, with an error that says `pool <pool> is
-   suspended; submit again once it is resumed`, `pool <pool> has no
+   suspended; submit again once it is resumed` or `pool <pool> has no
    custodian yet; submit again once a receiver of the pool has published
-   one` or `pool <pool>'s custodian <receiver> is not live; submit again once
-   a successor has published a snapshot`. Tell the user about a suspended
+   one`. Tell the user about a suspended
    pool, since its operator resumes it. Otherwise submit again after a few
    minutes.
 7. `wherry cancel RUN_ID` when the result is no longer needed.

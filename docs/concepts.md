@@ -224,8 +224,10 @@ state directory. It publishes the current public key in a signed
 **snapshot** on the snapshot topic, through the transactional ID
 `p.<pool>.custodian` that every receiver of the pool shares, so a new
 custodian's first transaction fences the previous custodian's writes. A host
-encrypts to the key in the latest committed snapshot, and refuses to submit
-while that snapshot's custodian is not live.
+encrypts to the key in the latest committed snapshot. Custody follows the
+custodian group's session alone: a custodian whose session ends, after the
+group's 45-second session timeout for a crash, is replaced, and
+advertisements only place tasks.
 
 Each snapshot states why it was published:
 
@@ -344,8 +346,10 @@ Custodian loss gives a weaker guarantee than receiver loss:
   before the task's `task_started_by`; a host that never returns loses it;
 - a running task under a lost key whose receiver dies fails, since no
   adopter can open its envelope;
-- between a custodian going silent and its successor's snapshot, hosts
-  refuse to submit to the pool.
+- between a custodian crashing and its successor's snapshot, up to the
+  group's 45-second session timeout, hosts still submit under the crashed
+  custodian's key, and those tasks fail key-lost and are resubmitted as
+  above.
 
 ### Suspension
 

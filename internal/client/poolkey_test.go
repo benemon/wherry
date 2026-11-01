@@ -40,24 +40,15 @@ func (f *fixture) submitErr(t *testing.T) error {
 	return err
 }
 
-// Submit refuses with a distinct reason when the pool has no snapshot, when the latest snapshot's custodian is silent
-// or revoked, even with an earlier snapshot whose custodian is live, and when the snapshot's writer is not the custodian
-// it names.
-func TestSubmitRefusesWithoutALiveCurrentCustodian(t *testing.T) {
+// Submit refuses with a distinct reason when the pool has no snapshot, when the latest snapshot's custodian is revoked,
+// and when the snapshot's writer is not the custodian it names.
+func TestSubmitRefusesWithoutAnAuthorisedCurrentSnapshot(t *testing.T) {
 	t.Run("no snapshot", func(t *testing.T) {
 		f := newFixture(t)
 		f.poolKeys["pool-a"] = noCustodian
 		f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 		if err := f.submitErr(t); !errors.Is(err, ErrNoSnapshot) {
 			t.Fatalf("submit = %v, want %v", err, ErrNoSnapshot)
-		}
-	})
-	t.Run("latest custodian silent", func(t *testing.T) {
-		f := newFixture(t)
-		f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
-		f.addReceiver(t, "receiver-b", "pool-a").snapshot(t, f.ctx, func(snapshot *wire.Snapshot) { snapshot.Reason = "takeover" })
-		if err := f.submitErr(t); !errors.Is(err, ErrCustodianUnavailable) || !strings.Contains(err.Error(), "custodian receiver-b is not live") {
-			t.Fatalf("submit = %v, want %v for receiver-b; the earlier snapshot's live receiver-a must not stand in", err, ErrCustodianUnavailable)
 		}
 	})
 	t.Run("latest custodian revoked", func(t *testing.T) {
@@ -83,6 +74,37 @@ func TestSubmitRefusesWithoutALiveCurrentCustodian(t *testing.T) {
 		other.produce(t, f.ctx, admin.CustodianTopic("pool-a"), wire.CustodianKey, forged)
 		if err := f.submitErr(t); !errors.Is(err, ErrCustodianUnavailable) || !strings.Contains(err.Error(), "written by another receiver") {
 			t.Fatalf("submit = %v, want the snapshot refused for its writer", err)
+		}
+	})
+}
+
+// Custody follows the custodian group's session, not advertisements, which only place tasks: a submission and a key-lost
+// run's resubmission wrap to the latest snapshot's key while its custodian's advertisement is stale or absent.
+func TestSubmitTakesTheSnapshotsKeyWhateverTheCustodiansAdvertisement(t *testing.T) {
+	takeover := func(snapshot *wire.Snapshot) { snapshot.Reason = "takeover" }
+	t.Run("submit", func(t *testing.T) {
+		f := newFixture(t)
+		f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
+		custodian := f.addReceiver(t, "receiver-b", "pool-a")
+		custodian.advertise(t, f.ctx, func(ad *wire.Advertisement) { ad.AtMS = time.Now().Add(-10 * time.Minute).UnixMilli() })
+		key := custodian.snapshot(t, f.ctx, takeover)
+		result := f.submit(t, defaultSelector())
+		if _, _, err := open(t, f, result.RunID, key); err != nil {
+			t.Fatalf("the task does not open with the snapshot's key: %v", err)
+		}
+	})
+	t.Run("resubmit", func(t *testing.T) {
+		f := newFixture(t)
+		receiver, task := f.admitted(t)
+		runID := task.submission.Wherry.Run
+		key := f.addReceiver(t, "receiver-b", "pool-a").snapshot(t, f.ctx, takeover)
+		receiver.keyLost(t, f.ctx, task)
+		status, err := f.host.Status(f.ctx, runID)
+		if err != nil || status.Replacement == "" {
+			t.Fatalf("status %+v, %v; want a replacement", status, err)
+		}
+		if _, _, err := open(t, f, status.Replacement, key); err != nil {
+			t.Fatalf("the replacement does not open with the snapshot's key: %v", err)
 		}
 	})
 }
