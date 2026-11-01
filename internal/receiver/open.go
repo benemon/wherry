@@ -22,7 +22,7 @@ import (
 // keyLostReason ends a run whose envelope no holder of a pool key can open.
 const keyLostReason = "cannot be opened: the pool's custodian changed and its key was lost"
 
-// claimantLease is how old the previous claimant's advertisement at a claim must be when the custodian decides, for a
+// claimantLease is how old the previous holder's advertisement at a claim must be when the custodian decides, for a
 // new claimant to be served without its release.
 const claimantLease = 120 * time.Second
 
@@ -631,7 +631,7 @@ func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses 
 		if string(ad.Key) != previous.Wherry.Receiver || ad.Timestamp.After(appended) {
 			continue
 		}
-		if advertisement, err := admin.AuthorizeAdvertisement(state, peers, ad.Value); err != nil || advertisement.Receiver != previous.Wherry.Receiver || advertisement.Pool != c.r.config.Pool {
+		if advertisement, err := admin.AuthorizeAdvertisement(state, peers, ad.Value); err != nil || advertisement.Receiver != previous.Wherry.Receiver {
 			continue
 		}
 		decision.Advertisement = &wire.AdvertisedRef{Offset: ad.Offset, AtMS: ad.Timestamp.UnixMilli()}

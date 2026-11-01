@@ -1223,7 +1223,8 @@ the [claim check](#the-claim-check).
 - `custodian` is the writer. `claim` is the SHA-256, in lowercase hex, of the
   record value of the `claimed` status decided, and `previous` the previous
   holder of rule 6, or with none the receiver of the ownership status before
-  the claim, absent for no ownership status before it.
+  the claim, absent for no ownership status before it and when the previous
+  holder is the claimant itself.
 - `reason` is `unchanged` for no ownership status before the claim or a
   previous holder that is the same receiver, `released` for no previous
   holder after one, `lease` for a previous holder whose advertisement at or
