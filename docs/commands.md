@@ -1012,17 +1012,6 @@ any other error. Step 5 waits the largest of
 is unbounded. `--wait DURATION` lengthens that wait and must be positive;
 step 5 refuses a duration below it and names the minimum.
 
-### `wherry admin skip OFFSET --sha256 HASH`
-
-Records the decision to pass over the undecodable record at `OFFSET` on
-`wherry.admin`, whose SHA-256 is `HASH`. Loading `wherry.admin` fails while
-any record on it does not decode, and the error lists each one as
-`offset=<n> size=<n> sha256=<hex>`. A record whose `v` is higher than this
-release knows is one a later release wrote; when every such record is one,
-the error says to upgrade this wherry instead. The command refuses an offset
-whose record decodes, a record a later release wrote, and a hash that does
-not match.
-
 ### `wherry admin check`
 
 Loads `wherry.admin`, checks that no two names collide, validates every

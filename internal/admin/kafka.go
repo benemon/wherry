@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -414,38 +412,6 @@ func (service *Service) Check(ctx context.Context) error {
 
 func (service *Service) LoadState(ctx context.Context) (State, error) {
 	return Load(ctx, service.Operator)
-}
-
-// Skip records the operator's decision to pass over the undecodable record at
-// offset, bound to its SHA-256. It writes directly: loading state fails until
-// the skip exists.
-func (service *Service) Skip(ctx context.Context, offset int64, hash string) error {
-	reader := NewReader(service.Operator)
-	defer reader.Close()
-	raw, err := readRaw(ctx, reader)
-	if err != nil {
-		return err
-	}
-	for _, entry := range raw {
-		if entry.Offset != offset {
-			continue
-		}
-		if _, err := DecodeRecord(entry.Value); err == nil {
-			return fmt.Errorf("record at offset %d decodes and cannot be skipped", offset)
-		} else if errors.Is(err, ErrNewerRecord) {
-			return fmt.Errorf("%w at offset %d; upgrade this wherry instead of skipping it", ErrNewerRecord, offset)
-		}
-		sum := sha256.Sum256(entry.Value)
-		if hex.EncodeToString(sum[:]) != hash {
-			return fmt.Errorf("record at offset %d does not have that SHA-256", offset)
-		}
-		encoded, err := EncodeRecord(Record{Kind: "skip", Offset: offset, SHA256: hash})
-		if err != nil {
-			return err
-		}
-		return service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Key: []byte("skip." + strconv.FormatInt(offset, 10)), Value: encoded}).FirstErr()
-	}
-	return fmt.Errorf("wherry.admin has no record at offset %d", offset)
 }
 
 // FeedRecordLimit is the largest record batch a tenant's feed and transcript topic take, their max.message.bytes, and

@@ -1280,7 +1280,6 @@ writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 | `entitlement` | `tenant`, `pool` | entitles the tenant to the pool |
 | `end` | `receiver`, or `tenant` and `host` | records a membership end |
 | `revoking` | `receiver`, or `tenant` and `host` | records a revocation in progress: the principal is granted no ACL and stays a member until its `end` |
-| `skip` | `offset`, `sha256` | passes over the undecodable record at that offset with that SHA-256 |
 
 `terms` has the members of the [pool terms](configuration.md#pool-terms) file
 and `record_limit`, the tasks topic's record limit that `pool create` reads
@@ -1300,16 +1299,16 @@ Readers fold the records in order. A reader loads no state when:
   pool;
 - a `receiver` or `host` record follows that member's `end`;
 - an `entitlement` names an unknown pool;
-- a record fails to decode and no `skip` matches it;
-- a `skip` names no undecodable record with that hash;
+- a record fails to decode;
 - two of the Kafka names that pools, receivers and hosts derive (topics,
   share groups, principals and transactional prefixes) collide.
 
 Readers ignore unknown members on a record and reject duplicate names. A
 record whose `v` is higher than the reader's release knows was written by a
-later release; when every undecodable record no `skip` matches is such a
+later release; when every undecodable record is such a
 record, the reader reports that a later wherry release wrote them and that
-this one needs an upgrade.
+this one needs an upgrade; otherwise it reports that this release cannot read
+`wherry.admin` and the deployment needs a reset.
 
 ## Admission
 

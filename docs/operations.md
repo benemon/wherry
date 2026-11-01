@@ -921,24 +921,33 @@ finds the type's plugin, the plugin checks each profile's section, and the
 receiver exits with `profile <name>: ...` on an error. Run it after changing a pool's terms, since
 receivers keep the configuration they started with.
 
-## Recover from an undecodable `wherry.admin` record
+## Reset a deployment
 
 Every reader of `wherry.admin` stops while any record on it fails to
-decode, so nothing loads state until the operator decides. The error lists
-each such record as `offset=<n> size=<n> sha256=<hex>`.
+decode, and the error lists each such record as
+`offset=<n> size=<n> sha256=<hex>`. When every such record has a higher `v`
+than this release knows, a later release wrote it and the error says to
+[upgrade wherry](#upgrade-wherry). Otherwise this release cannot read
+`wherry.admin`, and the deployment needs a reset: `wherry.admin` is
+append-only and read from offset 0, so no record on it can be passed over.
 
-1. Read the record at that offset with Kafka's own tools and decide that it
-   carries no state wherry needs.
-2. Record the decision:
+No `wherry` command reads state while this holds, so the reset works on the
+platform and on Kafka directly.
 
-   ```sh
-   wherry admin skip 42 --sha256 <hex>
-   ```
-
-The command refuses a record that decodes, so a skip cannot hide state such
-as a membership end. It also refuses a record a later release wrote, one
-whose `v` is higher than this release knows; the error says so, and
-upgrading `wherry` reads it.
+1. Stop every receiver and every `wherry mcp` and host command.
+2. Stop and remove every run's platform job (the Nomad job, Kubernetes Job
+   or systemd unit each [plugin](plugins.md) creates for a run). Once the
+   tasks topics are gone no receiver can adopt these jobs or end them at
+   their deadlines.
+3. As the super user, delete what `wherry admin` created: every topic whose
+   name starts with `wherry.`, including `wherry.admin`, as
+   [Kafka resources](design.md#kafka-resources) lists them; the share groups
+   and consumer groups on those topics; every ACL and SCRAM credential of a
+   principal named `wherry.rcv.<receiver>` or `wherry.tnt.<tenant>.<host>`;
+   and the client quotas set on the `wherry.tnt.` principals. Keep the super
+   user, `wherry.operator` and its ACLs.
+4. Set the deployment up again from [Create a pool](#create-a-pool), and
+   give each host and receiver its new bundle.
 
 ## Inputs and outputs
 
@@ -1246,14 +1255,14 @@ brokers or to the storage endpoint.
 
 Readers ignore unknown members on `wherry.admin` records and reject every
 record with a higher `v` than their release knows as written by a later
-release; do not skip such a record, upgrade the reader. A
+release; upgrade the reader. A
 host's run records carry `redaction_key`, so an older `wherry` cannot read a
 run this release submitted. A host or receiver of an earlier release that
 rejects unknown members on `wherry.admin` records cannot decode pool terms
 that set `models` or `default_model`, and stops reading `wherry.admin` while
 they hold them, so upgrade every receiver and host before the terms set them.
-Such a release reports those records as written by a later release; do not
-skip them, upgrade it. A harness does not restart a running `wherry mcp` when its binary
+Such a release reports those records as written by a later release;
+upgrade it. A harness does not restart a running `wherry mcp` when its binary
 changes, so restart the MCP server after upgrading.
 
 The [release notes](https://github.com/benemon/wherry/releases) mark a
