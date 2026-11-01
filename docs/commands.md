@@ -771,7 +771,14 @@ that reads the suspension, or whose acknowledgement of a claim, a renewal
 included, the broker refuses while `wherry.admin` records it, stops the job
 of every run of the pool it holds through the plugin and ends the run
 `TASK_STATE_FAILED` with `pool suspended`: a run waiting for its open, a run
-following its job, and a run whose outputs it is collecting. The run is not
+in `Dispatch`, a run following its job, and a run whose outputs it is
+collecting. A `Dispatch` in progress is cancelled; unless it reported its
+job, or that it created none, the receiver finds the job with `Lookup` and
+stops it. `Lookup` and `Stop` are retried for up to a minute. A job not
+confirmed stopped by then may still run: the receiver ends the run
+`TASK_STATE_FAILED` with `pool suspended: job stop unconfirmed`, neither
+returns its task to the pool nor releases its platform material, logs it
+and counts it in `wherry_suspend_stop_unconfirmed_total`. The run is not
 `key-lost`, so no host resubmits it, and its task delivered again after
 resume is acknowledged without a run. The key custodian keeps rotating.
 
@@ -813,10 +820,16 @@ holds no credential value:
 pool <pool>'s key custodian rotated for the rotate-key request; tasks appended through that rotation are listed
 suspect_keys=<kid>[,<kid>...]
 horizon partition=<n> oldest_retained_offset=<offset>
+horizon partition=<n>: retention deleted the tasks at offsets <offset> to <offset> during the scan; they may not be listed
 horizon: the oldest retained task was appended at <time>, <age> ago; tasks deleted by retention before it are not listed
 task run=<run> tenant=<tenant> key=<kid> credentials=<name>[,<name>...] appended=<time>
 tasks=<n>
 ```
+
+Each partition's horizon is its log start listed after the scan, since a
+fetch below the log start begins at the start then in effect. Where
+retention moved the start during the scan, the second `horizon` line names
+the offsets it deleted, from the start listed before the scan.
 
 The credential names are the task's own credentials and every credential
 any terms record of the pool on `wherry.admin` gives the task's agent. The
@@ -1317,6 +1330,7 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
 | `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events or, for the key custodian, its snapshot topic |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
+| `wherry_suspend_stop_unconfirmed_total` | counter | none | runs of a suspended pool ended `pool suspended: job stop unconfirmed`, their job possibly still running |
 | `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover`, `contested`; both start at 0 |
 | `wherry_runs_key_lost_total` | counter | none | runs this receiver ended with the wherry event `key-lost`; starts at 0 |
 | `wherry_claimant_changes_total` | counter | `reason` | claims the key custodian served to a new claimant: `released`, `lease` |

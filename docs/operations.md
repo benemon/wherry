@@ -736,8 +736,12 @@ that read it before the resume can withdraw the grants it restores.
 1. Suspend the pool. Hosts stop submitting to it and receivers stop
    claiming from it; the events topic, the snapshot topic and the custodian
    group keep working. Each receiver stops the job of every run of the pool
-   it holds and ends the run `TASK_STATE_FAILED` with `pool suspended`. No
-   host resubmits such a run, and resume does not run it again:
+   it holds and ends the run `TASK_STATE_FAILED` with `pool suspended`. A
+   run whose job's stop the plugin does not confirm within a minute ends
+   `pool suspended: job stop unconfirmed` and counts in
+   `wherry_suspend_stop_unconfirmed_total`; its job may still run, so stop
+   it on the platform. No host resubmits such a run, and resume does not
+   run it again:
 
    ```sh
    wherry admin pool suspend build
@@ -767,7 +771,8 @@ that read it before the resume can withdraw the grants it restores.
    credential names. A task's credential names are those of the pool terms
    in force when it was appended and its own. The output states its
    horizon: the oldest retained task. Tasks deleted by retention before the
-   horizon are not listed. When the wait ends without the snapshot, the
+   horizon are not listed, and the output names any offsets retention
+   deleted during the scan. When the wait ends without the snapshot, the
    request stands: wait for the new key custodian and run the command again.
 
 5. Rotate each listed credential at its issuer. Tenants cancel or resubmit
