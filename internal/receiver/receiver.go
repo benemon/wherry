@@ -28,8 +28,12 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// parseHistory is wire.ParseHistory, swapped by tests that count the verifications of a read.
-var parseHistory = wire.ParseHistory
+// parseHistory and parseStrict are wire.ParseHistory and wire.ParseStrict, swapped by tests that count the verifications
+// of a read.
+var (
+	parseHistory = wire.ParseHistory
+	parseStrict  = wire.ParseStrict
+)
 
 // ErrConfigChanged is returned by Run when wherry.admin holds a configuration other than the one it started with.
 var ErrConfigChanged = errors.New("receiver configuration changed")
@@ -99,6 +103,8 @@ type Receiver struct {
 	liveMu   sync.Mutex
 	live     map[*activeRun][]redact.Form
 	platform []redact.Form
+	// events is the pool's events folded so far, which every read of them shares.
+	events eventsFold
 }
 
 // New builds the receiver's Kafka client from bundle and loads or creates its signing key in stateDir, settling a
@@ -639,6 +645,44 @@ type poolEvents struct {
 	// rekeys holds, per task hash, its re-key wraps; decisions the first decision on each claim, by the claim's digest.
 	rekeys    map[string][]wire.RekeyWrap
 	decisions map[string]wire.ClaimDecision
+	// seen holds the event ID of each status in statuses; it is the fold's alone.
+	seen map[string]bool
+}
+
+func newPoolEvents() poolEvents {
+	return poolEvents{
+		statuses: map[string][]wire.RunStatus{}, records: map[string][]*kgo.Record{}, startFailures: map[string][]wire.StartFailure{}, others: map[string][][]byte{},
+		answered: map[string]bool{}, rekeys: map[string][]wire.RekeyWrap{}, decisions: map[string]wire.ClaimDecision{}, seen: map[string]bool{},
+	}
+}
+
+// view is a copy of events a reader may keep while the fold goes on: the fold only appends past each slice's length.
+func (events poolEvents) view() poolEvents {
+	events.statuses, events.records, events.startFailures, events.others = maps.Clone(events.statuses), maps.Clone(events.records), maps.Clone(events.startFailures), maps.Clone(events.others)
+	events.answered, events.rekeys, events.decisions, events.seen = maps.Clone(events.answered), maps.Clone(events.rekeys), maps.Clone(events.decisions), nil
+	return events
+}
+
+// eventsFold is the pool's events folded once per process, from the log start to next.
+type eventsFold struct {
+	mu   sync.Mutex
+	next int64
+	// entries holds what each folded record that counts adds to events, in log order.
+	entries []foldedEvent
+	events  poolEvents
+	// state, peers and ended are what every entry was verified and authorised against.
+	state        admin.State
+	peers, ended signed.Keys
+}
+
+// foldedEvent is what the record at offset adds to a view of the pool's events.
+type foldedEvent struct {
+	offset int64
+	apply  func(*poolEvents)
+}
+
+func (fold *eventsFold) reset() {
+	fold.next, fold.entries, fold.events = 0, nil, newPoolEvents()
 }
 
 // openRequest is an open request's record, with the request when it verifies as a live pool member's.
@@ -648,25 +692,55 @@ type openRequest struct {
 	request *wire.OpenRequest
 }
 
+// readEvents reads the pool's events after those already folded and returns the view a read of the whole topic gives.
 func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	ctx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	records, err := r.reader.ReadFrom(ctx, admin.PoolEventsTopic(r.config.Pool), 0)
-	if err != nil {
-		r.deny(err, capRead)
-		return poolEvents{}, err
-	}
+	fold := &r.events
+	fold.mu.Lock()
+	defer fold.mu.Unlock()
 	state, peers, _ := r.snapshot()
 	r.mu.Lock()
 	ended := r.ended
 	r.mu.Unlock()
+	// Any record's verification or authorisation may differ under other state or keys, so the fold starts again.
+	if fold.events.seen == nil || !reflect.DeepEqual(fold.state, state) || !reflect.DeepEqual(fold.peers, peers) || !reflect.DeepEqual(fold.ended, ended) {
+		fold.reset()
+	}
+	records, start, end, err := r.reader.ReadRange(ctx, admin.PoolEventsTopic(r.config.Pool), fold.next)
+	if err != nil {
+		r.deny(err, capRead)
+		return poolEvents{}, err
+	}
+	entries, err := r.foldEvents(ctx, records, state, peers, ended)
+	if err != nil {
+		return poolEvents{}, err
+	}
+	// Retention deletes from the log start: what a read of the whole topic no longer sees is dropped.
+	retained := slices.IndexFunc(fold.entries, func(entry foldedEvent) bool { return entry.offset >= start })
+	if retained < 0 {
+		retained = len(fold.entries)
+	}
+	if retained > 0 {
+		fold.entries, fold.events = slices.Clone(fold.entries[retained:]), newPoolEvents()
+		for _, entry := range fold.entries {
+			entry.apply(&fold.events)
+		}
+	}
+	for _, entry := range entries {
+		entry.apply(&fold.events)
+	}
+	fold.entries = append(fold.entries, entries...)
+	fold.next, fold.state, fold.peers, fold.ended = max(fold.next, end), state, peers, ended
+	return fold.events.view(), nil
+}
+
+// foldEvents verifies and authorises each record of the pool's events against state, peers and ended, and returns
+// what each that counts adds to their view.
+func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state admin.State, peers, ended signed.Keys) ([]foldedEvent, error) {
 	peerTopics := admin.PoolKeyTopics(state, r.config.Pool)
 	reread := map[string]bool{}
-	events := poolEvents{
-		statuses: map[string][]wire.RunStatus{}, records: map[string][]*kgo.Record{}, startFailures: map[string][]wire.StartFailure{}, others: map[string][][]byte{},
-		answered: map[string]bool{}, rekeys: map[string][]wire.RekeyWrap{}, decisions: map[string]wire.ClaimDecision{},
-	}
-	seen := map[string]bool{}
+	var entries []foldedEvent
 	for _, record := range records {
 		run := string(record.Key)
 		history := parseHistory(record.Timestamp)
@@ -688,7 +762,7 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 			}
 			// Open requests and re-key wraps verify only against live pool members' keys, which is their authorisation.
 			strict := func(value wire.Record) error {
-				parseErr = wire.ParseStrict(record.Value, peers, record.Timestamp, value)
+				parseErr = parseStrict(record.Value, peers, record.Timestamp, value)
 				return parseErr
 			}
 			// A custodian's answers and claim decisions verify against the key current at their append time, also after
@@ -699,7 +773,7 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 					keys = maps.Clone(peers)
 					keys[owner] = ended[owner]
 				}
-				parseErr = wire.ParseStrict(record.Value, keys, record.Timestamp, value)
+				parseErr = parseStrict(record.Value, keys, record.Timestamp, value)
 				return parseErr
 			}
 			var err error
@@ -728,10 +802,11 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 		if owner, topic, stale := staleKey(record.Value, peers, peerTopics); parseErr != nil && stale && !reread[owner] {
 			reread[owner] = true
 			if peers, err = r.rereadKey(ctx, &r.peers, owner, topic); err != nil {
-				return poolEvents{}, err
+				return nil, err
 			}
 			err = authorize(peers)
 		}
+		var apply func(*poolEvents)
 		switch {
 		case typ == wire.OpenRequestType:
 			// A request that does not verify is refused by its digest.
@@ -739,34 +814,43 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 			if err == nil && request.Run == run {
 				opened.request = &request
 			}
-			events.requests = append(events.requests, opened)
+			apply = func(events *poolEvents) { events.requests = append(events.requests, opened) }
 		case parseErr != nil:
-			events.others[run] = append(events.others[run], record.Value)
+			apply = func(events *poolEvents) { events.others[run] = append(events.others[run], record.Value) }
 		case err != nil:
 			// A status or start failure that verifies but is not authorised counts for nothing.
 		case typ == wire.StartFailureType:
 			// A start failure binds its run's tenant through the task hash, which failedHere matches.
 			if failure.Wherry.Run == run && failure.Wherry.Receiver == r.id {
-				events.startFailures[run] = append(events.startFailures[run], failure)
+				apply = func(events *poolEvents) { events.startFailures[run] = append(events.startFailures[run], failure) }
 			}
 		case typ == wire.AttemptWrapType:
-			events.answered[attemptWrap.Request] = true
+			apply = func(events *poolEvents) { events.answered[attemptWrap.Request] = true }
 		case typ == wire.OpenRefusalType:
-			events.answered[refusal.Request] = true
+			apply = func(events *poolEvents) { events.answered[refusal.Request] = true }
 		case typ == wire.RekeyWrapType:
-			events.rekeys[rekey.TaskHash] = append(events.rekeys[rekey.TaskHash], rekey)
+			apply = func(events *poolEvents) { events.rekeys[rekey.TaskHash] = append(events.rekeys[rekey.TaskHash], rekey) }
 		case typ == wire.ClaimDecisionType:
-			if _, decided := events.decisions[decision.Claim]; !decided {
-				events.decisions[decision.Claim] = decision
+			apply = func(events *poolEvents) {
+				if _, decided := events.decisions[decision.Claim]; !decided {
+					events.decisions[decision.Claim] = decision
+				}
 			}
-		case status.Wherry.Run == run && !seen[status.Wherry.EventID]:
+		case status.Wherry.Run == run:
 			// A status binds its run's tenant through the task hash; the pool, membership and entitlement are checked here.
-			seen[status.Wherry.EventID] = true
-			events.statuses[run] = append(events.statuses[run], status)
-			events.records[run] = append(events.records[run], record)
+			apply = func(events *poolEvents) {
+				if !events.seen[status.Wherry.EventID] {
+					events.seen[status.Wherry.EventID] = true
+					events.statuses[run] = append(events.statuses[run], status)
+					events.records[run] = append(events.records[run], record)
+				}
+			}
+		}
+		if apply != nil {
+			entries = append(entries, foldedEvent{offset: record.Offset, apply: apply})
 		}
 	}
-	return events, nil
+	return entries, nil
 }
 
 // committedTerminal reports a status in a terminal A2A state, a rejection included, for the exact task

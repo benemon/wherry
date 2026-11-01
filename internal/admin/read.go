@@ -39,8 +39,8 @@ type read struct {
 	records    []*kgo.Record
 	err        error
 	done       chan struct{}
-	// end is the highest last stable offset listed for the topic.
-	end int64
+	// start and end are the highest log start and last stable offsets listed for the topic.
+	start, end int64
 }
 
 // NewReader returns a Reader that lists offsets and reads through a client built from client's options. client must be
@@ -91,11 +91,17 @@ func (r *Reader) ReadFrom(ctx context.Context, topic string, offset int64) ([]*k
 
 // ReadFromWithEnd is ReadFrom that also returns the last stable offset it reads to.
 func (r *Reader) ReadFromWithEnd(ctx context.Context, topic string, offset int64) ([]*kgo.Record, int64, error) {
+	records, _, end, err := r.ReadRange(ctx, topic, offset)
+	return records, end, err
+}
+
+// ReadRange is ReadFromWithEnd that also returns the log start offset listed before the read.
+func (r *Reader) ReadRange(ctx context.Context, topic string, offset int64) ([]*kgo.Record, int64, int64, error) {
 	reads, err := r.readFrom(ctx, map[string]int64{topic: offset})
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
-	return reads[topic].records, reads[topic].end, reads[topic].err
+	return reads[topic].records, reads[topic].start, reads[topic].end, reads[topic].err
 }
 
 // readFrom reads each topic as ReadFrom does from its offset, listing their offsets in one request of each kind and
@@ -146,7 +152,7 @@ func (r *Reader) readFrom(ctx context.Context, offsets map[string]int64) (map[st
 			if current.err = cmp.Or(end.Err, start.Err); current.err != nil {
 				break
 			}
-			current.end = max(current.end, end.Offset)
+			current.start, current.end = max(current.start, start.Offset), max(current.end, end.Offset)
 			if ok && max(start.Offset, offset) < end.Offset {
 				current.remaining[partition] = end.Offset
 				current.partitions[partition] = kgo.NewOffset().At(max(start.Offset, offset))
