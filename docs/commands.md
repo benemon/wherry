@@ -1189,7 +1189,7 @@ plugins, `nomad` among them.
 
 The plugin directory is made absolute and `PATH` is never searched. The
 binary may be a symbolic link; the receiver resolves it and runs the file it
-names. Before every start and restart,
+names. When the receiver starts a plugin,
 [go-plugin's `SecureConfig`](https://pkg.go.dev/github.com/hashicorp/go-plugin#SecureConfig)
 checks the binary's SHA-256 against the pin the receiver's record holds for
 its type (`--plugin-sha256` on
@@ -1272,13 +1272,13 @@ profile's samples from its last answer.
 The receiver pings each plugin every 10 seconds and kills one that fails
 the ping or does not answer within 5 seconds, logging
 `plugin did not answer a ping; killing it`. Each Configure call has 30
-seconds. When a plugin exits, the receiver logs `plugin exited; restarting` as a
-`plugin` line, starts it again after one second, waiting twice as long after each failed start up to 30
-seconds, and configures every profile of the plugin again. Until then those
-profiles are not ready and the next advertisement withdraws their offers. A run
-whose job the receiver is following reads again from its last offset once the
-plugin is back; when the plugin stays down for one lock duration, the run fails
-with `log stream failed`.
+seconds. When a plugin exits, or is killed, the link logs `plugin exited` as a
+`plugin` line, and the receiver logs `stopping: plugin <type> exited` and
+exits non-zero with `plugin <type> exited`, starting no other plugin process. It
+stops claiming at once and leaves the runs it holds unacknowledged with their
+jobs running; once the broker delivers their tasks again, the restarted
+receiver or another member adopts each job and follows it from its last
+offset.
 
 A plugin's `Follow` may fail at any time; the receiver recovers the stream,
 so a plugin need not. When `Follow` fails otherwise, the receiver asks
@@ -1379,7 +1379,6 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_purge_failures_total` | counter | `profile` | failed `Purge` calls |
 | `wherry_sweep_failures_total` | counter | `profile` | failed `Sweep` calls |
 | `wherry_collection_failures_total` | counter | `profile`, `reason` | runs whose outputs were not collected: `not_stopped`, `over_limits`, `timeout`, `failed` |
-| `wherry_plugin_restarts_total` | counter | `type` | plugin restarts |
 | `wherry_open_waits_total` | counter | `tenant`, `outcome` | open request waits: `opened`, `refused`, `unanswered`, `expired` |
 | `wherry_open_wait_seconds` | histogram | `tenant` | time a claimed run waited for its attempt wrap or refusal |
 | `wherry_redactions_total` | counter | `tenant`, `profile` | credential values replaced in published output |

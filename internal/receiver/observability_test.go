@@ -17,7 +17,7 @@ var observability = filepath.Join("..", "..", "contrib", "observability")
 
 // hostSeries are the wherry_ series the receiver process registers beside the receiver's families;
 // TestHostSeries in cmd/wherry pins them to its registries.
-var hostSeries = []string{"wherry_build_info", "wherry_plugin_restarts_total"}
+var hostSeries = []string{"wherry_build_info"}
 
 var fqName = regexp.MustCompile(`fqName: "([^"]+)"`)
 

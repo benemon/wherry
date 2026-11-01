@@ -122,8 +122,11 @@ Planned changes go through
 [`receiver update`](operations.md#change-a-receiver-s-configuration), which
 drains with no time limit. `receiver update --force` and
 [`receiver revoke`](operations.md#revoke-a-host-or-receiver) are hard stops.
-A Kafka authorisation error also stops the receiver at once, with no drain
-and no key custodian handover, leaving its runs' jobs for an adopter.
+A Kafka authorisation error or a plugin process's exit also stops the
+receiver at once, with no drain and no key custodian handover, leaving its
+runs' jobs for an adopter. The receiver exits non-zero and relies on its
+platform to restart it: Nomad's `restart` block, a Kubernetes
+`restartPolicy` or systemd's `Restart=on-failure`.
 
 ### Receiver local configuration example
 

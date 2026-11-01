@@ -140,6 +140,8 @@ type fakePlugin struct {
 	// samples are what Metrics reports, unless metricsHang makes it block until its context ends.
 	samples     []pluginsdk.Sample
 	metricsHang bool
+	// exited stands for the plugin process's Exited.
+	exited chan struct{}
 }
 
 func (f *fakePlugin) Directories() pluginsdk.Directories {
@@ -623,7 +625,7 @@ func (f fixture) newReceiver(t *testing.T, config admin.ReceiverConfig) (*Receiv
 		plugin.mu.Lock()
 		plugin.pool, plugin.name, plugin.agent = pool, settings.Name, settings.Agent
 		plugin.mu.Unlock()
-		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin}, nil
+		return Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: plugin, Exited: plugin.exited}, nil
 	}
 	return &Receiver{id: config.Receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), started: time.Now(), factory: factory, logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry())}, logs
 }

@@ -299,23 +299,24 @@ func TestRoundTrip(t *testing.T) {
 		plugins.logs, plugins.hold = r.PluginLogs(logs), r.HoldPlatformCredential
 		return r
 	}
-	missing := &plugins{dir: t.TempDir(), registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	missing := &plugins{dir: t.TempDir(), running: map[string]*pluginsdk.Process{}}
 	if err := newReceiver(missing).Run(ctx); err == nil || err.Error() != "profile fake: credential \"fake-token\" has no source in the receiver's configuration" {
 		t.Fatalf("receiver without the credential's source: %v; want a configuration error", err)
 	}
 	t.Setenv("WHERRY_ROUNDTRIP_PLATFORM", platformText+"\n")
 	sources := map[string]credential.Source{"fake-token": {Env: "WHERRY_ROUNDTRIP_PLATFORM"}}
-	missing = &plugins{dir: t.TempDir(), credentials: sources, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	missing = &plugins{dir: t.TempDir(), credentials: sources, running: map[string]*pluginsdk.Process{}}
 	if err := newReceiver(missing).Run(ctx); err == nil || err.Error() != "profile fake: no plugin for type fake" {
 		t.Fatalf("receiver without its plugin: %v; want a configuration error", err)
 	}
 	read := recordPlugin(t)
-	plugins := &plugins{dir: pluginDir, credentials: sources, logger: discard, registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: pluginDir, credentials: sources, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	r := newReceiver(plugins)
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
-	go func() { _ = r.Run(runCtx) }()
+	ran := make(chan error, 1)
+	go func() { ran <- r.Run(runCtx) }()
 
 	credentialPath, deployPath := filepath.Join(dir, "model"), filepath.Join(dir, "deploy-key")
 	if err := os.WriteFile(credentialPath, []byte(credentialText), 0o600); err != nil {
@@ -415,16 +416,6 @@ func TestRoundTrip(t *testing.T) {
 	if configured.Credential != platformText || configured.Pool != "pool-a" || configured.Agent != "claude" || strings.Contains(string(configured.Config), "credential") {
 		t.Fatalf("plugin configured with %+v; want the source's platform credential, the profile's settings and no credential key", configured)
 	}
-	// A plugin crash: the receiver restarts it and configures its profile again, platform credential included.
-	if err := syscall.Kill(read()[0].PID, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	for !strings.Contains(logs.String(), "plugin restarted") {
-		if ctx.Err() != nil {
-			t.Fatalf("plugin never restarted; logs:\n%s", logs.String())
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
 	for _, secret := range []string{credentialText, platformText, deployText} {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("receiver or plugin logs carry a credential:\n%s", logs.String())
@@ -441,6 +432,24 @@ func TestRoundTrip(t *testing.T) {
 	inlineCapRoundTrip(t, ctx, bucket, host, read, logs, hostLogs)
 	if bucket.store != nil {
 		s3RoundTrip(t, ctx, bucket, host, read, logs, hostLogs)
+	}
+	// A plugin crash stops the receiver, which starts no other plugin process.
+	crashed := read()[0].PID
+	if err := syscall.Kill(crashed, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-ran:
+		if err == nil || err.Error() != "plugin fake exited" {
+			t.Fatalf("receiver run after a plugin crash = %v; want the plugin named", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("receiver kept running after its plugin crashed; logs:\n%s", logs.String())
+	}
+	for _, record := range read() {
+		if record.PID != crashed {
+			t.Fatalf("a plugin process %d started after the crash", record.PID)
+		}
 	}
 }
 
@@ -680,7 +689,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	}
 	t.Setenv("WHERRY_REDACTION_PLATFORM", platformText+"\n")
 	plugins := &plugins{dir: pluginDir, credentials: map[string]credential.Source{"fake-token": {Env: "WHERRY_REDACTION_PLATFORM"}},
-		registry: prometheus.NewRegistry(), running: map[string]*pluginsdk.Process{}}
+		running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	logs := &syncBuffer{}
 	r, err := receiver.New(bundle, filepath.Join(dir, "state"), false, 0, plugins.profile, log.New(logs, "receiver: ", 0), prometheus.NewRegistry())

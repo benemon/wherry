@@ -75,18 +75,6 @@ groups:
           description: Keys were lost; affected never-started runs are resubmitted by their hosts.
           runbook_url: https://benemon.github.io/wherry/runbooks#wherryrunskeylost
 
-      # The receiver restarts an exited plugin after one second, doubling the wait after each failed start up to
-      # 30 seconds.
-      - alert: WherryPluginRestartLoop
-        expr: |
-          sum by (job, instance, pool, type) (increase(wherry_plugin_restarts_total[15m])) >= 3
-        labels:
-          severity: critical
-        annotations:
-          summary: Plugin {{ $labels.type }} on receiver {{ $labels.instance }} keeps restarting
-          description: While a plugin is down its profiles are not ready and the receiver withdraws their offers.
-          runbook_url: https://benemon.github.io/wherry/runbooks#wherrypluginrestartloop
-
       - alert: WherryPlatformErrorsRising
         expr: |
           sum by (job, instance, pool, profile, class) (increase(wherry_plugin_platform_errors_total[10m])) >= 5

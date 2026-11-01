@@ -48,6 +48,8 @@ type Named struct {
 	// Labels are the operator's declared labels for the profile.
 	Labels map[string]string
 	Plugin pluginsdk.Plugin
+	// Exited, when set, is closed once the profile's plugin process exits, which stops the receiver.
+	Exited <-chan struct{}
 }
 
 // ProfileFactory configures one profile for the receiver's pool from its settings in the receiver's configuration
@@ -158,8 +160,8 @@ func (r *Receiver) newClient(extra ...kgo.Opt) (*kgo.Client, error) {
 // Run registers the receiver's keys, rotates them when New was asked to, waits for its configuration, then advertises
 // and claims until ctx ends or the configuration changes. Held runs then go on: after a configuration change until they
 // end, and after ctx ends for at most the drain timeout. A forced configuration change releases their tasks at once.
-// A Kafka authorisation error ends Run at once with that error: held runs are left unacknowledged and their jobs
-// running, for an adopter to find once the broker redelivers their tasks.
+// A Kafka authorisation error or a plugin process's exit ends Run at once with that error: held runs are left
+// unacknowledged and their jobs running, for an adopter to find once the broker redelivers their tasks.
 func (r *Receiver) Run(ctx context.Context) error {
 	defer r.base.Close()
 	defer r.reader.Close()
@@ -203,6 +205,17 @@ func (r *Receiver) Run(ctx context.Context) error {
 		releaseHeld()
 	}
 	r.mu.Unlock()
+	for i, named := range r.profiles {
+		if named.Exited != nil {
+			go func() {
+				select {
+				case <-named.Exited:
+					r.exit(fmt.Errorf("plugin %s exited", r.config.Profiles[i].Plugin))
+				case <-running.Done():
+				}
+			}()
+		}
+	}
 	if err := r.advertise(ctx); err != nil {
 		r.logger.Printf("advertise: %v", err)
 	}
@@ -274,8 +287,8 @@ func (r *Receiver) exit(err error) {
 	}
 }
 
-// halted reports that ctx, or the running context it derives from, ended for a denial: nothing is then acknowledged,
-// stopped or handed over.
+// halted reports that ctx, or the running context it derives from, ended for a denial or a plugin's exit: nothing is
+// then acknowledged, stopped or handed over.
 func halted(ctx context.Context) bool {
 	return ctx.Err() != nil && context.Cause(ctx) != ctx.Err()
 }

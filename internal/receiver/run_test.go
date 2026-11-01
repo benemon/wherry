@@ -1633,6 +1633,19 @@ func TestDenialStopsTheReceiver(t *testing.T) {
 	}
 }
 
+// TestPluginExitStopsTheReceiver ends the plugin process of a receiver holding a run: Run returns an error naming the
+// plugin and leaves the run unacknowledged with its job running.
+func TestPluginExitStopsTheReceiver(t *testing.T) {
+	exited := make(chan struct{})
+	f := newFixtureWith(t, noResultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, endDelay: 40 * time.Second, exited: exited}})
+	done, _ := holdRun(t, f)
+	close(exited)
+	if err := f.stopped(t, done, 10*time.Second); err == nil || err.Error() != "plugin fake exited" {
+		t.Fatalf("Run returned %v, want the plugin named", err)
+	}
+	f.leftRunning(t)
+}
+
 // TestRestartedReceiverAdoptsTheJobADeniedOneLeft denies a receiver holding a run, then starts it again once access
 // returns: the new receiver adopts the job the denied one left running and completes the run once.
 func TestRestartedReceiverAdoptsTheJobADeniedOneLeft(t *testing.T) {

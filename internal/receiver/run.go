@@ -596,7 +596,7 @@ func (r *Receiver) newProducer(run string) (*kgo.Client, error) {
 }
 
 // execute runs one task; it returns the final share acknowledgement, or 0 when fenced or when the receiver stops for a
-// denial, which leaves the task to the broker's redelivery and its job running for an adopter.
+// denial or a plugin's exit, which leaves the task to the broker's redelivery and its job running for an adopter.
 func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.Record, admitted *admission, attempt int64) (ack kgo.AckStatus) {
 	task := admitted.task
 	runID := task.Wherry.Run

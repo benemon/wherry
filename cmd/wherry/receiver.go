@@ -126,7 +126,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 		}
 		defer serveMetrics(listener, registry, logger).Close()
 	}
-	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, registry: registry, running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: config.PluginDir, credentials: config.Credentials, logger: logger, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	r, err := receiver.New(bundle, config.StateDir, *rotateKey, config.DrainTimeout, plugins.profile, logger, registry)
 	if err != nil {
@@ -178,7 +178,6 @@ type plugins struct {
 	hold        func(name string, value []byte)
 	logs        io.Writer
 	logger      *log.Logger
-	registry    prometheus.Registerer
 	running     map[string]*pluginsdk.Process
 }
 
@@ -211,9 +210,6 @@ func (p *plugins) profile(pool string, settings admin.ProfileSettings, pluginSHA
 			return receiver.Named{}, err
 		}
 		p.running[settings.Plugin] = running
-		p.registry.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{
-			Name: "wherry_plugin_restarts_total", Help: "Times a plugin was started again.", ConstLabels: prometheus.Labels{"pool": pool, "type": settings.Plugin},
-		}, func() float64 { return float64(running.Restarts()) }))
 	}
 	encoded, err := json.Marshal(config)
 	if err != nil {
@@ -233,7 +229,7 @@ func (p *plugins) profile(pool string, settings admin.ProfileSettings, pluginSHA
 		}
 		p.logger.Printf("plugin %s: version %s protocol %d", settings.Plugin, version, protocol)
 	}
-	return receiver.Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: configured}, nil
+	return receiver.Named{Name: settings.Name, Agent: settings.Agent, Labels: settings.Labels, Plugin: configured, Exited: running.Exited()}, nil
 }
 
 func (p *plugins) close() {

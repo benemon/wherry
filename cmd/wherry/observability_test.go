@@ -14,7 +14,7 @@ import (
 // internal/receiver's observability test lists the same names.
 func TestHostSeries(t *testing.T) {
 	registry := newRegistry()
-	plugins := &plugins{dir: installPlugin(t), logs: io.Discard, logger: discard, registry: registry, running: map[string]*pluginsdk.Process{}}
+	plugins := &plugins{dir: installPlugin(t), logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
 	if _, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}, fakeSHA256); err != nil {
 		t.Fatal(err)
@@ -29,7 +29,7 @@ func TestHostSeries(t *testing.T) {
 			names = append(names, family.GetName())
 		}
 	}
-	if want := []string{"wherry_build_info", "wherry_plugin_restarts_total"}; !slices.Equal(names, want) {
+	if want := []string{"wherry_build_info"}; !slices.Equal(names, want) {
 		t.Fatalf("host series %v, want %v", names, want)
 	}
 }

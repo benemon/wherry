@@ -48,6 +48,9 @@ Confirm it:
      `stopping: denied membership: <error>` name the authorisation failure
      the receiver exited for. The supervisor restarts it, and a receiver
      with revoked or wrong credentials exits again each time.
+   - `stopping: plugin <type> exited` names a plugin whose process exited,
+     or was killed after `plugin did not answer a ping; killing it`; the
+     plugin's own lines before it give the cause.
    - `configuration changed; exiting once held runs end` comes before a
      restart the supervisor is expected to make, once the runs the
      receiver holds have ended.
@@ -64,6 +67,11 @@ Then:
 - For write errors, follow [WherryBrokerUnreachable](#wherrybrokerunreachable).
   For `denied write`, run `wherry admin check`, which confirms that every
   ACL the state calls for exists.
+- For `plugin <type> exited`, fix the cause the plugin's lines give, such as
+  an unreachable platform API or memory pressure on the receiver host. For
+  a protocol version mismatch, install the plugin release that matches the
+  receiver's, as in [Upgrade wherry](operations.md#upgrade-wherry). The
+  runs the receiver held are adopted once their tasks are delivered again.
 - A receiver whose membership has ended stays ended. Provision a new
   receiver under a new name and stop the old process.
 
@@ -260,38 +268,6 @@ Then:
   and stop a pool's receivers one at a time, as in
   [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian),
   so that a stopping custodian has a live successor.
-
-## WherryPluginRestartLoop
-
-A plugin that exits is started again after one second, the wait doubling
-after each failed start up to 30 seconds, and its profiles are configured
-again. Until then those profiles are not ready, and the receiver's
-advertisement withdraws their offers. The alert fires on 3 or more restarts
-of one plugin in 15 minutes (`wherry_plugin_restarts_total`).
-
-Confirm it:
-
-1. Run `wherry receivers`. The plugin's profiles show `ready=false` while it
-   is down.
-2. Read the receiver's log for `plugin exited; restarting`,
-   `plugin restarted`, `plugin restart failed` and
-   `plugin did not answer a ping; killing it`, and for the plugin's own
-   lines before each exit.
-
-Then:
-
-- For `plugin restart failed` naming a SHA-256 that differs from the pin,
-  install the binary the pin names, or record the installed binary's pin
-  from its release's `checksums.txt`, as in
-  [Install plugins](operations.md#install-plugins). The receiver checks the
-  binary again before every restart.
-- For a protocol version mismatch, install the plugin release that matches
-  the receiver's, as in [Upgrade wherry](operations.md#upgrade-wherry).
-- For a crash or a missed ping, read the plugin's lines for the cause,
-  such as an unreachable platform API or memory pressure on the receiver
-  host, and fix it. Runs whose job the receiver follows read again from
-  their last offset once the plugin is back; a plugin down for one lock
-  duration fails them with `log stream failed`.
 
 ## WherryPlatformErrorsRising
 
