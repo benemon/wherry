@@ -826,3 +826,28 @@ func TestShutdownOfAnOpenAfterASuspensionEndsItSuspended(t *testing.T) {
 		})
 	}
 }
+
+// A shutdown of a run still looking its job up after its pool is suspended ends the run unconfirmed, not released.
+func TestShutdownOfARunLookingUpItsJobAfterASuspensionIsNotReleased(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.lookupErr = errors.New("platform unavailable")
+	record := f.submit(t, f.host, nil)
+	down, shutdown := context.WithCancel(f.ctx)
+	defer shutdown()
+	done := f.executing(t, down, record, 2)
+	for {
+		if _, lookups, _, _ := f.plugin.counts(); lookups > 0 {
+			break
+		}
+		if f.ctx.Err() != nil {
+			t.Fatalf("the job was never looked up; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.suspend(t)
+	shutdown()
+	if status := acknowledged(t, f, done, shutdownTimeout+10*time.Second); status != kgo.AckReject {
+		t.Fatalf("status %v, want the task rejected; logs:\n%s", status, f.logs.String())
+	}
+	endedUnconfirmed(t, f)
+}
