@@ -201,7 +201,9 @@ Confirm it:
    and for
    `custodian: fenced again within the session timeout in pool <pool>; standing down until assigned again`.
 2. Read the previous custodian's log for its stop: a planned drain logs
-   `custodian: stepping down in pool <pool>; waiting up to <timeout> for a successor`.
+   `custodian: stepping down in pool <pool>; waiting up to <timeout> for a successor`,
+   and a stop with `drain_timeout` at `0s` logs
+   `custodian: leaving pool <pool> with no drain timeout; keeping the pool keys to their deadlines`.
 3. Run `wherry receivers`. The pool's key custodian is one of its `live`
    receivers.
 

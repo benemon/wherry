@@ -793,12 +793,12 @@ func (f fixture) rekeys(t *testing.T) map[string][]wire.RekeyWrap {
 	return rekeys
 }
 
-// handoverFixture is a fixture whose receiver is custodian with a drain timeout, and receiver-b, a live member of the
+// handoverFixture is a fixture whose receiver is custodian with drainTimeout, and receiver-b, a live member of the
 // custodian group; it returns receiver-b and the function that drains the custodian.
-func handoverFixture(t *testing.T) (fixture, *Receiver, func()) {
+func handoverFixture(t *testing.T, drainTimeout time.Duration) (fixture, *Receiver, func()) {
 	t.Helper()
 	f := newBareFixture(t)
-	f.receiver.drainTimeout = 15 * time.Second
+	f.receiver.drainTimeout = drainTimeout
 	drain := custodyUntilDrained(t, f.ctx, f.receiver)
 	f.awaitSnapshots(t, 1)
 	awaitActing(t, f, f.receiver)
@@ -814,7 +814,7 @@ func handoverFixture(t *testing.T) (fixture, *Receiver, func()) {
 // within seconds, every queued or running task under the old key is re-keyed to the successor's key, and the old keys
 // are then deleted.
 func TestPlannedDrainHandsOverToALiveSuccessor(t *testing.T) {
-	f, successor, drain := handoverFixture(t)
+	f, successor, drain := handoverFixture(t, 15*time.Second)
 	queued := f.submit(t, f.host, nil)
 	running := f.turn(t, "run-r", 1)
 	f.publishStatus(t, running, testReceiver, f.receiver.signing, "started", wire.TaskStateWorking, nil)
@@ -846,6 +846,66 @@ func TestPlannedDrainHandsOverToALiveSuccessor(t *testing.T) {
 	}
 	if got := scrapedValue(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 0 {
 		t.Fatalf("takeovers = %v after a handover, want 0", got)
+	}
+}
+
+// A drain with the default drain timeout of 0 leaves the custodian group without stepping_down: the successor takes over
+// and counts it, nothing is re-keyed and the old custodian keeps its keys.
+func TestDrainWithNoTimeoutLeavesForATakeover(t *testing.T) {
+	f, successor, drain := handoverFixture(t, 0)
+	f.submit(t, f.host, nil)
+	held := heldKeys(t, f.receiver)
+	drain()
+	records := f.awaitSnapshots(t, 2)
+	if snapshot := parseSnapshot(t, records[1], "receiver-b", successor.signing); snapshot.Reason != "takeover" {
+		t.Fatalf("reason %s, want receiver-b's takeover; logs:\n%s", snapshot.Reason, f.logs.String())
+	}
+	if keys := heldKeys(t, f.receiver); len(keys) != len(held) {
+		t.Fatalf("keys %s after the drain, want %s kept", describeKeys(keys), describeKeys(held))
+	}
+	if len(f.rekeys(t)) != 0 {
+		t.Fatal("re-key wraps written without a handover")
+	}
+	if got := scrapedValue(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 {
+		t.Fatalf("takeovers = %v at the successor, want 1", got)
+	}
+}
+
+// A drain whose stepping_down advertisement cannot be written still leaves the custodian group, within the drain timeout
+// and stepDownMargin.
+func TestDrainLeavesWhenTheAdvertisementFails(t *testing.T) {
+	f := newBareFixture(t)
+	f.receiver.drainTimeout = time.Second
+	drain := custodyUntilDrained(t, f.ctx, f.receiver)
+	f.awaitSnapshots(t, 1)
+	awaitActing(t, f, f.receiver)
+	if err := f.peer(t, "receiver-b").advertise(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	var held atomic.Bool
+	held.Store(true)
+	arrived := holdProduces(t, f, admin.ReceiversTopic, &held)
+	var left atomic.Bool
+	f.cluster.ControlKey(kmsg.LeaveGroup.Int16(), func(kmsg.Request) (kmsg.Response, error, bool) {
+		f.cluster.KeepControl()
+		left.Store(true)
+		return nil, nil, false
+	})
+	bound := f.receiver.drainTimeout + stepDownMargin
+	// Past the bound the advertisement may land, so a drain that waits for it ends and fails here.
+	defer time.AfterFunc(bound+time.Second, func() { held.Store(false) }).Stop()
+	began := time.Now()
+	drain()
+	if took := time.Since(began); took > bound+time.Second {
+		t.Fatalf("drain took %s, want within %s", took, bound)
+	}
+	select {
+	case <-arrived:
+	default:
+		t.Fatal("no stepping_down advertisement attempted")
+	}
+	if !left.Load() {
+		t.Fatalf("no leave of the custodian group; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -895,9 +955,14 @@ func TestHandoverOnlyFromTheLiveProcessSteppingDown(t *testing.T) {
 // a drain with no successor takes over, and counts it.
 func TestStaleSteppingDownThenStateLossIsATakeover(t *testing.T) {
 	f := newBareFixture(t)
+	f.receiver.drainTimeout = time.Second
 	drain := custodyUntilDrained(t, f.ctx, f.receiver)
 	f.awaitSnapshots(t, 1)
 	awaitActing(t, f, f.receiver)
+	// A live member that never joins the custodian group: the drain steps down and waits for no successor.
+	if err := f.peer(t, "receiver-b").advertise(f.ctx); err != nil {
+		t.Fatal(err)
+	}
 	drain()
 	if err := os.RemoveAll(f.receiver.poolKeysDir()); err != nil {
 		t.Fatal(err)
@@ -938,7 +1003,7 @@ func failTaskListing(f fixture) {
 
 // A drain whose scan of the task topic fails keeps every key it holds.
 func TestDrainScanErrorKeepsTheKeys(t *testing.T) {
-	f, successor, drain := handoverFixture(t)
+	f, successor, drain := handoverFixture(t, 15*time.Second)
 	f.submit(t, f.host, nil)
 	held := heldKeys(t, f.receiver)
 	failTaskListing(f)
@@ -1040,11 +1105,9 @@ func TestFencedWhileAssignedContestsOnce(t *testing.T) {
 	}
 }
 
-// holdTaskProduces answers every produce to the pool's task topic with a retriable error while held is set, and closes
-// arrived at the first.
-func holdTaskProduces(t *testing.T, f fixture, held *atomic.Bool) <-chan struct{} {
+// holdProduces answers every produce to topic with a retriable error while held is set, and closes arrived at the first.
+func holdProduces(t *testing.T, f fixture, topic string, held *atomic.Bool) <-chan struct{} {
 	t.Helper()
-	topic := admin.PoolTasksTopic(testPool)
 	details, err := kadm.NewClient(f.service.Admin).ListTopics(f.ctx, topic)
 	if err != nil {
 		t.Fatal(err)
@@ -1096,7 +1159,7 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 	}
 	var held atomic.Bool
 	held.Store(true)
-	arrived := holdTaskProduces(t, f, &held)
+	arrived := holdProduces(t, f, admin.PoolTasksTopic(testPool), &held)
 	t.Setenv("WHERRY_TEST_TOKEN", testToken)
 	kafka, err := kgo.NewClient(append(f.service.Admin.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 	if err != nil {

@@ -963,10 +963,14 @@ ends, that stood down, or whose failed write is followed by another
 receiver's committed snapshot writes no more snapshots until it is assigned
 again.
 
-On `SIGINT`, `SIGTERM` or a configuration change, the key custodian
-advertises `stepping_down`, closes its custodian group client, removes its
-static membership from the group, which hands the partition on at once, and
-waits up to `drain_timeout` for another receiver's snapshot. With one, it
+On `SIGINT`, `SIGTERM` or a configuration change, a receiver closes its
+custodian group client and removes its static membership from the group,
+which hands the partition on at once. The key custodian with a
+`drain_timeout` over `0s` while another member of the pool has an
+advertisement within 120 seconds first advertises `stepping_down`, waiting
+at most 2.5 seconds for the write, and after the removal waits up to
+`drain_timeout` for another receiver's snapshot; the steps before any
+handover end within `drain_timeout` plus 5 seconds. With one, it
 reads the task topic to its last stable offset and the pool's events, writes
 in one transaction a re-key wrap to the successor's current key for every
 task its keys open that is its run's earliest accepted, not terminal and not
@@ -974,10 +978,14 @@ past its `task_ended_by`, and then deletes its pool keys. A read or write
 error keeps the keys to their deadlines. A task appended under its key after
 that read is not re-keyed: it fails key-lost before it starts, and its host
 resubmits it before its `task_started_by`. With no successor's snapshot
-within `drain_timeout`, or as soon as no other member of the pool has an
-advertisement within 120 seconds, it logs `custodian: no successor in pool
-<pool>; keeping the pool keys to their deadlines` and exits with its keys,
-and its restart continues as custodian.
+within `drain_timeout`, as soon as no other member of the pool has an
+advertisement within 120 seconds, or with no such member when the drain
+began, it logs `custodian: no successor in pool <pool>; keeping the pool
+keys to their deadlines` and exits with its keys, and its restart continues
+as custodian. With `drain_timeout` at `0s` it advertises no
+`stepping_down`, logs `custodian: leaving pool <pool> with no drain timeout;
+keeping the pool keys to their deadlines` and exits with its keys; its
+successor publishes a `takeover`.
 
 The key custodian answers its pool's open requests, every 2 seconds, with an
 attempt wrap or a refusal after the claim check
