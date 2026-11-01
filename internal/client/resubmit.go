@@ -102,7 +102,7 @@ func (h *Host) resubmitLost(ctx context.Context) {
 
 // resubmitIfLost resubmits r's run when it ended key-lost, logging a failure; a later pass retries it.
 func (h *Host) resubmitIfLost(ctx context.Context, r *runView) {
-	if r.local == nil || r.local.Task == nil || !r.keyLost() {
+	if !r.keyLost() {
 		return
 	}
 	h.logResubmit(ctx, r.run, true)
