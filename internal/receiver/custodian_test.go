@@ -460,7 +460,20 @@ func TestNoKeyIsDeletedWhileTheSnapshotTopicCannotBeRead(t *testing.T) {
 		t.Fatal("tended with the snapshot topic unread")
 	}
 	held("read error")
-	// Another writer's transaction open on the snapshot topic holds its last stable offset.
+	if err := f.receiver.tend(f.ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if keys := heldKeys(t, f.receiver); keys[expired] != nil || keys[unmarked] == nil || keys[unmarked].DeadlineMS == 0 {
+		t.Fatalf("keys = %s after a read, want the expired key deleted and the unmarked key given a deadline", describeKeys(keys))
+	}
+}
+
+// The snapshot read returns the latest committed record while another writer's transaction is open on the snapshot
+// topic, and a custody pass goes on from it.
+func TestSnapshotReadReturnsTheLatestCommittedRecordWhileATransactionIsOpen(t *testing.T) {
+	f := newBareFixture(t)
+	custodian(t, f.ctx, f.receiver, time.Now())
+	current, _ := onlyKey(t, f.receiver)
 	open, err := f.receiver.newClient(kgo.TransactionalID(admin.TransactionalPrefix(testPool) + "open"))
 	if err != nil {
 		t.Fatal(err)
@@ -472,18 +485,12 @@ func TestNoKeyIsDeletedWhileTheSnapshotTopicCannotBeRead(t *testing.T) {
 	if err := open.ProduceSync(f.ctx, &kgo.Record{Topic: admin.CustodianTopic(testPool), Key: []byte(wire.CustodianKey), Value: []byte("pending")}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.receiver.tend(f.ctx, time.Now()); err == nil {
-		t.Fatal("tended behind an open transaction")
-	}
-	held("last stable offset blocked")
-	if err := open.EndTransaction(f.ctx, kgo.TryAbort); err != nil {
-		t.Fatal(err)
+	latest, err := f.receiver.readCurrent(f.ctx)
+	if err != nil || !latest.names(f.receiver) || latest.snapshot.Current.KeyID != current {
+		t.Fatalf("read %+v, %v behind an open transaction, want the committed snapshot naming key %s", latest.snapshot, err, current)
 	}
 	if err := f.receiver.tend(f.ctx, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if keys := heldKeys(t, f.receiver); keys[expired] != nil || keys[unmarked] == nil || keys[unmarked].DeadlineMS == 0 {
-		t.Fatalf("keys = %s after the abort, want the expired key deleted and the unmarked key given a deadline", describeKeys(keys))
+		t.Fatalf("tend behind an open transaction: %v", err)
 	}
 }
 

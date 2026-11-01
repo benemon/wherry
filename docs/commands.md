@@ -1133,9 +1133,9 @@ counts from the receiver's first custody pass. A key the receiver generated
 and has not yet read back in a committed snapshot is marked published and
 kept current when the current snapshot names it. Any other such key's
 deadline is `start_by_limit` plus 7 hours after the current snapshot's
-append time. While the snapshot topic cannot be read to a last stable
-offset at its end, after a read error or behind an open transaction, the
-receiver keeps every key. It deletes a key at its deadline, and all of its
+append time. A custody pass reads the latest committed snapshot, also while
+another writer's transaction is open on the snapshot topic; after a read
+error the receiver keeps every key. It deletes a key at its deadline, and all of its
 keys at the end of a drain that re-keyed every task they open. Every
 other key stays in its state directory.
 
