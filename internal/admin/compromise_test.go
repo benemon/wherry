@@ -95,7 +95,13 @@ func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resumed := brokerACLs(t, ctx, service); !reflect.DeepEqual(resumed, before) {
-		t.Fatalf("resume left ACLs %v, want %v", resumed, before)
+		var missing []string
+		for _, acl := range before {
+			if !slices.Contains(resumed, acl) {
+				missing = append(missing, acl)
+			}
+		}
+		t.Fatalf("resume left %d ACLs, want %d; missing %v", len(resumed), len(before), missing)
 	}
 	if state, err := service.LoadState(ctx); err != nil || state.Suspended["pool-a"] {
 		t.Fatalf("state after resume %v, %v", state.Suspended, err)

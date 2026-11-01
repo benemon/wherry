@@ -72,7 +72,8 @@ func TestRotateKeyRecordRotatesAtOnceAndHostsEncryptToTheNewKey(t *testing.T) {
 	t.Fatal("the submitted task is not on the task topic")
 }
 
-// A receiver of a suspended pool claims nothing and records no denial; after resume it claims and runs the task.
+// A receiver of a suspended pool claims nothing, answers no open request and records no denial; after resume it claims
+// and runs the task.
 func TestSuspendedPoolIsNotClaimedFromUntilResumed(t *testing.T) {
 	f := newFixture(t, resultStream)
 	if err := f.service.PoolSuspend(f.ctx, testPool, true); err != nil {
@@ -81,10 +82,11 @@ func TestSuspendedPoolIsNotClaimedFromUntilResumed(t *testing.T) {
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	f.submit(t, f.host, nil)
+	record := f.submit(t, f.host, nil)
+	f.openAs(t, record, testReceiver, f.receiver.signing, 1)
 	f.run(t, f.ctx)
 	time.Sleep(2 * time.Second)
-	if dispatches, _, _ := f.dispatched(t); dispatches != 0 || strings.Contains(f.logs.String(), "denied (") {
+	if dispatches, _, _ := f.dispatched(t); dispatches != 0 || len(f.records(t, admin.PoolEventsTopic(testPool))) != 1 || strings.Contains(f.logs.String(), "denied (") {
 		t.Fatalf("dispatches %d while suspended; logs:\n%s", dispatches, f.logs.String())
 	}
 	if err := f.service.PoolSuspend(f.ctx, testPool, false); err != nil {
@@ -92,5 +94,29 @@ func TestSuspendedPoolIsNotClaimedFromUntilResumed(t *testing.T) {
 	}
 	if task := f.await(t, "run-a", func(task wire.Task) bool { return task.Status.State == wire.TaskStateCompleted }); task.ID != "run-a" {
 		t.Fatalf("task %+v after resume", task)
+	}
+}
+
+// A drain while the pool is suspended scans nothing, records no denial and keeps every key it holds.
+func TestDrainWhileSuspendedKeepsTheKeys(t *testing.T) {
+	f, successor, drain := handoverFixture(t, 15*time.Second)
+	f.submit(t, f.host, nil)
+	held := heldKeys(t, f.receiver)
+	if err := f.service.PoolSuspend(f.ctx, testPool, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.receiver.refresh(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	records := f.snapshotRecords(t)
+	if parseSnapshot(t, records[len(records)-1], "receiver-b", successor.signing).Reason != "handover" {
+		t.Fatalf("no handover; logs:\n%s", f.logs.String())
+	}
+	if keys := heldKeys(t, f.receiver); len(keys) != len(held) || len(f.rekeys(t)) != 0 {
+		t.Fatalf("keys %s and %d re-keyed runs after a drain while suspended, want %s kept and none", describeKeys(keys), len(f.rekeys(t)), describeKeys(held))
+	}
+	if logs := f.logs.String(); !strings.Contains(logs, "is suspended, so its task topic cannot be scanned") || strings.Contains(logs, "denied (") {
+		t.Fatalf("want the suspended scan logged without a denial; logs:\n%s", logs)
 	}
 }
