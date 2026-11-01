@@ -298,3 +298,26 @@ func mustBytes(t *testing.T) func([]byte, error) []byte {
 		return value
 	}
 }
+
+// A custodian named by the snapshot is awaited even with no live advertisement, since a stale advertisement does not end
+// custody: pool suspend reports the record unacknowledged, never in effect.
+func TestSuspendAwaitsACustodianWithAStaleAdvertisement(t *testing.T) {
+	_, service, ctx := compromiseFixture(t)
+	_, receiverKey, _ := ed25519.GenerateKey(rand.Reader)
+	if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: ReceiverTopic("receiver-a"), Key: []byte("receiver-a"), Value: mustBytes(t)(signed.RegisterKey("receiver-a", receiverKey))}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	snapshot := mustBytes(t)(signed.Sign(wire.CustodianType, "receiver-a", &wire.Snapshot{V: 1, Pool: "pool-a", Custodian: "receiver-a", Reason: "bootstrap",
+		Current: wire.PoolKey{KeyID: signed.KeyThumbprint(&key.PublicKey), Key: jose.JSONWebKey{Key: &key.PublicKey}}}, receiverKey))
+	if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: CustodianTopic("pool-a"), Key: []byte(wire.CustodianKey), Value: snapshot}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	wait, progress := snapshotWait, snapshotProgress
+	t.Cleanup(func() { snapshotWait, snapshotProgress = wait, progress })
+	snapshotWait, snapshotProgress = 300*time.Millisecond, 100*time.Millisecond
+	text, err := service.PoolSuspendAcknowledged(ctx, "pool-a", true, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "not yet in effect") {
+		t.Fatalf("pool suspend returned %q, %v; want the record unacknowledged", text, err)
+	}
+}

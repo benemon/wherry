@@ -23,7 +23,8 @@ func (service *Service) PoolSuspend(ctx context.Context, pool string, suspend bo
 }
 
 // PoolSuspendAcknowledged is PoolSuspend that then waits for pool's key custodian to acknowledge the record, reporting
-// the wait to progress, and returns the outcome. With no live custodian it returns at once: none opens anything.
+// the wait to progress, and returns the outcome. With no snapshot it returns at once: a custodian's first pass reads
+// the record before it opens anything. A stale advertisement does not end custody, so a snapshot is always awaited.
 func (service *Service) PoolSuspendAcknowledged(ctx context.Context, pool string, suspend bool, progress io.Writer) (string, error) {
 	recorded, err := service.poolSuspend(ctx, pool, suspend)
 	if err != nil {
@@ -39,12 +40,10 @@ func (service *Service) PoolSuspendAcknowledged(ctx context.Context, pool string
 	if err != nil {
 		return "", err
 	}
-	live, err := liveCustodian(ctx, reader, state, pool)
-	if err != nil {
+	if _, err := currentSnapshot(ctx, reader, state, pool); errors.Is(err, errNoSnapshot) {
+		return fmt.Sprintf("pool %s's %s record is written at wherry.admin offset %d; the pool has no key custodian yet, so nothing opens until one reads it", pool, kind, recorded), nil
+	} else if err != nil {
 		return "", err
-	}
-	if !live {
-		return fmt.Sprintf("pool %s's %s record is written at wherry.admin offset %d; the pool has no live key custodian, so nothing opens until one starts", pool, kind, recorded), nil
 	}
 	err = awaitSnapshot(ctx, reader, state, pool, progress, func(current wire.Snapshot) bool {
 		return suspend && current.SuspendedFor >= recorded || !suspend && current.ResumedFor >= recorded
@@ -67,27 +66,6 @@ func (service *Service) poolSuspend(ctx context.Context, pool string, suspend bo
 		return 0, err
 	}
 	return recorded, service.reconcileACLs(ctx, state)
-}
-
-// liveCustodian reports that pool's current snapshot names a custodian whose advertisement is live.
-func liveCustodian(ctx context.Context, reader *Reader, state State, pool string) (bool, error) {
-	current, err := currentSnapshot(ctx, reader, state, pool)
-	if errors.Is(err, errNoSnapshot) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	keys, err := reader.ReadKeys(ctx, PoolKeyTopics(state, pool))
-	if err != nil {
-		return false, err
-	}
-	live, err := reader.ReadAdvertisements(ctx, state, keys, time.Now(), advertisementLive)
-	if err != nil {
-		return false, err
-	}
-	_, ok := live[current.Custodian]
-	return ok, nil
 }
 
 // SuspectTask is a retained task record whose submit wrap is to a suspect key: names only, never a value.

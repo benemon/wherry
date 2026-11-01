@@ -835,9 +835,9 @@ to standard error every 10 seconds, then prints
 `pool <pool> is suspended: its key custodian acknowledged the suspend record at wherry.admin offset <offset>; no new start opens`.
 After that no new start opens. With no acknowledgement it fails with
 `pool <pool>'s suspend record is written at wherry.admin offset <offset>, but its key custodian did not acknowledge it within 5m0s; it is not yet in effect`.
-When the pool has no snapshot, or the custodian its snapshot names has no
-advertisement within 120 seconds, it returns at once with
-`pool <pool>'s suspend record is written at wherry.admin offset <offset>; the pool has no live key custodian, so nothing opens until one starts`.
+When the pool has no snapshot it returns at once with
+`pool <pool>'s suspend record is written at wherry.admin offset <offset>; the pool has no key custodian yet, so nothing opens until one reads it`.
+A custodian whose advertisement has gone stale is still awaited, since it can still open requests.
 
 ### `wherry admin pool resume POOL`
 

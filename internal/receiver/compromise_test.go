@@ -369,12 +369,12 @@ func TestOneSuspensionReadPerPass(t *testing.T) {
 	}
 }
 
-// With no live key custodian pool suspend returns at once, saying so.
-func TestSuspendWithNoLiveCustodianReturns(t *testing.T) {
+// With no snapshot pool suspend returns at once, saying so.
+func TestSuspendWithNoCustodianReturns(t *testing.T) {
 	f := newBareFixture(t)
 	text, err := f.service.PoolSuspendAcknowledged(f.ctx, testPool, true, io.Discard)
-	if err != nil || !strings.Contains(text, "no live key custodian") {
-		t.Fatalf("pool suspend returned %q, %v; want no live key custodian", text, err)
+	if err != nil || !strings.Contains(text, "no key custodian yet") {
+		t.Fatalf("pool suspend returned %q, %v; want no key custodian yet", text, err)
 	}
 }
 
