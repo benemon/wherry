@@ -1765,16 +1765,16 @@ func TestAdmissionWritesDoNotFenceTheRunsHolder(t *testing.T) {
 	}
 }
 
-func TestAmbiguousCommitReadBack(t *testing.T) {
+// An ambiguous commit abandons the task unacknowledged; its redelivered holder acknowledges a committed terminal
+// without running and runs again otherwise.
+func TestAmbiguousCommitAbandonsToRedelivery(t *testing.T) {
 	for name, test := range map[string]struct {
 		// applied is whether the broker applies the commit whose answer is lost.
 		applied   bool
-		ack       kgo.AckStatus
-		releases  int
 		terminals int
 	}{
-		"committed":     {true, kgo.AckAccept, 1, 1},
-		"not committed": {false, kgo.AckRelease, 0, 0},
+		"committed":     {true, 1},
+		"not committed": {false, 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
@@ -1791,11 +1791,11 @@ func TestAmbiguousCommitReadBack(t *testing.T) {
 				}
 				return kerr.RequestTimedOut
 			}
-			if status := run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true}); status != test.ack {
-				t.Fatalf("status %v, want %v; logs:\n%s", status, test.ack, f.logs.String())
+			if status := run.conclude(f.ctx, pluginsdk.Handle{}, nil, pluginsdk.Terminal{Started: true}); status != kgo.AckRelease {
+				t.Fatalf("status %v, want release; logs:\n%s", status, f.logs.String())
 			}
-			if _, _, _, releases := f.plugin.counts(); releases != test.releases {
-				t.Fatalf("releases %d, want %d", releases, test.releases)
+			if _, _, _, releases := f.plugin.counts(); releases != 0 {
+				t.Fatalf("releases %d, want 0", releases)
 			}
 			terminals := 0
 			for _, status := range f.eventStatuses(t) {
@@ -1806,31 +1806,16 @@ func TestAmbiguousCommitReadBack(t *testing.T) {
 			if terminals != test.terminals {
 				t.Fatalf("terminals on the pool's events %d, want %d", terminals, test.terminals)
 			}
+			commitTransaction = previous
+			tasks := f.records(t, admin.PoolTasksTopic(testPool))
+			admitted, ack := f.receiver.admit(f.ctx, tasks[len(tasks)-1])
+			if test.applied && (admitted != nil || ack != kgo.AckAccept) {
+				t.Fatalf("redelivered holder admitted=%v ack=%v, want accept without running", admitted != nil, ack)
+			}
+			if !test.applied && admitted == nil {
+				t.Fatalf("redelivered holder did not run again: ack %v", ack)
+			}
 		})
-	}
-}
-
-// A denied read-back of an ambiguous commit returns the denial, which stops the receiver, not the commit's error.
-func TestAmbiguousCommitReadBackDenied(t *testing.T) {
-	f := newFixture(t, resultStream)
-	run := testActiveRun(t, f, "run-ambiguous", 1)
-	previous := commitTransaction
-	t.Cleanup(func() { commitTransaction = previous })
-	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
-		if err := producer.EndTransaction(ctx, kgo.TryAbort); err != nil {
-			return err
-		}
-		f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.PoolEventsTopic(testPool)).Operations(kadm.OpRead))
-		return kerr.RequestTimedOut
-	}
-	halt := f.halts()
-	err := run.commit(f.ctx, run.statusRecords("claimed", taskStatus(wire.TaskStateWorking, ""), nil, nil)...)
-	if !errors.Is(err, kerr.TopicAuthorizationFailed) {
-		t.Fatalf("commit returned %v, want the read-back's denial", err)
-	}
-	run.abandon(err)
-	if err := halt(); err == nil || !strings.HasPrefix(err.Error(), "denied ") {
-		t.Fatalf("the read-back's denial stopped the receiver with %v", err)
 	}
 }
 

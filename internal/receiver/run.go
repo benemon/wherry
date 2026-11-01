@@ -1,7 +1,6 @@
 package receiver
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -464,7 +463,7 @@ var commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
 }
 
 // transact commits records in one transaction on producer. An EndTransaction error leaves the outcome
-// ambiguous, so the transaction's record on the pool's events is read back: present means committed.
+// ambiguous; it is returned, so the run's task is redelivered and its next holder finds the terminal if it committed.
 func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records ...*kgo.Record) error {
 	if len(records) == 0 {
 		return nil
@@ -478,27 +477,8 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 		return err
 	}
 	err := commitTransaction(ctx, producer)
-	if err == nil || errors.Is(err, kerr.ProducerFenced) || errors.Is(err, kerr.InvalidProducerEpoch) || authorisationError(err) {
-		return err
-	}
-	r.metrics.ambiguousCommits.Inc()
-	index := slices.IndexFunc(records, func(record *kgo.Record) bool { return record.Topic == admin.PoolEventsTopic(r.config.Pool) })
-	if index < 0 {
-		return err
-	}
-	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
-	defer cancel()
-	events, readErr := r.reader.ReadFrom(readCtx, admin.PoolEventsTopic(r.config.Pool), 0)
-	if readErr != nil {
-		r.logger.Printf("read back transaction: %v", readErr)
-		if authorisationError(readErr) {
-			return readErr
-		}
-		return err
-	}
-	if slices.ContainsFunc(events, func(event *kgo.Record) bool { return bytes.Equal(event.Value, records[index].Value) }) {
-		r.logger.Printf("transaction read back as committed after: %v", err)
-		return nil
+	if err != nil && !errors.Is(err, kerr.ProducerFenced) && !errors.Is(err, kerr.InvalidProducerEpoch) && !authorisationError(err) {
+		r.metrics.ambiguousCommits.Inc()
 	}
 	return err
 }

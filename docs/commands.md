@@ -1379,7 +1379,7 @@ before any profile took it, has `profile="none"` in `wherry_runs_total` and
 | `wherry_denials_total` | counter | `op` | Kafka authorisation errors, by the capability denied: `read`, `write`, `transactional ID`, `share group`, `membership` |
 | `wherry_renewal_failures_total` | counter | none | failed claim renewals |
 | `wherry_transaction_aborts_total` | counter | none | transactions aborted after a failed produce |
-| `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome, read back from the pool's events or, for the key custodian, its snapshot topic |
+| `wherry_ambiguous_commits_total` | counter | none | commits with an unknown outcome: a run gives its task back for redelivery, an open request is answered again only when its answer is absent, and the key custodian reads back its snapshot topic |
 | `wherry_fenced_total` | counter | none | runs given up to a newer holder |
 | `wherry_custodian_takeovers_total` | counter | `reason` | snapshots this receiver published taking over its pool's key custody: `takeover`, `contested`; both start at 0 |
 | `wherry_runs_key_lost_total` | counter | none | runs this receiver ended with the wherry event `key-lost`; starts at 0 |
