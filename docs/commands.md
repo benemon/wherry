@@ -1150,7 +1150,11 @@ value. On
 each held run go on for up to the local configuration's
 [`drain_timeout`](configuration.md#drain-timeout-and-the-stop-window),
 default `0s`. It then commits the pending transcript of each run still
-held, releases their tasks and exits, leaving their jobs running; set the
+held, releases their tasks and exits, leaving their jobs running. Those
+commits, releases and acknowledgements and the key custodian's drain all end
+within `drain_timeout` plus 5 seconds of the signal, so a stop takes at most
+that; a run whose commit does not complete by then is left unacknowledged
+for its acquisition lock to return. Set the
 platform's stop window as in
 [Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window).
 When a

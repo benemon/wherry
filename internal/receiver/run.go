@@ -54,7 +54,8 @@ var (
 	cancelReadInterval = 10 * time.Second
 	// stateCheckInterval is how often a running run checks the cancels and denial the receiver holds.
 	stateCheckInterval = time.Second
-	// shutdownTimeout bounds the final transcript commit and ack flush after the receiver is told to stop, and the
+	// shutdownTimeout bounds each of a held run's final transcript commit, released status and ack flush, which after a
+	// stop also end by the shutdown deadline, and the
 	// status of a run stopped for a lasting denial: a revoked producer retries a metadata load it cannot complete for as
 	// long as its context lasts.
 	shutdownTimeout = 5 * time.Second
@@ -121,7 +122,7 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	defer share.Close()
 	// Acks are flushed on shutdown too, so they must outlive ctx.
 	flush := func() error {
-		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		flushCtx, cancel := r.shutdownContext(ctx)
 		defer cancel()
 		return share.FlushAcks(flushCtx)
 	}
@@ -909,7 +910,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	// deadline, since ctx is already done, and returns the task. A commit the shutdown cut short can leave its
 	// transaction open. It ignores the delivery budget: the receiver is going away and an adopter continues the run.
 	shutdown := func() kgo.AckStatus {
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		shutdownCtx, cancel := r.shutdownContext(ctx)
 		defer cancel()
 		for drained := false; !drained; {
 			select {

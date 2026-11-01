@@ -1694,6 +1694,88 @@ func TestStopDrainsWithinTheDrainTimeout(t *testing.T) {
 	}
 }
 
+// hangCommits makes every transaction commit wait for its context to end once the returned flag is set.
+func hangCommits(t *testing.T) *atomic.Bool {
+	t.Helper()
+	var hang atomic.Bool
+	previous := commitTransaction
+	t.Cleanup(func() { commitTransaction = previous })
+	commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+		if hang.Load() {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return previous(ctx, producer)
+	}
+	return &hang
+}
+
+// TestStopEndsWithinTheShutdownDeadline stops a custodian holding a run while a live peer has it wait for a successor
+// and no commit completes: the held run's final steps and the step-down all end by the one shutdown deadline, the drain
+// timeout plus stepDownMargin after the stop.
+func TestStopEndsWithinTheShutdownDeadline(t *testing.T) {
+	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: time.Minute}})
+	f.receiver.drainTimeout = 2 * time.Second
+	hang := hangCommits(t)
+	keyB := f.addPeer(t, "receiver-b", testPool)
+	f.advertiseAs(t, "receiver-b", keyB, time.Now())
+	done, stop := holdRun(t, f)
+	awaitActing(t, f, f.receiver)
+	hang.Store(true)
+	stop()
+	signalled := time.Now()
+	if err := f.stopped(t, done, 30*time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context canceled", err)
+	}
+	took := time.Since(signalled)
+	if bound := f.receiver.drainTimeout + stepDownMargin + time.Second; took < f.receiver.drainTimeout || took > bound {
+		t.Fatalf("stop took %s, want between the drain timeout and %s; logs:\n%s", took, bound, f.logs.String())
+	}
+	if !strings.Contains(f.logs.String(), "custodian: stepping down") {
+		t.Fatalf("the custodian did not step down; logs:\n%s", f.logs.String())
+	}
+}
+
+// TestHeldRunPastTheShutdownDeadlineIsLeftUnacknowledged ends a held run's job after the stop, with no commit
+// completing before the shutdown deadline: the run is neither acknowledged nor released, so its task's acquisition lock
+// returns it with no terminal committed.
+func TestHeldRunPastTheShutdownDeadlineIsLeftUnacknowledged(t *testing.T) {
+	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: 2 * time.Second}})
+	hang := hangCommits(t)
+	record := f.submit(t, f.host, nil)
+	admitted := f.admitted(t, record)
+	running, release := context.WithCancel(f.ctx)
+	defer release()
+	done := make(chan kgo.AckStatus, 1)
+	go func() { done <- f.receiver.execute(running, f.service.Admin, record, admitted, 1) }()
+	for f.plugin.deliveredCount() < len(resultStream) {
+		if f.ctx.Err() != nil {
+			t.Fatalf("the run never followed its job; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// The last progress commit lands first, so the commit left waiting is the terminal's.
+	time.Sleep(time.Second)
+	hang.Store(true)
+	f.receiver.mu.Lock()
+	f.receiver.shutdownBy = time.Now().Add(3 * time.Second)
+	f.receiver.mu.Unlock()
+	// The job ends, and its terminal commit waits, before the drain timeout releases the run.
+	time.Sleep(1500 * time.Millisecond)
+	release()
+	select {
+	case status := <-done:
+		if status != 0 {
+			t.Fatalf("status %v, want no acknowledgement; logs:\n%s", status, f.logs.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run outlasted the shutdown deadline")
+	}
+	if kinds := f.kinds(t); slices.Contains(kinds, "released") || f.completed(t, "run-a") {
+		t.Fatalf("statuses %v, completed %t, want neither released nor completed", kinds, f.completed(t, "run-a"))
+	}
+}
+
 // TestRevocationStopsAHeldRun revokes the receiver while it holds a run whose job ends long after the pool's lock
 // duration, also while it drains for a configuration change: the receiver gives the run up within one lock duration
 // and the run never completes.

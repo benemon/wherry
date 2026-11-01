@@ -87,6 +87,8 @@ type Receiver struct {
 	inFlight int64
 	// steppingDown is set once the receiver drains as its pool's custodian.
 	steppingDown *wire.SteppingDown
+	// shutdownBy, set at a stop, is when every step of the stop must have ended.
+	shutdownBy time.Time
 	// denials holds the capabilities an authorisation error took away; deniedSince is when the first was
 	// lost, zero while access holds.
 	denials     map[capability]bool
@@ -182,7 +184,13 @@ func (r *Receiver) Run(ctx context.Context) error {
 	}
 	release := make(chan struct{})
 	releaseHeld := sync.OnceFunc(func() { close(release) })
-	defer context.AfterFunc(ctx, func() { time.AfterFunc(r.drainTimeout, releaseHeld) })()
+	// A stop fixes one shutdown deadline, the custodian's step-down bound, which held runs' final steps share.
+	defer context.AfterFunc(ctx, func() {
+		r.mu.Lock()
+		r.shutdownBy = time.Now().Add(r.drainTimeout + stepDownMargin)
+		r.mu.Unlock()
+		time.AfterFunc(r.drainTimeout, releaseHeld)
+	})()
 	ctx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 	// Held runs still read cancels and denials, so the periodic steps last until held tasks are released.
@@ -240,6 +248,17 @@ func (r *Receiver) Run(ctx context.Context) error {
 	slots.Wait()
 	wg.Wait()
 	return context.Cause(ctx)
+}
+
+// shutdownContext outlives ctx for a held run's final step, ending after shutdownTimeout or at the shutdown deadline.
+func (r *Receiver) shutdownContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(shutdownTimeout)
+	r.mu.Lock()
+	if !r.shutdownBy.IsZero() && r.shutdownBy.Before(deadline) {
+		deadline = r.shutdownBy
+	}
+	r.mu.Unlock()
+	return context.WithDeadline(context.WithoutCancel(ctx), deadline)
 }
 
 // every runs step at each interval until ctx ends; Run has already run each step once.

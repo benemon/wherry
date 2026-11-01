@@ -276,7 +276,7 @@ func (run *activeRun) poolStatus(kind string, state wire.TaskState) *kgo.Record 
 // released commits the run's released status, giving up its claim, before its task goes back to the pool. A fenced
 // holder leaves the task to its adopter; a released status not committed leaves the task to its acquisition lock.
 func (run *activeRun) released(ctx context.Context) kgo.AckStatus {
-	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	releaseCtx, cancel := run.receiver.shutdownContext(ctx)
 	defer cancel()
 	// A transaction a cut-short commit left open is aborted first.
 	err := run.producer.EndTransaction(releaseCtx, kgo.TryAbort)

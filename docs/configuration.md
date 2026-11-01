@@ -100,14 +100,16 @@ or systemd's [`TimeoutStopSec`](https://www.freedesktop.org/software/systemd/man
 On `SIGINT` or `SIGTERM` the receiver stops claiming, closes its idle claims
 and lets the runs it holds go on for up to `drain_timeout`. It then commits
 the pending transcript of each run still held and releases its task for
-adoption, leaving the job running. Each held run then has up to 5 seconds
-for that commit, 5 more to commit `released`, and 5 more to acknowledge the
-release to the broker. The key
+adoption, leaving the job running. The stop fixes one deadline,
+`drain_timeout` plus 5 seconds after the signal: each held run's commit, its
+`released` status and the acknowledgement to the broker, and the key
 custodian's [drain](commands.md#wherry-receiver-run), its handover
-included, runs beside them and ends within `drain_timeout` plus 5 seconds of
-the stop. A stop therefore takes up to `drain_timeout` plus 15 seconds. The
-receiver cannot read the window, so `drain_timeout` plus 15 seconds stays a
-few seconds below it, such as `20s` under a 40-second window. At `0s` the
+included, all end by it. A run whose commit does not complete by then is
+left unacknowledged, and the broker returns its task when its acquisition
+lock expires. A stop therefore takes at most `drain_timeout` plus 5 seconds.
+The receiver cannot read the window, so `drain_timeout` plus 5 seconds stays
+a few seconds below it: `20s` ends a stop within 25 seconds, inside
+Kubernetes' default 30-second window. At `0s` the
 receiver releases its held tasks at once, and a key custodian leaves without
 a handover.
 

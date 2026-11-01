@@ -409,7 +409,7 @@ credentials:
 ```
 
 Start the receiver under a supervisor that restarts it when it exits and
-allows it 40 seconds to stop, with `drain_timeout: 20s`, as in
+allows it 30 seconds to stop, with `drain_timeout: 20s`, as in
 [Run a receiver](#run-a-receiver). A
 platform credential with no source fails that plugin profile's
 configuration, and the receiver exits with:
@@ -486,10 +486,10 @@ A `--force` update during a drain ends it.
 - a source for each [platform credential](configuration.md#platform-credentials) its
   plugin profiles name;
 - a supervisor that restarts the process when it exits, since a
-  configuration change ends it, and that allows it 40 seconds to stop
+  configuration change ends it, and that allows it 30 seconds to stop
   after `SIGTERM` before a forced kill, with `drain_timeout` in the local
-  configuration plus 15 seconds set below that window, such as `20s`; a stop
-  takes up to `drain_timeout` plus 15 seconds
+  configuration plus 5 seconds set below that window, such as `20s`; a stop
+  takes at most `drain_timeout` plus 5 seconds
   ([Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window));
 - for the Nomad plugin, a Nomad token with the
   [receiver policy](https://github.com/benemon/wherry-plugins/tree/main/nomad#acl-policy), from a platform credential or `NOMAD_TOKEN`
@@ -1276,8 +1276,8 @@ configuration, bundle and state directory.
    The next delivery of each task adopts the running
    job, on the restarted receiver or another member, and resumes the
    transcript from the run's latest committed offset. A stop takes up to
-   `drain_timeout` plus 15 seconds. Allow the receiver 40 seconds to stop
-   before a forced kill, with `drain_timeout` plus 15 seconds below that
+   `drain_timeout` plus 5 seconds. Allow the receiver 30 seconds to stop
+   before a forced kill, with `drain_timeout` plus 5 seconds below that
    window. Restart a pool's receivers one at a time, so that a stopping key
    custodian hands over to a live successor
    ([Stop a pool's key custodian](#stop-a-pool-s-key-custodian)).
