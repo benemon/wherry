@@ -226,8 +226,6 @@ type Record struct {
 	Receiver string          `json:"receiver,omitzero"`
 	Terms    *Terms          `json:"terms,omitzero"`
 	Config   *ReceiverConfig `json:"config,omitzero"`
-	Offset   int64           `json:"offset,omitzero"`
-	SHA256   string          `json:"sha256,omitzero"`
 	AtMS     int64           `json:"at_ms"`
 	// At is the record's offset on wherry.admin, which load sets; offsets, never clocks, order operator requests.
 	At int64 `json:"-"`
@@ -649,21 +647,17 @@ func validateRecord(record Record) error {
 		if validateNames(record.Tenant, record.Pool) != nil {
 			return errors.New("invalid entitlement record")
 		}
-	case "skip":
-		if record.Offset < 0 || !wire.ValidHash(record.SHA256) {
-			return errors.New("invalid skip record")
-		}
 	case "end":
 		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil {
 			return errors.New("invalid membership end")
 		}
 	case "revoking":
 		if (record.Receiver == "") == (record.Host == "" || record.Tenant == "") || validateNames(record.Receiver+record.Tenant, record.Host+record.Receiver) != nil ||
-			record.Pool != "" || record.Terms != nil || record.Config != nil || record.Offset != 0 || record.SHA256 != "" {
+			record.Pool != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid revoking record")
 		}
 	case "suspend", "resume", "rotate-key":
-		if validateNames(record.Pool) != nil || record.Tenant != "" || record.Host != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil || record.Offset != 0 || record.SHA256 != "" {
+		if validateNames(record.Pool) != nil || record.Tenant != "" || record.Host != "" || record.Receiver != "" || record.Terms != nil || record.Config != nil {
 			return errors.New("invalid " + record.Kind + " record")
 		}
 	default:
@@ -680,49 +674,28 @@ type rawRecord struct {
 // ErrNewerRecord is a wherry.admin record whose version is above RecordVersion, written by a later release.
 var ErrNewerRecord = errors.New("wherry.admin holds records a later wherry release wrote")
 
-// load folds wherry.admin. An undecodable record is tolerated only when a
-// skip record names its offset and hash; a skip naming a decodable record is
-// refused, so a skip can never hide state such as a membership end.
+// load folds wherry.admin, which is append-only and read from offset 0, so an
+// undecodable record leaves no state this release can trust.
 func load(raw []rawRecord) (State, error) {
-	undecodable := map[int64]string{}
-	newer := map[int64]bool{}
-	var records, skips []Record
+	var records []Record
+	var undecodable []string
+	allNewer := true
 	for _, entry := range raw {
 		record, err := DecodeRecord(entry.Value)
 		if err != nil {
 			sum := sha256.Sum256(entry.Value)
-			undecodable[entry.Offset] = hex.EncodeToString(sum[:])
-			newer[entry.Offset] = errors.Is(err, ErrNewerRecord)
+			undecodable = append(undecodable, fmt.Sprintf("offset=%d size=%d sha256=%s", entry.Offset, len(entry.Value), hex.EncodeToString(sum[:])))
+			allNewer = allNewer && errors.Is(err, ErrNewerRecord)
 			continue
 		}
 		record.At = entry.Offset
-		if record.Kind == "skip" {
-			skips = append(skips, record)
-		} else {
-			records = append(records, record)
-		}
-	}
-	for _, skip := range skips {
-		// A decodable offset is absent from undecodable, and "" never matches.
-		if undecodable[skip.Offset] != skip.SHA256 {
-			return State{}, fmt.Errorf("skip record for offset %d names no undecodable record with that hash", skip.Offset)
-		}
-		delete(undecodable, skip.Offset)
+		records = append(records, record)
 	}
 	if len(undecodable) > 0 {
-		var uncovered []string
-		allNewer := true
-		for _, entry := range raw {
-			if hash, ok := undecodable[entry.Offset]; ok {
-				uncovered = append(uncovered, fmt.Sprintf("offset=%d size=%d sha256=%s", entry.Offset, len(entry.Value), hash))
-				allNewer = allNewer && newer[entry.Offset]
-			}
-		}
-		// Skipping a later release's record would hide state it holds.
 		if allNewer {
-			return State{}, fmt.Errorf("%w; upgrade this wherry: %s", ErrNewerRecord, strings.Join(uncovered, "; "))
+			return State{}, fmt.Errorf("%w; upgrade this wherry: %s", ErrNewerRecord, strings.Join(undecodable, "; "))
 		}
-		return State{}, fmt.Errorf("wherry.admin has undecodable records; review each and run wherry admin skip: %s", strings.Join(uncovered, "; "))
+		return State{}, fmt.Errorf("this wherry release cannot read wherry.admin; reset the deployment: %s", strings.Join(undecodable, "; "))
 	}
 	return Fold(records)
 }

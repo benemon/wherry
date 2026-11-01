@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -28,7 +27,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(pos) == 0 {
-		return errors.New("usage: wherry admin <pool create|pool update|pool entitle|pool suspend|pool resume|pool rotate-key|receiver add|receiver update|receiver show|receiver revoke|host add|host revoke|skip|check>")
+		return errors.New("usage: wherry admin <pool create|pool update|pool entitle|pool suspend|pool resume|pool rotate-key|receiver add|receiver update|receiver show|receiver revoke|host add|host revoke|check>")
 	}
 	broker, caPath := os.Getenv("WHERRY_TRUST_BROKER"), os.Getenv("WHERRY_TRUST_CA")
 	if broker == "" || caPath == "" {
@@ -51,9 +50,6 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	service := admin.Service{Admin: root, Operator: operator, Broker: broker, CA: string(ca)}
 	ctx := context.Background()
 	command := strings.Join(pos[:min(len(pos), 2)], " ")
-	if pos[0] == "skip" {
-		command = "skip"
-	}
 	switch command {
 	case "pool create":
 		if len(pos) != 3 {
@@ -211,15 +207,6 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 			return errors.New("revocation incomplete")
 		}
 		return nil
-	case "skip":
-		if len(pos) != 2 || options["sha256"] == "" {
-			return errors.New("usage: wherry admin skip OFFSET --sha256 HASH")
-		}
-		offset, err := strconv.ParseInt(pos[1], 10, 64)
-		if err != nil {
-			return err
-		}
-		return service.Skip(ctx, offset, options["sha256"])
 	case "check":
 		if len(pos) != 1 {
 			return errors.New("usage: wherry admin check")
@@ -324,9 +311,6 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 		options["suspect-key"] = strings.Join(suspects, "\n")
 	}
 	command := strings.Join(positional[:min(len(positional), 2)], " ")
-	if len(positional) > 0 && positional[0] == "skip" {
-		command = "skip"
-	}
 	allowed := map[string]map[string]bool{
 		"pool create":     {"config-file": true, "config-dir": true},
 		"pool update":     {"config-file": true, "config-dir": true, "dry-run": true},
@@ -340,7 +324,6 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 		"host add":        {"tenant": true, "bundle-file": true},
 		"host revoke":     {"tenant": true, "wait": true},
 		"receiver revoke": {"wait": true},
-		"skip":            {"sha256": true},
 		"check":           {},
 	}[command]
 	if allowed != nil {

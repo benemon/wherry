@@ -102,6 +102,8 @@ func TestAdminCommandUsage(t *testing.T) {
 		{[]string{"revoke", "host", "tenant-a", "host-a"}, "unknown admin command"},
 		{[]string{"revoke", "receiver", "receiver-a"}, "unknown admin command"},
 		{[]string{"receiver", "configure", "receiver-a"}, "unknown admin command"},
+		{[]string{"skip", "42", "--sha256", strings.Repeat("0", 64)}, "unknown admin command"},
+		{[]string{"skip", "42"}, "unknown admin command"},
 		{[]string{"pool", "update"}, "usage: wherry admin pool update NAME"},
 		{[]string{"pool", "suspend"}, "usage: wherry admin pool suspend POOL"},
 		{[]string{"pool", "resume", "pool-a", "pool-b"}, "usage: wherry admin pool resume POOL"},
