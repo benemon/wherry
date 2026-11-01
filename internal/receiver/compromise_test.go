@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,7 +19,9 @@ import (
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // A rotate-key request has the key custodian rotate on its next pass, once, the command returns once it reads the
@@ -312,14 +315,14 @@ func TestSuspendEndsARunInItsTerminalCommit(t *testing.T) {
 	endedSuspended(t, f, record, 2)
 }
 
-// suspendDuringDispatch starts a run whose Dispatch hangs, with Lookup reporting its job running, and suspends the pool
-// once it dispatches; it returns the run's acknowledgement, which the test fails without within timeout.
-func suspendDuringDispatch(t *testing.T, f fixture, record *kgo.Record, timeout time.Duration) kgo.AckStatus {
+// suspendDuringDispatch starts a run under ctx whose Dispatch hangs, with Lookup reporting its job running, and
+// suspends the pool once it dispatches; it returns where the run's acknowledgement arrives.
+func suspendDuringDispatch(t *testing.T, f fixture, ctx context.Context, record *kgo.Record) <-chan kgo.AckStatus {
 	t.Helper()
 	f.plugin.mu.Lock()
 	f.plugin.dispatchBlocks, f.plugin.job = true, pluginsdk.JobRunning
 	f.plugin.mu.Unlock()
-	done := f.executing(t, f.ctx, record, 1)
+	done := f.executing(t, ctx, record, 1)
 	for {
 		if dispatches, _, _ := f.dispatched(t); dispatches == 1 {
 			break
@@ -330,11 +333,17 @@ func suspendDuringDispatch(t *testing.T, f fixture, record *kgo.Record, timeout 
 		time.Sleep(20 * time.Millisecond)
 	}
 	f.suspend(t)
+	return done
+}
+
+// acknowledged returns the acknowledgement from done, failing the test without it within timeout.
+func acknowledged(t *testing.T, f fixture, done <-chan kgo.AckStatus, timeout time.Duration) kgo.AckStatus {
+	t.Helper()
 	select {
 	case status := <-done:
 		return status
 	case <-time.After(timeout):
-		t.Fatalf("the hung dispatch outlived the suspension; logs:\n%s", f.logs.String())
+		t.Fatalf("the run outlived the suspension; logs:\n%s", f.logs.String())
 		return 0
 	}
 }
@@ -344,7 +353,7 @@ func suspendDuringDispatch(t *testing.T, f fixture, record *kgo.Record, timeout 
 func TestSuspendCancelsAHungDispatchAndStopsItsJob(t *testing.T) {
 	f := newFixture(t, resultStream)
 	record := f.submit(t, f.host, nil)
-	if status := suspendDuringDispatch(t, f, record, 15*time.Second); status != kgo.AckReject {
+	if status := acknowledged(t, f, suspendDuringDispatch(t, f, f.ctx, record), 15*time.Second); status != kgo.AckReject {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
 	if _, lookups, _, _ := f.plugin.counts(); lookups == 0 {
@@ -362,7 +371,7 @@ func TestSuspendWithAnUnconfirmedStopKeepsTheRunHeld(t *testing.T) {
 	t.Cleanup(func() { suspendStopBound = previous })
 	f.plugin.stopErr = errors.New("platform unavailable")
 	record := f.submit(t, f.host, nil)
-	if status := suspendDuringDispatch(t, f, record, 15*time.Second); status != kgo.AckReject {
+	if status := acknowledged(t, f, suspendDuringDispatch(t, f, f.ctx, record), 15*time.Second); status != kgo.AckReject {
 		t.Fatalf("status %v, want the run ended, not released; logs:\n%s", status, f.logs.String())
 	}
 	var terminals []wire.RunStatus
@@ -387,4 +396,137 @@ func TestSuspendWithAnUnconfirmedStopKeepsTheRunHeld(t *testing.T) {
 		t.Fatalf("the unconfirmed stop is not logged; logs:\n%s", f.logs.String())
 	}
 	scraped(t, f.receiver, `wherry_suspend_stop_unconfirmed_total{pool="`+testPool+`"} 1`)
+}
+
+// endedUnconfirmed checks that the run ended with one FAILED job stop unconfirmed terminal, published no released
+// status and released no material.
+func endedUnconfirmed(t *testing.T, f fixture) {
+	t.Helper()
+	var terminals []wire.RunStatus
+	for _, status := range f.eventStatuses(t) {
+		if status.Wherry.Kind == "released" {
+			t.Fatalf("the run published released; logs:\n%s", f.logs.String())
+		}
+		if status.Wherry.Kind == "terminal" {
+			terminals = append(terminals, status)
+		}
+	}
+	if len(terminals) != 1 || terminals[0].StatusUpdate.Status.State != wire.TaskStateFailed || terminals[0].StatusUpdate.Status.Message.Parts[0].Text != suspendStopUnconfirmed {
+		t.Fatalf("terminals %+v, want one FAILED %s; logs:\n%s", terminals, suspendStopUnconfirmed, f.logs.String())
+	}
+	f.plugin.mu.Lock()
+	releases := f.plugin.releases
+	f.plugin.mu.Unlock()
+	if releases != 0 {
+		t.Fatalf("releases %d, want the material kept", releases)
+	}
+}
+
+// A shutdown while a suspended run's Stop fails ends the run unconfirmed: its terminal committed past the shutdown and
+// its task rejected, never released.
+func TestShutdownDuringASuspendedStopEndsTheRunUnconfirmed(t *testing.T) {
+	f := newFixture(t, resultStream)
+	f.plugin.stopErr = errors.New("platform unavailable")
+	record := f.submit(t, f.host, nil)
+	ctx, shutdown := context.WithCancel(f.ctx)
+	defer shutdown()
+	done := suspendDuringDispatch(t, f, ctx, record)
+	for {
+		f.plugin.mu.Lock()
+		stops := f.plugin.stops
+		f.plugin.mu.Unlock()
+		if stops > 0 {
+			break
+		}
+		if f.ctx.Err() != nil {
+			t.Fatalf("never stopped; logs:\n%s", f.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	shutdown()
+	if status := acknowledged(t, f, done, shutdownTimeout+5*time.Second); status != kgo.AckReject {
+		t.Fatalf("status %v, want the task rejected; logs:\n%s", status, f.logs.String())
+	}
+	endedUnconfirmed(t, f)
+}
+
+// A Stop that hangs is bounded by the suspended stop's bound: the run ends unconfirmed within it.
+func TestSuspendedStopThatHangsEndsUnconfirmedWithinTheBound(t *testing.T) {
+	f := newFixture(t, resultStream)
+	previous := suspendStopBound
+	suspendStopBound = 2 * time.Second
+	t.Cleanup(func() { suspendStopBound = previous })
+	f.plugin.stopBlocks = true
+	record := f.submit(t, f.host, nil)
+	if status := acknowledged(t, f, suspendDuringDispatch(t, f, f.ctx, record), suspendStopBound+10*time.Second); status != kgo.AckReject {
+		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+	}
+	endedUnconfirmed(t, f)
+}
+
+// A suspension cuts an adopted run's open short where it blocks, in the listing of the pool events' end or in the open
+// request's commit: the run ends FAILED pool suspended with its job stopped.
+func TestSuspendCutsAnAdoptedRunsOpenShort(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// block blocks the open until its context ends and sets blocked once it does.
+		block func(t *testing.T, f fixture, blocked *atomic.Bool)
+	}{
+		{"offset listing", func(t *testing.T, f fixture, blocked *atomic.Bool) {
+			topic := admin.PoolEventsTopic(testPool)
+			f.cluster.ControlKey(int16(kmsg.ListOffsets), func(request kmsg.Request) (kmsg.Response, error, bool) {
+				f.cluster.KeepControl()
+				listed := request.(*kmsg.ListOffsetsRequest)
+				if listed.IsolationLevel != 0 || len(listed.Topics) != 1 || listed.Topics[0].Topic != topic || listed.Topics[0].Partitions[0].Timestamp != -1 {
+					return nil, nil, false
+				}
+				blocked.Store(true)
+				response := listed.ResponseKind().(*kmsg.ListOffsetsResponse)
+				failed := kmsg.ListOffsetsResponseTopic{Topic: topic}
+				for _, partition := range listed.Topics[0].Partitions {
+					failed.Partitions = append(failed.Partitions, kmsg.ListOffsetsResponseTopicPartition{Partition: partition.Partition, ErrorCode: kerr.OffsetNotAvailable.Code})
+				}
+				response.Topics = append(response.Topics, failed)
+				return response, nil, true
+			})
+		}},
+		{"open request commit", func(t *testing.T, f fixture, blocked *atomic.Bool) {
+			previous := commitTransaction
+			t.Cleanup(func() { commitTransaction = previous })
+			// The adopter's commits are its claimed status, its adopting status, then its open request.
+			commits := 0
+			commitTransaction = func(ctx context.Context, producer *kgo.Client) error {
+				if producer.OptValue(kgo.TransactionalID) == admin.TransactionalPrefix(testPool)+"run-a" {
+					if commits++; commits == 3 {
+						blocked.Store(true)
+						<-ctx.Done()
+						return ctx.Err()
+					}
+				}
+				return previous(ctx, producer)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, record := adopting(t)
+			f.quiet()
+			blocked := &atomic.Bool{}
+			test.block(t, f, blocked)
+			done := f.executing(t, f.ctx, record, 2)
+			for !blocked.Load() {
+				if f.ctx.Err() != nil {
+					t.Fatalf("the open never blocked; logs:\n%s", f.logs.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			f.suspend(t)
+			if status := acknowledged(t, f, done, 15*time.Second); status != kgo.AckReject {
+				t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
+			}
+			if len(f.openRequests(t)) != 0 {
+				t.Fatal("the cut-short open request was committed")
+			}
+			endedSuspended(t, f, record, 1)
+		})
+	}
 }

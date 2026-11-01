@@ -776,7 +776,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	if !adopted {
 		named := run.profile
 		credentials := slices.Concat(admitted.agentCredentials, admitted.credentials)
-		values, status, ok := run.awaitOpen(ctx, startCtx, nil)
+		values, status, ok := run.awaitOpen(ctx, suspendCtx, startCtx, nil)
 		if !ok {
 			return status
 		}
@@ -916,7 +916,7 @@ func (r *Receiver) execute(ctx context.Context, share *kgo.Client, record *kgo.R
 	var held []pluginsdk.Line
 	if adopted {
 		release := run.hold(lines)
-		values, status, ok := run.awaitOpen(ctx, runCtx, &handle)
+		values, status, ok := run.awaitOpen(ctx, suspendCtx, runCtx, &handle)
 		held = release()
 		if !ok {
 			return status
@@ -1510,8 +1510,8 @@ func (run *activeRun) suspended(ctx context.Context, job *pluginsdk.Handle, pend
 }
 
 // stopSuspended stops a suspended run's job, looked up first when job is nil, and ends the run failed. Lookup and Stop
-// are retried until suspendStopBound; a job not confirmed stopped by then may still run, so the run ends failed with
-// its task and material kept, never released.
+// are retried until suspendStopBound, each Stop bounded by it; a job not confirmed stopped by then, or by a shutdown,
+// may still run, so the run ends failed with its task and material kept, never released.
 func (run *activeRun) stopSuspended(ctx context.Context, job *pluginsdk.Handle, pending []pluginsdk.Line) kgo.AckStatus {
 	r, runID := run.receiver, run.task.Wherry.Run
 	deadline := time.Now().Add(suspendStopBound)
@@ -1530,7 +1530,9 @@ func (run *activeRun) stopSuspended(ctx context.Context, job *pluginsdk.Handle, 
 			}
 		}
 		if job != nil {
-			err := run.profile.Plugin.Stop(ctx, *job)
+			stopCtx, cancel := context.WithDeadline(ctx, deadline)
+			err := run.profile.Plugin.Stop(stopCtx, *job)
+			cancel()
 			if err == nil {
 				return run.fail(ctx, suspendedReason, pending)
 			}
@@ -1545,7 +1547,13 @@ func (run *activeRun) stopSuspended(ctx context.Context, job *pluginsdk.Handle, 
 	r.metrics.suspendStopUnconfirmed.Inc()
 	r.logger.Printf("run %s: pool %s suspended and the job's stop is unconfirmed; the task and its material stay held", runID, r.config.Pool)
 	run.kept = true
-	return run.fail(ctx, suspendStopUnconfirmed, pending)
+	// A shutdown must not return the task: the terminal is committed past it and the task rejected.
+	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancel()
+	if run.fail(endCtx, suspendStopUnconfirmed, pending) == 0 {
+		return 0
+	}
+	return kgo.AckReject
 }
 
 // expired ends a run past a bound: task_ended_by once its deadline passed, else task_started_by before its job
