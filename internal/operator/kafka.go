@@ -339,8 +339,15 @@ func (service *Service) ReceiverReissue(ctx context.Context, receiver, bundlePat
 	return service.reissue(ctx, ReceiverPrincipal(receiver), bundlePath)
 }
 
-// reissue gives principal a new password and writes its bundle to bundlePath, replacing any file there.
+// reissue gives principal a new password and writes its bundle to bundlePath, replacing any file there. Once the
+// password changes, a failure leaves the old bundle, which no longer works.
 func (service *Service) reissue(ctx context.Context, principal, bundlePath string) (err error) {
+	rotated := false
+	defer func() {
+		if err != nil && rotated {
+			err = fmt.Errorf("%w: %s has a new password, so its old bundle no longer works; run the command with --force again to write a new bundle", err, principal)
+		}
+	}()
 	bundle, err := createBundle(bundlePath, true)
 	if err != nil {
 		return err
@@ -350,6 +357,7 @@ func (service *Service) reissue(ctx context.Context, principal, bundlePath strin
 	if err != nil {
 		return err
 	}
+	rotated = true
 	return writeBundle(bundle, Bundle{service.Broker, service.CA, principal, password})
 }
 
