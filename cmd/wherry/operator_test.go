@@ -534,10 +534,12 @@ func TestHostAddForceReissuesTheIdentity(t *testing.T) {
 	if !bundleWorks(t, service, bundle, true) {
 		t.Fatal("the broker refused the new host's bundle")
 	}
-	for _, path := range []string{other, bundle} {
-		if err := add(path); err == nil || err.Error() != "host exists; --force gives it a new password and bundle" {
-			t.Fatalf("host add of an existing host to %s = %v; want it refused without --force", path, err)
-		}
+	if err := add(other); err == nil || err.Error() != "host exists; --force gives it a new password and bundle" {
+		t.Fatalf("host add of an existing host to %s = %v; want it refused without --force", other, err)
+	}
+	// The bundle's file is reserved before the host is looked up.
+	if err := add(bundle); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("host add of an existing host to its bundle %s = %v; want the file refused", bundle, err)
 	}
 	if _, err := os.Stat(other); !errors.Is(err, os.ErrNotExist) || !bundleWorks(t, service, bundle, false) {
 		t.Fatalf("a refused host add wrote %s (%v) or changed the password", other, err)
