@@ -112,7 +112,9 @@ On the command line a selector is comma-separated:
 `wherry.operator`, with the [environment](configuration.md#environment-variables) set.
 It writes every `wherry.operator` record as `wherry.operator`, creating
 `wherry.operator` and `wherry.receivers` first if they are missing and setting the
-[configuration](design.md#topics-1) of an existing `wherry.receivers`. Options
+[configuration](design.md#topics-1) of an existing `wherry.receivers`.
+`pool apply --dry-run` creates neither, and reads a missing `wherry.operator`
+as holding no records. Options
 parse as Go flags, in the forms `--name value`, `--name=value` and
 `-name value`, and the last of a repeated option wins. Options other than
 `--dry-run` and `--force` take a value, and options can appear anywhere after
@@ -131,15 +133,23 @@ principal; another principal's ACL on the topic stays.
 the [pool terms](configuration.md#pool-terms) or
 [receiver configuration](configuration.md#receiver-configuration).
 
-`host add` and `receiver apply` refuse a host or receiver that exists unless
-given `--force`. Without `--force`, a bundle file must not exist beforehand.
-A command that fails removes the bundle it created.
+`host add` refuses a host that exists unless given `--force`. `receiver apply`
+of a receiver that exists updates its configuration, and refuses
+`--bundle-file`, which would write a new bundle, unless given `--force`.
+Without `--force`, a command never replaces a file at `FILE`: it writes the
+bundle to a temporary file beside `FILE` and links it to `FILE`, which fails
+when a file is there, including one created while the command ran. A command
+that fails leaves no bundle and no temporary file of its own.
 
 `--force` reissues the identity of an existing host or receiver: a new SCRAM
 password and a new bundle, written to a temporary file that is then renamed
-over `FILE`. Kafka holds one SCRAM credential per user, so the old password
-stops working at once, and the host or receiver is offline until its new
-bundle is in place. Use it to rotate a password or replace a lost bundle.
+over `FILE`. It appends no record. Kafka holds one SCRAM credential per user,
+so the old password stops working at once, and the host or receiver is
+offline until its new bundle is in place. Use it to rotate a password or
+replace a lost bundle. When writing, closing or renaming the new bundle fails
+after the password changed, the command removes its temporary file, leaves
+the old bundle at `FILE`, and fails saying that the old bundle no longer works
+and that running it again with `--force` writes a new one.
 
 ### `wherry operator pool apply POOL`
 
@@ -203,8 +213,10 @@ recorded them. When the tasks topic's
 [record limit](configuration.md#record-limit) has changed since, it records
 the terms again with the new limit.
 
-With `--dry-run`, it makes the same checks, prints nothing, and writes
-nothing to Kafka; it measures a tenant topic below 2 MiB as `apply` would
+With `--dry-run`, it makes the same checks, among them the stranded
+receivers, the lock duration ceiling, the record limit and the partitions of
+an existing tasks or events topic, prints nothing, and creates and writes
+nothing in Kafka; it measures a tenant topic below 2 MiB as `apply` would
 set it. Terms it refuses fail in the same way with or without
 `--dry-run`.
 
@@ -326,7 +338,9 @@ wherry operator host add HOST --tenant TENANT --bundle-file FILE [--force]
 Records the host, creates its principal, its key topic and the tenant
 feed and transcript topic, the latter two with `max.message.bytes` 2 MiB, grants its ACLs, applies its quotas, and writes
 its bundle. It refuses a host that exists, and an existing `FILE`, unless
-given [`--force`](#operator-commands), which reissues the host's identity.
+given [`--force`](#operator-commands). For a host that exists, `--force`
+reissues its identity alone: it records nothing, and sets no topic, ACL or
+quota. A host whose membership ended is refused.
 
 ### `wherry operator receiver apply RECEIVER`
 
