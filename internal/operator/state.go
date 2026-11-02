@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"cmp"
@@ -193,7 +193,7 @@ func withDefaults(terms Terms) Terms {
 }
 
 // ReceiverConfig is a receiver's whole configuration, recorded on
-// wherry.admin and read by the receiver after it authenticates.
+// wherry.operator and read by the receiver after it authenticates.
 type ReceiverConfig struct {
 	Receiver string            `json:"receiver"`
 	Pool     string            `json:"pool"`
@@ -227,7 +227,7 @@ type Record struct {
 	Terms    *Terms          `json:"terms,omitzero"`
 	Config   *ReceiverConfig `json:"config,omitzero"`
 	AtMS     int64           `json:"at_ms"`
-	// At is the record's offset on wherry.admin, which load sets; offsets, never clocks, order operator requests.
+	// At is the record's offset on wherry.operator, which load sets; offsets, never clocks, order operator requests.
 	At int64 `json:"-"`
 }
 type Host struct{ Tenant, Name string }
@@ -239,9 +239,9 @@ type State struct {
 	Ended        map[string]bool
 	Revoking     map[string]bool
 	Suspended    map[string]bool
-	// RotateRequested is the wherry.admin offset of each pool's latest rotate-key record.
+	// RotateRequested is the wherry.operator offset of each pool's latest rotate-key record.
 	RotateRequested map[string]int64
-	// SuspendChanged is the wherry.admin offset of each pool's latest suspend or resume record.
+	// SuspendChanged is the wherry.operator offset of each pool's latest suspend or resume record.
 	SuspendChanged map[string]int64
 }
 
@@ -249,7 +249,7 @@ func NewState() State {
 	return State{map[string]Terms{}, map[string]ReceiverConfig{}, map[string]Host{}, map[string]map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]int64{}, map[string]int64{}}
 }
 
-// RecordVersion is the wherry.admin record version this release writes and the highest it reads.
+// RecordVersion is the wherry.operator record version this release writes and the highest it reads.
 const RecordVersion = 1
 
 func EncodeRecord(record Record) ([]byte, error) {
@@ -271,14 +271,14 @@ func DecodeRecord(encoded []byte) (Record, error) {
 		V int `json:"v"`
 	}
 	if err := json.Unmarshal(encoded, &version, signed.Tolerant); err != nil {
-		return Record{}, fmt.Errorf("decode admin record: %w", err)
+		return Record{}, fmt.Errorf("decode operator record: %w", err)
 	}
 	if version.V > RecordVersion {
 		return Record{}, fmt.Errorf("%w: record version %d", ErrNewerRecord, version.V)
 	}
 	var record Record
 	if err := json.Unmarshal(encoded, &record, signed.Tolerant); err != nil {
-		return Record{}, fmt.Errorf("decode admin record: %w", err)
+		return Record{}, fmt.Errorf("decode operator record: %w", err)
 	}
 	if err := validateRecord(record); err != nil {
 		return Record{}, err
@@ -346,7 +346,7 @@ func apply(state *State, record Record) error {
 }
 
 func (state State) CheckNames() error {
-	seen := map[string]string{AdminTopic: "admin topic", ReceiversTopic: "receivers topic"}
+	seen := map[string]string{OperatorTopic: "operator topic", ReceiversTopic: "receivers topic"}
 	add := func(value, owner string) error {
 		if previous, ok := seen[value]; ok {
 			return fmt.Errorf("name collision between %s and %s", previous, owner)
@@ -628,7 +628,7 @@ func subject(record Record) string {
 
 func validateRecord(record Record) error {
 	if record.Version != RecordVersion || record.AtMS <= 0 {
-		return errors.New("invalid admin record")
+		return errors.New("invalid operator record")
 	}
 	switch record.Kind {
 	case "pool":
@@ -661,7 +661,7 @@ func validateRecord(record Record) error {
 			return errors.New("invalid " + record.Kind + " record")
 		}
 	default:
-		return errors.New("unknown admin record kind")
+		return errors.New("unknown operator record kind")
 	}
 	return nil
 }
@@ -671,10 +671,10 @@ type rawRecord struct {
 	Value  []byte
 }
 
-// ErrNewerRecord is a wherry.admin record whose version is above RecordVersion, written by a later release.
-var ErrNewerRecord = errors.New("wherry.admin holds records a later wherry release wrote")
+// ErrNewerRecord is a wherry.operator record whose version is above RecordVersion, written by a later release.
+var ErrNewerRecord = errors.New("wherry.operator holds records a later wherry release wrote")
 
-// load folds wherry.admin, which is append-only and read from offset 0, so an
+// load folds wherry.operator, which is append-only and read from offset 0, so an
 // undecodable record leaves no state this release can trust.
 func load(raw []rawRecord) (State, error) {
 	var records []Record
@@ -695,7 +695,7 @@ func load(raw []rawRecord) (State, error) {
 		if allNewer {
 			return State{}, fmt.Errorf("%w; upgrade this wherry: %s", ErrNewerRecord, strings.Join(undecodable, "; "))
 		}
-		return State{}, fmt.Errorf("this wherry release cannot read wherry.admin; reset the deployment: %s", strings.Join(undecodable, "; "))
+		return State{}, fmt.Errorf("this wherry release cannot read wherry.operator; reset the deployment: %s", strings.Join(undecodable, "; "))
 	}
 	return Fold(records)
 }

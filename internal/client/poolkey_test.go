@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
@@ -71,7 +71,7 @@ func TestSubmitRefusesWithoutAnAuthorisedCurrentSnapshot(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		other.produce(t, f.ctx, admin.CustodianTopic("pool-a"), wire.CustodianKey, forged)
+		other.produce(t, f.ctx, operator.CustodianTopic("pool-a"), wire.CustodianKey, forged)
 		if err := f.submitErr(t); !errors.Is(err, ErrCustodianUnavailable) || !strings.Contains(err.Error(), "written by another receiver") {
 			t.Fatalf("submit = %v, want the snapshot refused for its writer", err)
 		}
@@ -115,7 +115,7 @@ func TestSuspendedPoolRefusesSubmitBeforeResolvingAnything(t *testing.T) {
 	o := newUploadOracle(t)
 	f := newFixture(t)
 	terms := testTerms()
-	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolUpdate(f.ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func open(t *testing.T, f *fixture, runID string, key *ecdsa.PrivateKey) (wire.S
 		t.Fatalf("local record %v, %v", local, err)
 	}
 	pool := local.Pool
-	records, err := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic(pool))
+	records, err := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic(pool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,11 +170,11 @@ func open(t *testing.T, f *fixture, runID string, key *ecdsa.PrivateKey) (wire.S
 		if err != nil {
 			t.Fatal(err)
 		}
-		keys, err := admin.ReadKeys(f.ctx, f.service.Admin, admin.HostKeyTopics(state, pool))
+		keys, err := operator.ReadKeys(f.ctx, f.service.SuperUser, operator.HostKeyTopics(state, pool))
 		if err != nil {
 			t.Fatal(err)
 		}
-		task, err := admin.AuthorizeSubmission(state, keys, record.Value, pool)
+		task, err := operator.AuthorizeSubmission(state, keys, record.Value, pool)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -241,7 +241,7 @@ func TestEnvelopeOpensWithTheCurrentKeyAndBindsTheTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := admin.CheckEnvelope(state.Pools["pool-a"], &task, values); err != nil {
+	if err := operator.CheckEnvelope(state.Pools["pool-a"], &task, values); err != nil {
 		t.Fatalf("receiver check of the envelope: %v", err)
 	}
 	if _, _, err := open(t, f, submitted.RunID, stale); err == nil {
@@ -261,7 +261,7 @@ func TestSubmitRefusesAnEnvelopeTheCheckRefuses(t *testing.T) {
 	if err := f.submitErr(t); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "envelope credential model is empty") {
 		t.Fatalf("submit = %v, want the empty credential refused", err)
 	}
-	if records, err := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
+	if records, err := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
 		t.Fatalf("task topic holds %d records, %v", len(records), err)
 	}
 }
@@ -326,7 +326,7 @@ func (r *testReceiver) keyLost(t *testing.T, ctx context.Context, task claimed) 
 // replacements are the tasks on pool's task topic that replace runID.
 func (f *fixture) replacements(t *testing.T, pool, runID string) [][]byte {
 	t.Helper()
-	records, err := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic(pool))
+	records, err := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic(pool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +548,7 @@ func keyLostS3Run(t *testing.T) (*uploadOracle, *fixture, *testReceiver, claimed
 	o := newUploadOracle(t)
 	f := newFixture(t)
 	terms := testTerms()
-	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolUpdate(f.ctx, "pool-a", terms, false); err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +596,7 @@ func TestResubmissionReadsTheFeedOnce(t *testing.T) {
 	receiver, lost := f.admitted(t)
 	pending := []claimed{lost, f.anotherRun(t, receiver), f.anotherRun(t, receiver)}
 	receiver.keyLost(t, f.ctx, lost)
-	reads := f.failListings(t, admin.TenantTopic("tenant-a"), startListing, 0, 0)
+	reads := f.failListings(t, operator.TenantTopic("tenant-a"), startListing, 0, 0)
 	if err := f.submitErr(t); err != nil {
 		t.Fatal(err)
 	}
@@ -665,7 +665,7 @@ func TestTheSnapshotIsTheLatestRecordUnderItsKey(t *testing.T) {
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
-	receiver.produce(t, f.ctx, admin.CustodianTopic("pool-a"), "other", []byte("not a snapshot"))
+	receiver.produce(t, f.ctx, operator.CustodianTopic("pool-a"), "other", []byte("not a snapshot"))
 	if err := f.submitErr(t); err != nil {
 		t.Fatalf("submit = %v; want the snapshot under its key", err)
 	}
@@ -684,7 +684,7 @@ func TestTwoHostProcessesReplaceAKeyLostRunOnce(t *testing.T) {
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
 	receiver.keyLost(t, f.ctx, task)
-	config := helperConfig{Broker: f.service.Broker, Principal: admin.TenantPrincipal("tenant-a", "host-a"), StateDir: f.stateDir, Secret: f.secret, Run: runID,
+	config := helperConfig{Broker: f.service.Broker, Principal: operator.TenantPrincipal("tenant-a", "host-a"), StateDir: f.stateDir, Secret: f.secret, Run: runID,
 		Barrier: t.TempDir(), Key: f.host.key}
 	encoded, err := json.Marshal(config)
 	if err != nil {

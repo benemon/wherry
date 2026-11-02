@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 )
@@ -36,7 +36,7 @@ func TestConfigInputRequiresExactlyOne(t *testing.T) {
 				"both":    {"--config-file", file, "--config-dir", dir},
 			} {
 				t.Run(label, func(t *testing.T) {
-					_, parsed, err := adminArgs(append(command, options...))
+					_, parsed, err := operatorArgs(append(command, options...))
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -103,7 +103,7 @@ func TestPoolConfigExampleParses(t *testing.T) {
 			}
 		}
 	}
-	if _, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: "build", Terms: &want}); err != nil {
+	if _, err := operator.EncodeRecord(operator.Record{Kind: "pool", Pool: "build", Terms: &want}); err != nil {
 		t.Fatal(err)
 	}
 	documented(t, "configuration.md", "example-pool.yaml", "example-pool/pool.yaml", "example-pool/agents/claude.yaml", "example-pool/agents/coder.yaml", "example-pool/agents/codex.yaml")
@@ -185,7 +185,7 @@ func TestPoolConfigDirectoryRejectsInvalidLayout(t *testing.T) {
 	}
 }
 
-func TestAdminArgsRejectsUnknownOptions(t *testing.T) {
+func TestOperatorArgsRejectsUnknownOptions(t *testing.T) {
 	for _, args := range [][]string{
 		{"pool", "create", "pool-a", "--terms", "pool.yaml"},
 		{"receiver", "update", "receiver-a", "--config", "receiver.yaml"},
@@ -193,10 +193,10 @@ func TestAdminArgsRejectsUnknownOptions(t *testing.T) {
 		{"pool", "create", "pool-a", "--tenant", "tenant-a"},
 		{"receiver", "add", "receiver-a", "--pool", "pool-a", "--platform-credential-file", "nomad=token"},
 	} {
-		_, _, err := adminArgs(args)
+		_, _, err := operatorArgs(args)
 		option := strings.TrimPrefix(args[len(args)-2], "-")
 		if err == nil || !strings.Contains(err.Error(), option) {
-			t.Fatalf("adminArgs(%q) = %v, want an error naming %s", args, err, option)
+			t.Fatalf("operatorArgs(%q) = %v, want an error naming %s", args, err, option)
 		}
 	}
 }
@@ -270,7 +270,7 @@ func TestPoolConfigReadsDurations(t *testing.T) {
 		t.Fatal(err)
 	}
 	terms, err := readPoolConfig(file, false)
-	if err != nil || terms.LockDurationMS != 15000 || terms.StartByLimitMS != admin.Millis(36*time.Hour/time.Millisecond) {
+	if err != nil || terms.LockDurationMS != 15000 || terms.StartByLimitMS != operator.Millis(36*time.Hour/time.Millisecond) {
 		t.Fatalf("terms lock %d start_by_limit %d, %v; want 15s and 36h in milliseconds", terms.LockDurationMS, terms.StartByLimitMS, err)
 	}
 	old := bytes.Replace(pool, []byte("lock_duration: 15s"), []byte("lock_duration_ms: 15000"), 1)

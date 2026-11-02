@@ -4,7 +4,7 @@
 # containers rather than six fit a CI runner, the quorum still survives the loss of one node, and the tests move
 # partition leaders by election rather than by stopping nodes. Every node has up.sh's listeners, TLS and SCRAM: a TLS
 # listener with SCRAM-SHA-512 and the StandardAuthorizer (super user wherry-admin, operator wherry.operator with the
-# operator's ACLs on wherry.admin) and a plaintext listener whose anonymous principal is a super user, published on
+# operator's ACLs on wherry.operator) and a plaintext listener whose anonymous principal is a super user, published on
 # 127.0.0.1:9092/9093, 19092/19093 and 29092/29093 for nodes 1, 2 and 3. The nodes reach each other on a container
 # network over a plaintext INTERNAL listener (inter-broker) and the CONTROLLER listener. Topics default to replication
 # factor 3 and min.insync.replicas 2, which wherry's topics take since wherry creates them with the broker's default
@@ -117,7 +117,7 @@ if [ -z "$ready" ]; then
 fi
 "$container" exec wherry-kafka-1 /opt/kafka/bin/kafka-acls.sh --bootstrap-server "$internal" --add \
   --allow-principal User:wherry.operator --operation Write --operation Read --operation Describe \
-  --topic wherry.admin >/dev/null
+  --topic wherry.operator >/dev/null
 
 cat > "$dir/env" <<EOF
 export WHERRY_KAFKA_TEST_BROKER=127.0.0.1:9092
@@ -125,7 +125,7 @@ export WHERRY_KAFKA_TEST_BROKERS=${#nodes[@]}
 export WHERRY_TRUST_BROKER=127.0.0.1:9093
 export WHERRY_TRUST_CLUSTER_ID=$cluster
 export WHERRY_TRUST_CA=$dir/ca.crt
-export WHERRY_TRUST_ADMIN_USER=wherry-admin
-export WHERRY_TRUST_ADMIN_PASSWORD_FILE=$dir/admin-password
+export WHERRY_TRUST_SUPER_USER=wherry-admin
+export WHERRY_TRUST_SUPER_USER_PASSWORD_FILE=$dir/admin-password
 export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=$dir/operator-password
 EOF

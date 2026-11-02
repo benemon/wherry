@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 )
 
 func (service *Service) reconcileACLs(ctx context.Context, state State) error {
-	client := kadm.NewClient(service.Admin)
+	client := kadm.NewClient(service.SuperUser)
 	for _, acl := range ACLs(state) {
 		builder, err := aclBuilder(acl)
 		if err != nil {
@@ -57,7 +57,7 @@ func (service *Service) reconcileACLs(ctx context.Context, state State) error {
 }
 
 func (service *Service) verifyACLs(ctx context.Context, state State) error {
-	client := kadm.NewClient(service.Admin)
+	client := kadm.NewClient(service.SuperUser)
 	for _, acl := range ACLs(state) {
 		builder, err := aclBuilder(acl)
 		if err != nil {
@@ -87,7 +87,7 @@ func (service *Service) deletePrincipalACLs(ctx context.Context, principal strin
 
 // deleteACLs deletes the ACLs builder matches and waits until no broker describes one.
 func (service *Service) deleteACLs(ctx context.Context, builder *kadm.ACLBuilder) error {
-	results, err := kadm.NewClient(service.Admin).DeleteACLs(ctx, builder)
+	results, err := kadm.NewClient(service.SuperUser).DeleteACLs(ctx, builder)
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func (service *Service) deleteACLs(ctx context.Context, builder *kadm.ACLBuilder
 	// Brokers apply an ACL deletion in turn, so a describe can briefly still list it; retry within the probe window.
 	deadline := time.Now().Add(probeWindow)
 	for {
-		remaining, err := kadm.NewClient(service.Admin).DescribeACLs(ctx, builder)
+		remaining, err := kadm.NewClient(service.SuperUser).DescribeACLs(ctx, builder)
 		if err != nil {
 			return err
 		}

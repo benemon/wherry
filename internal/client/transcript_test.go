@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -57,7 +57,7 @@ func TestEmptyLastChunkIsNoLine(t *testing.T) {
 // end lists topic's end offset.
 func (f *fixture) endOffset(t *testing.T, topic string) int64 {
 	t.Helper()
-	ends, err := kadm.NewClient(f.service.Admin).ListEndOffsets(f.ctx, topic)
+	ends, err := kadm.NewClient(f.service.SuperUser).ListEndOffsets(f.ctx, topic)
 	if err == nil {
 		err = ends.Error()
 	}
@@ -88,7 +88,7 @@ func TestStatusAndEventsOfAnEndedRunFetchNoTranscriptRecords(t *testing.T) {
 	for range 5 {
 		f.endedRun(t, 20)
 	}
-	feed, transcript := admin.TenantTopic("tenant-a"), admin.TenantTranscriptTopic("tenant-a")
+	feed, transcript := operator.TenantTopic("tenant-a"), operator.TenantTranscriptTopic("tenant-a")
 	for _, record := range mustRead(t, f, feed) {
 		if typ, _ := header(record.Value); typ == wire.ChunkType || typ == wire.OutputType {
 			t.Fatalf("a %s record on the feed", typ)
@@ -137,7 +137,7 @@ func TestTranscriptOfAnOlderRunFetchesFromItsEarliestEcho(t *testing.T) {
 	for range 5 {
 		f.endedRun(t, 20)
 	}
-	topic := admin.TenantTranscriptTopic("tenant-a")
+	topic := operator.TenantTranscriptTopic("tenant-a")
 	records := mustRead(t, f, topic)
 	first := slices.IndexFunc(records, func(record *kgo.Record) bool { return string(record.Key) == runID })
 	end := f.endOffset(t, topic)
@@ -159,7 +159,7 @@ func TestTranscriptWaitsForChunksCommittedApartFromTheTerminal(t *testing.T) {
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
 	receiver.feed(t, f.ctx, runID, receiver.chunk(t, task, 1, 0))
-	producer, err := kgo.NewClient(append(receiver.kafka.Opts(), kgo.TransactionalID(admin.TransactionalPrefix(receiver.pool)+"window"))...)
+	producer, err := kgo.NewClient(append(receiver.kafka.Opts(), kgo.TransactionalID(operator.TransactionalPrefix(receiver.pool)+"window"))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestTranscriptWaitsForChunksCommittedApartFromTheTerminal(t *testing.T) {
 	if err := producer.BeginTransaction(); err != nil {
 		t.Fatal(err)
 	}
-	if err := producer.ProduceSync(f.ctx, &kgo.Record{Topic: admin.TenantTranscriptTopic("tenant-a"), Key: []byte(runID), Value: receiver.chunk(t, task, 1, 5)}).FirstErr(); err != nil {
+	if err := producer.ProduceSync(f.ctx, &kgo.Record{Topic: operator.TenantTranscriptTopic("tenant-a"), Key: []byte(runID), Value: receiver.chunk(t, task, 1, 5)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateCompleted, nil), receiver.terminal(t, task, 1, wire.TaskStateCompleted, 2))
@@ -196,7 +196,7 @@ func TestTranscriptWaitsForChunksCommittedApartFromTheTerminal(t *testing.T) {
 
 func mustRead(t *testing.T, f *fixture, topic string) []*kgo.Record {
 	t.Helper()
-	records, err := readTopic(f.ctx, f.service.Admin, topic)
+	records, err := readTopic(f.ctx, f.service.SuperUser, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestTranscriptStreamFetchesEachChunkOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := signed.RedactionMarker(local.RedactionKey, "model")
-	topic := admin.TenantTranscriptTopic("tenant-a")
+	topic := operator.TenantTranscriptTopic("tenant-a")
 	var counted traffic
 	reader := f.countedReader(t, &counted)
 	// The reader names the markers of the credentials f.host configures.
@@ -368,7 +368,7 @@ func TestTranscriptStreamTailsTheTopic(t *testing.T) {
 	receiver.advertise(t, f.ctx, nil)
 	runID := f.submit(t, defaultSelector()).RunID
 	task := receiver.claim(t, f.ctx, runID)[0]
-	topic := admin.TenantTranscriptTopic("tenant-a")
+	topic := operator.TenantTranscriptTopic("tenant-a")
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
 	if err := f.service.HostAdd(f.ctx, "tenant-a", "host-tail", bundle); err != nil {
 		t.Fatal(err)

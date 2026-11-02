@@ -12,8 +12,8 @@ The receiver logs to standard output, one line per event, each prefixed
 and under systemd, `journalctl -u` with the receiver's unit. The confirming
 commands run on a host of a tenant entitled to the pool, with its
 [client configuration](configuration.md#client-configuration), except
-`wherry admin` commands, which need the
-[`wherry admin` environment](operations.md#set-up-wherry-admin).
+`wherry operator` commands, which need the
+[`wherry operator` environment](operations.md#set-up-wherry-operator).
 
 ## WherryReceiverNotAdvertising
 
@@ -40,7 +40,7 @@ Confirm it:
    or `ended` after a revocation, and `advertisement_age` shows the age of its
    latest advertisement.
 2. Read the receiver's log.
-   - `waiting for configuration` repeats while `wherry.admin` holds no
+   - `waiting for configuration` repeats while `wherry.operator` holds no
      configuration for the receiver.
    - `advertise: <error>` and `periodic step: <error>` name a failed
      advertisement and its cause.
@@ -54,7 +54,7 @@ Confirm it:
    - `configuration changed; exiting once held runs end` comes before a
      restart the supervisor is expected to make, once the runs the
      receiver holds have ended.
-3. Run `wherry admin receiver show RECEIVER` to check the receiver has a
+3. Run `wherry operator receiver show RECEIVER` to check the receiver has a
    configuration.
 
 Then:
@@ -65,7 +65,7 @@ Then:
 - For `waiting for configuration`, record the configuration, as in
   [Add a receiver](operations.md#add-a-receiver).
 - For write errors, follow [WherryBrokerUnreachable](#wherrybrokerunreachable).
-  For `denied write`, run `wherry admin check`, which confirms that every
+  For `denied write`, run `wherry operator check`, which confirms that every
   ACL the state calls for exists.
 - For `plugin <type> exited`, fix the cause the plugin's lines give, such as
   an unreachable platform API or memory pressure on the receiver host. For
@@ -239,11 +239,11 @@ Then:
   [Stop a pool's key custodian](operations.md#stop-a-pool-s-key-custodian).
 - For a takeover with no planned stop, crash or lost state directory before
   it, treat the new custodian as suspect and revoke it with
-  `wherry admin receiver revoke`.
+  `wherry operator receiver revoke`.
 - For a contested snapshot with no custodian change, find the writer that
   initialised `p.<pool>.custodian`: every member of the pool holds that
   transactional ID. Revoke a suspect receiver with
-  `wherry admin receiver revoke`.
+  `wherry operator receiver revoke`.
 
 ## WherryRunsKeyLost
 
@@ -347,7 +347,7 @@ Then:
 - For a TLS or SCRAM error, check the bundle's CA against the listener's
   certificate and its principal and password against the cluster's SCRAM
   credentials.
-- For `denied <op>`, run `wherry admin check` to confirm the ACLs the state
+- For `denied <op>`, run `wherry operator check` to confirm the ACLs the state
   calls for exist, and fix the bundle's credentials; until then the
   receiver restarts and exits again.
 - A task whose claim lapsed during the outage is redelivered, and its next

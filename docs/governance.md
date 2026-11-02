@@ -5,10 +5,10 @@ where a run's data goes.
 
 ## Identity and grants
 
-The operator issues every identity. `wherry admin` creates each host and
+The operator issues every identity. `wherry operator` creates each host and
 receiver as a Kafka principal and writes its bundle, which the operator
-hands over outside Kafka. The broker enforces every grant: `wherry admin`
-generates each ACL from the state on `wherry.admin`, and no other approval
+hands over outside Kafka. The broker enforces every grant: `wherry operator`
+generates each ACL from the state on `wherry.operator`, and no other approval
 step exists. A tenant's hosts reach only the pools the tenant is entitled
 to, and a receiver reaches only its own pool.
 [Identity and authorisation](concepts.md#identity-and-authorisation)
@@ -18,14 +18,14 @@ describes the principals and [ACLs](design.md#acls) lists the matrix.
 
 Every record on a shared topic is an EdDSA JWS signed by its owner. A reader
 verifies it against the owner's current key, read from the owner's own key
-topic, and then checks it against `wherry.admin`: a submission must come
+topic, and then checks it against `wherry.operator`: a submission must come
 from a live host of a tenant entitled to the pool, and a receiver's record
 from a live member of the pool the run was placed in. No host or receiver
 can vouch for another's key. [Topics](design.md#topics) gives the detail.
 
 ## Run history
 
-Every operator action is a record on `wherry.admin`, which keeps its
+Every operator action is a record on `wherry.operator`, which keeps its
 records forever. A run's submission, statuses, transcript and result are
 records on its pool's and tenant's topics: the task and event topics keep
 them for the pool's `start_by_limit` plus a day and six hours, 4 days 6

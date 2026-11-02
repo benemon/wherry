@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
@@ -38,7 +38,7 @@ var storageTransport http.RoundTripper
 
 // bucket opens a pool's bucket, path-style, with this host's storage credential, which never leaves the host: the
 // receiver and the agent see only URLs it presigns.
-func (h *Host) bucket(ctx context.Context, pool string, storage *admin.Storage) (*minio.Client, error) {
+func (h *Host) bucket(ctx context.Context, pool string, storage *operator.Storage) (*minio.Client, error) {
 	if h.storage == nil {
 		return nil, fmt.Errorf("%w: this host's configuration has no storage credential for S3 inputs and outputs", ErrInvalidInput)
 	}
@@ -99,7 +99,7 @@ func uploadInputs(ctx context.Context, store *minio.Client, bucket, tenant, run 
 func presign(ctx context.Context, store *minio.Client, bucket, tenant, inputRun, run string, inputs, outputs []string, getDeadline, deadline time.Time) (map[string][]byte, error) {
 	values := map[string][]byte{}
 	if len(inputs) > 0 {
-		lifetime := min(time.Until(getDeadline).Truncate(time.Second)+time.Second, admin.MaxPresign)
+		lifetime := min(time.Until(getDeadline).Truncate(time.Second)+time.Second, operator.MaxPresign)
 		if lifetime < 2*time.Second {
 			return nil, errors.New("task_started_by has passed")
 		}
@@ -114,7 +114,7 @@ func presign(ctx context.Context, store *minio.Client, bucket, tenant, inputRun,
 	if len(outputs) == 0 {
 		return values, nil
 	}
-	lifetime := min(time.Until(deadline).Truncate(time.Second)+time.Second, admin.MaxPresign)
+	lifetime := min(time.Until(deadline).Truncate(time.Second)+time.Second, operator.MaxPresign)
 	if lifetime < 2*time.Second {
 		return nil, errors.New("task_ended_by has passed")
 	}

@@ -7,14 +7,14 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 )
 
 // resolvePlacement chooses, among live advertisements in the tenant's entitled pools, a member with a ready profile
 // launching the agent with labels satisfying selector. Labels come from the operator's config record, never the
 // advertisement. When no member places the task and a pool's terms refuse its model, the error is that refusal.
-func resolvePlacement(state admin.State, tenant, agent, model string, selector []wire.Requirement, ads map[string]wire.Advertisement) (string, wire.Placement, error) {
+func resolvePlacement(state operator.State, tenant, agent, model string, selector []wire.Requirement, ads map[string]wire.Advertisement) (string, wire.Placement, error) {
 	var chosen *wire.Advertisement
 	var placement wire.Placement
 	var chosenDefault bool
@@ -42,9 +42,9 @@ func resolvePlacement(state admin.State, tenant, agent, model string, selector [
 // place returns the first agent, by preference, whose terms in pool hold model and that one of the member's ready
 // profiles launches with labels satisfying selector. An empty model takes the agent's default model, and an agent with
 // models but no default requires one.
-func place(terms admin.Terms, pool string, config admin.ReceiverConfig, agent, model string, selector []wire.Requirement, offers []wire.Offer) (wire.Placement, error) {
+func place(terms operator.Terms, pool string, config operator.ReceiverConfig, agent, model string, selector []wire.Requirement, offers []wire.Offer) (wire.Placement, error) {
 	if agent != "" {
-		index := slices.IndexFunc(terms.Agents, func(allowed admin.AgentTerms) bool { return allowed.Name == agent })
+		index := slices.IndexFunc(terms.Agents, func(allowed operator.AgentTerms) bool { return allowed.Name == agent })
 		if index < 0 {
 			return wire.Placement{}, ErrNoMatchingReceiver
 		}
@@ -55,7 +55,7 @@ func place(terms admin.Terms, pool string, config admin.ReceiverConfig, agent, m
 			return wire.Placement{}, fmt.Errorf("%w: agent %s in pool %s requires a model", ErrInvalidInput, agent, pool)
 		}
 	}
-	var candidates []admin.AgentTerms
+	var candidates []operator.AgentTerms
 	for _, allowed := range terms.Agents {
 		switch {
 		case agent != "" && allowed.Name != agent, model != "" && !slices.Contains(allowed.Models, model), model == "" && requiresModel(allowed):
@@ -73,7 +73,7 @@ func place(terms admin.Terms, pool string, config admin.ReceiverConfig, agent, m
 	}
 	for _, candidate := range candidates {
 		for _, offer := range offers {
-			index := slices.IndexFunc(config.Profiles, func(profile admin.ProfileSettings) bool { return profile.Name == offer.Profile })
+			index := slices.IndexFunc(config.Profiles, func(profile operator.ProfileSettings) bool { return profile.Name == offer.Profile })
 			if index >= 0 && config.Profiles[index].Agent == candidate.Name && wire.Satisfies(selector, config.Profiles[index].Labels) {
 				placed := wire.Placement{Agent: candidate.Name, Selector: selector, Model: model}
 				if model == "" {
@@ -87,7 +87,7 @@ func place(terms admin.Terms, pool string, config admin.ReceiverConfig, agent, m
 }
 
 // requiresModel reports whether agent's terms make every task name a model: models without a default.
-func requiresModel(agent admin.AgentTerms) bool {
+func requiresModel(agent operator.AgentTerms) bool {
 	return len(agent.Models) > 0 && agent.DefaultModel == ""
 }
 
@@ -96,7 +96,7 @@ func spare(ad wire.Advertisement) int64 {
 }
 
 // profileInlineLimit returns the smallest declared limit of the advertised profiles in pool that satisfy placement.
-func profileInlineLimit(state admin.State, pool string, placement wire.Placement, ads map[string]wire.Advertisement) (int64, string) {
+func profileInlineLimit(state operator.State, pool string, placement wire.Placement, ads map[string]wire.Advertisement) (int64, string) {
 	var limit int64
 	var limiting string
 	for _, receiver := range slices.Sorted(maps.Keys(ads)) {
@@ -106,7 +106,7 @@ func profileInlineLimit(state admin.State, pool string, placement wire.Placement
 		}
 		config := state.Receivers[receiver]
 		for _, offer := range ad.Offers {
-			index := slices.IndexFunc(config.Profiles, func(profile admin.ProfileSettings) bool { return profile.Name == offer.Profile })
+			index := slices.IndexFunc(config.Profiles, func(profile operator.ProfileSettings) bool { return profile.Name == offer.Profile })
 			if index < 0 || config.Profiles[index].Agent != placement.Agent || !wire.Satisfies(placement.Selector, config.Profiles[index].Labels) {
 				continue
 			}

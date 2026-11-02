@@ -86,7 +86,7 @@ long.
 
 wherry is self-hosted and needs Kafka. An operator runs a Kafka 4.3 cluster
 with share groups, SCRAM over TLS and an authoriser, creates pools and
-grants access with `wherry admin`, and runs receivers with the plugins
+grants access with `wherry operator`, and runs receivers with the plugins
 for the target platforms. A coding agent's harness talks to wherry
 through the `wherry` CLI or its MCP server. [Prepare Kafka](operations.md#prepare-kafka)
 lists the cluster settings, [Why Kafka](design.md#why-kafka) explains the

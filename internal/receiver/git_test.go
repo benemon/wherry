@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -15,7 +15,7 @@ import (
 // testHostKey is a known_hosts line as ssh-keyscan prints one.
 const testHostKey = "git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
 
-func vcsTerms(hosts ...string) admin.Terms {
+func vcsTerms(hosts ...string) operator.Terms {
 	terms := testTerms()
 	terms.VCS = hosts
 	return terms

@@ -63,9 +63,9 @@ run when their variables are set and skip otherwise:
 - `WHERRY_KAFKA_TEST_BROKER`: a plaintext Kafka 4.3 broker with share
   groups, such as `127.0.0.1:9092`, for the receiver's claim tests.
 - `WHERRY_TRUST_BROKER` with the other `WHERRY_TRUST_*` variables of
-  `wherry admin`: the TLS broker `test/kafka/up.sh` or
+  `wherry operator`: the TLS broker `test/kafka/up.sh` or
   `test/kafka/up-cluster.sh` starts, for the provisioning, ACL and
-  revocation tests. They write to the broker's `wherry.admin`, so they fail
+  revocation tests. They write to the broker's `wherry.operator`, so they fail
   on any broker whose cluster ID is not the `WHERRY_TRUST_CLUSTER_ID` in the
   script's env file: never point them at a shared cluster. `WHERRY_TRUST_RECONCILE_WAIT` adds the check that
   provisioning survives a reconciliation.
@@ -79,10 +79,10 @@ and writes their variables to `DIR/env`; CI runs these tests against it:
 
 ```sh
 test/kafka/up.sh /tmp/wherry-kafka && . /tmp/wherry-kafka/env
-go test -p 1 -count=1 ./internal/admin/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
+go test -p 1 -count=1 ./internal/operator/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
 ```
 
-The packages share the broker's `wherry.admin`, so they run one at a time.
+The packages share the broker's `wherry.operator`, so they run one at a time.
 
 `test/s3/up.sh DIR` starts [ceph-aio](https://github.com/benemon/ceph-aio), a
 single-node Ceph with RGW, creates a user with generated keys and writes the S3

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -21,7 +21,7 @@ func (f fixture) startFailed(t *testing.T, record *kgo.Record, receiver string, 
 	task := f.parse(t, record)
 	failure := &wire.StartFailure{Wherry: f.receiver.binding(task, 1), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: wire.TaskHash(record.Value)}
 	failure.Wherry.Receiver = receiver
-	f.produce(t, admin.PoolEventsTopic(testPool), string(record.Key), must(t)(wire.SignRecord(failure, key)))
+	f.produce(t, operator.PoolEventsTopic(testPool), string(record.Key), must(t)(wire.SignRecord(failure, key)))
 }
 
 func TestRedeliveryAfterOwnStartFailureReleasesWithoutDispatch(t *testing.T) {
@@ -166,7 +166,7 @@ func TestStartFailureOfAnotherTenantsRunDoesNotHoldTheTaskBack(t *testing.T) {
 	task := testSubmission("run-a")
 	asTenantB(task)
 	failure := &wire.StartFailure{Wherry: f.receiver.binding(task, 1), Profile: "nomad", Agent: "claude", Class: "dispatch", TaskHash: wire.TaskHash(other.Value)}
-	f.produce(t, admin.PoolEventsTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(failure, f.receiver.signing)))
+	f.produce(t, operator.PoolEventsTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(failure, f.receiver.signing)))
 	events, err := f.receiver.readEvents(f.ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +200,7 @@ func TestPoolEventsRefuseUnboundStatusesAndStartFailures(t *testing.T) {
 				mutate(&failure.Wherry)
 			}
 			for _, value := range []wire.Record{status, failure} {
-				f.produce(t, admin.PoolEventsTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(value, f.receiver.signing)))
+				f.produce(t, operator.PoolEventsTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(value, f.receiver.signing)))
 			}
 			events, err := f.receiver.readEvents(f.ctx)
 			if err != nil {
@@ -222,7 +222,7 @@ func TestPoolEventsRefuseAnEndedMember(t *testing.T) {
 	f.startFailed(t, record, testReceiver, f.receiver.signing)
 	// A refresh replaces the state, never edits it.
 	f.receiver.mu.Lock()
-	f.receiver.state.Ended = map[string]bool{admin.ReceiverPrincipal(testReceiver): true}
+	f.receiver.state.Ended = map[string]bool{operator.ReceiverPrincipal(testReceiver): true}
 	f.receiver.mu.Unlock()
 	events, err := f.receiver.readEvents(f.ctx)
 	if err != nil {

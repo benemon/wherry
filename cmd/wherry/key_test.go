@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
@@ -21,7 +21,7 @@ import (
 // keyHost is host-a of tenant-a on a TLS kfake cluster, initialised through wherry init.
 type keyHost struct {
 	ctx      context.Context
-	service  *admin.Service
+	service  *operator.Service
 	config   string
 	keyPath  string
 	stateDir string
@@ -33,9 +33,9 @@ func newKeyHost(t *testing.T) keyHost {
 	t.Cleanup(cancel)
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
-	service := &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
+	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
 		Broker: address, CA: ca, DeliveryCeiling: 10}
-	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []admin.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	dir := t.TempDir()
 	h := keyHost{ctx: ctx, service: service, config: filepath.Join(dir, "config.yaml"), keyPath: filepath.Join(dir, "host.key"), stateDir: filepath.Join(dir, "state")}
@@ -72,12 +72,12 @@ func (h keyHost) key(t *testing.T) ed25519.PrivateKey {
 // topic returns the host's key topic records and its folded state.
 func (h keyHost) topic(t *testing.T) ([]*kgo.Record, signed.KeyState) {
 	t.Helper()
-	owner, topic := signed.HostOwner("tenant-a", "host-a"), admin.HostTopic("tenant-a", "host-a")
-	records, err := readTopic(h.ctx, h.service.Admin, topic)
+	owner, topic := signed.HostOwner("tenant-a", "host-a"), operator.HostTopic("tenant-a", "host-a")
+	records, err := readTopic(h.ctx, h.service.SuperUser, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys, err := admin.ReadKeys(h.ctx, h.service.Admin, map[string]string{owner: topic})
+	keys, err := operator.ReadKeys(h.ctx, h.service.SuperUser, map[string]string{owner: topic})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestHostCommandSettlesALeftoverNextKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.service.Admin.ProduceSync(h.ctx, &kgo.Record{Topic: admin.HostTopic("tenant-a", "host-a"), Value: rotation}).FirstErr(); err != nil {
+	if err := h.service.SuperUser.ProduceSync(h.ctx, &kgo.Record{Topic: operator.HostTopic("tenant-a", "host-a"), Value: rotation}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	stdout.Reset()
@@ -212,9 +212,9 @@ func TestReceiverRotateKey(t *testing.T) {
 	defer cancel()
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
-	service := &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
+	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
 		Broker: address, CA: ca, DeliveryCeiling: 10}
-	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []admin.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}}}, DefaultAgent: "claude",
 		DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
@@ -222,20 +222,20 @@ func TestReceiverRotateKey(t *testing.T) {
 	dir := t.TempDir()
 	bundle, stateDir := filepath.Join(dir, "receiver.yaml"), filepath.Join(dir, "state")
 	keyPath := filepath.Join(stateDir, "signing.key")
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1,
-		Profiles: []admin.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude"}}, PluginSHA256: map[string]string{"fake": fakeSHA256}}
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1,
+		Profiles: []operator.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude"}}, PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	if err := service.ReceiverAdd(ctx, config, bundle); err != nil {
 		t.Fatal(err)
 	}
 	resalt(t, service, bundle)
-	topic := admin.ReceiverTopic("receiver-a")
+	topic := operator.ReceiverTopic("receiver-a")
 	folded := func() ([]*kgo.Record, signed.KeyState) {
 		t.Helper()
-		records, err := readTopic(ctx, service.Admin, topic)
+		records, err := readTopic(ctx, service.SuperUser, topic)
 		if err != nil {
 			t.Fatal(err)
 		}
-		keys, err := admin.ReadKeys(ctx, service.Admin, map[string]string{"receiver-a": topic})
+		keys, err := operator.ReadKeys(ctx, service.SuperUser, map[string]string{"receiver-a": topic})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -294,7 +294,7 @@ func TestReceiverRotateKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: rotation}).FirstErr(); err != nil {
+	if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: rotation}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	start()

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -47,9 +47,9 @@ func TestKafkaClientRejectsPlaintextListener(t *testing.T) {
 	}
 	t.Setenv("WHERRY_TRUST_BROKER", cluster.ListenAddrs()[0])
 	t.Setenv("WHERRY_TRUST_CA", caPath)
-	t.Setenv("WHERRY_TRUST_ADMIN_USER", "admin")
-	t.Setenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE", passwordPath)
-	client, err := adminKafka(cluster.ListenAddrs()[0], pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), "admin", "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
+	t.Setenv("WHERRY_TRUST_SUPER_USER", "admin")
+	t.Setenv("WHERRY_TRUST_SUPER_USER_PASSWORD_FILE", passwordPath)
+	client, err := operatorKafka(cluster.ListenAddrs()[0], pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), "admin", "WHERRY_TRUST_SUPER_USER_PASSWORD_FILE")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,8 +61,8 @@ func TestKafkaClientRejectsPlaintextListener(t *testing.T) {
 	}
 }
 
-// adminEnv points runAdmin at a TLS fake broker and returns an admin service on it.
-func adminEnv(t *testing.T) *admin.Service {
+// operatorEnv points runOperator at a TLS fake broker and returns an operator service on it.
+func operatorEnv(t *testing.T) *operator.Service {
 	cluster, ca := tlsCluster(t)
 	dir := t.TempDir()
 	files := map[string]string{"ca.pem": ca, "admin": "password", "operator": "operator-password"}
@@ -73,45 +73,45 @@ func adminEnv(t *testing.T) *admin.Service {
 	}
 	t.Setenv("WHERRY_TRUST_BROKER", cluster.ListenAddrs()[0])
 	t.Setenv("WHERRY_TRUST_CA", filepath.Join(dir, "ca.pem"))
-	t.Setenv("WHERRY_TRUST_ADMIN_USER", "admin")
-	t.Setenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE", filepath.Join(dir, "admin"))
+	t.Setenv("WHERRY_TRUST_SUPER_USER", "admin")
+	t.Setenv("WHERRY_TRUST_SUPER_USER_PASSWORD_FILE", filepath.Join(dir, "admin"))
 	t.Setenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE", filepath.Join(dir, "operator"))
 	address := cluster.ListenAddrs()[0]
-	return &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
+	return &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
 		Broker: address, CA: ca, DeliveryCeiling: 10}
 }
 
-func TestAdminCommandUsage(t *testing.T) {
-	adminEnv(t)
+func TestOperatorCommandUsage(t *testing.T) {
+	operatorEnv(t)
 	bundle := filepath.Join(t.TempDir(), "host.bundle")
 	for _, test := range []struct {
 		args []string
 		want string
 	}{
-		{[]string{"host", "add", "host-a", "--bundle-file", bundle}, "usage: wherry admin host add HOST --tenant TENANT"},
-		{[]string{"host", "add", "tenant-a", "host-a", "--bundle-file", bundle}, "usage: wherry admin host add HOST --tenant TENANT"},
-		{[]string{"host", "add", "tenant-a", "host-a", "--tenant", "tenant-a", "--bundle-file", bundle}, "usage: wherry admin host add HOST --tenant TENANT"},
-		{[]string{"host", "add", "host-a", "--tenant", "tenant-a"}, "usage: wherry admin host add HOST --tenant TENANT"},
-		{[]string{"host", "revoke", "host-a"}, "usage: wherry admin host revoke HOST --tenant TENANT"},
-		{[]string{"host", "revoke", "--tenant", "tenant-a"}, "usage: wherry admin host revoke HOST --tenant TENANT"},
-		{[]string{"receiver", "revoke"}, "usage: wherry admin receiver revoke RECEIVER"},
-		{[]string{"receiver", "revoke", "receiver-a", "receiver-b"}, "usage: wherry admin receiver revoke RECEIVER"},
-		{[]string{"pool", "entitle", "build"}, "usage: wherry admin pool entitle POOL --tenant TENANT"},
-		{[]string{"pool", "entitle", "--tenant", "tenant-a"}, "usage: wherry admin pool entitle POOL --tenant TENANT"},
-		{[]string{"tenant", "add", "tenant-a", "--pool", "build"}, "unknown admin command"},
-		{[]string{"revoke", "host", "tenant-a", "host-a"}, "unknown admin command"},
-		{[]string{"revoke", "receiver", "receiver-a"}, "unknown admin command"},
-		{[]string{"receiver", "configure", "receiver-a"}, "unknown admin command"},
-		{[]string{"skip", "42", "--sha256", strings.Repeat("0", 64)}, "unknown admin command"},
-		{[]string{"skip", "42"}, "unknown admin command"},
-		{[]string{"pool", "update"}, "usage: wherry admin pool update NAME"},
-		{[]string{"pool", "suspend"}, "usage: wherry admin pool suspend POOL"},
-		{[]string{"pool", "resume", "pool-a", "pool-b"}, "usage: wherry admin pool resume POOL"},
-		{[]string{"pool", "rotate-key"}, "usage: wherry admin pool rotate-key POOL [--suspect-key KID]..."},
+		{[]string{"host", "add", "host-a", "--bundle-file", bundle}, "usage: wherry operator host add HOST --tenant TENANT"},
+		{[]string{"host", "add", "tenant-a", "host-a", "--bundle-file", bundle}, "usage: wherry operator host add HOST --tenant TENANT"},
+		{[]string{"host", "add", "tenant-a", "host-a", "--tenant", "tenant-a", "--bundle-file", bundle}, "usage: wherry operator host add HOST --tenant TENANT"},
+		{[]string{"host", "add", "host-a", "--tenant", "tenant-a"}, "usage: wherry operator host add HOST --tenant TENANT"},
+		{[]string{"host", "revoke", "host-a"}, "usage: wherry operator host revoke HOST --tenant TENANT"},
+		{[]string{"host", "revoke", "--tenant", "tenant-a"}, "usage: wherry operator host revoke HOST --tenant TENANT"},
+		{[]string{"receiver", "revoke"}, "usage: wherry operator receiver revoke RECEIVER"},
+		{[]string{"receiver", "revoke", "receiver-a", "receiver-b"}, "usage: wherry operator receiver revoke RECEIVER"},
+		{[]string{"pool", "entitle", "build"}, "usage: wherry operator pool entitle POOL --tenant TENANT"},
+		{[]string{"pool", "entitle", "--tenant", "tenant-a"}, "usage: wherry operator pool entitle POOL --tenant TENANT"},
+		{[]string{"tenant", "add", "tenant-a", "--pool", "build"}, "unknown operator command"},
+		{[]string{"revoke", "host", "tenant-a", "host-a"}, "unknown operator command"},
+		{[]string{"revoke", "receiver", "receiver-a"}, "unknown operator command"},
+		{[]string{"receiver", "configure", "receiver-a"}, "unknown operator command"},
+		{[]string{"skip", "42", "--sha256", strings.Repeat("0", 64)}, "unknown operator command"},
+		{[]string{"skip", "42"}, "unknown operator command"},
+		{[]string{"pool", "update"}, "usage: wherry operator pool update NAME"},
+		{[]string{"pool", "suspend"}, "usage: wherry operator pool suspend POOL"},
+		{[]string{"pool", "resume", "pool-a", "pool-b"}, "usage: wherry operator pool resume POOL"},
+		{[]string{"pool", "rotate-key"}, "usage: wherry operator pool rotate-key POOL [--suspect-key KID]..."},
 		{[]string{"pool", "suspend", "pool-a", "--suspect-key", "kid"}, "unknown option --suspect-key"},
 	} {
 		var stdout, stderr bytes.Buffer
-		if err := runAdmin(test.args, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), test.want) {
+		if err := runOperator(test.args, &stdout, &stderr); err == nil || !strings.HasPrefix(err.Error(), test.want) {
 			t.Errorf("%q = %v, want %q", test.args, err, test.want)
 		}
 	}
@@ -122,8 +122,8 @@ func TestAdminCommandUsage(t *testing.T) {
 func TestRotateKeyReportStatesItsHorizon(t *testing.T) {
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	var out bytes.Buffer
-	writeRotateReport(&out, "pool-a", admin.RotateReport{SuspectKeys: []string{"kid-a", "kid-b"}, Horizon: map[int32]int64{1: 7, 0: 3}, OldestMS: now.Add(-50 * time.Hour).UnixMilli(),
-		Tasks: []admin.SuspectTask{{Run: "run-a", Tenant: "tenant-a", KeyID: "kid-a", Credentials: []string{"deploy", "model"}, AppendedMS: now.Add(-time.Hour).UnixMilli()}}}, now)
+	writeRotateReport(&out, "pool-a", operator.RotateReport{SuspectKeys: []string{"kid-a", "kid-b"}, Horizon: map[int32]int64{1: 7, 0: 3}, OldestMS: now.Add(-50 * time.Hour).UnixMilli(),
+		Tasks: []operator.SuspectTask{{Run: "run-a", Tenant: "tenant-a", KeyID: "kid-a", Credentials: []string{"deploy", "model"}, AppendedMS: now.Add(-time.Hour).UnixMilli()}}}, now)
 	want := `pool pool-a's key custodian rotated for the rotate-key request; tasks appended through that rotation are listed
 suspect_keys=kid-a,kid-b
 horizon partition=0 oldest_retained_offset=3
@@ -136,21 +136,21 @@ tasks=1
 		t.Fatalf("report:\n%s\nwant:\n%s", out.String(), want)
 	}
 	out.Reset()
-	writeRotateReport(&out, "pool-a", admin.RotateReport{SuspectKeys: []string{"kid-a"}, Horizon: map[int32]int64{0: 0}}, now)
+	writeRotateReport(&out, "pool-a", operator.RotateReport{SuspectKeys: []string{"kid-a"}, Horizon: map[int32]int64{0: 0}}, now)
 	if !strings.Contains(out.String(), "horizon: the task topic retains no task; tasks deleted by retention are not listed\n") {
 		t.Fatalf("empty report states no horizon:\n%s", out.String())
 	}
 	out.Reset()
-	writeRotateReport(&out, "pool-a", admin.RotateReport{SuspectKeys: []string{"kid-a"}, Horizon: map[int32]int64{0: 9}, DeletedFrom: map[int32]int64{0: 3}}, now)
+	writeRotateReport(&out, "pool-a", operator.RotateReport{SuspectKeys: []string{"kid-a"}, Horizon: map[int32]int64{0: 9}, DeletedFrom: map[int32]int64{0: 3}}, now)
 	if !strings.Contains(out.String(), "horizon partition=0 oldest_retained_offset=9\nhorizon partition=0: retention deleted the tasks at offsets 3 to 8 during the scan; they may not be listed\n") {
 		t.Fatalf("report does not state the tasks deleted during the scan:\n%s", out.String())
 	}
 }
 
 func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
-	adminEnv(t)
+	operatorEnv(t)
 	var stdout, stderr bytes.Buffer
-	err := runAdmin([]string{"receiver", "revoke", "receiver-a", "--wait", "1ms"}, &stdout, &stderr)
+	err := runOperator([]string{"receiver", "revoke", "receiver-a", "--wait", "1ms"}, &stdout, &stderr)
 	if err == nil || err.Error() != "revocation incomplete" {
 		t.Fatalf("revoke = %v, want revocation incomplete", err)
 	}
@@ -167,7 +167,7 @@ func TestRevokePrintsTheCauseOfAFailedStep(t *testing.T) {
 }
 
 func TestRevokeRefusesAWaitThatIsNotPositive(t *testing.T) {
-	adminEnv(t)
+	operatorEnv(t)
 	const want = "--wait must be positive; omit it to compute the safe wait from the broker's timeouts"
 	for _, args := range [][]string{
 		{"receiver", "revoke", "receiver-a", "--wait", "0s"},
@@ -176,12 +176,12 @@ func TestRevokeRefusesAWaitThatIsNotPositive(t *testing.T) {
 		{"host", "revoke", "host-a", "--tenant", "tenant-a", "--wait", "-1s"},
 	} {
 		var stdout bytes.Buffer
-		if err := runAdmin(args, &stdout, io.Discard); err == nil || err.Error() != want || stdout.Len() != 0 {
+		if err := runOperator(args, &stdout, io.Discard); err == nil || err.Error() != want || stdout.Len() != 0 {
 			t.Errorf("%q = %v with output %q, want %q before any step", args, err, stdout.String(), want)
 		}
 	}
 	var stdout bytes.Buffer
-	if err := runAdmin([]string{"receiver", "revoke", "receiver-a"}, &stdout, io.Discard); err != nil && err.Error() == want || !strings.HasPrefix(stdout.String(), "step=1 ") {
+	if err := runOperator([]string{"receiver", "revoke", "receiver-a"}, &stdout, io.Discard); err != nil && err.Error() == want || !strings.HasPrefix(stdout.String(), "step=1 ") {
 		t.Fatalf("revoke without --wait = %v with output %q, want the revocation steps run", err, stdout.String())
 	}
 }
@@ -191,7 +191,7 @@ func TestRevokeRefusesAWaitThatIsNotPositive(t *testing.T) {
 // The record decodes numbers as float64; show prints a whole one as an integer.
 func TestReceiverShowPrintsWholeNumbersAsIntegers(t *testing.T) {
 	var out bytes.Buffer
-	config := admin.ReceiverConfig{Capacity: 1, Profiles: []admin.ProfileSettings{{Name: "p", Plugin: "nomad", Agent: "claude",
+	config := operator.ReceiverConfig{Capacity: 1, Profiles: []operator.ProfileSettings{{Name: "p", Plugin: "nomad", Agent: "claude",
 		Config: map[string]any{"memory_mb": float64(1 << 20), "ratio": 0.5, "sizes": []any{float64(2048000)}}}}}
 	if err := showReceiver(&out, config); err != nil {
 		t.Fatal(err)
@@ -204,30 +204,30 @@ func TestReceiverShowPrintsWholeNumbersAsIntegers(t *testing.T) {
 }
 
 func TestReceiverShowAndDryRun(t *testing.T) {
-	service := adminEnv(t)
+	service := operatorEnv(t)
 	ctx := context.Background()
-	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
 	if err := service.PoolCreate(ctx, "pool-a", terms); err != nil {
 		t.Fatal(err)
 	}
-	recorded := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 3, Profiles: []admin.ProfileSettings{{Name: "old", Plugin: "nomad", Agent: "claude"}},
+	recorded := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 3, Profiles: []operator.ProfileSettings{{Name: "old", Plugin: "nomad", Agent: "claude"}},
 		PluginSHA256: map[string]string{"nomad": fakeSHA256}}
 	if err := service.ReceiverAdd(ctx, recorded, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	records := func() int64 {
 		t.Helper()
-		offsets, err := kadm.NewClient(service.Admin).ListEndOffsets(ctx, admin.AdminTopic)
+		offsets, err := kadm.NewClient(service.SuperUser).ListEndOffsets(ctx, operator.OperatorTopic)
 		if err != nil || offsets.Error() != nil {
 			t.Fatal(err, offsets.Error())
 		}
-		offset, _ := offsets.Lookup(admin.AdminTopic, 0)
+		offset, _ := offsets.Lookup(operator.OperatorTopic, 0)
 		return offset.Offset
 	}
 	wherry := func(args ...string) string {
 		t.Helper()
 		var stdout bytes.Buffer
-		if err := runAdmin(args, &stdout, io.Discard); err != nil {
+		if err := runOperator(args, &stdout, io.Discard); err != nil {
 			t.Fatalf("%q: %v", args, err)
 		}
 		return stdout.String()
@@ -249,11 +249,11 @@ profiles:
 	before := records()
 	pin := "nomad=" + fakeSHA256
 	for _, bad := range []string{"nomad=" + strings.ToUpper(fakeSHA256), "nomad=" + fakeSHA256[1:], "nomad=" + fakeSHA256 + "0", "nomad=" + strings.Repeat("g", 64), "Nomad=" + fakeSHA256, "nomad"} {
-		if err := runAdmin([]string{"receiver", "update", "receiver-a", "--config-file", file, "--plugin-sha256", bad}, io.Discard, io.Discard); err == nil || records() != before {
+		if err := runOperator([]string{"receiver", "update", "receiver-a", "--config-file", file, "--plugin-sha256", bad}, io.Discard, io.Discard); err == nil || records() != before {
 			t.Fatalf("update --plugin-sha256 %s: %v; want it refused before writing", bad, err)
 		}
 	}
-	if err := runAdmin([]string{"receiver", "update", "receiver-a", "--config-file", file}, io.Discard, io.Discard); err == nil || err.Error() != "plugin type nomad has no pinned SHA-256; set it with receiver update --plugin-sha256 nomad=HEX" || records() != before {
+	if err := runOperator([]string{"receiver", "update", "receiver-a", "--config-file", file}, io.Discard, io.Discard); err == nil || err.Error() != "plugin type nomad has no pinned SHA-256; set it with receiver update --plugin-sha256 nomad=HEX" || records() != before {
 		t.Fatalf("update without a pin: %v; want it refused before writing", err)
 	}
 	dryRun := wherry("receiver", "update", "receiver-a", "--config-file", file, "--plugin-sha256", pin, "--dry-run")
@@ -289,14 +289,14 @@ profiles:
 	if got := wherry("receiver", "add", "receiver-b", "--pool", "pool-a", "--config-file", file, "--plugin-sha256", pin, "--dry-run"); got != resolved || records() != before {
 		t.Fatalf("receiver add --dry-run printed\n%s\nand left %d records; want the resolution and %d records", got, records(), before)
 	}
-	if err := runAdmin([]string{"receiver", "show", "receiver-b"}, io.Discard, io.Discard); err == nil {
+	if err := runOperator([]string{"receiver", "show", "receiver-b"}, io.Discard, io.Discard); err == nil {
 		t.Fatal("receiver add --dry-run recorded receiver-b")
 	}
 	if got := wherry("receiver", "show", "receiver-a"); got != shown {
 		t.Fatalf("after a dry run, show printed\n%s\nwant the recorded configuration", got)
 	}
 	outside := filepath.Join(writeTree(t, map[string]string{"receiver.yaml": basePlugin + item("name: codex\nagent: codex\n", "      ")}), "receiver.yaml")
-	if err := runAdmin([]string{"receiver", "update", "receiver-a", "--config-file", outside, "--plugin-sha256", pin, "--dry-run"}, io.Discard, io.Discard); err == nil || err.Error() != "receiver agent is outside pool terms" {
+	if err := runOperator([]string{"receiver", "update", "receiver-a", "--config-file", outside, "--plugin-sha256", pin, "--dry-run"}, io.Discard, io.Discard); err == nil || err.Error() != "receiver agent is outside pool terms" {
 		t.Fatalf("dry run of an agent outside the pool's terms: %v; want it refused", err)
 	}
 	if got := wherry("receiver", "update", "receiver-a", "--config-file", file, "--plugin-sha256", pin); got != "" || records() != before+1 {
@@ -319,11 +319,11 @@ profiles:
 // pool update records new terms and re-applies the share group's delivery limit and lock duration; pool create refuses
 // an existing pool and --dry-run writes nothing.
 func TestPoolUpdate(t *testing.T) {
-	service := adminEnv(t)
+	service := operatorEnv(t)
 	ctx := context.Background()
-	// runAdmin reads the delivery ceiling from the broker, and kfake reports none until it is set.
+	// runOperator reads the delivery ceiling from the broker, and kfake reports none until it is set.
 	ceiling := "10"
-	responses, err := kadm.NewClient(service.Admin).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "group.share.max.delivery.count.limit", Value: &ceiling}})
+	responses, err := kadm.NewClient(service.SuperUser).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "group.share.max.delivery.count.limit", Value: &ceiling}})
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -335,20 +335,20 @@ func TestPoolUpdate(t *testing.T) {
 	}
 	records := func() int64 {
 		t.Helper()
-		offsets, err := kadm.NewClient(service.Admin).ListEndOffsets(ctx, admin.AdminTopic)
+		offsets, err := kadm.NewClient(service.SuperUser).ListEndOffsets(ctx, operator.OperatorTopic)
 		if err != nil || offsets.Error() != nil {
 			t.Fatal(err, offsets.Error())
 		}
-		offset, _ := offsets.Lookup(admin.AdminTopic, 0)
+		offset, _ := offsets.Lookup(operator.OperatorTopic, 0)
 		return offset.Offset
 	}
-	terms := func() (string, string, admin.Terms) {
+	terms := func() (string, string, operator.Terms) {
 		t.Helper()
 		request := kmsg.NewPtrDescribeConfigsRequest()
 		resource := kmsg.NewDescribeConfigsRequestResource()
-		resource.ResourceType, resource.ResourceName = kmsg.ConfigResourceTypeGroupConfig, admin.PoolGroup("pool-a")
+		resource.ResourceType, resource.ResourceName = kmsg.ConfigResourceTypeGroupConfig, operator.PoolGroup("pool-a")
 		request.Resources = append(request.Resources, resource)
-		response, err := service.Admin.Request(ctx, request)
+		response, err := service.SuperUser.Request(ctx, request)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -364,24 +364,24 @@ func TestPoolUpdate(t *testing.T) {
 		}
 		return group["share.delivery.count.limit"], group["share.record.lock.duration.ms"], state.Pools["pool-a"]
 	}
-	if err := runAdmin([]string{"pool", "create", "pool-a", "--config-file", pool(5, "15s")}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"pool", "create", "pool-a", "--config-file", pool(5, "15s")}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if err := runAdmin([]string{"pool", "update", "pool-b", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err == nil || err.Error() != "no pool by that name" {
+	if err := runOperator([]string{"pool", "update", "pool-b", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err == nil || err.Error() != "no pool by that name" {
 		t.Fatalf("update of a missing pool = %v, want no pool by that name", err)
 	}
 	before := records()
-	if err := runAdmin([]string{"pool", "create", "pool-a", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err == nil || err.Error() != "pool exists; change its terms with pool update" {
+	if err := runOperator([]string{"pool", "create", "pool-a", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err == nil || err.Error() != "pool exists; change its terms with pool update" {
 		t.Fatalf("create of an existing pool = %v, want it refused naming pool update", err)
 	}
 	var stdout bytes.Buffer
-	if err := runAdmin([]string{"pool", "update", "pool-a", "--config-file", pool(3, "30s"), "--dry-run"}, &stdout, io.Discard); err != nil {
+	if err := runOperator([]string{"pool", "update", "pool-a", "--config-file", pool(3, "30s"), "--dry-run"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if limit, lock, recorded := terms(); records() != before || stdout.Len() != 0 || limit != "5" || lock != "15000" || recorded.DeliveryLimit != 5 || recorded.LockDurationMS != 15000 {
 		t.Fatalf("after create and dry run: %d records, output %q, share group %s/%s, terms %d/%d; want %d records, no output and 5/15000 throughout", records(), stdout.String(), limit, lock, recorded.DeliveryLimit, recorded.LockDurationMS, before)
 	}
-	if err := runAdmin([]string{"pool", "update", "pool-a", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err != nil {
+	if err := runOperator([]string{"pool", "update", "pool-a", "--config-file", pool(3, "30s")}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if limit, lock, recorded := terms(); records() != before+1 || limit != "3" || lock != "30000" || recorded.DeliveryLimit != 3 || recorded.LockDurationMS != 30000 {

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/pluginsdk"
 )
 
@@ -134,7 +134,7 @@ func TestReceiverConfigExampleParses(t *testing.T) {
 		t.Fatal(err)
 	}
 	want.Receiver, want.Pool, want.PluginSHA256 = "nomad-1", "build", map[string]string{"nomad": fakeSHA256}
-	if err := admin.ValidateConfig(want, terms); err != nil {
+	if err := operator.ValidateConfig(want, terms); err != nil {
 		t.Fatal(err)
 	}
 	documented(t, "configuration.md", "example-receiver.yaml", "example-receiver/receiver.yaml", "example-receiver/plugins/nomad/plugin.yaml",
@@ -149,7 +149,7 @@ func TestReceiverConfigMergesThePluginConfigIntoEachProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := admin.ProfileSettings{Name: "nomad-exec", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"isolation": "host"}, Config: map[string]any{
+	want := operator.ProfileSettings{Name: "nomad-exec", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"isolation": "host"}, Config: map[string]any{
 		"address": "https://nomad.example:4646", "ca_file": "/secrets/nomad-ca.crt", "namespace": "wherry",
 		"node_pool": "hosts", "runtime": map[string]any{"driver": "exec", "config": map[string]any{"command": "/bin/sh"}},
 	}}
@@ -216,7 +216,7 @@ const basePlugin = `plugins:
 `
 
 // readBase reads basePlugin, with replace applied to it, holding profiles.
-func readBase(t *testing.T, replace map[string]string, profiles ...string) (admin.ReceiverConfig, error) {
+func readBase(t *testing.T, replace map[string]string, profiles ...string) (operator.ReceiverConfig, error) {
 	t.Helper()
 	document := basePlugin
 	for old, new := range replace {
@@ -442,19 +442,19 @@ func TestReceiverConfigFileRefusesIdentity(t *testing.T) {
 	}
 }
 
-func TestAdminArgsParseAsFlags(t *testing.T) {
+func TestOperatorArgsParseAsFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"pool", "update", "p", "--config-file=x", "--dry-run"},
 		{"pool", "update", "p", "-config-file", "x", "-dry-run=true"},
 		{"pool", "update", "--config-file", "y", "p", "--config-file", "x", "--dry-run"},
 	} {
-		positional, options, err := adminArgs(args)
+		positional, options, err := operatorArgs(args)
 		if err != nil || !slices.Equal(positional, []string{"pool", "update", "p"}) || !maps.Equal(options, map[string]string{"config-file": "x", "dry-run": "true"}) {
-			t.Errorf("adminArgs(%q) = %q, %v, %v; want pool update p with --config-file x and --dry-run", args, positional, options, err)
+			t.Errorf("operatorArgs(%q) = %q, %v, %v; want pool update p with --config-file x and --dry-run", args, positional, options, err)
 		}
 	}
-	if _, options, err := adminArgs([]string{"receiver", "update", "r", "--force=false"}); err != nil || len(options) != 0 {
-		t.Errorf("adminArgs with --force=false = %v, %v; want no options", options, err)
+	if _, options, err := operatorArgs([]string{"receiver", "update", "r", "--force=false"}); err != nil || len(options) != 0 {
+		t.Errorf("operatorArgs with --force=false = %v, %v; want no options", options, err)
 	}
 }
 

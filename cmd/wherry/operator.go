@@ -15,19 +15,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"gopkg.in/yaml.v3"
 )
 
-func runAdmin(args []string, stdout, stderr io.Writer) error {
-	pos, options, err := adminArgs(args)
+func runOperator(args []string, stdout, stderr io.Writer) error {
+	pos, options, err := operatorArgs(args)
 	if err != nil {
 		return err
 	}
 	if len(pos) == 0 {
-		return errors.New("usage: wherry admin <pool create|pool update|pool entitle|pool suspend|pool resume|pool rotate-key|receiver add|receiver update|receiver show|receiver revoke|host add|host revoke|check>")
+		return errors.New("usage: wherry operator <pool create|pool update|pool entitle|pool suspend|pool resume|pool rotate-key|receiver add|receiver update|receiver show|receiver revoke|host add|host revoke|check>")
 	}
 	broker, caPath := os.Getenv("WHERRY_TRUST_BROKER"), os.Getenv("WHERRY_TRUST_CA")
 	if broker == "" || caPath == "" {
@@ -37,23 +37,23 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	root, err := adminKafka(broker, ca, os.Getenv("WHERRY_TRUST_ADMIN_USER"), "WHERRY_TRUST_ADMIN_PASSWORD_FILE")
+	root, err := operatorKafka(broker, ca, os.Getenv("WHERRY_TRUST_SUPER_USER"), "WHERRY_TRUST_SUPER_USER_PASSWORD_FILE")
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	operator, err := adminKafka(broker, ca, admin.OperatorPrincipal, "WHERRY_TRUST_OPERATOR_PASSWORD_FILE")
+	operatorClient, err := operatorKafka(broker, ca, operator.OperatorPrincipal, "WHERRY_TRUST_OPERATOR_PASSWORD_FILE")
 	if err != nil {
 		return err
 	}
-	defer operator.Close()
-	service := admin.Service{Admin: root, Operator: operator, Broker: broker, CA: string(ca)}
+	defer operatorClient.Close()
+	service := operator.Service{SuperUser: root, Operator: operatorClient, Broker: broker, CA: string(ca)}
 	ctx := context.Background()
 	command := strings.Join(pos[:min(len(pos), 2)], " ")
 	switch command {
 	case "pool create":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin pool create NAME <--config-file FILE|--config-dir DIR>")
+			return errors.New("usage: wherry operator pool create NAME <--config-file FILE|--config-dir DIR>")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -66,7 +66,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return service.PoolCreate(ctx, pos[2], terms)
 	case "pool update":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin pool update NAME <--config-file FILE|--config-dir DIR> [--dry-run]")
+			return errors.New("usage: wherry operator pool update NAME <--config-file FILE|--config-dir DIR> [--dry-run]")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -81,7 +81,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 	case "receiver add":
 		_, dryRun := options["dry-run"]
 		if len(pos) != 3 || options["pool"] == "" || options["bundle-file"] == "" && !dryRun {
-			return errors.New("usage: wherry admin receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... <--bundle-file FILE|--dry-run>")
+			return errors.New("usage: wherry operator receiver add ID --pool POOL <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... <--bundle-file FILE|--dry-run>")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -104,7 +104,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return service.ReceiverAdd(ctx, config, options["bundle-file"])
 	case "receiver update":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver update ID <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... [--force] [--dry-run]")
+			return errors.New("usage: wherry operator receiver update ID <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... [--force] [--dry-run]")
 		}
 		path, directory, err := configInput(options)
 		if err != nil {
@@ -126,7 +126,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return showReceiver(stdout, config)
 	case "receiver show":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver show ID")
+			return errors.New("usage: wherry operator receiver show ID")
 		}
 		state, err := service.LoadState(ctx)
 		if err != nil {
@@ -139,12 +139,12 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return showReceiver(stdout, config)
 	case "pool entitle":
 		if len(pos) != 3 || options["tenant"] == "" {
-			return errors.New("usage: wherry admin pool entitle POOL --tenant TENANT")
+			return errors.New("usage: wherry operator pool entitle POOL --tenant TENANT")
 		}
 		return service.TenantAdd(ctx, options["tenant"], pos[2])
 	case "pool suspend", "pool resume":
 		if len(pos) != 3 {
-			return fmt.Errorf("usage: wherry admin pool %s POOL", pos[1])
+			return fmt.Errorf("usage: wherry operator pool %s POOL", pos[1])
 		}
 		outcome, err := service.PoolSuspendAcknowledged(ctx, pos[2], pos[1] == "suspend", stderr)
 		if err != nil {
@@ -154,7 +154,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "pool rotate-key":
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin pool rotate-key POOL [--suspect-key KID]...")
+			return errors.New("usage: wherry operator pool rotate-key POOL [--suspect-key KID]...")
 		}
 		var suspects []string
 		if options["suspect-key"] != "" {
@@ -168,15 +168,15 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "host add":
 		if len(pos) != 3 || options["tenant"] == "" || options["bundle-file"] == "" {
-			return errors.New("usage: wherry admin host add HOST --tenant TENANT --bundle-file FILE")
+			return errors.New("usage: wherry operator host add HOST --tenant TENANT --bundle-file FILE")
 		}
 		return service.HostAdd(ctx, options["tenant"], pos[2], options["bundle-file"])
 	case "host revoke", "receiver revoke":
 		if pos[0] == "host" && (len(pos) != 3 || options["tenant"] == "") {
-			return errors.New("usage: wherry admin host revoke HOST --tenant TENANT [--wait DURATION]")
+			return errors.New("usage: wherry operator host revoke HOST --tenant TENANT [--wait DURATION]")
 		}
 		if len(pos) != 3 {
-			return errors.New("usage: wherry admin receiver revoke RECEIVER [--wait DURATION]")
+			return errors.New("usage: wherry operator receiver revoke RECEIVER [--wait DURATION]")
 		}
 		wait, err := time.ParseDuration(cmp.Or(options["wait"], "0s"))
 		if err != nil {
@@ -185,12 +185,12 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		if _, given := options["wait"]; given && wait <= 0 {
 			return errors.New("--wait must be positive; omit it to compute the safe wait from the broker's timeouts")
 		}
-		topic := admin.ReceiverTopic(pos[2])
+		topic := operator.ReceiverTopic(pos[2])
 		if pos[0] == "host" {
-			topic = admin.HostTopic(options["tenant"], pos[2])
+			topic = operator.HostTopic(options["tenant"], pos[2])
 		}
 		probe := service.Probe(topic)
-		var result admin.RevocationResult
+		var result operator.RevocationResult
 		if pos[0] == "host" {
 			result = service.RevokeHost(ctx, options["tenant"], pos[2], wait, probe)
 		} else {
@@ -209,16 +209,16 @@ func runAdmin(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "check":
 		if len(pos) != 1 {
-			return errors.New("usage: wherry admin check")
+			return errors.New("usage: wherry operator check")
 		}
 		return service.Check(ctx)
 	default:
-		return errors.New("unknown admin command")
+		return errors.New("unknown operator command")
 	}
 }
 
 // writeRotateReport writes report's suspect keys, retention horizon and suspect tasks, naming each task and never a value.
-func writeRotateReport(out io.Writer, pool string, report admin.RotateReport, now time.Time) {
+func writeRotateReport(out io.Writer, pool string, report operator.RotateReport, now time.Time) {
 	fmt.Fprintf(out, "pool %s's key custodian rotated for the rotate-key request; tasks appended through that rotation are listed\n", pool)
 	fmt.Fprintf(out, "suspect_keys=%s\n", strings.Join(report.SuspectKeys, ","))
 	for _, partition := range slices.Sorted(maps.Keys(report.Horizon)) {
@@ -240,15 +240,15 @@ func writeRotateReport(out io.Writer, pool string, report admin.RotateReport, no
 }
 
 // showReceiver writes config's capacity, plugin pins and resolved profiles, in routing order, to out as YAML.
-func showReceiver(out io.Writer, config admin.ReceiverConfig) error {
+func showReceiver(out io.Writer, config operator.ReceiverConfig) error {
 	// The record decodes numbers as float64, which YAML would print as 1e+06.
 	for i := range config.Profiles {
 		config.Profiles[i].Config = integral(config.Profiles[i].Config).(map[string]any)
 	}
 	encoded, err := yaml.Marshal(struct {
-		Capacity     int64                   `yaml:"capacity"`
-		PluginSHA256 map[string]string       `yaml:"plugin_sha256,omitempty"`
-		Profiles     []admin.ProfileSettings `yaml:"profiles"`
+		Capacity     int64                      `yaml:"capacity"`
+		PluginSHA256 map[string]string          `yaml:"plugin_sha256,omitempty"`
+		Profiles     []operator.ProfileSettings `yaml:"profiles"`
 	}{config.Capacity, config.PluginSHA256, config.Profiles})
 	if err != nil {
 		return err
@@ -276,8 +276,8 @@ func integral(value any) any {
 	return value
 }
 
-func adminArgs(args []string) ([]string, map[string]string, error) {
-	flags := flag.NewFlagSet("admin", flag.ContinueOnError)
+func operatorArgs(args []string) ([]string, map[string]string, error) {
+	flags := flag.NewFlagSet("operator", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	for _, name := range []string{"pool", "config-file", "config-dir", "bundle-file", "tenant", "wait", "sha256"} {
 		flags.String(name, "", "")
@@ -336,7 +336,7 @@ func adminArgs(args []string) ([]string, map[string]string, error) {
 	return positional, options, nil
 }
 
-// pluginPins is the map of plugin type to SHA-256 the --plugin-sha256 values name, one TYPE=HEX per line; admin
+// pluginPins is the map of plugin type to SHA-256 the --plugin-sha256 values name, one TYPE=HEX per line; operator
 // validates each before it writes a record.
 func pluginPins(values string) (map[string]string, error) {
 	pins := map[string]string{}
@@ -384,7 +384,7 @@ func readYAML(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	return admin.DecodeYAML(encoded, value)
+	return operator.DecodeYAML(encoded, value)
 }
 
 // receiverPlugin and receiverProfile are a plugin's and a profile's entries in a receiver config, in either form. A nil
@@ -405,14 +405,14 @@ type receiverProfile struct {
 // readReceiverConfig reads a receiver config from a single file holding capacity and plugins, or from a directory
 // holding receiver.yaml and, for each plugin, plugins/<type>/plugin.yaml with plugins/<type>/profiles/*.yaml,
 // where profile file order is routing order within the plugin.
-func readReceiverConfig(path string, directory bool) (admin.ReceiverConfig, error) {
+func readReceiverConfig(path string, directory bool) (operator.ReceiverConfig, error) {
 	if !directory {
 		var file struct {
 			Capacity int64                     `yaml:"capacity"`
 			Plugins  map[string]receiverPlugin `yaml:"plugins"`
 		}
 		if err := readYAML(path, &file); err != nil {
-			return admin.ReceiverConfig{}, err
+			return operator.ReceiverConfig{}, err
 		}
 		var plugins []plugin
 		for kind, value := range file.Plugins {
@@ -423,22 +423,22 @@ func readReceiverConfig(path string, directory bool) (admin.ReceiverConfig, erro
 	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		return admin.ReceiverConfig{}, err
+		return operator.ReceiverConfig{}, err
 	}
 	for _, entry := range entries {
 		if name := entry.Name(); !strings.HasPrefix(name, ".") && name != "receiver.yaml" && name != "plugins" {
-			return admin.ReceiverConfig{}, fmt.Errorf("%s does not belong in a receiver config directory", filepath.Join(path, name))
+			return operator.ReceiverConfig{}, fmt.Errorf("%s does not belong in a receiver config directory", filepath.Join(path, name))
 		}
 	}
 	var receiver struct {
 		Capacity int64 `yaml:"capacity"`
 	}
 	if err := readYAML(filepath.Join(path, "receiver.yaml"), &receiver); err != nil {
-		return admin.ReceiverConfig{}, err
+		return operator.ReceiverConfig{}, err
 	}
 	kinds, err := os.ReadDir(filepath.Join(path, "plugins"))
 	if err != nil {
-		return admin.ReceiverConfig{}, err
+		return operator.ReceiverConfig{}, err
 	}
 	var plugins []plugin
 	for _, kind := range kinds {
@@ -447,15 +447,15 @@ func readReceiverConfig(path string, directory bool) (admin.ReceiverConfig, erro
 			continue
 		}
 		if !kind.IsDir() {
-			return admin.ReceiverConfig{}, fmt.Errorf("%s is not a plugin directory", dir)
+			return operator.ReceiverConfig{}, fmt.Errorf("%s is not a plugin directory", dir)
 		}
 		files, err := os.ReadDir(dir)
 		if err != nil {
-			return admin.ReceiverConfig{}, err
+			return operator.ReceiverConfig{}, err
 		}
 		for _, file := range files {
 			if name := file.Name(); !strings.HasPrefix(name, ".") && name != "plugin.yaml" && name != "profiles" {
-				return admin.ReceiverConfig{}, fmt.Errorf("%s does not belong in a plugin directory", filepath.Join(dir, name))
+				return operator.ReceiverConfig{}, fmt.Errorf("%s does not belong in a plugin directory", filepath.Join(dir, name))
 			}
 		}
 		var settings struct {
@@ -463,11 +463,11 @@ func readReceiverConfig(path string, directory bool) (admin.ReceiverConfig, erro
 			Config map[string]any     `yaml:"config"`
 		}
 		if err := readYAML(filepath.Join(dir, "plugin.yaml"), &settings); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return admin.ReceiverConfig{}, fmt.Errorf("%s: %w", filepath.Join(dir, "plugin.yaml"), err)
+			return operator.ReceiverConfig{}, fmt.Errorf("%s: %w", filepath.Join(dir, "plugin.yaml"), err)
 		}
 		profiles, err := readEntries[receiverProfile](filepath.Join(dir, "profiles"))
 		if err != nil {
-			return admin.ReceiverConfig{}, err
+			return operator.ReceiverConfig{}, err
 		}
 		plugins = append(plugins, plugin{dir, kind.Name(), settings.Labels, settings.Config, profiles})
 	}
@@ -515,8 +515,8 @@ func readEntries[T any](dir string) ([]entry[T], error) {
 
 // receiverConfig lists the profiles of plugins sorted by type, each plugin's in their order, every profile's labels and
 // config merged onto its plugin's.
-func receiverConfig(capacity int64, plugins []plugin) (admin.ReceiverConfig, error) {
-	config := admin.ReceiverConfig{Capacity: cmp.Or(capacity, 1)}
+func receiverConfig(capacity int64, plugins []plugin) (operator.ReceiverConfig, error) {
+	config := operator.ReceiverConfig{Capacity: cmp.Or(capacity, 1)}
 	if len(plugins) == 0 {
 		return config, errors.New("receiver config holds no plugins")
 	}
@@ -558,7 +558,7 @@ func receiverConfig(capacity int64, plugins []plugin) (admin.ReceiverConfig, err
 			if err != nil {
 				return config, fmt.Errorf("%s: profile %q: labels %w", e.where, profile.Name, err)
 			}
-			settings := admin.ProfileSettings{Name: profile.Name, Plugin: p.kind, Agent: profile.Agent, Config: merged}
+			settings := operator.ProfileSettings{Name: profile.Name, Plugin: p.kind, Agent: profile.Agent, Config: merged}
 			for key, value := range mergedLabels {
 				if settings.Labels == nil {
 					settings.Labels = map[string]string{}
@@ -639,8 +639,8 @@ func nullable(labels map[string]*string) map[string]any {
 	return values
 }
 
-func readPoolConfig(path string, directory bool) (admin.Terms, error) {
-	var terms admin.Terms
+func readPoolConfig(path string, directory bool) (operator.Terms, error) {
+	var terms operator.Terms
 	if !directory {
 		return terms, readYAML(path, &terms)
 	}
@@ -667,7 +667,7 @@ func readPoolConfig(path string, directory bool) (admin.Terms, error) {
 		return terms, fmt.Errorf("%s holds no agents", filepath.Join(path, "agents"))
 	}
 	for _, file := range files {
-		var agent admin.AgentTerms
+		var agent operator.AgentTerms
 		if err := readYAML(file, &agent); err != nil {
 			return terms, fmt.Errorf("%s: %w", file, err)
 		}
@@ -697,8 +697,8 @@ func yamlFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
-// adminKafka connects to broker, trusting ca, as user with the password in the file passwordEnv names.
-func adminKafka(broker string, ca []byte, user, passwordEnv string) (*kgo.Client, error) {
+// operatorKafka connects to broker, trusting ca, as user with the password in the file passwordEnv names.
+func operatorKafka(broker string, ca []byte, user, passwordEnv string) (*kgo.Client, error) {
 	passwordPath := os.Getenv(passwordEnv)
 	if user == "" || passwordPath == "" {
 		return nil, errors.New("trust broker credentials are not configured")
@@ -707,7 +707,7 @@ func adminKafka(broker string, ca []byte, user, passwordEnv string) (*kgo.Client
 	if err != nil {
 		return nil, err
 	}
-	opts, err := admin.KafkaOpts(broker, ca, user, string(password))
+	opts, err := operator.KafkaOpts(broker, ca, user, string(password))
 	if err != nil {
 		return nil, fmt.Errorf("trust %w", err)
 	}

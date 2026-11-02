@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -895,7 +895,7 @@ func TestWaitCommand(t *testing.T) {
 
 func TestToolFailureCodes(t *testing.T) {
 	for err, want := range map[error]string{
-		fmt.Errorf("load: %w", admin.ErrNewerRecord): "VERSION_SKEW",
+		fmt.Errorf("load: %w", operator.ErrNewerRecord): "VERSION_SKEW",
 		newerRecord(t): "VERSION_SKEW",
 		fmt.Errorf("submit: %w", busclient.ErrStartByPastLimit): "INVALID_ARGUMENT",
 		busclient.ErrNoMatchingReceiver:                         "NO_MATCHING_RECEIVER",
@@ -908,11 +908,11 @@ func TestToolFailureCodes(t *testing.T) {
 
 // newerRecord is DecodeRecord's error for a record one version above this release's.
 func newerRecord(t *testing.T) error {
-	encoded, err := admin.EncodeRecord(admin.Record{Kind: "host", Tenant: "tenant-a", Host: "host-a"})
+	encoded, err := operator.EncodeRecord(operator.Record{Kind: "host", Tenant: "tenant-a", Host: "host-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = admin.DecodeRecord(bytes.Replace(encoded, []byte(`"v":1`), []byte(fmt.Sprintf(`"v":%d`, admin.RecordVersion+1)), 1))
+	_, err = operator.DecodeRecord(bytes.Replace(encoded, []byte(`"v":1`), []byte(fmt.Sprintf(`"v":%d`, operator.RecordVersion+1)), 1))
 	return fmt.Errorf("load: %w", err)
 }
 

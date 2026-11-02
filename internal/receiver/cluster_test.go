@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/kafkatest"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -64,7 +64,7 @@ func (c *clusterRig) start(t *testing.T, ctx context.Context) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(c.tenant, c.host), t.TempDir(), map[string]credential.Source{credentialName: {File: credentialFile}}, nil, log.New(c.hostLogs, "", 0))
+	host, err := client.NewHost(hostKafka, hostKey, operator.TenantPrincipal(c.tenant, c.host), t.TempDir(), map[string]credential.Source{credentialName: {File: credentialFile}}, nil, log.New(c.hostLogs, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,8 +79,8 @@ func (c *clusterRig) start(t *testing.T, ctx context.Context) {
 	}
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	c.plugin = &fakePlugin{stream: resultStream}
-	r := &Receiver{id: c.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(c.logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
+	r := &Receiver{id: c.receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(c.logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+		factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: c.plugin}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
@@ -132,7 +132,7 @@ func (c *clusterRig) leaders(t *testing.T, ctx context.Context, topics ...string
 // committed is the values of the run's records on topic that a read_committed reader sees.
 func (c *clusterRig) committed(t *testing.T, ctx context.Context, topic, key string) [][]byte {
 	t.Helper()
-	reader := admin.NewReader(c.kafka)
+	reader := operator.NewReader(c.kafka)
 	defer reader.Close()
 	records, err := reader.ReadFrom(ctx, topic, 0)
 	if err != nil {
@@ -173,8 +173,8 @@ func (c *clusterRig) move(ctx context.Context, topic string) error {
 // moves, so the receiver's share fetch has to find the new leader, which takes over the share partition's state,
 // before the task is even published. Every transaction the receiver commits has the leaders of the pool's events and
 // the tenant feed it has just written to moved before it commits, so its commit markers go to brokers other than the
-// ones that took its records. The first of them, the run's claim, which follows the receiver's read of wherry.admin,
-// also moves the leaders of wherry.admin, the host's key topic and the tenant's transcript topic, which the receiver
+// ones that took its records. The first of them, the run's claim, which follows the receiver's read of wherry.operator,
+// also moves the leaders of wherry.operator, the host's key topic and the tenant's transcript topic, which the receiver
 // and host read once the run is claimed; only then do those leaders start to rotate in the background as well. Each
 // move is confirmed from metadata before the commit goes ahead, and the run must still complete once. The background
 // rotation is extra pressure only: no assertion depends on when it moves anything.
@@ -184,8 +184,8 @@ func TestLeaderMovesDuringReadAndAdmissionOnCluster(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	c := newClusterRig(t, ctx)
-	events, feed := admin.PoolEventsTopic(c.pool), admin.TenantTopic(c.tenant)
-	read := []string{admin.HostTopic(c.tenant, c.host), admin.AdminTopic, admin.TenantTranscriptTopic(c.tenant)}
+	events, feed := operator.PoolEventsTopic(c.pool), operator.TenantTopic(c.tenant)
+	read := []string{operator.HostTopic(c.tenant, c.host), operator.OperatorTopic, operator.TenantTranscriptTopic(c.tenant)}
 	churnCtx, stopChurn := context.WithCancel(ctx)
 	defer stopChurn()
 	var mu sync.Mutex
@@ -231,7 +231,7 @@ func TestLeaderMovesDuringReadAndAdmissionOnCluster(t *testing.T) {
 	}
 	c.start(t, ctx)
 
-	tasks := admin.PoolTasksTopic(c.pool)
+	tasks := operator.PoolTasksTopic(c.pool)
 	if err := c.move(ctx, tasks); err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestTransactionsAcrossLeadersOnCluster(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	c := newClusterRig(t, ctx)
-	feed, transcript, events, progress := admin.TenantTopic(c.tenant), admin.TenantTranscriptTopic(c.tenant), admin.PoolEventsTopic(c.pool), admin.ReceiverProgressTopic(c.receiver)
+	feed, transcript, events, progress := operator.TenantTopic(c.tenant), operator.TenantTranscriptTopic(c.tenant), operator.PoolEventsTopic(c.pool), operator.ReceiverProgressTopic(c.receiver)
 	spanned := []string{feed, transcript, events}
 	if err := kafkatest.Spread(ctx, c.adm, c.brokers, append(slices.Clone(spanned), progress)...); err != nil {
 		t.Fatal(err)
@@ -305,7 +305,7 @@ func TestTransactionsAcrossLeadersOnCluster(t *testing.T) {
 		t.Fatalf("progress topic has %d records for run %s, want the run's tombstone last", len(values), run)
 	}
 
-	producer, err := kgo.NewClient(append(slices.Clone(c.opts), kgo.TransactionalID(admin.TransactionalPrefix(c.pool)+"aborted"))...)
+	producer, err := kgo.NewClient(append(slices.Clone(c.opts), kgo.TransactionalID(operator.TransactionalPrefix(c.pool)+"aborted"))...)
 	if err != nil {
 		t.Fatal(err)
 	}

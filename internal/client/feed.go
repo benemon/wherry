@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
@@ -206,10 +206,10 @@ func authorize[T any](ctx context.Context, r *runView, kid string, check func(vi
 		return check(r.v)
 	}
 	current := r.v.keys[owner].Current
-	if r.v.state.Ended[admin.ReceiverPrincipal(owner)] || !r.v.state.Entitlements[r.h.tenant][config.Pool] || current != nil && signed.KeyID(current) == keyID {
+	if r.v.state.Ended[operator.ReceiverPrincipal(owner)] || !r.v.state.Entitlements[r.h.tenant][config.Pool] || current != nil && signed.KeyID(current) == keyID {
 		return result, err
 	}
-	keys, readErr := r.h.reader.ReadKeys(ctx, map[string]string{owner: admin.ReceiverTopic(owner)})
+	keys, readErr := r.h.reader.ReadKeys(ctx, map[string]string{owner: operator.ReceiverTopic(owner)})
 	if readErr != nil {
 		return result, err
 	}
@@ -221,7 +221,7 @@ func authorize[T any](ctx context.Context, r *runView, kid string, check func(vi
 func (r *runView) addEcho(ctx context.Context, record *kgo.Record, kid string) bool {
 	value := record.Value
 	echo, err := authorize(ctx, r, kid, func(v view) (wire.Echo, error) {
-		return admin.AuthorizeEcho(wire.ParseHistory(record.Timestamp), v.state, v.keys, value, r.h.tenant)
+		return operator.AuthorizeEcho(wire.ParseHistory(record.Timestamp), v.state, v.keys, value, r.h.tenant)
 	})
 	if err != nil || echo.Run != r.run {
 		return false
@@ -251,28 +251,28 @@ func (r *runView) add(ctx context.Context, record *kgo.Record, typ, kid string) 
 		switch typ {
 		case wire.StatusType:
 			if status, err := authorize(ctx, r, kid, func(v view) (wire.RunStatus, error) {
-				return admin.AuthorizeStatus(history, v.state, v.keys, value, r.pool, r.h.tenant)
+				return operator.AuthorizeStatus(history, v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && status.Wherry.Run == r.run {
 				r.entries = append(r.entries, entry{receiver: status.Wherry.Receiver, status: &status})
 				return
 			}
 		case wire.ChunkType:
 			if chunk, err := authorize(ctx, r, kid, func(v view) (wire.Chunk, error) {
-				return admin.AuthorizeChunk(history, v.state, v.keys, value, r.pool, r.h.tenant)
+				return operator.AuthorizeChunk(history, v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && chunk.Wherry.Run == r.run {
 				r.entries = append(r.entries, entry{receiver: chunk.Wherry.Receiver, chunk: &chunk})
 				return
 			}
 		case wire.OutputType:
 			if output, err := authorize(ctx, r, kid, func(v view) (wire.Output, error) {
-				return admin.AuthorizeOutput(history, v.state, v.keys, value, r.pool, r.h.tenant)
+				return operator.AuthorizeOutput(history, v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && output.Wherry.Run == r.run {
 				r.entries = append(r.entries, entry{receiver: output.Wherry.Receiver, output: &output})
 				return
 			}
 		case wire.ResultType:
 			if result, err := authorize(ctx, r, kid, func(v view) (wire.Result, error) {
-				return admin.AuthorizeResult(history, v.state, v.keys, value, r.pool, r.h.tenant)
+				return operator.AuthorizeResult(history, v.state, v.keys, value, r.pool, r.h.tenant)
 			}); err == nil && result.Wherry.Run == r.run {
 				r.entries = append(r.entries, entry{receiver: result.Wherry.Receiver, result: &result})
 				return
@@ -316,7 +316,7 @@ func header(value []byte) (string, string) {
 func (r *runView) derive() {
 	live := func(receiver string) bool {
 		config, ok := r.v.state.Receivers[receiver]
-		return ok && config.Pool == r.pool && !r.v.state.Ended[admin.ReceiverPrincipal(receiver)] && r.v.state.Entitlements[r.h.tenant][r.pool]
+		return ok && config.Pool == r.pool && !r.v.state.Ended[operator.ReceiverPrincipal(receiver)] && r.v.state.Entitlements[r.h.tenant][r.pool]
 	}
 	r.binding, r.statuses, r.chunks, r.outputs, r.skipped, r.outcome, r.result = binding{}, nil, nil, nil, r.unread, nil, nil
 	if r.local != nil {
@@ -426,14 +426,14 @@ func (r *runView) readTranscript(ctx context.Context) error {
 	if err != nil || !echoed {
 		return err
 	}
-	topic := admin.TenantTranscriptTopic(r.h.tenant)
+	topic := operator.TenantTranscriptTopic(r.h.tenant)
 	listing, err := r.h.reader.Admin()
 	if err != nil {
 		return err
 	}
 	var end int64
 	if r.outcome != nil {
-		ends, err := admin.ListOffsets(ctx, listing.ListEndOffsets, topic)
+		ends, err := operator.ListOffsets(ctx, listing.ListEndOffsets, topic)
 		if err != nil {
 			return err
 		}
@@ -478,9 +478,9 @@ func (r *runView) transcriptStart(ctx context.Context) (int32, int64, bool, erro
 	if err != nil {
 		return 0, 0, false, err
 	}
-	starts, err := admin.ListOffsets(ctx, func(ctx context.Context, topics ...string) (kadm.ListedOffsets, error) {
+	starts, err := operator.ListOffsets(ctx, func(ctx context.Context, topics ...string) (kadm.ListedOffsets, error) {
 		return listing.ListOffsetsAfterMilli(ctx, echoed.Add(-transcriptSkew).UnixMilli(), topics...)
-	}, admin.TenantTranscriptTopic(r.h.tenant))
+	}, operator.TenantTranscriptTopic(r.h.tenant))
 	if err != nil {
 		return 0, 0, false, err
 	}
@@ -531,12 +531,12 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 	if h.follower != nil && h.follower.ctx.Err() == nil {
 		return h.follower, nil
 	}
-	topic := admin.TenantTopic(h.tenant)
+	topic := operator.TenantTopic(h.tenant)
 	listing, err := h.reader.Admin()
 	if err != nil {
 		return nil, err
 	}
-	ends, err := admin.ListOffsets(ctx, listing.ListCommittedOffsets, topic)
+	ends, err := operator.ListOffsets(ctx, listing.ListCommittedOffsets, topic)
 	if err != nil {
 		return nil, err
 	}
@@ -557,7 +557,7 @@ func (h *Host) follow(ctx context.Context) (*follower, error) {
 			}
 		}
 	}
-	starts, err := admin.ListOffsets(ctx, listing.ListStartOffsets, topic)
+	starts, err := operator.ListOffsets(ctx, listing.ListStartOffsets, topic)
 	if err != nil {
 		return nil, err
 	}
@@ -622,7 +622,7 @@ func (f *follower) from(offset int64) ([]*kgo.Record, int64, <-chan struct{}, er
 
 // readFeed returns the tenant feed's records from offset as readFollowed does.
 func (h *Host) readFeed(ctx context.Context, f *follower, offset int64) ([]*kgo.Record, int64, error) {
-	return h.readFollowed(ctx, f, admin.TenantTopic(h.tenant), offset)
+	return h.readFollowed(ctx, f, operator.TenantTopic(h.tenant), offset)
 }
 
 // readFollowed returns topic's records from offset up to at least its committed end, listed first, and the offset that
@@ -634,7 +634,7 @@ func (h *Host) readFollowed(ctx context.Context, f *follower, topic string, offs
 		if err != nil {
 			return nil, 0, err
 		}
-		ends, err := admin.ListOffsets(ctx, listing.ListCommittedOffsets, topic)
+		ends, err := operator.ListOffsets(ctx, listing.ListCommittedOffsets, topic)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -706,7 +706,7 @@ func (h *Host) Runs(ctx context.Context) (RunsResult, error) {
 	if err != nil {
 		return RunsResult{}, err
 	}
-	records, err := h.reader.ReadFrom(ctx, admin.TenantTopic(h.tenant), 0)
+	records, err := h.reader.ReadFrom(ctx, operator.TenantTopic(h.tenant), 0)
 	if err != nil {
 		return RunsResult{}, err
 	}
@@ -1037,7 +1037,7 @@ func (s *TranscriptStream) Next(ctx context.Context) (TranscriptResult, error) {
 		s.resubmitted = true
 		s.h.resubmitIfLost(ctx, s.r)
 	}
-	topic := admin.TenantTranscriptTopic(s.h.tenant)
+	topic := operator.TenantTranscriptTopic(s.h.tenant)
 	if s.tail == nil {
 		partition, offset, echoed, err := s.r.transcriptStart(ctx)
 		if err != nil || !echoed {
@@ -1179,7 +1179,7 @@ func (h *Host) Await(ctx context.Context, runID string, timeout time.Duration) (
 }
 
 // awaitRun follows the tenant feed until runID has an outcome.
-// Each arrival re-reads wherry.admin and the receivers' keys and derives the run again, so nothing from a member ended
+// Each arrival re-reads wherry.operator and the receivers' keys and derives the run again, so nothing from a member ended
 // by then shapes the outcome.
 func (h *Host) awaitRun(waitCtx context.Context, runID string) (AwaitResult, error) {
 	f, err := h.follow(waitCtx)

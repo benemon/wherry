@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"bytes"
@@ -294,7 +294,7 @@ func TestRevocationRunsAllSixStepsInOrder(t *testing.T) {
 	wait := 500 * time.Millisecond
 	started := time.Now()
 	result := service.RevokeReceiver(ctx, "receiver-a", wait, func(ctx context.Context, user, password string) error {
-		described, err := kadm.NewClient(service.Admin).DescribeUserSCRAMs(ctx, user)
+		described, err := kadm.NewClient(service.SuperUser).DescribeUserSCRAMs(ctx, user)
 		if err != nil {
 			return err
 		}
@@ -486,7 +486,7 @@ func revocationBounds(t *testing.T, service *Service, reauth, lock, transaction 
 	for name, value := range map[string]string{"connections.max.reauth.ms": reauth, "group.share.max.record.lock.duration.ms": lock, "transaction.max.timeout.ms": transaction} {
 		alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
 	}
-	responses, err := kadm.NewClient(service.Admin).AlterBrokerConfigs(context.Background(), alters)
+	responses, err := kadm.NewClient(service.SuperUser).AlterBrokerConfigs(context.Background(), alters)
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -499,7 +499,7 @@ func revocationBounds(t *testing.T, service *Service, reauth, lock, transaction 
 func principalACLs(ctx context.Context, service *Service, principal string) (int, error) {
 	builder := kadm.NewACLs().AnyResource().Allow(principal).AllowHosts("*").Operations(kadm.OpAny).ResourcePatternType(kadm.ACLPatternAny)
 	builder.PrefixUser()
-	results, err := kadm.NewClient(service.Admin).DescribeACLs(ctx, builder)
+	results, err := kadm.NewClient(service.SuperUser).DescribeACLs(ctx, builder)
 	if err != nil {
 		return 0, err
 	}
@@ -520,11 +520,11 @@ func TestRealBrokerTLSListener(t *testing.T) {
 	}
 	_, closeService := realService(t)
 	closeService()
-	password, err := os.ReadFile(os.Getenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE"))
+	password, err := os.ReadFile(os.Getenv("WHERRY_TRUST_SUPER_USER_PASSWORD_FILE"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := kgo.NewClient(kgo.SeedBrokers(broker), kgo.SASL(scram.Auth{User: os.Getenv("WHERRY_TRUST_ADMIN_USER"), Pass: strings.TrimSpace(string(password))}.AsSha512Mechanism()), kgo.RequestTimeoutOverhead(time.Second))
+	client, err := kgo.NewClient(kgo.SeedBrokers(broker), kgo.SASL(scram.Auth{User: os.Getenv("WHERRY_TRUST_SUPER_USER"), Pass: strings.TrimSpace(string(password))}.AsSha512Mechanism()), kgo.RequestTimeoutOverhead(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,10 +565,10 @@ func TestProvisioningSurvivesReconciliation(t *testing.T) {
 	}
 	defer func() {
 		_ = service.deletePrincipalACLs(ctx, ReceiverPrincipal(receiver))
-		_, _ = kadm.NewClient(service.Admin).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: ReceiverPrincipal(receiver), Mechanism: kadm.ScramSha512}}, nil)
+		_, _ = kadm.NewClient(service.SuperUser).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: ReceiverPrincipal(receiver), Mechanism: kadm.ScramSha512}}, nil)
 	}()
 	time.Sleep(wait)
-	described, err := kadm.NewClient(service.Admin).DescribeUserSCRAMs(ctx, ReceiverPrincipal(receiver))
+	described, err := kadm.NewClient(service.SuperUser).DescribeUserSCRAMs(ctx, ReceiverPrincipal(receiver))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +584,7 @@ func TestShareGroupStartsAtEarliest(t *testing.T) {
 	if err := service.PoolCreate(ctx, "pool-a", modelTerms()); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic("pool-a"), Value: []byte("submitted-before-fetch")}).FirstErr(); err != nil {
+	if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic("pool-a"), Value: []byte("submitted-before-fetch")}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	member, err := kgo.NewClient(kgo.SeedBrokers(service.Broker), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()), kgo.ConsumeTopics(PoolTasksTopic("pool-a")), kgo.ShareGroup(PoolGroup("pool-a")), kgo.ShareMaxRecords(1))
@@ -630,13 +630,13 @@ func TestReceiverAcceptsOnlyItsRecordedConfiguration(t *testing.T) {
 	}
 }
 
-func TestAdminRecordDecodeRefusesDuplicateAndMissingMembers(t *testing.T) {
+func TestOperatorRecordDecodeRefusesDuplicateAndMissingMembers(t *testing.T) {
 	for name, encoded := range map[string]string{
 		"duplicate member":        `{"v":1,"kind":"host","tenant":"t","host":"h","host":"g","at_ms":1}`,
 		"missing required member": `{"v":1,"kind":"host","tenant":"t","host":"h","extra":1}`,
 	} {
 		if _, err := DecodeRecord([]byte(encoded)); err == nil {
-			t.Fatalf("accepted an admin record with a %s", name)
+			t.Fatalf("accepted an operator record with a %s", name)
 		}
 	}
 }
@@ -679,7 +679,7 @@ func hasACL(acls []ACL, principal, resource, operation string) bool {
 
 func kfakeService(t *testing.T) (*kfake.Cluster, *Service, func()) {
 	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("PLAIN", "wherry.operator", "operator-password"))
-	if err := cluster.CreateTopic(AdminTopic, 1, map[string]string{"retention.ms": "-1"}); err != nil {
+	if err := cluster.CreateTopic(OperatorTopic, 1, map[string]string{"retention.ms": "-1"}); err != nil {
 		t.Fatal(err)
 	}
 	root, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()), kgo.FetchMaxWait(10*time.Millisecond))
@@ -693,7 +693,7 @@ func kfakeService(t *testing.T) (*kfake.Cluster, *Service, func()) {
 	if err := operator.Ping(context.Background()); err != nil {
 		t.Fatalf("operator ping: %v", err)
 	}
-	service := &Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}
+	service := &Service{SuperUser: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}
 	return cluster, service, func() { operator.Close(); root.Close(); cluster.Close() }
 }
 
@@ -717,17 +717,17 @@ func realService(t *testing.T) (*Service, func()) {
 		}
 		return client
 	}
-	root := connect(os.Getenv("WHERRY_TRUST_ADMIN_USER"), os.Getenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE"))
+	root := connect(os.Getenv("WHERRY_TRUST_SUPER_USER"), os.Getenv("WHERRY_TRUST_SUPER_USER_PASSWORD_FILE"))
 	if err := disposableBroker(context.Background(), root); err != nil {
 		root.Close()
 		t.Fatal(err)
 	}
 	operator := connect(OperatorPrincipal, os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
-	return &Service{Admin: root, Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: string(ca)}, func() { operator.Close(); root.Close() }
+	return &Service{SuperUser: root, Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: string(ca)}, func() { operator.Close(); root.Close() }
 }
 
 // disposableBroker refuses any broker but the disposable one test/kafka/up.sh or up-cluster.sh starts, whose cluster
-// ID is the WHERRY_TRUST_CLUSTER_ID its env file names: the trust-broker tests write to the broker's wherry.admin.
+// ID is the WHERRY_TRUST_CLUSTER_ID its env file names: the trust-broker tests write to the broker's wherry.operator.
 func disposableBroker(ctx context.Context, client *kgo.Client) error {
 	want := os.Getenv("WHERRY_TRUST_CLUSTER_ID")
 	if want == "" {
@@ -773,13 +773,13 @@ func TestLoadNamesALaterReleasesRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	later := bytes.Replace(raw[0].Value, []byte(`"v":1`), []byte(`"v":2`), 1)
-	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: later}).FirstErr(); err != nil {
+	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: OperatorTopic, Value: later}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.LoadState(ctx); !errors.Is(err, ErrNewerRecord) || !strings.Contains(err.Error(), "upgrade this wherry") || strings.Contains(err.Error(), "reset") {
 		t.Fatalf("load over a later release's record: %v; want ErrNewerRecord and the upgrade advice", err)
 	}
-	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: []byte("not a record")}).FirstErr(); err != nil {
+	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: OperatorTopic, Value: []byte("not a record")}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.LoadState(ctx); errors.Is(err, ErrNewerRecord) || err == nil || !strings.Contains(err.Error(), "reset the deployment") {
@@ -828,12 +828,12 @@ func TestLoadRefusesAnUndecodableRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	removed := []byte(`{"v":1,"kind":"skip","offset":0,"sha256":"` + strings.Repeat("0", 64) + `","at_ms":1}`)
-	produced := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: removed})
+	produced := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: OperatorTopic, Value: removed})
 	if err := produced.FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(removed)
-	want := fmt.Sprintf("this wherry release cannot read wherry.admin; reset the deployment: offset=%d size=%d sha256=%s", produced[0].Record.Offset, len(removed), hex.EncodeToString(sum[:]))
+	want := fmt.Sprintf("this wherry release cannot read wherry.operator; reset the deployment: offset=%d size=%d sha256=%s", produced[0].Record.Offset, len(removed), hex.EncodeToString(sum[:]))
 	if _, err := service.LoadState(ctx); err == nil || errors.Is(err, ErrNewerRecord) || err.Error() != want {
 		t.Fatalf("load over an undecodable record: %v; want %q", err, want)
 	}
@@ -891,7 +891,7 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 	}
 	// kfake's SCRAM handshake always names 4096 iterations.
 	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(service.Admin).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
+	if altered, err := kadm.NewClient(service.SuperUser).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
 		t.Fatalf("re-salt: %v %v", err, altered.Error())
 	}
 	login := func() error {
@@ -987,7 +987,7 @@ func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 	}
 }
 
-// One grammar holds for every name: one admin issues and the wire records carry must not be valid to one side alone.
+// One grammar holds for every name: one operator issues and the wire records carry must not be valid to one side alone.
 func TestNameGrammarIsOneOnBothSides(t *testing.T) {
 	for name, want := range map[string]bool{
 		"a": true, "pool-a": true, "0": true, strings.Repeat("a", 32): true,
@@ -997,7 +997,7 @@ func TestNameGrammarIsOneOnBothSides(t *testing.T) {
 			t.Errorf("wire.ValidName(%q) = %v, want %v", name, got, want)
 		}
 		if got := validateNames(name) == nil; got != want {
-			t.Errorf("admin accepts %q = %v, want %v", name, got, want)
+			t.Errorf("operator accepts %q = %v, want %v", name, got, want)
 		}
 	}
 }

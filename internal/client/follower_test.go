@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
@@ -25,7 +25,7 @@ type feedHook struct {
 }
 
 func consumesFeed(client *kgo.Client) bool {
-	topic := admin.TenantTopic("tenant-a")
+	topic := operator.TenantTopic("tenant-a")
 	partitions, _ := client.OptValue(kgo.ConsumePartitions).(map[string]map[int32]kgo.Offset)
 	_, consumed := client.OptValue(kgo.ConsumeTopics).(map[string]*regexp.Regexp)[topic]
 	return partitions[topic] != nil || consumed
@@ -44,7 +44,7 @@ func (h *feedHook) OnClientClosed(client *kgo.Client) {
 }
 
 func (h *feedHook) OnFetchRecordBuffered(record *kgo.Record) {
-	if record.Topic == admin.TenantTopic("tenant-a") {
+	if record.Topic == operator.TenantTopic("tenant-a") {
 		h.fetched.Add(1)
 		if h.slow.Load() {
 			time.Sleep(500 * time.Millisecond)
@@ -60,7 +60,7 @@ func (f *fixture) hooked(t *testing.T, hook *feedHook) *Host {
 		t.Fatal(err)
 	}
 	t.Cleanup(kafka.Close)
-	host, err := NewHost(kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
+	host, err := NewHost(kafka, f.host.key, operator.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func pastDeadline(t *testing.T, host *Host, runID string) *runRecord {
 // committedEnd returns the tenant feed's committed end.
 func committedEnd(t *testing.T, f *fixture) int64 {
 	t.Helper()
-	ends, err := kadm.NewClient(f.service.Admin).ListCommittedOffsets(f.ctx, admin.TenantTopic("tenant-a"))
+	ends, err := kadm.NewClient(f.service.SuperUser).ListCommittedOffsets(f.ctx, operator.TenantTopic("tenant-a"))
 	if err == nil {
 		err = ends.Error()
 	}
@@ -134,7 +134,7 @@ func TestTheFollowerLeavesTheHostsOptionsUnwritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(kafka.Close)
-	host, err := NewHost(kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
+	host, err := NewHost(kafka, f.host.key, operator.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,8 +152,8 @@ func TestAFollowerBelowTheLogStartStartsAtIt(t *testing.T) {
 	runID := task.submission.Wherry.Run
 	end := committedEnd(t, f)
 	var deleted kadm.Offsets
-	deleted.AddOffset(admin.TenantTopic("tenant-a"), 0, end, -1)
-	responses, err := kadm.NewClient(f.service.Admin).DeleteRecords(f.ctx, deleted)
+	deleted.AddOffset(operator.TenantTopic("tenant-a"), 0, end, -1)
+	responses, err := kadm.NewClient(f.service.SuperUser).DeleteRecords(f.ctx, deleted)
 	if err == nil {
 		err = responses.Error()
 	}
@@ -181,8 +181,8 @@ func TestAViewWhileTheFollowerCannotFetchReadsOnce(t *testing.T) {
 	receiver, task := f.admitted(t)
 	runID := task.submission.Wherry.Run
 	following(t, f, f.host)
-	denied := kadm.NewACLs().Deny("User:" + admin.TenantPrincipal("tenant-a", "host-a")).Topics(admin.TenantTopic("tenant-a")).Operations(kadm.OpRead).ResourcePatternType(kadm.ACLPatternLiteral)
-	created, err := kadm.NewClient(f.service.Admin).CreateACLs(f.ctx, denied)
+	denied := kadm.NewACLs().Deny("User:" + operator.TenantPrincipal("tenant-a", "host-a")).Topics(operator.TenantTopic("tenant-a")).Operations(kadm.OpRead).ResourcePatternType(kadm.ACLPatternLiteral)
+	created, err := kadm.NewClient(f.service.SuperUser).CreateACLs(f.ctx, denied)
 	if err == nil {
 		for _, result := range created {
 			err = errors.Join(err, result.Err)
@@ -212,7 +212,7 @@ func TestAViewFetchesOnlyTheRecordsSinceTheLast(t *testing.T) {
 	}
 	before := hook.fetched.Load()
 	for range 5 {
-		if err := receiver.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: admin.TenantTopic("tenant-a"), Key: []byte("run-other"), Value: []byte("unreadable")}).FirstErr(); err != nil {
+		if err := receiver.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: operator.TenantTopic("tenant-a"), Key: []byte("run-other"), Value: []byte("unreadable")}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -298,7 +298,7 @@ func TestAwaitFetchesOnlyTheRecordsAfterTheRunsOffset(t *testing.T) {
 	receiver.advertise(t, f.ctx, nil)
 	backlog := make([]*kgo.Record, 2000)
 	for i := range backlog {
-		backlog[i] = &kgo.Record{Topic: admin.TenantTopic("tenant-a"), Key: []byte("run-other"), Value: []byte("unreadable")}
+		backlog[i] = &kgo.Record{Topic: operator.TenantTopic("tenant-a"), Key: []byte("run-other"), Value: []byte("unreadable")}
 	}
 	if err := receiver.kafka.ProduceSync(f.ctx, backlog...).FirstErr(); err != nil {
 		t.Fatal(err)

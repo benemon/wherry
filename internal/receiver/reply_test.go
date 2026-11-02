@@ -11,7 +11,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -26,7 +26,7 @@ func outcomeWith(state wire.TaskState, parts ...any) string {
 func textPart(text string) map[string]string { return map[string]string{"text": text} }
 
 // replyRun ends a run whose job leaves outcome, under terms, and returns its fixture and last task.
-func replyRun(t *testing.T, terms admin.Terms, outcome string) (fixture, *wire.Task) {
+func replyRun(t *testing.T, terms operator.Terms, outcome string) (fixture, *wire.Task) {
 	t.Helper()
 	f := newFixtureWith(t, noResultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: noResultStream, outputs: []pluginsdk.Output{outcomeOutput(outcome)}}})
 	f.execute(t, f.submit(t, f.host, nil), 1)

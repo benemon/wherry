@@ -22,8 +22,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
@@ -111,7 +111,7 @@ type CancelResult struct {
 	Skipped int
 }
 
-// Receiver describes a receiver of a pool the tenant is entitled to, its profiles as wherry.admin records them and its
+// Receiver describes a receiver of a pool the tenant is entitled to, its profiles as wherry.operator records them and its
 // latest advertisement.
 type Receiver struct {
 	ReceiverID     string    `json:"receiver_id"`
@@ -149,7 +149,7 @@ type Credential struct {
 type Host struct {
 	kafka *kgo.Client
 	// reader reads every topic the host reads other than through its follower.
-	reader      *admin.Reader
+	reader      *operator.Reader
 	key         ed25519.PrivateKey
 	tenant      string
 	host        string
@@ -167,12 +167,12 @@ type Host struct {
 // NewHost constructs a host over a plain Kafka connection authenticated as principal.
 func NewHost(kafka *kgo.Client, key ed25519.PrivateKey, principal, stateDir string, credentials map[string]credential.Source, git []GitCredential, logger *log.Logger) (*Host, error) {
 	// TenantPrincipal("", "") is the prefix and the separator between tenant and host.
-	names, prefixed := strings.CutPrefix(principal, strings.TrimSuffix(admin.TenantPrincipal("", ""), "."))
+	names, prefixed := strings.CutPrefix(principal, strings.TrimSuffix(operator.TenantPrincipal("", ""), "."))
 	tenant, host, split := strings.Cut(names, ".")
 	if !prefixed || !split || !wire.ValidName(tenant) || !wire.ValidName(host) {
 		return nil, errors.New("principal is not a host principal wherry.tnt.<tenant>.<host>")
 	}
-	return &Host{kafka: kafka, reader: admin.NewReader(kafka), key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, git: git, logger: logger}, nil
+	return &Host{kafka: kafka, reader: operator.NewReader(kafka), key: key, tenant: tenant, host: host, stateDir: stateDir, credentials: credentials, git: git, logger: logger}, nil
 }
 
 // Close closes the Kafka connections.
@@ -184,7 +184,7 @@ func (h *Host) Close() {
 // Register registers the host key on the host's key topic unless that key is already there, and returns its key ID.
 func (h *Host) Register(ctx context.Context) (string, error) {
 	owner := signed.HostOwner(h.tenant, h.host)
-	topic := admin.HostTopic(h.tenant, h.host)
+	topic := operator.HostTopic(h.tenant, h.host)
 	keys, err := h.reader.ReadKeys(ctx, map[string]string{owner: topic})
 	if err != nil {
 		return "", err
@@ -213,9 +213,9 @@ func (h *Host) Register(ctx context.Context) (string, error) {
 	return signed.KeyID(public), nil
 }
 
-// view is wherry.admin and the keys of the receivers of the tenant's pools.
+// view is wherry.operator and the keys of the receivers of the tenant's pools.
 type view struct {
-	state admin.State
+	state operator.State
 	keys  signed.Keys
 }
 
@@ -226,7 +226,7 @@ func (h *Host) load(ctx context.Context) (view, error) {
 	}
 	topics := map[string]string{}
 	for pool := range state.Entitlements[h.tenant] {
-		maps.Copy(topics, admin.PoolKeyTopics(state, pool))
+		maps.Copy(topics, operator.PoolKeyTopics(state, pool))
 	}
 	keys, err := h.reader.ReadKeys(ctx, topics)
 	if err != nil {
@@ -294,7 +294,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		}
 	}
 	// A receiver rejects a task_ended_by past task_started_by plus the run cap.
-	if limit := input.StartBy.Add(time.Duration(admin.MaxRunDurationMS) * time.Millisecond); input.EndBy.After(limit) {
+	if limit := input.StartBy.Add(time.Duration(operator.MaxRunDurationMS) * time.Millisecond); input.EndBy.After(limit) {
 		return SubmitResult{}, fmt.Errorf("%w: task_ended_by (%s) is past task_started_by plus the 6h run cap (%s)", ErrInvalidInput, wire.RFC3339(input.EndBy.Unix()), wire.RFC3339(limit.Unix()))
 	}
 	stored := len(input.S3Inputs)+len(s3OutputNames(outputs)) > 0
@@ -305,7 +305,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 	var v view
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() (err error) {
-		keys, err = h.reader.ReadKeys(groupCtx, map[string]string{owner: admin.HostTopic(h.tenant, h.host)})
+		keys, err = h.reader.ReadKeys(groupCtx, map[string]string{owner: operator.HostTopic(h.tenant, h.host)})
 		return err
 	})
 	group.Go(func() (err error) {
@@ -340,7 +340,7 @@ func (h *Host) Submit(ctx context.Context, input SubmitInput) (SubmitResult, err
 		return SubmitResult{}, err
 	}
 	agents := v.state.Pools[pool].Agents
-	agent := agents[slices.IndexFunc(agents, func(agent admin.AgentTerms) bool { return agent.Name == placement.Agent })]
+	agent := agents[slices.IndexFunc(agents, func(agent operator.AgentTerms) bool { return agent.Name == placement.Agent })]
 	var unsupplied []string
 	for _, credential := range agent.Credentials {
 		if _, configured := h.credentials[credential.Name]; configured {
@@ -454,7 +454,7 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicK
 	if v.state.Suspended[pool] {
 		return nil, fmt.Errorf("pool %s is suspended; submit again once it is resumed", pool)
 	}
-	records, err := h.reader.ReadFrom(ctx, admin.CustodianTopic(pool), 0)
+	records, err := h.reader.ReadFrom(ctx, operator.CustodianTopic(pool), 0)
 	if err != nil {
 		return nil, err
 	}
@@ -468,7 +468,7 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicK
 	if latest == nil {
 		return nil, fmt.Errorf("%w: pool %s has no custodian yet; submit again once a receiver of the pool has published one", ErrNoSnapshot, pool)
 	}
-	snapshot, err := admin.AuthorizeSnapshot(v.state, v.keys, latest.Value, pool)
+	snapshot, err := operator.AuthorizeSnapshot(v.state, v.keys, latest.Value, pool)
 	if err != nil {
 		return nil, fmt.Errorf("%w: pool %s's current snapshot: %v", ErrCustodianUnavailable, pool, err)
 	}
@@ -481,11 +481,11 @@ func (h *Host) poolKey(ctx context.Context, v view, pool string) (*ecdsa.PublicK
 // enveloped signs submission with an envelope of its credentials, its S3 links and redactionKey, under a fresh content
 // key wrapped to poolKey. Credentials resolve here, a command source's child with the task's task_ended_by; GET links
 // last until task_started_by plus getLifetime and PUT links until task_ended_by.
-func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms admin.Terms, poolKey *ecdsa.PublicKey, store *minio.Client, redactionKey []byte) ([]byte, error) {
+func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms operator.Terms, poolKey *ecdsa.PublicKey, store *minio.Client, redactionKey []byte) ([]byte, error) {
 	binding := submission.Wherry
 	values := signed.EnvelopeValues{Binding: binding.EnvelopeBinding(), Credentials: map[string][]byte{}, S3Inputs: map[string]string{}, S3Outputs: map[string]string{}, RedactionKey: redactionKey}
 	var names []string
-	if agent := slices.IndexFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == binding.Placement.Agent }); agent >= 0 {
+	if agent := slices.IndexFunc(terms.Agents, func(agent operator.AgentTerms) bool { return agent.Name == binding.Placement.Agent }); agent >= 0 {
 		for _, credential := range terms.Agents[agent].Credentials {
 			if !slices.Contains(binding.Unsupplied, credential.Name) {
 				names = append(names, credential.Name)
@@ -528,7 +528,7 @@ func (h *Host) enveloped(ctx context.Context, submission *wire.Submission, terms
 			values.S3Outputs[output] = string(urls[signed.S3OutputValue(output)])
 		}
 	}
-	if err := admin.CheckEnvelope(terms, submission, values); err != nil {
+	if err := operator.CheckEnvelope(terms, submission, values); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	contentKey := make([]byte, 32)
@@ -592,7 +592,7 @@ func (h *Host) Cancel(ctx context.Context, runID string) (CancelResult, error) {
 	if err != nil {
 		return CancelResult{}, err
 	}
-	if err := h.produce(ctx, &kgo.Record{Topic: admin.PoolEventsTopic(r.pool), Key: []byte(runID), Value: encoded}); err != nil {
+	if err := h.produce(ctx, &kgo.Record{Topic: operator.PoolEventsTopic(r.pool), Key: []byte(runID), Value: encoded}); err != nil {
 		return CancelResult{}, err
 	}
 	return CancelResult{RunID: runID, Skipped: r.skipped}, nil
@@ -648,7 +648,7 @@ func (h *Host) newRecord(ctx context.Context, submission *wire.Submission, encod
 	}
 	record.S3Outputs = s3OutputNames(binding.Outputs)
 	// Listed before the write: a receiver that claims at once writes the run's first records after the submission.
-	ends, err := admin.ListOffsets(ctx, kadm.NewClient(h.kafka).ListCommittedOffsets, admin.TenantTopic(h.tenant))
+	ends, err := operator.ListOffsets(ctx, kadm.NewClient(h.kafka).ListCommittedOffsets, operator.TenantTopic(h.tenant))
 	if err != nil {
 		return runRecord{}, err
 	}
@@ -658,7 +658,7 @@ func (h *Host) newRecord(ctx context.Context, submission *wire.Submission, encod
 
 // produceTask writes encoded, a signed submission, to its pool's task topic.
 func (h *Host) produceTask(ctx context.Context, binding wire.SubmissionBinding, encoded []byte) error {
-	err := h.produce(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(binding.Pool), Key: []byte(binding.Run), Value: encoded})
+	err := h.produce(ctx, &kgo.Record{Topic: operator.PoolTasksTopic(binding.Pool), Key: []byte(binding.Run), Value: encoded})
 	switch {
 	case errors.Is(err, kerr.MessageTooLarge):
 		return fmt.Errorf("%w: the submission is a %d-byte record, over the broker's record limit; shorten the prompt or the input files", ErrInvalidInput, len(encoded))
@@ -686,7 +686,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 		receiver := Receiver{
 			ReceiverID: id, Pool: config.Pool, Profiles: []Profile{}, Status: "silent",
 		}
-		ended := v.state.Ended[admin.ReceiverPrincipal(id)]
+		ended := v.state.Ended[operator.ReceiverPrincipal(id)]
 		ad, advertised := ads[id]
 		if ended {
 			receiver.Status = "ended"
@@ -714,7 +714,7 @@ func (h *Host) Receivers(ctx context.Context) ([]Receiver, error) {
 				listed.InlineLimit = ad.Offers[offerIndex].InlineLimit
 			}
 			agents := v.state.Pools[config.Pool].Agents
-			if index := slices.IndexFunc(agents, func(agent admin.AgentTerms) bool { return agent.Name == profile.Agent }); index >= 0 {
+			if index := slices.IndexFunc(agents, func(agent operator.AgentTerms) bool { return agent.Name == profile.Agent }); index >= 0 {
 				listed.Models, listed.DefaultModel = agents[index].Models, agents[index].DefaultModel
 				for _, credential := range agents[index].Credentials {
 					_, configured := h.credentials[credential.Name]

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 )
 
@@ -20,7 +20,7 @@ func fakeStorageFixture(t *testing.T) (*fixture, *uploadOracle, *testReceiver) {
 	o := newUploadOracle(t)
 	f := newFixture(t)
 	terms := testTerms()
-	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	f.host.storage = o.config
 	maps.Copy(f.host.credentials, o.sources)
 	if err := f.service.PoolCreate(f.ctx, "pool-s3", terms); err != nil {

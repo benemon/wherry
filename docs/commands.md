@@ -11,7 +11,7 @@
   shape freezes at 1.0. The CLI's text output may change. `wherry receivers
   --json` is the one CLI JSON form, and it prints the objects the MCP
   `receivers` tool returns.
-- `wherry admin`, `wherry dev`, `wherry receiver run` and `wherry version` read no client
+- `wherry operator`, `wherry dev`, `wherry receiver run` and `wherry version` read no client
   configuration. Every other command reads it first, and every command except `key` and `mcp`
   then connects to Kafka. `key` connects only to settle a
   [leftover next key](#wherry-key-rotate).
@@ -645,7 +645,7 @@ returns once a run of the mock agent completes. Its steps:
    127.0.0.1, and the SCRAM passwords of `wherry-admin` and
    `wherry.operator`. `env/admin/admin.env` exports the five
    [`WHERRY_TRUST_*` variables](configuration.md#environment-variables)
-   for `wherry admin` against the instance.
+   for `wherry operator` against the instance.
 4. `image` checks that the manifest's tags are still in the runtime, and
    fails with `image TAG is no longer in the runtime; run wherry dev init`.
 5. `nomad` starts `nomad agent -dev` as you, detached, its log in
@@ -657,7 +657,7 @@ returns once a run of the mock agent completes. Its steps:
    service` beside Nomad.
 6. `kafka` runs the broker as a Nomad job from the local tag and waits for
    a metadata request over SCRAM. `operator-acl` grants `wherry.operator`
-   its ACL on `wherry.admin`.
+   its ACL on `wherry.operator`.
 7. `bootstrap` makes the admin calls of the operator's steps: pool `dev`,
    tenant `dev`, host `dev` and receiver `dev-1` with a plugin profile per
    agent, and registers the host key.
@@ -716,18 +716,18 @@ wherry dev reset [--instance NAME]
 Removes `cache/`. It refuses while the instance is up. The images stay in
 the runtime's store. Remove `wherry-dev/kafka:<id12>` with the runtime.
 
-## Admin commands
+## Operator commands
 
-`wherry admin` connects twice, as the Kafka super user and as
+`wherry operator` connects twice, as the Kafka super user and as
 `wherry.operator`, with the [environment](configuration.md#environment-variables) set.
-It writes every `wherry.admin` record as `wherry.operator`, creating
-`wherry.admin` and `wherry.receivers` first if they are missing and setting the
+It writes every `wherry.operator` record as `wherry.operator`, creating
+`wherry.operator` and `wherry.receivers` first if they are missing and setting the
 [configuration](design.md#topics-1) of an existing `wherry.receivers`. Options
 parse as Go flags, in the forms `--name value`, `--name=value` and
 `-name value`, and the last of a repeated option wins. Options other than
 `--dry-run` and `--force` take a value, and options can appear anywhere after
-`admin`. An option without a value fails with
-`flag needs an argument: -<name>`, one no admin command takes with
+`operator`. An option without a value fails with
+`flag needs an argument: -<name>`, one no operator command takes with
 `flag provided but not defined: -<name>`, and one the command does not take
 with `unknown option --<name>`. `--plugin-sha256` is given once per plugin
 type and `--suspect-key` once per key; any other repeated option takes its last value. `pool create`, `pool update`,
@@ -740,7 +740,7 @@ principal; another principal's ACL on the topic stays.
 A bundle file must not exist beforehand. A command that fails removes the
 bundle it created.
 
-### `wherry admin pool create POOL <--config-file FILE|--config-dir DIR>`
+### `wherry operator pool create POOL <--config-file FILE|--config-dir DIR>`
 
 Records the [pool terms](configuration.md#pool-terms), creates the pool's tasks
 and events topics, and sets the configuration of share group `p-<pool>`:
@@ -777,10 +777,10 @@ SigV4 presigned URL lasts`. Before it measures the records, it sets `max.message
 entitlement. See
 [Topics](design.md#topics-1).
 
-### `wherry admin pool update POOL`
+### `wherry operator pool update POOL`
 
 ```sh
-wherry admin pool update POOL <--config-file FILE|--config-dir DIR> [--dry-run]
+wherry operator pool update POOL <--config-file FILE|--config-dir DIR> [--dry-run]
 ```
 
 Records new terms for an existing pool, makes the checks and settings of
@@ -793,7 +793,7 @@ the terms when a plugin profile no longer fits, naming each receiver, plugin
 and profile and the reason. It sets the pool's topics before it records the terms, so a failure leaves the
 old terms in force, and never lowers their `retention.ms`: runs submitted
 under a longer `start_by_limit` keep their records. Receivers apply the new terms at their next read
-of `wherry.admin`, within 15 seconds, without a restart. A lowered
+of `wherry.operator`, within 15 seconds, without a restart. A lowered
 `delivery_limit` applies to a task in flight at its next release.
 
 With `--dry-run`, it makes the same checks, prints nothing, and writes
@@ -801,7 +801,7 @@ nothing to Kafka; it measures a tenant topic below 2 MiB as the update would
 set it. Terms it refuses fail in the same way with or without
 `--dry-run`.
 
-### `wherry admin pool entitle POOL --tenant TENANT`
+### `wherry operator pool entitle POOL --tenant TENANT`
 
 Entitles the tenant to an existing pool, creates the tenant feed and
 transcript topic with `max.message.bytes` 2 MiB, or sets existing ones to
@@ -812,9 +812,9 @@ transcript topic counted, or when the `retention.ms` of either is below the
 pool's `start_by_limit` plus six hours, and records nothing. It applies
 each host's [quotas](configuration.md#quotas).
 
-### `wherry admin pool suspend POOL`
+### `wherry operator pool suspend POOL`
 
-Records a `suspend` record for the pool on `wherry.admin` and reconciles the
+Records a `suspend` record for the pool on `wherry.operator` and reconciles the
 ACLs. A suspended pool's tenants' hosts hold no `WRITE` on its tasks topic.
 The receivers keep `READ` on it, and every other ACL stays. A host refuses a
 submission to the pool with `pool POOL is suspended; submit again once it is
@@ -828,47 +828,47 @@ already holding a claim renew it and continue to their terminal status, and
 their tasks are acknowledged as on an unsuspended pool. A suspension does
 not stop a running job or take back the credentials it holds: rotating them
 at their issuers does, and
-[`wherry admin receiver revoke`](#wherry-admin-receiver-revoke-receiver)
+[`wherry operator receiver revoke`](#wherry-operator-receiver-revoke-receiver)
 stops a receiver. A key custodian that drains while the pool is
 suspended does not scan the task topic or re-key any task. It keeps its
 pool keys to their deadlines and logs
 `custodian: hand over to <receiver>: pool <pool> is suspended; its re-key scan waits for resume; keeping the pool keys to their deadlines`.
 The key custodian keeps rotating.
 
-The key custodian reads `wherry.admin` once at the start of each pass over
+The key custodian reads `wherry.operator` once at the start of each pass over
 the open requests and decides every request of the pass by that read. A
 pass begins once every attempt wrap of the previous pass committed. The
 first pass that reads the `suspend` record republishes the custodian's
-snapshot with `suspended_for` set to the record's `wherry.admin` offset,
+snapshot with `suspended_for` set to the record's `wherry.operator` offset,
 before it decides any request. The command returns once the key custodian
 has acknowledged: it waits up to 5 minutes for a snapshot whose
 `suspended_for` is at or above its record's offset, writing
-`waiting for pool <pool>'s key custodian to acknowledge the suspend record at wherry.admin offset <offset>, up to <time>`
+`waiting for pool <pool>'s key custodian to acknowledge the suspend record at wherry.operator offset <offset>, up to <time>`
 to standard error every 10 seconds, then prints
-`pool <pool> is suspended: its key custodian acknowledged the suspend record at wherry.admin offset <offset>; no new start opens`.
+`pool <pool> is suspended: its key custodian acknowledged the suspend record at wherry.operator offset <offset>; no new start opens`.
 After that no new start opens. With no acknowledgement it fails with
-`pool <pool>'s suspend record is written at wherry.admin offset <offset>, but its key custodian did not acknowledge it within 5m0s; it is not yet in effect`.
+`pool <pool>'s suspend record is written at wherry.operator offset <offset>, but its key custodian did not acknowledge it within 5m0s; it is not yet in effect`.
 When the pool has no snapshot it returns at once with
-`pool <pool>'s suspend record is written at wherry.admin offset <offset>; the pool has no key custodian yet, so nothing opens until one reads it`.
+`pool <pool>'s suspend record is written at wherry.operator offset <offset>; the pool has no key custodian yet, so nothing opens until one reads it`.
 A custodian whose advertisement has gone stale is still awaited, since it can still open requests.
 
-### `wherry admin pool resume POOL`
+### `wherry operator pool resume POOL`
 
-Records a `resume` record for the pool on `wherry.admin` and reconciles the
+Records a `resume` record for the pool on `wherry.operator` and reconciles the
 ACLs, granting the hosts' `WRITE` on the tasks topic again. Receivers claim
-from the pool again at their next refresh of `wherry.admin`. The key
+from the pool again at their next refresh of `wherry.operator`. The key
 custodian serves first starts from the pass that acknowledges the record
 with `resumed_for` in its snapshot, and the command waits for that
 acknowledgement as `pool suspend` does, printing
-`pool <pool> is resumed: its key custodian acknowledged the resume record at wherry.admin offset <offset>; first starts open again`.
+`pool <pool> is resumed: its key custodian acknowledged the resume record at wherry.operator offset <offset>; first starts open again`.
 
-### `wherry admin pool rotate-key POOL [--suspect-key KID]...`
+### `wherry operator pool rotate-key POOL [--suspect-key KID]...`
 
 Refuses a pool that is not suspended with `pool <pool> is not suspended; run
-wherry admin pool suspend <pool> first`. Otherwise records a `rotate-key`
-record for the pool on `wherry.admin`. The pool's key custodian publishes a
+wherry operator pool suspend <pool> first`. Otherwise records a `rotate-key`
+record for the pool on `wherry.operator`. The pool's key custodian publishes a
 `rotation` snapshot with a new key on its first pass after it reads a
-`rotate-key` record whose `wherry.admin` offset is above the `rotated_for`
+`rotate-key` record whose `wherry.operator` offset is above the `rotated_for`
 its current snapshot carries, as at its daily rotation. A snapshot with a
 new key carries as `rotated_for` the offset of the latest `rotate-key`
 record its custodian read, and every later snapshot carries it on; append
@@ -877,9 +877,9 @@ snapshot.
 
 The command waits up to 5 minutes for a snapshot whose `rotated_for` is at
 or above its record's offset, writing
-`waiting for pool <pool>'s key custodian to rotate for the request at wherry.admin offset <offset>, up to <time>`
+`waiting for pool <pool>'s key custodian to rotate for the request at wherry.operator offset <offset>, up to <time>`
 to standard error every 10 seconds. With none, it fails with
-`pool <pool>'s key custodian published no snapshot rotated for the rotate-key request at wherry.admin offset <offset> within 5m0s; the request stands`.
+`pool <pool>'s key custodian published no snapshot rotated for the rotate-key request at wherry.operator offset <offset> within 5m0s; the request stands`.
 It then captures the end offset of the pool's tasks topic, reads the topic
 as the Kafka super user through that offset, and lists every retained task
 record whose submit wrap's `kid` is one of the suspect keys. Without
@@ -905,21 +905,21 @@ retention moved the start during the scan, the second `horizon` line names
 the offsets it deleted, from the start listed before the scan.
 
 The credential names are the task's own credentials and every credential
-any terms record of the pool on `wherry.admin` gives the task's agent,
+any terms record of the pool on `wherry.operator` gives the task's agent,
 other than the task's `unsupplied_credentials`. The
 list can name a credential the envelope did not hold; it never omits one it
 did, so rotating every listed credential covers the exposure.
 
-### `wherry admin host add HOST --tenant TENANT --bundle-file FILE`
+### `wherry operator host add HOST --tenant TENANT --bundle-file FILE`
 
 Records the host, creates its principal, its key topic and the tenant
 feed and transcript topic, the latter two with `max.message.bytes` 2 MiB, grants its ACLs, applies its quotas, and writes
 its bundle.
 
-### `wherry admin receiver add RECEIVER`
+### `wherry operator receiver add RECEIVER`
 
 ```sh
-wherry admin receiver add RECEIVER --pool POOL \
+wherry operator receiver add RECEIVER --pool POOL \
   <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... <--bundle-file FILE|--dry-run>
 ```
 
@@ -944,10 +944,10 @@ With `--dry-run`, it makes the same checks and prints each plugin profile as
 the record would hold it, with the pins, in the format of `receiver show`, and creates and
 writes nothing; `--bundle-file` is then not needed.
 
-### `wherry admin receiver update RECEIVER`
+### `wherry operator receiver update RECEIVER`
 
 ```sh
-wherry admin receiver update RECEIVER <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... [--force] [--dry-run]
+wherry operator receiver update RECEIVER <--config-file FILE|--config-dir DIR> --plugin-sha256 TYPE=HEX... [--force] [--dry-run]
 ```
 
 Records a new configuration for a live receiver in its pool, with the
@@ -964,11 +964,11 @@ under way.
 
 With `--dry-run`, it reads and validates the configuration as it does to
 record it, against the receiver's pool's terms, and prints the resolution
-in the format of [`receiver show`](#wherry-admin-receiver-show-receiver),
+in the format of [`receiver show`](#wherry-operator-receiver-show-receiver),
 writing nothing to Kafka. A configuration it refuses fails in the same way
 with or without `--dry-run`.
 
-### `wherry admin receiver show RECEIVER`
+### `wherry operator receiver show RECEIVER`
 
 Prints the receiver's recorded configuration as YAML: `capacity`, then
 `plugin_sha256`, the SHA-256 pinned for each plugin type, then
@@ -998,13 +998,13 @@ profiles:
 A `credential` key shows the credential's name, which is all the record
 holds; neither `show` nor `--dry-run` prints a credential value.
 
-### `wherry admin host revoke HOST --tenant TENANT`
+### `wherry operator host revoke HOST --tenant TENANT`
 
 Runs the [revocation](concepts.md#revocation) steps for the host, as
-[`receiver revoke`](#wherry-admin-receiver-revoke-receiver) does for a
+[`receiver revoke`](#wherry-operator-receiver-revoke-receiver) does for a
 receiver.
 
-### `wherry admin receiver revoke RECEIVER`
+### `wherry operator receiver revoke RECEIVER`
 
 Runs the [revocation](concepts.md#revocation) steps. When it ends, it
 prints one line per step it ran:
@@ -1025,9 +1025,9 @@ any other error. Step 5 waits the largest of
 is unbounded. `--wait DURATION` lengthens that wait and must be positive;
 step 5 refuses a duration below it and names the minimum.
 
-### `wherry admin check`
+### `wherry operator check`
 
-Loads `wherry.admin`, checks that no two names collide, validates every
+Loads `wherry.operator`, checks that no two names collide, validates every
 receiver configuration against its pool's terms, checks that every pool's
 [records still fit the broker](configuration.md#record-limit), checks that every
 tenant feed and transcript topic has a `max.message.bytes` of at least 2 MiB, checks topic retention and
@@ -1064,7 +1064,7 @@ On start it:
 3. with `--rotate-key`, replaces `signing.key` as
    [`wherry key rotate`](#wherry-key-rotate) replaces the host key, through
    `signing.key.next`, and logs `rotated key: old=<id> new=<id>`;
-4. waits for its configuration record on `wherry.admin` and validates it
+4. waits for its configuration record on `wherry.operator` and validates it
    against the pool's terms;
 5. for each plugin profile in turn, resolves its [platform
    credential](configuration.md#platform-credentials), starts its
@@ -1090,8 +1090,8 @@ with reason `takeover` once, when its snapshot is first read back, also on a
 later pass when the commit landed but its read-back failed. The custodian rotates the key at the
 append time of the snapshot first read back naming it plus 24 hours plus a
 jitter under one hour derived from the pool and key ID, publishing a
-`rotation` snapshot, at once on a [`rotate-key`](#wherry-admin-pool-rotate-key-pool-suspect-key-kid) record whose
-`wherry.admin` offset is above the snapshot's `rotated_for`, and republishes its snapshot with the same reason after
+`rotation` snapshot, at once on a [`rotate-key`](#wherry-operator-pool-rotate-key-pool-suspect-key-kid) record whose
+`wherry.operator` offset is above the snapshot's `rotated_for`, and republishes its snapshot with the same reason after
 its signing key rotates; a republish does not move the rotation. A commit
 is attempted up to 3 times on the same producer, and a fenced or denied
 commit is not retried; a commit with an
@@ -1203,7 +1203,7 @@ names. When the receiver starts a plugin,
 [go-plugin's `SecureConfig`](https://pkg.go.dev/github.com/hashicorp/go-plugin#SecureConfig)
 checks the binary's SHA-256 against the pin the receiver's record holds for
 its type (`--plugin-sha256` on
-[`receiver update`](#wherry-admin-receiver-update-receiver)). The receiver
+[`receiver update`](#wherry-operator-receiver-update-receiver)). The receiver
 refuses a plugin whose type has no pin, and a binary whose SHA-256 differs,
 exiting with
 `profile <name>: plugin type <type>: <path> has SHA-256 <hex> and the pin is <hex>`.

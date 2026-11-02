@@ -6,10 +6,10 @@
 
 ## Roles
 
-- **The operator** runs `wherry admin`. It issues every Kafka principal,
-  grants every ACL, and writes the records on `wherry.admin` that define
+- **The operator** runs `wherry operator`. It issues every Kafka principal,
+  grants every ACL, and writes the records on `wherry.operator` that define
   pools, receivers, hosts and entitlements. The operator is root: its
-  admin credential can write any topic and grant any ACL.
+  Kafka super user can write any topic and grant any ACL.
 - **A tenant** submits work. Each tenant has one or more **hosts**,
   machines that run the `wherry` CLI or its MCP server. Each host is its
   own Kafka principal with its own Ed25519 signing key. A compromised host
@@ -42,7 +42,7 @@ One person can hold every role in a development setup.
 
 Identity is a Kafka principal authenticated with
 [SCRAM-SHA-512](https://kafka.apache.org/documentation/#security_sasl_scram)
-over TLS. `wherry admin` creates each host and receiver principal, sets a
+over TLS. `wherry operator` creates each host and receiver principal, sets a
 generated password, and writes a **bundle**: a file, mode 0600, holding the
 broker address, the broker's CA certificate, the principal and its
 password. The operator hands the bundle to the host or receiver. It never travels over Kafka.
@@ -55,10 +55,10 @@ password. The operator hands the bundle to the host or receiver. It never travel
 
 Authorisation is
 [Kafka ACLs](https://kafka.apache.org/documentation/#security_authz), enforced
-by the broker. `wherry admin` generates every ACL from the state on
-`wherry.admin`. Each names one resource literally, except one prefixed grant per
-receiver on its pool's transactional IDs. The `wherry admin` command that
-records a host or receiver on `wherry.admin` also issues its principal and ACLs,
+by the broker. `wherry operator` generates every ACL from the state on
+`wherry.operator`. Each names one resource literally, except one prefixed grant per
+receiver on its pool's transactional IDs. The `wherry operator` command that
+records a host or receiver on `wherry.operator` also issues its principal and ACLs,
 and `pool entitle` records an entitlement with its ACLs; no other approval step
 exists. [Design](design.md#acls) lists the matrix.
 
@@ -81,7 +81,7 @@ The platform, runtime, node pool and datacenter a profile uses are part
 of its configuration, and are neither labels nor selectable.
 
 **The client resolves placement before it signs.** It reads the receiver
-configurations on `wherry.admin` for their labels, and the advertisements on
+configurations on `wherry.operator` for their labels, and the advertisements on
 `wherry.receivers` for liveness, capacity and which profiles are ready. A
 receiver whose latest advertisement is at most 120 seconds old is live. For each
 live receiver in a pool the tenant is entitled to, the client looks for a ready
@@ -234,7 +234,7 @@ Each snapshot states why it was published:
 | Reason | Published when |
 | --- | --- |
 | `bootstrap` | the pool's first custodian publishes its first key |
-| `rotation` | the custodian rotates its key, daily or on `wherry admin pool rotate-key` |
+| `rotation` | the custodian rotates its key, daily or on `wherry operator pool rotate-key` |
 | `takeover` | a receiver becomes custodian after another: the previous custodian drained, crashed, or came back without its state directory |
 | `contested` | the custodian finds its writes fenced while the group still assigns it the partition |
 
@@ -253,7 +253,7 @@ The custodian rotates the pool key daily, at the append time of the
 snapshot that first published the key plus 24 hours plus a jitter under one
 hour derived from the pool and the key ID. A suspended pool's key also
 rotates at once on
-[`wherry admin pool rotate-key`](commands.md#wherry-admin-pool-rotate-key-pool-suspect-key-kid).
+[`wherry operator pool rotate-key`](commands.md#wherry-operator-pool-rotate-key-pool-suspect-key-kid).
 A rotation publishes a `rotation` snapshot with a new key, and hosts encrypt
 to the new key once they read it.
 
@@ -356,7 +356,7 @@ Custodian loss gives a weaker guarantee than receiver loss:
 
 Suspending a pool stops new work on it while its running jobs complete and
 its key custody keeps working, so an operator can contain a compromise.
-[`wherry admin pool suspend`](commands.md#wherry-admin-pool-suspend-pool)
+[`wherry operator pool suspend`](commands.md#wherry-operator-pool-suspend-pool)
 withdraws the hosts' Write on the pool's tasks topic. The receivers keep
 Read, and every other grant stays. Hosts refuse to submit to the pool, and
 receivers claim nothing from it. The custodian refuses with
@@ -367,7 +367,7 @@ after that no new start opens. It serves adoptions of started jobs. Runs in prog
 terminal status. A suspension takes back no
 credential a running job holds: rotating the credential at its issuer does,
 and revoking a receiver stops it. The custodian keeps rotating its key, and
-`rotate-key` runs only on a suspended pool. `wherry admin pool resume`
+`rotate-key` runs only on a suspended pool. `wherry operator pool resume`
 restores the grants, and queued tasks run.
 [Respond to a compromised receiver or pool key](operations.md#respond-to-a-compromised-receiver-or-pool-key)
 gives the procedure.
@@ -385,9 +385,9 @@ that claims a cancelled run starts no job. Either way the run ends in
 Revoking a host or receiver removes its access at the broker, in six
 steps:
 
-1. Record the principal as revoking on `wherry.admin`, then rotate its
+1. Record the principal as revoking on `wherry.operator`, then rotate its
    SCRAM password. From the revoking record on, the principal is granted
-   no ACL, so an admin command that reconciles ACLs does not restore its
+   no ACL, so an operator command that reconciles ACLs does not restore its
    grants. It stays a member until step 6.
 2. Delete its ACLs.
 3. Probe every broker as the principal, with the new password. While any
@@ -398,7 +398,7 @@ steps:
 5. Wait the longest of the broker's re-authentication, share-group lock
    and transaction timeout intervals. A longer wait can be asked for; a
    shorter one is refused.
-6. Record its membership end on `wherry.admin`.
+6. Record its membership end on `wherry.operator`.
 
 No claim or write by the principal is authorised after step 5. A
 revocation run again after a failed step continues from the revoking

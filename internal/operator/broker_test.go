@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"context"
@@ -194,10 +194,10 @@ func TestRealBrokerFixture(t *testing.T) {
 		}
 	})
 
-	t.Run("only the operator writes wherry.admin", func(t *testing.T) {
+	t.Run("only the operator writes wherry.operator", func(t *testing.T) {
 		receiver := f.connect(t, ReceiverPrincipal(f.receiverA), kgo.ProducerBatchMaxBytes(4<<20), kgo.ProducerBatchCompression(kgo.NoCompression()))
-		expectReadable(t, receiver, AdminTopic)
-		// wherry.admin is never deleted, so the write probe must be unable to
+		expectReadable(t, receiver, OperatorTopic)
+		// wherry.operator is never deleted, so the write probe must be unable to
 		// land even if the ACL is wrong: an incompressible record above the
 		// broker's size limit. The broker authorises a produce before checking
 		// size, so denial still reports as denial.
@@ -209,7 +209,7 @@ func TestRealBrokerFixture(t *testing.T) {
 		if !errors.Is(err, kerr.MessageTooLarge) && !errors.Is(err, kerr.RecordListTooLarge) {
 			t.Fatalf("write probe could land on a writable topic: %v", err)
 		}
-		expectDenied(t, receiver.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Value: probe}).FirstErr())
+		expectDenied(t, receiver.ProduceSync(ctx, &kgo.Record{Topic: OperatorTopic, Value: probe}).FirstErr())
 	})
 
 	t.Run("provisioning survives Strimzi reconciliation", func(t *testing.T) {
@@ -282,7 +282,7 @@ func provision(t *testing.T) *fixture {
 		state, _ := service.LoadState(ctx)
 		for principal, end := range ends {
 			_ = service.deletePrincipalACLs(ctx, principal)
-			_, _ = kadm.NewClient(service.Admin).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: principal, Mechanism: kadm.ScramSha512}}, nil)
+			_, _ = kadm.NewClient(service.SuperUser).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: principal, Mechanism: kadm.ScramSha512}}, nil)
 			if !state.Ended[principal] {
 				_, _ = service.appendChecked(ctx, []byte("end."+principal), end)
 			}
@@ -308,7 +308,7 @@ func provision(t *testing.T) *fixture {
 		must(service.HostAdd(ctx, host[0], host[1], path))
 		f.bundles[TenantPrincipal(host[0], host[1])] = readBundle(t, path)
 	}
-	must(kafkatest.Led(ctx, service.Admin, PoolTasksTopic(f.poolA), PoolEventsTopic(f.poolA), PoolTasksTopic(f.poolB), PoolEventsTopic(f.poolB),
+	must(kafkatest.Led(ctx, service.SuperUser, PoolTasksTopic(f.poolA), PoolEventsTopic(f.poolA), PoolTasksTopic(f.poolB), PoolEventsTopic(f.poolB),
 		TenantTopic(f.tenantA), TenantTranscriptTopic(f.tenantA), TenantTopic(f.tenantB), TenantTranscriptTopic(f.tenantB),
 		ReceiverTopic(f.receiverA), ReceiverProgressTopic(f.receiverA), ReceiverTopic(f.receiverB), ReceiverProgressTopic(f.receiverB),
 		HostTopic(f.tenantA, f.hostA1), HostTopic(f.tenantA, f.hostA2), HostTopic(f.tenantB, f.hostB1)))
@@ -408,7 +408,7 @@ func TestPoolGroupTakesTermDefaultsOnRealBroker(t *testing.T) {
 	ctx := context.Background()
 	terms := modelTerms()
 	terms.DeliveryLimit, terms.LockDurationMS = 0, 0
-	// The broker keeps wherry.admin between runs and pool create refuses an existing pool, so each run names its own.
+	// The broker keeps wherry.operator between runs and pool create refuses an existing pool, so each run names its own.
 	pool := fmt.Sprintf("defaults-%d", time.Now().UnixNano())
 	if err := service.PoolCreate(ctx, pool, terms); err != nil {
 		t.Fatal(err)
@@ -483,7 +483,7 @@ func groupTerms(t *testing.T, service *Service, pool, limit, lock string) {
 	request.Resources = append(request.Resources, resource)
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		response, err := service.Admin.Request(context.Background(), request)
+		response, err := service.SuperUser.Request(context.Background(), request)
 		if err != nil {
 			t.Fatal(err)
 		}

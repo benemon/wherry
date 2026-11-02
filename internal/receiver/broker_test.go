@@ -19,10 +19,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
 	"github.com/benemon/wherry/internal/kafkatest"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
@@ -33,8 +33,8 @@ import (
 )
 
 // brokerPool is a pool of its own on the plaintext broker named by WHERRY_KAFKA_TEST_BROKER, with one receiver, one
-// host and its tenant. That broker has no authoriser, so the admin records are written with admin.EncodeRecord rather
-// than admin.Service.
+// host and its tenant. That broker has no authoriser, so the operator records are written with operator.EncodeRecord rather
+// than operator.Service.
 type brokerPool struct {
 	opts                         []kgo.Opt
 	kafka                        *kgo.Client
@@ -51,21 +51,21 @@ func newBrokerPool(t *testing.T, ctx context.Context, address string) brokerPool
 	t.Cleanup(kafka.Close)
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	b := brokerPool{opts: opts, kafka: kafka, receiver: "receiver-" + suffix, pool: "pool-" + suffix, tenant: "tenant-" + suffix, host: "host-" + suffix}
-	b.createTopics(t, ctx, admin.AdminTopic, admin.ReceiversTopic, admin.PoolTasksTopic(b.pool), admin.PoolEventsTopic(b.pool), admin.TenantTopic(b.tenant), admin.TenantTranscriptTopic(b.tenant), admin.HostTopic(b.tenant, b.host), admin.ReceiverTopic(b.receiver), admin.ReceiverProgressTopic(b.receiver), admin.CustodianTopic(b.pool))
+	b.createTopics(t, ctx, operator.OperatorTopic, operator.ReceiversTopic, operator.PoolTasksTopic(b.pool), operator.PoolEventsTopic(b.pool), operator.TenantTopic(b.tenant), operator.TenantTranscriptTopic(b.tenant), operator.HostTopic(b.tenant, b.host), operator.ReceiverTopic(b.receiver), operator.ReceiverProgressTopic(b.receiver), operator.CustodianTopic(b.pool))
 	terms := testTerms()
 	config := testConfig(b.receiver)
 	config.Pool = b.pool
-	for _, record := range []admin.Record{
+	for _, record := range []operator.Record{
 		{Kind: "pool", Pool: b.pool, Terms: &terms},
 		{Kind: "host", Tenant: b.tenant, Host: b.host},
 		{Kind: "entitlement", Tenant: b.tenant, Pool: b.pool},
 		{Kind: "receiver", Pool: b.pool, Receiver: b.receiver, Config: &config},
 	} {
-		encoded, err := admin.EncodeRecord(record)
+		encoded, err := operator.EncodeRecord(record)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+		if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -87,8 +87,8 @@ func (b brokerPool) createTopics(t *testing.T, ctx context.Context, topics ...st
 func (b brokerPool) joined(t *testing.T, ctx context.Context, logs *syncBuffer) {
 	t.Helper()
 	for {
-		groups, err := kadm.NewClient(b.kafka).DescribeShareGroups(ctx, admin.PoolGroup(b.pool))
-		if group := groups[admin.PoolGroup(b.pool)]; err == nil && len(group.AssignedPartitions()) > 0 {
+		groups, err := kadm.NewClient(b.kafka).DescribeShareGroups(ctx, operator.PoolGroup(b.pool))
+		if group := groups[operator.PoolGroup(b.pool)]; err == nil && len(group.AssignedPartitions()) > 0 {
 			break
 		}
 		if ctx.Err() != nil {
@@ -130,7 +130,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.HostTopic(tenant, host), Value: registration}).FirstErr(); err != nil {
+			if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.HostTopic(tenant, host), Value: registration}).FirstErr(); err != nil {
 				t.Fatal(err)
 			}
 			base, err := kgo.NewClient(opts...)
@@ -139,8 +139,8 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			}
 			logs := &syncBuffer{}
 			plugin := &fakePlugin{stream: noResultStream, endDelay: time.Minute}
-			r := &Receiver{id: receiverID, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-				factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
+			r := &Receiver{id: receiverID, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+				factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
 					return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 				}}
 			runCtx, stop := context.WithCancel(ctx)
@@ -157,7 +157,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(pool), Key: []byte(run), Value: value}).FirstErr(); err != nil {
+			if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.PoolTasksTopic(pool), Key: []byte(run), Value: value}).FirstErr(); err != nil {
 				t.Fatal(err)
 			}
 			for {
@@ -175,7 +175,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			}
 			done <- nil
 			stopped := time.Now()
-			member, err := kgo.NewClient(append(append([]kgo.Opt(nil), opts...), kgo.ConsumeTopics(admin.PoolTasksTopic(pool)), kgo.ShareGroup(admin.PoolGroup(pool)), kgo.ShareMaxRecords(1))...)
+			member, err := kgo.NewClient(append(append([]kgo.Opt(nil), opts...), kgo.ConsumeTopics(operator.PoolTasksTopic(pool)), kgo.ShareGroup(operator.PoolGroup(pool)), kgo.ShareMaxRecords(1))...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -199,11 +199,11 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 			if count := redelivered.DeliveryCount(); count != 2 {
 				t.Fatalf("redelivered with delivery count %d, want 2: the receiver's claim and this one", count)
 			}
-			offsets, err := kadm.NewClient(kafka).DescribeShareGroupOffsets(ctx, admin.PoolGroup(pool))
+			offsets, err := kadm.NewClient(kafka).DescribeShareGroupOffsets(ctx, operator.PoolGroup(pool))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if offset, ok := offsets[admin.PoolGroup(pool)].Offsets.Lookup(admin.PoolTasksTopic(pool), redelivered.Partition); !ok || offset.Err != nil || offset.StartOffset > redelivered.Offset {
+			if offset, ok := offsets[operator.PoolGroup(pool)].Offsets.Lookup(operator.PoolTasksTopic(pool), redelivered.Partition); !ok || offset.Err != nil || offset.StartOffset > redelivered.Offset {
 				t.Fatalf("share group start offset %+v past the task at %d: the task was archived", offset, redelivered.Offset)
 			}
 		})
@@ -214,7 +214,7 @@ func TestShutdownReleasesClaimOnRealBroker(t *testing.T) {
 func (b brokerPool) seal(t *testing.T, ctx context.Context, submission *wire.Submission) {
 	t.Helper()
 	for {
-		records, err := readTopic(ctx, b.kafka, admin.CustodianTopic(b.pool))
+		records, err := readTopic(ctx, b.kafka, operator.CustodianTopic(b.pool))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -238,11 +238,11 @@ func (b brokerPool) configure(t *testing.T, ctx context.Context, capacity int64,
 	t.Helper()
 	config := testConfig(b.receiver)
 	config.Pool, config.Capacity, config.Force = b.pool, capacity, force
-	encoded, err := admin.EncodeRecord(admin.Record{Kind: "receiver", Pool: b.pool, Receiver: b.receiver, Config: &config})
+	encoded, err := operator.EncodeRecord(operator.Record{Kind: "receiver", Pool: b.pool, Receiver: b.receiver, Config: &config})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -252,18 +252,18 @@ func (b brokerPool) deliveryLimit(t *testing.T, ctx context.Context, limit int32
 	t.Helper()
 	terms := testTerms()
 	terms.DeliveryLimit = limit
-	encoded, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
+	encoded, err := operator.EncodeRecord(operator.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	value := fmt.Sprint(limit)
 	config := kmsg.NewIncrementalAlterConfigsRequestResourceConfig()
 	config.Name, config.Value, config.Op = "share.delivery.count.limit", &value, kmsg.IncrementalAlterConfigOpSet
 	resource := kmsg.NewIncrementalAlterConfigsRequestResource()
-	resource.ResourceType, resource.ResourceName = kmsg.ConfigResourceTypeGroupConfig, admin.PoolGroup(b.pool)
+	resource.ResourceType, resource.ResourceName = kmsg.ConfigResourceTypeGroupConfig, operator.PoolGroup(b.pool)
 	resource.Configs = []kmsg.IncrementalAlterConfigsRequestResourceConfig{config}
 	request := kmsg.NewPtrIncrementalAlterConfigsRequest()
 	request.Resources = []kmsg.IncrementalAlterConfigsRequestResource{resource}
@@ -279,14 +279,14 @@ func (b brokerPool) deliveryLimit(t *testing.T, ctx context.Context, limit int32
 // member adds receiver id to the pool with its topics and configuration record.
 func (b brokerPool) member(t *testing.T, ctx context.Context, id string) {
 	t.Helper()
-	b.createTopics(t, ctx, admin.ReceiverTopic(id), admin.ReceiverProgressTopic(id))
+	b.createTopics(t, ctx, operator.ReceiverTopic(id), operator.ReceiverProgressTopic(id))
 	config := testConfig(id)
 	config.Pool = b.pool
-	encoded, err := admin.EncodeRecord(admin.Record{Kind: "receiver", Pool: b.pool, Receiver: id, Config: &config})
+	encoded, err := operator.EncodeRecord(operator.Record{Kind: "receiver", Pool: b.pool, Receiver: id, Config: &config})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -310,7 +310,7 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.HostTopic(b.tenant, b.host), Value: registration}).FirstErr(); err != nil {
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.HostTopic(b.tenant, b.host), Value: registration}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	keys := signed.Keys{}
@@ -322,8 +322,8 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 		_, signing, _ := ed25519.GenerateKey(rand.Reader)
 		keys[id] = signed.KeyState{Current: signing.Public().(ed25519.PublicKey)}
 		logs, plugin := &syncBuffer{}, &fakePlugin{outcome: pluginsdk.OutcomeNothingCreated}
-		return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-			factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
+		return &Receiver{id: id, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+			factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
 				return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 			}}, plugin, logs
 	}
@@ -346,7 +346,7 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.PoolTasksTopic(b.pool), Key: []byte(run), Value: value}).FirstErr(); err != nil {
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.PoolTasksTopic(b.pool), Key: []byte(run), Value: value}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	for !strings.Contains(firstLogs.String(), "run "+run+": already failed here; releasing for another member") {
@@ -364,7 +364,7 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 			t.Fatalf("no terminal; first logs:\n%s\nsecond logs:\n%s", firstLogs.String(), laterLogs.String())
 		}
 		time.Sleep(200 * time.Millisecond)
-		records, err := readTopic(ctx, b.kafka, admin.PoolEventsTopic(b.pool))
+		records, err := readTopic(ctx, b.kafka, operator.PoolEventsTopic(b.pool))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -383,7 +383,7 @@ func TestDeliveryBudgetEndsATaskTwoMembersFailedOnRealBroker(t *testing.T) {
 	// A further terminal could only follow a redelivery, which the member poll below rules out.
 	pollCtx, cancelPoll := context.WithTimeout(ctx, 3*time.Second)
 	defer cancelPoll()
-	poller, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ConsumeTopics(admin.PoolTasksTopic(b.pool)), kgo.ShareGroup(admin.PoolGroup(b.pool)), kgo.ShareMaxRecords(1))...)
+	poller, err := kgo.NewClient(append(slices.Clone(b.opts), kgo.ConsumeTopics(operator.PoolTasksTopic(b.pool)), kgo.ShareGroup(operator.PoolGroup(b.pool)), kgo.ShareMaxRecords(1))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(), map[string]credential.Source{credentialName: {File: credentialFile}}, nil, log.New(hostLogs, "", 0))
+	host, err := client.NewHost(hostKafka, hostKey, operator.TenantPrincipal(b.tenant, b.host), t.TempDir(), map[string]credential.Source{credentialName: {File: credentialFile}}, nil, log.New(hostLogs, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,8 +447,8 @@ func TestCredentialedRunOnRealBroker(t *testing.T) {
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	logs := &syncBuffer{}
 	plugin := &fakePlugin{stream: resultStream}
-	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
+	r := &Receiver{id: b.receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+		factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: plugin}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
@@ -494,11 +494,11 @@ func TestFilesOnRealBroker(t *testing.T) {
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
 	terms := testTerms()
-	encoded, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
+	encoded, err := operator.EncodeRecord(operator.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	input := make([]byte, 480<<10)
@@ -517,7 +517,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(),
+	host, err := client.NewHost(hostKafka, hostKey, operator.TenantPrincipal(b.tenant, b.host), t.TempDir(),
 		map[string]credential.Source{credentialName: {File: credentialFile}, "deploy-key": {File: deployKey}}, nil, log.New(hostLogs, "", 0))
 	if err != nil {
 		t.Fatal(err)
@@ -533,7 +533,7 @@ func TestFilesOnRealBroker(t *testing.T) {
 	_, signing, _ := ed25519.GenerateKey(rand.Reader)
 	logs := &syncBuffer{}
 	report := []byte("key " + deployValue + "\n")
-	big := make([]byte, admin.DefaultOutputLimit-len(report))
+	big := make([]byte, operator.DefaultOutputLimit-len(report))
 	for i := range big {
 		big[i] = byte(i * 7)
 	}
@@ -543,8 +543,8 @@ func TestFilesOnRealBroker(t *testing.T) {
 		outputs = append(outputs, pluginsdk.Output{Name: strings.Repeat(fmt.Sprintf("x%0249d/", i), 2) + "over", Size: 1})
 	}
 	fake := &fakePlugin{stream: resultStream, outputs: outputs}
-	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
+	r := &Receiver{id: b.receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+		factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
@@ -594,11 +594,11 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	defer cancel()
 	b := newBrokerPool(t, ctx, address)
 	terms := vcsTerms("git.example.test")
-	encoded, err := admin.EncodeRecord(admin.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
+	encoded, err := operator.EncodeRecord(operator.Record{Kind: "pool", Pool: b.pool, Terms: &terms})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+	if err := b.kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
@@ -619,7 +619,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := client.NewHost(hostKafka, hostKey, admin.TenantPrincipal(b.tenant, b.host), t.TempDir(),
+	host, err := client.NewHost(hostKafka, hostKey, operator.TenantPrincipal(b.tenant, b.host), t.TempDir(),
 		map[string]credential.Source{credentialName: {File: credentialFile}, "deploy-key": {File: deployKey}},
 		[]client.GitCredential{{URL: "ssh://git@git.example.test/", Credential: "deploy-key", HostKey: hostKeyFile}}, log.New(hostLogs, "", 0))
 	if err != nil {
@@ -637,8 +637,8 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	logs := &syncBuffer{}
 	patch := []byte("From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n")
 	fake := &fakePlugin{stream: resultStream, outputs: []pluginsdk.Output{{Name: wire.GitPatch, Size: int64(len(patch)), Data: patch}}}
-	r := &Receiver{id: b.receiver, base: base, reader: admin.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
-		factory: func(_ string, settings admin.ProfileSettings, _ string) (Named, error) {
+	r := &Receiver{id: b.receiver, base: base, reader: operator.NewReader(base), signing: signing, stateDir: t.TempDir(), logger: log.New(logs, "", 0), metrics: newMetrics(prometheus.NewRegistry()),
+		factory: func(_ string, settings operator.ProfileSettings, _ string) (Named, error) {
 			return Named{Name: settings.Name, Agent: settings.Agent, Plugin: fake}, nil
 		}}
 	runCtx, stop := context.WithCancel(ctx)
@@ -660,7 +660,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submit never placed: %v", err)
 	}
-	tasks, err := readTopic(ctx, b.kafka, admin.PoolTasksTopic(b.pool))
+	tasks, err := readTopic(ctx, b.kafka, operator.PoolTasksTopic(b.pool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -669,7 +669,7 @@ func TestGitInputOnRealBroker(t *testing.T) {
 	if _, err := host.Submit(ctx, outside); !errors.Is(err, client.ErrInvalidInput) || !strings.Contains(err.Error(), "git remote host github.com is not in pool "+b.pool+"'s vcs hosts") {
 		t.Fatalf("submit outside the vcs hosts = %v; want a refusal naming the host and the pool", err)
 	}
-	if after, err := readTopic(ctx, b.kafka, admin.PoolTasksTopic(b.pool)); err != nil || len(after) != len(tasks) {
+	if after, err := readTopic(ctx, b.kafka, operator.PoolTasksTopic(b.pool)); err != nil || len(after) != len(tasks) {
 		t.Fatalf("task topic holds %d records after the refusal, %v; want %d", len(after), err, len(tasks))
 	}
 	awaited, err := host.Await(ctx, submitted.RunID, 60*time.Second)

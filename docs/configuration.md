@@ -152,7 +152,7 @@ credentials:
 
 ## Bundle
 
-A YAML file that `wherry admin` writes with mode 0600. Unknown fields are
+A YAML file that `wherry operator` writes with mode 0600. Unknown fields are
 errors, and `broker`, `ca`, `principal` and `password` are required, a `ca`
 with no certificate failing with `CA contains no certificates`; a decode
 error names only its line numbers. A trailing line break ends the password
@@ -249,7 +249,7 @@ by a member with no matching profile. From attempt
 `delivery budget exhausted` where it would release it, except in the cases
 the [extension](a2a-extension-v1.md#delivery-budget) lists.
 
-[`pool update`](commands.md#wherry-admin-pool-update-pool) changes an existing
+[`pool update`](commands.md#wherry-operator-pool-update-pool) changes an existing
 pool's terms. A lowered `delivery_limit` applies to a task in flight at its
 next release.
 
@@ -396,7 +396,7 @@ base64url-encoded, so an inline input takes about 16/9 of its size in the
 submission record.
 
 `pool create`, `pool update` and `pool entitle` check against the broker at the time.
-Receivers apply the limits from their view of `wherry.admin`, which they
+Receivers apply the limits from their view of `wherry.operator`, which they
 read every 15 seconds, so a changed limit takes effect within that
 window.
 
@@ -409,7 +409,7 @@ entitled to.
 ## Receiver configuration
 
 What `receiver add` and `receiver update` read, recorded on
-`wherry.admin`: a [directory](#receiver-configuration-directory) named by
+`wherry.operator`: a [directory](#receiver-configuration-directory) named by
 `--config-dir`, or a single YAML file named by `--config-file` with the same
 entries in maps and lists. Exactly one is required. The receiver and pool
 come from the command, as do the plugin pins: `--plugin-sha256 TYPE=HEX`
@@ -449,7 +449,7 @@ credential](#platform-credentials), and its value is a string.
 The receiver routes a run to the first ready profile, in order within its
 plugin, whose agent and labels satisfy the task. It visits the plugins in
 the order of their names, so the host and the receiver compute the same
-match. Labels choose between plugins. The record on `wherry.admin` holds each profile with
+match. Labels choose between plugins. The record on `wherry.operator` holds each profile with
 its name, plugin, agent, labels and merged `config`.
 
 ### Plugin profile merge
@@ -512,9 +512,9 @@ driver, the resources and the label `platform: nomad`, and the image
 same address, credential and resources, the `exec` driver with `command`
 alone in its driver configuration, and the labels `platform: nomad` and
 `isolation: host`.
-`wherry admin receiver update ID --dry-run` prints what a file resolves
-to, with the pins, and `wherry admin receiver show ID` prints what a receiver's record
-holds ([commands](commands.md#wherry-admin-receiver-show-receiver)).
+`wherry operator receiver update ID --dry-run` prints what a file resolves
+to, with the pins, and `wherry operator receiver show ID` prints what a receiver's record
+holds ([commands](commands.md#wherry-operator-receiver-show-receiver)).
 
 ### Receiver configuration directory
 
@@ -691,7 +691,7 @@ profile container: credential "nomad-token" has no source in the receiver's conf
 A plugin profile that names no credential leaves the plugin to its own
 default, such as the Nomad plugin's `NOMAD_TOKEN`.
 
-Sources stay on the receiver's host. `wherry.admin`, which every principal
+Sources stay on the receiver's host. `wherry.operator`, which every principal
 reads, records the credential's name alone, and the receiver's bundle holds
 its Kafka identity alone. The [Quickstart](quickstart.md#_7-write-the-receiver-s-local-configuration)
 writes a local configuration with a source for each platform credential its
@@ -822,11 +822,11 @@ within six hours after `start_by_limit`.
 | Variable | Read by | Effect |
 | --- | --- | --- |
 | `SSL_CERT_FILE` | host commands | PEM CA file that replaces the system roots, for a pool's S3 endpoint under a private CA; include the public roots in it when the host also reaches public endpoints |
-| `WHERRY_TRUST_BROKER` | `wherry admin` | Kafka bootstrap address, also written into bundles |
-| `WHERRY_TRUST_CA` | `wherry admin` | PEM CA file for the broker, also written into bundles |
-| `WHERRY_TRUST_ADMIN_USER` | `wherry admin` | super user name |
-| `WHERRY_TRUST_ADMIN_PASSWORD_FILE` | `wherry admin` | file holding the super user's SCRAM password |
-| `WHERRY_TRUST_OPERATOR_PASSWORD_FILE` | `wherry admin` | file holding the operator's SCRAM password |
+| `WHERRY_TRUST_BROKER` | `wherry operator` | Kafka bootstrap address, also written into bundles |
+| `WHERRY_TRUST_CA` | `wherry operator` | PEM CA file for the broker, also written into bundles |
+| `WHERRY_TRUST_SUPER_USER` | `wherry operator` | super user name |
+| `WHERRY_TRUST_SUPER_USER_PASSWORD_FILE` | `wherry operator` | file holding the super user's SCRAM password |
+| `WHERRY_TRUST_OPERATOR_PASSWORD_FILE` | `wherry operator` | file holding the operator's SCRAM password |
 
 A plugin reads its own variables from the receiver's environment; the
 [Nomad plugin](https://github.com/benemon/wherry-plugins/tree/main/nomad#credentials)

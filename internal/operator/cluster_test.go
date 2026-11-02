@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"bytes"
@@ -34,7 +34,7 @@ func TestCompactionAcrossReplicasOnCluster(t *testing.T) {
 	defer kafka.Close()
 	adm := kadm.NewClient(kafka)
 	brokers := kafkatest.Brokers(t, ctx, adm)
-	service := &Service{Admin: kafka, Operator: kafka}
+	service := &Service{SuperUser: kafka, Operator: kafka}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	progress := ReceiverProgressTopic("compaction-" + suffix)
 	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
@@ -66,7 +66,7 @@ func TestCompactionAcrossReplicasOnCluster(t *testing.T) {
 		defer restoring.Close()
 		restoreCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		restoreAdm, restoreService := kadm.NewClient(restoring), &Service{Admin: restoring, Operator: restoring}
+		restoreAdm, restoreService := kadm.NewClient(restoring), &Service{SuperUser: restoring, Operator: restoring}
 		if err := retried(restoreCtx, func() error {
 			return alterTopicConfigs(restoreCtx, restoreAdm, []kadm.AlterConfig{{Op: kadm.DeleteConfig, Name: "min.cleanable.dirty.ratio"}}, ReceiversTopic)
 		}); err != nil {

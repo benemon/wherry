@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"context"
@@ -30,25 +30,25 @@ func (service *Service) PoolSuspendAcknowledged(ctx context.Context, pool string
 	if err != nil {
 		return "", err
 	}
-	kind, effect := "resume", "resumed: its key custodian acknowledged the resume record at wherry.admin offset %d; first starts open again"
+	kind, effect := "resume", "resumed: its key custodian acknowledged the resume record at wherry.operator offset %d; first starts open again"
 	if suspend {
-		kind, effect = "suspend", "suspended: its key custodian acknowledged the suspend record at wherry.admin offset %d; no new start opens"
+		kind, effect = "suspend", "suspended: its key custodian acknowledged the suspend record at wherry.operator offset %d; no new start opens"
 	}
-	reader := NewReader(service.Admin)
+	reader := NewReader(service.SuperUser)
 	defer reader.Close()
 	state, err := service.LoadState(ctx)
 	if err != nil {
 		return "", err
 	}
 	if _, err := currentSnapshot(ctx, reader, state, pool); errors.Is(err, errNoSnapshot) {
-		return fmt.Sprintf("pool %s's %s record is written at wherry.admin offset %d; the pool has no key custodian yet, so nothing opens until one reads it", pool, kind, recorded), nil
+		return fmt.Sprintf("pool %s's %s record is written at wherry.operator offset %d; the pool has no key custodian yet, so nothing opens until one reads it", pool, kind, recorded), nil
 	} else if err != nil {
 		return "", err
 	}
 	err = awaitSnapshot(ctx, reader, state, pool, progress, func(current wire.Snapshot) bool {
 		return suspend && current.SuspendedFor >= recorded || !suspend && current.ResumedFor >= recorded
-	}, fmt.Sprintf("waiting for pool %s's key custodian to acknowledge the %s record at wherry.admin offset %d", pool, kind, recorded),
-		fmt.Errorf("pool %s's %s record is written at wherry.admin offset %d, but its key custodian did not acknowledge it within %s; it is not yet in effect", pool, kind, recorded, snapshotWait))
+	}, fmt.Sprintf("waiting for pool %s's key custodian to acknowledge the %s record at wherry.operator offset %d", pool, kind, recorded),
+		fmt.Errorf("pool %s's %s record is written at wherry.operator offset %d, but its key custodian did not acknowledge it within %s; it is not yet in effect", pool, kind, recorded, snapshotWait))
 	if err != nil {
 		return "", err
 	}
@@ -87,7 +87,7 @@ type RotateReport struct {
 	OldestMS    int64
 }
 
-// snapshotWait bounds an admin command's wait for the snapshot acknowledging its record, and snapshotProgress separates
+// snapshotWait bounds an operator command's wait for the snapshot acknowledging its record, and snapshotProgress separates
 // the lines reporting it; variables so tests can shorten them.
 var snapshotWait, snapshotProgress = 5 * time.Minute, 10 * time.Second
 
@@ -119,7 +119,7 @@ func awaitSnapshot(ctx context.Context, reader *Reader, state State, pool string
 // reporting the wait to progress, and then reports every task retained through the task topic's end at that point whose
 // submit wrap is to one of suspects, by default the current key when the request is made. A task record is listed as
 // written, verified or not, since its envelope is exposed either way. Its credential names are its own and those every
-// terms record of the pool on wherry.admin gives its agent: a superset, since an incident inventory must not miss one.
+// terms record of the pool on wherry.operator gives its agent: a superset, since an incident inventory must not miss one.
 func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects []string, progress io.Writer) (RotateReport, error) {
 	operator := NewReader(service.Operator)
 	defer operator.Close()
@@ -136,9 +136,9 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	}
 	// A pool taking tasks would add to the inventory after it is taken.
 	if !state.Suspended[pool] {
-		return RotateReport{}, fmt.Errorf("pool %s is not suspended; run wherry admin pool suspend %s first", pool, pool)
+		return RotateReport{}, fmt.Errorf("pool %s is not suspended; run wherry operator pool suspend %s first", pool, pool)
 	}
-	reader := NewReader(service.Admin)
+	reader := NewReader(service.SuperUser)
 	defer reader.Close()
 	if len(suspects) == 0 {
 		current, err := currentSnapshot(ctx, reader, state, pool)
@@ -152,8 +152,8 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 		return RotateReport{}, err
 	}
 	err = awaitSnapshot(ctx, reader, state, pool, progress, func(current wire.Snapshot) bool { return current.RotatedFor >= requested },
-		fmt.Sprintf("waiting for pool %s's key custodian to rotate for the request at wherry.admin offset %d", pool, requested),
-		fmt.Errorf("pool %s's key custodian published no snapshot rotated for the rotate-key request at wherry.admin offset %d within %s; the request stands", pool, requested, snapshotWait))
+		fmt.Sprintf("waiting for pool %s's key custodian to rotate for the request at wherry.operator offset %d", pool, requested),
+		fmt.Errorf("pool %s's key custodian published no snapshot rotated for the rotate-key request at wherry.operator offset %d within %s; the request stands", pool, requested, snapshotWait))
 	if err != nil {
 		return RotateReport{}, err
 	}
@@ -220,7 +220,7 @@ func (service *Service) PoolRotateKey(ctx context.Context, pool string, suspects
 	return report, nil
 }
 
-// termsHistory is every terms record of pool among raw, wherry.admin's records, which keep them all, in offset order.
+// termsHistory is every terms record of pool among raw, wherry.operator's records, which keep them all, in offset order.
 func termsHistory(raw []rawRecord, pool string) []Terms {
 	var history []Terms
 	for _, entry := range raw {

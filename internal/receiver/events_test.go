@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -84,7 +84,7 @@ func TestPoolEventsIncrementalViewEqualsAFullRead(t *testing.T) {
 	sameAsFullRead(t, f, fresh)
 	record := f.submit(t, f.host, nil)
 	other := f.turn(t, "run-b", 1)
-	events := admin.PoolEventsTopic(testPool)
+	events := operator.PoolEventsTopic(testPool)
 	var eventID string
 	steps := [][]func(){
 		{func() {
@@ -126,7 +126,7 @@ func TestPoolEventsDropWhatRetentionDeleted(t *testing.T) {
 	f.quiet()
 	fresh := freshReader(t, f)
 	record := f.submit(t, f.host, nil)
-	topic := admin.PoolEventsTopic(testPool)
+	topic := operator.PoolEventsTopic(testPool)
 	f.produce(t, topic, testRun("run-a"), must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: testRun("run-a")}, f.host)))
 	var eventID string
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, func(status *wire.RunStatus) { eventID = status.Wherry.EventID })
@@ -137,7 +137,7 @@ func TestPoolEventsDropWhatRetentionDeleted(t *testing.T) {
 	repeated := records[len(records)-1].Offset
 	var offsets kadm.Offsets
 	offsets.Add(kadm.Offset{Topic: topic, Partition: 0, At: repeated})
-	deleted, err := kadm.NewClient(f.service.Admin).DeleteRecords(f.ctx, offsets)
+	deleted, err := kadm.NewClient(f.service.SuperUser).DeleteRecords(f.ctx, offsets)
 	if err == nil {
 		err = deleted.Error()
 	}
@@ -160,7 +160,7 @@ func TestPoolEventsDropByTheStartInEffectAfterTheFetch(t *testing.T) {
 	f.quiet()
 	fresh := freshReader(t, f)
 	record := f.submit(t, f.host, nil)
-	topic := admin.PoolEventsTopic(testPool)
+	topic := operator.PoolEventsTopic(testPool)
 	f.produce(t, topic, testRun("run-a"), must(t)(wire.SignRecord(&wire.Cancel{Tenant: testTenant, Host: testHost, Pool: testPool, Run: testRun("run-a")}, f.host)))
 	before := sameAsFullRead(t, f, fresh)
 	f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)

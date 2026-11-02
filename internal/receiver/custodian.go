@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
@@ -87,7 +87,7 @@ func (key *poolKey) id() string {
 // custodianTransactionalID is the one transactional ID every custodian of the pool writes through, so a successor's
 // initialisation fences its predecessor.
 func (r *Receiver) custodianTransactionalID() string {
-	return admin.TransactionalPrefix(r.config.Pool) + "custodian"
+	return operator.TransactionalPrefix(r.config.Pool) + "custodian"
 }
 
 func (r *Receiver) poolKeysDir() string { return filepath.Join(r.stateDir, poolKeysDir) }
@@ -95,7 +95,7 @@ func (r *Receiver) poolKeysDir() string { return filepath.Join(r.stateDir, poolK
 // keepCustody joins the pool's custodian group with the receiver ID as its instance ID and tends the pool keys at each
 // custody interval and on each change of assignment, until ctx ends, when a custodian steps down, or running ends.
 func (r *Receiver) keepCustody(ctx, running context.Context) {
-	topic := admin.CustodianTopic(r.config.Pool)
+	topic := operator.CustodianTopic(r.config.Pool)
 	r.custody.wake = make(chan struct{}, 1)
 	gained := func(_ context.Context, _ *kgo.Client, partitions map[string][]int32) {
 		if len(partitions[topic]) > 0 {
@@ -111,7 +111,7 @@ func (r *Receiver) keepCustody(ctx, running context.Context) {
 	// never decide the current snapshot; readCurrent scans the topic for it.
 	groupCtx, cancelGroup := context.WithCancel(context.Background())
 	defer cancelGroup()
-	group, err := r.newClient(kgo.ConsumerGroup(admin.CustodianGroup(r.config.Pool)), kgo.ConsumeTopics(topic), kgo.InstanceID(r.id),
+	group, err := r.newClient(kgo.ConsumerGroup(operator.CustodianGroup(r.config.Pool)), kgo.ConsumeTopics(topic), kgo.InstanceID(r.id),
 		kgo.SessionTimeout(sessionTimeout), kgo.DisableAutoCommit(), kgo.OnPartitionsAssigned(gained), kgo.OnPartitionsRevoked(lost), kgo.OnPartitionsLost(lost),
 		kgo.WithHooks(groupDenial{r}), kgo.WithContext(groupCtx))
 	if err != nil {
@@ -190,7 +190,7 @@ func (r *Receiver) stepDown(ctx context.Context, stopped time.Time, closeGroup f
 	// A closed static member keeps its assignment until the session timeout; removing it hands the partition on at once.
 	closeGroup()
 	r.assign(false)
-	left, err := kadm.NewClient(r.base).LeaveGroup(bounded, kadm.LeaveGroup(admin.CustodianGroup(r.config.Pool)).InstanceIDs(r.id))
+	left, err := kadm.NewClient(r.base).LeaveGroup(bounded, kadm.LeaveGroup(operator.CustodianGroup(r.config.Pool)).InstanceIDs(r.id))
 	if err == nil {
 		err = left.Error()
 	}
@@ -234,7 +234,7 @@ func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 	if r.suspended() {
 		return fmt.Errorf("pool %s is suspended; its re-key scan waits for resume", r.config.Pool)
 	}
-	tasks, err := r.reader.ReadFrom(ctx, admin.PoolTasksTopic(r.config.Pool), 0)
+	tasks, err := r.reader.ReadFrom(ctx, operator.PoolTasksTopic(r.config.Pool), 0)
 	if err != nil {
 		r.deny(err, capRead)
 		return err
@@ -309,7 +309,7 @@ func (r *Receiver) assign(assigned bool) {
 
 func (r *Receiver) revoked() bool {
 	state, _, _ := r.snapshot()
-	return state.Ended[admin.ReceiverPrincipal(r.id)]
+	return state.Ended[operator.ReceiverPrincipal(r.id)]
 }
 
 func (r *Receiver) dropProducer() {
@@ -329,7 +329,7 @@ type current struct {
 func (c current) names(r *Receiver) bool { return c.snapshot != nil && c.snapshot.Custodian == r.id }
 
 func (r *Receiver) readCurrent(ctx context.Context) (current, error) {
-	records, err := r.reader.ReadFrom(ctx, admin.CustodianTopic(r.config.Pool), 0)
+	records, err := r.reader.ReadFrom(ctx, operator.CustodianTopic(r.config.Pool), 0)
 	if err != nil {
 		return current{}, r.deny(err, capRead)
 	}
@@ -343,7 +343,7 @@ func (r *Receiver) readCurrent(ctx context.Context) (current, error) {
 		return latest, nil
 	}
 	state, peers, _ := r.snapshot()
-	snapshot, err := admin.AuthorizeSnapshotHistory(state, peers, latest.record.Value, r.config.Pool, latest.record.Timestamp)
+	snapshot, err := operator.AuthorizeSnapshotHistory(state, peers, latest.record.Value, r.config.Pool, latest.record.Timestamp)
 	if err != nil {
 		return latest, nil
 	}
@@ -528,7 +528,7 @@ func (r *Receiver) mint(ctx context.Context, keys map[string]*poolKey, reason st
 	return r.publish(ctx, keys, reason, key, marks, from, now)
 }
 
-// publish commits a snapshot naming key current for reason and carrying the wherry.admin offsets of marks, and marks key
+// publish commits a snapshot naming key current for reason and carrying the wherry.operator offsets of marks, and marks key
 // published once the snapshot reads back; a fenced producer, or another receiver's snapshot committed after from,
 // supersedes the receiver.
 func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason string, key *poolKey, marks wire.Snapshot, from current, now time.Time) error {
@@ -542,7 +542,7 @@ func (r *Receiver) publish(ctx context.Context, keys map[string]*poolKey, reason
 		err = producer.BeginTransaction()
 	}
 	if err == nil {
-		if err = producer.ProduceSync(ctx, &kgo.Record{Topic: admin.CustodianTopic(r.config.Pool), Key: []byte(wire.CustodianKey), Value: value}).FirstErr(); err == nil {
+		if err = producer.ProduceSync(ctx, &kgo.Record{Topic: operator.CustodianTopic(r.config.Pool), Key: []byte(wire.CustodianKey), Value: value}).FirstErr(); err == nil {
 			err = commitSnapshot(ctx, producer)
 			if err != nil && !fenced(err) && !authorisationError(err) {
 				r.metrics.ambiguousCommits.Inc()

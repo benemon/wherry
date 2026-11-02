@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"context"
@@ -150,7 +150,7 @@ func TestHostAddAppliesPoolQuotasOnRealBroker(t *testing.T) {
 	terms.ProducerByteRate, terms.RequestPercentage = 123457, 37
 	t.Cleanup(func() {
 		_ = service.deletePrincipalACLs(ctx, principal)
-		_, _ = kadm.NewClient(service.Admin).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: principal, Mechanism: kadm.ScramSha512}}, nil)
+		_, _ = kadm.NewClient(service.SuperUser).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: principal, Mechanism: kadm.ScramSha512}}, nil)
 		_, _ = service.appendChecked(ctx, []byte("end."+principal), Record{Kind: "end", Tenant: tenant, Host: host})
 	})
 	if err := service.PoolCreate(ctx, pool, terms); err != nil {
@@ -165,7 +165,7 @@ func TestHostAddAppliesPoolQuotasOnRealBroker(t *testing.T) {
 	// A broker describes the quotas only once the alter reaches its metadata.
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		described, err := kadm.NewClient(service.Admin).DescribeClientQuotas(ctx, true, []kadm.DescribeClientQuotaComponent{{Type: "user", MatchName: &principal}})
+		described, err := kadm.NewClient(service.SuperUser).DescribeClientQuotas(ctx, true, []kadm.DescribeClientQuotaComponent{{Type: "user", MatchName: &principal}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -186,7 +186,7 @@ func TestHostAddAppliesPoolQuotasOnRealBroker(t *testing.T) {
 }
 
 // shareTest is a pool of its own whose share group locks records for lock, the broker's floor
-// (group.share.min.record.lock.duration.ms, 15 s by default); its members connect as the admin super user.
+// (group.share.min.record.lock.duration.ms, 15 s by default); its members connect as the Kafka super user.
 type shareTest struct {
 	service *Service
 	pool    string
@@ -205,7 +205,7 @@ func sharePool(t *testing.T) shareTest {
 		t.Fatal(err)
 	}
 	groupTerms(t, service, s.pool, strconv.Itoa(int(terms.DeliveryLimit)), strconv.FormatInt(int64(terms.LockDurationMS), 10))
-	if err := kafkatest.Led(ctx, service.Admin, PoolTasksTopic(s.pool)); err != nil {
+	if err := kafkatest.Led(ctx, service.SuperUser, PoolTasksTopic(s.pool)); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -224,12 +224,12 @@ func (s shareTest) member(t *testing.T, results chan<- kgo.ShareAckResults) *kgo
 	if !roots.AppendCertsFromPEM(ca) {
 		t.Fatal("invalid CA")
 	}
-	password, err := os.ReadFile(os.Getenv("WHERRY_TRUST_ADMIN_PASSWORD_FILE"))
+	password, err := os.ReadFile(os.Getenv("WHERRY_TRUST_SUPER_USER_PASSWORD_FILE"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	client, err := kgo.NewClient(kgo.SeedBrokers(os.Getenv("WHERRY_TRUST_BROKER")), kgo.DialTLSConfig(&tls.Config{RootCAs: roots}),
-		kgo.SASL(scram.Auth{User: os.Getenv("WHERRY_TRUST_ADMIN_USER"), Pass: strings.TrimSpace(string(password))}.AsSha512Mechanism()),
+		kgo.SASL(scram.Auth{User: os.Getenv("WHERRY_TRUST_SUPER_USER"), Pass: strings.TrimSpace(string(password))}.AsSha512Mechanism()),
 		kgo.ConsumeTopics(PoolTasksTopic(s.pool)), kgo.ShareGroup(PoolGroup(s.pool)), kgo.ShareMaxRecords(1), kgo.ShareMaxRecordsStrict(),
 		kgo.MaxConcurrentFetches(0), kgo.FetchMaxWait(time.Second),
 		kgo.ShareAckCallback(func(_ *kgo.Client, r kgo.ShareAckResults) {
@@ -246,7 +246,7 @@ func (s shareTest) member(t *testing.T, results chan<- kgo.ShareAckResults) *kgo
 
 func (s shareTest) produce(t *testing.T, value string) {
 	t.Helper()
-	if err := s.service.Admin.ProduceSync(context.Background(), &kgo.Record{Topic: PoolTasksTopic(s.pool), Value: []byte(value)}).FirstErr(); err != nil {
+	if err := s.service.SuperUser.ProduceSync(context.Background(), &kgo.Record{Topic: PoolTasksTopic(s.pool), Value: []byte(value)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }

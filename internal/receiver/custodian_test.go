@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
@@ -65,7 +65,7 @@ func heldKeys(t *testing.T, r *Receiver) map[string]*poolKey {
 // snapshotRecords returns the snapshot topic's committed records in log order.
 func (f fixture) snapshotRecords(t *testing.T) []*kgo.Record {
 	t.Helper()
-	return f.records(t, admin.CustodianTopic(testPool))
+	return f.records(t, operator.CustodianTopic(testPool))
 }
 
 // parseSnapshot verifies record against writer's signing key.
@@ -100,7 +100,7 @@ func restarted(t *testing.T, r *Receiver) *Receiver {
 		t.Fatal(err)
 	}
 	t.Cleanup(base.Close)
-	return &Receiver{id: r.id, base: base, reader: admin.NewReader(base), signing: r.signing, stateDir: r.stateDir, drainTimeout: r.drainTimeout, factory: r.factory, logger: r.logger, metrics: newMetrics(prometheus.NewRegistry())}
+	return &Receiver{id: r.id, base: base, reader: operator.NewReader(base), signing: r.signing, stateDir: r.stateDir, drainTimeout: r.drainTimeout, factory: r.factory, logger: r.logger, metrics: newMetrics(prometheus.NewRegistry())}
 }
 
 // runUntilStopped runs r and returns a function that stops it and waits for Run to return.
@@ -338,7 +338,7 @@ func TestSecondRotationKeepsBothEarlierKeys(t *testing.T) {
 	first, _ := onlyKey(t, f.receiver)
 	second := rotate(t, f, f.receiver)
 	third := rotate(t, f, f.receiver)
-	window := time.Duration(admin.DefaultStartByLimitMS)*time.Millisecond + keyGrace
+	window := time.Duration(operator.DefaultStartByLimitMS)*time.Millisecond + keyGrace
 	keys := heldKeys(t, f.receiver)
 	secondID := parseSnapshot(t, second, testReceiver, f.receiver.signing).Current.KeyID
 	thirdID := parseSnapshot(t, third, testReceiver, f.receiver.signing).Current.KeyID
@@ -356,7 +356,7 @@ func TestReplacedKeyIsDeletedOnlyAtItsDeadline(t *testing.T) {
 	custodian(t, f.ctx, f.receiver, time.Now())
 	first, _ := onlyKey(t, f.receiver)
 	rotation := rotate(t, f, f.receiver)
-	deadline := rotation.Timestamp.Add(time.Duration(admin.DefaultStartByLimitMS)*time.Millisecond + keyGrace)
+	deadline := rotation.Timestamp.Add(time.Duration(operator.DefaultStartByLimitMS)*time.Millisecond + keyGrace)
 	if key := heldKeys(t, f.receiver)[first]; key == nil || key.DeadlineMS != deadline.UnixMilli() {
 		t.Fatalf("replaced key = %s, want it held with the rotation's append time + start_by_limit + 7h", describeKeys(map[string]*poolKey{first: key}))
 	}
@@ -422,7 +422,7 @@ func TestUnmarkedKeyNotNamedGetsItsDeadlineFromTheLaterSnapshot(t *testing.T) {
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	deadline := record.Timestamp.Add(time.Duration(admin.DefaultStartByLimitMS)*time.Millisecond + keyGrace)
+	deadline := record.Timestamp.Add(time.Duration(operator.DefaultStartByLimitMS)*time.Millisecond + keyGrace)
 	for _, now := range []time.Time{time.Now(), deadline.Add(-time.Millisecond)} {
 		if err := f.receiver.tend(f.ctx, now); err != nil {
 			t.Fatal(err)
@@ -474,7 +474,7 @@ func TestSnapshotReadReturnsTheLatestCommittedRecordWhileATransactionIsOpen(t *t
 	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	current, _ := onlyKey(t, f.receiver)
-	open, err := f.receiver.newClient(kgo.TransactionalID(admin.TransactionalPrefix(testPool) + "open"))
+	open, err := f.receiver.newClient(kgo.TransactionalID(operator.TransactionalPrefix(testPool) + "open"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func TestSnapshotReadReturnsTheLatestCommittedRecordWhileATransactionIsOpen(t *t
 	if err := open.BeginTransaction(); err != nil {
 		t.Fatal(err)
 	}
-	if err := open.ProduceSync(f.ctx, &kgo.Record{Topic: admin.CustodianTopic(testPool), Key: []byte(wire.CustodianKey), Value: []byte("pending")}).FirstErr(); err != nil {
+	if err := open.ProduceSync(f.ctx, &kgo.Record{Topic: operator.CustodianTopic(testPool), Key: []byte(wire.CustodianKey), Value: []byte("pending")}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	latest, err := f.receiver.readCurrent(f.ctx)
@@ -500,10 +500,10 @@ func TestCustodyDenialStopsTheReceiver(t *testing.T) {
 		denied *kadm.ACLBuilder
 		want   string
 	}{
-		"transactional ID init": {kadm.NewACLs().TransactionalIDs(admin.TransactionalPrefix(testPool)).Operations(kadm.OpAny), "denied transactional ID: "},
-		"snapshot read":         {kadm.NewACLs().Topics(admin.CustodianTopic(testPool)).Operations(kadm.OpRead), "denied read: "},
-		"snapshot transaction":  {kadm.NewACLs().Topics(admin.CustodianTopic(testPool)).Operations(kadm.OpWrite), "denied write: "},
-		"custodian group":       {kadm.NewACLs().Groups(admin.CustodianGroup(testPool)).Operations(kadm.OpAny), "denied share group: "},
+		"transactional ID init": {kadm.NewACLs().TransactionalIDs(operator.TransactionalPrefix(testPool)).Operations(kadm.OpAny), "denied transactional ID: "},
+		"snapshot read":         {kadm.NewACLs().Topics(operator.CustodianTopic(testPool)).Operations(kadm.OpRead), "denied read: "},
+		"snapshot transaction":  {kadm.NewACLs().Topics(operator.CustodianTopic(testPool)).Operations(kadm.OpWrite), "denied write: "},
+		"custodian group":       {kadm.NewACLs().Groups(operator.CustodianGroup(testPool)).Operations(kadm.OpAny), "denied share group: "},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newBareFixture(t)
@@ -522,7 +522,7 @@ func TestMarkedNonCurrentKeyGetsADeadlineOnStart(t *testing.T) {
 	if err := f.receiver.tend(f.ctx, now); err != nil {
 		t.Fatal(err)
 	}
-	want := now.Add(time.Duration(admin.DefaultStartByLimitMS)*time.Millisecond + keyGrace).UnixMilli()
+	want := now.Add(time.Duration(operator.DefaultStartByLimitMS)*time.Millisecond + keyGrace).UnixMilli()
 	if got := heldKeys(t, f.receiver)[retired].DeadlineMS; got != want {
 		t.Fatalf("deadline = %d, want now + start_by_limit + 7h = %d", got, want)
 	}
@@ -537,7 +537,7 @@ func TestSigningKeyRotationRepublishesTheSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.produce(t, admin.ReceiverTopic(testReceiver), testReceiver, must(t)(signed.RotateKey(testReceiver, f.receiver.signing, next)))
+	f.produce(t, operator.ReceiverTopic(testReceiver), testReceiver, must(t)(signed.RotateKey(testReceiver, f.receiver.signing, next)))
 	f.receiver.signing = next
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
@@ -582,7 +582,7 @@ func rotateSigningKey(t *testing.T, f fixture, r *Receiver) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.produce(t, admin.ReceiverTopic(r.id), r.id, must(t)(signed.RotateKey(r.id, r.signing, next)))
+	f.produce(t, operator.ReceiverTopic(r.id), r.id, must(t)(signed.RotateKey(r.id, r.signing, next)))
 	r.signing = next
 	if err := r.refresh(f.ctx); err != nil {
 		t.Fatal(err)
@@ -707,7 +707,7 @@ func TestRevokedMemberNeverActsAsCustodian(t *testing.T) {
 	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	f.receiver.mu.Lock()
-	f.receiver.state.Ended[admin.ReceiverPrincipal(testReceiver)] = true
+	f.receiver.state.Ended[operator.ReceiverPrincipal(testReceiver)] = true
 	f.receiver.mu.Unlock()
 	for range 2 {
 		f.receiver.assign(true)
@@ -812,7 +812,7 @@ func awaitActing(t *testing.T, f fixture, r *Receiver) {
 func (f fixture) rekeys(t *testing.T) map[string][]wire.RekeyWrap {
 	t.Helper()
 	rekeys := map[string][]wire.RekeyWrap{}
-	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
+	for _, record := range f.records(t, operator.PoolEventsTopic(testPool)) {
 		var rekey wire.RekeyWrap
 		if wire.ParseStrict(record.Value, f.receiver.peers, record.Timestamp, &rekey) == nil {
 			rekeys[string(record.Key)] = append(rekeys[string(record.Key)], rekey)
@@ -875,7 +875,7 @@ func TestPlannedDrainHandsOverToALiveSuccessor(t *testing.T) {
 	if got := scrapedValue(t, successor, `wherry_custodian_takeovers_total{pool="pool-a",reason="takeover"}`); got != 1 {
 		t.Fatalf("takeovers = %v after a drain, want 1", got)
 	}
-	for _, record := range append(f.records(t, admin.ReceiversTopic), records...) {
+	for _, record := range append(f.records(t, operator.ReceiversTopic), records...) {
 		parsed, err := jose.ParseSignedCompact(string(record.Value), []jose.SignatureAlgorithm{jose.EdDSA})
 		if err != nil {
 			t.Fatal(err)
@@ -913,7 +913,7 @@ func advertiseWith(t *testing.T, f fixture, r *Receiver, advertisement wire.Adve
 	t.Helper()
 	advertisement.Receiver, advertisement.Pool, advertisement.Offers, advertisement.Capacity = r.id, testPool, []wire.Offer{}, 1
 	value := must(t)(wire.SignRecord(&advertisement, r.signing))
-	if err := f.service.Admin.ProduceSync(f.ctx, &kgo.Record{Topic: admin.ReceiversTopic, Key: []byte(r.id), Value: value, Timestamp: time.UnixMilli(advertisement.AtMS)}).FirstErr(); err != nil {
+	if err := f.service.SuperUser.ProduceSync(f.ctx, &kgo.Record{Topic: operator.ReceiversTopic, Key: []byte(r.id), Value: value, Timestamp: time.UnixMilli(advertisement.AtMS)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -985,7 +985,7 @@ func TestHandoverNearTheDeadlineEndsWithinTheBoundKeepingTheKeys(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		f.cluster.KeepControl()
-		if slices.ContainsFunc(request.(*kmsg.ListOffsetsRequest).Topics, func(topic kmsg.ListOffsetsRequestTopic) bool { return topic.Topic == admin.PoolTasksTopic(testPool) }) {
+		if slices.ContainsFunc(request.(*kmsg.ListOffsetsRequest).Topics, func(topic kmsg.ListOffsetsRequestTopic) bool { return topic.Topic == operator.PoolTasksTopic(testPool) }) {
 			f.cluster.SleepControl(func() { <-release })
 		}
 		return nil, nil, false
@@ -1070,7 +1070,7 @@ func failTaskListing(f fixture) {
 	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		f.cluster.KeepControl()
 		req := request.(*kmsg.ListOffsetsRequest)
-		if !slices.ContainsFunc(req.Topics, func(topic kmsg.ListOffsetsRequestTopic) bool { return topic.Topic == admin.PoolTasksTopic(testPool) }) {
+		if !slices.ContainsFunc(req.Topics, func(topic kmsg.ListOffsetsRequestTopic) bool { return topic.Topic == operator.PoolTasksTopic(testPool) }) {
 			return nil, nil, false
 		}
 		response := kmsg.NewPtrListOffsetsResponse()
@@ -1163,7 +1163,7 @@ func holdJoins(f fixture, release <-chan struct{}) *atomic.Int32 {
 	held := &atomic.Int32{}
 	f.cluster.ControlKey(kmsg.JoinGroup.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
 		f.cluster.KeepControl()
-		if request.(*kmsg.JoinGroupRequest).Group == admin.CustodianGroup(testPool) {
+		if request.(*kmsg.JoinGroupRequest).Group == operator.CustodianGroup(testPool) {
 			held.Add(1)
 			f.cluster.SleepControl(func() { <-release })
 		}
@@ -1201,7 +1201,7 @@ func runMember(t *testing.T, ctx context.Context, r *Receiver, logs *syncBuffer)
 func concurrentDrains(t *testing.T, lastOther, rebalancing bool) {
 	f := newBareFixture(t)
 	f.receiver.drainTimeout = 2 * time.Second
-	// Peers are provisioned before any Run: a running receiver that refreshes between a peer's admin record and its
+	// Peers are provisioned before any Run: a running receiver that refreshes between a peer's operator record and its
 	// key-topic grant is denied and exits (agb-yk39).
 	type peer struct {
 		id   string
@@ -1368,7 +1368,7 @@ func TestFencedWhileAssignedContestsOnce(t *testing.T) {
 // holdProduces answers every produce to topic with a retriable error while held is set, and closes arrived at the first.
 func holdProduces(t *testing.T, f fixture, topic string, held *atomic.Bool) <-chan struct{} {
 	t.Helper()
-	details, err := kadm.NewClient(f.service.Admin).ListTopics(f.ctx, topic)
+	details, err := kadm.NewClient(f.service.SuperUser).ListTopics(f.ctx, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1419,13 +1419,13 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 	}
 	var held atomic.Bool
 	held.Store(true)
-	arrived := holdProduces(t, f, admin.PoolTasksTopic(testPool), &held)
+	arrived := holdProduces(t, f, operator.PoolTasksTopic(testPool), &held)
 	t.Setenv("WHERRY_TEST_TOKEN", testToken)
-	kafka, err := kgo.NewClient(append(f.service.Admin.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+	kafka, err := kgo.NewClient(append(f.service.SuperUser.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := client.NewHost(kafka, f.host, admin.TenantPrincipal(testTenant, testHost), filepath.Join(t.TempDir(), "host"),
+	host, err := client.NewHost(kafka, f.host, operator.TenantPrincipal(testTenant, testHost), filepath.Join(t.TempDir(), "host"),
 		map[string]credential.Source{credentialName: {Env: "WHERRY_TEST_TOKEN"}}, nil, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
@@ -1464,7 +1464,7 @@ func TestTaskAppendedAfterTheDrainScanIsResubmittedOnce(t *testing.T) {
 		t.Fatalf("await %+v, %v, want the run resubmitted once and completed; logs:\n%s", awaited, err, successorLogs.String())
 	}
 	lost := false
-	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
+	for _, record := range f.records(t, operator.PoolEventsTopic(testPool)) {
 		var status wire.RunStatus
 		if wire.ParseRecord(record.Value, signed.Keys{"receiver-b": {Current: successor.signing.Public().(ed25519.PublicKey)}}, &status) == nil {
 			lost = lost || status.Wherry.Run == result.RunID && status.Wherry.Event == wire.EventKeyLost
@@ -1484,16 +1484,16 @@ func TestHandoverVerifiesEachTaskRecordOnce(t *testing.T) {
 	for i := range runs {
 		run := fmt.Sprintf("run-%d", i)
 		record := f.turn(t, run, 1)
-		f.produce(t, admin.PoolTasksTopic(testPool), string(record.Key), record.Value)
+		f.produce(t, operator.PoolTasksTopic(testPool), string(record.Key), record.Value)
 		f.publishStatus(t, record, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 		f.turn(t, run, 2)
 	}
 	var verifications atomic.Int64
-	authorizeSubmission = func(state admin.State, hosts signed.Keys, encoded []byte, pool string) (wire.Submission, error) {
+	authorizeSubmission = func(state operator.State, hosts signed.Keys, encoded []byte, pool string) (wire.Submission, error) {
 		verifications.Add(1)
-		return admin.AuthorizeSubmission(state, hosts, encoded, pool)
+		return operator.AuthorizeSubmission(state, hosts, encoded, pool)
 	}
-	t.Cleanup(func() { authorizeSubmission = admin.AuthorizeSubmission })
+	t.Cleanup(func() { authorizeSubmission = operator.AuthorizeSubmission })
 	successor, err := newAttemptKey()
 	if err != nil {
 		t.Fatal(err)
@@ -1526,7 +1526,7 @@ func TestDrainRekeysEachLiveHashOnce(t *testing.T) {
 		task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = time.Now().Unix()+1, time.Now().Unix()+1
 	})
 	live := f.turn(t, "run-live", 1)
-	f.produce(t, admin.PoolTasksTopic(testPool), string(live.Key), live.Value)
+	f.produce(t, operator.PoolTasksTopic(testPool), string(live.Key), live.Value)
 	f.publishStatus(t, live, testReceiver, f.receiver.signing, "claimed", wire.TaskStateWorking, nil)
 	f.turn(t, "run-live", 2)
 	f.turn(t, "run-open", 1)

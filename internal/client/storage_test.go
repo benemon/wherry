@@ -27,8 +27,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/minio/minio-go/v7"
@@ -253,7 +253,7 @@ func storageFixture(t *testing.T) (*fixture, *oracle, *testReceiver) {
 	o := newOracle(t)
 	f := newFixture(t)
 	terms := testTerms()
-	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolCreate(f.ctx, "pool-s3", terms); err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestSubmitUploadsS3InputsBeforePublishing(t *testing.T) {
 		t.Fatalf("submission's S3 inputs %+v", task.submission.Wherry.S3Inputs)
 	}
 	// The task carries the inputs' coordinates and no URL.
-	records, err := readTopic(f.ctx, receiver.kafka, admin.PoolTasksTopic("pool-s3"))
+	records, err := readTopic(f.ctx, receiver.kafka, operator.PoolTasksTopic("pool-s3"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestSubmitMovesInputsOverSmallestProfileLimitToS3(t *testing.T) {
 	o := newUploadOracle(t)
 	f := newFixture(t)
 	terms := testTerms()
-	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolCreate(f.ctx, "pool-inline", terms); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func recordLimitFixture(t *testing.T, stored bool) (*fixture, *uploadOracle, *te
 	f := newFixture(t)
 	terms := testTerms()
 	if stored {
-		terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+		terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 		f.host.storage = o.config
 		maps.Copy(f.host.credentials, o.sources)
 	}
@@ -378,7 +378,7 @@ func recordLimitFixture(t *testing.T, stored bool) (*fixture, *uploadOracle, *te
 		t.Fatal(err)
 	}
 	limit := "100000"
-	if responses, err := kadm.NewClient(f.service.Admin).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &limit}}, admin.PoolTasksTopic("pool-r")); err != nil || responses[0].Err != nil {
+	if responses, err := kadm.NewClient(f.service.SuperUser).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &limit}}, operator.PoolTasksTopic("pool-r")); err != nil || responses[0].Err != nil {
 		t.Fatalf("alter topic: %v %v", err, responses)
 	}
 	if err := f.service.PoolUpdate(f.ctx, "pool-r", terms, false); err != nil {
@@ -461,7 +461,7 @@ func TestSubmitAppliesTheProfileLimitOfAStaleReceiver(t *testing.T) {
 	o := newUploadOracle(t)
 	f := newFixture(t)
 	terms := testTerms()
-	terms.Storage = &admin.Storage{Endpoint: o.endpoint, Bucket: testBucket}
+	terms.Storage = &operator.Storage{Endpoint: o.endpoint, Bucket: testBucket}
 	if err := f.service.PoolCreate(f.ctx, "pool-inline", terms); err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +601,7 @@ func TestStorageKeysResolveThroughSources(t *testing.T) {
 		"s3-access": {Env: "WHERRY_TEST_STORAGE_ACCESS"},
 		"s3-secret": {Command: []string{"printf", secret + "\n"}},
 	}}
-	pool := &admin.Storage{Endpoint: "https://s3.example.test", Bucket: testBucket}
+	pool := &operator.Storage{Endpoint: "https://s3.example.test", Bucket: testBucket}
 	store, err := h.bucket(context.Background(), "pool-s3", pool)
 	if err != nil {
 		t.Fatal(err)
@@ -793,7 +793,7 @@ func TestPaddedStorageKeyIsRedacted(t *testing.T) {
 	h := &Host{storage: &StorageConfig{AccessKey: "padded-access", SecretKey: "padded-secret"},
 		credentials: map[string]credential.Source{"padded-access": {File: access}, "padded-secret": {File: secret}}}
 	ctx := context.Background()
-	store, err := h.bucket(ctx, "pool-s3", &admin.Storage{Endpoint: server.URL, Bucket: testBucket})
+	store, err := h.bucket(ctx, "pool-s3", &operator.Storage{Endpoint: server.URL, Bucket: testBucket})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -833,7 +833,7 @@ func TestLoopbackHTTPStorage(t *testing.T) {
 	h := &Host{storage: &StorageConfig{AccessKey: "access", SecretKey: "secret"},
 		credentials: map[string]credential.Source{"access": {File: access}, "secret": {File: secret}}}
 	ctx := context.Background()
-	storage := &admin.Storage{Endpoint: server.URL, Bucket: testBucket}
+	storage := &operator.Storage{Endpoint: server.URL, Bucket: testBucket}
 	store, err := h.bucket(ctx, "pool-s3", storage)
 	if err != nil {
 		t.Fatal(err)

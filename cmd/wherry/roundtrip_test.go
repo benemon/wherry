@@ -34,9 +34,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/receiver"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -118,7 +118,7 @@ func connectTLS(t *testing.T, address, ca, user, password string) *kgo.Client {
 	return client
 }
 
-// A password file's last line break is not part of the password, for every client KafkaOpts builds; the admin
+// A password file's last line break is not part of the password, for every client KafkaOpts builds; the operator
 // command's client and a revocation probe stand for them.
 func TestPasswordLineBreakIsNotThePassword(t *testing.T) {
 	ctx := context.Background()
@@ -135,20 +135,20 @@ func TestPasswordLineBreakIsNotThePassword(t *testing.T) {
 	t.Setenv("WHERRY_TRUST_BROKER", address)
 	t.Setenv("WHERRY_TRUST_CA", caPath)
 	t.Setenv("WHERRY_TEST_PASSWORD_FILE", passwordPath)
-	client, err := adminKafka(address, []byte(ca), "admin", "WHERRY_TEST_PASSWORD_FILE")
+	client, err := operatorKafka(address, []byte(ca), "admin", "WHERRY_TEST_PASSWORD_FILE")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Close()
 	if err := client.Ping(ctx); err != nil {
-		t.Fatalf("admin client with a password file ending in a line break: %v", err)
+		t.Fatalf("super-user client with a password file ending in a line break: %v", err)
 	}
-	service := &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Broker: address, CA: ca}
+	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Broker: address, CA: ca}
 	// The superuser is authorised, so a probe that logs in finds it still authorised.
-	if err := service.Probe("wherry.admin")(ctx, "admin", "password\n"); !errors.Is(err, admin.ErrStillAuthorised) {
+	if err := service.Probe("wherry.operator")(ctx, "admin", "password\n"); !errors.Is(err, operator.ErrStillAuthorised) {
 		t.Fatalf("probe with a password ending in a line break = %v; want a login", err)
 	}
-	if err := service.Probe("wherry.admin")(ctx, "admin", "other"); errors.Is(err, admin.ErrStillAuthorised) {
+	if err := service.Probe("wherry.operator")(ctx, "admin", "other"); errors.Is(err, operator.ErrStillAuthorised) {
 		t.Fatal("probe with a wrong password logged in")
 	}
 }
@@ -175,7 +175,7 @@ func TestKafkaOptsAskApiVersionsOncePerConnection(t *testing.T) {
 	brokerVersions := kversion.Stable()
 	brokerVersions.SetMaxKeyVersion(int16(kmsg.ApiVersions), 4)
 	cluster, ca := tlsCluster(t, kfake.MaxVersions(brokerVersions))
-	opts, err := admin.KafkaOpts(cluster.ListenAddrs()[0], []byte(ca), "admin", "password")
+	opts, err := operator.KafkaOpts(cluster.ListenAddrs()[0], []byte(ca), "admin", "password")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,24 +221,24 @@ func TestKafkaOptsAskApiVersionsOncePerConnection(t *testing.T) {
 }
 
 // resalt works around kfake's SCRAM handshake, which always names 4096 iterations.
-func resalt(t *testing.T, service *admin.Service, bundlePath string) {
+func resalt(t *testing.T, service *operator.Service, bundlePath string) {
 	t.Helper()
 	encoded, err := os.ReadFile(bundlePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var bundle admin.Bundle
+	var bundle operator.Bundle
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
 	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(service.Admin).AlterUserSCRAMs(context.Background(), nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
+	if altered, err := kadm.NewClient(service.SuperUser).AlterUserSCRAMs(context.Background(), nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
 		t.Fatalf("re-salt %s: %v %v", bundle.Principal, err, altered.Error())
 	}
 }
 
 // TestRoundTrip runs a task from a host's Submit through a receiver and the test plugin process to the host's Await,
-// on records each side produces for the other: provisioning through wherry admin, bundles, the host and receiver
+// on records each side produces for the other: provisioning through wherry operator, bundles, the host and receiver
 // constructors, plugin discovery and the plugin link, the platform credential's local source, the real claim, admission, the
 // envelope the receiver opens through the pool's key custodian, dual write and feed reads.
 func TestRoundTrip(t *testing.T) {
@@ -246,11 +246,11 @@ func TestRoundTrip(t *testing.T) {
 	defer cancel()
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
-	service := &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
+	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
 		Broker: address, CA: ca, DeliveryCeiling: 10}
 	dir := t.TempDir()
 	optional := false
-	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []admin.AgentCredential{
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
 		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},
 		{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional},
 	}}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
@@ -258,10 +258,10 @@ func TestRoundTrip(t *testing.T) {
 	if bucket == nil {
 		bucket = fallbackS3(t)
 	}
-	terms.Storage = &admin.Storage{Endpoint: bucket.endpoint, Bucket: s3Bucket}
+	terms.Storage = &operator.Storage{Endpoint: bucket.endpoint, Bucket: s3Bucket}
 	hostBundle, otherBundle, receiverBundle := filepath.Join(dir, "host.yaml"), filepath.Join(dir, "other.yaml"), filepath.Join(dir, "receiver.yaml")
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2,
-		Profiles: []admin.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude", Labels: map[string]string{"gpu": "yes"},
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2,
+		Profiles: []operator.ProfileSettings{{Name: "fake", Plugin: "fake", Agent: "claude", Labels: map[string]string{"gpu": "yes"},
 			Config: map[string]any{"outputs": true, "finish": true, "inline_limit": 1000, "credential": "fake-token"}}},
 		PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	for _, step := range []func() error{
@@ -283,7 +283,7 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var bundle admin.Bundle
+	var bundle operator.Bundle
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
@@ -668,10 +668,10 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 	defer cancel()
 	cluster, ca := tlsCluster(t)
 	address := cluster.ListenAddrs()[0]
-	service := &admin.Service{Admin: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
+	service := &operator.Service{SuperUser: connectTLS(t, address, ca, "admin", "password"), Operator: connectTLS(t, address, ca, "wherry.operator", "operator-password"),
 		Broker: address, CA: ca, DeliveryCeiling: 10}
-	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []admin.ProfileSettings{
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude"}}, DefaultAgent: "claude", DeliveryLimit: 5, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50}
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{
 		{Name: "fake", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "fake-token", "log_credential": true}},
 	}, PluginSHA256: map[string]string{"fake": fakeSHA256}}
 	dir := t.TempDir()
@@ -683,7 +683,7 @@ func TestPlatformCredentialIsRedactedFromTheReceiverLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	resalt(t, service, bundlePath)
-	bundle, err := admin.ReadBundle(bundlePath)
+	bundle, err := operator.ReadBundle(bundlePath)
 	if err != nil {
 		t.Fatal(err)
 	}

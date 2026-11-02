@@ -24,9 +24,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
@@ -72,11 +72,11 @@ func TestParseSelectorRejectsInvalidInput(t *testing.T) {
 
 const credentialText = "s3cr3t-model-credential"
 
-// bus is a kfake cluster provisioned through admin.Service: pool-a with receiver-a live in it, and host-a of
+// bus is a kfake cluster provisioned through operator.Service: pool-a with receiver-a live in it, and host-a of
 // tenant-a entitled to it with its key registered.
 type bus struct {
 	ctx         context.Context
-	service     *admin.Service
+	service     *operator.Service
 	client      *busclient.Host
 	hostBundle  string
 	hostKey     ed25519.PrivateKey
@@ -93,7 +93,7 @@ func newBus(t *testing.T) *bus {
 	t.Helper()
 	cluster := kfake.MustCluster(kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("PLAIN", "wherry.operator", "operator-password"))
 	t.Cleanup(cluster.Close)
-	if err := cluster.CreateTopic(admin.AdminTopic, 1, nil); err != nil {
+	if err := cluster.CreateTopic(operator.OperatorTopic, 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	root, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()))
@@ -101,16 +101,16 @@ func newBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	t.Cleanup(root.Close)
-	operator, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(plain.Auth{User: "wherry.operator", Pass: "operator-password"}.AsMechanism()), kgo.FetchMaxWait(10*time.Millisecond))
+	operatorClient, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(plain.Auth{User: "wherry.operator", Pass: "operator-password"}.AsMechanism()), kgo.FetchMaxWait(10*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(operator.Close)
+	t.Cleanup(operatorClient.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	b := &bus{ctx: ctx, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, stateDir: t.TempDir(), logs: &syncBuffer{}}
+	b := &bus{ctx: ctx, service: &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, stateDir: t.TempDir(), logs: &syncBuffer{}}
 	optional := false
-	terms := admin.Terms{Agents: []admin.AgentTerms{{Name: "claude", Credentials: []admin.AgentCredential{
+	terms := operator.Terms{Agents: []operator.AgentTerms{{Name: "claude", Credentials: []operator.AgentCredential{
 		{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}},
 		{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional},
 	}}}, DefaultAgent: "claude", DeliveryLimit: 3, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 50,
@@ -126,7 +126,7 @@ func newBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	receiverBundle := filepath.Join(t.TempDir(), "receiver.yaml")
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []admin.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}},
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}}},
 		PluginSHA256: map[string]string{"nomad": fakeSHA256}}
 	if err := b.service.ReceiverAdd(ctx, config, receiverBundle); err != nil {
 		t.Fatal(err)
@@ -155,8 +155,8 @@ func newBus(t *testing.T) *bus {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.produce(t, admin.ReceiverTopic("receiver-a"), "receiver-a", registration)
-	b.produce(t, admin.ReceiversTopic, "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
+	b.produce(t, operator.ReceiverTopic("receiver-a"), "receiver-a", registration)
+	b.produce(t, operator.ReceiversTopic, "receiver-a", b.sign(t, &wire.Advertisement{Receiver: "receiver-a", Pool: "pool-a",
 		Offers: []wire.Offer{{Profile: "lab", Agent: "claude", InlineLimit: 49152}}, Capacity: 1, AtMS: time.Now().UnixMilli()}))
 	publishSnapshot(t, ctx, b.receiver, "pool-a", "receiver-a", b.receiverKey)
 	return b
@@ -175,7 +175,7 @@ func publishSnapshot(t *testing.T, ctx context.Context, kafka *kgo.Client, pool,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: admin.CustodianTopic(pool), Key: []byte(wire.CustodianKey), Value: encoded}).FirstErr(); err != nil {
+	if err := kafka.ProduceSync(ctx, &kgo.Record{Topic: operator.CustodianTopic(pool), Key: []byte(wire.CustodianKey), Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -187,12 +187,12 @@ func (b *bus) kafka(t *testing.T, path string) (*kgo.Client, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var bundle admin.Bundle
+	var bundle operator.Bundle
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	// kfake's SCRAM server always offers 4096 iterations, so the 8192 that admin provisions never authenticates.
-	if _, err := kadm.NewClient(b.service.Admin).AlterUserSCRAMs(b.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
+	// kfake's SCRAM server always offers 4096 iterations, so the 8192 that operator provisions never authenticates.
+	if _, err := kadm.NewClient(b.service.SuperUser).AlterUserSCRAMs(b.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
 		t.Fatal(err)
 	}
 	kafka, err := kgo.NewClient(kgo.SeedBrokers(b.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
@@ -209,7 +209,7 @@ func (b *bus) connect(t *testing.T) func() (*busclient.Host, error) {
 	kafka.Close()
 	return func() (*busclient.Host, error) {
 		encoded, _ := os.ReadFile(b.hostBundle)
-		var bundle admin.Bundle
+		var bundle operator.Bundle
 		if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 			return nil, err
 		}
@@ -247,21 +247,21 @@ type task struct {
 // tasks reads and authorises runID's turns from pool-a's task topic as receiver-a does.
 func (b *bus) tasks(t *testing.T, runID string) []task {
 	t.Helper()
-	state, err := admin.Load(b.ctx, b.receiver)
+	state, err := operator.Load(b.ctx, b.receiver)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys, err := admin.ReadKeys(b.ctx, b.receiver, admin.HostKeyTopics(state, "pool-a"))
+	keys, err := operator.ReadKeys(b.ctx, b.receiver, operator.HostKeyTopics(state, "pool-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := readTopic(b.ctx, b.receiver, admin.PoolTasksTopic("pool-a"))
+	records, err := readTopic(b.ctx, b.receiver, operator.PoolTasksTopic("pool-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var tasks []task
 	for _, record := range records {
-		submission, err := admin.AuthorizeSubmission(state, keys, record.Value, "pool-a")
+		submission, err := operator.AuthorizeSubmission(state, keys, record.Value, "pool-a")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -310,7 +310,7 @@ func now(state wire.TaskState) wire.TaskStatus {
 // others to its feed.
 func (b *bus) feed(t *testing.T, runID string, values ...[]byte) {
 	t.Helper()
-	producer, err := kgo.NewClient(append(b.receiver.Opts(), kgo.TransactionalID(admin.TransactionalPrefix("pool-a")+runID))...)
+	producer, err := kgo.NewClient(append(b.receiver.Opts(), kgo.TransactionalID(operator.TransactionalPrefix("pool-a")+runID))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,10 +319,10 @@ func (b *bus) feed(t *testing.T, runID string, values ...[]byte) {
 		t.Fatal(err)
 	}
 	for _, value := range values {
-		topic := admin.TenantTopic("tenant-a")
+		topic := operator.TenantTopic("tenant-a")
 		if jws, err := jose.ParseSignedCompact(string(value), []jose.SignatureAlgorithm{jose.EdDSA}); err == nil {
 			if typ := jws.Signatures[0].Protected.ExtraHeaders[jose.HeaderType]; typ == wire.ChunkType || typ == wire.OutputType {
-				topic = admin.TenantTranscriptTopic("tenant-a")
+				topic = operator.TenantTranscriptTopic("tenant-a")
 			}
 		}
 		if err := producer.ProduceSync(b.ctx, &kgo.Record{Topic: topic, Key: []byte(runID), Value: value}).FirstErr(); err != nil {
@@ -348,7 +348,7 @@ func (b *bus) admitted(t *testing.T) task {
 
 func TestReceiversJSONOutputShape(t *testing.T) {
 	b := newBus(t)
-	silent := admin.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Capacity: 1, Profiles: []admin.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
+	silent := operator.ReceiverConfig{Receiver: "receiver-b", Pool: "pool-a", Capacity: 1, Profiles: []operator.ProfileSettings{{Name: "lab", Plugin: "nomad", Agent: "claude"}}, PluginSHA256: map[string]string{"nomad": fakeSHA256}}
 	if err := b.service.ReceiverAdd(b.ctx, silent, filepath.Join(t.TempDir(), "receiver.yaml")); err != nil {
 		t.Fatal(err)
 	}
@@ -399,11 +399,11 @@ func TestReceiversJSONOutputShape(t *testing.T) {
 
 func TestReceiversShowsEnded(t *testing.T) {
 	b := newBus(t)
-	end, err := admin.EncodeRecord(admin.Record{Kind: "end", Receiver: "receiver-a"})
+	end, err := operator.EncodeRecord(operator.Record{Kind: "end", Receiver: "receiver-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.service.Operator.ProduceSync(b.ctx, &kgo.Record{Topic: admin.AdminTopic, Value: end}).FirstErr(); err != nil {
+	if err := b.service.Operator.ProduceSync(b.ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: end}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
@@ -431,7 +431,7 @@ func TestSubmitNeverPrintsCredential(t *testing.T) {
 	if strings.Contains(stdout.String()+stderr.String(), credentialText) {
 		t.Fatalf("submit printed the credential: stdout %q stderr %q", stdout.String(), stderr.String())
 	}
-	if records, err := readTopic(b.ctx, b.receiver, admin.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
+	if records, err := readTopic(b.ctx, b.receiver, operator.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
 		t.Fatalf("host topic holds %d records, %v; want the key registration alone", len(records), err)
 	}
 }
@@ -494,20 +494,20 @@ func publishFailedRun(t *testing.T) (*bus, task) {
 // cancelRun reads the host's cancel from pool-a's events and writes its CANCELED terminal.
 func (b *bus) cancelRun(t *testing.T, admitted task) {
 	t.Helper()
-	state, err := admin.Load(b.ctx, b.receiver)
+	state, err := operator.Load(b.ctx, b.receiver)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys, err := admin.ReadKeys(b.ctx, b.receiver, admin.HostKeyTopics(state, "pool-a"))
+	keys, err := operator.ReadKeys(b.ctx, b.receiver, operator.HostKeyTopics(state, "pool-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := readTopic(b.ctx, b.receiver, admin.PoolEventsTopic("pool-a"))
+	records, err := readTopic(b.ctx, b.receiver, operator.PoolEventsTopic("pool-a"))
 	if err != nil || len(records) != 1 {
 		t.Fatalf("pool events hold %d records, %v", len(records), err)
 	}
 	runID := admitted.submission.Wherry.Run
-	if cancel, err := admin.AuthorizeCancel(state, keys, records[0].Value, "pool-a", "tenant-a"); err != nil || cancel.Run != runID {
+	if cancel, err := operator.AuthorizeCancel(state, keys, records[0].Value, "pool-a", "tenant-a"); err != nil || cancel.Run != runID {
 		t.Fatalf("cancel %#v, %v", cancel, err)
 	}
 	b.feed(t, runID, b.status(t, admitted, runID+"/1/canceled", "terminal", now(wire.TaskStateCanceled)))
@@ -911,7 +911,7 @@ func TestSubmitGitFlags(t *testing.T) {
 			}
 		})
 	}
-	if records, err := readTopic(b.ctx, b.receiver, admin.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
+	if records, err := readTopic(b.ctx, b.receiver, operator.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
 		t.Fatalf("refused submissions published %d tasks, %v", len(records), err)
 	}
 	submit := func(flags ...string) wire.Submission {
@@ -993,7 +993,7 @@ func TestVersionNeedsNoConfigOrBroker(t *testing.T) {
 
 // readTopic reads topic from its start through a reader of its own.
 func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Record, error) {
-	reader := admin.NewReader(client)
+	reader := operator.NewReader(client)
 	defer reader.Close()
 	return reader.ReadFrom(ctx, topic, 0)
 }

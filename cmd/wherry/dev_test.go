@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/hashicorp/nomad/api"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -770,7 +770,7 @@ func TestDevStorageUserPassesNoKey(t *testing.T) {
 	}
 }
 
-// TestDevOperatorACL fails when dev's operator ACL drifts from the one wherry admin expects of the operator.
+// TestDevOperatorACL fails when dev's operator ACL drifts from the one wherry operator expects of the operator.
 func TestDevOperatorACL(t *testing.T) {
 	cluster := kfake.MustCluster()
 	defer cluster.Close()
@@ -799,7 +799,7 @@ func TestDevOperatorACL(t *testing.T) {
 			got = append(got, fmt.Sprintf("%s %s %s %s %s %s %s", acl.Principal, acl.Host, acl.Type, acl.Name, acl.Pattern, acl.Operation, acl.Permission))
 		}
 	}
-	for _, acl := range admin.ACLs(admin.State{}) {
+	for _, acl := range operator.ACLs(operator.State{}) {
 		pattern := "LITERAL"
 		if acl.Prefix {
 			pattern = "PREFIXED"
@@ -811,7 +811,7 @@ func TestDevOperatorACL(t *testing.T) {
 	slices.Sort(got)
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
-		t.Fatalf("dev grants\n%s\nwherry admin expects\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		t.Fatalf("dev grants\n%s\nwherry operator expects\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

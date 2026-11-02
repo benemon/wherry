@@ -21,9 +21,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/receiver"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
@@ -62,7 +62,7 @@ func loadReceiverLocalConfig(path string) (receiverLocalConfig, error) {
 		return receiverLocalConfig{}, err
 	}
 	var config receiverLocalConfig
-	if err := admin.DecodeYAML(encoded, &config); err != nil {
+	if err := operator.DecodeYAML(encoded, &config); err != nil {
 		return receiverLocalConfig{}, fmt.Errorf("decode config: %w", err)
 	}
 	if config.Bundle == "" {
@@ -113,7 +113,7 @@ func runReceiver(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	bundle, err := admin.ReadBundle(config.Bundle)
+	bundle, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
 		return err
 	}
@@ -183,7 +183,7 @@ type plugins struct {
 
 // profile configures one profile in its type's plugin, handing the plugin the value of the credential its config names
 // in place of the name. The plugin starts only from a binary whose SHA-256 is pluginSHA256.
-func (p *plugins) profile(pool string, settings admin.ProfileSettings, pluginSHA256 string) (receiver.Named, error) {
+func (p *plugins) profile(pool string, settings operator.ProfileSettings, pluginSHA256 string) (receiver.Named, error) {
 	config := maps.Clone(settings.Config)
 	var value []byte
 	if named, ok := config["credential"]; ok {
