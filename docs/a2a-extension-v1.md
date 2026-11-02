@@ -500,6 +500,8 @@ base64 does. The fixed texts are:
   `model not in the pool's terms`, `duplicate submission`,
   `the task carries no envelope`,
   `task_started_by is past the pool's start_by_limit`,
+  `task_started_by is before its append time`,
+  `task_ended_by is before task_started_by`,
   `not started by task_started_by (<RFC 3339 time>)`,
   `not ended by task_ended_by (<RFC 3339 time>)`,
   `task_ended_by is past task_started_by plus the 6h run cap`,
@@ -1361,26 +1363,32 @@ A receiver that claims a submission:
    its task hash names another `task_offset`: it is a copy, byte for byte, of
    the claimed submission. A redelivery of the claimed submission itself goes
    on;
-6. rejects it with `the task carries no envelope` when it has none, and when
-   its agent is outside the pool's terms; with
-   `model not in the pool's terms` when the agent has `models` and the
+6. rejects it with `agent is outside the pool terms` when its agent is
+   outside the pool's terms; with `model not in the pool's terms` when the agent has `models` and the
    placement names no model or one outside the current `models`, or the
    agent has no `models` and the placement names one;
 7. rejects a run no pool member has claimed with
    `not started by task_started_by (<RFC 3339 time>)` or
    `not ended by task_ended_by (<RFC 3339 time>)` when that bound has
    passed;
-8. rejects a run no pool member has claimed with
+8. rejects a run no pool member has claimed when it fails a check judged at
+   its append time, which its delivery carries, naming the first that fails:
+   `the task carries no envelope` when it has none;
+   `task_started_by is before its append time`;
+   `task_started_by is past the pool's start_by_limit` when its
+   `task_started_by` falls more than `start_by_limit_ms` after its append
+   time; `task_ended_by is before task_started_by`; and
    `task_ended_by is past task_started_by plus the 6h run cap` when its
-   `task_ended_by` is more than six hours after its `task_started_by`;
+   `task_ended_by` is more than six hours after its `task_started_by`. Its
+   `rejected` status names no run's task (step 4), so a later submission of
+   the run that passes is admitted;
 9. releases it when no ready plugin profile satisfies the placement, unless
    a member has claimed the run and its `task_ended_by` has passed, or its
    `task_started_by` has passed with no `started` event;
 10. rejects a run no pool member has claimed with
     `task_started_by is past the pool's start_by_limit` when its submission
     reached the pool's task topic more than the pool's `start_by_limit_ms`
-    ago, or its `task_started_by` falls more than `start_by_limit_ms` after
-    that, judged at its append time, which its delivery carries;
+    ago;
 11. rejects it when the host of the run's [git input](#git-input) is not
     one of the pool's current VCS hosts, and with `pool <pool> has no
     storage for S3 inputs and outputs` when the run has S3 inputs or
@@ -1680,6 +1688,9 @@ attribute to a host and run with a `rejected` [status](#status) in
 | a later submission of a run ID | rejected | `duplicate submission` |
 | the submission is older than the pool's `start_by_limit_ms`, or its `task_started_by` is later than `start_by_limit_ms` after it | rejected | `task_started_by is past the pool's start_by_limit` |
 | `task_ended_by` is more than six hours after `task_started_by` | rejected | `task_ended_by is past task_started_by plus the 6h run cap` |
+| the submission carries no envelope | rejected | `the task carries no envelope` |
+| `task_started_by` is before the submission's append time | rejected | `task_started_by is before its append time` |
+| `task_ended_by` is before `task_started_by` | rejected | `task_ended_by is before task_started_by` |
 | `task_started_by` or `task_ended_by` has passed | rejected | `not started by task_started_by (<RFC 3339 time>)`, `not ended by task_ended_by (<RFC 3339 time>)` |
 | a required credential of the agent is unsupplied | rejected | `the host does not supply a required credential of the agent` |
 | a task credential takes an agent credential's target | rejected | `a task credential takes the target of one of the agent's credentials` |
