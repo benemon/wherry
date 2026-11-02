@@ -233,12 +233,14 @@ func TestAdmitRejectsStartByPastTheStartByLimit(t *testing.T) {
 
 func TestRedeliveredClaimedRunPastStartByLimitIsAdopted(t *testing.T) {
 	terms := testTerms()
-	terms.StartByLimitMS = 50
+	// Bounds are whole seconds judged at the append time, so task_started_by is one second ahead of submitting and the
+	// limit two seconds: the task is admissible when appended, and past the limit when redelivered.
+	terms.StartByLimitMS = 2000
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, job: pluginsdk.JobRunning}})
 	record := startedTurn(t, f, "run-held", func(task *wire.Submission) {
-		task.Wherry.TaskStartedBy = time.Now().Unix()
+		task.Wherry.TaskStartedBy = time.Now().Add(time.Second).Unix()
 	})
-	time.Sleep(60 * time.Millisecond)
+	time.Sleep(2100 * time.Millisecond)
 	if status := f.receiver.execute(f.ctx, f.service.Admin, record, f.admitted(t, record), 2); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
