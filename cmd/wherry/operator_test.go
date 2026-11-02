@@ -21,7 +21,9 @@ import (
 
 	"github.com/benemon/wherry/internal/operator"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
@@ -370,17 +372,36 @@ func TestPoolApply(t *testing.T) {
 	apply := func(path string, options ...string) error {
 		return runOperator(append([]string{"pool", "apply", "pool-a", "-f", path}, options...), io.Discard, io.Discard)
 	}
+	// A dry run and a refused apply on a fresh cluster record nothing and create no wherry.operator. The metadata request
+	// goes through its own client, whose cache of the absent topic the later listings must not read.
+	absent := func() bool {
+		t.Helper()
+		client, err := kgo.NewClient(service.SuperUser.Opts()...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer client.Close()
+		request := kmsg.NewPtrMetadataRequest()
+		topic := kmsg.NewMetadataRequestTopic()
+		topic.Topic = kmsg.StringPtr(operator.OperatorTopic)
+		request.Topics = append(request.Topics, topic)
+		response, err := request.RequestWith(ctx, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response.Topics[0].ErrorCode == kerr.UnknownTopicOrPartition.Code
+	}
 	if err := apply(pool(5, "15s"), "--dry-run"); err != nil {
 		t.Fatal(err)
 	}
-	if state, err := service.LoadState(ctx); err != nil || len(state.Pools) != 0 {
-		t.Fatalf("pools %v, %v; want none recorded by a dry run", state.Pools, err)
+	if !absent() {
+		t.Fatal("a dry run created wherry.operator")
 	}
 	if err := apply(pool(5, "2m")); err == nil || err.Error() != "lock_duration 2m0s exceeds the broker's group.share.max.record.lock.duration.ms 1m0s" {
 		t.Fatalf("apply above the lock ceiling = %v, want it refused naming the field and the ceiling", err)
 	}
-	if state, err := service.LoadState(ctx); err != nil || len(state.Pools) != 0 {
-		t.Fatalf("pools %v, %v; want none recorded", state.Pools, err)
+	if !absent() {
+		t.Fatal("an apply refused for its lock duration created wherry.operator")
 	}
 	if err := apply(pool(5, "15s")); err != nil {
 		t.Fatal(err)
