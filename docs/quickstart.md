@@ -136,7 +136,7 @@ credentials. `wherry dev reset` deletes the downloads.
 ## Operator
 
 Each step names the machine it runs on: the operator's machine, which holds
-the Kafka credentials `wherry admin` uses; the receiver host, which runs
+the Kafka credentials `wherry operator` uses; the receiver host, which runs
 receiver `nomad-1`; and `laptop`, the host the tenant submits from.
 
 Two pairs of files name the same credentials:
@@ -147,7 +147,7 @@ Two pairs of files name the same credentials:
   the Nomad token the receiver authenticates with. The receiver's local
   configuration maps that name to a source on the receiver host.
 
-The configuration on `wherry.admin` holds the names. Each value is read from
+The configuration on `wherry.operator` holds the names. Each value is read from
 its source on the machine that resolves it.
 
 ### Prerequisites
@@ -179,17 +179,17 @@ On the operator's machine, put the listener's CA certificate in
 `/etc/wherry/admin-password` and `wherry.operator`'s password in
 `/etc/wherry/operator-password`, each with mode 0600.
 
-### 2. Set up `wherry admin`
+### 2. Set up `wherry operator`
 
-On the operator's machine, export the five variables `wherry admin` reads.
+On the operator's machine, export the five variables `wherry operator` reads.
 `WHERRY_TRUST_BROKER` and the CA file also go into every bundle, so the
 address is the one the receiver host and `laptop` reach:
 
 ```sh
 export WHERRY_TRUST_BROKER=kafka.example.com:9093
 export WHERRY_TRUST_CA=/etc/wherry/kafka-ca.pem
-export WHERRY_TRUST_ADMIN_USER=kafka-admin
-export WHERRY_TRUST_ADMIN_PASSWORD_FILE=/etc/wherry/admin-password
+export WHERRY_TRUST_SUPER_USER=kafka-admin
+export WHERRY_TRUST_SUPER_USER_PASSWORD_FILE=/etc/wherry/admin-password
 export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=/etc/wherry/operator-password
 ```
 
@@ -230,10 +230,10 @@ invalid input: auth required: credential claude-oauth-token is not in this host'
 On the operator's machine:
 
 ```sh
-wherry admin pool create build --config-file build-terms.yaml
+wherry operator pool create build --config-file build-terms.yaml
 ```
 
-`pool create` records the terms on `wherry.admin` and creates the pool's
+`pool create` records the terms on `wherry.operator` and creates the pool's
 topics and share group.
 
 ### 5. Entitle the tenant
@@ -241,7 +241,7 @@ topics and share group.
 On the operator's machine:
 
 ```sh
-wherry admin pool entitle build --tenant acme
+wherry operator pool entitle build --tenant acme
 ```
 
 Tenant `acme` may now submit to `build` from any host the operator adds for
@@ -350,7 +350,7 @@ sha256=$(awk -v name="wherry-plugin-${plugin}_${version}_linux_${arch}" '$2 == n
 Check the file against the pool's terms, with the pin:
 
 ```sh
-wherry admin receiver add nomad-1 --pool build --config-file nomad-1.yaml \
+wherry operator receiver add nomad-1 --pool build --config-file nomad-1.yaml \
   --plugin-sha256 "nomad=$sha256" --dry-run
 ```
 
@@ -416,11 +416,11 @@ profile whose agent is outside the pool's terms fails with
 On the operator's machine:
 
 ```sh
-wherry admin receiver add nomad-1 --pool build --config-file nomad-1.yaml \
+wherry operator receiver add nomad-1 --pool build --config-file nomad-1.yaml \
   --plugin-sha256 "nomad=$sha256" --bundle-file nomad-1.bundle
 ```
 
-`receiver add` records the configuration and the pin on `wherry.admin`, creates the
+`receiver add` records the configuration and the pin on `wherry.operator`, creates the
 receiver's Kafka principal, and writes its bundle, `nomad-1.bundle`, with mode
 0600. The bundle holds the receiver's Kafka password; hand it to the receiver
 host over a channel you trust.
@@ -499,7 +499,7 @@ profile container: credential "nomad-token" has no source in the receiver's conf
 
 `state_dir` keeps the receiver's signing key, and the pool keys while the
 receiver is its pool's key custodian, and survives restarts. The
-receiver reads the token on this host, and neither `wherry.admin` nor the
+receiver reads the token on this host, and neither `wherry.operator` nor the
 bundle holds it.
 
 ### 8. Start the receiver
@@ -528,7 +528,7 @@ running the receiver as a Nomad job.
 On the operator's machine, print the configuration the receiver runs:
 
 ```sh
-wherry admin receiver show nomad-1
+wherry operator receiver show nomad-1
 ```
 
 It prints the record, the same YAML `--dry-run` printed in
@@ -610,7 +610,7 @@ from the pool terms; one `laptop` has no source for shows as
 On the operator's machine:
 
 ```sh
-wherry admin host add laptop --tenant acme --bundle-file laptop.bundle
+wherry operator host add laptop --tenant acme --bundle-file laptop.bundle
 ```
 
 `host add` records host `laptop` of tenant `acme`, creates its Kafka

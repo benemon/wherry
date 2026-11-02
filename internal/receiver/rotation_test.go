@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -19,7 +19,7 @@ func rotateSelf(t *testing.T, f *fixture) {
 	// A retired key counts only strictly before its rotation's broker time, which has millisecond resolution.
 	time.Sleep(2 * time.Millisecond)
 	_, next, _ := ed25519.GenerateKey(rand.Reader)
-	f.produce(t, admin.ReceiverTopic(testReceiver), testReceiver, must(t)(signed.RotateKey(testReceiver, f.receiver.signing, next)))
+	f.produce(t, operator.ReceiverTopic(testReceiver), testReceiver, must(t)(signed.RotateKey(testReceiver, f.receiver.signing, next)))
 	f.receiver.signing = next
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
@@ -30,7 +30,7 @@ func rotatePeer(t *testing.T, f fixture, id string, old ed25519.PrivateKey) {
 	t.Helper()
 	time.Sleep(2 * time.Millisecond)
 	_, next, _ := ed25519.GenerateKey(rand.Reader)
-	f.produce(t, admin.ReceiverTopic(id), id, must(t)(signed.RotateKey(id, old, next)))
+	f.produce(t, operator.ReceiverTopic(id), id, must(t)(signed.RotateKey(id, old, next)))
 	if err := f.receiver.refresh(f.ctx); err != nil {
 		t.Fatal(err)
 	}

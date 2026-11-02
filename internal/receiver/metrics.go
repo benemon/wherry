@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
@@ -257,7 +257,7 @@ func (m *metrics) pluginMetric(sample pluginsdk.Sample, labels []string) (promet
 func (r *Receiver) placementLabels(placement wire.Placement) (string, string) {
 	state, _, _ := r.snapshot()
 	agents := state.Pools[r.config.Pool].Agents
-	index := slices.IndexFunc(agents, func(terms admin.AgentTerms) bool { return terms.Name == placement.Agent })
+	index := slices.IndexFunc(agents, func(terms operator.AgentTerms) bool { return terms.Name == placement.Agent })
 	switch {
 	case index < 0:
 		return "other", ""

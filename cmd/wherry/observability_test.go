@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/pluginsdk"
 )
 
@@ -16,7 +16,7 @@ func TestHostSeries(t *testing.T) {
 	registry := newRegistry()
 	plugins := &plugins{dir: installPlugin(t), logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	if _, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}, fakeSHA256); err != nil {
+	if _, err := plugins.profile("build", operator.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}, fakeSHA256); err != nil {
 		t.Fatal(err)
 	}
 	families, err := registry.Gather()

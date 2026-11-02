@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"bytes"
@@ -28,7 +28,7 @@ import (
 )
 
 type Service struct {
-	Admin           *kgo.Client
+	SuperUser       *kgo.Client // connected as the Kafka super user
 	Operator        *kgo.Client
 	Broker          string
 	CA              string // PEM, copied into bundles
@@ -136,7 +136,7 @@ func (service *Service) poolTerms(ctx context.Context, pool string, terms Terms,
 		return fmt.Errorf("delivery limit exceeds broker ceiling %d", service.DeliveryCeiling)
 	}
 	if !update {
-		if err := service.createTopics(ctx, "-1", AdminTopic); err != nil {
+		if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
 			return err
 		}
 	}
@@ -574,15 +574,15 @@ func (service *Service) appendChecked(ctx context.Context, key []byte, record Re
 	return state, err
 }
 
-// appendRecord is appendChecked that also returns the record's wherry.admin offset.
+// appendRecord is appendChecked that also returns the record's wherry.operator offset.
 func (service *Service) appendRecord(ctx context.Context, key []byte, record Record) (State, int64, error) {
-	if err := service.createTopics(ctx, "-1", AdminTopic); err != nil {
+	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
 		return State{}, 0, err
 	}
 	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
 		return State{}, 0, err
 	}
-	// A topic created with older configs converges on the next admin write.
+	// A topic created with older configs converges on the next operator write.
 	if err := service.configureTopics(ctx, receiversConfigs, ReceiversTopic); err != nil {
 		return State{}, 0, err
 	}
@@ -601,9 +601,9 @@ func (service *Service) appendRecord(ctx context.Context, key []byte, record Rec
 	if err := state.CheckNames(); err != nil {
 		return State{}, 0, err
 	}
-	produced, err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: AdminTopic, Key: key, Value: encoded}).First()
+	produced, err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: OperatorTopic, Key: key, Value: encoded}).First()
 	if err != nil {
-		return State{}, 0, fmt.Errorf("write admin record: %w", err)
+		return State{}, 0, fmt.Errorf("write operator record: %w", err)
 	}
 	return state, produced.Offset, nil
 }
@@ -617,7 +617,7 @@ func (service *Service) createTopicsWith(ctx context.Context, values map[string]
 	for name, value := range values {
 		configs[name] = kadm.StringPtr(value)
 	}
-	responses, err := kadm.NewClient(service.Admin).CreateTopics(ctx, 1, -1, configs, topics...)
+	responses, err := kadm.NewClient(service.SuperUser).CreateTopics(ctx, 1, -1, configs, topics...)
 	if err != nil {
 		return err
 	}
@@ -640,7 +640,7 @@ func (service *Service) createTopicsWith(ctx context.Context, values map[string]
 // propagating reports whether a broker's own metadata lacks one of topics or a leader for one of their partitions, as
 // it does until a created topic's metadata reaches it; describes and config changes it answers fail until then.
 func (service *Service) propagating(ctx context.Context, topics []string) bool {
-	metadata, err := kadm.NewClient(service.Admin).BrokerMetadata(ctx)
+	metadata, err := kadm.NewClient(service.SuperUser).BrokerMetadata(ctx)
 	if err != nil {
 		return false
 	}
@@ -651,7 +651,7 @@ func (service *Service) propagating(ctx context.Context, topics []string) bool {
 		request.Topics = append(request.Topics, requested)
 	}
 	for _, broker := range metadata.Brokers {
-		response, err := request.RequestWith(ctx, service.Admin.Broker(int(broker.NodeID)))
+		response, err := request.RequestWith(ctx, service.SuperUser.Broker(int(broker.NodeID)))
 		if err != nil {
 			return false
 		}
@@ -699,7 +699,7 @@ func (service *Service) configureTopics(ctx context.Context, values map[string]s
 	for name, value := range values {
 		configs = append(configs, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
 	}
-	responses, err := kadm.NewClient(service.Admin).AlterTopicConfigs(ctx, configs, topics...)
+	responses, err := kadm.NewClient(service.SuperUser).AlterTopicConfigs(ctx, configs, topics...)
 	if err != nil {
 		return err
 	}
@@ -761,7 +761,7 @@ func (service *Service) topicRetentions(ctx context.Context, topics ...string) (
 }
 
 func (service *Service) topicConfigs(ctx context.Context, name string, topics ...string) (map[string]string, error) {
-	resources, err := kadm.NewClient(service.Admin).DescribeTopicConfigs(ctx, topics...)
+	resources, err := kadm.NewClient(service.SuperUser).DescribeTopicConfigs(ctx, topics...)
 	if err != nil {
 		return nil, err
 	}
@@ -807,7 +807,7 @@ func (service *Service) checkPoolFeedsRetention(ctx context.Context, state State
 }
 
 func (service *Service) checkRetention(ctx context.Context, state State) error {
-	topics := []string{AdminTopic}
+	topics := []string{OperatorTopic}
 	for receiver := range state.Receivers {
 		topics = append(topics, ReceiverTopic(receiver))
 	}
@@ -916,7 +916,7 @@ func (service *Service) onePartition(ctx context.Context, absent bool, topics ..
 		requested.Topic = kmsg.StringPtr(topic)
 		request.Topics = append(request.Topics, requested)
 	}
-	response, err := request.RequestWith(ctx, service.Admin)
+	response, err := request.RequestWith(ctx, service.SuperUser)
 	if err != nil {
 		return err
 	}
@@ -949,7 +949,7 @@ func (service *Service) configureGroup(ctx context.Context, pool string, terms T
 	}
 	request := kmsg.NewPtrIncrementalAlterConfigsRequest()
 	request.Resources = []kmsg.IncrementalAlterConfigsRequestResource{resource}
-	response, err := service.Admin.Request(ctx, request)
+	response, err := service.SuperUser.Request(ctx, request)
 	if err != nil {
 		return err
 	}
@@ -966,7 +966,7 @@ func (service *Service) upsertUser(ctx context.Context, user string) (string, er
 		return "", err
 	}
 	password := base64.RawURLEncoding.EncodeToString(random)
-	results, err := kadm.NewClient(service.Admin).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{{User: user, Mechanism: kadm.ScramSha512, Iterations: 8192, Password: password}})
+	results, err := kadm.NewClient(service.SuperUser).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{{User: user, Mechanism: kadm.ScramSha512, Iterations: 8192, Password: password}})
 	if err != nil {
 		return "", err
 	}
@@ -991,7 +991,7 @@ func (service *Service) applyQuota(ctx context.Context, state State, tenant, pri
 	if rate == 0 {
 		return nil
 	}
-	results, err := kadm.NewClient(service.Admin).AlterClientQuotas(ctx, []kadm.AlterClientQuotaEntry{{Entity: kadm.ClientQuotaEntity{{Type: "user", Name: &principal}}, Ops: []kadm.AlterClientQuotaOp{{Key: "producer_byte_rate", Value: float64(rate)}, {Key: "request_percentage", Value: request}}}})
+	results, err := kadm.NewClient(service.SuperUser).AlterClientQuotas(ctx, []kadm.AlterClientQuotaEntry{{Entity: kadm.ClientQuotaEntity{{Type: "user", Name: &principal}}, Ops: []kadm.AlterClientQuotaOp{{Key: "producer_byte_rate", Value: float64(rate)}, {Key: "request_percentage", Value: request}}}})
 	if err != nil {
 		return err
 	}
@@ -1027,7 +1027,7 @@ func (service *Service) checkFeedLimits(ctx context.Context, state State) error 
 
 // brokerSetting reads a numeric setting from every broker, combining values with pick.
 func (service *Service) brokerSetting(ctx context.Context, name string, pick func(a, b int64) int64) (int64, error) {
-	client := kadm.NewClient(service.Admin)
+	client := kadm.NewClient(service.SuperUser)
 	brokers, err := client.ListBrokers(ctx)
 	if err != nil {
 		return 0, err
@@ -1096,12 +1096,12 @@ func (service *Service) recordLimits(ctx context.Context, state State, pool stri
 			topics = append(topics, TenantTopic(tenant), TenantTranscriptTopic(tenant))
 		}
 	}
-	resources, err := kadm.NewClient(service.Admin).DescribeTopicConfigs(ctx, topics...)
+	resources, err := kadm.NewClient(service.SuperUser).DescribeTopicConfigs(ctx, topics...)
 	if err != nil {
 		return 0, 0, err
 	}
-	// Hosts, like the admin client, produce with franz-go's default batch maximum, and receivers with FeedRecordLimit.
-	tasks, feeds := int64(service.Admin.OptValue(kgo.ProducerBatchMaxBytes).(int32)), int64(FeedRecordLimit)
+	// Hosts, like the super-user client, produce with franz-go's default batch maximum, and receivers with FeedRecordLimit.
+	tasks, feeds := int64(service.SuperUser.OptValue(kgo.ProducerBatchMaxBytes).(int32)), int64(FeedRecordLimit)
 	for _, resource := range resources {
 		// A topic without its own max.message.bytes, as a pool's task topic before its first create, takes each
 		// broker's message.max.bytes; one set on the topic overrides them.

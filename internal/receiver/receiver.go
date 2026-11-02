@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
@@ -30,16 +30,16 @@ import (
 )
 
 // parseHistory, parseStrict and authorizeSubmission are wire.ParseHistory, wire.ParseStrict and
-// admin.AuthorizeSubmission, swapped by tests that count the verifications of a read; loadState is the custodian's read
-// of wherry.admin, swapped by tests that count its reads.
+// operator.AuthorizeSubmission, swapped by tests that count the verifications of a read; loadState is the custodian's read
+// of wherry.operator, swapped by tests that count its reads.
 var (
 	parseHistory        = wire.ParseHistory
 	parseStrict         = wire.ParseStrict
-	authorizeSubmission = admin.AuthorizeSubmission
-	loadState           = (*admin.Reader).Load
+	authorizeSubmission = operator.AuthorizeSubmission
+	loadState           = (*operator.Reader).Load
 )
 
-// ErrConfigChanged is returned by Run when wherry.admin holds a configuration other than the one it started with.
+// ErrConfigChanged is returned by Run when wherry.operator holds a configuration other than the one it started with.
 var ErrConfigChanged = errors.New("receiver configuration changed")
 
 // Named is a configured profile with its name, the agent it launches and its plugin's handle on it.
@@ -55,14 +55,14 @@ type Named struct {
 
 // ProfileFactory configures one profile for the receiver's pool from its settings in the receiver's configuration
 // record and the SHA-256 the record pins for its plugin's binary.
-type ProfileFactory func(pool string, settings admin.ProfileSettings, pluginSHA256 string) (Named, error)
+type ProfileFactory func(pool string, settings operator.ProfileSettings, pluginSHA256 string) (Named, error)
 
 // Receiver claims tasks for one pool and runs them through its profiles.
 type Receiver struct {
 	id   string
 	base *kgo.Client
 	// reader reads every topic the receiver reads.
-	reader  *admin.Reader
+	reader  *operator.Reader
 	signing ed25519.PrivateKey
 	factory ProfileFactory
 	logger  *log.Logger
@@ -76,10 +76,10 @@ type Receiver struct {
 	// drainTimeout bounds how long Run lets held runs end after its context ends.
 	drainTimeout time.Duration
 	// config and profiles are set by configure before any claim and never change.
-	config   admin.ReceiverConfig
+	config   operator.ReceiverConfig
 	profiles []Named
 	mu       sync.Mutex
-	state    admin.State
+	state    operator.State
 	// peers holds the pool's receiver keys, this receiver's included; hosts the keys of entitled tenants' hosts.
 	peers signed.Keys
 	hosts signed.Keys
@@ -112,12 +112,12 @@ type Receiver struct {
 // New builds the receiver's Kafka client from bundle and loads or creates its signing key in stateDir, settling a
 // rotation an earlier start left. With rotateKey, Run rotates the key. Once configured, the receiver registers its
 // metric families on registry.
-func New(bundle admin.Bundle, stateDir string, rotateKey bool, drainTimeout time.Duration, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
-	id, ok := strings.CutPrefix(bundle.Principal, admin.ReceiverPrincipal(""))
+func New(bundle operator.Bundle, stateDir string, rotateKey bool, drainTimeout time.Duration, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
+	id, ok := strings.CutPrefix(bundle.Principal, operator.ReceiverPrincipal(""))
 	if !ok || !wire.ValidName(id) {
 		return nil, errors.New("bundle principal is not a receiver principal")
 	}
-	opts, err := admin.KafkaOpts(bundle.Broker, []byte(bundle.CA), bundle.Principal, bundle.Password)
+	opts, err := operator.KafkaOpts(bundle.Broker, []byte(bundle.CA), bundle.Principal, bundle.Password)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}
@@ -132,7 +132,7 @@ func New(bundle admin.Bundle, stateDir string, rotateKey bool, drainTimeout time
 		return nil, err
 	}
 	keyFile := filepath.Join(stateDir, "signing.key")
-	signing, err := admin.RecoverKey(context.Background(), base, id, admin.ReceiverTopic(id), keyFile)
+	signing, err := operator.RecoverKey(context.Background(), base, id, operator.ReceiverTopic(id), keyFile)
 	if errors.Is(err, os.ErrNotExist) {
 		signing, err = trust.GenerateSigningKeyFile(keyFile)
 	}
@@ -140,13 +140,13 @@ func New(bundle admin.Bundle, stateDir string, rotateKey bool, drainTimeout time
 		base.Close()
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	return &Receiver{id: id, base: base, reader: admin.NewReader(base), signing: signing, keyFile: keyFile, stateDir: stateDir, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
+	return &Receiver{id: id, base: base, reader: operator.NewReader(base), signing: signing, keyFile: keyFile, stateDir: stateDir, rotateKey: rotateKey, drainTimeout: drainTimeout, factory: factory, logger: logger, metrics: newMetrics(registry)}, nil
 }
 
 // feedBatches is opts with producer batches up to what a tenant's feed takes, so the largest result fits. Every client
 // of the receiver's connection carries it.
 func feedBatches(opts []kgo.Opt) []kgo.Opt {
-	return append(opts, kgo.ProducerBatchMaxBytes(admin.FeedRecordLimit))
+	return append(opts, kgo.ProducerBatchMaxBytes(operator.FeedRecordLimit))
 }
 
 // newClient is a client of the receiver's connection with extra options.
@@ -166,7 +166,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 		return err
 	}
 	if r.rotateKey {
-		next, err := admin.RotateKey(ctx, r.base, r.id, admin.ReceiverTopic(r.id), r.keyFile, r.signing)
+		next, err := operator.RotateKey(ctx, r.base, r.id, operator.ReceiverTopic(r.id), r.keyFile, r.signing)
 		if err != nil {
 			return r.denyStep(fmt.Errorf("rotate key: %w", err), capWrite, "rotate key")
 		}
@@ -320,7 +320,7 @@ func (r *Receiver) every(ctx context.Context, interval time.Duration, step func(
 // register puts the signing key on a key topic with no records at all, and refuses a topic holding anything but
 // this receiver's own registration.
 func (r *Receiver) register(ctx context.Context) error {
-	topic := admin.ReceiverTopic(r.id)
+	topic := operator.ReceiverTopic(r.id)
 	public := r.signing.Public().(ed25519.PublicKey)
 	records, err := r.reader.ReadFrom(ctx, topic, 0)
 	if err != nil {
@@ -358,15 +358,15 @@ func (r *Receiver) configure(ctx context.Context) error {
 	for {
 		state, err := r.reader.Load(ctx)
 		if err != nil {
-			return r.denyStep(fmt.Errorf("read wherry.admin: %w", err), capRead, "configure")
+			return r.denyStep(fmt.Errorf("read wherry.operator: %w", err), capRead, "configure")
 		}
-		if state.Ended[admin.ReceiverPrincipal(r.id)] {
+		if state.Ended[operator.ReceiverPrincipal(r.id)] {
 			r.metrics.denials.WithLabelValues(string(capMembership)).Inc()
 			return errors.New("receiver membership has ended")
 		}
 		if config, ok := state.Receivers[r.id]; ok {
-			record := admin.Record{Kind: "receiver", Pool: config.Pool, Receiver: r.id, Config: &config}
-			if err := admin.ValidateReceiverRecord(record, r.id, state.Pools[config.Pool]); err != nil {
+			record := operator.Record{Kind: "receiver", Pool: config.Pool, Receiver: r.id, Config: &config}
+			if err := operator.ValidateReceiverRecord(record, r.id, state.Pools[config.Pool]); err != nil {
 				return fmt.Errorf("configuration: %w", err)
 			}
 			profiles := make([]Named, 0, len(config.Profiles))
@@ -395,7 +395,7 @@ func (r *Receiver) configure(ctx context.Context) error {
 	}
 }
 
-// refresh folds wherry.admin and the pool's key topics; it returns ErrConfigChanged when the
+// refresh folds wherry.operator and the pool's key topics; it returns ErrConfigChanged when the
 // configuration record is no longer the one the receiver started with.
 func (r *Receiver) refresh(ctx context.Context) error {
 	// A bounded read can wait on another holder's open transaction; never longer than this.
@@ -404,13 +404,13 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	state, err := r.reader.Load(ctx)
 	var peers, hosts, ended signed.Keys
 	if err == nil {
-		peers, err = r.reader.ReadKeys(ctx, admin.PoolKeyTopics(state, r.config.Pool))
+		peers, err = r.reader.ReadKeys(ctx, operator.PoolKeyTopics(state, r.config.Pool))
 	}
 	if err == nil {
-		ended, err = r.reader.ReadKeys(ctx, admin.EndedPoolKeyTopics(state, r.config.Pool))
+		ended, err = r.reader.ReadKeys(ctx, operator.EndedPoolKeyTopics(state, r.config.Pool))
 	}
 	if err == nil {
-		hosts, err = r.reader.ReadKeys(ctx, admin.HostKeyTopics(state, r.config.Pool))
+		hosts, err = r.reader.ReadKeys(ctx, operator.HostKeyTopics(state, r.config.Pool))
 	}
 	if err != nil {
 		return r.deny(err, capRead)
@@ -421,7 +421,7 @@ func (r *Receiver) refresh(ctx context.Context) error {
 	r.state, r.peers, r.hosts, r.ended = state, peers, hosts, ended
 	r.mu.Unlock()
 	// A membership end comes before a configuration change, so a revoked receiver does not drain.
-	if state.Ended[admin.ReceiverPrincipal(r.id)] {
+	if state.Ended[operator.ReceiverPrincipal(r.id)] {
 		r.deny(kerr.ClusterAuthorizationFailed, capMembership)
 		return nil
 	}
@@ -477,7 +477,7 @@ func authorisationError(err error) bool {
 	return false
 }
 
-// suspended reports the receiver's pool suspended as it holds wherry.admin.
+// suspended reports the receiver's pool suspended as it holds wherry.operator.
 func (r *Receiver) suspended() bool {
 	state, _, _ := r.snapshot()
 	return state.Suspended[r.config.Pool]
@@ -497,7 +497,7 @@ func (r *Receiver) sessions() int {
 	return r.fetching
 }
 
-func (r *Receiver) snapshot() (admin.State, signed.Keys, signed.Keys) {
+func (r *Receiver) snapshot() (operator.State, signed.Keys, signed.Keys) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.state, r.peers, r.hosts
@@ -505,13 +505,13 @@ func (r *Receiver) snapshot() (admin.State, signed.Keys, signed.Keys) {
 
 // authorizeHost calls authorize with the host keys, and once more after re-reading the signing
 // owner's key topic when the record names a key ID other than the owner's current one.
-func (r *Receiver) authorizeHost(ctx context.Context, encoded []byte, authorize func(admin.State, signed.Keys) error) error {
+func (r *Receiver) authorizeHost(ctx context.Context, encoded []byte, authorize func(operator.State, signed.Keys) error) error {
 	state, _, hosts := r.snapshot()
 	err := authorize(state, hosts)
 	if err == nil {
 		return nil
 	}
-	owner, topic, stale := staleKey(encoded, hosts, admin.HostKeyTopics(state, r.config.Pool))
+	owner, topic, stale := staleKey(encoded, hosts, operator.HostKeyTopics(state, r.config.Pool))
 	if !stale {
 		return err
 	}
@@ -611,7 +611,7 @@ func (r *Receiver) advertise(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: admin.ReceiversTopic, Key: []byte(r.id), Value: value}).FirstErr(); err != nil {
+	if err := r.base.ProduceSync(ctx, &kgo.Record{Topic: operator.ReceiversTopic, Key: []byte(r.id), Value: value}).FirstErr(); err != nil {
 		r.deny(err, capWrite)
 		return err
 	}
@@ -677,7 +677,7 @@ type eventsFold struct {
 	entries []foldedEvent
 	events  poolEvents
 	// state, peers and ended are what every entry was verified and authorised against.
-	state        admin.State
+	state        operator.State
 	peers, ended signed.Keys
 }
 
@@ -713,7 +713,7 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 	if fold.events.seen == nil || !reflect.DeepEqual(fold.state, state) || !reflect.DeepEqual(fold.peers, peers) || !reflect.DeepEqual(fold.ended, ended) {
 		fold.reset()
 	}
-	records, start, end, err := r.reader.ReadRange(ctx, admin.PoolEventsTopic(r.config.Pool), fold.next)
+	records, start, end, err := r.reader.ReadRange(ctx, operator.PoolEventsTopic(r.config.Pool), fold.next)
 	if err != nil {
 		return poolEvents{}, r.deny(err, capRead)
 	}
@@ -745,8 +745,8 @@ func (r *Receiver) readEvents(ctx context.Context) (poolEvents, error) {
 
 // foldEvents verifies and authorises each record of the pool's events against state, peers and ended, and returns
 // what each that counts adds to their view.
-func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state admin.State, peers, ended signed.Keys) ([]foldedEvent, error) {
-	peerTopics := admin.PoolKeyTopics(state, r.config.Pool)
+func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state operator.State, peers, ended signed.Keys) ([]foldedEvent, error) {
+	peerTopics := operator.PoolKeyTopics(state, r.config.Pool)
 	reread := map[string]bool{}
 	var entries []foldedEvent
 	for _, record := range records {
@@ -787,9 +787,9 @@ func (r *Receiver) foldEvents(ctx context.Context, records []*kgo.Record, state 
 			var err error
 			switch typ {
 			case wire.StatusType:
-				status, err = admin.AuthorizePoolStatus(parse, state, peers, record.Value, r.config.Pool)
+				status, err = operator.AuthorizePoolStatus(parse, state, peers, record.Value, r.config.Pool)
 			case wire.StartFailureType:
-				failure, err = admin.AuthorizePoolStartFailure(parse, state, peers, record.Value, r.config.Pool)
+				failure, err = operator.AuthorizePoolStartFailure(parse, state, peers, record.Value, r.config.Pool)
 			case wire.OpenRequestType:
 				err = strict(&request)
 			case wire.AttemptWrapType:
@@ -901,8 +901,8 @@ type runKey struct{ tenant, run string }
 func (r *Receiver) cancelledRun(ctx context.Context, events poolEvents, run, tenant string) bool {
 	found := false
 	for _, encoded := range events.others[run] {
-		err := r.authorizeHost(ctx, encoded, func(state admin.State, hosts signed.Keys) error {
-			cancel, err := admin.AuthorizeCancel(state, hosts, encoded, r.config.Pool, tenant)
+		err := r.authorizeHost(ctx, encoded, func(state operator.State, hosts signed.Keys) error {
+			cancel, err := operator.AuthorizeCancel(state, hosts, encoded, r.config.Pool, tenant)
 			if err == nil && cancel.Run != run {
 				return errors.New("cancel names another run than its key")
 			}

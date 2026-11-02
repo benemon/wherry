@@ -26,7 +26,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -106,8 +106,8 @@ func (r *Receiver) claimOne(claiming, ctx context.Context, idle func()) error {
 	})
 	defer fetched()
 	share, err := r.newClient(
-		kgo.ConsumeTopics(admin.PoolTasksTopic(r.config.Pool)),
-		kgo.ShareGroup(admin.PoolGroup(r.config.Pool)),
+		kgo.ConsumeTopics(operator.PoolTasksTopic(r.config.Pool)),
+		kgo.ShareGroup(operator.PoolGroup(r.config.Pool)),
 		kgo.ShareMaxRecords(1),
 		kgo.ShareMaxRecordsStrict(),
 		// Closing waits out a pending fetch for up to its MaxWait plus 5 s; this bounds the receiver's stop.
@@ -221,8 +221,8 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		return nil, kgo.AckAccept
 	}
 	var task wire.Submission
-	if err := r.authorizeHost(ctx, record.Value, func(state admin.State, hosts signed.Keys) error {
-		task, err = admin.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
+	if err := r.authorizeHost(ctx, record.Value, func(state operator.State, hosts signed.Keys) error {
+		task, err = operator.AuthorizeSubmission(state, hosts, record.Value, r.config.Pool)
 		return err
 	}); err != nil || task.Wherry.Run != string(record.Key) {
 		return nil, kgo.AckReject
@@ -247,7 +247,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 			return nil, kgo.AckRelease
 		}
 		held := &activeRun{receiver: r, task: &task, taskHash: hash, history: []wire.Message{task.Message}, attempt: attempt}
-		echo := &kgo.Record{Topic: admin.TenantTopic(task.Wherry.Tenant), Key: []byte(run), Value: r.sign(r.echo(&task, hash))}
+		echo := &kgo.Record{Topic: operator.TenantTopic(task.Wherry.Tenant), Key: []byte(run), Value: r.sign(r.echo(&task, hash))}
 		if err := r.admissionCommit(ctx, append([]*kgo.Record{echo}, held.budgetRecords(nil)...)...); err != nil {
 			r.logger.Printf("publish terminal for %s: %v", run, err)
 			return nil, kgo.AckRelease
@@ -270,7 +270,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	state, _, _ := r.snapshot()
 	terms := state.Pools[r.config.Pool]
 	placement := task.Wherry.Placement
-	agent := slices.IndexFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == placement.Agent })
+	agent := slices.IndexFunc(terms.Agents, func(agent operator.AgentTerms) bool { return agent.Name == placement.Agent })
 	if agent < 0 {
 		return reject("agent is outside the pool terms")
 	}
@@ -357,7 +357,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 }
 
 // modelInTerms reports whether agent's terms allow model: one of its models, or none when it has none.
-func modelInTerms(agent admin.AgentTerms, model string) bool {
+func modelInTerms(agent operator.AgentTerms, model string) bool {
 	return slices.Contains(agent.Models, model) || len(agent.Models) == 0 && model == ""
 }
 
@@ -398,7 +398,7 @@ func deliverables(history []wire.Message, git *wire.GitInput) ([]pluginsdk.File,
 // status on the pool's events and the feed, in one admission transaction.
 func (r *Receiver) publishRejection(ctx context.Context, task *wire.Submission, hash string, attempt int64, reason string) error {
 	status := r.status(task, hash, attempt, "rejected", taskStatus(wire.TaskStateRejected, reason), nil)
-	echo := &kgo.Record{Topic: admin.TenantTopic(task.Wherry.Tenant), Key: []byte(task.Wherry.Run), Value: r.sign(r.echo(task, hash))}
+	echo := &kgo.Record{Topic: operator.TenantTopic(task.Wherry.Tenant), Key: []byte(task.Wherry.Run), Value: r.sign(r.echo(task, hash))}
 	return r.admissionCommit(ctx, append([]*kgo.Record{echo}, r.statusRecords(task, status)...)...)
 }
 
@@ -412,7 +412,7 @@ func (r *Receiver) echo(task *wire.Submission, hash string) *wire.Echo {
 // admissionTransactionalID is this receiver's own transactional ID inside its pool's prefix, for the writes
 // it makes while holding no run; using a run's ID would fence that run's holder.
 func (r *Receiver) admissionTransactionalID() string {
-	return admin.TransactionalPrefix(r.config.Pool) + "admission." + r.id
+	return operator.TransactionalPrefix(r.config.Pool) + "admission." + r.id
 }
 
 // admissionCommit writes records in one transaction under the admission transactional ID; an
@@ -462,7 +462,7 @@ func (r *Receiver) transact(ctx context.Context, producer *kgo.Client, records .
 // startFailure names the profile the task was routed to.
 func (r *Receiver) startFailure(task *wire.Submission, hash string, attempt int64, profile, class string) *kgo.Record {
 	failure := &wire.StartFailure{Wherry: r.binding(task, attempt), Profile: profile, Agent: task.Wherry.Placement.Agent, Class: class, TaskHash: hash}
-	return &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: r.sign(failure)}
+	return &kgo.Record{Topic: operator.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: r.sign(failure)}
 }
 
 type runSubmission struct {
@@ -474,7 +474,7 @@ type runSubmission struct {
 
 // inadmissible is the rejection reason of a submission that carries no envelope or whose bounds fail at its append time
 // under terms, and empty for one that is admissible.
-func inadmissible(submission runSubmission, terms admin.Terms) string {
+func inadmissible(submission runSubmission, terms operator.Terms) string {
 	binding, appended := submission.record.Wherry, submission.submitted
 	switch {
 	case binding.Envelope == "":
@@ -485,7 +485,7 @@ func inadmissible(submission runSubmission, terms admin.Terms) string {
 		return "task_started_by is past the pool's start_by_limit"
 	case binding.TaskStartedBy > binding.TaskEndedBy:
 		return "task_ended_by is before task_started_by"
-	case binding.TaskEndedBy > binding.TaskStartedBy+admin.MaxRunDurationMS/1000:
+	case binding.TaskEndedBy > binding.TaskStartedBy+operator.MaxRunDurationMS/1000:
 		return "task_ended_by is past task_started_by plus the 6h run cap"
 	}
 	return ""
@@ -519,7 +519,7 @@ func renewer(ctx context.Context, share *kgo.Client, record *kgo.Record, failure
 
 // newProducer is the run's transactional producer: an adopter initialising the same ID fences this holder.
 func (r *Receiver) newProducer(run string) (*kgo.Client, error) {
-	return r.newClient(kgo.TransactionalID(admin.TransactionalPrefix(r.config.Pool) + run))
+	return r.newClient(kgo.TransactionalID(operator.TransactionalPrefix(r.config.Pool) + run))
 }
 
 // execute runs one task; it returns the final share acknowledgement, or 0 when fenced or when the receiver stops for a
@@ -1268,7 +1268,7 @@ func (r *redactedForm) over() bool { return r.size > r.limit }
 func (r *redactedForm) hash() string { return hex.EncodeToString(r.sum.Sum(nil)) }
 
 // terms are the run's pool's terms as the receiver holds them now.
-func (run *activeRun) terms() admin.Terms {
+func (run *activeRun) terms() operator.Terms {
 	state, _, _ := run.receiver.snapshot()
 	return state.Pools[run.receiver.config.Pool]
 }
@@ -1539,7 +1539,7 @@ func (run *activeRun) conclude(ctx context.Context, handle pluginsdk.Handle, pen
 // collect reads the outputs of a stopped job, redacts them and keeps their chunks and the result's lists of what the
 // run returned and did not. S3 outputs are uploaded as Collect streams them, unredacted, since they go to the host's own
 // bucket and never to the feed. Every expected output is listed as one or the other.
-func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stopped bool, terms admin.Terms) {
+func (run *activeRun) collect(ctx context.Context, handle pluginsdk.Handle, stopped bool, terms operator.Terms) {
 	limit := terms.OutputLimit
 	stored := map[string]storedOutput{}
 	collected, err := run.collected(ctx, handle, stopped, limit, stored)
@@ -1942,7 +1942,7 @@ func (run *activeRun) terminal(status wire.TaskStatus, pending []pluginsdk.Line)
 	value := run.status("terminal", status, nil, nil)
 	value.Wherry.TranscriptChunks = run.chunked + int64(max(len(pending), 1))
 	value.Wherry.Event = run.event
-	tombstone := &kgo.Record{Topic: admin.ReceiverProgressTopic(run.receiver.id), Key: []byte(run.task.Wherry.Run)}
+	tombstone := &kgo.Record{Topic: operator.ReceiverProgressTopic(run.receiver.id), Key: []byte(run.task.Wherry.Run)}
 	return append(run.receiver.statusRecords(run.task, value), tombstone)
 }
 
@@ -1952,23 +1952,23 @@ func (run *activeRun) progress(offset int64) *kgo.Record {
 	if err != nil {
 		panic(fmt.Sprintf("encode progress: %v", err)) // records are built here; invalid ones are programming errors
 	}
-	return &kgo.Record{Topic: admin.ReceiverProgressTopic(run.receiver.id), Key: []byte(run.task.Wherry.Run), Value: encoded}
+	return &kgo.Record{Topic: operator.ReceiverProgressTopic(run.receiver.id), Key: []byte(run.task.Wherry.Run), Value: encoded}
 }
 
 func (r *Receiver) statusRecords(task *wire.Submission, status *wire.RunStatus) []*kgo.Record {
 	value := r.sign(status)
 	return []*kgo.Record{
-		{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: value},
-		{Topic: admin.TenantTopic(task.Wherry.Tenant), Key: []byte(task.Wherry.Run), Value: value},
+		{Topic: operator.PoolEventsTopic(r.config.Pool), Key: []byte(task.Wherry.Run), Value: value},
+		{Topic: operator.TenantTopic(task.Wherry.Tenant), Key: []byte(task.Wherry.Run), Value: value},
 	}
 }
 
 func (run *activeRun) feed(value wire.Record) *kgo.Record {
-	return &kgo.Record{Topic: admin.TenantTopic(run.task.Wherry.Tenant), Key: []byte(run.task.Wherry.Run), Value: run.receiver.sign(value)}
+	return &kgo.Record{Topic: operator.TenantTopic(run.task.Wherry.Tenant), Key: []byte(run.task.Wherry.Run), Value: run.receiver.sign(value)}
 }
 
 func (run *activeRun) transcript(value wire.Record) *kgo.Record {
-	return &kgo.Record{Topic: admin.TenantTranscriptTopic(run.task.Wherry.Tenant), Key: []byte(run.task.Wherry.Run), Value: run.receiver.sign(value)}
+	return &kgo.Record{Topic: operator.TenantTranscriptTopic(run.task.Wherry.Tenant), Key: []byte(run.task.Wherry.Run), Value: run.receiver.sign(value)}
 }
 
 func (r *Receiver) binding(task *wire.Submission, attempt int64) wire.ReceiverBinding {
@@ -2162,15 +2162,15 @@ func (r *Receiver) lastOffset(ctx context.Context, task *wire.Submission, hash s
 	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	for holder := range holders {
-		records, err := r.reader.ReadFrom(readCtx, admin.ReceiverProgressTopic(holder), 0)
+		records, err := r.reader.ReadFrom(readCtx, operator.ReceiverProgressTopic(holder), 0)
 		if errors.Is(err, kerr.UnknownTopicOrPartition) {
 			continue
 		}
 		// The end comes into the receiver's state only at its next refresh: a holder ended before then is a peer still.
 		if errors.Is(err, kerr.TopicAuthorizationFailed) {
 			// A revocation of this receiver deletes its ACLs broker by broker, so its own denial can arrive here first.
-			self := admin.ReceiverPrincipal(r.id)
-			if state, loadErr := r.reader.Load(readCtx); loadErr == nil && state.Ended[admin.ReceiverPrincipal(holder)] && !state.Ended[self] && !state.Revoking[self] {
+			self := operator.ReceiverPrincipal(r.id)
+			if state, loadErr := r.reader.Load(readCtx); loadErr == nil && state.Ended[operator.ReceiverPrincipal(holder)] && !state.Ended[self] && !state.Revoking[self] {
 				continue
 			}
 		}

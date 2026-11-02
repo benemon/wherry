@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/pluginsdk"
 )
 
@@ -157,7 +157,7 @@ func TestRelativePluginDirRunsTheCheckedBinary(t *testing.T) {
 	t.Chdir(dir)
 	plugins := &plugins{dir: ".", logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	_, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}, fakeSHA256)
+	_, err := plugins.profile("build", operator.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}, fakeSHA256)
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Fatal("a binary found on PATH ran in place of the checked plugin")
 	}
@@ -174,7 +174,7 @@ func TestPluginLaunchesOnlyFromItsPin(t *testing.T) {
 	}
 	plugins := &plugins{dir: dir, logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	settings := admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}
+	settings := operator.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude"}
 	if _, err := plugins.profile("build", settings, ""); err == nil || err.Error() != "plugin type fake has no pinned SHA-256; set it with receiver update --plugin-sha256 fake=HEX" {
 		t.Fatalf("unpinned plugin: %v; want refused naming the type and the flag", err)
 	}
@@ -191,7 +191,7 @@ func TestPluginLaunchesOnlyFromItsPin(t *testing.T) {
 func TestMissingPluginIsAConfigurationError(t *testing.T) {
 	plugins := &plugins{dir: t.TempDir(), logs: io.Discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	_, err := plugins.profile("build", admin.ProfileSettings{Name: "lab", Plugin: "nomad", Agent: "claude"}, fakeSHA256)
+	_, err := plugins.profile("build", operator.ProfileSettings{Name: "lab", Plugin: "nomad", Agent: "claude"}, fakeSHA256)
 	if err == nil || err.Error() != "no plugin for type nomad" {
 		t.Fatalf("got %v, want no plugin for type nomad", err)
 	}
@@ -212,7 +212,7 @@ func TestOneProcessPerPlugin(t *testing.T) {
 	logged := &syncBuffer{}
 	plugins := &plugins{dir: dir, logs: io.Discard, logger: log.New(logged, "receiver: ", 0), running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	for _, settings := range []admin.ProfileSettings{
+	for _, settings := range []operator.ProfileSettings{
 		{Name: "exec", Plugin: "fake", Agent: "claude"}, {Name: "podman", Plugin: "fake", Agent: "claude"}, {Name: "edge", Plugin: "other", Agent: "claude"},
 	} {
 		named, err := plugins.profile("build", settings, fakeSHA256)
@@ -238,27 +238,27 @@ func TestReadBundleIsStrict(t *testing.T) {
 	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\nextra: 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admin.ReadBundle(path); err == nil {
+	if _, err := operator.ReadBundle(path); err == nil {
 		t.Fatal("accepted a bundle with an unknown field")
 	}
 	// The bundle holds only the receiver's Kafka identity; platform credentials come from the local configuration.
 	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\nplatform:\n  lab: token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admin.ReadBundle(path); err == nil {
+	if _, err := operator.ReadBundle(path); err == nil {
 		t.Fatal("accepted a bundle carrying platform credentials")
 	}
 	if err := os.WriteFile(path, []byte("broker: b\nprincipal: wherry.rcv.r\npassword: p\nca: c\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	bundle, err := admin.ReadBundle(path)
+	bundle, err := operator.ReadBundle(path)
 	if err != nil || bundle.Principal != "wherry.rcv.r" {
 		t.Fatalf("bundle %#v err %v", bundle, err)
 	}
 	if err := os.WriteFile(path, []byte("broker: b\nca: c\npassword: p\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admin.ReadBundle(path); err == nil {
+	if _, err := operator.ReadBundle(path); err == nil {
 		t.Fatal("accepted a bundle without a principal")
 	}
 }
@@ -274,7 +274,7 @@ func TestReadBundleErrorsEchoNoContent(t *testing.T) {
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := admin.ReadBundle(path); err == nil || strings.Contains(err.Error(), "sk-ant") {
+		if _, err := operator.ReadBundle(path); err == nil || strings.Contains(err.Error(), "sk-ant") {
 			t.Fatalf("bundle error %v must name no YAML content", err)
 		}
 	}
@@ -385,7 +385,7 @@ func TestProfileCredentialReachesThePluginInPlaceOfItsName(t *testing.T) {
 	plugins := &plugins{dir: installPlugin(t), credentials: map[string]credential.Source{"nomad-token": {File: token}}, hold: func(string, []byte) {},
 		logs: io.Discard, logger: discard, running: map[string]*pluginsdk.Process{}}
 	defer plugins.close()
-	settings := admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "nomad-token", "outputs": true}}
+	settings := operator.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": "nomad-token", "outputs": true}}
 	if _, err := plugins.profile("build", settings, fakeSHA256); err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +418,7 @@ func TestProfileCredentialFailures(t *testing.T) {
 		"nomad-token": `credential "nomad-token" has no source in the receiver's configuration`,
 		"open-token":  "resolve credential open-token: its file is writable by its group or open to others; chmod 600 it",
 	} {
-		_, err := plugins.profile("build", admin.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": name}}, fakeSHA256)
+		_, err := plugins.profile("build", operator.ProfileSettings{Name: "exec", Plugin: "fake", Agent: "claude", Config: map[string]any{"credential": name}}, fakeSHA256)
 		if err == nil || err.Error() != want || strings.Contains(err.Error(), value) || strings.Contains(err.Error(), dir) {
 			t.Errorf("credential %s: %v; want %q", name, err, want)
 		}

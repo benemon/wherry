@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/prometheus/client_golang/prometheus"
@@ -101,7 +101,7 @@ func TestScrapeCarriesNoRunMaterial(t *testing.T) {
 
 // pluginReceiver is a configured receiver with one fake plugin, enough to scrape its plugin families.
 func pluginReceiver(fake *fakePlugin) *Receiver {
-	r := &Receiver{config: admin.ReceiverConfig{Pool: testPool}, profiles: []Named{{Name: "nomad", Plugin: fake}}, metrics: newMetrics(prometheus.NewRegistry())}
+	r := &Receiver{config: operator.ReceiverConfig{Pool: testPool}, profiles: []Named{{Name: "nomad", Plugin: fake}}, metrics: newMetrics(prometheus.NewRegistry())}
 	r.metrics.registerFor(r)
 	return r
 }

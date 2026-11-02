@@ -81,7 +81,7 @@ highest of the run's `started` offsets and progress records.
 unit a run is routed to is a plugin profile, a named, configured use of a plugin.
 The member `adapter` of advertisement offers, start failures and result
 metadata is renamed `profile`. The receiver configuration on
-`wherry.admin` holds `profiles` in place of `adapters`, each with `plugin`
+`wherry.operator` holds `profiles` in place of `adapters`, each with `plugin`
 in place of `type` and no `platform`. Messages that named the adapter name
 the profile.
 
@@ -103,7 +103,7 @@ not. [Key concepts](concepts.md) explains the roles this document names, and
   duplicate names. A member added after wherry 1.0 states, beside it, what a
   reader that ignores it does.
 - Every payload has `v`, the payload version, which is `1`. Readers reject
-  any other version; a reader reports an [admin record](#admin-records)
+  any other version; a reader reports an [operator record](#operator-records)
   with a higher version as written by a later release.
 - A2A objects use the
   [proto3 JSON mapping](https://protobuf.dev/programming-guides/json/) of
@@ -225,12 +225,12 @@ A reader accepts a signed record only when all of these hold:
    broker appended before that key's rotation.
 3. The payload decodes, has `v` 1 and passes the rules for its type.
 4. The owner the payload names equals the `kid` owner.
-5. The record passes the checks against `wherry.admin` for its type:
-   - A submission or cancel comes from a host on `wherry.admin`, without a
+5. The record passes the checks against `wherry.operator` for its type:
+   - A submission or cancel comes from a host on `wherry.operator`, without a
      membership end, of a tenant entitled to the pool. Its `pool` is the
      pool of the topic it arrived on.
    - A status, chunk, output chunk, result or start failure comes from a
-     receiver on `wherry.admin`, without a membership end, in the pool the run
+     receiver on `wherry.operator`, without a membership end, in the pool the run
      was placed in. Its `tenant` and `pool` are the run's, and the tenant is
      entitled to the pool.
    - An open request, attempt wrap, re-key wrap, open refusal or claim
@@ -798,7 +798,7 @@ An advertisement reports a receiver's liveness and capacity.
   and `data` parts the profile delivers, absent when it declares no limit
   and never negative. It is empty when no profile is ready. Readers take a
   profile's agent and labels from the receiver's configuration record on
-  `wherry.admin`. Each `profile` appears at most once. A host takes the
+  `wherry.operator`. Each `profile` appears at most once. A host takes the
   smallest `inline_limit` among the offers that satisfy a placement in each
   receiver's last advertisement, live or stale; submitting inputs over it,
   the host carries them as S3 inputs, or refuses the run when the pool or
@@ -833,12 +833,12 @@ that key's public half, on the pool's compacted
 - `reason` is `bootstrap`, `rotation`, `takeover` or `contested`.
 - `current.key` is a P-256 public JWK, and `current.key_id` its RFC 7638
   SHA-256 thumbprint, unpadded base64url.
-- `rotated_for` is the `wherry.admin` offset of the latest `rotate-key`
+- `rotated_for` is the `wherry.operator` offset of the latest `rotate-key`
   record for the pool that a key this snapshot or an earlier one published
   was generated after; it is absent before the first. Every later snapshot
   carries it on, and the custodian rotates on a `rotate-key` record whose
   offset is above it.
-- `suspended_for` and `resumed_for` are the `wherry.admin` offsets of the
+- `suspended_for` and `resumed_for` are the `wherry.operator` offsets of the
   latest `suspend` and `resume` records for the pool the custodian
   acknowledged; each is absent before the first. A pass over the open
   requests that reads a record above the offset its snapshot carries
@@ -853,7 +853,7 @@ that key's public half, on the pool's compacted
   custodian's advertisement is not read. Otherwise
   the host refuses the submission, and never takes an earlier record in its
   place. It also refuses when the pool has no snapshot, and when
-  `wherry.admin` records the pool suspended, before it resolves any
+  `wherry.operator` records the pool suspended, before it resolves any
   credential or uploads any input. A host logs a `takeover` or `contested`
   snapshot.
 
@@ -1061,7 +1061,7 @@ pool's events in a transaction of its own, after the run's `claimed` status.
   the record, and names that member as its writer. An attempt wrap, open
   refusal or claim decision also verifies under a key its writer held when
   its membership ended, for a record the broker appended before the
-  `wherry.admin` record that ended it.
+  `wherry.operator` record that ended it.
 - `key` is the attempt's P-256 public JWK of exactly `kty`, `crv`, `x` and
   `y`. `task_hash` is the hash of the run's task
   ([Admission](#admission)).
@@ -1119,7 +1119,7 @@ request only when:
    `past its bound`;
 5. the claim has an `adopting` status, which its receiver writes once
    `Lookup` finds the job, or the pool is not suspended in the read of
-   `wherry.admin` the custodian makes at the start of its pass; otherwise
+   `wherry.operator` the custodian makes at the start of its pass; otherwise
    `pool suspended`. A failed read leaves the pass's requests unanswered;
 6. when the claim changed receivers, it has no previous holder, or the
    previous holder has no live membership or its latest advertisement in the
@@ -1298,9 +1298,9 @@ first, and a marker can join the bytes beside it into a value that was not there
 before: when a value starts with a marker's tail, such as `]`, and the rest of
 it follows a replaced value, the published text holds that value whole.
 
-## Admin records
+## Operator records
 
-`wherry.admin` holds unsigned JSON records that only `wherry.operator`
+`wherry.operator` holds unsigned JSON records that only `wherry.operator`
 writes, each with `v`, `kind` and `at_ms` (Unix milliseconds).
 
 | `kind` | Members | Effect |
@@ -1339,7 +1339,7 @@ record whose `v` is higher than the reader's release knows was written by a
 later release; when every undecodable record is such a
 record, the reader reports that a later wherry release wrote them and that
 this one needs an upgrade; otherwise it reports that this release cannot read
-`wherry.admin` and the deployment needs a reset.
+`wherry.operator` and the deployment needs a reset.
 
 ## Admission
 
@@ -1697,7 +1697,7 @@ attribute to a host and run with a `rejected` [status](#status) in
 | the git remote's host is not a VCS host of the pool | rejected | `git remote host <host> is not in pool <pool>'s vcs hosts` |
 | S3 inputs or outputs in a pool without storage | rejected | `pool <pool> has no storage for S3 inputs and outputs` |
 | a `url` part in the message | rejected | `unsupported message part` |
-| the record fails a [signed-record check](#signed-records): its JWS, its signer, its payload, its version, its owner or its checks against `wherry.admin` | dropped | none |
+| the record fails a [signed-record check](#signed-records): its JWS, its signer, its payload, its version, its owner or its checks against `wherry.operator` | dropped | none |
 | the record's Kafka key is not its `run` | dropped | none |
 | the run already has a terminal status with the submission's task hash | acknowledged, nothing written | none |
 

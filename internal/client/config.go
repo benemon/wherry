@@ -12,8 +12,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/trust"
 	"github.com/benemon/wherry/internal/wire"
@@ -68,7 +68,7 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, err
 	}
 	var config Config
-	if err := admin.DecodeYAML(encoded, &config); err != nil {
+	if err := operator.DecodeYAML(encoded, &config); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if config.Bundle == "" {
@@ -158,11 +158,11 @@ func Init(ctx context.Context, config Config) (string, error) {
 
 // Connect opens the bundle's TLS and SCRAM-SHA-512 Kafka connection as its host principal; the host logs to logger.
 func Connect(config Config, logger *log.Logger) (*Host, error) {
-	bundle, err := admin.ReadBundle(config.Bundle)
+	bundle, err := operator.ReadBundle(config.Bundle)
 	if err != nil {
 		return nil, err
 	}
-	opts, err := admin.KafkaOpts(bundle.Broker, []byte(bundle.CA), bundle.Principal, bundle.Password)
+	opts, err := operator.KafkaOpts(bundle.Broker, []byte(bundle.CA), bundle.Principal, bundle.Password)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}
@@ -176,7 +176,7 @@ func Connect(config Config, logger *log.Logger) (*Host, error) {
 		kafka.Close()
 		return nil, err
 	}
-	if host.key, err = admin.RecoverKey(context.Background(), kafka, signed.HostOwner(host.tenant, host.host), admin.HostTopic(host.tenant, host.host), config.HostKey); err != nil {
+	if host.key, err = operator.RecoverKey(context.Background(), kafka, signed.HostOwner(host.tenant, host.host), operator.HostTopic(host.tenant, host.host), config.HostKey); err != nil {
 		kafka.Close()
 		return nil, fmt.Errorf("load host key: %w", err)
 	}
@@ -208,7 +208,7 @@ func RotateKey(ctx context.Context, config Config) (string, string, error) {
 		return "", "", fmt.Errorf("runs %s have not ended; rotate the key once they have, with every other wherry process of this host (the MCP server, any wherry wait) stopped", strings.Join(unfinished, ", "))
 	}
 	old := host.key
-	next, err := admin.RotateKey(ctx, host.kafka, signed.HostOwner(host.tenant, host.host), admin.HostTopic(host.tenant, host.host), config.HostKey, old)
+	next, err := operator.RotateKey(ctx, host.kafka, signed.HostOwner(host.tenant, host.host), operator.HostTopic(host.tenant, host.host), config.HostKey, old)
 	if err != nil {
 		return "", "", err
 	}

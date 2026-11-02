@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"context"
@@ -41,7 +41,7 @@ func TestSnapshotTopicIsCompactedSinglePartitionAndKeptForever(t *testing.T) {
 	if got := configs(topic, "cleanup.policy", "retention.ms", "message.timestamp.type"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("new %s configs %v, want %v", topic, got, want)
 	}
-	topics, err := kadm.NewClient(service.Admin).ListTopics(ctx, topic)
+	topics, err := kadm.NewClient(service.SuperUser).ListTopics(ctx, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestCheckReportsSnapshotTopicAndSegmentDrift(t *testing.T) {
 		want   string
 	}{
 		{"snapshot topic missing", func(t *testing.T, service *Service) {
-			responses, err := kadm.NewClient(service.Admin).DeleteTopics(context.Background(), CustodianTopic("pool-a"))
+			responses, err := kadm.NewClient(service.SuperUser).DeleteTopics(context.Background(), CustodianTopic("pool-a"))
 			if err == nil {
 				err = responses.Error()
 			}
@@ -188,7 +188,7 @@ func TestCheckReportsSnapshotTopicAndSegmentDrift(t *testing.T) {
 
 func deleteTopicConfig(t *testing.T, service *Service, topic, name string) {
 	t.Helper()
-	responses, err := kadm.NewClient(service.Admin).AlterTopicConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.DeleteConfig, Name: name}}, topic)
+	responses, err := kadm.NewClient(service.SuperUser).AlterTopicConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.DeleteConfig, Name: name}}, topic)
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -311,7 +311,7 @@ func TestCheckEnvelope(t *testing.T) {
 
 func addPartition(t *testing.T, service *Service, topic string) {
 	t.Helper()
-	responses, err := kadm.NewClient(service.Admin).CreatePartitions(context.Background(), 1, topic)
+	responses, err := kadm.NewClient(service.SuperUser).CreatePartitions(context.Background(), 1, topic)
 	if err == nil {
 		err = responses.Error()
 	}

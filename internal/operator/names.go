@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"errors"
@@ -6,7 +6,7 @@ import (
 	"github.com/benemon/wherry/internal/wire"
 )
 
-const AdminTopic = "wherry.admin"
+const OperatorTopic = "wherry.operator"
 const OperatorPrincipal = "wherry.operator"
 const ReceiversTopic = "wherry.receivers"
 

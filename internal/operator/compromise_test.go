@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ import (
 func brokerACLs(t *testing.T, ctx context.Context, service *Service) []string {
 	t.Helper()
 	builder := kadm.NewACLs().AnyResource().Allow().AllowHosts().Operations(kadm.OpAny).ResourcePatternType(kadm.ACLPatternAny)
-	results, err := kadm.NewClient(service.Admin).DescribeACLs(ctx, builder)
+	results, err := kadm.NewClient(service.SuperUser).DescribeACLs(ctx, builder)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func compromiseFixture(t *testing.T) (*kfake.Cluster, *Service, context.Context)
 func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
 	_, service, ctx := compromiseFixture(t)
 	unrelated := kadm.NewACLs().Topics(PoolTasksTopic("pool-a")).Allow("User:mirror").AllowHosts("*").Operations(kadm.OpRead, kadm.OpWrite).ResourcePatternType(kadm.ACLPatternLiteral)
-	created, err := kadm.NewClient(service.Admin).CreateACLs(ctx, unrelated)
+	created, err := kadm.NewClient(service.SuperUser).CreateACLs(ctx, unrelated)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestSuspendWithdrawsTaskTopicAccessOnlyAndResumeRestoresIt(t *testing.T) {
 func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 	cluster, service, ctx := compromiseFixture(t)
 	_, receiverKey, _ := ed25519.GenerateKey(rand.Reader)
-	if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: ReceiverTopic("receiver-a"), Key: []byte("receiver-a"), Value: mustBytes(t)(signed.RegisterKey("receiver-a", receiverKey))}).FirstErr(); err != nil {
+	if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: ReceiverTopic("receiver-a"), Key: []byte("receiver-a"), Value: mustBytes(t)(signed.RegisterKey("receiver-a", receiverKey))}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	current, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -141,7 +141,7 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 	currentID, otherID := signed.KeyThumbprint(&current.PublicKey), signed.KeyThumbprint(&other.PublicKey)
 	snapshot := mustBytes(t)(signed.Sign(wire.CustodianType, "receiver-a", &wire.Snapshot{V: 1, Pool: "pool-a", Custodian: "receiver-a", Reason: "bootstrap",
 		Current: wire.PoolKey{KeyID: currentID, Key: jose.JSONWebKey{Key: &current.PublicKey}}}, receiverKey))
-	if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: CustodianTopic("pool-a"), Key: []byte(wire.CustodianKey), Value: snapshot}).FirstErr(); err != nil {
+	if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: CustodianTopic("pool-a"), Key: []byte(wire.CustodianKey), Value: snapshot}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)
@@ -158,13 +158,13 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 		tasks[run] = binding.Envelope + binding.Wrap
 		submission := &wire.Submission{Message: wire.Message{MessageID: "msg-" + run, ContextID: run, TaskID: run, Role: wire.RoleUser, Parts: []wire.Part{{Text: "hi"}}, Extensions: []string{wire.ExtensionURI}}, Wherry: binding}
 		record := &kgo.Record{Topic: PoolTasksTopic("pool-a"), Key: []byte(run), Value: mustBytes(t)(wire.SignRecord(submission, hostKey))}
-		if err := service.Admin.ProduceSync(ctx, record).FirstErr(); err != nil {
+		if err := service.SuperUser.ProduceSync(ctx, record).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 		return record
 	}
 	expired := submit("run-expired", current)
-	deleted, err := kadm.NewClient(service.Admin).DeleteRecords(ctx, kadm.Offsets{expired.Topic: {expired.Partition: {Topic: expired.Topic, Partition: expired.Partition, At: expired.Offset + 1}}})
+	deleted, err := kadm.NewClient(service.SuperUser).DeleteRecords(ctx, kadm.Offsets{expired.Topic: {expired.Partition: {Topic: expired.Topic, Partition: expired.Partition, At: expired.Offset + 1}}})
 	if err == nil {
 		err = deleted.Error()
 	}
@@ -213,14 +213,14 @@ func TestRotateKeyReportListsRetainedTasksUnderSuspectKeys(t *testing.T) {
 		next, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		snapshot := mustBytes(t)(signed.Sign(wire.CustodianType, "receiver-a", &wire.Snapshot{V: 1, Pool: "pool-a", Custodian: "receiver-a", Reason: "rotation",
 			Current: wire.PoolKey{KeyID: signed.KeyThumbprint(&next.PublicKey), Key: jose.JSONWebKey{Key: &next.PublicKey}}, RotatedFor: state.RotateRequested["pool-a"]}, receiverKey))
-		if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: CustodianTopic("pool-a"), Key: []byte(wire.CustodianKey), Value: snapshot}).FirstErr(); err != nil {
+		if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: CustodianTopic("pool-a"), Key: []byte(wire.CustodianKey), Value: snapshot}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 		result := <-done
 		if result.err != nil {
 			t.Fatal(result.err)
 		}
-		if !strings.Contains(waiting.String(), "waiting for pool pool-a's key custodian to rotate for the request at wherry.admin offset ") {
+		if !strings.Contains(waiting.String(), "waiting for pool pool-a's key custodian to rotate for the request at wherry.operator offset ") {
 			t.Fatalf("progress %q", waiting.String())
 		}
 		return result.report
@@ -304,13 +304,13 @@ func mustBytes(t *testing.T) func([]byte, error) []byte {
 func TestSuspendAwaitsACustodianWithAStaleAdvertisement(t *testing.T) {
 	_, service, ctx := compromiseFixture(t)
 	_, receiverKey, _ := ed25519.GenerateKey(rand.Reader)
-	if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: ReceiverTopic("receiver-a"), Key: []byte("receiver-a"), Value: mustBytes(t)(signed.RegisterKey("receiver-a", receiverKey))}).FirstErr(); err != nil {
+	if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: ReceiverTopic("receiver-a"), Key: []byte("receiver-a"), Value: mustBytes(t)(signed.RegisterKey("receiver-a", receiverKey))}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	snapshot := mustBytes(t)(signed.Sign(wire.CustodianType, "receiver-a", &wire.Snapshot{V: 1, Pool: "pool-a", Custodian: "receiver-a", Reason: "bootstrap",
 		Current: wire.PoolKey{KeyID: signed.KeyThumbprint(&key.PublicKey), Key: jose.JSONWebKey{Key: &key.PublicKey}}}, receiverKey))
-	if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: CustodianTopic("pool-a"), Key: []byte(wire.CustodianKey), Value: snapshot}).FirstErr(); err != nil {
+	if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: CustodianTopic("pool-a"), Key: []byte(wire.CustodianKey), Value: snapshot}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	wait, progress := snapshotWait, snapshotProgress

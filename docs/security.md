@@ -106,10 +106,10 @@ otherwise refuses it with the reason the
   job;
 - the claim has an `adopting` status, which its receiver writes once
   `Lookup` finds the job, or the pool is not suspended in the read of
-  `wherry.admin` the custodian makes at the start of its pass, so on a
+  `wherry.operator` the custodian makes at the start of its pass, so on a
   suspended pool the custodian serves adoptions of running jobs and no first
   start, even to a receiver that has not yet read the suspension.
-  `wherry admin pool suspend` returns once the key custodian has
+  `wherry operator pool suspend` returns once the key custodian has
   acknowledged the suspension with `suspended_for` in its snapshot, which a
   pass publishes before it decides any request and after every attempt wrap
   of the previous pass committed: after that no new start opens;
@@ -275,7 +275,7 @@ for it.
 
 ### Give a pool's agents a dedicated credential
 
-Prerequisites: the [`wherry admin` environment](operations.md#set-up-wherry-admin),
+Prerequisites: the [`wherry operator` environment](operations.md#set-up-wherry-operator),
 the pool's terms file, and, for each tenant entitled to the pool, a model
 provider account that issues and revokes API keys, such as per-project or
 per-workspace keys.
@@ -308,7 +308,7 @@ per-workspace keys.
    ```
 
    ```sh
-   wherry admin pool create build --config-file build-terms.yaml
+   wherry operator pool create build --config-file build-terms.yaml
    ```
 
    The credential is required unless the entry sets `required: false`, so
@@ -414,7 +414,7 @@ value and passes it to the plugin when it configures the profile, at start
 and after a configuration change.
 
 [Platform credentials](configuration.md#platform-credentials) states what
-`wherry.admin` and the bundle hold of it. A rotated platform token takes
+`wherry.operator` and the bundle hold of it. A rotated platform token takes
 effect on the receiver's next start without a new bundle.
 
 ## Git credentials

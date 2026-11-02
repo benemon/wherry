@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -57,7 +57,7 @@ func (f *fixture) failListings(t *testing.T, topic string, kind listing, failure
 // error, and fails with its context's error when the retriable error outlasts it. OFFSET_NOT_AVAILABLE is a retriable
 // error kgo never retries itself.
 func TestHostListingsListAgainOnlyOnARetriablePartitionError(t *testing.T) {
-	feed, transcript := admin.TenantTopic("tenant-a"), admin.TenantTranscriptTopic("tenant-a")
+	feed, transcript := operator.TenantTopic("tenant-a"), operator.TenantTranscriptTopic("tenant-a")
 	for _, site := range []struct {
 		name  string
 		topic string

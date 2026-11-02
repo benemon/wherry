@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"bytes"
@@ -140,7 +140,7 @@ func setTopicRetention(t *testing.T, service *Service, topic string, value int64
 
 func setTopicConfig(t *testing.T, service *Service, topic, name, value string) {
 	t.Helper()
-	responses, err := kadm.NewClient(service.Admin).AlterTopicConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.SetConfig, Name: name, Value: &value}}, topic)
+	responses, err := kadm.NewClient(service.SuperUser).AlterTopicConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.SetConfig, Name: name, Value: &value}}, topic)
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -205,7 +205,7 @@ func TestPoolUpdateNeverLowersPoolTopicRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	cluster.ApplyRetention()
-	starts, err := kadm.NewClient(service.Admin).ListStartOffsets(ctx, topics...)
+	starts, err := kadm.NewClient(service.SuperUser).ListStartOffsets(ctx, topics...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestPoolUpdateRaisesRetentionBeforeLongerTerms(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err == nil || !strings.Contains(err.Error(), "write admin record") {
+	if err := service.PoolUpdate(ctx, "pool-a", terms, false); err == nil || !strings.Contains(err.Error(), "write operator record") {
 		t.Fatalf("pool update = %v; want the terms record refused", err)
 	}
 	for _, topic := range []string{PoolTasksTopic("pool-a"), PoolEventsTopic("pool-a")} {
@@ -346,7 +346,7 @@ func TestPoolCreateRefusesAPartitionedTopicBeforeRecording(t *testing.T) {
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	responses, err := kadm.NewClient(service.Admin).CreateTopics(ctx, 2, -1, nil, PoolEventsTopic("pool-a"))
+	responses, err := kadm.NewClient(service.SuperUser).CreateTopics(ctx, 2, -1, nil, PoolEventsTopic("pool-a"))
 	if err == nil {
 		err = responses.Error()
 	}
@@ -462,7 +462,7 @@ func TestPoolCreateSetsThePoolTopicLayout(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	responses, err := kadm.NewClient(service.Admin).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "log.retention.bytes", Value: kadm.StringPtr("1")}})
+	responses, err := kadm.NewClient(service.SuperUser).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "log.retention.bytes", Value: kadm.StringPtr("1")}})
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -479,7 +479,7 @@ func TestPoolCreateSetsThePoolTopicLayout(t *testing.T) {
 		}
 	}
 	cluster.ApplyRetention()
-	starts, err := kadm.NewClient(service.Admin).ListStartOffsets(ctx, topics...)
+	starts, err := kadm.NewClient(service.SuperUser).ListStartOffsets(ctx, topics...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,11 +528,11 @@ func TestPoolUpdateEnforcesThePoolTopicLayout(t *testing.T) {
 func assertPoolTopicLayout(t *testing.T, service *Service, pool string) {
 	t.Helper()
 	topics := []string{PoolTasksTopic(pool), PoolEventsTopic(pool)}
-	details, err := kadm.NewClient(service.Admin).ListTopics(context.Background(), topics...)
+	details, err := kadm.NewClient(service.SuperUser).ListTopics(context.Background(), topics...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resources, err := kadm.NewClient(service.Admin).DescribeTopicConfigs(context.Background(), topics...)
+	resources, err := kadm.NewClient(service.SuperUser).DescribeTopicConfigs(context.Background(), topics...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -672,8 +672,8 @@ func TestCheckReportsRetentionDrift(t *testing.T) {
 			setTopicConfig(t, service, PoolEventsTopic("pool-a"), "message.timestamp.type", "CreateTime")
 		}, "wherry.pool.pool-a.events message.timestamp.type"},
 		{"identity is not forever", func(t *testing.T, service *Service) {
-			setTopicRetention(t, service, AdminTopic, 1)
-		}, "wherry.admin"},
+			setTopicRetention(t, service, OperatorTopic, 1)
+		}, "wherry.operator"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, service, closeFixture := kfakeService(t)
@@ -695,7 +695,7 @@ func TestCheckReportsRetentionDrift(t *testing.T) {
 
 func setTopicLimit(t *testing.T, service *Service, topic, value string) {
 	t.Helper()
-	responses, err := kadm.NewClient(service.Admin).AlterTopicConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &value}}, topic)
+	responses, err := kadm.NewClient(service.SuperUser).AlterTopicConfigs(context.Background(), []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &value}}, topic)
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -729,7 +729,7 @@ func TestPoolCreateRecordsTheRecordLimit(t *testing.T) {
 		t.Fatalf("record limit %d; want the producer maximum", got)
 	}
 	message := "1000000"
-	responses, err := kadm.NewClient(service.Admin).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "message.max.bytes", Value: &message}})
+	responses, err := kadm.NewClient(service.SuperUser).AlterBrokerConfigs(ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "message.max.bytes", Value: &message}})
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -849,7 +849,7 @@ func TestCheckReportsLimitsTheBrokerNoLongerCarries(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Terms that leave the output limit out are recorded without it; its default applies where the terms are read.
-	records, err := readTopic(ctx, service.Operator, AdminTopic)
+	records, err := readTopic(ctx, service.Operator, OperatorTopic)
 	if err != nil || len(records) != 1 || strings.Contains(string(records[0].Value), "output_limit") {
 		t.Fatalf("pool record %v, %v; want one without an output limit", records, err)
 	}
@@ -908,7 +908,7 @@ func TestCheckFailsOnAMissingTenantFeed(t *testing.T) {
 	if err := service.TenantAdd(ctx, "tenant-a", "pool-a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := kadm.NewClient(service.Admin).DeleteTopics(ctx, TenantTopic("tenant-a")); err != nil {
+	if _, err := kadm.NewClient(service.SuperUser).DeleteTopics(ctx, TenantTopic("tenant-a")); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Check(ctx); err == nil || !strings.Contains(err.Error(), "describe topic wherry.tenant.tenant-a") {
@@ -1187,7 +1187,7 @@ func TestSingleAnswerTermsDefault(t *testing.T) {
 	}
 }
 
-// wherry.receivers is created compacted, and one created before converges on the next admin write.
+// wherry.receivers is created compacted, and one created before converges on the next operator write.
 func TestProgressTopicIsCompactedOnNewAndExistingTopics(t *testing.T) {
 	cluster, service, closeFixture := kfakeService(t)
 	defer closeFixture()

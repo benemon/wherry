@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
@@ -117,7 +117,7 @@ func TestEchoSharesTheClaimedTransaction(t *testing.T) {
 	f := newFixture(t, resultStream)
 	record := f.submit(t, f.host, nil)
 	f.execute(t, record, 1)
-	records := f.records(t, admin.TenantTopic(testTenant))
+	records := f.records(t, operator.TenantTopic(testTenant))
 	var echo wire.Echo
 	if len(records) < 2 || wire.ParseRecord(records[0].Value, f.keys(), &echo) != nil {
 		t.Fatal("the feed does not open with the echo")
@@ -149,7 +149,7 @@ func oneTransaction(records []*kgo.Record) bool {
 func TestFailedStatusSharesItsResultsTransaction(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.execute(t, f.submit(t, f.host, nil), 1)
-	records := f.records(t, admin.TenantTopic(testTenant))
+	records := f.records(t, operator.TenantTopic(testTenant))
 	// Echo and claimed, the seal request, then the FAILED result and terminal status.
 	if len(records) != 5 {
 		t.Fatalf("feed records %d, want 5", len(records))
@@ -262,7 +262,7 @@ func TestTranscriptArtifactChunks(t *testing.T) {
 				}
 				offset += int64(len(line) + 1)
 			}
-			if len(f.records(t, admin.PoolEventsTopic(testPool))) == 0 {
+			if len(f.records(t, operator.PoolEventsTopic(testPool))) == 0 {
 				t.Fatal("nothing on the pool's events")
 			}
 			if !test.progress {
@@ -334,7 +334,7 @@ func TestProgressStaysOffTheStateTopics(t *testing.T) {
 		}
 	}
 	// Each run's open adds its request, the claim decision and the attempt wrap.
-	if records := f.records(t, admin.PoolEventsTopic(testPool)); len(records) != len(runs)*(len(want)+3) {
+	if records := f.records(t, operator.PoolEventsTopic(testPool)); len(records) != len(runs)*(len(want)+3) {
 		t.Fatalf("pool events hold %d records, want %d", len(records), len(runs)*(len(want)+3))
 	}
 }
@@ -345,7 +345,7 @@ func TestProgressCommitsWithItsChunks(t *testing.T) {
 	f := newFixture(t, resultStream)
 	f.plugin.stream = append([]string{`{"type":"system"}`}, noResultStream...)
 	f.plugin.endDelay = 4 * renewInterval
-	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.ReceiverProgressTopic(testReceiver)).Operations(kadm.OpAny))
+	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(operator.ReceiverProgressTopic(testReceiver)).Operations(kadm.OpAny))
 	if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release when progress cannot be written; logs:\n%s", status, f.logs.String())
 	}
@@ -447,7 +447,7 @@ func TestResultSharesTheTerminalTransaction(t *testing.T) {
 	}
 	t.Cleanup(func() { commitTransaction = commit })
 	run.conclude(f.ctx, pluginsdk.Handle{}, []pluginsdk.Line{{Offset: 0, Next: 5, Data: []byte("line")}}, pluginsdk.Terminal{Started: true})
-	records := f.records(t, admin.TenantTopic(testTenant))
+	records := f.records(t, operator.TenantTopic(testTenant))
 	if len(records) != 2 || len(f.chunks(t)) != 1 {
 		t.Fatalf("feed records %d and chunks %d, want the result and the terminal, and the last chunk", len(records), len(f.chunks(t)))
 	}
@@ -498,7 +498,7 @@ func TestEndOfJobStopsAllocationBeforeTerminal(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-result-stop", 1)
 	f.plugin.stopCheck = func() error {
-		if n := len(f.records(t, admin.TenantTopic(testTenant))) + len(f.records(t, admin.TenantTranscriptTopic(testTenant))); n != 0 {
+		if n := len(f.records(t, operator.TenantTopic(testTenant))) + len(f.records(t, operator.TenantTranscriptTopic(testTenant))); n != 0 {
 			return fmt.Errorf("feed records visible before Stop: %d", n)
 		}
 		return nil
@@ -537,7 +537,7 @@ func TestStopFailureReleasesWithoutTerminal(t *testing.T) {
 			if status := test.call(run, f.ctx, pending); status != kgo.AckRelease {
 				t.Fatalf("status %v, want release", status)
 			}
-			if feed, events := len(f.records(t, admin.TenantTopic(testTenant)))+len(f.records(t, admin.TenantTranscriptTopic(testTenant))), len(f.records(t, admin.PoolEventsTopic(testPool))); feed != 0 || events != 0 {
+			if feed, events := len(f.records(t, operator.TenantTopic(testTenant)))+len(f.records(t, operator.TenantTranscriptTopic(testTenant))), len(f.records(t, operator.PoolEventsTopic(testPool))); feed != 0 || events != 0 {
 				t.Fatalf("Stop failure published feed=%d events=%d", feed, events)
 			}
 		})
@@ -574,13 +574,13 @@ func (f fixture) holding(t *testing.T, task *wire.Submission, hash, receiver str
 	if kind == "claimed" {
 		status.Wherry.TaskOffset = new(int64)
 	}
-	f.produce(t, admin.PoolEventsTopic(testPool), task.Wherry.Run, must(t)(wire.SignRecord(status, key)))
+	f.produce(t, operator.PoolEventsTopic(testPool), task.Wherry.Run, must(t)(wire.SignRecord(status, key)))
 }
 
 // taskOffset is the offset of the task record hashing to hash on the pool's task topic.
 func (f fixture) taskOffset(t *testing.T, hash string) int64 {
 	t.Helper()
-	for _, record := range f.records(t, admin.PoolTasksTopic(testPool)) {
+	for _, record := range f.records(t, operator.PoolTasksTopic(testPool)) {
 		if wire.TaskHash(record.Value) == hash {
 			return record.Offset
 		}
@@ -603,7 +603,7 @@ func progressRecord(t *testing.T, hash string, offset int64, mutate func(*wire.P
 func (f fixture) progressByRun(t *testing.T, receiver string) map[string][]int64 {
 	t.Helper()
 	offsets := map[string][]int64{}
-	for _, record := range f.records(t, admin.ReceiverProgressTopic(receiver)) {
+	for _, record := range f.records(t, operator.ReceiverProgressTopic(receiver)) {
 		run := string(record.Key)
 		if record.Value == nil {
 			offsets[run] = append(offsets[run], -1)
@@ -637,7 +637,7 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	started := int64(5)
 	f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &started)
 	for _, offset := range []int64{10, 42} {
-		f.produce(t, admin.ReceiverProgressTopic(testReceiver), testRun("run-adopt"), progressRecord(t, hash, offset, nil))
+		f.produce(t, operator.ReceiverProgressTopic(testReceiver), testRun("run-adopt"), progressRecord(t, hash, offset, nil))
 	}
 	// A fenced holder's aborted progress must not move the resume point.
 	aborted, err := f.receiver.newProducer(testRun("run-adopt"))
@@ -648,7 +648,7 @@ func TestAdoptionResumesFromLastOffset(t *testing.T) {
 	if err := aborted.BeginTransaction(); err != nil {
 		t.Fatal(err)
 	}
-	if err := aborted.ProduceSync(f.ctx, &kgo.Record{Topic: admin.ReceiverProgressTopic(testReceiver), Key: []byte(testRun("run-adopt")), Value: progressRecord(t, hash, 99, nil)}).FirstErr(); err != nil {
+	if err := aborted.ProduceSync(f.ctx, &kgo.Record{Topic: operator.ReceiverProgressTopic(testReceiver), Key: []byte(testRun("run-adopt")), Value: progressRecord(t, hash, 99, nil)}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	if err := aborted.EndTransaction(f.ctx, kgo.TryAbort); err != nil {
@@ -668,7 +668,7 @@ func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
 	record := f.submit(t, f.host, nil)
 	resume := int64(len(stream[0]) + 1)
 	f.holding(t, f.parse(t, record), wire.TaskHash(record.Value), testReceiver, f.receiver.signing, "claimed", nil)
-	f.produce(t, admin.ReceiverProgressTopic(testReceiver), testRun("run-a"), progressRecord(t, wire.TaskHash(record.Value), resume, nil))
+	f.produce(t, operator.ReceiverProgressTopic(testReceiver), testRun("run-a"), progressRecord(t, wire.TaskHash(record.Value), resume, nil))
 	if status := f.execute(t, record, 2); status != kgo.AckAccept {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
@@ -687,7 +687,7 @@ func TestAdoptedRunEndsFromTheOutcomeFile(t *testing.T) {
 		t.Fatalf("chunks at %v followed from %v, want each line from %d once: %v", seqs, froms, resume, want)
 	}
 	adopterProgress := 0
-	for _, record := range f.records(t, admin.ReceiverProgressTopic(testReceiver)) {
+	for _, record := range f.records(t, operator.ReceiverProgressTopic(testReceiver)) {
 		if progress, err := wire.DecodeProgress(record.Value); err == nil && progress.Attempt == 2 {
 			adopterProgress++
 		}
@@ -714,9 +714,9 @@ func TestLastOffsetIgnoresMismatchedStatus(t *testing.T) {
 		progressRecord(t, hash, 99, func(progress *wire.Progress) { progress.Tenant = "tenant-b" }),
 		[]byte(`{"v":1,"tenant":"tenant-a","tenant":"tenant-a","task_hash":"` + hash + `","attempt":1,"log_offset":99}`),
 	} {
-		f.produce(t, admin.ReceiverProgressTopic(testReceiver), testRun("run-offset-binding"), value)
+		f.produce(t, operator.ReceiverProgressTopic(testReceiver), testRun("run-offset-binding"), value)
 	}
-	f.produce(t, admin.ReceiverProgressTopic(testReceiver), testRun("run-other"), progressRecord(t, hash, 99, nil))
+	f.produce(t, operator.ReceiverProgressTopic(testReceiver), testRun("run-other"), progressRecord(t, hash, 99, nil))
 	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("resume offset %d err %v, want 42", got, err)
 	}
@@ -740,7 +740,7 @@ func TestAdoptionReadFailureReleases(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	if status := f.receiver.execute(f.ctx, f.service.Admin, record, admitted, 2); status != kgo.AckRelease {
+	if status := f.receiver.execute(f.ctx, f.service.SuperUser, record, admitted, 2); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
 	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 {
@@ -759,8 +759,8 @@ func TestAdoptionTrustsPeerProgress(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
 	f.holding(t, task, hash, "receiver-other-pool", otherSigning, "claimed", nil)
-	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
-	f.produce(t, admin.ReceiverProgressTopic("receiver-other-pool"), testRun("run-peer"), progressRecord(t, hash, 99, nil))
+	f.produce(t, operator.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
+	f.produce(t, operator.ReceiverProgressTopic("receiver-other-pool"), testRun("run-peer"), progressRecord(t, hash, 99, nil))
 	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("peer progress offset %d err %v, want 42", got, err)
 	}
@@ -778,14 +778,14 @@ func TestAdoptionFallsBackToStartedWithoutTheHoldersProgress(t *testing.T) {
 			started := int64(7)
 			f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &started)
 			f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
-			f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
+			f.produce(t, operator.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
 			if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 				t.Fatalf("live peer's progress offset %d err %v, want 42", got, err)
 			}
 			switch cause {
 			case "ended":
 				revocationBounds(t, f.service, "1")
-				result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return admin.ErrAuthorizationDenied })
+				result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied })
 				revocationBounds(t, f.service, "")
 				if !result.Complete {
 					t.Fatalf("incomplete revocation: %+v", result)
@@ -794,7 +794,7 @@ func TestAdoptionFallsBackToStartedWithoutTheHoldersProgress(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "no acl":
-				f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.ReceiverProgressTopic("receiver-peer")).Operations(kadm.OpAny))
+				f.deleteReceiverACLs(t, kadm.NewACLs().Topics(operator.ReceiverProgressTopic("receiver-peer")).Operations(kadm.OpAny))
 			}
 			halt := f.halts()
 			got, _, err := f.receiver.lastOffset(f.ctx, task, hash)
@@ -821,14 +821,14 @@ func TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial(t *testing.T) {
 	started := int64(7)
 	f.holding(t, task, hash, testReceiver, f.receiver.signing, "started", &started)
 	f.holding(t, task, hash, "receiver-peer", peerSigning, "claimed", nil)
-	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
+	f.produce(t, operator.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
 	revocationBounds(t, f.service, "1")
-	result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return admin.ErrAuthorizationDenied })
+	result := f.service.RevokeReceiver(f.ctx, "receiver-peer", time.Millisecond, func(context.Context, string, string) error { return operator.ErrAuthorizationDenied })
 	revocationBounds(t, f.service, "")
 	if !result.Complete {
 		t.Fatalf("incomplete revocation: %+v", result)
 	}
-	progress := admin.ReceiverProgressTopic("receiver-peer")
+	progress := operator.ReceiverProgressTopic("receiver-peer")
 	var sasl atomic.Bool
 	sasl.Store(true)
 	f.cluster.ControlKey(kmsg.ListOffsets.Int16(), func(request kmsg.Request) (kmsg.Response, error, bool) {
@@ -856,11 +856,11 @@ func TestLastOffsetSkipsOnlyAnEndedHoldersTopicDenial(t *testing.T) {
 	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != started || halt() != nil {
 		t.Fatalf("offset %d err %v, stopped with %v, without the ended holder's progress; want the started offset %d", got, err, halt(), started)
 	}
-	revoking, err := admin.EncodeRecord(admin.Record{Kind: "revoking", Receiver: testReceiver})
+	revoking, err := operator.EncodeRecord(operator.Record{Kind: "revoking", Receiver: testReceiver})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.produce(t, admin.AdminTopic, "revoking."+admin.ReceiverPrincipal(testReceiver), revoking)
+	f.produce(t, operator.OperatorTopic, "revoking."+operator.ReceiverPrincipal(testReceiver), revoking)
 	halt = f.halts()
 	if _, _, err := f.receiver.lastOffset(f.ctx, task, hash); !errors.Is(err, kerr.TopicAuthorizationFailed) || halt() == nil {
 		t.Fatalf("the topic denial while this receiver is being revoked returned %v and stopped the receiver with %v; want the denial", err, halt())
@@ -873,7 +873,7 @@ func TestFencedProducerStopsRunWrites(t *testing.T) {
 	if err := zombie.commit(f.ctx, zombie.claimRecords(f.taskOffset(t, zombie.taskHash))...); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(admin.TransactionalPrefix(testPool)+testRun("run-fence"), "p."+testPool+".") {
+	if !strings.HasPrefix(operator.TransactionalPrefix(testPool)+testRun("run-fence"), "p."+testPool+".") {
 		t.Fatal("transactional ID is outside the pool's prefix")
 	}
 	adopter := testActiveRun(t, f, "run-fence", 2)
@@ -916,7 +916,7 @@ func TestFencedStartFailureLeavesTheJob(t *testing.T) {
 func TestStartFailureWriteDenialStopsTheReceiver(t *testing.T) {
 	f := newFixture(t, resultStream)
 	run := testActiveRun(t, f, "run-a", 1)
-	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.PoolEventsTopic(testPool)).Operations(kadm.OpWrite))
+	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(operator.PoolEventsTopic(testPool)).Operations(kadm.OpWrite))
 	halt := f.halts()
 	if status := run.startFailure(f.ctx, "dispatch", "profile nomad created no job"); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
@@ -948,7 +948,7 @@ func shortLock(f fixture, lock time.Duration) {
 	f.receiver.mu.Lock()
 	defer f.receiver.mu.Unlock()
 	terms := f.receiver.state.Pools[testPool]
-	terms.LockDurationMS = admin.Millis(lock.Milliseconds())
+	terms.LockDurationMS = operator.Millis(lock.Milliseconds())
 	f.receiver.state.Pools[testPool] = terms
 }
 
@@ -1128,7 +1128,7 @@ func TestDispatchErrorDetailIsNotPublished(t *testing.T) {
 	if failures := f.startFailures(t); len(failures) != 1 || failures[0].Class != "dispatch" {
 		t.Fatalf("start failures %#v, want one dispatch start failure", failures)
 	}
-	for _, topic := range []string{admin.PoolEventsTopic(testPool), admin.TenantTopic(testTenant), admin.TenantTranscriptTopic(testTenant)} {
+	for _, topic := range []string{operator.PoolEventsTopic(testPool), operator.TenantTopic(testTenant), operator.TenantTranscriptTopic(testTenant)} {
 		for _, record := range f.records(t, topic) {
 			if strings.Contains(string(record.Value), secret) {
 				t.Fatalf("dispatch error detail published on %s", topic)
@@ -1440,7 +1440,7 @@ func TestOutcomeMessageIsRedactedAndBounded(t *testing.T) {
 			if test.chunks == straddled && (len(chunks) != 2 || !strings.HasSuffix(string(chunks[0].ArtifactUpdate.Artifact.Parts[0].Raw), marker[:13])) {
 				t.Fatal("the chunk seam does not split the second marker")
 			}
-			for _, record := range append(f.records(t, admin.TenantTopic(testTenant)), f.records(t, admin.TenantTranscriptTopic(testTenant))...) {
+			for _, record := range append(f.records(t, operator.TenantTopic(testTenant)), f.records(t, operator.TenantTranscriptTopic(testTenant))...) {
 				if strings.Contains(string(decodedPayload(record.Value)), testToken[:13]) {
 					t.Fatal("part of the credential value reached the feed")
 				}
@@ -1574,7 +1574,7 @@ type shutdownAt struct {
 
 func (h shutdownAt) OnProduceRecordBuffered(record *kgo.Record) {
 	var status wire.RunStatus
-	progress := h.kind == "progress" && record.Topic == admin.ReceiverProgressTopic(testReceiver) && record.Value != nil
+	progress := h.kind == "progress" && record.Topic == operator.ReceiverProgressTopic(testReceiver) && record.Value != nil
 	if !progress && (wire.ParseRecord(record.Value, h.f.keys(), &status) != nil || status.Wherry.Kind != h.kind) {
 		return
 	}
@@ -1641,9 +1641,9 @@ func (f fixture) deleteReceiverACLs(t *testing.T, builder *kadm.ACLBuilder) {
 // deleteACLsOf removes receiver's principal's ACLs that builder's resources and operations select.
 func (f fixture) deleteACLsOf(t *testing.T, receiver string, builder *kadm.ACLBuilder) {
 	t.Helper()
-	builder = builder.Allow(admin.ReceiverPrincipal(receiver)).AllowHosts("*").ResourcePatternType(kadm.ACLPatternAny)
+	builder = builder.Allow(operator.ReceiverPrincipal(receiver)).AllowHosts("*").ResourcePatternType(kadm.ACLPatternAny)
 	builder.PrefixUser()
-	results, err := kadm.NewClient(f.service.Admin).DeleteACLs(f.ctx, builder)
+	results, err := kadm.NewClient(f.service.SuperUser).DeleteACLs(f.ctx, builder)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1699,10 +1699,10 @@ func TestDenialStopsTheReceiver(t *testing.T) {
 		denied *kadm.ACLBuilder
 		want   string
 	}{
-		"fetch":            {kadm.NewACLs().Topics(admin.PoolEventsTopic(testPool)).Operations(kadm.OpRead), "denied read: "},
-		"produce":          {kadm.NewACLs().Topics(admin.ReceiversTopic).Operations(kadm.OpWrite), "denied write: "},
-		"transactional ID": {kadm.NewACLs().TransactionalIDs(admin.TransactionalPrefix(testPool)).Operations(kadm.OpAny), "denied transactional ID: "},
-		"share group":      {kadm.NewACLs().Groups(admin.PoolGroup(testPool)).Operations(kadm.OpAny), "denied share group: "},
+		"fetch":            {kadm.NewACLs().Topics(operator.PoolEventsTopic(testPool)).Operations(kadm.OpRead), "denied read: "},
+		"produce":          {kadm.NewACLs().Topics(operator.ReceiversTopic).Operations(kadm.OpWrite), "denied write: "},
+		"transactional ID": {kadm.NewACLs().TransactionalIDs(operator.TransactionalPrefix(testPool)).Operations(kadm.OpAny), "denied transactional ID: "},
+		"share group":      {kadm.NewACLs().Groups(operator.PoolGroup(testPool)).Operations(kadm.OpAny), "denied share group: "},
 	} {
 		t.Run(name, func(t *testing.T) {
 			// The second line arrives after the denial, so a held run commits under its transactional ID; the held run's
@@ -1712,7 +1712,7 @@ func TestDenialStopsTheReceiver(t *testing.T) {
 			done, _ := holdRun(t, f)
 			f.deleteReceiverACLs(t, c.denied)
 			// A record past those read makes the next read of the pool's events fetch.
-			f.produce(t, admin.PoolEventsTopic(testPool), "noise", []byte("noise"))
+			f.produce(t, operator.PoolEventsTopic(testPool), "noise", []byte("noise"))
 			denied := time.Now()
 			if err := f.stopped(t, done, 10*time.Second); err == nil || !strings.HasPrefix(err.Error(), c.want) {
 				t.Fatalf("Run returned %v, want %q", err, c.want)
@@ -1741,7 +1741,7 @@ func TestPluginExitStopsTheReceiver(t *testing.T) {
 func TestRestartedReceiverAdoptsTheJobADeniedOneLeft(t *testing.T) {
 	f := newFixtureWith(t, resultStream, testTerms(), testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream, endDelay: 40 * time.Second}})
 	done, _ := holdRun(t, f)
-	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(admin.ReceiversTopic).Operations(kadm.OpWrite))
+	f.deleteReceiverACLs(t, kadm.NewACLs().Topics(operator.ReceiversTopic).Operations(kadm.OpWrite))
 	if err := f.stopped(t, done, 10*time.Second); err == nil {
 		t.Fatal("Run returned no error after a denial")
 	}
@@ -1828,7 +1828,7 @@ func TestAmbiguousCommitAbandonsToRedelivery(t *testing.T) {
 				t.Fatalf("terminals on the pool's events %d, want %d", terminals, test.terminals)
 			}
 			commitTransaction = previous
-			tasks := f.records(t, admin.PoolTasksTopic(testPool))
+			tasks := f.records(t, operator.PoolTasksTopic(testPool))
 			admitted, ack := f.receiver.admit(f.ctx, tasks[len(tasks)-1])
 			if test.applied && (admitted != nil || ack != kgo.AckAccept) {
 				t.Fatalf("redelivered holder admitted=%v ack=%v, want accept without running", admitted != nil, ack)
@@ -1845,11 +1845,11 @@ func TestAdoptionTrustsRotatedPeerKey(t *testing.T) {
 	peerSigning := f.addPeer(t, "receiver-peer", testPool)
 	// The peer rotates after the receiver's last refresh.
 	_, next, _ := ed25519.GenerateKey(rand.Reader)
-	f.produce(t, admin.ReceiverTopic("receiver-peer"), "receiver-peer", must(t)(signed.RotateKey("receiver-peer", peerSigning, next)))
+	f.produce(t, operator.ReceiverTopic("receiver-peer"), "receiver-peer", must(t)(signed.RotateKey("receiver-peer", peerSigning, next)))
 	task := testSubmission("run-peer")
 	hash := strings.Repeat("a", 64)
 	f.holding(t, task, hash, "receiver-peer", next, "claimed", nil)
-	f.produce(t, admin.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
+	f.produce(t, operator.ReceiverProgressTopic("receiver-peer"), testRun("run-peer"), progressRecord(t, hash, 42, nil))
 	if got, _, err := f.receiver.lastOffset(f.ctx, task, hash); err != nil || got != 42 {
 		t.Fatalf("claim under the peer's rotated key: offset %d err %v, want 42", got, err)
 	}
@@ -1858,7 +1858,7 @@ func TestAdoptionTrustsRotatedPeerKey(t *testing.T) {
 func (f fixture) startFailures(t *testing.T) []wire.StartFailure {
 	t.Helper()
 	var failures []wire.StartFailure
-	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
+	for _, record := range f.records(t, operator.PoolEventsTopic(testPool)) {
 		var failure wire.StartFailure
 		if wire.ParseRecord(record.Value, f.keys(), &failure) == nil {
 			failures = append(failures, failure)
@@ -2325,7 +2325,7 @@ func TestReleasesAtTheBudgetFail(t *testing.T) {
 			record := f.submit(t, f.host, nil)
 			admitted := f.admitted(t, record)
 			test.setup(t, f)
-			if status := f.receiver.execute(f.ctx, f.service.Admin, record, admitted, int64(testTerms().DeliveryLimit)-1); status != kgo.AckReject {
+			if status := f.receiver.execute(f.ctx, f.service.SuperUser, record, admitted, int64(testTerms().DeliveryLimit)-1); status != kgo.AckReject {
 				t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
 			}
 			if !test.readable {
@@ -2347,7 +2347,7 @@ func TestShutdownAtTheBudgetStillReleases(t *testing.T) {
 	defer shutdown()
 	done := make(chan kgo.AckStatus, 1)
 	go func() {
-		done <- f.receiver.execute(ctx, f.service.Admin, record, admitted, int64(testTerms().DeliveryLimit)-1)
+		done <- f.receiver.execute(ctx, f.service.SuperUser, record, admitted, int64(testTerms().DeliveryLimit)-1)
 	}()
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows > 0 {

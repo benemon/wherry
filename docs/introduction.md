@@ -35,7 +35,7 @@ the agent.
 
 One `wherry` binary with three sides:
 
-- **Operator:** `wherry admin` creates pools and their terms, entitles
+- **Operator:** `wherry operator` creates pools and their terms, entitles
   tenants, adds hosts and receivers with their Kafka principals, ACLs and
   bundles, records receiver configurations, revokes access, suspends and
   resumes pools and rotates their keys, and checks the result against the

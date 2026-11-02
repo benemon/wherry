@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Starts a single-node Kafka for the real-broker tests and writes their environment to DIR/env: a TLS listener on
 # 127.0.0.1:9093 with SCRAM-SHA-512 and the StandardAuthorizer (super user wherry-admin, operator wherry.operator
-# with the operator's ACLs on wherry.admin), and a plaintext listener on 127.0.0.1:9092 whose anonymous principal is
+# with the operator's ACLs on wherry.operator), and a plaintext listener on 127.0.0.1:9092 whose anonymous principal is
 # a super user. Usage: up.sh DIR. CONTAINER (docker by default) runs it; down: $CONTAINER rm -f wherry-kafka.
 # ADVERTISED_IP (127.0.0.1 by default) replaces 127.0.0.1 in the listeners, the published ports and the certificate,
 # so a client in another network namespace, such as a Nomad bridge-mode task, can reach the broker. The plaintext
@@ -81,14 +81,14 @@ for _ in $(seq 1 60); do
 done
 "$container" exec wherry-kafka /opt/kafka/bin/kafka-acls.sh --bootstrap-server 127.0.0.1:9092 --add \
   --allow-principal User:wherry.operator --operation Write --operation Read --operation Describe \
-  --topic wherry.admin >/dev/null
+  --topic wherry.operator >/dev/null
 
 cat > "$dir/env" <<EOF
 export WHERRY_KAFKA_TEST_BROKER=$ip:9092
 export WHERRY_TRUST_BROKER=$ip:9093
 export WHERRY_TRUST_CLUSTER_ID=$cluster_id
 export WHERRY_TRUST_CA=$dir/ca.crt
-export WHERRY_TRUST_ADMIN_USER=wherry-admin
-export WHERRY_TRUST_ADMIN_PASSWORD_FILE=$dir/admin-password
+export WHERRY_TRUST_SUPER_USER=wherry-admin
+export WHERRY_TRUST_SUPER_USER_PASSWORD_FILE=$dir/admin-password
 export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=$dir/operator-password
 EOF

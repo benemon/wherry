@@ -25,8 +25,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	jose "github.com/go-jose/go-jose/v4"
@@ -39,11 +39,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// fixture is a kfake cluster provisioned through admin.Service, with a host connected as its own principal.
+// fixture is a kfake cluster provisioned through operator.Service, with a host connected as its own principal.
 type fixture struct {
 	ctx       context.Context
 	cluster   *kfake.Cluster
-	service   *admin.Service
+	service   *operator.Service
 	host      *Host
 	stateDir  string
 	secret    string
@@ -78,12 +78,12 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-func testTerms() admin.Terms {
+func testTerms() operator.Terms {
 	optional := false
-	return admin.Terms{
-		Agents: []admin.AgentTerms{
-			{Name: "claude", Credentials: []admin.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}},
-			{Name: "codex", Credentials: []admin.AgentCredential{
+	return operator.Terms{
+		Agents: []operator.AgentTerms{
+			{Name: "claude", Credentials: []operator.AgentCredential{{TaskCredential: wire.TaskCredential{Name: "model", Env: "MODEL_API_KEY"}}}},
+			{Name: "codex", Credentials: []operator.AgentCredential{
 				{TaskCredential: wire.TaskCredential{Name: "openai", Env: "OPENAI_API_KEY"}},
 				{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional},
 			}},
@@ -97,7 +97,7 @@ func newFixtureNoHost(t *testing.T, opts ...kfake.Opt) *fixture {
 	t.Helper()
 	cluster := kfake.MustCluster(append([]kfake.Opt{kfake.EnableSASL(), kfake.EnableACLs(), kfake.Superuser("SCRAM-SHA-512", "admin", "password"), kfake.Superuser("PLAIN", "wherry.operator", "operator-password")}, opts...)...)
 	t.Cleanup(cluster.Close)
-	if err := cluster.CreateTopic(admin.AdminTopic, 1, nil); err != nil {
+	if err := cluster.CreateTopic(operator.OperatorTopic, 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	root, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()))
@@ -105,14 +105,14 @@ func newFixtureNoHost(t *testing.T, opts ...kfake.Opt) *fixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(root.Close)
-	operator, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(plain.Auth{User: "wherry.operator", Pass: "operator-password"}.AsMechanism()), kgo.FetchMaxWait(10*time.Millisecond))
+	operatorClient, err := kgo.NewClient(kgo.SeedBrokers(cluster.ListenAddrs()...), kgo.SASL(plain.Auth{User: "wherry.operator", Pass: "operator-password"}.AsMechanism()), kgo.FetchMaxWait(10*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(operator.Close)
+	t.Cleanup(operatorClient.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	f := &fixture{ctx: ctx, cluster: cluster, service: &admin.Service{Admin: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, receivers: map[string]*testReceiver{}, poolKeys: map[string]*ecdsa.PrivateKey{}, logs: &syncBuffer{}}
+	f := &fixture{ctx: ctx, cluster: cluster, service: &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10}, receivers: map[string]*testReceiver{}, poolKeys: map[string]*ecdsa.PrivateKey{}, logs: &syncBuffer{}}
 	f.pool(t, "pool-a")
 	return f
 }
@@ -146,12 +146,12 @@ func (f *fixture) connect(t *testing.T, path string, extra ...kgo.Opt) (*kgo.Cli
 	if err != nil {
 		t.Fatal(err)
 	}
-	var bundle admin.Bundle
+	var bundle operator.Bundle
 	if err := yaml.Unmarshal(encoded, &bundle); err != nil {
 		t.Fatal(err)
 	}
-	// kfake's SCRAM server always offers 4096 iterations, so the 8192 that admin provisions never authenticates.
-	if _, err := kadm.NewClient(f.service.Admin).AlterUserSCRAMs(f.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
+	// kfake's SCRAM server always offers 4096 iterations, so the 8192 that operator provisions never authenticates.
+	if _, err := kadm.NewClient(f.service.SuperUser).AlterUserSCRAMs(f.ctx, nil, []kadm.UpsertSCRAM{{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}}); err != nil {
 		t.Fatal(err)
 	}
 	kafka, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(f.service.Broker), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()),
@@ -189,14 +189,14 @@ func (f *fixture) newHost(t *testing.T, host, stateDir string) *Host {
 // key.
 func (f *fixture) addReceiver(t *testing.T, id, pool string) *testReceiver {
 	t.Helper()
-	config := admin.ReceiverConfig{Receiver: id, Pool: pool, Capacity: 2, Profiles: []admin.ProfileSettings{
+	config := operator.ReceiverConfig{Receiver: id, Pool: pool, Capacity: 2, Profiles: []operator.ProfileSettings{
 		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu"}},
 		{Name: "cloud", Plugin: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
 	}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32), "aws": strings.Repeat("cd", 32)}}
 	return f.addReceiverConfig(t, config)
 }
 
-func (f *fixture) addReceiverConfig(t *testing.T, config admin.ReceiverConfig) *testReceiver {
+func (f *fixture) addReceiverConfig(t *testing.T, config operator.ReceiverConfig) *testReceiver {
 	t.Helper()
 	bundle := filepath.Join(t.TempDir(), "bundle.yaml")
 	if err := f.service.ReceiverAdd(f.ctx, config, bundle); err != nil {
@@ -212,7 +212,7 @@ func (f *fixture) addReceiverConfig(t *testing.T, config admin.ReceiverConfig) *
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiver.produce(t, f.ctx, admin.ReceiverTopic(config.Receiver), config.Receiver, registration)
+	receiver.produce(t, f.ctx, operator.ReceiverTopic(config.Receiver), config.Receiver, registration)
 	f.receivers[config.Receiver] = receiver
 	if f.poolKeys[config.Pool] == nil {
 		f.poolKeys[config.Pool] = receiver.snapshot(t, f.ctx, nil)
@@ -232,7 +232,7 @@ func (r *testReceiver) snapshot(t *testing.T, ctx context.Context, mutate func(*
 	if mutate != nil {
 		mutate(snapshot)
 	}
-	r.produce(t, ctx, admin.CustodianTopic(r.pool), wire.CustodianKey, r.sign(t, snapshot))
+	r.produce(t, ctx, operator.CustodianTopic(r.pool), wire.CustodianKey, r.sign(t, snapshot))
 	return key
 }
 
@@ -268,7 +268,7 @@ func (r *testReceiver) advertise(t *testing.T, ctx context.Context, mutate func(
 	if mutate != nil {
 		mutate(ad)
 	}
-	r.produce(t, ctx, admin.ReceiversTopic, r.id, r.sign(t, ad))
+	r.produce(t, ctx, operator.ReceiversTopic, r.id, r.sign(t, ad))
 }
 
 func defaultSelector() []wire.Requirement {
@@ -295,21 +295,21 @@ type claimed struct {
 // of the pool's entitled tenants, as admission does.
 func (r *testReceiver) claim(t *testing.T, ctx context.Context, runID string) []claimed {
 	t.Helper()
-	state, err := admin.Load(ctx, r.kafka)
+	state, err := operator.Load(ctx, r.kafka)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys, err := admin.ReadKeys(ctx, r.kafka, admin.HostKeyTopics(state, r.pool))
+	keys, err := operator.ReadKeys(ctx, r.kafka, operator.HostKeyTopics(state, r.pool))
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := readTopic(ctx, r.kafka, admin.PoolTasksTopic(r.pool))
+	records, err := readTopic(ctx, r.kafka, operator.PoolTasksTopic(r.pool))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var tasks []claimed
 	for _, record := range records {
-		submission, err := admin.AuthorizeSubmission(state, keys, record.Value, r.pool)
+		submission, err := operator.AuthorizeSubmission(state, keys, record.Value, r.pool)
 		if err != nil {
 			t.Fatalf("task does not authorise: %v", err)
 		}
@@ -380,7 +380,7 @@ func (r *testReceiver) result(t *testing.T, task claimed, attempt int64, state w
 // tenant's transcript topic, the others to its feed.
 func (r *testReceiver) feed(t *testing.T, ctx context.Context, runID string, values ...[]byte) {
 	t.Helper()
-	producer, err := kgo.NewClient(append(r.kafka.Opts(), kgo.TransactionalID(admin.TransactionalPrefix(r.pool)+runID))...)
+	producer, err := kgo.NewClient(append(r.kafka.Opts(), kgo.TransactionalID(operator.TransactionalPrefix(r.pool)+runID))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,9 +389,9 @@ func (r *testReceiver) feed(t *testing.T, ctx context.Context, runID string, val
 		t.Fatal(err)
 	}
 	for _, value := range values {
-		topic := admin.TenantTopic("tenant-a")
+		topic := operator.TenantTopic("tenant-a")
 		if typ, _ := header(value); typ == wire.ChunkType || typ == wire.OutputType {
-			topic = admin.TenantTranscriptTopic("tenant-a")
+			topic = operator.TenantTranscriptTopic("tenant-a")
 		}
 		if err := producer.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: []byte(runID), Value: value}).FirstErr(); err != nil {
 			t.Fatal(err)
@@ -418,11 +418,11 @@ func (f *fixture) admitted(t *testing.T) (*testReceiver, claimed) {
 
 func (f *fixture) end(t *testing.T, receiver string) {
 	t.Helper()
-	encoded, err := admin.EncodeRecord(admin.Record{Kind: "end", Receiver: receiver})
+	encoded, err := operator.EncodeRecord(operator.Record{Kind: "end", Receiver: receiver})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: admin.AdminTopic, Value: encoded}).FirstErr(); err != nil {
+	if err := f.service.Operator.ProduceSync(f.ctx, &kgo.Record{Topic: operator.OperatorTopic, Value: encoded}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -465,7 +465,7 @@ func TestHostEndToEnd(t *testing.T) {
 		t.Fatalf("status %#v, %v", status, err)
 	}
 	// The host topic holds the host's key alone.
-	if records, err := readTopic(f.ctx, receiver.kafka, admin.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
+	if records, err := readTopic(f.ctx, receiver.kafka, operator.HostTopic("tenant-a", "host-a")); err != nil || len(records) != 1 {
 		t.Fatalf("host topic holds %d records, %v; want the key registration alone", len(records), err)
 	}
 }
@@ -476,12 +476,12 @@ func TestRegisterIsIdempotentAndRefusesAnotherKey(t *testing.T) {
 	if err != nil || id != signed.KeyID(f.host.key.Public().(ed25519.PublicKey)) {
 		t.Fatalf("second register %q, %v", id, err)
 	}
-	records, err := readTopic(f.ctx, f.host.kafka, admin.HostTopic("tenant-a", "host-a"))
+	records, err := readTopic(f.ctx, f.host.kafka, operator.HostTopic("tenant-a", "host-a"))
 	if err != nil || len(records) != 1 {
 		t.Fatalf("host topic holds %d records, %v; want one registration", len(records), err)
 	}
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
-	impostor, err := NewHost(f.host.kafka, other, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
+	impostor, err := NewHost(f.host.kafka, other, operator.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +504,7 @@ func TestNewHostParsesPrincipal(t *testing.T) {
 
 func (f *fixture) tasksEnd(t *testing.T, pool string) int {
 	t.Helper()
-	records, err := readTopic(f.ctx, f.service.Admin, admin.PoolTasksTopic(pool))
+	records, err := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic(pool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +588,7 @@ func TestSubmitKeepsInputsWithinProfileInlineLimit(t *testing.T) {
 
 func TestSubmitIgnoresInlineLimitOfOfferOutsideSelector(t *testing.T) {
 	f := newFixture(t)
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2, Profiles: []admin.ProfileSettings{
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Capacity: 2, Profiles: []operator.ProfileSettings{
 		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman"}},
 		{Name: "other", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "exec"}},
 	}, PluginSHA256: map[string]string{"nomad": strings.Repeat("ab", 32)}}
@@ -675,9 +675,9 @@ func TestResolvePlacementModel(t *testing.T) {
 	terms.DefaultAgent = "codex"
 	terms.Agents[0].Models, terms.Agents[0].DefaultModel = []string{"haiku", "sonnet"}, "haiku"
 	terms.Agents[1].Models, terms.Agents[1].DefaultModel = []string{"gpt-5-mini"}, "gpt-5-mini"
-	state := admin.NewState()
+	state := operator.NewState()
 	state.Pools["pool-a"] = terms
-	state.Receivers["receiver-a"] = admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []admin.ProfileSettings{
+	state.Receivers["receiver-a"] = operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{
 		{Name: "lab", Plugin: "nomad", Agent: "claude"}, {Name: "cloud", Plugin: "aws", Agent: "codex"},
 	}}
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
@@ -763,17 +763,17 @@ func TestSubmitChoosesPoolOfMostSpareMember(t *testing.T) {
 
 func TestResolvePlacement(t *testing.T) {
 	terms := testTerms()
-	terms.Agents = append(terms.Agents, admin.AgentTerms{Name: "gemini"})
+	terms.Agents = append(terms.Agents, operator.AgentTerms{Name: "gemini"})
 	terms.DefaultAgent = "codex"
 	// The declared agent order is claude, codex, gemini; codex is the default.
-	config := admin.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []admin.ProfileSettings{
+	config := operator.ReceiverConfig{Receiver: "receiver-a", Pool: "pool-a", Profiles: []operator.ProfileSettings{
 		{Name: "lab", Plugin: "nomad", Agent: "claude", Labels: map[string]string{"runtime": "podman", "region": "eu", "gpu": "a100"}},
 		{Name: "batch", Plugin: "nomad", Agent: "gemini", Labels: map[string]string{"runtime": "exec", "region": "us"}},
 		{Name: "cloud", Plugin: "aws", Agent: "codex", Labels: map[string]string{"runtime": "exec"}},
 		{Name: "spare", Plugin: "nomad", Agent: "codex", Labels: map[string]string{"runtime": "wasm"}},
 		{Name: "rogue", Plugin: "nomad", Agent: "other"},
 	}}
-	state := admin.NewState()
+	state := operator.NewState()
 	state.Pools["pool-a"] = terms
 	state.Receivers["receiver-a"] = config
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
@@ -823,12 +823,12 @@ func TestResolvePlacement(t *testing.T) {
 }
 
 func TestResolvePlacementChoosesMostSpareThenLowestID(t *testing.T) {
-	state := admin.NewState()
+	state := operator.NewState()
 	state.Pools["pool-a"], state.Pools["pool-b"], state.Pools["pool-c"] = testTerms(), testTerms(), testTerms()
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true, "pool-b": true}
 	ads := map[string]wire.Advertisement{}
 	member := func(id, pool string, capacity, inFlight int64, profile string) {
-		state.Receivers[id] = admin.ReceiverConfig{Receiver: id, Pool: pool, Profiles: []admin.ProfileSettings{
+		state.Receivers[id] = operator.ReceiverConfig{Receiver: id, Pool: pool, Profiles: []operator.ProfileSettings{
 			{Name: "lab", Plugin: "nomad", Agent: "claude"}, {Name: "cloud", Plugin: "aws", Agent: "codex"},
 		}}
 		ads[id] = wire.Advertisement{Receiver: id, Pool: pool, Capacity: capacity, InFlight: inFlight, Offers: []wire.Offer{{Profile: profile, Agent: "x"}}}
@@ -849,7 +849,7 @@ func TestResolvePlacementChoosesMostSpareThenLowestID(t *testing.T) {
 }
 
 func TestResolvePlacementPrefersTheDefaultAgentOverSpareCapacity(t *testing.T) {
-	state := admin.NewState()
+	state := operator.NewState()
 	state.Pools["pool-a"] = testTerms()
 	state.Entitlements["tenant-a"] = map[string]bool{"pool-a": true}
 	ads := map[string]wire.Advertisement{}
@@ -857,7 +857,7 @@ func TestResolvePlacementPrefersTheDefaultAgentOverSpareCapacity(t *testing.T) {
 		id, agent string
 		spare     int64
 	}{{"receiver-a", "codex", 9}, {"receiver-b", "claude", 1}} {
-		state.Receivers[member.id] = admin.ReceiverConfig{Receiver: member.id, Pool: "pool-a", Profiles: []admin.ProfileSettings{{Name: member.agent, Plugin: "nomad", Agent: member.agent}}}
+		state.Receivers[member.id] = operator.ReceiverConfig{Receiver: member.id, Pool: "pool-a", Profiles: []operator.ProfileSettings{{Name: member.agent, Plugin: "nomad", Agent: member.agent}}}
 		ads[member.id] = wire.Advertisement{Receiver: member.id, Pool: "pool-a", Capacity: member.spare, Offers: []wire.Offer{{Profile: member.agent, Agent: member.agent}}}
 	}
 	if _, placement, err := resolvePlacement(state, "tenant-a", "", "", nil, ads); err != nil || placement.Agent != "claude" {
@@ -1039,7 +1039,7 @@ func TestSubmitRefusesAKeyThatIsNotCurrentBeforePublishing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.host.produce(f.ctx, &kgo.Record{Topic: admin.HostTopic("tenant-a", "host-a"), Key: []byte("tenant-a.host-a"), Value: rotation}); err != nil {
+	if err := f.host.produce(f.ctx, &kgo.Record{Topic: operator.HostTopic("tenant-a", "host-a"), Key: []byte("tenant-a.host-a"), Value: rotation}); err != nil {
 		t.Fatal(err)
 	}
 	_, err = f.host.Submit(f.ctx, SubmitInput{Selector: defaultSelector(), Prompt: "work", EndBy: time.Now().Add(time.Minute), StartBy: time.Now().Add(time.Minute)})
@@ -1124,19 +1124,19 @@ func TestCancelWritesToTheEchosPool(t *testing.T) {
 	if _, err := other.Cancel(f.ctx, "run-missing"); !errors.Is(err, ErrRunNotFound) {
 		t.Fatalf("cancel of an unknown run: %v", err)
 	}
-	state, err := admin.Load(f.ctx, receiver.kafka)
+	state, err := operator.Load(f.ctx, receiver.kafka)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys, err := admin.ReadKeys(f.ctx, receiver.kafka, admin.HostKeyTopics(state, "pool-a"))
+	keys, err := operator.ReadKeys(f.ctx, receiver.kafka, operator.HostKeyTopics(state, "pool-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := readTopic(f.ctx, receiver.kafka, admin.PoolEventsTopic("pool-a"))
+	records, err := readTopic(f.ctx, receiver.kafka, operator.PoolEventsTopic("pool-a"))
 	if err != nil || len(records) != 1 {
 		t.Fatalf("pool events hold %d records, %v", len(records), err)
 	}
-	cancel, err := admin.AuthorizeCancel(state, keys, records[0].Value, "pool-a", "tenant-a")
+	cancel, err := operator.AuthorizeCancel(state, keys, records[0].Value, "pool-a", "tenant-a")
 	if err != nil || cancel.Run != runID || cancel.Host != "host-b" {
 		t.Fatalf("cancel %#v, %v", cancel, err)
 	}
@@ -1434,7 +1434,7 @@ func TestAwaitRereadsRotatedKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiver.produce(t, f.ctx, admin.ReceiverTopic("receiver-a"), "receiver-a", rotation)
+	receiver.produce(t, f.ctx, operator.ReceiverTopic("receiver-a"), "receiver-a", rotation)
 	receiver.key = next
 	receiver.feed(t, f.ctx, runID, receiver.result(t, task, 1, wire.TaskStateCompleted, nil))
 	if err := <-done; err != nil {
@@ -1453,7 +1453,7 @@ func TestStatusReadsWhatAReceiverSignedBeforeItRotated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiver.produce(t, f.ctx, admin.ReceiverTopic("receiver-a"), "receiver-a", rotation)
+	receiver.produce(t, f.ctx, operator.ReceiverTopic("receiver-a"), "receiver-a", rotation)
 	time.Sleep(5 * time.Millisecond)
 	receiver.feed(t, f.ctx, runID, receiver.status(t, task, 1, "terminal-1", "terminal", wire.TaskStateCanceled, nil))
 	status, err := f.host.Status(f.ctx, runID)
@@ -1523,7 +1523,7 @@ func TestEchoOfAMismatchingTaskDoesNotBindTheRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	for receiver, want := range map[*testReceiver]int{genuineReceiver: 1, mismatchReceiver: 0} {
-		if records, err := readTopic(f.ctx, receiver.kafka, admin.PoolEventsTopic(receiver.pool)); err != nil || len(records) != want {
+		if records, err := readTopic(f.ctx, receiver.kafka, operator.PoolEventsTopic(receiver.pool)); err != nil || len(records) != want {
 			t.Fatalf("%s events hold %d records, %v; want %d", receiver.pool, len(records), err, want)
 		}
 	}
@@ -1561,7 +1561,7 @@ func TestRegisterConcurrently(t *testing.T) {
 	}
 	wg.Wait()
 	owner := signed.HostOwner("tenant-a", "host-c")
-	keys, err := admin.ReadKeys(f.ctx, f.service.Admin, map[string]string{owner: admin.HostTopic("tenant-a", "host-c")})
+	keys, err := operator.ReadKeys(f.ctx, f.service.SuperUser, map[string]string{owner: operator.HostTopic("tenant-a", "host-c")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1850,7 +1850,7 @@ func TestRunHistoryStartsAtTheFeedOffsetOfItsSubmission(t *testing.T) {
 	f := newFixture(t)
 	receiver := f.addReceiver(t, "receiver-a", "pool-a")
 	receiver.advertise(t, f.ctx, nil)
-	if err := receiver.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: admin.TenantTopic("tenant-a"), Key: []byte("run-earlier"), Value: []byte("unreadable")}).FirstErr(); err != nil {
+	if err := receiver.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: operator.TenantTopic("tenant-a"), Key: []byte("run-earlier"), Value: []byte("unreadable")}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	submitted := f.submit(t, defaultSelector())
@@ -1859,7 +1859,7 @@ func TestRunHistoryStartsAtTheFeedOffsetOfItsSubmission(t *testing.T) {
 		t.Fatalf("local record %#v, %v; want the feed offset after the earlier record", local, err)
 	}
 	// A record keyed by the run below the recorded offset, which a whole-feed read would count as unreadable.
-	if err := receiver.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: admin.TenantTopic("tenant-a"), Key: []byte(submitted.RunID), Value: []byte("unreadable")}).FirstErr(); err != nil {
+	if err := receiver.kafka.ProduceSync(f.ctx, &kgo.Record{Topic: operator.TenantTopic("tenant-a"), Key: []byte(submitted.RunID), Value: []byte("unreadable")}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	local.FeedOffset = 2
@@ -1905,7 +1905,7 @@ func TestStatusAndSubmitShareConnections(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h, err := NewHost(kafka, f.host.key, admin.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
+		h, err := NewHost(kafka, f.host.key, operator.TenantPrincipal("tenant-a", "host-a"), f.stateDir, f.host.credentials, f.host.git, f.host.logger)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1964,7 +1964,7 @@ func TestFailedKeyReadFailsTheLoad(t *testing.T) {
 	for _, id := range []string{"receiver-a", "receiver-b", "receiver-c"} {
 		f.addReceiver(t, id, "pool-a").advertise(t, f.ctx, nil)
 	}
-	deleted, err := kadm.NewClient(f.service.Admin).DeleteTopics(f.ctx, admin.ReceiverTopic("receiver-b"))
+	deleted, err := kadm.NewClient(f.service.SuperUser).DeleteTopics(f.ctx, operator.ReceiverTopic("receiver-b"))
 	if err == nil {
 		err = deleted.Error()
 	}
@@ -2117,7 +2117,7 @@ func TestAwaitOfAFinishedRunBoundsItsConnectionsAndRequests(t *testing.T) {
 
 // readTopic reads topic from its start through a reader of its own.
 func readTopic(ctx context.Context, client *kgo.Client, topic string) ([]*kgo.Record, error) {
-	reader := admin.NewReader(client)
+	reader := operator.NewReader(client)
 	defer reader.Close()
 	return reader.ReadFrom(ctx, topic, 0)
 }

@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"cmp"
@@ -383,7 +383,7 @@ func (r *Reader) fetch(ctx context.Context) {
 	})
 }
 
-// Load folds wherry.admin as client's principal; it fails closed.
+// Load folds wherry.operator as client's principal; it fails closed.
 func Load(ctx context.Context, client *kgo.Client) (State, error) {
 	reader := NewReader(client)
 	defer reader.Close()
@@ -400,7 +400,7 @@ func (r *Reader) Load(ctx context.Context) (State, error) {
 }
 
 func readRaw(ctx context.Context, reader *Reader) ([]rawRecord, error) {
-	records, err := reader.ReadFrom(ctx, AdminTopic, 0)
+	records, err := reader.ReadFrom(ctx, OperatorTopic, 0)
 	if err != nil {
 		return nil, err
 	}

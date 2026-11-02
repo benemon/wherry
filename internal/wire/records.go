@@ -324,10 +324,10 @@ type Snapshot struct {
 	Custodian string  `json:"custodian"`
 	Reason    string  `json:"reason"`
 	Current   PoolKey `json:"current"`
-	// RotatedFor is the wherry.admin offset of the latest rotate-key record for the pool a key published by this
+	// RotatedFor is the wherry.operator offset of the latest rotate-key record for the pool a key published by this
 	// snapshot or an earlier one was generated after; every snapshot carries it on.
 	RotatedFor int64 `json:"rotated_for,omitzero"`
-	// SuspendedFor and ResumedFor are the wherry.admin offsets of the latest suspend and resume records for the pool its
+	// SuspendedFor and ResumedFor are the wherry.operator offsets of the latest suspend and resume records for the pool its
 	// custodian acknowledged, each after every attempt wrap it decided before reading the record committed; every
 	// snapshot carries them on.
 	SuspendedFor int64 `json:"suspended_for,omitzero"`
@@ -478,7 +478,7 @@ var runID = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 var namePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
 
-// ValidName reports whether name follows the grammar of the names wherry admin issues, which a pool's credentials
+// ValidName reports whether name follows the grammar of the names wherry operator issues, which a pool's credentials
 // follow too.
 func ValidName(name string) bool { return namePattern.MatchString(name) }
 

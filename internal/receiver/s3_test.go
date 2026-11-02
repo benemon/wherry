@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
@@ -83,9 +83,9 @@ func presigned(origin, key string) string {
 	return origin + "/" + s3Bucket + "/" + key + "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=900&X-Amz-Signature=" + s3Signature
 }
 
-func s3Terms(endpoint string) admin.Terms {
+func s3Terms(endpoint string) operator.Terms {
 	terms := testTerms()
-	terms.Storage = &admin.Storage{Endpoint: endpoint, Bucket: s3Bucket}
+	terms.Storage = &operator.Storage{Endpoint: endpoint, Bucket: s3Bucket}
 	return terms
 }
 
@@ -134,7 +134,7 @@ func TestS3ObjectsTravelOnlyInTheEnvelope(t *testing.T) {
 		t.Fatalf("prompt %q; want the input's path and no URL", prompt)
 	}
 	// Every record on the feed and the pool's topics is free of the URLs, the signature and the endpoint's paths.
-	for _, topic := range []string{admin.TenantTopic(testTenant), admin.TenantTranscriptTopic(testTenant), admin.PoolTasksTopic(testPool), admin.PoolEventsTopic(testPool)} {
+	for _, topic := range []string{operator.TenantTopic(testTenant), operator.TenantTranscriptTopic(testTenant), operator.PoolTasksTopic(testPool), operator.PoolEventsTopic(testPool)} {
 		for _, record := range f.records(t, topic) {
 			for _, never := range []string{s3Signature, "X-Amz", s.endpoint()} {
 				if bytes.Contains(record.Value, []byte(never)) || bytes.Contains(decodedPayload(record.Value), []byte(never)) {

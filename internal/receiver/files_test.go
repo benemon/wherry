@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/redact"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
@@ -51,7 +51,7 @@ func (f fixture) submitPayload(t *testing.T, edit func(map[string]any)) *kgo.Rec
 	}
 	edit(named)
 	value := must(t)(signed.Sign("application/vnd.wherry.submission.v1+jws", signed.HostOwner(testTenant, testHost), named, f.host))
-	return f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-a"), value)
+	return f.produce(t, operator.PoolTasksTopic(testPool), testRun("run-a"), value)
 }
 
 func (f fixture) lastRun() pluginsdk.Run {
@@ -108,7 +108,7 @@ func TestNoPartIsAnUnstoredURL(t *testing.T) {
 		t.Fatalf("status %v; logs:\n%s", status, f.logs.String())
 	}
 	references := 0
-	for _, topic := range []string{admin.TenantTopic(testTenant), admin.TenantTranscriptTopic(testTenant)} {
+	for _, topic := range []string{operator.TenantTopic(testTenant), operator.TenantTranscriptTopic(testTenant)} {
 		for _, record := range f.records(t, topic) {
 			payload, err := base64.RawURLEncoding.DecodeString(strings.Split(string(record.Value), ".")[1])
 			if err != nil {
@@ -221,10 +221,10 @@ func TestTaskCredentialOfTheAgentsNameIsAskedOnce(t *testing.T) {
 }
 
 // optionalTerms give claude, beside its required credential, an optional one its host may not supply.
-func optionalTerms() admin.Terms {
+func optionalTerms() operator.Terms {
 	terms := testTerms()
 	optional := false
-	terms.Agents[0].Credentials = append(terms.Agents[0].Credentials, admin.AgentCredential{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional})
+	terms.Agents[0].Credentials = append(terms.Agents[0].Credentials, operator.AgentCredential{TaskCredential: wire.TaskCredential{Name: "github-token", Env: "GH_TOKEN"}, Required: &optional})
 	return terms
 }
 
@@ -270,7 +270,7 @@ func TestAdmissionRefusesCredentialsOutsideTheAgentsTerms(t *testing.T) {
 func (f fixture) outputChunks(t *testing.T) []wire.Output {
 	t.Helper()
 	var outputs []wire.Output
-	for _, record := range f.records(t, admin.TenantTranscriptTopic(testTenant)) {
+	for _, record := range f.records(t, operator.TenantTranscriptTopic(testTenant)) {
 		var output wire.Output
 		if wire.ParseRecord(record.Value, f.keys(), &output) == nil {
 			outputs = append(outputs, output)
@@ -322,7 +322,7 @@ func TestPreambleNamesFilesAndTheOutcomeContract(t *testing.T) {
 	inputs := []string{"data.csv"}
 	credentials := []wire.TaskCredential{{Name: "deploy-key", File: "id_ed25519"}, {Name: "github-token", Env: "GH_TOKEN"}}
 	outputs := []wire.ExpectedOutput{{Name: "report.md", Required: true}, {Name: "notes/extra.txt"}}
-	got := Preamble(directories, inputs, credentials, []string{"vault-token"}, outputs, nil, "run-a", admin.DefaultReplyLimit)
+	got := Preamble(directories, inputs, credentials, []string{"vault-token"}, outputs, nil, "run-a", operator.DefaultReplyLimit)
 	for _, want := range []string{"input directory is /local/inputs", "credentials directory /secrets/credentials", "output directory /local/outputs",
 		"WHERRY_INPUT_DIR", "Input files: /local/inputs/data.csv.", "Credential files: /secrets/credentials/id_ed25519. Never print or copy their contents.",
 		"Credential environment variables: GH_TOKEN. Never print or copy their values.",
@@ -333,10 +333,10 @@ func TestPreambleNamesFilesAndTheOutcomeContract(t *testing.T) {
 			t.Errorf("preamble %q lacks %q", got, want)
 		}
 	}
-	if unreported := Preamble(pluginsdk.Directories{}, inputs, nil, nil, nil, nil, "run-a", admin.DefaultReplyLimit); !strings.Contains(unreported, "Input files: $WHERRY_INPUT_DIR/data.csv.") {
+	if unreported := Preamble(pluginsdk.Directories{}, inputs, nil, nil, nil, nil, "run-a", operator.DefaultReplyLimit); !strings.Contains(unreported, "Input files: $WHERRY_INPUT_DIR/data.csv.") {
 		t.Errorf("preamble %q, want the variable for a directory the plugin does not report", unreported)
 	}
-	if bare := Preamble(directories, nil, nil, nil, nil, nil, "run-a", admin.DefaultReplyLimit); !strings.Contains(bare, "/local/outputs/.wherry/outcome.json") || !strings.Contains(bare, "This run has no credentials.") {
+	if bare := Preamble(directories, nil, nil, nil, nil, nil, "run-a", operator.DefaultReplyLimit); !strings.Contains(bare, "/local/outputs/.wherry/outcome.json") || !strings.Contains(bare, "This run has no credentials.") {
 		t.Errorf("preamble %q, want the outcome contract for a run that declares no files", bare)
 	}
 }
@@ -349,7 +349,7 @@ func runWithOutputs(t *testing.T, expected []wire.ExpectedOutput, outputs []plug
 }
 
 // runWithOutputsUnder is runWithOutputs in a pool of terms.
-func runWithOutputsUnder(t *testing.T, terms admin.Terms, expected []wire.ExpectedOutput, outputs []pluginsdk.Output, collectErr error) (fixture, *wire.Task, kgo.AckStatus) {
+func runWithOutputsUnder(t *testing.T, terms operator.Terms, expected []wire.ExpectedOutput, outputs []pluginsdk.Output, collectErr error) (fixture, *wire.Task, kgo.AckStatus) {
 	t.Helper()
 	f := newFixtureWith(t, resultStream, terms, testConfig(testReceiver), map[string]*fakePlugin{"nomad": {stream: resultStream}})
 	f.plugin.outputs, f.plugin.collectErr = outputs, collectErr
@@ -380,7 +380,7 @@ func TestCollectionRejectsWhatIsNotARegularFile(t *testing.T) {
 		{Name: "fifo", Mode: fs.ModeNamedPipe},
 		{Name: "tty", Mode: fs.ModeDevice | fs.ModeCharDevice},
 		{Name: "sock", Mode: fs.ModeSocket},
-		{Name: "big.bin", Size: admin.DefaultOutputLimit + 1},
+		{Name: "big.bin", Size: operator.DefaultOutputLimit + 1},
 		{Name: "../escape", Size: 1, Data: []byte("x")},
 		{Name: "short", Size: 5, Data: []byte("abc")},
 		file("report.md", "# Report\n"),
@@ -390,7 +390,7 @@ func TestCollectionRejectsWhatIsNotARegularFile(t *testing.T) {
 	}
 	listed := manifest(t, task)
 	want := []wire.UnreturnedOutput{
-		{Name: `"../escape"`, Size: 1, Reason: "rejected: invalid name"}, {Name: "big.bin", Size: admin.DefaultOutputLimit + 1, Reason: "exceeds output limit"},
+		{Name: `"../escape"`, Size: 1, Reason: "rejected: invalid name"}, {Name: "big.bin", Size: operator.DefaultOutputLimit + 1, Reason: "exceeds output limit"},
 		{Name: "fifo", Reason: "rejected: fifo"}, {Name: "link", Size: 9, Reason: "rejected: symlink"},
 		{Name: "short", Size: 5, Reason: "rejected: size changed while read"}, {Name: "sock", Reason: "rejected: socket"}, {Name: "tty", Reason: "rejected: device"},
 	}
@@ -410,7 +410,7 @@ func TestCollectionRefusesAnPluginPastTheLimits(t *testing.T) {
 	}
 	for name, outputs := range map[string][]pluginsdk.Output{
 		"count": many,
-		"total": {file("a", strings.Repeat("a", admin.DefaultOutputLimit/2+1)), file("b", strings.Repeat("b", admin.DefaultOutputLimit/2+1))},
+		"total": {file("a", strings.Repeat("a", operator.DefaultOutputLimit/2+1)), file("b", strings.Repeat("b", operator.DefaultOutputLimit/2+1))},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, task, _ := runWithOutputs(t, []wire.ExpectedOutput{{Name: "a"}}, outputs, nil)
@@ -601,7 +601,7 @@ func TestLargestResultFitsTheProducerBatch(t *testing.T) {
 	if err := wire.ParseRecord(record.Value, f.keys(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if raw := result.Task.Status.Message.Parts[0].Raw; len(raw) != wire.MaxText || len(result.Task.Artifacts) != 1+wire.MaxOutputs+2 || size > admin.FeedRecordLimit {
+	if raw := result.Task.Status.Message.Parts[0].Raw; len(raw) != wire.MaxText || len(result.Task.Artifacts) != 1+wire.MaxOutputs+2 || size > operator.FeedRecordLimit {
 		t.Fatalf("largest result is a %d-byte batch with a %d-byte raw status message", size, len(raw))
 	}
 	// The receiver's producer batches it whole, and the tenant's feed takes it.
@@ -701,12 +701,12 @@ func TestOutputChunksAreBoundedAndCommittedWithTheResult(t *testing.T) {
 	if listed := manifest(t, task).Outputs; !slices.Equal(listed, []wire.ReturnedOutput{{Name: "empty", SHA256: sha(nil), Size: 0}, {Name: "sub/big.bin", SHA256: sha(data), Size: int64(len(data))}}) {
 		t.Fatalf("manifest %+v", listed)
 	}
-	feed := f.records(t, admin.TenantTopic(testTenant))
+	feed := f.records(t, operator.TenantTopic(testTenant))
 	last := slices.IndexFunc(feed, func(record *kgo.Record) bool {
 		var result wire.Result
 		return wire.ParseRecord(record.Value, f.keys(), &result) == nil
 	})
-	transcript := f.records(t, admin.TenantTranscriptTopic(testTenant))
+	transcript := f.records(t, operator.TenantTranscriptTopic(testTenant))
 	chunks := transcript[len(transcript)-len(outputs):]
 	if !oneTransaction(chunks) || chunks[0].ProducerID != feed[last].ProducerID || chunks[0].ProducerEpoch != feed[last].ProducerEpoch {
 		t.Fatal("the output chunks are not in the result's transaction")
@@ -731,7 +731,7 @@ func TestInputTooLargeFailsTheTurnNamingIt(t *testing.T) {
 				t.Fatalf("ended %s with %+v, want FAILED with %q", task.Status.State, task.Status.Message, test.message)
 			}
 			var failures []wire.StartFailure
-			for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
+			for _, record := range f.records(t, operator.PoolEventsTopic(testPool)) {
 				var failure wire.StartFailure
 				if wire.ParseRecord(record.Value, f.keys(), &failure) == nil {
 					failures = append(failures, failure)

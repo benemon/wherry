@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"slices"
@@ -22,10 +22,10 @@ func ACLs(state State) []ACL {
 		return writeDescribe
 	}
 	// A revoking or ended principal is granted nothing, so no reconcile during its revocation restores a grant.
-	acls := []ACL{{OperatorPrincipal, "topic", AdminTopic, false, []string{"READ", "WRITE", "DESCRIBE"}}}
+	acls := []ACL{{OperatorPrincipal, "topic", OperatorTopic, false, []string{"READ", "WRITE", "DESCRIBE"}}}
 	for principal, host := range state.Hosts {
 		if !state.Ended[principal] && !state.Revoking[principal] {
-			acls = append(acls, ACL{principal, "topic", AdminTopic, false, readDescribe}, ACL{principal, "topic", ReceiversTopic, false, readDescribe}, ACL{principal, "topic", TenantTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", TenantTranscriptTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, []string{"READ", "WRITE", "DESCRIBE"}})
+			acls = append(acls, ACL{principal, "topic", OperatorTopic, false, readDescribe}, ACL{principal, "topic", ReceiversTopic, false, readDescribe}, ACL{principal, "topic", TenantTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", TenantTranscriptTopic(host.Tenant), false, readDescribe}, ACL{principal, "topic", HostTopic(host.Tenant, host.Name), false, []string{"READ", "WRITE", "DESCRIBE"}})
 		}
 	}
 	for receiver, config := range state.Receivers {
@@ -33,7 +33,7 @@ func ACLs(state State) []ACL {
 		if state.Ended[principal] || state.Revoking[principal] {
 			continue
 		}
-		acls = append(acls, ACL{principal, "topic", AdminTopic, false, readDescribe}, ACL{principal, "topic", ReceiverTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiverProgressTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiversTopic, false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", PoolTasksTopic(config.Pool), false, readDescribe}, ACL{principal, "topic", PoolEventsTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", PoolGroup(config.Pool), false, []string{"READ", "DESCRIBE", "DESCRIBE_CONFIGS"}}, ACL{principal, "topic", CustodianTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", CustodianGroup(config.Pool), false, readDescribe}, ACL{principal, "transactional", TransactionalPrefix(config.Pool), true, writeDescribe})
+		acls = append(acls, ACL{principal, "topic", OperatorTopic, false, readDescribe}, ACL{principal, "topic", ReceiverTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiverProgressTopic(receiver), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", ReceiversTopic, false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "topic", PoolTasksTopic(config.Pool), false, readDescribe}, ACL{principal, "topic", PoolEventsTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", PoolGroup(config.Pool), false, []string{"READ", "DESCRIBE", "DESCRIBE_CONFIGS"}}, ACL{principal, "topic", CustodianTopic(config.Pool), false, []string{"READ", "WRITE", "DESCRIBE"}}, ACL{principal, "group", CustodianGroup(config.Pool), false, readDescribe}, ACL{principal, "transactional", TransactionalPrefix(config.Pool), true, writeDescribe})
 		for peer, peerConfig := range state.Receivers {
 			if peer == receiver || peerConfig.Pool != config.Pool {
 				continue

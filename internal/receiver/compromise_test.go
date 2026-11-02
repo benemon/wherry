@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -30,7 +30,7 @@ func TestRotateKeyRecordRotatesAtOnceAndHostsEncryptToTheNewKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	type rotated struct {
-		report admin.RotateReport
+		report operator.RotateReport
 		err    error
 	}
 	done := make(chan rotated, 1)
@@ -69,12 +69,12 @@ func TestRotateKeyRecordRotatesAtOnceAndHostsEncryptToTheNewKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("WHERRY_TEST_TOKEN", testToken)
-	kafka, err := kgo.NewClient(append(f.service.Admin.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
+	kafka, err := kgo.NewClient(append(f.service.SuperUser.Opts(), kgo.FetchIsolationLevel(kgo.ReadCommitted()))...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer kafka.Close()
-	host, err := client.NewHost(kafka, f.host, admin.TenantPrincipal(testTenant, testHost), filepath.Join(t.TempDir(), "host"),
+	host, err := client.NewHost(kafka, f.host, operator.TenantPrincipal(testTenant, testHost), filepath.Join(t.TempDir(), "host"),
 		map[string]credential.Source{credentialName: {Env: "WHERRY_TEST_TOKEN"}}, nil, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestRotateKeyRecordRotatesAtOnceAndHostsEncryptToTheNewKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, record := range f.records(t, admin.PoolTasksTopic(testPool)) {
+	for _, record := range f.records(t, operator.PoolTasksTopic(testPool)) {
 		if string(record.Key) != submitted.RunID {
 			continue
 		}
@@ -100,15 +100,15 @@ func TestRotateKeyRecordRotatesAtOnceAndHostsEncryptToTheNewKey(t *testing.T) {
 	t.Fatal("the submitted task is not on the task topic")
 }
 
-// Rotate-key requests are ordered by their wherry.admin offsets, never by a clock: a request above the offset the
+// Rotate-key requests are ordered by their wherry.operator offsets, never by a clock: a request above the offset the
 // current snapshot carries rotates the key once, whatever its timestamp, and one at or below it never does.
 func TestRotateKeyRequestsAreOrderedByOffset(t *testing.T) {
 	f := newBareFixture(t)
 	custodian(t, f.ctx, f.receiver, time.Now())
 	request := func(stamped time.Time) int64 {
 		t.Helper()
-		record := &kgo.Record{Topic: admin.AdminTopic, Key: []byte("rotate-key." + testPool), Value: must(t)(admin.EncodeRecord(admin.Record{Kind: "rotate-key", Pool: testPool})), Timestamp: stamped}
-		if err := f.service.Admin.ProduceSync(f.ctx, record).FirstErr(); err != nil {
+		record := &kgo.Record{Topic: operator.OperatorTopic, Key: []byte("rotate-key." + testPool), Value: must(t)(operator.EncodeRecord(operator.Record{Kind: "rotate-key", Pool: testPool})), Timestamp: stamped}
+		if err := f.service.SuperUser.ProduceSync(f.ctx, record).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 		if err := f.receiver.refresh(f.ctx); err != nil {
@@ -249,7 +249,7 @@ func TestSuspendedPoolRefusesAStartedRunWhoseJobIsAbsent(t *testing.T) {
 	}
 }
 
-// A receiver that has not read its pool's suspension still claims, but the custodian reads wherry.admin before it serves
+// A receiver that has not read its pool's suspension still claims, but the custodian reads wherry.operator before it serves
 // a first start: the open is refused pool suspended and no attempt wrap is written or job dispatched.
 func TestCustodianReadsTheSuspensionFresh(t *testing.T) {
 	f := newFixture(t, resultStream)
@@ -262,7 +262,7 @@ func TestCustodianReadsTheSuspensionFresh(t *testing.T) {
 	if refused := f.answeredWith(t, wire.RefusedPoolSuspended); refused != 1 {
 		t.Fatalf("%d pool suspended refusals, want one; logs:\n%s", refused, f.logs.String())
 	}
-	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
+	for _, record := range f.records(t, operator.PoolEventsTopic(testPool)) {
 		if recordType(record.Value) == wire.AttemptWrapType {
 			t.Fatal("an attempt wrap was written for a suspended pool")
 		}
@@ -272,11 +272,11 @@ func TestCustodianReadsTheSuspensionFresh(t *testing.T) {
 	}
 }
 
-// A suspension landing after a pass's read of wherry.admin does not stop that pass's first start, and pool suspend
+// A suspension landing after a pass's read of wherry.operator does not stop that pass's first start, and pool suspend
 // waits for the next pass's snapshot acknowledging the record; no first start decided after it opens.
 func TestSuspendReturnsOnceTheKeyCustodianAcknowledges(t *testing.T) {
 	// Restored once the fixture stops serving.
-	t.Cleanup(func() { loadState = (*admin.Reader).Load })
+	t.Cleanup(func() { loadState = (*operator.Reader).Load })
 	f := newFixture(t, resultStream)
 	f.quiet()
 	first := f.executing(t, f.ctx, f.submit(t, f.host, nil), 1)
@@ -288,7 +288,7 @@ func TestSuspendReturnsOnceTheKeyCustodianAcknowledges(t *testing.T) {
 	returned := make(chan outcome, 1)
 	var suspendedAt int64
 	landed := false
-	loadState = func(reader *admin.Reader, ctx context.Context) (admin.State, error) {
+	loadState = func(reader *operator.Reader, ctx context.Context) (operator.State, error) {
 		state, err := reader.Load(ctx)
 		if landed {
 			return state, err
@@ -334,17 +334,17 @@ func TestSuspendReturnsOnceTheKeyCustodianAcknowledges(t *testing.T) {
 	if status := f.execute(t, second, 1); status != kgo.AckRelease || f.answeredWith(t, wire.RefusedPoolSuspended) != 1 {
 		t.Fatalf("a first start after the acknowledgement ended %v with %d pool suspended refusals, want released and one", status, f.answeredWith(t, wire.RefusedPoolSuspended))
 	}
-	for _, record := range f.records(t, admin.PoolEventsTopic(testPool)) {
+	for _, record := range f.records(t, operator.PoolEventsTopic(testPool)) {
 		if recordType(record.Value) == wire.AttemptWrapType && (string(record.Key) != testRun("run-a") || record.Timestamp.After(records[len(records)-1].Timestamp)) {
 			t.Fatalf("an attempt wrap for %s appended at %s, after the acknowledgement at %s", record.Key, record.Timestamp, records[len(records)-1].Timestamp)
 		}
 	}
 }
 
-// A pass reads wherry.admin once for all its pending first starts.
+// A pass reads wherry.operator once for all its pending first starts.
 func TestOneSuspensionReadPerPass(t *testing.T) {
 	// Restored once the fixture stops serving.
-	t.Cleanup(func() { loadState = (*admin.Reader).Load })
+	t.Cleanup(func() { loadState = (*operator.Reader).Load })
 	f := newFixture(t, resultStream)
 	f.quiet()
 	if err := f.service.PoolSuspend(f.ctx, testPool, true); err != nil {
@@ -358,7 +358,7 @@ func TestOneSuspensionReadPerPass(t *testing.T) {
 		f.openAs(t, record, testReceiver, f.receiver.signing, 1)
 	}
 	reads := 0
-	loadState = func(reader *admin.Reader, ctx context.Context) (admin.State, error) {
+	loadState = func(reader *operator.Reader, ctx context.Context) (operator.State, error) {
 		reads++
 		return reader.Load(ctx)
 	}
@@ -366,7 +366,7 @@ func TestOneSuspensionReadPerPass(t *testing.T) {
 		t.Fatal(err)
 	}
 	if refused := f.answeredWith(t, wire.RefusedPoolSuspended); refused != 3 || reads != 1 {
-		t.Fatalf("%d pool suspended refusals over %d reads of wherry.admin, want 3 over one; logs:\n%s", refused, reads, f.logs.String())
+		t.Fatalf("%d pool suspended refusals over %d reads of wherry.operator, want 3 over one; logs:\n%s", refused, reads, f.logs.String())
 	}
 }
 

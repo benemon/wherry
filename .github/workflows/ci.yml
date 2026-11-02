@@ -68,11 +68,11 @@ jobs:
             pluginsdk/go.sum
       - name: Start Kafka
         run: test/kafka/up.sh "$RUNNER_TEMP/kafka"
-      # One package at a time: the packages share the broker's wherry.admin.
+      # One package at a time: the packages share the broker's wherry.operator.
       - name: Run the real-broker tests
         run: |
           . "$RUNNER_TEMP/kafka/env"
-          go test -p 1 -count=1 -timeout 30m ./internal/admin/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
+          go test -p 1 -count=1 -timeout 30m ./internal/operator/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
 
   s3:
     runs-on: ubuntu-latest
@@ -115,11 +115,11 @@ jobs:
             pluginsdk/go.sum
       - name: Start a three-broker Kafka cluster
         run: test/kafka/up-cluster.sh "$RUNNER_TEMP/kafka"
-      # One package at a time: the packages share the cluster's wherry.admin and wherry.receivers.
+      # One package at a time: the packages share the cluster's wherry.operator and wherry.receivers.
       - name: Run the real-broker tests
         run: |
           . "$RUNNER_TEMP/kafka/env"
-          go test -p 1 -count=1 -timeout 30m ./internal/admin/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
+          go test -p 1 -count=1 -timeout 30m ./internal/operator/ ./internal/receiver/ ./internal/client/ ./cmd/wherry/
       - name: Show the brokers' logs
         if: failure()
         run: for node in 1 2 3; do docker logs --tail 200 "wherry-kafka-$node"; done

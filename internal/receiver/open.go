@@ -11,7 +11,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/signed"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/benemon/wherry/pluginsdk"
@@ -82,7 +82,7 @@ func (run *activeRun) awaitOpen(ctx, bound context.Context, job *pluginsdk.Handl
 func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle, waited func(string)) (*signed.EnvelopeValues, string, kgo.AckStatus, bool) {
 	r, task := run.receiver, run.task
 	runID := task.Wherry.Run
-	topic := admin.PoolEventsTopic(r.config.Pool)
+	topic := operator.PoolEventsTopic(r.config.Pool)
 	key, err := newAttemptKey()
 	if err != nil {
 		r.logger.Printf("run %s: attempt key: %v", runID, err)
@@ -91,7 +91,7 @@ func (run *activeRun) openOnce(ctx, bound context.Context, job *pluginsdk.Handle
 	request := r.sign(&wire.OpenRequest{Run: runID, Attempt: run.attempt, Receiver: r.id, TaskHash: run.taskHash, Key: wire.NewAttemptKey(&key.PublicKey)})
 	digest := wire.Digest(request)
 	// Reading from the events' end before the request is committed sees every answer to it.
-	ends, err := admin.ListOffsets(ctx, kadm.NewClient(r.base).ListEndOffsets, topic)
+	ends, err := operator.ListOffsets(ctx, kadm.NewClient(r.base).ListEndOffsets, topic)
 	if err != nil {
 		r.deny(err, capRead)
 		r.logger.Printf("run %s: read pool events: %v", runID, err)
@@ -220,11 +220,11 @@ func (run *activeRun) open(key *ecdsa.PrivateKey, jwe []byte) (signed.EnvelopeVa
 
 // checkOpened is the check of an opened envelope against its task, by the custodian before an attempt wrap and by the
 // claimant at open.
-func checkOpened(terms admin.Terms, task *wire.Submission, values signed.EnvelopeValues) error {
+func checkOpened(terms operator.Terms, task *wire.Submission, values signed.EnvelopeValues) error {
 	if err := wire.CheckBinding(task, values.Binding); err != nil {
 		return err
 	}
-	return admin.CheckEnvelope(terms, task, values)
+	return operator.CheckEnvelope(terms, task, values)
 }
 
 // keyLost ends a run that never started and whose envelope cannot be opened, for its host to resubmit.
@@ -270,7 +270,7 @@ func (run *activeRun) reconcileKey(ctx context.Context) kgo.AckStatus {
 
 // poolStatus is the run's status of kind on the pool's events alone: released, adopting and reconciling are the pool's.
 func (run *activeRun) poolStatus(kind string, state wire.TaskState) *kgo.Record {
-	return &kgo.Record{Topic: admin.PoolEventsTopic(run.receiver.config.Pool), Key: []byte(run.task.Wherry.Run), Value: run.receiver.sign(run.status(kind, taskStatus(state, ""), nil, nil))}
+	return &kgo.Record{Topic: operator.PoolEventsTopic(run.receiver.config.Pool), Key: []byte(run.task.Wherry.Run), Value: run.receiver.sign(run.status(kind, taskStatus(state, ""), nil, nil))}
 }
 
 // released commits the run's released status, giving up its claim, before its task goes back to the pool. A fenced
@@ -321,14 +321,14 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 	if !custodian && keys[current.KeyID] != nil {
 		return nil
 	}
-	// One read of wherry.admin decides the pass's suspension. A pass begins once every attempt wrap of the previous one
+	// One read of wherry.operator decides the pass's suspension. A pass begins once every attempt wrap of the previous one
 	// committed, so a suspension acknowledged here holds for every first start decided after it.
 	var suspended bool
 	if custodian {
 		state, err := loadState(r.reader, ctx)
 		if err != nil {
 			r.deny(err, capRead)
-			return fmt.Errorf("read wherry.admin: %w", err)
+			return fmt.Errorf("read wherry.operator: %w", err)
 		}
 		suspended = state.Suspended[r.config.Pool]
 		if err := r.acknowledgeSuspension(ctx, keys, latest, state); err != nil {
@@ -384,7 +384,7 @@ func (r *Receiver) serveOpens(ctx context.Context) error {
 
 // acknowledgeSuspension republishes latest, the custodian's snapshot, carrying the offset of state's latest suspend or
 // resume record for the pool when latest does not acknowledge it.
-func (r *Receiver) acknowledgeSuspension(ctx context.Context, keys map[string]*poolKey, latest current, state admin.State) error {
+func (r *Receiver) acknowledgeSuspension(ctx context.Context, keys map[string]*poolKey, latest current, state operator.State) error {
 	marks, at := *latest.snapshot, state.SuspendChanged[r.config.Pool]
 	switch suspended := state.Suspended[r.config.Pool]; {
 	case suspended && at > marks.SuspendedFor:
@@ -440,7 +440,7 @@ func (r *Receiver) rekeyRecord(run, hash string, contentKey []byte, current wire
 		return nil, err
 	}
 	value := r.sign(&wire.RekeyWrap{Holder: r.id, TaskHash: hash, RecipientKID: current.KeyID, JWE: string(jwe)})
-	return &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: []byte(run), Value: value}, nil
+	return &kgo.Record{Topic: operator.PoolEventsTopic(r.config.Pool), Key: []byte(run), Value: value}, nil
 }
 
 // contentKey recovers a task's content key from its submit wrap or a re-key wrap to a key in keys; a wrap whose key does
@@ -488,7 +488,7 @@ func (c *claimCheck) decide(ctx context.Context, opened openRequest) []*kgo.Reco
 	var decision *wire.ClaimDecision
 	answer := func(value wire.Record) []*kgo.Record {
 		event := func(value wire.Record) *kgo.Record {
-			return &kgo.Record{Topic: admin.PoolEventsTopic(r.config.Pool), Key: opened.record.Key, Value: r.sign(value)}
+			return &kgo.Record{Topic: operator.PoolEventsTopic(r.config.Pool), Key: opened.record.Key, Value: r.sign(value)}
 		}
 		if decision == nil {
 			return []*kgo.Record{event(value)}
@@ -597,7 +597,7 @@ func (r *Receiver) lookup(ctx context.Context, events poolEvents, request *wire.
 	if events.task(request.Run) != request.TaskHash {
 		return nil, nil, wire.RefusedNotClaimant, nil
 	}
-	record, err := r.reader.ReadAt(ctx, admin.PoolTasksTopic(r.config.Pool), *claim.Wherry.TaskOffset)
+	record, err := r.reader.ReadAt(ctx, operator.PoolTasksTopic(r.config.Pool), *claim.Wherry.TaskOffset)
 	if err != nil {
 		r.deny(err, capRead)
 		return nil, nil, "", err
@@ -618,9 +618,9 @@ func (r *Receiver) lookup(ctx context.Context, events poolEvents, request *wire.
 }
 
 // poolMember reports that receiver is a live member of pool.
-func poolMember(state admin.State, pool, receiver string) bool {
+func poolMember(state operator.State, pool, receiver string) bool {
 	config, member := state.Receivers[receiver]
-	return member && config.Pool == pool && !state.Ended[admin.ReceiverPrincipal(receiver)]
+	return member && config.Pool == pool && !state.Ended[operator.ReceiverPrincipal(receiver)]
 }
 
 // claimDecision decides the claim statuses[owners[last]] against its previous holder, the receiver of the latest earlier
@@ -657,7 +657,7 @@ func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses 
 	}
 	if !c.adsRead {
 		readCtx, cancel := context.WithTimeout(ctx, readTimeout)
-		ads, err := c.r.reader.ReadFrom(readCtx, admin.ReceiversTopic, 0)
+		ads, err := c.r.reader.ReadFrom(readCtx, operator.ReceiversTopic, 0)
 		cancel()
 		if err != nil {
 			// Without the advertisements the previous holder is taken as live.
@@ -672,7 +672,7 @@ func (c *claimCheck) claimDecision(ctx context.Context, digest string, statuses 
 		if string(ad.Key) != previous.Wherry.Receiver || ad.Timestamp.After(appended) {
 			continue
 		}
-		if advertisement, err := admin.AuthorizeAdvertisement(state, peers, ad.Value); err != nil || advertisement.Receiver != previous.Wherry.Receiver {
+		if advertisement, err := operator.AuthorizeAdvertisement(state, peers, ad.Value); err != nil || advertisement.Receiver != previous.Wherry.Receiver {
 			continue
 		}
 		decision.Advertisement = &wire.AdvertisedRef{Offset: ad.Offset, AtMS: ad.Timestamp.UnixMilli()}

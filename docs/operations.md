@@ -11,7 +11,7 @@ covers credentialed tasks.
 
 ## Prepare Kafka
 
-wherry is tested against Kafka 4.3. `wherry admin` creates its topics, ACLs,
+wherry is tested against Kafka 4.3. `wherry operator` creates its topics, ACLs,
 principals and group configurations; the cluster itself is prepared once.
 
 - **Share groups** are enabled, so receivers can claim tasks. See
@@ -19,7 +19,7 @@ principals and group configurations; the cluster itself is prepared once.
 - **A TLS listener with SCRAM-SHA-512** is reachable from every host and
   receiver. Its address and CA certificate go into every bundle.
 - **An authoriser** denies anything no ACL allows, and `super.users` names
-  the principal `wherry admin` uses as root. See
+  the principal `wherry operator` uses as root. See
   [Authorization and ACLs](https://kafka.apache.org/documentation/#security_authz).
 - **`auto.create.topics.enable=false`**, so a mistyped topic name fails.
 - **`connections.max.reauth.ms`** is set on the listener. Revocation
@@ -30,12 +30,12 @@ principals and group configurations; the cluster itself is prepared once.
   `group.share.max.record.lock.duration.ms`. Kafka's default makes each
   revocation wait that long.
 - **Two SCRAM principals** exist: the super user, and `wherry.operator`
-  with Read, Write and Describe on topic `wherry.admin`.
+  with Read, Write and Describe on topic `wherry.operator`.
 
 ### Strimzi
 
 On a [Strimzi](https://strimzi.io/documentation/) cluster, declare the
-super user and `wherry.operator` as `KafkaUser` resources. `wherry admin`
+super user and `wherry.operator` as `KafkaUser` resources. `wherry operator`
 creates host and receiver principals through the Kafka Admin API, which
 Strimzi's User Operator removes unless it ignores them. Set the User
 Operator's `STRIMZI_IGNORED_USERS_PATTERN` environment variable, described
@@ -45,30 +45,30 @@ in the [Strimzi documentation](https://strimzi.io/documentation/), to:
 ^wherry\.(tnt|rcv)\..+
 ```
 
-## Set up `wherry admin`
+## Set up `wherry operator`
 
-`wherry admin` reads its connection from the environment. The broker
+`wherry operator` reads its connection from the environment. The broker
 address and CA file are also what it writes into bundles, so use the
 address hosts and receivers reach.
 
 ```sh
 export WHERRY_TRUST_BROKER=kafka.example.com:9093
 export WHERRY_TRUST_CA=/etc/wherry/kafka-ca.pem
-export WHERRY_TRUST_ADMIN_USER=kafka-admin
-export WHERRY_TRUST_ADMIN_PASSWORD_FILE=/etc/wherry/admin-password
+export WHERRY_TRUST_SUPER_USER=kafka-admin
+export WHERRY_TRUST_SUPER_USER_PASSWORD_FILE=/etc/wherry/admin-password
 export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=/etc/wherry/operator-password
 ```
 
 ## Create a pool
 
-Prerequisites: the `wherry admin` environment
-([Set up `wherry admin`](#set-up-wherry-admin)).
+Prerequisites: the `wherry operator` environment
+([Set up `wherry operator`](#set-up-wherry-operator)).
 
 A pool's terms apply to every receiver in it. Write them as a
 [terms file](configuration.md#pool-terms) and create the pool:
 
 ```sh
-wherry admin pool create build --config-file build-terms.yaml
+wherry operator pool create build --config-file build-terms.yaml
 ```
 
 The [pool terms example](configuration.md#pool-terms-example) sets every field,
@@ -129,12 +129,12 @@ as one file and as a `--config-dir` directory.
 
 ### Change a pool's terms
 
-Prerequisites: the `wherry admin` environment and the pool's new terms
+Prerequisites: the `wherry operator` environment and the pool's new terms
 file.
 
 1. Find the receivers the new terms would strand: a live receiver in the
    pool with a plugin profile whose agent the new terms drop.
-   `wherry admin receiver show RECEIVER` prints each profile's `agent`.
+   `wherry operator receiver show RECEIVER` prints each profile's `agent`.
 
 2. Reconfigure each of those receivers without the profile, as in
    [Change a receiver's configuration](#change-a-receiver-s-configuration),
@@ -147,7 +147,7 @@ file.
 4. Record the terms:
 
    ```sh
-   wherry admin pool update build --config-file build-terms.yaml
+   wherry operator pool update build --config-file build-terms.yaml
    ```
 
    `pool update` checks every live receiver in the pool against the new
@@ -189,7 +189,7 @@ statuses and results, and tenant transcript topics transcripts, outputs and
 replies over 64 KiB, for 30 days, and both must keep them for at least `start_by_limit` plus six
 hours, so `pool create` refuses a limit above 29 days and 18 hours, and
 `pool entitle` refuses a feed or transcript topic that keeps less. Identity and
-configuration topics stay forever. `wherry admin check` reports a topic whose
+configuration topics stay forever. `wherry operator check` reports a topic whose
 retention drops below its bound, a pool topic whose timestamp type is not
 `LogAppendTime`, and a tasks or events topic without the hourly
 `segment.ms`, `cleanup.policy=delete` or `retention.bytes=-1`, or with more
@@ -199,7 +199,7 @@ than one partition; partitions cannot be removed, so recreate the pool's topics.
 A tenant transcript topic whose retention is shorter than its feed's loses an
 old run's reply and transcript before its result: the result then keeps the
 reply's first 64 KiB, and `wherry wait` reports the rest
-`rejected by this host: gap`. `wherry admin check` does not report the
+`rejected by this host: gap`. `wherry operator check` does not report the
 difference.
 
 ### Size a pool against the broker
@@ -213,7 +213,7 @@ names each output the run returned, so the largest result is a
 `pool entitle` create a tenant's feed and transcript topic at 2 MiB, and
 `pool entitle`, `pool create` and `pool update` set existing ones to it. A
 cluster policy that refuses the setting fails the command, and
-`wherry admin check` reports a tenant topic below 2 MiB.
+`wherry operator check` reports a tenant topic below 2 MiB.
 
 `pool create` reads
 `message.max.bytes` from every broker and `max.message.bytes` from the
@@ -221,7 +221,7 @@ pool's tasks topic and its tenants' feeds and transcript topics, records the
 tasks topic's record limit in the pool's terms, signs the largest output and
 transcript chunks and results, and refuses the terms when one is over the
 limit of those tenant topics. A topic's own `max.message.bytes` overrides
-the brokers' `message.max.bytes`. `wherry admin check` measures the tenant
+the brokers' `message.max.bytes`. `wherry operator check` measures the tenant
 topics as they stand, so a feed lowered to a broker's default since reads:
 
 ```
@@ -243,27 +243,27 @@ output chunk, so the same holds for `reply_limit`.
 `pool entitle` makes the same check with the new tenant's feed and
 transcript topic counted.
 Lowering a broker or topic limit later can leave a pool's terms too large;
-[`wherry admin check`](#check-a-deployment) reports it. Receivers read
-their pool's terms from `wherry.admin` every 15 seconds, so admission and
+[`wherry operator check`](#check-a-deployment) reports it. Receivers read
+their pool's terms from `wherry.operator` every 15 seconds, so admission and
 output collection use a changed limit within that window.
 
 ## Add tenants and hosts
 
-Prerequisites: the `wherry admin` environment
-([Set up `wherry admin`](#set-up-wherry-admin)) and the pool.
+Prerequisites: the `wherry operator` environment
+([Set up `wherry operator`](#set-up-wherry-operator)) and the pool.
 [Quickstart: Host](quickstart.md#host) walks through these steps for host
 `laptop` of tenant `acme`, with its complete configuration.
 
 1. Entitle the tenant to a pool:
 
    ```sh
-   wherry admin pool entitle build --tenant acme
+   wherry operator pool entitle build --tenant acme
    ```
 
 2. Add each host the tenant submits from:
 
    ```sh
-   wherry admin host add laptop --tenant acme --bundle-file laptop.bundle
+   wherry operator host add laptop --tenant acme --bundle-file laptop.bundle
    ```
 
 3. Hand the bundle to the host's user over a channel you trust. It holds
@@ -294,8 +294,8 @@ says.
 [Quickstart: Receiver](quickstart.md#receiver) walks through adding and
 starting receiver `nomad-1`, with every file it writes.
 
-Prerequisites: the `wherry admin` environment
-([Set up `wherry admin`](#set-up-wherry-admin)), the pool, and a receiver
+Prerequisites: the `wherry operator` environment
+([Set up `wherry operator`](#set-up-wherry-operator)), the pool, and a receiver
 host that meets [Run a receiver](#run-a-receiver).
 
 1. Write the configuration directory. This configuration of receiver
@@ -388,14 +388,14 @@ target.
    nothing:
 
    ```sh
-   wherry admin receiver add nomad-1 --pool build --config-dir nomad-1 \
+   wherry operator receiver add nomad-1 --pool build --config-dir nomad-1 \
      --plugin-sha256 nomad=<sha256> --dry-run
    ```
 
 3. Add the receiver:
 
    ```sh
-   wherry admin receiver add nomad-1 --pool build --config-dir nomad-1 \
+   wherry operator receiver add nomad-1 --pool build --config-dir nomad-1 \
      --plugin-sha256 nomad=<sha256> --bundle-file nomad-1.bundle
    ```
 
@@ -439,7 +439,7 @@ restart the receiver; the bundle stays as it is.
 
 ### Change a receiver's configuration
 
-Prerequisites: the `wherry admin` environment and the receiver's new
+Prerequisites: the `wherry operator` environment and the receiver's new
 configuration.
 
 1. Check the configuration. `--plugin-sha256` gives the pin of each
@@ -449,16 +449,16 @@ configuration.
    plugin profile as the record would hold them, writing nothing:
 
    ```sh
-   wherry admin receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256> --dry-run
+   wherry operator receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256> --dry-run
    ```
 
 2. Compare the output with what the receiver runs now, which
-   `wherry admin receiver show nomad-1` prints in the same format.
+   `wherry operator receiver show nomad-1` prints in the same format.
 
 3. Record the configuration:
 
    ```sh
-   wherry admin receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256>
+   wherry operator receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256>
    ```
 
 4. At its next configuration check, within 15 seconds, the receiver stops
@@ -477,7 +477,7 @@ run's profile or changes its agent, the adopting receiver stops and purges
 the run's job and dispatches the run again:
 
 ```sh
-wherry admin receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256> --force
+wherry operator receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 nomad=<sha256> --force
 ```
 
 A `--force` update during a drain ends it.
@@ -563,12 +563,12 @@ install -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
 Then pin the binary's SHA-256 on the receiver's record. `checksums.txt`
 holds a line for each plugin binary,
 `wherry-plugin-<plugin>_<version>_<os>_<arch>`, beside the archive's; the
-binary in the archive has that SHA-256. With the `wherry admin` environment
+binary in the archive has that SHA-256. With the `wherry operator` environment
 and the receiver's configuration, and the verified `checksums.txt`:
 
 ```sh
 sha256=$(awk -v name="wherry-plugin-${plugin}_${version}_${os}_${arch}" '$2 == name {print $1}' checksums.txt)
-wherry admin receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 "$plugin=$sha256"
+wherry operator receiver update nomad-1 --config-dir nomad-1 --plugin-sha256 "$plugin=$sha256"
 ```
 
 Give `--plugin-sha256` once for each plugin type the configuration names.
@@ -754,16 +754,16 @@ within the stop window.
 ## Revoke a host or receiver
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
-the `wherry admin` environment. Run no other `wherry admin` command until the
-revocation completes: admin commands do not lock each other, and one that read
-`wherry.admin` before the revocation started can restore the principal's
+the `wherry operator` environment. Run no other `wherry operator` command until the
+revocation completes: operator commands do not lock each other, and one that read
+`wherry.operator` before the revocation started can restore the principal's
 credential and ACLs.
 
 1. Run the revocation:
 
    ```sh
-   wherry admin host revoke laptop --tenant alice
-   wherry admin receiver revoke nomad-1
+   wherry operator host revoke laptop --tenant alice
+   wherry operator receiver revoke nomad-1
    ```
 
    When it ends, the command prints one line per
@@ -802,9 +802,9 @@ custody, and lists what was exposed so that its credentials are rotated at
 their issuers.
 
 Prerequisites: the broker settings in [Prepare Kafka](#prepare-kafka), and
-the `wherry admin` environment. Run one `wherry admin` command at a time,
-each to its end, from the suspension to the resume: admin commands do not
-lock each other, and one that read `wherry.admin` before another's record
+the `wherry operator` environment. Run one `wherry operator` command at a time,
+each to its end, from the suspension to the resume: operator commands do not
+lock each other, and one that read `wherry.operator` before another's record
 can undo it, restoring the task topic grants a suspension withdrew, the
 grants a resume restored, or a revoked principal's credential and ACLs.
 
@@ -817,7 +817,7 @@ grants a resume restored, or a revoked principal's credential and ACLs.
    has acknowledged the suspension; after that no new start opens:
 
    ```sh
-   wherry admin pool suspend build
+   wherry operator pool suspend build
    ```
 
 2. Revoke the suspect receiver, as in
@@ -825,7 +825,7 @@ grants a resume restored, or a revoked principal's credential and ACLs.
    the hard stop for a receiver:
 
    ```sh
-   wherry admin receiver revoke nomad-1
+   wherry operator receiver revoke nomad-1
    ```
 
 3. When the revoked receiver was the pool's key custodian, wait for a new
@@ -839,7 +839,7 @@ grants a resume restored, or a revoked principal's credential and ACLs.
    `custodian: published pool <pool> key <id> (<reason>)` log lines:
 
    ```sh
-   wherry admin pool rotate-key build --suspect-key <kid> --suspect-key <kid>
+   wherry operator pool rotate-key build --suspect-key <kid> --suspect-key <kid>
    ```
 
    The command refuses a pool that is not suspended. It waits up to 5
@@ -867,7 +867,7 @@ grants a resume restored, or a revoked principal's credential and ACLs.
 7. Resume the pool, last:
 
    ```sh
-   wherry admin pool resume build
+   wherry operator pool resume build
    ```
 
 A drain of the key custodian while the pool is suspended keeps its keys to
@@ -928,10 +928,10 @@ Revoke it, then add a host or receiver under a new name.
 ## Check a deployment
 
 ```sh
-wherry admin check
+wherry operator check
 ```
 
-It loads `wherry.admin`, validates every receiver configuration against its
+It loads `wherry.operator`, validates every receiver configuration against its
 pool's current terms, checks that every pool's largest records still fit the
 broker's record limit, reports a tenant feed or transcript topic whose
 `max.message.bytes` is below 2 MiB, reports topic retention below the pool's required
@@ -947,12 +947,12 @@ receivers keep the configuration they started with.
 
 ## Reset a deployment
 
-Every reader of `wherry.admin` stops while any record on it fails to
+Every reader of `wherry.operator` stops while any record on it fails to
 decode, and the error lists each such record as
 `offset=<n> size=<n> sha256=<hex>`. When every such record has a higher `v`
 than this release knows, a later release wrote it and the error says to
 [upgrade wherry](#upgrade-wherry). Otherwise this release cannot read
-`wherry.admin`, and the deployment needs a reset: `wherry.admin` is
+`wherry.operator`, and the deployment needs a reset: `wherry.operator` is
 append-only and read from offset 0, so no record on it can be passed over.
 
 No `wherry` command reads state while this holds, so the reset works on the
@@ -963,8 +963,8 @@ platform and on Kafka directly.
    or systemd unit each [plugin](plugins.md) creates for a run). Once the
    tasks topics are gone no receiver can adopt these jobs or end them at
    their deadlines.
-3. As the super user, delete what `wherry admin` created: every topic whose
-   name starts with `wherry.`, including `wherry.admin`, as
+3. As the super user, delete what `wherry operator` created: every topic whose
+   name starts with `wherry.`, including `wherry.operator`, as
    [Kafka resources](design.md#kafka-resources) lists them; the share groups
    and consumer groups on those topics; every ACL and SCRAM credential of a
    principal named `wherry.rcv.<receiver>` or `wherry.tnt.<tenant>.<host>`;
@@ -1277,13 +1277,13 @@ brokers or to the storage endpoint.
 
 ## Upgrade wherry
 
-Readers ignore unknown members on `wherry.admin` records and reject every
+Readers ignore unknown members on `wherry.operator` records and reject every
 record with a higher `v` than their release knows as written by a later
 release; upgrade the reader. A
 host's run records carry `redaction_key`, so an older `wherry` cannot read a
 run this release submitted. A host or receiver of an earlier release that
-rejects unknown members on `wherry.admin` records cannot decode pool terms
-that set `models` or `default_model`, and stops reading `wherry.admin` while
+rejects unknown members on `wherry.operator` records cannot decode pool terms
+that set `models` or `default_model`, and stops reading `wherry.operator` while
 they hold them, so upgrade every receiver and host before the terms set them.
 Such a release reports those records as written by a later release;
 upgrade it. A harness does not restart a running `wherry mcp` when its binary

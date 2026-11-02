@@ -30,9 +30,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
 	"github.com/benemon/wherry/internal/credential"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/hashicorp/nomad/api"
 	"github.com/minio/minio-go/v7"
@@ -51,7 +51,7 @@ const (
 	devTenant     = "dev"
 	devHost       = "dev"
 	devReceiver   = "dev-1"
-	devAdminUser  = "wherry-admin"
+	devSuperUser  = "wherry-admin"
 	devSmokeInput = "smoke-input.txt"
 )
 
@@ -269,12 +269,12 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	}
 
 	step("operator-acl")
-	root, operator, err := devAdminClients(ca, passwords)
+	root, operatorClient, err := devAdminClients(ca, passwords)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	defer operator.Close()
+	defer operatorClient.Close()
 	results, err := kadm.NewClient(root).CreateACLs(ctx, operatorACL())
 	if err != nil {
 		return err
@@ -286,7 +286,7 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	}
 
 	step("bootstrap")
-	hostConfig, err := devBootstrap(ctx, env, agents, admin.Service{Admin: root, Operator: operator, Broker: devBroker, CA: string(ca)}, sources)
+	hostConfig, err := devBootstrap(ctx, env, agents, operator.Service{SuperUser: root, Operator: operatorClient, Broker: devBroker, CA: string(ca)}, sources)
 	if err != nil {
 		return err
 	}
@@ -321,9 +321,9 @@ func devUp(ctx context.Context, instance devInstance, runtimeFlag string, images
 	return nil
 }
 
-// operatorACL is the operator's ACL on wherry.admin, which the cluster's preparer grants before wherry admin runs.
+// operatorACL is the operator's ACL on wherry.operator, which the cluster's preparer grants before wherry operator runs.
 func operatorACL() *kadm.ACLBuilder {
-	return kadm.NewACLs().Allow("User:"+admin.OperatorPrincipal).AllowHosts("*").Topics(admin.AdminTopic).
+	return kadm.NewACLs().Allow("User:"+operator.OperatorPrincipal).AllowHosts("*").Topics(operator.OperatorTopic).
 		Operations(kadm.OpRead, kadm.OpWrite, kadm.OpDescribe).ResourcePatternType(kadm.ACLPatternLiteral)
 }
 
@@ -470,13 +470,13 @@ func randomSerial() *big.Int {
 	return serial
 }
 
-// devAdminEnv exports the trust broker settings wherry admin reads.
+// devAdminEnv exports the trust broker settings wherry operator reads.
 func devAdminEnv(instance devInstance) string {
 	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'" }
 	return "export WHERRY_TRUST_BROKER=" + devBroker + "\n" +
 		"export WHERRY_TRUST_CA=" + quote(instance.env("admin", "ca.pem")) + "\n" +
-		"export WHERRY_TRUST_ADMIN_USER=" + devAdminUser + "\n" +
-		"export WHERRY_TRUST_ADMIN_PASSWORD_FILE=" + quote(instance.env("admin", "admin-password")) + "\n" +
+		"export WHERRY_TRUST_SUPER_USER=" + devSuperUser + "\n" +
+		"export WHERRY_TRUST_SUPER_USER_PASSWORD_FILE=" + quote(instance.env("admin", "admin-password")) + "\n" +
 		"export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=" + quote(instance.env("admin", "operator-password")) + "\n"
 }
 
@@ -734,7 +734,7 @@ func startKafka(ctx context.Context, nomad *api.Client, env devEnv, ca []byte, a
 	if err != nil {
 		return "", err
 	}
-	opts, err := admin.KafkaOpts(devBroker, ca, devAdminUser, adminPassword)
+	opts, err := operator.KafkaOpts(devBroker, ca, devSuperUser, adminPassword)
 	if err != nil {
 		return alloc, err
 	}
@@ -864,8 +864,8 @@ func createBucket(ctx context.Context, keys [2]string) error {
 // devAdminClients connect to the broker as wherry-admin and as the operator.
 func devAdminClients(ca []byte, passwords map[string]string) (*kgo.Client, *kgo.Client, error) {
 	var clients []*kgo.Client
-	for _, user := range [][2]string{{devAdminUser, passwords["admin"]}, {admin.OperatorPrincipal, passwords["operator"]}} {
-		opts, err := admin.KafkaOpts(devBroker, ca, user[0], user[1])
+	for _, user := range [][2]string{{devSuperUser, passwords["admin"]}, {operator.OperatorPrincipal, passwords["operator"]}} {
+		opts, err := operator.KafkaOpts(devBroker, ca, user[0], user[1])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -879,29 +879,29 @@ func devAdminClients(ca []byte, passwords map[string]string) (*kgo.Client, *kgo.
 }
 
 // devTerms are pool dev's terms: each agent with its credentials, every one optional.
-func devTerms(agents []string, defaultAgent string, storage bool) admin.Terms {
+func devTerms(agents []string, defaultAgent string, storage bool) operator.Terms {
 	optional := false
-	terms := admin.Terms{DefaultAgent: defaultAgent, DeliveryLimit: 2, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 10}
+	terms := operator.Terms{DefaultAgent: defaultAgent, DeliveryLimit: 2, LockDurationMS: 15000, ProducerByteRate: 1 << 20, RequestPercentage: 10}
 	for _, agent := range agents {
-		agentTerms := admin.AgentTerms{Name: agent, Credentials: []admin.AgentCredential{}}
+		agentTerms := operator.AgentTerms{Name: agent, Credentials: []operator.AgentCredential{}}
 		for _, credential := range devCredentials[agent] {
-			agentTerms.Credentials = append(agentTerms.Credentials, admin.AgentCredential{
+			agentTerms.Credentials = append(agentTerms.Credentials, operator.AgentCredential{
 				TaskCredential: wire.TaskCredential{Name: credential.name, Env: credential.target}, Required: &optional,
 			})
 		}
 		terms.Agents = append(terms.Agents, agentTerms)
 	}
 	if storage {
-		terms.Storage = &admin.Storage{Endpoint: devStorage, Bucket: devBucket}
+		terms.Storage = &operator.Storage{Endpoint: devStorage, Bucket: devBucket}
 	}
 	return terms
 }
 
 // devProfiles are receiver dev-1's profiles, one per agent: the harnesses and the mock under raw_exec on this
 // machine, an --agent-image agent in its container.
-func devProfiles(env devEnv, agents []string) []admin.ProfileSettings {
+func devProfiles(env devEnv, agents []string) []operator.ProfileSettings {
 	images := env.images
-	var profiles []admin.ProfileSettings
+	var profiles []operator.ProfileSettings
 	for _, agent := range agents {
 		runtimeConfig := map[string]any{"driver": "raw_exec"}
 		labels := map[string]string{"isolation": "host"}
@@ -917,7 +917,7 @@ func devProfiles(env devEnv, agents []string) []admin.ProfileSettings {
 		} else {
 			runtimeConfig["config"] = map[string]any{"command": "/bin/sh", "args": []string{"-c", `mkdir -p "$WHERRY_OUTPUT_DIR" && cd "$NOMAD_TASK_DIR" && ` + devCommands[agent]}}
 		}
-		profiles = append(profiles, admin.ProfileSettings{
+		profiles = append(profiles, operator.ProfileSettings{
 			Name: agent, Plugin: "nomad", Agent: agent, Labels: labels,
 			Config: map[string]any{"address": devNomadAddr, "namespace": "default", "runtime": runtimeConfig},
 		})
@@ -926,7 +926,7 @@ func devProfiles(env devEnv, agents []string) []admin.ProfileSettings {
 }
 
 // devBootstrap makes the operator's admin calls for the instance and registers its host.
-func devBootstrap(ctx context.Context, env devEnv, agents []string, service admin.Service, sources map[string]credential.Source) (busclient.Config, error) {
+func devBootstrap(ctx context.Context, env devEnv, agents []string, service operator.Service, sources map[string]credential.Source) (busclient.Config, error) {
 	instance := env.instance
 	if err := service.PoolCreate(ctx, devPool, devTerms(agents, env.manifest.DefaultAgent, env.storage())); err != nil {
 		return busclient.Config{}, fmt.Errorf("pool create: %w", err)
@@ -937,7 +937,7 @@ func devBootstrap(ctx context.Context, env devEnv, agents []string, service admi
 	if err := service.HostAdd(ctx, devTenant, devHost, instance.env("host", "dev.bundle")); err != nil {
 		return busclient.Config{}, fmt.Errorf("host add: %w", err)
 	}
-	receiver := admin.ReceiverConfig{Receiver: devReceiver, Pool: devPool, Capacity: 2, Profiles: devProfiles(env, agents),
+	receiver := operator.ReceiverConfig{Receiver: devReceiver, Pool: devPool, Capacity: 2, Profiles: devProfiles(env, agents),
 		PluginSHA256: map[string]string{"nomad": env.manifest.Plugin.SHA256}}
 	if err := service.ReceiverAdd(ctx, receiver, instance.env("receiver", "dev-1.bundle")); err != nil {
 		return busclient.Config{}, fmt.Errorf("receiver add: %w", err)

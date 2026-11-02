@@ -80,7 +80,7 @@
 
   <!-- 1. place and record -->
   <rect x="36" y="104" width="350" height="44" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1"/>
-  <text x="211" y="122" text-anchor="middle" font-size="10.5" fill="#2e4a35">resolves placement from wherry.admin and wherry.receivers,</text>
+  <text x="211" y="122" text-anchor="middle" font-size="10.5" fill="#2e4a35">resolves placement from wherry.operator and wherry.receivers,</text>
   <text x="211" y="137" text-anchor="middle" font-size="10.5" fill="#2e4a35">records the run and its redaction key locally</text>
 
   <g font-size="10.5" fill="#2e4a35" text-anchor="middle">
@@ -94,7 +94,7 @@
 
     <!-- 4. admission -->
     <rect x="1300" y="228" width="226" height="40" rx="6" fill="#fffdf7" stroke="#b7c0b0" stroke-width="1"/>
-    <text x="1413" y="245">admits it against wherry.admin</text>
+    <text x="1413" y="245">admits it against wherry.operator</text>
     <text x="1413" y="260">and the pool's events</text>
 
     <!-- 5. claimed -->

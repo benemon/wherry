@@ -1,4 +1,4 @@
-package admin
+package operator
 
 import (
 	"bytes"
@@ -24,7 +24,7 @@ func TestShareDeliveryCarriesTheRecordsPositionAndAppendTimeOnRealBroker(t *test
 	for _, value := range []string{"first", "second", "third"} {
 		s.produce(t, value)
 	}
-	reader := NewReader(s.service.Admin)
+	reader := NewReader(s.service.SuperUser)
 	defer reader.Close()
 	records, err := reader.ReadFrom(context.Background(), PoolTasksTopic(s.pool), 0)
 	if err != nil {
@@ -73,7 +73,7 @@ func TestRetentionKeepsARecordYoungerThanRetentionMsOnRealBroker(t *testing.T) {
 	service, closeService := realService(t)
 	defer closeService()
 	ctx := context.Background()
-	admin := kadm.NewClient(service.Admin)
+	admin := kadm.NewClient(service.SuperUser)
 	suffix := time.Now().UnixNano()
 	short, long := fmt.Sprintf("pin-retention-short-%d", suffix), fmt.Sprintf("pin-retention-long-%d", suffix)
 	for topic, retention := range map[string]string{short: "15000", long: "3600000"} {
@@ -81,7 +81,7 @@ func TestRetentionKeepsARecordYoungerThanRetentionMsOnRealBroker(t *testing.T) {
 	}
 	produce := func(value string) {
 		for _, topic := range []string{short, long} {
-			if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte(value)}).FirstErr(); err != nil {
+			if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte(value)}).FirstErr(); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -108,7 +108,7 @@ func TestRetentionKeepsARecordYoungerThanRetentionMsOnRealBroker(t *testing.T) {
 		}
 		time.Sleep(time.Second)
 	}
-	reader := NewReader(service.Admin)
+	reader := NewReader(service.SuperUser)
 	defer reader.Close()
 	records, err := reader.ReadFrom(ctx, long, 0)
 	if err != nil {
@@ -128,11 +128,11 @@ func TestReadOutsideTheLogReturnsPromptlyOnRealBroker(t *testing.T) {
 	service, closeService := realService(t)
 	defer closeService()
 	ctx := context.Background()
-	admin := kadm.NewClient(service.Admin)
+	admin := kadm.NewClient(service.SuperUser)
 	topic := fmt.Sprintf("pin-read-%d", time.Now().UnixNano())
 	createPinTopic(t, admin, topic, nil)
 	for _, value := range []string{"zero", "one", "two", "three"} {
-		if err := service.Admin.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte(value)}).FirstErr(); err != nil {
+		if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: []byte(value)}).FirstErr(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -145,7 +145,7 @@ func TestReadOutsideTheLogReturnsPromptlyOnRealBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader := NewReader(service.Admin)
+	reader := NewReader(service.SuperUser)
 	defer reader.Close()
 	for _, c := range []struct {
 		from  int64

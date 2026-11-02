@@ -63,7 +63,7 @@ func TestKeysOnlyFollowRegistrationRules(t *testing.T) {
 	if _, err := ApplyKeyRecord(rotated, owner, reregistration, time.Time{}); err == nil {
 		t.Fatal("accepted a registration signed by the current key, which would drop the retired keys")
 	}
-	// No action closes a topic; an admin revocation of the owner does.
+	// No action closes a topic; an operator revocation of the owner does.
 	revocation, err := signKeys(KeyRecord{Version: 1, Owner: owner, Action: "revoke", Key: publicJWK(second)}, second)
 	if err != nil {
 		t.Fatal(err)

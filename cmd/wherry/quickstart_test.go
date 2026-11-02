@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/benemon/wherry/internal/admin"
 	"github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/pluginsdk"
 )
 
@@ -32,7 +32,7 @@ func TestQuickstartFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	config.Receiver, config.Pool, config.PluginSHA256 = "nomad-1", "build", map[string]string{"nomad": fakeSHA256}
-	if err := admin.ValidateConfig(config, terms); err != nil {
+	if err := operator.ValidateConfig(config, terms); err != nil {
 		t.Fatal(err)
 	}
 	if len(config.Profiles) != 2 || config.Profiles[0].Name != "container" || config.Profiles[1].Name != "host" {
@@ -90,15 +90,15 @@ func TestQuickstartMissingSourceError(t *testing.T) {
 	}
 }
 
-// TestQuickstartAdminOutput runs the quickstart's wherry admin commands, pool create aside, on its files and finds what receiver add
+// TestQuickstartOperatorOutput runs the quickstart's wherry operator commands, pool create aside, on its files and finds what receiver add
 // --dry-run and receiver show print in docs/quickstart.md, as two YAML code blocks.
-func TestQuickstartAdminOutput(t *testing.T) {
-	service := adminEnv(t)
+func TestQuickstartOperatorOutput(t *testing.T) {
+	service := operatorEnv(t)
 	dir := t.TempDir()
 	wherry := func(args ...string) string {
 		t.Helper()
 		var stdout bytes.Buffer
-		if err := runAdmin(args, &stdout, io.Discard); err != nil {
+		if err := runOperator(args, &stdout, io.Discard); err != nil {
 			t.Fatalf("%q: %v", args, err)
 		}
 		return stdout.String()

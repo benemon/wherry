@@ -22,8 +22,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/benemon/wherry/internal/admin"
 	busclient "github.com/benemon/wherry/internal/client"
+	"github.com/benemon/wherry/internal/operator"
 	"github.com/benemon/wherry/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -139,7 +139,7 @@ func toolFailure(err error) error {
 		return invalidArgument(err.Error())
 	case errors.Is(err, context.Canceled):
 		return &toolError{Code: "CANCELLED", Message: "the request was cancelled"}
-	case errors.Is(err, admin.ErrNewerRecord):
+	case errors.Is(err, operator.ErrNewerRecord):
 		return &toolError{Code: "VERSION_SKEW", Message: "this wherry is older than the release that wrote the pool's records; upgrade wherry and restart this MCP server"}
 	}
 	return &toolError{Code: "UNAVAILABLE", Message: "the wherry bus could not complete the request; the wherry CLI reports the cause"}
@@ -355,7 +355,7 @@ func newMCPServer(connect func() (*busclient.Host, error), readInput func(string
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receivers",
-		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each profile's plugin type, agent and labels as wherry.admin records them, its inline_limit from the offer, and its agent's models, default_model and credentials from the pool's terms, each credential with optional and configured, whether this host has a source for it, with ready set when the receiver's live advertisement offers the profile. A live receiver with no ready profile lists every profile with ready false. Read it to choose an agent and selector before submit.",
+		Description: "List the receivers of the pools this tenant may use: each receiver's status (live, stale, silent or ended) and capacity, and each profile's plugin type, agent and labels as wherry.operator records them, its inline_limit from the offer, and its agent's models, default_model and credentials from the pool's terms, each credential with optional and configured, whether this host has a source for it, with ready set when the receiver's live advertisement offers the profile. A live receiver with no ready profile lists every profile with ready false. Read it to choose an agent and selector before submit.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ receiversInput) (*mcp.CallToolResult, receiversOutput, error) {
 		client, err := connect()
