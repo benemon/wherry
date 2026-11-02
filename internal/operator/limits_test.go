@@ -713,9 +713,12 @@ func TestPoolApplyUpdateRefusesTermsThatStrandALiveReceiver(t *testing.T) {
 	if err := service.ReceiverAdd(ctx, config, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	err := service.PoolApply(ctx, "pool-a", modelTerms(), false)
-	if err == nil || err.Error() != "pool terms would strand live receivers: receiver receiver-a plugin fake profile profile-codex: receiver agent is outside pool terms" {
-		t.Fatalf("pool apply without codex = %v", err)
+	// A dry run reads the recorded state, so it refuses as the apply does.
+	for _, dryRun := range []bool{true, false} {
+		err := service.PoolApply(ctx, "pool-a", modelTerms(), dryRun)
+		if err == nil || err.Error() != "pool terms would strand live receivers: receiver receiver-a plugin fake profile profile-codex: receiver agent is outside pool terms" {
+			t.Fatalf("pool apply without codex, dry run %t = %v", dryRun, err)
+		}
 	}
 	if state, err := service.LoadState(ctx); err != nil || len(state.Pools["pool-a"].Agents) != 2 {
 		t.Fatalf("pool-a terms %v, %v; want the terms with codex kept", state.Pools["pool-a"], err)
