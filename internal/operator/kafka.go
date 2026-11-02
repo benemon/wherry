@@ -1224,7 +1224,7 @@ var feedRecords = []struct {
 	{"a transcript chunk", 933498},
 }
 
-// createBundle opens a temporary file beside path that writeBundle fills and closeBundle renames to path, so a reader
+// createBundle opens a temporary file beside path that writeBundle fills and closeBundle moves to path, so a reader
 // of path never sees part of a bundle. Without replace, an existing file at path is refused.
 func createBundle(path string, replace bool) (*bundleFile, error) {
 	if _, err := os.Lstat(path); err == nil && !replace {
@@ -1234,23 +1234,37 @@ func createBundle(path string, replace bool) (*bundleFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &bundleFile{file, path}, nil
+	return &bundleFile{file, path, replace}, nil
 }
 
 type bundleFile struct {
 	*os.File
-	path string
+	path    string
+	replace bool
 }
 
-// closeBundle renames a written bundle to its path, and removes it if its command failed, so a retry can create it.
+// Tests replace these to fail a bundle's write, close, link or rename.
+var (
+	writeFile  = (*os.File).Write
+	closeFile  = (*os.File).Close
+	linkFile   = os.Link
+	renameFile = os.Rename
+)
+
+// closeBundle moves a written bundle to its path and removes its temporary name, so a retry can create it. Without
+// replace it links rather than renames: a link refuses a file created at path since createBundle checked.
 func closeBundle(bundle *bundleFile, err *error) {
-	if closeErr := bundle.Close(); *err == nil {
+	if closeErr := closeFile(bundle.File); *err == nil {
 		*err = closeErr
 	}
-	if *err == nil {
-		*err = os.Rename(bundle.Name(), bundle.path)
+	switch {
+	case *err != nil:
+	case bundle.replace:
+		*err = renameFile(bundle.Name(), bundle.path)
+	default:
+		*err = linkFile(bundle.Name(), bundle.path)
 	}
-	if *err != nil {
+	if *err != nil || !bundle.replace {
 		os.Remove(bundle.Name())
 	}
 }
@@ -1260,6 +1274,6 @@ func writeBundle(bundle *bundleFile, contents Bundle) error {
 	if err != nil {
 		return err
 	}
-	_, err = bundle.Write(encoded)
+	_, err = writeFile(bundle.File, encoded)
 	return err
 }
