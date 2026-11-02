@@ -151,8 +151,8 @@ The binding does not protect the task's other members, such as its message,
 placement and outputs. They rest on the host's signature and on
 earliest-accepted admission. A record before the original from any other
 host names a run ID its signer does not derive, so it is never the earliest
-accepted; only the Kafka operator, which is root, can append a record before
-the original. Receivers cannot read the binding at
+accepted; only the Kafka operator, which is root, can append a record that
+wins before the original. Receivers cannot read the binding at
 admission: a malformed first task can win its run and then fail at open with
 `envelope invalid`.
 

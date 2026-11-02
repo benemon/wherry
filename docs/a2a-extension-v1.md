@@ -753,8 +753,8 @@ An echo tells every host of a tenant where a run was admitted.
 ```json
 {
   "v": 1,
-  "receiver": "nomad-1", "tenant": "alice", "pool": "build",
-  "run": "run-0f3c...",
+  "receiver": "nomad-1", "tenant": "alice", "host": "laptop", "pool": "build",
+  "run": "run-0f3c...", "run_nonce": "ZrHrUw-3SKTyOPCMstQuRA",
   "placement": {"agent": "coder", "selector": []},
   "task_hash": "9d2a...",
   "message_id": "msg-77c0..."
@@ -765,11 +765,13 @@ A receiver writes the echo in the transaction that holds the run's
 `claimed` or `rejected` status, or its `terminal` status when the receiver
 ends at the [delivery budget](#delivery-budget) a run no ready plugin profile
 satisfies or a run it already failed to start. The echo's fields copy the
-submission's. A
-host that has no record of the run takes the run's pool from its first
-valid echo, and ignores records of the run from any other pool. A status or
-chunk binds to the run when its `task_hash` equals the hash of the run's
-submission.
+submission's, so the echo of a task rejected with `run ID does not match its
+signer` carries the `host` and `run_nonce` that do not derive its `run`. A
+host that has no record of the run takes the run's pool and submission hash
+from its first valid echo whose `tenant`, `host` and `run_nonce` derive its
+`run` ([Submission](#submission)), ignores every other echo, and ignores
+records of the run from any other pool. A status or chunk binds to the run
+when its `task_hash` equals the hash of the run's submission.
 
 ## Advertisement
 
