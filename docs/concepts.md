@@ -279,8 +279,9 @@ the group and waits up to `drain_timeout` for a successor's snapshot. The
 successor publishes a `takeover`, as for any custodian change, and raises
 [WherryCustodianTakeover](runbooks.md#wherrycustodiantakeover). The draining custodian
 then re-keys to the successor's key, in one transaction, every task its keys
-open that is its run's earliest accepted task, not terminal and not past its
-`task_ended_by`, and deletes its pool keys. Every step of the drain ends
+open that is its run's task, or any admissible task of a run that has none, not
+terminal and not past its `task_ended_by`, once for each task hash, and deletes
+its pool keys. Every step of the drain ends
 within `drain_timeout` plus 5 seconds of the stop, so the stop fits the
 platform's kill window as
 [Drain timeout and the stop window](configuration.md#drain-timeout-and-the-stop-window)

@@ -91,8 +91,11 @@ otherwise refuses it with the reason the
 [claim check](a2a-extension-v1.md#the-claim-check) names:
 
 - the request is signed by the live member of the pool it names;
-- it names the run's earliest accepted task, and the run has no terminal
-  status and no cancel;
+- it names the run's task, the first hash with a status other than
+  `rejected`, and the run has no terminal status and no cancel;
+- the record at its claim's task offset is that task, signed by an
+  authorised host for the run under its derived run ID, with bounds that hold
+  at its append time;
 - the run's latest ownership status is the requester's `claimed` for the
   request's attempt;
 - the run is within its open bound: `task_started_by` for a first start,
@@ -141,18 +144,19 @@ again at open, so an envelope copied into another task fails:
 
 - under another run, tenant or pool, the binding differs and the envelope
   does not open;
-- under the same run while the original task is retained, the copy is not
-  the run's earliest accepted task, and receivers act on the earliest alone
+- under the same run once the original is claimed, the copy is another hash,
+  not the run's task: admission rejects it and the key custodian refuses its
+  open, since the run's first claimed hash is its task
   ([Admission](a2a-extension-v1.md#admission));
 - under the same run after retention has deleted the original, the copy must
   carry the original's bounds, which have passed, so admission rejects it.
 
 The binding does not protect the task's other members, such as its message,
-placement and outputs. They rest on the host's signature and on
-earliest-accepted admission. A record before the original from any other
-host names a run ID its signer does not derive, so it is never the earliest
-accepted; only the Kafka operator, which is root, can append a record that
-wins before the original. Receivers cannot read the binding at
+placement and outputs. They rest on the host's signature and on first-wins
+admission. A record from any other host names a run ID its signer does not
+derive, so admission rejects it and it never becomes the run's task; only the
+Kafka operator, which is root, can append a record that is claimed before the
+original. Receivers cannot read the binding at
 admission: a malformed first task can win its run and then fail at open with
 `envelope invalid`.
 

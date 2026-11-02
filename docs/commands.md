@@ -1119,9 +1119,12 @@ re-key's reads, its transaction and the key deletion included,
 ends within `drain_timeout` plus 5 seconds of the stop; a read or write that
 bound ends keeps the keys. With a successor's snapshot, it
 reads the task topic to its last stable offset and the pool's events, writes
-in one transaction a re-key wrap to the successor's current key for every
-task its keys open that is its run's earliest accepted, not terminal and not
-past its `task_ended_by`, and then deletes its pool keys. A read or write
+in one transaction a re-key wrap to the successor's current key, once for each
+task hash, for every task its keys open that is an authorised host's under its
+run's Kafka key and derived run ID, whose bounds hold at its append time, that
+is its run's task when the run has one, and that is not terminal, not past its
+`task_ended_by` and not already re-keyed to that key, and then deletes its
+pool keys. A read or write
 error keeps the keys to their deadlines. A task appended under its key after
 that read is not re-keyed: it fails key-lost before it starts, and its host
 resubmits it before its `task_started_by`. While its pool is suspended it
