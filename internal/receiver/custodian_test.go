@@ -1201,12 +1201,24 @@ func runMember(t *testing.T, ctx context.Context, r *Receiver, logs *syncBuffer)
 func concurrentDrains(t *testing.T, lastOther, rebalancing bool) {
 	f := newBareFixture(t)
 	f.receiver.drainTimeout = 2 * time.Second
-	members := []*drainingMember{runMember(t, f.ctx, f.receiver, f.logs)}
-	f.awaitSnapshots(t, 1)
-	awaitActing(t, f, f.receiver)
+	// Peers are provisioned before any Run: a running receiver that refreshes between a peer's admin record and its
+	// key-topic grant is denied and exits (agb-yk39).
+	type peer struct {
+		id   string
+		r    *Receiver
+		logs *syncBuffer
+	}
+	var peers []peer
 	for _, id := range []string{"receiver-b", "receiver-c"} {
 		r, logs := f.newReceiver(t, testConfig(id))
 		r.drainTimeout = f.receiver.drainTimeout
+		peers = append(peers, peer{id, r, logs})
+	}
+	members := []*drainingMember{runMember(t, f.ctx, f.receiver, f.logs)}
+	f.awaitSnapshots(t, 1)
+	awaitActing(t, f, f.receiver)
+	for _, p := range peers {
+		id, r, logs := p.id, p.r, p.logs
 		members = append(members, runMember(t, f.ctx, r, logs))
 		for !strings.Contains(logs.String(), "configured:") {
 			if f.ctx.Err() != nil {
