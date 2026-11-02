@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // kafkaChanges counts wherry.operator's records and the SCRAM users, which a provisioning command changes first.
@@ -63,6 +64,35 @@ func TestBundleWithoutForceRefusesAnExistingFileFirst(t *testing.T) {
 				t.Fatalf("%s holds %q, %v; want the other file", path, contents, err)
 			}
 		})
+	}
+}
+
+// On a fresh cluster, host add refuses an existing bundle file before it creates wherry.operator.
+func TestHostAddRefusesAnExistingFileBeforeCreatingTheRecordTopic(t *testing.T) {
+	_, service, closeFixture := kfakeService(t)
+	defer closeFixture()
+	ctx := context.Background()
+	responses, err := kadm.NewClient(service.SuperUser).DeleteTopics(ctx, OperatorTopic)
+	if err == nil {
+		err = responses.Error()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "other.bundle")
+	if err := os.WriteFile(path, []byte("other"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.HostAdd(ctx, "tenant-a", "host-b", path, false); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("host add = %v; want the existing file refused", err)
+	}
+	// kadm's ListTopics answers from cached metadata; a direct request lists what exists.
+	response, err := kmsg.NewPtrMetadataRequest().RequestWith(ctx, service.SuperUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Topics) != 0 {
+		t.Fatalf("host add left %d topics, first %s; want none", len(response.Topics), *response.Topics[0].Topic)
 	}
 }
 
