@@ -756,19 +756,27 @@ func resultParts(parts []wire.Part) []resultPart {
 	return result
 }
 
+// resolveInput is a variable so tests can swap a link in between an input's resolution and its open.
+var resolveInput = filepath.EvalSymlinks
+
 // inputOpener opens an MCP input: a regular file beneath one of the configured input roots, or dir when there are
 // none, and none of the host's own files, so a client steered by its prompt cannot send the host key, the bundle, the
-// state or a credential, the storage keys included. Files are compared by identity, since path strings miss case-insensitive
-// spellings and hard links. Relative paths resolve against dir.
+// state or a credential, the storage keys included. Each input opens through the root containing its resolved path, so a
+// link that escapes it, even one swapped in after resolution, is refused. The host's files are compared by identity,
+// since path strings miss case-insensitive spellings and hard links. Relative paths resolve against dir.
 func inputOpener(dir string, config busclient.Config) func(string) (*os.File, error) {
 	configured := config.InputRoots
 	if len(configured) == 0 {
 		configured = []string{dir}
 	}
-	var roots []os.FileInfo
-	for _, root := range configured {
-		if info, err := os.Stat(root); err == nil {
-			roots = append(roots, info)
+	roots := map[string]*os.Root{}
+	for _, path := range configured {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			continue
+		}
+		if root, err := os.OpenRoot(resolved); err == nil {
+			roots[resolved] = root
 		}
 	}
 	protected := []string{config.StateDir, config.HostKey, config.Bundle}
@@ -786,21 +794,19 @@ func inputOpener(dir string, config busclient.Config) func(string) (*os.File, er
 				own = append(own, info)
 			}
 		}
-		is := func(set []os.FileInfo, info os.FileInfo) bool {
-			return slices.ContainsFunc(set, func(other os.FileInfo) bool { return os.SameFile(other, info) })
+		is := func(info os.FileInfo) bool {
+			return slices.ContainsFunc(own, func(other os.FileInfo) bool { return os.SameFile(other, info) })
 		}
-		if !info.Mode().IsRegular() || is(own, info) {
+		if !info.Mode().IsRegular() || is(info) {
 			return false
 		}
-		contained := false
 		for ancestor := filepath.Dir(resolved); ; ancestor = filepath.Dir(ancestor) {
 			info, err := os.Stat(ancestor)
-			if err != nil || is(own, info) {
+			if err != nil || is(info) {
 				return false
 			}
-			contained = contained || is(roots, info)
 			if ancestor == filepath.Dir(ancestor) {
-				return contained
+				return true
 			}
 		}
 	}
@@ -808,21 +814,28 @@ func inputOpener(dir string, config busclient.Config) func(string) (*os.File, er
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(dir, path)
 		}
-		resolved, err := filepath.EvalSymlinks(path)
+		resolved, err := resolveInput(path)
 		if err != nil {
 			return nil, refused
 		}
-		// O_NONBLOCK keeps opening a FIFO from blocking until a writer appears; the regular-file check refuses it.
-		file, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-		if err != nil {
-			return nil, refused
+		for path, root := range roots {
+			relative, err := filepath.Rel(path, resolved)
+			if err != nil || !filepath.IsLocal(relative) {
+				continue
+			}
+			// O_NONBLOCK keeps opening a FIFO from blocking until a writer appears; the regular-file check refuses it.
+			file, err := root.OpenFile(relative, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+			if err != nil {
+				return nil, refused
+			}
+			info, err := file.Stat()
+			if err != nil || !allowed(resolved, info) {
+				file.Close()
+				return nil, refused
+			}
+			return file, nil
 		}
-		info, err := file.Stat()
-		if err != nil || !allowed(resolved, info) {
-			file.Close()
-			return nil, refused
-		}
-		return file, nil
+		return nil, refused
 	}
 }
 

@@ -36,7 +36,9 @@ defaults, `10m` and `2h`.
   as `--input`, `--credential` and `--output` take them;
   `storage` is `s3` or absent, and `s3` is `:s3`. An input must resolve, through any
   symbolic links, to a regular file beneath one of the
-  [`input_roots`](configuration.md#client-configuration), and to none of `state_dir`,
+  [`input_roots`](configuration.md#client-configuration), each spelled as it resolved
+  when the server started, and opens through that root, so a link that leads out of
+  it, even one that appears after the path resolves, is refused. It must resolve to none of `state_dir`,
   `host_key`, `bundle`, a file a `file` source names or a storage key file; a relative
   path is taken from the server's working directory.
 - `status` returns the latest verified state of a run without
