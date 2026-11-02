@@ -163,7 +163,8 @@ admission: a malformed first task can win its run and then fail at open with
   record. `pool create` sizes the pool against a task with a maximum
   envelope ([Size a pool against the broker](operations.md#size-a-pool-against-the-broker)).
 - **Time on the broker.** The pool's tasks and events topics keep records for
-  `start_by_limit` plus six hours plus a day, and roll a segment every hour,
+  `start_by_limit` plus six hours plus a day, or longer after `pool update`
+  shortens `start_by_limit`, since it never lowers their retention, and roll a segment every hour,
   so retention deletes a record within about an hour of that bound; an
   envelope's exposure is that retention plus the broker's deletion lag.
   Attempt wraps, re-key wraps and refusals live on the events topic and
