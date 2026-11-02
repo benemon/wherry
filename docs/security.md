@@ -91,8 +91,11 @@ otherwise refuses it with the reason the
 [claim check](a2a-extension-v1.md#the-claim-check) names:
 
 - the request is signed by the live member of the pool it names;
-- it names the run's task, the first hash with a status other than
-  `rejected`, and the run has no terminal status and no cancel;
+- it names the run's task, the hash of the run's first status other than
+  `rejected`, of any kind, among the statuses of live pool members, and the
+  run has no terminal status and no cancel. Revoking the member that wrote
+  that status makes the next one first and can move the run's task: an
+  accepted residual;
 - the record at its claim's task offset is that task, signed by an
   authorised host for the run under its derived run ID, with bounds that hold
   at its append time;
@@ -146,7 +149,8 @@ again at open, so an envelope copied into another task fails:
   does not open;
 - under the same run once the original is claimed, the copy is another hash,
   not the run's task: admission rejects it and the key custodian refuses its
-  open, since the run's first claimed hash is its task
+  open, since the run's task is the first hash with a status other than
+  `rejected` among live pool members' statuses
   ([Admission](a2a-extension-v1.md#admission));
 - under the same run after retention has deleted the original, the copy must
   carry the original's bounds, which have passed, so admission rejects it.
