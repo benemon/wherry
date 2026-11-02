@@ -272,7 +272,7 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	}
 	defer closeBundle(bundle, &err)
 	record := Record{Kind: "receiver", Pool: config.Pool, Receiver: config.Receiver, Config: &config}
-	state, err := service.appendChecked(ctx, []byte(config.Receiver), record)
+	state, _, err := service.planRecord(ctx, record)
 	if err != nil {
 		return err
 	}
@@ -286,7 +286,11 @@ func (service *Service) ReceiverAdd(ctx context.Context, config ReceiverConfig, 
 	if err := service.progressTopics(ctx, state, config.Pool); err != nil {
 		return err
 	}
+	// A live peer that reads the record before it may read the new receiver's topics exits (agb-yk39).
 	if err := service.reconcileACLs(ctx, state); err != nil {
+		return err
+	}
+	if _, err := service.appendChecked(ctx, []byte(config.Receiver), record); err != nil {
 		return err
 	}
 	return writeBundle(bundle, Bundle{service.Broker, service.CA, ReceiverPrincipal(config.Receiver), password})
@@ -598,29 +602,8 @@ func (service *Service) appendChecked(ctx context.Context, key []byte, record Re
 
 // appendRecord is appendChecked that also returns the record's wherry.operator offset.
 func (service *Service) appendRecord(ctx context.Context, key []byte, record Record) (State, int64, error) {
-	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
-		return State{}, 0, err
-	}
-	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
-		return State{}, 0, err
-	}
-	// A topic created with older configs converges on the next operator write.
-	if err := service.configureTopics(ctx, receiversConfigs, ReceiversTopic); err != nil {
-		return State{}, 0, err
-	}
-	state, err := service.LoadState(ctx)
+	state, encoded, err := service.planRecord(ctx, record)
 	if err != nil {
-		return State{}, 0, err
-	}
-	encoded, err := EncodeRecord(record)
-	if err != nil {
-		return State{}, 0, err
-	}
-	decoded, _ := DecodeRecord(encoded)
-	if err := apply(&state, decoded); err != nil {
-		return State{}, 0, err
-	}
-	if err := state.CheckNames(); err != nil {
 		return State{}, 0, err
 	}
 	produced, err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: OperatorTopic, Key: key, Value: encoded}).First()
@@ -628,6 +611,36 @@ func (service *Service) appendRecord(ctx context.Context, key []byte, record Rec
 		return State{}, 0, fmt.Errorf("write operator record: %w", err)
 	}
 	return state, produced.Offset, nil
+}
+
+// planRecord is the state once record is appended and record encoded, refusing a record the state refuses.
+func (service *Service) planRecord(ctx context.Context, record Record) (State, []byte, error) {
+	if err := service.createTopics(ctx, "-1", OperatorTopic); err != nil {
+		return State{}, nil, err
+	}
+	if err := service.createTopicsWith(ctx, receiversConfigs, ReceiversTopic); err != nil {
+		return State{}, nil, err
+	}
+	// A topic created with older configs converges on the next operator write.
+	if err := service.configureTopics(ctx, receiversConfigs, ReceiversTopic); err != nil {
+		return State{}, nil, err
+	}
+	state, err := service.LoadState(ctx)
+	if err != nil {
+		return State{}, nil, err
+	}
+	encoded, err := EncodeRecord(record)
+	if err != nil {
+		return State{}, nil, err
+	}
+	decoded, _ := DecodeRecord(encoded)
+	if err := apply(&state, decoded); err != nil {
+		return State{}, nil, err
+	}
+	if err := state.CheckNames(); err != nil {
+		return State{}, nil, err
+	}
+	return state, encoded, nil
 }
 
 func (service *Service) createTopics(ctx context.Context, retentionMS string, topics ...string) error {
