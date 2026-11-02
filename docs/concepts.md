@@ -8,8 +8,10 @@
 
 - **The operator** runs `wherry operator`. It issues every Kafka principal,
   grants every ACL, and writes the records on `wherry.operator` that define
-  pools, receivers, hosts and entitlements. The operator is root: its
-  Kafka super user can write any topic and grant any ACL.
+  pools, receivers, hosts and entitlements. The operator is close to root:
+  `wherry operator init` uses the Kafka super user once to create the
+  principal `wherry.operator`, whose `Alter` on the cluster lets it grant
+  any ACL, and every later command connects as `wherry.operator`.
 - **A tenant** submits work. Each tenant has one or more **hosts**,
   machines that run the `wherry` CLI or its MCP server. Each host is its
   own Kafka principal with its own Ed25519 signing key. A compromised host
@@ -44,8 +46,9 @@ Identity is a Kafka principal authenticated with
 [SCRAM-SHA-512](https://kafka.apache.org/documentation/#security_sasl_scram)
 over TLS. `wherry operator` creates each host and receiver principal, sets a
 generated password, and writes a **bundle**: a file, mode 0600, holding the
-broker address, the broker's CA certificate, the principal and its
-password. The operator hands the bundle to the host or receiver. It never travels over Kafka.
+broker address, the principal and its password, and no CA: each machine
+trusts the broker through the system roots or a CA file in its own
+configuration. The operator hands the bundle to the host or receiver. It never travels over Kafka.
 
 | Principal | Name |
 | --- | --- |

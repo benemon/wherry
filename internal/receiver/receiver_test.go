@@ -477,7 +477,7 @@ func revocationBounds(t *testing.T, service *operator.Service, ms string) {
 		}
 		alters = append(alters, alter)
 	}
-	responses, err := kadm.NewClient(service.SuperUser).AlterBrokerConfigs(context.Background(), alters)
+	responses, err := kadm.NewClient(service.Operator).AlterBrokerConfigs(context.Background(), alters)
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -500,7 +500,7 @@ func newService(t *testing.T, ctx context.Context, terms operator.Terms) (*kfake
 		t.Fatal(err)
 	}
 	t.Cleanup(operatorClient.Close)
-	service := &operator.Service{SuperUser: root, Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}
+	service := &operator.Service{Operator: operatorClient, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}
 	if err := service.PoolApply(ctx, testPool, terms, false); err != nil {
 		t.Fatal(err)
 	}
@@ -597,7 +597,7 @@ func must(t *testing.T) func([]byte, error) []byte {
 func (f fixture) newReceiver(t *testing.T, config operator.ReceiverConfig) (*Receiver, *syncBuffer) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := f.service.ReceiverAdd(f.ctx, config, path); err != nil {
+	if err := f.service.ReceiverAdd(f.ctx, config, f.service.Broker, path); err != nil {
 		t.Fatal(err)
 	}
 	encoded, err := os.ReadFile(path)
@@ -610,7 +610,7 @@ func (f fixture) newReceiver(t *testing.T, config operator.ReceiverConfig) (*Rec
 	}
 	// kfake's server-first message always names 4096 iterations, whatever the credential was stored with.
 	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(f.service.SuperUser).AlterUserSCRAMs(f.ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
+	if altered, err := kadm.NewClient(f.service.Operator).AlterUserSCRAMs(f.ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
 		t.Fatalf("re-salt SCRAM credential: %v %v", err, altered.Error())
 	}
 	opts := []kgo.Opt{kgo.SeedBrokers(f.cluster.ListenAddrs()...), kgo.SASL(scram.Auth{User: bundle.Principal, Pass: bundle.Password}.AsSha512Mechanism()), kgo.FetchMaxWait(10 * time.Millisecond)}
@@ -640,7 +640,7 @@ func (f fixture) newReceiver(t *testing.T, config operator.ReceiverConfig) (*Rec
 func (f fixture) produce(t *testing.T, topic, key string, value []byte) *kgo.Record {
 	t.Helper()
 	record := &kgo.Record{Topic: topic, Key: []byte(key), Value: value}
-	if err := f.service.SuperUser.ProduceSync(f.ctx, record).FirstErr(); err != nil {
+	if err := f.service.Operator.ProduceSync(f.ctx, record).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	return record
@@ -809,7 +809,7 @@ func (f fixture) addPeer(t *testing.T, id, pool string) ed25519.PrivateKey {
 	t.Helper()
 	config := testConfig(id)
 	config.Pool = pool
-	if err := f.service.ReceiverAdd(f.ctx, config, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := f.service.ReceiverAdd(f.ctx, config, f.service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	_, signing, err := ed25519.GenerateKey(rand.Reader)
@@ -825,7 +825,7 @@ func (f fixture) addPeer(t *testing.T, id, pool string) ed25519.PrivateKey {
 
 func (f fixture) records(t *testing.T, topic string) []*kgo.Record {
 	t.Helper()
-	records, err := readTopic(f.ctx, f.service.SuperUser, topic)
+	records, err := readTopic(f.ctx, f.service.Operator, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -911,7 +911,7 @@ func (f fixture) admitted(t *testing.T, record *kgo.Record) *admission {
 
 func (f fixture) execute(t *testing.T, record *kgo.Record, attempt int64) kgo.AckStatus {
 	t.Helper()
-	return f.receiver.execute(f.ctx, f.service.SuperUser, record, f.admitted(t, record), attempt)
+	return f.receiver.execute(f.ctx, f.service.Operator, record, f.admitted(t, record), attempt)
 }
 
 // run starts the receiver's Run, which the test's end stops, and returns the channel its error arrives on.
@@ -988,7 +988,7 @@ func TestRegisterPutsItsKeyOnAnEmptyTopic(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("key topic records = %d, want one registration", len(records))
 	}
-	keys, err := operator.ReadKeys(f.ctx, f.service.SuperUser, map[string]string{testReceiver: operator.ReceiverTopic(testReceiver)})
+	keys, err := operator.ReadKeys(f.ctx, f.service.Operator, map[string]string{testReceiver: operator.ReceiverTopic(testReceiver)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1052,7 +1052,7 @@ func TestRegisterRefusesAnotherKey(t *testing.T) {
 func TestConfigureWaitsForItsRecord(t *testing.T) {
 	f := newFixture(t, resultStream)
 	// The superuser reads wherry.operator; no record names receiver-z.
-	waiting := &Receiver{id: "receiver-z", base: f.service.SuperUser, reader: operator.NewReader(f.service.SuperUser), logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
+	waiting := &Receiver{id: "receiver-z", base: f.service.Operator, reader: operator.NewReader(f.service.Operator), logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
 	ctx, cancel := context.WithTimeout(f.ctx, time.Second)
 	defer cancel()
 	if err := waiting.configure(ctx); !errors.Is(err, context.DeadlineExceeded) {
@@ -1092,7 +1092,7 @@ func TestConfigureRefusesUnpinnedPluginType(t *testing.T) {
 	config.PluginSHA256 = map[string]string{"other": testPluginSHA256}
 	f.appendConfig(t, config)
 	restarted := &Receiver{id: testReceiver, base: f.receiver.base, reader: operator.NewReader(f.receiver.base), logger: f.receiver.logger, factory: f.receiver.factory, metrics: newMetrics(prometheus.NewRegistry())}
-	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "plugin type fake has no pinned SHA-256; set it with receiver apply --plugin-sha256 fake=HEX") {
+	if err := restarted.configure(f.ctx); err == nil || !strings.Contains(err.Error(), "plugin type fake has no pinned SHA-256; set plugin_sha256.fake in the receiver's file and run receiver apply") {
 		t.Fatalf("configure: %v, want a refusal naming the type and the flag", err)
 	}
 }
@@ -1194,15 +1194,18 @@ func testCA(t *testing.T) []byte {
 func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 	ca := testCA(t)
 	dir := t.TempDir()
-	for name, bundle := range map[string]operator.Bundle{
-		"host principal": {Broker: "127.0.0.1:1", CA: string(ca), Principal: operator.TenantPrincipal("tenant-a", "host-a"), Password: "p"},
-		"no CA":          {Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"},
+	for name, test := range map[string]struct {
+		bundle operator.Bundle
+		ca     []byte
+	}{
+		"host principal":           {operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.TenantPrincipal("tenant-a", "host-a"), Password: "p"}, ca},
+		"a CA with no certificate": {operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, []byte("no certificate")},
 	} {
-		if _, err := New(bundle, filepath.Join(dir, name), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
+		if _, err := New(test.bundle, test.ca, filepath.Join(dir, name), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry()); err == nil {
 			t.Fatalf("%s: New accepted the bundle", name)
 		}
 	}
-	r, err := New(operator.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	r, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, ca, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1210,7 +1213,7 @@ func TestNewTakesItsIDFromTheBundle(t *testing.T) {
 	if r.id != "receiver-a" {
 		t.Fatalf("receiver ID %q", r.id)
 	}
-	again, err := New(operator.Bundle{Broker: "127.0.0.1:1", CA: string(ca), Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
+	again, err := New(operator.Bundle{Broker: "127.0.0.1:1", Principal: operator.ReceiverPrincipal("receiver-a"), Password: "p"}, ca, filepath.Join(dir, "state"), false, 0, nil, log.New(io.Discard, "", 0), prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1227,7 +1230,7 @@ func (f fixture) advertisedOffers(t *testing.T) wire.Advertisement {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader := operator.NewReader(f.service.SuperUser)
+	reader := operator.NewReader(f.service.Operator)
 	defer reader.Close()
 	latest, err := reader.ReadAdvertisements(f.ctx, state, f.keys(), time.Now(), 2*time.Minute)
 	if err != nil {
@@ -1747,7 +1750,7 @@ func TestHeldRunPastTheShutdownDeadlineIsLeftUnacknowledged(t *testing.T) {
 	running, release := context.WithCancel(f.ctx)
 	defer release()
 	done := make(chan kgo.AckStatus, 1)
-	go func() { done <- f.receiver.execute(running, f.service.SuperUser, record, admitted, 1) }()
+	go func() { done <- f.receiver.execute(running, f.service.Operator, record, admitted, 1) }()
 	for f.plugin.deliveredCount() < len(resultStream) {
 		if f.ctx.Err() != nil {
 			t.Fatalf("the run never followed its job; logs:\n%s", f.logs.String())

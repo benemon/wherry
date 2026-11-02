@@ -137,7 +137,8 @@ credentials. `wherry dev down --reset` deletes the downloads.
 ## Operator
 
 Each step names the machine it runs on: the operator's machine, which holds
-the Kafka credentials `wherry operator` uses; the receiver host, which runs
+the installation's working directory, where `wherry operator` keeps its
+connection, the pool and receiver files and every bundle; the receiver host, which runs
 receiver `nomad-1`; and `laptop`, the host the tenant submits from.
 
 Two pairs of files name the same credentials:
@@ -171,33 +172,43 @@ its source on the machine that resolves it.
 
 On the Kafka cluster, enable share groups, a TLS listener with
 SCRAM-SHA-512, an authoriser, and the settings
-[Prepare Kafka](operations.md#prepare-kafka) lists, and create the two
-SCRAM principals it names: the super user, here `kafka-admin`, and
-`wherry.operator`. This step happens once per cluster.
+[Prepare Kafka](operations.md#prepare-kafka) lists, and create the Kafka
+super user's SCRAM credential, here `kafka-admin`. This step happens once per
+cluster.
 
-On the operator's machine, put the listener's CA certificate in
-`/etc/wherry/kafka-ca.pem`, the super user's password in
-`/etc/wherry/admin-password` and `wherry.operator`'s password in
-`/etc/wherry/operator-password`, each with mode 0600.
+On the operator's machine, put the super user's password in
+`/etc/wherry/admin-password`, mode 0600. The listener's certificate here
+chains to a private CA, so put that CA's certificate in
+`/etc/wherry/kafka-ca.pem` too; a listener whose certificate chains to a
+system root needs no CA file.
 
-### 2. Set up `wherry operator`
+### 2. Initialise the working directory
 
-On the operator's machine, export the five variables `wherry operator` reads.
-`WHERRY_TRUST_BROKER` and the CA file also go into every bundle, so the
-address is the one the receiver host and `laptop` reach:
+On the operator's machine, make the installation's working directory and
+run `wherry operator init` in it:
 
 ```sh
-export WHERRY_TRUST_BROKER=kafka.example.com:9093
-export WHERRY_TRUST_CA=/etc/wherry/kafka-ca.pem
-export WHERRY_TRUST_SUPER_USER=kafka-admin
-export WHERRY_TRUST_SUPER_USER_PASSWORD_FILE=/etc/wherry/admin-password
-export WHERRY_TRUST_OPERATOR_PASSWORD_FILE=/etc/wherry/operator-password
+mkdir wherry-prod && cd wherry-prod
+wherry operator init --broker kafka.example.com:9093 --ca-file /etc/wherry/kafka-ca.pem \
+  --super-user kafka-admin --super-user-password-file /etc/wherry/admin-password
 ```
+
+On a terminal, `init` asks for whatever the flags leave out. Connected as
+the Kafka super user, it creates the principal `wherry.operator` with a new
+password, grants it the ACLs provisioning needs, and creates the
+installation-wide topics. It writes `operator.yaml` (the broker, the CA file
+and `password_file: operator.password`) and `operator.password`, mode 0600,
+and adds `operator.password` and `bundles/` to `.gitignore`. The super user is
+written nowhere: every later `wherry operator` command, run in this
+directory or given `--dir`, connects as `wherry.operator`.
+
+The broker address goes into every host bundle, so it is the one `laptop`
+reaches; a receiver can name another in its file.
 
 ### 3. Write the pool terms
 
-On the operator's machine, write the [pool terms](configuration.md#pool-terms)
-to `build-terms.yaml`:
+In the working directory, write the [pool terms](configuration.md#pool-terms)
+to `pools/build.yaml`:
 
 ```yaml
 agents:
@@ -228,18 +239,21 @@ invalid input: auth required: credential claude-oauth-token is not in this host'
 
 ### 4. Create the pool
 
-On the operator's machine:
+In the working directory:
 
 ```sh
-wherry operator pool apply build -f build-terms.yaml
+wherry operator pool apply build
 ```
 
-`pool apply` creates the pool: it records the terms on `wherry.operator` and creates the pool's
-topics and share group.
+`pool apply` reads `pools/build.yaml` and creates the pool: it records the
+terms on `wherry.operator` and creates the pool's topics and share group.
+Without that file, on a terminal, it asks for the agents, their models and
+credentials, the quotas and the start-by limit, writes `pools/build.yaml`,
+then applies it.
 
 ### 5. Entitle the tenant
 
-On the operator's machine:
+In the working directory:
 
 ```sh
 wherry operator pool entitle build --tenant acme
@@ -252,11 +266,32 @@ it, as in [Host step 1](#_1-add-the-host).
 
 ### 1. Write the receiver configuration
 
-On the operator's machine, write the
+On the operator's machine, download the `checksums.txt` of the Nomad
+plugin's [wherry-plugins release](https://github.com/benemon/wherry-plugins/releases),
+verify its signature, and take the plugin binary's SHA-256 from it, as
+[Install plugins](operations.md#install-plugins) describes. The receiver
+starts the plugin only from a binary with that SHA-256:
+
+```sh
+plugin=nomad version=<version> arch=amd64
+base=https://github.com/benemon/wherry-plugins/releases/download/$plugin/$version
+curl -fsSL --remote-name-all "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp "^https://github\.com/benemon/wherry-plugins/\.github/workflows/release\.yml@refs/tags/$plugin/v" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+awk -v name="wherry-plugin-${plugin}_${version}_linux_${arch}" '$2 == name {print $1}' checksums.txt
+```
+
+In the working directory, write the
 [receiver configuration](configuration.md#receiver-configuration) to
-`nomad-1.yaml`:
+`receivers/nomad-1.yaml`, with the SHA-256 `awk` printed as the pin (shown
+here as `0123…`):
 
 ```yaml
+pool: build
+plugin_sha256:
+  # The SHA-256 of the plugin binary the receiver may run, from the plugin's release.
+  nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 capacity: 2
 plugins:
   nomad:
@@ -295,7 +330,10 @@ plugins:
               image: null
 ```
 
-The receiver holds two runs at once and runs one plugin, `nomad`, whose
+The receiver joins pool `build`, may start the Nomad plugin only from a
+binary with the pinned SHA-256, connects to the broker `operator.yaml` names
+(a `broker:` key names another), holds two runs at once and runs one plugin,
+`nomad`, whose
 `config` holds the settings both plugin profiles share: the cluster's
 address, its CA file on the receiver host, the namespace, the name of the
 Nomad token, and a Docker runtime that starts Claude Code in the task
@@ -328,31 +366,17 @@ profile container: credential "nomad-token" has no source in the receiver's conf
 The same configuration also works as a
 [directory](configuration.md#receiver-configuration-directory) with one file
 for the receiver, one for the plugin and one for each plugin profile, given
-with `-f` naming the directory.
+with `-f` naming the directory. Without a file, on a terminal,
+`receiver apply` asks for the pool, the plugin, its pin and config, the
+agents with their labels, the capacity and the broker address, writes
+`receivers/nomad-1.yaml`, then applies it.
 
 ### 2. Check the receiver configuration
 
-On the operator's machine, download the `checksums.txt` of the Nomad
-plugin's [wherry-plugins release](https://github.com/benemon/wherry-plugins/releases),
-verify its signature, and take the plugin binary's SHA-256 from it, as
-[Install plugins](operations.md#install-plugins) describes. The receiver
-starts the plugin only from a binary with that SHA-256:
+In the working directory, check the file against the pool's terms:
 
 ```sh
-plugin=nomad version=<version> arch=amd64
-base=https://github.com/benemon/wherry-plugins/releases/download/$plugin/$version
-curl -fsSL --remote-name-all "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
-cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
-  --certificate-identity-regexp "^https://github\.com/benemon/wherry-plugins/\.github/workflows/release\.yml@refs/tags/$plugin/v" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-sha256=$(awk -v name="wherry-plugin-${plugin}_${version}_linux_${arch}" '$2 == name {print $1}' checksums.txt)
-```
-
-Check the file against the pool's terms, with the pin:
-
-```sh
-wherry operator receiver apply nomad-1 --pool build -f nomad-1.yaml \
-  --plugin-sha256 "nomad=$sha256" --dry-run
+wherry operator receiver apply nomad-1 --dry-run
 ```
 
 `--dry-run` writes nothing and prints the pin and each plugin profile as the
@@ -414,17 +438,17 @@ profile whose agent is outside the pool's terms fails with
 
 ### 3. Add the receiver
 
-On the operator's machine:
+In the working directory:
 
 ```sh
-wherry operator receiver apply nomad-1 --pool build -f nomad-1.yaml \
-  --plugin-sha256 "nomad=$sha256" --bundle-file nomad-1.bundle
+wherry operator receiver apply nomad-1
 ```
 
-`receiver apply` adds the receiver: it records the configuration and the pin on `wherry.operator`, creates the
-receiver's Kafka principal, and writes its bundle, `nomad-1.bundle`, with mode
-0600. The bundle holds the receiver's Kafka password; hand it to the receiver
-host over a channel you trust.
+`receiver apply` adds the receiver: it records the configuration and the pin
+on `wherry.operator`, creates the receiver's Kafka principal, and writes its
+bundle, `bundles/receivers/nomad-1.bundle`, mode 0600 in a directory of mode
+0700. The bundle holds the broker address, the principal and its Kafka
+password, and no CA; hand it to the receiver host over a channel you trust.
 
 ### 4. Install wherry and the plugin
 
@@ -447,18 +471,20 @@ install -d /usr/local/libexec/wherry/plugins
 install -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
 ```
 
-The binary in the archive has the SHA-256 that step 2 pinned. To upgrade
-the plugin later, install the new version's binary, then record its pin with
-`receiver apply --plugin-sha256`, as
+The binary in the archive has the SHA-256 that step 1 pinned. To upgrade
+the plugin later, install the new version's binary, then record its pin in
+`receivers/nomad-1.yaml` and run `receiver apply`, as
 [Install plugins](operations.md#install-plugins) describes.
 
 ### 5. Place the bundle
 
 On the receiver host, put the bundle where the local configuration names it,
-readable by the receiver's user alone:
+readable by the receiver's user alone, and the broker's CA certificate,
+`kafka-ca.pem`, beside it:
 
 ```sh
 install -m 0600 nomad-1.bundle /etc/wherry/nomad-1.bundle
+install -m 0644 kafka-ca.pem /etc/wherry/kafka-ca.pem
 ```
 
 ### 6. Put the Nomad token at its source
@@ -482,6 +508,7 @@ configuration](configuration.md#receiver-local-configuration) to
 
 ```yaml
 bundle: /etc/wherry/nomad-1.bundle
+ca_file: /etc/wherry/kafka-ca.pem
 state_dir: /var/lib/wherry
 plugin_dir: /usr/local/libexec/wherry/plugins
 credentials:
@@ -489,7 +516,8 @@ credentials:
     file: /etc/wherry/nomad-token
 ```
 
-`credentials` gives the platform credential `nomad-token`, which the
+`ca_file` is the CA the receiver trusts the broker with; without it, the
+system roots. `credentials` gives the platform credential `nomad-token`, which the
 receiver configuration names in [Receiver step 1](#_1-write-the-receiver-configuration),
 its source. Without the entry, the plugin profile fails to configure and the
 receiver exits with:
@@ -526,7 +554,7 @@ running the receiver as a Nomad job.
 
 ### 9. Check the receiver
 
-On the operator's machine, print the configuration the receiver runs:
+In the working directory, print the configuration the receiver runs:
 
 ```sh
 wherry operator receiver show nomad-1
@@ -608,21 +636,24 @@ from the pool terms; one `laptop` has no source for shows as
 
 ### 1. Add the host
 
-On the operator's machine:
+In the working directory:
 
 ```sh
-wherry operator host add laptop --tenant acme --bundle-file laptop.bundle
+wherry operator host add laptop --tenant acme
 ```
 
 `host add` records host `laptop` of tenant `acme`, creates its Kafka
-principal and key topic, and writes its bundle, `laptop.bundle`, with mode
-0600. Hand the bundle to `laptop`'s user over a channel you trust; it holds
-the host's Kafka password. On `laptop`, put it where the host configuration
-names it:
+principal and key topic, and writes its bundle,
+`bundles/hosts/laptop.bundle`, mode 0600. Hand the bundle to `laptop`'s user
+over a channel you trust; it holds the host's Kafka password. On `laptop`,
+put it where the host configuration names it, and the broker's CA
+certificate at `~/.config/wherry/ca.pem`, where the host looks for one when
+its configuration names no `ca_file`:
 
 ```sh
 install -d -m 0700 ~/.config/wherry
 install -m 0600 laptop.bundle ~/.config/wherry/laptop.bundle
+install -m 0644 kafka-ca.pem ~/.config/wherry/ca.pem
 ```
 
 ### 2. Install wherry

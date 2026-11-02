@@ -62,10 +62,11 @@ run when their variables are set and skip otherwise:
 
 - `WHERRY_KAFKA_TEST_BROKER`: a plaintext Kafka 4.3 broker with share
   groups, such as `127.0.0.1:9092`, for the receiver's claim tests.
-- `WHERRY_TRUST_BROKER` with the other `WHERRY_TRUST_*` variables of
-  `wherry operator`: the TLS broker `test/kafka/up.sh` or
-  `test/kafka/up-cluster.sh` starts, for the provisioning, ACL and
-  revocation tests. They write to the broker's `wherry.operator`, so they fail
+- `WHERRY_TRUST_BROKER` with the other `WHERRY_TRUST_*` variables the
+  test fixtures read (the CLI reads none): the TLS broker `test/kafka/up.sh` or
+  `test/kafka/up-cluster.sh` starts, with its Kafka super user, for the
+  provisioning, `wherry operator init`, ACL and revocation tests. The
+  fixtures delegate to `wherry.operator` as `init` does. They write to the broker's `wherry.operator`, so they fail
   on any broker whose cluster ID is not the `WHERRY_TRUST_CLUSTER_ID` in the
   script's env file: never point them at a shared cluster. `WHERRY_TRUST_RECONCILE_WAIT` adds the check that
   provisioning survives a reconciliation.

@@ -164,7 +164,7 @@ func TestSubmitRefusesAnUnconfiguredCredential(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "auth required: credential absent is not in this host's configuration") {
 		t.Fatalf("submit = %v; want the unconfigured credential named", err)
 	}
-	if records, _ := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
+	if records, _ := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
 		t.Fatal("published a task naming an unconfigured credential")
 	}
 }
@@ -274,7 +274,7 @@ func TestSubmitRefusesALongCredentialName(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "credential names are at most 32") {
 		t.Fatalf("submit = %v; want the name refused", err)
 	}
-	if records, _ := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
+	if records, _ := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
 		t.Fatal("published a credential name over 32 characters")
 	}
 }
@@ -290,7 +290,7 @@ func TestSubmitRefusesOver256ExpectedOutputs(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "a submission expects at most 256 outputs") {
 		t.Fatalf("submit = %v; want the outputs refused", err)
 	}
-	if records, _ := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
+	if records, _ := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic("pool-a")); len(records) != 0 {
 		t.Fatal("published over 256 expected outputs")
 	}
 }
@@ -299,7 +299,7 @@ func TestSubmitNamesARecordTheBrokerRefuses(t *testing.T) {
 	f := newFixture(t)
 	f.addReceiver(t, "receiver-a", "pool-a").advertise(t, f.ctx, nil)
 	limit := "2000"
-	if responses, err := kadm.NewClient(f.service.SuperUser).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &limit}}, operator.PoolTasksTopic("pool-a")); err != nil || responses[0].Err != nil {
+	if responses, err := kadm.NewClient(f.service.Operator).AlterTopicConfigs(f.ctx, []kadm.AlterConfig{{Op: kadm.SetConfig, Name: "max.message.bytes", Value: &limit}}, operator.PoolTasksTopic("pool-a")); err != nil || responses[0].Err != nil {
 		t.Fatalf("alter topic: %v %v", err, responses)
 	}
 	random := make([]byte, 10000)

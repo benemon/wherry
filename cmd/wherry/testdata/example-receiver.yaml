@@ -1,3 +1,6 @@
+pool: build
+plugin_sha256:
+  nomad: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 capacity: 3
 plugins:
   nomad:

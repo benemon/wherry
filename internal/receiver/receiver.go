@@ -109,15 +109,16 @@ type Receiver struct {
 	events eventsFold
 }
 
-// New builds the receiver's Kafka client from bundle and loads or creates its signing key in stateDir, settling a
+// New builds the receiver's Kafka client from bundle, trusting the broker through the PEM certificates in ca or, when ca
+// is nil, the system roots, and loads or creates its signing key in stateDir, settling a
 // rotation an earlier start left. With rotateKey, Run rotates the key. Once configured, the receiver registers its
 // metric families on registry.
-func New(bundle operator.Bundle, stateDir string, rotateKey bool, drainTimeout time.Duration, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
+func New(bundle operator.Bundle, ca []byte, stateDir string, rotateKey bool, drainTimeout time.Duration, factory ProfileFactory, logger *log.Logger, registry *prometheus.Registry) (*Receiver, error) {
 	id, ok := strings.CutPrefix(bundle.Principal, operator.ReceiverPrincipal(""))
 	if !ok || !wire.ValidName(id) {
 		return nil, errors.New("bundle principal is not a receiver principal")
 	}
-	opts, err := operator.KafkaOpts(bundle.Broker, []byte(bundle.CA), bundle.Principal, bundle.Password)
+	opts, err := operator.KafkaOpts(bundle.Broker, ca, bundle.Principal, bundle.Password)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: %w", err)
 	}

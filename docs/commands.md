@@ -11,7 +11,7 @@ Every command but `version` and the shortcuts runs under its role's word:
 
 | Role | Commands |
 | --- | --- |
-| Operator | `wherry operator pool apply`, `entitle`, `suspend`, `resume` and `rotate-key`; `wherry operator host add` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check` |
+| Operator | `wherry operator init`; `wherry operator pool apply`, `entitle`, `suspend`, `resume` and `rotate-key`; `wherry operator host add` and `remove`; `wherry operator receiver apply`, `show` and `remove`; `wherry operator check` |
 | Receiver | `wherry receiver run` |
 | Host user | `wherry host init`, `key rotate`, `receivers`, `mcp`, `submit`, `wait`, `status`, `events`, `logs` and `cancel` |
 | Developer | `wherry dev init`, `up` and `down` |
@@ -108,57 +108,114 @@ On the command line a selector is comma-separated:
 
 ## Operator commands
 
-`wherry operator` connects twice, as the Kafka super user and as
-`wherry.operator`, with the [environment](configuration.md#environment-variables) set.
-It writes every `wherry.operator` record as `wherry.operator`, creating
-`wherry.operator` and `wherry.receivers` first if they are missing and setting the
-[configuration](design.md#topics-1) of an existing `wherry.receivers`.
-`pool apply --dry-run` creates neither, and reads a missing `wherry.operator`
-as holding no records. Options
-parse as Go flags, in the forms `--name value`, `--name=value` and
-`-name value`, and the last of a repeated option wins. Options other than
-`--dry-run` and `--force` take a value, and options can appear anywhere after
-`operator`. An option without a value fails with
-`flag needs an argument: -<name>`, one no operator command takes with
-`flag provided but not defined: -<name>`, and one the command does not take
-with `unknown option --<name>`. `--plugin-sha256` is given once per plugin
-type and `--suspect-key` once per key; any other repeated option takes its last value. `pool apply`,
+Every `wherry operator` command works in a working directory, one per
+installation: `--dir DIR`, the current directory by default. `operator init`
+writes its `operator.yaml`; every other command reads it and connects as
+`wherry.operator` alone, with the password in its `password_file`. A missing
+`operator.yaml` fails with `<dir>/operator.yaml does not exist; run wherry
+operator init`. [Working directory](configuration.md#operator-working-directory)
+lists what the directory holds.
+
+`wherry operator` writes every `wherry.operator` record as
+`wherry.operator`, creating `wherry.operator` and `wherry.receivers` first if
+they are missing and setting the [configuration](design.md#topics-1) of an
+existing `wherry.receivers`. `pool apply --dry-run` creates neither, and reads
+a missing `wherry.operator` as holding no records. Options parse as Go flags,
+in the forms `--name value`, `--name=value` and `-name value`, and the last of
+a repeated option wins. Options other than `--dry-run` and `--force` take a
+value, and options can appear anywhere after `operator`. An option without a
+value fails with `flag needs an argument: -<name>`, one no operator command
+takes with `flag provided but not defined: -<name>`, and one the command does
+not take with `unknown option --<name>`. `--suspect-key` is given once per key;
+any other repeated option takes its last value. `pool apply`,
 `pool entitle`, `pool suspend`, `pool resume`, `host add` and `receiver apply` then create every ACL the new
 state calls for, re-read them, and fail with `ACL plan incomplete` when one
 is missing. They then delete the `WRITE` ACLs on a suspended pool's tasks
 topic that the pool's hosts hold unsuspended, each by a filter naming its
 principal; another principal's ACL on the topic stays.
 
-`-f PATH` names a file, or a directory, which selects the directory form of
-the [pool terms](configuration.md#pool-terms) or
-[receiver configuration](configuration.md#receiver-configuration).
+`pool apply` and `receiver apply` read the object's file: `-f PATH`, else
+`pools/<pool>.yaml` or `receivers/<receiver>.yaml` in the working directory.
+Either applies without a prompt. `-f PATH` names a file, or a directory,
+which selects the directory form of the
+[pool terms](configuration.md#pool-terms) or
+[receiver configuration](configuration.md#receiver-configuration). With
+neither, on a terminal, the command asks for the object's real choices, with
+defaults shown, writes the file, then applies it; a refused apply leaves the
+file to correct and apply again. With neither and no terminal it refuses,
+naming the fields the file must give.
 
-`host add` refuses a host that exists unless given `--force`. `receiver apply`
-of a receiver that exists updates its configuration, and refuses
-`--bundle-file`, which would write a new bundle, unless given `--force`.
-Without `--force`, a command never replaces a file at `FILE`: before it
-changes anything in Kafka it creates `FILE`, failing when a file is there, and
-writes the bundle into it at the end. A command that fails leaves no bundle and
-no temporary file of its own, or, when it cannot remove one, fails naming it.
+`host add` and `receiver apply` write bundles under the working directory's
+`bundles/`, mode 0700: `bundles/hosts/<host>.bundle` and
+`bundles/receivers/<receiver>.bundle`, mode 0600. A bundle holds the broker
+address, the principal and its password, and no CA. `host add` refuses a host
+that exists unless given `--force`. `receiver apply` of a receiver that exists
+updates its configuration. Without `--force`, a command never replaces a
+bundle: before it changes anything in Kafka it creates the bundle file,
+failing when a file is there, and writes the bundle into it at the end. A
+command that fails leaves no bundle and no temporary file of its own, or, when
+it cannot remove one, fails naming it.
 
 `--force` reissues the identity of an existing host or receiver: a new SCRAM
 password and a new bundle, written to a temporary file that is then renamed
-over `FILE`. It appends no record. Kafka holds one SCRAM credential per user,
-so the old password stops working at once, and the host or receiver is
-offline until its new bundle is in place. Use it to rotate a password or
-replace a lost bundle. When writing, closing or renaming the new bundle fails
-after the password changed, the command removes its temporary file, leaves
-the old bundle at `FILE`, and fails saying that the old bundle no longer works
-and that running it again with `--force` writes a new one.
+over the bundle. It appends no record. Kafka holds one SCRAM credential per
+user, so the old password stops working at once, and the host or receiver is
+offline until its new bundle is in place. Use it to rotate a password, replace
+a lost bundle or change a host's broker address. When writing, closing or
+renaming the new bundle fails after the password changed, the command removes
+its temporary file, leaves the old bundle, and fails saying that the old
+bundle no longer works and that running it again with `--force` writes a new
+one.
+
+### `wherry operator init`
+
+```sh
+wherry operator init [--dir DIR] [--broker ADDR] [--ca-file PATH] \
+  [--super-user NAME --super-user-password-file FILE]
+```
+
+Delegates provisioning from the Kafka super user to `wherry.operator`. On a
+terminal it asks for each value the flags do not give: the broker address,
+the CA file the broker's certificate chains to (blank for the system roots),
+and the Kafka super user's name and password file. Without a terminal it
+refuses any missing flag but `--ca-file`, naming them:
+`operator init has no terminal to prompt on; give --broker, --super-user, --super-user-password-file`.
+
+Connected as the super user, once, it:
+
+1. writes a new random password for `wherry.operator` to a temporary file,
+   mode 0600, in the working directory;
+2. grants `wherry.operator` the [operator ACLs](security.md#the-operator-principal);
+3. creates `wherry.operator` and `wherry.receivers` if they are missing;
+4. sets the new password on `wherry.operator`, creating the principal or
+   replacing its password;
+5. renames the temporary file over `operator.password`.
+
+It then writes `operator.yaml`: `broker`, `ca_file` as an absolute path
+(omitted for the system roots) and `password_file: operator.password`, and
+appends `operator.password` and `bundles/` to `.gitignore`, creating it if
+absent and adding only lines it lacks. It closes the super-user connection;
+nothing it writes names the super user, which no later command uses.
+
+Running `init` again rotates `wherry.operator`'s password: Kafka holds one
+SCRAM credential per user, so commands still running with the old password
+fail. A failure between steps 4 and 5 leaves `operator.password` holding the
+old password; running `init` again recovers. `init` always takes the super
+user from its flags or prompts, never from `operator.yaml`.
 
 ### `wherry operator pool apply POOL`
 
 ```sh
-wherry operator pool apply POOL -f PATH [--dry-run]
+wherry operator pool apply POOL [-f PATH] [--dry-run]
 ```
 
 Creates the pool, or records new terms for it, from the
-[pool terms](configuration.md#pool-terms) at `PATH`.
+[pool terms](configuration.md#pool-terms) at `PATH` or in
+`pools/<pool>.yaml`. The [guided path](#operator-commands) asks for the
+agents, each one's models and credentials (`NAME=ENV_VAR` or
+`NAME=file:FILE_NAME`), the default agent, `producer_byte_rate` (default
+1048576), `request_percentage` (default 10) and `start_by_limit` (default
+`72h0m0s`).
 
 With no pool of that name, it records the terms, creates the pool's tasks
 and events topics, and sets the configuration of share group `p-<pool>`:
@@ -300,7 +357,7 @@ or above its record's offset, writing
 to standard error every 10 seconds. With none, it fails with
 `pool <pool>'s key custodian published no snapshot rotated for the rotate-key request at wherry.operator offset <offset> within 5m0s; the request stands`.
 It then captures the end offset of the pool's tasks topic, reads the topic
-as the Kafka super user through that offset, and lists every retained task
+as `wherry.operator` through that offset, and lists every retained task
 record whose submit wrap's `kid` is one of the suspect keys. Without
 `--suspect-key` the suspect key is the key the current snapshot names when
 the command starts; the command refuses when the pool has no snapshot or its
@@ -329,55 +386,67 @@ other than the task's `unsupplied_credentials`. The
 list can name a credential the envelope did not hold; it never omits one it
 did, so rotating every listed credential covers the exposure.
 
-### `wherry operator host add HOST --tenant TENANT --bundle-file FILE`
+### `wherry operator host add HOST --tenant TENANT`
 
 ```sh
-wherry operator host add HOST --tenant TENANT --bundle-file FILE [--force]
+wherry operator host add HOST --tenant TENANT [--force]
 ```
 
 Records the host, creates its principal, its key topic and the tenant
 feed and transcript topic, the latter two with `max.message.bytes` 2 MiB, grants its ACLs, applies its quotas, and writes
-its bundle. It refuses a host that exists, and an existing `FILE`, unless
-given [`--force`](#operator-commands). For a host that exists, `--force`
-reissues its identity alone: it records nothing, and sets no topic, ACL or
-quota. A host whose membership ended is refused.
+its bundle to `bundles/hosts/<host>.bundle`, naming the broker in
+`operator.yaml`. It refuses a host that exists, and an existing bundle file,
+unless given [`--force`](#operator-commands). For a host that exists,
+`--force` reissues its identity alone: it records nothing, and sets no topic,
+ACL or quota. A host whose membership ended is refused. Host names are unique
+within a tenant, and bundle files are named by host alone, so a host of
+another tenant's host's name is refused while that bundle is in the working
+directory.
 
 ### `wherry operator receiver apply RECEIVER`
 
 ```sh
-wherry operator receiver apply RECEIVER --pool POOL -f PATH \
-  --plugin-sha256 TYPE=HEX... <--bundle-file FILE|--dry-run>
-wherry operator receiver apply RECEIVER --force --bundle-file FILE
+wherry operator receiver apply RECEIVER [-f PATH] [--dry-run]
+wherry operator receiver apply RECEIVER --force
 ```
 
-Reads the [receiver configuration](configuration.md#receiver-configuration) from a
-directory or a single file and validates it against the pool's terms.
-`--plugin-sha256 TYPE=HEX`, given once per plugin type, pins the SHA-256 of
-that type's binary as lowercase hex: the line for the binary in the plugin
-release's signed `checksums.txt`
-([Install plugins](operations.md#install-plugins)). Every plugin type in the
-configuration needs a pin, and a pin that is not 64 lowercase hex digits is
-an error; either refusal writes nothing.
+Reads the [receiver configuration](configuration.md#receiver-configuration)
+from `PATH` or `receivers/<receiver>.yaml`, a directory or a single file, and
+validates it against the pool's terms. Its `pool` names the receiver's pool;
+its `plugin_sha256` pins, for each plugin type, the SHA-256 of that type's
+binary as lowercase hex: the line for the binary in the plugin release's
+signed `checksums.txt` ([Install plugins](operations.md#install-plugins)).
+Every plugin type in the configuration needs a pin, and a pin that is not 64
+lowercase hex digits is an error; either refusal writes nothing. Its
+`broker` is the address the receiver's bundle names, the broker in
+`operator.yaml` when it is empty. The [guided path](#operator-commands) asks
+for the pool, the plugin type (default `nomad`), its pin and its `config` as
+a YAML flow mapping, the agents (one plugin profile each, named after its
+agent) with their labels, the capacity (default 1) and the broker address
+(default the operator's).
 
 With no receiver of that name, it records the configuration, creates the
 receiver's principal, key topic and progress topic,
 `wherry.receiver.<receiver>.progress`, grants its ACLs, and writes its
-bundle. `--pool` and `--bundle-file` are required. It creates the progress topic of every other live receiver in the
+bundle to `bundles/receivers/<receiver>.bundle`. The file must name a
+`pool`. It creates the progress topic of every other live receiver in the
 pool that lacks one, and sets the
 [progress topic configuration](design.md#topics-1) on each existing one, never lowering its `retention.ms`.
 The bundle holds the receiver's Kafka identity alone; the receiver's [local
 configuration](configuration.md#receiver-local-configuration) gives the
-sources of its [platform credentials](configuration.md#platform-credentials).
+sources of its [platform credentials](configuration.md#platform-credentials)
+and the CA it trusts the broker with.
 With `--dry-run`, it makes the same checks and prints each plugin profile as
 the record would hold it, with the pins, in the format of `receiver show`, and creates and
-writes nothing; `--bundle-file` is then not needed.
+writes nothing.
 
 With a receiver of that name, it records the new configuration in the
-receiver's pool. `--pool` is optional and must name that pool. The record
-holds only the pins the command gives, so give one for every plugin type
-each time. The principal, password and bundle stay as they are, and no
-bundle is written; `--bundle-file` without `--force` is refused, since it
-would reissue the identity. When the receiver reads a record that differs
+receiver's pool. The file's `pool` may be empty and otherwise must name that
+pool. The record holds only the pins the file gives, so give one for every
+plugin type. The principal and password stay as they are. When the file's
+broker address differs from the one in the receiver's bundle in
+`bundles/receivers/`, it rewrites the bundle with the new address and the
+same password. When the receiver reads a record that differs
 from the configuration it runs, it stops claiming, lets each run it holds
 end and commit with no time limit, then exits, and its platform restarts it.
 To apply a change at once, restart the receiver through its platform, as
@@ -388,13 +457,13 @@ released to other receivers.
 With `--dry-run`, it reads and validates the configuration as it does to
 record it, against the receiver's pool's terms, and prints the resolution
 in the format of [`receiver show`](#wherry-operator-receiver-show-receiver),
-writing nothing to Kafka. A configuration it refuses fails in the same way
+writing nothing. A configuration it refuses fails in the same way
 with or without `--dry-run`.
 
-With `--force` and `--bundle-file`, it [reissues](#operator-commands) an
-existing receiver's identity and writes its new bundle. It does not change
-the receiver's configuration record, and takes no `-f`, `--plugin-sha256`
-or `--dry-run`.
+With `--force`, it [reissues](#operator-commands) an existing receiver's
+identity and writes its new bundle, naming the broker of
+`receivers/<receiver>.yaml` when that file names one. It does not change the
+receiver's configuration record, and takes no `-f` or `--dry-run`.
 
 ### `wherry operator receiver show RECEIVER`
 
@@ -476,7 +545,9 @@ wherry receiver run [--config-file FILE] [--rotate-key]
 ```
 
 Runs a receiver as the principal of the bundle its [local
-configuration](configuration.md#receiver-local-configuration) names.
+configuration](configuration.md#receiver-local-configuration) names,
+trusting the broker through the configuration's `ca_file` or, without one,
+the system roots.
 `--config-file` defaults to `/etc/wherry/config.yaml`. It creates the
 configuration's `state_dir` with mode 0700 and keeps `signing.key`, a
 private JWK with mode 0600, in it, and in `pool-keys/` one file with mode
@@ -629,10 +700,10 @@ binary may be a symbolic link; the receiver resolves it and runs the file it
 names. When the receiver starts a plugin,
 [go-plugin's `SecureConfig`](https://pkg.go.dev/github.com/hashicorp/go-plugin#SecureConfig)
 checks the binary's SHA-256 against the pin the receiver's record holds for
-its type (`--plugin-sha256` on
-[`receiver apply`](#wherry-operator-receiver-apply-receiver)). The receiver
+its type (`plugin_sha256` in the file
+[`receiver apply`](#wherry-operator-receiver-apply-receiver) reads). The receiver
 refuses a plugin whose type has no pin, with
-`plugin type <type> has no pinned SHA-256; set it with receiver apply --plugin-sha256 <type>=HEX`,
+`plugin type <type> has no pinned SHA-256; set plugin_sha256.<type> in the receiver's file and run receiver apply`,
 and a binary whose SHA-256 differs, exiting with
 `profile <name>: plugin type <type>: <path> has SHA-256 <hex> and the pin is <hex>`.
 A type with no binary in the directory is a configuration error, and the
@@ -1390,9 +1461,9 @@ returns once a run of the mock agent completes. Its steps:
    copied into `env/host/credentials/`, mode 0600.
 3. `tls`, `passwords`: an instance CA, the broker's certificate for
    127.0.0.1, and the SCRAM passwords of `wherry-admin` and
-   `wherry.operator`. `env/admin/admin.env` exports the five
-   [`WHERRY_TRUST_*` variables](configuration.md#environment-variables)
-   for `wherry operator` against the instance.
+   `wherry.operator`. `env/admin` is an operator
+   [working directory](configuration.md#operator-working-directory) for the
+   instance: `wherry operator --dir <instance>/env/admin` runs against it.
 4. `image` checks that the manifest's tags are still in the runtime, and
    fails with `image TAG is no longer in the runtime; run wherry dev init`.
 5. `nomad` starts `nomad agent -dev` as you, detached, its log in
@@ -1403,11 +1474,12 @@ returns once a run of the mock agent completes. Its steps:
    them. On Linux without a Podman socket it starts `podman system
    service` beside Nomad.
 6. `kafka` runs the broker as a Nomad job from the local tag and waits for
-   a metadata request over SCRAM. `operator-acl` grants `wherry.operator`
-   its ACL on `wherry.operator`.
+   a metadata request over SCRAM. `operator-acl` delegates to
+   `wherry.operator` as [`operator init`](#wherry-operator-init) does.
 7. `bootstrap` makes the admin calls of the operator's steps: pool `dev`,
    tenant `dev`, host `dev` and receiver `dev-1` with a plugin profile per
-   agent, and registers the host key.
+   agent, and registers the host key. The host's and the receiver's
+   configurations name the instance CA as `ca_file`.
 8. `receiver` runs `wherry receiver run` from the copy as a `raw_exec` job
    and waits for `dev-1` to be live with every profile ready.
 9. `smoke` runs the mock agent and checks the output it returns. `ready`

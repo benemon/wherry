@@ -287,14 +287,14 @@ func TestRevocationRunsAllSixStepsInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := modelConfig("receiver-a", "pool-a")
-	if err := service.ReceiverAdd(ctx, config, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, config, service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	revocationBounds(t, service, "100", "400", "200")
 	wait := 500 * time.Millisecond
 	started := time.Now()
 	result := service.RevokeReceiver(ctx, "receiver-a", wait, func(ctx context.Context, user, password string) error {
-		described, err := kadm.NewClient(service.SuperUser).DescribeUserSCRAMs(ctx, user)
+		described, err := kadm.NewClient(service.Operator).DescribeUserSCRAMs(ctx, user)
 		if err != nil {
 			return err
 		}
@@ -337,7 +337,7 @@ func TestRevocationWithoutAWaitWaitsTheBrokersLongestTimeout(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	revocationBounds(t, service, "100", "400", "200")
@@ -358,7 +358,7 @@ func TestRevocationRefusesAWaitBelowTheBrokersLongestTimeout(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	revocationBounds(t, service, "100", "400", "200")
@@ -424,14 +424,14 @@ func TestReconcileDuringRevocationRestoresNoGrant(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	revocationBounds(t, service, "1", "1", "1")
 	var restored int
 	result := service.RevokeReceiver(ctx, "receiver-a", 0, func(ctx context.Context, user, _ string) error {
 		// Adding a receiver reconciles every grant the folded state calls for.
-		if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+		if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 			return err
 		}
 		var err error
@@ -456,7 +456,7 @@ func TestRevocationReRunContinuesAfterAFailedStep(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	revocationBounds(t, service, "1", "1", "1")
@@ -486,7 +486,7 @@ func revocationBounds(t *testing.T, service *Service, reauth, lock, transaction 
 	for name, value := range map[string]string{"connections.max.reauth.ms": reauth, "group.share.max.record.lock.duration.ms": lock, "transaction.max.timeout.ms": transaction} {
 		alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: name, Value: &value})
 	}
-	responses, err := kadm.NewClient(service.SuperUser).AlterBrokerConfigs(context.Background(), alters)
+	responses, err := kadm.NewClient(service.Operator).AlterBrokerConfigs(context.Background(), alters)
 	if err == nil {
 		err = responses[0].Err
 	}
@@ -499,7 +499,7 @@ func revocationBounds(t *testing.T, service *Service, reauth, lock, transaction 
 func principalACLs(ctx context.Context, service *Service, principal string) (int, error) {
 	builder := kadm.NewACLs().AnyResource().Allow(principal).AllowHosts("*").Operations(kadm.OpAny).ResourcePatternType(kadm.ACLPatternAny)
 	builder.PrefixUser()
-	results, err := kadm.NewClient(service.SuperUser).DescribeACLs(ctx, builder)
+	results, err := kadm.NewClient(service.Operator).DescribeACLs(ctx, builder)
 	if err != nil {
 		return 0, err
 	}
@@ -560,15 +560,15 @@ func TestProvisioningSurvivesReconciliation(t *testing.T) {
 	}
 	config := modelConfig(receiver, pool)
 	bundlePath := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := service.ReceiverAdd(ctx, config, bundlePath); err != nil {
+	if err := service.ReceiverAdd(ctx, config, service.Broker, bundlePath); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
 		_ = service.deletePrincipalACLs(ctx, ReceiverPrincipal(receiver))
-		_, _ = kadm.NewClient(service.SuperUser).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: ReceiverPrincipal(receiver), Mechanism: kadm.ScramSha512}}, nil)
+		_, _ = kadm.NewClient(service.Operator).AlterUserSCRAMs(ctx, []kadm.DeleteSCRAM{{User: ReceiverPrincipal(receiver), Mechanism: kadm.ScramSha512}}, nil)
 	}()
 	time.Sleep(wait)
-	described, err := kadm.NewClient(service.SuperUser).DescribeUserSCRAMs(ctx, ReceiverPrincipal(receiver))
+	described, err := kadm.NewClient(service.Operator).DescribeUserSCRAMs(ctx, ReceiverPrincipal(receiver))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +584,7 @@ func TestShareGroupStartsAtEarliest(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.SuperUser.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic("pool-a"), Value: []byte("submitted-before-fetch")}).FirstErr(); err != nil {
+	if err := service.Operator.ProduceSync(ctx, &kgo.Record{Topic: PoolTasksTopic("pool-a"), Value: []byte("submitted-before-fetch")}).FirstErr(); err != nil {
 		t.Fatal(err)
 	}
 	member, err := kgo.NewClient(kgo.SeedBrokers(service.Broker), kgo.SASL(scram.Auth{User: "admin", Pass: "password"}.AsSha512Mechanism()), kgo.ConsumeTopics(PoolTasksTopic("pool-a")), kgo.ShareGroup(PoolGroup("pool-a")), kgo.ShareMaxRecords(1))
@@ -693,11 +693,39 @@ func kfakeService(t *testing.T) (*kfake.Cluster, *Service, func()) {
 	if err := operator.Ping(context.Background()); err != nil {
 		t.Fatalf("operator ping: %v", err)
 	}
-	service := &Service{SuperUser: root, Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}
+	service := &Service{Operator: operator, Broker: cluster.ListenAddrs()[0], DeliveryCeiling: 10, LockCeilingMS: 60000}
 	return cluster, service, func() { operator.Close(); root.Close(); cluster.Close() }
 }
 
+// realService connects to the disposable broker as wherry.operator once it is delegated the provisioning ACLs, as
+// wherry operator init delegates them, with the password WHERRY_TRUST_OPERATOR_PASSWORD_FILE holds.
 func realService(t *testing.T) (*Service, func()) {
+	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	password, err := os.ReadFile(os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Delegate(context.Background(), realRoot(t), strings.TrimSpace(string(password))); err != nil {
+		t.Fatal(err)
+	}
+	operator := realClient(t, OperatorPrincipal, os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
+	return &Service{Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: ca}, operator.Close
+}
+
+// realRoot connects to the disposable broker as the Kafka super user, for what a test does beyond provisioning.
+func realRoot(t *testing.T) *kgo.Client {
+	root := realClient(t, os.Getenv("WHERRY_TRUST_SUPER_USER"), os.Getenv("WHERRY_TRUST_SUPER_USER_PASSWORD_FILE"))
+	t.Cleanup(root.Close)
+	if err := disposableBroker(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func realClient(t *testing.T, user, passwordFile string) *kgo.Client {
 	ca, err := os.ReadFile(os.Getenv("WHERRY_TRUST_CA"))
 	if err != nil {
 		t.Fatal(err)
@@ -706,24 +734,15 @@ func realService(t *testing.T) (*Service, func()) {
 	if !roots.AppendCertsFromPEM(ca) {
 		t.Fatal("invalid CA")
 	}
-	connect := func(user, passwordFile string) *kgo.Client {
-		password, err := os.ReadFile(passwordFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		client, err := kgo.NewClient(kgo.SeedBrokers(os.Getenv("WHERRY_TRUST_BROKER")), kgo.DialTLSConfig(&tls.Config{RootCAs: roots}), kgo.SASL(scram.Auth{User: user, Pass: strings.TrimSpace(string(password))}.AsSha512Mechanism()), kgo.FetchIsolationLevel(kgo.ReadCommitted()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return client
-	}
-	root := connect(os.Getenv("WHERRY_TRUST_SUPER_USER"), os.Getenv("WHERRY_TRUST_SUPER_USER_PASSWORD_FILE"))
-	if err := disposableBroker(context.Background(), root); err != nil {
-		root.Close()
+	password, err := os.ReadFile(passwordFile)
+	if err != nil {
 		t.Fatal(err)
 	}
-	operator := connect(OperatorPrincipal, os.Getenv("WHERRY_TRUST_OPERATOR_PASSWORD_FILE"))
-	return &Service{SuperUser: root, Operator: operator, Broker: os.Getenv("WHERRY_TRUST_BROKER"), CA: string(ca)}, func() { operator.Close(); root.Close() }
+	client, err := kgo.NewClient(kgo.SeedBrokers(os.Getenv("WHERRY_TRUST_BROKER")), kgo.DialTLSConfig(&tls.Config{RootCAs: roots}), kgo.SASL(scram.Auth{User: user, Pass: strings.TrimSpace(string(password))}.AsSha512Mechanism()), kgo.FetchIsolationLevel(kgo.ReadCommitted()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
 }
 
 // disposableBroker refuses any broker but the disposable one test/kafka/up.sh or up-cluster.sh starts, whose cluster
@@ -878,7 +897,7 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "bundle.yaml")
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), path); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, path); err != nil {
 		t.Fatal(err)
 	}
 	encoded, err := os.ReadFile(path)
@@ -891,7 +910,7 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 	}
 	// kfake's SCRAM handshake always names 4096 iterations.
 	upsert := kadm.UpsertSCRAM{User: bundle.Principal, Mechanism: kadm.ScramSha512, Iterations: 4096, Password: bundle.Password}
-	if altered, err := kadm.NewClient(service.SuperUser).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
+	if altered, err := kadm.NewClient(service.Operator).AlterUserSCRAMs(ctx, nil, []kadm.UpsertSCRAM{upsert}); err != nil || altered.Error() != nil {
 		t.Fatalf("re-salt: %v %v", err, altered.Error())
 	}
 	login := func() error {
@@ -920,7 +939,7 @@ func TestReceiverUpdateKeepsThePrincipal(t *testing.T) {
 	if err := login(); err != nil {
 		t.Fatalf("configure changed the receiver's credential: %v", err)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "again.yaml")); err == nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "again.yaml")); err == nil {
 		t.Fatal("re-added an existing receiver, rotating its password")
 	}
 	if _, err := service.ReceiverUpdate(ctx, modelConfig("receiver-z", "pool-a"), false); err == nil {
@@ -935,7 +954,7 @@ func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 	if err := service.PoolApply(ctx, "pool-a", modelTerms(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-a", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	revocationBounds(t, service, "1", "1", "1")
@@ -961,7 +980,7 @@ func TestRevocationProbeRetriesWhileBrokersSettle(t *testing.T) {
 	if step := stepThree(service.RevokeReceiver(ctx, "receiver-a", time.Millisecond, lagging)); !step.Complete || *calls != 3 {
 		t.Fatalf("lagging broker: step %+v after %d probes; want complete after 3", step, *calls)
 	}
-	if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
+	if err := service.ReceiverAdd(ctx, modelConfig("receiver-b", "pool-a"), service.Broker, filepath.Join(t.TempDir(), "bundle.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	settling, calls, _ := probe(errLoginRefused, ErrAuthorizationDenied)

@@ -57,7 +57,7 @@ func TestEmptyLastChunkIsNoLine(t *testing.T) {
 // end lists topic's end offset.
 func (f *fixture) endOffset(t *testing.T, topic string) int64 {
 	t.Helper()
-	ends, err := kadm.NewClient(f.service.SuperUser).ListEndOffsets(f.ctx, topic)
+	ends, err := kadm.NewClient(f.service.Operator).ListEndOffsets(f.ctx, topic)
 	if err == nil {
 		err = ends.Error()
 	}
@@ -196,7 +196,7 @@ func TestTranscriptWaitsForChunksCommittedApartFromTheTerminal(t *testing.T) {
 
 func mustRead(t *testing.T, f *fixture, topic string) []*kgo.Record {
 	t.Helper()
-	records, err := readTopic(f.ctx, f.service.SuperUser, topic)
+	records, err := readTopic(f.ctx, f.service.Operator, topic)
 	if err != nil {
 		t.Fatal(err)
 	}

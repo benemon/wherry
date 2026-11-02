@@ -158,7 +158,7 @@ func open(t *testing.T, f *fixture, runID string, key *ecdsa.PrivateKey) (wire.S
 		t.Fatalf("local record %v, %v", local, err)
 	}
 	pool := local.Pool
-	records, err := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic(pool))
+	records, err := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic(pool))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func open(t *testing.T, f *fixture, runID string, key *ecdsa.PrivateKey) (wire.S
 		if err != nil {
 			t.Fatal(err)
 		}
-		keys, err := operator.ReadKeys(f.ctx, f.service.SuperUser, operator.HostKeyTopics(state, pool))
+		keys, err := operator.ReadKeys(f.ctx, f.service.Operator, operator.HostKeyTopics(state, pool))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -261,7 +261,7 @@ func TestSubmitRefusesAnEnvelopeTheCheckRefuses(t *testing.T) {
 	if err := f.submitErr(t); !errors.Is(err, ErrInvalidInput) || !strings.Contains(err.Error(), "envelope credential model is empty") {
 		t.Fatalf("submit = %v, want the empty credential refused", err)
 	}
-	if records, err := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
+	if records, err := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic("pool-a")); err != nil || len(records) != 0 {
 		t.Fatalf("task topic holds %d records, %v", len(records), err)
 	}
 }
@@ -326,7 +326,7 @@ func (r *testReceiver) keyLost(t *testing.T, ctx context.Context, task claimed) 
 // replacements are the tasks on pool's task topic that replace runID.
 func (f *fixture) replacements(t *testing.T, pool, runID string) [][]byte {
 	t.Helper()
-	records, err := readTopic(f.ctx, f.service.SuperUser, operator.PoolTasksTopic(pool))
+	records, err := readTopic(f.ctx, f.service.Operator, operator.PoolTasksTopic(pool))
 	if err != nil {
 		t.Fatal(err)
 	}

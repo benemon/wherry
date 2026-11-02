@@ -16,7 +16,7 @@ import (
 // kafkaChanges counts wherry.operator's records and the SCRAM users, which a provisioning command changes first.
 func kafkaChanges(t *testing.T, service *Service) [2]int64 {
 	t.Helper()
-	admin := kadm.NewClient(service.SuperUser)
+	admin := kadm.NewClient(service.Operator)
 	offsets, err := admin.ListEndOffsets(t.Context(), OperatorTopic)
 	if err == nil {
 		err = offsets.Error()
@@ -40,7 +40,7 @@ var bundleAdds = []struct {
 		return service.HostAdd(context.Background(), "tenant-a", "host-b", path, false)
 	}},
 	{"receiver", func(service *Service, path string) error {
-		return service.ReceiverAdd(context.Background(), modelConfig("receiver-b", "pool-a"), path)
+		return service.ReceiverAdd(context.Background(), modelConfig("receiver-b", "pool-a"), service.Broker, path)
 	}},
 }
 
@@ -72,7 +72,7 @@ func TestHostAddRefusesAnExistingFileBeforeCreatingTheRecordTopic(t *testing.T) 
 	_, service, closeFixture := kfakeService(t)
 	defer closeFixture()
 	ctx := context.Background()
-	responses, err := kadm.NewClient(service.SuperUser).DeleteTopics(ctx, OperatorTopic)
+	responses, err := kadm.NewClient(service.Operator).DeleteTopics(ctx, OperatorTopic)
 	if err == nil {
 		err = responses.Error()
 	}
@@ -87,7 +87,7 @@ func TestHostAddRefusesAnExistingFileBeforeCreatingTheRecordTopic(t *testing.T) 
 		t.Fatalf("host add = %v; want the existing file refused", err)
 	}
 	// kadm's ListTopics answers from cached metadata; a direct request lists what exists.
-	response, err := kmsg.NewPtrMetadataRequest().RequestWith(ctx, service.SuperUser)
+	response, err := kmsg.NewPtrMetadataRequest().RequestWith(ctx, service.Operator)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestReissueFailingAfterThePasswordChanges(t *testing.T) {
 				return service.HostAdd(t.Context(), "tenant-a", "host-a", path, true)
 			}},
 			{"receiver", func(service *Service, path string) error {
-				return service.ReceiverReissue(t.Context(), "receiver-a", path)
+				return service.ReceiverReissue(t.Context(), "receiver-a", service.Broker, path)
 			}},
 		} {
 			t.Run(step.name+"/"+identity.name, func(t *testing.T) {

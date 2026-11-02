@@ -740,7 +740,7 @@ func TestAdoptionReadFailureReleases(t *testing.T) {
 		}
 		return response, nil, true
 	})
-	if status := f.receiver.execute(f.ctx, f.service.SuperUser, record, admitted, 2); status != kgo.AckRelease {
+	if status := f.receiver.execute(f.ctx, f.service.Operator, record, admitted, 2); status != kgo.AckRelease {
 		t.Fatalf("status %v, want release", status)
 	}
 	if dispatches, _, _, _ := f.plugin.counts(); dispatches != 0 {
@@ -1637,7 +1637,7 @@ func (f fixture) deleteACLsOf(t *testing.T, receiver string, builder *kadm.ACLBu
 	t.Helper()
 	builder = builder.Allow(operator.ReceiverPrincipal(receiver)).AllowHosts("*").ResourcePatternType(kadm.ACLPatternAny)
 	builder.PrefixUser()
-	results, err := kadm.NewClient(f.service.SuperUser).DeleteACLs(f.ctx, builder)
+	results, err := kadm.NewClient(f.service.Operator).DeleteACLs(f.ctx, builder)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2319,7 +2319,7 @@ func TestReleasesAtTheBudgetFail(t *testing.T) {
 			record := f.submit(t, f.host, nil)
 			admitted := f.admitted(t, record)
 			test.setup(t, f)
-			if status := f.receiver.execute(f.ctx, f.service.SuperUser, record, admitted, int64(testTerms().DeliveryLimit)-1); status != kgo.AckReject {
+			if status := f.receiver.execute(f.ctx, f.service.Operator, record, admitted, int64(testTerms().DeliveryLimit)-1); status != kgo.AckReject {
 				t.Fatalf("status %v, want reject; logs:\n%s", status, f.logs.String())
 			}
 			if !test.readable {
@@ -2341,7 +2341,7 @@ func TestShutdownAtTheBudgetStillReleases(t *testing.T) {
 	defer shutdown()
 	done := make(chan kgo.AckStatus, 1)
 	go func() {
-		done <- f.receiver.execute(ctx, f.service.SuperUser, record, admitted, int64(testTerms().DeliveryLimit)-1)
+		done <- f.receiver.execute(ctx, f.service.Operator, record, admitted, int64(testTerms().DeliveryLimit)-1)
 	}()
 	for {
 		if _, _, follows, _ := f.plugin.counts(); follows > 0 {
