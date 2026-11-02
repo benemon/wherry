@@ -269,9 +269,6 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	}
 	state, _, _ := r.snapshot()
 	terms := state.Pools[r.config.Pool]
-	if task.Wherry.Envelope == "" {
-		return reject("the task carries no envelope")
-	}
 	placement := task.Wherry.Placement
 	agent := slices.IndexFunc(terms.Agents, func(agent admin.AgentTerms) bool { return agent.Name == placement.Agent })
 	if agent < 0 {
@@ -293,8 +290,8 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 	if !claimed && !cancelled && now > task.Wherry.TaskEndedBy {
 		return rejectAs("not ended by task_ended_by", wire.NotEndedBy(task.Wherry.TaskEndedBy))
 	}
-	if !claimed && task.Wherry.TaskEndedBy > task.Wherry.TaskStartedBy+admin.MaxRunDurationMS/1000 {
-		return reject("task_ended_by is past task_started_by plus the 6h run cap")
+	if reason := inadmissible(runSubmission{&task, hash, record.Timestamp}, terms); !claimed && reason != "" {
+		return reject(reason)
 	}
 	// A claimed run past a bound its job has not met is ended here, with or without an offer, so its job is stopped.
 	started := slices.ContainsFunc(events.statuses[run], func(status wire.RunStatus) bool {
@@ -319,7 +316,7 @@ func (r *Receiver) admit(ctx context.Context, record *kgo.Record) (*admission, k
 		r.metrics.startFailures.WithLabelValues("none", "offer-unavailable").Inc()
 		return giveBack()
 	}
-	if maximum := terms.StartByLimit(); !claimed && (time.Since(record.Timestamp) > maximum || task.Wherry.TaskStartedBy > record.Timestamp.Add(maximum).Unix()) {
+	if !claimed && time.Since(record.Timestamp) > terms.StartByLimit() {
 		return reject("task_started_by is past the pool's start_by_limit")
 	}
 	history := []wire.Message{task.Message}
@@ -475,11 +472,23 @@ type runSubmission struct {
 	submitted time.Time
 }
 
-// admissible reports a submission that carries an envelope and whose bounds hold at its append time under terms.
-func admissible(submission runSubmission, terms admin.Terms) bool {
+// inadmissible is the rejection reason of a submission that carries no envelope or whose bounds fail at its append time
+// under terms, and empty for one that is admissible.
+func inadmissible(submission runSubmission, terms admin.Terms) string {
 	binding, appended := submission.record.Wherry, submission.submitted
-	return binding.Envelope != "" && appended.Unix() <= binding.TaskStartedBy && binding.TaskStartedBy <= appended.Add(terms.StartByLimit()).Unix() &&
-		binding.TaskStartedBy <= binding.TaskEndedBy && binding.TaskEndedBy <= binding.TaskStartedBy+admin.MaxRunDurationMS/1000
+	switch {
+	case binding.Envelope == "":
+		return "the task carries no envelope"
+	case appended.Unix() > binding.TaskStartedBy:
+		return "task_started_by is before its append time"
+	case binding.TaskStartedBy > appended.Add(terms.StartByLimit()).Unix():
+		return "task_started_by is past the pool's start_by_limit"
+	case binding.TaskStartedBy > binding.TaskEndedBy:
+		return "task_ended_by is before task_started_by"
+	case binding.TaskEndedBy > binding.TaskStartedBy+admin.MaxRunDurationMS/1000:
+		return "task_ended_by is past task_started_by plus the 6h run cap"
+	}
+	return ""
 }
 
 // renewer keeps the share lock alive from claim until the final acknowledgement,

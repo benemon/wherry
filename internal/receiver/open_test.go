@@ -1414,26 +1414,34 @@ func TestMismatchingEarlierRecordsNeverWin(t *testing.T) {
 }
 
 // A run's earlier record rejected at admission never becomes the run's task: rejected statuses name none, and the
-// valid record after it runs. A task_ended_by before task_started_by passes admission's checks and is not among these.
+// valid record after it runs.
 func TestARejectedHashIsNeverTheRunsTask(t *testing.T) {
 	now := time.Now()
 	runCap := int64(admin.MaxRunDurationMS / 1000)
 	for name, test := range map[string]struct {
 		edit   func(*wire.Submission)
 		reason string
+		// appended moves the record's append time.
+		appended time.Duration
 	}{
 		"past task_started_by at its append": {func(task *wire.Submission) {
 			task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = now.Add(-time.Minute).Unix(), now.Add(time.Minute).Unix()
-		}, "not started by task_started_by"},
+		}, "not started by task_started_by", 0},
+		"appended after task_started_by": {func(task *wire.Submission) {
+			task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = now.Add(time.Minute).Unix(), now.Add(2*time.Minute).Unix()
+		}, "task_started_by is before its append time", 2 * time.Minute},
+		"task_ended_by before task_started_by": {func(task *wire.Submission) {
+			task.Wherry.TaskStartedBy, task.Wherry.TaskEndedBy = now.Add(time.Minute).Unix(), now.Add(30*time.Second).Unix()
+		}, "task_ended_by is before task_started_by", 0},
 		"past the run cap": {func(task *wire.Submission) {
 			task.Wherry.TaskStartedBy = now.Add(time.Minute).Unix()
 			task.Wherry.TaskEndedBy = task.Wherry.TaskStartedBy + runCap + 1
-		}, "task_ended_by is past task_started_by plus the 6h run cap"},
+		}, "task_ended_by is past task_started_by plus the 6h run cap", 0},
 		"past the start_by_limit": {func(task *wire.Submission) {
 			task.Wherry.TaskStartedBy = now.Add(time.Duration(admin.DefaultStartByLimitMS)*time.Millisecond + time.Hour).Unix()
 			task.Wherry.TaskEndedBy = task.Wherry.TaskStartedBy
-		}, "task_started_by is past the pool's start_by_limit"},
-		"no envelope": {nil, "the task carries no envelope"},
+		}, "task_started_by is past the pool's start_by_limit", 0},
+		"no envelope": {nil, "the task carries no envelope", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, resultStream)
@@ -1442,7 +1450,9 @@ func TestARejectedHashIsNeverTheRunsTask(t *testing.T) {
 				test.edit(invalid)
 				f.seal(t, invalid)
 			}
-			f.rejected(t, f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(invalid, f.host))), test.reason)
+			record := f.produce(t, admin.PoolTasksTopic(testPool), testRun("run-a"), must(t)(wire.SignRecord(invalid, f.host)))
+			record.Timestamp = record.Timestamp.Add(test.appended)
+			f.rejected(t, record, test.reason)
 			if status := f.execute(t, f.submit(t, f.host, nil), 1); status != kgo.AckAccept {
 				t.Fatalf("the valid task ended %v; logs:\n%s", status, f.logs.String())
 			}

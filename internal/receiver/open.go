@@ -611,7 +611,7 @@ func (r *Receiver) lookup(ctx context.Context, events poolEvents, request *wire.
 		return nil, nil, wire.RefusedNotClaimant, nil
 	}
 	task := &runSubmission{record: &submission, hash: request.TaskHash, submitted: record.Timestamp}
-	if !admissible(*task, state.Pools[r.config.Pool]) {
+	if inadmissible(*task, state.Pools[r.config.Pool]) != "" {
 		return nil, nil, wire.RefusedNotClaimant, nil
 	}
 	return owners, task, "", nil

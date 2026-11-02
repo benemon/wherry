@@ -257,7 +257,7 @@ func (r *Receiver) handOver(ctx context.Context, current wire.PoolKey) error {
 			continue
 		}
 		task := runSubmission{record: &submission, hash: hash, submitted: record.Timestamp}
-		if !admissible(task, state.Pools[r.config.Pool]) || !time.Now().Before(wire.PastBound(submission.Wherry.TaskEndedBy)) {
+		if inadmissible(task, state.Pools[r.config.Pool]) != "" || !time.Now().Before(wire.PastBound(submission.Wherry.TaskEndedBy)) {
 			continue
 		}
 		seen[hash] = true
